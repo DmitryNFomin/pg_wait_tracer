@@ -384,6 +384,11 @@ struct pgwt_load_info {
      *                          makes it audible. */
     int      straddlers_admitted;
     int      right_edge_truncated;
+    /* #429: block headers that could not be read during candidacy. The
+     * block is still decoded (unknown is never "no"), so this is a loss
+     * COUNTER, not a refusal — but a scan that cannot see headers is a scan
+     * whose completeness claim rests on the decode succeeding instead. */
+    int      headers_unreadable;
     /* How far past `to` the scan was allowed to look, in ns, when it was
      * cut. Reported with the flag so "incomplete" comes with the bound that
      * made it incomplete instead of leaving the caller to guess. */
@@ -1602,6 +1607,83 @@ static int straddle_max_blocks(void)
     return PGWT_STRADDLE_MAX_BLOCKS_DEFAULT;
 }
 
+/* ── #429: block candidacy, header-only ──────────────────────────────────
+ *
+ * Can block `bi` hold a record overlapping [from_mono_ns, to_mono_ns]?
+ * Returns 1 = possible (decode it), 0 = provably not, -1 = the header could
+ * not be read. **-1 IS NOT "no"**: a caller that cannot see must pay for the
+ * decode or report the loss, never silently drop the block.
+ *
+ * This replaces "binary-search block_index[], then iterate forward until a
+ * block starts after the right edge", which load_file_range_mono did and
+ * which is unsound twice over:
+ *
+ *   - block_index[] is appended in COMMIT order (one entry per flushed
+ *     block) and nothing sorts it or checks that it is sorted, so the binary
+ *     search has no precondition. Commit order and timestamp order disagree
+ *     whenever the ring drain lags the sampler — a loaded `--mode full`
+ *     capture by design — and then the search returns an ARBITRARY block,
+ *     not an off-by-one. Agent E measured an index of [1000 ms, 6000 ms,
+ *     1100 ms] written through the public writer API.
+ *   - even on a sorted index, `lo - 1` assumes only the immediately
+ *     preceding block can reach into the window. Blocks OVERLAP in time (a
+ *     SAMPLES block batches ~1 s of ticks across several TRANSITIONS
+ *     blocks), so a block two or more positions back can still be inside it.
+ *
+ * Why it belongs to #424 and not to a follow-up: a straddler in a block the
+ * scan never visits is invisible to the answer AND to
+ * right_edge_truncated — the window is silently short while reporting
+ * itself complete, which is the one property this whole change set exists to
+ * remove. A guarantee to "say when it could not" is only as sound as the
+ * lookup underneath it.
+ *
+ * INTERFACE NOTE, deliberately not a second design: agent E's #429 commit
+ * (05bc852 on agent/424-replay) lands exactly this primitive in the reader
+ * as `pgwt_reader_block_candidate()`, with the same 1 / 0 / -1 contract and
+ * the same `right_open` out-parameter, and rebuilds `pgwt_replay_file` on
+ * it. This function is the SERVER side of the same seam, written against
+ * `pgwt_reader_block_info()` (which already exists and already reads a
+ * header without decompressing) so that this branch compiles and gates on
+ * its own instead of waiting on a merge. When the two trees combine, the
+ * body below collapses onto E's function: call it with `scan_to_ns` as its
+ * `to_mono_ns`, and compute `only_straddlers` at the call site from the
+ * `*info` it hands back. Same returns, same meaning, no behaviour change —
+ * and do not keep two implementations after that.
+ *
+ * TWO right edges, which is why there are two `to` arguments and not one:
+ *   scan_to_ns   — the widest edge this load may look at (the sample
+ *                  lookahead or the #424 straddler horizon, whichever is
+ *                  further). CANDIDACY is decided against this.
+ *   window_to_ns — the request's own right edge. A block whose records all
+ *                  close after it can only contribute still-running
+ *                  straddlers, which is where the lookahead BUDGET applies.
+ * Collapsing them would either refuse straddler blocks or spend the
+ * straddler budget on the pre-existing sample lookahead. */
+static int server_block_candidate(struct pgwt_event_reader *r, int bi,
+                                  uint64_t from_mono_ns, uint64_t scan_to_ns,
+                                  uint64_t window_to_ns,
+                                  struct pgwt_block_info *info,
+                                  int *only_straddlers)
+{
+    struct pgwt_block_info local;
+    struct pgwt_block_info *hdr = info ? info : &local;
+    if (only_straddlers)
+        *only_straddlers = 0;
+    if (pgwt_reader_block_info(r, bi, hdr) != 0)
+        return -1;                      /* cannot see — never "no" */
+    /* Every record in a block lies within [first, last] per its header, so
+     * the block can only matter if that span reaches the window. 0 means
+     * unbounded on that side. */
+    if (scan_to_ns != 0 && hdr->first_timestamp_ns > scan_to_ns)
+        return 0;
+    if (from_mono_ns != 0 && hdr->last_timestamp_ns < from_mono_ns)
+        return 0;
+    if (only_straddlers && window_to_ns != 0 &&
+        hdr->first_timestamp_ns > window_to_ns)
+        *only_straddlers = 1;
+    return 1;
+}
+
 /* Is this file SKIPPED WITHOUT BEING LOOKED AT, in a way that could hide a
  * straddler's close?
  *
@@ -1636,6 +1718,7 @@ struct straddle_scan {
     int      max_blocks;
     int      admitted;
     int      truncated;
+    int      headers_unreadable;   /* #429 candidacy could not see a header */
 };
 
 /* Read events from a trace file for a MONO time range. Opens file, seeks to
@@ -1677,7 +1760,13 @@ static void load_file_range_mono(struct pgwt_server *srv,
     if (cc)
         cur_cache_sync(cc, path, &reader);
 
-    int first_block = pgwt_reader_find_block(&reader, from_mono);
+    /* #429: NO binary-searched scan start. pgwt_reader_find_block() is a
+     * hint over an index written in COMMIT order, and `lo - 1` additionally
+     * assumes blocks do not overlap in time, which they do. Both assumptions
+     * fail SILENTLY — a window missing a whole block reports itself
+     * complete. Every block is candidacy-tested by HEADER instead (agent E
+     * measured 0.12 us to ask against 58 us to decode, warm, on a
+     * 1024-block trace, so the search was never buying much). */
     struct pgwt_trace_event block_buf[PGWT_BLOCK_EVENTS];
     int max_events = load_max_events();
 
@@ -1693,28 +1782,66 @@ static void load_file_range_mono(struct pgwt_server *srv,
                                                     : straddle_to;
     int straddle_blocks = 0;
 
-    for (int b = first_block; b < reader.num_blocks; b++) {
-        if (reader.block_index[b].timestamp_ns > scan_to) {
-            /* Stopped at a bound with blocks still ahead: a straddler longer
-             * than the horizon would be invisible, and the caller is told so
-             * rather than handed a silent partial. */
-            if (ss && ss->enabled)
-                ss->truncated = 1;
-            break;
-        }
-        if (ss && ss->enabled &&
-            reader.block_index[b].timestamp_ns > sample_to_mono &&
-            ss->max_blocks && straddle_blocks >= ss->max_blocks) {
-            ss->truncated = 1;
-            break;
-        }
-        if (reader.block_index[b].timestamp_ns > sample_to_mono)
-            straddle_blocks++;
-
+    for (int b = 0; b < reader.num_blocks; b++) {
         struct pgwt_block_info bi;
         const struct pgwt_trace_event *rec;
         int n;
         const struct cur_cache_block *cb = cc ? cur_cache_get(cc, b) : NULL;
+
+        /* Candidacy first, and CONTINUE rather than break on a no.
+         *
+         * #429: the old loop broke out as soon as a block started after the
+         * scan edge. Under commit order a block that cannot matter says
+         * NOTHING about the blocks after it, so that break threw away
+         * in-window blocks sitting behind a far-future SAMPLES block — and
+         * then blamed the right edge for the loss. A cached block answers
+         * from its retained descriptor with no I/O at all; an uncached one
+         * costs one header read. */
+        uint64_t first_ts, last_ts;
+        int only_straddlers = 0;
+        int cand;
+        if (cb) {
+            first_ts = cb->index_ts;
+            last_ts  = cb->last_ts;
+            cand = !(first_ts > scan_to || last_ts < from_mono);
+            only_straddlers = first_ts > sample_to_mono;
+        } else {
+            cand = server_block_candidate(&reader, b, from_mono, scan_to,
+                                          sample_to_mono, &bi,
+                                          &only_straddlers);
+            first_ts = (cand >= 0) ? bi.first_timestamp_ns : 0;
+            last_ts  = (cand >= 0) ? bi.last_timestamp_ns : 0;
+        }
+
+        if (cand == 0) {
+            /* Provably irrelevant. One shape of that is worth reporting:
+             * the block begins past the straddler horizon, so a wait still
+             * running at `to` and closing in there is beyond what this load
+             * was allowed to look at. Say so (#424) instead of returning a
+             * quietly short answer. */
+            if (ss && ss->enabled && first_ts > straddle_to)
+                ss->truncated = 1;
+            continue;
+        }
+        if (cand < 0) {
+            /* The header could not be read. That is NOT "no": fall through
+             * and attempt the decode; if that fails too the block is counted
+             * below, so the loss is reported rather than inferred. */
+            if (ss)
+                ss->headers_unreadable++;
+        }
+        if (only_straddlers && ss && ss->enabled &&
+            ss->max_blocks && straddle_blocks >= ss->max_blocks) {
+            /* The decode budget past the right edge is spent. Skip THIS
+             * block and keep scanning — a later block may be squarely
+             * inside the window (that is the break→continue lesson) — and
+             * record that the straddler search was cut. */
+            ss->truncated = 1;
+            continue;
+        }
+        if (only_straddlers)
+            straddle_blocks++;
+
         if (cb) {
             rec = cc->events + cb->start;
             n = cb->count;
@@ -1757,21 +1884,28 @@ static void load_file_range_mono(struct pgwt_server *srv,
                  * still OVERLAP the window — its interval started at or
                  * before `to` — so the scan continues through the block
                  * instead of stopping at the first late close. */
+                /* #429, in miniature: CONTINUE, never break. A block's
+                 * records are in the order the writer received them from the
+                 * ring, and nothing sorts them within the block, so one
+                 * record closing past the edge says nothing about the next.
+                 * The old `break` was the same unsound assumption as the
+                 * block-level one, two scopes down; the array is already in
+                 * memory, so scanning the rest of it is free. */
                 if (sample_block)
-                    break;
-                /* Stopping HERE, mid-data, is a bound stopping the scan, not
-                 * the data running out: there may be a longer straddler in
-                 * this block or a later one and this load will never see it.
-                 * Say so. (Over-reporting is the safe direction — the flag
-                 * means "may be missing", never "is missing".) */
+                    continue;
+                /* Stopping HERE is a bound stopping the scan, not the data
+                 * running out: there may be a longer straddler in this block
+                 * or a later one and this load will never see it. Say so.
+                 * (Over-reporting is the safe direction — the flag means
+                 * "may be missing", never "is missing".) */
                 if (!(ss && ss->enabled && ss->lookahead_ns)) {
                     if (ss && ss->enabled)
                         ss->truncated = 1;
-                    break;
+                    continue;
                 }
                 if (ts_mono > straddle_to) {
                     ss->truncated = 1;
-                    break;
+                    continue;
                 }
                 /* A marker/instant (duration 0) starts where it ends, so it
                  * is outside the window by definition — never a straddler. */
@@ -3223,6 +3357,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         info->straddlers_admitted = ss.admitted;
         info->right_edge_truncated = ss.truncated;
         info->right_edge_scan_ns = ss.enabled ? ss.lookahead_ns : 0;
+        info->headers_unreadable = ss.headers_unreadable;
     }
     if (overloaded)
         fprintf(stderr, "ERROR: window too large: the requested range holds "
