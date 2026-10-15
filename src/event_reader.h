@@ -19,6 +19,24 @@ struct pgwt_event_reader {
     struct pgwt_block_index_entry *block_index;
     int           num_blocks;
 
+    /* #429: is block_index[] actually ascending in timestamp_ns?
+     *
+     * It is written in COMMIT order (event_writer.c appends one entry per
+     * flushed block) and nothing enforces timestamp order on top of that.
+     * The writer flushes whichever pending buffer holds the older first
+     * timestamp, which keeps the two streams in order pairwise — but not
+     * across a lagging ring drain, where TRANSITIONS carry timestamps
+     * seconds behind the sampler's. Then a SAMPLES block commits with a
+     * far-future first timestamp and the next TRANSITIONS block commits
+     * after it with an earlier one. Measured on a trace written through the
+     * public writer API: [1000 ms, 6000 ms, 1100 ms].
+     *
+     * Computed once at open, so a consumer can keep a binary search on the
+     * files where the invariant does hold and must fall back to a full
+     * candidacy scan where it does not. Never assume it: this flag exists
+     * because the assumption was silently wrong for `--mode full`. */
+    int           block_index_sorted;
+
     /* Clock conversion: wall_ns = mono_ns + mono_to_wall */
     int64_t       mono_to_wall;
 
@@ -73,9 +91,41 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
 int pgwt_reader_block_info(struct pgwt_event_reader *r, int block_idx,
                            struct pgwt_block_info *info);
 
-/* Find the first block that could contain events at or after mono_ns.
- * Returns block index (0-based). */
+/* Lower-bound HINT by first timestamp: the last block whose first timestamp
+ * is at or before mono_ns, or 0.
+ *
+ * Two things it is NOT (#429):
+ *  - it is not valid on an unsorted index, so it returns 0 (scan everything)
+ *    whenever r->block_index_sorted is false, rather than the arbitrary
+ *    answer a binary search gives on commit-ordered data;
+ *  - even on a sorted index it is NOT a safe scan start on its own. Blocks
+ *    OVERLAP in time (a SAMPLES block batches ~1 s of ticks across several
+ *    TRANSITIONS blocks), so a block two or more positions earlier can still
+ *    reach into the window. Candidacy-test the earlier blocks with
+ *    pgwt_reader_block_candidate() instead of trusting this index as a
+ *    boundary. */
 int pgwt_reader_find_block(const struct pgwt_event_reader *r, uint64_t mono_ns);
+
+/* Can block `bi` hold a record overlapping [from_mono_ns, to_mono_ns]?
+ * Header-only — no decompression, one small read.
+ *
+ * Returns 1 = possible (decode it), 0 = provably not, -1 = the header could
+ * not be read. -1 is NOT "no": a caller that cannot see must refuse or pay
+ * for the decode, never silently drop the block.
+ *
+ * `*info` (optional) receives the header. `*right_open` (optional) is set
+ * when every record in the block closes after `to` — the block can only
+ * contribute still-running straddlers, which is where a caller's lookahead
+ * budget applies. 0 / 0 bounds mean unbounded on that side.
+ *
+ * This is the sound replacement for "binary-search the index, then iterate
+ * forward until a block starts after `to`": that pattern assumes the index
+ * is sorted (it is in commit order) AND that blocks do not overlap (they
+ * do), and it fails SILENTLY — a window missing a whole block reports
+ * itself complete. */
+int pgwt_reader_block_candidate(struct pgwt_event_reader *r, int bi,
+                                uint64_t from_mono_ns, uint64_t to_mono_ns,
+                                struct pgwt_block_info *info, int *right_open);
 
 /* Convert wall-clock nanoseconds to monotonic for this file. */
 uint64_t pgwt_reader_wall_to_mono(const struct pgwt_event_reader *r, uint64_t wall_ns);

@@ -599,4 +599,15 @@ test_summary_raw_parity_lib.py
 # double-count one close in two windows. Includes the bypass suite for the
 # budgeted right-edge scan: exhausted budget, unreadable block header, a
 # SAMPLES tail that must cost no budget, bad arguments, empty input.
+#
+# #429: and the lookup underneath all of that. block_index[] is written
+# in COMMIT order and nothing sorts it, so pgwt_reader_find_block's
+# binary search had no precondition -- on a lagging --mode full drain a
+# SAMPLES block commits with a far-future first timestamp and the next
+# TRANSITIONS block commits after it with an earlier one. The search then
+# returns an ARBITRARY block, and a window can come back EMPTY while
+# reporting itself complete. The fixture here interleaves the two streams
+# so commit order and timestamp order genuinely disagree, and ASSERTS
+# that they do before asserting anything else -- a fixture where the two
+# orders coincide passes while the code is broken.
 test_replay_window

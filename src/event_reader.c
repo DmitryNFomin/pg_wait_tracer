@@ -198,6 +198,21 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
         }
     }
 
+    /* #429: does block_index[] actually ascend? It is built in COMMIT order
+     * (by the writer's footer, by the meta-file read, or by the fallback
+     * sequential scan — all three append in file order), and nothing makes
+     * that timestamp order. Check it once here instead of assuming it in
+     * every binary search; see the field's comment in event_reader.h for the
+     * lagging-drain case that breaks it in a real `--mode full` capture. */
+    r->block_index_sorted = 1;
+    for (int i = 1; i < r->num_blocks; i++) {
+        if (r->block_index[i].timestamp_ns <
+            r->block_index[i - 1].timestamp_ns) {
+            r->block_index_sorted = 0;
+            break;
+        }
+    }
+
     /* Allocate scratch buffers */
     r->decode_buf_size = PGWT_BLOCK_EVENTS * 36 + PGWT_BLOCK_EVENTS * 10;
     r->decode_buf = malloc(r->decode_buf_size);
@@ -397,6 +412,23 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
 
 int pgwt_reader_find_block(const struct pgwt_event_reader *r, uint64_t mono_ns)
 {
+    /* #429. A binary search needs a sorted array, and block_index[] is in
+     * COMMIT order. On a lagging `--mode full` drain the two disagree, and
+     * then this search does not return a slightly wrong block — it returns
+     * an ARBITRARY one. Measured on a trace written through the public
+     * writer API with first timestamps [1000 ms, 6000 ms, 1100 ms]: the
+     * search for 6000 ms returns block 2 (TRANSITIONS, 1100-1119 ms) and
+     * skips block 1 (SAMPLES, 6000-7100 ms) — the only block covering that
+     * window. Every record in the window is lost and the scan reports
+     * itself complete.
+     *
+     * So when the precondition does not hold, refuse to narrow: 0 says
+     * "start at the beginning", which is slower and correct, instead of a
+     * confident wrong answer. A caller that wants the fast path can test
+     * r->block_index_sorted itself. */
+    if (!r->block_index_sorted)
+        return 0;
+
     int lo = 0, hi = r->num_blocks;
     while (lo < hi) {
         int mid = (lo + hi) / 2;
@@ -406,6 +438,37 @@ int pgwt_reader_find_block(const struct pgwt_event_reader *r, uint64_t mono_ns)
             hi = mid;
     }
     return (lo > 0) ? lo - 1 : 0;
+}
+
+int pgwt_reader_block_candidate(struct pgwt_event_reader *r, int bi,
+                                uint64_t from_mono_ns, uint64_t to_mono_ns,
+                                struct pgwt_block_info *info, int *right_open)
+{
+    struct pgwt_block_info hdr;
+    if (right_open) *right_open = 0;
+    if (pgwt_reader_block_info(r, bi, &hdr) != 0)
+        return -1;
+    if (info) *info = hdr;
+
+    /* A record is written in the block it CLOSES in, so a block whose last
+     * timestamp is before `from` holds nothing that reaches the window —
+     * whatever its first timestamp or its position in the index says. This
+     * is the only exclusion that is sound under commit order. */
+    if (from_mono_ns != 0 && hdr.last_timestamp_ns < from_mono_ns)
+        return 0;
+
+    if (to_mono_ns != 0 && hdr.first_timestamp_ns > to_mono_ns) {
+        /* Everything in this block closes after `to`. An interval record can
+         * still have STARTED inside the window (a wait still running at
+         * `to`), so the block is a straddler candidate and the caller's
+         * budget decides whether to pay for it. A SAMPLES block cannot: its
+         * records are point observations, so a sample past `to` is simply
+         * outside the window. */
+        if (hdr.block_type == PGWT_BLOCK_SAMPLES)
+            return 0;
+        if (right_open) *right_open = 1;
+    }
+    return 1;
 }
 
 uint64_t pgwt_reader_wall_to_mono(const struct pgwt_event_reader *r, uint64_t wall_ns)
@@ -732,70 +795,55 @@ int pgwt_replay_file(struct pgwt_event_reader *r,
     if (!r || !acc || !buf || max_events <= 0)
         return -1;
 
-    int start_block = (from_mono_ns > 0)
-                    ? pgwt_reader_find_block(r, from_mono_ns) : 0;
     uint64_t decoded = 0;
 
+    /* EVERY block is examined, by its HEADER (#424 both edges, #429).
+     *
+     * The pattern this replaces — binary-search block_index[] for a start,
+     * iterate forward, stop at the first block past `to` — is wrong three
+     * times over, and each way is silent:
+     *   - block_index[] is in COMMIT order, so the binary search has no
+     *     precondition and returns an arbitrary index on a lagging
+     *     `--mode full` drain (#429);
+     *   - one start index assumes only the immediately preceding block can
+     *     reach into the window, but blocks OVERLAP in time, so a block two
+     *     or more positions back can still be inside it (#429; this cost
+     *     400 ms of 1200 ms of sampled time in one window of the test);
+     *   - stopping at `to` discards the straddlers still running there
+     *     (#424).
+     * A header read costs no decompression. Measured warm over a
+     * 1024-block trace (tests/results/issue424-replay/bench-lookahead.log):
+     * 0.12 us per block to ask, against 58 us to decode one. So the sound
+     * scan is simply to ask every block whether it can matter, and the
+     * binary search was never buying much to begin with.
+     * There is NO `break` in this loop on purpose:
+     * under commit order, a block that cannot matter says nothing about the
+     * blocks after it. */
     for (int bi = 0; bi < r->num_blocks; bi++) {
-        if (bi < start_block) {
-            /* LEFT EDGE. pgwt_reader_find_block returns ONE start index, the
-             * last block beginning at or before --from. That is exact only
-             * while blocks do not overlap in time — and they do: a tiered
-             * capture interleaves TRANSITIONS and SAMPLES blocks, and a
-             * SAMPLES block batches ~1 s of ticks, so it routinely starts
-             * before a later TRANSITIONS block and ends after it. Starting
-             * at the single index silently dropped every record of the
-             * earlier-starting block that lies inside the window (found by
-             * tests/test_replay_window.c's tiling check: 400 ms of 1200 ms
-             * of sampled time vanished from one tile).
-             *
-             * A block can hold a record relevant to [from, to] only if its
-             * LAST timestamp is at or after `from`, and that is in the block
-             * header — no decompression. An unreadable header is not treated
-             * as "nothing here": fall through and let the decode and the
-             * record rule decide, so a bad header can only cost work, never
-             * silently remove time. */
-            struct pgwt_block_info hdr;
-            if (pgwt_reader_block_info(r, bi, &hdr) == 0 &&
-                hdr.last_timestamp_ns < from_mono_ns)
-                continue;
-        } else if (to_mono_ns > 0 &&
-            r->block_index[bi].timestamp_ns > to_mono_ns) {
-            /* RIGHT-EDGE LOOKAHEAD (#424, second half).
-             *
-             * This loop used to `break` here, which made the record-level
-             * overlap rule above unreachable: a wait still running at `to`
-             * closes LATER, so its one record lives in a block that starts
-             * after `to` — possibly in the next hourly file. Breaking
-             * discarded it in the prefilter before the record loop ever saw
-             * it, so clipping alone would have fixed nothing on this edge.
-             *
-             * Nothing in the trace bounds how far right that close can be
-             * (an io_worker can hold one wait for a whole capture), and the
-             * block index carries timestamps only — no maximum duration — so
-             * the scan is "keep going, BUDGETED". Two cheap exemptions keep
-             * the usual case cheap:
-             *   - a block header read costs no decompression, and a SAMPLES
-             *     block holds only point observations, which cannot straddle
-             *     anything, so it is skipped without spending budget;
-             *   - only TRANSITIONS blocks past `to` are decoded, against the
-             *     caller's budget.
-             *
-             * When the budget runs out, or a header cannot be read at all,
-             * the answer is marked right_edge_truncated rather than quietly
-             * returned short: a partial scan that says nothing is the silent
-             * wrong answer this change exists to remove. */
-            struct pgwt_block_info hdr;
-            if (pgwt_reader_block_info(r, bi, &hdr) != 0) {
-                if (st) st->right_edge_truncated = 1;
-                break;
-            }
-            if (hdr.block_type == PGWT_BLOCK_SAMPLES)
-                continue;
+        struct pgwt_block_info hdr;
+        int right_open = 0;
+        int cand = pgwt_reader_block_candidate(r, bi, from_mono_ns,
+                                               to_mono_ns, &hdr, &right_open);
+        if (cand == 0)
+            continue;   /* provably holds nothing for this window */
+        /* cand < 0: the header could not be read. NOT treated as "nothing
+         * here" — fall through to the decode and let the record rule
+         * decide, so a bad header can only cost work, never silently remove
+         * time. If the decode fails too it is counted below. */
+
+        if (cand > 0 && right_open) {
+            /* Still-running straddlers only (#424). Nothing in the trace
+             * bounds how far right the close can be — an io_worker can hold
+             * one wait for a whole capture, and the index carries timestamps
+             * but no maximum duration — so the scan past `to` is budgeted.
+             * When the budget is gone the answer is MARKED
+             * (right_edge_truncated) and the scan CONTINUES: skipping this
+             * block must not skip the in-window blocks that follow it in
+             * commit order. */
             if (lookahead_budget) {
                 if (*lookahead_budget <= 0) {
                     if (st) st->right_edge_truncated = 1;
-                    break;
+                    continue;
                 }
                 (*lookahead_budget)--;
             }

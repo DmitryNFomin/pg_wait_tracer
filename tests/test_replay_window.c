@@ -172,6 +172,91 @@ static int write_trace(const char *dir)
     return 0;
 }
 
+/* ── The #429 fixture: commit order vs timestamp order ───────────────────
+ *
+ * block_index[] is appended in COMMIT order and nothing sorts it. The writer
+ * flushes whichever pending buffer holds the older first timestamp, which
+ * keeps the two streams ordered pairwise — but not when the ring drain LAGS
+ * the sampler, which is what a loaded `--mode full` capture does by design
+ * (the daemon has a per-main-loop consume budget). Transitions then carry
+ * timestamps seconds behind the sampler's, a SAMPLES block commits with a
+ * far-future first timestamp, and the NEXT transitions block commits after
+ * it with an earlier one.
+ *
+ * Written below, in push order, with the resulting block index:
+ *
+ *   block 0  TRANSITIONS  EV_A      1000-1019 ms   (drain, 5 s behind)
+ *   block 1  SAMPLES                6000-7100 ms   (sampler at "now")
+ *   block 2  TRANSITIONS  EV_B      1100-1119 ms   (drain, still behind)
+ *   block 3  SAMPLES                8000-9100 ms
+ *   block 4  TRANSITIONS  EV_STRAD  1300-1350 ms   (holds the straddler)
+ *   block 5  SAMPLES               10000-11100 ms
+ *   block 6  TRANSITIONS  EV_D      1090-1090 ms   (flushed by close())
+ *
+ *   first timestamps: 1000, 6000, 1100, 8000, 1300, 10000, 1090  -> UNSORTED
+ *
+ * Every one of blocks 2, 4 and 6 sits AFTER a block that starts later. A
+ * scan that binary-searches this index, or that stops at the first block
+ * past --to, loses them silently. The test asserts the fixture really has
+ * this property before it asserts anything about the answers — if the
+ * writer is ever changed to sort, this goes red rather than passing
+ * vacuously on a fixture that no longer exercises #429.
+ */
+#define EV_A     0x0A000011u
+#define EV_B     0x0A000012u
+#define EV_STRAD 0x0A000013u
+#define EV_C     0x0A000014u
+#define EV_D     0x0A000015u
+
+static int write_lagging_trace(const char *dir)
+{
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0)
+        return -1;
+
+    /* A batch of 12 sampler ticks spans 1.1 s, over the writer's ~1 s
+     * batching cut, so each call commits a SAMPLES block. */
+    for (int round = 0; round < 3; round++) {
+        if (round == 0)
+            for (int i = 0; i < 20; i++) {
+                struct pgwt_trace_event e = ev(1000 + (uint64_t)i, 1, EV_A);
+                if (pgwt_writer_push_event(&w, &e) != 0) return -1;
+            }
+        else if (round == 1)
+            for (int i = 0; i < 20; i++) {
+                struct pgwt_trace_event e = ev(1100 + (uint64_t)i, 1, EV_B);
+                if (pgwt_writer_push_event(&w, &e) != 0) return -1;
+            }
+        else {
+            /* The straddler: closes at 1300 ms after running 250 ms, so it
+             * is inside a window ending at 1100 ms — and it lives in a block
+             * committed after two far-future SAMPLES blocks. */
+            struct pgwt_trace_event s = ev(1300, 250, EV_STRAD);
+            struct pgwt_trace_event c = ev(1350, 1, EV_C);
+            if (pgwt_writer_push_event(&w, &s) != 0) return -1;
+            if (pgwt_writer_push_event(&w, &c) != 0) return -1;
+        }
+
+        struct pgwt_trace_event smp[NSAMPLES];
+        for (int i = 0; i < NSAMPLES; i++) {
+            smp[i] = ev(6000 + (uint64_t)round * 2000 + (uint64_t)i * 100,
+                        0, 0);
+            smp[i].old_event = 0;
+            smp[i].new_event = EV_SAMPLE;
+        }
+        if (pgwt_writer_push_samples(&w, smp, NSAMPLES, PERIOD) != 0)
+            return -1;
+    }
+    /* Flushed by close(), after every SAMPLES block, with the earliest
+     * first timestamp of the lot bar block 0. */
+    struct pgwt_trace_event d = ev(1090, 1, EV_D);
+    if (pgwt_writer_push_event(&w, &d) != 0) return -1;
+
+    if (pgwt_writer_close(&w) != 0) return -1;
+    pgwt_writer_destroy(&w);
+    return 0;
+}
+
 /* A trace with NO straddler at all — the "absent, not wrong" input. */
 static int write_clean_trace(const char *dir)
 {
@@ -239,6 +324,36 @@ static uint64_t hist_total(struct pgwt_accumulator *acc, uint32_t we)
     if (s) for (int i = 0; i < HISTOGRAM_BUCKETS; i++) n += s->histogram[i];
     return n;
 }
+/* Is `path`'s block index ascending in first timestamp? Returns 1/0, and
+ * writes the first inversion's index (or -1) so the test can NAME it. */
+static int index_sorted(const char *path, int *first_inversion, int *nblocks)
+{
+    struct pgwt_event_reader r;
+    *first_inversion = -1;
+    *nblocks = 0;
+    if (pgwt_reader_open(&r, path) != 0)
+        return -1;
+    *nblocks = r.num_blocks;
+    int sorted = r.block_index_sorted;
+    for (int i = 1; i < r.num_blocks; i++) {
+        if (r.block_index[i].timestamp_ns < r.block_index[i - 1].timestamp_ns) {
+            *first_inversion = i;
+            break;
+        }
+    }
+    pgwt_reader_close(&r);
+    return sorted;
+}
+
+static int find_block_at(const char *path, uint64_t mono)
+{
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, path) != 0) return -1;
+    int b = pgwt_reader_find_block(&r, mono);
+    pgwt_reader_close(&r);
+    return b;
+}
+
 static uint64_t qtot(struct pgwt_accumulator *acc, uint32_t we)
 {
     for (int i = 0; i < acc->num_query_events; i++)
@@ -252,7 +367,10 @@ int main(void)
 {
     char dir[]  = "/tmp/pgwt_replay_win_XXXXXX";
     char dir2[] = "/tmp/pgwt_replay_cln_XXXXXX";
-    if (!mkdtemp(dir) || !mkdtemp(dir2)) { perror("mkdtemp"); return 1; }
+    char dir3[] = "/tmp/pgwt_replay_lag_XXXXXX";
+    if (!mkdtemp(dir) || !mkdtemp(dir2) || !mkdtemp(dir3)) {
+        perror("mkdtemp"); return 1;
+    }
     pgwt_init_event_names(18);
 
     if (write_trace(dir) != 0) {
@@ -263,9 +381,14 @@ int main(void)
         fprintf(stderr, "FATAL: could not write the straddler-free trace\n");
         return 1;
     }
-    char path[600], path2[600];
+    if (write_lagging_trace(dir3) != 0) {
+        fprintf(stderr, "FATAL: could not write the lagging-drain trace\n");
+        return 1;
+    }
+    char path[600], path2[600], path3[600];
     snprintf(path,  sizeof(path),  "%s/current.trace", dir);
     snprintf(path2, sizeof(path2), "%s/current.trace", dir2);
+    snprintf(path3, sizeof(path3), "%s/current.trace", dir3);
 
     /* ── Preconditions. A writer/reader failure must FAIL this test, never
      * let it pass vacuously on an accumulator nobody filled. ───────────── */
@@ -466,6 +589,131 @@ int main(void)
         free(a);
     }
 
+    printf("CASE 10: #429 — commit order and timestamp order DISAGREE\n");
+    {
+        int inv = -1, nb = 0;
+        int sorted = index_sorted(path3, &inv, &nb);
+        /* Fixture preconditions FIRST. If the writer is ever changed to sort
+         * the index, these go red and say so, instead of the cases below
+         * passing on a fixture that no longer exercises #429. */
+        CHECK_EQ(nb, 7, "lagging-drain trace cut into 7 blocks");
+        CHECK(sorted == 0,
+              "FIXTURE: block_index is NOT ascending (reader agrees)");
+        CHECK_EQ(inv, 2,
+                 "FIXTURE: first inversion is block 2 (1100 ms committed "
+                 "after the 6000 ms SAMPLES block)");
+        CHECK_EQ(index_sorted(path, &(int){0}, &(int){0}), 1,
+                 "CONTROL: the ordinary fixture's index IS ascending, so the "
+                 "flag discriminates rather than always saying 'unsorted'");
+
+        /* The lookup itself. On this index a binary search has no
+         * precondition: searching for 6000 ms returns block 2 (TRANSITIONS,
+         * 1100-1119 ms) and skips block 1 (SAMPLES, 6000-7100 ms), the only
+         * block covering the window. find_block must refuse to narrow. */
+        CHECK_EQ(find_block_at(path3, BASE + 6000 * MS), 0,
+                 "find_block refuses to narrow an unsorted index (was 2, "
+                 "which skips the only block covering the window)");
+
+        /* …and the window really is answered from that skipped block. */
+        int b = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
+        struct pgwt_replay_stats s10 = {0};
+        struct pgwt_accumulator *a =
+            replay(path3, BASE + 6000 * MS, BASE + 7000 * MS, &b, &s10, -1,
+                   NULL, NULL);
+        CHECK_EQ(tot(a, EV_SAMPLE), 11 * PERIOD,
+                 "11 sampler ticks found in the block the binary search "
+                 "skipped");
+        CHECK_EQ(s10.samples, 11, "…and reported");
+        CHECK_EQ(s10.right_edge_truncated, 0, "no truncation needed");
+        free(a);
+    }
+
+    printf("CASE 11: #429 — a straddler in a LATER-committed, "
+           "EARLIER-timestamped block\n");
+    {
+        /* Window [1000, 1100] ms. EV_STRAD closes at 1300 ms after 250 ms,
+         * so 50 ms of it is inside — and its block is committed after two
+         * far-future SAMPLES blocks. EV_D (1090 ms, inside) is committed
+         * last of all. A scan that stops at the first block past --to loses
+         * blocks 2, 4 and 6 and reports 19 ms where 71 ms is in the window. */
+        int b = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
+        struct pgwt_replay_stats s11 = {0};
+        struct pgwt_accumulator *a =
+            replay(path3, BASE + 1000 * MS, BASE + 1100 * MS, &b, &s11, -1,
+                   NULL, NULL);
+        CHECK_EQ(tot(a, EV_A), 19 * MS, "EV_A: 19 of 20 records contribute");
+        CHECK_EQ(cnt(a, EV_A), 20, "EV_A: all 20 closes counted");
+        CHECK_EQ(tot(a, EV_B), 1 * MS,
+                 "EV_B: the record closing exactly at --to (block 2, after "
+                 "the first SAMPLES block)");
+        CHECK_EQ(tot(a, EV_STRAD), 50 * MS,
+                 "EV_STRAD: the straddler in block 4 is found");
+        CHECK_EQ(cnt(a, EV_STRAD), 0, "EV_STRAD: closes outside, not counted");
+        CHECK_EQ(tot(a, EV_D), 1 * MS,
+                 "EV_D: the block committed LAST, with the second-earliest "
+                 "first timestamp, is still read");
+        CHECK(pgwt_find_system_event(a, EV_C) == NULL,
+              "EV_C (starts after --to) creates no entry");
+        CHECK_EQ(a->tm.io_time_ns, 71 * MS, "time model = 19+1+50+1 ms");
+        CHECK_EQ(s11.straddlers_admitted, 1, "one right-open record admitted");
+        free(a);
+    }
+
+    printf("CASE 12: #429 — tiling the lagging-drain capture loses nothing, "
+           "and nothing is excused by a flag\n");
+    {
+        /* The strongest statement available without a second implementation:
+         * tile the whole capture into windows, sum each record's clipped
+         * time, and require the whole duration back. Under the old scan the
+         * sum is SHORT and no flag is set — the answer looks complete. So
+         * this asserts both halves: conservation, and that no truncation or
+         * unreadable-block flag was needed to get it. */
+        const uint64_t edges[] = { BASE, BASE + 1050 * MS, BASE + 1250 * MS,
+                                   BASE + 1320 * MS, BASE + 5000 * MS,
+                                   BASE + 7050 * MS, BASE + 9050 * MS,
+                                   BASE + 11050 * MS, BASE + 12000 * MS };
+        const int nedge = (int)(sizeof(edges) / sizeof(edges[0]));
+        const uint32_t ids[] = { EV_A, EV_B, EV_STRAD, EV_C, EV_D };
+        const uint64_t want_t[] = { 20 * MS, 20 * MS, 250 * MS, 1 * MS, 1 * MS };
+        const uint64_t want_c[] = { 20, 20, 1, 1, 1 };
+        uint64_t sum_t[5] = {0}, sum_c[5] = {0}, sum_s = 0;
+        int flags = 0;
+        for (int i = 0; i + 1 < nedge; i++) {
+            int b = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
+            struct pgwt_replay_stats ts = {0};
+            struct pgwt_accumulator *t =
+                replay(path3, edges[i], edges[i + 1], &b, &ts, -1, NULL, NULL);
+            for (int k = 0; k < 5; k++) {
+                sum_t[k] += tot(t, ids[k]);
+                sum_c[k] += cnt(t, ids[k]);
+            }
+            sum_s += tot(t, EV_SAMPLE);
+            flags += ts.right_edge_truncated + (int)ts.blocks_unreadable;
+            free(t);
+        }
+        int ok_t = 1, ok_c = 1;
+        for (int k = 0; k < 5; k++) {
+            if (sum_t[k] != want_t[k]) {
+                ok_t = 0;
+                printf("    %08x time %" PRIu64 " ns, want %" PRIu64 "\n",
+                       ids[k], sum_t[k], want_t[k]);
+            }
+            if (sum_c[k] != want_c[k]) {
+                ok_c = 0;
+                printf("    %08x count %" PRIu64 ", want %" PRIu64 "\n",
+                       ids[k], sum_c[k], want_c[k]);
+            }
+        }
+        CHECK(ok_t, "every record's time survives the tiling of an unsorted "
+                    "capture");
+        CHECK(ok_c, "every occurrence is counted exactly once");
+        CHECK_EQ(sum_s, 3ULL * NSAMPLES * PERIOD,
+                 "all 36 sampler ticks accounted");
+        CHECK_EQ(flags, 0,
+                 "and NO window needed a truncation/unreadable flag to get "
+                 "there (a short answer must never look complete)");
+    }
+
     /* ── Bypass suite: every way the right-edge scan could fail to SEE ──
      * A scan that cannot reach the straddlers must say so, not report a
      * short answer as if it were complete. */
@@ -495,20 +743,26 @@ int main(void)
         free(a);
     }
 
-    printf("CASE B3: unreadable block header -> refuses rather than skipping\n");
+    printf("CASE B3: unreadable block header -> reported, and the scan "
+           "keeps going\n");
     {
-        /* Block 2 is the straddlers' block; point it past EOF so its header
-         * cannot be read. The scan must mark the answer, not continue as if
-         * the block held nothing. */
+        /* Block 2 is the straddlers' block; point it past EOF so neither its
+         * header nor its payload can be read. An unreadable header is NOT
+         * read as "this block holds nothing" — the scan still attempts the
+         * decode, and when that fails too the block is COUNTED. #429: it
+         * must not stop the loop either, because under commit order the
+         * blocks after it can still be inside the window. */
         int b = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
         struct pgwt_replay_stats sb = {0};
         struct pgwt_accumulator *a =
             replay(path, W_FROM, W_TO, &b, &sb, 2, NULL, NULL);
-        CHECK_EQ(sb.right_edge_truncated, 1,
-                 "right_edge_truncated set when a header cannot be read");
+        CHECK_EQ(sb.blocks_unreadable, 1,
+                 "the block nobody could read is reported, not swallowed");
         CHECK_EQ(tot(a, EV_RIGHT), 0, "the straddler is genuinely missing");
+        CHECK_EQ(tot(a, EV_IN), 100 * MS,
+                 "and the readable blocks still answered (no early stop)");
         CHECK_EQ(b, PGWT_REPLAY_LOOKAHEAD_BLOCKS,
-                 "an unreadable header spends no budget");
+                 "an unreadable header spends no lookahead budget");
         free(a);
     }
 
@@ -603,6 +857,31 @@ int main(void)
         free(a);
     }
 
+    printf("CASE B10: #429 — an exhausted budget must not skip the "
+           "IN-WINDOW blocks behind it\n");
+    {
+        /* Same window as CASE 11, budget 0. Block 4 (right-open) can no
+         * longer be paid for, which is what the flag is for — but blocks 5
+         * and 6 come after it in COMMIT order and block 6 is inside the
+         * window. The old `break` on an exhausted budget threw them away,
+         * and the flag said "right edge truncated", not "I dropped an
+         * in-window block". A scan that cannot see must refuse, not guess
+         * about the blocks it never looked at. */
+        int b = 0;
+        struct pgwt_replay_stats sb = {0};
+        struct pgwt_accumulator *a =
+            replay(path3, BASE + 1000 * MS, BASE + 1100 * MS, &b, &sb, -1,
+                   NULL, NULL);
+        CHECK_EQ(sb.right_edge_truncated, 1, "the straddler block is flagged");
+        CHECK_EQ(tot(a, EV_STRAD), 0, "…and really is missing");
+        CHECK_EQ(tot(a, EV_D), 1 * MS,
+                 "but EV_D, committed AFTER it and inside the window, is "
+                 "still found (break -> continue)");
+        CHECK_EQ(tot(a, EV_A) + tot(a, EV_B), 20 * MS,
+                 "and so are the earlier in-window blocks");
+        free(a);
+    }
+
     printf("CASE B8: a window past the end of the trace\n");
     {
         int b = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
@@ -619,7 +898,7 @@ int main(void)
     free(w);
 
     char cmd[1400];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s %s", dir, dir2);
+    snprintf(cmd, sizeof(cmd), "rm -rf %s %s %s", dir, dir2, dir3);
     if (system(cmd) != 0) { /* best effort */ }
 
     printf("\n%d checks, %d failures\n", checks, failures);

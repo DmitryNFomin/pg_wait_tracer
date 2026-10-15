@@ -103,14 +103,20 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
         if (to_wall > 0)
             to_mono = pgwt_reader_wall_to_mono(&reader, to_wall);
 
-        /* Find starting block */
-        int start_block = 0;
-        if (from_mono > 0)
-            start_block = pgwt_reader_find_block(&reader, from_mono);
-
+        /* #429: pgwt_replay_file examines every block by its header rather
+         * than trusting a start index, so there is no "starting block" to
+         * report any more. What IS worth reporting is whether this file's
+         * block index is in timestamp order at all: it is written in commit
+         * order, and a lagging drain makes the two disagree — the condition
+         * under which the old binary search returned an arbitrary block and
+         * windows came back silently short. */
         if (d->verbose)
-            fprintf(stderr, "INFO: %s: %d blocks, starting at block %d\n",
-                    files[fi].path, reader.num_blocks, start_block);
+            fprintf(stderr, "INFO: %s: %d blocks, index %s\n",
+                    files[fi].path, reader.num_blocks,
+                    reader.block_index_sorted
+                        ? "in timestamp order"
+                        : "NOT in timestamp order (commit order differs — "
+                          "scanning every block by header)");
 
         /* The block scan, including the budgeted right-edge lookahead, lives
          * in pgwt_replay_file (src/event_reader.c) next to the record rule it
