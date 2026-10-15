@@ -1044,8 +1044,13 @@ def main():
         print(f"REFUSED (6): artifact/configuration failure: {exc}",file=sys.stderr)
         return 6
     finally:
+        # #421: a refusal used to delete `staging` here, destroying the only
+        # frames/observations that could explain why. On success the normal
+        # path already sets staging=None after os.rename(), so this branch
+        # only ever fires on a Refusal or the generic-exception path above —
+        # retain it there for diagnosis instead of cleaning it up.
         if staging:
-            shutil.rmtree(staging)
+            print(f"staging retained for diagnosis: {staging}",file=sys.stderr)
 
 
 if __name__ == "__main__":
