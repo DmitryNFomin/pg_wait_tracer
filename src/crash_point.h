@@ -16,11 +16,32 @@
  * flush, no close. The test then asserts what the NEXT startup makes of the
  * state left behind.
  *
- * Inert unless the variable is set, and the points sit only in the rotation
- * and recovery handovers, which run at most once an hour (and once per
- * start), so the getenv is not on any hot path. The variable is read on every
- * arrival rather than cached precisely so a test can arm one point, let the
- * child die, and have the next process (which does not set it) run clean.
+ * WHY A TEST HOOK IS IN PRODUCTION CODE. It makes an otherwise unprovable
+ * property provable. Both of the bugs this exists to catch — rotation
+ * deleting a checkpoint before a successor existed, and recovery renaming the
+ * trace before its sidecar — survived a green end-to-end gate, because the
+ * only alternative to a hook is to CONSTRUCT the intermediate state in a test
+ * and assert the next start resolves it. That proves the resolver handles a
+ * state, never that the product actually passes through only resolvable
+ * states, which is precisely the gap both bugs lived in. The hook closes it:
+ * a real process really dies, mid-handover, at a point the product reached by
+ * itself.
+ *
+ * SAFETY, by construction:
+ *   - no variable set            → getenv returns NULL        → no-op
+ *   - variable set to ""         → explicit empty check       → no-op
+ *   - variable set to anything
+ *     that is not an exact match → strcmp fails               → no-op
+ *   There is NO default point, no prefix match, no "any", and no numeric
+ *   index that could land on a point by accident: a crash happens only when a
+ *   full string equals one of the four names below, which are spelled out as
+ *   macros so a test cannot arm something a typo invented.
+ *
+ * COST. The points sit only in the rotation and recovery handovers, which run
+ * at most once an hour and once per start, so the getenv is on no hot path.
+ * The variable is read on every arrival rather than cached, so a test can arm
+ * one point, let the child die, and have the next process — which does not
+ * set it — run clean.
  */
 #ifndef PGWT_CRASH_POINT_H
 #define PGWT_CRASH_POINT_H

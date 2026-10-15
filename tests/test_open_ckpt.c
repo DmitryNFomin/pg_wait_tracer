@@ -846,6 +846,58 @@ static void test_checkpoint_forces_no_block_boundary(void)
     rm_rf(dir);
 }
 
+/* Run one rotation in a child with PGWT_CRASH_AT set to `val` (NULL = unset)
+ * and report whether the child was killed by the hook. */
+static int rotation_child_died(const char *dir, const char *val)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (val) setenv("PGWT_CRASH_AT", val, 1);
+        else     unsetenv("PGWT_CRASH_AT");
+        struct pgwt_event_writer w;
+        if (pgwt_writer_init(&w, dir, 16, 0, NULL) != 0) _exit(2);
+        push_n(&w, 30, 30000000000ULL);
+        struct pgwt_open_ckpt_record r = mkrec(7001, 30100000000ULL, 1000);
+        if (pgwt_writer_checkpoint_open(&w, 30100000000ULL, &r, 1) != 0)
+            _exit(3);
+        w.current_hour = -99;
+        pgwt_writer_check_rotation(&w);
+        pgwt_writer_close(&w);
+        pgwt_writer_destroy(&w);
+        _exit(0);              /* reached only if the hook did NOT fire */
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) return -1;
+    return WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL;
+}
+
+static void test_crash_hook_cannot_fire_by_accident(void)
+{
+    printf("\n[C9] the crash hook is inert unless armed EXACTLY\n");
+
+    /* The hook lives in production code, so the thing to prove is not only
+     * that it fires, but that nothing short of an exact match can make it.
+     * No default, no prefix match, no case folding, no "any". */
+    const char *inert[] = { NULL, "", "nonsense", "rotate_after_ck",
+                            "rotate_after_ckpt_extra", "ROTATE_AFTER_CKPT",
+                            "recover_after_ckpt" /* a real name, wrong path */ };
+    for (unsigned i = 0; i < sizeof(inert) / sizeof(inert[0]); i++) {
+        const char *dir = fresh_dir("hookinert");
+        int died = rotation_child_died(dir, inert[i]);
+        CHECK(died == 0, "PGWT_CRASH_AT=%s must not kill a rotation",
+              inert[i] ? (inert[i][0] ? inert[i] : "(empty)") : "(unset)");
+        rm_rf(dir);
+    }
+
+    /* And the positive control, in the same table, so "inert" cannot be
+     * satisfied by a hook that never works at all. */
+    const char *dir = fresh_dir("hookarmed");
+    CHECK(rotation_child_died(dir, PGWT_CRASH_ROTATE_AFTER_CKPT) == 1,
+          "the exact name DOES kill — otherwise the inertness above is "
+          "vacuous and the window tests prove nothing");
+    rm_rf(dir);
+}
+
 static void test_sidecar_path_rule(void)
 {
     printf("\n[C8] both sidecar names, including the un-recovered one\n");
@@ -1179,6 +1231,7 @@ int main(void)
     test_kill_between_recovery_renames();
     test_adoption_requires_identity();
     test_checkpoint_forces_no_block_boundary();
+    test_crash_hook_cannot_fire_by_accident();
     test_sidecar_path_rule();
     test_uncertified_close_keeps_checkpoint();
     test_stale_sidecar_refused();
