@@ -305,6 +305,17 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     # once per route; its pure comparison core is gated separately in
     # `make check` and below as test_summary_raw_parity_lib.py.
     run_test "test_summary_raw_parity" python3 "$SCRIPT_DIR/test_summary_raw_parity.py"
+    # #424: the raw loader admits a non-sample record only when its CLOSE
+    # falls in [from, to]; the correct rule is overlap (close >= from AND
+    # start <= to). The parity gate above cannot see it -- its generator
+    # closes every interval at the shutdown flush and its QUIET tuple puts
+    # every window edge in a data hole. This one asserts CONSERVATION, which
+    # needs no reference path at all: cutting a window into adjacent parts
+    # must preserve total time per class and per event, because clipping is
+    # additive. Counts are asserted additive in the same probe -- that is the
+    # guard against a half fix that widens admission without making
+    # occurrences select on the record's own close timestamp.
+    run_test "test_window_additivity" python3 "$SCRIPT_DIR/test_window_additivity.py"
     run_test "test_data_markers" python3 "$SCRIPT_DIR/test_data_markers.py"
     # #274: executions/exec_scatter read the pre-window marker prefix from
     # the retained index; this is the differential proving it is the SAME
