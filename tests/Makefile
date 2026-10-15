@@ -45,7 +45,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_summary_tick_flush \
             test_block_agg bench_block_agg test_transitions_loader \
             test_top_wait_backfill \
-            test_open_interval
+            test_open_interval \
+            test_trace_closure
 
 .PHONY: all clean check
 
@@ -388,6 +389,12 @@ test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c \
 # recovery (kill -9 matrix), collision-safe archive names, size-cap
 # retention, meta/footer sanity caps, ~1 s SAMPLES batching. Server build
 # (no BPF skeleton) — the writers/readers are BPF-free.
+# test_trace_closure: #424 deliverable 1 — the header closure bits. Clean
+# close vs rotation vs crash recovery vs legacy, plus the bypass suite (a
+# gate that cannot read the file must refuse, never approve). Server build.
+test_trace_closure: test_trace_closure.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
 test_durability: test_durability.c $(BUILD)/server_event_writer.o \
                  $(BUILD)/server_event_reader.o \
                  $(BUILD)/server_summary_writer.o \

@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <errno.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -175,6 +176,53 @@ int pgwt_archive_path_nonclobber(const char *dir, const struct tm *tm,
     return -1;
 }
 
+/* ── Closure status (#424 deliverable 1) ──────────────────── */
+
+/* Rewrite the header's `flags` field in place and make the new value durable.
+ *
+ * Called only AFTER the file's data is already on stable storage, so the
+ * ordering is: data fsync → flag write → flag fsync. A reader can therefore
+ * never see a clean/rotated bit for data that is not there; the reverse
+ * (data durable, bit missing) is the safe direction and reads as "not
+ * finalized".
+ *
+ * pwrite, not fseek+fwrite: it leaves the stream's append position alone, so
+ * a caller that keeps writing (nobody does today, but a future one might)
+ * cannot be silently corrupted by this. Returns 0 only if both the write and
+ * the fsync succeeded. */
+static int write_header_flags(FILE *fp, uint16_t flags)
+{
+    if (fflush(fp) != 0)
+        return -1;
+    int fd = fileno(fp);
+    off_t off = (off_t)offsetof(struct pgwt_trace_file_header, flags);
+    if (pwrite(fd, &flags, sizeof(flags), off) != (ssize_t)sizeof(flags))
+        return -1;
+    if (fsync(fd) != 0)
+        return -1;
+    return 0;
+}
+
+int pgwt_trace_file_closure(const char *path, enum pgwt_closure_status *out)
+{
+    if (out)
+        *out = PGWT_CLOSURE_UNKNOWN;   /* a file we cannot read is never clean */
+    if (!path)
+        return -1;
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return -1;
+    struct pgwt_trace_file_header hdr;
+    int ok = (fread(&hdr, sizeof(hdr), 1, fp) == 1) &&
+             hdr.magic == PGWT_TRACE_MAGIC;
+    fclose(fp);
+    if (!ok)
+        return -1;
+    if (out)
+        *out = pgwt_closure_from_flags(hdr.flags);
+    return 0;
+}
+
 /* ── Startup recovery (DUR-1) ─────────────────────────────── */
 
 /* A previous daemon left a current.trace behind (crash, kill -9, or plain
@@ -319,6 +367,38 @@ static void recover_current_trace(struct pgwt_event_writer *w)
     }
     fflush(fp);
     fsync(fileno(fp));
+
+    /* #424: record how this file ENDED, now that its data is durable.
+     *
+     *   - legacy file (no CLOSURE_TRACKED): left exactly as it is. A
+     *     pre-#424 daemon left no trace of whether it shut down or died, so
+     *     the file reads as UNKNOWN. Stamping RECOVERED on it would be
+     *     inventing evidence in the other direction — just as wrong as
+     *     calling it clean.
+     *   - already CLEAN or ROTATED: preserved. Finding such a file here is
+     *     normal: a clean close leaves current.trace in place with its
+     *     footer, and it is THIS path that archives it on the next start.
+     *     Recovery must not relabel that as a crash.
+     *   - tracked but never finalized: the previous daemon died without
+     *     closing. RECOVERED — intervals open at the end are missing.
+     *   - tracked, says CLEAN, but the scan found FEWER blocks than the meta
+     *     high-watermark says were committed: the close bit contradicts the
+     *     file. RECOVERED wins (trace_closure.h rule 2a) — a "clean" label
+     *     over missing committed data is exactly the false clean this whole
+     *     deliverable exists to prevent. */
+    int tracked = (hdr.flags & PGWT_FLAG_CLOSURE_TRACKED) != 0;
+    int finalized = (hdr.flags & (PGWT_FLAG_CLOSED_CLEAN |
+                                  PGWT_FLAG_ROTATED)) != 0;
+    int lost_committed = (committed > nidx);
+    if (!finalize_failed && tracked && (!finalized || lost_committed) &&
+        !(hdr.flags & PGWT_FLAG_RECOVERED)) {
+        uint16_t newf = (uint16_t)(hdr.flags | PGWT_FLAG_RECOVERED);
+        if (write_header_flags(fp, newf) != 0)
+            fprintf(stderr, "WARN: could not mark recovered %s as uncleanly "
+                    "ended (%s) — it will read as an unfinished capture\n",
+                    cur, strerror(errno));
+    }
+
     fclose(fp);
     free(idx);
     if (finalize_failed)
@@ -404,7 +484,10 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     struct pgwt_trace_file_header hdr = {
         .magic = PGWT_TRACE_MAGIC,
         .version = PGWT_TRACE_VERSION,
-        .flags = PGWT_FLAG_LZ4,
+        /* CLOSURE_TRACKED from byte one: it is the capability bit that makes
+         * the absence of a terminal bit MEAN something later (#424). A file
+         * without it is a legacy file and reads as "unknown", never clean. */
+        .flags = PGWT_FLAG_LZ4 | PGWT_FLAG_CLOSURE_TRACKED,
         .pg_version = (uint32_t)w->pg_version,
         .start_time_ns = w->file_start_wall_ns,
         .clock_offset_ns = w->file_start_mono_ns,
@@ -584,6 +667,56 @@ static int flush_samples(struct pgwt_event_writer *w)
             return -1;
     }
     return flush_sample_buf(w);
+}
+
+/* Finalize the current file and record WHY it ended (#424 deliverable 1).
+ *
+ * `terminal_flag` is PGWT_FLAG_CLOSED_CLEAN (shutdown) or PGWT_FLAG_ROTATED
+ * (hour / block-cap rotation). The bit is written only when the whole chain
+ * succeeded: both pending buffers flushed, the footer written, the data
+ * fsynced. Every one of those is CHECKED — before #424 all of those return
+ * values were discarded, which is exactly how a file with a truncated tail
+ * ended up indistinguishable from a complete one.
+ *
+ * Returns 0 if the file now carries that bit, -1 if anything in the chain
+ * failed. On -1 the file keeps NO terminal bit and reads back as
+ * IN_PROGRESS, which for an archived file means "open intervals may be
+ * missing" — the safe direction. The caller still rotates/closes: refusing
+ * to would only stall the capture and lose more. */
+static int finalize_current_file(struct pgwt_event_writer *w,
+                                 uint16_t terminal_flag)
+{
+    if (!w->fp)
+        return -1;
+
+    int ok = 1;
+    if (flush_block(w) != 0)
+        ok = 0;
+    if (flush_samples(w) != 0)
+        ok = 0;
+    if (write_footer(w) != 0)
+        ok = 0;
+    if (fflush(w->fp) != 0)
+        ok = 0;
+    if (fsync(fileno(w->fp)) != 0)
+        ok = 0;
+
+    if (!ok) {
+        fprintf(stderr, "WARN: could not finalize %s durably — it will read "
+                "as an unfinished capture (open intervals may be missing)\n",
+                w->current_path);
+        return -1;
+    }
+
+    uint16_t flags = (uint16_t)(PGWT_FLAG_LZ4 | PGWT_FLAG_CLOSURE_TRACKED |
+                                terminal_flag);
+    if (write_header_flags(w->fp, flags) != 0) {
+        fprintf(stderr, "WARN: could not record the closure status of %s "
+                "(%s) — it will read as an unfinished capture\n",
+                w->current_path, strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 /* ── Public API ───────────────────────────────────────────── */
@@ -767,10 +900,12 @@ int pgwt_writer_check_rotation(struct pgwt_event_writer *w)
     if (current_hour == w->current_hour && !w->force_rotate)
         return 0;
 
-    /* Hour changed (or the block cap forced it) — rotate */
-    flush_block(w);
-    flush_samples(w);
-    write_footer(w);
+    /* Hour changed (or the block cap forced it) — rotate. #424: ROTATED, not
+     * CLOSED_CLEAN. The capture did NOT end here, so an interval open across
+     * the boundary is not lost — it closes in the next file, and a reader
+     * must not be warned about it. That distinction is the whole reason the
+     * footer alone could not certify anything. */
+    finalize_current_file(w, PGWT_FLAG_ROTATED);
 
     if (w->verbose) {
         double ratio = w->total_events_written > 0
@@ -829,9 +964,12 @@ int pgwt_writer_close(struct pgwt_event_writer *w)
 {
     if (!w->fp) return 0;
 
-    flush_block(w);
-    flush_samples(w);
-    write_footer(w);
+    /* #424: the ONLY place a file is certified clean. finalize_current_file
+     * checks every step and fsyncs the data BEFORE the bit, so the bit is
+     * never set over data that is not on disk. If it fails the file simply
+     * stays uncertified — a reader then says "open intervals may be
+     * missing", which is the truth. */
+    finalize_current_file(w, PGWT_FLAG_CLOSED_CLEAN);
 
     if (w->verbose) {
         double ratio = w->total_events_written > 0

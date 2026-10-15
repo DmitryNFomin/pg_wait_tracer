@@ -3,6 +3,7 @@
 #define PGWT_EVENT_WRITER_H
 
 #include "pg_wait_tracer.h"
+#include "trace_closure.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -21,6 +22,11 @@
  * back to gap-inference. See docs/TRACE_FORMAT.md. */
 #define PGWT_TRACE_VERSION    3
 #define PGWT_FLAG_LZ4         0x0001
+/* The remaining bits of the header `flags` field carry the closure status
+ * (#424 deliverable 1): PGWT_FLAG_CLOSURE_TRACKED / _CLOSED_CLEAN / _ROTATED
+ * / _RECOVERED, defined with their reading rules in src/trace_closure.h. No
+ * layout change and no version bump — a pre-#424 reader ignores the field's
+ * spare bits, and a pre-#424 FILE reads back as "unknown", never as clean. */
 
 #define PGWT_BLOCK_EVENTS     4096         /* events per block */
 
@@ -74,7 +80,9 @@ enum pgwt_block_type {
 struct pgwt_trace_file_header {
     uint32_t magic;
     uint16_t version;
-    uint16_t flags;
+    uint16_t flags;              /* PGWT_FLAG_LZ4 | closure bits (trace_closure.h).
+                                  * Rewritten in place at offset 6, once, when
+                                  * the file is finalized. */
     uint32_t pg_version;
     uint64_t start_time_ns;      /* CLOCK_REALTIME at file creation */
     uint64_t clock_offset_ns;    /* CLOCK_MONOTONIC at file creation */
@@ -188,6 +196,13 @@ int  pgwt_writer_push_samples(struct pgwt_event_writer *w,
  * success, -1 if a block write failed. Safe (no-op) before the first event. */
 int  pgwt_writer_publish(struct pgwt_event_writer *w);
 uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w);
+
+/* #424: how the trace file at `path` ended — see src/trace_closure.h for the
+ * verdicts and the rules behind them. Returns 0 when the header was read and
+ * *out holds the verdict; -1 when the file could not be opened or is not a
+ * trace file, in which case *out is PGWT_CLOSURE_UNKNOWN (a file we cannot
+ * inspect is never reported clean). */
+int  pgwt_trace_file_closure(const char *path, enum pgwt_closure_status *out);
 
 int  pgwt_writer_check_rotation(struct pgwt_event_writer *w);
 int  pgwt_writer_close(struct pgwt_event_writer *w);

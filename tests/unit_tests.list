@@ -603,3 +603,18 @@ test_summary_raw_parity_lib.py
 # 64 KB buffer is demonstrably insufficient, and the old drop-on-EAGAIN
 # sender truncates a reply the queued sender delivers whole.
 test_open_interval
+
+# test_trace_closure (#424 deliverable 1): can a reader tell that a capture
+# ended uncleanly? A footer could never answer that -- rotation, crash
+# recovery and a clean close all write one -- so the writer now records WHY a
+# file ended in spare header flag bits. Three groups: the pure bit->verdict
+# mapping (a legacy file reads UNKNOWN, never clean; contradictory bits
+# resolve to UNCLEAN); the real lifecycle on real files (clean close,
+# rotation, mid-capture, SIGKILL + recovery, SIGKILL twice, a clean label
+# surviving the recovery that archives it, a CLEAN label contradicted by the
+# committed watermark, and a close whose flush was made to FAIL -- which is
+# the only case that distinguishes "checked and durable" from "always set the
+# bit"); and the bypass suite -- missing file, empty file, truncated header,
+# wrong magic with every bit set, a directory, and a capture that never
+# opened a file at all. A gate that cannot see must refuse, never approve.
+test_trace_closure
