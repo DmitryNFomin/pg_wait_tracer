@@ -3725,6 +3725,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
     struct pgwt_load_info linfo = {0};
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
+    int top_wait_unavailable = 0;
+    const char *top_wait_unavailable_reason = NULL;
 
     /* The per-second records carry NO per-session breakdown by query, wait
      * class or wait event -- struct pgwt_summary_session is {pid, db_time_ns,
@@ -3742,10 +3744,76 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
     int sessions_filter_needs_raw = (req->filter.query_id != 0 ||
                                      req->filter.class_name[0] != '\0' ||
                                      req->filter.has_event_filter);
+    /* #319: the summary path's top_wait is a different QUESTION from the
+     * raw path's, not a looser approximation of it -- struct
+     * pgwt_summary_session keeps "dur > top_wait_ns" PER SECOND (the single
+     * longest individual wait), while the raw path's top_wait is the argmax
+     * of a session's per-event TOTAL over the whole window. On the retained
+     * demo capture they disagreed on 41 of 142 rows at the full window and
+     * 26 of 81 at 900 s -- not a rounding difference, a different event
+     * name on screen (the three largest sessions read LWLock:WALWrite from
+     * summaries where raw reads IO:WalSync).
+     *
+     * Fixed by BACKFILLING, not by changing what summaries store: every
+     * other field on this response (db_time_ms, cpu_pct, wait_pct, the row
+     * set itself) stays exactly what the summary path already computes --
+     * cheap and correct. top_wait is the one field the record cannot answer
+     * on its own, so it is overwritten from ONE raw load of the SAME
+     * [from,to) window already being served (never a wider one), after the
+     * page is already known. This is bounded by one window's worth of raw
+     * events regardless of how many session rows come back, same as the
+     * `else` branch below already pays for a sub-120s window.
+     *
+     * A summary record that stores no per-session per-event breakdown at
+     * all (see ts_summary_visitor's comment) rules out deriving top_wait
+     * from anything the summary already has -- there is nothing to derive
+     * it FROM short of a raw pass. */
     if (should_use_summaries(srv, req, &wfid) && !sessions_filter_needs_raw) {
         pgwt_compute_top_sessions_from_summaries(srv->trace_dir, from, to,
                                                   &req->filter, wall_ms, &res);
         from_summaries = 1;
+
+        if (!res.failed && res.num_rows > 0) {
+            int rcount = 0;
+            struct pgwt_load_info rinfo = {0};
+            struct pgwt_trace_event *revents =
+                server_load_events_fi(srv, req->from_ns, req->to_ns,
+                                      req->filter.pid, &rcount, &rinfo);
+            if (rinfo.overloaded || rinfo.allocation_failed) {
+                /* Absence with a reason, never the summary path's
+                 * single-longest-wait value passed off as the raw answer
+                 * (that IS the #319 defect) and never a silent blank. The
+                 * rest of the row (db_time_ms etc.) is still the correct,
+                 * cheap summary answer -- only top_wait degrades. */
+                free(revents);
+                top_wait_unavailable = 1;
+                top_wait_unavailable_reason = rinfo.allocation_failed
+                    ? "allocation_failed" : "window_too_large";
+            } else {
+                struct pgwt_sessions_result raw_res;
+                pgwt_compute_top_sessions(revents, rcount, &req->filter,
+                                          req->from_ns, req->to_ns, wall_ms,
+                                          &raw_res);
+                free(revents);
+                if (raw_res.failed) {
+                    top_wait_unavailable = 1;
+                    top_wait_unavailable_reason = "compute_failed";
+                } else {
+                    for (int i = 0; i < res.num_rows; i++) {
+                        for (int j = 0; j < raw_res.num_rows; j++) {
+                            if (raw_res.rows[j].pid != res.rows[i].pid)
+                                continue;
+                            res.rows[i].top_wait_id = raw_res.rows[j].top_wait_id;
+                            memcpy(res.rows[i].top_wait,
+                                  raw_res.rows[j].top_wait,
+                                  sizeof(res.rows[i].top_wait));
+                            break;
+                        }
+                    }
+                }
+                free(raw_res.rows);
+            }
+        }
     } else {
         int count;
         struct pgwt_trace_event *events =
@@ -3779,6 +3847,15 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     if (from_summaries) add_fidelity_window(root, &wfid);
     else                add_fidelity(root, &linfo);
+    /* #319: the raw backfill above could not run (the window's raw events
+     * alone would overload, or its compute failed). Say so once at the
+     * top level -- every row's top_wait below is reported as absent rather
+     * than left holding the summary path's different-question answer. */
+    if (top_wait_unavailable) {
+        cJSON_AddTrueToObject(root, "top_wait_unavailable");
+        cJSON_AddStringToObject(root, "top_wait_unavailable_reason",
+                                top_wait_unavailable_reason);
+    }
 
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
@@ -3787,8 +3864,13 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
         cJSON_AddNumberToObject(r, "db_time_ms", res.rows[i].db_time_ms);
         cJSON_AddNumberToObject(r, "cpu_pct", res.rows[i].cpu_pct);
         cJSON_AddNumberToObject(r, "wait_pct", res.rows[i].wait_pct);
-        cJSON_AddStringToObject(r, "top_wait", res.rows[i].top_wait);
-        cJSON_AddNumberToObject(r, "top_wait_id", res.rows[i].top_wait_id);
+        if (top_wait_unavailable) {
+            cJSON_AddNullToObject(r, "top_wait");
+            cJSON_AddNumberToObject(r, "top_wait_id", 0);
+        } else {
+            cJSON_AddStringToObject(r, "top_wait", res.rows[i].top_wait);
+            cJSON_AddNumberToObject(r, "top_wait_id", res.rows[i].top_wait_id);
+        }
         const struct bm_entry *bm = bm_map_lookup(srv, res.rows[i].pid);
         if (bm) {
             cJSON_AddStringToObject(r, "type", bm->type);
@@ -3822,6 +3904,8 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_load_info linfo = {0};
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
+    int top_wait_unavailable = 0;
+    const char *top_wait_unavailable_reason = NULL;
 
     /* Use summaries for large ranges (>120s) for the class breakdown.
      * Always load raw events for lifecycle stats (exec/plan counts).
@@ -3837,6 +3921,39 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         pgwt_compute_top_queries_from_summaries(srv->trace_dir, from, to,
                                                  &req->filter, wall_ms, &res);
         from_summaries = 1;
+
+        /* #319: same backfill as handle_top_sessions, and cheaper here --
+         * `all_events` above is ALREADY a full raw load of this exact
+         * window (lifecycle stats need it unconditionally) and has ALREADY
+         * cleared reject_overload, so there is no second raw load and no
+         * window-too-large case to degrade for: the only way this can fail
+         * is the same allocation failure res.failed below already reports
+         * for the summary path. struct pgwt_summary_query's top_wait_ns is
+         * the same per-second "longest single wait" shape as sessions' (see
+         * accum_query_add in summary_writer.c), so it answers a different
+         * question from raw's per-event-TOTAL argmax the same way. */
+        if (!res.failed && res.num_rows > 0) {
+            struct pgwt_queries_result raw_res;
+            pgwt_compute_top_queries(all_events, ecount, &req->filter,
+                                     req->from_ns, req->to_ns, wall_ms,
+                                     &raw_res);
+            if (raw_res.failed) {
+                top_wait_unavailable = 1;
+                top_wait_unavailable_reason = "compute_failed";
+            } else {
+                for (int i = 0; i < res.num_rows; i++) {
+                    for (int j = 0; j < raw_res.num_rows; j++) {
+                        if (raw_res.rows[j].query_id != res.rows[i].query_id)
+                            continue;
+                        res.rows[i].top_wait_id = raw_res.rows[j].top_wait_id;
+                        memcpy(res.rows[i].top_wait, raw_res.rows[j].top_wait,
+                              sizeof(res.rows[i].top_wait));
+                        break;
+                    }
+                }
+            }
+            free(raw_res.rows);
+        }
     } else {
         pgwt_compute_top_queries(all_events, ecount, &req->filter,
                                  req->from_ns, req->to_ns, wall_ms, &res);
@@ -3897,6 +4014,12 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     if (from_summaries) add_fidelity_window(root, &wfid);
     else                add_fidelity(root, &linfo);
+    /* #319: see the matching comment in handle_top_sessions. */
+    if (top_wait_unavailable) {
+        cJSON_AddTrueToObject(root, "top_wait_unavailable");
+        cJSON_AddStringToObject(root, "top_wait_unavailable_reason",
+                                top_wait_unavailable_reason);
+    }
 
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
@@ -3912,8 +4035,19 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         cJSON_AddNumberToObject(r, "total_ms", res.rows[i].total_ms);
         cJSON_AddNumberToObject(r, "avg_us", res.rows[i].avg_us);
         cJSON_AddNumberToObject(r, "pct", res.rows[i].pct_db);
-        cJSON_AddStringToObject(r, "top_wait", res.rows[i].top_wait);
-        cJSON_AddNumberToObject(r, "top_wait_id", res.rows[i].top_wait_id);
+
+        /* #319: emitted at the SAME POINT relative to the CPU-dominance
+         * override below as before this change (that override mutates
+         * res.rows[i].top_wait/top_wait_id AFTER the JSON node already
+         * holds a copy of the old value -- a pre-existing, unrelated
+         * no-op this fix does not touch either way). */
+        if (top_wait_unavailable) {
+            cJSON_AddNullToObject(r, "top_wait");
+            cJSON_AddNumberToObject(r, "top_wait_id", 0);
+        } else {
+            cJSON_AddStringToObject(r, "top_wait", res.rows[i].top_wait);
+            cJSON_AddNumberToObject(r, "top_wait_id", res.rows[i].top_wait_id);
+        }
 
         /* Override top_wait if CPU dominates (summary path doesn't track CPU as a wait) */
         if (res.rows[i].class_ms[PGWT_CLASS_CPU] > 0) {

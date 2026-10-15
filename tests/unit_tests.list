@@ -459,6 +459,17 @@ test_straddler_accounting
 # site -- a re-hand-written comparison there would still ship green.
 test_block_agg
 test_transitions_loader
+# #319: handle_top_sessions and handle_top_queries backfill top_wait from a
+# raw computation over the same window the summary path already answered
+# everything else from (the per-second summary record keeps only the single
+# longest wait, the raw definition is the largest per-event TOTAL -- a
+# different question, not a looser one; see the issue and the comment at
+# each call site). Pins the Sessions backfill (a session whose summary-only
+# answer is provably different from raw), the Sessions fail-safe (a raw
+# load small enough to overload reports absence with a reason and
+# top_wait: null, never the summary-only name and never a silent blank),
+# and the matching Queries backfill on the same fixture.
+test_top_wait_backfill
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact
 # tier the missing nanoseconds have no visible destination -- "it became

@@ -10,30 +10,10 @@
    "raw": 39000,
    "summary": 0
   },
-  "queries/row/102/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "queries/row/102/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
-  },
   "queries/unattributed_available": {
    "issue": 410,
    "raw": true,
    "summary": false
-  },
-  "sessions/row/1001/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "sessions/row/1001/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
@@ -52,30 +32,10 @@
    "raw": 39000,
    "summary": 0
   },
-  "queries/row/102/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "queries/row/102/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
-  },
   "queries/unattributed_available": {
    "issue": 410,
    "raw": true,
    "summary": false
-  },
-  "sessions/row/1001/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "sessions/row/1001/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
@@ -94,30 +54,10 @@
    "raw": 39000,
    "summary": 0
   },
-  "queries/row/102/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "queries/row/102/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
-  },
   "queries/unattributed_available": {
    "issue": 410,
    "raw": true,
    "summary": false
-  },
-  "sessions/row/1001/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "sessions/row/1001/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
@@ -193,40 +133,10 @@
    "raw": 39000,
    "summary": 0
   },
-  "queries/row/102/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "queries/row/102/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
-  },
   "queries/unattributed_available": {
    "issue": 410,
    "raw": true,
    "summary": false
-  },
-  "sessions/row/1000/top_wait": {
-   "issue": 319,
-   "raw": "LWLock:WALWrite",
-   "summary": "IO:DataFileRead"
-  },
-  "sessions/row/1000/top_wait_id": {
-   "issue": 319,
-   "raw": 16777224,
-   "summary": 167772181
-  },
-  "sessions/row/1001/top_wait": {
-   "issue": 319,
-   "raw": "Lock:relation",
-   "summary": "IO:DataFileRead"
-  },
-  "sessions/row/1001/top_wait_id": {
-   "issue": 319,
-   "raw": 50331648,
-   "summary": 167772181
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,

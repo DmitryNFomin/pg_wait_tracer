@@ -43,7 +43,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             wait_cpu_scan wait_cpu_fixture \
             test_summary_tick_flush \
-            test_block_agg bench_block_agg test_transitions_loader
+            test_block_agg bench_block_agg test_transitions_loader \
+            test_top_wait_backfill
 
 .PHONY: all clean check
 
@@ -704,6 +705,13 @@ TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
     event_reader.o event_writer.o summary_writer.o summary_reader.o \
     wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_top_wait_backfill: #319 — handle_top_sessions' and handle_top_queries'
+# raw backfill of top_wait over the summary-derived page. Same server.c-
+# included recipe as test_transitions_loader (the real writer, the real
+# summary writer, the real handlers).
+test_top_wait_backfill: test_top_wait_backfill.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction
