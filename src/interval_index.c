@@ -120,6 +120,38 @@ static int chunks_reserve(struct pgwt_interval_index *idx)
     return 0;
 }
 
+/* The chunk's four prefilter bounds, derived from its rows. ONE definition,
+ * called by add_block to SET them and by seal to VERIFY them — deliberately
+ * not two copies of the arithmetic, because two copies of one mistake agree
+ * with each other and the cross-check would read as a pass. What catches a
+ * wrong bound here is the differential sweep (a bound that is too narrow
+ * makes the prefilter skip a selected interval, and the answer comes back
+ * short); what seal's call catches is a bound corrupted AFTER it was
+ * computed. Those are different failures and need different gates. */
+static void chunk_bounds_from_rows(const struct pgwt_wait_interval *rows,
+                                   int first_row, int n_rows,
+                                   struct pgwt_interval_index_chunk *into)
+{
+    if (n_rows <= 0) {
+        into->min_end_ns = UINT64_MAX;    /* overlaps no window */
+        into->max_end_ns = 0;
+        into->min_start_ns = UINT64_MAX;  /* starts after every `to` */
+        into->max_duration_ns = 0;
+        return;
+    }
+    into->min_end_ns = UINT64_MAX;
+    into->max_end_ns = 0;
+    into->min_start_ns = UINT64_MAX;
+    into->max_duration_ns = 0;
+    for (int i = first_row; i < first_row + n_rows; i++) {
+        uint64_t s = rows[i].start_ns, e = rows[i].end_ns;
+        if (e < into->min_end_ns) into->min_end_ns = e;
+        if (e > into->max_end_ns) into->max_end_ns = e;
+        if (s < into->min_start_ns) into->min_start_ns = s;
+        if (e - s > into->max_duration_ns) into->max_duration_ns = e - s;
+    }
+}
+
 int pgwt_interval_index_add_block(struct pgwt_interval_index *idx,
                                   int block_idx,
                                   uint64_t block_first_ns,
@@ -203,16 +235,11 @@ int pgwt_interval_index_add_block(struct pgwt_interval_index *idx,
     }
 
     ch->n_rows = idx->n_rows - ch->first_row;
-    if (ch->n_rows > 0) {
-        /* Rows are appended in fed order and the feed is non-decreasing in
-         * timestamp_ns, so the first and last rows carry the extremes.
-         * seal() re-verifies the invariant rather than trusting it. */
-        ch->min_end_ns = idx->rows[ch->first_row].end_ns;
-        ch->max_end_ns = idx->rows[ch->first_row + ch->n_rows - 1].end_ns;
-    } else {
-        ch->min_end_ns = UINT64_MAX;    /* overlaps no window */
-        ch->max_end_ns = 0;
-    }
+    /* The END extremes could be read off the first and last rows (the feed
+     * is non-decreasing in timestamp_ns), but start_ns has no such ordering
+     * — a later row can start earlier — so min_start_ns and max_duration_ns
+     * need a real scan and all four are taken the same way. */
+    chunk_bounds_from_rows(idx->rows, ch->first_row, ch->n_rows, ch);
 
     idx->last_event_ns = last_ts;
     idx->have_last_event = have_last;
@@ -254,6 +281,28 @@ int pgwt_interval_index_seal(struct pgwt_interval_index *idx)
         if (idx->rows[i].start_ns < idx->cover_from_ns)
             idx->n_start_before_cover++;
 
+    /* RE-DERIVE every prefilter bound and refuse on a disagreement. What
+     * this catches is a bound CORRUPTED between add_block and seal; a bound
+     * computed wrongly in the first place is caught by the differential,
+     * not here — see chunk_bounds_from_rows(). A bound that is too NARROW
+     * makes the prefilter skip a chunk holding a selected interval, and the
+     * answer comes back short with nothing in it looking wrong, which is
+     * the one failure this module exists to prevent. */
+    for (int c = 0; c < idx->n_chunks; c++) {
+        const struct pgwt_interval_index_chunk *ch = &idx->chunks[c];
+        if (ch->first_row < 0 || ch->n_rows < 0 ||
+            ch->first_row + ch->n_rows > idx->n_rows)
+            return fail_build(idx, PGWT_INTERVAL_INDEX_REFUSE_GAP);
+        struct pgwt_interval_index_chunk want;
+        memset(&want, 0, sizeof(want));
+        chunk_bounds_from_rows(idx->rows, ch->first_row, ch->n_rows, &want);
+        if (ch->min_end_ns != want.min_end_ns ||
+            ch->max_end_ns != want.max_end_ns ||
+            ch->min_start_ns != want.min_start_ns ||
+            ch->max_duration_ns != want.max_duration_ns)
+            return fail_build(idx, PGWT_INTERVAL_INDEX_REFUSE_GAP);
+    }
+
     idx->sealed = 1;
     return 0;
 }
@@ -291,38 +340,70 @@ static long select_walk(const struct pgwt_interval_index *idx,
     long n = 0;
     for (int c = 0; c < idx->n_chunks; c++) {
         const struct pgwt_interval_index_chunk *ch = &idx->chunks[c];
-        /* Prefilter on the SELECTION key (end_ns), inclusive at both ends —
-         * the loader's own predicate. Narrowing either comparison to
-         * half-open would skip a chunk holding a record the raw path keeps:
-         * an event ending exactly at `to` lies wholly inside the window. */
+        /* OVERLAP-AWARE PREFILTER, inclusive at both ends.
+         *   low  — nothing in the chunk reaches `from`.
+         *   high — nothing in the chunk had STARTED by `to`. Testing
+         *          min_end_ns here instead is the trap named in the header:
+         *          a chunk whose intervals all END after `to` can still hold
+         *          one that BEGAN before it, and skipping it drops exactly
+         *          the records overlap admission exists to keep. */
         if (ch->n_rows == 0 || ch->max_end_ns < from_ns ||
-            ch->min_end_ns > to_ns)
+            ch->min_start_ns > to_ns)
             continue;
-        if (stats)
+        if (stats) {
             stats->chunks_scanned++;
+            /* A version-1 prefilter would have skipped this chunk. Counted
+             * so a test can prove the trap was reached, not reasoned about. */
+            if (ch->min_end_ns > to_ns)
+                stats->chunks_overlap_rescued++;
+        }
 
         int end = ch->first_row + ch->n_rows;
         int lb = lower_bound_end(idx->rows, ch->first_row, end, from_ns);
         if (stats)
             stats->excluded_end_before_from += lb - ch->first_row;
 
+        /* Rows ascend in end_ns, NOT in start_ns, so there is no early exit
+         * on `end_ns > to_ns` any more. The scan stops where no remaining
+         * row of this chunk can still have started by `to`: every one of
+         * them lasts at most max_duration_ns, so end_ns > to + max_duration
+         * implies start_ns > to. Saturating, never wrapping. */
+        uint64_t scan_limit = ch->max_duration_ns > UINT64_MAX - to_ns
+                              ? UINT64_MAX : to_ns + ch->max_duration_ns;
+
         for (int i = lb; i < end; i++) {
             const struct pgwt_wait_interval *iv = &idx->rows[i];
-            if (iv->end_ns > to_ns) {
-                /* Still waiting at `to`: its end record is outside the
-                 * window, so the raw path does not select it either. Every
-                 * remaining row of this chunk ends later still. */
+            if (iv->end_ns > scan_limit) {
                 if (stats)
-                    stats->excluded_open_past_to += end - i;
+                    stats->chunks_scan_limited++;
                 break;
             }
-            if (stats)
+            if (iv->start_ns > to_ns) {
+                /* Began after the window closed: no overlap at all. Not a
+                 * break — a later row of this chunk may start earlier. */
+                if (stats)
+                    stats->excluded_start_past_to++;
+                continue;
+            }
+            if (stats) {
                 stats->rows_examined++;
+                if (iv->end_ns > to_ns)
+                    stats->clipped_open_past_to++;
+            }
             if (fill) {
                 struct pgwt_trace_event *e = &fill[n];
                 memset(e, 0, sizeof(*e));
-                e->timestamp_ns = iv->end_ns;
-                e->duration_ns = iv->end_ns - iv->start_ns;
+                /* CLIPPED TIME. Still open at `to`: hand the computation the
+                 * interval cut at the window edge. end - duration is still
+                 * the TRUE start, so the burst onset and the low bucket are
+                 * untouched and only the high bucket is clipped. */
+                if (iv->end_ns > to_ns) {
+                    e->timestamp_ns = to_ns;
+                    e->duration_ns = to_ns - iv->start_ns;
+                } else {
+                    e->timestamp_ns = iv->end_ns;
+                    e->duration_ns = iv->end_ns - iv->start_ns;
+                }
                 e->pid = iv->pid;
                 e->old_event = iv->event_id;
                 e->new_event = 0;          /* the wait ended */

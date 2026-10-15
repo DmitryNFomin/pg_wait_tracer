@@ -20,34 +20,81 @@
  * THE BOUNDARY RULE — the whole safety argument
  * ---------------------------------------------
  * Each interval is stored EXACTLY ONCE, in the block that holds its END
- * record, with its true `start_ns` UNCLIPPED. That works because
- * `pgwt_compute_concurrency` selects records by their END timestamp
- * (`ev->timestamp_ns`), inclusive at both window ends, and only then clips
- * the interval to the window when deciding which buckets it overlaps. A
- * wait starting in block N and ending in N+1 therefore sits in N+1's list
- * and still overlaps N's buckets, exactly as the raw path does today.
+ * record, with its true `start_ns` UNCLIPPED. The END record is what marks
+ * the interval's existence and its duration, so that block is the only one
+ * that can store it without guessing; storing it anywhere else, or in two
+ * places, is the double-count of silent-wrong mode 2. A wait starting in
+ * block N and ending in N+1 therefore sits in N+1's list and still overlaps
+ * N's buckets, exactly as the raw path does.
+ *
+ * STORAGE IS NOT SELECTION. Which BLOCK holds an interval (its end record's)
+ * and which WINDOW selects it (overlap, below) are independent decisions.
+ * Version 1 conflated them — it selected on the end timestamp because that
+ * is what it stored by — and that is the bug version 2 undoes.
  *
  * CLIPPING `start_ns` TO THE BLOCK START IS THE CARDINAL ERROR. It lowers
  * peaks in earlier buckets and shifts burst onsets later, so bursts silently
  * vanish. There is no code path here that writes anything but the record's
  * own `timestamp_ns - duration_ns`.
  *
- * WINDOW SEMANTICS, RECONCILED TO THE LOADER (never the reverse)
- * -------------------------------------------------------------
+ * WINDOW SEMANTICS — OVERLAP ADMISSION (version 2)
+ * ------------------------------------------------
  * SELECTION and CONTRIBUTION are separate steps and have different rules:
- *   - selection: `from_ns <= end_ns <= to_ns`, INCLUSIVE at both ends. That
- *     is src/server.c's own record predicate (`timestamp_ns < from_m ||
- *     timestamp_ns > to_m` -> skip) and concurrency_qualifies' window test.
- *     An event ending exactly at `to` lies wholly inside the window.
- *   - contribution: the interval is clipped to the window when buckets are
- *     assigned (`end_ns > from_ns` guard plus the b_lo/b_hi arithmetic in
- *     pgwt_compute_concurrency). This module does none of that itself.
- * A wait still OPEN at `to` has its end record after `to` (or no end record
- * at all) and is therefore NOT selected. That exclusion is the raw path's
- * existing behaviour; this phase reproduces it and does not "fix" it — a
- * semantic change hidden inside a performance phase is exactly what plan
- * rule 1 forbids. `out->excluded_open_past_to` counts it so the test can
- * prove the case was reached.
+ *   - selection: the interval is selected when it OVERLAPS the window,
+ *     `end_ns >= from_ns && start_ns <= to_ns`, INCLUSIVE at both ends. An
+ *     interval ending exactly at `from` and one starting exactly at `to`
+ *     are both IN (neither contributes to a bucket, but both are real
+ *     occurrences and both can anchor a burst).
+ *   - contribution: the interval is CLIPPED to the window. Version 2 does
+ *     the clipping itself, at materialisation: a selected interval whose
+ *     end lies past `to` is handed to pgwt_compute_concurrency as
+ *     `timestamp_ns = to_ns, duration_ns = to_ns - start_ns`. That keeps
+ *     `timestamp_ns - duration_ns` equal to the TRUE start, so the burst
+ *     onset and the low bucket are unchanged and only the high bucket is
+ *     clipped to the window's last bucket. Nothing else is clipped: the
+ *     low end needs none, because pgwt_compute_concurrency's own b_lo
+ *     arithmetic already floors at bucket 0.
+ *
+ * WHAT CHANGED FROM VERSION 1, AND WHY. Version 1 selected on the END
+ * timestamp alone (`from <= end <= to`), so a wait still OPEN at `to` was
+ * dropped: its end record lies past the window, so the peak in the last
+ * buckets lost it and a burst could lose a member. That reproduced the raw
+ * path's then-current behaviour deliberately.
+ *
+ * #424 then corrected the RAW path: compute.c's concurrency_qualifies() is
+ * now overlap-selected, because concurrent session occupancy is an INTERVAL
+ * quantity and counting distinct sessions does not make it close-selected.
+ * That left two code paths answering the same question differently, and
+ * tests/test_interval_index.c cross-checks them against each other, so it
+ * went red. THIS IS A CONSISTENCY REPAIR, NOT A NEW CAPABILITY: the rule
+ * below is literally concurrency_qualifies()'s own window test, restated
+ * for rows instead of records. No caller consults this index, so nothing
+ * shipped changes either way.
+ *
+ * The version stamp goes to 2 because selection changed, so an index built
+ * by version-1 code must refuse rather than answer under version-2 rules —
+ * the stamp records a semantic change, it does not advertise a feature.
+ *
+ * THE CHUNK PREFILTER IS THE TRAP. Removing the `end > to` exclusion is not
+ * enough on its own. A chunk whose stored intervals ALL end after `to` can
+ * still hold one that BEGAN before `to`, so a prefilter keyed on the chunk's
+ * end range (`min_end_ns > to_ns -> skip`) silently drops exactly the
+ * records the new rule exists to admit — the same bug, moved one level up
+ * and harder to see. The chunk bounds are therefore overlap-aware: the high
+ * side is tested against `min_start_ns` (the earliest START in the chunk),
+ * never against `min_end_ns`. `out->chunks_overlap_rescued` counts chunks a
+ * version-1 prefilter would have skipped and version 2 had to scan, so the
+ * test can prove the trap was reached rather than argued about.
+ *
+ * MATERIALISATION ORDER IS PART OF THE ANSWER. pgwt_compute_concurrency
+ * gives a bucket to the FIRST record that REACHES a count, so the array
+ * handed to it must be in the raw path's order: ascending TRUE end_ns, the
+ * order the records were fed in. Clipping rewrites `timestamp_ns` to `to_ns`
+ * for every clipped row, so the materialised array is NOT sorted by its own
+ * timestamps and must never be re-sorted by them — nor by start_ns, which
+ * is a different order entirely for a long interval. The walk below visits
+ * rows in ascending row index, which IS ascending true end_ns, and does
+ * nothing else.
  *
  * THE ORACLE IS THE SHIPPING COMPUTATION, AND SO IS THE ANSWER
  * -----------------------------------------------------------
@@ -102,16 +149,28 @@
  * and `cover_to_ns` are public so the caller can clamp and decode the
  * remainder from raw instead.
  *
- * WIRING PRECONDITION (version 1). The index answers for the records it is
- * FED. src/server.c's loader applies record-level surgery of its own on
- * degraded windows — sample-interval splitting and the T2 phantom-EXIT drop
- * — which this module does not model. Wiring must therefore only consult the
- * index for windows where the loader performs no such surgery (handle_concurrency
- * already requires PGWT_REQ_EXACT fidelity), or bump the version. Stating
- * this is the #315 rule: never ship a version whose contract is not yet true.
+ * WIRING PRECONDITION (version 1, still true). The index answers for the
+ * records it is FED. src/server.c's loader applies record-level surgery of
+ * its own on degraded windows — sample-interval splitting and the T2
+ * phantom-EXIT drop — which this module does not model. Wiring must
+ * therefore only consult the index for windows where the loader performs no
+ * such surgery (handle_concurrency already requires PGWT_REQ_EXACT
+ * fidelity), or bump the version. Stating this is the #315 rule: never ship
+ * a version whose contract is not yet true.
+ *
+ * WIRING PRECONDITION (version 2, NEW and sharper). Overlap admission can
+ * only find a wait open at `to` if the END record that closes it was FED.
+ * That record lies AFTER `to`, so coverage containment (`to <= cover_to_ns`)
+ * no longer implies completeness: a window ending exactly at `cover_to_ns`
+ * cannot see waits closed by a record past the coverage, and the index has
+ * no way to know whether such a record exists. This is the same obligation
+ * the corrected loader carries — it too must read forward past `to` — and it
+ * is the caller's: feed every block the loader would decode for the window,
+ * or do not consult the index for a window whose `to` reaches the end of the
+ * feed. The index cannot verify it, so it is stated, not assumed.
  *
  * VERSION IS THE CONTRACT. PGWT_INTERVAL_INDEX_VERSION is stamped at init and
- * checked on every query and seal. Everything above is true of version 1 as
+ * checked on every query and seal. Everything above is true of version 2 as
  * shipped and is pinned by tests/test_interval_index.c. Bump the version in
  * the same commit that changes any of it.
  */
@@ -123,7 +182,9 @@
 
 #include <stdint.h>
 
-#define PGWT_INTERVAL_INDEX_VERSION 1
+/* 2: overlap admission with clipped time (#424). Version 1 selected on the
+ * end timestamp alone and dropped waits still open at `to`. */
+#define PGWT_INTERVAL_INDEX_VERSION 2
 
 enum pgwt_interval_index_refusal {
     PGWT_INTERVAL_INDEX_OK = 0,
@@ -157,19 +218,32 @@ struct pgwt_wait_interval {
     uint32_t event_id;      /* the record's old_event (the wait being left) */
 };
 
-/* One add_block() call. The prefilter unit: a chunk whose selected-end range
- * [min_end_ns, max_end_ns] cannot overlap the request window is skipped
- * without touching its rows.
+/* One add_block() call. The prefilter unit: a chunk none of whose intervals
+ * can OVERLAP the request window is skipped without touching its rows.
  *
- * Both bounds are over the chunk's own rows and are EXACT, because selection
- * is by end timestamp alone — unlike the executions index there is no
- * "still open at capture end" case to widen them with: an interval exists in
- * this index only because its END record was seen. */
+ * Every bound is over the chunk's own rows and is EXACT: an interval exists
+ * in this index only because its END record was seen, so there is no "still
+ * open at capture end" case to widen anything with.
+ *
+ * WHICH BOUND THE PREFILTER USES, AND WHICH IT MUST NOT:
+ *   low side  — `max_end_ns < from_ns` -> skip. Exact: nothing in the chunk
+ *               reaches the window.
+ *   high side — `min_start_ns > to_ns` -> skip. Exact, and the ONLY sound
+ *               high-side test under overlap admission. `min_end_ns > to_ns`
+ *               is NOT a reason to skip: an interval that began before `to`
+ *               is selected however late it ends. min_end_ns is kept because
+ *               it describes the chunk and seal() cross-checks it against
+ *               min_start_ns, not because the prefilter may use it.
+ * `max_duration_ns` bounds the in-chunk scan: once the rows (ascending in
+ * end_ns) pass `to_ns + max_duration_ns`, no remaining row of this chunk can
+ * still have started by `to`, so the scan stops without a suffix array. */
 struct pgwt_interval_index_chunk {
     int      block_idx;
     int      first_row, n_rows;
     uint64_t block_first_ns, block_last_ns;
     uint64_t min_end_ns, max_end_ns;
+    uint64_t min_start_ns;      /* earliest TRUE start in the chunk */
+    uint64_t max_duration_ns;   /* longest interval in the chunk */
 };
 
 struct pgwt_interval_index {
@@ -245,6 +319,13 @@ int pgwt_interval_index_add_block(struct pgwt_interval_index *idx,
 /* Finalise chunk prefilter bounds and verify the row array is non-decreasing
  * in end_ns (the invariant the query's binary search and the peak tie-break
  * both rest on). Must be called once, after the last add_block().
+ *
+ * Also RE-DERIVES every chunk bound from the rows and refuses (REFUSE_GAP)
+ * if a stored bound disagrees. A prefilter bound that is wrong does not
+ * produce a wrong-looking index: it produces a silently SHORT answer, which
+ * is the one failure mode this module exists to prevent, so the bounds are
+ * verified rather than trusted.
+ *
  * Returns 0 on success, -1 on failure. */
 int pgwt_interval_index_seal(struct pgwt_interval_index *idx);
 
@@ -260,10 +341,26 @@ struct pgwt_interval_index_query_result {
     /* Measured work, for the falsifiable prediction, and the non-vacuity
      * ledger for the selection rules. */
     long chunks_total, chunks_scanned;
+    /* Chunks a VERSION-1 prefilter would have skipped (min_end_ns > to_ns)
+     * and version 2 had to scan because something in them started by `to`.
+     * The named trap's own counter: zero across a whole suite means the
+     * overlap-aware chunk bound was never the thing that mattered. */
+    long chunks_overlap_rescued;
+    /* Chunks whose scan stopped early on `to_ns + max_duration_ns`. That
+     * bound is the one place a row can be skipped WITHOUT its start_ns ever
+     * being looked at, so a suite in which it never fires has not tested
+     * it. */
+    long chunks_scan_limited;
     long rows_examined;             /* rows the prefilter let through */
     long intervals_used;            /* rows handed to the computation */
     long excluded_end_before_from;  /* ended before the window opened */
-    long excluded_open_past_to;     /* still open at `to`: raw excludes it */
+    /* Selected intervals whose end lies past `to`: admitted by overlap and
+     * CLIPPED to the window. Version 1 called this excluded_open_past_to and
+     * dropped them; the field is renamed rather than reused so that any
+     * caller written against version 1 fails to compile instead of silently
+     * reading "excluded" off a counter that now means "kept". */
+    long clipped_open_past_to;
+    long excluded_start_past_to;    /* began after `to`: no overlap at all */
     long bytes_materialised;        /* synthetic event array size */
 };
 

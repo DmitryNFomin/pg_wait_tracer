@@ -85,8 +85,8 @@ MUTATIONS = [
 
     ("M04 the materialised record loses its duration",
      "interval_index.c",
-     "                e->duration_ns = iv->end_ns - iv->start_ns;",
-     "                e->duration_ns = 0;"),
+     "                    e->duration_ns = iv->end_ns - iv->start_ns;",
+     "                    e->duration_ns = 0;"),
 
     # ── silent-wrong mode 2: an interval counted twice ───────────────────
     ("M05 a boundary-straddling interval is stored TWICE",
@@ -102,17 +102,99 @@ MUTATIONS = [
      "        }\n"
      "    }"),
 
-    # ── silent-wrong mode 3: the open-past-`to` exclusion ────────────────
-    ("M06 waits still open at `to` are INCLUDED (semantics changed)",
+    # ── silent-wrong mode 3 (version 2): losing a wait open at `to` ──────
+    # Each of these restores, in a different place, the version-1 behaviour
+    # the #424 fix exists to remove. M06b is the one the adviser named: the
+    # row-level rule can be perfectly correct and the chunk prefilter still
+    # throws the same records away, one level up.
+    ("M06 waits still open at `to` are EXCLUDED again (version 1's rule)",
      "interval_index.c",
-     "            if (iv->end_ns > to_ns) {",
-     "            if (iv->end_ns > to_ns + 1000000000ULL) {"),
+     "            if (iv->start_ns > to_ns) {\n"
+     "                /* Began after the window closed: no overlap at all. Not a",
+     "            if (iv->end_ns > to_ns)\n"
+     "                continue;\n"
+     "            if (iv->start_ns > to_ns) {\n"
+     "                /* Began after the window closed: no overlap at all. Not a"),
+
+    ("M06b THE TRAP: the chunk prefilter keys on min_end_ns again, so a "
+     "chunk whose intervals all end past `to` is skipped whole",
+     "interval_index.c",
+     "            ch->min_start_ns > to_ns)\n"
+     "            continue;",
+     "            ch->min_end_ns > to_ns)\n"
+     "            continue;"),
+
+    ("M06c the clip is dropped: the TRUE end is materialised, so the "
+     "shipping computation's own window test discards the row again",
+     "interval_index.c",
+     "                    e->timestamp_ns = to_ns;\n"
+     "                    e->duration_ns = to_ns - iv->start_ns;",
+     "                    e->timestamp_ns = iv->end_ns;\n"
+     "                    e->duration_ns = iv->end_ns - iv->start_ns;"),
+
+    ("M06d the clip keeps the original duration, so the clipped row's "
+     "START moves earlier",
+     "interval_index.c",
+     "                    e->duration_ns = to_ns - iv->start_ns;",
+     "                    e->duration_ns = iv->end_ns - iv->start_ns;"),
+
+    ("M06e EVERY row is clipped to `to`, not only the ones open past it",
+     "interval_index.c",
+     "                if (iv->end_ns > to_ns) {\n"
+     "                    e->timestamp_ns = to_ns;",
+     "                if (iv->end_ns > 0) {\n"
+     "                    e->timestamp_ns = to_ns;"),
+
+    ("M06f the in-chunk scan bound is tightened back to `to`, so a long "
+     "interval whose end is far past `to` is never reached",
+     "interval_index.c",
+     "        uint64_t scan_limit = ch->max_duration_ns > UINT64_MAX - to_ns\n"
+     "                              ? UINT64_MAX : to_ns + ch->max_duration_ns;",
+     "        uint64_t scan_limit = to_ns;"),
+
+    ("M06g a row that began AFTER `to` is selected anyway (overlap "
+     "admission with no far side)",
+     "interval_index.c",
+     "            if (iv->start_ns > to_ns) {",
+     "            if (0) {"),
+
+    ("M06h the materialised array is re-sorted by start_ns, which is not "
+     "the raw path's order once a row has been clipped",
+     "interval_index.c",
+     "    long nfill = select_walk(idx, from_ns, to_ns, arr, NULL);",
+     "    long nfill = select_walk(idx, from_ns, to_ns, arr, NULL);\n"
+     "    if (nfill > 1 && nfill <= 64)\n"
+     "        for (long a = 1; a < nfill; a++) {\n"
+     "            struct pgwt_trace_event mv = arr[a];\n"
+     "            long b = a - 1;\n"
+     "            while (b >= 0 &&\n"
+     "                   arr[b].timestamp_ns - arr[b].duration_ns >\n"
+     "                   mv.timestamp_ns - mv.duration_ns) {\n"
+     "                arr[b + 1] = arr[b];\n"
+     "                b--;\n"
+     "            }\n"
+     "            arr[b + 1] = mv;\n"
+     "        }"),
+
+    ("M06i the SHARED chunk-bound helper computes min_start_ns from the "
+     "first row only — seal's cross-check agrees with it, so only the "
+     "differential can see this one",
+     "interval_index.c",
+     "        if (s < into->min_start_ns) into->min_start_ns = s;",
+     "        if (i == first_row) into->min_start_ns = s;"),
+
+    ("M06j the SHARED chunk-bound helper understates max_duration_ns, so "
+     "the in-chunk scan stops before the long intervals",
+     "interval_index.c",
+     "        if (e - s > into->max_duration_ns) into->max_duration_ns = e - s;",
+     "        if (i == first_row) into->max_duration_ns = e - s;"),
 
     # ── selection bounds: half-open where the loader is inclusive ────────
-    ("M07 selection narrowed to half-open at `to`",
+    ("M07 selection narrowed to half-open at `to` (a wait starting exactly "
+     "at `to` is dropped)",
      "interval_index.c",
-     "            if (iv->end_ns > to_ns) {",
-     "            if (iv->end_ns >= to_ns) {"),
+     "            if (iv->start_ns > to_ns) {",
+     "            if (iv->start_ns >= to_ns) {"),
 
     ("M08 selection narrowed to half-open at `from`",
      "interval_index.c",
@@ -126,8 +208,10 @@ MUTATIONS = [
 
     ("M10 chunk prefilter narrowed at `to`",
      "interval_index.c",
-     "            ch->min_end_ns > to_ns)",
-     "            ch->min_end_ns >= to_ns)"),
+     "            ch->min_start_ns > to_ns)\n"
+     "            continue;",
+     "            ch->min_start_ns >= to_ns)\n"
+     "            continue;"),
 
     # ── the restated predicate ───────────────────────────────────────────
     ("M11 the idle-wait exclusion is dropped from the predicate",
