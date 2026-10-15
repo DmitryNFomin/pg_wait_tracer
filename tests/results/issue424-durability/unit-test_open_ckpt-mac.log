@@ -1,24 +1,32 @@
 WARN: refusing an open-interval checkpoint: record 0 has duration > timestamp
-INFO: carried open-interval checkpoint 1 (3 intervals open at the crash) -> /tmp/pgwt_ckpt_m4qQQ8/carry/2026-10-15_20.trace.lz4.open
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/carry/2026-10-15_20.trace.lz4
-INFO: recovered previous current.trace: 1 blocks, 40 events -> /tmp/pgwt_ckpt_m4qQQ8/closedrop/2026-10-15_20.trace.lz4
+INFO: carried open-interval checkpoint 1 (3 open intervals) -> /tmp/pgwt_ckpt_E2mc9E/carry/2026-10-15_21.trace.lz4.open
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/carry/2026-10-15_21.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 40 events -> /tmp/pgwt_ckpt_E2mc9E/closedrop/2026-10-15_21.trace.lz4
+INFO: adopted the open-interval checkpoint already at /tmp/pgwt_ckpt_E2mc9E/killrot/2026-10-15_21.trace.lz4.open (seq 1, 2 open intervals) — a previous handover was interrupted
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/killrot/2026-10-15_21.trace.lz4
+INFO: carried open-interval checkpoint 1 (3 open intervals) -> /tmp/pgwt_ckpt_E2mc9E/killrec/2026-10-15_21.trace.lz4.open
+INFO: adopted the open-interval checkpoint already at /tmp/pgwt_ckpt_E2mc9E/killrec/2026-10-15_21.trace.lz4.open (seq 1, 3 open intervals) — a previous handover was interrupted
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/killrec/2026-10-15_21.trace.lz4
+INFO: carried open-interval checkpoint 1 (2 open intervals) -> /tmp/pgwt_ckpt_E2mc9E/adopt/2026-10-15_21.trace.lz4.open
+WARN: /tmp/pgwt_ckpt_E2mc9E/adopt/2026-10-15_21.trace.lz4.open does not describe this trace (identity-mismatch) — removing it rather than leaving it beside an archive it is not about
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/adopt/2026-10-15_21.trace.lz4
 WARN: LZ4 compression failed
-WARN: could not finalize /tmp/pgwt_ckpt_m4qQQ8/keepdrop/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
-WARN: refused the open-interval checkpoint next to /tmp/pgwt_ckpt_m4qQQ8/stale/2026-10-15_20.trace.lz4 (identity-mismatch) — dropping it
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/stale/2026-10-15_20.trace.lz4
-WARN: refused the open-interval checkpoint next to /tmp/pgwt_ckpt_m4qQQ8/corrupt/2026-10-15_20.trace.lz4 (bad-checksum) — dropping it
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/corrupt/2026-10-15_20.trace.lz4
-WARN: refused the open-interval checkpoint next to /tmp/pgwt_ckpt_m4qQQ8/trunc/2026-10-15_20.trace.lz4 (truncated) — dropping it
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/trunc/2026-10-15_20.trace.lz4
-WARN: refused the open-interval checkpoint next to /tmp/pgwt_ckpt_m4qQQ8/insane/2026-10-15_20.trace.lz4 (insane-count) — dropping it
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/insane/2026-10-15_20.trace.lz4
-WARN: refused the open-interval checkpoint next to /tmp/pgwt_ckpt_m4qQQ8/notackpt/2026-10-15_20.trace.lz4 (too-short) — dropping it
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/notackpt/2026-10-15_20.trace.lz4
-INFO: carried open-interval checkpoint 2 (0 intervals open at the crash) -> /tmp/pgwt_ckpt_m4qQQ8/supersede/2026-10-15_20.trace.lz4.open
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/supersede/2026-10-15_20.trace.lz4
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/nockpt/2026-10-15_20.trace.lz4
-INFO: carried open-interval checkpoint 1 (2 intervals open at the crash) -> /tmp/pgwt_ckpt_m4qQQ8/retain/2026-10-15_20.trace.lz4.open
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_m4qQQ8/retain/2026-10-15_20.trace.lz4
+WARN: could not finalize /tmp/pgwt_ckpt_E2mc9E/keepdrop/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
+WARN: refused the open-interval checkpoint for /tmp/pgwt_ckpt_E2mc9E/stale/2026-10-15_21.trace.lz4 (identity-mismatch) — dropping it
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/stale/2026-10-15_21.trace.lz4
+WARN: refused the open-interval checkpoint for /tmp/pgwt_ckpt_E2mc9E/corrupt/2026-10-15_21.trace.lz4 (bad-checksum) — dropping it
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/corrupt/2026-10-15_21.trace.lz4
+WARN: refused the open-interval checkpoint for /tmp/pgwt_ckpt_E2mc9E/trunc/2026-10-15_21.trace.lz4 (truncated) — dropping it
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/trunc/2026-10-15_21.trace.lz4
+WARN: refused the open-interval checkpoint for /tmp/pgwt_ckpt_E2mc9E/insane/2026-10-15_21.trace.lz4 (insane-count) — dropping it
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/insane/2026-10-15_21.trace.lz4
+WARN: refused the open-interval checkpoint for /tmp/pgwt_ckpt_E2mc9E/notackpt/2026-10-15_21.trace.lz4 (too-short) — dropping it
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/notackpt/2026-10-15_21.trace.lz4
+INFO: carried open-interval checkpoint 2 (0 open intervals) -> /tmp/pgwt_ckpt_E2mc9E/supersede/2026-10-15_21.trace.lz4.open
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/supersede/2026-10-15_21.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/nockpt/2026-10-15_21.trace.lz4
+INFO: carried open-interval checkpoint 1 (2 open intervals) -> /tmp/pgwt_ckpt_E2mc9E/retain/2026-10-15_21.trace.lz4.open
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_ckpt_E2mc9E/retain/2026-10-15_21.trace.lz4
 WARN: trace dir still 151 bytes over the --retention-gb cap after deleting every archive — the live current files alone exceed the cap
 === open-interval checkpoints (#424 deliverable 2) ===
 
@@ -34,6 +42,16 @@ WARN: trace dir still 151 bytes over the --retention-gb cap after deleting every
 
 [C2] a clean close and a rotation DROP the checkpoint
 
+[C4] killed INSIDE the rotation handover
+
+[C5] killed BETWEEN recovery's two renames
+
+[C6] a sidecar at the destination is adopted ONLY if it fits
+
+[C7] a checkpoint cuts no block and never overstates
+
+[C8] both sidecar names, including the un-recovered one
+
 [C3] a close that could NOT be certified keeps the checkpoint
 
 [D1] a sidecar from another file is refused, not applied
@@ -46,4 +64,4 @@ WARN: trace dir still 151 bytes over the --retention-gb cap after deleting every
 
 [D5] retention deletes a sidecar with its archive
 
-=== 134/134 passed ===
+=== 188/188 passed ===

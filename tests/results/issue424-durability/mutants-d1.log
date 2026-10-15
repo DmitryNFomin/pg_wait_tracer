@@ -2,34 +2,40 @@
   FAIL(176): legacy flags must read UNKNOWN, got in_progress
   FAIL(185): clean bit without the capability bit must NOT read clean (got clean)
   FAIL(188): no capability bit: every other bit is noise, must read UNKNOWN
-  FAIL(527): a legacy header must read UNKNOWN, got in_progress
-=== 80/85 passed ===
+  FAIL(558): a legacy header must read UNKNOWN, got in_progress
+=== 86/91 passed ===
 --- [m2-rotation-claims-clean] exit=1 failing-assertions=1
-  FAIL(302): a rotated archive must read ROTATED, got clean
-=== 84/85 passed ===
+  FAIL(333): a rotated archive must read ROTATED, got clean
+=== 90/91 passed ===
 --- [m3-recovery-never-marks] exit=1 failing-assertions=4
-  FAIL(358): a recovered crash archive must read UNCLEAN, got in_progress
-  FAIL(400): both crash archives must read UNCLEAN (0 of 2 did)
-  FAIL(461): a CLEAN label contradicted by the committed watermark must read UNCLEAN, got clean
-  FAIL(660): a file killed mid-publication must read UNCLEAN, got in_progress
-=== 81/85 passed ===
+  FAIL(389): a recovered crash archive must read UNCLEAN, got in_progress
+  FAIL(431): both crash archives must read UNCLEAN (0 of 2 did)
+  FAIL(492): a CLEAN label contradicted by the committed watermark must read UNCLEAN, got clean
+  FAIL(691): a file killed mid-publication must read UNCLEAN, got in_progress
+=== 87/91 passed ===
 --- [m4-recovery-marks-everything] exit=1 failing-assertions=2
-  FAIL(427): a cleanly closed file must still read CLEAN after recovery archives it, got unclean
-  FAIL(542): a recovered legacy file must stay UNKNOWN — never fabricated in either direction — got unclean
-=== 83/85 passed ===
+  FAIL(458): a cleanly closed file must still read CLEAN after recovery archives it, got unclean
+  FAIL(573): a recovered legacy file must stay UNKNOWN — never fabricated in either direction — got unclean
+=== 89/91 passed ===
 --- [m5-unreadable-reads-clean] exit=1 failing-assertions=7
-  FAIL(561): a missing file must refuse (rc<0, UNKNOWN), got rc/unknown
-  FAIL(568): a NULL path must refuse and must OVERWRITE the caller's variable
-  FAIL(574): an empty file must refuse, got clean
-  FAIL(581): a truncated header must refuse, got clean
-=== 78/85 passed ===
+  FAIL(592): a missing file must refuse (rc<0, UNKNOWN), got rc/unknown
+  FAIL(599): a NULL path must refuse and must OVERWRITE the caller's variable
+  FAIL(605): an empty file must refuse, got clean
+  FAIL(612): a truncated header must refuse, got clean
+=== 84/91 passed ===
 --- [m6-no-magic-check] exit=1 failing-assertions=1
-  FAIL(595): a non-trace file with all bits set must refuse, got unclean
-=== 84/85 passed ===
+  FAIL(626): a non-trace file with all bits set must refuse, got unclean
+=== 90/91 passed ===
 --- [m7-flag-before-fsync] exit=1 failing-assertions=2
-  FAIL(486): a close whose flush failed must not read CLEAN (got clean)
-  FAIL(489): it must read IN_PROGRESS — uncertified, not mislabelled (got clean)
-=== 83/85 passed ===
+  FAIL(517): a close whose flush failed must not read CLEAN (got clean)
+  FAIL(520): it must read IN_PROGRESS — uncertified, not mislabelled (got clean)
+=== 89/91 passed ===
 --- [m8-finalize-rebuilds-flags] exit=1 failing-assertions=1
-  FAIL(275): finalize must OR its bit in, preserving the rest (flags 0x0007)
-=== 84/85 passed ===
+  FAIL(306): finalize must OR its bit in, preserving the rest (flags 0x0007)
+=== 90/91 passed ===
+--- [o6-live-suppresses-warning] exit=1 failing-assertions=6
+  FAIL(178): UNKNOWN must warn about open intervals
+  FAIL(195): an ARCHIVED unfinalized file must warn
+  FAIL(237): a copied, un-recovered capture must warn
+  FAIL(242): and it must say the SAME thing as an unclean capture — for a file nobody is writing to, they are the same hazard
+=== 85/91 passed ===

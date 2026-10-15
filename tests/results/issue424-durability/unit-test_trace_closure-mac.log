@@ -1,14 +1,15 @@
-INFO: recovered previous current.trace: 1 blocks, 200 events -> /tmp/pgwt_closure_FsDPuv/crash/2026-10-15_20.trace.lz4
-INFO: recovered previous current.trace: 1 blocks, 120 events -> /tmp/pgwt_closure_FsDPuv/repeat/2026-10-15_20.trace.lz4
-INFO: recovered previous current.trace: 1 blocks, 120 events -> /tmp/pgwt_closure_FsDPuv/repeat/2026-10-15_20.1.trace.lz4
-INFO: recovered previous current.trace: 1 blocks, 80 events -> /tmp/pgwt_closure_FsDPuv/preserve/2026-10-15_20.trace.lz4
-ERROR: recovery of /tmp/pgwt_closure_FsDPuv/liar/current.trace found 1 complete blocks but the meta high-watermark says 99 were committed — data below the watermark is missing or corrupt
-INFO: recovered previous current.trace: 1 blocks, 100 events -> /tmp/pgwt_closure_FsDPuv/liar/2026-10-15_20.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 200 events -> /tmp/pgwt_closure_PxTShD/crash/2026-10-15_21.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 120 events -> /tmp/pgwt_closure_PxTShD/repeat/2026-10-15_21.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 120 events -> /tmp/pgwt_closure_PxTShD/repeat/2026-10-15_21.1.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 80 events -> /tmp/pgwt_closure_PxTShD/preserve/2026-10-15_21.trace.lz4
+ERROR: recovery of /tmp/pgwt_closure_PxTShD/liar/current.trace found 1 complete blocks but the meta high-watermark says 99 were committed — data below the watermark is missing or corrupt
+INFO: recovered previous current.trace: 1 blocks, 100 events -> /tmp/pgwt_closure_PxTShD/liar/2026-10-15_21.trace.lz4
 WARN: LZ4 compression failed
-WARN: could not finalize /tmp/pgwt_closure_FsDPuv/badflush/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
-WARN: could not finalize /tmp/pgwt_closure_FsDPuv/badfsync/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
-INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_closure_FsDPuv/legacy/2026-10-15_20.trace.lz4
-INFO: recovered previous current.trace: 1 blocks, 4096 events -> /tmp/pgwt_closure_FsDPuv/midpub/2026-10-15_20.trace.lz4
+WARN: could not finalize /tmp/pgwt_closure_PxTShD/badflush/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
+WARN: could not finalize /tmp/pgwt_closure_PxTShD/badfsync/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
+WARN: final flush of /tmp/pgwt_closure_PxTShD/badfsync/current.trace failed (Bad file descriptor) — the file is closed but its tail may not be on disk
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_closure_PxTShD/legacy/2026-10-15_21.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 4096 events -> /tmp/pgwt_closure_PxTShD/midpub/2026-10-15_21.trace.lz4
 === trace closure status (#424 deliverable 1) ===
 
 [A] bits -> verdict
@@ -35,4 +36,4 @@ INFO: recovered previous current.trace: 1 blocks, 4096 events -> /tmp/pgwt_closu
 
 [C4] killed mid-publication: partial data, honest label
 
-=== 85/85 passed ===
+=== 91/91 passed ===

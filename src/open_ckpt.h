@@ -294,7 +294,14 @@ pgwt_open_ckpt_start_ns(const struct pgwt_open_ckpt_record *r)
  * Equality is NOT suppression: a closing record ending exactly at the
  * interval's start is the record of the PREVIOUS stretch (intervals are
  * half-open, [start, end)), and suppressing on it would silently drop every
- * genuinely-open interval whose predecessor closed on the same nanosecond. */
+ * genuinely-open interval whose predecessor closed on the same nanosecond.
+ *
+ * SCOPE, and the trap in it: the closing records must be drawn from the whole
+ * analysis window, NOT from the one file the sidecar sits next to. Rotation
+ * carries a checkpoint describing intervals that are still open, and their
+ * closing records land in the NEXT file. A consumer that only scans the
+ * archive it found the sidecar beside will therefore suppress nothing and
+ * show reconstruction for intervals that were in fact recorded in full. */
 static inline bool
 pgwt_open_ckpt_suppressed_by(const struct pgwt_open_ckpt_record *ckpt,
                              const struct pgwt_trace_event *closing)

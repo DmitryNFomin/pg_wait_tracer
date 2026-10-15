@@ -1,6 +1,6 @@
-commit=2eb1b3c863c3102a65f75a8c75b7534c26c142e1 host=pgwt-dev-1792088477-2380 kernel=6.8.0-139-generic gcc=13
-test_trace_closure: === 85/85 passed ===
-test_open_ckpt: === 134/134 passed ===
+commit=da54ffaedfed282876518ffa133d43c16f0a3759 host=pgwt-dev-1792091224-17625 kernel=6.8.0-139-generic gcc=13
+test_trace_closure: === 91/91 passed ===
+test_open_ckpt: === 188/188 passed ===
 test_event_writer: 5062/5062 tests passed
 test_durability: 97/97 tests passed
 test_trace_v2: === 98 / 98 tests passed ===

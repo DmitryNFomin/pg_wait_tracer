@@ -1,9 +1,9 @@
 hetzner-sweep: done (deleted=0 warned=0 dry_run=0 cutoff=6h force_all=0)
-box-check: EPHEMERAL=1 — creating pgwt-dev-1792088477-2380 from the pgwt=gate-snapshot image (labels: pgwt=ephemeral,created=1792088477,owner=mac)
+box-check: EPHEMERAL=1 — creating pgwt-dev-1792091224-17625 from the pgwt=gate-snapshot image (labels: pgwt=ephemeral,created=1792091224,owner=mac)
   Resolving --image-snapshot latest (label pgwt=gate-snapshot) ...
   Resolved image id: 433799516
 === Creating Hetzner VM ===
-  Name:       pgwt-dev-1792088477-2380
+  Name:       pgwt-dev-1792091224-17625
   Type:       cx33
   Image:      433799516
   Locations:  fsn1 nbg1 hel1
@@ -11,7 +11,7 @@ box-check: EPHEMERAL=1 — creating pgwt-dev-1792088477-2380 from the pgwt=gate-
   SSH key ID: 130098089
   Trying location: fsn1 ...
 
-  Server ID: 170608030
+  Server ID: 170614863
   Server IP: 49.13.209.14
 
   Waiting for SSH ...
@@ -20,7 +20,7 @@ box-check: EPHEMERAL=1 — creating pgwt-dev-1792088477-2380 from the pgwt=gate-
     cloud-init: running (attempt 1/30)
   Cloud-init done!
   Refreshing root's own localhost/127.0.0.1 known_hosts (issue #174) ...
-box-check: created pgwt-dev-1792088477-2380 id=170608030 ip=49.13.209.14
+box-check: created pgwt-dev-1792091224-17625 id=170614863 ip=49.13.209.14
 box-check: staging repo + running tests/provision-runner.sh ubuntu on root@49.13.209.14 (refreshes bpftool for this VM's kernel)
 [provision-runner] waiting for /tmp/pgwt-box-check.lock (up to 600s)
 [provision-runner] lock acquired
@@ -67,10 +67,10 @@ NOTICE:  extension "pg_stat_statements" already exists, skipping
 dropping old tables...
 creating tables...
 generating data (client-side)...
-1000000 of 1000000 tuples (100%) done (elapsed 1.12 s, remaining 0.00 s)
+1000000 of 1000000 tuples (100%) done (elapsed 0.97 s, remaining 0.00 s)
 vacuuming...
 creating primary keys...
-done in 1.89 s (drop tables 0.03 s, create tables 0.02 s, client-side generate 1.14 s, vacuum 0.31 s, primary keys 0.39 s).
+done in 1.67 s (drop tables 0.03 s, create tables 0.02 s, client-side generate 0.99 s, vacuum 0.29 s, primary keys 0.34 s).
 [provision-runner] _smoke_io_load missing/short on port 5413 (found 0 rows, want 3000000) -- building (measured on a gate-box cx33 and reported in the owning branch's PR body: build time + pg_total_relation_size)
 NOTICE:  table "_smoke_io_load" does not exist, skipping
 [provision-runner] _smoke_io_load built on port 5413 in 11s, on-disk size 775 MB
@@ -93,10 +93,10 @@ dropping old tables...
 creating tables...
 generating data (client-side)...
 100 of 100 tuples (100%) of pgbench_tellers done (elapsed 0.00 s, remaining 0.00 s)
-1000000 of 1000000 tuples (100%) of pgbench_accounts done (elapsed 0.99 s, remaining 0.00 s)
+1000000 of 1000000 tuples (100%) of pgbench_accounts done (elapsed 1.09 s, remaining 0.00 s)
 vacuuming...
 creating primary keys...
-done in 1.50 s (drop tables 0.01 s, create tables 0.01 s, client-side generate 1.02 s, vacuum 0.13 s, primary keys 0.33 s).
+done in 1.54 s (drop tables 0.01 s, create tables 0.01 s, client-side generate 1.11 s, vacuum 0.12 s, primary keys 0.29 s).
 [provision-runner] _smoke_io_load missing/short on port 5417 (found 0 rows, want 3000000) -- building (measured on a gate-box cx33 and reported in the owning branch's PR body: build time + pg_total_relation_size)
 NOTICE:  table "_smoke_io_load" does not exist, skipping
 [provision-runner] _smoke_io_load built on port 5417 in 11s, on-disk size 775 MB
@@ -143,9 +143,9 @@ No VM guests are running outdated hypervisor (qemu) binaries on this host.
 [provision-runner] writing /etc/pgwt-gate-box marker
 [provision-runner] no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration
 [provision-runner] provisioning complete (ubuntu)
-box-check: commit=2eb1b3c863c3102a65f75a8c75b7534c26c142e1 tree-hash=ce191caa68ab5d21de9c1ec79d94eca09e7ccef9
-box-check: target=root@49.13.209.14 OS=ubuntu PG=all EPHEMERAL=1 -> pgwt-check/agent_424-durability (log: tests/results/box-check-ephemeral-ubuntu-20261015-202117.log)
-box-check: remote hostname=pgwt-dev-1792088477-2380 machine_id=2cd101b7f7984352bac6db55b1655c2e
+box-check: commit=da54ffaedfed282876518ffa133d43c16f0a3759 tree-hash=2c62ca85a7287f4c2dff445be9dd294cd9386c14
+box-check: target=root@49.13.209.14 OS=ubuntu PG=all EPHEMERAL=1 -> pgwt-check/agent_424-durability (log: tests/results/box-check-ephemeral-ubuntu-20261015-210703.log)
+box-check: remote hostname=pgwt-dev-1792091224-17625 machine_id=2cd101b7f7984352bac6db55b1655c2e
 box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)
   VMLINUX  include/vmlinux.h
   CC       build/server_server.o (server)
@@ -171,27 +171,21 @@ src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wu
    37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
       |                    ^~~~~~~~~~~~~~~~~~
   CC       build/server_event_writer.o (server)
-  CC       build/server_summary_writer.o (server)
-src/event_writer.c: In function ‘pgwt_writer_checkpoint_open’:
-src/event_writer.c:353:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
-  353 |         fchown(fileno(f), (uid_t)-1, w->trace_gid);
-      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 src/event_writer.c: In function ‘pgwt_writer_init’:
-src/event_writer.c:999:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
-  999 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
+src/event_writer.c:1141:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+ 1141 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
       |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 src/event_writer.c: In function ‘open_trace_file’:
-src/event_writer.c:703:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
-  703 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+src/event_writer.c:837:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  837 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
       |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/server_summary_writer.o (server)
 src/summary_writer.c: In function ‘open_summary_file’:
 src/summary_writer.c:959:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
   959 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
       |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   CC       build/server_summary_reader.o (server)
   CC       build/server_wait_event.o (server)
-  CC       build/server_idle_rule.o (server)
-  CC       build/server_spawn.o (server)
 src/server.c: In function ‘coverage_refresh’:
 src/server.c:1701:43: warning: ‘%s’ directive output may be truncated writing up to 137215 bytes into a region of size 512 [-Wformat-truncation=]
  1701 |     snprintf(fc->path, sizeof(fc->path), "%s", path);
@@ -210,6 +204,8 @@ In function ‘snprintf’,
       |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
    56 |                                    __va_arg_pack ());
       |                                    ~~~~~~~~~~~~~~~~~
+  CC       build/server_idle_rule.o (server)
+  CC       build/server_spawn.o (server)
   CC       build/server_cmdline.o (server)
   CC       build/server_backend_meta.o (server)
   CC       build/server_cJSON.o (server)
@@ -223,15 +219,17 @@ In file included from src/percentile.h:32,
 /usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
   675 | extern void *calloc (size_t __nmemb, size_t __size)
       |              ^~~~~~
+  LINK     pgwt-server
+  DONE     pgwt-server
   SKEL     include/pg_wait_tracer.skel.h
   CC       build/pg_wait_tracer.o
   CC       build/daemon.o
   CC       build/control.o
+  CC       build/effective_cores.o
 In file included from src/control.c:8:
 src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
   216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
       |                                           
-  CC       build/effective_cores.o
   CC       build/provider_full.o
   CC       build/provider_coop.o
   CC       build/sampler.o
@@ -240,11 +238,11 @@ src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
   216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
       |                                           
   CC       build/exact_probe.o
-  CC       build/escalation.o
 In file included from src/exact_probe.c:178:
 src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
   216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
       |                                           
+  CC       build/escalation.o
   CC       build/escalation_budget.o
   CC       build/anomaly.o
 In file included from src/anomaly.c:442:
@@ -284,26 +282,23 @@ src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
   CC       build/cmdline.o
   CC       build/snapshot.o
   CC       build/event_writer.o
-src/event_writer.c: In function ‘pgwt_writer_checkpoint_open’:
-src/event_writer.c:353:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
-  353 |         fchown(fileno(f), (uid_t)-1, w->trace_gid);
-      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 src/event_writer.c: In function ‘pgwt_writer_init’:
-src/event_writer.c:999:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
-  999 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
+src/event_writer.c:1141:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+ 1141 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
       |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 src/event_writer.c: In function ‘open_trace_file’:
-src/event_writer.c:703:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
-  703 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+src/event_writer.c:837:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  837 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
       |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   CC       build/event_reader.o
   CC       build/replay.o
   CC       build/summary_writer.o
-  CC       build/query_text.o
 src/summary_writer.c: In function ‘open_summary_file’:
 src/summary_writer.c:959:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
   959 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
       |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/query_text.o
+  CC       build/pgss_resolver.o
 src/query_text.c: In function ‘pgwt_qt_init’:
 src/query_text.c:625:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
   625 |             fchown(fileno(qt->fp), (uid_t)-1, qt->trace_gid);
@@ -311,15 +306,12 @@ src/query_text.c:625:13: warning: ignoring return value of ‘fchown’ declared
 src/query_text.c:629:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
   629 |             fchown(fileno(qt->quality_fp), (uid_t)-1, qt->trace_gid);
       |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  CC       build/pgss_resolver.o
 src/query_text.c: In function ‘compact_quality_locked’:
 src/query_text.c:444:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
   444 |         fchown(fileno(out), (uid_t)-1, qt->trace_gid);
       |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   CC       build/backend_meta.o
   CC       build/cJSON.o
-  LINK     pgwt-server
-  DONE     pgwt-server
   LINK     pg_wait_tracer
   DONE     pg_wait_tracer
 make: Entering directory '/root/pgwt-check/agent_424-durability/tests'
@@ -335,19 +327,19 @@ test_event_reader.c:37:5: warning: ignoring return value of ‘system’ declare
       |     ^~~~~~~~~~~
 /usr/bin/ld: ../build/map_reader.o: in function `pgwt_collect_open_intervals':
 /root/pgwt-check/agent_424-durability/src/map_reader.c:985:(.text+0x229e): undefined reference to `pgwt_exact_resolve_attr'
-collect2: error: ld returned 1 exit status
 make: Leaving directory '/root/pgwt-check/agent_424-durability/tests'
-make: *** [Makefile:97: test_event_reader] Error 1
+collect2: error: ld returned 1 exit status
+make: *** [Makefile:98: test_event_reader] Error 1
 box-check: no tests/results/ui_live/ on root@49.13.209.14 (test_ui_live_smoke skipped or produced no artifacts)
 
 box-check (ubuntu, PG=all, EPHEMERAL=1) exit=2 — summary:
+        |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/query_text.c: In function ‘compact_quality_locked’:
   src/query_text.c:444:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
     444 |         fchown(fileno(out), (uid_t)-1, qt->trace_gid);
         |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     CC       build/backend_meta.o
     CC       build/cJSON.o
-    LINK     pgwt-server
-    DONE     pgwt-server
     LINK     pg_wait_tracer
     DONE     pg_wait_tracer
   make: Entering directory '/root/pgwt-check/agent_424-durability/tests'
@@ -363,11 +355,11 @@ box-check (ubuntu, PG=all, EPHEMERAL=1) exit=2 — summary:
         |     ^~~~~~~~~~~
   /usr/bin/ld: ../build/map_reader.o: in function `pgwt_collect_open_intervals':
   /root/pgwt-check/agent_424-durability/src/map_reader.c:985:(.text+0x229e): undefined reference to `pgwt_exact_resolve_attr'
-  collect2: error: ld returned 1 exit status
   make: Leaving directory '/root/pgwt-check/agent_424-durability/tests'
-  make: *** [Makefile:97: test_event_reader] Error 1
-box-check: EPHEMERAL=1 KEEP=1 — leaving pgwt-dev-1792088477-2380 (id=170608030, ip=49.13.209.14) up.
+  collect2: error: ld returned 1 exit status
+  make: *** [Makefile:98: test_event_reader] Error 1
+box-check: EPHEMERAL=1 KEEP=1 — leaving pgwt-dev-1792091224-17625 (id=170614863, ip=49.13.209.14) up.
 box-check: tests/hetzner-sweep.sh (make hetzner-sweep, cutoff 6h by default) WILL delete this VM on its own in a few hours unless you raise MAX_AGE_HOURS/--max-age-hours or delete it yourself first:
-  HCLOUD_TOKEN="$(security find-generic-password -s hcloud -a claude_token -w)" tests/hetzner-vm.sh delete 170608030
+  HCLOUD_TOKEN="$(security find-generic-password -s hcloud -a claude_token -w)" tests/hetzner-vm.sh delete 170614863
 make: *** [box-check] Error 2
 BOXCHECK_EXIT=2

@@ -1,48 +1,59 @@
---- [n1-no-identity-check] exit=1 failing=3
-  FAIL(244): a different mono stamp must refuse
-  FAIL(248): a different wall stamp must refuse
-  FAIL(604): a stale sidecar must NOT be carried next to the archive
-=== 131/134 passed ===
+--- [n1-no-identity-check] exit=1 failing=4
+  FAIL(305): a different mono stamp must refuse
+  FAIL(309): a different wall stamp must refuse
+  FAIL(797): a sidecar that does not describe this trace must be REMOVED, not left sitting beside an archive it is not about
+=== 184/188 passed ===
 --- [n2-no-checksum] exit=1 failing=3
-  FAIL(238): a flipped record bit must refuse
-  FAIL(256): a damaged AND stale buffer reports damage
-  FAIL(670): [corrupt] an unvalidatable sidecar must not be carried
-=== 131/134 passed ===
+  FAIL(299): a flipped record bit must refuse
+  FAIL(317): a damaged AND stale buffer reports damage
+  FAIL(993): [corrupt] an unvalidatable sidecar must not be carried
+=== 185/188 passed ===
 --- [n3-no-count-cap] exit=1 failing=1
-  FAIL(227): a count beyond the cap must refuse BEFORE any size arithmetic
-=== 133/134 passed ===
+  FAIL(288): a count beyond the cap must refuse BEFORE any size arithmetic
+=== 187/188 passed ===
 --- [n4-clean-close-keeps] exit=1 failing=2
-  FAIL(506): a clean close must drop the checkpoint
-  FAIL(518): a cleanly closed archive must have no checkpoint beside it
-=== 132/134 passed ===
---- [n5-rotation-keeps] exit=1 failing=1
-  FAIL(533): rotation must drop the checkpoint
-=== 133/134 passed ===
+  FAIL(597): a clean close must drop the checkpoint
+  FAIL(609): a cleanly closed archive must have no checkpoint beside it
+=== 186/188 passed ===
 --- [n6-empty-is-noop] exit=1 failing=2
-  FAIL(720): it must be the EMPTY one (seq 1, 1 records) — a stale non-empty checkpoint here is a double count
-  FAIL(722): and it must be the later seq, got 1
-=== 132/134 passed ===
---- [n7-no-publish-first] exit=1 failing=10
-  FAIL(370): the checkpoint must publish first: watermark 0, expected 10049000000
-  FAIL(392): the recorded watermark must be the published one
-  FAIL(452): the crashed trace was archived
-=== 107/117 passed ===
+  FAIL(1044): it must be the EMPTY one (seq 1, 1 records) — a stale non-empty checkpoint here is a double count
+  FAIL(1046): and it must be the later seq, got 1
+=== 186/188 passed ===
 --- [n8-suppress-on-equal] exit=1 failing=1
-  FAIL(291): a record ending exactly AT the start is the PREVIOUS stretch ([start,end) is half-open) and must not suppress
-=== 133/134 passed ===
+  FAIL(352): a record ending exactly AT the start is the PREVIOUS stretch ([start,end) is half-open) and must not suppress
+=== 187/188 passed ===
 --- [n9-suppress-vs-ckpt-instant] exit=1 failing=3
-  FAIL(299): one nanosecond after the start is already a closed stretch
-  FAIL(328): exactly one of the three must be suppressed (kept=3 dropped=0)
-  FAIL(332): recovered open time must be 7000 ns, got 9000 (0 = suppresses everything, 9000 = suppresses nothing)
-=== 131/134 passed ===
---- [n10-recovery-carries-blindly] exit=1 failing=5
-  FAIL(604): a stale sidecar must NOT be carried next to the archive
-  FAIL(670): [corrupt] an unvalidatable sidecar must not be carried
-  FAIL(670): [trunc] an unvalidatable sidecar must not be carried
-=== 129/134 passed ===
+  FAIL(360): one nanosecond after the start is already a closed stretch
+  FAIL(389): exactly one of the three must be suppressed (kept=3 dropped=0)
+  FAIL(393): recovered open time must be 7000 ns, got 9000 (0 = suppresses everything, 9000 = suppresses nothing)
+=== 185/188 passed ===
+--- [n10-recovery-carries-blindly] exit=1 failing=1
+  FAIL(927): a stale sidecar must NOT be carried next to the archive
+=== 187/188 passed ===
 --- [n11-retention-leaks-sidecar] exit=1 failing=1
-  FAIL(812): and its sidecar went with it (a sidecar without its trace is unattributable evidence that would otherwise never be deleted)
-=== 133/134 passed ===
+  FAIL(1136): and its sidecar went with it (a sidecar without its trace is unattributable evidence that would otherwise never be deleted)
+=== 187/188 passed ===
 --- [n12-uncertified-close-drops] exit=1 failing=1
-  FAIL(566): an uncertified close must KEEP the checkpoint
-=== 133/134 passed ===
+  FAIL(889): an uncertified close must KEEP the checkpoint
+=== 187/188 passed ===
+--- [o1-rotation-drops-ckpt] exit=1 failing=5
+  FAIL(636): the rotated archive must KEEP its checkpoint at /tmp/pgwt_ckpt_Beju4f/rotcarry/2026-10-15_21.trace.lz4.open
+  FAIL(639): ...with its records intact (got -1 records, 0 ns)
+  FAIL(681): the checkpoint moved first, so it is already at its destination
+=== 183/188 passed ===
+--- [o2-recovery-trace-first] exit=1 failing=7
+  FAIL(730): the trace is still unarchived
+  FAIL(732): the live checkpoint has already moved
+  FAIL(734): ...to its destination, where it waits for the trace
+=== 179/186 passed ===
+--- [o3-no-adoption] exit=1 failing=1
+  FAIL(797): a sidecar that does not describe this trace must be REMOVED, not left sitting beside an archive it is not about
+=== 187/188 passed ===
+--- [o4-adopt-without-identity] exit=1 failing=1
+  FAIL(797): a sidecar that does not describe this trace must be REMOVED, not left sitting beside an archive it is not about
+=== 187/188 passed ===
+--- [o5-checkpoint-flushes] exit=1 failing=4
+  FAIL(434): the checkpoint must not flush: watermark 10049000000, expected 0
+  FAIL(458): an unpublished writer's checkpoint records watermark 0, not the pending tail (got 10049000000)
+  FAIL(829): ten checkpoints must cut no block (blocks 1 -> 2)
+=== 184/188 passed ===
