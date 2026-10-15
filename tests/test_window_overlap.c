@@ -366,6 +366,30 @@ struct bypass_result {
     uint64_t lock_count;
 };
 
+/* WINDOW ORIGIN CONVENTION -- READ THIS BEFORE ADDING A FIXTURE HERE.
+ *
+ * Every window in this file is measured from `srv->earliest_wall_ns - 10 ms`,
+ * NOT from the base timestamp the fixture writer was given. `window_lo` and
+ * `window_hi` are whole seconds from that origin. The origin is therefore
+ * decided by the EARLIEST RECORD the fixture happens to write, which means a
+ * fixture whose first record sits well after its own `base` shifts every
+ * window in the section by that distance.
+ *
+ * That is not hypothetical and it is not a crash -- it is a SILENT MISS. The
+ * tiered-budget section (the SAMPLES-blocks-charged-against-the-straddler-
+ * budget defect) first passed 63/63 against the UNFIXED tree: its fixture
+ * started at base + 10 s, so every window slid ~10 s and landed on the
+ * SAMPLES blocks, where they sit inside the sample edge, are never charged
+ * to the budget, and the defect is unreachable. The section was green
+ * because it was pointed somewhere else. One anchor record at base + 10 ms
+ * pinned the origin, and only then did it go red.
+ *
+ * So: either write an anchor record at the base, or compute your window
+ * bounds from the same earliest record the loader will. And whichever you
+ * do, run the new section against the PARENT tree and confirm it fails --
+ * a section that has never been red has not been shown to be looking at
+ * anything.
+ */
 static int run_bypass(const char *dir, uint64_t w0_unused,
                       const char *env_name, const char *env_value,
                       struct bypass_result *out, int window_lo, int window_hi)
