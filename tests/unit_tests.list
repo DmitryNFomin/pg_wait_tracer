@@ -401,6 +401,31 @@ test_cpu_split_parity
 # table, a missing trace dir (the read-back must REFUSE, not agree with
 # nothing) and a late first note. A gate that cannot see must never approve.
 test_straddler_accounting
+# #424 / summary v9: an OPEN ON-CPU interval must be credited to the seconds
+# it occupies WITHOUT destroying v7's measured-CPU split -- the residual v8
+# deliberately left open, which made an in-flight pure-CPU statement absent
+# from the CPU rows of the 15-minute Overview until it ended. The producer
+# supplies the observation v8 said could not exist (cumulative measured CPU
+# over the open prefix, plus its own command-gate classification) through
+# pgwt_summary_note_open_ex. Asserted: placement (ten seconds, 1 s each) AND
+# the split surviving (6000 ms measured, 0 clamped) in the same fixture;
+# conservation with the two sides read off DISK and out of the fixture's
+# literals, never one sum against itself; either order of (tick, close)
+# including a tick crediting past the close; the CLASSIFICATION FREEZE (the
+# open-prefix command-majority answer can flip before close, and a written
+# second is immutable, so one interval must carry ONE label -- divergence
+# counted in ns); the unknown tier and a tier flip (CPU* is measured +
+# unknown, so a flip must not double count); and NON-VACUITY -- a fixture
+# with no open CPU is BIT-IDENTICAL through the new entry point. Bypass
+# suite: the observation WITHHELD (the reachability probe -- it must degrade
+# to v8 exactly, or the gate measures nothing), a stale observation, an exit,
+# a mismatched note, an io_worker pid, an illegal eff_we, a full table, a
+# missing/empty trace dir and a PREVIOUS-VERSION file (the reader must
+# REFUSE, so evidence from the old accounting rule cannot green this one), a
+# disabled writer, a sub-second gap, and the open-credit-only round trip (an
+# events[] row with time and no count must survive, or the block header
+# desynchronises and whole seconds fail to decode).
+test_open_cpu_accounting
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second
