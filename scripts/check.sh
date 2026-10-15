@@ -71,6 +71,17 @@ fi
 step "bash: .gitignore covers every tests/ build product (tree-hash integrity)"
 run bash tests/test_gitignore_build_products.sh
 
+# The summary format version is the one number in the docs with an
+# OPERATIONAL consequence: DEMO_RUNBOOK.md tells the operator which trace
+# directories to move aside, and a stale N leaves a directory the server
+# then refuses on the summary fast path -- the 900 s Overview silently
+# drops to raw, which is the paint latency the runbook exists to avoid.
+# It drifted twice in one night (v6 while the code was 8; then a v8
+# correction landing on a tree that had merged v9), so it is checked rather
+# than proofread.
+step "bash: the docs name the PGWT_SUMMARY_VERSION the code defines"
+run bash tests/test_docs_summary_version.sh
+
 step "snapshot-history guard self-test"
 run tests/test_check_snapshot_history.sh
 

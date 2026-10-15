@@ -496,10 +496,34 @@ accounting rule and not about the byte layout:
   attribution at an interval boundary, and a second that completed before the
   pid had a note) are listed and COUNTED in `src/summary_writer.h`.
 
+- **v9** (#424) makes an OPEN on-CPU interval creditable per second. v8
+  deliberately refused that case: a per-second credit has no `cpu_ns` of its
+  own, so spreading a CPU gap's wall while its measurement stayed whole at
+  close would have put everything into `cpu_clamped_ns` and nothing into
+  `cpu_measured_ns`, destroying v7's split. v9 credits it only when the
+  PRODUCER supplies the measurement, and widens `cpu_measured_records` from
+  "records" to "CPU observations" so that a window whose only CPU time is
+  one still-open gap still reports `has_measured_cpu` — without that widening
+  the reader would ignore the split it had just been given and emit one
+  combined CPU* row, which is the v8 symptom one layer up. Layout is
+  byte-identical to v8; the bump exists for the rule.
+
+  **Claimed is not wired.** `summary_open_cpu_credited_ns` on the control
+  socket is the check: on a capture with an in-flight CPU statement it must
+  be non-zero. Measured on gate-2 at integration HEAD, watchpoints attached,
+  three CPU statements spanning 10 s of ticks and `cpu_ns_total` moving
+  0 → 23,715,122,379, all three of `summary_open_cpu_credited_ns`,
+  `summary_open_cpu_refused_total` and `summary_cpu_open_uncredited_ns_total`
+  read **0** — a writer that is never asked, so the accounting silently falls
+  back to v8. `tests/test_v9_open_cpu_wired.sh` is that check, in the live
+  tier, and it is RED until the producer is wired.
+
 This list is kept in step with `PGWT_SUMMARY_VERSION` in
-`src/summary_writer.h`, which is **8** as of 2026-10-15. It stopped at v6 for
+`src/summary_writer.h`, which is **9** as of 2026-10-15. It stopped at v6 for
 two bumps; a version list that trails the constant is worse than no list,
-because it reads as "nothing has changed since".
+because it reads as "nothing has changed since" — and it misled once more
+after that, when the v7/v8 entries were added against a tree that had since
+become v9.
 
 Startup recovery still archives an intact older file instead of calling it
 corrupt.
