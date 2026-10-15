@@ -1,0 +1,9 @@
+exit=0
+--- test_blink_injector_record_feeds_a_proven_verdict ---
+  PASS: the injector's own bracket is provable (None)
+
+Ran 46, passed 46, failed 0 (16 test functions discovered)
+
+CHECK PASSED (full) — stamp fc8d6be4a700567a663ce6f812606504a09dc9bf
+
+[exited with code 0]
