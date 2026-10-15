@@ -1,0 +1,10 @@
+commit=331f350d3fb21d3e4124bd1b6de2d0effc467ba4 host=pgwt-dev-1792092501-32026 kernel=6.8.0-139-generic gcc=13
+test_trace_closure: === 91/91 passed ===
+test_open_ckpt: === 196/196 passed ===
+test_event_writer: 5062/5062 tests passed
+test_event_reader: === 69 / 69 tests passed ===
+test_concurrent_rw: 9/9 tests passed
+test_durability: 97/97 tests passed
+test_trace_v2: === 98 / 98 tests passed ===
+test_open_interval: 180 checks, 0 failed
+(test_event_reader and test_concurrent_rw now BUILD and pass: the parent link break is fixed by B f72bdc5)
