@@ -66,9 +66,16 @@ static void write_marker_at(struct pgwt_daemon *d, uint32_t marker_type,
     pgwt_writer_push_event(d->event_writer, &ev);
     /* cat_flag 0: this record is pid-LESS (pid = 0) and a marker, which the
      * writer drops in accum_event. Resolving a T2 category for pid 0 would
-     * be meaningless and would scan the backend registry for nothing. */
+     * be meaningless and would scan the backend registry for nothing.
+     *
+     * eff_event = ev.old_event (v7, #408): RESOLVED, with no rewrite. The
+     * non-command relabel applies only to a foreground we == 0 interval, and
+     * a marker is neither -- so this is the honest answer rather than
+     * PGWT_SUMMARY_EFF_UNRESOLVED, which would inflate the
+     * eff_unresolved_events_total residual signal with records the rule can
+     * never touch. */
     if (d->summary_writer)
-        pgwt_summary_push_event(d->summary_writer, &ev, 0);
+        pgwt_summary_push_event(d->summary_writer, &ev, 0, ev.old_event);
 }
 
 static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
@@ -94,9 +101,12 @@ static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
      * resolving a real category here would silently disable marker-driven
      * attribution for any pid that resolved as io_worker -- a correctness
      * change dressed as a cleanup. Markers carry no duration, so 0 cannot
-     * misaccount any time; this argument is about the qattr side effect. */
+     * misaccount any time; this argument is about the qattr side effect.
+     *
+     * eff_event = ev.old_event (v7, #408): a marker is never relabelled --
+     * see the same argument in write_marker_at. */
     if (d->summary_writer)
-        pgwt_summary_push_event(d->summary_writer, &ev, 0);
+        pgwt_summary_push_event(d->summary_writer, &ev, 0, ev.old_event);
 }
 
 /* ── Budget accounting (rolling hour) ─────────────────────────────────── */
@@ -289,10 +299,34 @@ static void flush_open_intervals(struct pgwt_daemon *d, uint64_t now)
          * NULL): we hold `be` already, this runs once per backend per capture
          * end, and at that point be->meta is long since parsed. Same function
          * the live path uses, so the two producers cannot drift apart. */
-        if (d->summary_writer)
-            pgwt_summary_push_event(d->summary_writer, &ev,
-                                    pgwt_live_pid_cat_flag(d, NULL,
-                                                           (uint32_t)be->pid));
+        /* v7 (#408): the SECOND thing this push now resolves is the
+         * non-command relabel -- a foreground we == 0 interval outside a
+         * command is idle, not CPU, and the writer has to be told. The input
+         * is the gate value pgwt_exact_resolve_attr just read (`cmd_open`),
+         * fed through the SAME classifier both live paths use. There is no
+         * marker sweep to consult here -- this loop holds `be`, not a per-pid
+         * accumulator -- so this is the documented FALLBACK input to the
+         * majority rule: the one event_stream.c uses when a pid has no gate
+         * yet, and the one pgwt_tag_events falls back to under its seen_cmd
+         * rule. A capture-end gap the marker sweep would have called
+         * in-command and this flag calls otherwise is classified as idle here
+         * and as CPU by a raw reload: ONE record per backend per capture end.
+         * The alternative (passing PGWT_SUMMARY_EFF_UNRESOLVED) keeps the v6
+         * behaviour, which is wrong for the far more common case -- a
+         * genuinely idle session sitting between commands when the tracer
+         * stops.
+         *
+         * The category is resolved into a local because it is needed TWICE
+         * (as cat_flag and as the classifier's input) and resolving twice is
+         * what the v6 note in src/event_stream.c forbids: two lookups can
+         * disagree once the per-pid cache fills between them. */
+        if (d->summary_writer) {
+            uint32_t cf = pgwt_live_pid_cat_flag(d, NULL, (uint32_t)be->pid);
+            uint32_t eff = pgwt_live_effective_event(we, cf,
+                                                     d->cmd_gate_active,
+                                                     cmd_open != 0);
+            pgwt_summary_push_event(d->summary_writer, &ev, cf, eff);
+        }
         /* T8: flush records bypass the ringbuf/event_stream funnel, so fold
          * their measured CPU into the lifetime counters here — a pure-CPU
          * command straddling capture end contributes its cpu_ns_total from

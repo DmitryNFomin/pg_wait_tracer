@@ -1,0 +1,1477 @@
+{
+ "commit_fixture": "synthetic",
+ "ok": false,
+ "sabotage": false,
+ "summary_files_present": [
+  "current.summary",
+  "current.summary.meta"
+ ],
+ "summary_format_version": "8",
+ "windows": {
+  "control_59s_both_raw": {
+   "fallbacks": {
+    "raw": null,
+    "summary": null
+   },
+   "fields_compared": 141,
+   "findings": [],
+   "from_ns": 10200000000000,
+   "ok": true,
+   "routes": {
+    "raw": "raw",
+    "summary": "raw"
+   },
+   "to_ns": 10259000000000
+  },
+  "fractional_bounds": {
+   "fallbacks": {
+    "raw": "INFO: no summary file covers this window -- recomputing from raw events",
+    "summary": null
+   },
+   "fields_compared": 141,
+   "findings": [
+    {
+     "delta": 1.5312500000000004,
+     "field": "aas/max_aas",
+     "issue": 410,
+     "note": "recorded raw=2.96975 summary=4.251",
+     "raw": 2.96975,
+     "rel": 0.5156157925751328,
+     "status": "CHANGED-DIVERGENCE",
+     "summary": 4.501
+    },
+    {
+     "delta": 0,
+     "field": "time_model/cpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 40044,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 40044
+    },
+    {
+     "delta": null,
+     "field": "time_model/has_measured_cpu",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": true,
+     "rel": null,
+     "status": "xpass",
+     "summary": true
+    },
+    {
+     "delta": 0,
+     "field": "time_model/offcpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 20100,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 20100
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.250275,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.250275
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 40044,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 40044
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (running)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (running)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (running)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 12.995223012617476,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 12.995223012617476
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.125625,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.125625
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 20100,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 20100
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (waiting for a core)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (waiting for a core)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (waiting for a core)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 6.522924347058518,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 6.522924347058518
+    },
+    {
+     "delta": null,
+     "field": "time_model/rowset",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2",
+     "rel": null,
+     "status": "xpass",
+     "summary": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2"
+    },
+    {
+     "delta": -39000,
+     "field": "queries/backfilled_ms",
+     "issue": 410,
+     "note": "",
+     "raw": 39000,
+     "rel": -1.0,
+     "status": "known",
+     "summary": 0
+    },
+    {
+     "delta": null,
+     "field": "queries/row/102/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "queries/row/102/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "queries/unattributed_available",
+     "issue": 410,
+     "note": "",
+     "raw": true,
+     "rel": null,
+     "status": "known",
+     "summary": false
+    },
+    {
+     "delta": null,
+     "field": "sessions/row/1001/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "sessions/row/1001/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "time_model/io_worker_busy_pct",
+     "issue": 410,
+     "note": "present on raw only",
+     "raw": 0,
+     "rel": null,
+     "status": "known",
+     "summary": "<absent>"
+    }
+   ],
+   "from_ns": 10140500000000,
+   "ok": false,
+   "routes": {
+    "raw": "raw",
+    "summary": "summary"
+   },
+   "to_ns": 10300500000000
+  },
+  "interior_160s": {
+   "fallbacks": {
+    "raw": "INFO: no summary file covers this window -- recomputing from raw events",
+    "summary": null
+   },
+   "fields_compared": 141,
+   "findings": [
+    {
+     "delta": 1.3125000000000004,
+     "field": "aas/max_aas",
+     "issue": 410,
+     "note": "recorded raw=3.001 summary=4.251",
+     "raw": 3.001,
+     "rel": 0.43735421526157964,
+     "status": "CHANGED-DIVERGENCE",
+     "summary": 4.3135
+    },
+    {
+     "delta": 0,
+     "field": "time_model/cpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 40044,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 40044
+    },
+    {
+     "delta": null,
+     "field": "time_model/has_measured_cpu",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": true,
+     "rel": null,
+     "status": "xpass",
+     "summary": true
+    },
+    {
+     "delta": 0,
+     "field": "time_model/offcpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 20100,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 20100
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.250275,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.250275
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 40044,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 40044
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (running)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (running)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (running)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 12.995223012617476,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 12.995223012617476
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.125625,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.125625
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 20100,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 20100
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (waiting for a core)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (waiting for a core)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (waiting for a core)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 6.522924347058518,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 6.522924347058518
+    },
+    {
+     "delta": null,
+     "field": "time_model/rowset",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2",
+     "rel": null,
+     "status": "xpass",
+     "summary": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2"
+    },
+    {
+     "delta": -39000,
+     "field": "queries/backfilled_ms",
+     "issue": 410,
+     "note": "",
+     "raw": 39000,
+     "rel": -1.0,
+     "status": "known",
+     "summary": 0
+    },
+    {
+     "delta": null,
+     "field": "queries/row/102/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "queries/row/102/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "queries/unattributed_available",
+     "issue": 410,
+     "note": "",
+     "raw": true,
+     "rel": null,
+     "status": "known",
+     "summary": false
+    },
+    {
+     "delta": null,
+     "field": "sessions/row/1001/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "sessions/row/1001/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "time_model/io_worker_busy_pct",
+     "issue": 410,
+     "note": "present on raw only",
+     "raw": 0,
+     "rel": null,
+     "status": "known",
+     "summary": "<absent>"
+    }
+   ],
+   "from_ns": 10140000000000,
+   "ok": false,
+   "routes": {
+    "raw": "raw",
+    "summary": "summary"
+   },
+   "to_ns": 10300000000000
+  },
+  "shift_1s": {
+   "fallbacks": {
+    "raw": "INFO: no summary file covers this window -- recomputing from raw events",
+    "summary": null
+   },
+   "fields_compared": 141,
+   "findings": [
+    {
+     "delta": 1.5625000000000004,
+     "field": "aas/max_aas",
+     "issue": 410,
+     "note": "recorded raw=2.9385 summary=4.251",
+     "raw": 2.9385,
+     "rel": 0.5317338778288244,
+     "status": "CHANGED-DIVERGENCE",
+     "summary": 4.501
+    },
+    {
+     "delta": 0,
+     "field": "time_model/cpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 40044,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 40044
+    },
+    {
+     "delta": null,
+     "field": "time_model/has_measured_cpu",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": true,
+     "rel": null,
+     "status": "xpass",
+     "summary": true
+    },
+    {
+     "delta": 0,
+     "field": "time_model/offcpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 20100,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 20100
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.250275,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.250275
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 40044,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 40044
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (running)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (running)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (running)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 12.995223012617476,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 12.995223012617476
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.125625,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.125625
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 20100,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 20100
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (waiting for a core)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (waiting for a core)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (waiting for a core)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 6.522924347058518,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 6.522924347058518
+    },
+    {
+     "delta": null,
+     "field": "time_model/rowset",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2",
+     "rel": null,
+     "status": "xpass",
+     "summary": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2"
+    },
+    {
+     "delta": -39000,
+     "field": "queries/backfilled_ms",
+     "issue": 410,
+     "note": "",
+     "raw": 39000,
+     "rel": -1.0,
+     "status": "known",
+     "summary": 0
+    },
+    {
+     "delta": null,
+     "field": "queries/row/102/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "queries/row/102/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "queries/unattributed_available",
+     "issue": 410,
+     "note": "",
+     "raw": true,
+     "rel": null,
+     "status": "known",
+     "summary": false
+    },
+    {
+     "delta": null,
+     "field": "sessions/row/1001/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "sessions/row/1001/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "time_model/io_worker_busy_pct",
+     "issue": 410,
+     "note": "present on raw only",
+     "raw": 0,
+     "rel": null,
+     "status": "known",
+     "summary": "<absent>"
+    }
+   ],
+   "from_ns": 10141000000000,
+   "ok": false,
+   "routes": {
+    "raw": "raw",
+    "summary": "summary"
+   },
+   "to_ns": 10301000000000
+  },
+  "straddle_130s": {
+   "fallbacks": {
+    "raw": "INFO: no summary file covers this window -- recomputing from raw events",
+    "summary": null
+   },
+   "fields_compared": 158,
+   "findings": [
+    {
+     "delta": 0.0,
+     "field": "aas/integral_ms",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 252113.99999999997,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 252113.99999999997
+    },
+    {
+     "delta": 0.0,
+     "field": "aas/max_aas",
+     "issue": 410,
+     "note": "recorded as divergent, now AGREES -- if #410 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 2.885615384615385,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 2.885615384615385
+    },
+    {
+     "delta": 0.0,
+     "field": "sessions/row/1003/cpu_pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 2.4390243902439024,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 2.4390243902439024
+    },
+    {
+     "delta": 0,
+     "field": "sessions/row/1003/db_time_ms",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 41000,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 41000
+    },
+    {
+     "delta": 0.0,
+     "field": "sessions/row/1003/wait_pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 97.5609756097561,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 97.5609756097561
+    },
+    {
+     "delta": null,
+     "field": "sessions/rowset",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "1000 | 1001 | 1003 | 1002",
+     "rel": null,
+     "status": "xpass",
+     "summary": "1000 | 1001 | 1003 | 1002"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/aas",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1.9393384615384615,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1.9393384615384615
+    },
+    {
+     "delta": 0,
+     "field": "time_model/cpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 31814,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 31814
+    },
+    {
+     "delta": 0,
+     "field": "time_model/db_time_ms",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 252114,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 252114
+    },
+    {
+     "delta": null,
+     "field": "time_model/has_measured_cpu",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": true,
+     "rel": null,
+     "status": "xpass",
+     "summary": true
+    },
+    {
+     "delta": 0,
+     "field": "time_model/offcpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 16300,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 16300
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.24472307692307693,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.24472307692307693
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 31814,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 31814
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (running)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (running)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (running)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 12.6188946270338,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 12.6188946270338
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.12538461538461537,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.12538461538461537
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 16300,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 16300
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (waiting for a core)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (waiting for a core)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (waiting for a core)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 6.465329176483654,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 6.465329176483654
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/Client/aas",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.5384615384615384,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.5384615384615384
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/Client/ms",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 70000,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 70000
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/Client/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 27.765217322322442,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 27.765217322322442
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/Client:ClientWrite/aas",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.5384615384615384,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.5384615384615384
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/Client:ClientWrite/ms",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 70000,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 70000
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/Client:ClientWrite/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 27.765217322322442,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 27.765217322322442
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/DB Time/aas",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1.9393384615384615,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1.9393384615384615
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/DB Time/ms",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 252114,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 252114
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/IO/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 15.469192508151075,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 15.469192508151075
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/IO:DataFileRead/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 15.469192508151075,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 15.469192508151075
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/LWLock/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 15.072546546403611,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 15.072546546403611
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/LWLock:WALWrite/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 15.072546546403611,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 15.072546546403611
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/Lock/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 22.608819819605415,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 22.608819819605415
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/Lock:relation/pct",
+     "issue": 379,
+     "note": "recorded as divergent, now AGREES -- if #379 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 22.608819819605415,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 22.608819819605415
+    },
+    {
+     "delta": null,
+     "field": "time_model/rowset",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "DB Time@0 | Client@1 | Client:ClientWrite@2 | Lock@1 | Lock:relation@2 | IO@1 | IO:DataFileRead@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1",
+     "rel": null,
+     "status": "xpass",
+     "summary": "DB Time@0 | Client@1 | Client:ClientWrite@2 | Lock@1 | Lock:relation@2 | IO@1 | IO:DataFileRead@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1"
+    },
+    {
+     "delta": -70000,
+     "field": "queries/backfilled_ms",
+     "issue": 410,
+     "note": "",
+     "raw": 70000,
+     "rel": -1.0,
+     "status": "known",
+     "summary": 0
+    },
+    {
+     "delta": 60000,
+     "field": "queries/db_time_ms",
+     "issue": 379,
+     "note": "",
+     "raw": 252114,
+     "rel": 0.23798757704847806,
+     "status": "known",
+     "summary": 312114
+    },
+    {
+     "delta": null,
+     "field": "queries/order",
+     "issue": 379,
+     "note": "",
+     "raw": "100 | 102 | 104 | 103 | 101",
+     "rel": null,
+     "status": "known",
+     "summary": "104 | 100 | 102 | 103 | 101"
+    },
+    {
+     "delta": -5.795015877430789,
+     "field": "queries/row/100/pct",
+     "issue": 379,
+     "note": "",
+     "raw": 30.145093092807222,
+     "rel": -0.19223745170034023,
+     "status": "known",
+     "summary": 24.350077215376434
+    },
+    {
+     "delta": -2.8975079387153944,
+     "field": "queries/row/101/pct",
+     "issue": 379,
+     "note": "",
+     "raw": 15.072546546403611,
+     "rel": -0.19223745170034023,
+     "status": "known",
+     "summary": 12.175038607688217
+    },
+    {
+     "delta": -4.354954431889237,
+     "field": "queries/row/102/pct",
+     "issue": 379,
+     "note": "",
+     "raw": 22.654037459244627,
+     "rel": -0.1922374517003402,
+     "status": "known",
+     "summary": 18.29908302735539
+    },
+    {
+     "delta": -3.050008356542522,
+     "field": "queries/row/103/pct",
+     "issue": 379,
+     "note": "",
+     "raw": 15.865838469898538,
+     "rel": -0.19223745170034034,
+     "status": "known",
+     "summary": 12.815830113356016
+    },
+    {
+     "delta": 16.097486604577945,
+     "field": "queries/row/104/pct",
+     "issue": 379,
+     "note": "",
+     "raw": 16.262484431646,
+     "rel": 0.9898540823967229,
+     "status": "known",
+     "summary": 32.359971036223946
+    },
+    {
+     "delta": 60000,
+     "field": "queries/row/104/total_ms",
+     "issue": 379,
+     "note": "",
+     "raw": 41000,
+     "rel": 1.4634146341463414,
+     "status": "known",
+     "summary": 101000
+    },
+    {
+     "delta": null,
+     "field": "queries/unattributed_available",
+     "issue": 410,
+     "note": "",
+     "raw": true,
+     "rel": null,
+     "status": "known",
+     "summary": false
+    },
+    {
+     "delta": null,
+     "field": "time_model/io_worker_busy_pct",
+     "issue": 410,
+     "note": "present on raw only",
+     "raw": 0,
+     "rel": null,
+     "status": "known",
+     "summary": "<absent>"
+    }
+   ],
+   "from_ns": 10060000000000,
+   "ok": true,
+   "routes": {
+    "raw": "raw",
+    "summary": "summary"
+   },
+   "to_ns": 10190000000000
+  },
+  "to_capture_close": {
+   "fallbacks": {
+    "raw": "INFO: no summary file covers this window -- recomputing from raw events",
+    "summary": null
+   },
+   "fields_compared": 141,
+   "findings": [
+    {
+     "delta": 1.3099415204678362,
+     "field": "aas/max_aas",
+     "issue": 410,
+     "note": "recorded raw=2.813859649122807 summary=4.299239766081872",
+     "raw": 2.813859649122807,
+     "rel": 0.46553193258100045,
+     "status": "CHANGED-DIVERGENCE",
+     "summary": 4.123801169590643
+    },
+    {
+     "delta": 0,
+     "field": "time_model/cpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 42452,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 42452
+    },
+    {
+     "delta": null,
+     "field": "time_model/has_measured_cpu",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": true,
+     "rel": null,
+     "status": "xpass",
+     "summary": true
+    },
+    {
+     "delta": 0,
+     "field": "time_model/offcpu_ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 21700,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 21700
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.24825730994152045,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.24825730994152045
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (running)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 42452,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 42452
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (running)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (running)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (running)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (running)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 13.096325180779386,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 13.096325180779386
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/aas",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 0.12690058479532162,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 0.12690058479532162
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/indent",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 1,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 1
+    },
+    {
+     "delta": 0,
+     "field": "time_model/row/CPU (waiting for a core)/ms",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 21700,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 21700
+    },
+    {
+     "delta": null,
+     "field": "time_model/row/CPU (waiting for a core)/name",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "CPU (waiting for a core)",
+     "rel": null,
+     "status": "xpass",
+     "summary": "CPU (waiting for a core)"
+    },
+    {
+     "delta": 0.0,
+     "field": "time_model/row/CPU (waiting for a core)/pct",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": 6.694390286038648,
+     "rel": 0.0,
+     "status": "xpass",
+     "summary": 6.694390286038648
+    },
+    {
+     "delta": null,
+     "field": "time_model/rowset",
+     "issue": 408,
+     "note": "recorded as divergent, now AGREES -- if #408 is fixed, delete this entry from tests/summary_raw_parity_expected.json. Removing the pin is the last step of landing that fix, not an edit to be nervous about",
+     "raw": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2",
+     "rel": null,
+     "status": "xpass",
+     "summary": "DB Time@0 | IO@1 | IO:DataFileRead@2 | Lock@1 | Lock:relation@2 | LWLock@1 | LWLock:WALWrite@2 | CPU (running)@1 | CPU (waiting for a core)@1 | Client@1 | Client:ClientWrite@2"
+    },
+    {
+     "delta": -39000,
+     "field": "queries/backfilled_ms",
+     "issue": 410,
+     "note": "",
+     "raw": 39000,
+     "rel": -1.0,
+     "status": "known",
+     "summary": 0
+    },
+    {
+     "delta": null,
+     "field": "queries/row/102/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "queries/row/102/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "queries/unattributed_available",
+     "issue": 410,
+     "note": "",
+     "raw": true,
+     "rel": null,
+     "status": "known",
+     "summary": false
+    },
+    {
+     "delta": null,
+     "field": "sessions/row/1000/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "LWLock:WALWrite",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 150994957,
+     "field": "sessions/row/1000/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 16777224,
+     "rel": 8.999996483327635,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "sessions/row/1001/top_wait",
+     "issue": 319,
+     "note": "",
+     "raw": "Lock:relation",
+     "rel": null,
+     "status": "known",
+     "summary": "IO:DataFileRead"
+    },
+    {
+     "delta": 117440533,
+     "field": "sessions/row/1001/top_wait_id",
+     "issue": 319,
+     "note": "",
+     "raw": 50331648,
+     "rel": 2.333333750565847,
+     "status": "known",
+     "summary": 167772181
+    },
+    {
+     "delta": null,
+     "field": "time_model/io_worker_busy_pct",
+     "issue": 410,
+     "note": "present on raw only",
+     "raw": 0,
+     "rel": null,
+     "status": "known",
+     "summary": "<absent>"
+    }
+   ],
+   "from_ns": 10180000000000,
+   "ok": false,
+   "routes": {
+    "raw": "raw",
+    "summary": "summary"
+   },
+   "to_ns": 10351000000000
+  }
+ }
+}

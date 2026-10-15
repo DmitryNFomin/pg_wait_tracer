@@ -173,7 +173,193 @@
  * Client:ClientRead behaves the same way -- so "the summary equals raw on
  * any window" is NOT what this version claims; it claims the io_worker
  * accounting rule now matches. */
-#define PGWT_SUMMARY_VERSION  6
+/* v7 (2026-10-14, issue #408): the per-second record now carries the
+ * MEASURED-CPU SPLIT, and the writer applies the non-command-CPU relabel the
+ * raw paths apply. Two content changes, one layout change (a 40-byte record
+ * trailer).
+ *
+ * WHAT WAS WRONG, measured on the PG18 demo capture run.id 1791973533
+ * (1929 s, 7,416,121 records; harness and output in
+ * tests/results/issue408-measurement):
+ *
+ *   1. THE SPLIT WAS NOT IN THE FILE. The raw time model reports CPU as two
+ *      rows -- "CPU (running)" (the conserved sum of each interval's measured
+ *      cpu_ns) and "CPU (waiting for a core)" (the runqueue residual
+ *      DB - CPU* - Sigma waits) -- whenever any record carried a measured
+ *      cpu_ns. The summary record stored neither quantity, so
+ *      pgwt_compute_time_model_from_summaries could only report
+ *      has_measured_cpu = 0 and emit ONE combined "CPU*" row. At the full
+ *      span that is 340,625.997 + 225,927.106 ms shown as one 586,586.148 ms
+ *      row: the runqueue-wait signal -- the subject of #386's whole Off-CPU
+ *      investigation -- simply disappears from the Overview on every window
+ *      of 120 s or more, which is every window the demo shows.
+ *
+ *   2. THE NON-COMMAND RELABEL WAS NOT APPLIED. A foreground backend's
+ *      we == 0 interval OUTSIDE a command is post/between-command idle time,
+ *      not CPU (docs/AAS_SEMANTICS_DECISION.md). Both raw paths file it under
+ *      PGWT_WEI_NONCMD_CPU: the server's tagging pass (pgwt_tag_events) and
+ *      the live accumulators (pgwt_live_effective_event, issue #97). The
+ *      writer never did -- it saw the raw ringbuf id, and the daemon resolved
+ *      the command gate ~65 lines BELOW the summary push -- so that time sat
+ *      in the summary's CPU class and therefore inside DB Time, while raw
+ *      counts it as Idle. MEASURED: +20,033.044 ms on the full span, which is
+ *      the WHOLE of the DB Time divergence there (raw 4,210,812.782 vs
+ *      summary 4,230,845.827 = +20,033.044, and Idle is low by exactly the
+ *      same -20,033.044) -- +3.54% on the CPU row itself. The identity holds
+ *      to three decimals, which is why this is not a pid-categorisation
+ *      effect: no other mechanism contributes at the full span.
+ *
+ * HOW the writer knows, both times: it is TOLD, the same way v6 is told a
+ * pid's category. pgwt_summary_push_event takes `eff_event` -- the wait id
+ * the PRODUCER resolved through the shared classifier
+ * (pgwt_live_effective_event in src/event_stream.c, which now runs the
+ * command-gate sweep ABOVE the push; pgwt_tag_events' output for offline
+ * producers). A flags- or gate-only check inside the writer would be dead
+ * code in the daemon, exactly as hole N7 in tests/test_agg_raw_crosscheck.c
+ * records for the category bits. PGWT_SUMMARY_EFF_UNRESOLVED means "the
+ * producer did not resolve one": the writer then uses evt->old_event (the v6
+ * behaviour) and COUNTS it (eff_unresolved_events_total), so the residual is
+ * observable rather than assumed. An eff_event that is neither
+ * evt->old_event nor PGWT_WEI_NONCMD_CPU is refused the same way
+ * (eff_rejected_events_total) -- the relabel is the only rewrite this
+ * parameter may express.
+ *
+ * WHY THE VERSION HAS TO MOVE: both changes are ACCOUNTING-RULE changes, the
+ * same reason v3, v4, v5 and v6 exist. A v6 second charges non-command CPU to
+ * DB Time and a v7 second charges it to Idle, so a window holding both
+ * reports a DB Time that is neither; and a v6 second cannot answer "what was
+ * measured CPU" at all, so a mixed window would emit the two-row split
+ * carrying only part of its span. The layout also grows, which makes the bump
+ * mandatory rather than conventional: a v6 record ends after the 12-byte v4
+ * trailer, so a reader expecting the v7 trailer mis-parses it.
+ *
+ * FILES ALREADY ON DISK are handled by machinery that exists and is unchanged
+ * here: pgwt_summary_reader_open refuses any file whose version is not
+ * PGWT_SUMMARY_VERSION (with a WARN naming both), and pgwt-server preflights
+ * the window (should_use_summaries -> pgwt_summaries_window_current) so a
+ * refusal becomes a RAW RECOMPUTE, never a plausible partial answer. Since
+ * #403 that fallback is correct rather than a silent zero. Startup recovery
+ * still finalizes and archives an intact older file instead of calling it
+ * corrupt. A v6 capture therefore stays fully readable from its raw events,
+ * which carry cpu_ns and the CMD markers and are the source of truth for
+ * both rules. No migration is possible: the measured-CPU scalars are simply
+ * not in a v6 record.
+ *
+ * SCOPE, stated because it is easy to over-read:
+ *   - The split is reported on the UNFILTERED window only. The stored
+ *     scalars are record-wide, which IS the unfiltered population; a
+ *     class/event/query-filtered request asks about a different population
+ *     the file cannot answer, so that path keeps has_measured_cpu = 0 and the
+ *     single "CPU*" row (the v6 behaviour, honest about what it cannot
+ *     split). Per-query and per-session CPU are unchanged.
+ *   - v7 says NOTHING about #379: the writer still charges a long interval
+ *     WHOLE to the second in which it closes, while the raw path clips it to
+ *     the window. On the capture above that is +4,699 ms of the +14,153 ms
+ *     DB Time divergence at a 900 s window (the rest being the relabel) and
+ *     most of the Idle divergence there. "The summary equals raw on any
+ *     window" is NOT what this version claims; at the FULL span, where no
+ *     record straddles an edge, the two paths now agree to 0.000 ms. */
+/* v8 (2026-10-14, issue #379): a wait/idle interval's DURATION is now spread
+ * across the seconds it actually occupies, instead of being charged WHOLE to
+ * the second in which it closes. ONE content change, no layout change.
+ *
+ * WHAT WAS WRONG. The raw path clips every record to the requested window
+ * (event_window_ns, src/compute.c); the writer charged the whole duration to
+ * floor(close). So a window containing a long record's CLOSING second but not
+ * its whole span over-reported by the out-of-window part, and a window
+ * containing the SPAN but not the closing second reported none of it. On the
+ * #410 parity fixture, a 130 s window straddling a 100 s Client:ClientRead's
+ * closing second reports DB Time +60,000 ms = +23.80% across 29 fields; on
+ * the PG18 demo capture an interior 900 s window is +1.14%. Dragging the time
+ * range across such a boundary moves DB Time by a quarter with the workload
+ * unchanged.
+ *
+ * HOW: a WATERMARK, not a retro-spread. The file is append-only -- a second
+ * is immutable the moment it is written (#277) -- so a 100 s interval cannot
+ * be back-charged to the 100 already-written seconds it covered. Instead the
+ * writer is TOLD which interval each pid currently has OPEN (
+ * pgwt_summary_note_open, from the producer's own open-interval source: the
+ * daemon's state_map read, src/map_reader.c) and, as each second COMPLETES,
+ * credits that second's share of every open interval into that second's
+ * record. When the interval finally closes, the record contributes only the
+ * REMAINDER it has not already been credited for
+ * (close - max(start, credited_until)). Every per-pid watermark is monotone,
+ * so the two halves can never overlap and can never leave a gap, whichever
+ * order a tick and a close arrive in.
+ *
+ * NOT the live view's rule. pgwt_live_account_open_stretch adds the WHOLE
+ * open stretch every tick; that is correct only because d->accum is rebuilt
+ * from scratch into a throwaway display copy each time. A persistent writer
+ * doing the same would charge a 100 s ClientRead as 1+2+...+100 s.
+ *
+ * WHAT IS SPREAD AND WHAT IS NOT -- the distinction is the subtle part:
+ *   - SPREAD (per second): class_ns, idle_ns, events[].total_ns,
+ *     sessions[].db_time_ns. These are TIME, and time is what a window clips.
+ *   - ONCE, AT CLOSE, WITH THE FULL DURATION: events[].count,
+ *     events[].histogram, events[].max_ns, sessions[].top_wait_*,
+ *     queries[].*. A latency histogram of a 100 s wait must show one 100 s
+ *     observation, not 100 one-second ones, and `max_ns` means the longest
+ *     single wait. The raw path does the same: it counts a straddler once and
+ *     measures it whole (pgwt_compute_heatmap, top_wait).
+ *   - NEVER CREDITED OPEN: queries[]. An open interval's query attribution is
+ *     unresolved at credit time (#128's deferral exists precisely because the
+ *     id can arrive after the wait ends), and Queries always raw-loads
+ *     (#324), so there is no divergence to close and a guess would create one.
+ *   - NEVER CREDITED OPEN: an on-CPU (we == 0) interval. A per-second credit
+ *     has no cpu_ns -- se.sum_exec_runtime is only current at a tick or a
+ *     context switch, and the record carries its measurement only at close --
+ *     so spreading a CPU gap's wall while its measured cpu_ns stayed whole at
+ *     close would put the whole measurement into cpu_clamped_ns and ZERO into
+ *     cpu_measured_ns, destroying v7's split. A long CPU gap therefore keeps
+ *     the v7 whole-at-close behaviour and remains a #379 residual; it is
+ *     COUNTED (cpu_open_uncredited_ns_total, exported by the control socket)
+ *     so the residual is observable rather than assumed, and it is bounded by
+ *     how long a backend runs with no wait event at all.
+ *   - NEVER CREDITED OPEN: an io_worker pid, for the same reason v6 drops its
+ *     records (counted: open_io_worker_refused_total).
+ *
+ * NOTHING IS INVENTED. The writer never derives an open interval from the
+ * record stream; it only credits what a producer explicitly noted, and only
+ * while that note stays fresh (PGWT_SUMMARY_OPEN_STALE_NS). A producer that
+ * notes nothing degrades EXACTLY to v7 -- which is what pgwt_summary_push_event
+ * does on its own, and what the lightweight/sampled tiers (no state_map
+ * intervals) get. The alternative -- inferring the open interval from each
+ * record's new_event -- would fabricate time on any stream whose records do
+ * not tile the timeline, which is every synthetic fixture and every mode
+ * where records are dropped.
+ *
+ * WHY THE VERSION HAS TO MOVE: it is an ACCOUNTING-RULE change, the same
+ * reason v3-v7 exist. A v7 second holds a long interval's whole duration and a
+ * v8 second holds one second of it, so a window holding both double-counts the
+ * overlap and reports a DB Time that is neither. The layout is unchanged, so
+ * the bump is conventional rather than forced -- which is exactly the case
+ * v5's note argues is the most dangerous one to skip. Files already on disk
+ * are handled by machinery that is unchanged here: pgwt_summary_reader_open
+ * refuses any file whose version is not PGWT_SUMMARY_VERSION, and pgwt-server
+ * preflights the window so a refusal becomes a RAW RECOMPUTE rather than a
+ * plausible partial answer; startup recovery still archives an intact older
+ * file instead of calling it corrupt.
+ *
+ * RESIDUALS, stated because they are real:
+ *   1. the on-CPU gap above;
+ *   2. ATTRIBUTION (never conservation) can be off by up to one tick at an
+ *      interval boundary: if a tick credits [x, floor(now)) under the open
+ *      interval's event and the closing record then shows the interval ended
+ *      earlier, the overlap stays filed under the older event. The watermark
+ *      clamps the close to 0 remainder, so no nanosecond is counted twice or
+ *      lost;
+ *   3. a second that completed while the writer had no note yet (the pid's
+ *      first tick, or a producer that notes late) cannot be back-credited.
+ *      That slice is not lost and not double counted -- the closing record
+ *      still carries it, i.e. it keeps the v7 answer -- and it is counted
+ *      (open_credit_late_ns_total). */
+#define PGWT_SUMMARY_VERSION  8
+
+/* `eff_event` sentinel: the producer resolved no effective wait id, so the
+ * writer uses evt->old_event and counts the push. Not 0 -- 0 is a valid id
+ * (the on-CPU gap), which is exactly the id this parameter exists to
+ * reclassify. */
+#define PGWT_SUMMARY_EFF_UNRESOLVED  0xFFFFFFFFu
 
 /* #277: how long after a second ends it is treated as complete by the
  * periodic flush. The daemon's timer handler runs BEFORE the event-ring
@@ -182,6 +368,24 @@
  * arrivals beyond this are still counted exactly once -- they fold into the
  * next open second -- this only keeps them in the right second. */
 #define PGWT_SUMMARY_FLUSH_LAG_NS  100000000ULL   /* 100 ms */
+
+/* v8 (#379): how long a producer's open-interval note stays creditable
+ * without being refreshed. The live producer re-notes every pid on every
+ * display tick (1 s), so three ticks of slack costs nothing there -- and it
+ * is the FAIL-SAFE that bounds the one way this mechanism could fabricate
+ * time: a pid that vanishes from the producer's view without an EXIT record
+ * (SIGKILL, a dropped map entry, a mode change) stops being credited within
+ * this long instead of accruing forever. Expiry is COUNTED
+ * (open_notes_expired_total), never silent. */
+#define PGWT_SUMMARY_OPEN_STALE_NS  3000000000ULL   /* 3 s */
+
+/* v8 (#379): the most consecutive event-less seconds one advance may
+ * materialise as open-credit-only records. Reached only if the writer is not
+ * ticked for that long (a stopped daemon, a synthetic producer jumping its
+ * clock); beyond it the credit for the skipped span is dropped and counted
+ * (open_credit_late_ns_total, open_fill_capped_total) rather than spending
+ * unbounded time in one call. */
+#define PGWT_SUMMARY_OPEN_FILL_MAX_SECONDS  3600
 
 /* Limits for per-second accumulator hash tables */
 #define SUMMARY_MAX_EVENTS    1024
@@ -205,6 +409,7 @@
  *   queries    SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES*8 + 1
  *                                      + SUMMARY_QUERY_TOP_EVENTS*20 + 8)
  *   trailer    8 (idle_ns) + 4 (events_overflow)
+ *              + v7: 5 * 8 (the measured-CPU scalars)
  */
 #define PGWT_SUMMARY_SERIALIZE_MAX                                            \
     ((size_t)(PGWT_NUM_CLASSES * 8)                                           \
@@ -212,7 +417,7 @@
      + (size_t)SUMMARY_MAX_SESSIONS * 32                                      \
      + (size_t)SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES * 8 + 1          \
                                        + SUMMARY_QUERY_TOP_EVENTS * 20 + 8)   \
-     + 12)
+     + 12 + 40)
 
 /* ── Per-second accumulator ───────────────────────────────── */
 
@@ -284,6 +489,28 @@ struct pgwt_summary_accum {
      * events[] so it survives a full table. */
     uint64_t idle_ns;
 
+    /* v7 (#408): the MEASURED-CPU SPLIT for this second, i.e. everything
+     * pgwt_compute_time_model derives its two CPU rows from. Without these
+     * the summary path could only report has_measured_cpu = 0 and one
+     * combined "CPU*" row -- see the v7 note above.
+     *
+     * The CPU* total is cpu_measured_ns + cpu_unknown_ns, exactly as the raw
+     * path's single cpu_measured_ns accumulator holds both tiers; the
+     * runqueue row is then the residual DB - CPU* - Sigma waits, computed by
+     * the reader from these and class_ns (the same leak-immune arithmetic the
+     * raw path uses -- never a per-interval wall-minus-cpu split, because
+     * se.sum_exec_runtime is only current at a tick or a context switch).
+     *
+     * cpu_measured_records is NOT derivable from the sums: a MEASURED ZERO is
+     * a signal ("this window can separate running from waiting, and nothing
+     * ran") while an absent measurement is not, and the raw path distinguishes
+     * them by counting records, not nanoseconds. */
+    uint64_t cpu_measured_ns;       /* Sigma clamped cpu_ns over we==0 gaps   */
+    uint64_t cpu_unknown_ns;        /* Sigma wall over UNKNOWN we==0 gaps     */
+    uint64_t cpu_clamped_ns;        /* Sigma (cpu_ns - wall) clamped away     */
+    uint64_t wait_gap_cpu_ns;       /* Sigma cpu_ns on WAIT records (obs.)    */
+    uint64_t cpu_measured_records;  /* records with cpu_ns != UNKNOWN         */
+
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];
     int num_sessions;
@@ -306,6 +533,33 @@ struct pgwt_summary_block_header {
 
 /* ── Writer state ─────────────────────────────────────────── */
 
+/* v8 (#379): one pid's OPEN interval, as the producer last described it,
+ * plus the monotone watermark that keeps the per-second credits and the
+ * at-close remainder from overlapping.
+ *
+ * `credited_until_ns` outlives the interval it was accrued for: it is a
+ * per-PID high-water mark over the pid's whole timeline, which is what makes
+ * the tick/close race safe in BOTH orders. BPF stamps
+ * `duration = now - last_ts; last_ts = now` on every transition
+ * (src/bpf/pg_wait_tracer.bpf.c), so a pid's records TILE its timeline
+ * exactly -- one watermark per pid therefore partitions that timeline with
+ * no gap and no overlap.
+ *
+ * `we == 0` means "no creditable interval open for this pid": either the
+ * producer has not noted one since the last close, or what is open is an
+ * on-CPU gap, which v8 deliberately does not spread (see the version note).
+ * The entry survives so the watermark does. */
+#define SUMMARY_MAX_OPEN  MAX_BACKENDS   /* 1024 */
+struct pgwt_summary_open {
+    uint32_t pid;                 /* 0 = empty slot */
+    uint32_t we;                  /* open wait id; 0 = nothing creditable */
+    uint32_t cat_flag;            /* producer's T2 category for this pid */
+    uint64_t start_ns;            /* monotonic start of the open interval */
+    uint64_t credited_until_ns;   /* monotone per-PID watermark */
+    uint64_t credited_ns;         /* credited for the CURRENT interval only */
+    uint64_t noted_ns;            /* when the producer last refreshed it */
+};
+
 #define SUMMARY_QATTR_SLOTS 1024
 struct pgwt_summary_qattr_slot {
     uint32_t pid;                 /* 0 = empty */
@@ -323,6 +577,10 @@ struct pgwt_summary_writer {
     /* Clock offset: wall_ns - mono_ns at file creation */
     uint64_t      clock_offset_wall_ns;
     uint64_t      clock_offset_mono_ns;
+    /* v8: the offsets above were set by pgwt_summary_pin_clock BEFORE the
+     * first record, so the lazy file open must not overwrite them. Offline
+     * producers only; the daemon leaves this false. */
+    bool          clock_anchor_pinned;
 
     /* Current file */
     FILE         *fp;
@@ -382,6 +640,20 @@ struct pgwt_summary_writer {
      * summary_io_worker_ns_excluded_total. */
     uint64_t      io_worker_events_excluded_total;
     uint64_t      io_worker_ns_excluded_total;
+    /* v7 (#408): pushes whose producer resolved no effective wait id
+     * (PGWT_SUMMARY_EFF_UNRESOLVED -- the record keeps evt->old_event, i.e.
+     * the v6 behaviour), and pushes whose eff_event was neither
+     * evt->old_event nor PGWT_WEI_NONCMD_CPU and was therefore REFUSED. Both
+     * are the non-command relabel's residual made observable, the same role
+     * io_worker_*_excluded_total play for v6: a non-zero
+     * eff_unresolved_events_total means some of this file's we==0 time is
+     * classified the pre-v7 way, and eff_rejected_events_total should be 0 in
+     * any build (it means a producer is passing an id the rule does not
+     * allow). Exported by the control socket as
+     * summary_eff_unresolved_events_total /
+     * summary_eff_rejected_events_total. */
+    uint64_t      eff_unresolved_events_total;
+    uint64_t      eff_rejected_events_total;
 
     /* #128 deferred per-query attribution (query_attr.h), per pid; heap
      * (SUMMARY_QATTR_SLOTS entries, open addressing, reclaimed on backend
@@ -393,6 +665,51 @@ struct pgwt_summary_writer {
     struct pgwt_summary_qattr_slot *qattr;
     uint64_t      qattr_table_full_total;
     uint64_t      qattr_unattributed_ns_total;
+
+    /* v8 (#379): the open-interval watermarks, heap (SUMMARY_MAX_OPEN
+     * entries, open addressing), NULL = the mechanism is off and the writer
+     * behaves exactly as v7. */
+    struct pgwt_summary_open *open;
+    /* Every way this mechanism can do something other than spread a
+     * duration, counted so none of them is silent. Exported by the control
+     * socket as summary_open_*:
+     *   credited_ns     Sigma of every per-second open credit. ZERO on a
+     *                   capture that contains a multi-second wait means the
+     *                   producer is not feeding notes -- i.e. v7 behaviour
+     *                   with a v8 version stamp, which is the one failure
+     *                   this whole change could have that still looks green.
+     *   records         open-credit-only per-second records materialised
+     *                   (seconds in which nothing closed but something was
+     *                   open).
+     *   late_ns         span an interval was open for in seconds that were
+     *                   already written when the producer first noted it.
+     *                   Not lost: the closing record still carries it, i.e.
+     *                   that slice keeps the v7 answer.
+     *   notes_expired   notes that went stale (PGWT_SUMMARY_OPEN_STALE_NS)
+     *                   before being refreshed -- the fail-safe firing.
+     *   table_full      note_open refused because every slot was taken.
+     *   io_worker_refused / cpu_refused  notes the rule declines to spread.
+     *   cpu_uncredited_ns  wall of on-CPU gaps left whole-at-close: the
+     *                   measured #379 residual v8 does not close. */
+    uint64_t      open_credited_ns_total;
+    uint64_t      open_credit_records_total;
+    uint64_t      open_credit_late_ns_total;
+    uint64_t      open_notes_expired_total;
+    uint64_t      open_table_full_total;
+    uint64_t      open_io_worker_refused_total;
+    uint64_t      open_cpu_refused_total;
+    uint64_t      cpu_open_uncredited_ns_total;
+    uint64_t      open_fill_capped_total;
+    /*   note_mismatch   a closing record whose pid had a note describing a
+     *                   DIFFERENT interval (different wait id or start).
+     *                   Nothing is subtracted in that case -- the record is
+     *                   charged whole, the v7 answer -- so this counts how
+     *                   often the producer's open-interval view and the
+     *                   record stream disagree. Expected to be 0 from the
+     *                   daemon, where BPF's records tile each pid's
+     *                   timeline; non-zero only means some records keep the
+     *                   old accounting, never that time was double counted. */
+    uint64_t      open_note_mismatch_total;
 };
 
 /* ── Public API ───────────────────────────────────────────── */
@@ -417,10 +734,68 @@ int  pgwt_summary_writer_init(struct pgwt_summary_writer *w,
  * daemon (hole N7, tests/test_agg_raw_crosscheck.c). Making it an argument
  * also means no caller can inherit the wrong answer silently: every producer
  * must say what it resolved. Pass 0 for a pid-less marker (the writer drops
- * markers anyway, and resolving a category for pid 0 would be meaningless). */
+ * markers anyway, and resolving a category for pid 0 would be meaningless).
+ *
+ * `eff_event` (v7, #408) is the EFFECTIVE wait id the producer resolved
+ * through the shared classifier -- pgwt_live_effective_event() on the live
+ * path, pgwt_tag_events()' rewrite offline. Its only legal value other than
+ * evt->old_event is PGWT_WEI_NONCMD_CPU: a foreground we==0 interval outside
+ * a command is post/between-command IDLE time, not CPU, and both raw paths
+ * file it that way (docs/AAS_SEMANTICS_DECISION.md, issues #97 and #408). It
+ * is a PARAMETER for the same reason cat_flag is: the command gate lives in
+ * the producer's per-pid accumulator, and a writer-side guess would be a
+ * second copy of the rule that could drift from the one the raw paths use.
+ * PGWT_SUMMARY_EFF_UNRESOLVED means "not resolved" -- the writer uses
+ * evt->old_event and counts the push (eff_unresolved_events_total), so a
+ * producer that cannot resolve degrades to the v6 behaviour VISIBLY instead
+ * of silently. Anything else is refused and counted
+ * (eff_rejected_events_total). */
 int  pgwt_summary_push_event(struct pgwt_summary_writer *w,
                               const struct pgwt_trace_event *evt,
-                              uint32_t cat_flag);
+                              uint32_t cat_flag,
+                              uint32_t eff_event);
+
+/* v8 (#379): tell the writer what interval `pid` currently has OPEN, so the
+ * seconds it occupies are credited as they complete instead of the whole
+ * duration landing in the second it closes in. Call it for every pid with a
+ * live interval on every tick, BEFORE pgwt_summary_flush_completed: a note is
+ * only creditable while it is fresher than PGWT_SUMMARY_OPEN_STALE_NS, which
+ * is what stops a pid that vanishes without an EXIT record from accruing
+ * fabricated time forever.
+ *
+ * `we` is the RAW wait id of the open interval (state_map's last_event), not
+ * an effective one: the only relabel v7 allows is a we == 0 gap becoming
+ * PGWT_WEI_NONCMD_CPU, and v8 declines to spread we == 0 at all (no cpu_ns
+ * exists until close -- see the version note), so the two never interact.
+ * `start_mono_ns` is the interval's start on the SAME clock as
+ * evt->timestamp_ns (bpf_ktime_get_ns / CLOCK_MONOTONIC) -- state_map's
+ * last_ts, which is exactly where the closing record's
+ * timestamp_ns - duration_ns comes from. `now_mono_ns` is the producer's
+ * current clock read, used only for freshness.
+ *
+ * Calling it never ADDS time by itself: time is credited only as whole
+ * seconds complete, and only for the part of the interval that the pid's
+ * monotone watermark has not already been credited for. Not calling it at
+ * all is the exact v7 behaviour. */
+void pgwt_summary_note_open(struct pgwt_summary_writer *w,
+                             uint32_t pid, uint32_t we,
+                             uint64_t start_mono_ns, uint32_t cat_flag,
+                             uint64_t now_mono_ns);
+
+/* Drop `pid`'s open-interval note and its watermark (backend exit, GC, or a
+ * producer that knows the pid is gone). Idempotent. The staleness rule is the
+ * fail-safe for the pids this is never called for; this is the exact one. */
+void pgwt_summary_forget_open(struct pgwt_summary_writer *w, uint32_t pid);
+
+/* Pin the mono->wall anchor BEFORE the first record, for an OFFLINE producer
+ * driving the writer with synthetic timestamps (tests/gen_test_traces.c).
+ * The file opens lazily on the first push and stamps the anchor from the
+ * real clocks; v8 can write a per-second record for a second EARLIER than
+ * that first record (every second a long interval was already open in), so
+ * re-anchoring afterwards is too late for exactly the records this change
+ * adds. The daemon never calls this and is unaffected. */
+void pgwt_summary_pin_clock(struct pgwt_summary_writer *w,
+                             uint64_t mono_anchor_ns, uint64_t wall_anchor_ns);
 
 /* Force-flush the current accumulator whatever its state (rotation, close,
  * and offline generators that drive the writer with synthetic timestamps).

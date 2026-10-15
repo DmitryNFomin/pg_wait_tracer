@@ -188,7 +188,7 @@ static int write_summaries(const char *dir, const struct pgwt_trace_event *ev,
     if (pgwt_summary_writer_init(w, dir, 24, NULL) != 0) { free(w); return -1; }
     for (int i = 0; i < n; i++) {
         uint32_t cf = resolve ? cat_of(ev[i].pid) : 0;
-        pgwt_summary_push_event(w, &ev[i], cf);
+        pgwt_summary_push_event(w, &ev[i], cf, ev[i].old_event);
     }
     pgwt_summary_flush(w);
     pgwt_summary_close(w);

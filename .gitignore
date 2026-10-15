@@ -85,3 +85,4 @@ tests/results/demo_rehearsal/
 tests/results/.demo-rehearsal-state.sh
 tests/results/.demo_rehearsal_staging/
 tests/results/demo_workload_coverage/
+tests/results/summary_raw_parity/

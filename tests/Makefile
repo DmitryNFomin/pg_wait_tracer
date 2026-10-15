@@ -34,6 +34,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
             test_io_worker_summary test_io_worker_parity \
+            test_cpu_split_parity \
+            test_straddler_accounting \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -80,8 +82,12 @@ test_spawn: test_spawn.c ../src/spawn.c
 test_event_writer: test_event_writer.c $(BUILD)/event_writer.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
 
+# summary_writer.o since #379: the daemon build of map_reader.c calls
+# pgwt_summary_note_open from pgwt_read_state_map (that loop is the daemon's
+# only open-interval source), so every target linking map_reader.o needs it.
 test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
-                   $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+                   $(BUILD)/map_reader.o $(BUILD)/summary_writer.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
                    $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
@@ -413,8 +419,10 @@ gen_test_traces: gen_test_traces.c $(SERVER_OBJS)
 gen_bench_traces: gen_bench_traces.c $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
+# summary_writer.o: see test_event_reader above (#379).
 test_concurrent_rw: test_concurrent_rw.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
-                    $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+                    $(BUILD)/map_reader.o $(BUILD)/summary_writer.o \
+                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
                     $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
@@ -607,6 +615,57 @@ test_io_worker_parity: test_io_worker_parity.c ../src/compute.c \
                    $(BUILD)/server_cmdline.o \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_cpu_split_parity: the RAW-vs-SUMMARY parity gate for the CPU ROWS
+# (#408, summary v7). The raw time model emits "CPU (running)" +
+# "CPU (waiting for a core)" wherever a record carried a measured cpu_ns, and
+# charges a foreground we==0 interval outside a command to Idle
+# (PGWT_WEI_NONCMD_CPU). The summary record stored neither the measurement nor
+# the relabel, so the same window answered with ONE "CPU*" row that was also
+# 3.54% too large -- the runqueue signal disappeared from the Overview on
+# every window of 120 s or more. Neither property is written into the
+# fixture: the relabel comes from the production classifier on BOTH sides
+# (pgwt_tag_events for the raw oracle, the producer's eff_event for the
+# writer), and the fixture's intervals are contiguous because both command
+# gates bank command-open time onto the pid's next record. Bypass suite: an
+# all-UNKNOWN fixture, a fixture with nothing to relabel, a producer that
+# resolves NOTHING (the reachability probe -- it must go RED, or eff_event is
+# dead code), a window holding no records, a deleted summary dir, a v6 file in
+# the window, a truncated v7 record (the scalars are the LAST bytes, so a
+# short block is exactly what would silently restore the v6 behaviour) and an
+# illegal eff_event. Server build, no BPF, no live PG; ~0.2 s.
+test_cpu_split_parity: test_cpu_split_parity.c ../src/compute.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_cmdline.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_straddler_accounting: #379 / summary v8 -- a long wait's DURATION must
+# land in the seconds it occupied, not whole in the second it closed in. The
+# rule is a watermark: the producer notes what each pid has open and the
+# writer credits each completed second as it is written, the closing record
+# contributing only the remainder. Asserted: placement (ten seconds, 1 s
+# each), CONSERVATION (exactly the duration, once -- not 1+2+...+10, which is
+# what the live view's open-stretch rule would give a persistent writer),
+# occurrence quantities staying whole and once (count, histogram bucket,
+# max_ns), both tick/close orders, and the two deliberate refusals (queries[]
+# and an on-CPU gap, whose measured split spreading would destroy). Bypass
+# suite: no notes at all (the reachability probe -- it must fall back to v7,
+# or the credit path is dead code), a stale note, an exit, a mismatched note,
+# an io_worker, a full table, a missing trace dir (the read-back must refuse)
+# and a late first note. Server build, no BPF, no live PG; ~0.2 s.
+test_straddler_accounting: test_straddler_accounting.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                   $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
 # test_exec_index: the EXECUTIONS INDEX (paint-latency plan, Phase 3,

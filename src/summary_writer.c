@@ -257,10 +257,29 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
  * marker/EXIT, which have their own long-standing reasons). */
 static int accum_event(struct pgwt_summary_accum *acc,
                         const struct pgwt_trace_event *evt,
-                        uint64_t query_id, bool io_worker)
+                        uint64_t query_id, bool io_worker, uint32_t eff_event,
+                        uint64_t already_credited_ns)
 {
-    uint32_t old_ev = evt->old_event;
+    /* v7 (#408): the EFFECTIVE id, as the producer resolved it (validated by
+     * pgwt_summary_push_event, which is also where an unresolved or illegal
+     * value is counted). It replaces evt->old_event for EVERY accumulator
+     * below -- class_ns, idle_ns, events[], sessions[] and queries[] -- for
+     * the same reason v6's io_worker drop covers all five: the raw paths
+     * REWRITE the record's old_event (pgwt_tag_events) so every row and
+     * bucket downstream sees the relabel, and a partial application here
+     * would not fix the divergence, it would relocate it. */
+    uint32_t old_ev = eff_event;
     uint64_t dur = evt->duration_ns;
+    /* v8 (#379): the part of this record's duration the per-second watermark
+     * has NOT already credited to the earlier seconds the interval occupied.
+     * `dur` stays the FULL duration and keeps every per-OCCURRENCE quantity
+     * honest -- count, histogram bucket, max_ns, top_wait and the whole of
+     * queries[] (never credited open; see the v8 note) -- while `tns` is what
+     * every TIME accumulator takes, so the interval's nanoseconds land in the
+     * seconds they happened in and are counted exactly once in total.
+     * already_credited_ns is 0 unless a producer noted this pid's interval,
+     * which is what makes "no notes" byte-identical to v7. */
+    uint64_t tns = dur > already_credited_ns ? dur - already_credited_ns : 0;
 
     if (old_ev == PGWT_EVENT_EXIT)
         return 0;
@@ -312,11 +331,53 @@ static int accum_event(struct pgwt_summary_accum *acc,
     int cls = summary_wait_class_index(old_ev);
     int ev_idle = pgwt_is_idle_event(old_ev);
     if (cls >= 0 && cls < PGWT_NUM_CLASSES && !ev_idle)
-        acc->class_ns[cls] += dur;
+        acc->class_ns[cls] += tns;
     /* v3: the exact system-wide idle total, independent of events[] so a full
      * event table cannot under-report it (see acc->events_overflow). */
     if (ev_idle)
-        acc->idle_ns += dur;
+        acc->idle_ns += tns;
+
+    /* v7 (#408): the measured-CPU split, accumulated with the SAME arithmetic
+     * pgwt_compute_time_model applies per record, so the reader can reproduce
+     * its two CPU rows from these scalars instead of reporting
+     * has_measured_cpu = 0 and one combined row.
+     *
+     * The clamp is per-record and therefore has to happen HERE: cpu_ns comes
+     * from sum_exec_runtime, which is only current at a tick or a context
+     * switch, so a sub-ms burst can leak into the following interval's delta
+     * and make one record's cpu_ns exceed its own wall. Raw clamps each
+     * record to its wall and counts the excess (cpu_clamped_ms); clamping a
+     * whole second's SUM instead would hide a per-record inconsistency behind
+     * the other records' headroom. Idle records are excluded above by the
+     * same `ev_idle` rule the raw path applies before its CPU branch -- a
+     * relabelled non-command gap (PGWT_WEI_NONCMD_CPU, v7's other half) is
+     * idle, so it contributes to neither CPU scalar, exactly as on raw. */
+    if (!ev_idle) {
+        if (cls == PGWT_CLASS_CPU) {
+            if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+                uint64_t m = evt->cpu_ns;
+                if (m > tns) {
+                    acc->cpu_clamped_ns += m - tns;
+                    m = tns;
+                }
+                acc->cpu_measured_ns += m;
+                acc->cpu_measured_records++;
+            } else {
+                /* UNKNOWN (sampled / v2 / no CPU capability): gap-inference,
+                 * the whole gap is CPU* and there is no runqueue residual for
+                 * it. Kept SEPARATE from cpu_measured_ns so a window mixing
+                 * the two tiers still reports the measured part honestly. */
+                acc->cpu_unknown_ns += tns;
+            }
+        } else if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+            /* A wait's measured on-CPU spin keeps its WAIT label (the label
+             * is the diagnostic); raw counts it only as an observability sum
+             * and as evidence that this window CAN split CPU. Both of those
+             * are reproduced here. */
+            acc->wait_gap_cpu_ns += evt->cpu_ns;
+            acc->cpu_measured_records++;
+        }
+    }
 
     /* Per-event stats */
     struct pgwt_summary_event *se = find_or_insert_event(acc, old_ev);
@@ -338,7 +399,7 @@ static int accum_event(struct pgwt_summary_accum *acc,
     }
     if (se) {
         se->count++;
-        se->total_ns += dur;
+        se->total_ns += tns;
         if (dur > se->max_ns) se->max_ns = dur;
         uint32_t bucket = pgwt_duration_to_bucket(dur);
         if (bucket < HISTOGRAM_BUCKETS)
@@ -349,9 +410,9 @@ static int accum_event(struct pgwt_summary_accum *acc,
     struct pgwt_summary_session *ss = find_or_insert_session(acc, evt->pid);
     if (ss) {
         if (!pgwt_is_idle_event(old_ev))
-            ss->db_time_ns += dur;
+            ss->db_time_ns += tns;
         if (old_ev == 0)
-            ss->cpu_ns += dur;
+            ss->cpu_ns += tns;
         /* Track top wait per session. v3: never an IDLE event -- "this
          * session's top wait is Timeout:CheckpointWriteDelay" names the thing
          * that is explicitly NOT load, which is the opposite of what the
@@ -566,6 +627,17 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
     memcpy(p, &acc->idle_ns, 8);          p += 8;
     memcpy(p, &acc->events_overflow, 4);  p += 4;
 
+    /* v7 (#408) measured-CPU trailer, after the v4 one for the same reason:
+     * every older reader stops before it, and the version gate (the reader
+     * refuses any file that is not PGWT_SUMMARY_VERSION) is what keeps a v6
+     * record -- which ends 40 bytes earlier -- from being read as if these
+     * fields were there. */
+    memcpy(p, &acc->cpu_measured_ns, 8);      p += 8;
+    memcpy(p, &acc->cpu_unknown_ns, 8);       p += 8;
+    memcpy(p, &acc->cpu_clamped_ns, 8);       p += 8;
+    memcpy(p, &acc->wait_gap_cpu_ns, 8);      p += 8;
+    memcpy(p, &acc->cpu_measured_records, 8); p += 8;
+
     return (size_t)(p - out);
 }
 
@@ -677,6 +749,22 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
         if (p + 12 > end) return -1;
         memcpy(&acc->idle_ns, p, 8);          p += 8;
         memcpy(&acc->events_overflow, p, 4);  p += 4;
+    }
+
+    /* v7 (#408): REFUSE a short record rather than leaving the measured-CPU
+     * scalars at 0. A zero here is not neutral -- it is the exact shape of
+     * the bug this version fixes (cpu_measured_records == 0 reads as "this
+     * window cannot split CPU" and the reader emits one combined CPU* row),
+     * so a truncated block must fail to decode and be skipped as a decode
+     * error, not silently answer with the v6 behaviour for part of a
+     * window. */
+    if (version >= 7) {
+        if (p + 40 > end) return -1;
+        memcpy(&acc->cpu_measured_ns, p, 8);      p += 8;
+        memcpy(&acc->cpu_unknown_ns, p, 8);       p += 8;
+        memcpy(&acc->cpu_clamped_ns, p, 8);       p += 8;
+        memcpy(&acc->wait_gap_cpu_ns, p, 8);      p += 8;
+        memcpy(&acc->cpu_measured_records, p, 8); p += 8;
     }
 
     return 0;
@@ -876,8 +964,19 @@ static int open_summary_file(struct pgwt_summary_writer *w)
     struct timespec wall, mono;
     clock_gettime(CLOCK_REALTIME, &wall);
     clock_gettime(CLOCK_MONOTONIC, &mono);
-    w->clock_offset_wall_ns = (uint64_t)wall.tv_sec * 1000000000ULL + wall.tv_nsec;
-    w->clock_offset_mono_ns = (uint64_t)mono.tv_sec * 1000000000ULL + mono.tv_nsec;
+    /* An offline producer may have PINNED the anchor to a synthetic
+     * timestamp domain before the first push (pgwt_summary_pin_clock). It
+     * has to be able to: the file opens lazily on the first record, and v8
+     * can write a per-second record for a second EARLIER than that record
+     * (the seconds a long interval was already open in). Fixing the offsets
+     * up afterwards, as the generator used to, is too late for those. The
+     * daemon never pins, so its behaviour here is unchanged. */
+    if (!w->clock_anchor_pinned) {
+        w->clock_offset_wall_ns =
+            (uint64_t)wall.tv_sec * 1000000000ULL + wall.tv_nsec;
+        w->clock_offset_mono_ns =
+            (uint64_t)mono.tv_sec * 1000000000ULL + mono.tv_nsec;
+    }
 
     /* Record current hour for rotation */
     time_t now = wall.tv_sec;
@@ -1039,6 +1138,276 @@ static int flush_accum(struct pgwt_summary_writer *w)
     return 0;
 }
 
+/* ── v8 (#379): per-second credit of OPEN intervals ───────────────────────
+ * See the v8 note in summary_writer.h for the rule and for everything this
+ * deliberately does NOT spread. The code below is only the mechanism:
+ *   open_slot()           find/create a pid's watermark entry
+ *   accum_open_credit()   put one second's share into one second's record
+ *   credit_open_second()  do that for every fresh note, for one second
+ *   writer_seal_through() seal every second strictly before a target,
+ *                         materialising open-credit-only records for the
+ *                         seconds in which nothing closed
+ * Every refusal and every nanosecond that could not be placed is counted. */
+
+#define PGWT_NS_PER_SEC 1000000000ULL
+
+static struct pgwt_summary_open *open_slot(struct pgwt_summary_writer *w,
+                                           uint32_t pid, bool create)
+{
+    if (!w->open || pid == 0)
+        return NULL;
+    uint32_t h = hash32(pid) & (SUMMARY_MAX_OPEN - 1);
+    for (int i = 0; i < SUMMARY_MAX_OPEN; i++) {
+        struct pgwt_summary_open *o =
+            &w->open[(h + (uint32_t)i) & (SUMMARY_MAX_OPEN - 1)];
+        if (o->pid == pid)
+            return o;
+        if (o->pid == 0) {
+            if (!create)
+                return NULL;
+            o->pid = pid;
+            return o;
+        }
+    }
+    if (create)
+        w->open_table_full_total++;
+    return NULL;
+}
+
+/* One open interval's share of ONE second, into that second's accumulator.
+ *
+ * TIME ONLY, and only the four accumulators a window clips: class_ns,
+ * idle_ns, events[].total_ns and sessions[].db_time_ns. No count, no
+ * histogram bucket, no max_ns, no top_wait, no queries[] -- those are
+ * per-OCCURRENCE and are recorded once, whole, when the interval closes
+ * (summary_writer.h's v8 note says why for each). io_worker and on-CPU
+ * intervals never reach here: pgwt_summary_note_open refuses them. */
+static void accum_open_credit(struct pgwt_summary_accum *acc, uint32_t pid,
+                              uint32_t we, uint64_t ns)
+{
+    if (ns == 0)
+        return;
+    int cls = summary_wait_class_index(we);
+    int ev_idle = pgwt_is_idle_event(we);
+    if (ev_idle)
+        acc->idle_ns += ns;
+    else if (cls >= 0 && cls < PGWT_NUM_CLASSES)
+        acc->class_ns[cls] += ns;
+
+    struct pgwt_summary_event *se = find_or_insert_event(acc, we);
+    if (se)
+        se->total_ns += ns;
+    else
+        acc->events_overflow++;
+
+    if (!ev_idle) {
+        struct pgwt_summary_session *ss = find_or_insert_session(acc, pid);
+        if (ss)
+            ss->db_time_ns += ns;
+    }
+}
+
+/* Credit [sec, sec+1s) of every creditable open interval into the
+ * accumulator, which the caller guarantees is the record for `sec`. */
+static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec)
+{
+    if (!w->open)
+        return;
+    uint64_t end = sec + PGWT_NS_PER_SEC;
+    for (int i = 0; i < SUMMARY_MAX_OPEN; i++) {
+        struct pgwt_summary_open *o = &w->open[i];
+        if (o->pid == 0 || o->we == 0)
+            continue;
+        /* FAIL-SAFE (the one way this could fabricate time): a note the
+         * producer stopped refreshing describes a pid that may no longer
+         * exist. Stop crediting it, count the expiry, and keep the pid's
+         * watermark so a later record still cannot double count. */
+        if (o->noted_ns + PGWT_SUMMARY_OPEN_STALE_NS < end) {
+            o->we = 0;
+            w->open_notes_expired_total++;
+            continue;
+        }
+        uint64_t from = o->start_ns > o->credited_until_ns
+                      ? o->start_ns : o->credited_until_ns;
+        if (from >= end)
+            continue;
+        if (from < sec) {
+            /* The seconds before this one are already on disk and immutable
+             * (#277), so that part cannot be credited to the seconds it
+             * happened in. It is NOT lost and NOT silently dropped: it stays
+             * un-credited, so the closing record still carries it (the v7
+             * answer for that slice), and it is counted here because a
+             * producer that notes an interval late is exactly the condition
+             * under which v8 degrades towards v7. */
+            w->open_credit_late_ns_total += sec - from;
+            from = sec;
+        }
+        accum_open_credit(&w->accum, o->pid, o->we, end - from);
+        w->open_credited_ns_total += end - from;
+        o->credited_ns += end - from;
+        o->credited_until_ns = end;
+    }
+}
+
+/* The earliest second any fresh open interval still owes credit for, or
+ * UINT64_MAX if nothing is open. Only consulted when no accumulator exists,
+ * i.e. when a whole second passed with no event at all. */
+static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
+                                     uint64_t now_hint)
+{
+    uint64_t best = UINT64_MAX;
+    if (!w->open)
+        return best;
+    for (int i = 0; i < SUMMARY_MAX_OPEN; i++) {
+        struct pgwt_summary_open *o = &w->open[i];
+        if (o->pid == 0 || o->we == 0)
+            continue;
+        if (o->noted_ns + PGWT_SUMMARY_OPEN_STALE_NS < now_hint) {
+            /* The SAME fail-safe credit_open_second applies, retired here
+             * too -- and counted here too. Without this, a note that goes
+             * stale while no accumulator is open is silently skipped
+             * forever and open_notes_expired_total reads 0: the fail-safe
+             * would be working and invisible, which is the state in which
+             * nobody notices it stop working. */
+            o->we = 0;
+            w->open_notes_expired_total++;
+            continue;
+        }
+        uint64_t from = o->start_ns > o->credited_until_ns
+                      ? o->start_ns : o->credited_until_ns;
+        uint64_t sec = (from / PGWT_NS_PER_SEC) * PGWT_NS_PER_SEC;
+        if (sec < best)
+            best = sec;
+    }
+    return best;
+}
+
+/* Seal every second STRICTLY BEFORE `to_sec`: credit the open intervals into
+ * it, write it, and open the next one if anything is still open there.
+ *
+ * This replaces the bare second-boundary flush. The loop is what makes a
+ * long interval appear in the seconds it spans even when no event closes in
+ * them -- without it a 100 s ClientRead on an otherwise quiet system would
+ * still land whole in its closing second, because nothing would have written
+ * the 99 seconds before it. */
+static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec)
+{
+    if (!w->fp)
+        return;            /* clocks not anchored yet: invent nothing */
+    int guard = PGWT_SUMMARY_OPEN_FILL_MAX_SECONDS;
+    for (;;) {
+        uint64_t sec;
+        if (w->accum_active) {
+            sec = w->accum.second_mono_ns;
+            if (sec >= to_sec)
+                return;
+        } else {
+            sec = earliest_open_second(w, to_sec);
+            if (sec >= to_sec)
+                return;    /* nothing open: no empty record is invented */
+            if (w->have_flushed_second &&
+                sec <= w->last_flushed_second_mono_ns)
+                sec = w->last_flushed_second_mono_ns + PGWT_NS_PER_SEC;
+            if (sec >= to_sec)
+                return;
+            w->accum.second_mono_ns = sec;
+            w->accum.second_wall_ns = mono_to_wall(w, sec);
+            w->accum_active = true;
+            w->open_credit_records_total++;
+        }
+        credit_open_second(w, sec);
+        if (flush_accum(w) != 0) {
+            /* The accumulator stays open and is retried at the next
+             * boundary (flush_accum's contract). Returning rather than
+             * spinning on a failing write is the difference between a
+             * counted gap and a hang. */
+            w->flush_failures_total++;
+            return;
+        }
+        if (--guard <= 0) {
+            /* Not reached by a producer that ticks; a clock jump or a
+             * stopped daemon can. Give up on the span rather than spend
+             * unbounded time in one call, and make the give-up visible. */
+            w->open_fill_capped_total++;
+            return;
+        }
+    }
+}
+
+void pgwt_summary_note_open(struct pgwt_summary_writer *w,
+                             uint32_t pid, uint32_t we,
+                             uint64_t start_mono_ns, uint32_t cat_flag,
+                             uint64_t now_mono_ns)
+{
+    if (!w->enabled || !w->open || pid == 0)
+        return;
+    /* v6's rule, on the open path: io_worker time is outside the model, so
+     * there is nothing to spread. Refused at the note rather than at the
+     * credit so the refusal is attributable to a pid. */
+    if (cat_flag & PGWT_EVENT_FLAG_IO_WORKER) {
+        w->open_io_worker_refused_total++;
+        struct pgwt_summary_open *ex = open_slot(w, pid, false);
+        if (ex)
+            ex->we = 0;
+        return;
+    }
+    struct pgwt_summary_open *o = open_slot(w, pid, true);
+    if (!o)
+        return;            /* table full, already counted */
+    o->noted_ns = now_mono_ns;
+    o->cat_flag = cat_flag;
+    /* An on-CPU interval is NOT spread: the record carries its measured
+     * cpu_ns only at close, so crediting its wall per second would clamp the
+     * whole measurement away and destroy v7's CPU split. It keeps the v7
+     * whole-at-close behaviour; the wall that therefore stays unspread is
+     * measured at close (cpu_open_uncredited_ns_total) so the residual this
+     * version does not close is a number rather than a belief. The pid's
+     * watermark is deliberately left alone. */
+    if (we == 0 || summary_wait_class_index(we) == PGWT_CLASS_CPU) {
+        o->we = 0;
+        o->start_ns = start_mono_ns;
+        w->open_cpu_refused_total++;
+        return;
+    }
+    if (o->we != we || o->start_ns != start_mono_ns) {
+        /* A DIFFERENT interval from the one last noted. Its per-interval
+         * credit starts at zero -- except for any part of it the pid's
+         * monotone watermark says was already credited (a tick that ran
+         * past the previous close credits into what turns out to be this
+         * interval's span). Pre-charging that overlap is what makes the
+         * at-close subtraction exact in both tick/close orders instead of
+         * counting the overlap twice. */
+        o->credited_ns = 0;
+        if (o->credited_until_ns > start_mono_ns)
+            o->credited_ns = o->credited_until_ns - start_mono_ns;
+        o->we = we;
+        o->start_ns = start_mono_ns;
+    }
+}
+
+void pgwt_summary_pin_clock(struct pgwt_summary_writer *w,
+                             uint64_t mono_anchor_ns, uint64_t wall_anchor_ns)
+{
+    w->clock_offset_mono_ns = mono_anchor_ns;
+    w->clock_offset_wall_ns = wall_anchor_ns;
+    w->clock_anchor_pinned = true;
+}
+
+void pgwt_summary_forget_open(struct pgwt_summary_writer *w, uint32_t pid)
+{
+    struct pgwt_summary_open *o = open_slot(w, pid, false);
+    if (!o)
+        return;
+    /* Tombstone, not a hole: open addressing cannot free a middle slot
+     * without breaking the probe chain of every key that passed through it.
+     * Clearing `we` stops the credit, which is the point; the slot is reused
+     * by the same pid and reclaimed when the writer is destroyed. */
+    o->we = 0;
+    o->start_ns = 0;
+    o->credited_until_ns = 0;
+    o->noted_ns = 0;
+}
+
 /* ── Public API ───────────────────────────────────────────── */
 
 int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
@@ -1090,14 +1459,39 @@ int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
      * on a caller's stack). NULL is non-fatal: emission-time ids as before. */
     w->qattr = calloc(SUMMARY_QATTR_SLOTS, sizeof(*w->qattr));
 
+    /* v8 (#379) open-interval watermarks (heap, same reason). NULL is
+     * non-fatal and means exactly the v7 accounting rule: nothing is noted,
+     * so nothing is credited per second and every duration lands whole in
+     * its closing second. */
+    w->open = calloc(SUMMARY_MAX_OPEN, sizeof(*w->open));
+
     return 0;
 }
 
 int pgwt_summary_push_event(struct pgwt_summary_writer *w,
                               const struct pgwt_trace_event *evt,
-                              uint32_t cat_flag)
+                              uint32_t cat_flag, uint32_t eff_event)
 {
     if (!w->enabled) return 0;
+
+    /* v7 (#408): VALIDATE the producer's effective id before anything uses
+     * it. The parameter may express exactly one rewrite -- a foreground
+     * we == 0 interval outside a command becomes PGWT_WEI_NONCMD_CPU, which
+     * is what both raw paths do (pgwt_tag_events, pgwt_live_effective_event)
+     * -- so anything else is a producer bug, and accepting it would let a
+     * caller refile arbitrary time into an arbitrary class through a
+     * parameter that looks like plumbing. Both degradations keep the v6
+     * behaviour (evt->old_event) and are COUNTED, because "the writer quietly
+     * classified this the old way" is precisely the kind of silence #408 was:
+     * the resolve existed 65 lines below the push and nothing said so. */
+    uint32_t eff = eff_event;
+    if (eff == PGWT_SUMMARY_EFF_UNRESOLVED) {
+        eff = evt->old_event;
+        w->eff_unresolved_events_total++;
+    } else if (eff != evt->old_event && eff != PGWT_WEI_NONCMD_CPU) {
+        eff = evt->old_event;
+        w->eff_rejected_events_total++;
+    }
 
     /* v6 (#315, #376): the producer's verdict on this pid's category. The
      * drop itself stays in accum_event -- the one write-side chokepoint,
@@ -1141,13 +1535,23 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
         w->late_events_folded_total++;
     }
 
-    /* Second boundary detection */
+    /* Second boundary detection.
+     *
+     * v8 (#379): sealing is what credits each completed second's share of
+     * every OPEN interval, so it has to happen here -- before this event's
+     * second becomes the accumulator -- and it has to cover EVERY second in
+     * between, not just the previous one: a 100 s wait is only in the record
+     * for second 40 if second 40 was written while that wait was open.
+     *
+     * A failed flush leaves the accumulator OPEN on purpose (see
+     * flush_accum): the second is retried at the next boundary rather than
+     * silently becoming a hole in the window. Counted so the gap is
+     * attributable instead of merely absent. */
+    writer_seal_through(w, evt_second);
     if (w->accum_active && evt_second > w->accum.second_mono_ns) {
-        /* New second — flush old accumulator (which resets it).
-         * A failed flush leaves the accumulator OPEN on purpose (see
-         * flush_accum): the second is retried at the next boundary rather
-         * than silently becoming a hole in the window. Counted so the gap is
-         * attributable instead of merely absent. */
+        /* Only reachable when writer_seal_through gave up (a failed write),
+         * since it seals every second below evt_second. Kept so a sealing
+         * failure still cannot leave two seconds in one accumulator. */
         if (flush_accum(w) != 0)
             w->flush_failures_total++;
     }
@@ -1186,7 +1590,81 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
         if (s)
             qattr_slot_free(w, s);
     }
-    if (accum_event(&w->accum, evt, qid, io_worker)) {
+    /* v8 (#379): close the pid's open interval against its watermark. The
+     * record contributes only the part of its duration no completed second
+     * has already been credited for -- `close - max(start, credited_until)`,
+     * clamped at both ends so the tick and the close can arrive in EITHER
+     * order without double counting or losing a nanosecond:
+     *   - tick first (the normal case): credited_until sits at a second
+     *     boundary inside the interval, and the remainder is the tail;
+     *   - close first: credited_until is below the record's start, nothing
+     *     was credited, and the whole duration lands here (v7 behaviour);
+     *   - a tick that already saw the NEXT interval and credited past this
+     *     close: credited_until > close, the remainder clamps to 0, and the
+     *     overlap stays filed under the previous event. Attribution moves by
+     *     at most one tick; the total does not move at all.
+     * Markers and EXIT records are excluded because they are not intervals
+     * (accum_event drops them); an EXIT also retires the pid's note. */
+    uint64_t already = 0;
+    bool is_marker = PGWT_IS_MARKER(evt->old_event) ||
+                     evt->old_event == PGWT_EVENT_EXIT;
+    if (w->open && !is_marker) {
+        uint64_t start = evt->timestamp_ns >= evt->duration_ns
+                       ? evt->timestamp_ns - evt->duration_ns : 0;
+        struct pgwt_summary_open *o = open_slot(w, evt->pid, false);
+        if (o) {
+            /* IDENTITY CHECK, and it is load-bearing. Only subtract credits
+             * when the note that was credited IS the interval this record
+             * closes -- same pid, same wait id, same start. A producer whose
+             * records do NOT tile one pid's timeline (overlapping intervals;
+             * a synthetic scenario that interleaves a long wait with short
+             * ones for the same pid) would otherwise have the long record's
+             * duration cancelled by credits that belonged to the short ones,
+             * turning an over-report into a 39.5 s UNDER-report. Measured on
+             * the #410 parity fixture's pid 1001 before this check existed:
+             * IO:DataFileRead 89,000 ms raw vs 49,499 ms summary on the
+             * interior window. The watermark itself still floors every
+             * credit, so a mismatch can only ever charge the record WHOLE
+             * (the v7 answer) -- never twice. */
+            if (o->we == evt->old_event && o->start_ns == start) {
+                already = o->credited_ns;
+                if (already > evt->duration_ns)
+                    already = evt->duration_ns;
+            } else {
+                /* No matching note. Subtract only what the pid's MONOTONE
+                 * watermark proves was already placed inside this record's
+                 * span -- normally nothing. This is the anti-double-count
+                 * floor for the cases the identity check refuses: a
+                 * producer whose open-interval view is not interval-exact,
+                 * or two intervals overlapping on one pid. */
+                if (o->credited_until_ns > start) {
+                    already = o->credited_until_ns - start;
+                    if (already > evt->duration_ns)
+                        already = evt->duration_ns;
+                }
+                if (o->we != 0)
+                    w->open_note_mismatch_total++;
+            }
+            /* The interval is over: nothing is creditable for this pid until
+             * the producer notes the next one. credited_until_ns is NOT
+             * bumped here -- it advances only where credit was actually
+             * placed, which is what keeps a mismatched record from eating
+             * another interval's accounting. */
+            o->we = 0;
+            o->start_ns = evt->timestamp_ns;
+            o->credited_ns = 0;
+        }
+        /* The #379 residual v8 leaves open, MEASURED rather than asserted:
+         * an on-CPU gap longer than a second, which keeps its whole duration
+         * in its closing second because its cpu_ns only exists now. */
+        if (already == 0 && evt->duration_ns > PGWT_NS_PER_SEC &&
+            summary_wait_class_index(evt->old_event) == PGWT_CLASS_CPU)
+            w->cpu_open_uncredited_ns_total += evt->duration_ns;
+    }
+    if (evt->new_event == PGWT_EVENT_EXIT || evt->old_event == PGWT_EVENT_EXIT)
+        pgwt_summary_forget_open(w, evt->pid);
+
+    if (accum_event(&w->accum, evt, qid, io_worker, eff, already)) {
         w->io_worker_events_excluded_total++;
         w->io_worker_ns_excluded_total += evt->duration_ns;
     }
@@ -1214,20 +1692,30 @@ int pgwt_summary_flush(struct pgwt_summary_writer *w)
 int pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
                                    uint64_t now_mono_ns)
 {
-    if (!w->enabled || !w->accum_active)
+    if (!w->enabled)
         return 0;
 
-    /* The second is still open: writing it now would put a partial record
-     * on disk that the real second boundary writes again as a superset
-     * (#277). The decision is on the clock, not on event arrival, so a
-     * second that simply stops receiving events is still written on the
-     * next tick — this can delay a record, never withhold one. */
-    uint64_t ready_at = w->accum.second_mono_ns + 1000000000ULL
-                      + PGWT_SUMMARY_FLUSH_LAG_NS;
-    if (now_mono_ns < ready_at)
+    /* A second is written once it is COMPLETE: writing it earlier would put
+     * a partial record on disk that the real second boundary writes again as
+     * a superset (#277). The decision is on the clock, not on event arrival,
+     * so a second that simply stops receiving events is still written on the
+     * next tick — this can delay a record, never withhold one.
+     *
+     * `complete_before` is the first second that is NOT complete, i.e. every
+     * second S with S + 1 s + PGWT_SUMMARY_FLUSH_LAG_NS <= now_mono_ns is
+     * sealed. That is the identical rule the single-accumulator version
+     * applied; what v8 adds is that the seal also credits each of those
+     * seconds with its share of every open interval, and that a second in
+     * which NOTHING closed is still written when something was open in it —
+     * which is the whole of #379 for a system that goes quiet. */
+    if (now_mono_ns < PGWT_NS_PER_SEC + PGWT_SUMMARY_FLUSH_LAG_NS)
         return 0;
-
-    return flush_counted(w);
+    uint64_t latest = now_mono_ns - PGWT_SUMMARY_FLUSH_LAG_NS
+                    - PGWT_NS_PER_SEC;          /* last complete second's ts */
+    uint64_t complete_before = (latest / PGWT_NS_PER_SEC) * PGWT_NS_PER_SEC
+                             + PGWT_NS_PER_SEC; /* first INcomplete second  */
+    writer_seal_through(w, complete_before);
+    return 0;
 }
 
 int pgwt_summary_check_rotation(struct pgwt_summary_writer *w)
@@ -1378,4 +1866,6 @@ void pgwt_summary_destroy(struct pgwt_summary_writer *w)
     w->block_index = NULL;
     free(w->qattr);
     w->qattr = NULL;
+    free(w->open);
+    w->open = NULL;
 }

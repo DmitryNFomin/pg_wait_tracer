@@ -1,0 +1,91 @@
+=== CPU-split raw-vs-summary parity (#408) ===
+
+--- 1. the fixture ---
+  ok: the fixture builds (writer, registry, reader, raw oracle)
+--- 2. the fixture holds both properties under test ---
+  ok: the writer committed 130 per-second records for a 130 s stream
+  ok: the span is 130 s -- at or above the 120 s width at which src/server.c routes to the summary path
+  ok: pgwt_tag_events relabelled 130 records to PGWT_WEI_NONCMD_CPU -- the relabel is produced by the PRODUCTION classifier, never written into the fixture
+  ok: NOTHING handed to the writer carries a category bit or a pre-relabelled id (0) -- the 8705412 pre-cooked-fixture trap
+  ok: 390 records carry a measured cpu_ns
+  ok: and the FILE carries the measured-record count (260) and the measured total (3900000000 ns) -- v7's new bytes, read back through the real reader
+--- 3. raw vs summary over three windows ---
+    full span                    run raw     3900.000 sum     3900.000 | wait raw     2600.000 sum     2600.000
+                                 DB  raw     7800.000 sum     7800.000 | Idle raw     2600.000 sum     2600.000  [130 records]
+  ok: full span: the comparison was possible
+  ok: full span: BOTH paths report has_measured_cpu (raw 1, summary 1)
+  ok: full span: the summary path emits BOTH CPU rows (run 3900.000, wait 2600.000) -- the #408 symptom is one row and a missing runqueue signal
+  ok: full span: neither path emits the combined "CPU*" row when the split is available
+  ok: full span: CPU (running) agrees exactly (3900.000000)
+  ok: full span: CPU (waiting for a core) agrees exactly (2600.000000)
+  ok: full span: and the runqueue row is NON-ZERO (2600.000000) -- a zero would make the equality above vacuous
+  ok: full span: DB Time agrees exactly (7800.000000) -- the non-command relabel is what moved it
+  ok: full span: Idle agrees exactly (2600.000000)
+    interior 120 s               run raw     3600.000 sum     3600.000 | wait raw     2400.000 sum     2400.000
+                                 DB  raw     7200.000 sum     7200.000 | Idle raw     2400.000 sum     2400.000  [120 records]
+  ok: interior 120 s: the comparison was possible
+  ok: interior 120 s: BOTH paths report has_measured_cpu (raw 1, summary 1)
+  ok: interior 120 s: the summary path emits BOTH CPU rows (run 3600.000, wait 2400.000) -- the #408 symptom is one row and a missing runqueue signal
+  ok: interior 120 s: neither path emits the combined "CPU*" row when the split is available
+  ok: interior 120 s: CPU (running) agrees exactly (3600.000000)
+  ok: interior 120 s: CPU (waiting for a core) agrees exactly (2400.000000)
+  ok: interior 120 s: and the runqueue row is NON-ZERO (2400.000000) -- a zero would make the equality above vacuous
+  ok: interior 120 s: DB Time agrees exactly (7200.000000) -- the non-command relabel is what moved it
+  ok: interior 120 s: Idle agrees exactly (2400.000000)
+    125 s to the end             run raw     3750.000 sum     3750.000 | wait raw     2500.000 sum     2500.000
+                                 DB  raw     7500.000 sum     7500.000 | Idle raw     2500.000 sum     2500.000  [125 records]
+  ok: 125 s to the end: the comparison was possible
+  ok: 125 s to the end: BOTH paths report has_measured_cpu (raw 1, summary 1)
+  ok: 125 s to the end: the summary path emits BOTH CPU rows (run 3750.000, wait 2500.000) -- the #408 symptom is one row and a missing runqueue signal
+  ok: 125 s to the end: neither path emits the combined "CPU*" row when the split is available
+  ok: 125 s to the end: CPU (running) agrees exactly (3750.000000)
+  ok: 125 s to the end: CPU (waiting for a core) agrees exactly (2500.000000)
+  ok: 125 s to the end: and the runqueue row is NON-ZERO (2500.000000) -- a zero would make the equality above vacuous
+  ok: 125 s to the end: DB Time agrees exactly (7500.000000) -- the non-command relabel is what moved it
+  ok: 125 s to the end: Idle agrees exactly (2500.000000)
+--- 5. bypass suite (a gate that cannot see must refuse) ---
+  ok: 5a. a fixture whose every record is cpu_ns UNKNOWN builds
+    5a all-UNKNOWN               REFUSED: no record in this window carries a measured cpu_ns: the two CPU rows are UNAVAILABLE here, not equal
+  ok: 5a. REFUSED (no record in this window carries a measured cpu_ns: the two CPU rows are UNAVAILABLE here, not equal) -- the split is unavailable, not equal
+    5a if it were trusted        REFUSED: no record in this window carries a measured cpu_ns: the two CPU rows are UNAVAILABLE here, not equal
+  red-as-designed(line 530): 5a if it were trusted: the comparison was possible
+  ok: 5b. a fixture with no out-of-command gap builds
+  ok: 5b. and pgwt_tag_events relabels nothing in it (0) -- the relabel assertion would be satisfied by ABSENCE
+  ok: 5c. a fixture whose producer resolves nothing builds
+    5c producer unresolved       run raw     3900.000 sum     6500.000 | wait raw     2600.000 sum     2600.000
+                                 DB  raw     7800.000 sum    10400.000 | Idle raw     2600.000 sum        0.000  [130 records]
+  ok: 5c. the comparison DIVERGES when the producer resolves nothing -- the eff_event parameter is load-bearing, not decoration
+  ok: 5c. and it diverges in the #408 DIRECTION: summary DB Time 10400.000 over raw 7800.000, i.e. non-command CPU counted as load
+  ok: 5c. while the SPLIT still works (run 6500.000, wait 2600.000) -- the two halves of v7 are independent
+    5c if it were trusted        run raw     3900.000 sum     6500.000 | wait raw     2600.000 sum     2600.000
+                                 DB  raw     7800.000 sum    10400.000 | Idle raw     2600.000 sum        0.000  [130 records]
+  ok: 5c if it were trusted: the comparison was possible
+  ok: 5c if it were trusted: BOTH paths report has_measured_cpu (raw 1, summary 1)
+  ok: 5c if it were trusted: the summary path emits BOTH CPU rows (run 6500.000, wait 2600.000) -- the #408 symptom is one row and a missing runqueue signal
+  ok: 5c if it were trusted: neither path emits the combined "CPU*" row when the split is available
+  red-as-designed(line 543): 5c if it were trusted: CPU (running) agrees exactly (3900.000000)
+  ok: 5c if it were trusted: CPU (waiting for a core) agrees exactly (2600.000000)
+  ok: 5c if it were trusted: and the runqueue row is NON-ZERO (2600.000000) -- a zero would make the equality above vacuous
+  red-as-designed(line 552): 5c if it were trusted: DB Time agrees exactly (7800.000000) -- the non-command relabel is what moved it
+  red-as-designed(line 554): 5c if it were trusted: Idle agrees exactly (2600.000000)
+    5d window misses records     REFUSED: no record in this window carries a measured cpu_ns: the two CPU rows are UNAVAILABLE here, not equal
+  ok: 5d. REFUSED (no record in this window carries a measured cpu_ns: the two CPU rows are UNAVAILABLE here, not equal)
+    5e summary dir removed       REFUSED: the production summary preflight refuses this window (verdict 0, 0 considered, 0 unusable)
+  ok: 5e. REFUSED (the production summary preflight refuses this window (verdict 0, 0 considered, 0 unusable))
+  ok: 5f. a summary file was rewritten as v6
+    5f v6 file in the window     REFUSED: the production summary preflight refuses this window (verdict 0, 1 considered, 1 unusable)
+  ok: 5f. REFUSED (the production summary preflight refuses this window (verdict 0, 1 considered, 1 unusable)) -- an older-rule file is never reinterpreted
+  ok: 5g. buffers
+  ok: 5g. a record serializes to 140 bytes
+  ok: 5g. the full record decodes (the control)
+  ok: 5g. and round-trips the v7 scalars (30000000 ns, 1 records)
+  ok: 5g. one byte short is REFUSED, not decoded with the scalars left at 0
+  ok: 5g. a payload missing the whole v7 trailer (a v6-shaped record) is REFUSED
+  ok: 5h. writer opens
+  ok: 5h. an eff_event that is neither the record's id nor PGWT_WEI_NONCMD_CPU is REFUSED and counted (1)
+  ok: 5h. and the record keeps its own class (50000000 ns in CPU) rather than the one the caller asked for
+  ok: 5h. and an UNRESOLVED push is counted too (1) -- the v6 behaviour stays visible instead of silent
+
+4 expected-red lines fired (each a shape where a naive comparison reads agreement)
+
+66 checks, 0 failed

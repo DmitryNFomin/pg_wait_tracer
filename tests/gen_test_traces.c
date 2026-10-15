@@ -416,23 +416,92 @@ static uint64_t scenario_first_ts(const struct scenario *sc)
     return first == UINT64_MAX ? 0 : first;
 }
 
-/* Re-anchor the (lazily opened) summary writer's clocks to the synthetic
- * timestamp domain, so summary block wall timestamps come out as
- * scenario_ts + wall_offset — coherent with the patched trace headers.
- * Must run after the first push (which opens the file) and before the first
- * second-boundary flush. Without this, summary blocks carry wall values
- * derived from the real machine clocks and the summary path is untestable
- * with synthetic data. */
-static void anchor_summary_clock(struct pgwt_summary_writer *sw,
-                                 uint64_t anchor_mono, uint64_t wall_offset_ns)
+
+/* #379: the scenario's own view of what each pid has OPEN right now.
+ *
+ * The summary writer never infers an open interval from the record stream —
+ * on a stream whose records do not tile the timeline (which is every
+ * scenario with a deliberate hole in it) that would fabricate time the raw
+ * path does not have. It is TOLD, by whoever knows: the daemon reads BPF's
+ * state_map, and this generator looks AHEAD at the record that will close
+ * the interval. Record k of pid p covers [ts_k - dur_k, ts_k), so at any
+ * time T between those, p's open interval is exactly (old_event_k,
+ * ts_k - dur_k) — the same pair state_map would have held.
+ *
+ * A scenario HOLE (the next record for p starts later than T) therefore
+ * notes nothing, which is the honest answer: the scenario does not say what
+ * p was doing, and the raw path has no record for it either.
+ *
+ * Notes are refreshed on every push because the writer only credits a note
+ * younger than PGWT_SUMMARY_OPEN_STALE_NS — the fail-safe that stops a
+ * vanished pid accruing time forever. A live daemon refreshes on every tick;
+ * this refreshes on every record, which is at least as often. */
+struct gen_open_state {
+    uint32_t pids[1024];
+    int      head[1024];       /* index of the pid's next unpushed event */
+    int      num_pids;
+    int     *next_same_pid;    /* per-event: next event of the same pid */
+};
+
+static void gen_open_init(struct gen_open_state *g, const struct scenario *sc)
 {
-    if (!sw->fp)
+    g->num_pids = 0;
+    g->next_same_pid = NULL;
+    if (sc->num_events <= 0)
         return;
-    sw->clock_offset_mono_ns = anchor_mono;
-    sw->clock_offset_wall_ns = anchor_mono + wall_offset_ns;
-    /* Fix up the accumulator second opened by the first push. */
-    if (sw->accum_active)
-        sw->accum.second_wall_ns = sw->accum.second_mono_ns + wall_offset_ns;
+    g->next_same_pid = malloc((size_t)sc->num_events * sizeof(int));
+    if (!g->next_same_pid)
+        return;
+    int last_of_pid[1024];
+    for (int i = 0; i < sc->num_events; i++)
+        g->next_same_pid[i] = -1;
+    for (int i = sc->num_events - 1; i >= 0; i--) {
+        uint32_t pid = sc->events[i].pid;
+        int slot = -1;
+        for (int k = 0; k < g->num_pids; k++)
+            if (g->pids[k] == pid) { slot = k; break; }
+        if (slot < 0) {
+            if (g->num_pids >= 1024)
+                continue;
+            slot = g->num_pids++;
+            g->pids[slot] = pid;
+            last_of_pid[slot] = -1;
+        }
+        g->next_same_pid[i] = last_of_pid[slot];
+        last_of_pid[slot] = i;
+        g->head[slot] = i;     /* reverse walk ends on the FIRST event */
+    }
+}
+
+/* Tell the writer every pid's open interval as of time `now`. */
+static void gen_open_note(struct gen_open_state *g, const struct scenario *sc,
+                          struct pgwt_summary_writer *sw, uint64_t now)
+{
+    if (!g->next_same_pid)
+        return;
+    for (int k = 0; k < g->num_pids; k++) {
+        int i = g->head[k];
+        if (i < 0)
+            continue;
+        const struct pgwt_trace_event *e = &sc->events[i];
+        if (e->duration_ns > e->timestamp_ns)
+            continue;
+        uint64_t start = e->timestamp_ns - e->duration_ns;
+        if (start > now)
+            continue;          /* a hole: the scenario says nothing here */
+        pgwt_summary_note_open(sw, e->pid, e->old_event, start, 0, now);
+    }
+}
+
+/* The record at index `i` has been pushed: advance its pid's lookahead. */
+static void gen_open_advance(struct gen_open_state *g,
+                             const struct scenario *sc, int i)
+{
+    if (!g->next_same_pid)
+        return;
+    uint32_t pid = sc->events[i].pid;
+    for (int k = 0; k < g->num_pids; k++)
+        if (g->pids[k] == pid) { g->head[k] = g->next_same_pid[i]; return; }
 }
 
 static int write_traces(const char *dir, struct scenario *sc,
@@ -442,7 +511,6 @@ static int write_traces(const char *dir, struct scenario *sc,
     struct pgwt_summary_writer sw;
     uint64_t anchor_mono = scenario_first_ts(sc);
     anchor_mono = (anchor_mono / 1000000000ULL) * 1000000000ULL;
-    int summary_anchored = 0;
 
     if (pgwt_writer_init(&ew, dir, pg_version, 24, NULL) != 0) {
         fprintf(stderr, "Failed to init event writer\n");
@@ -458,12 +526,33 @@ static int write_traces(const char *dir, struct scenario *sc,
         pgwt_writer_destroy(&ew);
         return -1;
     }
-    #define PUSH_SUMMARY(evp) do { \
-        pgwt_summary_push_event(&sw, (evp), 0); \
-        if (!summary_anchored) { \
-            anchor_summary_clock(&sw, anchor_mono, wall_offset_ns); \
-            summary_anchored = 1; \
-        } \
+    struct gen_open_state gopen;
+    gen_open_init(&gopen, sc);
+
+    /* The summary clock is PINNED to the synthetic domain before the first
+     * push, not fixed up after it: #379's writer can emit a per-second
+     * record for a second EARLIER than the first record (every second a
+     * long interval was already open in), and those would otherwise carry
+     * wall timestamps derived from this machine's clock. The values are the
+     * same ones patch_file_header writes, so the files are unchanged in
+     * every other respect. */
+    pgwt_summary_pin_clock(&sw, anchor_mono, anchor_mono + wall_offset_ns);
+
+    /* v7 (#408): eff_event = the record's own id. This generator synthesizes
+     * its scenarios directly and runs no command gate, so it resolves NO
+     * relabel -- passing the id says exactly that, and (unlike
+     * PGWT_SUMMARY_EFF_UNRESOLVED) does not inflate the writer's
+     * eff_unresolved_events_total, which is the production residual signal
+     * for "some of this file's we == 0 time was classified the pre-v7 way".
+     *
+     * v8 (#379): the push is bracketed by the open-interval feed --
+     * gen_open_note tells the writer what every pid has open as of this
+     * record's timestamp, gen_open_advance moves the pid's lookahead past
+     * the record just closed. */
+    #define PUSH_SUMMARY(evp, idx) do { \
+        gen_open_note(&gopen, sc, &sw, (evp)->timestamp_ns); \
+        pgwt_summary_push_event(&sw, (evp), 0, (evp)->old_event); \
+        gen_open_advance(&gopen, sc, (idx)); \
     } while (0)
 
     if (sc->interleave) {
@@ -481,7 +570,7 @@ static int write_traces(const char *dir, struct scenario *sc,
                     fprintf(stderr, "Failed to write event %d\n", ei);
                     break;
                 }
-                PUSH_SUMMARY(&sc->events[ei]);
+                PUSH_SUMMARY(&sc->events[ei], ei);
                 ei++;
             } else {
                 /* Collect the contiguous run of samples before the next event */
@@ -504,7 +593,7 @@ static int write_traces(const char *dir, struct scenario *sc,
                 fprintf(stderr, "Failed to write event %d\n", i);
                 break;
             }
-            PUSH_SUMMARY(&sc->events[i]);
+            PUSH_SUMMARY(&sc->events[i], i);
         }
 
         /* SAMPLES block: the "samples" array (trace format v2). Written after
@@ -517,8 +606,12 @@ static int write_traces(const char *dir, struct scenario *sc,
         }
     }
 
-    /* Flush summary */
+    /* Flush summary. Open intervals are NOT credited past the last record:
+     * the scenario stops there and the raw path has no record for whatever
+     * was still open, so crediting it would invent a divergence instead of
+     * closing one. */
     pgwt_summary_flush(&sw);
+    free(gopen.next_same_pid);
 
     pgwt_writer_close(&ew);
     pgwt_summary_close(&sw);

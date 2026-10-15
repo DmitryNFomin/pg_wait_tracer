@@ -614,6 +614,33 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                 pa_cur->current_wait_ns = open_ns;
             }
 
+            /* #379: tell the SUMMARY WRITER what this pid has open, so each
+             * second the interval spans is credited as that second completes
+             * instead of the whole duration landing in the second it closes
+             * in. This is the only open-interval source the writer has — it
+             * deliberately infers nothing from the record stream — and it is
+             * read here because this loop is already the one place that
+             * knows BPF's (last_event, last_ts) for every live backend.
+             *
+             * sval.last_ts, not `now - open_ns`: it is the exact value BPF
+             * will subtract to produce the closing record's duration
+             * (duration = now - last_ts; last_ts = now), which is what makes
+             * the per-second credits and the at-close remainder partition
+             * the interval with no gap and no overlap.
+             *
+             * EXACT tiers only, by construction: pgwt_read_state_map is
+             * called only when the mode uses watchpoints (lightweight and
+             * sampled have no watchpoint-maintained intervals to report),
+             * and summaries are only computed from for EXACT-covered
+             * windows. A mode that never notes anything gets the v7
+             * accounting rule, which is correct for it rather than merely
+             * unchanged. */
+            if (d->summary_writer)
+                pgwt_summary_note_open(d->summary_writer, snext, we,
+                                       sval.last_ts,
+                                       pgwt_live_pid_cat_flag(d, pa_cur, snext),
+                                       now);
+
             /* #393: the open interval is accounted whatever else this (PID,
              * event) did in this interval — pgwt_live_account_open_stretch()
              * is the one place that decides, and src/map_reader.h carries the
