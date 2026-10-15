@@ -19,6 +19,11 @@
 #include <unistd.h>
 
 #include "cJSON.h"
+/* The daemon half's shared builder. pgwt_open_stretch_cpu_ns() is the ONE
+ * open-stretch CPU arithmetic, used by the de-escalation flush, the shutdown
+ * flush and this consumer — a second copy here is exactly the drift the
+ * header was created to remove. */
+#include "open_interval.h"
 #include "open_overlay.h"
 
 /* ── small helpers ─────────────────────────────────────────── */
@@ -115,6 +120,96 @@ static int json_u16(const cJSON *obj, const char *key, uint16_t *out)
         return -1;
     *out = (uint16_t)v;
     return 0;
+}
+
+/* The daemon emits the gate flags as JSON booleans (cJSON_AddBoolToObject).
+ * A 0/1 number is accepted too, so a producer that switches representation
+ * does not take the pane down — but a string, null or absence is a missing
+ * field, not a false. */
+static int json_bool(const cJSON *obj, const char *key, uint8_t *out)
+{
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!it)
+        return -1;
+    if (cJSON_IsBool(it)) {
+        *out = cJSON_IsTrue(it) ? 1 : 0;
+        return 0;
+    }
+    if (cJSON_IsNumber(it) && (it->valuedouble == 0.0 || it->valuedouble == 1.0)) {
+        *out = it->valuedouble != 0.0;
+        return 0;
+    }
+    return -1;
+}
+
+/* A required, NON-EMPTY string. An empty string is treated as missing: the
+ * producer refuses a row whose wait category it could not resolve rather than
+ * shipping "", and a consumer that accepted "" would turn that contract back
+ * into a guess. */
+static int json_str(const cJSON *obj, const char *key, char *out, size_t cap)
+{
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!cJSON_IsString(it) || !it->valuestring || !it->valuestring[0])
+        return -1;
+    snprintf(out, cap, "%s", it->valuestring);
+    return 0;
+}
+
+/* The command classification for an open stretch [t0, t1].
+ *
+ * THREE STEPS, and two of them are RULES rather than consequences of the
+ * majority rule — do not re-derive this from first principles. The daemon
+ * half's first draft had only the middle step and differed from the real
+ * pgwt_live_cmd_gate_classify in 59 of 96 gate states; with the two
+ * short-circuits and the clamp it differs in 0 of 96.
+ *
+ *   1. no sweep state for this pid  → the emission-time gate `cmd_open`,
+ *      exactly as the closed-record path does;
+ *   2. the pid has no CMD markers at all → IN-COMMAND (the server's seen_cmd
+ *      rule: an unmarked pid's CPU stays CPU);
+ *   3. otherwise the majority rule over banked + the still-open run, CLAMPED
+ *      to the stretch — banked may predate t0, because state_map's last_ts
+ *      can run ahead of the last drained record, and the unclamped sum then
+ *      exceeds the stretch it is supposed to describe.
+ *
+ * `cmd_sweep_open`, never `cmd_open`: the first is the marker sweep's flag,
+ * the second BPF's instantaneous uprobe gate, and they disagree exactly in
+ * the #98 case the sweep exists for. PROVISIONAL either way — the majority
+ * can flip when the interval finally closes. */
+/* Step 3's quantity on its own: command-open ns inside [t0, t1]. This is the
+ * daemon's `cmd_open_ns`, and the parser cross-checks the two — which is also
+ * what makes the CLAMP observable. The clamp cannot change the majority
+ * verdict (min(open, wall) >= wall/2 whenever open >= wall/2), so a test that
+ * only looked at the verdict could never see it removed. Here it can. */
+static uint64_t overlay_cmd_open_ns(const struct pgwt_open_interval *it,
+                                    uint64_t t0, uint64_t t1)
+{
+    if (!it->cmd_gate_present || !it->cmd_seen)
+        return 0;
+    uint64_t wall = t1 > t0 ? t1 - t0 : 0;
+    uint64_t open_ns = it->cmd_banked_ns;
+    if (it->cmd_sweep_open) {
+        uint64_t a = it->cmd_anchor_ns > t0 ? it->cmd_anchor_ns : t0;
+        if (t1 > a)
+            open_ns += t1 - a;
+    }
+    if (open_ns > wall)
+        open_ns = wall;
+    return open_ns;
+}
+
+static int overlay_in_command(const struct pgwt_open_interval *it,
+                              uint64_t t0, uint64_t t1)
+{
+    if (!it->cmd_gate_present)
+        return it->cmd_open != 0;
+    if (!it->cmd_seen)
+        return 1;
+
+    uint64_t wall = t1 > t0 ? t1 - t0 : 0;
+    if (t1 == t0)
+        return it->cmd_sweep_open != 0;
+    return overlay_cmd_open_ns(it, t0, t1) * 2 >= wall;
 }
 
 /* ── lifecycle ─────────────────────────────────────────────── */
@@ -231,17 +326,35 @@ int pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap)
         return -1;
     }
 
-    /* An explicit daemon-side error (wrong mode, no watchpoints) is a REFUSAL,
-     * not a transport failure — it is reported, never retried into silence. */
+    const cJSON *rsn = cJSON_GetObjectItemCaseSensitive(root, "reason");
+    const char *rsn_s = (cJSON_IsString(rsn) && rsn->valuestring && rsn->valuestring[0])
+                      ? rsn->valuestring : NULL;
+
+    /* A daemon too old to know the command answers {"ok":false,"error":…}.
+     * That is UNAVAILABLE (transient, a version skew), not REFUSED — refused
+     * is reserved for "this tier cannot have open intervals", which the
+     * daemon reports through `status`. */
     const cJSON *err = cJSON_GetObjectItemCaseSensitive(root, "error");
     if (cJSON_IsString(err) && err->valuestring) {
         char buf[192];
-        set_reason(buf, sizeof(buf), "daemon refused: %s", err->valuestring);
-        snap_fail(snap, PGWT_OVERLAY_REFUSED, buf);
+        set_reason(buf, sizeof(buf), "daemon could not answer: %s", err->valuestring);
+        snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE, buf);
         cJSON_Delete(root);
         return -1;
     }
 
+    /* STATUS FIRST, and then the producer's own invariant:
+     *      pids present  ==  status "included"  ==  complete true
+     * There is deliberately no fourth combination. A reply that breaks the
+     * invariant is a producer bug, and the fail-safe answer to a producer bug
+     * is the degraded one — never the optimistic one. */
+    char status[32] = "";
+    if (json_str(root, "status", status, sizeof(status)) != 0) {
+        snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE,
+                  "daemon reply missing mandatory field status");
+        cJSON_Delete(root);
+        return -1;
+    }
     const cJSON *complete = cJSON_GetObjectItemCaseSensitive(root, "complete");
     if (!cJSON_IsBool(complete)) {
         snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE,
@@ -249,12 +362,19 @@ int pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap)
         cJSON_Delete(root);
         return -1;
     }
-    const cJSON *rsn = cJSON_GetObjectItemCaseSensitive(root, "reason");
+    if (strcmp(status, "included") != 0) {
+        char buf[192];
+        int refused = strcmp(status, "refused") == 0;
+        set_reason(buf, sizeof(buf), "daemon reported %s: %s", status,
+                   rsn_s ? rsn_s : "no reason given");
+        snap_fail(snap, refused ? PGWT_OVERLAY_REFUSED : PGWT_OVERLAY_UNAVAILABLE, buf);
+        cJSON_Delete(root);
+        return -1;
+    }
     if (!cJSON_IsTrue(complete)) {
         char buf[192];
         set_reason(buf, sizeof(buf), "daemon reported an incomplete snapshot: %s",
-                   (cJSON_IsString(rsn) && rsn->valuestring && rsn->valuestring[0])
-                       ? rsn->valuestring : "no reason given");
+                   rsn_s ? rsn_s : "no reason given");
         snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE, buf);
         cJSON_Delete(root);
         return -1;
@@ -263,10 +383,11 @@ int pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap)
 
     static const char *const top_u64[] = {
         "snapshot_ns", "now_mono_ns", "now_wall_ns",
-        "committed_through_ns", "daemon_generation"
+        "committed_through_ns", "daemon_generation",
+        "snapshot_wall_ns", "committed_through_wall_ns"
     };
-    uint64_t tv[5];
-    for (int i = 0; i < 5; i++) {
+    uint64_t tv[7];
+    for (int i = 0; i < 7; i++) {
         if (json_u64(root, top_u64[i], &tv[i]) != 0) {
             char buf[192];
             set_reason(buf, sizeof(buf),
@@ -276,11 +397,16 @@ int pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap)
             return -1;
         }
     }
-    snap->snapshot_ns          = tv[0];
-    snap->now_mono_ns          = tv[1];
-    snap->now_wall_ns          = tv[2];
-    snap->committed_through_ns = tv[3];
-    snap->daemon_generation    = tv[4];
+    snap->snapshot_ns               = tv[0];
+    snap->now_mono_ns               = tv[1];
+    snap->now_wall_ns               = tv[2];
+    snap->committed_through_ns      = tv[3];
+    snap->daemon_generation         = tv[4];
+    snap->snapshot_wall_ns          = tv[5];
+    snap->committed_through_wall_ns = tv[6];
+    (void)json_u64(root, "daemon_start_wall_ns", &snap->daemon_start_wall_ns);
+    (void)json_u32(root, "daemon_pid", &snap->daemon_pid);
+    (void)json_str(root, "tier", snap->tier, sizeof(snap->tier));
 
     if (snap->snapshot_ns == 0 || snap->now_mono_ns == 0 || snap->now_wall_ns == 0) {
         snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE,
@@ -290,18 +416,73 @@ int pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap)
     }
     snap->anchor_offset_ns = (int64_t)snap->now_wall_ns - (int64_t)snap->now_mono_ns;
 
+    /* The wall fields and the anchor are two expressions of one clock model,
+     * computed by the producer and by us. They must agree exactly: a daemon
+     * whose wall stamps do not sit on its own anchor has no coherent mapping,
+     * and every span we would place on the timeline from it is arbitrary. */
+    uint64_t want_snap_wall = 0, want_committed_wall = 0;
+    if (mono_to_wall(snap->snapshot_ns, snap->anchor_offset_ns, &want_snap_wall) != 0 ||
+        mono_to_wall(snap->committed_through_ns, snap->anchor_offset_ns,
+                     &want_committed_wall) != 0) {
+        snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE,
+                  "daemon clock anchor does not map its own snapshot");
+        cJSON_Delete(root);
+        return -1;
+    }
+    if (want_snap_wall != snap->snapshot_wall_ns ||
+        want_committed_wall != snap->committed_through_wall_ns) {
+        char buf[192];
+        set_reason(buf, sizeof(buf),
+                   "daemon wall stamps disagree with its own anchor "
+                   "(snapshot_wall_ns %llu, anchored %llu)",
+                   (unsigned long long)snap->snapshot_wall_ns,
+                   (unsigned long long)want_snap_wall);
+        snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE, buf);
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    /* cpu_accounting decides whether a CPU figure exists at all, so it is
+     * mandatory: defaulting it either way would turn "not measured" into a
+     * measured number or the reverse. */
+    uint8_t cpu_acct = 0, gate_active = 0;
+    if (json_bool(root, "cpu_accounting", &cpu_acct) != 0) {
+        snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE,
+                  "daemon reply missing mandatory field cpu_accounting");
+        cJSON_Delete(root);
+        return -1;
+    }
+    snap->cpu_accounting = cpu_acct;
+    if (json_bool(root, "cmd_gate_active", &gate_active) == 0)
+        snap->cmd_gate_active = gate_active;
+
     const cJSON *pids = cJSON_GetObjectItemCaseSensitive(root, "pids");
     if (!cJSON_IsArray(pids)) {
-        /* Absent is NOT the same as "nothing open": a reply with no pids array
-         * is malformed, and treating it as an empty overlay would be exactly
-         * the silent-zero this module exists to prevent. */
+        /* status said "included", so by the producer's own invariant the array
+         * must be here. Absent is NOT "nothing open": an empty ARRAY is that
+         * measurement, and treating a missing array as one would be exactly
+         * the silent zero this module exists to prevent. */
         snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE,
-                  "daemon reply missing mandatory field pids");
+                  "daemon reply says included but carries no pids array");
         cJSON_Delete(root);
         return -1;
     }
 
     int n = cJSON_GetArraySize(pids);
+    /* open_count is the producer's own row counter, written before the array
+     * was serialised. Comparing it with what actually arrived catches a reply
+     * that lost rows on the way out and still parses — the two numbers come
+     * from different places, which is the only reason the check can fail. */
+    uint64_t open_count = 0;
+    if (json_u64(root, "open_count", &open_count) == 0 && open_count != (uint64_t)n) {
+        char buf[192];
+        set_reason(buf, sizeof(buf),
+                   "daemon reply carries %d open intervals but reports open_count %llu",
+                   n, (unsigned long long)open_count);
+        snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE, buf);
+        cJSON_Delete(root);
+        return -1;
+    }
     if (n < 0 || n > OVERLAY_MAX_ENTRIES) {
         snap_fail(snap, PGWT_OVERLAY_UNAVAILABLE,
                   "daemon reply reports an implausible number of open intervals");
@@ -326,13 +507,27 @@ int pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap)
         if (!cJSON_IsObject(e))                              bad = "entry";
         else if (json_u32(e, "pid", &it->pid) != 0)          bad = "pid";
         else if (json_u64(e, "incarnation", &it->incarnation) != 0) bad = "incarnation";
+        else if (json_u64(e, "generation", &it->generation) != 0) bad = "generation";
         else if (json_u32(e, "event_id", &it->event_id) != 0) bad = "event_id";
-        else if (json_u32(e, "category", &it->cat_flag) != 0) bad = "category";
+        /* cat_flag is the PROCESS type (io_worker/maint/background), which is
+         * what the AAS exclusion turns on; `category` is the WAIT CLASS name.
+         * Two different facts that both used to be called "category". */
+        else if (json_u32(e, "cat_flag", &it->cat_flag) != 0) bad = "cat_flag";
+        else if (json_str(e, "category", it->category, sizeof(it->category)) != 0)
+            bad = "category (absent or empty)";
+        else if (json_u32(e, "category_id", &it->category_id) != 0) bad = "category_id";
         else if (json_u64(e, "open_start_ns", &it->open_start_ns) != 0) bad = "open_start_ns";
         else if (json_u64(e, "cpu_ns_total", &it->cpu_ns_total) != 0) bad = "cpu_ns_total";
         else if (json_u64(e, "on_cpu_ts", &it->on_cpu_ts) != 0) bad = "on_cpu_ts";
         else if (json_u64(e, "last_cpu_ns", &it->last_cpu_ns) != 0) bad = "last_cpu_ns";
-        else if (json_u16(e, "cmd_open", &it->cmd_open) != 0) bad = "cmd_open";
+        else if (json_bool(e, "cmd_open", &it->cmd_open) != 0) bad = "cmd_open";
+        else if (json_bool(e, "cmd_sweep_open", &it->cmd_sweep_open) != 0)
+            bad = "cmd_sweep_open";
+        else if (json_bool(e, "cmd_seen", &it->cmd_seen) != 0) bad = "cmd_seen";
+        else if (json_bool(e, "cmd_gate_present", &it->cmd_gate_present) != 0)
+            bad = "cmd_gate_present";
+        else if (json_bool(e, "cmd_in_window", &it->cmd_in_window) != 0)
+            bad = "cmd_in_window";
         else if (json_u64(e, "cmd_banked_ns", &it->cmd_banked_ns) != 0) bad = "cmd_banked_ns";
         else if (json_u64(e, "cmd_anchor_ns", &it->cmd_anchor_ns) != 0) bad = "cmd_anchor_ns";
         else if (json_u64(e, "query_id", &it->query_id) != 0) bad = "query_id";
@@ -345,6 +540,51 @@ int pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap)
             bad = "event_id (a marker is never an open wait)";
         else if (it->on_cpu_ts != 0 && it->on_cpu_ts > snap->snapshot_ns)
             bad = "on_cpu_ts (after the snapshot)";
+
+        if (!bad) {
+            /* CPU. The arithmetic is B's shared helper (src/open_interval.h),
+             * the SAME function the de-escalation and shutdown flushes use —
+             * a second copy here is the one place the two producers could
+             * drift, invisibly, with both answers looking plausible. The
+             * helper is deliberately NOT clamped to the stretch; clamping is
+             * the consumer's step and happens in the builder. */
+            it->cpu_ns = pgwt_open_stretch_cpu_ns(it->cpu_ns_total, it->on_cpu_ts,
+                                                  it->last_cpu_ns, snap->snapshot_ns,
+                                                  snap->cpu_accounting != 0);
+            uint64_t sent = 0;
+            int has_sent = json_u64(e, "cpu_ns", &sent) == 0;
+            if (!snap->cpu_accounting && has_sent)
+                bad = "cpu_ns (present although the daemon measures no CPU)";
+            else if (snap->cpu_accounting && has_sent && sent != it->cpu_ns)
+                /* Cross-producer drift check: two processes, one formula. If
+                 * these differ, one of the two computed the stretch at a
+                 * different instant or with different inputs, and crediting
+                 * either would be a guess. */
+                bad = "cpu_ns (disagrees with the shared open-stretch arithmetic)";
+            else if (snap->cpu_accounting && !has_sent)
+                /* Absence stays absence — never a measured zero. */
+                it->cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        }
+
+        if (!bad) {
+            /* The command classification, reduced here and cross-checked
+             * against the daemon's own figures from the real classifier.
+             * They are two implementations of one documented rule; a
+             * disagreement is the 59-of-96 defect class, so it refuses.
+             * BOTH quantities are compared: the verdict, and the open-ns the
+             * verdict came from — a verdict alone cannot see the clamp. */
+            uint64_t sent_open_ns = 0;
+            it->in_command = overlay_in_command(it, it->open_start_ns,
+                                                snap->snapshot_ns) ? 1 : 0;
+            if (json_u64(e, "cmd_open_ns", &sent_open_ns) != 0)
+                bad = "cmd_open_ns";
+            else if (it->cmd_gate_present &&
+                     sent_open_ns != overlay_cmd_open_ns(it, it->open_start_ns,
+                                                         snap->snapshot_ns))
+                bad = "cmd_open_ns (disagrees with our own gate reduction)";
+            else if (it->in_command != it->cmd_in_window)
+                bad = "cmd_in_window (the daemon's verdict and ours disagree)";
+        }
 
         if (bad) {
             /* One bad entry fails the WHOLE reply. A partially parsed snapshot
@@ -617,40 +857,6 @@ static uint64_t prorate(uint64_t value, uint64_t num, uint64_t den)
 #endif
 }
 
-/* The open stretch's measured CPU, computed exactly as flush_open_intervals
- * does (src/escalation.c), with `now` = the snapshot stamp. Unmeasured stays
- * unmeasured: PGWT_CPU_NS_UNKNOWN never degrades into 0. */
-static uint64_t stretch_cpu_ns(const struct pgwt_open_interval *it,
-                               uint64_t snapshot_ns)
-{
-    if (it->cpu_ns_total == PGWT_CPU_NS_UNKNOWN)
-        return PGWT_CPU_NS_UNKNOWN;
-    uint64_t exact = it->cpu_ns_total;
-    if (it->on_cpu_ts && snapshot_ns >= it->on_cpu_ts)
-        exact += snapshot_ns - it->on_cpu_ts;
-    return (exact >= it->last_cpu_ns) ? exact - it->last_cpu_ns : 0;
-}
-
-/* compute.c:486-496's majority rule, applied to the open stretch. PROVISIONAL:
- * the majority can flip when the interval finally closes. */
-static int stretch_in_command(const struct pgwt_open_interval *it,
-                              uint64_t snapshot_ns)
-{
-    uint64_t t0 = it->open_start_ns, t1 = snapshot_ns;
-    if (t1 <= t0)
-        return it->cmd_open != 0;
-    uint64_t open_ns = it->cmd_banked_ns;
-    if (it->cmd_open) {
-        uint64_t a = it->cmd_anchor_ns > t0 ? it->cmd_anchor_ns : t0;
-        if (t1 > a)
-            open_ns += t1 - a;
-    }
-    uint64_t dur = t1 - t0;
-    if (open_ns > dur)
-        open_ns = dur;
-    return open_ns * 2 >= dur;
-}
-
 int pgwt_overlay_build(struct pgwt_overlay *ov,
                        const struct pgwt_open_snapshot *snap,
                        const struct pgwt_overlay_request *req,
@@ -816,6 +1022,8 @@ int pgwt_overlay_build(struct pgwt_overlay *ov,
         sp->incarnation   = it->incarnation;
         sp->event_id      = it->event_id;
         sp->cat_flag      = it->cat_flag;
+        sp->category_id   = it->category_id;
+        memcpy(sp->category, it->category, sizeof(sp->category));
         sp->query_id      = it->query_id;
         sp->query_quality = it->query_quality;
         sp->from_wall_ns  = start;
@@ -823,12 +1031,23 @@ int pgwt_overlay_build(struct pgwt_overlay *ov,
         sp->wall_ns       = end - start;
         sp->stretch_from_wall_ns = s_from;
         sp->stretch_to_wall_ns   = s_to;
-        sp->in_command    = stretch_in_command(it, snap->snapshot_ns);
+        /* Reduced and cross-checked against the daemon's verdict at parse
+         * time; PROVISIONAL, because the majority can flip at the close. */
+        sp->in_command    = it->in_command;
 
-        uint64_t cpu_full = stretch_cpu_ns(it, snap->snapshot_ns);
-        sp->cpu_ns = (cpu_full == PGWT_CPU_NS_UNKNOWN)
-                   ? PGWT_CPU_NS_UNKNOWN
-                   : prorate(cpu_full, sp->wall_ns, s_to - s_from);
+        /* The shared helper's figure is deliberately unclamped (the flush has
+         * never clamped, and changing that would rewrite records the trace
+         * has carried since T8). Clamping is the CONSUMER's step, so it is
+         * here: prorate the stretch's CPU onto the clipped span, then cap it
+         * at the span's own wall — one backend cannot burn more CPU than the
+         * wall time it occupied. */
+        uint64_t cpu_full = it->cpu_ns;
+        if (cpu_full == PGWT_CPU_NS_UNKNOWN) {
+            sp->cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        } else {
+            uint64_t c = prorate(cpu_full, sp->wall_ns, s_to - s_from);
+            sp->cpu_ns = c > sp->wall_ns ? sp->wall_ns : c;
+        }
 
         /* The request's own filter predicate, applied to the fully built span
          * so it can test event, category, query and pid alike. */
@@ -910,6 +1129,10 @@ uint64_t pgwt_overlay_span_cpu_ns(const struct pgwt_overlay_span *s,
     uint64_t ov = pgwt_overlay_span_overlap_ns(s, from_wall_ns, to_wall_ns);
     if (ov == 0)
         return 0;
+    /* No clamp needed here: the span's own cpu_ns was already clamped to its
+     * wall by the builder, so a sub-window share of it cannot exceed that
+     * sub-window. A second clamp would be unreachable code — and unreachable
+     * code is indistinguishable from a guard that does not work. */
     return prorate(s->cpu_ns, ov, s->wall_ns);
 }
 

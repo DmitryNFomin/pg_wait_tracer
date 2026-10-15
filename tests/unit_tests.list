@@ -610,7 +610,13 @@ test_summary_raw_parity_lib.py
 # window that ends before the open stamp empties itself through the clip
 # alone, and there is no near-now test anywhere in the module to regress),
 # the mandatory span filter for a filtered request, the refusal of a window
-# the snapshot never covered (unknown is not zero), the RAW-route
+# the snapshot never covered (unknown is not zero), the three-step command
+# classification (cmd_sweep_open, NOT the instantaneous cmd_open, with the
+# two fallbacks that are rules rather than derivations -- 144 gate states,
+# each also driven with the daemon's verdict flipped so the table cannot be
+# satisfied by copying it), the cross-checks against the producer's own
+# figures (cmd_in_window, cmd_open_ns, cpu_ns, open_count and the wall-vs-
+# anchor identity), the RAW-route
 # and EXACT-tier refusals (summary v8 already credits open waits per sealed
 # second, so synthesizing there double counts), and the degraded contract: when
 # the overlay is unavailable the in-flight contribution is ABSENT and labelled,
@@ -618,13 +624,16 @@ test_summary_raw_parity_lib.py
 # second call of the code under test; additivity is deliberately not the
 # primary assertion because it accepts an all-zero overlay.
 test_open_overlay
-# The false-negative suite over the entry above: 21 mutations of
+# The false-negative suite over the entry above: 34 mutations of
 # src/open_overlay.c, each of which must turn test_open_overlay RED, plus a
 # comment-only control that must leave it GREEN (otherwise "every edit fails"
 # would look exactly like "every guard works"). A mutation that does not
 # apply, does not compile, or HANGS is a failure, and a missing compiler
-# refuses instead of skipping. It found two blind spots in the unit test
-# itself before either was committed: an unmeasured-CPU sentinel that survived
-# the arithmetic by accident, and a wall stamp that happened to be exactly
-# representable as a double.
+# refuses instead of skipping. It found four blind spots in the unit test
+# itself before any of them was committed: an unmeasured-CPU sentinel that
+# survived the arithmetic by accident, a wall stamp that happened to be
+# exactly representable as a double, a sub-window CPU clamp that was
+# unreachable (deleted), and the gate reduction's CLAMP, which cannot change
+# the majority verdict and so was invisible until the fixture started
+# carrying the daemon's cmd_open_ns as well.
 test_open_overlay_mutations.sh

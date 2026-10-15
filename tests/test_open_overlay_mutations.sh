@@ -98,7 +98,20 @@ clip-past-snapshot	s@uint64_t end_cap = req->to_wall_ns < snapshot_wall \? req->
 absent-pids-is-empty	s@if \(!cJSON_IsArray\(pids\)\) \{@if (0) {@
 route-tier-gate-off	s@if \(!pgwt_overlay_wanted\(req, why, sizeof\(why\)\)\) \{@if (0) {@
 io-worker-included	s@if \(it->cat_flag & PGWT_EVENT_FLAG_IO_WORKER\)@if (0)@
-unknown-cpu-becomes-zero	s@if \(it->cpu_ns_total == PGWT_CPU_NS_UNKNOWN\)\n        return PGWT_CPU_NS_UNKNOWN;@if (0)\n        return PGWT_CPU_NS_UNKNOWN;@
+absent-cpu-becomes-measured	s@            else if \(snap->cpu_accounting && !has_sent\)@            else if (0)@
+cpu-drift-check-off	s@            else if \(snap->cpu_accounting && has_sent && sent != it->cpu_ns\)@            else if (0)@
+cpu-span-clamp-off	s@            sp->cpu_ns = c > sp->wall_ns \? sp->wall_ns : c;@            sp->cpu_ns = c;@
+classify-uses-instantaneous-gate	s@    if \(it->cmd_sweep_open\) \{\n        uint64_t a = it->cmd_anchor_ns@    if (it->cmd_open) {\n        uint64_t a = it->cmd_anchor_ns@
+classify-no-seen-shortcircuit	s@    if \(!it->cmd_seen\)\n        return 1;@    if (0)\n        return 1;@
+classify-no-gate-present-fallback	s@    if \(!it->cmd_gate_present\)\n        return it->cmd_open != 0;@    if (0)\n        return it->cmd_open != 0;@
+classify-no-clamp	s@    if \(open_ns > wall\)\n        open_ns = wall;@    if (0)\n        open_ns = wall;@
+verdict-crosscheck-off	s@            else if \(it->in_command != it->cmd_in_window\)@            else if (0)@
+cmd-open-ns-crosscheck-off	s@            else if \(it->cmd_gate_present &&@            else if (0 \&\&@
+anchor-consistency-off	s@    if \(want_snap_wall != snap->snapshot_wall_ns \|\|@    if (0 \&\&@
+open-count-crosscheck-off	s@    if \(json_u64\(root, "open_count", &open_count\) == 0 && open_count != \(uint64_t\)n\) \{@    if (0) {@
+status-ignored	s@    if \(strcmp\(status, "included"\) != 0\) \{@    if (0) {@
+empty-category-accepted	s@    if \(!cJSON_IsString\(it\) \|\| !it->valuestring \|\| !it->valuestring\[0\]\)@    if (!cJSON_IsString(it) || !it->valuestring)@
+bool-accepts-anything	s@    if \(cJSON_IsNumber\(it\) && \(it->valuedouble == 0.0 \|\| it->valuedouble == 1.0\)\) \{\n        \*out = it->valuedouble != 0.0;\n        return 0;\n    \}\n    return -1;@    *out = 1;\n    return 0;@
 init-fails-open	s@ov->status = PGWT_OVERLAY_UNAVAILABLE;\n    set_reason\(ov->reason, sizeof\(ov->reason\), "overlay not requested"\);@ov->status = PGWT_OVERLAY_INCLUDED;\n    set_reason(ov->reason, sizeof(ov->reason), "");@
 degraded-renders-zero	s@cJSON_AddBoolToObject\(o, "excludes_in_flight", 1\);@cJSON_AddBoolToObject(o, "excludes_in_flight", 1); cJSON_AddNumberToObject(o, "in_flight_ns", 0);@
 committed-prefix-ignored	s@if \(snap->committed_through_ns < it->open_start_ns\) \{@if (0) {@
