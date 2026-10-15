@@ -1,0 +1,25 @@
+--- test_blink_injector_bracket_moves_with_the_target_index ---
+  PASS: target 1: overlay appended after exactly 1 screenshots (got 1)
+  PASS: target 1: overlay removed after the target's own screenshot (got 2)
+  PASS: target 3: overlay appended after exactly 3 screenshots (got 3)
+  PASS: target 3: overlay removed after the target's own screenshot (got 4)
+  PASS: target 4: overlay appended after exactly 4 screenshots (got 4)
+  PASS: target 4: overlay removed after the target's own screenshot (got 5)
+--- test_blink_injector_records_the_four_bounding_timestamps ---
+  PASS: all four bounding timestamps recorded
+  PASS: the recorded bounds are monotonic
+  PASS: the page reports the overlay was still present at removal
+  PASS: the record carries the target index and the configured dwell
+--- test_blink_injector_min_dwell_is_measured_from_the_painted_frame ---
+  PASS: the hide waits until painted+400ms, not until a wall-clock deadline chosen before the sweep ([1000440])
+--- test_blink_injector_leaves_nones_when_the_show_handshake_fails ---
+  PASS: an empty show result leaves both show timestamps None
+  PASS: with no painted time the hide removes immediately rather than waiting painted+dwell on a None ([0])
+  PASS: the verdict refuses on the half-filled record
+--- test_blink_injector_record_feeds_a_proven_verdict ---
+  PASS: the injector's own bracket is provable (None)
+
+Ran 46, passed 46, failed 0 (16 test functions discovered)
+
+CHECK PASSED (full) — stamp b795b7c2f76a5204b7877a1cacbff09fc4566714
+make check exit=0

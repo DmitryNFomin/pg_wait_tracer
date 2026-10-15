@@ -19,6 +19,16 @@
  * construction; a mistake in selection is what the three silent-wrong modes
  * are made of, and that is what is swept here.
  *
+ * WHAT THE ORACLE'S ARRAY IS, UNDER VERSION 2. The corrected loader admits
+ * a record whose interval OVERLAPS the window and CLIPS it at `to`, so the
+ * oracle applies that transform — corrected_loader_clip() below — to the
+ * full record array before calling the shipping computation. That function
+ * is a LINEAR pass over the array with no chunks, no bounds, no binary
+ * search and no call into src/interval_index.c, which is what keeps this a
+ * differential instead of a tautology: the index's prefilter, its chunk
+ * bounds and its walk have to arrive at the same set by a completely
+ * different route.
+ *
  * THE THREE SILENT-WRONG MODES, each with its own literal expectation
  * -------------------------------------------------------------------
  * 1. CLIPPED start_ns. "fx_long" holds one 700 ms wait whose END record
@@ -34,11 +44,18 @@
  *    a 4-pid burst whose four END records can be cut into four different
  *    blocks; every cut must still report bursts_total == 1 with the same
  *    four pids. Mutation M05 duplicates a boundary row.
- * 3. SILENTLY "FIXING" the raw path's exclusion of waits still open at `to`.
- *    "fx_main" has a wait whose end record is past `to`; the raw path does
- *    not select it, so neither may the index. Asserted by value, and
- *    out->excluded_open_past_to proves the case was reached rather than
- *    assumed. Mutation M06 includes it.
+ * 3. LOSING A WAIT STILL OPEN AT `to` (version 2). The corrected loader
+ *    admits an interval that OVERLAPS the window and clips it there; the
+ *    index must do the same. "fx_main" has a wait whose end record is past
+ *    `to` and whose start is inside, so it must be selected and clipped;
+ *    "fx_order" has one whose presence changes a bucket's peak COUNT, so
+ *    dropping it is visible and not merely arguable. out->clipped_open_past_to
+ *    proves the case was reached. Mutations M06/M06b restore version 1's
+ *    exclusion at the row level and at the CHUNK level — the second is the
+ *    trap: a chunk whose intervals all end after `to` can still hold one
+ *    that began before it, so a prefilter keyed on the chunk's end range
+ *    drops the same records one level up. out->chunks_overlap_rescued
+ *    counts the chunks a version-1 prefilter would have skipped.
  *
  * WHAT MAKES THIS PASS WHILE BROKEN — and what stops it
  * -----------------------------------------------------
@@ -88,6 +105,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <time.h>
 
 static int tests_run = 0;
@@ -186,7 +204,7 @@ static struct pgwt_trace_event impossible_rec(int ts_ms, uint32_t pid)
     return e;
 }
 
-static struct fixture g_fx[10];
+static struct fixture g_fx[12];
 static int g_nfx = 0;
 
 static struct fixture *add_fx(const char *name)
@@ -204,7 +222,7 @@ static void push(struct fixture *f, struct pgwt_trace_event e)
 
 /* Fixture indices, so literal expectations can name one. */
 static int FX_MAIN, FX_NOWAIT, FX_ONE, FX_TWOBURST, FX_PIDREPEAT, FX_LONG;
-static int FX_EDGE, FX_COVER;
+static int FX_EDGE, FX_COVER, FX_ORDER, FX_FAREDGE;
 
 static void build_fixtures(void)
 {
@@ -284,6 +302,29 @@ static void build_fixtures(void)
     push(f, wait_rec(300, 52, 206, EV_C));     /* onset 94 */
     push(f, wait_rec(900, 53, 804, EV_C));     /* ends AT `to`, onset 96 */
 
+    /* fx_faredge — fx_edge's mirror image at the FAR edge, and the fixture
+     * version 1 had no reason to own.
+     *
+     * A 4-pid burst whose members are ALL still waiting at `to` (every end
+     * record is past 900 ms) and whose onsets are 892, 894, 896 and 900 ms
+     * — the last one starting EXACTLY at `to`. Under overlap admission all
+     * four are in, the group is 4 pids and the burst exists. Narrow the far
+     * side to half-open (`start >= to` drops it), or skip the chunk that
+     * holds only that record (`min_start_ns >= to_ns`), and the group falls
+     * to 3 pids and the burst DISAPPEARS.
+     *
+     * Why it had to be a burst and not a peak: a wait starting exactly at
+     * `to` contributes to NO bucket (b_lo lands past the last one), exactly
+     * as a wait ending exactly at `from` contributes to none. Peaks cannot
+     * see either edge; only the burst grouping can. Without this fixture
+     * mutations M07 and M10 both stayed GREEN. */
+    FX_FAREDGE = g_nfx;
+    f = add_fx("fx_faredge");
+    push(f, wait_rec(1100, 60, 208, EV_B));    /* onset 892, open at `to` */
+    push(f, wait_rec(1150, 61, 256, EV_B));    /* onset 894, open at `to` */
+    push(f, wait_rec(1200, 62, 304, EV_B));    /* onset 896, open at `to` */
+    push(f, wait_rec(1300, 63, 400, EV_B));    /* onset 900 == `to` exactly */
+
     /* fx_cover — a 4-pid burst whose onsets ALL lie before the indexed
      * coverage starts (35..41 ms vs coverage opening at 50 ms), with their
      * end records spread across the stream so a cut puts them in later
@@ -302,6 +343,31 @@ static void build_fixtures(void)
     push(f, wait_rec(300, 101, 263, EV_B));    /* onset 37 ms */
     push(f, wait_rec(400, 102, 361, EV_B));    /* onset 39 ms */
     push(f, wait_rec(500, 103, 459, EV_B));    /* onset 41 ms */
+
+    /* fx_order — ORDER and the CLIPPED ROW, each made visible on its own.
+     *
+     * Bucket 2 pins ORDER: pid 74 (EV_A, 340..350) sits inside it, pid 75
+     * (EV_B, 150..380) runs across it. Both reach a count of 1 there, and
+     * pgwt_compute_concurrency gives the bucket to whichever REACHES the
+     * count first, so by true END order (350 before 380) bucket 2 belongs
+     * to EV_A. Materialise the array in START order instead — the one
+     * re-sort a clipped row invites, because its own timestamp is no longer
+     * its end — and 150 comes before 340, so bucket 2 flips to EV_B.
+     *
+     * Bucket 7 pins the CLIPPED ROW by COUNT, not by tie-break: pid 73
+     * (EV_C, 820..830) and pid 72 (EV_C, 850..950, still open at `to`) are
+     * two distinct pids on the same event in the same bucket. Keep the
+     * clipped row and the peak is 2; drop it, as version 1 did, and the
+     * peak is 1. pid 70 (EV_B) and pid 71 (EV_A) are there so the bucket
+     * also has losing events in it. */
+    FX_ORDER = g_nfx;
+    f = add_fx("fx_order");
+    push(f, wait_rec(350, 74, 10, EV_A));      /* 340..350, bucket 2 */
+    push(f, wait_rec(380, 75, 230, EV_B));     /* 150..380, buckets 0..2 */
+    push(f, wait_rec(830, 73, 10, EV_C));      /* 820..830, bucket 7 */
+    push(f, wait_rec(850, 70, 10, EV_B));      /* 840..850, bucket 7 */
+    push(f, wait_rec(880, 71, 300, EV_A));     /* 580..880, buckets 4..7 */
+    push(f, wait_rec(950, 72, 100, EV_C));     /* 850..950: OPEN at `to` */
 
     FX_LONG = g_nfx;
     f = add_fx("fx_long");
@@ -360,13 +426,48 @@ static int build_index(const struct fixture *fx, unsigned mask,
     return pgwt_interval_index_seal(idx);
 }
 
-/* The raw path: the shipping computation over the FULL record array, which
- * is what src/server.c's handle_concurrency() does. */
+/* THE CORRECTED LOADER, as one linear pass and nothing else.
+ *
+ * Rule, written out: a record's interval is [timestamp_ns - duration_ns,
+ * timestamp_ns]. It OVERLAPS [from, to] when it ends at or after `from` and
+ * starts at or before `to`. One whose end lies past `to` is CUT AT `to`,
+ * keeping its true start: timestamp := to, duration := to - start. Every
+ * other record is left exactly as it was — including records that overlap
+ * nothing, which pgwt_compute_concurrency drops on its own window test, and
+ * records that are not waits at all (markers, on-CPU gaps, idle waits),
+ * which it drops on its own predicate. Nothing here consults
+ * src/interval_index.c.
+ *
+ * A record whose duration exceeds its own end timestamp is impossible and
+ * is never clipped: `start` would have to be negative. The shipping
+ * chokepoint refuses it on both sides, and the explicit guard here means
+ * this function does not depend on unsigned wrap to get that right. */
+static void corrected_loader_clip(const struct pgwt_trace_event *in, int n,
+                                  uint64_t to_ns, struct pgwt_trace_event *out)
+{
+    for (int i = 0; i < n; i++) {
+        struct pgwt_trace_event e = in[i];
+        if (e.duration_ns <= e.timestamp_ns && e.timestamp_ns > to_ns) {
+            uint64_t start = e.timestamp_ns - e.duration_ns;
+            if (start <= to_ns) {
+                e.timestamp_ns = to_ns;
+                e.duration_ns = to_ns - start;
+            }
+        }
+        out[i] = e;
+    }
+}
+
+/* The raw path: the shipping computation over the corrected loader's FULL
+ * record array, which is what src/server.c's handle_concurrency() does once
+ * the loader admits by overlap (#424). */
 static void oracle(const struct fixture *fx, const struct pgwt_filter *f,
                    uint64_t from_ns, uint64_t to_ns, int nb,
                    struct pgwt_concurrency_result *out)
 {
-    pgwt_compute_concurrency(fx->ev, fx->n, f, from_ns, to_ns, nb,
+    struct pgwt_trace_event ev[MAXEV];
+    corrected_loader_clip(fx->ev, fx->n, to_ns, ev);
+    pgwt_compute_concurrency(ev, fx->n, f, from_ns, to_ns, nb,
                              BURST_WIN, BURST_THRESH, out);
 }
 
@@ -463,7 +564,8 @@ static int cmp_conc(const struct pgwt_concurrency_result *a,
 /* ── ledger counters ──────────────────────────────────────── */
 
 static long c_triples, c_cut_masks, c_multiblock, c_cross_block;
-static long c_before_cover, c_open_past_to, c_end_before_from;
+static long c_before_cover, c_clipped, c_end_before_from;
+static long c_start_past_to, c_rescued, c_scan_limit_chunks;
 static long c_peak_gt1, c_bursts, c_burst_multiblock, c_pid_two_chunks;
 static long c_no_intervals, c_empty_chunk_skipped, c_rows;
 static long c_mismatch;
@@ -530,26 +632,32 @@ static int pid_in_two_chunks_same_bucket(const struct pgwt_interval_index *idx,
                                          uint64_t from_ns, uint64_t to_ns,
                                          uint64_t bucket_ns, int nb)
 {
+    /* Version 2's selection, restated for the ledger: overlap, then the end
+     * clipped to `to`. */
+#define SELECTED(iv) ((iv)->end_ns >= from_ns && (iv)->start_ns <= to_ns)
+#define CLIP_END(iv) ((iv)->end_ns > to_ns ? to_ns : (iv)->end_ns)
     for (int i = 0; i < idx->n_rows; i++) {
         const struct pgwt_wait_interval *a = &idx->rows[i];
-        if (a->end_ns < from_ns || a->end_ns > to_ns) continue;
+        if (!SELECTED(a)) continue;
         int alo, ahi;
-        ledger_bucket_range(a->start_ns, a->end_ns, from_ns, bucket_ns, nb,
+        ledger_bucket_range(a->start_ns, CLIP_END(a), from_ns, bucket_ns, nb,
                             &alo, &ahi);
         if (ahi < alo) continue;
         for (int j = i + 1; j < idx->n_rows; j++) {
             const struct pgwt_wait_interval *b = &idx->rows[j];
-            if (b->end_ns < from_ns || b->end_ns > to_ns) continue;
+            if (!SELECTED(b)) continue;
             if (a->pid != b->pid || a->event_id != b->event_id) continue;
             if (chunk_of_row(idx, i) == chunk_of_row(idx, j)) continue;
             int blo, bhi;
-            ledger_bucket_range(b->start_ns, b->end_ns, from_ns, bucket_ns,
+            ledger_bucket_range(b->start_ns, CLIP_END(b), from_ns, bucket_ns,
                                 nb, &blo, &bhi);
             if (bhi < blo) continue;
             if (alo <= bhi && blo <= ahi)
                 return 1;
         }
     }
+#undef SELECTED
+#undef CLIP_END
     return 0;
 }
 
@@ -648,26 +756,115 @@ static void literal_expectations(void)
                   (long long)((int64_t)(b->timestamp_ns - BASE) / 1000000));
             CHECK(b->event_id == EV_A, "fx_main: burst event is EV_A");
         }
-        CHECK(q.excluded_open_past_to == 1,
-              "fx_main: exactly 1 interval excluded for ending past `to` "
-              "(got %ld) — the raw path's exclusion, reproduced not 'fixed'",
-              q.excluded_open_past_to);
+        CHECK(q.clipped_open_past_to == 1,
+              "fx_main: exactly 1 interval still OPEN at `to` was admitted "
+              "and clipped (got %ld) — version 2's overlap admission, "
+              "reached and not merely argued", q.clipped_open_past_to);
         /* The wait ending exactly AT `to` (pid 40, 850..900) is INSIDE the
          * window: buckets 7 only. The one ending exactly at `from` (pid 41)
          * contributes to no bucket. */
         CHECK(q.result.peak_sessions[7] >= 1,
               "fx_main: the wait ending exactly at `to` is selected "
               "(bucket 7 peak %d >= 1)", q.result.peak_sessions[7]);
-        CHECK(q.intervals_used == 9,
-              "fx_main: 9 of its 14 records are indexable waits inside the "
-              "window (got %ld): the marker, the on-CPU gap, the idle wait, "
-              "the impossible record and the one open past `to` are all out",
-              q.intervals_used);
+        /* ORDER. Bucket 7 holds pid 40 (EV_C, ends exactly at `to`) and the
+         * clipped pid 12 (EV_A, ends at 950), each reaching a count of 1.
+         * The first to REACH the count owns the bucket, and the array must
+         * be in true-END order, so EV_C owns it. Materialise the clipped
+         * row ahead of the in-window ones and this reads EV_A. */
+        CHECK(q.result.peak_event[7] == EV_C,
+              "fx_main: bucket 7 belongs to EV_C — the clipped row is "
+              "materialised in true-END order, after pid 40 (got %u)",
+              q.result.peak_event[7]);
+        CHECK(q.intervals_used == 10,
+              "fx_main: 10 of its 14 records are waits overlapping the "
+              "window (got %ld): the marker, the on-CPU gap, the idle wait "
+              "and the impossible record are out; the one still open at "
+              "`to` is IN, clipped", q.intervals_used);
     }
     CHECK(idx.n_records_skipped == 4,
           "fx_main: the shared predicate skipped exactly 4 records "
           "(marker, on-CPU, idle, impossible); got %ld",
           idx.n_records_skipped);
+    pgwt_interval_index_query_free(&q);
+    pgwt_interval_index_free(&idx);
+
+    /* fx_order: the two version-2 properties that the differential alone
+     * would only catch by luck — the clipped row raising a bucket's COUNT,
+     * and the materialisation ORDER deciding which event owns a bucket. */
+    const struct fixture *fo = &g_fx[FX_ORDER];
+    CHECK(build_index(fo, 0x1Fu, 0, &idx) == 0,
+          "fx_order: index built with each record in its own block");
+    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+                                    BURST_WIN, BURST_THRESH, &q) == 0,
+          "fx_order: query answered (%s)",
+          pgwt_interval_index_refusal_str(q.refused));
+    if (q.have_result) {
+        int want[8] = {1, 1, 1, 0, 1, 1, 1, 2};
+        uint32_t wante[8] = {EV_B, EV_B, EV_A, 0, EV_A, EV_A, EV_A, EV_C};
+        int ok = (q.result.num_buckets == 8);
+        for (int i = 0; ok && i < 8; i++)
+            ok = (q.result.peak_sessions[i] == want[i]);
+        CHECK(ok, "fx_order: peak_sessions == {1,1,1,0,1,1,1,2}; got "
+              "{%d,%d,%d,%d,%d,%d,%d,%d}",
+              q.result.peak_sessions[0], q.result.peak_sessions[1],
+              q.result.peak_sessions[2], q.result.peak_sessions[3],
+              q.result.peak_sessions[4], q.result.peak_sessions[5],
+              q.result.peak_sessions[6], q.result.peak_sessions[7]);
+        int oke = 1;
+        for (int i = 0; i < 8; i++)
+            if (q.result.peak_event[i] != wante[i]) oke = 0;
+        CHECK(oke, "fx_order: peak_event == {B,B,A,-,A,A,A,C}; got "
+              "{%u,%u,%u,%u,%u,%u,%u,%u}",
+              q.result.peak_event[0], q.result.peak_event[1],
+              q.result.peak_event[2], q.result.peak_event[3],
+              q.result.peak_event[4], q.result.peak_event[5],
+              q.result.peak_event[6], q.result.peak_event[7]);
+        CHECK(q.result.peak_sessions[7] == 2,
+              "fx_order: bucket 7 peak is 2 — the wait still OPEN at `to` is "
+              "a second distinct pid on EV_C there; version 1 read 1 (got %d)",
+              q.result.peak_sessions[7]);
+        CHECK(q.result.peak_event[2] == EV_A,
+              "fx_order: bucket 2 belongs to EV_A — true-END order, not "
+              "start order (got %u)", q.result.peak_event[2]);
+        CHECK(q.clipped_open_past_to == 1 && q.intervals_used == 6,
+              "fx_order: 1 clipped row, 6 intervals used (got %ld/%ld)",
+              q.clipped_open_past_to, q.intervals_used);
+    }
+    pgwt_interval_index_query_free(&q);
+    pgwt_interval_index_free(&idx);
+
+    /* fx_order again, with `to` moved PAST every end record: nothing is
+     * open at `to`, so the clip counter must be 0 and the answer must still
+     * be produced. The thing being checked is ABSENT here, not wrong — a
+     * counter that is never 0 is not measuring anything. */
+    CHECK(build_index(fo, 0x1Fu, 0, &idx) == 0, "fx_order: rebuilt");
+    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(1000), 9,
+                                    BURST_WIN, BURST_THRESH, &q) == 0,
+          "fx_order: wider window answered");
+    if (q.have_result)
+        CHECK(q.clipped_open_past_to == 0 && q.chunks_overlap_rescued == 0 &&
+              q.intervals_used == 6,
+              "fx_order [100,1000]: nothing is open at `to`, so 0 clipped "
+              "and 0 rescued chunks, still 6 intervals (got %ld/%ld/%ld)",
+              q.clipped_open_past_to, q.chunks_overlap_rescued,
+              q.intervals_used);
+    pgwt_interval_index_query_free(&q);
+    pgwt_interval_index_free(&idx);
+
+    /* THE TRAP, by value. The last record of fx_order is alone in a chunk
+     * whose min_end_ns (950 ms) is past `to` (900 ms) — a version-1
+     * prefilter skips that chunk outright, and the clipped row disappears
+     * without any row-level test ever running. The counter below is what
+     * says the overlap-aware chunk bound was the thing that saved it. */
+    CHECK(build_index(fo, 0x1Fu, 0, &idx) == 0, "fx_order: rebuilt for trap");
+    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+                                    BURST_WIN, BURST_THRESH, &q) == 0,
+          "fx_order: trap window answered");
+    if (q.have_result)
+        CHECK(q.chunks_overlap_rescued == 1,
+              "fx_order: exactly 1 chunk would have been SKIPPED by a "
+              "version-1 end-range prefilter and had to be scanned (got %ld)",
+              q.chunks_overlap_rescued);
     pgwt_interval_index_query_free(&q);
     pgwt_interval_index_free(&idx);
 
@@ -704,6 +901,47 @@ static void literal_expectations(void)
               "fx_edge: bucket 0 peak is 3 (the member ending exactly at "
               "`from` contributes to no bucket); got %d",
               q.result.peak_sessions[0]);
+    }
+    pgwt_interval_index_query_free(&q);
+    pgwt_interval_index_free(&idx);
+
+    /* fx_faredge: the far edge, which peaks cannot see. All four members
+     * are still waiting at `to`; the fourth STARTS exactly at `to`. */
+    const struct fixture *ff = &g_fx[FX_FAREDGE];
+    CHECK(build_index(ff, 0x7u, 0, &idx) == 0,
+          "fx_faredge: index built with each record in its own block");
+    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+                                    BURST_WIN, BURST_THRESH, &q) == 0,
+          "fx_faredge: query answered (%s)",
+          pgwt_interval_index_refusal_str(q.refused));
+    if (q.have_result) {
+        CHECK(q.intervals_used == 4 && q.clipped_open_past_to == 4,
+              "fx_faredge: all 4 are selected and all 4 are CLIPPED — every "
+              "end record lies past `to` (got %ld/%ld)",
+              q.intervals_used, q.clipped_open_past_to);
+        CHECK(q.chunks_overlap_rescued == 4,
+              "fx_faredge: all 4 chunks would have been skipped whole by a "
+              "version-1 end-range prefilter (got %ld)",
+              q.chunks_overlap_rescued);
+        CHECK(q.result.bursts_total == 1 && q.result.num_bursts == 1,
+              "fx_faredge: the 4-pid burst survives at the far edge "
+              "(bursts_total %d, num_bursts %d)",
+              q.result.bursts_total, q.result.num_bursts);
+        if (q.result.num_bursts == 1) {
+            const struct pgwt_burst *b = &q.result.bursts[0];
+            CHECK(b->num_sessions == 4 && b->pids[0] == 60 &&
+                  b->pids[1] == 61 && b->pids[2] == 62 && b->pids[3] == 63,
+                  "fx_faredge: burst pid list is {60,61,62,63} — including "
+                  "the one that STARTS exactly at `to` (got %d sessions, "
+                  "{%u,%u,%u,%u})", b->num_sessions, b->pids[0], b->pids[1],
+                  b->pids[2], b->pids[3]);
+            CHECK(b->timestamp_ns == T(892),
+                  "fx_faredge: onset is the UNCLIPPED first start (892 ms)");
+        }
+        CHECK(q.result.peak_sessions[7] == 3,
+              "fx_faredge: bucket 7 peak is 3, not 4 — the member starting "
+              "exactly at `to` contributes to NO bucket, which is why this "
+              "fixture asserts the BURST (got %d)", q.result.peak_sessions[7]);
     }
     pgwt_interval_index_query_free(&q);
     pgwt_interval_index_free(&idx);
@@ -760,15 +998,19 @@ static void prewindow_equivalence(void)
         const struct fixture *fx = &g_fx[x];
         for (int w = 0; w < 4; w++) {
             uint64_t from = T(wins[w][0]), to = T(wins[w][1]);
-            /* src/server.c's record predicate: skip timestamp_ns < from_m
-             * or > to_m. Inclusive at both ends, keyed on the END. */
+            /* The corrected loader's own record predicate: clip at `to`
+             * first, then keep timestamp_ns in [from, to]. Clipping is what
+             * brings a wait still open at `to` INTO that range — under
+             * version 1's predicate it was simply skipped. */
             struct fixture cut;
             memset(&cut, 0, sizeof(cut));
             cut.name = fx->name;
+            struct pgwt_trace_event clipped[MAXEV];
+            corrected_loader_clip(fx->ev, fx->n, to, clipped);
             for (int i = 0; i < fx->n; i++)
-                if (fx->ev[i].timestamp_ns >= from &&
-                    fx->ev[i].timestamp_ns <= to)
-                    cut.ev[cut.n++] = fx->ev[i];
+                if (clipped[i].timestamp_ns >= from &&
+                    clipped[i].timestamp_ns <= to)
+                    cut.ev[cut.n++] = clipped[i];
             if (cut.n == 0)
                 continue;   /* count==0 is the documented seam; see the header */
             for (int nb = 8; nb <= 23; nb += 15) {
@@ -880,7 +1122,10 @@ static void sweep_cuts(void)
 
                     c_triples++;
                     c_rows += q.intervals_used;
-                    c_open_past_to += q.excluded_open_past_to;
+                    c_clipped += q.clipped_open_past_to;
+                    c_start_past_to += q.excluded_start_past_to;
+                    c_rescued += q.chunks_overlap_rescued;
+                    c_scan_limit_chunks += q.chunks_scan_limited;
                     c_end_before_from += q.excluded_end_before_from;
                     c_empty_chunk_skipped += q.chunks_total - q.chunks_scanned;
                     c_bursts += q.result.bursts_total;
@@ -1064,17 +1309,93 @@ static void bypass_suite(void)
     idx.version = PGWT_INTERVAL_INDEX_VERSION;
 
     /* A hand-corrupted row order: seal must catch it rather than let the
-     * binary search read a sorted array that is not sorted. */
-    if (idx.n_rows >= 2) {
-        struct pgwt_wait_interval t = idx.rows[0];
-        idx.rows[0] = idx.rows[idx.n_rows - 1];
-        idx.rows[idx.n_rows - 1] = t;
-        CHECK(pgwt_interval_index_seal(&idx) == -1,
-              "seal REFUSES a row array that is not sorted by end_ns");
-        expect_refusal("unsorted rows", &idx, &f, T(100), T(900), 8,
-                       PGWT_INTERVAL_INDEX_REFUSE_GAP);
+     * binary search read a sorted array that is not sorted.
+     *
+     * The swap is deliberately WITHIN ONE CHUNK. Every chunk bound
+     * (min/max end, min start, max duration) is order-independent, so an
+     * in-chunk swap leaves all four identical and seal's bound
+     * re-derivation cannot fire — which means a pass here is the
+     * sorted-by-end_ns check doing the work and nothing else. Swapping
+     * across chunks, as this case used to, moves rows between chunks and
+     * the bound check catches it instead: the sort check would then be
+     * removable with this test still green (mutation M25 proved exactly
+     * that). */
+    {
+        int target = -1;
+        for (int c = 0; c < idx.n_chunks; c++) {
+            const struct pgwt_interval_index_chunk *ch = &idx.chunks[c];
+            if (ch->n_rows >= 2 &&
+                idx.rows[ch->first_row].end_ns !=
+                idx.rows[ch->first_row + ch->n_rows - 1].end_ns) {
+                target = c;
+                break;
+            }
+        }
+        CHECK(target >= 0,
+              "unsorted rows: a chunk with two rows of different end_ns "
+              "exists to swap (the case must be reachable)");
+        if (target >= 0) {
+            int a = idx.chunks[target].first_row;
+            int b = a + idx.chunks[target].n_rows - 1;
+            struct pgwt_wait_interval t = idx.rows[a];
+            idx.rows[a] = idx.rows[b];
+            idx.rows[b] = t;
+            CHECK(pgwt_interval_index_seal(&idx) == -1,
+                  "seal REFUSES a row array that is not sorted by end_ns "
+                  "(swapped inside ONE chunk, so every chunk bound is "
+                  "still exactly right and only the sort check can see it)");
+            expect_refusal("unsorted rows", &idx, &f, T(100), T(900), 8,
+                           PGWT_INTERVAL_INDEX_REFUSE_GAP);
+        }
     }
     pgwt_interval_index_free(&idx);
+
+    /* A CHUNK BOUND THAT LIES. This is the version-2 failure mode with no
+     * symptom: a prefilter bound that is too narrow skips a chunk holding
+     * a selected interval, and the answer comes back SHORT with nothing in
+     * it looking wrong. Each bound is corrupted in the direction that
+     * loses rows, and seal must refuse rather than re-derive and carry on.
+     * The pristine re-seal between them proves the refusals are caused by
+     * the corruption and not by the index being unsealable. */
+    {
+        struct {
+            const char *name;
+            size_t off;
+            uint64_t delta;     /* added to the true bound */
+        } cases[] = {
+            {"min_start_ns raised past the rows that start earlier",
+             offsetof(struct pgwt_interval_index_chunk, min_start_ns),
+             1000 * MS},
+            {"max_duration_ns shortened (the scan stops too early)",
+             offsetof(struct pgwt_interval_index_chunk, max_duration_ns),
+             (uint64_t)-1},     /* true - 1 */
+            {"max_end_ns lowered (the low-side skip fires wrongly)",
+             offsetof(struct pgwt_interval_index_chunk, max_end_ns),
+             (uint64_t)-(int64_t)(1000 * MS)},
+            {"min_end_ns raised (the bound the prefilter must NOT use, "
+             "still verified)",
+             offsetof(struct pgwt_interval_index_chunk, min_end_ns),
+             1000 * MS},
+        };
+        for (unsigned ci = 0; ci < sizeof(cases) / sizeof(cases[0]); ci++) {
+            CHECK(build_index(fm, 0x5u, 0, &idx) == 0,
+                  "chunk-bound: pristine index built for '%s'",
+                  cases[ci].name);
+            int target = -1;
+            for (int c = 0; c < idx.n_chunks; c++)
+                if (idx.chunks[c].n_rows > 1) { target = c; break; }
+            CHECK(target >= 0, "chunk-bound: a chunk with >1 row exists");
+            if (target < 0) { pgwt_interval_index_free(&idx); continue; }
+            uint64_t *slot = (uint64_t *)((char *)&idx.chunks[target] +
+                                          cases[ci].off);
+            *slot += cases[ci].delta;
+            CHECK(pgwt_interval_index_seal(&idx) == -1,
+                  "seal REFUSES a corrupted chunk bound: %s", cases[ci].name);
+            expect_refusal("corrupted chunk bound", &idx, &f, T(100), T(900),
+                           8, PGWT_INTERVAL_INDEX_REFUSE_GAP);
+            pgwt_interval_index_free(&idx);
+        }
+    }
 
     /* Empty index: no block was ever added. NOT "no concurrency". */
     pgwt_interval_index_init(&idx);
@@ -1268,11 +1589,19 @@ static void measure_compaction(void)
     CHECK(rc == 0 && q.have_result, "measure: index answered (%s)",
           pgwt_interval_index_refusal_str(q.refused));
 
+    /* The raw path is the CORRECTED loader: clip at `to`, then compute.
+     * The clip pass is part of what the raw path costs, so it is inside
+     * the timed region. */
+    struct pgwt_trace_event *clipped =
+        (struct pgwt_trace_event *)malloc((size_t)n * sizeof(*clipped));
+    if (!clipped) { CHECK(0, "measure: malloc failed"); free(ev); return; }
     struct pgwt_concurrency_result ref;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    pgwt_compute_concurrency(ev, n, &f, from, to, 60, BURST_WIN,
+    corrected_loader_clip(ev, n, to, clipped);
+    pgwt_compute_concurrency(clipped, n, &f, from, to, 60, BURST_WIN,
                              BURST_THRESH, &ref);
     clock_gettime(CLOCK_MONOTONIC, &t1);
+    free(clipped);
     double raw_us = (t1.tv_sec - t0.tv_sec) * 1e6 +
                     (t1.tv_nsec - t0.tv_nsec) / 1e3;
 
@@ -1345,8 +1674,15 @@ static void non_vacuity(void)
           "(the clipped-start detector)", c_cross_block);
     CHECK(c_before_cover > 0, "%ld intervals started before the indexed "
           "coverage itself", c_before_cover);
-    CHECK(c_open_past_to > 0, "%ld intervals were excluded for ending past "
-          "`to` (the raw path's exclusion, exercised)", c_open_past_to);
+    CHECK(c_clipped > 0, "%ld intervals were still OPEN at `to`, admitted "
+          "by overlap and CLIPPED there — version 2's new selection, "
+          "exercised", c_clipped);
+    CHECK(c_start_past_to > 0, "%ld intervals were examined and rejected "
+          "for STARTING after `to` — overlap admission has a far side, and "
+          "a rule that only ever admits is not a rule", c_start_past_to);
+    CHECK(c_scan_limit_chunks > 0, "%ld chunk scans stopped on the "
+          "`to + max_duration` bound — the one place a row is skipped "
+          "without its start_ns being read", c_scan_limit_chunks);
     CHECK(c_end_before_from > 0, "%ld intervals were excluded for ending "
           "before `from`", c_end_before_from);
     CHECK(c_pid_two_chunks > 0, "%ld answers had the SAME pid selected from "
@@ -1360,6 +1696,16 @@ static void non_vacuity(void)
           c_no_intervals);
     CHECK(c_empty_chunk_skipped > 0, "the prefilter skipped a block %ld "
           "times across the sweep", c_empty_chunk_skipped);
+    /* THE TRAP'S OWN ROW. A version-1 end-range prefilter would have
+     * skipped these chunks whole, and the clipped rows inside them would
+     * have vanished with no row-level test ever running. Zero here means
+     * the overlap-aware chunk bound was never the thing that mattered and
+     * the sweep cannot tell the two prefilters apart. A ONE-BLOCK feed
+     * drives it to 0 by construction (the trap needs a chunk that begins
+     * after `to`), which is part of what `oneblock` falsifies. */
+    CHECK(c_rescued > 0, "%ld chunk scans happened ONLY because the "
+          "high-side prefilter tests min_start_ns instead of min_end_ns — "
+          "the named trap, reached", c_rescued);
 }
 
 int main(int argc, char **argv)
