@@ -88,6 +88,26 @@ static inline uint64_t pgwt_open_stretch_cpu_ns(uint64_t cpu_ns_total,
     return (exact >= last_cpu_ns) ? exact - last_cpu_ns : 0;
 }
 
+/* The CPU prefix reported to the SUMMARY writer for a still-open on-CPU gap
+ * (summary v9, #424), and the one place the distinction that matters is made:
+ *
+ *   measured     → the measured on-CPU ns of [last_ts, now), already clamped
+ *                  to that wall by the caller;
+ *   NOT measured → PGWT_CPU_NS_UNKNOWN, never the wall.
+ *
+ * The live VIEW initialises its `cpu_open` to the full wall and only replaces
+ * it when the schedstat delta resolves, which is right for a display that
+ * must show something. Handing that same fallback to the writer as a
+ * measurement would claim the gap was 100% on CPU — a fabrication, and one
+ * that looks entirely plausible. The writer has an UNKNOWN tier for exactly
+ * this case (it is what the raw path does with an UNKNOWN record), so the
+ * honest answer is available and costs nothing. */
+static inline uint64_t pgwt_open_cpu_prefix_ns(uint64_t cpu_open_ns,
+                                               bool cpu_measured)
+{
+    return cpu_measured ? cpu_open_ns : PGWT_CPU_NS_UNKNOWN;
+}
+
 /* Is there an open stretch to close at all? The builder applies this itself;
  * it is exposed so a caller can skip resolving attribution (two BPF map reads
  * per pid) for a backend that will be skipped anyway — NOT so a caller can

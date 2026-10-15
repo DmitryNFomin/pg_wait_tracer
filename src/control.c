@@ -435,6 +435,73 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->summary_writer
                          ? d->summary_writer->io_worker_ns_excluded_total : 0);
 
+    /* ── Open-interval crediting (#379 v8, #424 v9) ──────────────────────
+     * The summary writer spreads a still-open interval across the seconds it
+     * covers instead of charging its closing second. These counters are the
+     * only way to tell a PRODUCER that feeds it observations from one that
+     * does not: a daemon whose live loop never notes an open on-CPU gap reads
+     * credited_ns == 0 with refused_total climbing, and every other number in
+     * this response still looks perfectly healthy. Unobservable before these
+     * keys existed, which is why they are published even though nothing
+     * gates on them. */
+    cjson_add_uint64(root, "summary_open_credited_ns_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_credited_ns_total : 0);
+    cjson_add_uint64(root, "summary_open_credit_records_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_credit_records_total : 0);
+    /* The v8 refusal of an OPEN on-CPU gap, counted rather than silent: it is
+     * what this daemon does until the v9 writer and the live-loop observation
+     * are in the same build. Non-zero here with
+     * summary_open_cpu_credited_ns at 0 is the honest signature of that
+     * state, and cpu_open_uncredited_ns is how much time it cost. */
+    cjson_add_uint64(root, "summary_open_cpu_refused_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_refused_total : 0);
+    cjson_add_uint64(root, "summary_cpu_open_uncredited_ns_total",
+                     d->summary_writer
+                         ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
+#if PGWT_SUMMARY_VERSION >= 9
+    /* v9 (#424). summary_open_cpu_credited_ns is THE verification for the
+     * producer side: on a capture containing an in-flight CPU statement it
+     * must be non-zero. Zero there means the live loop is not feeding
+     * observations while every test still passes.
+     *
+     * The rest are the writer's own self-checks: eff_rejected_total should
+     * read 0 in any build (the producer passes a classification the writer
+     * validates), class_divergent_ns counts the time whose majority answer
+     * changed after the class was frozen at first credit, tier_mismatch
+     * counts a measurement tier that changed mid-interval, and overcredit_ns
+     * counts credit the per-second cap had to refuse.
+     *
+     * Guarded for the same reason as the call site in src/map_reader.c: these
+     * fields arrive with the v9 writer, on another branch. Delete the
+     * conditional when it lands, and add these seven keys to
+     * tests/test_control.sh's required list at the same time. */
+    cjson_add_uint64(root, "summary_open_cpu_credited_ns",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_credited_ns_total : 0);
+    cjson_add_uint64(root, "summary_open_cpu_measured_ns",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_measured_ns_total : 0);
+    cjson_add_uint64(root, "summary_open_cpu_unknown_ns",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_unknown_ns_total : 0);
+    cjson_add_uint64(root, "summary_open_cpu_eff_rejected_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_eff_rejected_total : 0);
+    cjson_add_uint64(root, "summary_open_cpu_class_divergent_ns",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_class_divergent_ns_total
+                         : 0);
+    cjson_add_uint64(root, "summary_open_cpu_tier_mismatch_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_tier_mismatch_total : 0);
+    cjson_add_uint64(root, "summary_open_cpu_overcredit_ns",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_overcredit_ns_total : 0);
+#endif
+
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);
     cjson_add_uint64(root, "io_worker_busy_total",
