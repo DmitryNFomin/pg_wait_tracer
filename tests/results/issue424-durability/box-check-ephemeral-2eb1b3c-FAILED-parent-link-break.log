@@ -1,0 +1,373 @@
+hetzner-sweep: done (deleted=0 warned=0 dry_run=0 cutoff=6h force_all=0)
+box-check: EPHEMERAL=1 — creating pgwt-dev-1792088477-2380 from the pgwt=gate-snapshot image (labels: pgwt=ephemeral,created=1792088477,owner=mac)
+  Resolving --image-snapshot latest (label pgwt=gate-snapshot) ...
+  Resolved image id: 433799516
+=== Creating Hetzner VM ===
+  Name:       pgwt-dev-1792088477-2380
+  Type:       cx33
+  Image:      433799516
+  Locations:  fsn1 nbg1 hel1
+  Cloud-init: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-afa3ba99b93bf5b11/tests/cloud-init-ubuntu-minimal.yaml
+  SSH key ID: 130098089
+  Trying location: fsn1 ...
+
+  Server ID: 170608030
+  Server IP: 49.13.209.14
+
+  Waiting for SSH ...
+  SSH ready!
+  Waiting for cloud-init ...
+    cloud-init: running (attempt 1/30)
+  Cloud-init done!
+  Refreshing root's own localhost/127.0.0.1 known_hosts (issue #174) ...
+box-check: created pgwt-dev-1792088477-2380 id=170608030 ip=49.13.209.14
+box-check: staging repo + running tests/provision-runner.sh ubuntu on root@49.13.209.14 (refreshes bpftool for this VM's kernel)
+[provision-runner] waiting for /tmp/pgwt-box-check.lock (up to 600s)
+[provision-runner] lock acquired
+[provision-runner] disabling + masking unattended-upgrade timers/service
+Synchronizing state of unattended-upgrades.service with SysV service script with /usr/lib/systemd/systemd-sysv-install.
+Executing: /usr/lib/systemd/systemd-sysv-install disable unattended-upgrades
+Unit /etc/systemd/system/apt-daily.timer is masked, ignoring.
+Unit /etc/systemd/system/apt-daily-upgrade.timer is masked, ignoring.
+Unit /etc/systemd/system/unattended-upgrades.service is masked, ignoring.
+The unit files have no installation config (WantedBy=, RequiredBy=, UpheldBy=,
+Also=, or Alias= settings in the [Install] section, and DefaultInstance= for
+template units). This means they are not meant to be enabled or disabled using systemctl.
+ 
+Possible reasons for having these kinds of units are:
+• A unit may be statically enabled by being symlinked from another unit's
+  .wants/, .requires/, or .upholds/ directory.
+• A unit's purpose may be to act as a helper for some other unit which has
+  a requirement dependency on it.
+• A unit may be started when needed via activation (socket, path, timer,
+  D-Bus, udev, scripted systemctl call, ...).
+• In case of template units, the unit is meant to be enabled with some
+  instance name specified.
+[provision-runner] setting needrestart to list-only mode (never auto-restart services)
+[provision-runner] apt-get update
+[provision-runner] installing build + runtime dependencies
+
+Running kernel seems to be up-to-date.
+
+Services to be restarted:
+ systemctl restart packagekit.service
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+[provision-runner] installing perf (linux-tools for 6.8.0-139-generic)
+[provision-runner] system bpftool OK (/usr/sbin/bpftool)
+[provision-runner] PGDG apt repo already present
+[provision-runner] === PostgreSQL 13 (port 5413) ===
+[provision-runner] postgresql-13 already installed
+NOTICE:  extension "pg_stat_statements" already exists, skipping
+[provision-runner] pgbench tables missing/at a smaller scale on port 5413 (found 100000 rows, want 1000000) -- (re)initializing at scale 10
+dropping old tables...
+creating tables...
+generating data (client-side)...
+1000000 of 1000000 tuples (100%) done (elapsed 1.12 s, remaining 0.00 s)
+vacuuming...
+creating primary keys...
+done in 1.89 s (drop tables 0.03 s, create tables 0.02 s, client-side generate 1.14 s, vacuum 0.31 s, primary keys 0.39 s).
+[provision-runner] _smoke_io_load missing/short on port 5413 (found 0 rows, want 3000000) -- building (measured on a gate-box cx33 and reported in the owning branch's PR body: build time + pg_total_relation_size)
+NOTICE:  table "_smoke_io_load" does not exist, skipping
+[provision-runner] _smoke_io_load built on port 5413 in 11s, on-disk size 775 MB
+[provision-runner] _smoke_lockmgr_fanout: 200 partitions present on port 5413
+[provision-runner] PG 13: PostgreSQL 13.23 (Ubuntu 13.23-1.pgdg24.04+1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+[provision-runner] === PostgreSQL 16 (port 5416) ===
+[provision-runner] postgresql-16 already installed
+NOTICE:  extension "pg_stat_statements" already exists, skipping
+[provision-runner] pgbench tables already present on port 5416 (1000000 rows)
+[provision-runner] _smoke_io_load missing/short on port 5416 (found 0 rows, want 3000000) -- building (measured on a gate-box cx33 and reported in the owning branch's PR body: build time + pg_total_relation_size)
+NOTICE:  table "_smoke_io_load" does not exist, skipping
+[provision-runner] _smoke_io_load built on port 5416 in 11s, on-disk size 775 MB
+[provision-runner] _smoke_lockmgr_fanout: 200 partitions present on port 5416
+[provision-runner] PG 16: PostgreSQL 16.15 (Ubuntu 16.15-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+[provision-runner] === PostgreSQL 17 (port 5417) ===
+[provision-runner] postgresql-17 already installed
+NOTICE:  extension "pg_stat_statements" already exists, skipping
+[provision-runner] pgbench tables missing/at a smaller scale on port 5417 (found 100000 rows, want 1000000) -- (re)initializing at scale 10
+dropping old tables...
+creating tables...
+generating data (client-side)...
+100 of 100 tuples (100%) of pgbench_tellers done (elapsed 0.00 s, remaining 0.00 s)
+1000000 of 1000000 tuples (100%) of pgbench_accounts done (elapsed 0.99 s, remaining 0.00 s)
+vacuuming...
+creating primary keys...
+done in 1.50 s (drop tables 0.01 s, create tables 0.01 s, client-side generate 1.02 s, vacuum 0.13 s, primary keys 0.33 s).
+[provision-runner] _smoke_io_load missing/short on port 5417 (found 0 rows, want 3000000) -- building (measured on a gate-box cx33 and reported in the owning branch's PR body: build time + pg_total_relation_size)
+NOTICE:  table "_smoke_io_load" does not exist, skipping
+[provision-runner] _smoke_io_load built on port 5417 in 11s, on-disk size 775 MB
+[provision-runner] _smoke_lockmgr_fanout: 200 partitions present on port 5417
+[provision-runner] PG 17: PostgreSQL 17.11 (Ubuntu 17.11-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+[provision-runner] === PostgreSQL 18 (port 5418) ===
+[provision-runner] postgresql-18 already installed
+NOTICE:  extension "pg_stat_statements" already exists, skipping
+[provision-runner] pgbench tables already present on port 5418 (1000000 rows)
+[provision-runner] _smoke_io_load missing/short on port 5418 (found 0 rows, want 3000000) -- building (measured on a gate-box cx33 and reported in the owning branch's PR body: build time + pg_total_relation_size)
+NOTICE:  table "_smoke_io_load" does not exist, skipping
+[provision-runner] _smoke_io_load built on port 5418 in 11s, on-disk size 775 MB
+[provision-runner] _smoke_lockmgr_fanout: 200 partitions present on port 5418
+[provision-runner] PG 18: PostgreSQL 18.6 (Ubuntu 18.6-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+[provision-runner] PGPORT already set in /etc/environment: PGPORT=5418
+[provision-runner] clusters:
+Ver Cluster Port Status Owner    Data directory              Log file
+13  main    5413 online postgres /var/lib/postgresql/13/main /var/log/postgresql/postgresql-13-main.log
+16  main    5416 online postgres /var/lib/postgresql/16/main /var/log/postgresql/postgresql-16-main.log
+17  main    5417 online postgres /var/lib/postgresql/17/main /var/log/postgresql/postgresql-17-main.log
+18  main    5418 online postgres /var/lib/postgresql/18/main /var/log/postgresql/postgresql-18-main.log
+[provision-runner] go: go version go1.22.2 linux/amd64
+[provision-runner] installing python3-pip
+[provision-runner] installing Playwright + websockets + Pillow + numpy for root's python3
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
+[provision-runner] installing Chromium + its OS dependencies
+
+Running kernel seems to be up-to-date.
+
+Services to be restarted:
+ systemctl restart packagekit.service
+ systemctl restart polkit.service
+ systemctl restart qemu-guest-agent.service
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+[provision-runner] setting up root's localhost ssh self-trust loop
+[provision-runner] (re)scanned localhost into known_hosts
+[provision-runner] (re)scanned 127.0.0.1 into known_hosts
+[provision-runner] root@localhost ssh self-trust loop OK
+[provision-runner] writing /etc/pgwt-gate-box marker
+[provision-runner] no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration
+[provision-runner] provisioning complete (ubuntu)
+box-check: commit=2eb1b3c863c3102a65f75a8c75b7534c26c142e1 tree-hash=ce191caa68ab5d21de9c1ec79d94eca09e7ccef9
+box-check: target=root@49.13.209.14 OS=ubuntu PG=all EPHEMERAL=1 -> pgwt-check/agent_424-durability (log: tests/results/box-check-ephemeral-ubuntu-20261015-202117.log)
+box-check: remote hostname=pgwt-dev-1792088477-2380 machine_id=2cd101b7f7984352bac6db55b1655c2e
+box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)
+  VMLINUX  include/vmlinux.h
+  CC       build/server_server.o (server)
+  CC       build/server_compute.o (server)
+  CC       build/server_block_agg.o (server)
+In file included from src/block_agg.c:10:
+src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from src/compute.c:6:
+src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+  CC       build/server_event_reader.o (server)
+In file included from src/server.c:10:
+src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+  CC       build/server_event_writer.o (server)
+  CC       build/server_summary_writer.o (server)
+src/event_writer.c: In function ‘pgwt_writer_checkpoint_open’:
+src/event_writer.c:353:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  353 |         fchown(fileno(f), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/event_writer.c: In function ‘pgwt_writer_init’:
+src/event_writer.c:999:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  999 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/event_writer.c: In function ‘open_trace_file’:
+src/event_writer.c:703:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  703 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/summary_writer.c: In function ‘open_summary_file’:
+src/summary_writer.c:959:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  959 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/server_summary_reader.o (server)
+  CC       build/server_wait_event.o (server)
+  CC       build/server_idle_rule.o (server)
+  CC       build/server_spawn.o (server)
+src/server.c: In function ‘coverage_refresh’:
+src/server.c:1701:43: warning: ‘%s’ directive output may be truncated writing up to 137215 bytes into a region of size 512 [-Wformat-truncation=]
+ 1701 |     snprintf(fc->path, sizeof(fc->path), "%s", path);
+      |                                           ^~
+In file included from /usr/include/stdio.h:980,
+                 from src/event_writer.h:12,
+                 from src/block_agg.h:135,
+                 from src/server.c:7:
+In function ‘snprintf’,
+    inlined from ‘cov_find_or_add’ at src/server.c:1701:5,
+    inlined from ‘coverage_refresh’ at src/server.c:2204:36:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin_snprintf’ output between 1 and 137216 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+  CC       build/server_cmdline.o (server)
+  CC       build/server_backend_meta.o (server)
+  CC       build/server_cJSON.o (server)
+  BPF      build/pg_wait_tracer.bpf.o
+src/compute.c: In function ‘pgwt_compute_transitions’:
+src/compute.c:3342:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3342 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from src/percentile.h:32,
+                 from src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+  SKEL     include/pg_wait_tracer.skel.h
+  CC       build/pg_wait_tracer.o
+  CC       build/daemon.o
+  CC       build/control.o
+In file included from src/control.c:8:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |                                           
+  CC       build/effective_cores.o
+  CC       build/provider_full.o
+  CC       build/provider_coop.o
+  CC       build/sampler.o
+In file included from src/sampler.c:16:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |                                           
+  CC       build/exact_probe.o
+  CC       build/escalation.o
+In file included from src/exact_probe.c:178:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |                                           
+  CC       build/escalation_budget.o
+  CC       build/anomaly.o
+In file included from src/anomaly.c:442:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |                                           
+  CC       build/backend.o
+  CC       build/discovery.o
+  CC       build/backend_status_layout.o
+  CC       build/synthetic_query.o
+src/discovery.c: In function ‘pgwt_discover’:
+src/discovery.c:947:51: warning: ‘/postmaster.pid’ directive output may be truncated writing 15 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+  947 |             snprintf(pidpath, sizeof(pidpath), "%s/postmaster.pid", d->pgdata);
+      |                                                   ^~~~~~~~~~~~~~~
+In file included from /usr/include/stdio.h:980,
+                 from src/discovery.c:6:
+In function ‘snprintf’,
+    inlined from ‘pgwt_discover’ at src/discovery.c:947:13:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output between 16 and 527 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+  CC       build/map_reader.o
+In file included from src/map_reader.c:21:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |                                           
+  CC       build/event_stream.o
+  CC       build/output.o
+  CC       build/wait_event.o
+  CC       build/idle_rule.o
+  CC       build/spawn.o
+  CC       build/perf_event.o
+  CC       build/cmdline.o
+  CC       build/snapshot.o
+  CC       build/event_writer.o
+src/event_writer.c: In function ‘pgwt_writer_checkpoint_open’:
+src/event_writer.c:353:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  353 |         fchown(fileno(f), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/event_writer.c: In function ‘pgwt_writer_init’:
+src/event_writer.c:999:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  999 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/event_writer.c: In function ‘open_trace_file’:
+src/event_writer.c:703:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  703 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/event_reader.o
+  CC       build/replay.o
+  CC       build/summary_writer.o
+  CC       build/query_text.o
+src/summary_writer.c: In function ‘open_summary_file’:
+src/summary_writer.c:959:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  959 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/query_text.c: In function ‘pgwt_qt_init’:
+src/query_text.c:625:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  625 |             fchown(fileno(qt->fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/query_text.c:629:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  629 |             fchown(fileno(qt->quality_fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/pgss_resolver.o
+src/query_text.c: In function ‘compact_quality_locked’:
+src/query_text.c:444:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  444 |         fchown(fileno(out), (uid_t)-1, qt->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/backend_meta.o
+  CC       build/cJSON.o
+  LINK     pgwt-server
+  DONE     pgwt-server
+  LINK     pg_wait_tracer
+  DONE     pg_wait_tracer
+make: Entering directory '/root/pgwt-check/agent_424-durability/tests'
+cc -g -O2 -Wall -I../src -I../include -o test_wait_event test_wait_event.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o
+cc -g -O2 -Wall -I../src -I../include -o test_cmdline test_cmdline.c ../build/cmdline.o
+cc -g -O2 -Wall -I../src -I../include -o test_backend_lifecycle test_backend_lifecycle.c ../build/anomaly.o ../build/backend_meta.o ../build/backend.o ../build/backend_status_layout.o ../build/cJSON.o ../build/cmdline.o ../build/control.o ../build/daemon.o ../build/discovery.o ../build/effective_cores.o ../build/escalation_budget.o ../build/escalation.o ../build/event_reader.o ../build/event_stream.o ../build/event_writer.o ../build/exact_probe.o ../build/idle_rule.o ../build/map_reader.o ../build/output.o ../build/perf_event.o ../build/pgss_resolver.o ../build/provider_coop.o ../build/provider_full.o ../build/query_text.o ../build/replay.o ../build/sampler.o ../build/snapshot.o ../build/spawn.o ../build/summary_writer.o ../build/synthetic_query.o ../build/wait_event.o -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem -lbpf -lelf -lz -llz4 -pthread -lm
+cc -g -O2 -Wall -I../src -I../include -o test_spawn test_spawn.c ../src/spawn.c
+cc -g -O2 -Wall -I../src -I../include -o test_event_writer test_event_writer.c ../build/event_writer.o -llz4
+cc -g -O2 -Wall -I../src -I../include -o test_event_reader test_event_reader.c ../build/event_reader.o ../build/event_writer.o ../build/map_reader.o ../build/summary_writer.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o ../build/discovery.o ../build/backend_status_layout.o -llz4 -lbpf -lelf -lz
+test_event_reader.c: In function ‘cleanup_test_dir’:
+test_event_reader.c:37:5: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   37 |     system(cmd);
+      |     ^~~~~~~~~~~
+/usr/bin/ld: ../build/map_reader.o: in function `pgwt_collect_open_intervals':
+/root/pgwt-check/agent_424-durability/src/map_reader.c:985:(.text+0x229e): undefined reference to `pgwt_exact_resolve_attr'
+collect2: error: ld returned 1 exit status
+make: Leaving directory '/root/pgwt-check/agent_424-durability/tests'
+make: *** [Makefile:97: test_event_reader] Error 1
+box-check: no tests/results/ui_live/ on root@49.13.209.14 (test_ui_live_smoke skipped or produced no artifacts)
+
+box-check (ubuntu, PG=all, EPHEMERAL=1) exit=2 — summary:
+  src/query_text.c:444:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+    444 |         fchown(fileno(out), (uid_t)-1, qt->trace_gid);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    CC       build/backend_meta.o
+    CC       build/cJSON.o
+    LINK     pgwt-server
+    DONE     pgwt-server
+    LINK     pg_wait_tracer
+    DONE     pg_wait_tracer
+  make: Entering directory '/root/pgwt-check/agent_424-durability/tests'
+  cc -g -O2 -Wall -I../src -I../include -o test_wait_event test_wait_event.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o
+  cc -g -O2 -Wall -I../src -I../include -o test_cmdline test_cmdline.c ../build/cmdline.o
+  cc -g -O2 -Wall -I../src -I../include -o test_backend_lifecycle test_backend_lifecycle.c ../build/anomaly.o ../build/backend_meta.o ../build/backend.o ../build/backend_status_layout.o ../build/cJSON.o ../build/cmdline.o ../build/control.o ../build/daemon.o ../build/discovery.o ../build/effective_cores.o ../build/escalation_budget.o ../build/escalation.o ../build/event_reader.o ../build/event_stream.o ../build/event_writer.o ../build/exact_probe.o ../build/idle_rule.o ../build/map_reader.o ../build/output.o ../build/perf_event.o ../build/pgss_resolver.o ../build/provider_coop.o ../build/provider_full.o ../build/query_text.o ../build/replay.o ../build/sampler.o ../build/snapshot.o ../build/spawn.o ../build/summary_writer.o ../build/synthetic_query.o ../build/wait_event.o -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem -lbpf -lelf -lz -llz4 -pthread -lm
+  cc -g -O2 -Wall -I../src -I../include -o test_spawn test_spawn.c ../src/spawn.c
+  cc -g -O2 -Wall -I../src -I../include -o test_event_writer test_event_writer.c ../build/event_writer.o -llz4
+  cc -g -O2 -Wall -I../src -I../include -o test_event_reader test_event_reader.c ../build/event_reader.o ../build/event_writer.o ../build/map_reader.o ../build/summary_writer.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o ../build/discovery.o ../build/backend_status_layout.o -llz4 -lbpf -lelf -lz
+  test_event_reader.c: In function ‘cleanup_test_dir’:
+  test_event_reader.c:37:5: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+     37 |     system(cmd);
+        |     ^~~~~~~~~~~
+  /usr/bin/ld: ../build/map_reader.o: in function `pgwt_collect_open_intervals':
+  /root/pgwt-check/agent_424-durability/src/map_reader.c:985:(.text+0x229e): undefined reference to `pgwt_exact_resolve_attr'
+  collect2: error: ld returned 1 exit status
+  make: Leaving directory '/root/pgwt-check/agent_424-durability/tests'
+  make: *** [Makefile:97: test_event_reader] Error 1
+box-check: EPHEMERAL=1 KEEP=1 — leaving pgwt-dev-1792088477-2380 (id=170608030, ip=49.13.209.14) up.
+box-check: tests/hetzner-sweep.sh (make hetzner-sweep, cutoff 6h by default) WILL delete this VM on its own in a few hours unless you raise MAX_AGE_HOURS/--max-age-hours or delete it yourself first:
+  HCLOUD_TOKEN="$(security find-generic-password -s hcloud -a claude_token -w)" tests/hetzner-vm.sh delete 170608030
+make: *** [box-check] Error 2
+BOXCHECK_EXIT=2

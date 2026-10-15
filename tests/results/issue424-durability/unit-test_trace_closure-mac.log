@@ -1,0 +1,38 @@
+INFO: recovered previous current.trace: 1 blocks, 200 events -> /tmp/pgwt_closure_FsDPuv/crash/2026-10-15_20.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 120 events -> /tmp/pgwt_closure_FsDPuv/repeat/2026-10-15_20.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 120 events -> /tmp/pgwt_closure_FsDPuv/repeat/2026-10-15_20.1.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 80 events -> /tmp/pgwt_closure_FsDPuv/preserve/2026-10-15_20.trace.lz4
+ERROR: recovery of /tmp/pgwt_closure_FsDPuv/liar/current.trace found 1 complete blocks but the meta high-watermark says 99 were committed — data below the watermark is missing or corrupt
+INFO: recovered previous current.trace: 1 blocks, 100 events -> /tmp/pgwt_closure_FsDPuv/liar/2026-10-15_20.trace.lz4
+WARN: LZ4 compression failed
+WARN: could not finalize /tmp/pgwt_closure_FsDPuv/badflush/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
+WARN: could not finalize /tmp/pgwt_closure_FsDPuv/badfsync/current.trace durably — it will read as an unfinished capture (open intervals may be missing)
+INFO: recovered previous current.trace: 1 blocks, 60 events -> /tmp/pgwt_closure_FsDPuv/legacy/2026-10-15_20.trace.lz4
+INFO: recovered previous current.trace: 1 blocks, 4096 events -> /tmp/pgwt_closure_FsDPuv/midpub/2026-10-15_20.trace.lz4
+=== trace closure status (#424 deliverable 1) ===
+
+[A] bits -> verdict
+
+[B1] a clean close certifies the file
+
+[B2] rotation says ROTATED, not CLEAN
+
+[B3] SIGKILL -> the archive says UNCLEAN
+
+[B4] crash, restart, crash again
+
+[B5] a clean close stays CLEAN after recovery archives it
+
+[B6] CLEAN over missing committed blocks -> UNCLEAN
+
+[B7] a close whose flush failed must NOT be certified
+
+[C1] a legacy file reads UNKNOWN, before and after recovery
+
+[C2] no file / empty / truncated / garbage -> refuse
+
+[C3] a capture that never opened a file is not a clean capture
+
+[C4] killed mid-publication: partial data, honest label
+
+=== 85/85 passed ===

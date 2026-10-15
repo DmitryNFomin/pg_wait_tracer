@@ -1,0 +1,48 @@
+--- [n1-no-identity-check] exit=1 failing=3
+  FAIL(244): a different mono stamp must refuse
+  FAIL(248): a different wall stamp must refuse
+  FAIL(604): a stale sidecar must NOT be carried next to the archive
+=== 131/134 passed ===
+--- [n2-no-checksum] exit=1 failing=3
+  FAIL(238): a flipped record bit must refuse
+  FAIL(256): a damaged AND stale buffer reports damage
+  FAIL(670): [corrupt] an unvalidatable sidecar must not be carried
+=== 131/134 passed ===
+--- [n3-no-count-cap] exit=1 failing=1
+  FAIL(227): a count beyond the cap must refuse BEFORE any size arithmetic
+=== 133/134 passed ===
+--- [n4-clean-close-keeps] exit=1 failing=2
+  FAIL(506): a clean close must drop the checkpoint
+  FAIL(518): a cleanly closed archive must have no checkpoint beside it
+=== 132/134 passed ===
+--- [n5-rotation-keeps] exit=1 failing=1
+  FAIL(533): rotation must drop the checkpoint
+=== 133/134 passed ===
+--- [n6-empty-is-noop] exit=1 failing=2
+  FAIL(720): it must be the EMPTY one (seq 1, 1 records) — a stale non-empty checkpoint here is a double count
+  FAIL(722): and it must be the later seq, got 1
+=== 132/134 passed ===
+--- [n7-no-publish-first] exit=1 failing=10
+  FAIL(370): the checkpoint must publish first: watermark 0, expected 10049000000
+  FAIL(392): the recorded watermark must be the published one
+  FAIL(452): the crashed trace was archived
+=== 107/117 passed ===
+--- [n8-suppress-on-equal] exit=1 failing=1
+  FAIL(291): a record ending exactly AT the start is the PREVIOUS stretch ([start,end) is half-open) and must not suppress
+=== 133/134 passed ===
+--- [n9-suppress-vs-ckpt-instant] exit=1 failing=3
+  FAIL(299): one nanosecond after the start is already a closed stretch
+  FAIL(328): exactly one of the three must be suppressed (kept=3 dropped=0)
+  FAIL(332): recovered open time must be 7000 ns, got 9000 (0 = suppresses everything, 9000 = suppresses nothing)
+=== 131/134 passed ===
+--- [n10-recovery-carries-blindly] exit=1 failing=5
+  FAIL(604): a stale sidecar must NOT be carried next to the archive
+  FAIL(670): [corrupt] an unvalidatable sidecar must not be carried
+  FAIL(670): [trunc] an unvalidatable sidecar must not be carried
+=== 129/134 passed ===
+--- [n11-retention-leaks-sidecar] exit=1 failing=1
+  FAIL(812): and its sidecar went with it (a sidecar without its trace is unattributable evidence that would otherwise never be deleted)
+=== 133/134 passed ===
+--- [n12-uncertified-close-drops] exit=1 failing=1
+  FAIL(566): an uncertified close must KEEP the checkpoint
+=== 133/134 passed ===

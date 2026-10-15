@@ -1,0 +1,46 @@
+#424 crash scenarios — daemon=/root/pgwt-check/agent_424-durability/pg_wait_tracer pm_pid=3220
+commit=MUTANT-pre424-writer
+kernel=6.8.0-139-generic host=pgwt-dev-1792086593-22557
+
+[open_wait] capture → workload → SIGKILL → restart
+  leftover: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_wait/current.trace closure=unknown may_lose_open_intervals=1 checkpoint=none
+  FAIL: [open_wait] the killed daemon's live file is unfinalized — expected 'in_progress', got 'unknown'
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_wait/2026-10-15_18.trace.lz4 closure=unknown may_lose_open_intervals=1 checkpoint=none
+  FAIL: [open_wait] the recovered archive is labelled unclean — expected 'unclean', got 'unknown'
+  PASS: [open_wait] a reader is told open intervals may be missing (1)
+
+[open_cpu] capture → workload → SIGKILL → restart
+  leftover: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_cpu/current.trace closure=unknown may_lose_open_intervals=1 checkpoint=none
+  FAIL: [open_cpu] the killed daemon's live file is unfinalized — expected 'in_progress', got 'unknown'
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_cpu/2026-10-15_18.trace.lz4 closure=unknown may_lose_open_intervals=1 checkpoint=none
+  FAIL: [open_cpu] the recovered archive is labelled unclean — expected 'unclean', got 'unknown'
+  PASS: [open_cpu] a reader is told open intervals may be missing (1)
+
+[publication] capture → workload → SIGKILL → restart
+  leftover: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/publication/current.trace closure=unknown may_lose_open_intervals=1 checkpoint=none
+  FAIL: [publication] the killed daemon's live file is unfinalized — expected 'in_progress', got 'unknown'
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/publication/2026-10-15_18.trace.lz4 closure=unknown may_lose_open_intervals=1 checkpoint=none
+  FAIL: [publication] the recovered archive is labelled unclean — expected 'unclean', got 'unknown'
+  PASS: [publication] a reader is told open intervals may be missing (1)
+
+[early] kill before any block was committed
+  leftover: unknown
+  PASS: [early] not clean (unknown)
+  PASS: [early] no archive from this scenario claims clean (0)
+
+[repeated] kill, restart, kill again, restart again
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/repeated/2026-10-15_18.1.trace.lz4 closure=clean may_lose_open_intervals=0 checkpoint=none
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/repeated/2026-10-15_18.2.trace.lz4 closure=unknown may_lose_open_intervals=1 checkpoint=none
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/repeated/2026-10-15_18.trace.lz4 closure=unknown may_lose_open_intervals=1 checkpoint=none
+  FAIL: [repeated] exactly the two crashed captures are labelled unclean — expected '2', got '0'
+  PASS: [repeated] and every other archive here is a clean exit (1)
+
+[graceful] the CONTROL case: a normal exit must read clean
+  closed file: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/graceful/current.trace closure=clean may_lose_open_intervals=0 checkpoint=none
+  PASS: [graceful] a normal shutdown reads clean (clean)
+  PASS: [graceful] and no warning is raised for it (0)
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/graceful/2026-10-15_18.trace.lz4 closure=clean may_lose_open_intervals=0 checkpoint=none
+  PASS: [graceful] the clean label survives being archived by recovery (clean)
+
+summary: open_wait=unknown open_cpu=unknown publication=unknown early=unknown repeated=0unclean/1clean graceful=clean 
+crash_scenarios: 7 FAILED

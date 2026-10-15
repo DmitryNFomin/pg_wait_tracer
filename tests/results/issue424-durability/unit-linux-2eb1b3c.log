@@ -1,0 +1,8 @@
+commit=2eb1b3c863c3102a65f75a8c75b7534c26c142e1 host=pgwt-dev-1792088477-2380 kernel=6.8.0-139-generic gcc=13
+test_trace_closure: === 85/85 passed ===
+test_open_ckpt: === 134/134 passed ===
+test_event_writer: 5062/5062 tests passed
+test_durability: 97/97 tests passed
+test_trace_v2: === 98 / 98 tests passed ===
+test_open_interval: 124 checks, 0 failed
+full unit_tests.list run: failed=0 notbuilt=2 (test_event_reader, test_concurrent_rw -- pre-existing link break on the parent branch)
