@@ -272,7 +272,7 @@ static void print_time_model_multi(struct pgwt_daemon *d)
 
         for (int j = 0; j < deltas[0].num_events; j++) {
             struct pgwt_snap_event *ev = &deltas[0].events[j];
-            if (ev->count == 0) continue;
+            if (pgwt_row_is_empty(ev->count, ev->total_ns)) continue;   /* #424 */
             if (WE_CLASS(ev->wait_event) != classes[i].class_id) continue;
             if (db0 == 0 || 100.0 * ev->total_ns / db0 < MIN_DB_PCT_M)
                 continue;
@@ -396,7 +396,7 @@ void pgwt_print_time_model(struct pgwt_daemon *d)
 
         for (int j = 0; j < acc->num_system_events; j++) {
             struct pgwt_event_stats *ev = &acc->system_events[j];
-            if (ev->count == 0) continue;
+            if (pgwt_row_is_empty(ev->count, ev->total_ns)) continue;   /* #424 */
             if (WE_CLASS(ev->wait_event) != classes[i].class_id) continue;
             if (100.0 * ev->total_ns / db < MIN_DB_PCT) continue;
 
@@ -511,7 +511,7 @@ static void print_system_event_multi(struct pgwt_daemon *d)
         int shown = 0;
         for (int i = 0; i < deltas[w].num_events && shown < 20; i++) {
             struct pgwt_snap_event *ev = &deltas[w].events[i];
-            if (ev->count == 0) continue;
+            if (pgwt_row_is_empty(ev->count, ev->total_ns)) continue;   /* #424 */
             /* System events list (visibility): keep Client:ClientRead. */
             if (pgwt_is_hidden_event(ev->wait_event)) continue;
 
@@ -572,7 +572,7 @@ void pgwt_print_system_event(struct pgwt_daemon *d)
 
     int shown = 0;
     for (int i = 0; i < n && shown < 20; i++) {
-        if (sorted[i].count == 0) continue;
+        if (pgwt_row_is_empty(sorted[i].count, sorted[i].total_ns)) continue;
         /* System events list (visibility): keep Client:ClientRead. */
         if (pgwt_is_hidden_event(sorted[i].wait_event)) continue;
 
@@ -677,7 +677,7 @@ void pgwt_print_session_event(struct pgwt_daemon *d)
         qsort(sorted, pa->num_events, sizeof(sorted[0]), cmp_event_total);
 
         for (int j = 0; j < pa->num_events; j++) {
-            if (sorted[j].count == 0) continue;
+            if (pgwt_row_is_empty(sorted[j].count, sorted[j].total_ns)) continue;
             char name[64];
             pgwt_event_full_name(sorted[j].wait_event, name, sizeof(name));
             double avg_us = sorted[j].count ?
@@ -980,7 +980,7 @@ static void print_query_event_multi(struct pgwt_daemon *d)
         char qid_buf[24];
         for (int i = 0; i < deltas[w].num_query_events && shown < 30; i++) {
             struct pgwt_snap_query_event *qe = &deltas[w].query_events[i];
-            if (qe->count == 0) continue;
+            if (pgwt_row_is_empty(qe->count, qe->total_ns)) continue;
             if (pgwt_is_idle_event(qe->wait_event)) continue;
 
             char name[64];
@@ -1105,7 +1105,7 @@ void pgwt_print_query_event(struct pgwt_daemon *d)
     int shown = 0;
     char qid_buf[24];
     for (int i = 0; i < n && shown < 30; i++) {
-        if (sorted[i].count == 0) continue;
+        if (pgwt_row_is_empty(sorted[i].count, sorted[i].total_ns)) continue;
         if (pgwt_is_idle_event(sorted[i].wait_event)) continue;
 
         char name[64];

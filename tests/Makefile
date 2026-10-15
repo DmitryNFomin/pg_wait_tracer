@@ -44,7 +44,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             wait_cpu_scan wait_cpu_fixture \
             test_summary_tick_flush \
             test_block_agg bench_block_agg test_transitions_loader \
-            test_top_wait_backfill
+            test_top_wait_backfill \
+            test_window_overlap
 
 .PHONY: all clean check
 
@@ -712,6 +713,14 @@ test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS
 # included recipe as test_transitions_loader (the real writer, the real
 # summary writer, the real handlers).
 test_top_wait_backfill: test_top_wait_backfill.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_window_overlap: #424 — the raw loader selected non-sample records by
+# CLOSE time, so a wait still running at the window's right edge contributed
+# nothing. Admission is now OVERLAP and the per-occurrence statistics are
+# gated on the close, together. Same server.c-included recipe (the real
+# writer, the real loader, the real compute).
+test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction

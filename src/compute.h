@@ -110,6 +110,32 @@ int pgwt_tag_events(struct pgwt_trace_event *events, int count,
                     const struct pgwt_pid_cat *cats, int n_cats)
     __attribute__((warn_unused_result));
 
+/* #424: the same pass, told where the window's right edge is.
+ *
+ * WHY IT EXISTS. A record admitted by OVERLAP closes after `to`, so the
+ * CMD_END that would have closed its command lies past the window and is
+ * never loaded. The in-command MAJORITY RULE then sees a full duration with
+ * an apparently still-open command and can mark the record in-command (or,
+ * symmetrically, out of it) on the strength of time that is not in the
+ * window at all. That is not a labelling nicety: the decision rewrites a
+ * we==0 record's old_event to PGWT_WEI_NONCMD_CPU, which the idle rules
+ * exclude from DB Time — so getting it wrong MOVES THE DB TIME HEADLINE,
+ * not just a tag. With `to_ns` the majority is taken over the record's
+ * IN-WINDOW portion, which is the part the window is reporting on.
+ *
+ * `to_ns == 0` means "no right edge" and is EXACTLY the old behaviour;
+ * pgwt_tag_events() is that call, kept so the dozen existing callers and
+ * tests are untouched and so the unbounded path stays bit-identical.
+ *
+ * Still provisional for a right-open record, and deliberately not claimed
+ * otherwise: its query-id attribution (the #128 backward pass) can change
+ * once the rest of its command is visible, and so can its measured CPU. The
+ * WAIT WALL is stable; the attribution is not. */
+int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
+                           const struct pgwt_pid_cat *cats, int n_cats,
+                           uint64_t to_ns)
+    __attribute__((warn_unused_result));
+
 /* Category of a tagged record: 0..PGWT_NUM_CATS-1, or -1 for idle. */
 int pgwt_event_category(const struct pgwt_trace_event *ev);
 
