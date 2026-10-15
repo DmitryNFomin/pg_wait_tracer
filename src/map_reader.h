@@ -149,19 +149,6 @@ void pgwt_accum_init(struct pgwt_accumulator *acc);
 /* Read state_map for open intervals and current state (active view). */
 void pgwt_read_state_map(struct pgwt_daemon *d);
 
-/* #424: fill a snapshot of every live backend's still-OPEN stretch for the
- * {"cmd":"open_intervals"} control command, then coordinate publication (a
- * bounded ring drain + a writer flush) so committed_through_ns means
- * something. READ-ONLY with respect to the trace and the live accumulators:
- * no record is written, no command-gate sweep is advanced, no accumulator
- * entry is created. Always fills *s — a tier that cannot answer is REFUSED
- * with a reason, never an empty success. Declared here (not in
- * open_snapshot.h) because the collector is the daemon-side twin of
- * pgwt_read_state_map and shares its BPF guard. */
-struct pgwt_open_snapshot;
-void pgwt_collect_open_intervals(struct pgwt_daemon *d,
-                                 struct pgwt_open_snapshot *s);
-
 /* T2 category flag (0 foreground / PGWT_EVENT_FLAG_{IO_WORKER,MAINT,
  * BACKGROUND}) of a pid for live accumulation, resolved against the
  * registry and cached in the pid's accumulator entry `pa` (NULL when the

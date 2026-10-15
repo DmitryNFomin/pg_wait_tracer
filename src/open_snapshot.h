@@ -406,4 +406,19 @@ static inline cJSON *pgwt_open_snapshot_to_json(
     return pgwt_open_snapshot_json_as(s, s->status, s->reason, reply_max, 0);
 }
 
+/* Fill a snapshot of every live backend's still-OPEN stretch, then coordinate
+ * publication (a bounded ring drain + a writer flush) so committed_through_ns
+ * means something. READ-ONLY with respect to the trace and the live
+ * accumulators: no record is written, no command-gate sweep is advanced, no
+ * accumulator entry is created. Always fills *s — a tier that cannot answer is
+ * REFUSED with a reason, never an empty success.
+ *
+ * Implemented in src/open_snapshot.c, deliberately NOT in map_reader.c: it
+ * resolves attribution (pgwt_exact_resolve_attr), and map_reader.o is linked
+ * by BPF-free unit tests that must not drag the exact-probe slice of the
+ * daemon in with it. */
+struct pgwt_daemon;
+void pgwt_collect_open_intervals(struct pgwt_daemon *d,
+                                 struct pgwt_open_snapshot *s);
+
 #endif /* PGWT_OPEN_SNAPSHOT_H */

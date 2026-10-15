@@ -107,6 +107,7 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/backend_status_layout.c \
              $(SRC_DIR)/synthetic_query.c \
              $(SRC_DIR)/map_reader.c \
+             $(SRC_DIR)/open_snapshot.c \
              $(SRC_DIR)/event_stream.c \
              $(SRC_DIR)/output.c \
              $(SRC_DIR)/wait_event.c \
