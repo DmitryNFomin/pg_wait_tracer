@@ -938,37 +938,6 @@ static void test_status_invariant(void)
     free(s);
 }
 
-/* SUMMARY v9's producer input (#424): what the live loop reports as the open
- * on-CPU prefix. The live view initialises its cpu_open to the FULL WALL and
- * only replaces it when the schedstat delta resolves — correct for a display,
- * a fabrication if handed to the summary writer, which would then credit the
- * gap as 100%% on CPU. Three cases, and the middle one is why a bool is
- * needed at all: a measured ZERO and an unmeasured gap are different facts
- * and only one of them is a number. */
-static void test_open_cpu_prefix(void)
-{
-    printf("test_open_cpu_prefix\n");
-    CHECK(pgwt_open_cpu_prefix_ns(MS(37), true) == MS(37),
-          "a resolved measurement is reported as measured");
-    CHECK(pgwt_open_cpu_prefix_ns(0, true) == 0,
-          "a measured ZERO must stay 0, not become UNKNOWN");
-    CHECK(pgwt_open_cpu_prefix_ns(S(10), false) == PGWT_CPU_NS_UNKNOWN,
-          "an UNRESOLVED measurement must be UNKNOWN, never the wall — "
-          "reporting the wall claims the gap was 100%% on CPU");
-    /* And the sentinel must not be mistakable for a plausible duration: if it
-     * ever became a small number this whole distinction would collapse
-     * silently. */
-    CHECK(PGWT_CPU_NS_UNKNOWN > S(1000000),
-          "the UNKNOWN sentinel must be far outside any real ns duration");
-    /* The wall is the value the live view would have passed; the helper must
-     * not return it for an unmeasured gap whatever its size. */
-    uint64_t walls[] = { 1, MS(1), S(1), S(3600) };
-    for (size_t i = 0; i < sizeof(walls) / sizeof(*walls); i++)
-        CHECK(pgwt_open_cpu_prefix_ns(walls[i], false) != walls[i],
-              "an unmeasured gap of %llu ns must not be reported as that "
-              "many measured CPU ns", (unsigned long long)walls[i]);
-}
-
 /* A snapshot whose anchor was never filled must not fabricate a wall clock. */
 static void test_anchor_absent(void)
 {
@@ -1174,7 +1143,6 @@ int main(void)
     test_status_invariant();
     test_cmd_gate_formula();
     test_missing_category_refuses();
-    test_open_cpu_prefix();
     test_full_house();
     test_anchor_absent();
     test_transport_queue();

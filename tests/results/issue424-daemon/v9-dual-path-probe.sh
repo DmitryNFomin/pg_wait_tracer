@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# v9-dual-path-probe.sh — compile BOTH #if PGWT_SUMMARY_VERSION branches of the
-# summary-v9 producer wiring (src/map_reader.c's note_open call, src/control.c's
-# metrics block).
+# v9-dual-path-probe.sh — compile this branch against BOTH summary-writer
+# versions: src/control.c's #if PGWT_SUMMARY_VERSION >= 9 metrics block in
+# each of its two branches, and src/map_reader.c (which has no conditional)
+# under both, where it must NOT call the dormant v9 producer entry point.
 #
 # WHY THIS EXISTS. The v9 writer API (pgwt_summary_note_open_ex, struct
 # pgwt_summary_open_cpu, the seven open_cpu_* counters) lands on branch
@@ -150,16 +151,21 @@ probe() {
     # v9-probe-bypass.log. The first argument is what makes it the call site.
     local has_ex=0
     grep -q 'pgwt_summary_note_open_ex *( *d->summary_writer' "$pp" && has_ex=1
-    case "$want:$has_ex:$tu" in
-        v9:0:map_reader.c)
-            echo "  FAIL $label ($want): the v9 branch was NOT compiled" \
-                 "(no note_open_ex in the preprocessed TU) — the probe cannot see"
-            fail=1; return ;;
-        v8:1:map_reader.c)
-            echo "  FAIL $label ($want): the v8 branch was NOT compiled" \
-                 "(note_open_ex present) — wrong header won"
-            fail=1; return ;;
-    esac
+    # DORMANCY. map_reader.c no longer has a v9 branch: the open-CPU
+    # observation was reverted because all three open-CPU counters read zero
+    # on a live capture, i.e. the writer was never asked, and a producer
+    # whose only evidence is "it compiles" is not a wired producer. So the
+    # assertion here is the inverse of what it was — the call must be absent
+    # under BOTH writer versions. Re-adding it is a deliberate act that has
+    # to come with a live measurement, and it also brings back the
+    # link-closure dependency, so this fires first and cheapest.
+    if [[ "$tu" == map_reader.c && $has_ex -eq 1 ]]; then
+        echo "  FAIL $label ($want): map_reader.c calls" \
+             "pgwt_summary_note_open_ex, but the v9 open-CPU producer is" \
+             "DORMANT by decision — wire it only with a capture showing" \
+             "summary_open_cpu_credited_ns non-zero"
+        fail=1; return
+    fi
     # control.c has no note_open call; check its v9-only metric key instead.
     if [[ "$tu" == control.c ]]; then
         # The string LITERAL, which only control.c's own emitted code has:
@@ -185,6 +191,8 @@ probe() {
 # v8: this branch's own tree, unmodified.
 cp -R src "$stub/v8tree"
 echo "v8 path (this branch's own headers):"
+# map_reader.c carries no #if any more; it must simply COMPILE against both
+# writer versions, and must not call the dormant v9 entry point in either.
 probe "src/map_reader.c" "$stub/v8tree" map_reader.c v8
 probe "src/control.c"    "$stub/v8tree" control.c    v8
 

@@ -1,0 +1,29 @@
+# link-closure-allow.txt — new link-time dependencies that are ALREADY
+# satisfied everywhere the translation unit is linked.
+#
+# scripts/check-link-closure.sh fails when a TU references a symbol it did not
+# reference at the merge base. Most of the time that is the defect it was
+# written for. Sometimes the dependency is deliberate AND harmless, because
+# the object that provides it is already a mandatory companion of the TU's
+# object in every target that links it. This file is where that case is
+# declared — and the declaration is CHECKED, not trusted: for each entry the
+# guard reads tests/Makefile and requires every target linking the TU's object
+# to link the provider's object too. An entry naming the wrong provider, or a
+# provider that some target does not link, FAILS exactly as an undeclared
+# symbol does.
+#
+# That is what keeps this from being the usual escape hatch. You cannot
+# silence the guard by editing this file; you can only record which object
+# supplies the symbol, and the Makefile has to agree.
+#
+# Format:  <symbol>  <provider-object-basename>   # justification
+# (symbol as `nm` prints it, with the platform's leading underscore or
+#  without — both spellings are accepted, so one file works on macOS and
+#  Linux.)
+
+# (No entries. The v9 producer call that needed one was reverted — see the
+# note at pgwt_summary_note_open in src/map_reader.c — and an entry for a
+# symbol nothing references is exactly the kind of rot this guard exists to
+# prevent. The mechanism is exercised by tests/test_check_link_closure.sh
+# against a synthetic repo, so it does not depend on a live entry to stay
+# honest.)

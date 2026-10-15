@@ -19,10 +19,6 @@
 #include "daemon.h"
 #include "discovery.h"   /* pgwt_read_sched_cpu_ns (T8 live measured CPU) */
 #include "sampler.h"     /* pgwt_backend_type_flag (header-inline) */
-/* v9 (#424): pgwt_open_cpu_prefix_ns, the measured-vs-UNKNOWN rule for the
- * open on-CPU observation. Header-only and pure — no link-time cost, which
- * matters here: map_reader.o is linked by BPF-free unit tests. */
-#include "open_interval.h"
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "pg_wait_tracer.skel.h"
@@ -618,6 +614,41 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                 pa_cur->current_wait_ns = open_ns;
             }
 
+            /* #379: tell the SUMMARY WRITER what this pid has open, so each
+             * second the interval spans is credited as that second completes
+             * instead of the whole duration landing in the second it closes
+             * in. This is the only open-interval source the writer has — it
+             * deliberately infers nothing from the record stream — and it is
+             * read here because this loop is already the one place that
+             * knows BPF's (last_event, last_ts) for every live backend.
+             *
+             * sval.last_ts, not `now - open_ns`: it is the exact value BPF
+             * will subtract to produce the closing record's duration
+             * (duration = now - last_ts; last_ts = now), which is what makes
+             * the per-second credits and the at-close remainder partition
+             * the interval with no gap and no overlap.
+             *
+             * v9's open-CPU OBSERVATION was wired here and is deliberately
+             * NOT here now (#424). On a gate-2 capture with watchpoints
+             * attached and cpu_ns_total moving 0 -> 23.7 s, all three
+             * open-CPU counters read zero — credited, refused AND
+             * uncredited — which means the writer was never asked about an
+             * on-CPU open interval at all, not that it declined. Without a
+             * box this agent could not tell the remaining causes apart, and
+             * a producer whose only evidence is "it compiles" is not a
+             * wired producer. So v9's writer capability stays DORMANT and
+             * unclaimed rather than claimed and silently falling back; the
+             * v8 behaviour below is exactly what shipped before, and the
+             * refusal it produces for an on-CPU gap is counted
+             * (open_cpu_refused_total, cpu_open_uncredited_ns_total, both
+             * published by src/control.c). See the handover note in that
+             * file for the one measurement that tells the causes apart. */
+            if (d->summary_writer)
+                pgwt_summary_note_open(d->summary_writer, snext, we,
+                                       sval.last_ts,
+                                       pgwt_live_pid_cat_flag(d, pa_cur, snext),
+                                       now);
+
             /* #393: the open interval is accounted whatever else this (PID,
              * event) did in this interval — pgwt_live_account_open_stretch()
              * is the one place that decides, and src/map_reader.h carries the
@@ -653,13 +684,6 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                  * interim trace record is written. Legacy (cpu_accounting off)
                  * keeps the full gap as CPU, byte-identical to before. */
                 uint64_t cpu_open = open_ns;
-                /* v9 (#424): `cpu_open` starts at the full WALL, which is the
-                 * right fallback for the live display and a fabrication if
-                 * handed to the summary writer as a measurement (it would
-                 * claim the gap was 100% on CPU). Track whether the schedstat
-                 * delta actually resolved, so the note below can report
-                 * UNKNOWN instead of a plausible wrong number. */
-                bool cpu_measured = false;
                 if (we == 0 && d->cpu_accounting) {
                     /* S3: exact on-CPU ns for the open interval = cpu_ns_total +
                      * current stretch (on_cpu_ts != 0 iff running), minus the
@@ -670,7 +694,6 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                     if (exact >= sval.last_cpu_ns) {
                         uint64_t m = exact - sval.last_cpu_ns;
                         cpu_open = m < open_ns ? m : open_ns;   /* clamp to wall */
-                        cpu_measured = true;
                     }
                     /* PGWT_DEBUG_DUMP_STATE tick-time companion of the
                      * shutdown STATEDUMP (fourth-mode investigation): the
@@ -734,75 +757,6 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                 };
                 pgwt_accum_add_interval(&d->accum, &iv);
 
-                /* #379 / #424: tell the SUMMARY WRITER what this pid has
-                 * open, so each second the interval spans is credited as that
-                 * second completes instead of the whole duration landing in
-                 * the second it closes in. This is the only open-interval
-                 * source the writer has — it deliberately infers nothing from
-                 * the record stream — and it is read here because this loop
-                 * is already the one place that knows BPF's (last_event,
-                 * last_ts) for every live backend.
-                 *
-                 * sval.last_ts, not `now - open_ns`: it is the exact value
-                 * BPF will subtract to produce the closing record's duration
-                 * (duration = now - last_ts; last_ts = now), which is what
-                 * makes the per-second credits and the at-close remainder
-                 * partition the interval with no gap and no overlap.
-                 *
-                 * MOVED here from above the open-stretch block (v9): the two
-                 * values v9 needs — the measured CPU prefix and the SAME
-                 * effective-event classification the live and raw paths use —
-                 * are computed in this block, and the alternative was a
-                 * second copy of both rules. The only case the old position
-                 * covered and this one does not is a ZERO-LENGTH open
-                 * interval (pgwt_live_account_open_stretch returns
-                 * open_ns != 0), which has nothing to credit in either
-                 * version and whose start is noted again on the next tick.
-                 *
-                 * EXACT tiers only, by construction: pgwt_read_state_map is
-                 * called only when the mode uses watchpoints (lightweight and
-                 * sampled have no watchpoint-maintained intervals to report),
-                 * and summaries are only computed from for EXACT-covered
-                 * windows. A mode that never notes anything gets the v7
-                 * accounting rule, which is correct for it rather than merely
-                 * unchanged. */
-                if (d->summary_writer) {
-                    /* The `#if PGWT_SUMMARY_VERSION >= 9` that used to
-                     * wrap this, and the v8 fallback under its #else,
-                     * are gone: v9's writer is in this tree, so the
-                     * conditional could only ever hide the producer
-                     * again if the constant moved. The verification
-                     * that it is actually wired is
-                     * summary_open_cpu_credited_ns on the control
-                     * socket, non-zero on a capture with an in-flight
-                     * CPU statement. */
-                    /* v9 (#424): the OBSERVATION is what lets an on-CPU gap
-                     * be spread at all. cpu_open is the measured on-CPU ns of
-                     * [last_ts, now) already clamped to that wall, and
-                     * pgwt_live_effective_event() is the SAME classifier the
-                     * live and raw paths use — so the writer is told, exactly
-                     * as v6 is told a pid's category and v7 the effective
-                     * wait id, instead of keeping a second copy of the
-                     * command gate that could drift. PGWT_CPU_NS_UNKNOWN when
-                     * the tier has no measurement: the writer then credits
-                     * the UNKNOWN tier, which is what the raw path does with
-                     * an UNKNOWN record. For a WAIT the observation is
-                     * ignored by the writer, so one call covers both.
-                     *
-                     * The keys this feeds are published unconditionally
-                     * by src/control.c and asserted by name in
-                     * tests/test_control.sh. */
-                    struct pgwt_summary_open_cpu obs = {
-                        .eff_we = pgwt_live_effective_event(
-                                      we, iv.cat_flag, d->cmd_gate_active,
-                                      in_cmd),
-                        .cpu_prefix_ns = pgwt_open_cpu_prefix_ns(cpu_open,
-                                                                 cpu_measured),
-                    };
-                    pgwt_summary_note_open_ex(d->summary_writer, snext, we,
-                                              sval.last_ts, iv.cat_flag, now,
-                                              &obs);
-                }
             }
         } else if (dbg_scan) {
             lookup_failed++;

@@ -461,10 +461,45 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_cpu_open_uncredited_ns_total",
                      d->summary_writer
                          ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
-    /* v9 (#424). summary_open_cpu_credited_ns is THE verification for the
-     * producer side: on a capture containing an in-flight CPU statement it
-     * must be non-zero. Zero there means the live loop is not feeding
-     * observations while every test still passes.
+    /* The `#if PGWT_SUMMARY_VERSION >= 9` agent/424-daemon wrapped
+     * these in is deliberately NOT taken: the constant is 9, so it
+     * is true today and buys nothing, while tests/test_control.sh
+     * asserts all seven keys by name unconditionally. A live
+     * conditional over a version constant is how the producer got
+     * hidden the first time. */
+    /* v9 (#424). THE CAPABILITY IS DORMANT: no producer feeds the writer an
+     * open-CPU observation, deliberately (see the note at the v8
+     * pgwt_summary_note_open call in src/map_reader.c). These counters are
+     * published anyway, because they are what MADE that visible — on a
+     * gate-2 capture with watchpoints attached and cpu_ns_total moving
+     * 0 -> 23.7 s, credited, refused AND uncredited all read zero, which
+     * says the writer was never asked rather than that it declined.
+     *
+     * THE FOURTH OUTCOME, found by reading the writer rather than by
+     * reasoning from the counters: a note can be ACCEPTED and then credited
+     * by nobody, moving no counter at all.
+     *   - crediting happens only in writer_seal_through()
+     *     (src/summary_writer.c:1510), whose first statement is
+     *     `if (!w->fp) return;`;
+     *   - its only two callers are pgwt_summary_push_event() and
+     *     pgwt_summary_flush_completed();
+     *   - w->fp is NULL before the first record opens the file lazily, and
+     *     again after every rotation (:2094).
+     * So on a capture whose in-flight statements are pure CPU — emitting no
+     * wait boundaries, hence no pushed records — the open interval is noted,
+     * nothing seals, and credited/refused/uncredited all stay 0. That is
+     * NOT "the producer never ran", which is what three zeros look like.
+     *
+     * The reading that separates them, and this code predicts its value:
+     * summary_open_credited_ns_total (the v8 WAIT crediting, above) in the
+     * same capture.
+     *   zero too  -> nothing sealed at all; the seal trigger is the bug and
+     *                re-wiring the producer will not move a single counter;
+     *   non-zero  -> seconds were sealed, so the CPU path really was asked
+     *                and declined somewhere, and THEN the producer is worth
+     *                looking at.
+     * Neither is distinguishable without a live capture, which is why the
+     * wiring was reverted rather than guessed at.
      *
      * The rest are the writer's own self-checks: eff_rejected_total should
      * read 0 in any build (the producer passes a classification the writer
@@ -477,7 +512,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * with the v9 writer, which is on another branch; the conditional exists
      * only so this branch builds and box-checks on its own, and the
      * integration agent DELETES it when v9 folds in. At that moment add these
-     * seven keys to tests/test_control.sh's required-key list, by name:
+     * seven keys to tests/test_control.sh's required-key list, by name
+     * (they report a dormant capability honestly — zeros that mean "nobody
+     * asked", not "nothing happened"):
      *
      *     summary_open_cpu_credited_ns
      *     summary_open_cpu_measured_ns
