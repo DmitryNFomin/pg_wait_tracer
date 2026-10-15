@@ -720,10 +720,17 @@ test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS
 # without them an incremental build silently reruns a stale binary (found
 # by this test's own bypass suite, which scored 9 green mutations until
 # the dependency was added).
-test_open_interval: test_open_interval.c ../src/cJSON.c \
+# map_reader.c (-DPGWT_SERVER, the BPF-free core) and wait_event.c are linked
+# so the command-gate cross-check runs the REAL peek/majority functions and the
+# category strings are the real ones, rather than transcriptions that cannot
+# notice the originals changing. Still BPF-free: runs anywhere.
+test_open_interval: test_open_interval.c ../src/map_reader.c \
+                    ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c \
                     ../src/open_interval.h ../src/open_snapshot.h \
                     ../src/ctrl_outq.h
-	$(CC) $(CFLAGS) -o $@ test_open_interval.c ../src/cJSON.c
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_open_interval.c \
+	    ../src/map_reader.c ../src/wait_event.c ../src/idle_rule.c \
+	    ../src/cJSON.c
 
 # test_top_wait_backfill: #319 — handle_top_sessions' and handle_top_queries'
 # raw backfill of top_wait over the summary-derived page. Same server.c-

@@ -100,14 +100,85 @@ struct pgwt_open_row {
     uint64_t on_cpu_ts;       /* the same arithmetic rather than re-derive it */
     uint64_t last_cpu_ns;
     uint64_t query_id;
+    uint16_t query_quality;   /* enum pgwt_query_attribution_quality: 0 none,
+                               * 1 real, 2 PG13 synthetic */
+    uint32_t category_id;     /* WE_CLASS(event_id); 0 for on-CPU */
+    char     category[16];    /* pgwt_class_name(event_id): "IO", "Lock",
+                               * "CPU", … — the house representation (the
+                               * server emits "class" the same way). Filled by
+                               * the collector, which has wait_event.c; the
+                               * serialiser stays pure and REFUSES a row whose
+                               * category was never filled rather than
+                               * shipping an empty string a consumer must
+                               * guess at. */
+
+    /* ── Command classification ───────────────────────────────────────────
+     * Two decompositions of the same sweep, both emitted, because the daemon
+     * and the server reduce it differently and a silent rename between them
+     * would be a misclassification nobody could see:
+     *
+     *  (a) the daemon's VERDICT: cmd_open_ns / cmd_in_window / cmd_by_markers
+     *  (b) the RAW gate state: cmd_banked_ns / cmd_anchor_ns / cmd_sweep_open
+     *      (+ cmd_seen, cmd_gate_present), from which (a) is reproduced by
+     *      map_reader.c's rule, ALL THREE STEPS — the first draft of this
+     *      comment had only the middle one, and
+     *      tests/test_open_interval.c test_cmd_gate_formula caught it
+     *      differing from the real function in 59 of 96 gate states:
+     *
+     *          if (!cmd_seen)                     // an unmarked pid
+     *              open_ns = 0;
+     *          else {
+     *              open_ns = cmd_banked_ns
+     *                      + (cmd_sweep_open
+     *                         ? max(0, t1 - max(cmd_anchor_ns, t0)) : 0);
+     *              open_ns = min(open_ns, max(0, t1 - t0));
+     *          }                                  // banked may predate t0:
+     *                                             // state_map's last_ts can
+     *                                             // run ahead of the last
+     *                                             // drained record, and an
+     *                                             // unclamped sum then
+     *                                             // exceeds the stretch
+     *
+     *      == pgwt_live_cmd_gate_peek(g, t0, t1), and the verdict is
+     *
+     *          in_cmd = (t1 == t0) ? cmd_sweep_open
+     *                              : open_ns * 2 >= (t1 - t0);
+     *
+     *      == pgwt_live_cmd_majority. The two fallbacks are NOT the majority
+     *      rule and must not be derived from it:
+     *
+     *          !cmd_gate_present  → use cmd_open (the emission-time gate),
+     *                               exactly as the closed-record path does;
+     *          cmd_seen == false  → IN-COMMAND (the server's seen_cmd rule:
+     *                               an unmarked pid's CPU stays CPU).
+     *
+     *      Both are what pgwt_live_cmd_gate_classify returns, and in both
+     *      cases cmd_by_markers is false.
+     *
+     * NOTE the one thing that is NOT interchangeable: `cmd_open` is BPF's
+     * INSTANTANEOUS uprobe gate, `cmd_sweep_open` is the marker sweep's open
+     * flag. They disagree exactly in the #98 case the sweep exists for (the
+     * gate is already clear at the ClientRead that ends a waitless statement
+     * whose whole run was in-command), so the banked/anchor arithmetic takes
+     * cmd_sweep_open, and cmd_open is only the fallback for a pid with no
+     * sweep state. */
     uint64_t cmd_open_ns;     /* command-open ns inside [open_start, snapshot] */
-    bool     cmd_open;        /* INSTANTANEOUS gate — never classify on this
-                               * alone; it misclassifies (the gate is already
-                               * clear at the ClientRead that ends a waitless
-                               * statement whose whole run was in-command) */
+    uint64_t cmd_banked_ns;   /* gate.banked_ns: closed command runs since the
+                               * pid's last record */
+    uint64_t cmd_anchor_ns;   /* gate.anchor_ns: start of the open command run,
+                               * or the last record end */
+    bool     cmd_open;        /* INSTANTANEOUS BPF gate — never classify on
+                               * this alone */
+    bool     cmd_sweep_open;  /* gate.open: inside a command at the sweep point */
+    bool     cmd_seen;        /* gate.seen: this pid has CMD markers at all.
+                               * false ⇒ the server's seen_cmd fallback */
+    bool     cmd_gate_present;/* the daemon HAS per-pid sweep state for this
+                               * pid (false ⇒ banked/anchor/sweep_open are not
+                               * measurements, and the consumer must fall back
+                               * to cmd_open like the closed path does) */
     bool     cmd_in_window;   /* the majority rule's verdict for the stretch */
     bool     cmd_by_markers;  /* true: markers decided it. false: fell back */
-    bool     query_synth;     /* PG13 synthetic query id */
+    bool     query_synth;     /* PG13 synthetic query id (== query_quality 2) */
 };
 
 struct pgwt_open_snapshot {
@@ -158,6 +229,25 @@ static inline void pgwt_json_u64(cJSON *o, const char *k, uint64_t v)
     cJSON_AddRawToObject(o, k, buf);
 }
 
+/* WALL-clock nanoseconds go out as a decimal STRING, and this is a
+ * correctness fix rather than a style choice.
+ *
+ * Emitting the exact digits as a raw JSON NUMBER is not enough: the consumer
+ * parses with cJSON, which stores every number in a double, so a wall value
+ * near 1.76e18 is rounded to the nearest representable multiple of 256 ns on
+ * the way IN. Producer-side care is defeated at the parser. A string crosses
+ * the boundary byte-for-byte and the consumer calls strtoull.
+ *
+ * Monotonic fields stay numbers (the consumer already parses them that way)
+ * and are exact while the clock is below 2^53 ns — ~104 days of uptime. That
+ * is a real ceiling, not a comfortable one; see the report. */
+static inline void pgwt_json_u64_str(cJSON *o, const char *k, uint64_t v)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)v);
+    cJSON_AddStringToObject(o, k, buf);
+}
+
 /* Serialise one snapshot. PURE: no daemon, no BPF, no socket — so the exact
  * wire shape is unit-testable, which is the only reason the field names can be
  * frozen honestly.
@@ -194,14 +284,14 @@ static inline cJSON *pgwt_open_snapshot_json_as(
     cJSON_AddStringToObject(root, "reason", reason ? reason : "");
     cJSON_AddBoolToObject(root, "complete", included);
     pgwt_json_u64(root, "snapshot_ns", s->snapshot_ns);
-    pgwt_json_u64(root, "snapshot_wall_ns", s->snapshot_wall_ns);
+    pgwt_json_u64_str(root, "snapshot_wall_ns", s->snapshot_wall_ns);
     pgwt_json_u64(root, "now_mono_ns", s->now_mono_ns);
-    pgwt_json_u64(root, "now_wall_ns", s->now_wall_ns);
+    pgwt_json_u64_str(root, "now_wall_ns", s->now_wall_ns);
     pgwt_json_u64(root, "committed_through_ns", s->committed_through_ns);
-    pgwt_json_u64(root, "committed_through_wall_ns",
-                  pgwt_open_snapshot_wall_of(s, s->committed_through_ns));
+    pgwt_json_u64_str(root, "committed_through_wall_ns",
+                      pgwt_open_snapshot_wall_of(s, s->committed_through_ns));
     pgwt_json_u64(root, "daemon_generation", s->daemon_generation);
-    pgwt_json_u64(root, "daemon_start_wall_ns", s->daemon_start_wall_ns);
+    pgwt_json_u64_str(root, "daemon_start_wall_ns", s->daemon_start_wall_ns);
     pgwt_json_u64(root, "daemon_pid", s->daemon_pid);
     cJSON_AddStringToObject(root, "tier", s->tier);
     cJSON_AddBoolToObject(root, "cpu_accounting", s->cpu_accounting);
@@ -211,6 +301,23 @@ static inline cJSON *pgwt_open_snapshot_json_as(
     /* pids is present ONLY for a trustworthy answer. Absent beats empty: an
      * empty array says "nothing is open", which is a measurement. */
     if (included) {
+        /* A row whose category the collector never filled would reach the
+         * consumer as "", and a consumer that refuses on absence cannot tell
+         * that from a class it does not know. Refuse the whole reply instead:
+         * a producer bug becomes a labelled pane, not a silent gap. */
+        for (int i = 0; i < s->n_rows; i++) {
+            if (s->rows[i].category[0] != '\0')
+                continue;
+            cJSON_Delete(root);
+            if (depth > 0)
+                return NULL;
+            char why[128];
+            snprintf(why, sizeof(why),
+                     "internal: open interval for pid %u has no resolved "
+                     "wait category", s->rows[i].pid);
+            return pgwt_open_snapshot_json_as(s, PGWT_OPEN_SNAP_UNAVAILABLE,
+                                              why, reply_max, depth + 1);
+        }
         cJSON *arr = cJSON_AddArrayToObject(root, "pids");
         if (!arr) {
             cJSON_Delete(root);
@@ -241,8 +348,16 @@ static inline cJSON *pgwt_open_snapshot_json_as(
             pgwt_json_u64(o, "on_cpu_ts", r->on_cpu_ts);
             pgwt_json_u64(o, "last_cpu_ns", r->last_cpu_ns);
             pgwt_json_u64(o, "query_id", r->query_id);
+            pgwt_json_u64(o, "query_quality", r->query_quality);
+            cJSON_AddStringToObject(o, "category", r->category);
+            pgwt_json_u64(o, "category_id", r->category_id);
             pgwt_json_u64(o, "cmd_open_ns", r->cmd_open_ns);
+            pgwt_json_u64(o, "cmd_banked_ns", r->cmd_banked_ns);
+            pgwt_json_u64(o, "cmd_anchor_ns", r->cmd_anchor_ns);
             cJSON_AddBoolToObject(o, "cmd_open", r->cmd_open);
+            cJSON_AddBoolToObject(o, "cmd_sweep_open", r->cmd_sweep_open);
+            cJSON_AddBoolToObject(o, "cmd_seen", r->cmd_seen);
+            cJSON_AddBoolToObject(o, "cmd_gate_present", r->cmd_gate_present);
             cJSON_AddBoolToObject(o, "cmd_in_window", r->cmd_in_window);
             cJSON_AddBoolToObject(o, "cmd_by_markers", r->cmd_by_markers);
             cJSON_AddBoolToObject(o, "query_synth", r->query_synth);

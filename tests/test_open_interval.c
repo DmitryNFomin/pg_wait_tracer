@@ -28,12 +28,34 @@
 #include "open_snapshot.h"
 #include "ctrl_outq.h"
 #include "pg_wait_tracer.h"
+#include "map_reader.h"
+#include "wait_event.h"
+#include "spawn.h"
 #include "cJSON.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* map_reader.c is linked (-DPGWT_SERVER, the BPF-free core) so the
+ * command-gate cross-check below runs the REAL pgwt_live_cmd_gate_peek rather
+ * than a transcription of it, and wait_event.c so the category strings are the
+ * ones the collector produces. wait_event.c's PG-querying path pulls two spawn
+ * symbols that nothing here reaches — stubbed rather than linking Linux-only
+ * spawn.c, which would cost this test its "runs anywhere" property. */
+int pgwt_proc_open(struct pgwt_proc *p, char *const argv[])
+{
+    (void)p; (void)argv;
+    printf("  FATAL: pgwt_proc_open must be unreachable in this test\n");
+    exit(2);
+}
+int pgwt_proc_close(struct pgwt_proc *p)
+{
+    (void)p;
+    printf("  FATAL: pgwt_proc_close must be unreachable in this test\n");
+    exit(2);
+}
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -272,7 +294,10 @@ static struct pgwt_open_snapshot *new_snapshot(void)
     s->complete = true;
     s->snapshot_ns = S(1000);
     s->now_mono_ns = S(1000) + MS(2);
-    s->now_wall_ns = 1760000000000000000ULL;
+    /* Deliberately NOT a multiple of 256: near 1.76e18 a double can only
+     * represent multiples of 256 ns, so this value proves the wire form is
+     * lossless instead of merely looking exact. */
+    s->now_wall_ns = 1760000000000000123ULL;
     s->snapshot_wall_ns = pgwt_open_snapshot_wall_of(s, s->snapshot_ns);
     s->committed_through_ns = S(1000) + MS(3);
     s->daemon_generation = 7;
@@ -302,8 +327,16 @@ static void add_row(struct pgwt_open_snapshot *s, uint32_t pid, uint32_t we,
     r->on_cpu_ts = S(999);
     r->last_cpu_ns = MS(100);
     r->query_id = 0xDEADBEEFULL;
+    r->query_quality = PGWT_QUERY_QUALITY_REAL;
+    snprintf(r->category, sizeof(r->category), "%s", pgwt_class_name(we));
+    r->category_id = we ? WE_CLASS(we) : 0;
     r->cmd_open_ns = MS(1200);
+    r->cmd_banked_ns = MS(1200);
+    r->cmd_anchor_ns = r->open_start_ns;
     r->cmd_open = true;
+    r->cmd_sweep_open = false;
+    r->cmd_seen = true;
+    r->cmd_gate_present = true;
     r->cmd_in_window = true;
     r->cmd_by_markers = true;
     r->query_synth = false;
@@ -340,7 +373,10 @@ static uint64_t raw_u64(const char *json, const char *key, bool *found)
     *found = p != NULL;
     if (!p)
         return 0;
-    return strtoull(p + strlen(pat), NULL, 10);
+    p += strlen(pat);
+    if (*p == '"')          /* the wall fields are decimal STRINGS */
+        p++;
+    return strtoull(p, NULL, 10);
 }
 
 static uint64_t u64_of(cJSON *o, const char *k, bool *found)
@@ -376,10 +412,11 @@ static void test_json_shape(void)
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(parsed, "complete")),
           "complete must be true");
     /* Every top-level field the consumer cannot repair if it is missing. */
-    const char *req[] = { "snapshot_ns", "snapshot_wall_ns", "now_mono_ns",
-                          "now_wall_ns", "committed_through_ns",
-                          "committed_through_wall_ns", "daemon_generation",
-                          "daemon_start_wall_ns", "daemon_pid", "open_count" };
+    /* Numeric top-level fields. The wall-ns ones are checked separately
+     * below: they are decimal STRINGS on purpose. */
+    const char *req[] = { "snapshot_ns", "now_mono_ns",
+                          "committed_through_ns", "daemon_generation",
+                          "daemon_pid", "open_count" };
     for (size_t i = 0; i < sizeof(req) / sizeof(*req); i++) {
         u64_of(parsed, req[i], &f);
         CHECK(f, "top-level field %s missing", req[i]);
@@ -414,10 +451,11 @@ static void test_json_shape(void)
           cJSON_GetArraySize(pids));
     cJSON *r0 = cJSON_GetArrayItem(pids, 0);
     const char *rowreq[] = { "pid", "incarnation", "generation", "event_id",
-                             "cat_flag", "eff_event", "flags",
+                             "cat_flag", "category_id", "eff_event", "flags",
                              "open_start_ns", "duration_ns", "cpu_ns_total",
                              "on_cpu_ts", "last_cpu_ns", "query_id",
-                             "cmd_open_ns" };
+                             "query_quality", "cmd_open_ns", "cmd_banked_ns",
+                             "cmd_anchor_ns" };
     for (size_t i = 0; i < sizeof(rowreq) / sizeof(*rowreq); i++) {
         u64_of(r0, rowreq[i], &f);
         CHECK(f, "row field %s missing", rowreq[i]);
@@ -427,6 +465,51 @@ static void test_json_shape(void)
           "cmd_in_window missing");
     CHECK(cJSON_GetObjectItem(r0, "cmd_by_markers") != NULL,
           "cmd_by_markers missing");
+    /* The raw command-gate trio the server half reduces itself. Present AND
+     * boolean-typed: a missing one makes its classifier refuse outright. */
+    const char *gatereq[] = { "cmd_open", "cmd_sweep_open", "cmd_seen",
+                              "cmd_gate_present" };
+    for (size_t i = 0; i < sizeof(gatereq) / sizeof(*gatereq); i++)
+        CHECK(cJSON_IsBool(cJSON_GetObjectItem(r0, gatereq[i])),
+              "row flag %s missing or not a bool", gatereq[i]);
+    /* The wait class as its own field, not merely derivable. */
+    cJSON *cat = cJSON_GetObjectItem(r0, "category");
+    CHECK(cJSON_IsString(cat) && cat->valuestring[0] != '\0',
+          "category must be a non-empty string");
+    CHECK(strcmp(cat->valuestring, "CPU") == 0,
+          "an on-CPU row's category must be CPU, got %s",
+          cat ? cat->valuestring : "(none)");
+    cJSON *cat1 = cJSON_GetObjectItem(cJSON_GetArrayItem(pids, 1), "category");
+    CHECK(cJSON_IsString(cat1) && strcmp(cat1->valuestring, "Client") == 0,
+          "a 0x06000004 row's category must be Client, got %s",
+          cat1 && cat1->valuestring ? cat1->valuestring : "(none)");
+    CHECK(u64_of(r0, "query_quality", &f) == PGWT_QUERY_QUALITY_REAL,
+          "query_quality must travel as its own field");
+
+    /* WALL-ns fields cross the wire as decimal STRINGS. A raw JSON number
+     * with the exact digits is NOT enough: the consumer parses with cJSON,
+     * which stores a number as a double, and near 1.76e18 that rounds to the
+     * nearest 256 ns. The ...123 fixture is what makes this detectable. */
+    const char *wallreq[] = { "snapshot_wall_ns", "now_wall_ns",
+                              "committed_through_wall_ns",
+                              "daemon_start_wall_ns" };
+    for (size_t i = 0; i < sizeof(wallreq) / sizeof(*wallreq); i++) {
+        cJSON *w = cJSON_GetObjectItem(parsed, wallreq[i]);
+        CHECK(cJSON_IsString(w),
+              "%s must be a decimal STRING (a JSON number is rounded to a "
+              "double by the consumer's parser)", wallreq[i]);
+    }
+    CHECK((uint64_t)(double)s->now_wall_ns != s->now_wall_ns,
+          "the precision fixture is vacuous: this wall value survives a "
+          "double, so the string requirement would not be detectable");
+    cJSON *nw = cJSON_GetObjectItem(parsed, "now_wall_ns");
+    CHECK(nw && cJSON_IsString(nw) &&
+          strtoull(nw->valuestring, NULL, 10) == s->now_wall_ns,
+          "now_wall_ns must round-trip EXACTLY through the string form");
+    /* Monotonic fields stay numbers — the consumer already parses them that
+     * way, and they are exact below 2^53 ns (~104 days of uptime). */
+    CHECK(cJSON_IsNumber(cJSON_GetObjectItem(parsed, "snapshot_ns")),
+          "snapshot_ns must stay a JSON number");
     CHECK(u64_of(r0, "duration_ns", &f) == S(2), "duration_ns wrong");
     CHECK(u64_of(r0, "cpu_ns", &f) == MS(37), "measured cpu_ns wrong");
 
@@ -596,6 +679,146 @@ static void test_full_house(void)
     CHECK(root3 == NULL, "an impossibly small cap must refuse, not approve");
     cJSON_Delete(root3);
 
+    free(str);
+    cJSON_Delete(root);
+    free(s);
+}
+
+/* THE FORMULA THE CONTRACT HANDS THE SERVER HALF.
+ *
+ * The snapshot ships the raw gate state (cmd_banked_ns, cmd_anchor_ns,
+ * cmd_sweep_open) and open_snapshot.h tells the consumer how to reduce it:
+ *
+ *     open_ns = banked + (sweep_open ? max(0, t1 - max(anchor, t0)) : 0)
+ *
+ * If that sentence is wrong, the consumer misclassifies every open stretch
+ * and the daemon's own verdict field hides it (the two would simply
+ * disagree). So the sentence is differenced against the REAL implementation,
+ * map_reader.c pgwt_live_cmd_gate_peek, over a gate matrix — and the majority
+ * rule on top of it against pgwt_live_cmd_majority. */
+static void test_cmd_gate_formula(void)
+{
+    printf("test_cmd_gate_formula\n");
+    const uint64_t t0 = S(1000), t1 = S(1000) + MS(800);
+    const uint64_t anchors[] = { 0, t0 - MS(500), t0, t0 + MS(200), t1,
+                                 t1 + MS(100) };
+    const uint64_t banked[] = { 0, MS(1), MS(400), MS(900) };
+    const uint8_t opens[] = { 0, 1 };
+    const uint8_t seens[] = { 0, 1 };
+    int cases = 0, diffs = 0, maj_diffs = 0, nonzero = 0, both_verdicts[2] = {0, 0};
+
+    for (size_t a = 0; a < sizeof(anchors) / sizeof(*anchors); a++)
+    for (size_t b = 0; b < sizeof(banked) / sizeof(*banked); b++)
+    for (size_t c = 0; c < sizeof(opens) / sizeof(*opens); c++)
+    for (size_t d = 0; d < sizeof(seens) / sizeof(*seens); d++) {
+        struct pgwt_live_cmd_gate g = {
+            .seen = seens[d], .open = opens[c],
+            .anchor_ns = anchors[a], .banked_ns = banked[b],
+        };
+        /* The contract's formula, written exactly as the header states it
+         * — all three steps, including the two the first draft missed. */
+        uint64_t doc;
+        if (!g.seen) {
+            doc = 0;
+        } else {
+            doc = g.banked_ns;
+            if (g.open) {
+                uint64_t from = g.anchor_ns > t0 ? g.anchor_ns : t0;
+                if (t1 > from)
+                    doc += t1 - from;
+            }
+            uint64_t wall = t1 > t0 ? t1 - t0 : 0;
+            if (doc > wall)
+                doc = wall;
+        }
+        uint64_t real = pgwt_live_cmd_gate_peek(&g, t0, t1);
+        cases++;
+        if (real > 0)
+            nonzero++;
+        if (doc != real) {
+            diffs++;
+            if (diffs <= 3)
+                printf("  DIFF peek: anchor=%llu banked=%llu open=%u "
+                       "doc=%llu real=%llu\n",
+                       (unsigned long long)g.anchor_ns,
+                       (unsigned long long)g.banked_ns, g.open,
+                       (unsigned long long)doc, (unsigned long long)real);
+        }
+        /* And the verdict on top: in-command iff at least half the wall
+         * (a zero-length stretch takes the instantaneous sweep flag). */
+        bool doc_maj = (t1 == t0) ? g.open != 0 : doc * 2 >= (t1 - t0);
+        bool real_maj = pgwt_live_cmd_majority(real, t1 - t0, g.open != 0);
+        both_verdicts[real_maj ? 1 : 0]++;
+        if (doc_maj != real_maj)
+            maj_diffs++;
+
+        /* The whole decision the consumer must reproduce, fallbacks
+         * included: an unmarked pid is IN-COMMAND (seen_cmd), and a pid with
+         * no sweep state at all falls back to the emission-time gate. Those
+         * are not the majority rule, and deriving them from it is the
+         * mistake the contract text now forbids. */
+        for (int fb = 0; fb < 2; fb++) {
+            struct pgwt_live_cmd_gate gg = g;
+            bool doc_cmd, doc_by_markers;
+            if (!gg.seen) { doc_cmd = true;  doc_by_markers = false; }
+            else          { doc_cmd = doc_maj; doc_by_markers = true; }
+            bool real_cmd = false;
+            bool real_by = pgwt_live_cmd_gate_classify(&gg, false, t0, t1,
+                                                       fb != 0, &real_cmd);
+            if (doc_cmd != real_cmd || doc_by_markers != real_by)
+                maj_diffs++;
+            /* …and with no per-pid state at all. */
+            bool nog_cmd = !fb;
+            bool nog_by = pgwt_live_cmd_gate_classify(NULL, false, t0, t1,
+                                                      fb != 0, &nog_cmd);
+            if (nog_cmd != (fb != 0) || nog_by)
+                maj_diffs++;
+        }
+    }
+    CHECK(cases > 40, "gate matrix too small: %d", cases);
+    CHECK(nonzero > 0, "every gate case produced 0 command-open ns — the "
+                       "comparison would hold for any formula");
+    CHECK(both_verdicts[0] > 0 && both_verdicts[1] > 0,
+          "the majority rule returned only one verdict (%d/%d): the "
+          "comparison cannot see a flip",
+          both_verdicts[0], both_verdicts[1]);
+    CHECK(diffs == 0, "the formula open_snapshot.h gives the server half "
+                      "differs from pgwt_live_cmd_gate_peek in %d of %d cases",
+          diffs, cases);
+    CHECK(maj_diffs == 0, "the majority rule differs in %d of %d cases",
+          maj_diffs, cases);
+    printf("  %d gate cases, %d nonzero, verdicts false/true=%d/%d, "
+           "%d peek diffs, %d majority diffs\n", cases, nonzero,
+           both_verdicts[0], both_verdicts[1], diffs, maj_diffs);
+}
+
+/* A row whose category the collector never resolved must make the whole reply
+ * refuse: a consumer that refuses on absence cannot tell "" from a class it
+ * does not know, and an empty string is the shape in which a silent gap
+ * ships. */
+static void test_missing_category_refuses(void)
+{
+    printf("test_missing_category_refuses\n");
+    struct pgwt_open_snapshot *s = new_snapshot();
+    add_row(s, 401, 0, MS(5));
+    add_row(s, 402, 0x06000004, MS(5));
+    s->rows[1].category[0] = '\0';          /* the producer bug */
+    char *str = NULL;
+    cJSON *root = json_of(s, PGWT_OPEN_INTERVALS_REPLY_MAX, &str);
+    cJSON *p = str ? cJSON_Parse(str) : NULL;
+    CHECK(p != NULL, "the refusal must still be a valid reply");
+    if (p) {
+        CHECK(strcmp(cJSON_GetObjectItem(p, "status")->valuestring,
+                     "unavailable") == 0,
+              "an unresolved category must make the reply unavailable");
+        CHECK(cJSON_GetObjectItem(p, "pids") == NULL,
+              "the refusal must carry no rows");
+        cJSON *rs = cJSON_GetObjectItem(p, "reason");
+        CHECK(rs && strstr(rs->valuestring, "402") != NULL,
+              "the reason must name the offending pid, got '%s'",
+              rs && rs->valuestring ? rs->valuestring : "");
+        cJSON_Delete(p);
+    }
     free(str);
     cJSON_Delete(root);
     free(s);
@@ -864,6 +1087,8 @@ int main(void)
     test_empty_but_included();
     test_degraded_statuses();
     test_status_invariant();
+    test_cmd_gate_formula();
+    test_missing_category_refuses();
     test_full_house();
     test_anchor_absent();
     test_transport_queue();

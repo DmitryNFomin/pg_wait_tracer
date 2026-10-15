@@ -1004,6 +1004,12 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
             st.cmd_open != 0, &in_cmd);
         uint64_t cmd_ns = pa
             ? pgwt_live_cmd_gate_peek(&pa->cmd_gate, st.last_ts, snap) : 0;
+        /* The RAW sweep state as well as the verdict: the server half reduces
+         * it with its own arithmetic, and handing it only a verdict would
+         * force it to keep a second copy of the peek. When this pid has no
+         * per-pid state the three fields are NOT measurements, which is what
+         * cmd_gate_present says. */
+        const struct pgwt_live_cmd_gate *g = pa ? &pa->cmd_gate : NULL;
         /* cat_flag with pa = NULL: resolved from the registry, cached
          * nowhere — the same call the flush makes, and it keeps this read
          * free of side effects on the live accumulator. */
@@ -1026,8 +1032,20 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
         r->on_cpu_ts      = st.on_cpu_ts;
         r->last_cpu_ns    = st.last_cpu_ns;
         r->query_id       = ev.query_id;
+        r->query_quality  = quality;
+        /* The wait CLASS as its own field, resolved with the same function the
+         * server emits "class" from — derivable is not the same as present
+         * for a consumer that refuses on absence. */
+        snprintf(r->category, sizeof(r->category), "%s",
+                 pgwt_class_name(ev.old_event));
+        r->category_id    = ev.old_event ? WE_CLASS(ev.old_event) : 0;
         r->cmd_open_ns    = cmd_ns;
+        r->cmd_banked_ns  = g ? g->banked_ns : 0;
+        r->cmd_anchor_ns  = g ? g->anchor_ns : 0;
         r->cmd_open       = st.cmd_open != 0;
+        r->cmd_sweep_open = g && g->open != 0;
+        r->cmd_seen       = g && g->seen != 0;
+        r->cmd_gate_present = g != NULL;
         r->cmd_in_window  = in_cmd;
         r->cmd_by_markers = by_markers;
         r->query_synth    = (ev.flags & PGWT_EVENT_FLAG_QUERY_SYNTH) != 0;

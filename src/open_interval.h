@@ -53,6 +53,41 @@ struct pgwt_open_stretch_attr {
     uint16_t quality;       /* enum pgwt_query_attribution_quality */
 };
 
+/* The S3 measured-CPU arithmetic for a still-open stretch, in ONE place:
+ *
+ *     exact-on-CPU-now = cpu_ns_total + (on_cpu_ts ? now - on_cpu_ts : 0)
+ *     stretch CPU      = exact - last_cpu_ns, floored at 0
+ *
+ * — the straddling command's on-CPU ns the watchpoint never emitted, because
+ * no wait boundary fired. PGWT_CPU_NS_UNKNOWN when the daemon measures no CPU
+ * (legacy capability): the consumer then falls back to gap inference, and must
+ * not read it as a measured zero.
+ *
+ * Deliberately NOT clamped to the stretch's wall. The de-escalation/shutdown
+ * flush has never clamped, so clamping here would silently change records the
+ * trace has carried since T8; the clamp is the live VIEW's display step
+ * (map_reader.h pgwt_live_closed_cpu_ns / the cpu_open clamp in
+ * pgwt_read_state_map). A consumer that wants the clamped quantity applies
+ * `min(cpu, span_wall)` itself, and says so where it does.
+ *
+ * #424: the live server half calls THIS with a snapshot row's
+ * cpu_ns_total / on_cpu_ts / last_cpu_ns instead of keeping a second copy —
+ * that second copy is the one place the two producers could drift, and the
+ * drift would be invisible (both answers look plausible). */
+static inline uint64_t pgwt_open_stretch_cpu_ns(uint64_t cpu_ns_total,
+                                                uint64_t on_cpu_ts,
+                                                uint64_t last_cpu_ns,
+                                                uint64_t now_ns,
+                                                bool cpu_accounting)
+{
+    if (!cpu_accounting)
+        return PGWT_CPU_NS_UNKNOWN;
+    uint64_t exact = cpu_ns_total;
+    if (on_cpu_ts && now_ns >= on_cpu_ts)
+        exact += now_ns - on_cpu_ts;
+    return (exact >= last_cpu_ns) ? exact - last_cpu_ns : 0;
+}
+
 /* Is there an open stretch to close at all? The builder applies this itself;
  * it is exposed so a caller can skip resolving attribution (two BPF map reads
  * per pid) for a backend that will be skipped anyway — NOT so a caller can
@@ -84,17 +119,10 @@ pgwt_build_open_stretch(uint32_t pid, const struct pgwt_pid_state *st,
         return rc;
     uint32_t we = st->last_event;
 
-    /* S3: close the open stretch with its exact MEASURED CPU — the straddling
-     * command's on-CPU ns the watchpoint never emitted (no wait boundary
-     * fired). exact-on-CPU-now = cpu_ns_total + the current open stretch
-     * (on_cpu_ts != 0 iff running); subtract the seeded base. */
-    uint64_t cpu_ns = PGWT_CPU_NS_UNKNOWN;
-    if (cpu_accounting) {
-        uint64_t exact = st->cpu_ns_total;
-        if (st->on_cpu_ts && now_ns >= st->on_cpu_ts)
-            exact += now_ns - st->on_cpu_ts;
-        cpu_ns = (exact >= st->last_cpu_ns) ? exact - st->last_cpu_ns : 0;
-    }
+    /* S3 measured CPU — one call, see pgwt_open_stretch_cpu_ns above. */
+    uint64_t cpu_ns = pgwt_open_stretch_cpu_ns(st->cpu_ns_total, st->on_cpu_ts,
+                                               st->last_cpu_ns, now_ns,
+                                               cpu_accounting);
 
     struct pgwt_trace_event ev = {
         .timestamp_ns = now_ns,
