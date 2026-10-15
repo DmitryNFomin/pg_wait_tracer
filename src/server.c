@@ -368,6 +368,22 @@ struct pgwt_load_info {
                                    partial; handlers MUST error, not render */
     int      allocation_failed; /* working/merge allocation failed — never
                                    misreport this as a range-size refusal */
+    /* #424 straddler diagnostics. Not a fidelity label and not in the wire
+     * protocol: they exist so that a later refactor which drops or narrows
+     * the right-edge lookahead is VISIBLE in a test instead of silently
+     * restoring the undercount.
+     *   straddlers_admitted  — records admitted by OVERLAP whose close is
+     *                          past `to` (each one is stamped
+     *                          PGWT_EVENT_FLAG_RIGHT_OPEN).
+     *   right_edge_truncated — the lookahead stopped at its budget (time
+     *                          horizon or block count) with trace data still
+     *                          beyond it, so a straddler LONGER than what
+     *                          was scanned may be missing. A budgeted scan
+     *                          that stops silently is the failure class this
+     *                          project keeps hitting; this is the flag that
+     *                          makes it audible. */
+    int      straddlers_admitted;
+    int      right_edge_truncated;
 };
 
 struct pgwt_server {
@@ -1518,6 +1534,80 @@ static int load_max_events(void)
     return cached;
 }
 
+/* ── #424: right-edge straddler lookahead ────────────────────────────────
+ *
+ * A trace record is written when its interval CLOSES, so selecting records
+ * by `close in [from, to]` drops every wait that was still running at the
+ * right edge — a wait spanning the whole window contributed nothing at all.
+ * Correct selection is OVERLAP (`close >= from && start <= to`), and the
+ * left half already worked (a straddler at `from` has its close inside the
+ * window and arrives whole, clipped by event_window_ns). The RIGHT half
+ * needs records that live in blocks AFTER the window, which is why it is a
+ * lookahead and not a predicate change.
+ *
+ * There is no a-priori bound on how far to look: without trace format v4
+ * nothing in a block header says how long the longest interval in it is, and
+ * an io_worker can hold one wait for an entire capture. The sample_to_mono
+ * precedent (one max measured sample period) does NOT generalise. So the
+ * scan is "the rest of the file(s), BUDGETED", with two bounds:
+ *
+ *   PGWT_STRADDLE_LOOKAHEAD_NS   time horizon past `to`   (default 300 s)
+ *   PGWT_STRADDLE_MAX_BLOCKS     blocks decoded past `to` (default 256)
+ *
+ * Either one cutting the scan sets pgwt_load_info.right_edge_truncated —
+ * the answer is then "complete for straddlers up to what was scanned", said
+ * out loud, instead of a silent partial. Setting the horizon to 0 disables
+ * the lookahead entirely and restores the pre-#424 selection (and sets the
+ * truncation flag, because that is exactly what it is).
+ *
+ * LIMIT, STATED HERE AND IN src/compute.c: a wait that is STILL OPEN RIGHT
+ * NOW has no closing record in the trace at all. No admission rule can
+ * recover it — there is nothing to admit. This is a fix for HISTORICAL and
+ * replay windows only, including an older window inside a still-growing
+ * capture once the closing record is committed. It does not repair the live
+ * right edge. */
+#define PGWT_STRADDLE_LOOKAHEAD_DEFAULT_NS  (300ULL * 1000000000ULL)
+#define PGWT_STRADDLE_MAX_BLOCKS_DEFAULT    256
+
+/* Deliberately NOT cached in a static, unlike load_max_events(): both are
+ * read once per load (not per record), and a cached copy is a bypass hazard
+ * — it survives fork(), so a test that lowers the horizon in a child would
+ * silently keep the parent's value and the gate would pass while measuring
+ * nothing. */
+static uint64_t straddle_lookahead_ns(void)
+{
+    const char *env = getenv("PGWT_STRADDLE_LOOKAHEAD_NS");
+    if (env && *env) {
+        char *end = NULL;
+        unsigned long long v = strtoull(env, &end, 10);
+        if (end && *end == '\0')
+            return (uint64_t)v;        /* 0 = disabled, deliberately */
+    }
+    return PGWT_STRADDLE_LOOKAHEAD_DEFAULT_NS;
+}
+
+static int straddle_max_blocks(void)
+{
+    const char *env = getenv("PGWT_STRADDLE_MAX_BLOCKS");
+    if (env && *env) {
+        char *end = NULL;
+        long v = strtol(env, &end, 10);
+        if (end && *end == '\0' && v >= 0)
+            return (int)v;             /* 0 = disabled, deliberately */
+    }
+    return PGWT_STRADDLE_MAX_BLOCKS_DEFAULT;
+}
+
+/* The per-load straddler bookkeeping, passed down into every admission site
+ * so no site can widen admission without reporting what it did. */
+struct straddle_scan {
+    int      enabled;      /* the caller asked for a bounded right edge */
+    uint64_t lookahead_ns;
+    int      max_blocks;
+    int      admitted;
+    int      truncated;
+};
+
 /* Read events from a trace file for a MONO time range. Opens file, seeks to
  * the right blocks via block index, decodes
  * only the blocks that overlap [from_mono, sample_to_mono]. Non-samples use
@@ -1545,6 +1635,7 @@ static void load_file_range_mono(struct pgwt_server *srv,
                                  uint64_t from_mono, uint64_t to_mono,
                                  uint64_t sample_to_mono,
                                  uint32_t pid, int markers_only,
+                                 struct straddle_scan *ss,
                                  struct pgwt_trace_event **events,
                                  int *total, int *cap, int *overloaded,
                                  int *allocation_failed)
@@ -1560,9 +1651,35 @@ static void load_file_range_mono(struct pgwt_server *srv,
     struct pgwt_trace_event block_buf[PGWT_BLOCK_EVENTS];
     int max_events = load_max_events();
 
+    /* #424: how far past `to_mono` this call may look for a straddler, and
+     * how many blocks it may decode to do it. straddle_to is the TIME bound;
+     * scan_to is the widest right edge of the whole block loop (the sample
+     * lookahead is unchanged and independent). */
+    uint64_t straddle_to = (ss && ss->enabled && ss->lookahead_ns)
+        ? (UINT64_MAX - to_mono < ss->lookahead_ns ? UINT64_MAX
+                                                   : to_mono + ss->lookahead_ns)
+        : to_mono;
+    uint64_t scan_to = sample_to_mono > straddle_to ? sample_to_mono
+                                                    : straddle_to;
+    int straddle_blocks = 0;
+
     for (int b = first_block; b < reader.num_blocks; b++) {
-        if (reader.block_index[b].timestamp_ns > sample_to_mono)
+        if (reader.block_index[b].timestamp_ns > scan_to) {
+            /* Stopped at a bound with blocks still ahead: a straddler longer
+             * than the horizon would be invisible, and the caller is told so
+             * rather than handed a silent partial. */
+            if (ss && ss->enabled)
+                ss->truncated = 1;
             break;
+        }
+        if (ss && ss->enabled &&
+            reader.block_index[b].timestamp_ns > sample_to_mono &&
+            ss->max_blocks && straddle_blocks >= ss->max_blocks) {
+            ss->truncated = 1;
+            break;
+        }
+        if (reader.block_index[b].timestamp_ns > sample_to_mono)
+            straddle_blocks++;
 
         struct pgwt_block_info bi;
         const struct pgwt_trace_event *rec;
@@ -1601,8 +1718,44 @@ static void load_file_range_mono(struct pgwt_server *srv,
 
         for (int i = 0; i < n; i++) {
             uint64_t ts_mono = rec[i].timestamp_ns;
+            int right_open = 0;
             if (ts_mono < from_mono) continue;
-            if (ts_mono > block_to) break;
+            if (ts_mono > block_to) {
+                /* #424: past the record's own right edge. For a SAMPLES
+                 * block, and when the lookahead is off, this is the
+                 * pre-#424 `break` unchanged. Otherwise the record may
+                 * still OVERLAP the window — its interval started at or
+                 * before `to` — so the scan continues through the block
+                 * instead of stopping at the first late close. */
+                if (sample_block)
+                    break;
+                /* Stopping HERE, mid-data, is a bound stopping the scan, not
+                 * the data running out: there may be a longer straddler in
+                 * this block or a later one and this load will never see it.
+                 * Say so. (Over-reporting is the safe direction — the flag
+                 * means "may be missing", never "is missing".) */
+                if (!(ss && ss->enabled && ss->lookahead_ns)) {
+                    if (ss && ss->enabled)
+                        ss->truncated = 1;
+                    break;
+                }
+                if (ts_mono > straddle_to) {
+                    ss->truncated = 1;
+                    break;
+                }
+                /* A marker/instant (duration 0) starts where it ends, so it
+                 * is outside the window by definition — never a straddler. */
+                if (rec[i].duration_ns == 0)
+                    continue;
+                /* The impossible record pgwt_filter_matches refuses
+                 * (duration past its own timestamp): refuse it here too
+                 * rather than wrap the subtraction. */
+                if (rec[i].duration_ns > ts_mono)
+                    continue;
+                if (ts_mono - rec[i].duration_ns > to_mono)
+                    continue;   /* starts after `to`: no overlap */
+                right_open = 1;
+            }
             if (pid != 0 && rec[i].pid != pid)
                 continue;
             if (markers_only && !PGWT_IS_MARKER(rec[i].old_event))
@@ -1635,6 +1788,13 @@ static void load_file_range_mono(struct pgwt_server *srv,
             if (rec[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
                 (*events)[*total].old_event = rec[i].new_event;
                 (*events)[*total].duration_ns = bi.sample_period_ns;
+            }
+            if (right_open) {
+                /* Derived here, at the ONE place that knows both the record
+                 * and the requested right edge; src/compute.c's selection
+                 * rule reads it. */
+                (*events)[*total].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
+                ss->admitted++;
             }
             (*total)++;
         }
@@ -2580,6 +2740,17 @@ server_load_events_fi_mode(struct pgwt_server *srv,
     int allocation_failed = 0;
     int max_events = load_max_events();
 
+    /* #424: the right-edge lookahead only applies when the CALLER asked for
+     * a bounded right edge. A whole-capture request (to_wall_ns == 0) is
+     * defaulted to the last record in the capture below, past which nothing
+     * can close, so disabling it there is both free and the guarantee that
+     * an unbounded request stays bit-identical to pre-#424. */
+    struct straddle_scan ss = {
+        .enabled      = to_wall_ns != 0,
+        .lookahead_ns = straddle_lookahead_ns(),
+        .max_blocks   = straddle_max_blocks(),
+    };
+
     /* Rescan directory + refresh coverage/clock-domain state. */
     coverage_refresh(srv);
 
@@ -2649,7 +2820,19 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                         ? UINT64_MAX : to_m + fc->max_sample_period_ns;
         }
 
-        if (fc->mono_first > sample_to_m || fc->mono_last < from_m)
+        /* #424: a straddler's CLOSE can sit in the NEXT hourly file, so the
+         * per-file gate has to use the lookahead edge too. Without this the
+         * record-level overlap test below is unreachable for a window that
+         * ends near a rotation boundary — the file holding the close is
+         * skipped before any of its records are examined. */
+        uint64_t straddle_to_m = to_m;
+        if (ss.enabled && ss.lookahead_ns)
+            straddle_to_m = UINT64_MAX - to_m < ss.lookahead_ns
+                          ? UINT64_MAX : to_m + ss.lookahead_ns;
+        uint64_t scan_to_m = straddle_to_m > sample_to_m ? straddle_to_m
+                                                         : sample_to_m;
+
+        if (fc->mono_first > scan_to_m || fc->mono_last < from_m)
             continue;
 
         if (fc->sample_period_ns)
@@ -2664,7 +2847,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
             load_file_range_mono(srv,
                                  cur_cache_enabled() ? &srv->cur : NULL,
                                  fc->path, from_m, to_m, sample_to_m,
-                                 pid, markers_only,
+                                 pid, markers_only, &ss,
                                  &events, &total, &cap, &overloaded,
                                  &allocation_failed);
         } else {
@@ -2675,17 +2858,53 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                  * declined it. */
                 load_file_range_mono(srv, NULL,
                                      fc->path, from_m, to_m, sample_to_m,
-                                     pid, markers_only,
+                                     pid, markers_only, &ss,
                                      &events, &total, &cap, &overloaded,
                                      &allocation_failed);
             } else {
                 for (int i = 0; i < ce->count; i++) {
                     uint64_t ts = ce->events[i].timestamp_ns;
+                    int right_open = 0;
                     if (ts < from_m) continue;
-                    if (ts > sample_to_m) break;
+                    if (ts > scan_to_m) {
+                        /* Whole file decoded in memory: if the scan stops
+                         * here it is the horizon, not the data, that ended.
+                         * Say so (#424) — same rule as the file path. */
+                        if (ss.enabled)
+                            ss.truncated = 1;
+                        break;
+                    }
+                    if ((ce->events[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
+                        ts > sample_to_m)
+                        continue;   /* the sample lookahead is unchanged:
+                                       widening the loop bound above must
+                                       not widen the SAMPLES edge too */
                     if (!(ce->events[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
-                        ts > to_m)
-                        continue;
+                        ts > to_m) {
+                        /* #424 overlap admission, identical predicate to
+                         * load_file_range_mono's. The cached array holds the
+                         * whole file, so no block budget applies here: the
+                         * records are already decoded. */
+                        if (!(ss.enabled && ss.lookahead_ns)) {
+                            /* Same rule as the file path: a bound, not the
+                             * data, ended the straddler search. */
+                            if (ss.enabled)
+                                ss.truncated = 1;
+                            continue;
+                        }
+                        if (ts > straddle_to_m) {
+                            ss.truncated = 1;
+                            continue;
+                        }
+                        const struct pgwt_trace_event *ce_ev = &ce->events[i];
+                        if (ce_ev->duration_ns == 0)
+                            continue;
+                        if (ce_ev->duration_ns > ts)
+                            continue;
+                        if (ts - ce_ev->duration_ns > to_m)
+                            continue;
+                        right_open = 1;
+                    }
                     if (pid != 0 && ce->events[i].pid != pid)
                         continue;
                     if (markers_only && !PGWT_IS_MARKER(ce->events[i].old_event))
@@ -2711,7 +2930,12 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                         events = tmp;
                         cap = next;
                     }
-                    events[total++] = ce->events[i];
+                    events[total] = ce->events[i];
+                    if (right_open) {
+                        events[total].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
+                        ss.admitted++;
+                    }
+                    total++;
                 }
             }
         }
@@ -2856,9 +3080,19 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                  * src/compute.c). #316 is the same rule read from the other
                  * end of the interval: the summary reader keys seconds by
                  * their START, so a second at `to` is out. Making this
-                 * half-open zeroed test_data_aas and test_data_categories. */
-                if (events[i].timestamp_ns < segs[s].from_m ||
-                    events[i].timestamp_ns > segs[s].to_m)
+                 * half-open zeroed test_data_aas and test_data_categories.
+                 *
+                 * #424: the ONE exception is a record the loader admitted by
+                 * OVERLAP and stamped PGWT_EVENT_FLAG_RIGHT_OPEN. Its close
+                 * is past `to` by construction, so this endpoint test would
+                 * throw away exactly the records the admission change exists
+                 * to keep. It is let through here and excluded from every
+                 * per-occurrence statistic in src/compute.c instead (see the
+                 * INTERVAL/INSTANT rule there) — the selection split, not a
+                 * second selection rule. */
+                if (!(events[i].flags & PGWT_EVENT_FLAG_RIGHT_OPEN) &&
+                    (events[i].timestamp_ns < segs[s].from_m ||
+                     events[i].timestamp_ns > segs[s].to_m))
                     continue;
                 /* T2 backstop (study defect 2): an EXIT record whose closing
                  * interval lies OUTSIDE exact coverage in a generation that
@@ -2936,6 +3170,8 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         info->sample_period_ns = has_samples ? sample_period_ns : 0;
         info->overloaded = overloaded;
         info->allocation_failed = allocation_failed;
+        info->straddlers_admitted = ss.admitted;
+        info->right_edge_truncated = ss.truncated;
     }
     if (overloaded)
         fprintf(stderr, "ERROR: window too large: the requested range holds "
@@ -4309,6 +4545,13 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
         /* Timeline is a visibility view: keep Client:ClientRead bars. */
         if (pgwt_is_hidden_event(ev->old_event))
             continue;
+        /* #424: a bar is one completed interval, and both the bar count and
+         * the TIMELINE_MAX_EVENTS truncation decision are per-occurrence.
+         * A record admitted by overlap that closes after the window would
+         * draw a bar running off the right edge AND be counted again in the
+         * next window, so the timeline keeps its pre-#424 record set. */
+        if (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
+            continue;
         total_matching++;
 
         /* #278/#360: grow BOTH per-PID state and the lookup table. A query
@@ -4400,6 +4643,13 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
             continue;
         /* Timeline is a visibility view: keep Client:ClientRead bars. */
         if (pgwt_is_hidden_event(ev->old_event))
+            continue;
+        /* #424: a bar is one completed interval, and both the bar count and
+         * the TIMELINE_MAX_EVENTS truncation decision are per-occurrence.
+         * A record admitted by overlap that closes after the window would
+         * draw a bar running off the right edge AND be counted again in the
+         * next window, so the timeline keeps its pre-#424 record set. */
+        if (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
             continue;
 
         /* O(1) PID index lookup */

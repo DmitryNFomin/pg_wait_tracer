@@ -241,6 +241,18 @@ struct pgwt_trace_event {
  * unattributed_ms instead of dropping). */
 #define PGWT_EVENT_FLAG_QUERY_BACKFILL 0x200U
 #define PGWT_EVENT_FLAG_QUERY_UNATTRIB 0x400U
+/* Issue #424: this record was admitted to the window by OVERLAP (its
+ * interval started at or before `to`) but it CLOSED after `to`. The raw
+ * loader (src/server.c) is the only producer: it derives the bit from the
+ * requested right edge at admission time, so an unbounded (whole-capture)
+ * request never sets it and those results stay bit-identical.
+ *
+ * The bit exists because the INSTANT/INTERVAL selection rule (src/compute.c,
+ * "Window selection: INTERVAL vs INSTANT") has to reach consumers that are
+ * not given the window at all (transitions, lock chains, interference,
+ * variants, lifecycle). Those take the record's own close timestamp as the
+ * selector, and for them "closed after `to`" is the whole question. */
+#define PGWT_EVENT_FLAG_RIGHT_OPEN 0x800U
 
 #define PGWT_EVENT_EXIT  0xFFFFFFFFU  /* sentinel new_event for process exit */
 
