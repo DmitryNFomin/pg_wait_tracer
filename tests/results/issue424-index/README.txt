@@ -115,9 +115,24 @@ All at commit 6e78861 unless the row says otherwise.
 |   (mutation M06b — the named trap)      |         |             |                              |                                                |   |
 | box-check (Linux, live PG)              | NOT RUN | —           | —                            | — ($PGWT_BOX / _EL8 / _EL9 all unset for this  | 0 |
 |                                         |         |             |                              |    agent; no live tier claimed)                |   |
+| `make check` (full, this Mac)           | PASSED  | exit code   | exit 0; 444/444 web unit,    | make-check-tail.txt                            | 2 |
+|                                         |         |             | 46/46 chaos                  |                                                |   |
 
-`make check` was run on this tree; its result is recorded in
-make-check-tail.txt in this directory (added in the same artifacts commit).
+A NOTE ON THAT LAST ROW, because a stamp is only worth anything if it names
+the right tree. `make check` ran twice. The first run (b795b7c2…) started
+before the final header edit, so its stamp named a tree that no longer
+existed by the time it finished — it was re-run on the final tree rather
+than quoted. Both runs ended on the same tree and so produced the same
+stamp, which is checkable:
+
+  $ cat .pgwt-check.stamp          b795b7c2f76a5204b7877a1cacbff09fc4566714
+  $ bash scripts/tree-hash.sh      b795b7c2f76a5204b7877a1cacbff09fc4566714
+  $ git status --short             (empty)
+
+That stamp was taken BEFORE make-check-tail.txt and this paragraph were
+added, so re-running scripts/tree-hash.sh after this commit gives a
+different hash. The stamp names the tree the tests actually ran against;
+the only difference since is this file and the log excerpt beside it.
 
 
 THE TWO DEMONSTRATED REDS, AND WHY THERE ARE TWO
