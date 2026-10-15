@@ -368,20 +368,32 @@ struct pgwt_load_info {
                                    partial; handlers MUST error, not render */
     int      allocation_failed; /* working/merge allocation failed — never
                                    misreport this as a range-size refusal */
-    /* #424 straddler diagnostics. Not a fidelity label and not in the wire
-     * protocol: they exist so that a later refactor which drops or narrows
-     * the right-edge lookahead is VISIBLE in a test instead of silently
-     * restoring the undercount.
+    /* #424 straddler diagnostics. Not a fidelity label. Two of them ARE on
+     * the wire and two are not, and the difference is deliberate:
+     *
+     *   right_edge_truncated — ON THE WIRE (add_fidelity /
+     *                          add_right_edge_note), with
+     *                          right_edge_scan_ns beside it. The lookahead
+     *                          stopped at its budget (time horizon or block
+     *                          count) with trace data still beyond it, so a
+     *                          straddler LONGER than what was scanned may be
+     *                          missing. A budgeted scan that stops silently
+     *                          is the failure class this project keeps
+     *                          hitting, so the CALLER is told, not just a
+     *                          struct nobody reads.
      *   straddlers_admitted  — records admitted by OVERLAP whose close is
-     *                          past `to` (each one is stamped
+     *                          past `to` (each stamped
      *                          PGWT_EVENT_FLAG_RIGHT_OPEN).
-     *   right_edge_truncated — the lookahead stopped at its budget (time
-     *                          horizon or block count) with trace data still
-     *                          beyond it, so a straddler LONGER than what
-     *                          was scanned may be missing. A budgeted scan
-     *                          that stops silently is the failure class this
-     *                          project keeps hitting; this is the flag that
-     *                          makes it audible. */
+     *   headers_unreadable   — see below.
+     *
+     * The last two are NOT on the wire: straddlers_admitted is non-zero on
+     * most ordinary windows, so emitting it would add a field to nearly
+     * every response for a number no client acts on. They are readable two
+     * ways instead — in-process by a test through pgwt_load_info, and at
+     * runtime on stderr via PGWT_STRADDLE_STATS=1 (straddle_report()).
+     * That is what makes them a tripwire rather than a decoration: a
+     * refactor that drops or narrows the lookahead changes numbers somebody
+     * can actually see. */
     int      straddlers_admitted;
     int      right_edge_truncated;
     /* #429: block headers that could not be read during candidacy. The
@@ -1721,6 +1733,26 @@ struct straddle_scan {
     int      headers_unreadable;   /* #429 candidacy could not see a header */
 };
 
+/* Make the two off-wire counters readable at RUNTIME, not only from a test.
+ * Opt-in on stderr, exactly like the #283 cur-cache stats line and for the
+ * same reason: a counter nobody can read is not a tripwire, while a field on
+ * every response for a number no client acts on is noise. */
+static void straddle_report(const struct straddle_scan *ss)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *env = getenv("PGWT_STRADDLE_STATS");
+        on = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    if (!on || !ss->enabled)
+        return;
+    fprintf(stderr,
+            "pgwt-straddle: admitted=%d truncated=%d headers_unreadable=%d "
+            "lookahead_ns=%llu max_blocks=%d\n",
+            ss->admitted, ss->truncated, ss->headers_unreadable,
+            (unsigned long long)ss->lookahead_ns, ss->max_blocks);
+}
+
 /* Read events from a trace file for a MONO time range. Opens file, seeks to
  * the right blocks via block index, decodes
  * only the blocks that overlap [from_mono, sample_to_mono]. Non-samples use
@@ -1800,26 +1832,62 @@ static void load_file_range_mono(struct pgwt_server *srv,
         uint64_t first_ts, last_ts;
         int only_straddlers = 0;
         int cand;
+        int sample_blk = 0;      /* known only when the header was read */
+        int type_known = 0;
         if (cb) {
             first_ts = cb->index_ts;
             last_ts  = cb->last_ts;
             cand = !(first_ts > scan_to || last_ts < from_mono);
-            only_straddlers = first_ts > sample_to_mono;
+            sample_blk = cb->is_sample;
+            type_known = 1;
         } else {
             cand = server_block_candidate(&reader, b, from_mono, scan_to,
                                           sample_to_mono, &bi,
                                           &only_straddlers);
             first_ts = (cand >= 0) ? bi.first_timestamp_ns : 0;
             last_ts  = (cand >= 0) ? bi.last_timestamp_ns : 0;
+            if (cand >= 0) {
+                sample_blk = bi.block_type == PGWT_BLOCK_SAMPLES;
+                type_known = 1;
+            }
         }
+
+        /* #424: a SAMPLES block past the SAMPLE edge cannot contribute
+         * anything at all — the record loop below discards every record in
+         * it (`if (sample_block) continue;`), because the sample lookahead
+         * has its own, narrower edge. Deciding that HERE, before the budget
+         * is touched, is the whole point:
+         *
+         * the straddler budget exists to bound decodes of blocks that might
+         * hold a wait still running at `to`, and only a TRANSITIONS block
+         * can hold one. Charging SAMPLES blocks against it spends the
+         * budget on blocks that were never candidates, fires
+         * right_edge_truncated falsely, and then skips the TRANSITIONS
+         * blocks that do hold straddlers — on a tiered capture, where
+         * SAMPLES blocks dominate the horizon, that defeats #424 entirely
+         * while reporting itself as an honest truncation.
+         *
+         * Unknown type (header unreadable, cand < 0) is NOT treated as
+         * SAMPLES: it falls through to the decode, as every other unknown
+         * on this path does. */
+        if (type_known && sample_blk && first_ts > sample_to_mono)
+            continue;
+
+        /* Only a TRANSITIONS block can hold a straddler, so only one can
+         * spend the straddler budget. */
+        only_straddlers = (cand > 0) && type_known && !sample_blk &&
+                          first_ts > sample_to_mono;
 
         if (cand == 0) {
             /* Provably irrelevant. One shape of that is worth reporting:
              * the block begins past the straddler horizon, so a wait still
              * running at `to` and closing in there is beyond what this load
              * was allowed to look at. Say so (#424) instead of returning a
-             * quietly short answer. */
-            if (ss && ss->enabled && first_ts > straddle_to)
+             * quietly short answer — but only for a block that could have
+             * held a straddler, or a tiered capture would report a
+             * truncation caused entirely by SAMPLES blocks it never needed. */
+            if (ss && ss->enabled && first_ts > straddle_to &&
+                !(type_known && sample_blk))
                 ss->truncated = 1;
             continue;
         }
@@ -3359,6 +3427,9 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         info->right_edge_scan_ns = ss.enabled ? ss.lookahead_ns : 0;
         info->headers_unreadable = ss.headers_unreadable;
     }
+    /* Outside the `if (info)`: a caller that wants no load_info still ran a
+     * load, and the operator asking for stats wants to see it. */
+    straddle_report(&ss);
     if (overloaded)
         fprintf(stderr, "ERROR: window too large: the requested range holds "
                 "more than %d events%s — narrow the time range%s\n",
