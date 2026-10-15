@@ -45,7 +45,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_summary_tick_flush \
             test_block_agg bench_block_agg test_transitions_loader \
             test_top_wait_backfill \
-            test_window_overlap
+            test_window_overlap \
+            test_open_overlay
 
 .PHONY: all clean check
 
@@ -751,6 +752,17 @@ test_interval_index: test_interval_index.c ../src/interval_index.c \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+#
+# #424 live half: the request-scoped open-interval overlay (src/open_overlay.c).
+# Pure C plus cJSON and one AF_UNIX round-trip against a forked fixture
+# daemon -- no BPF, no libbpf, no PostgreSQL, no root, so it also builds and
+# runs on a developer Mac. Companion: tests/test_open_overlay_mutations.sh
+# breaks one guard at a time (the precedence rule, the snapshot clip, the
+# route/tier refusal, the absent-pids read as empty, the overall socket
+# deadline, ...) and requires THIS binary to go red for each.
+test_open_overlay: test_open_overlay.c ../src/open_overlay.c ../src/cJSON.c
+	$(CC) $(CFLAGS) -o $@ $^
 
 clean:
 	rm -f $(TESTS) test_exec_index map_reader_core.o
