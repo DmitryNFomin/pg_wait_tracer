@@ -602,8 +602,19 @@ static void test_exec_stats_scope(struct pgwt_server *srv)
  * Under filter class=Lock only the first survives, so the node table must
  * hold Lock:relation ALONE at 100 ms. On the parent tree the node pass saw
  * every record, so it also published an IO:DataFileRead node of 200 ms --
- * twice the mass of the only edge in the picture, attached to nothing. */
-#define PID_GRAPH 701
+ * twice the mass of the only edge in the picture, attached to nothing.
+ *
+ * It ALSO carries ten LWLock:BufferContent records whose new_event is
+ * PGWT_EVENT_EXIT (5 ms each, 50 ms total). The edge population has always
+ * excluded those -- an exit is not a transition into a wait state -- while
+ * pgwt_block_agg_node_counts() admitted them, so their dwell appeared as a
+ * node with no outgoing edge even with NO filter at all, and made the node
+ * total exceed the edge total. That is a real, user-visible narrowing
+ * introduced by #436 in the UNFILTERED case, so it is pinned here rather than
+ * left to ride along inside the filtered fix.
+ */
+#define PID_GRAPH  701
+#define EV_LWLOCK  WEI(PG_WAIT_LWLOCK, 55)   /* any non-idle LWLock */
 
 static void build_fixture_b(const char *dir, uint64_t base)
 {
@@ -630,6 +641,17 @@ static void build_fixture_b(const char *dir, uint64_t base)
         e.old_event = EV_IO;
         e.new_event = EV_LOCK;
         e.duration_ns = 20 * MS;
+        e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        pgwt_writer_push_event(&w, &e);
+
+        /* A backend exit: 5 ms of LWLock dwell that closes with no next
+         * state. No edge can exist for it; a node must not either. */
+        memset(&e, 0, sizeof(e));
+        e.timestamp_ns = sec + 500 * MS;
+        e.pid = PID_GRAPH;
+        e.old_event = EV_LWLOCK;
+        e.new_event = PGWT_EVENT_EXIT;
+        e.duration_ns = 5 * MS;
         e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
         pgwt_writer_push_event(&w, &e);
     }
@@ -665,6 +687,25 @@ static double node_ms(cJSON *out, const char *name)
 {
     cJSON *n = row_by_name(cJSON_GetObjectItem(out, "nodes"), name);
     return n ? json_num(n, "total_ms") : -1.0;
+}
+
+/* By CLASS, not by display name. The first version of section 4a asserted
+ * `!has_node(out, "LWLock:BufferContent")` and was VACUOUSLY TRUE: the
+ * fixture's LWLock id resolves to a different name in this build's static
+ * tables, so the assertion could never fail and did not appear in the red
+ * run's failure list. The class is in the response ("class" per node, derived
+ * from the name's prefix by handle_transitions) and is what the contract is
+ * actually about. */
+static int node_count_in_class(cJSON *out, const char *cls)
+{
+    int n = 0;
+    cJSON *node;
+    cJSON_ArrayForEach(node, cJSON_GetObjectItem(out, "nodes")) {
+        cJSON *c = cJSON_GetObjectItem(node, "class");
+        if (c && cJSON_IsString(c) && strcmp(c->valuestring, cls) == 0)
+            n++;
+    }
+    return n;
 }
 
 static void test_graph_node_population(const char *dir, uint64_t base)
@@ -703,6 +744,17 @@ static void test_graph_node_population(const char *dir, uint64_t base)
     CHECK(fabs(node_ms(out, "Lock:relation") - 100.0) < 1e-6,
           "4a. and the Lock node at 100 ms (got %.3f)",
           node_ms(out, "Lock:relation"));
+    /* THE EXIT RECORDS, unfiltered. 50 ms of LWLock dwell that no edge can
+     * carry: the parent tree published it as a third node attached to
+     * nothing, and Σ nodes (350 ms) then exceeded Σ edge dwell (300 ms) in
+     * the same response. */
+    CHECK(node_count_in_class(out, "LWLock") == 0,
+          "4a. the exit records' LWLock dwell is NOT a node (%d LWLock nodes): "
+          "an exit is not a transition, so no edge carries it and no node may "
+          "either", node_count_in_class(out, "LWLock"));
+    CHECK(g.n_nodes == 2,
+          "4a. …which is why there are 2 nodes and not 3 (got %d)",
+          g.n_nodes);
     /* CONSERVATION. Each counted record contributes its dwell to exactly one
      * node (its old_event) and to exactly one edge (old->new), so the two
      * totals are equal iff the two populations are. The two sides are
@@ -710,10 +762,11 @@ static void test_graph_node_population(const char *dir, uint64_t base)
      * node table and compute.c's pair hash -- so this is a comparison, not
      * one sum against itself. */
     CHECK(fabs(g.node_ms - 300.0) < 1e-6,
-          "4a. Σ node dwell == the fixture's 300 ms (got %.3f)", g.node_ms);
+          "4a. Σ node dwell == the 300 ms the EDGES carry, not the 350 ms "
+          "the file holds (got %.3f)", g.node_ms);
     CHECK(fabs(g.link_count - 20.0) < 1e-6,
-          "4a. Σ edge count == the fixture's 20 records (got %.0f)",
-          g.link_count);
+          "4a. Σ edge count == the fixture's 20 transitions, excluding the "
+          "10 exits (got %.0f)", g.link_count);
     cJSON_Delete(out);
 
     /* 4b. CLASS FILTER: the node population must narrow with the edges. */
@@ -892,8 +945,8 @@ int main(void)
 
     /* A suite that ran no assertions proved nothing, and a FLOOR that does
      * not move with the suite lets a whole section stop running unnoticed.
-     * 74 assertions today. */
-    if (checks < 70) {
+     * 76 assertions today. */
+    if (checks < 74) {
         printf("FAIL: only %d assertions ran -- the suite did not execute\n",
                checks);
         return 1;
