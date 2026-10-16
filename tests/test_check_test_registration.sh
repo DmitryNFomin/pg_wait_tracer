@@ -390,6 +390,35 @@ else
     echo "  SKIP: no 'dash' binary on this machine -- case 11 (real-dash invocation) not exercised here (reported, not silently skipped)"
 fi
 
+# Case 12 (RED, adviser-found hole): the guard checks comm's own exit
+# status but, before this case, not the two process substitutions FEEDING
+# it -- a `sort` that fails (missing from PATH, or present but exiting
+# non-zero with no output) makes BOTH substitutions present an empty-but-
+# valid stream to comm, which then succeeds and reports "nothing missing"
+# for a comparison that never actually ran. Identical root cause to #431
+# itself (a failed producer whose exit status nobody checked), one step
+# further upstream -- so it belongs in this self-test permanently, not just
+# as a one-off repro. Shims a `sort` on PATH that exits 1 and writes
+# nothing, against the SAME s2_repo used above (test_s2 genuinely dropped).
+shim_dir="$tmpdir/sort_shim"
+mkdir -p "$shim_dir"
+cat > "$shim_dir/sort" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$shim_dir/sort"
+out=$(PATH="$shim_dir:$PATH" bash "$GUARD" "$s2_repo" 2>&1); rc=$?
+if [[ "$rc" != "0" ]] && ! grep -qx "OK: test-registration guard (base .*) — append-only invariant holds" <<<"$out"; then
+    report true "a failing 'sort' on PATH is refused, no OK (exit $rc)"
+else
+    report false "a failing 'sort' on PATH must be refused, not print OK (exit $rc; output: $out)"
+fi
+if grep -qi "refusing to approve blind" <<<"$out"; then
+    report true "failing-'sort' failure names a reason (\"refusing to approve blind\")"
+else
+    report false "failing-'sort' failure names a reason; output: $out"
+fi
+
 echo
 echo "$tests_passed/$tests_run passed"
 [[ $tests_failed -eq 0 ]]

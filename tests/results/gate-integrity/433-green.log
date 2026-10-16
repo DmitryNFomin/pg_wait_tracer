@@ -14,6 +14,18 @@
   PASS: missing-runner failure says so explicitly ("not found")
   PASS: malformed exemption-list entry is refused (exit 1)
   PASS: malformed-exemption failure names the reason
+  PASS: an orphan test file invoked by nothing is refused (exit 1)
+  PASS: failure names the orphan file (test_orphan_fixture.sh)
+  PASS: the same file, once registered into scripts/check.sh, passes (exit 0)
+  PASS: a .test.mjs file under tests/web_unit/, glob-discovered, does not trip the orphan scan (exit 0)
+  PASS: example.test.mjs is not named as a problem anywhere in the output
+  PASS: a test invoked only via the root Makefile is not an orphan (exit 0)
+  PASS: missing scripts/check.sh is refused (exit 1)
+  PASS: missing-check.sh failure says so explicitly
+  PASS: a bare mention (echo "...is disabled") does not register the file -- it is reported as an orphan (exit 1)
+  PASS: failure names the merely-mentioned file (test_mentioned_only.sh)
+  PASS: a trailing inline comment naming a file does not register it (exit 1)
+  PASS: failure names the inline-comment-only file (test_commented_tail.sh)
 
-16/16 passed
+28/28 passed
 EXIT=0

@@ -72,8 +72,14 @@ DIRECT_INVOKE_RE = re.compile(
 # often no python3/bash prefix either -- it relies on the shebang + exec
 # bit, e.g. `run tests/test_check_snapshot_history.sh`), and some of those
 # paths are a glob rather than one literal file (e.g.
-# `tests/web_unit/*.test.mjs`, run via `node --test`).
-CHECK_SH_PATH_RE = re.compile(r"\btests/([A-Za-z0-9_./*-]+\.(?:py|sh|mjs))")
+# `tests/web_unit/*.test.mjs`, run via `node --test`). A bare path token
+# alone, matched anywhere on the line, is not sufficient: it also matches a
+# non-invoking MENTION (`echo "tests/test_orphan.py is disabled"`), which is
+# the same class of mistake a naive grep makes on the $SCRIPT_DIR-quoted
+# form (instance 3), one level down. The token immediately BEFORE the path
+# must be one of these to count as an actual invocation.
+BARE_PATH_INVOKE_PREV_TOKENS = {"bash", "python3", "run", "--test"}
+BARE_PATH_TOKEN_RE = re.compile(r"^tests/([A-Za-z0-9_./*-]+\.(?:py|sh|mjs))$")
 TEST_FILE_NAME_RE = re.compile(r"^test_[A-Za-z0-9_]+\.(?:py|sh)$")
 
 
@@ -161,26 +167,58 @@ def extract_unit_tests_list_entries(repo, errors):
 
 
 def extract_bare_tests_path_registrations(clean_text):
-    """Bare `tests/<file>` paths (see CHECK_SH_PATH_RE's docstring above),
-    used by BOTH scripts/check.sh and the root Makefile's `check:` target
-    (`@bash tests/test_check_lock.sh` -- a 4th place a test can be wired in,
-    found by this guard flagging test_check_lock.sh as an orphan when it is
-    not one). Skips any line containing `py_compile` deliberately --
-    compiling a module is not running it as a test, and that glob matches
-    EVERY .py file in tests/, so counting it as "registered" would make
-    every python test file permanently invisible to the orphan scan (the
-    exact unreachable-gate failure class this guard exists to avoid
-    creating). Returns (direct_files, glob_patterns): direct_files are
-    literal basenames with no '*'; glob_patterns are fnmatch-style patterns
+    """Bare `tests/<file>` paths, used by BOTH scripts/check.sh and the root
+    Makefile's `check:` target (`@bash tests/test_check_lock.sh` -- a 4th
+    place a test can be wired in, found by this guard flagging
+    test_check_lock.sh as an orphan when it is not one).
+
+    A path TOKEN alone is not sufficient evidence of invocation -- only a
+    path token immediately preceded (whitespace-separated) by one of
+    BARE_PATH_INVOKE_PREV_TOKENS counts: "bash"/"python3" (the interpreter),
+    "run" (check.sh's helper, for a path run directly via its shebang +
+    exec bit, e.g. `run tests/test_check_snapshot_history.sh`), or "--test"
+    (node's flag, for `node --test 'tests/web_unit/*.test.mjs'`). The
+    Makefile's `@bash tests/x.sh` token is `@bash`; `@` is stripped before
+    the membership check. This rejects a bare MENTION
+    (`echo "tests/test_orphan.py is disabled"` -- "echo" is not an invoking
+    token) that the previous, path-presence-only version of this function
+    wrongly counted as a registration -- the same class of mistake a naive
+    grep makes on the $SCRIPT_DIR-quoted form (instance 3), one level down.
+
+    Also strips a trailing `  # ...` INLINE comment before tokenising (full
+    LINE comments are already gone via strip_full_line_comments; an inline
+    one survives that pass and could otherwise satisfy the token-adjacency
+    check too, e.g. `run bash tests/x.sh  # tests/evil.sh is NOT run` --
+    splitting on the first " #" removes that whole trailing segment before
+    any token in it is ever examined).
+
+    Skips any line containing `py_compile` deliberately -- compiling a
+    module is not running it as a test, and that glob matches EVERY .py
+    file in tests/, so counting it as "registered" would make every python
+    test file permanently invisible to the orphan scan (the exact
+    unreachable-gate failure class this guard exists to avoid creating).
+
+    Returns (direct_files, glob_patterns): direct_files are literal
+    basenames with no '*'; glob_patterns are fnmatch-style patterns
     (relative to the repo) for files discovered by a glob rather than named
     individually (e.g. tests/web_unit/*.test.mjs).
     """
     direct = set()
     globs = []
-    for line in clean_text.splitlines():
+    for raw_line in clean_text.splitlines():
+        line = raw_line.split(" #", 1)[0]
         if "py_compile" in line:
             continue
-        for m in CHECK_SH_PATH_RE.finditer(line):
+        tokens = line.split()
+        for i, tok in enumerate(tokens):
+            m = BARE_PATH_TOKEN_RE.match(tok.strip("'\""))
+            if not m:
+                continue
+            if i == 0:
+                continue  # a path with nothing before it invokes nothing
+            prev = tokens[i - 1].lstrip("@").strip("'\"")
+            if prev not in BARE_PATH_INVOKE_PREV_TOKENS:
+                continue  # a mention, not an invocation
             token = m.group(1)
             if "*" in token:
                 globs.append("tests/" + token)

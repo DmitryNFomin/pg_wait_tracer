@@ -149,9 +149,48 @@ check_one() {
         return
     fi
 
-    local missing rc
-    missing=$(comm -23 <(printf '%s\n' "$base_entries" | sed '/^$/d' | sort -u) \
-                        <(printf '%s\n' "$current_entries" | sed '/^$/d' | sort -u))
+    # Sort each side as a PLAIN pipeline first (no process substitution yet),
+    # so `set -o pipefail` (active from the top of this file) gives an exit
+    # status for the actual producer -- `sort` -- not just for `comm`
+    # consuming whatever two streams happen to land in front of it. This
+    # closes the identical root cause one step further upstream: a failed
+    # producer (sort missing, or a `sort` that exits non-zero having written
+    # nothing) feeding `comm` through `<(...)` used to present as an EMPTY
+    # but structurally valid stream on both sides -- `comm -23 <empty>
+    # <empty>` succeeds and prints nothing, so a genuinely deleted
+    # registration read as "nothing missing" even though the comparison
+    # never actually ran. Checking only comm's own $? (as a prior version of
+    # this guard did) cannot see that: comm has no way to know its input
+    # pipe was fed by a producer that failed. Reproduced directly: shim a
+    # `sort` on PATH that exits 1 with no output, delete a real registration,
+    # run this guard -- pre-fix it printed OK and exited 0.
+    local base_sorted current_sorted rc
+    base_sorted=$(printf '%s\n' "$base_entries" | sed '/^$/d' | sort -u)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "FAIL: test-registration guard: could not sort $label entries at base" >&2
+        echo "  ($base) (sed/sort exited $rc) -- refusing to approve blind. A failed" >&2
+        echo "  sort/sed here would otherwise present as an empty-but-valid stream to" >&2
+        echo "  the comparison below, silently hiding every entry that was there." >&2
+        fail=1
+        return
+    fi
+    current_sorted=$(printf '%s\n' "$current_entries" | sed '/^$/d' | sort -u)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "FAIL: test-registration guard: could not sort $label entries on this tree" >&2
+        echo "  (sed/sort exited $rc) -- refusing to approve blind. A failed sort/sed" >&2
+        echo "  here would otherwise present as an empty-but-valid stream to the" >&2
+        echo "  comparison below, silently hiding every entry that was dropped." >&2
+        fail=1
+        return
+    fi
+
+    # Both sides are now known-good, already-sorted strings; feeding them to
+    # `comm` via `printf | <(...)` cannot reintroduce the same failure mode
+    # -- printf of a literal string does not fail.
+    local missing
+    missing=$(comm -23 <(printf '%s\n' "$base_sorted") <(printf '%s\n' "$current_sorted"))
     rc=$?
     # The $BASH_VERSION check at the top of this file already refuses a shell
     # that never had process substitution (dash). This check is the second

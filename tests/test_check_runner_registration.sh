@@ -404,6 +404,57 @@ else
     report false "missing-check.sh failure says so explicitly; output: $out"
 fi
 
+# Case 14 (RED, adviser-found hole #1a): a bare MENTION of a path, not an
+# invocation, must not register it. tests/test_mentioned_only.sh exists on
+# disk; scripts/check.sh only ever echoes its name in a human-readable
+# message ("is disabled") -- the path-presence-only version of the
+# extractor counted this as a registration (the same mistake a naive grep
+# makes on the $SCRIPT_DIR-quoted form, one level down -- instance 3 again).
+repo14="$tmpdir/case14_mention_only"
+write_reconciled "$repo14"
+printf '#!/usr/bin/env bash\necho mentioned\n' > "$repo14/tests/test_mentioned_only.sh"
+cat > "$repo14/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+run() { :; }
+echo "tests/test_mentioned_only.sh is disabled"
+EOF
+out=$("$GUARD" "$repo14" 2>&1); rc=$?
+if [[ "$rc" == "1" ]]; then
+    report true "a bare mention (echo \"...is disabled\") does not register the file -- it is reported as an orphan (exit 1)"
+else
+    report false "bare mention must not count as registration (wanted exit 1, got $rc; output: $out)"
+fi
+if grep -q "test_mentioned_only.sh" <<<"$out"; then
+    report true "failure names the merely-mentioned file (test_mentioned_only.sh)"
+else
+    report false "failure names test_mentioned_only.sh; output: $out"
+fi
+
+# Case 15 (RED, adviser-found hole #1b): a TRAILING INLINE comment on a real
+# invocation line must not register the file it names either -- only the
+# invocation BEFORE the "#" counts. tests/test_commented_tail.sh is named
+# only in a trailing comment on a line that really invokes test_a.sh (a
+# different, genuinely-registered file).
+repo15="$tmpdir/case15_inline_comment"
+write_reconciled "$repo15"
+printf '#!/usr/bin/env bash\necho tail\n' > "$repo15/tests/test_commented_tail.sh"
+cat > "$repo15/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+run() { :; }
+run bash tests/test_a.py  # tests/test_commented_tail.sh is NOT run here
+EOF
+out=$("$GUARD" "$repo15" 2>&1); rc=$?
+if [[ "$rc" == "1" ]]; then
+    report true "a trailing inline comment naming a file does not register it (exit 1)"
+else
+    report false "trailing inline comment must not count as registration (wanted exit 1, got $rc; output: $out)"
+fi
+if grep -q "test_commented_tail.sh" <<<"$out"; then
+    report true "failure names the inline-comment-only file (test_commented_tail.sh)"
+else
+    report false "failure names test_commented_tail.sh; output: $out"
+fi
+
 echo
 echo "$tests_passed/$tests_run passed"
 [[ $tests_failed -eq 0 ]]

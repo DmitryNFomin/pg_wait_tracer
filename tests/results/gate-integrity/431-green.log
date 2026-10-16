@@ -21,6 +21,8 @@
   PASS: 'sh script' names a reason ("refusing to approve blind")
   PASS: 'dash script' refuses the drop, no OK (exit 1)
   PASS: 'dash script' names a reason ("refusing to approve blind")
+  PASS: a failing 'sort' on PATH is refused, no OK (exit 1)
+  PASS: failing-'sort' failure names a reason ("refusing to approve blind")
 
-23/23 passed
+25/25 passed
 EXIT=0
