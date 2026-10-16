@@ -36,6 +36,25 @@ an event enters or leaves the top-N, the others must not reshuffle. Cross-check
 must belong to its class hue, identically to the same event anywhere else in
 the app.
 
+**Row order (#440, table views only — a DRAFT policy, not yet an existing
+repository rule elsewhere):** the drill-down tables (Overview/Events/
+Sessions/Queries, `lib/table.js`) apply the same stability principle to row
+ORDER. A re-sort by raw value on every refresh jitters: two rows within noise
+of each other swap rank every tick, reading as motion instead of a real
+change. `lib/table.js createStableOrder()` keeps a row's position unless its
+current value is strictly greater than 1.05x its predecessor's — the first
+render for a given identity set still ranks by descending value (then
+identity), and an explicit column sort (the user asking for the exact
+displayed order) is never dampened by this. Applied within Overview's
+indent-1 class / indent-2 event sibling groups, preserving the DB Time/Idle
+bookends and each class's children moving with it.
+
+**Check it:** `tests/web_unit/table.test.mjs`'s `refresh-near-ties` cases —
+shuffled identical input must never jitter; an alternating ~5%-noise value
+must not reorder; a genuine >5% swing must. No gallery cell currently replays
+this (the gallery's fixtures are single static snapshots, not refresh
+sequences) — the Node unit tests are the check until one exists.
+
 **Historical instances:** index-keyed event colors and stack order (P2);
 index-keyed legend Set soloing the wrong series after a drill (P2); yMax
 breathing and bucket phase shimmer (P7); heatmap global recolor per tick (P8);

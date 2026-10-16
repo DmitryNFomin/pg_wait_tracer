@@ -19,7 +19,7 @@ import {
     WAIT_CLASSES, classColor, classFilterName, eventColor,
     fmtMs, fmtUs, fmtCount, fmtPct, fmtAas, esc,
 } from '../format.js';
-import { dot, pctBar, stackedBar, eventStackedBar } from '../table.js';
+import { dot, pctBar, stackedBar, eventStackedBar, createStableOrder } from '../table.js';
 
 const _dot = (name) => dot(name, classColor);
 
@@ -78,10 +78,20 @@ function histogramIntent(key) {
  * (row.p95_us stays 16384): the sort key must mean what the cell shows, and
  * ranking every overflow row at +inf would both tie them arbitrarily and
  * order them against a number the user cannot see. Max is the column that
- * ranks the true tail. */
-const pctlOverflowNote = (bound) =>
-    'At least ' + bound + '. The latency histogram\'s top bucket is ' +
-    'open-ended, so the true value is higher — see Max for the real tail.';
+ * ranks the true tail.
+ *
+ * #437 (contract item 4): the tooltip carries the exact agreed sentence,
+ * verbatim. The pre-#437 wording ("the true value is higher") wrongly
+ * EXCLUDED equality — a percentile sitting exactly at the bucket boundary is
+ * not "higher than itself", its actual value is unavailable. The same
+ * sentence is also shown BESIDE the table (buildOverflowNote/overflowNoteHtml
+ * below), not only on hover: a tooltip is undiscoverable until someone
+ * hovers the exact cell, and this fact changes how every percentile in the
+ * table should be read. */
+export const PCTL_OVERFLOW_SENTENCE =
+    'Percentiles marked ≥16.4 ms fall in the open-ended ≥16.384 ms ' +
+    'histogram bucket; they are lower bounds, and their actual values are ' +
+    'unavailable.';
 
 function pctlCell(key) {
     const intent = histogramIntent(key);
@@ -92,7 +102,7 @@ function pctlCell(key) {
         const drillable = !!intent(r);
         if (!drillable && !overflow) return v;
         const title = overflow
-            ? pctlOverflowNote(fmtUs(r[key])) + (drillable
+            ? PCTL_OVERFLOW_SENTENCE + (drillable
                 ? ' Click to see its latency distribution.' : '')
             : 'View the latency distribution of ' + r.name;
         /* Drillable cells keep the inline drill affordance; a bound on a
@@ -105,6 +115,23 @@ function pctlCell(key) {
     };
 }
 
+/* #435/#425 (contract item 1): Idle is categorically excluded from DB Time
+ * (docs/AAS_SEMANTICS_DECISION.md:10/:43/:171) — not a row whose share
+ * happens to compute to zero. src/server.c:3533 currently serializes that
+ * exclusion as a numeric 0 (Events' handler already emits null for the same
+ * fact, server.c:3661 — a recorded CONTRADICTION, src/ owner's to fix, not
+ * this file's); this predicate makes the client-side presentation rule hold
+ * regardless of which shape arrives, so the "meaningful 0%" bug cannot come
+ * back if the server-side 0 reappears after a refactor. Matches the
+ * existing idle-row finder in views/overview.js's buildSummary(). */
+function isIdleRow(r) {
+    return r.indent === 0 && typeof r.name === 'string' && r.name.indexOf('Idle') >= 0;
+}
+
+const IDLE_PCT_HTML =
+    '<span class="idle-excluded" title="Excluded from DB Time — not a ' +
+    'measured zero share of it.">—</span>';
+
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
@@ -114,6 +141,9 @@ export const overviewConfig = {
         { key: 'ms', label: 'Time', cls: 'num', format: (r) => fmtMs(r.ms) },
         { key: 'pct', label: '%DB Time', cls: 'num', format: (r) => {
             if (r.indent === 0 && r.name === 'DB Time') return fmtPct(r.pct);
+            // #435: never a meaningful "0%" for idle -- it is not applicable,
+            // not a measured zero share of DB Time.
+            if (isIdleRow(r)) return IDLE_PCT_HTML;
             /* U2 (U1-review F4): event rows (indent 2) take the event's
              * identity tint so "same event = same color" holds against the
              * AAS breakdown and the wait-profile bars; class rows (indent 1)
@@ -122,7 +152,20 @@ export const overviewConfig = {
                                          : classColor(r.name)) || '#4fc3f7';
             return pctBar(r.pct, color);
         }},
-        { key: 'aas', label: 'AAS', cls: 'num', format: (r) => fmtAas(r.aas) },
+        { key: 'aas', label: 'AAS', cls: 'num', format: (r) => {
+            // #435: the column header says "AAS" for every row, but idle
+            // time/window is not an active-session average -- no session is
+            // "active" while idle. Keep showing the rate (contract allows
+            // it, unlike the pct share above) but relabel it on hover so it
+            // is never read as active-session AAS.
+            if (isIdleRow(r)) {
+                const v = fmtAas(r.aas);
+                return v === '—' ? v : '<span title="Idle occupancy ' +
+                    '(idle time ÷ window), not active-session AAS">' +
+                    v + '</span>';
+            }
+            return fmtAas(r.aas);
+        }},
     ],
     rowClass: (r) => {
         let c = '';
@@ -148,6 +191,81 @@ export const overviewConfig = {
         return { filterKey: 'class', filterValue: cls, label: cls };
     },
 };
+
+/* #440 (contract item 6): apply the refresh-ordering/near-tie hysteresis
+ * (lib/table.js createStableOrder) to Overview's indent-1 "class" sibling
+ * group, and independently to each class's indent-2 "event" children —
+ * "preserving hierarchy" means a class's children move WITH it and are
+ * reordered only against their OWN siblings, never promoted into a
+ * different class's group or above/below the indent-0 bookends.
+ *
+ * DB Time (always first) and Idle (wherever the server places it, normally
+ * last — #435: it is excluded from DB Time, not a competing "class") are
+ * indent-0 and are deliberately EXCLUDED from the ranked pool: they are
+ * structural bookends, not entries competing on contribution, and Idle's
+ * own `ms` is routinely larger than any one class's (idle time often
+ * dwarfs any single wait class) — ranking it in would float it to the top,
+ * which is not what "preserving hierarchy" means here. */
+function splitOverviewRows(rows) {
+    const pre = [];                 // indent-0 rows seen before any indent-1
+    const classes = [];             // [{ row, children: [indent-2 rows] }]
+    const post = [];                // indent-0 rows seen after the first indent-1
+    for (const r of rows || []) {
+        if (r.indent === 1) {
+            classes.push({ row: r, children: [] });
+        } else if (r.indent === 0) {
+            (classes.length ? post : pre).push(r);
+        } else if (classes.length) {
+            classes[classes.length - 1].children.push(r);
+        }
+    }
+    return { pre, classes, post };
+}
+
+/* createOverviewOrder() returns { apply(rows)->orderedRows, reset() } — one
+ * instance per mounted Overview table (view-local state, like
+ * views/waterfall.js's `selected`); callers reset() it on an explicit
+ * re-sort or a window/filter change (contract item 6). Child trackers are
+ * created lazily per class identity and pruned when that class is no
+ * longer present, so a class that comes back later starts that nested
+ * group fresh rather than resuming stale history. */
+export function createOverviewOrder() {
+    const classOrder = createStableOrder({ idKey: (r) => r.name, valueKey: (r) => r.ms });
+    const childOrders = new Map();   // class name -> createStableOrder()
+
+    function reset() {
+        classOrder.reset();
+        childOrders.clear();
+    }
+
+    function apply(rows) {
+        const { pre, classes, post } = splitOverviewRows(rows);
+        const childrenByName = new Map(classes.map((c) => [c.row.name, c.children]));
+        const orderedClasses = classOrder.apply(classes.map((c) => c.row));
+
+        const seenNames = new Set(orderedClasses.map((r) => r.name));
+        for (const name of Array.from(childOrders.keys())) {
+            if (!seenNames.has(name)) childOrders.delete(name);
+        }
+
+        const out = pre.slice();
+        for (const classRow of orderedClasses) {
+            out.push(classRow);
+            const kids = childrenByName.get(classRow.name) || [];
+            if (!kids.length) continue;
+            let tracker = childOrders.get(classRow.name);
+            if (!tracker) {
+                tracker = createStableOrder({ idKey: (r) => r.name, valueKey: (r) => r.ms });
+                childOrders.set(classRow.name, tracker);
+            }
+            for (const kid of tracker.apply(kids)) out.push(kid);
+        }
+        out.push(...post);
+        return out;
+    }
+
+    return { apply, reset };
+}
 
 export const eventsConfig = {
     columns: [
@@ -177,6 +295,23 @@ export const eventsConfig = {
     onClick: (r) => ({ filterKey: 'event_id', filterValue: r.event_id, label: r.name }),
 };
 
+/* #437: the disclosure beside the table, not only on hover. PURE — the view
+ * (views/events.js) renders whatever this returns next to the mounted table,
+ * the same spot it already uses for the percentile-basis footnote
+ * (lib/panels.js's buildPercentileBasis/percentileBasisHtml), so a reader
+ * sees it without hovering any one cell. Null when nothing in the current
+ * page overflowed, so an exact/no-tail window shows nothing extra. */
+export function buildOverflowNote(rows) {
+    const hasOverflow = (rows || []).some((r) =>
+        r.p50_overflow === true || r.p95_overflow === true || r.p99_overflow === true);
+    return hasOverflow ? { text: PCTL_OVERFLOW_SENTENCE } : null;
+}
+
+export function overflowNoteHtml(model) {
+    if (!model) return '';
+    return '<div class="pctl-overflow-banner">' + esc(model.text) + '</div>';
+}
+
 export const sessionsConfig = {
     columns: [
         { key: 'pid', label: 'PID', format: (r) => r.pid },
@@ -198,58 +333,139 @@ export const sessionsConfig = {
     onClick: (r) => ({ filterKey: 'pid', filterValue: r.pid, label: 'PID ' + r.pid }),
 };
 
-export const queriesConfig = {
-    columns: [
-        { key: 'query_id', label: 'Query ID', cls: 'sticky-col sticky-col-0', format: (r) =>
-            '<span class="query-id">' + r.query_id + '</span>' },
-        { key: 'text', label: 'Query Text', cls: 'sticky-col sticky-col-1', format: (r) => {
-            if (!r.text) return '<span style="color:#555">—</span>';
-            const truncated = esc(r.text.substring(0, 80)) +
-                (r.text.length > 80 ? '...' : '');
-            return '<span class="qt-hover" data-fulltext="' +
-                esc(r.text).replace(/"/g, '&quot;') + '">' +
-                _dot(r.top_wait) + truncated + '</span>';
-        }},
-        { key: '_executions', label: 'Waterfall', sortable: false,
-          cls: 'query-executions-cell',
-          format: () => '<span class="cell-drill query-executions-action" ' +
-              'title="Open individual executions">Executions →</span>',
-          intent: (r) => ({ pivot: 'query-executions', filterKey: 'query_id',
-              filterValue: r.query_id,
-              label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
-        { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
-        { key: 'pct', label: '%DB', cls: 'num', format: (r) => fmtPct(r.pct) },
-        { key: 'classes', label: 'Wait Profile', format: (r) =>
-            r.events ? eventStackedBar(r.events, r.total_ms, eventColor, fmtMs)
-                     : stackedBar(r.classes, r.total_ms, WAIT_CLASSES, fmtMs) },
-        { key: 'exec_count', label: 'Execs', cls: 'num', format: (r) =>
-            r.exec_count != null ? fmtCount(r.exec_count) : '—' },
-        { key: 'plan_count', label: 'Plans', cls: 'num', format: (r) =>
-            r.plan_count != null ? fmtCount(r.plan_count) : '—' },
-        { key: 'plan_ratio', label: 'Plan%', cls: 'num', format: (r) =>
-            (r.exec_count > 0 && r.plan_count != null)
-                ? (r.plan_count / r.exec_count * 100).toFixed(0) + '%' : '—' },
-        { key: 'avg_exec_ms', label: 'Avg Exec', cls: 'num', format: (r) =>
-            r.avg_exec_ms != null ? fmtMs(r.avg_exec_ms) : '—' },
-        { key: 'p95_exec_ms', label: 'p95 Exec', cls: 'num', format: (r) =>
-            r.p95_exec_ms != null ? fmtMs(r.p95_exec_ms) : '—' },
-        { key: 'p99_exec_ms', label: 'p99 Exec', cls: 'num', format: (r) =>
-            r.p99_exec_ms != null ? fmtMs(r.p99_exec_ms) : '—' },
-        { key: 'avg_plan_ms', label: 'Avg Plan', cls: 'num', format: (r) =>
-            r.avg_plan_ms != null ? fmtMs(r.avg_plan_ms) : '—' },
-        { key: 'p95_plan_ms', label: 'p95 Plan', cls: 'num', format: (r) =>
-            r.p95_plan_ms != null ? fmtMs(r.p95_plan_ms) : '—' },
-        { key: 'p99_plan_ms', label: 'p99 Plan', cls: 'num', format: (r) =>
-            r.p99_plan_ms != null ? fmtMs(r.p99_plan_ms) : '—' },
-        { key: 'count', label: 'Waits', cls: 'num', format: (r) => fmtCount(r.count) },
-        { key: 'avg_us', label: 'Avg Wait', cls: 'num', format: (r) => fmtUs(r.avg_us) },
-    ],
-    rowClass: () => 'clickable',
-    onClick: (r) => ({
-        filterKey: 'query_id', filterValue: r.query_id,
-        label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id,
-    }),
-};
+const queriesOnClick = (r) => ({
+    filterKey: 'query_id', filterValue: r.query_id,
+    label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id,
+});
+
+/* #441 (contract item 3): `count` counts non-idle WAIT **and CPU** records
+ * (src/compute.c handle_top_queries) — a "Waits" label overstates what it
+ * is. It is still meaningful (every exact row's full-duration average
+ * below is over this SAME population), so it keeps a name, just an honest
+ * one: "Wait/CPU intervals" for exact rows, where a continuation never adds
+ * a new observation; "Observations" over sampled data, where each sample is
+ * one, not an interval boundary. */
+function queriesCountColumn(sampled) {
+    return { key: 'count', label: sampled ? 'Observations' : 'Wait/CPU intervals',
+        cls: 'num', format: (r) => fmtCount(r.count) };
+}
+
+/* #441: this average is full-duration-exact-only (src/server.c:3829/
+ * compute.c:1741) over the SAME mixed wait+CPU population as `count` above
+ * — "Avg Wait" is wrong twice: it is not waits-only, and it is not a
+ * meaningful average once interval count only exists ("sampled continuations
+ * add no new observations") rather than a fully exact duration. Never
+ * invented by dividing DB Time by a different count (that would silently
+ * swap in a number this aggregate does not actually have). */
+function queriesAvgColumn(sampled) {
+    return { key: 'avg_us', label: 'Avg interval', cls: 'num',
+        format: (r) => sampled ? '—' : fmtUs(r.avg_us) };
+}
+
+/* #439 (contract item 1/3): `pct` divides by query-ATTRIBUTED active time
+ * (src/compute.c:1691), excluding query_id-0 (unattributed) work — a
+ * narrower, DIFFERENT denominator than Overview's total DB Time. "%DB"
+ * implied the same denominator as every other tab; this name says which
+ * one it actually is. The excluded time is disclosed separately, beside
+ * the table (buildUnattributedNote/unattributedNoteHtml below), not folded
+ * into this number and not silently dropped. */
+const QUERIES_PCT_LABEL = '% attributed DB Time';
+
+/* PURE: builds the queries table config for a given response fidelity
+ * ('exact'|'sampled'|'mixed'|'none', see fidelity.js fidelityOf()). Only
+ * `count`/`avg_us` depend on it; every other column is identical, so the
+ * default export below (fidelity 'exact') is what the gallery and any
+ * caller that does not have a live response still get. */
+export function makeQueriesConfig(fidelity) {
+    const sampled = fidelity === 'sampled' || fidelity === 'mixed';
+    return {
+        columns: [
+            { key: 'query_id', label: 'Query ID', cls: 'sticky-col sticky-col-0', format: (r) =>
+                '<span class="query-id">' + r.query_id + '</span>' },
+            { key: 'text', label: 'Query Text', cls: 'sticky-col sticky-col-1', format: (r) => {
+                if (!r.text) return '<span style="color:#555">—</span>';
+                const truncated = esc(r.text.substring(0, 80)) +
+                    (r.text.length > 80 ? '...' : '');
+                return '<span class="qt-hover" data-fulltext="' +
+                    esc(r.text).replace(/"/g, '&quot;') + '">' +
+                    _dot(r.top_wait) + truncated + '</span>';
+            }},
+            { key: '_executions', label: 'Waterfall', sortable: false,
+              cls: 'query-executions-cell',
+              format: () => '<span class="cell-drill query-executions-action" ' +
+                  'title="Open individual executions">Executions →</span>',
+              intent: (r) => ({ pivot: 'query-executions', filterKey: 'query_id',
+                  filterValue: r.query_id,
+                  label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
+            { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
+            { key: 'pct', label: QUERIES_PCT_LABEL, cls: 'num', format: (r) => fmtPct(r.pct) },
+            { key: 'classes', label: 'Wait Profile', format: (r) =>
+                r.events ? eventStackedBar(r.events, r.total_ms, eventColor, fmtMs)
+                         : stackedBar(r.classes, r.total_ms, WAIT_CLASSES, fmtMs) },
+            { key: 'exec_count', label: 'Execs', cls: 'num', format: (r) =>
+                r.exec_count != null ? fmtCount(r.exec_count) : '—' },
+            { key: 'plan_count', label: 'Plans', cls: 'num', format: (r) =>
+                r.plan_count != null ? fmtCount(r.plan_count) : '—' },
+            { key: 'plan_ratio', label: 'Plan%', cls: 'num', format: (r) =>
+                (r.exec_count > 0 && r.plan_count != null)
+                    ? (r.plan_count / r.exec_count * 100).toFixed(0) + '%' : '—' },
+            { key: 'avg_exec_ms', label: 'Avg Exec', cls: 'num', format: (r) =>
+                r.avg_exec_ms != null ? fmtMs(r.avg_exec_ms) : '—' },
+            { key: 'p95_exec_ms', label: 'p95 Exec', cls: 'num', format: (r) =>
+                r.p95_exec_ms != null ? fmtMs(r.p95_exec_ms) : '—' },
+            { key: 'p99_exec_ms', label: 'p99 Exec', cls: 'num', format: (r) =>
+                r.p99_exec_ms != null ? fmtMs(r.p99_exec_ms) : '—' },
+            { key: 'avg_plan_ms', label: 'Avg Plan', cls: 'num', format: (r) =>
+                r.avg_plan_ms != null ? fmtMs(r.avg_plan_ms) : '—' },
+            { key: 'p95_plan_ms', label: 'p95 Plan', cls: 'num', format: (r) =>
+                r.p95_plan_ms != null ? fmtMs(r.p95_plan_ms) : '—' },
+            { key: 'p99_plan_ms', label: 'p99 Plan', cls: 'num', format: (r) =>
+                r.p99_plan_ms != null ? fmtMs(r.p99_plan_ms) : '—' },
+            queriesCountColumn(sampled),
+            queriesAvgColumn(sampled),
+        ],
+        rowClass: () => 'clickable',
+        onClick: queriesOnClick,
+    };
+}
+
+/* Default/back-compat export: the gallery and any caller without a live
+ * fidelity tag get the EXACT-tier config (today's behavior unchanged for
+ * every existing use). views/queries.js calls makeQueriesConfig(fidelityOf
+ * (data)) instead, so the live tab's headers track the real response. */
+export const queriesConfig = makeQueriesConfig('exact');
+
+/* #439 beside-table disclosure: how much foreground time no query claimed
+ * (query_id 0), separate from the attributed total the table's own %
+ * column (QUERIES_PCT_LABEL) divides by. PURE — same slot pattern as
+ * buildOverflowNote above. `unattributed_available: false` (the
+ * per-second-summary fast path, src/server.c) means the server genuinely
+ * cannot say — that is reported as such, never silently as "none". */
+export function buildUnattributedNote(data) {
+    if (!data) return null;
+    if (data.unattributed_available === false) {
+        return { text: 'Unattributed foreground time is not available for ' +
+            'this window (per-second summary tier has no unattributed bucket).' };
+    }
+    const ms = data.unattributed_ms;
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return null;
+    const count = typeof data.unattributed_count === 'number'
+        ? data.unattributed_count : null;
+    if (ms === 0 && (count == null || count === 0)) return null;
+    const attributed = typeof data.db_time_ms === 'number' ? data.db_time_ms : null;
+    const total = attributed != null ? attributed + ms : null;
+    const pctText = (total != null && total > 0)
+        ? ' (' + (ms / total * 100).toFixed(1) + '% of foreground DB Time)' : '';
+    const countText = count != null
+        ? ', ' + fmtCount(count) + ' occurrence' + (count === 1 ? '' : 's') : '';
+    return { text: fmtMs(ms) + pctText + ' of foreground DB Time is not ' +
+        'attributed to any query (query_id 0)' + countText + '.' };
+}
+
+export function unattributedNoteHtml(model) {
+    if (!model) return '';
+    return '<div class="unattributed-note">' + esc(model.text) + '</div>';
+}
 
 /* D3 compare-mode configs: identity + A | B | Δ | ×. The source entity's
  * normal drill identity rides on each joined delta row, so drills still act

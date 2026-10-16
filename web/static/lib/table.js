@@ -73,6 +73,97 @@ export function buildTableModel(config, rows, sort) {
     return { headers, rows: modelRows };
 }
 
+/* ── #440: refresh ordering + near-tie hysteresis (contract item 6) ─────────
+ *
+ * A live table re-sorted by raw value on every tick jitters: two rows whose
+ * values are within noise of each other swap rank every refresh, which reads
+ * as random motion rather than as a real change. The agreed policy (NOT an
+ * existing repository rule before this — draft, see the 1.05x constant
+ * below): the FIRST render for a given identity set sorts by descending
+ * value then stable identity; every later tick keeps the previous order
+ * except where a row's current value is STRICTLY GREATER than 1.05x its
+ * predecessor's — applied as deterministic adjacent (bubble) passes,
+ * left-to-right, until no such inversion remains, so the result does not
+ * depend on how many passes happen to run. A departed identity is dropped;
+ * a new one is appended (ranked against the other newcomers by
+ * value/identity) BEFORE the passes run, so a newcomer can still rise past
+ * a weaker survivor in the same tick it appears.
+ *
+ * This is NOT folded into buildTableModel()/the `sort` param above: an
+ * explicit column sort (the `sort` argument) is a request for the EXACT
+ * displayed order and must never be dampened by hysteresis (docs/
+ * VISUAL_CHECKLIST.md:23) -- callers reset() this tracker on an explicit
+ * re-sort or a window/filter change, and only feed its output through
+ * buildTableModel with sort=null (server/stable order) on every other tick.
+ * Selection/clicks must key off the row's identity (whatever idKey(row)
+ * returns), never its index in this order -- an index is exactly what a
+ * hysteresis pass is free to change under a selected row.
+ *
+ * createStableOrder({ idKey(row)->string, valueKey(row)->number, ratio? })
+ * returns { apply(rows)->orderedRows, reset() }. Pure except for its own
+ * internal "previous tick" memory, which is exactly the state this policy
+ * needs to carry — there is no hidden global, one instance per table. */
+export const STABLE_ORDER_PASS_RATIO = 1.05;
+
+function stableOrderValue(valueKey, row) {
+    const v = row ? valueKey(row) : null;
+    return typeof v === 'number' && Number.isFinite(v) ? v : -Infinity;
+}
+
+function stableOrderSortNewcomers(rows, idKey, valueKey) {
+    return rows.slice().sort((a, b) => {
+        const va = stableOrderValue(valueKey, a), vb = stableOrderValue(valueKey, b);
+        if (va !== vb) return vb - va;
+        return String(idKey(a)).localeCompare(String(idKey(b)));
+    });
+}
+
+export function createStableOrder(opts) {
+    const idKey = opts.idKey;
+    const valueKey = opts.valueKey;
+    const ratio = opts.ratio != null ? opts.ratio : STABLE_ORDER_PASS_RATIO;
+    let prevIds = null;   // null = "no prior tick" (first render, or just reset())
+
+    function reset() { prevIds = null; }
+
+    function apply(rows) {
+        rows = rows || [];
+        if (!rows.length) { prevIds = []; return []; }
+        const byId = new Map(rows.map(r => [idKey(r), r]));
+
+        if (prevIds === null) {
+            const ordered = stableOrderSortNewcomers(rows, idKey, valueKey);
+            prevIds = ordered.map(idKey);
+            return ordered;
+        }
+
+        const survivorIds = prevIds.filter((id) => byId.has(id));
+        const survivorSet = new Set(survivorIds);
+        const newcomers = stableOrderSortNewcomers(
+            rows.filter((r) => !survivorSet.has(idKey(r))), idKey, valueKey)
+            .map(idKey);
+        const order = survivorIds.concat(newcomers);
+
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (let i = 0; i < order.length - 1; i++) {
+                const predVal = stableOrderValue(valueKey, byId.get(order[i]));
+                const curVal = stableOrderValue(valueKey, byId.get(order[i + 1]));
+                if (curVal > predVal * ratio) {
+                    const tmp = order[i]; order[i] = order[i + 1]; order[i + 1] = tmp;
+                    changed = true;
+                }
+            }
+        }
+
+        prevIds = order;
+        return order.map((id) => byId.get(id));
+    }
+
+    return { apply, reset };
+}
+
 /* ── Truncation row (U2, review P10) ─────────────────────────────────────────
  *
  * The summary tier caps distinct entities per second-record

@@ -15,10 +15,14 @@
  */
 
 import { buildTableModel, buildTruncationRow } from '../lib/table.js';
-import { queriesConfig, compareQueriesConfig } from '../lib/builders/table-configs.js';
+import {
+    makeQueriesConfig, queriesConfig, compareQueriesConfig,
+    buildUnattributedNote, unattributedNoteHtml,
+} from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
 import { settleBaseline } from '../lib/compare-request.js';
+import { fidelityOf } from '../lib/builders/fidelity.js';
 import {
     buildPaneFidelity, paneFidelityBadgeHtml,
     buildComparePaneFidelity, compareFidelityHtml,
@@ -32,10 +36,13 @@ export function buildQueriesModel(data, sort) {
     if (data && data.compare && data.baselineUnavailable) {
         const primary = data.a;
         const rows = (primary && primary.rows) || [];
+        const config = makeQueriesConfig(fidelityOf(primary));
         return {
             hasRows: rows.length > 0,
-            table: buildTableModel(queriesConfig, rows, sort),
+            table: buildTableModel(config, rows, sort),
+            queryConfig: config,
             paneFidelity: buildPaneFidelity(primary),
+            unattributedNote: buildUnattributedNote(primary),
             truncation: buildTruncationRow(primary),
             baselineUnavailable: true,
         };
@@ -56,10 +63,13 @@ export function buildQueriesModel(data, sort) {
         };
     }
     const rows = (data && data.rows) || [];
+    const config = makeQueriesConfig(fidelityOf(data));
     return {
         hasRows: rows.length > 0,
-        table: buildTableModel(queriesConfig, rows, sort),
+        table: buildTableModel(config, rows, sort),
+        queryConfig: config,
         paneFidelity: buildPaneFidelity(data),
+        unattributedNote: buildUnattributedNote(data),
         truncation: buildTruncationRow(data),
     };
 }
@@ -107,7 +117,11 @@ export function createQueriesView() {
                         : 'No data for selected range') + '</div>';
                 return;
             }
-            const config = model.compare ? compareQueriesConfig : queriesConfig;
+            // #441: the live config tracks the response's own fidelity
+            // (model.queryConfig, built by buildQueriesModel); the static
+            // import is only the gallery/back-compat default.
+            const config = model.compare ? compareQueriesConfig
+                : (model.queryConfig || queriesConfig);
             ctx.mountTable(el, config, model.table, {
                 sort: model.compare ? model.sort : ctx.getSort('queries'),
                 onSort: (key) => { ctx.toggleSort('queries', key); ctx.refresh(); },
@@ -123,6 +137,9 @@ export function createQueriesView() {
                 baselineUnavailableHtml(model.baselineUnavailable) +
                 (model.compare ? compareFidelityHtml(model.compareFidelity)
                                : paneFidelityBadgeHtml(model.paneFidelity)));
+            // #439: disclosed beside the table, not folded into %/omitted.
+            if (!model.compare) el.insertAdjacentHTML('beforeend',
+                unattributedNoteHtml(model.unattributedNote));
         },
 
         enter() { /* no chart */ },

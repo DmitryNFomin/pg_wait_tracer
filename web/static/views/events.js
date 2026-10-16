@@ -22,7 +22,9 @@
  */
 
 import { buildTableModel, buildTruncationRow } from '../lib/table.js';
-import { eventsConfig, compareEventsConfig } from '../lib/builders/table-configs.js';
+import {
+    eventsConfig, compareEventsConfig, buildOverflowNote, overflowNoteHtml,
+} from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
 import { settleBaseline } from '../lib/compare-request.js';
@@ -43,6 +45,7 @@ export function buildEventsModel(data, sort) {
             table: buildTableModel(eventsConfig, rows, sort),
             paneFidelity: buildPaneFidelity(primary),
             percentileBasis: buildPercentileBasis(primary),
+            overflowNote: buildOverflowNote(rows),
             truncation: buildTruncationRow(primary),
             baselineUnavailable: true,
         };
@@ -68,6 +71,7 @@ export function buildEventsModel(data, sort) {
         table: buildTableModel(eventsConfig, rows, sort),
         paneFidelity: buildPaneFidelity(data),
         percentileBasis: buildPercentileBasis(data),
+        overflowNote: buildOverflowNote(rows),
         truncation: buildTruncationRow(data),
     };
 }
@@ -133,7 +137,8 @@ export function createEventsView() {
                 (model.compare ? compareFidelityHtml(model.compareFidelity)
                                : paneFidelityBadgeHtml(model.paneFidelity)));
             if (!model.compare) el.insertAdjacentHTML('beforeend',
-                percentileBasisHtml(model.percentileBasis));
+                percentileBasisHtml(model.percentileBasis) +
+                overflowNoteHtml(model.overflowNote));
         },
 
         enter() { /* no chart */ },

@@ -226,13 +226,33 @@ test('#103 overflow percentiles reach the assembled model as ">=" bounds', () =>
     for (const ci of [4, 5, 6]) {
         const html = m.table.rows[0].cells[ci].html;
         assert.ok(html.includes('\u226516.4ms'), `col ${ci}: ${html}`);
-        assert.ok(/title="At least 16\.4ms\./.test(html), html);
+        // #437: the exact agreed sentence, verbatim -- "the true value is
+        // higher" (the pre-#437 wording) wrongly excluded equality.
+        assert.ok(html.includes('Percentiles marked \u226516.4 ms fall in the ' +
+            'open-ended \u226516.384 ms histogram bucket; they are lower ' +
+            'bounds, and their actual values are unavailable.'), html);
     }
     // Avg and Max are exact numbers and keep saying so.
     assert.ok(m.table.rows[0].cells[3].html.includes('1.8s'),
         m.table.rows[0].cells[3].html);
     assert.ok(m.table.rows[0].cells[7].html.includes('2.6s'),
         m.table.rows[0].cells[7].html);
+    // #437: shown BESIDE the table too, not only in the per-cell tooltip.
+    assert.deepEqual(m.overflowNote, { text:
+        'Percentiles marked \u226516.4 ms fall in the open-ended ' +
+        '\u226516.384 ms histogram bucket; they are lower bounds, and ' +
+        'their actual values are unavailable.' });
+});
+
+// #437 negative control: no row overflowed -> no banner. Without this, a
+// banner that always renders regardless of data would pass the positive
+// test above too (it does not check for ABSENCE anywhere else).
+test('#437 no overflow anywhere in the page -> no beside-table note', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'IO:DataFileRead', event_id: 0x01000015,
+             p50_us: 8, p95_us: 40, p99_us: 90 }),
+    ] }, null);
+    assert.equal(m.overflowNote, null);
 });
 
 test('percentile cells in the assembled model carry the histogram pivot intent', () => {
