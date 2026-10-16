@@ -27,6 +27,35 @@
 #   repo-dir defaults to this script's own repository; a test harness passes
 #   a scratch git repo to exercise the logic in isolation (see
 #   tests/test_check_test_registration.sh).
+#
+# A guard that cannot run under the invoking shell must refuse, not silently
+# approve (issue #431). This script requires bash: the comparison below uses
+# `<(...)` process substitution, `[[ ]]` and function-local state, none of
+# which a plain `sh` reliably provides. Two distinct ways that bites:
+#   - real dash (the Linux gate boxes' /bin/sh) hard syntax-errors on `<(...)`
+#     and aborts outright -- noisy, but at least it does not approve;
+#   - bash invoked AS "sh" (e.g. macOS's /bin/sh, which IS bash, so
+#     $BASH_VERSION is still set) resolves `<(...)` to a failed command
+#     substitution whose nonzero exit status nothing downstream used to
+#     check, so the comparison silently became "nothing missing" -- a
+#     registration genuinely removed from tests/unit_tests.list, run through
+#     `sh scripts/check-test-registration.sh`, printed OK and exited 0.
+# The $BASH_VERSION check below closes the first case (dash never sets it);
+# the explicit exit-status check after the `comm` calls further down closes
+# the second (same bash binary, process substitution still unusable). Pure
+# POSIX /bin/sh syntax ONLY until that `exit`, so this check itself can run
+# under the very shell it may need to reject.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "FAIL: test-registration guard: not running under bash (\$BASH_VERSION is" >&2
+    echo "  unset) -- refusing to approve blind. Re-run as" >&2
+    echo "  './scripts/check-test-registration.sh' or" >&2
+    echo "  'bash scripts/check-test-registration.sh', never" >&2
+    echo "  'sh scripts/check-test-registration.sh': this guard's comparison relies" >&2
+    echo "  on bash's <(...) process substitution, which plain sh does not reliably" >&2
+    echo "  provide (issue #431)." >&2
+    exit 1
+fi
+
 set -uo pipefail
 
 repo="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -120,9 +149,29 @@ check_one() {
         return
     fi
 
-    local missing
+    local missing rc
     missing=$(comm -23 <(printf '%s\n' "$base_entries" | sed '/^$/d' | sort -u) \
                         <(printf '%s\n' "$current_entries" | sed '/^$/d' | sort -u))
+    rc=$?
+    # The $BASH_VERSION check at the top of this file already refuses a shell
+    # that never had process substitution (dash). This check is the second
+    # line of defense: it catches the same feature failing at RUNTIME inside
+    # a shell that otherwise looks like bash (e.g. bash invoked as "sh" on
+    # macOS, where $BASH_VERSION stays set but `<(...)` resolves to a broken
+    # command substitution instead of a syntax error) -- without it, `missing`
+    # silently ends up empty and this guard reports "nothing missing" for a
+    # comparison that never actually ran. Reproduced directly: remove a real
+    # entry from tests/unit_tests.list, run `sh scripts/check-test-registration.sh`
+    # pre-fix -- it printed OK and exited 0.
+    if [[ $rc -ne 0 ]]; then
+        echo "FAIL: test-registration guard: could not compare $label entries (the" >&2
+        echo "  comm/process-substitution comparison exited $rc) -- refusing to approve blind." >&2
+        echo "  This usually means the invoking shell does not support bash's <(...) process" >&2
+        echo "  substitution; re-run with './scripts/check-test-registration.sh' or" >&2
+        echo "  'bash scripts/check-test-registration.sh', not 'sh scripts/check-test-registration.sh'." >&2
+        fail=1
+        return
+    fi
     if [[ -n "$missing" ]]; then
         echo "FAIL: test-registration guard: $label entries present at base ($base) but" >&2
         echo "  missing on this tree:" >&2

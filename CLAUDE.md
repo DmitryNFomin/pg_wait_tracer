@@ -196,11 +196,13 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   tree, where a shared-file break goes red. Required approving reviews is 0:
   a push after READY would merge unreviewed. The contract's no-push-after-READY
   rule is now load-bearing.
-- **Two evidence guards a reviewer runs before declaring READY** (added after
-  two silent failures: a rebase that dropped `tests/Makefile`'s
-  `test_exec_index` command line with the target still listed, and a
-  `box-check` log carrying no commit id, so "passed" could be true of a tree
-  that no longer exists):
+- **Three evidence guards a reviewer runs before declaring READY** (added
+  after silent failures: a rebase that dropped `tests/Makefile`'s
+  `test_exec_index` command line with the target still listed, a
+  `box-check` log carrying no commit id so "passed" could be true of a tree
+  that no longer exists, and `tests/run_all.sh` / `tests/ci_smoke.sh`
+  drifting into independent membership so a `box-check` green proved
+  nothing about a gate only `ci_smoke.sh` ran):
   - `scripts/check-test-registration.sh` — fails if any entry present in
     `tests/unit_tests.list` or `tests/Makefile`'s `TESTS` list at the
     branch's merge-base is missing from the current tree (append-only
@@ -212,6 +214,20 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
     immediately before the rsync that syncs that exact tree to the box —
     match those two values against the PR head before trusting a
     `box-check` log.
+  - `scripts/check-runner-registration.sh` (issue #433) — fails if a test
+    file `tests/ci_smoke.sh` actually invokes is not also invoked by
+    `tests/run_all.sh` (what `make box-check` runs), unless named with a
+    reason in `tests/runner_registration_exemptions.list`. "Actually
+    invokes", not "mentions": a filename inside a comment does not count
+    (the guard's hardest case — a naive grep gets this wrong). Mac-side,
+    seconds, no box; its self-test (synthetic fixtures) runs in `make check`,
+    but running it against THIS repo is still a manual reviewer step, same
+    as `check-test-registration.sh` above — wiring the live check into every
+    `make check` would turn the two real, already-filed gaps it currently
+    reports (`test_capture_smoke.py`, `test_uprobe_fired.py` — ci_smoke-only,
+    tracked by #433, not fixed by the guard that found them since fixing
+    them means editing `tests/run_all.sh`) into a permanent red for every
+    unrelated branch. Self-tests: `tests/test_check_runner_registration.sh`.
 - **Adviser** (owner rules 2026-09-27 and 2026-09-29): consult BOTH by default:
   codex via `codex exec` is primary; Fable via `.claude/agents/adviser.md`
   is the standing second.

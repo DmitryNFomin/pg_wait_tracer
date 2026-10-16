@@ -1,0 +1,19 @@
+  PASS: reconciled membership passes (exit 0)
+  PASS: ci_smoke-only test_ghost.py (run_all mentions it only in a comment) is refused (exit 1)
+  PASS: failure names the undetected-registration file (test_ghost.py)
+  PASS: failure does not also flag the already-reconciled test_a.py / run_all-only test_b.py
+  PASS: test_a.py dropped from run_all.sh's LIVE_TESTS is refused (exit 1)
+  PASS: failure names the dropped entry (test_a.py)
+  PASS: test_b.py moved to ci_smoke-only is refused (exit 1)
+  PASS: failure names the moved entry (test_b.py)
+  PASS: a documented exemption (test_ghost.py) passes (exit 0)
+  PASS: OK message reports the exemption count (1 listed)
+  PASS: unparseable ci_smoke.sh (indirect variable, no literal path) is refused (exit 1)
+  PASS: unparseable-ci_smoke failure names the reason ("refusing to approve blind")
+  PASS: missing tests/ci_smoke.sh is refused (exit 1)
+  PASS: missing-runner failure says so explicitly ("not found")
+  PASS: malformed exemption-list entry is refused (exit 1)
+  PASS: malformed-exemption failure names the reason
+
+16/16 passed
+EXIT=0

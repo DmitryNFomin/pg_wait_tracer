@@ -98,5 +98,63 @@ tests/results/demo-rehearsal*
 tests/results/demo_rehearsal*
 tests/results/.demo-rehearsal*
 tests/results/.demo_rehearsal*
-tests/results/demo_workload_coverage/
-tests/results/summary_raw_parity/
+
+# Agent-written evidence directories under tests/results/, ignored AS A
+# CLASS instead of one line per directory name (issue: the demo-rehearsal
+# patterns above already show the per-name approach falling behind -- an
+# agent invents a new directory name, it sits untracked-but-unignored, and
+# scripts/tree-hash.sh (tracked + untracked-UNIGNORED) counts it, moving the
+# tree hash out from under a counted rehearsal attempt exactly like the
+# per-file provenance miss above did). This ignores every directory
+# directly under tests/results/ -- `*` does not cross `/`, so this does NOT
+# touch tests/results/<file> (tracked top-level files like
+# tests/results/gesture_gate.json, tests/results/overhead_trend.csv,
+# tests/results/HANDOVER-424.md and tests/results/RELEASE-PLAN.md are
+# untouched) and does NOT touch nested files inside a directory this file
+# re-tracks below.
+#
+# A real, intentionally-committed evidence directory is excluded from this
+# ignore (re-tracked) by name, below. Verify any change here with
+# `git ls-files -i -c --exclude-standard` (must print NOTHING -- a tracked
+# file that is also ignored is invisible to `git status` while git still
+# tracks it, which is worse than the drift this fixes) BEFORE committing;
+# add the new `!tests/results/<dir>/` line in the SAME commit that commits
+# real content into a brand new directory, never pre-emptively, and never
+# for a directory an agent run merely produced.
+tests/results/*/
+!tests/results/block-agg/
+!tests/results/cpufilter/
+!tests/results/cx340-safety/
+!tests/results/demo_walk/
+!tests/results/gate-integrity/
+!tests/results/interference-bounds/
+!tests/results/interval-index/
+!tests/results/issue25-perclass-raw-scan/
+!tests/results/issue266/
+!tests/results/issue334/
+!tests/results/issue363/
+!tests/results/issue376-measurement/
+!tests/results/issue379-measurement/
+!tests/results/issue408-measurement/
+!tests/results/issue424-daemon/
+!tests/results/issue424-durability/
+!tests/results/issue424-fix/
+!tests/results/issue424-index/
+!tests/results/issue424-integration/
+!tests/results/overhead-envelope/
+!tests/results/probe-bounds/
+!tests/results/probe-bounds-diagnosis/
+!tests/results/sampler-294/
+!tests/results/sampler-294-residual/
+!tests/results/schedstat_contention/
+!tests/results/time-model-absence/
+!tests/results/ui_live_anchor_evidence/
+!tests/results/ui_live_gate1_bypass/
+!tests/results/ui_live_gate1_healthy_run1/
+!tests/results/ui_live_gate1_healthy_run2/
+!tests/results/ui_live_gate1_healthy_run3_postfix/
+!tests/results/ui_live_gate1_healthy_run4_bound150/
+!tests/results/ui_live_gate2_bypass/
+!tests/results/ui_live_gate2_healthy_run1/
+!tests/results/ui_live_gate2_healthy_run2/
+!tests/results/verdict-hardening/
