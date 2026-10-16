@@ -81,9 +81,22 @@ tests/results/ci-smoke-*.log
 tests/results/web_ui_failures/
 tests/results/ui_live/
 tests/results/ui_live_mock/
-tests/results/demo-rehearsal-*.log
-tests/results/demo_rehearsal/
-tests/results/.demo-rehearsal-state.sh
-tests/results/.demo_rehearsal_staging/
+# Demo-rehearsal run artifacts, as a CLASS in all four spellings the scripts
+# actually use (hyphen/underscore x hidden/visible). Per-file entries here
+# are what disqualified counted attempt 2: the per-run provenance file
+# tests/results/.demo-rehearsal-provenance-<run_id>.json was never listed,
+# so it sat untracked-but-unignored, scripts/tree-hash.sh counted it, the
+# provenance hash stopped matching and the attempt was lost -- while its
+# sibling .demo-rehearsal-state.sh WAS listed and caused no trouble. Naming
+# one more file would leave the next sibling to do it again, and only two
+# counted attempts remain.
+#
+# These are anchored patterns, so `*` does not cross a `/`: they match direct
+# children of tests/results/ only. tests/results/probe-bounds/*rehearsal*.txt
+# is TRACKED and unaffected -- verified with `git ls-files`, not assumed.
+tests/results/demo-rehearsal*
+tests/results/demo_rehearsal*
+tests/results/.demo-rehearsal*
+tests/results/.demo_rehearsal*
 tests/results/demo_workload_coverage/
 tests/results/summary_raw_parity/

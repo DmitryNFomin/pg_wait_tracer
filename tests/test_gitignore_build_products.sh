@@ -190,6 +190,55 @@ else
     fi
 fi
 
+# ── 2b. demo-rehearsal run artifacts ────────────────────────────────────
+# Same mechanism as section 2, different producer. A rehearsal writes a
+# per-run provenance JSON next to its state file; the state file was ignored
+# and the provenance file was not, so it sat untracked-but-unignored, moved
+# the tree hash, and counted attempt 2 was disqualified when its provenance
+# hash stopped matching. Two counted attempts remain, so this is checked
+# rather than remembered.
+echo "--- 2b. a rehearsal run's artifacts must not move the tree hash ---"
+r_before=$("$repo/scripts/tree-hash.sh" 2>/dev/null)
+if [[ -z "$r_before" ]]; then
+    bad "scripts/tree-hash.sh produced nothing -- section 2b measures nothing"
+else
+    rid=1792000001
+    r_files=(
+        "$repo/tests/results/.demo-rehearsal-provenance-${rid}.json"
+        "$repo/tests/results/.demo-rehearsal-state.sh"
+        "$repo/tests/results/demo-rehearsal-${rid}.log"
+    )
+    r_made=()
+    for f in "${r_files[@]}"; do
+        [[ -e "$f" ]] && continue          # never clobber a real artifact
+        printf '{"run_id": %s}\n' "$rid" > "$f" && r_made+=("$f")
+    done
+    r_after=$("$repo/scripts/tree-hash.sh" 2>/dev/null)
+    for f in "${r_made[@]}"; do rm -f "$f"; done
+
+    if [[ "${#r_made[@]}" -eq 0 ]]; then
+        bad "2b. could not create any stand-in artifact -- nothing was measured"
+    elif [[ "$r_before" == "$r_after" ]]; then
+        ok "2b. ${#r_made[@]} rehearsal artifact(s) do not move the tree hash ($r_before)"
+    else
+        bad "2b. a rehearsal artifact moved the tree hash: $r_before -> $r_after -- a counted attempt would be disqualified"
+    fi
+
+    # Non-vacuity: a NEIGHBOURING file the class does not cover must still
+    # move it, or 2b would pass against a .gitignore that ignored all of
+    # tests/results/ (which would hide real evidence instead).
+    r_probe="$repo/tests/results/not-a-rehearsal-artifact.json"
+    rm -f "$r_probe"
+    printf 'x\n' > "$r_probe"
+    r_moved=$("$repo/scripts/tree-hash.sh" 2>/dev/null)
+    rm -f "$r_probe"
+    if [[ "$r_moved" != "$r_before" ]]; then
+        ok "2b. an uncovered tests/results/ file DOES move it -- the class is not just 'ignore everything'"
+    else
+        bad "2b. nothing under tests/results/ moves the hash: the class is too broad and would hide real evidence"
+    fi
+fi
+
 if [[ -n "${PGWT_GUARD_AUDIT_ONLY:-}" ]]; then
     echo ""
     echo "$checks checks, $fails failures (audit only; self-test skipped by request)"
