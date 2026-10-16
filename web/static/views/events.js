@@ -21,7 +21,10 @@
  *     'histogram-event' pivot intent via ctx.onDrill; row-click unchanged).
  */
 
-import { buildTableModel, buildTruncationRow } from '../lib/table.js';
+import {
+    buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
+    createOrderResetGate,
+} from '../lib/table.js';
 import {
     eventsConfig, compareEventsConfig, buildOverflowNote, overflowNoteHtml,
 } from '../lib/builders/table-configs.js';
@@ -35,14 +38,21 @@ import {
     baselineUnavailableHtml,
 } from '../lib/panels.js';
 
-/* PURE: top_events response + sort -> render model. Exported for testing. */
-export function buildEventsModel(data, sort) {
+/* PURE: top_events response + sort -> render model. Exported for testing.
+ * #440 (contract item 6): `orderTracker` (lib/table.js createStableOrder,
+ * see views/overview.js's identical pattern) applies the refresh-ordering
+ * hysteresis to the DEFAULT (no explicit column sort) order; an explicit
+ * sort bypasses it entirely (applyDefaultOrder). Optional so every existing
+ * caller/test that does not pass one keeps today's plain order -- a REAL
+ * production call always passes one (createEventsView() below). */
+export function buildEventsModel(data, sort, orderTracker) {
     if (data && data.compare && data.baselineUnavailable) {
         const primary = data.a;
         const rows = (primary && primary.rows) || [];
+        const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
         return {
             hasRows: rows.length > 0,
-            table: buildTableModel(eventsConfig, rows, sort),
+            table: buildTableModel(eventsConfig, ordered, sort),
             paneFidelity: buildPaneFidelity(primary),
             percentileBasis: buildPercentileBasis(primary),
             overflowNote: buildOverflowNote(rows),
@@ -66,9 +76,10 @@ export function buildEventsModel(data, sort) {
         };
     }
     const rows = (data && data.rows) || [];
+    const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
     return {
         hasRows: rows.length > 0,
-        table: buildTableModel(eventsConfig, rows, sort),
+        table: buildTableModel(eventsConfig, ordered, sort),
         paneFidelity: buildPaneFidelity(data),
         percentileBasis: buildPercentileBasis(data),
         overflowNote: buildOverflowNote(rows),
@@ -77,6 +88,15 @@ export function buildEventsModel(data, sort) {
 }
 
 export function createEventsView() {
+    // #440: one hysteresis tracker for this mounted view's whole lifetime
+    // (view-local state, like views/waterfall.js's `selected`) -- identity
+    // is event_id (stable, unique per row), value is total_ms (the Events
+    // table's own DB-time contribution column).
+    const order = createStableOrder({
+        idKey: (r) => String(r.event_id), valueKey: (r) => r.total_ms,
+    });
+    const resetIfChanged = createOrderResetGate();
+
     return {
         id: 'events',
 
@@ -104,7 +124,9 @@ export function createEventsView() {
 
         build(data, ctx) {
             const sort = ctx.getSort('events');
-            return buildEventsModel(data, sort);
+            resetIfChanged(order, { from: ctx.timeRange.from, to: ctx.timeRange.to,
+                filters: ctx.filters.snapshot(), sort });
+            return buildEventsModel(data, sort, order);
         },
 
         mount(el, model, ctx) {

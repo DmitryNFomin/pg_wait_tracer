@@ -352,6 +352,67 @@ test('createOverviewOrder: a class that disappears and returns starts its child 
         ['DB Time', 'Lock', 'Lock:tuple', 'Lock:relation']);
 });
 
+// ── Review finding: Idle's own indent-2 children attached to the WRONG
+// parent (the preceding class), or vanished entirely when no class had
+// been seen yet. Contract §6 requires hierarchy to be preserved, not
+// reassigned -- and NEVER silently dropped. ───────────────────────────────
+
+test("Idle's indent-2 child attaches to IDLE, not to the preceding class", () => {
+    const o = createOverviewOrder();
+    const rows = [
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(2, 'IO:DataFileRead', 2100),
+        overviewRow(0, 'Idle', 45000),
+        overviewRow(2, 'Client:ClientRead', 39000),
+    ];
+    const out = o.apply(rows);
+    assert.deepEqual(out.map((r) => r.name),
+        ['DB Time', 'IO', 'IO:DataFileRead', 'Idle', 'Client:ClientRead']);
+    // Specifically: Client:ClientRead must NOT render under IO (before
+    // Idle) -- it must come AFTER Idle, as its own child.
+    const idleIdx = out.findIndex((r) => r.name === 'Idle');
+    const clientIdx = out.findIndex((r) => r.name === 'Client:ClientRead');
+    assert.ok(clientIdx > idleIdx,
+        `Client:ClientRead (${clientIdx}) must follow Idle (${idleIdx})`);
+});
+
+test('an indent-2 row with NO parent seen yet is never silently dropped', () => {
+    const o = createOverviewOrder();
+    // Pathological/defensive: an indent-2 row arrives before any indent-0
+    // or indent-1 row at all (should not happen from a real server, but a
+    // dropped row is worse than a defensively-placed one).
+    const rows = [
+        overviewRow(2, 'Orphan:child', 100),
+        overviewRow(0, 'DB Time', 10000),
+    ];
+    const out = o.apply(rows);
+    assert.ok(out.some((r) => r.name === 'Orphan:child'),
+        `Orphan:child must not vanish: ${JSON.stringify(out.map((r) => r.name))}`);
+});
+
+test("Idle's children get their OWN nested hysteresis, independent of any class", () => {
+    const o = createOverviewOrder();
+    o.apply([
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(0, 'Idle', 45000),
+        overviewRow(2, 'Client:ClientRead', 39000),
+        overviewRow(2, 'Timeout:PgSleep', 6000),
+    ]);
+    // Timeout:PgSleep jumps past ClientRead by >5% -- must reorder WITHIN
+    // Idle's children, independent of IO (which has none here).
+    const out = o.apply([
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(0, 'Idle', 45000),
+        overviewRow(2, 'Client:ClientRead', 39000),
+        overviewRow(2, 'Timeout:PgSleep', 42000),
+    ]);
+    assert.deepEqual(out.map((r) => r.name),
+        ['DB Time', 'IO', 'Idle', 'Timeout:PgSleep', 'Client:ClientRead']);
+});
+
 test('events: descending sort by count', () => {
     const rows = [
         { name: 'A', event_id: 1, count: 10, total_ms: 1, avg_us: 1, p50_us: 1,

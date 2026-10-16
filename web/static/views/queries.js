@@ -14,7 +14,10 @@
  *   - Long query text shows a hover tooltip (lib/table.js tooltipEl wiring).
  */
 
-import { buildTableModel, buildTruncationRow } from '../lib/table.js';
+import {
+    buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
+    createOrderResetGate,
+} from '../lib/table.js';
 import {
     makeQueriesConfig, queriesConfig, compareQueriesConfig,
     buildUnattributedNote, unattributedNoteHtml,
@@ -31,15 +34,21 @@ import {
 
 /* PURE: top_queries response + sort -> render model. Exported for testing.
  * U2 (review P10): carries the pane fidelity badge (sampled/mixed numbers are
- * scaled estimates) and the server-flagged truncation row. */
-export function buildQueriesModel(data, sort) {
+ * scaled estimates) and the server-flagged truncation row.
+ * #440 (contract item 6): `orderTracker` applies the refresh-ordering
+ * hysteresis to the DEFAULT (no explicit column sort) order; optional so
+ * every existing caller/test that does not pass one keeps today's plain
+ * order (a REAL production call always passes one — createQueriesView()
+ * below). */
+export function buildQueriesModel(data, sort, orderTracker) {
     if (data && data.compare && data.baselineUnavailable) {
         const primary = data.a;
         const rows = (primary && primary.rows) || [];
+        const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
         const config = makeQueriesConfig(fidelityOf(primary));
         return {
             hasRows: rows.length > 0,
-            table: buildTableModel(config, rows, sort),
+            table: buildTableModel(config, ordered, sort),
             queryConfig: config,
             paneFidelity: buildPaneFidelity(primary),
             unattributedNote: buildUnattributedNote(primary),
@@ -63,10 +72,11 @@ export function buildQueriesModel(data, sort) {
         };
     }
     const rows = (data && data.rows) || [];
+    const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
     const config = makeQueriesConfig(fidelityOf(data));
     return {
         hasRows: rows.length > 0,
-        table: buildTableModel(config, rows, sort),
+        table: buildTableModel(config, ordered, sort),
         queryConfig: config,
         paneFidelity: buildPaneFidelity(data),
         unattributedNote: buildUnattributedNote(data),
@@ -74,7 +84,32 @@ export function buildQueriesModel(data, sort) {
     };
 }
 
+/* PURE: the "no rows" pane HTML. Exported for testing -- mount() is not a
+ * pure function (it writes a real DOM element), so this is the unit-
+ * testable half of the #439 fix: wholly-unattributed activity (no row has
+ * its OWN query_id) is exactly the case where disclosure matters most, so
+ * the empty-rows pane must NOT drop unattributedNote the way the exact
+ * text/table pane never did. */
+export function buildQueriesEmptyStateHtml(model) {
+    return baselineUnavailableHtml(model.baselineUnavailable) +
+        (model.compare
+        ? compareFidelityHtml(model.compareFidelity)
+        : paneFidelityBadgeHtml(model.paneFidelity)) +
+        '<div class="loading">' + (model.baselinePredates
+            ? 'Baseline unavailable for comparison'
+            : 'No data for selected range') + '</div>' +
+        (model.compare ? '' : unattributedNoteHtml(model.unattributedNote));
+}
+
 export function createQueriesView() {
+    // #440: one hysteresis tracker for this mounted view's whole lifetime --
+    // identity is query_id (stable, unique per row), value is total_ms (the
+    // Queries table's own DB-time contribution column).
+    const order = createStableOrder({
+        idKey: (r) => String(r.query_id), valueKey: (r) => r.total_ms,
+    });
+    const resetIfChanged = createOrderResetGate();
+
     return {
         id: 'queries',
 
@@ -102,19 +137,15 @@ export function createQueriesView() {
 
         build(data, ctx) {
             const sort = ctx.getSort('queries');
-            return buildQueriesModel(data, sort);
+            resetIfChanged(order, { from: ctx.timeRange.from, to: ctx.timeRange.to,
+                filters: ctx.filters.snapshot(), sort });
+            return buildQueriesModel(data, sort, order);
         },
 
         mount(el, model, ctx) {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             if (!model.hasRows) {
-                el.innerHTML = baselineUnavailableHtml(model.baselineUnavailable) +
-                    (model.compare
-                    ? compareFidelityHtml(model.compareFidelity)
-                    : paneFidelityBadgeHtml(model.paneFidelity)) +
-                    '<div class="loading">' + (model.baselinePredates
-                        ? 'Baseline unavailable for comparison'
-                        : 'No data for selected range') + '</div>';
+                el.innerHTML = buildQueriesEmptyStateHtml(model);
                 return;
             }
             // #441: the live config tracks the response's own fidelity

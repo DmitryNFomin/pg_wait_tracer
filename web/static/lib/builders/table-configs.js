@@ -194,32 +194,79 @@ export const overviewConfig = {
 
 /* #440 (contract item 6): apply the refresh-ordering/near-tie hysteresis
  * (lib/table.js createStableOrder) to Overview's indent-1 "class" sibling
- * group, and independently to each class's indent-2 "event" children —
- * "preserving hierarchy" means a class's children move WITH it and are
+ * group, and independently to each sibling group's indent-2 children —
+ * "preserving hierarchy" means a group's children move WITH it and are
  * reordered only against their OWN siblings, never promoted into a
- * different class's group or above/below the indent-0 bookends.
+ * different group or reshuffled relative to the indent-0 bookends.
  *
  * DB Time (always first) and Idle (wherever the server places it, normally
  * last — #435: it is excluded from DB Time, not a competing "class") are
- * indent-0 and are deliberately EXCLUDED from the ranked pool: they are
+ * indent-0 and are deliberately EXCLUDED from the RANKED pool: they are
  * structural bookends, not entries competing on contribution, and Idle's
  * own `ms` is routinely larger than any one class's (idle time often
  * dwarfs any single wait class) — ranking it in would float it to the top,
- * which is not what "preserving hierarchy" means here. */
+ * which is not what "preserving hierarchy" means here. Idle's own indent-2
+ * children (e.g. Client:ClientRead) are still real rows that need a
+ * parent, though, so bookends carry a children group exactly like classes
+ * do -- they are just never themselves re-ranked.
+ *
+ * Bug found by review: an earlier version routed every indent-2 row to
+ * "whichever class group was pushed last" (classes[classes.length-1]),
+ * which is only correct while the CURRENT parent is in fact a class. The
+ * moment an indent-0 row (Idle) follows a class, that check is still true
+ * (classes is non-empty) even though the class is no longer the active
+ * parent -- Idle's children attached to the PRECEDING class instead (wrong
+ * parent, wrong position: rendered before Idle, under the wrong name), and
+ * if no class had been seen at all yet, the same stale check (`classes.
+ * length` falsy) silently DROPPED the row instead of attaching it
+ * anywhere. Fixed below by tracking the single most-recently-seen group
+ * explicitly (`active`), reassigned on every indent-0 OR indent-1 row:
+ * children always attach to whichever parent is actually current, and a
+ * row with truly no parent yet is never dropped (last-resort `pre` entry). */
 function splitOverviewRows(rows) {
-    const pre = [];                 // indent-0 rows seen before any indent-1
-    const classes = [];             // [{ row, children: [indent-2 rows] }]
-    const post = [];                // indent-0 rows seen after the first indent-1
+    const pre = [];                 // [{ row, children }] indent-0, before any indent-1
+    const classes = [];             // [{ row, children }] indent-1 (the RANKED pool)
+    const post = [];                // [{ row, children }] indent-0, after the first indent-1
+    let active = null;              // the group indent-2 rows currently attach to
     for (const r of rows || []) {
         if (r.indent === 1) {
-            classes.push({ row: r, children: [] });
+            active = { row: r, children: [] };
+            classes.push(active);
         } else if (r.indent === 0) {
-            (classes.length ? post : pre).push(r);
-        } else if (classes.length) {
-            classes[classes.length - 1].children.push(r);
+            active = { row: r, children: [] };
+            (classes.length ? post : pre).push(active);
+        } else if (active) {
+            active.children.push(r);
+        } else {
+            // Defensive only -- real server output always opens with an
+            // indent-0 DB Time row first. Never silently drop a real row.
+            pre.push({ row: r, children: [] });
         }
     }
     return { pre, classes, post };
+}
+
+/* PURE: flatten a list of { row, children } groups, applying (and lazily
+ * creating/pruning) a per-group-identity child hysteresis tracker from
+ * `childOrders` -- shared between the class pool and the pre/post bookends
+ * so Idle's children get exactly the same nested-hysteresis treatment a
+ * class's children get, keyed by the SAME map (row names are unique across
+ * the whole table). */
+function flattenOverviewGroups(groups, childOrders, out) {
+    const seenNames = new Set(groups.map((g) => g.row.name));
+    for (const name of Array.from(childOrders.keys())) {
+        if (!seenNames.has(name)) childOrders.delete(name);
+    }
+    for (const g of groups) {
+        out.push(g.row);
+        if (!g.children.length) continue;
+        let tracker = childOrders.get(g.row.name);
+        if (!tracker) {
+            tracker = createStableOrder({ idKey: (r) => r.name, valueKey: (r) => r.ms });
+            childOrders.set(g.row.name, tracker);
+        }
+        for (const kid of tracker.apply(g.children)) out.push(kid);
+    }
 }
 
 /* createOverviewOrder() returns { apply(rows)->orderedRows, reset() } — one
@@ -231,7 +278,7 @@ function splitOverviewRows(rows) {
  * group fresh rather than resuming stale history. */
 export function createOverviewOrder() {
     const classOrder = createStableOrder({ idKey: (r) => r.name, valueKey: (r) => r.ms });
-    const childOrders = new Map();   // class name -> createStableOrder()
+    const childOrders = new Map();   // row name (class OR bookend) -> createStableOrder()
 
     function reset() {
         classOrder.reset();
@@ -240,27 +287,20 @@ export function createOverviewOrder() {
 
     function apply(rows) {
         const { pre, classes, post } = splitOverviewRows(rows);
-        const childrenByName = new Map(classes.map((c) => [c.row.name, c.children]));
-        const orderedClasses = classOrder.apply(classes.map((c) => c.row));
+        const classByName = new Map(classes.map((g) => [g.row.name, g]));
+        const orderedClassRows = classOrder.apply(classes.map((g) => g.row));
+        // Re-attach each ranked row to ITS OWN children group (classOrder
+        // only reorders rows, never their nested children) -- this is what
+        // "preserving hierarchy" means: a class moves, but keeps its kids.
+        const orderedClassGroups = orderedClassRows.map((r) => classByName.get(r.name));
 
-        const seenNames = new Set(orderedClasses.map((r) => r.name));
-        for (const name of Array.from(childOrders.keys())) {
-            if (!seenNames.has(name)) childOrders.delete(name);
-        }
-
-        const out = pre.slice();
-        for (const classRow of orderedClasses) {
-            out.push(classRow);
-            const kids = childrenByName.get(classRow.name) || [];
-            if (!kids.length) continue;
-            let tracker = childOrders.get(classRow.name);
-            if (!tracker) {
-                tracker = createStableOrder({ idKey: (r) => r.name, valueKey: (r) => r.ms });
-                childOrders.set(classRow.name, tracker);
-            }
-            for (const kid of tracker.apply(kids)) out.push(kid);
-        }
-        out.push(...post);
+        // ONE prune pass over every group that exists this tick (pre +
+        // classes + post combined) -- pruning per-subset would wipe a
+        // bookend's (or a class's) tracker just because it is not in
+        // WHICHEVER subset happened to be flattened first.
+        const out = [];
+        flattenOverviewGroups(
+            pre.concat(orderedClassGroups, post), childOrders, out);
         return out;
     }
 

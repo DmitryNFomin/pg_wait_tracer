@@ -164,6 +164,34 @@ export function createStableOrder(opts) {
     return { apply, reset };
 }
 
+/* Shared gate for the flat (non-hierarchical) drill-down tables
+ * (Events/Sessions/Queries — Overview's hierarchical case has its own
+ * wrapper, table-configs.js createOverviewOrder): an EXPLICIT column sort
+ * (`sort.key` set — the user clicked a header) is a request for the exact
+ * displayed order and bypasses the tracker entirely, never dampened by
+ * hysteresis; the default (no explicit sort) view runs through it. Every
+ * view's build() calls this the same way, so "a view stopped using the
+ * tracker" is a one-line diff to spot and a one-line call to restore. */
+export function applyDefaultOrder(tracker, rows, sort) {
+    if (sort && sort.key) return rows || [];
+    return tracker.apply(rows || []);
+}
+
+/* Shared "reset on window/filter change or explicit re-sort" gate (contract
+ * item 6): returns a function a view calls every build() with whatever
+ * facts should force a fresh first-render ranking (window, filters, the
+ * CURRENT sort state) -- resets the tracker exactly when that fact set
+ * changes since the previous call, never on an ordinary same-window
+ * refresh tick. One instance per mounted view (view-local state, same
+ * family as views/waterfall.js's `selected`). */
+export function createOrderResetGate() {
+    let lastKey = null;
+    return (tracker, keyParts) => {
+        const key = JSON.stringify(keyParts);
+        if (key !== lastKey) { tracker.reset(); lastKey = key; }
+    };
+}
+
 /* ── Truncation row (U2, review P10) ─────────────────────────────────────────
  *
  * The summary tier caps distinct entities per second-record

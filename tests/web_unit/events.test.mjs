@@ -8,8 +8,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEventsModel } from '../../web/static/views/events.js';
+import { buildEventsModel, createEventsView } from '../../web/static/views/events.js';
 import { eventsConfig } from '../../web/static/lib/builders/table-configs.js';
+import { createStableOrder } from '../../web/static/lib/table.js';
 import {
     buildPaneFidelity, paneFidelityBadgeHtml,
     buildPercentileBasis, percentileBasisHtml,
@@ -23,6 +24,16 @@ function ev(over) {
         name: 'X', event_id: 0, count: 0, total_ms: 0, avg_us: 0,
         p50_us: 0, p95_us: 0, p99_us: 0, max_us: 0, pct: 0, aas: 0,
     }, over);
+}
+
+// #440: a minimal fake view-manager ctx -- just enough for build(data, ctx)
+// (getSort/timeRange/filters.snapshot), no transport/DOM needed.
+function fakeCtx(sortState) {
+    return {
+        getSort: () => sortState,
+        timeRange: { from: 0, to: 1000 },
+        filters: { snapshot: () => ({}) },
+    };
 }
 
 test('no sort: keeps server order; every row clickable', () => {
@@ -266,4 +277,94 @@ test('percentile cells in the assembled model carry the histogram pivot intent',
         pivot: 'histogram-event', filterKey: 'event_id',
         filterValue: 0x01000015, label: 'IO:DataFileRead',
     });
+});
+
+// ── #440 (coordinator finding): the production path must actually USE the
+// tracker it is handed, not just build()/discard it. These tests pass a
+// REAL createStableOrder() instance through buildEventsModel exactly as
+// views/events.js's createEventsView() wires it -- if the view stopped
+// threading the tracker into rows before buildTableModel, this is the
+// test that goes red. ──────────────────────────────────────────────────────
+
+test('#440 default order (no explicit sort) is damped by the tracker across ticks', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.event_id), valueKey: (r) => r.total_ms,
+    });
+    buildEventsModel({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 100 }),
+        ev({ name: 'B', event_id: 2, total_ms: 95 }),
+    ] }, null, tracker);
+    // B rises to 101 -- within 5% of A's 100, must NOT reorder.
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 100 }),
+        ev({ name: 'B', event_id: 2, total_ms: 101 }),
+    ] }, null, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.name), ['A', 'B']);
+});
+
+test('#440 a genuine >5% swing DOES reorder through the same tracker', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.event_id), valueKey: (r) => r.total_ms,
+    });
+    buildEventsModel({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 100 }),
+        ev({ name: 'B', event_id: 2, total_ms: 95 }),
+    ] }, null, tracker);
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 100 }),
+        ev({ name: 'B', event_id: 2, total_ms: 106 }),
+    ] }, null, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.name), ['B', 'A']);
+});
+
+test('#440 an EXPLICIT column sort bypasses the tracker entirely (exact value order)', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.event_id), valueKey: (r) => r.total_ms,
+    });
+    // Prime the tracker with an order an explicit sort must NOT honor.
+    buildEventsModel({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 1000 }),
+        ev({ name: 'B', event_id: 2, total_ms: 1 }),
+    ] }, null, tracker);
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 50 }),
+        ev({ name: 'B', event_id: 2, total_ms: 100 }),
+    ] }, { key: 'total_ms', asc: false }, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.name), ['B', 'A']);
+});
+
+test('#440 no tracker passed -> unchanged (plain) order, exactly today\'s behavior', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 50 }),
+        ev({ name: 'B', event_id: 2, total_ms: 100 }),
+    ] }, null);
+    assert.deepEqual(m.table.rows.map((r) => r.row.name), ['A', 'B']);
+});
+
+// This is the test that actually closes the gap: it exercises the REAL
+// production object createEventsView() returns, not buildEventsModel called
+// directly with a hand-made tracker. If createEventsView()'s build() ever
+// stops passing its tracker into buildEventsModel, THIS is the test that
+// goes red -- the ones above only prove buildEventsModel can apply one it
+// is handed, not that the view actually hands it one.
+test('#440 WIRING: createEventsView().build() damps order across real build() calls', () => {
+    // The incoming row ORDER itself flips tick-to-tick (a server that
+    // re-sorts by current value every response, exactly like a plain
+    // descending-every-tick policy would look from the wire) -- so this
+    // input only passes under REAL hysteresis. Un-wiring build() (dropping
+    // the tracker arg) falls back to plain/incoming order, which WOULD
+    // follow the flip to [B, A] -- verified RED below before restoring.
+    const view = createEventsView();
+    const ctx = fakeCtx(null);
+    view.build({ rows: [
+        ev({ name: 'A', event_id: 1, total_ms: 100 }),
+        ev({ name: 'B', event_id: 2, total_ms: 95 }),
+    ] }, ctx);
+    const m = view.build({ rows: [
+        ev({ name: 'B', event_id: 2, total_ms: 101 }),
+        ev({ name: 'A', event_id: 1, total_ms: 100 }),
+    ] }, ctx);
+    assert.deepEqual(m.table.rows.map((r) => r.row.name), ['A', 'B'],
+        'B at 101 is within 5% of A\'s 100 -- must not jitter, even though ' +
+        'the SERVER sent B first this tick');
 });

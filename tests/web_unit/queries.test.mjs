@@ -4,14 +4,27 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildQueriesModel } from '../../web/static/views/queries.js';
-import { queriesConfig } from '../../web/static/lib/builders/table-configs.js';
+import {
+    buildQueriesModel, buildQueriesEmptyStateHtml, createQueriesView,
+} from '../../web/static/views/queries.js';
+import { queriesConfig, buildUnattributedNote } from '../../web/static/lib/builders/table-configs.js';
+import { createStableOrder } from '../../web/static/lib/table.js';
 
 function q(over) {
     return Object.assign({
         query_id: '0', text: 'SELECT 1', total_ms: 0, pct: 0, count: 0,
         avg_us: 0, top_wait: 'CPU*',
     }, over);
+}
+
+// #440: a minimal fake view-manager ctx -- just enough for build(data, ctx)
+// (getSort/timeRange/filters.snapshot), no transport/DOM needed.
+function fakeCtx(sortState) {
+    return {
+        getSort: () => sortState,
+        timeRange: { from: 0, to: 1000 },
+        filters: { snapshot: () => ({}) },
+    };
 }
 
 const LONG = 'SELECT ' + 'a'.repeat(200) + ' FROM t';
@@ -106,4 +119,116 @@ test('B-only compare failure falls back to the ordinary A queries model', () => 
     assert.deepEqual(m.table.rows.map(r => r.row.query_id), ['A']);
     assert.ok(m.table.headers.some(h => h.label === 'Query ID'));
     assert.ok(!m.table.headers.some(h => h.label === 'B'));
+});
+
+// ── #440 (coordinator finding): the production path must actually USE the
+// tracker it is handed. Mirrors events.test.mjs's wiring proof exactly --
+// if views/queries.js stopped threading the tracker into rows before
+// buildTableModel, this is the test that goes red. ──────────────────────────
+
+test('#440 default order (no explicit sort) is damped by the tracker across ticks', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.query_id), valueKey: (r) => r.total_ms,
+    });
+    buildQueriesModel({ rows: [
+        q({ query_id: 'A', total_ms: 100 }), q({ query_id: 'B', total_ms: 95 }),
+    ] }, null, tracker);
+    // B rises to 101 -- within 5% of A's 100, must NOT reorder.
+    const m = buildQueriesModel({ rows: [
+        q({ query_id: 'A', total_ms: 100 }), q({ query_id: 'B', total_ms: 101 }),
+    ] }, null, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.query_id), ['A', 'B']);
+});
+
+test('#440 a genuine >5% swing DOES reorder through the same tracker', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.query_id), valueKey: (r) => r.total_ms,
+    });
+    buildQueriesModel({ rows: [
+        q({ query_id: 'A', total_ms: 100 }), q({ query_id: 'B', total_ms: 95 }),
+    ] }, null, tracker);
+    const m = buildQueriesModel({ rows: [
+        q({ query_id: 'A', total_ms: 100 }), q({ query_id: 'B', total_ms: 106 }),
+    ] }, null, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.query_id), ['B', 'A']);
+});
+
+test('#440 an EXPLICIT column sort bypasses the tracker entirely (exact value order)', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.query_id), valueKey: (r) => r.total_ms,
+    });
+    buildQueriesModel({ rows: [
+        q({ query_id: 'A', total_ms: 1000 }), q({ query_id: 'B', total_ms: 1 }),
+    ] }, null, tracker);
+    const m = buildQueriesModel({ rows: [
+        q({ query_id: 'A', total_ms: 50 }), q({ query_id: 'B', total_ms: 100 }),
+    ] }, { key: 'total_ms', asc: false }, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.query_id), ['B', 'A']);
+});
+
+test('#440 no tracker passed -> unchanged (plain) order, exactly today\'s behavior', () => {
+    const m = buildQueriesModel({ rows: [
+        q({ query_id: 'A', total_ms: 50 }), q({ query_id: 'B', total_ms: 100 }),
+    ] }, null);
+    assert.deepEqual(m.table.rows.map((r) => r.row.query_id), ['A', 'B']);
+});
+
+// This is the test that actually closes the gap: it exercises the REAL
+// production object createQueriesView() returns. If its build() ever stops
+// passing its tracker into buildQueriesModel, THIS is the test that goes
+// red -- the ones above only prove buildQueriesModel CAN apply a tracker it
+// is handed, not that the view actually hands it one.
+test('#440 WIRING: createQueriesView().build() damps order across real build() calls', () => {
+    // Incoming row order flips tick-to-tick (see events.test.mjs's
+    // identical comment) -- only passes under real hysteresis.
+    const view = createQueriesView();
+    const ctx = fakeCtx(null);
+    view.build({ rows: [
+        q({ query_id: 'A', total_ms: 100 }), q({ query_id: 'B', total_ms: 95 }),
+    ] }, ctx);
+    const m = view.build({ rows: [
+        q({ query_id: 'B', total_ms: 101 }), q({ query_id: 'A', total_ms: 100 }),
+    ] }, ctx);
+    assert.deepEqual(m.table.rows.map((r) => r.row.query_id), ['A', 'B'],
+        'B at 101 is within 5% of A\'s 100 -- must not jitter');
+});
+
+// ── #439 (coordinator finding): wholly-unattributed activity must still
+// disclose unattributedNote even when there are NO query_id rows -- an
+// empty table is exactly when disclosure matters most (it is then ALL of
+// the foreground time, not a caveat on some of it). ─────────────────────────
+
+test('#439 empty rows + unattributed time: the model STILL carries the note', () => {
+    const data = { rows: [], unattributed_available: true,
+        unattributed_ms: 5000, unattributed_count: 1, db_time_ms: 0 };
+    const m = buildQueriesModel(data, null);
+    assert.equal(m.hasRows, false);
+    assert.ok(m.unattributedNote, 'unattributedNote must survive the empty-rows case');
+    assert.deepEqual(m.unattributedNote, buildUnattributedNote(data));
+});
+
+test('#439 empty-state PANE (what mount() actually writes to the DOM) discloses it too', () => {
+    // This is the real bug location: buildQueriesModel already carried
+    // unattributedNote (above) even before the fix -- the empty-rows DOM
+    // pane (mount()'s early return) is what used to drop it on the floor.
+    const data = { rows: [], unattributed_available: true,
+        unattributed_ms: 5000, unattributed_count: 1, db_time_ms: 0 };
+    const m = buildQueriesModel(data, null);
+    const html = buildQueriesEmptyStateHtml(m);
+    assert.ok(html.includes('No data for selected range'), html);
+    assert.ok(html.includes('unattributed-note'), html);
+    assert.ok(html.includes('not attributed to any query'), html);
+});
+
+test('#439 empty-state pane: NO unattributed time -> no note, "No data" stands alone', () => {
+    const m = buildQueriesModel({ rows: [] }, null);
+    const html = buildQueriesEmptyStateHtml(m);
+    assert.ok(html.includes('No data for selected range'), html);
+    assert.ok(!html.includes('unattributed-note'), html);
+});
+
+test('#439 empty-state pane: compare mode never shows the (compare-less) unattributed note', () => {
+    const html = buildQueriesEmptyStateHtml({ compare: true, baselinePredates: true });
+    assert.ok(html.includes('Baseline unavailable for comparison'), html);
+    assert.ok(!html.includes('unattributed-note'), html);
 });
