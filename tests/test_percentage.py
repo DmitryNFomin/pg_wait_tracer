@@ -400,10 +400,35 @@ def test_percentage_split(pm_pid):
     cpu_ev = [e for e in events if e['name'] == 'CPU*']
 
     if pg_sleep_ev:
-        sleep_ok = pg_sleep_ev[0]['total_ms'] > 2000
+        # #416 CONSERVATION, not a floor. The old assertion was
+        # `total_ms > 2000`, which passes on ANY value above 2 s -- including
+        # a 3 s reading of the same 8.6 s sleep. That is why a tick losing
+        # the sleeper's entire closing record survived for months: the
+        # failing runs read 0.0-1.7 ms, but so would a 3 s truncation have
+        # passed, and nobody would have looked.
+        #
+        # The second side of this comparison is WALL TIME, deliberately:
+        # the sleeper runs pg_sleep(10) then pg_sleep(60) and its presence
+        # in Timeout:PgSleep is verified against pg_stat_activity before the
+        # capture starts, so it is provably in that wait for the whole
+        # INTERVAL-second display window. Reconciling the class rows against
+        # the view's own DB Time instead would be worthless: both sides come
+        # out of the same accumulation, so a dropped record leaves them
+        # agreeing and the check could not fail.
+        #
+        # Measured healthy band on gate-2, n=51 isolated runs (issue #416
+        # scope probe): 8605-8612 ms against an 8000 ms interval. The floor
+        # below is 75% of the interval, ~30% under the tightest observed
+        # value -- a conservation statement with margin, not a tolerance
+        # widened to absorb noise.
+        floor_ms = INTERVAL * 1000 * 0.75
+        sleep_ms = pg_sleep_ev[0]['total_ms']
+        sleep_ok = sleep_ms >= floor_ms
         check(sleep_ok,
-              f"system_event: PgSleep total = {pg_sleep_ev[0]['total_ms']:.0f}ms "
-              f"(> 2000ms){'' if sleep_ok else '; ' + diagnostics}")
+              f"system_event: PgSleep total = {sleep_ms:.0f}ms "
+              f"(>= {floor_ms:.0f}ms = 75% of the {INTERVAL}s window the "
+              f"sleeper spent entirely in Timeout:PgSleep)"
+              f"{'' if sleep_ok else '; ' + diagnostics}")
     else:
         check(False, f"PgSleep not in system_event "
               f"(events: {[e['name'] for e in events]}); {diagnostics}")

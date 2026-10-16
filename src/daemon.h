@@ -91,6 +91,24 @@ struct pgwt_counters {
     uint64_t state_reseeds_total;      /* frozen-stale state_map entries reseeded by
                                         * pgwt_sweep_stale_state (seed→arm race repair) */
 
+    /* #416 per-tick event-ring drain (live-display conservation). The tick
+     * used to be built from whatever the epoll loop happened to have drained,
+     * so a long wait's single closing record could miss it entirely. These
+     * say how deep the backlog at tick time actually is, and whether the
+     * drain's pass cap was ever reached — the latter means a tick WAS short. */
+    uint64_t tick_drain_records_total;   /* records recovered by tick drains */
+    uint64_t tick_drain_max_records;     /* deepest single-tick backlog seen */
+    uint64_t tick_drain_truncated_total; /* ticks whose drain hit a bound */
+    /* Which bound the LAST truncated tick drain hit. Exists so the loud
+     * WARN's reported bound is ASSERTABLE (tests/test_tick_drain.c B7)
+     * rather than merely plausible: the message and this field are set from
+     * the same decision, so a WARN naming the wrong bound fails a test. */
+    enum pgwt_tick_drain_bound {
+        PGWT_TICK_DRAIN_BOUND_NONE = 0,
+        PGWT_TICK_DRAIN_BOUND_RECORDS,
+        PGWT_TICK_DRAIN_BOUND_TIME,
+    } tick_drain_last_bound;
+
     /* T8 measured-CPU observability (docs/ROADMAP_AND_STATUS.md).
      * Lifetime totals over the exact tier's measured intervals — the closed
      * ringbuf transitions plus the terminal/de-escalation flush records (open
@@ -350,6 +368,7 @@ struct pgwt_daemon {
     bool seen_qids_full_logged;      /* CAP-6 */
     bool invalid_wait_reads_logged;  /* CAP-2/5 backstop */
     bool cmd_gate_order_read_failed_logged;  /* #294 recheck, one-shot */
+    bool tick_drain_truncated_logged;        /* #416 drain cap, one-shot */
 
     /* State */
     struct pgwt_backend_table backends;
@@ -447,6 +466,13 @@ static inline bool pgwt_mode_uses_sampler(const struct pgwt_daemon *d)
 
 /* Initialize daemon: load BPF, attach tracepoints, scan backends. */
 int pgwt_daemon_init(struct pgwt_daemon *d);
+
+/* One display tick: drain the event ring, build the display from the
+ * cumulative accumulator plus the live state_map, print, maintain.
+ * Non-static ONLY so tests/test_tick_drain.c can drive the real handler
+ * (#416): the defect was the ORDER of the steps inside it, so a test that
+ * called a narrower seam could not have seen it. */
+void pgwt_handle_timer(struct pgwt_daemon *d);
 
 /* Run the main event loop. Returns on signal or duration timeout. */
 int pgwt_daemon_run(struct pgwt_daemon *d);

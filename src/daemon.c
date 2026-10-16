@@ -31,6 +31,52 @@
 #define PGWT_TEST_EVENT_DELAY_COUNT 1024U
 #define PGWT_EVENT_DRAIN_CALLBACK_BUDGET 64U
 
+/* #416: how many budgeted passes the per-tick drain (drain_event_ring_for_tick
+ * below) may take before it gives up on this tick. The cap exists because
+ * ring_buffer__consume() has no finite work bound while a producer keeps
+ * refilling the ring (see consume_event_ring above), and the tick drain runs
+ * INSIDE the timer handler — an unbounded drain there would let the producer
+ * decide how long the next tick is delayed.
+ *
+ * Sizing, from the producer rate measured in #416 (~37,700 records/s): one
+ * main-loop poll quantum is 10 ms of production, ~377 records, so a single
+ * 64-callback pass is ~6x too small to clear even the steady-state backlog —
+ * which is why the budget is looped here rather than raised. 256 passes x 64
+ * records = 16,384 records, ~435 ms of production at that rate: ~43x one
+ * quantum, with room for a tick's own prefix work (recovery scan + stale
+ * sweep) running long. Hitting the cap is therefore not a tuning event but a
+ * real degradation, so it is counted and logged once rather than absorbed. */
+#define PGWT_TICK_DRAIN_MAX_PASSES 256U
+
+/* ...and a WALL-CLOCK bound on top of the record bound, because the two
+ * bound different hazards. The pass cap bounds how many records the drain
+ * will process; it says nothing about how long each one takes. In production
+ * a trace callback is 0.295 us mean / 0.200 ms worst observed (measured on
+ * gate-2: callback_ms_total 135.354 over 458,778 callbacks), so 16,384 of
+ * them is ~5 ms — but tests/test_capture_smoke.py's event-ring phase
+ * deliberately makes one callback take 20 ms, 68,000x the mean, and that
+ * phase's whole point is that the DISPLAY TIMER MUST KEEP RUNNING. With only
+ * the record cap a tick could spend 256 x 64 x 20 ms there.
+ *
+ * 500 ms = half the SMALLEST display interval the CLI accepts: --interval is
+ * whole seconds and src/pg_wait_tracer.c:515 refuses anything below 1. So
+ * this is a constant rather than interval/2: for every accepted interval,
+ * interval/2 >= 500 ms, and deriving it per tick only produced a value that
+ * was always clamped back to this one. If sub-second intervals are ever
+ * added, this must become interval-derived again (and the floor it is
+ * clamped against then matters).
+ *
+ * This does NOT make the drain unable to delay a tick. The deadline is
+ * tested once per COMPLETED 64-callback pass, so the worst case is the
+ * budget plus one pass: ~19 us over in production (64 x 0.295 us), up to
+ * 64 x 0.200 ms = ~13 ms if every callback ran at the worst observed cost,
+ * and a measured 1.286 s under the 20 ms test hook — which is why that
+ * phase's tick came out at 1290 ms against a 2 s interval. Finer
+ * granularity would need a per-call budget inside consume_event_ring; at
+ * production callback costs the overshoot is four orders of magnitude under
+ * the interval, so it is not worth the coupling. */
+#define PGWT_TICK_DRAIN_BUDGET_NS  (500ULL * 1000000ULL)
+
 uint64_t pgwt_debug_monotonic_ns(void)
 {
     struct timespec ts;
@@ -181,7 +227,135 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
     return 0;
 }
 
-static void handle_timer(struct pgwt_daemon *d)
+/* #416: drain the event ringbuf so the tick about to be built reflects every
+ * record the producer has already emitted.
+ *
+ * Before this existed, handle_timer built the display as a copy of the
+ * cumulative event accumulator PLUS a LIVE pgwt_read_state_map() read, while
+ * the ring was drained only by the epoll loop — afterwards, and 64 callbacks
+ * at a time. So every record still queued when the timer fired was absent
+ * from that tick even though state_map already showed the interval it closed
+ * as re-opened. For most classes that costs the last few ms of the stream
+ * (CPU* -0.6%, BufFileWrite +1.5% as measured in #416 — inside run-to-run
+ * noise), but a LONG wait's entire contribution rides on a SINGLE record, so
+ * Timeout:PgSleep lost 100% of an 8.6 s sleep and whole-capture DB Time came
+ * out 50.1% short. The trace on disk was correct throughout (--replay and
+ * pgwt-server both returned the full record): a live-display defect only.
+ *
+ * Reentrancy: none. handle_timer runs from the epoll dispatch loop, never
+ * from inside a ring callback, and pgwt_escalation_check_budget() — called
+ * from this same handler a few lines above — already reaches
+ * ring_buffer__consume(d->event_rb) through pgwt_deescalate(). The main
+ * loop's own drain is unaffected: it recomputes event_ring_backlog after
+ * every dispatch pass, and consume_event_ring() leaves no state behind (it
+ * resets the callback counter and clears the limit on every call).
+ *
+ * Double counting: impossible. A record is consumed from the ring exactly
+ * once, by whichever drain reaches it first, and pgwt_accum_copy_used()
+ * OVERWRITES the display from the cumulative accumulator rather than adding
+ * to it.
+ *
+ * Open-stretch disjointness (pgwt_live_account_open_stretch) still holds,
+ * but NOT because the emit and the last_ts store are atomic — they are not.
+ * BPF emits FIRST and advances last_ts AFTER: src/bpf/pg_wait_tracer.bpf.c
+ * emit_event() at :565 then st->last_event/last_ts at :568-569, and the same
+ * order on the exit path (:743 then :781). So there are two windows, in
+ * opposite directions, and this drain is on the safe side of both:
+ *
+ *  - LOSS (this defect, #416): the store landed but the record has not been
+ *    consumed at display-build time, so the tick is short by its duration
+ *    while [last_ts, now) no longer covers it. This is the window the drain
+ *    closes: it shrinks from "whatever the epoll loop had not reached yet"
+ *    — the 10 ms poll quantum or more, which is how an 8.6 s record went
+ *    missing — to the accumulator memcpy between this call and now_ns()
+ *    inside pgwt_read_state_map. Non-zero, but microseconds, and the next
+ *    tick carries the record regardless.
+ *
+ *  - OVERLAP: the record was consumed but the store has NOT landed, so
+ *    [last_ts, now) still spans the interval the record already accounts and
+ *    the old event is counted twice. Reaching it requires the consume of
+ *    that record AND the accumulator memcpy AND the scan down to that pid to
+ *    all fit inside BPF's emit→store gap — a handful of instructions in one
+ *    BPF program with preemption disabled, nanoseconds. Userspace's side of
+ *    that race is microseconds, three orders of magnitude larger, so the
+ *    store is always observed.
+ *
+ * Be precise about the direction: moving the drain INTO the tick shortens
+ * drain→read, which does not narrow the overlap window — if anything it
+ * brings the state read closer to the consume. It stays unreachable on
+ * timescale alone, not because this patch improved it, and it was equally
+ * unreachable before. What the patch narrows is the LOSS window.
+ *
+ * THE ORDERING IS THEREFORE LOAD-BEARING: this drain must stay strictly
+ * before pgwt_accum_copy_used() and pgwt_read_state_map() below. Moving it
+ * after either one reinstates #416 — pinned by tests/test_tick_drain.c,
+ * where the "drain after the display copy" mutant fails 5 of its 48
+ * checks. */
+static void drain_event_ring_for_tick(struct pgwt_daemon *d)
+{
+    if (!d->event_rb)
+        return;
+
+    uint64_t before = d->counters.events_total;
+    unsigned passes = 0;
+    bool backlog = true;
+
+    uint64_t drain_started_ns = pgwt_debug_block_begin(d);
+
+    /* pgwt_debug_monotonic_ns(), not pgwt_debug_block_begin(): the latter is
+     * a no-op unless the debug env is set, and this deadline is PRODUCTION
+     * behaviour. The name is a historical misnomer — it is a plain
+     * CLOCK_MONOTONIC read (same note as the #277 summary flush below). */
+    uint64_t deadline_ns = pgwt_debug_monotonic_ns()
+                         + PGWT_TICK_DRAIN_BUDGET_NS;
+    const char *why = NULL;
+    unsigned long long bound = 0;   /* the bound that fired, in its own unit */
+    const char *bound_unit = "";
+    while (backlog) {
+        if (passes >= PGWT_TICK_DRAIN_MAX_PASSES) {
+            why = "record cap";
+            bound = (unsigned long long)PGWT_TICK_DRAIN_MAX_PASSES
+                  * PGWT_EVENT_DRAIN_CALLBACK_BUDGET;
+            bound_unit = "records";
+            d->counters.tick_drain_last_bound =
+                PGWT_TICK_DRAIN_BOUND_RECORDS;
+            break;
+        }
+        backlog = consume_event_ring(d, "event_ring_tick_drain", true);
+        passes++;
+        if (backlog && pgwt_debug_monotonic_ns() >= deadline_ns) {
+            why = "time budget";
+            bound = PGWT_TICK_DRAIN_BUDGET_NS / 1000000ULL;
+            bound_unit = "ms";
+            d->counters.tick_drain_last_bound = PGWT_TICK_DRAIN_BOUND_TIME;
+            break;
+        }
+    }
+    pgwt_debug_block_end(d, "tick_event_drain", 0, drain_started_ns);
+
+    uint64_t recovered = d->counters.events_total - before;
+    d->counters.tick_drain_records_total += recovered;
+    if (recovered > d->counters.tick_drain_max_records)
+        d->counters.tick_drain_max_records = recovered;
+
+    if (!backlog)
+        return;
+
+    /* Fail loud, never silently: this tick's live view is short by whatever
+     * is still queued, which is exactly the #416 symptom. */
+    d->counters.tick_drain_truncated_total++;
+    if (!d->tick_drain_truncated_logged) {
+        d->tick_drain_truncated_logged = true;
+        fprintf(stderr,
+                "WARN: event ring still had a backlog when the per-tick "
+                "drain hit its %s (%llu %s) — this display tick is short by "
+                "the records left queued (the trace file is unaffected); "
+                "tick_drain_truncated_total counts these\n",
+                why ? why : "bound", bound, bound_unit);
+    }
+}
+
+void pgwt_handle_timer(struct pgwt_daemon *d)
 {
     if (d->debug_dump_state)
         d->debug_timer_entries++;
@@ -271,6 +445,11 @@ static void handle_timer(struct pgwt_daemon *d)
         pgwt_read_accum_map(d);
         pgwt_debug_block_end(d, "accum_map_read", 0, started_ns);
     }
+
+    /* #416: the LAST thing before the display is built, so the smallest
+     * possible window separates "every emitted record is in event_accum"
+     * from the state_map read that supplies the still-open stretches. */
+    drain_event_ring_for_tick(d);
 
     /* Copy cumulative event_accum to display accum,
      * then add open intervals from state_map.
@@ -1373,7 +1552,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == d->timer_fd) {
                 started_ns = pgwt_debug_block_begin(d);
-                handle_timer(d);
+                pgwt_handle_timer(d);
                 pgwt_debug_block_end(d, "timer_handler", 0, started_ns);
             } else if (d->sample_timer_fd >= 0
                        && events[i].data.fd == d->sample_timer_fd) {
@@ -1484,7 +1663,9 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "state_reseeds_total=%llu invalid_wait_reads_total=%llu "
             "wp_attach_failures_total=%llu state_map_full_total=%llu "
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
-            "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu\n",
+            "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
+            "tick_drain_records_total=%llu tick_drain_max_records=%llu "
+            "tick_drain_truncated_total=%llu\n",
             d->cpu_accounting ? 1 : 0, backends_tracked,
             (unsigned long long)d->debug_loop_iterations,
             (unsigned long long)d->debug_timer_entries,
@@ -1507,7 +1688,10 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.cpu_ns_total,
             (unsigned long long)d->counters.offcpu_ns_total,
             (unsigned long long)d->counters.cpu_clamped_ns_total,
-            (unsigned long long)d->counters.wait_gap_cpu_ns_total);
+            (unsigned long long)d->counters.wait_gap_cpu_ns_total,
+            (unsigned long long)d->counters.tick_drain_records_total,
+            (unsigned long long)d->counters.tick_drain_max_records,
+            (unsigned long long)d->counters.tick_drain_truncated_total);
 
     uint32_t key = 0, next;
     struct pgwt_pid_state st;
