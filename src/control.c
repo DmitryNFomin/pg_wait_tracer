@@ -461,6 +461,43 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_cpu_open_uncredited_ns_total",
                      d->summary_writer
                          ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
+    /* #430: the seal's own file lifecycle, published because the fix is
+     * otherwise unobservable in production. reopens_total > 0 says the
+     * rotation window really was sealed by the ticks rather than waiting for
+     * a record; reopen_failures_total > 0 says some seconds are OWED and the
+     * window they belong to is short by that much. A zero pair on a capture
+     * long enough to rotate means either no rotation happened or nothing was
+     * open across one — not that the pause is gone. */
+    cjson_add_uint64(root, "summary_open_seal_reopens_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_seal_reopens_total : 0);
+    cjson_add_uint64(root, "summary_open_seal_reopen_failures_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_seal_reopen_failures_total
+                         : 0);
+    /* The FIRST open failing is a different event from a reopen failing --
+     * "this capture produced no summary file at all" rather than "recording
+     * stopped mid-capture with seconds owed" -- and both reach the push
+     * path, which is why they are two keys and not one. */
+    cjson_add_uint64(root, "summary_first_open_failures_total",
+                     d->summary_writer
+                         ? d->summary_writer->first_open_failures_total : 0);
+    /* #447: a record can be OLDER than the file it is written into (an
+     * event's second began before it arrived; a seal reopen writes a second
+     * that completed ~1.1 s earlier), and the reader places a file by its
+     * header start and prunes any file starting after the window's end. So
+     * the header start is widened to cover the record. widened_total > 0 is
+     * normal and expected on any capture that rotates; widen_failures_total
+     * > 0 means some file is placed conservatively LATE and a narrow window
+     * can miss its earliest records -- the number that says a window may be
+     * short rather than leaving it to be assumed. */
+    cjson_add_uint64(root, "summary_file_start_widened_total",
+                     d->summary_writer
+                         ? d->summary_writer->file_start_widened_total : 0);
+    cjson_add_uint64(root, "summary_file_start_widen_failures_total",
+                     d->summary_writer
+                         ? d->summary_writer->file_start_widen_failures_total
+                         : 0);
     /* The `#if PGWT_SUMMARY_VERSION >= 9` agent/424-daemon wrapped
      * these in is deliberately NOT taken: the constant is 9, so it
      * is true today and buys nothing, while tests/test_control.sh
@@ -479,16 +516,26 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * reasoning from the counters: a note can be ACCEPTED and then credited
      * by nobody, moving no counter at all.
      *   - crediting happens only in writer_seal_through()
-     *     (src/summary_writer.c:1510), whose first statement is
+     *     (src/summary_writer.c), which used to begin
      *     `if (!w->fp) return;`;
      *   - its only two callers are pgwt_summary_push_event() and
      *     pgwt_summary_flush_completed();
      *   - w->fp is NULL before the first record opens the file lazily, and
-     *     again after every rotation (:2094).
+     *     again after every rotation.
      * So on a capture whose in-flight statements are pure CPU — emitting no
      * wait boundaries, hence no pushed records — the open interval is noted,
      * nothing seals, and credited/refused/uncredited all stay 0. That is
      * NOT "the producer never ran", which is what three zeros look like.
+     *
+     * HALF OF THAT IS FIXED (#430), and the half that is not is the half
+     * that matters here. writer_seal_through now REOPENS the file itself
+     * after a rotation, so the post-rotation case no longer stalls and
+     * summary_open_seal_reopens_total below is non-zero whenever it
+     * happened. The PRE-FIRST-RECORD case stands exactly as described: with
+     * no file ever opened there is no clock anchor, the seal must invent
+     * nothing, and a pure-CPU capture that never pushes a record still reads
+     * three zeros. So this paragraph's discriminator is still the right one
+     * — only its second cause is gone.
      *
      * The reading that separates them, and this code predicts its value:
      * summary_open_credited_ns_total (the v8 WAIT crediting, above) in the
