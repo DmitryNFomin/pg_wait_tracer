@@ -389,6 +389,15 @@ _CANNED["top_queries"] = {
     "unattributed_ms": 310.5,
     "unattributed_count": 4,
     "backfilled_ms": 4003.4,
+    # #441: the SCOPE of the exec/plan columns below. The marker scan is not
+    # pid-scoped, so "whole-query" means every pid that ran the query -- which
+    # is correct under a class/event filter and deliberately unaffected by it.
+    # The real server sends "unavailable" (plus exec_stats_unavailable_reason)
+    # under a PID DRILL and nulls the lifecycle columns; this mock serves the
+    # unfiltered shape, so it carries the whole-query value. Added because
+    # test_protocol_drift caught the field as real-server-only, which is
+    # exactly what that gate is for.
+    "exec_stats_scope": "whole-query",
     "rows": [
         {"query_id": "3886912043147135675", "text": "UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2",
          "total_ms": 4200, "pct": 33.6, "count": 45000, "avg_us": 93.3,
