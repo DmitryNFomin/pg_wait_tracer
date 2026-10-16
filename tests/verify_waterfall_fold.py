@@ -21,14 +21,29 @@ original commit measured as 90px over) so the executions list + chart
 combination actually exercises executionListMaxHeight(), not a short list
 that was never near the old 310px cap.
 
-Not wired into run_all.sh / unit_tests.list: it is one-off integration
-evidence for the #415 cherry-pick, not a new permanent gate (the permanent
-regression coverage is tests/web_unit/waterfall_fit.test.mjs, which already
-ran before this file existed). Exit 0 + "PASS" on success, exit 1 + "FAIL"
-with the measured numbers otherwise.
+Wired into scripts/check.sh (every `make check`, unconditional -- the gate
+the pre-push hook enforces) and, behind the SAME PGWT_RUN_WEB_UI=1 opt-in as
+its siblings test_web_ui.py/test_web_ui_chaos.py, into tests/run_all.sh
+(box-check) and .github/workflows/ci.yml's `web-ui` job. It needs only
+python3 + playwright + mock_server.py -- no PG, no root, no BPF -- the exact
+tier test_web_ui.py already runs in all three places, so it follows that
+precedent rather than inventing a fourth one. The permanent REGRESSION
+coverage for the underlying fix is tests/web_unit/waterfall_fit.test.mjs
+(pure-function unit tests, no browser); this script is the integration half
+that catches what the isolated fixture gallery cannot see (real breadcrumbs/
+controls/AAS-chart geometry) -- see the module docstring above. Exit 0 +
+"PASS" on success, exit 1 + "FAIL" with the measured numbers otherwise, so a
+non-zero exit here is a real gate failure, not an optional warning.
+
+PORT: reads PGWT_WATERFALL_PORT (falls back to 18977 standalone, matching
+mock_server.py's own default-port convention) rather than a hardcoded value,
+so scripts/check.sh can hand it a run-private port out of its own
+PGWT_PORT_BASE allocation (concurrent `make check` runs on one Mac must not
+collide on ports -- see check.sh's own port-map comment).
 
 Usage:
-    python3 tests/verify_waterfall_fold.py [--web-root DIR]
+    python3 tests/verify_waterfall_fold.py [--out FILE]
+    PGWT_WATERFALL_PORT=18866 python3 tests/verify_waterfall_fold.py
 """
 import argparse
 import json
@@ -45,18 +60,11 @@ except ImportError:
           file=sys.stderr)
     sys.exit(1)
 
-PORT = int(os.environ.get("PGWT_VERIFY_PORT", "18977"))
+PORT = int(os.environ.get("PGWT_WATERFALL_PORT", "18977"))
 
 
-def run(web_root=None):
-    env = None
-    if web_root:
-        # mock_server.py serves web/static/ relative to its own file; there
-        # is no override flag, so this parameter is currently unused -- kept
-        # for a future worktree-comparison run (see the module docstring's
-        # "before/after" use at the bottom of this file).
-        env = dict(os.environ)
-    proc = start_mock_server(extra_env=env, port=PORT)
+def run():
+    proc = start_mock_server(port=PORT)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
