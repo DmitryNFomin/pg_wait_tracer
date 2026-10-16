@@ -473,6 +473,30 @@ test_open_cpu_accounting
 # checks 0 failures and byte-identical numbers either way. If this probe were
 # red too, the conservation leg's red would be the harness and not the pause.
 #
+# #447, THE OTHER HALF, and the reason crediting the seconds was not enough
+# on its own. A file is placed by its header's start_time_ns and
+# summary_file_in_window prunes any file starting after the window's end --
+# but a reopened file's header is written at the reopen instant, ~1.1 s AFTER
+# the second the seal is writing (a second is complete only
+# PGWT_SUMMARY_FLUSH_LAG_NS + 1 s after it begins). So the recovered second
+# was computed, written, and still pruned out of a query for its own second,
+# which is how every view reads. widen_file_start now moves the header start
+# back to cover it, from flush_accum -- the single funnel every record passes
+# through, so no path can bypass it. BOTH header clock fields move by the same
+# delta, because the reader derives mono_to_wall = start_time_ns -
+# clock_offset_ns and that difference must not change: the pair is re-anchored
+# to an earlier instant on the same two clocks, which is a true statement
+# about both rather than a lie about either.
+#
+# This class is INVISIBLE to a pinned-clock fixture (a pinned writer does not
+# re-read the clock on reopen, so no header can be later than its own
+# records) and invisible to an unbounded read. So §10 runs UNPINNED -- the
+# daemon's real lifecycle -- and queries a BOUNDED window equal to exactly the
+# recovered second, with the bound read out of the file rather than predicted.
+# §12 pins the anchor so start - clock_offset is literally 0 and asserts the
+# widening leaves it at 0 exactly, with no tolerance, while placing the record
+# BEFORE the anchor so the widening actually fires.
+#
 # Bypass suite, one leg per way this gate's DETECTION could be made
 # unreachable, each demonstrated red against a one-edit mutant of the fix: a
 # writer that never opened a file (no clock anchor exists, so it must invent
@@ -486,10 +510,13 @@ test_open_cpu_accounting
 # (same schedule, same 11 s, so the rotation is the only variable); a
 # missing dir, an empty dir and a PREVIOUS-VERSION file (the read-back must
 # REFUSE -- a gate that sums zero records agrees with everything); and a
-# disabled writer. The refusal lives in exactly ONE place for this reason:
-# the first draft kept a `if (!w->fp && !w->file_ever_opened) return` early
-# out as well, and deleting the real refusal then left the never-anchored leg
-# fully GREEN.
+# disabled writer; a bounded window containing none of the records (so the
+# bound is doing work); a PUSH-path open failure, which kept its own uncounted
+# open and so stopped recording with no number moving; and a FIRST open
+# failure, which must not be reported as a mid-capture stall. The refusal
+# lives in exactly ONE place for this reason: the first draft kept a
+# `if (!w->fp && !w->file_ever_opened) return` early out as well, and deleting
+# the real refusal then left the never-anchored leg fully GREEN.
 test_rotation_open_credit
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event

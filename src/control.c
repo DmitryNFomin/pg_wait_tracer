@@ -475,6 +475,29 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->summary_writer
                          ? d->summary_writer->open_seal_reopen_failures_total
                          : 0);
+    /* The FIRST open failing is a different event from a reopen failing --
+     * "this capture produced no summary file at all" rather than "recording
+     * stopped mid-capture with seconds owed" -- and both reach the push
+     * path, which is why they are two keys and not one. */
+    cjson_add_uint64(root, "summary_first_open_failures_total",
+                     d->summary_writer
+                         ? d->summary_writer->first_open_failures_total : 0);
+    /* #447: a record can be OLDER than the file it is written into (an
+     * event's second began before it arrived; a seal reopen writes a second
+     * that completed ~1.1 s earlier), and the reader places a file by its
+     * header start and prunes any file starting after the window's end. So
+     * the header start is widened to cover the record. widened_total > 0 is
+     * normal and expected on any capture that rotates; widen_failures_total
+     * > 0 means some file is placed conservatively LATE and a narrow window
+     * can miss its earliest records -- the number that says a window may be
+     * short rather than leaving it to be assumed. */
+    cjson_add_uint64(root, "summary_file_start_widened_total",
+                     d->summary_writer
+                         ? d->summary_writer->file_start_widened_total : 0);
+    cjson_add_uint64(root, "summary_file_start_widen_failures_total",
+                     d->summary_writer
+                         ? d->summary_writer->file_start_widen_failures_total
+                         : 0);
     /* The `#if PGWT_SUMMARY_VERSION >= 9` agent/424-daemon wrapped
      * these in is deliberately NOT taken: the constant is 9, so it
      * is true today and buys nothing, while tests/test_control.sh

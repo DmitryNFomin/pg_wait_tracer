@@ -6,6 +6,8 @@
  * .summary.lz4 files with the same hourly rotation as trace files. */
 #include "summary_writer.h"
 #include "event_writer.h"   /* block index entry, varint, trace file header reuse */
+#include <stddef.h>         /* offsetof: widen_file_start rewrites two header
+                             * fields in place (#447) */
 /* pgwt_duration_to_bucket: defined in map_reader.c (daemon) but not available
  * in the server build. Use a local copy for server compilation. */
 #ifdef PGWT_SERVER
@@ -1098,6 +1100,12 @@ static int open_summary_file(struct pgwt_summary_writer *w)
 
     w->num_blocks = 0;
     w->file_ever_opened = true;   /* #430: the clock anchor now exists */
+    /* #447: what this file's header currently CLAIMS, which widen_file_start
+     * may move earlier as records older than the open instant arrive. Kept
+     * apart from the writer's own anchor above on purpose -- see
+     * widen_file_start. */
+    w->file_start_wall_ns = hdr.start_time_ns;
+    w->file_start_mono_ns = hdr.clock_offset_ns;
     return 0;
 }
 
@@ -1108,6 +1116,90 @@ static uint64_t mono_to_wall(const struct pgwt_summary_writer *w,
     return w->clock_offset_wall_ns + (mono_ns - w->clock_offset_mono_ns);
 }
 
+/* #447: WIDEN THIS FILE'S HEADER START so it covers a record older than the
+ * header says the file begins.
+ *
+ * pgwt_scan_summary_files places a file by its header's start_time_ns and
+ * summary_file_in_window prunes any file whose start is after the requested
+ * window's end. A file's header is written when the file is OPENED, but the
+ * records written into it can be OLDER than that instant:
+ *
+ *   - the lazy open happens on the first PUSH, and an event's second began up
+ *     to a second before it arrived;
+ *   - #430's seal reopen happens on a TICK, and the second it seals completed
+ *     PGWT_SUMMARY_FLUSH_LAG_NS + 1 s earlier -- so every reopened file's
+ *     earliest record is ~1.1 s before its own header.
+ *
+ * Without this, #430's recovered seconds are written and still unreachable: a
+ * reopen at 10:00:07.2 writing the owed 10:00:06 second is pruned out of a
+ * query for [10:00:06, 10:00:07), which is how every view reads. Crediting
+ * them would have been pointless.
+ *
+ * BOTH header fields move by the SAME delta, because the reader derives
+ * `mono_to_wall = start_time_ns - clock_offset_ns` (src/summary_reader.c) and
+ * that difference must not change. Widening only ever moves the start
+ * EARLIER, which only widens coverage -- it can never hide a record, so a
+ * reader part-way through a live current.summary cannot be made to miss
+ * anything by it.
+ *
+ * The WRITER's own anchor (w->clock_offset_wall_ns / _mono_ns) is deliberately
+ * NOT touched, which is why the header's values are tracked separately in
+ * file_start_wall_ns / file_start_mono_ns. Moving the writer's anchor would
+ * have changed two unrelated things with it: mono_to_wall(), so every later
+ * record in the file would be stamped differently from the earlier ones; and
+ * the rotation's archive NAME, which is derived from clock_offset_wall_ns and
+ * would have jumped back into the previous hour for every reopened file.
+ *
+ * It cannot make the file's span exceed the hour the reader assumes: the
+ * earliest record a reopened file can hold is the second before the rotation
+ * boundary that created it, and the latest is the second before the NEXT
+ * boundary, so the span is at most one hour and summary_file_in_window's end
+ * test (a strict `<`) still includes it. The one way to exceed that is a
+ * flush that failed an hour earlier and left older seconds owed, which
+ * flush_failures_total already counts.
+ *
+ * Called from flush_accum, which is the single funnel every record passes
+ * through -- so this holds for every path (push, seal, rotation) rather than
+ * for the one that prompted it. */
+static void widen_file_start(struct pgwt_summary_writer *w, uint64_t wall_ns)
+{
+    if (!w->fp || wall_ns == 0 || wall_ns >= w->file_start_wall_ns)
+        return;
+    uint64_t delta = w->file_start_wall_ns - wall_ns;
+    /* clock_offset_ns is CLOCK_MONOTONIC, i.e. small just after boot. Refuse
+     * rather than wrap: a wrapped anchor is a wrong answer everywhere, where
+     * a refusal is one file placed conservatively late and counted. */
+    if (delta > w->file_start_mono_ns) {
+        w->file_start_widen_failures_total++;
+        return;
+    }
+    uint64_t new_start = wall_ns;
+    uint64_t new_mono  = w->file_start_mono_ns - delta;
+    long pos = ftell(w->fp);
+    if (pos < 0 ||
+        fseek(w->fp, (long)offsetof(struct pgwt_trace_file_header,
+                                    start_time_ns), SEEK_SET) != 0 ||
+        fwrite(&new_start, sizeof(new_start), 1, w->fp) != 1 ||
+        fwrite(&new_mono, sizeof(new_mono), 1, w->fp) != 1 ||
+        fseek(w->fp, pos, SEEK_SET) != 0) {
+        /* The header may now be half-written, so the file must not be
+         * trusted to place itself: leave file_start_wall_ns alone (so a
+         * later record retries) and count it. pgwt_scan_summary_files falls
+         * back to the NAME for an archived file and
+         * pgwt_summaries_window_current counts a current.summary it cannot
+         * place as unusable, which becomes a raw recompute -- never a
+         * silent partial window. */
+        w->file_start_widen_failures_total++;
+        fprintf(stderr, "WARN: could not widen %s's header start to cover a "
+                "record %llu ns older than it: %s\n", w->current_path,
+                (unsigned long long)delta, strerror(errno));
+        return;
+    }
+    w->file_start_mono_ns = new_mono;
+    w->file_start_wall_ns = new_start;
+    w->file_start_widened_total++;
+}
+
 /* Flush current accumulator as one LZ4-compressed block. */
 static int flush_accum(struct pgwt_summary_writer *w)
 {
@@ -1116,6 +1208,12 @@ static int flush_accum(struct pgwt_summary_writer *w)
 
     struct pgwt_summary_accum *acc = &w->accum;
     uint64_t flushed_second_mono_ns = acc->second_mono_ns;
+
+    /* #447: before anything is written, make sure the file's header claims a
+     * start early enough for the reader to find this record. Done here, at
+     * the single point every record is written, so no path can bypass it --
+     * and before the ftell below, whose offset must be the real one. */
+    widen_file_start(w, acc->second_wall_ns);
 
     /* Serialize */
     size_t encoded_size = pgwt_summary_serialize(acc, w->encode_buf,
@@ -1537,18 +1635,44 @@ static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
  * open_summary_file's own WARN once a second while the condition lasts,
  * which is the loudness this project wants for a write it could not do, and
  * it stops the instant the reopen succeeds. */
+/* Open the file if it is not open, and COUNT the outcome. Every caller that
+ * can open a summary file goes through here, so there is no path that stops
+ * recording without moving a number.
+ *
+ * It deliberately does not care WHO is asking -- what it counts is which of
+ * the two opens this is. A FIRST open failing means the capture never
+ * produced a summary file at all; a REOPEN failing means the file existed, a
+ * rotation closed it, and recording has stopped mid-capture with seconds
+ * still owed. The second is the one #430 cares about and the one that used to
+ * be invisible: pgwt_summary_push_event kept its own open, so a rotation
+ * followed by an event arriving before the next seal tick disabled the
+ * writer with NEITHER seal counter moving, the later ticks returned in
+ * silence, and the daemon discards the push's return value. There was a
+ * warning on stderr and no number anywhere. */
+static bool writer_open_counted(struct pgwt_summary_writer *w)
+{
+    if (w->fp)
+        return true;
+    bool reopen = w->file_ever_opened;
+    if (open_summary_file(w) != 0) {
+        if (reopen)
+            w->open_seal_reopen_failures_total++;
+        else
+            w->first_open_failures_total++;
+        return false;
+    }
+    if (reopen)
+        w->open_seal_reopens_total++;
+    return true;
+}
+
 static bool seal_can_write(struct pgwt_summary_writer *w)
 {
     if (w->fp)
         return true;
     if (!w->file_ever_opened)
         return false;      /* clocks never anchored: invent nothing */
-    if (open_summary_file(w) != 0) {
-        w->open_seal_reopen_failures_total++;
-        return false;
-    }
-    w->open_seal_reopens_total++;
-    return true;
+    return writer_open_counted(w);
 }
 
 /* Seal every second STRICTLY BEFORE `to_sec`: credit the open intervals into
@@ -1866,12 +1990,13 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
      * as cat_flag at the call site, where it is visible. */
     bool io_worker = (cat_flag & PGWT_EVENT_FLAG_IO_WORKER) != 0;
 
-    /* Lazy file open on first event */
-    if (!w->fp) {
-        if (open_summary_file(w) != 0) {
-            w->enabled = false;
-            return -1;
-        }
+    /* Lazy file open on first event -- and on the first event after a
+     * rotation, which is the same call and a different failure. #430: it goes
+     * through writer_open_counted so that failure is a NUMBER; it used to
+     * call open_summary_file directly and move no counter at all. */
+    if (!writer_open_counted(w)) {
+        w->enabled = false;
+        return -1;
     }
 
     /* Determine which second this event belongs to (monotonic, floored) */

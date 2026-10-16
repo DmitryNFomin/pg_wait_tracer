@@ -758,7 +758,17 @@ test_open_cpu_accounting: test_open_cpu_accounting.c \
 # fabricated, the seconds stay owed and arrive later), a note that goes stale
 # mid-pause (crediting stops, expiry counted), the rotation ABSENT rather than
 # wrong, a missing/empty dir and a previous-version file (the read-back must
-# REFUSE), and a disabled writer. Rotation is forced via w->current_hour = -1,
+# REFUSE), and a disabled writer.
+#
+# It also gates #447, which is why crediting the seconds was not enough on its
+# own: a reopened file's header is written at the reopen instant, ~1.1 s AFTER
+# the second the seal writes, and the reader prunes any file starting after
+# the window's end -- so the recovered second was written and still pruned out
+# of a query for its own second. §10 runs UNPINNED (a pinned fixture cannot
+# see this class at all) and reads a BOUNDED window equal to that one second;
+# §12 asserts the in-place header rewrite leaves the reader's
+# start_time_ns - clock_offset_ns at exactly 0. Both have a mutant control.
+# Rotation is forced via w->current_hour = -1,
 # the same deterministic seam test_open_cpu_accounting uses: no real hour
 # boundary is waited for and no assertion reads a clock. Server build, no BPF,
 # no live PG; ~0.1 s.

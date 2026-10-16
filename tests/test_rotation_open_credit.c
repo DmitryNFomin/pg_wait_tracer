@@ -244,6 +244,9 @@ struct per_file {
     uint64_t sess_ns[8];
     int      nrecs[8];
     char     name[8][128];
+    uint64_t hdr_start[8];     /* the header's own start_time_ns          */
+    uint64_t min_rec_wall[8];  /* earliest second_wall_ns actually inside  */
+    int      uncovered[8];      /* records BEFORE their own file's start   */
 };
 
 static int read_per_file(const char *dir, uint32_t want_pid,
@@ -263,6 +266,8 @@ static int read_per_file(const char *dir, uint32_t want_pid,
         const char *slash = strrchr(files[f].path, '/');
         snprintf(out->name[f], sizeof(out->name[f]), "%s",
                  slash ? slash + 1 : files[f].path);
+        out->hdr_start[f] = r.header.start_time_ns;
+        out->min_rec_wall[f] = UINT64_MAX;
         struct pgwt_summary_accum *rec = calloc(1, sizeof(*rec));
         if (!rec) { pgwt_summary_reader_close(&r); return -1; }
         for (int b = 0; b < r.num_blocks; b++) {
@@ -272,6 +277,16 @@ static int read_per_file(const char *dir, uint32_t want_pid,
                 return -1;
             }
             out->nrecs[f]++;
+            if (rec->second_wall_ns < out->min_rec_wall[f])
+                out->min_rec_wall[f] = rec->second_wall_ns;
+            /* #447: a record whose second starts BEFORE its own file's header
+             * start is unreachable from any window that does not also reach
+             * one of the file's later records -- pgwt_scan_summary_files
+             * places the file by that header and summary_file_in_window
+             * prunes it. Counted per file so the assertion names a number
+             * rather than a feeling. */
+            if (rec->second_wall_ns < r.header.start_time_ns)
+                out->uncovered[f]++;
             for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
                 if (rec->sessions[i].pid == want_pid)
                     out->sess_ns[f] += rec->sessions[i].db_time_ns;
@@ -281,6 +296,13 @@ static int read_per_file(const char *dir, uint32_t want_pid,
     }
     out->nfiles = nf;
     return nf;
+}
+
+static int pf_uncovered_total(const struct per_file *pf)
+{
+    int n = 0;
+    for (int f = 0; f < pf->nfiles; f++) n += pf->uncovered[f];
+    return n;
 }
 
 /* The index of the one file whose name ENDS with `suffix`, or -1 if there is
@@ -777,6 +799,271 @@ static void test_reader_refusals(void)
     wr_free(&y);
 }
 
+/* ── §10 THE RECOVERED SECONDS MUST REACH A BOUNDED WINDOW (#447) ─────── */
+
+/* Every leg above pins the clock anchor, which HIDES this class entirely: a
+ * pinned writer does not re-read the clock when the file reopens, so both
+ * files carry the same header start and no header can be later than its own
+ * records. The daemon never pins. So this leg runs UNPINNED -- the real
+ * lifecycle -- and reads a BOUNDED window, which is how every view reads.
+ *
+ * Without the #447 widening the reopened file's header start is the reopen
+ * instant, ~1.1 s AFTER the second it is sealing (the seal runs on a tick and
+ * a second is complete only PGWT_SUMMARY_FLUSH_LAG_NS + 1 s after it began).
+ * summary_file_in_window then prunes the whole file out of a query for that
+ * second: the #430 credit is computed, written, and still never reaches the
+ * view. An unbounded read cannot see this, which is why §1 could not.
+ *
+ * NOTHING HERE DEPENDS ON A REAL CLOCK FOR ITS VALUES. The synthetic
+ * monotonic base is placed 60 s in the PAST of the real monotonic clock, the
+ * daemon's own relationship between an event's timestamp and now, and the
+ * window bounds are read back OUT OF THE FILE rather than predicted -- so the
+ * assertions are about placement, never about elapsed time. */
+static uint64_t base_mono_unpinned(void)
+{
+    struct timespec m;
+    clock_gettime(CLOCK_MONOTONIC, &m);
+    uint64_t now = (uint64_t)m.tv_sec * S + (uint64_t)m.tv_nsec;
+    return ((now - 60 * S) / S) * S;        /* second-aligned, 60 s ago */
+}
+
+struct bounded_ctx { int n; uint64_t sess_ns; uint32_t want_pid; };
+
+static int bounded_visit(const struct pgwt_summary_accum *rec, void *vctx)
+{
+    struct bounded_ctx *c = vctx;
+    c->n++;
+    for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
+        if (rec->sessions[i].pid == c->want_pid)
+            c->sess_ns += rec->sessions[i].db_time_ns;
+    return 0;
+}
+
+static void test_bounded_window_reaches_recovered_second(void)
+{
+    const char *d = fresh_dir("bounded");
+    if (!d) { printf("  FAIL: setup\n"); failures++; return; }
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s", d);
+    struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+    if (!w || pgwt_summary_writer_init(w, dir, 24, NULL) != 0) {
+        printf("  FAIL: setup\n"); failures++; free(w); return;
+    }
+    /* NO pgwt_summary_pin_clock: the file anchors itself from the real clocks
+     * at every open, exactly as it does in the daemon. */
+    uint64_t base = base_mono_unpinned();
+
+    struct pgwt_trace_event sd = mkev(PID_SEED, base + 1 * S, 1 * S, EV_LOCK, 0);
+    pgwt_summary_push_event(w, &sd, 0, sd.old_event);
+    for (int k = 2; k <= LAST_TICK; k++) {
+        uint64_t now = base + (uint64_t)k * S + 200 * MS;
+        pgwt_summary_note_open(w, PID_A, EV_LOCK, base + 1 * S, 0, now);
+        pgwt_summary_flush_completed(w, now);
+        if (k == ROT_TICK) {
+            w->current_hour = -1;
+            pgwt_summary_check_rotation(w);
+        }
+    }
+    pgwt_summary_close(w);
+
+    struct per_file pf;
+    int pn = read_per_file(dir, PID_A, &pf);
+    CHECK(pn == 2, "bounded: both files decoded (%d)", pn);
+    if (pn != 2) { pgwt_summary_destroy(w); free(w); return; }
+
+    int cur = pf_index_of(&pf, "current.summary");
+    CHECK(cur >= 0, "bounded: the reopened file is present (%d)", cur);
+    if (cur < 0) { pgwt_summary_destroy(w); free(w); return; }
+
+    /* THE INVARIANT, independent of the reader's pruning rule: no record may
+     * start before its own file's header says the file does. */
+    CHECK(pf_uncovered_total(&pf) == 0,
+          "#447 INVARIANT: %d records start before their own file's header "
+          "start. The reopened file's header reads %llu and its earliest "
+          "record is %llu (header must be <= earliest, delta %lld ns)",
+          pf_uncovered_total(&pf),
+          (unsigned long long)pf.hdr_start[cur],
+          (unsigned long long)pf.min_rec_wall[cur],
+          (long long)((int64_t)pf.min_rec_wall[cur]
+                      - (int64_t)pf.hdr_start[cur]));
+
+    /* THE BOUNDED READ, which is how every view reads. The window is EXACTLY
+     * the one second the seal recovered after the rotation, taken out of the
+     * file rather than predicted, and pgwt_visit_summaries' filter is
+     * half-open [from, to) so it selects that record alone. */
+    uint64_t from = pf.min_rec_wall[cur];
+    uint64_t to   = from + S;
+    struct bounded_ctx c = { .want_pid = PID_A };
+    int rc = pgwt_visit_summaries(dir, from, to, bounded_visit, &c);
+    CHECK(rc == 1 && c.n == 1,
+          "#447 BOUNDED WINDOW: the recovered second IS returned by a query "
+          "for exactly its own second (rc=%d, records=%d). With the header "
+          "left at the reopen instant the whole file is pruned here and the "
+          "answer is 0 -- the credit computed, written, and never delivered",
+          rc, c.n);
+    CHECK(c.sess_ns == S,
+          "#447 BOUNDED WINDOW: and it carries the full 1000 ms of PID_A "
+          "(%llu ms)", (unsigned long long)(c.sess_ns / MS));
+
+    /* The same read one second EARLIER must return nothing: otherwise the
+     * assertion above could be satisfied by a reader that ignores bounds. */
+    struct bounded_ctx before = { .want_pid = PID_A };
+    int rc_before = pgwt_visit_summaries(dir, from - 60 * S, from - 59 * S,
+                                         bounded_visit, &before);
+    CHECK(before.n == 0,
+          "#447 CONTROL: a bounded window containing none of these records "
+          "returns none (%d, rc=%d) — so the bound is doing work and the "
+          "assertion above is not a reader that ignores it",
+          before.n, rc_before);
+
+    CHECK(w->file_start_widened_total > 0,
+          "COUNTED: the header start had to be widened %llu time(s); zero "
+          "would mean this leg never exercised the widening",
+          (unsigned long long)w->file_start_widened_total);
+    CHECK(w->file_start_widen_failures_total == 0,
+          "COUNTED: no widening failed (%llu)",
+          (unsigned long long)w->file_start_widen_failures_total);
+    pgwt_summary_destroy(w);
+    free(w);
+}
+
+/* ── §11 BYPASS: the PUSH path's open failure must be a number ─────────── */
+
+static void test_push_open_failure_is_counted(void)
+{
+    struct wr x;
+    if (wr_open(&x, "pushfail") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    seed(&x);
+    for (int k = 2; k <= ROT_TICK; k++)
+        tick(&x, k, true, k == ROT_TICK);
+
+    char blocker[600];
+    snprintf(blocker, sizeof(blocker), "%s/current.summary", x.dir);
+    CHECK(mkdir(blocker, 0755) == 0,
+          "SETUP: current.summary replaced by a directory");
+
+    /* AN EVENT ARRIVES BEFORE THE NEXT SEAL TICK. pgwt_summary_push_event
+     * used to open the file itself and, on failure, set enabled = false and
+     * return -1 -- moving NO counter. The daemon discards this return value
+     * and every later tick returns in silence, so recording stopped with a
+     * stderr line and no number. */
+    struct pgwt_trace_event e =
+        mkev(PID_A, BASE_MONO + (ROT_TICK + 1) * S, 1 * S, EV_LOCK, 0);
+    int rc = pgwt_summary_push_event(x.w, &e, 0, e.old_event);
+
+    CHECK(rc == -1 && !x.w->enabled,
+          "BYPASS §11: the push refused (rc=%d) and the writer is disabled "
+          "(enabled=%d) — unchanged behaviour", rc, (int)x.w->enabled);
+    CHECK(x.w->open_seal_reopen_failures_total == 1,
+          "BYPASS §11: the PUSH path's failed reopen is COUNTED "
+          "(open_seal_reopen_failures_total = %llu). It read 0 before #430's "
+          "follow-up: the push kept its own uncounted open, so a rotation "
+          "plus one early event stopped recording without moving a number",
+          (unsigned long long)x.w->open_seal_reopen_failures_total);
+    CHECK(x.w->first_open_failures_total == 0,
+          "BYPASS §11: and it is counted as a REOPEN, not as a first open "
+          "(%llu) — the two mean different things to whoever reads them",
+          (unsigned long long)x.w->first_open_failures_total);
+    rmdir(blocker);
+    wr_free(&x);
+
+    /* THE OTHER SIDE of that counter: a FIRST open that fails must land in
+     * first_open_failures_total and not in the reopen one, or a capture that
+     * never produced a file at all would be reported as a mid-capture stall. */
+    const char *d2 = fresh_dir("firstfail");
+    if (!d2) { printf("  FAIL: setup\n"); failures++; return; }
+    char dir2[512];
+    snprintf(dir2, sizeof(dir2), "%s", d2);
+    char blocker2[600];
+    snprintf(blocker2, sizeof(blocker2), "%s/current.summary", dir2);
+    struct pgwt_summary_writer *y = calloc(1, sizeof(*y));
+    if (!y || pgwt_summary_writer_init(y, dir2, 24, NULL) != 0) {
+        printf("  FAIL: setup\n"); failures++; free(y); return;
+    }
+    pgwt_summary_pin_clock(y, BASE_MONO, BASE_MONO);
+    CHECK(mkdir(blocker2, 0755) == 0, "SETUP: first open blocked too");
+    struct pgwt_trace_event e2 = mkev(PID_A, BASE_MONO + 1 * S, 1 * S, EV_LOCK, 0);
+    int rc2 = pgwt_summary_push_event(y, &e2, 0, e2.old_event);
+    CHECK(rc2 == -1 && y->first_open_failures_total == 1 &&
+          y->open_seal_reopen_failures_total == 0,
+          "BYPASS §11: a FIRST open failure is counted as one (first=%llu, "
+          "reopen=%llu) — \"there is nothing\" never reported as \"recording "
+          "stopped\"",
+          (unsigned long long)y->first_open_failures_total,
+          (unsigned long long)y->open_seal_reopen_failures_total);
+    rmdir(blocker2);
+    pgwt_summary_destroy(y);
+    free(y);
+}
+
+/* ── §12 THE WIDENING MUST NOT MOVE THE FILE'S CLOCK MAPPING ──────────── */
+
+static void test_widen_preserves_clock_mapping(void)
+{
+    /* The header's (start_time_ns, clock_offset_ns) is a (wall, mono) pair
+     * read at one instant, and the reader turns it into an affine map:
+     * mono_to_wall = start_time_ns - clock_offset_ns (src/summary_reader.c).
+     * Widening moves the pair to an instant DELTA EARLIER on the same two
+     * clocks, so both fields move by the same delta and the difference is
+     * unchanged -- a different anchor point on the same line, not a lie about
+     * either clock. Moving start_time_ns alone would silently re-date every
+     * monotonic quantity a reader derives from this file.
+     *
+     * A PINNED anchor is what makes this exactly checkable: pin_clock here
+     * sets wall == mono, so the difference is literally 0 and the assertion
+     * needs no tolerance. The record is placed BEFORE the anchor so the
+     * widening actually fires -- otherwise this leg would assert 0 == 0 about
+     * a code path it never reached, which is the shape of a dead gate. */
+    struct wr x;
+    if (wr_open(&x, "mapping") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    struct pgwt_trace_event e =
+        mkev(PID_A, BASE_MONO - 5 * S, 1 * S, EV_LOCK, 0);
+    pgwt_summary_push_event(x.w, &e, 0, e.old_event);
+    pgwt_summary_flush(x.w);
+    pgwt_summary_close(x.w);
+
+    CHECK(x.w->file_start_widened_total == 1,
+          "SETUP: the widening FIRED (%llu) — a record 5 s before the pinned "
+          "anchor is exactly the case it exists for",
+          (unsigned long long)x.w->file_start_widened_total);
+
+    struct pgwt_summary_file_entry files[4];
+    int nf = pgwt_scan_summary_files(x.dir, files, 4);
+    CHECK(nf == 1, "mapping: one file on disk (%d)", nf);
+    if (nf == 1) {
+        struct pgwt_summary_reader r;
+        CHECK(pgwt_summary_reader_open(&r, files[0].path) == 0,
+              "mapping: the file still opens after the in-place header "
+              "rewrite");
+        CHECK(r.header.start_time_ns == BASE_MONO - 5 * S,
+              "#447: the header start moved to the record's own second "
+              "(%llu, want %llu)",
+              (unsigned long long)r.header.start_time_ns,
+              (unsigned long long)(BASE_MONO - 5 * S));
+        CHECK(r.mono_to_wall == 0,
+              "#447 CLOCK MAPPING: start_time_ns - clock_offset_ns is still "
+              "exactly 0, the pinned anchor's own difference (%lld). Moving "
+              "start_time_ns without clock_offset_ns would read -5000000000 "
+              "and re-date every monotonic quantity derived from this file",
+              (long long)r.mono_to_wall);
+        CHECK(r.header.magic == PGWT_SUMMARY_MAGIC &&
+              r.header.version == PGWT_SUMMARY_VERSION,
+              "#447: the rewrite touched ONLY the two 8-byte clock fields — "
+              "magic and version survive (0x%x, v%u)",
+              (unsigned)r.header.magic, (unsigned)r.header.version);
+        pgwt_summary_reader_close(&r);
+    }
+    /* And the record is still readable through the shipping visitor, so the
+     * in-place rewrite did not corrupt the block that follows the header. */
+    struct readback rb = { .want_pid = PID_A };
+    int n = read_back(x.dir, &rb);
+    CHECK(n == 1 && rb_sum_sess(&rb) == S,
+          "#447: the file still decodes after the rewrite (%d record, %llu "
+          "ms) — the block offsets written after it are intact",
+          n, (unsigned long long)(rb_sum_sess(&rb) / MS));
+    wr_free(&x);
+}
+
 int main(void)
 {
     printf("=== test_rotation_open_credit: #430 rotation must not pause "
@@ -797,6 +1084,13 @@ int main(void)
     test_no_rotation_same_total();
     printf("-- 8/9: bypass — empty input, wrong version, disabled writer --\n");
     test_reader_refusals();
+    printf("-- 10: the recovered second must reach a BOUNDED window "
+           "(#447) --\n");
+    test_bounded_window_reaches_recovered_second();
+    printf("-- 11: bypass — the push path's open failure is a number --\n");
+    test_push_open_failure_is_counted();
+    printf("-- 12: the widening must not move the file's clock mapping --\n");
+    test_widen_preserves_clock_mapping();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     printf("=== test_rotation_open_credit: %s ===\n",

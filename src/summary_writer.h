@@ -824,6 +824,17 @@ struct pgwt_summary_writer {
      * tests/test_rotation_open_credit.c §1 at 5000 of 11000 ms with the fix
      * applied. A separate flag cannot be aliased by a seam. */
     bool          file_ever_opened;
+    /* #447: what the OPEN file's header currently claims, which is not the
+     * same as the writer's anchor above. The reader places a file by
+     * start_time_ns and prunes any file whose start is after the window's
+     * end, but a file's records can be OLDER than the instant it was opened
+     * -- an event's second began before it arrived, and #430's seal reopen
+     * writes a second that completed ~1.1 s earlier. widen_file_start moves
+     * these two earlier, in step, so the header keeps covering every record
+     * in the file; the writer's own clock_offset_* must NOT move with them
+     * (mono_to_wall and the archive name both depend on those). */
+    uint64_t      file_start_wall_ns;
+    uint64_t      file_start_mono_ns;
 
     /* Block index (footer) */
     struct pgwt_block_index_entry *block_index;
@@ -961,6 +972,20 @@ struct pgwt_summary_writer {
      *                               rather than a belief. */
     uint64_t      open_seal_reopens_total;
     uint64_t      open_seal_reopen_failures_total;
+    /* The FIRST open failing, as opposed to a reopen: the capture never
+     * produced a summary file at all. Separate because the two mean different
+     * things to whoever reads them -- "there is nothing" vs "recording
+     * stopped mid-capture with seconds owed" -- and because the push path
+     * reaches both. Both are published as summary_*. */
+    uint64_t      first_open_failures_total;
+    /* #447: times this file's header start had to be moved EARLIER so the
+     * reader would still find a record older than the open instant, and times
+     * that could not be done (a write failure, or a monotonic anchor too
+     * small to shift). A non-zero failure count means some file is placed
+     * conservatively LATE and a narrow window may miss its earliest records;
+     * it is the number that says so rather than leaving it to be assumed. */
+    uint64_t      file_start_widened_total;
+    uint64_t      file_start_widen_failures_total;
     /*   note_mismatch   a closing record whose pid had a note describing a
      *                   DIFFERENT interval (different wait id or start).
      *                   Nothing is subtracted in that case -- the record is
