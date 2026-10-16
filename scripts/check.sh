@@ -275,6 +275,14 @@ if [[ $FAST -eq 0 ]]; then
     #     PGWT_WATERFALL_PORT = base+65 verify_waterfall_fold.py (#415):
     #                                HTTP +65/WS +66 (gap left after CHIP so
     #                                a future WS-pair test can slot into +61)
+    #     PGWT_DFG_GEOM_PORT  = base+67 test_dfg_geometry.py: HTTP +67
+    #                                (gallery.html is static — no WS pair;
+    #                                merge note: agent/web-tables and
+    #                                agent/web-graph both independently
+    #                                claimed +65 — a genuine collision found
+    #                                at integration, not a design choice;
+    #                                moved DFG_GEOM here to the next free
+    #                                offset rather than picking a "winner")
     PORT_SPAN=70
     PGWT_PORT_BASE=$(python3 tests/free_ports.py "$PORT_SPAN") || { echo "free_ports: could not allocate $PORT_SPAN free ports"; exit 2; }
     [[ $PGWT_PORT_BASE =~ ^[0-9]+$ ]] || { echo "free_ports: non-numeric base '$PGWT_PORT_BASE'"; exit 2; }
@@ -283,7 +291,8 @@ if [[ $FAST -eq 0 ]]; then
     export PGWT_SNAP_PORT=$((PGWT_PORT_BASE + 40))
     export PGWT_CHIP_PORT=$((PGWT_PORT_BASE + 60))
     export PGWT_WATERFALL_PORT=$((PGWT_PORT_BASE + 65))
-    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60 WATERFALL=+65)"
+    export PGWT_DFG_GEOM_PORT=$((PGWT_PORT_BASE + 67))
+    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60 WATERFALL=+65 DFG_GEOM=+67)"
 
     step "web UI suite vs mock_server.py (Playwright)"
     run python3 tests/test_web_ui.py
@@ -297,6 +306,8 @@ if [[ $FAST -eq 0 ]]; then
     # missed this originally (see the script's own docstring).
     step "Waterfall drilled-readout fold check at the demo viewport (issue #415)"
     run python3 tests/verify_waterfall_fold.py
+    step "DFG rendered-geometry guard: real coordinateSystem.dataToPoint, not getOption() (issue #436)"
+    run python3 tests/test_dfg_geometry.py
 
     # issue #245 (TTFP): _navigate_to_tab's ttfp_ms anchor and its wiring
     # into run_tab's build_tab_result call -- imports ui_live_smoke.py,

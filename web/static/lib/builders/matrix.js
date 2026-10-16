@@ -49,7 +49,21 @@ export function matrixLegendBucketMax(x) {
     return 10 * base;
 }
 
-/* `limit` is clamped to 1..20. Events are ranked by total incident link
+/* DEFINITIONS (contract 5, issue #438 — RELEASE-PLAN.md "Transitions and
+ * simplification"): CPU* is a LITERAL intermediate state the sampler
+ * observed between two off-CPU waits — not necessarily measured running CPU
+ * time (it can include scheduling gaps the sampler cannot distinguish from
+ * CPU). A CPU-centered matrix (most rows/columns funnel through the CPU*
+ * cell) is therefore the correct shape of the literal transition data for a
+ * CPU-mediated workload, not a bug to be fixed by re-deriving a different
+ * (inferred wait-to-wait) metric — the adviser named that scope explicitly
+ * as a different product. #438's actual fix is EXPLANATION: see the CPU*
+ * note appended below when it is one of the shown labels. The topology
+ * itself, the top-20 selection by summed incident count, and the existing
+ * omission accounting (hiddenCount/hiddenVolume/serverTruncated) are
+ * unchanged.
+ *
+ * `limit` is clamped to 1..20. Events are ranked by total incident link
  * count (source + target), with a lexical tie-break for deterministic output
  * — this ranking decides which events make the top-N, tick to tick. Display
  * ORDER is a separate, stickier concern (STABILITY, #104): with no
@@ -137,6 +151,14 @@ export function buildMatrixOption(data, opts) {
             ? ' of ' + Number(data.total_link_count).toLocaleString() : '';
         notes.push('Server returned ' + keptLinks.toLocaleString() + totalLinks +
             ' transition links (link cap); transition totals include omitted links');
+    }
+    // #438: explain the CPU* cell wherever it is actually shown, rather than
+    // leaving a CPU-saturated-looking row/column unexplained. Conditioned on
+    // `labels` (what is ON the axes right now), not on the raw node catalog,
+    // so the note never appears for a window where CPU* did not make top-N.
+    if (labels.includes('CPU*')) {
+        notes.push('CPU* is a literal intermediate state between waits, not ' +
+            'necessarily measured running CPU');
     }
     const option = {
         backgroundColor: 'transparent', animation: false,

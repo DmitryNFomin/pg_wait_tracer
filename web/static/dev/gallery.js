@@ -38,7 +38,7 @@ import { buildWaterfallOption } from '../lib/builders/waterfall.js';
 import { buildExecScatterOption } from '../lib/builders/exec-scatter.js';
 import { buildMatrixOption } from '../lib/builders/matrix.js';
 import {
-    buildTransitionsOption, buildVariantsHtml,
+    buildTransitionsOption, buildVariantsHtml, buildTransitionsDisclosure,
 } from '../lib/builders/transitions.js';
 import {
     buildConcurrencyOption, buildConcurrencyTables,
@@ -540,10 +540,12 @@ function renderTransitions(body, foot, state) {
         return;
     }
     makeChart(div('chart', body), m.option, state.opts.dims.height);
+    // #436: the gallery footer carries the SAME disclosure text the live
+    // view shows (buildTransitionsDisclosure) — idle/threshold/server-
+    // truncation stay three distinct, named reasons here too.
     factLine(foot, 'visibleCount: ' + m.visibleCount +
         ' · threshold: ' + state.opts.threshold + '%' +
-        (state.opts.hideIdle ? ' · hideIdle: on (' + m.hiddenIdleLinks +
-            ' idle edges / ' + m.hiddenIdleValue.toLocaleString() + ' transitions hidden)' : ''));
+        ' · ' + buildTransitionsDisclosure(m, state.data.total));
 }
 
 function renderConcurrency(body, foot, state) {
