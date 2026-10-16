@@ -66,6 +66,114 @@ static inline double event_window_frac(uint64_t clip_ns, uint64_t dur_ns)
     return (double)clip_ns / (double)dur_ns;
 }
 
+/* ── Window selection: INTERVAL vs INSTANT (issue #424) ───────────────────
+ *
+ * THE RULE, STATED ONCE. The raw loader admits a record when its interval
+ * OVERLAPS [from, to] -- `close >= from && start <= to`. Before #424 it
+ * admitted only `close` in [from, to], so a wait still running at the right
+ * edge contributed nothing and a wait spanning the whole window was dropped
+ * entirely. Widening admission ALONE would have been worse than that bug:
+ * every per-occurrence statistic below counts an admitted record once, so a
+ * record closing after `to` would be counted in this window AND again in the
+ * window it closes in -- a known undercount of time traded for a new
+ * overcount of counts, latencies and histograms. The two halves are one
+ * change; this is the statement of the second half.
+ *
+ * Each quantity is selected in exactly one of two ways:
+ *
+ *  INTERVAL-selected (a share of wall time inside the window)
+ *      class_ns, events[].total_ns, sessions[].db_time_ns, queries[] time,
+ *      AAS buckets, cpu_measured/offcpu.
+ *      Selected by OVERLAP; contributed CLIPPED through event_window_ns()
+ *      (and event_window_frac() for cpu_ns). A right-open record IS
+ *      included -- its in-window part is real time that really elapsed.
+ *
+ *  INSTANT-selected (a property of one completed observation)
+ *      events[].count / avg / max / percentiles / histogram, queries[].count
+ *      and full_ns, the transition matrix, the latency heatmap, execution and
+ *      plan marker pairing, fingerprints, lock chains, interference,
+ *      variants, lifecycle.
+ *      Selected by the record's own close timestamp lying in [from, to]. A
+ *      right-open record is EXCLUDED, and is counted once, later, by the
+ *      window it actually closes in.
+ *
+ * This is not a new rule: src/summary_writer.h's v8 note states exactly this
+ * split for the writer. Installing the raw path's half is what makes the two
+ * paths agree by construction instead of by luck.
+ *
+ * SCOPE -- HISTORICAL WINDOWS ONLY. A wait that is STILL OPEN RIGHT NOW has
+ * no closing record anywhere in the trace, so no admission rule can recover
+ * it: there is nothing to admit. This change fixes historical and replay
+ * windows, including an older window inside a still-growing capture once the
+ * closing record is committed. It does NOT repair the live right edge; that
+ * needs open-interval markers in the trace format (v4). Do not read #424 as
+ * having fixed "now".
+ *
+ * pgwt_tag_events' in-command majority rule still runs over the record's
+ * FULL duration, including for a right-open record whose CMD_END lies past
+ * `to` and was therefore never loaded. That approximation is LABELLED, not
+ * fixed, here -- see the note in pgwt_tag_events.
+ */
+static inline int event_right_open(const struct pgwt_trace_event *ev,
+                                   uint64_t to_ns)
+{
+    /* Two independent sources, deliberately OR-ed:
+     *   - the loader's derived bit, the only thing available to consumers
+     *     that are never handed a window;
+     *   - the same test re-derived here, so a caller that admits straddlers
+     *     itself (a test harness, a future loader) cannot silently get the
+     *     per-occurrence statistics wrong by forgetting to stamp the bit.
+     * Both are false on the unbounded path (to_ns == 0, bit never set), which
+     * is what keeps a whole-capture request bit-identical to pre-#424. */
+    if (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
+        return 1;
+    return to_ns != 0 && ev->timestamp_ns > to_ns;
+}
+
+/* The window-less form, for consumers whose signature carries no [from, to]
+ * (transitions, fingerprints, lock chains, interference, variants,
+ * lifecycle, execution detail). Every one of them is INSTANT-selected, so
+ * "skip the right-open records" is the whole of their #424 change, and their
+ * behaviour on an array that holds none of them is unchanged. */
+static inline int event_right_open_flagged(const struct pgwt_trace_event *ev)
+{
+    return (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN) != 0;
+}
+
+/* INSTANT selection, BOTH bounds: is this record's own close inside
+ * [from_ns, to_ns]?
+ *
+ * The rule above has always said `timestamp_ns in [from, to]`, but the first
+ * implementation only tested the upper half — `!event_right_open(...)` — so
+ * a record closing BEFORE `from` passed the per-occurrence gate and was
+ * counted. It showed up three ways in tests/test_window_clip.c section 6 (a
+ * compute-level suite that builds its arrays by hand): a sweep counted one
+ * occurrence twice, a zero-width window reported one occurrence, and a
+ * record wholly before `from` reported one.
+ *
+ * Why the server-driven gates did not see it: the raw loader supplies the
+ * lower bound before compute ever runs (src/server.c rejects `ts < from_m`,
+ * and overlap admission cannot admit a record that closes before `from`
+ * because it does not overlap). So it is not reachable through the server
+ * today — but compute's documented contract is `[from, to]`, a caller is
+ * entitled to rely on it, and the bound costs one comparison.
+ *
+ * INCLUSIVE at both ends, deliberately. `timestamp_ns == to_ns` is one
+ * occurrence, not zero: a trace event's timestamp is when the wait ENDED, so
+ * an event ending exactly at `to` lies wholly inside the window (block_agg.h
+ * C7, and the reason test_data_aas once went to zero). Making this half-open
+ * is the deferred #427 migration and must not arrive here as a side effect.
+ *
+ * `from_ns == 0` / `to_ns == 0` mean unbounded on that side, as everywhere
+ * else in this file, so the whole-capture path is unchanged. */
+static inline int event_instant_in_window(const struct pgwt_trace_event *ev,
+                                          uint64_t from_ns, uint64_t to_ns)
+{
+    if (from_ns != 0 && ev->timestamp_ns < from_ns)
+        return 0;
+    return !event_right_open(ev, to_ns);
+}
+
 /* pgwt_duration_to_bucket: log2 latency bucket for heatmap.
  * In daemon build this comes from map_reader.c; inline it here for server. */
 #ifdef PGWT_SERVER
@@ -348,6 +456,14 @@ static int tag_alloc_fail(const char *point)
 int pgwt_tag_events(struct pgwt_trace_event *events, int count,
                     const struct pgwt_pid_cat *cats, int n_cats)
 {
+    /* No right edge: the pre-#424 behaviour, bit for bit. */
+    return pgwt_tag_events_window(events, count, cats, n_cats, 0);
+}
+
+int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
+                           const struct pgwt_pid_cat *cats, int n_cats,
+                           uint64_t to_ns)
+{
     /* An absent window is not a failure: there is nothing to tag, so the
      * result is complete. Refusing here would turn every empty window into
      * an allocation error. */
@@ -466,6 +582,21 @@ int pgwt_tag_events(struct pgwt_trace_event *events, int count,
         if (st->exec_open) ev->flags |= PGWT_EVENT_FLAG_EXEC;
 
         if (st->seen_cmd) {
+            /* #424: for a record admitted by OVERLAP that closes after the
+             * window, the majority rule is applied to the portion INSIDE
+             * the window. Everything past `to` belongs to a window this
+             * answer is not reporting on, and the markers that would have
+             * ended the command out there were never loaded, so judging the
+             * record by them is judging it by data we do not have.
+             *
+             * Only the DECISION uses the clipped view. The per-pid state
+             * machine below (banked_ns, cmd_anchor) still advances to the
+             * real t1 — it is reconstructing the backend's command timeline,
+             * which does not stop at the window edge. */
+            uint64_t eff_t1 = (to_ns && (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
+                               && t1 > to_ns && to_ns > t0) ? to_ns : t1;
+            uint64_t eff_dur = eff_t1 > t0 ? eff_t1 - t0 : 0;
+
             /* Command-open ns inside this interval: the banked closed runs
              * plus the currently-open run clipped to the interval. Records
              * for one pid are contiguous in an exact span, so banked time
@@ -473,19 +604,41 @@ int pgwt_tag_events(struct pgwt_trace_event *events, int count,
             uint64_t open_ns = st->banked_ns;
             if (st->cmd_open) {
                 uint64_t a = st->cmd_anchor > t0 ? st->cmd_anchor : t0;
-                if (t1 > a)
-                    open_ns += t1 - a;
+                if (eff_t1 > a)
+                    open_ns += eff_t1 - a;
             }
+            /* Banked time was accrued over the whole interval; against a
+             * clipped denominator it could exceed it and turn the majority
+             * into a tautology. Clamp — a share cannot exceed its whole. */
+            if (open_ns > eff_dur)
+                open_ns = eff_dur;
             st->banked_ns = 0;
             if (st->cmd_open)
                 st->cmd_anchor = t1;
 
             /* Majority rule: an interval more than half inside a command
              * window is in-command (bounded by one interval's length —
-             * we==0 intervals are µs-ms vs multi-second buckets). */
-            int in_cmd = ev->duration_ns == 0
+             * we==0 intervals are µs-ms vs multi-second buckets).
+             *
+             * #424: for a right-open record the denominator is the CLIPPED
+             * duration (eff_dur above), not the full one. This is a
+             * CORRECTNESS fix, not a cosmetic one: `in_cmd == 0` on a we==0
+             * record rewrites old_event to PGWT_WEI_NONCMD_CPU, which the
+             * idle rules drop from DB Time, so a majority decided on time
+             * outside the window moves the DB Time headline.
+             *
+             * STILL PROVISIONAL, and not claimed otherwise: the #128
+             * BACKWARD pass below can hand a right-open record the query id
+             * its command reports later, and a right-open record can itself
+             * be the carrier that supplies an id to a neighbouring real
+             * record — both depend on markers past `to` that were never
+             * loaded. Those move time BETWEEN queries, never into or out of
+             * DB Time, which is why they are labelled where the majority
+             * rule is fixed. A right-open record's wait WALL is stable; its
+             * query attribution and its measured CPU are not. */
+            int in_cmd = eff_dur == 0
                        ? st->cmd_open
-                       : (open_ns * 2 >= ev->duration_ns);
+                       : (open_ns * 2 >= eff_dur);
             if (in_cmd)
                 ev->flags |= PGWT_EVENT_FLAG_CMD_OPEN;
 
@@ -1456,6 +1609,12 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 
 struct top_event_accum {
     uint32_t event_id;
+    /* #424: slot occupancy used to be `count > 0`. A right-open record
+     * contributes total_ns but NOT count, so a slot can now be in use with
+     * count still 0; without a separate occupancy bit such a row would be
+     * invisible to the collection loop AND would be re-probed as an empty
+     * slot by the next event_id that hashes to it. */
+    uint8_t  used;
     uint64_t count;
     uint64_t total_ns;
     /* Exact-only accumulation for the latency columns (FID-3): samples do
@@ -1563,6 +1722,10 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
          * property of the wait, not of the window — clipping it would report
          * a p99 no wait ever had). */
         uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
+        /* Per-occurrence selection needs BOTH bounds, not just the right
+         * one: a record closing before `from` is no more an observation of
+         * this window than one closing after `to`. */
+        int instant_here = event_instant_in_window(ev, from_ns, to_ns);
 
         /* Idle-but-visible events (Client:ClientRead) appear in the list
          * but are excluded from DB Time. Their time is not part of the
@@ -1574,19 +1737,30 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
 
         /* Hash by event_id */
         uint32_t h = ev->old_event & EVENT_HT_MASK;
-        while (ht[h].count > 0 && ht[h].event_id != ev->old_event)
+        while (ht[h].used && ht[h].event_id != ev->old_event)
             h = (h + 1) & EVENT_HT_MASK;
 
-        if (ht[h].count == 0) {
+        if (!ht[h].used) {
+            ht[h].used = 1;
             ht[h].event_id = ev->old_event;
             num_entries++;
         }
+        ht[h].total_ns += clip_u;
+
+        /* #424: everything from here down is INSTANT-selected -- one
+         * completed observation. A record admitted by overlap that closes
+         * after `to` has not been observed yet in THIS window; the window it
+         * closes in counts it. One that closed before `from` was already
+         * counted by an earlier window. Either way its clipped time above
+         * stays in. */
+        if (!instant_here)
+            continue;
+
         /* Exact-window subtraction can split one delayed sampled observation
          * into multiple timeline fragments. Preserve its duration pieces but
          * count the physical observation once. */
         if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)
             ht[h].count++;
-        ht[h].total_ns += clip_u;
         /* Latency stats from exact records only (FID-3), on FULL durations. */
         if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE)) {
             ht[h].exact_count++;
@@ -1604,7 +1778,8 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
     int nr = 0;
 
     for (int i = 0; i < EVENT_HT_SIZE; i++) {
-        if (ht[i].count == 0)
+        if (!ht[i].used)   /* #424: occupancy, not count -- a row can be
+                               all right-open time with count 0 */
             continue;
 
         struct pgwt_event_row *r = &rows[nr];
@@ -1854,8 +2029,10 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
             /* #128: foreground non-idle time whose command never reported
              * an id is reported, not dropped. */
             if (ev->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) {
-                unattributed_ns += clip_u;
-                unattributed_count++;
+                unattributed_ns += clip_u;        /* INTERVAL */
+                /* INSTANT (#424), both bounds */
+                if (event_instant_in_window(ev, from_ns, to_ns))
+                    unattributed_count++;
             }
             continue;
         }
@@ -1879,11 +2056,16 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
             num_entries++;
             ht[h].query_id = ev->query_id;
         }
-        /* Split sample continuations conserve time, not observation count. */
-        if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)
+        /* Split sample continuations conserve time, not observation count.
+         * #424: `count` and `full_ns` are INSTANT-selected (an observation
+         * and its latency); a record that closes after `to` supplies neither
+         * to this window. Its clipped time, below, is still real. */
+        if (event_instant_in_window(ev, from_ns, to_ns) &&
+            (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)) {
             ht[h].count++;
+            ht[h].full_ns  += ev->duration_ns;
+        }
         ht[h].total_ns += clip_u;
-        ht[h].full_ns  += ev->duration_ns;
         ht[h].class_ns[pgwt_wait_class_index(ev->old_event)] += clip_u;
 
         /* O(1) hash lookup for per-wait totals */
@@ -3297,6 +3479,14 @@ void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,
          * views only. */
         if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
             continue;
+        /* #424: a transition IS the close of one state and the start of the
+         * next -- the purest INSTANT-selected quantity in the model. This
+         * function has no [from, to] and the block aggregate that can serve
+         * it is keyed by CLOSE block, so without this line a record admitted
+         * by overlap would be counted here AND again in the window where it
+         * closes. */
+        if (event_right_open_flagged(ev))
+            continue;
         if (!pgwt_filter_matches(f, ev))
             continue;
         /* Visibility filter: Client:ClientRead transitions stay in the graph. */
@@ -3410,6 +3600,10 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
         /* Fingerprints describe exact transition structure; sampled records
          * (including clipped continuations) must not fabricate self-edges. */
         if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
+            continue;
+        /* #424: a fingerprint counts transitions and sums full durations —
+         * INSTANT-selected, and no window reaches this function. */
+        if (event_right_open_flagged(ev))
             continue;
         if (!pgwt_filter_matches(f, ev))
             continue;
@@ -3653,7 +3847,26 @@ static inline int concurrency_qualifies(const struct pgwt_trace_event *ev,
         return 0;
     if (ev->old_event == 0)
         return 0;        /* on-CPU: not a wait, never part of a burst */
-    if (ev->timestamp_ns < from_ns || ev->timestamp_ns > to_ns)
+    /* #424: OVERLAP, not close-in-window. Concurrent session occupancy is an
+     * INTERVAL quantity — "how many sessions were waiting on this event at
+     * this instant" — and a session still waiting at `to` was occupying the
+     * resource for every bucket it covers. Selecting it by its close dropped
+     * exactly the longest waits from the peak, which is the shape the burst
+     * view exists to show. Counting DISTINCT SESSIONS does not make it
+     * per-occurrence: the thing being counted is occupancy during a bucket,
+     * and the per-bucket loop below already computes the overlap and clamps
+     * b_hi to the last bucket, so a close past `to` contributes to the
+     * buckets it really covers and to no others.
+     *
+     * `close >= from` still applies (a wait that ended before the window
+     * occupies none of it). The second half is `start <= to`; duration is
+     * trusted here because pgwt_filter_matches has already refused a record
+     * whose duration exceeds its own timestamp (the FID-4 chokepoint named
+     * above). */
+    if (ev->timestamp_ns < from_ns)
+        return 0;
+    if (ev->timestamp_ns > to_ns &&
+        ev->timestamp_ns - ev->duration_ns > to_ns)
         return 0;
     return 1;
 }
@@ -3722,9 +3935,16 @@ void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
         uint64_t end_ns = ev->timestamp_ns;
         uint64_t start_ns = end_ns - ev->duration_ns;
 
-        /* Buckets overlapped: start < bucket_end && end > bucket_start. The
-         * window filter above guarantees end_ns <= to_ns and end_ns >= from_ns;
-         * end_ns == from_ns overlaps no bucket. */
+        /* Buckets overlapped: start < bucket_end && end > bucket_start.
+         * The window filter above guarantees end_ns >= from_ns; end_ns ==
+         * from_ns overlaps no bucket.
+         *
+         * #424: end_ns is NO LONGER guaranteed <= to_ns — a wait still
+         * running at the right edge is admitted now. The b_hi clamp below
+         * already did the clipping this needs (it predates the change and
+         * existed for the num_buckets rounding), so a straddler occupies
+         * every bucket up to the last and none beyond it. Do not "simplify"
+         * the clamp away. */
         if (end_ns > from_ns) {
             uint64_t into = end_ns - from_ns;
             int b_hi = (int)((into - 1) / bucket_ns);
@@ -3950,6 +4170,12 @@ void pgwt_compute_lock_chains(const struct pgwt_trace_event *events, int count,
         const struct pgwt_trace_event *ev = &events[i];
         if (!pgwt_filter_matches(f, ev))
             continue;
+        /* #424: INSTANT-selected (a chain LINK is one completed blocking
+         * episode, and this function is handed no window to clip against).
+         * Skipping right-open records keeps lock chains exactly what they
+         * were before admission widened. */
+        if (event_right_open_flagged(ev))
+            continue;
 
         uint8_t cls = (ev->old_event >> 24) & 0xFF;
 
@@ -4069,6 +4295,10 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
     for (int i = 0; i < count && nactive < cap; i++) {
         const struct pgwt_trace_event *ev = &events[i];
         if (!pgwt_filter_matches(f, ev) || pgwt_is_idle_event(ev->old_event))
+            continue;
+        /* #424: INSTANT-selected, no window available here — see the
+         * selection rule at the top of this file. */
+        if (event_right_open_flagged(ev))
             continue;
         if (ev->old_event == 0) continue;  /* skip CPU */
 
@@ -4347,6 +4577,13 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
+        /* #424: execution rows are built by pairing EXEC/PLAN markers, which
+         * are instants and so are never admitted past `to`. A wait record
+         * that closes after the window would otherwise land in the row's
+         * per-wait breakdown as if it had completed; the breakdown is
+         * per-occurrence, so it is skipped. */
+        if (event_right_open_flagged(ev))
+            continue;
         int si = exec_pid_state_get(&states, &n_states, &cap_states, ev->pid);
         if (si < 0) {
             out->failed = 1;
@@ -4645,6 +4882,10 @@ void pgwt_compute_execution_detail(
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
+        /* #424: lane entries are completed waits inside one execution —
+         * INSTANT-selected. See the selection rule at the top of this file. */
+        if (event_right_open_flagged(ev))
+            continue;
         if (ev->pid == leader_pid) {
             if (ev->old_event == PGWT_MARKER_PLAN_START) {
                 plan_start = ev->timestamp_ns;
@@ -5152,6 +5393,12 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
+        /* #424: a variant is a pattern of COMPLETED waits between two
+         * markers — INSTANT-selected. Markers themselves are instants
+         * (duration 0) and are never admitted past `to`, so this only ever
+         * skips a wait record that closes after the window. */
+        if (event_right_open_flagged(ev))
+            continue;
 
         /* Find or create PID state */
         int pidx = pgwt_pid_index_find(&pid_ix, ev->pid);

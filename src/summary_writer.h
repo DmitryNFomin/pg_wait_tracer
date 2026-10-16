@@ -305,7 +305,11 @@
  *     unresolved at credit time (#128's deferral exists precisely because the
  *     id can arrive after the wait ends), and Queries always raw-loads
  *     (#324), so there is no divergence to close and a guess would create one.
- *   - NEVER CREDITED OPEN: an on-CPU (we == 0) interval. A per-second credit
+ *   - NEVER CREDITED OPEN: an on-CPU (we == 0) interval. SUPERSEDED BY v9
+ *     (#424), which credits it from a producer-supplied CPU OBSERVATION --
+ *     the constraint stated below still holds and v9 SATISFIES it rather
+ *     than bypassing it; a producer that supplies no observation still gets
+ *     exactly the v8 refusal described here. A per-second credit
  *     has no cpu_ns -- se.sum_exec_runtime is only current at a tick or a
  *     context switch, and the record carries its measurement only at close --
  *     so spreading a CPU gap's wall while its measured cpu_ns stayed whole at
@@ -353,6 +357,158 @@
  *      That slice is not lost and not double counted -- the closing record
  *      still carries it, i.e. it keeps the v7 answer -- and it is counted
  *      (open_credit_late_ns_total). */
+/* v9 (2026-10-15, issue #424): an OPEN ON-CPU interval is credited per
+ * second too, WITHOUT destroying v7's measured-CPU split. ONE content
+ * change, no layout change.
+ *
+ * WHAT WAS WRONG. v8 refused on-CPU intervals outright (the bullet above),
+ * so an in-flight pure-CPU statement was ABSENT from the CPU rows of the
+ * summaries path until it ended -- on the 15-minute Overview, the demo's
+ * own headline view, a backend that had been burning CPU for 90 s showed
+ * nothing at all. The unspread wall was counted
+ * (cpu_open_uncredited_ns_total) but never placed.
+ *
+ * WHY v8 REFUSED, and how v9 satisfies the same constraint. v8's argument
+ * was that a per-second credit has no cpu_ns: se.sum_exec_runtime is only
+ * current at a tick or a context switch, and the closing RECORD carries its
+ * measurement whole, so crediting wall per second while the whole
+ * measurement arrived at close would clamp the entire measurement into
+ * cpu_clamped_ns and leave ZERO in cpu_measured_ns. Every word of that is
+ * still true about the RECORD STREAM. It is not true about the PRODUCER: at
+ * the exact point where src/map_reader.c notes the open interval it has
+ * already computed, for the live view, the measured on-CPU ns of the open
+ * stretch (cpu_ns_total + the current stretch - the seeded base, clamped to
+ * the stretch's wall). v9 does not GUESS the missing measurement and does
+ * not drop it -- it is TOLD, the same way v6 is told a pid's category and v7
+ * is told the effective wait id, through
+ * pgwt_summary_note_open_ex(..., const struct pgwt_summary_open_cpu *).
+ * A producer that passes NULL -- or the v8-signature
+ * pgwt_summary_note_open(), which is exactly that call -- gets the v8
+ * refusal unchanged, counted in open_cpu_refused_total.
+ *
+ * THE FIVE PIECES, because "credit the wall" alone would be wrong four
+ * different ways:
+ *
+ *  1. THE CPU OBSERVATION IS A PREFIX, NOT A SLICE. The producer measures
+ *     [start, now), cumulative; the writer credits [from, end) for one
+ *     completed second. So the writer keeps the interval's CUMULATIVE
+ *     credited measurement and credits the DIFFERENCE,
+ *     min(prefix, wall credited so far) - already credited. The min() is
+ *     what keeps a prefix that runs past `end` (the observation is always
+ *     newer than the second being sealed) from exceeding the second's own
+ *     wall and manufacturing the very clamp this version exists to avoid:
+ *     the excess is CARRIED to the next second instead of being clamped
+ *     away, and the carry always drains because the producer clamps its
+ *     prefix to the prefix wall.
+ *
+ *  2. THE CLOSE SUBTRACTS WHAT WAS CREDITED -- for the MEASUREMENT as well
+ *     as for the wall. v8 subtracted only the wall (already_credited_ns);
+ *     accum_event then clamped the FULL closing cpu_ns against the small
+ *     remaining wall, which is precisely v8's objection, reproduced. v9
+ *     subtracts the credited measurement first and clamps the REMAINDER:
+ *     sum(per-second measured credits) + close measured + close clamped
+ *     == the closing record's cpu_ns, exactly, which is the conservation
+ *     leg tests/test_open_cpu_accounting.c asserts.
+ *
+ *  3. CLASSIFICATION IS FROZEN AT THE FIRST CREDIT. A we == 0 gap is CPU or
+ *     (foreground, outside a command) idle PGWT_WEI_NONCMD_CPU, and the
+ *     producer's answer is a MAJORITY over the open prefix [start, now) --
+ *     so it CAN CHANGE as the prefix grows (a gap that starts outside a
+ *     command and later spends most of itself inside one flips from idle to
+ *     CPU). A written second is immutable (#277), so persisting each tick's
+ *     answer would leave one interval's seconds disagreeing with each other
+ *     and with its own closing record. Instead the writer takes the
+ *     producer's latest answer up to the moment the FIRST second of this
+ *     interval is written, freezes it there, and uses it for every later
+ *     credit AND for the closing record -- overriding the record's
+ *     eff_event, whose only other legal value is the same pair. One
+ *     interval therefore carries ONE label, which is also the shape the raw
+ *     path produces (pgwt_tag_events labels a record once); the two can
+ *     disagree about WHICH label, never about how many, and when they
+ *     disagree the whole interval's wall is counted in
+ *     open_cpu_class_divergent_ns_total. Freezing at the first CREDIT
+ *     rather than at the first NOTE is deliberate: it is the last instant
+ *     at which the answer is still free, so it uses the most information
+ *     that can still be acted on.
+ *
+ *  4. THE TIER IS FROZEN WITH IT. An interval whose credits went to
+ *     cpu_unknown_ns (the producer had no measurement) must not also have
+ *     its closing cpu_ns added to cpu_measured_ns -- CPU* is
+ *     measured + unknown, so that would double count the credited wall.
+ *     The tier is frozen at the first credit exactly as the class is, a
+ *     flip is counted (open_cpu_tier_mismatch_total), and BOTH directions
+ *     conserve CPU*: only the tier attribution moves.
+ *
+ *  5. THE PER-OCCURRENCE QUANTITIES STILL HAPPEN ONCE, AT CLOSE. count, the
+ *     histogram bucket, max_ns, top_wait and queries[] are unchanged from
+ *     v8 -- they ride the closing record with the FULL duration. Only time
+ *     is spread. Because the label is frozen, the count and the time land
+ *     on the SAME events[] row; splitting them would give the Events tab a
+ *     row with time and no count and another with count and no time.
+ *
+ * NOTHING IS INVENTED, same as v8: the writer credits only what a producer
+ * explicitly noted, only while the note is fresher than
+ * PGWT_SUMMARY_OPEN_STALE_NS, and only up to seconds that have completed.
+ *
+ * WHAT IS NOT IN THIS VERSION, stated because it is easy to over-read:
+ *   - A CLOSED CPU interval is still charged to its CLOSING second, exactly
+ *     as v7/v8 charge it. v9 changes the OPEN prefix only. A long CPU gap
+ *     that was never noted (no producer notes, lightweight/sampled tiers,
+ *     a pid that appeared and closed between two ticks) therefore keeps the
+ *     v7 answer and keeps being counted in cpu_open_uncredited_ns_total.
+ *   - ATTRIBUTION can still move by up to one tick at an interval boundary,
+ *     and a second that completed before the producer's first note still
+ *     cannot be back-credited (open_credit_late_ns_total). Both are v8
+ *     residuals, unchanged.
+ *   - AN HOURLY ROTATION PAUSES CREDITING until the next pushed record.
+ *     pgwt_summary_check_rotation closes the file and leaves w->fp NULL for
+ *     open_summary_file to fill in lazily, and writer_seal_through refuses
+ *     to invent records with no file -- so the ticks between the rotation
+ *     and the next event seal nothing, and the seconds they covered are all
+ *     credited in ONE pass when the next record arrives. This is a v8
+ *     behaviour, identical for waits, and it moves ATTRIBUTION only: the
+ *     window total is exact either way. Its v9-specific hazard -- one
+ *     second receiving several seconds' worth of measured CPU against its
+ *     own one second of wall -- is what the per-second slice cap in
+ *     credit_open_cpu_measured exists for, and
+ *     tests/test_open_cpu_accounting.c's rotation leg is where it was
+ *     found. Reopening the file at rotation time would narrow the
+ *     attribution residual for waits and gaps alike; it is #379's business,
+ *     not this version's.
+ *   - If the producer's prefix measurement for a tick EXCEEDS the closing
+ *     record's own cpu_ns (schedstat jitter between the two reads), the
+ *     over-credited part cannot be taken back out of an immutable second.
+ *     It is counted (open_cpu_overcredit_ns_total) and is the one way the
+ *     per-interval measured identity in piece 2 can fail to hold exactly;
+ *     the WALL identity never can.
+ *
+ * WHY THE VERSION WILL HAVE TO MOVE, AND WHY IT HAS NOT YET. The rule above
+ * is an ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
+ * gap's whole wall and measurement, a v9 second holds one second of each, and
+ * a window holding both double-counts the overlap.
+ *
+ * But NO PRODUCER CALLS pgwt_summary_note_open_ex. The live wiring was
+ * reverted (agent/424-daemon fc7d7f5) once its counters showed it had never
+ * been reached, so nothing credits an open on-CPU interval and v9's only
+ * difference from v8 -- the widened cpu_measured_records -- never
+ * materialises. A build shipping this constant at 9 writes a v8 file wearing
+ * a 9.
+ *
+ * That is worse than merely untidy. pgwt_summaries_window_current compares
+ * the NUMBER, so if 9 ships now and the producer is wired later without
+ * another bump, 9 names two different accounting rules and no reader can
+ * tell the resulting files apart -- the exact mixing the version exists to
+ * prevent. The project's rule is never to ship a version whose contract is
+ * not yet true, so the constant stays at 8 and the commit that WIRES the
+ * producer is the one that sets it to 9. The writer-side capability below
+ * is dormant, not absent: it is implemented and unit-tested
+ * (tests/test_open_cpu_accounting.c), and tests/test_v9_open_cpu_wired.sh
+ * is its acceptance test, deliberately registered nowhere until then.
+ *
+ * The machinery for files already on disk is unchanged either way:
+ * pgwt_summary_reader_open refuses any version that is not
+ * PGWT_SUMMARY_VERSION and the server preflights the window, so a refusal
+ * becomes a RAW RECOMPUTE, never a plausible partial answer. */
 #define PGWT_SUMMARY_VERSION  8
 
 /* `eff_event` sentinel: the producer resolved no effective wait id, so the
@@ -504,12 +660,25 @@ struct pgwt_summary_accum {
      * cpu_measured_records is NOT derivable from the sums: a MEASURED ZERO is
      * a signal ("this window can separate running from waiting, and nothing
      * ran") while an absent measurement is not, and the raw path distinguishes
-     * them by counting records, not nanoseconds. */
-    uint64_t cpu_measured_ns;       /* Sigma clamped cpu_ns over we==0 gaps   */
+     * them by counting records, not nanoseconds.
+     *
+     * v9 (#424) WIDENS cpu_measured_records from "records" to CPU
+     * OBSERVATIONS: a closed record with a cpu_ns, OR a per-second credit of
+     * an open on-CPU gap whose producer supplied a measurement. It had to
+     * widen. Its single consumer is `rec->cpu_measured_records > 0 =>
+     * has_measured_cpu` (src/compute.c), and a window whose only CPU time is
+     * one still-open gap would otherwise carry cpu_measured_ns while
+     * reporting has_measured_cpu = 0 -- the reader would then ignore the
+     * split it was just given and emit one combined CPU* row, which is the
+     * v8 symptom reintroduced one layer up. Nothing compares it to a record
+     * count. */
+    uint64_t cpu_measured_ns;       /* Sigma clamped cpu_ns over we==0 gaps
+                                     * + v9 per-second open-gap credits      */
     uint64_t cpu_unknown_ns;        /* Sigma wall over UNKNOWN we==0 gaps     */
     uint64_t cpu_clamped_ns;        /* Sigma (cpu_ns - wall) clamped away     */
     uint64_t wait_gap_cpu_ns;       /* Sigma cpu_ns on WAIT records (obs.)    */
-    uint64_t cpu_measured_records;  /* records with cpu_ns != UNKNOWN         */
+    uint64_t cpu_measured_records;  /* CPU observations: records with
+                                     * cpu_ns != UNKNOWN, plus v9 credits     */
 
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];
@@ -552,12 +721,57 @@ struct pgwt_summary_block_header {
 #define SUMMARY_MAX_OPEN  MAX_BACKENDS   /* 1024 */
 struct pgwt_summary_open {
     uint32_t pid;                 /* 0 = empty slot */
-    uint32_t we;                  /* open wait id; 0 = nothing creditable */
+    uint32_t we;                  /* open wait id; 0 = nothing creditable
+                                   * UNLESS cpu_slot says this is an open
+                                   * on-CPU gap (v9) */
     uint32_t cat_flag;            /* producer's T2 category for this pid */
     uint64_t start_ns;            /* monotonic start of the open interval */
     uint64_t credited_until_ns;   /* monotone per-PID watermark */
     uint64_t credited_ns;         /* credited for the CURRENT interval only */
     uint64_t noted_ns;            /* when the producer last refreshed it */
+
+    /* v9 (#424): the open ON-CPU gap. `we` is 0 for such an interval, which
+     * is also the "nothing creditable" sentinel, so creditability is carried
+     * by its own flag rather than overloaded onto `we` -- see
+     * open_creditable() in summary_writer.c, the ONE predicate every loop
+     * uses so a new state cannot be half-handled. */
+    uint8_t  cpu_slot;            /* 1 = this slot is an open on-CPU gap */
+    uint8_t  cpu_frozen;          /* 1 = class/tier fixed by a written second */
+    uint8_t  cpu_tier_known;      /* frozen tier: 1 = measured, 0 = unknown */
+    uint32_t cpu_eff_we;          /* producer's LATEST classification
+                                   * (0 or PGWT_WEI_NONCMD_CPU) while the
+                                   * interval is still unfrozen; the FROZEN
+                                   * one once cpu_frozen is set */
+    uint64_t cpu_prefix_ns;       /* producer's measured CPU over
+                                   * [start_ns, its last note), or
+                                   * PGWT_CPU_NS_UNKNOWN */
+    uint64_t cpu_credited_ns;     /* measured CPU credited for THIS interval */
+};
+
+/* v9 (#424): a producer's OBSERVATION of one open on-CPU gap at tick time.
+ * Passing NULL to pgwt_summary_note_open_ex (and calling the v8-signature
+ * pgwt_summary_note_open, which is that call) means "I have no observation"
+ * and keeps the v8 refusal.
+ *
+ * `eff_we` is the EFFECTIVE id for the gap as the producer's own classifier
+ * resolved it -- pgwt_live_effective_event(we=0, cat_flag, cmd_gate_active,
+ * in_cmd) on the live path. Exactly two values are legal, 0 (CPU) and
+ * PGWT_WEI_NONCMD_CPU (idle, foreground outside a command); anything else is
+ * refused and counted (open_cpu_eff_rejected_total), the same contract
+ * pgwt_summary_push_event's `eff_event` has and for the same reason -- the
+ * command gate lives in the producer and a writer-side copy would drift.
+ * It is a PREFIX answer and may change between ticks; see piece 3 of the v9
+ * note for what the writer does about that.
+ *
+ * `cpu_prefix_ns` is the measured on-CPU ns of [start_mono_ns, now_mono_ns),
+ * CUMULATIVE and already clamped by the producer to that prefix's wall --
+ * i.e. exactly the `cpu_open` that src/map_reader.c already computes for the
+ * live view. PGWT_CPU_NS_UNKNOWN means the tier has no measurement at all
+ * (cpu_accounting off, no CPU capability): the credit then goes to
+ * cpu_unknown_ns, which is what the raw path does with an UNKNOWN record. */
+struct pgwt_summary_open_cpu {
+    uint32_t eff_we;
+    uint64_t cpu_prefix_ns;
 };
 
 #define SUMMARY_QATTR_SLOTS 1024
@@ -710,6 +924,42 @@ struct pgwt_summary_writer {
      *                   timeline; non-zero only means some records keep the
      *                   old accounting, never that time was double counted. */
     uint64_t      open_note_mismatch_total;
+
+    /* v9 (#424): the open-ON-CPU credit, and every way it can do something
+     * other than spread wall+measurement. Same discipline as the v8 block
+     * above -- nothing here is silent. Intended control-socket names
+     * summary_open_cpu_*:
+     *   credited_ns          Sigma of the WALL credited to seconds from open
+     *                        on-CPU gaps. ZERO on a capture that contains a
+     *                        multi-second CPU gap means no producer is
+     *                        passing an observation -- i.e. v8 behaviour
+     *                        under a v9 stamp, the one failure this change
+     *                        could have that still looks green. Pair it with
+     *                        cpu_open_uncredited_ns_total, which counts the
+     *                        complement.
+     *   measured_ns          Sigma of the MEASURED CPU credited to seconds.
+     *                        The quantity v8 argued could not exist.
+     *   unknown_ns           Sigma of wall credited to the UNKNOWN tier.
+     *   eff_rejected         notes whose eff_we was neither 0 nor
+     *                        PGWT_WEI_NONCMD_CPU; treated as 0 and counted.
+     *                        Should be 0 in any build.
+     *   class_divergent_ns   wall of intervals whose FROZEN class differed
+     *                        from the producer's answer at close -- the
+     *                        measured cost of freezing (piece 3).
+     *   tier_mismatch        intervals whose measurement tier flipped
+     *                        between the first credit and the close.
+     *   overcredit_ns        measured CPU credited while open that the
+     *                        closing record's own cpu_ns did not cover
+     *                        (schedstat jitter): the one place the measured
+     *                        identity can fail. The WALL identity cannot.
+     */
+    uint64_t      open_cpu_credited_ns_total;
+    uint64_t      open_cpu_measured_ns_total;
+    uint64_t      open_cpu_unknown_ns_total;
+    uint64_t      open_cpu_eff_rejected_total;
+    uint64_t      open_cpu_class_divergent_ns_total;
+    uint64_t      open_cpu_tier_mismatch_total;
+    uint64_t      open_cpu_overcredit_ns_total;
 };
 
 /* ── Public API ───────────────────────────────────────────── */
@@ -765,8 +1015,11 @@ int  pgwt_summary_push_event(struct pgwt_summary_writer *w,
  *
  * `we` is the RAW wait id of the open interval (state_map's last_event), not
  * an effective one: the only relabel v7 allows is a we == 0 gap becoming
- * PGWT_WEI_NONCMD_CPU, and v8 declines to spread we == 0 at all (no cpu_ns
- * exists until close -- see the version note), so the two never interact.
+ * PGWT_WEI_NONCMD_CPU. v8 declined to spread we == 0 at all; v9 spreads it
+ * when -- and only when -- the producer supplies the CPU observation that
+ * makes the split possible, which THIS entry point does not (see
+ * pgwt_summary_note_open_ex below). Calling this function for a we == 0 gap
+ * is therefore the v8 refusal, counted in open_cpu_refused_total.
  * `start_mono_ns` is the interval's start on the SAME clock as
  * evt->timestamp_ns (bpf_ktime_get_ns / CLOCK_MONOTONIC) -- state_map's
  * last_ts, which is exactly where the closing record's
@@ -781,6 +1034,29 @@ void pgwt_summary_note_open(struct pgwt_summary_writer *w,
                              uint32_t pid, uint32_t we,
                              uint64_t start_mono_ns, uint32_t cat_flag,
                              uint64_t now_mono_ns);
+
+/* v9 (#424): the same note, plus the producer's CPU OBSERVATION of an open
+ * ON-CPU gap. This is the full interface; pgwt_summary_note_open() above is
+ * exactly this call with `cpu == NULL`.
+ *
+ * `cpu` is read ONLY when the noted interval is on-CPU (we == 0, or a `we`
+ * whose class is CPU). For every wait id it is ignored, so one producer loop
+ * can pass it unconditionally. `cpu == NULL` on an on-CPU gap keeps the v8
+ * refusal exactly -- no credit, counted in open_cpu_refused_total -- which
+ * is what makes "a producer that has no measurement" a documented
+ * degradation rather than a silent mis-split.
+ *
+ * The live call site (src/map_reader.c) already computes both members for
+ * the live view, a few lines below where it notes the interval: `cpu_open`
+ * (the clamped schedstat delta over the open stretch) and
+ * pgwt_live_effective_event(we, cat_flag, d->cmd_gate_active, in_cmd) with
+ * in_cmd from pgwt_live_cmd_gate_classify over [last_ts, now). Pass those,
+ * not a second copy of either rule. */
+void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
+                                uint32_t pid, uint32_t we,
+                                uint64_t start_mono_ns, uint32_t cat_flag,
+                                uint64_t now_mono_ns,
+                                const struct pgwt_summary_open_cpu *cpu);
 
 /* Drop `pid`'s open-interval note and its watermark (backend exit, GC, or a
  * producer that knows the pid is gone). Idempotent. The staleness rule is the

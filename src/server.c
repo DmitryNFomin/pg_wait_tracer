@@ -368,6 +368,43 @@ struct pgwt_load_info {
                                    partial; handlers MUST error, not render */
     int      allocation_failed; /* working/merge allocation failed — never
                                    misreport this as a range-size refusal */
+    /* #424 straddler diagnostics. Not a fidelity label. Two of them ARE on
+     * the wire and two are not, and the difference is deliberate:
+     *
+     *   right_edge_truncated — ON THE WIRE (add_fidelity /
+     *                          add_right_edge_note), with
+     *                          right_edge_scan_ns beside it. The lookahead
+     *                          stopped at its budget (time horizon or block
+     *                          count) with trace data still beyond it, so a
+     *                          straddler LONGER than what was scanned may be
+     *                          missing. A budgeted scan that stops silently
+     *                          is the failure class this project keeps
+     *                          hitting, so the CALLER is told, not just a
+     *                          struct nobody reads.
+     *   straddlers_admitted  — records admitted by OVERLAP whose close is
+     *                          past `to` (each stamped
+     *                          PGWT_EVENT_FLAG_RIGHT_OPEN).
+     *   headers_unreadable   — see below.
+     *
+     * The last two are NOT on the wire: straddlers_admitted is non-zero on
+     * most ordinary windows, so emitting it would add a field to nearly
+     * every response for a number no client acts on. They are readable two
+     * ways instead — in-process by a test through pgwt_load_info, and at
+     * runtime on stderr via PGWT_STRADDLE_STATS=1 (straddle_report()).
+     * That is what makes them a tripwire rather than a decoration: a
+     * refactor that drops or narrows the lookahead changes numbers somebody
+     * can actually see. */
+    int      straddlers_admitted;
+    int      right_edge_truncated;
+    /* #429: block headers that could not be read during candidacy. The
+     * block is still decoded (unknown is never "no"), so this is a loss
+     * COUNTER, not a refusal — but a scan that cannot see headers is a scan
+     * whose completeness claim rests on the decode succeeding instead. */
+    int      headers_unreadable;
+    /* How far past `to` the scan was allowed to look, in ns, when it was
+     * cut. Reported with the flag so "incomplete" comes with the bound that
+     * made it incomplete instead of leaving the caller to guess. */
+    uint64_t right_edge_scan_ns;
 };
 
 struct pgwt_server {
@@ -1518,6 +1555,140 @@ static int load_max_events(void)
     return cached;
 }
 
+/* ── #424: right-edge straddler lookahead ────────────────────────────────
+ *
+ * A trace record is written when its interval CLOSES, so selecting records
+ * by `close in [from, to]` drops every wait that was still running at the
+ * right edge — a wait spanning the whole window contributed nothing at all.
+ * Correct selection is OVERLAP (`close >= from && start <= to`), and the
+ * left half already worked (a straddler at `from` has its close inside the
+ * window and arrives whole, clipped by event_window_ns). The RIGHT half
+ * needs records that live in blocks AFTER the window, which is why it is a
+ * lookahead and not a predicate change.
+ *
+ * There is no a-priori bound on how far to look: without trace format v4
+ * nothing in a block header says how long the longest interval in it is, and
+ * an io_worker can hold one wait for an entire capture. The sample_to_mono
+ * precedent (one max measured sample period) does NOT generalise. So the
+ * scan is "the rest of the file(s), BUDGETED", with two bounds:
+ *
+ *   PGWT_STRADDLE_LOOKAHEAD_NS   time horizon past `to`   (default 300 s)
+ *   PGWT_STRADDLE_MAX_BLOCKS     blocks decoded past `to` (default 256)
+ *
+ * Either one cutting the scan sets pgwt_load_info.right_edge_truncated —
+ * the answer is then "complete for straddlers up to what was scanned", said
+ * out loud, instead of a silent partial. Setting the horizon to 0 disables
+ * the lookahead entirely and restores the pre-#424 selection (and sets the
+ * truncation flag, because that is exactly what it is).
+ *
+ * LIMIT, STATED HERE AND IN src/compute.c: a wait that is STILL OPEN RIGHT
+ * NOW has no closing record in the trace at all. No admission rule can
+ * recover it — there is nothing to admit. This is a fix for HISTORICAL and
+ * replay windows only, including an older window inside a still-growing
+ * capture once the closing record is committed. It does not repair the live
+ * right edge. */
+#define PGWT_STRADDLE_LOOKAHEAD_DEFAULT_NS  (300ULL * 1000000000ULL)
+#define PGWT_STRADDLE_MAX_BLOCKS_DEFAULT    256
+
+/* Deliberately NOT cached in a static, unlike load_max_events(): both are
+ * read once per load (not per record), and a cached copy is a bypass hazard
+ * — it survives fork(), so a test that lowers the horizon in a child would
+ * silently keep the parent's value and the gate would pass while measuring
+ * nothing. */
+static uint64_t straddle_lookahead_ns(void)
+{
+    const char *env = getenv("PGWT_STRADDLE_LOOKAHEAD_NS");
+    if (env && *env) {
+        char *end = NULL;
+        unsigned long long v = strtoull(env, &end, 10);
+        if (end && *end == '\0')
+            return (uint64_t)v;        /* 0 = disabled, deliberately */
+    }
+    return PGWT_STRADDLE_LOOKAHEAD_DEFAULT_NS;
+}
+
+static int straddle_max_blocks(void)
+{
+    const char *env = getenv("PGWT_STRADDLE_MAX_BLOCKS");
+    if (env && *env) {
+        char *end = NULL;
+        long v = strtol(env, &end, 10);
+        if (end && *end == '\0' && v >= 0)
+            return (int)v;             /* 0 = disabled, deliberately */
+    }
+    return PGWT_STRADDLE_MAX_BLOCKS_DEFAULT;
+}
+
+/* #429 block candidacy lives in ONE place: pgwt_reader_block_candidate()
+ * in src/event_reader.c (agent E, 05bc852), used by both pgwt_replay_file
+ * and load_file_range_mono below. The server carried a second copy of the
+ * same primitive while the two halves were separate branches; it is gone.
+ * The reasoning for the primitive -- why "binary-search block_index[], then
+ * iterate forward until a block starts past the right edge" is unsound
+ * twice over (the index is in COMMIT order and nothing checks it is sorted;
+ * and blocks OVERLAP in time, so a block two positions back can still reach
+ * into the window) -- is in src/event_reader.h above the declaration.
+ *
+ * The server needs TWO right edges and the shared function takes one, so
+ * the second is applied at the call site; see the comment there. */
+
+/* Is this file SKIPPED WITHOUT BEING LOOKED AT, in a way that could hide a
+ * straddler's close?
+ *
+ * The per-file gate rejects a file before it is ever opened, so the
+ * record-level truncation flag inside load_file_range_mono can never fire
+ * for it — a gate that cannot see. A file beginning past the scan edge is
+ * exactly the rotated-capture case: the wait was still running at `to` and
+ * its closing record lives in the NEXT hourly file, out past the horizon.
+ *
+ * A separate function, not an inline condition, so the bypass can be tested
+ * directly: building a second trace file in a unit test means writing an
+ * LZ4-compressed `YYYY-MM-DD_HH.trace.lz4` that the hourly rotation produces
+ * from wall-clock time, which a test cannot provoke deterministically.
+ * tests/test_window_overlap.c §8d calls this predicate with the numbers that
+ * case produces. */
+static int straddle_file_unseen(int enabled, uint64_t mono_first,
+                                uint64_t mono_last, uint64_t from_m,
+                                uint64_t scan_to_m)
+{
+    if (!enabled)
+        return 0;                      /* no right edge: nothing to miss */
+    if (mono_last < from_m)
+        return 0;                      /* entirely before the window */
+    return mono_first > scan_to_m;     /* begins past where we looked */
+}
+
+/* The per-load straddler bookkeeping, passed down into every admission site
+ * so no site can widen admission without reporting what it did. */
+struct straddle_scan {
+    int      enabled;      /* the caller asked for a bounded right edge */
+    uint64_t lookahead_ns;
+    int      max_blocks;
+    int      admitted;
+    int      truncated;
+    int      headers_unreadable;   /* #429 candidacy could not see a header */
+};
+
+/* Make the two off-wire counters readable at RUNTIME, not only from a test.
+ * Opt-in on stderr, exactly like the #283 cur-cache stats line and for the
+ * same reason: a counter nobody can read is not a tripwire, while a field on
+ * every response for a number no client acts on is noise. */
+static void straddle_report(const struct straddle_scan *ss)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *env = getenv("PGWT_STRADDLE_STATS");
+        on = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    if (!on || !ss->enabled)
+        return;
+    fprintf(stderr,
+            "pgwt-straddle: admitted=%d truncated=%d headers_unreadable=%d "
+            "lookahead_ns=%llu max_blocks=%d\n",
+            ss->admitted, ss->truncated, ss->headers_unreadable,
+            (unsigned long long)ss->lookahead_ns, ss->max_blocks);
+}
+
 /* Read events from a trace file for a MONO time range. Opens file, seeks to
  * the right blocks via block index, decodes
  * only the blocks that overlap [from_mono, sample_to_mono]. Non-samples use
@@ -1545,6 +1716,7 @@ static void load_file_range_mono(struct pgwt_server *srv,
                                  uint64_t from_mono, uint64_t to_mono,
                                  uint64_t sample_to_mono,
                                  uint32_t pid, int markers_only,
+                                 struct straddle_scan *ss,
                                  struct pgwt_trace_event **events,
                                  int *total, int *cap, int *overloaded,
                                  int *allocation_failed)
@@ -1556,18 +1728,153 @@ static void load_file_range_mono(struct pgwt_server *srv,
     if (cc)
         cur_cache_sync(cc, path, &reader);
 
-    int first_block = pgwt_reader_find_block(&reader, from_mono);
+    /* #429: NO binary-searched scan start. pgwt_reader_find_block() is a
+     * hint over an index written in COMMIT order, and `lo - 1` additionally
+     * assumes blocks do not overlap in time, which they do. Both assumptions
+     * fail SILENTLY — a window missing a whole block reports itself
+     * complete. Every block is candidacy-tested by HEADER instead (agent E
+     * measured 0.12 us to ask against 58 us to decode, warm, on a
+     * 1024-block trace, so the search was never buying much). */
     struct pgwt_trace_event block_buf[PGWT_BLOCK_EVENTS];
     int max_events = load_max_events();
 
-    for (int b = first_block; b < reader.num_blocks; b++) {
-        if (reader.block_index[b].timestamp_ns > sample_to_mono)
-            break;
+    /* #424: how far past `to_mono` this call may look for a straddler, and
+     * how many blocks it may decode to do it. straddle_to is the TIME bound;
+     * scan_to is the widest right edge of the whole block loop (the sample
+     * lookahead is unchanged and independent). */
+    uint64_t straddle_to = (ss && ss->enabled && ss->lookahead_ns)
+        ? (UINT64_MAX - to_mono < ss->lookahead_ns ? UINT64_MAX
+                                                   : to_mono + ss->lookahead_ns)
+        : to_mono;
+    uint64_t scan_to = sample_to_mono > straddle_to ? sample_to_mono
+                                                    : straddle_to;
+    int straddle_blocks = 0;
 
+    for (int b = 0; b < reader.num_blocks; b++) {
         struct pgwt_block_info bi;
         const struct pgwt_trace_event *rec;
         int n;
         const struct cur_cache_block *cb = cc ? cur_cache_get(cc, b) : NULL;
+
+        /* Candidacy first, and CONTINUE rather than break on a no.
+         *
+         * #429: the old loop broke out as soon as a block started after the
+         * scan edge. Under commit order a block that cannot matter says
+         * NOTHING about the blocks after it, so that break threw away
+         * in-window blocks sitting behind a far-future SAMPLES block — and
+         * then blamed the right edge for the loss. A cached block answers
+         * from its retained descriptor with no I/O at all; an uncached one
+         * costs one header read. */
+        uint64_t first_ts, last_ts;
+        int only_straddlers = 0;
+        int cand;
+        int sample_blk = 0;      /* known only when the header was read */
+        int type_known = 0;
+        if (cb) {
+            first_ts = cb->index_ts;
+            last_ts  = cb->last_ts;
+            cand = !(first_ts > scan_to || last_ts < from_mono);
+            sample_blk = cb->is_sample;
+            type_known = 1;
+        } else {
+            /* #429: ONE implementation of this primitive, agent E's in
+             * src/event_reader.c. The server used to carry a second copy
+             * (server_block_candidate) only so its branch could compile
+             * before the reader half merged; two bodies deciding block
+             * candidacy is how the two halves drift apart silently.
+             *
+             * The seam needs TWO right edges and the shared function takes
+             * one, so the second is computed HERE rather than pushed into
+             * the reader:
+             *   - `scan_to` is passed as E's `to_mono_ns`. For this caller
+             *     it is a HARD horizon -- the widest edge the load may look
+             *     at -- so E's `right_open` ("every record closes after
+             *     to_mono_ns, your budget decides") becomes a rejection.
+             *     Without that line a block beginning past the horizon
+             *     would be decoded, which is the opposite of what the
+             *     horizon is for.
+             *   - `sample_to_mono` is the BUDGETED edge, and
+             *     `only_straddlers` is derived from the header E hands
+             *     back. Collapsing the two into one argument would either
+             *     refuse straddler blocks outright or spend the straddler
+             *     budget on the pre-existing sample lookahead. */
+            int past_scan_edge = 0;
+            cand = pgwt_reader_block_candidate(&reader, b, from_mono,
+                                               scan_to, &bi,
+                                               &past_scan_edge);
+            if (cand > 0 && past_scan_edge)
+                cand = 0;
+            first_ts = (cand >= 0) ? bi.first_timestamp_ns : 0;
+            last_ts  = (cand >= 0) ? bi.last_timestamp_ns : 0;
+            /* Block TYPE, not the straddler verdict. This branch used to
+             * set only_straddlers itself; 7f066fb moved that to the single
+             * site below, which also excludes SAMPLES blocks from the
+             * budget. Computing it here as well would be dead code that
+             * reads like a second rule. */
+            if (cand >= 0) {
+                sample_blk = bi.block_type == PGWT_BLOCK_SAMPLES;
+                type_known = 1;
+            }
+        }
+
+        /* #424: a SAMPLES block past the SAMPLE edge cannot contribute
+         * anything at all — the record loop below discards every record in
+         * it (`if (sample_block) continue;`), because the sample lookahead
+         * has its own, narrower edge. Deciding that HERE, before the budget
+         * is touched, is the whole point:
+         *
+         * the straddler budget exists to bound decodes of blocks that might
+         * hold a wait still running at `to`, and only a TRANSITIONS block
+         * can hold one. Charging SAMPLES blocks against it spends the
+         * budget on blocks that were never candidates, fires
+         * right_edge_truncated falsely, and then skips the TRANSITIONS
+         * blocks that do hold straddlers — on a tiered capture, where
+         * SAMPLES blocks dominate the horizon, that defeats #424 entirely
+         * while reporting itself as an honest truncation.
+         *
+         * Unknown type (header unreadable, cand < 0) is NOT treated as
+         * SAMPLES: it falls through to the decode, as every other unknown
+         * on this path does. */
+        if (type_known && sample_blk && first_ts > sample_to_mono)
+            continue;
+
+        /* Only a TRANSITIONS block can hold a straddler, so only one can
+         * spend the straddler budget. */
+        only_straddlers = (cand > 0) && type_known && !sample_blk &&
+                          first_ts > sample_to_mono;
+
+        if (cand == 0) {
+            /* Provably irrelevant. One shape of that is worth reporting:
+             * the block begins past the straddler horizon, so a wait still
+             * running at `to` and closing in there is beyond what this load
+             * was allowed to look at. Say so (#424) instead of returning a
+             * quietly short answer — but only for a block that could have
+             * held a straddler, or a tiered capture would report a
+             * truncation caused entirely by SAMPLES blocks it never needed. */
+            if (ss && ss->enabled && first_ts > straddle_to &&
+                !(type_known && sample_blk))
+                ss->truncated = 1;
+            continue;
+        }
+        if (cand < 0) {
+            /* The header could not be read. That is NOT "no": fall through
+             * and attempt the decode; if that fails too the block is counted
+             * below, so the loss is reported rather than inferred. */
+            if (ss)
+                ss->headers_unreadable++;
+        }
+        if (only_straddlers && ss && ss->enabled &&
+            ss->max_blocks && straddle_blocks >= ss->max_blocks) {
+            /* The decode budget past the right edge is spent. Skip THIS
+             * block and keep scanning — a later block may be squarely
+             * inside the window (that is the break→continue lesson) — and
+             * record that the straddler search was cut. */
+            ss->truncated = 1;
+            continue;
+        }
+        if (only_straddlers)
+            straddle_blocks++;
+
         if (cb) {
             rec = cc->events + cb->start;
             n = cb->count;
@@ -1601,8 +1908,51 @@ static void load_file_range_mono(struct pgwt_server *srv,
 
         for (int i = 0; i < n; i++) {
             uint64_t ts_mono = rec[i].timestamp_ns;
+            int right_open = 0;
             if (ts_mono < from_mono) continue;
-            if (ts_mono > block_to) break;
+            if (ts_mono > block_to) {
+                /* #424: past the record's own right edge. For a SAMPLES
+                 * block, and when the lookahead is off, this is the
+                 * pre-#424 `break` unchanged. Otherwise the record may
+                 * still OVERLAP the window — its interval started at or
+                 * before `to` — so the scan continues through the block
+                 * instead of stopping at the first late close. */
+                /* #429, in miniature: CONTINUE, never break. A block's
+                 * records are in the order the writer received them from the
+                 * ring, and nothing sorts them within the block, so one
+                 * record closing past the edge says nothing about the next.
+                 * The old `break` was the same unsound assumption as the
+                 * block-level one, two scopes down; the array is already in
+                 * memory, so scanning the rest of it is free. */
+                if (sample_block)
+                    continue;
+                /* Stopping HERE is a bound stopping the scan, not the data
+                 * running out: there may be a longer straddler in this block
+                 * or a later one and this load will never see it. Say so.
+                 * (Over-reporting is the safe direction — the flag means
+                 * "may be missing", never "is missing".) */
+                if (!(ss && ss->enabled && ss->lookahead_ns)) {
+                    if (ss && ss->enabled)
+                        ss->truncated = 1;
+                    continue;
+                }
+                if (ts_mono > straddle_to) {
+                    ss->truncated = 1;
+                    continue;
+                }
+                /* A marker/instant (duration 0) starts where it ends, so it
+                 * is outside the window by definition — never a straddler. */
+                if (rec[i].duration_ns == 0)
+                    continue;
+                /* The impossible record pgwt_filter_matches refuses
+                 * (duration past its own timestamp): refuse it here too
+                 * rather than wrap the subtraction. */
+                if (rec[i].duration_ns > ts_mono)
+                    continue;
+                if (ts_mono - rec[i].duration_ns > to_mono)
+                    continue;   /* starts after `to`: no overlap */
+                right_open = 1;
+            }
             if (pid != 0 && rec[i].pid != pid)
                 continue;
             if (markers_only && !PGWT_IS_MARKER(rec[i].old_event))
@@ -1635,6 +1985,13 @@ static void load_file_range_mono(struct pgwt_server *srv,
             if (rec[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
                 (*events)[*total].old_event = rec[i].new_event;
                 (*events)[*total].duration_ns = bi.sample_period_ns;
+            }
+            if (right_open) {
+                /* Derived here, at the ONE place that knows both the record
+                 * and the requested right edge; src/compute.c's selection
+                 * rule reads it. */
+                (*events)[*total].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
+                ss->admitted++;
             }
             (*total)++;
         }
@@ -2580,6 +2937,17 @@ server_load_events_fi_mode(struct pgwt_server *srv,
     int allocation_failed = 0;
     int max_events = load_max_events();
 
+    /* #424: the right-edge lookahead only applies when the CALLER asked for
+     * a bounded right edge. A whole-capture request (to_wall_ns == 0) is
+     * defaulted to the last record in the capture below, past which nothing
+     * can close, so disabling it there is both free and the guarantee that
+     * an unbounded request stays bit-identical to pre-#424. */
+    struct straddle_scan ss = {
+        .enabled      = to_wall_ns != 0,
+        .lookahead_ns = straddle_lookahead_ns(),
+        .max_blocks   = straddle_max_blocks(),
+    };
+
     /* Rescan directory + refresh coverage/clock-domain state. */
     coverage_refresh(srv);
 
@@ -2649,8 +3017,31 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                         ? UINT64_MAX : to_m + fc->max_sample_period_ns;
         }
 
-        if (fc->mono_first > sample_to_m || fc->mono_last < from_m)
+        /* #424: a straddler's CLOSE can sit in the NEXT hourly file, so the
+         * per-file gate has to use the lookahead edge too. Without this the
+         * record-level overlap test below is unreachable for a window that
+         * ends near a rotation boundary — the file holding the close is
+         * skipped before any of its records are examined. */
+        uint64_t straddle_to_m = to_m;
+        if (ss.enabled && ss.lookahead_ns)
+            straddle_to_m = UINT64_MAX - to_m < ss.lookahead_ns
+                          ? UINT64_MAX : to_m + ss.lookahead_ns;
+        uint64_t scan_to_m = straddle_to_m > sample_to_m ? straddle_to_m
+                                                         : sample_to_m;
+
+        if (fc->mono_first > scan_to_m || fc->mono_last < from_m) {
+            /* #424 BYPASS CLOSED: a file skipped here is a file whose
+             * records were never examined, so if it begins past the scan
+             * edge it may hold the close of a wait that was still running
+             * at `to` — and the record-level truncation flag inside
+             * load_file_range_mono can never fire for a file that is never
+             * opened. Flag it HERE or the budget's one honest signal is
+             * silently unreachable for a rotated capture. */
+            if (straddle_file_unseen(ss.enabled, fc->mono_first,
+                                     fc->mono_last, from_m, scan_to_m))
+                ss.truncated = 1;
             continue;
+        }
 
         if (fc->sample_period_ns)
             sample_period_ns = fc->sample_period_ns;
@@ -2664,7 +3055,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
             load_file_range_mono(srv,
                                  cur_cache_enabled() ? &srv->cur : NULL,
                                  fc->path, from_m, to_m, sample_to_m,
-                                 pid, markers_only,
+                                 pid, markers_only, &ss,
                                  &events, &total, &cap, &overloaded,
                                  &allocation_failed);
         } else {
@@ -2675,17 +3066,53 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                  * declined it. */
                 load_file_range_mono(srv, NULL,
                                      fc->path, from_m, to_m, sample_to_m,
-                                     pid, markers_only,
+                                     pid, markers_only, &ss,
                                      &events, &total, &cap, &overloaded,
                                      &allocation_failed);
             } else {
                 for (int i = 0; i < ce->count; i++) {
                     uint64_t ts = ce->events[i].timestamp_ns;
+                    int right_open = 0;
                     if (ts < from_m) continue;
-                    if (ts > sample_to_m) break;
+                    if (ts > scan_to_m) {
+                        /* Whole file decoded in memory: if the scan stops
+                         * here it is the horizon, not the data, that ended.
+                         * Say so (#424) — same rule as the file path. */
+                        if (ss.enabled)
+                            ss.truncated = 1;
+                        break;
+                    }
+                    if ((ce->events[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
+                        ts > sample_to_m)
+                        continue;   /* the sample lookahead is unchanged:
+                                       widening the loop bound above must
+                                       not widen the SAMPLES edge too */
                     if (!(ce->events[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
-                        ts > to_m)
-                        continue;
+                        ts > to_m) {
+                        /* #424 overlap admission, identical predicate to
+                         * load_file_range_mono's. The cached array holds the
+                         * whole file, so no block budget applies here: the
+                         * records are already decoded. */
+                        if (!(ss.enabled && ss.lookahead_ns)) {
+                            /* Same rule as the file path: a bound, not the
+                             * data, ended the straddler search. */
+                            if (ss.enabled)
+                                ss.truncated = 1;
+                            continue;
+                        }
+                        if (ts > straddle_to_m) {
+                            ss.truncated = 1;
+                            continue;
+                        }
+                        const struct pgwt_trace_event *ce_ev = &ce->events[i];
+                        if (ce_ev->duration_ns == 0)
+                            continue;
+                        if (ce_ev->duration_ns > ts)
+                            continue;
+                        if (ts - ce_ev->duration_ns > to_m)
+                            continue;
+                        right_open = 1;
+                    }
                     if (pid != 0 && ce->events[i].pid != pid)
                         continue;
                     if (markers_only && !PGWT_IS_MARKER(ce->events[i].old_event))
@@ -2711,7 +3138,12 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                         events = tmp;
                         cap = next;
                     }
-                    events[total++] = ce->events[i];
+                    events[total] = ce->events[i];
+                    if (right_open) {
+                        events[total].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
+                        ss.admitted++;
+                    }
+                    total++;
                 }
             }
         }
@@ -2856,9 +3288,19 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                  * src/compute.c). #316 is the same rule read from the other
                  * end of the interval: the summary reader keys seconds by
                  * their START, so a second at `to` is out. Making this
-                 * half-open zeroed test_data_aas and test_data_categories. */
-                if (events[i].timestamp_ns < segs[s].from_m ||
-                    events[i].timestamp_ns > segs[s].to_m)
+                 * half-open zeroed test_data_aas and test_data_categories.
+                 *
+                 * #424: the ONE exception is a record the loader admitted by
+                 * OVERLAP and stamped PGWT_EVENT_FLAG_RIGHT_OPEN. Its close
+                 * is past `to` by construction, so this endpoint test would
+                 * throw away exactly the records the admission change exists
+                 * to keep. It is let through here and excluded from every
+                 * per-occurrence statistic in src/compute.c instead (see the
+                 * INTERVAL/INSTANT rule there) — the selection split, not a
+                 * second selection rule. */
+                if (!(events[i].flags & PGWT_EVENT_FLAG_RIGHT_OPEN) &&
+                    (events[i].timestamp_ns < segs[s].from_m ||
+                     events[i].timestamp_ns > segs[s].to_m))
                     continue;
                 /* T2 backstop (study defect 2): an EXIT record whose closing
                  * interval lies OUTSIDE exact coverage in a generation that
@@ -2907,7 +3349,16 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * we==0 intervals against the command gate. One pass feeding every raw
      * estimator (docs/AAS_SEMANTICS_DECISION.md). */
     if (!markers_only &&
-        !pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats)) {
+        !pgwt_tag_events_window(events, total, srv->pid_cats, srv->n_pid_cats,
+                                /* #424: the request's right edge, in the
+                                 * WALL domain the merge above re-anchored
+                                 * the array to. 0 when the caller asked for
+                                 * no right edge, which is the pre-#424 call.
+                                 * Passing it is what lets the in-command
+                                 * majority judge a straddler on its
+                                 * in-window portion instead of on data this
+                                 * window never loaded. */
+                                ss.enabled ? to_wall_ns : 0)) {
         /* #363: the tagged array is the oracle, so a pass that stopped
          * partway is a wrong answer, not a short one. Route it through this
          * loader's EXISTING degradation channel — every raw consumer reads
@@ -2936,7 +3387,14 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         info->sample_period_ns = has_samples ? sample_period_ns : 0;
         info->overloaded = overloaded;
         info->allocation_failed = allocation_failed;
+        info->straddlers_admitted = ss.admitted;
+        info->right_edge_truncated = ss.truncated;
+        info->right_edge_scan_ns = ss.enabled ? ss.lookahead_ns : 0;
+        info->headers_unreadable = ss.headers_unreadable;
     }
+    /* Outside the `if (info)`: a caller that wants no load_info still ran a
+     * load, and the operator asking for stats wants to see it. */
+    straddle_report(&ss);
     if (overloaded)
         fprintf(stderr, "ERROR: window too large: the requested range holds "
                 "more than %d events%s — narrow the time range%s\n",
@@ -3332,6 +3790,38 @@ static void add_fidelity(cJSON *root, const struct pgwt_load_info *info)
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
     if (info->has_samples && info->sample_period_ns)
         cjson_add_uint64(root, "sample_period_ns", info->sample_period_ns);
+    /* #424: the right-edge straddler scan is BUDGETED (there is no header
+     * bound on how long an interval in a later block may be), so it can stop
+     * before it can prove no wait still running at `to` closes later. When
+     * that happens the window's time totals are a LOWER BOUND, and the
+     * caller is told — in the response, not only in a struct nobody reads.
+     * A budgeted scan that stops quietly is the exact defect class this
+     * change exists to remove; shipping the flag only into pgwt_load_info
+     * would have reproduced it one layer up.
+     *
+     * Emitted ONLY when true, so every complete answer is byte-identical to
+     * before and no client has to learn a new field to stay correct. The
+     * horizon that cut the scan is emitted with it: "may be missing a wait
+     * longer than N ns", which is actionable (raise
+     * PGWT_STRADDLE_LOOKAHEAD_NS) in a way a bare boolean is not. */
+    if (info->right_edge_truncated) {
+        cJSON_AddBoolToObject(root, "right_edge_truncated", 1);
+        cjson_add_uint64(root, "right_edge_scan_ns", info->right_edge_scan_ns);
+    }
+}
+
+/* The same note for the handlers that write the fidelity string themselves
+ * instead of calling add_fidelity (they derive `fid` from their own linfo
+ * and add view-specific fields around it). Factored rather than copied so
+ * there is ONE definition of how an incomplete right edge is reported; a
+ * handler that forgets to call it is visible as a missing call, not as a
+ * subtly different field name. */
+static void add_right_edge_note(cJSON *root, const struct pgwt_load_info *info)
+{
+    if (!info || !info->right_edge_truncated)
+        return;
+    cJSON_AddBoolToObject(root, "right_edge_truncated", 1);
+    cjson_add_uint64(root, "right_edge_scan_ns", info->right_edge_scan_ns);
 }
 
 /* Label for a summary-path response: derived from coverage, never
@@ -4309,6 +4799,13 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
         /* Timeline is a visibility view: keep Client:ClientRead bars. */
         if (pgwt_is_hidden_event(ev->old_event))
             continue;
+        /* #424: a bar is one completed interval, and both the bar count and
+         * the TIMELINE_MAX_EVENTS truncation decision are per-occurrence.
+         * A record admitted by overlap that closes after the window would
+         * draw a bar running off the right edge AND be counted again in the
+         * next window, so the timeline keeps its pre-#424 record set. */
+        if (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
+            continue;
         total_matching++;
 
         /* #278/#360: grow BOTH per-PID state and the lookup table. A query
@@ -4400,6 +4897,13 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
             continue;
         /* Timeline is a visibility view: keep Client:ClientRead bars. */
         if (pgwt_is_hidden_event(ev->old_event))
+            continue;
+        /* #424: a bar is one completed interval, and both the bar count and
+         * the TIMELINE_MAX_EVENTS truncation decision are per-occurrence.
+         * A record admitted by overlap that closes after the window would
+         * draw a bar running off the right edge AND be counted again in the
+         * next window, so the timeline keeps its pre-#424 record set. */
+        if (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
             continue;
 
         /* O(1) PID index lookup */
@@ -5478,7 +5982,8 @@ static void emit_transitions_response(struct pgwt_request *req,
                                       const struct pgwt_transitions_result *res,
                                       int use_res,
                                       const struct pgwt_block_agg *win,
-                                      int merged_blocks, int decoded_blocks)
+                                      int merged_blocks, int decoded_blocks,
+                                      const struct pgwt_load_info *linfo)
 {
     struct pgwt_block_agg_pair *pairs = NULL;
     int n_pairs = 0;
@@ -5507,6 +6012,7 @@ static void emit_transitions_response(struct pgwt_request *req,
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, linfo);
     cjson_add_uint64(root, "total", total);
     cJSON_AddNumberToObject(root, "link_count", shown);
     cJSON_AddNumberToObject(root, "total_link_count", total_links);
@@ -5650,7 +6156,8 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
                 return;
             }
             emit_transitions_response(req, ag_fid, max_rows,
-                                      NULL, 0, &win, merged, decoded);
+                                      NULL, 0, &win, merged, decoded,
+                                      &ag_linfo);
             pgwt_block_agg_free(&win);
             return;
         }
@@ -5678,12 +6185,26 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
 
     /* Node totals go through the SAME accumulator the aggregate path uses
      * (pgwt_block_agg_add_events), so the per-node numbers cannot drift
-     * between the two paths. The loader has already applied the window, hence
-     * the open interval here. A refusal means raw cannot answer either — emit
-     * nothing rather than a response with half a graph. */
+     * between the two paths. A refusal means raw cannot answer either — emit
+     * nothing rather than a response with half a graph.
+     *
+     * #424: the bounds used to be `0, UINT64_MAX` ("the loader has already
+     * applied the window"). That stopped being true the moment admission
+     * widened: a record admitted by OVERLAP closes after `to`, and a node
+     * total is a sum of FULL durations keyed by close (block_agg.h C6/C7),
+     * so an open interval here credited the whole 30 s of a straddler to its
+     * node while pgwt_compute_transitions correctly refused its edge —
+     * right edges, wrong node bars, in the same response. Passing the
+     * request's own window re-applies block_agg's inclusive close test,
+     * which is exactly the INSTANT selector; for every record that is not
+     * right-open it is a no-op, because the loader applied the identical
+     * rule. A whole-capture request (0) stays unbounded. */
+    uint64_t node_from = req->from_ns;
+    uint64_t node_to   = req->to_ns ? req->to_ns : UINT64_MAX;
     struct pgwt_block_agg raw_nodes;
     pgwt_block_agg_init_window(&raw_nodes);
-    if (pgwt_block_agg_add_events(&raw_nodes, events, count, 0, UINT64_MAX,
+    if (pgwt_block_agg_add_events(&raw_nodes, events, count,
+                                  node_from, node_to,
                                   NULL) != PGWT_BAGG_OK) {
         pgwt_block_agg_free(&raw_nodes);
         free(events);
@@ -5693,7 +6214,8 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
         return;
     }
 
-    emit_transitions_response(req, fid, max_rows, &res, 1, &raw_nodes, 0, 0);
+    emit_transitions_response(req, fid, max_rows, &res, 1, &raw_nodes, 0, 0,
+                              &linfo);
 
     pgwt_block_agg_free(&raw_nodes);
     free(events);
@@ -5740,6 +6262,7 @@ static void handle_fingerprints(struct pgwt_server *srv, struct pgwt_request *re
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
@@ -5796,6 +6319,7 @@ static void handle_lock_chains(struct pgwt_server *srv, struct pgwt_request *req
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     cJSON *chains = cJSON_AddArrayToObject(root, "chains");
     for (int i = 0; i < res.num_links; i++) {
@@ -5849,6 +6373,7 @@ static void handle_interference(struct pgwt_server *srv, struct pgwt_request *re
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
@@ -5915,6 +6440,7 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
     cjson_add_uint64(root, "bucket_ns", res.bucket_ns);
 
     /* Peak concurrency per bucket */
@@ -6083,6 +6609,7 @@ static void handle_variants(struct pgwt_server *srv, struct pgwt_request *req)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     /* Execution */
     cJSON *exec_obj = cJSON_AddObjectToObject(root, "exec");

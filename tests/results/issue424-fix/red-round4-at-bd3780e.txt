@@ -1,0 +1,148 @@
+RED RUN, ROUND 4 - section 14 (the INSTANT lower bound) against commit bd3780e.
+
+Built from bd3780e's src/compute.c, where the per-occurrence gate was
+!event_right_open(ev, to_ns) -- the UPPER bound only. No shim needed.
+
+4 of 59 fail, and they are D's three Linux failures reproduced in this suite:
+  14a  record closing before `from`  -> count 1, expected 0   (= clip :887)
+  14b  swept by two adjacent windows -> count 2, expected 1   (= clip :805)
+  14c  zero-width window             -> count 1, expected 0   (= clip :854)
+  14f  the same at the second gated site, top_queries
+
+14d and 14e pass on BOTH trees on purpose: inclusivity at `to` and at
+`from` must SURVIVE the fix. Half-open selection is #427, deferred, and
+must not arrive as a side effect of adding a lower bound.
+
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_CWvQVU -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~4096 events
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_CWvQVU -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~4096 events
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_CWvQVU -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~4096 events
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_CWvQVU -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~4096 events
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_ns_142ee6 -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~4096 events
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_CWvQVU -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~4096 events
+=== test_window_overlap (#424) ===
+--- 1. a wait open at the right edge is ADMITTED (overlap) ---
+  ok: the window loaded (overloaded=0 alloc_failed=0)
+  ok: exactly one record was admitted by OVERLAP (got 1) -- before #424 this was 0 and the whole window's Lock time was invisible
+  ok: exactly one loaded record carries PGWT_EVENT_FLAG_RIGHT_OPEN (got 1) -- the bit the selection rule reads
+  ok: the lookahead reached the close, so the answer is NOT labelled truncated
+--- 2. INTERVAL-selected: the in-window time is contributed ---
+  ok: Lock appears in Top Events for a window whose only Lock time belongs to a still-running wait
+  ok: Lock total_ms = 11000.0, expected 11000.0 (10 s of the [5.5, 35.5] straddler clipped to [10, 20], plus the 1 s wait that closed at 15.5)
+--- 3. INSTANT-selected: count/latency/transitions exclude it ---
+  ok: the Lock row exists (its time is in it)
+  ok: Lock count = 1, expected 1 -- only the wait that CLOSED inside the window is an observation here; admitting the straddler as a second one is the overcount this gate exists to refuse
+  ok: Lock exact_count = 1, expected 1 (the latency population is the closed observation only)
+  ok: Lock max = 1000.0 ms, expected 1000.0 -- the 30 s straddler must not set a max no completed wait had in this window
+  ok: Lock->IO transitions = 1, expected 1 -- a transition IS a close; the straddler has not transitioned yet
+--- 4. split windows: time is additive, the count lands once ---
+  ok: every sub-window has a Lock row (whole=1 a=1 b=1 c=1)
+  ok: Lock time is additive across the split: 11000.0 ms (10-20) + 10000.0 (20-30) + 5500.0 (30-40) = 26500.0 vs 26500.0 for 10-40
+  ok: and the whole-window figure is the arithmetic truth, 26500.0 ms (25.5 s of the straddler + 1 s closed), not 26500.0
+  ok: 2 Lock records produce 2 counts across the three windows (got 2: 1 + 0 + 1) -- 3 would be the double-count an admission-only change creates
+  ok: the straddler's count lands in [30,40] where it CLOSES (1), not in [20,30] which it merely crosses (0)
+  ok: and the transition matrix counts the same two closes once each (2) -- it is keyed by close, so a straddler counted here would be counted twice
+--- 5. a whole-capture request stamps no right-open record ---
+  ok: to_ns == 0 admits no straddler and flags nothing (0/0): there is no right edge to be open at
+  ok: and it is not labelled truncated -- nothing was cut
+--- 6. bypass suite: a lookahead that cannot see must REFUSE ---
+  ok: 6a. horizon 0 admits no straddler (0) -- the pre-#424 selection, reproduced on demand
+  ok: 6a. and SAYS SO: right_edge_truncated=1. A disabled lookahead that reported a clean answer would be the silent undercount #424 is about
+  ok: 6b. a 1 s horizon cannot reach a close 15.5 s away: admitted=0 truncated=1 -- partial, and labelled partial
+  ok: 6c. a 1-block budget either still reaches the close (admitted=1) or reports the cut (truncated=0) -- never a quiet partial
+  ok: 6d. a window with no straddler admits none (0) and is not truncated (0) -- section 1 cannot be satisfied by absence
+  ok: 6d. and the ordinary closed wait is still there, 1000.0 ms (got 1000.0, present=1) -- the fixture differs by the straddler alone
+--- 7. compute re-derives openness, so a missing bit cannot overcount ---
+  ok: count = 1 with the flag absent -- event_right_open() also re-derives `timestamp_ns > to_ns`, so the rule does not depend on one producer remembering to stamp a bit
+  ok: and its time is still the clipped 11000.0 ms (got 11000.0)
+--- 8. a budget-limited scan is reported in the RESPONSE ---
+=== test_window_overlap (#424) ===
+--- 1. a wait open at the right edge is ADMITTED (overlap) ---
+  ok: the window loaded (overloaded=0 alloc_failed=0)
+  ok: exactly one record was admitted by OVERLAP (got 1) -- before #424 this was 0 and the whole window's Lock time was invisible
+  ok: exactly one loaded record carries PGWT_EVENT_FLAG_RIGHT_OPEN (got 1) -- the bit the selection rule reads
+  ok: the lookahead reached the close, so the answer is NOT labelled truncated
+--- 2. INTERVAL-selected: the in-window time is contributed ---
+  ok: Lock appears in Top Events for a window whose only Lock time belongs to a still-running wait
+  ok: Lock total_ms = 11000.0, expected 11000.0 (10 s of the [5.5, 35.5] straddler clipped to [10, 20], plus the 1 s wait that closed at 15.5)
+--- 3. INSTANT-selected: count/latency/transitions exclude it ---
+  ok: the Lock row exists (its time is in it)
+  ok: Lock count = 1, expected 1 -- only the wait that CLOSED inside the window is an observation here; admitting the straddler as a second one is the overcount this gate exists to refuse
+  ok: Lock exact_count = 1, expected 1 (the latency population is the closed observation only)
+  ok: Lock max = 1000.0 ms, expected 1000.0 -- the 30 s straddler must not set a max no completed wait had in this window
+  ok: Lock->IO transitions = 1, expected 1 -- a transition IS a close; the straddler has not transitioned yet
+--- 4. split windows: time is additive, the count lands once ---
+  ok: every sub-window has a Lock row (whole=1 a=1 b=1 c=1)
+  ok: Lock time is additive across the split: 11000.0 ms (10-20) + 10000.0 (20-30) + 5500.0 (30-40) = 26500.0 vs 26500.0 for 10-40
+  ok: and the whole-window figure is the arithmetic truth, 26500.0 ms (25.5 s of the straddler + 1 s closed), not 26500.0
+  ok: 2 Lock records produce 2 counts across the three windows (got 2: 1 + 0 + 1) -- 3 would be the double-count an admission-only change creates
+  ok: the straddler's count lands in [30,40] where it CLOSES (1), not in [20,30] which it merely crosses (0)
+  ok: and the transition matrix counts the same two closes once each (2) -- it is keyed by close, so a straddler counted here would be counted twice
+--- 5. a whole-capture request stamps no right-open record ---
+  ok: to_ns == 0 admits no straddler and flags nothing (0/0): there is no right edge to be open at
+  ok: and it is not labelled truncated -- nothing was cut
+--- 6. bypass suite: a lookahead that cannot see must REFUSE ---
+  ok: 6a. horizon 0 admits no straddler (0) -- the pre-#424 selection, reproduced on demand
+  ok: 6a. and SAYS SO: right_edge_truncated=1. A disabled lookahead that reported a clean answer would be the silent undercount #424 is about
+  ok: 6b. a 1 s horizon cannot reach a close 15.5 s away: admitted=0 truncated=1 -- partial, and labelled partial
+  ok: 6c. a 1-block budget either still reaches the close (admitted=1) or reports the cut (truncated=0) -- never a quiet partial
+  ok: 6d. a window with no straddler admits none (0) and is not truncated (0) -- section 1 cannot be satisfied by absence
+  ok: 6d. and the ordinary closed wait is still there, 1000.0 ms (got 1000.0, present=1) -- the fixture differs by the straddler alone
+--- 7. compute re-derives openness, so a missing bit cannot overcount ---
+  ok: count = 1 with the flag absent -- event_right_open() also re-derives `timestamp_ns > to_ns`, so the rule does not depend on one producer remembering to stamp a bit
+  ok: and its time is still the clipped 11000.0 ms (got 11000.0)
+--- 8. a budget-limited scan is reported in the RESPONSE ---
+  ok: 8a. the response carries right_edge_truncated=true (1) -- the flag reaches the CALLER, not just pgwt_load_info
+  ok: 8b. and right_edge_scan_ns, so "incomplete" arrives with the bound that made it incomplete (1)
+  ok: 8c. a COMPLETE answer omits the field entirely (1) -- otherwise the signal is noise and clients learn to ignore it
+--- 8d. a file skipped past the horizon must REFUSE ---
+  ok: 8d. the next hourly file starts 2 h past a 320 s scan edge: UNSEEN, so the load is marked truncated -- the one case where the record-level flag is structurally unreachable
+  ok: 8d. a file the scan actually covers is not flagged -- otherwise every ordinary window would claim to be incomplete and the signal would be noise
+  ok: 8d. a file entirely BEFORE the window is not flagged: nothing that closed before `from` can overlap it
+  ok: 8d. and an unbounded request flags nothing -- there is no right edge for a wait to be open at
+--- 9. concurrent occupancy counts a session still waiting ---
+  ok: a session that is STILL waiting at `to` occupies the buckets it covers: 10 of 10 buckets show a Lock waiter. Selecting occupancy by the wait's CLOSE dropped exactly the longest waits from the peak -- the opposite of what the burst view is for
+--- 10. node bars exclude the straddler, as its edges do ---
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_cmd_PWL27N -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~4096 events
+  ok: handle_transitions produced parseable JSON
+  ok: the Lock node bar is 1000.0 ms, expected 1000.0 -- node totals are FULL durations keyed by close (block_agg C6/C7), so feeding the accumulator unbounded credited the straddler's whole 30 s to a node whose EDGE the same response correctly refused
+--- 11. a straddler's in-command majority is judged on the in-window portion ---
+  ok: 11a. the on-CPU stretch is admitted by overlap (1) -- without that there is no majority to decide and this section is vacuous
+  ok: 11b. the straddler keeps its CPU label (kept=1 relabelled=0): 1 s of its in-window 2 s was in-command. The full-duration rule saw 1 s of 30 s, relabelled it PGWT_WEI_NONCMD_CPU and took its time OUT of DB Time -- a wrong headline, not a wrong tag
+  ok: 11c. and DB Time for the window is 2002.0 ms, i.e. it contains the straddler's clipped 2 s. The relabel would have left ~0
+--- 12. a row with time and no completed occurrence is shown ---
+  ok: 12a. a row with neither time nor occurrences is still suppressed -- the fix is 'empty in BOTH senses', not 'show everything'
+  ok: 12a. a row with 5 s of right-open time and count 0 is SHOWN -- its milliseconds are already in DB Time, so suppressing it makes the breakdown unable to explain the total
+  ok: 12a. and a row with occurrences but no time is shown too (the zero-duration transition case that #347 was about)
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_il_C9pilL -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~24576 events
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_il_C9pilL -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~24576 events
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_wovl_il_C9pilL -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~24576 events
+  ok: 12b. handle_top_events produced parseable JSON
+  ok: 12b. the served response HAS a Lock row for a window whose only Lock time is a wait still running at both edges -- without it the UI shows DB Time it cannot break down
+  ok: 12b. and its count is 0, PRESENT not omitted (0) -- the occurrence belongs to the window where it closes
+  ok: 12b. and its time is the clipped 10000.0 ms (got 10000.0)
+--- 13. the block lookup must not skip a block (#429) ---
+  ok: 13a. the fixture's block index is NOT ascending: 6 blocks, first inversion at block 2. Commit order and timestamp order genuinely disagree -- if the writer is ever changed to sort, THIS check goes red rather than the gate going quiet
+  ok: 13a. and the ordinary fixture IS ascending (inversion=-1), so the property above is a property of the fixture, not of the reader
+  ok: 13b. a window over the sampled region returns its ticks (10 of 10 records) -- the binary search landed past this block and the old scan answered the window with NOTHING
+  ok: 13b. and it is not flagged truncated (0) -- which on the old scan was a LIE about an empty window, and here is the truth about a complete one
+  ok: 13c. the straddler in a late-committed block IS found (admitted=1) even though a far-future SAMPLES block sits between it and the window -- a block that cannot matter says nothing about the blocks after it
+  ok: 13d. with a 1 ms horizon the straddler is out of reach (admitted=0) and the load SAYS SO (truncated=1) -- on the old scan this came back short with 0 flags, which is the false negative #429 is about
+--- 14. per-occurrence selection is [from, to], both ends ---
+  FAIL(line 1131): 14a. a record closing 5 s BEFORE `from` is not an occurrence of this window (count=1) -- the upper-bound-only gate counted it
+  FAIL(line 1151): 14b. one record swept by two adjacent windows is counted ONCE (got 2) -- 2 is the same defect seen as a double count
+  FAIL(line 1160): 14c. a zero-width window at 20 s holds no occurrence of a record that closed at 15 s (count=1)
+  ok: 14d. a record closing exactly AT `to` is still one occurrence (count=1) -- adding the lower bound must not quietly make selection half-open at the end (that is #427, deferred)
+  ok: 14e. a record closing exactly AT `from` is one occurrence (count=1) -- the new bound is inclusive, not an off-by-one that drops the boundary record
+  FAIL(line 1198): 14f. top_queries applies the same lower bound (count=1 for a query whose only record closed before `from`)
+
+59 checks, 4 failed

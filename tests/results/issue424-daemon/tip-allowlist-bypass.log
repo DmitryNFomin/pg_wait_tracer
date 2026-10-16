@@ -1,0 +1,36 @@
+=== BASELINE (tip tree, entry present, Makefile intact) ===
+      consuming map_reader.o already links — verified against tests/Makefile)
+    OK: map_reader.c gained 1 declared dependency/ies, each
+      already satisfied in every target that consumes map_reader.o
+    exit=0
+=== (a) the allowlist entry removed ===
+      src/open_snapshot.c), or — if the providing object is already
+      linked by every such target — declare it in scripts/link-closure-allow.txt, where the
+      claim is checked against tests/Makefile.
+    exit=1
+=== (b) the entry names a provider those targets do NOT link ===
+    FAIL: _pgwt_summary_note_open_ex is declared in scripts/link-closure-allow.txt as provided by exact_probe.o,
+      but these targets consume map_reader.o WITHOUT linking it: test_event_reader test_concurrent_rw
+      The declaration is wrong, or those targets need the object.
+    exit=1
+=== (c) a target stops linking summary_writer.o (entry still there) ===
+    FAIL: _pgwt_summary_note_open_ex is declared in scripts/link-closure-allow.txt as provided by summary_writer.o,
+      but these targets consume map_reader.o WITHOUT linking it: test_event_reader test_concurrent_rw
+      The declaration is wrong, or those targets need the object.
+    exit=1
+=== (d) the allowlist file does not exist ===
+      src/open_snapshot.c), or — if the providing object is already
+      linked by every such target — declare it in scripts/nonexistent.txt, where the
+      claim is checked against tests/Makefile.
+    exit=1
+=== (e) tests/Makefile missing entirely ===
+    CANNOT VERIFY: tests/Makefile not found, so an allowlist entry cannot be
+      checked against the targets that consume map_reader.o
+    exit=2
+=== RESTORED ===
+      consuming map_reader.o already links — verified against tests/Makefile)
+    OK: map_reader.c gained 1 declared dependency/ies, each
+      already satisfied in every target that consumes map_reader.o
+    exit=0
+=== (f) the -DPGWT_SERVER targets must NOT be implicated ===
+    OK: no -DPGWT_SERVER consumer implicated

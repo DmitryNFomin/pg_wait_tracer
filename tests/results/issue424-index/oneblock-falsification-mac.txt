@@ -1,0 +1,27 @@
+=== test_interval_index: the concurrency interval index (Phase 4) ===
+index version under test: 2
+MODE: oneblock — DELIBERATE FALSIFICATION. Every fixture is fed as a SINGLE block, so the boundary ledger MUST go red. A green run here means the ledger cannot see.
+10 fixtures
+--- sweep: every block cut x every window x two resolutions ---
+  PASS: no disagreement in 8940 comparisons
+--- non-vacuity ledger: the interesting cases really ran ---
+  PASS: 842 block-cut sets were built
+  PASS: 8940 (cut, window, resolution) answers compared
+  PASS: 53200 intervals were actually compared (not 0 == 0)
+  FAIL(1671): 0 indexes had MORE THAN ONE block — a one-block suite never tests the boundary rule
+  FAIL(1674): 0 intervals straddled an INTERNAL block boundary — stored in a later block, started before it opened (the clipped-start detector)
+  PASS: 545 intervals started before the indexed coverage itself
+  PASS: 7670 intervals were still OPEN at `to`, admitted by overlap and CLIPPED there — version 2's new selection, exercised
+  PASS: 8 intervals were examined and rejected for STARTING after `to` — overlap admission has a far side, and a rule that only ever admits is not a rule
+  PASS: 1618 chunk scans stopped on the `to + max_duration` bound — the one place a row is skipped without its start_ns being read
+  PASS: 26028 intervals were excluded for ending before `from`
+  FAIL(1689): 0 answers had the SAME pid selected from two different blocks inside one bucket
+  PASS: 6512 answers had a bucket peak above 1
+  PASS: 7320 burst onsets were detected across the sweep
+  FAIL(1694): 0 answers contained a burst whose members live in TWO OR MORE blocks
+  PASS: 1164 windows selected nothing and REFUSED
+  FAIL(1698): the prefilter skipped a block 0 times across the sweep
+  PASS: 64 chunk scans happened ONLY because the high-side prefilter tests min_start_ns instead of min_end_ns — the named trap, reached
+
+18 checks, 5 failed
+FAILED

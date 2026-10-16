@@ -1,0 +1,2 @@
+  TRACKED SOURCE (correctly not ignored): tests/Makefile
+ignored=63 tracked=1 unignored=0

@@ -198,6 +198,21 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
         }
     }
 
+    /* #429: does block_index[] actually ascend? It is built in COMMIT order
+     * (by the writer's footer, by the meta-file read, or by the fallback
+     * sequential scan — all three append in file order), and nothing makes
+     * that timestamp order. Check it once here instead of assuming it in
+     * every binary search; see the field's comment in event_reader.h for the
+     * lagging-drain case that breaks it in a real `--mode full` capture. */
+    r->block_index_sorted = 1;
+    for (int i = 1; i < r->num_blocks; i++) {
+        if (r->block_index[i].timestamp_ns <
+            r->block_index[i - 1].timestamp_ns) {
+            r->block_index_sorted = 0;
+            break;
+        }
+    }
+
     /* Allocate scratch buffers */
     r->decode_buf_size = PGWT_BLOCK_EVENTS * 36 + PGWT_BLOCK_EVENTS * 10;
     r->decode_buf = malloc(r->decode_buf_size);
@@ -397,6 +412,23 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
 
 int pgwt_reader_find_block(const struct pgwt_event_reader *r, uint64_t mono_ns)
 {
+    /* #429. A binary search needs a sorted array, and block_index[] is in
+     * COMMIT order. On a lagging `--mode full` drain the two disagree, and
+     * then this search does not return a slightly wrong block — it returns
+     * an ARBITRARY one. Measured on a trace written through the public
+     * writer API with first timestamps [1000 ms, 6000 ms, 1100 ms]: the
+     * search for 6000 ms returns block 2 (TRANSITIONS, 1100-1119 ms) and
+     * skips block 1 (SAMPLES, 6000-7100 ms) — the only block covering that
+     * window. Every record in the window is lost and the scan reports
+     * itself complete.
+     *
+     * So when the precondition does not hold, refuse to narrow: 0 says
+     * "start at the beginning", which is slower and correct, instead of a
+     * confident wrong answer. A caller that wants the fast path can test
+     * r->block_index_sorted itself. */
+    if (!r->block_index_sorted)
+        return 0;
+
     int lo = 0, hi = r->num_blocks;
     while (lo < hi) {
         int mid = (lo + hi) / 2;
@@ -406,6 +438,37 @@ int pgwt_reader_find_block(const struct pgwt_event_reader *r, uint64_t mono_ns)
             hi = mid;
     }
     return (lo > 0) ? lo - 1 : 0;
+}
+
+int pgwt_reader_block_candidate(struct pgwt_event_reader *r, int bi,
+                                uint64_t from_mono_ns, uint64_t to_mono_ns,
+                                struct pgwt_block_info *info, int *right_open)
+{
+    struct pgwt_block_info hdr;
+    if (right_open) *right_open = 0;
+    if (pgwt_reader_block_info(r, bi, &hdr) != 0)
+        return -1;
+    if (info) *info = hdr;
+
+    /* A record is written in the block it CLOSES in, so a block whose last
+     * timestamp is before `from` holds nothing that reaches the window —
+     * whatever its first timestamp or its position in the index says. This
+     * is the only exclusion that is sound under commit order. */
+    if (from_mono_ns != 0 && hdr.last_timestamp_ns < from_mono_ns)
+        return 0;
+
+    if (to_mono_ns != 0 && hdr.first_timestamp_ns > to_mono_ns) {
+        /* Everything in this block closes after `to`. An interval record can
+         * still have STARTED inside the window (a wait still running at
+         * `to`), so the block is a straddler candidate and the caller's
+         * budget decides whether to pay for it. A SAMPLES block cannot: its
+         * records are point observations, so a sample past `to` is simply
+         * outside the window. */
+        if (hdr.block_type == PGWT_BLOCK_SAMPLES)
+            return 0;
+        if (right_open) *right_open = 1;
+    }
+    return 1;
 }
 
 uint64_t pgwt_reader_wall_to_mono(const struct pgwt_event_reader *r, uint64_t wall_ns)
@@ -540,6 +603,37 @@ done_relative:
 /* ── Replay accumulation (fidelity-aware — T1/FID-5) ────── */
 
 #ifndef PGWT_SERVER
+
+/* Window clipping for replay — the SAME rule as the server's raw path
+ * (event_window_ns, src/compute.c).
+ *
+ * A trace record's timestamp_ns is when the wait ENDED and duration_ns is how
+ * long it ran, so the record covers the interval [ts - dur, ts]. A record
+ * that straddles a window edge contributes only the part inside the window.
+ *
+ * Deliberately a verbatim copy of compute.c's helper rather than a shared
+ * symbol: compute.c belongs to the pgwt-server build and this replay half is
+ * #ifdef'd out of it, so no translation unit can hold both. Keep the two in
+ * step — tests/test_replay_window.c pins this one on the same straddler cases
+ * tests/test_window_clip.c pins the other.
+ *
+ * Returns 0 for a record wholly outside the window (never a wrapped uint64
+ * difference), and 0 for the impossible record (duration longer than its own
+ * absolute monotonic timestamp) that compute.c refuses the same way.
+ * from_ns == 0 / to_ns == 0 mean "unbounded on that side", so a whole-capture
+ * replay still credits exactly duration_ns. */
+static inline uint64_t replay_window_ns(const struct pgwt_trace_event *ev,
+                                        uint64_t from_ns, uint64_t to_ns)
+{
+    if (ev->duration_ns > ev->timestamp_ns)
+        return 0;
+    uint64_t start = ev->timestamp_ns - ev->duration_ns;
+    uint64_t end   = ev->timestamp_ns;
+    if (from_ns != 0 && start < from_ns) start = from_ns;
+    if (to_ns   != 0 && end   > to_ns)   end   = to_ns;
+    return end > start ? end - start : 0;
+}
+
 void pgwt_replay_events(struct pgwt_accumulator *acc,
                          const struct pgwt_trace_event *events, int count,
                          uint64_t from_mono_ns, uint64_t to_mono_ns,
@@ -554,39 +648,83 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *evt = &events[i];
-
-        if (from_mono_ns > 0 && evt->timestamp_ns < from_mono_ns)
-            continue;
-        if (to_mono_ns > 0 && evt->timestamp_ns > to_mono_ns)
-            break;  /* events are sorted by timestamp */
+        int sampled = is_samples || (evt->flags & PGWT_EVENT_FLAG_SAMPLE);
 
         uint32_t we;
-        uint64_t dur;
+        uint64_t add_ns;   /* time credited to THIS window (clipped) */
+        uint64_t occ_ns;   /* this occurrence's whole duration */
         int exact;
+        int closed_in_window;
 
-        if (is_samples || (evt->flags & PGWT_EVENT_FLAG_SAMPLE)) {
-            /* A sample is a point observation of the CURRENT wait
-             * (new_event); it is worth one sample period of estimated
-             * time, and carries no real duration. */
-            we = evt->new_event;
-            dur = period;
-            exact = 0;
-        } else {
-            we = evt->old_event;
-            dur = evt->duration_ns;
-            exact = 1;
-
-            /* Markers (exec/plan/escalation) are structural records —
-             * never wait data (FID-4/5). */
-            if (PGWT_IS_MARKER(we)) {
-                if (st) st->markers_skipped++;
+        if (sampled) {
+            /* A sample is a POINT observation of the CURRENT wait
+             * (new_event): worth one sample period of estimated time, no real
+             * duration, and no interval to clip. So it keeps its own
+             * timestamp-selected rule — the overlap rule below is for
+             * intervals only. */
+            if (from_mono_ns > 0 && evt->timestamp_ns < from_mono_ns)
+                continue;
+            if (to_mono_ns > 0 && evt->timestamp_ns > to_mono_ns) {
+                if (is_samples)
+                    break;  /* a SAMPLES block is sorted and holds only points */
                 continue;
             }
+            we = evt->new_event;
+            occ_ns = add_ns = period;
+            exact = 0;
+            closed_in_window = 1;
+        } else {
+            /* INTERVAL record (#424). Admission is by OVERLAP
+             * (close >= from && start <= to) and the contribution is CLIPPED
+             * to the window. The old rule selected on the close timestamp
+             * alone and added duration_ns whole, which was wrong twice:
+             *   - a LEFT straddler (started before `from`) over-reported by
+             *     everything that ran before the window opened;
+             *   - a RIGHT straddler (still running at `to`) was dropped
+             *     entirely, contributing 0 of its in-window part.
+             *
+             * There is no `break` on ts > to any more: the records past the
+             * right edge are exactly where the right straddlers are. The
+             * block loop (pgwt_replay_file) has to scan past `to` for the
+             * same reason — fixing only this loop leaves them unreachable.
+             *
+             * What this canNOT fix, and no admission rule can: a wait that is
+             * still open has no closing record in the trace at all, so a
+             * window at the very end of a still-growing capture still
+             * under-reports it until the close is written. That needs
+             * open-interval markers in the trace format. */
+            add_ns = replay_window_ns(evt, from_mono_ns, to_mono_ns);
+            closed_in_window =
+                (from_mono_ns == 0 || evt->timestamp_ns >= from_mono_ns) &&
+                (to_mono_ns   == 0 || evt->timestamp_ns <= to_mono_ns);
+            if (add_ns == 0 && !closed_in_window)
+                continue;   /* no overlap with the window at all */
+
+            we = evt->old_event;
+            occ_ns = evt->duration_ns;
+
+            /* Markers (exec/plan/escalation) are structural records —
+             * never wait data (FID-4/5). Counted as skipped only when they
+             * fall in the window, exactly as before this change: a marker
+             * carries no duration, so overlap and close-in-window agree. */
+            if (PGWT_IS_MARKER(we)) {
+                if (st && closed_in_window) st->markers_skipped++;
+                continue;
+            }
+            exact = 1;
         }
 
+        /* INSTANT vs INTERVAL, the product-wide rule (src/summary_writer.h's
+         * v8 note, src/compute.c's raw half): TIME is overlap-selected and
+         * clipped; per-OCCURRENCE statistics (count, histogram, min/max) are
+         * selected by the record's own close timestamp and use the whole
+         * duration. Widening admission without this split would turn a known
+         * undercount of time into a new OVERCOUNT of counts and latencies —
+         * two adjacent windows would each count the same close. */
         if (st) {
-            if (exact) st->transitions++;
-            else       st->samples++;
+            if (!exact)                 st->samples++;
+            else if (closed_in_window)  st->transitions++;
+            else                        st->straddlers_admitted++;
         }
 
         /* Per-PID accumulation */
@@ -594,54 +732,139 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
         if (pa) {
             struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, we);
             if (es) {
-                es->count++;
-                es->total_ns += dur;
-                if (exact) {
-                    if (dur < es->min_ns) es->min_ns = dur;
-                    if (dur > es->max_ns) es->max_ns = dur;
-                    uint32_t bucket = pgwt_duration_to_bucket(dur);
+                if (closed_in_window) es->count++;
+                es->total_ns += add_ns;
+                if (exact && closed_in_window) {
+                    if (occ_ns < es->min_ns) es->min_ns = occ_ns;
+                    if (occ_ns > es->max_ns) es->max_ns = occ_ns;
+                    uint32_t bucket = pgwt_duration_to_bucket(occ_ns);
                     if (bucket < HISTOGRAM_BUCKETS)
                         es->histogram[bucket]++;
                 }
             }
             if (we == 0)
-                pa->cpu_time_ns += dur;
+                pa->cpu_time_ns += add_ns;
             else if (!pgwt_is_idle_event(we))
-                pa->wait_time_ns += dur;
+                pa->wait_time_ns += add_ns;
             if (!pgwt_is_idle_event(we))
-                pa->db_time_ns += dur;
+                pa->db_time_ns += add_ns;
         }
 
         /* System-wide accumulation */
         struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, we);
         if (se) {
-            se->count++;
-            se->total_ns += dur;
-            if (exact) {
-                if (dur < se->min_ns) se->min_ns = dur;
-                if (dur > se->max_ns) se->max_ns = dur;
-                uint32_t bucket = pgwt_duration_to_bucket(dur);
+            if (closed_in_window) se->count++;
+            se->total_ns += add_ns;
+            if (exact && closed_in_window) {
+                if (occ_ns < se->min_ns) se->min_ns = occ_ns;
+                if (occ_ns > se->max_ns) se->max_ns = occ_ns;
+                uint32_t bucket = pgwt_duration_to_bucket(occ_ns);
                 if (bucket < HISTOGRAM_BUCKETS)
                     se->histogram[bucket]++;
             }
         }
 
         /* Time model */
-        pgwt_update_time_model(&acc->tm, we, dur);
+        pgwt_update_time_model(&acc->tm, we, add_ns);
 
         /* Query events */
         if (evt->query_id != 0) {
             struct pgwt_query_event_stats *qe =
                 pgwt_get_or_create_query_event(acc, evt->query_id, we);
             if (qe) {
-                qe->count++;
-                qe->total_ns += dur;
-                if (exact) {
-                    if (dur < qe->min_ns) qe->min_ns = dur;
-                    if (dur > qe->max_ns) qe->max_ns = dur;
+                if (closed_in_window) qe->count++;
+                qe->total_ns += add_ns;
+                if (exact && closed_in_window) {
+                    if (occ_ns < qe->min_ns) qe->min_ns = occ_ns;
+                    if (occ_ns > qe->max_ns) qe->max_ns = occ_ns;
                 }
             }
         }
     }
+}
+
+int pgwt_replay_file(struct pgwt_event_reader *r,
+                     struct pgwt_accumulator *acc,
+                     uint64_t from_mono_ns, uint64_t to_mono_ns,
+                     struct pgwt_trace_event *buf, int max_events,
+                     int *lookahead_budget,
+                     struct pgwt_replay_stats *st,
+                     uint64_t *out_decoded)
+{
+    if (out_decoded) *out_decoded = 0;
+    if (!r || !acc || !buf || max_events <= 0)
+        return -1;
+
+    uint64_t decoded = 0;
+
+    /* EVERY block is examined, by its HEADER (#424 both edges, #429).
+     *
+     * The pattern this replaces — binary-search block_index[] for a start,
+     * iterate forward, stop at the first block past `to` — is wrong three
+     * times over, and each way is silent:
+     *   - block_index[] is in COMMIT order, so the binary search has no
+     *     precondition and returns an arbitrary index on a lagging
+     *     `--mode full` drain (#429);
+     *   - one start index assumes only the immediately preceding block can
+     *     reach into the window, but blocks OVERLAP in time, so a block two
+     *     or more positions back can still be inside it (#429; this cost
+     *     400 ms of 1200 ms of sampled time in one window of the test);
+     *   - stopping at `to` discards the straddlers still running there
+     *     (#424).
+     * A header read costs no decompression. Measured warm over a
+     * 1024-block trace (tests/results/issue424-replay/bench-lookahead.log):
+     * 0.12 us per block to ask, against 58 us to decode one. So the sound
+     * scan is simply to ask every block whether it can matter, and the
+     * binary search was never buying much to begin with.
+     * There is NO `break` in this loop on purpose:
+     * under commit order, a block that cannot matter says nothing about the
+     * blocks after it. */
+    for (int bi = 0; bi < r->num_blocks; bi++) {
+        struct pgwt_block_info hdr;
+        int right_open = 0;
+        int cand = pgwt_reader_block_candidate(r, bi, from_mono_ns,
+                                               to_mono_ns, &hdr, &right_open);
+        if (cand == 0)
+            continue;   /* provably holds nothing for this window */
+        /* cand < 0: the header could not be read. NOT treated as "nothing
+         * here" — fall through to the decode and let the record rule
+         * decide, so a bad header can only cost work, never silently remove
+         * time. If the decode fails too it is counted below. */
+
+        if (cand > 0 && right_open) {
+            /* Still-running straddlers only (#424). Nothing in the trace
+             * bounds how far right the close can be — an io_worker can hold
+             * one wait for a whole capture, and the index carries timestamps
+             * but no maximum duration — so the scan past `to` is budgeted.
+             * When the budget is gone the answer is MARKED
+             * (right_edge_truncated) and the scan CONTINUES: skipping this
+             * block must not skip the in-window blocks that follow it in
+             * commit order. */
+            if (lookahead_budget) {
+                if (*lookahead_budget <= 0) {
+                    if (st) st->right_edge_truncated = 1;
+                    continue;
+                }
+                (*lookahead_budget)--;
+            }
+        }
+
+        struct pgwt_block_info binfo;
+        int n = pgwt_reader_decode_block_info(r, bi, buf, max_events, &binfo);
+        if (n <= 0) {
+            /* A block that cannot be decoded is time this window will never
+             * see. Skipping it quietly (what the old loop did) makes a
+             * truncated or corrupt file look like a complete, smaller
+             * answer; count it so the caller can say so. */
+            if (n < 0 && st) st->blocks_unreadable++;
+            continue;
+        }
+
+        pgwt_replay_events(acc, buf, n, from_mono_ns, to_mono_ns, &binfo, st);
+        decoded += (uint64_t)n;
+    }
+
+    if (out_decoded) *out_decoded = decoded;
+    return 0;
 }
 #endif /* !PGWT_SERVER */

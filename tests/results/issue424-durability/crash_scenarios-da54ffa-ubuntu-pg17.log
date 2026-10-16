@@ -1,0 +1,67 @@
+#424 crash scenarios — daemon=/root/pgwt-check/agent_424-durability/pg_wait_tracer pm_pid=3210
+commit=da54ffaedfed282876518ffa133d43c16f0a3759+doc
+kernel=6.8.0-139-generic host=pgwt-dev-1792091224-17625
+
+[open_wait] capture → workload → SIGKILL → restart
+  leftover: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_wait/current.trace closure=in_progress may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [open_wait] the killed daemon's live file is unfinalized (in_progress)
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_wait/2026-10-15_19.trace.lz4 closure=unclean may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [open_wait] the recovered archive is labelled unclean (unclean)
+  PASS: [open_wait] a reader is told open intervals may be missing (1)
+
+[open_cpu] capture → workload → SIGKILL → restart
+  leftover: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_cpu/current.trace closure=in_progress may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [open_cpu] the killed daemon's live file is unfinalized (in_progress)
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/open_cpu/2026-10-15_19.trace.lz4 closure=unclean may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [open_cpu] the recovered archive is labelled unclean (unclean)
+  PASS: [open_cpu] a reader is told open intervals may be missing (1)
+
+[publication] capture → workload → SIGKILL → restart
+  leftover: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/publication/current.trace closure=in_progress may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [publication] the killed daemon's live file is unfinalized (in_progress)
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/publication/2026-10-15_19.trace.lz4 closure=unclean may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [publication] the recovered archive is labelled unclean (unclean)
+  PASS: [publication] a reader is told open intervals may be missing (1)
+
+[early] kill before any block was committed
+  leftover: in_progress
+  PASS: [early] not clean (in_progress)
+  PASS: [early] no archive from this scenario claims clean (0)
+
+[repeated] kill, restart, kill again, restart again
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/repeated/2026-10-15_19.1.trace.lz4 closure=clean may_lose_open_intervals=0 checkpoint=none warning=-
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/repeated/2026-10-15_19.2.trace.lz4 closure=unclean may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/repeated/2026-10-15_19.trace.lz4 closure=unclean may_lose_open_intervals=1 checkpoint=none warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [repeated] exactly the two crashed captures are labelled unclean (2)
+  PASS: [repeated] and every other archive here is a clean exit (1)
+
+[graceful] the CONTROL case: a normal exit must read clean
+  closed file: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/graceful/current.trace closure=clean may_lose_open_intervals=0 checkpoint=none warning=-
+  PASS: [graceful] a normal shutdown reads clean (clean)
+  PASS: [graceful] and no warning is raised for it (0)
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/graceful/2026-10-15_19.trace.lz4 closure=clean may_lose_open_intervals=0 checkpoint=none warning=-
+  PASS: [graceful] the clean label survives being archived by recovery (clean)
+
+[ckpt_survives] checkpoint beside a live capture → SIGKILL → restart
+  stub: wrote 3 records open_ns=12000000
+  PASS: [ckpt_survives] the live capture reports its checkpoint (seq=1,intervals=3,open_ns=12000000)
+  PASS: [ckpt_survives] it is still there after the kill (seq=1,intervals=3,open_ns=12000000)
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/ckpt_survives/2026-10-15_19.trace.lz4 closure=unclean may_lose_open_intervals=1 checkpoint=seq=1,intervals=3,open_ns=12000000 warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [ckpt_survives] recovery carried it to the archive, intact (seq=1,intervals=3,open_ns=12000000)
+  PASS: [ckpt_survives] and the archive is still labelled unclean (unclean)
+
+[ckpt_clean] checkpoint + graceful shutdown → it must be dropped
+  PASS: [ckpt_clean] the checkpoint is there before the shutdown (seq=1,intervals=2,open_ns=9000000)
+  PASS: [ckpt_clean] a clean close drops it (none)
+  PASS: [ckpt_clean] and the file is clean (clean)
+
+[ckpt_window] daemon killed INSIDE recovery's handover
+tests/crash_scenarios.sh: line 425:  9398 Killed                  PGWT_CRASH_AT=recover_after_ckpt "$PROJECT_DIR/pg_wait_tracer" --mode tiered --pid "$PM_PID" --trace-dir "$dir" --duration 4 --quiet >> "$LOG" 2>&1
+  recovering daemon exit=137 (137 = SIGKILL at the crash point)
+  PASS: [ckpt_window] the checkpoint moved first and waits for its trace (yes)
+  PASS: [ckpt_window] the trace is not archived yet (yes)
+  archive: /root/pgwt-check/agent_424-durability/tests/results/issue424-durability/ckpt_window/2026-10-15_19.trace.lz4 closure=unclean may_lose_open_intervals=1 checkpoint=seq=1,intervals=2,open_ns=15000000 warning="This capture ended uncleanly; intervals open at the end may be missing."
+  PASS: [ckpt_window] the interrupted handover completed, evidence intact (seq=1,intervals=2,open_ns=15000000)
+
+summary: open_wait=unclean open_cpu=unclean publication=unclean early=in_progress repeated=2unclean/1clean graceful=clean ckpt_survives=seq=1,intervals=3,open_ns=12000000 ckpt_clean=none ckpt_window=seq=1,intervals=2,open_ns=15000000 
+crash_scenarios: ALL PASS

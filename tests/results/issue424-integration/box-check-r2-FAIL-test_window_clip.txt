@@ -1,0 +1,112 @@
+  test_window_clip
+════════════════════════════════════════
+=== test_window_clip ===
+--- 1. leading-edge straddler contributes only its overlap ---
+  ok: fixture really straddles `from` (4 s wait, 1 s inside)
+  ok: time_model DB Time = in-window 1 s (1000.000000 ms)
+  ok: time_model Lock row = 1 s (1000.000000 ms)
+  ok: time_model AAS = 1 s / 10 s window (dimensionless) (0.100000)
+  ok: top_events DB Time = 1 s (1000.000000 ms)
+  ok: top_events Lock:relation total = 1 s (1000.000000 ms)
+  ok: top_sessions pid 4242 = 1 s (1000.000000 ms)
+  ok: top_queries has the query row
+  ok: top_queries query 77 total = 1 s (1000.000000 ms)
+--- 1b. trailing-edge straddler is clipped at `to` ---
+  ok: time_model counts 2 s of an 8 s wait (2000.000000 ms)
+--- 2. Σ(AAS buckets)·bucket_ns == time_model DB ns ---
+  ok: time_model DB Time (hand-computed) (9000.000000 ms)
+  ok: idle time is clipped too (3 s Client:ClientRead, 2 s inside) (2000.000000 ms)
+  ok: CPU* splits the straddling gap by overlap (900.000000 ms)
+  ok: AAS(1 buckets) == time_model DB Time (diff 0 ns, bucket overhang 0 ns)
+  ok: AAS(1 buckets) agrees EXACTLY (bucket width divides the range) (9000.000000 ms)
+  ok: AAS(10 buckets) == time_model DB Time (diff 0 ns, bucket overhang 0 ns)
+  ok: AAS(10 buckets) agrees EXACTLY (bucket width divides the range) (9000.000000 ms)
+  ok: AAS(60 buckets) == time_model DB Time (diff 20 ns, bucket overhang 20 ns)
+  ok: AAS(120 buckets) == time_model DB Time (diff 80 ns, bucket overhang 80 ns)
+--- 3. from=0/to=0 (whole capture) keeps full durations ---
+  ok: unbounded: 4 s + 2 s + 1 s in full (7000.000000 ms)
+  ok: unbounded: measured CPU is not scaled (400.000000 ms)
+  ok: unbounded: top_events keeps the full 4 s (4000.000000 ms)
+  ok: unbounded: top_sessions keeps 4 s (4000.000000 ms)
+  ok: unbounded: top_queries keeps 4 s (4000.000000 ms)
+  ok: from set / to unbounded clips the start (1000.000000 ms)
+  ok: to set / from unbounded leaves it whole (4000.000000 ms)
+--- 4. false-negative suite: the gate must refuse, not approve ---
+  ok: empty input yields 0 ms, not garbage (0.000000 ms)
+  ok: empty input still emits the DB Time row
+  ok: empty input still lays out its buckets
+  ok: empty input: AAS total 0 (0.000000 ms)
+  ok: interior event is not clipped (2000.000000 ms)
+  ok: event ending before `from` contributes 0 (0.000000 ms)
+  ok: event starting after `to` contributes 0 (0.000000 ms)
+  ok: zero-width window yields 0 ms (0.000000 ms)
+  ok: zero-width window yields 0 CPU* (0.000000 ms)
+  ok: zero-duration record adds 0 ms (0.000000 ms)
+  ok: zero-duration record leaves CPU* a real 0, not NaN
+  ok: duration > timestamp is refused, not clamped to a 1 s window (0.000000 ms)
+  ok: ...refused on the UNBOUNDED path too, not counted as timestamp_ns (0.000000 ms)
+  ok: an impossible record does not disturb the valid one beside it (2000.000000 ms)
+  ok: AAS and time_model agree on an array containing garbage (2000.000000 ms)
+  ok: non-matching filter yields 0, vacuously (0.000000 ms)
+  ok: ...and the SAME events without the filter are non-zero
+--- 5. avg/max/percentiles keep the full duration ---
+  ok: top_events has the Lock:relation row
+  ok: …its DB-time column is clipped to 1 s (1000.000000 ms)
+  ok: …counted once
+  ok: …but avg latency is the real 4 s wait
+  ok: …and so is max latency
+  ok: top_queries has the query row
+  ok: …query DB-time column is clipped (1000.000000 ms)
+  ok: …query avg keeps the full 4 s
+--- 6a. wait open at `to`: time clipped in, occurrence out ---
+  ok: fixture really crosses `to` (closes 2 s after the window ends)
+  ok: time_model DB Time = 8 s clipped straddler + 3 s interior (11000.000000 ms)
+  ok: time_model Lock row = 11 s (11000.000000 ms)
+  ok: top_events Lock:relation time = 11 s (11000.000000 ms)
+  ok: top_events counts ONLY the wait that closed in-window (1)
+  ok: …exact_count likewise excludes the right-open wait (1)
+  ok: top_events has the Lock:relation row
+  ok: …max latency (us) is the 3 s wait that finished, not the open 10 s (3000000.000000)
+  ok: …the row still HAS a distribution (the 3 s observation)
+  ok: top_sessions pid 5001 = 11 s (11000.000000 ms)
+  ok: top_queries has the query row
+  ok: top_queries query 88 time = 11 s (11000.000000 ms)
+  ok: …and counts only the wait that closed in-window (1)
+--- 6b. window extended past T: the wait is counted in full ---
+  ok: both waits whole: 10 s + 3 s (13000.000000 ms)
+  ok: both waits counted — ev_count() is not stuck at 0 (2)
+  ok: …max latency (us) is now the 10 s wait, which closed in-window (10000000.000000)
+--- 6c. a wait spanning the whole window ---
+  ok: fixture really spans the whole window on both sides
+  ok: spanner fills the window: 18 s (18000.000000 ms)
+  ok: …on the Timeout row (18000.000000 ms)
+  ok: top_events still REPORTS the 18 s (independent accumulator) (18000.000000 ms)
+  ok: …with zero occurrences: the wait closed outside the window (0)
+  ok: top_sessions pid 5002 = 18 s (18000.000000 ms)
+--- 6d. adjacent-window sweep: Σ time == duration, Σ count == 1 ---
+  ok: Σ clipped time over the sweep == the 10 s wait (10000.000000 ms)
+  FAIL: Σ count over the sweep == 1 occurrence — got 2, want 1 (test_window_clip.c:805)
+  ok: …and it belongs to window 3, [T-2, T+2], the one T falls in (3)
+--- 6e. right-edge false-negative suite ---
+  ok: unbounded: Lock keeps 10 s + 3 s (13000.000000 ms)
+  ok: unbounded: both Lock waits count (2)
+  ok: unbounded: the 100 s spanner keeps its full duration (100000.000000 ms)
+  ok: unbounded: the spanner counts (1)
+  ok: non-straddling fixture is non-zero (3 s), so 0 is a real answer (3000.000000 ms)
+  ok: …and counts its one occurrence (1)
+  ok: zero-width window: 0 ms (0.000000 ms)
+  FAIL: zero-width window: 0 occurrences — got 1, want 0 (test_window_clip.c:854)
+  ok: zero-duration record at `to`: 0 ms of time (0.000000 ms)
+  ok: …but one occurrence: it closed inside the window (1)
+  ok: record wholly past `to`: 0 ms (0.000000 ms)
+  ok: record wholly past `to`: 0 occurrences (0)
+  ok: record wholly before `from`: 0 ms (0.000000 ms)
+  FAIL: record wholly before `from`: 0 occurrences — got 1, want 0 (test_window_clip.c:887)
+  ok: empty input: 0 ms (0.000000 ms)
+  ok: empty input: no rows (0)
+
+92 checks, 3 failures
+
+════════════════════════════════════════
+  test_window_overlap
+════════════════════════════════════════

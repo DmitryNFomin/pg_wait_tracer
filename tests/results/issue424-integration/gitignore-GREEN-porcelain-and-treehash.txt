@@ -1,0 +1,4 @@
+CLEAN: porcelain=0 lines  tree-hash=914959e698b87e5e57e1252d38ee4eb07fe97249  HEAD^{tree}=914959e698b87e5e57e1252d38ee4eb07fe97249
+created 63 build products (the exact set the box build left)
+AFTER: porcelain=0 lines  tree-hash=914959e698b87e5e57e1252d38ee4eb07fe97249
+RESULT: tree hash UNCHANGED by a full tests/ build

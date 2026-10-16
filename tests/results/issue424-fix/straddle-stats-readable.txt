@@ -1,0 +1,4 @@
+with PGWT_STRADDLE_STATS=1: 1 line(s)
+   pgwt-straddle: admitted=4 truncated=0 headers_unreadable=0 lookahead_ns=300000000000 max_blocks=256
+without the env var:        0 line(s)
+VERDICT: readable on demand, silent by default

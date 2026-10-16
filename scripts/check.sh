@@ -58,11 +58,51 @@ if [[ $FAST -eq 0 ]] && ! "$py" -c 'import playwright' 2>/dev/null; then
     exit 2
 fi
 
+# Same family as the snapshot-history guard: both protect the integrity of
+# the .pgwt-check.stamp this script writes at the end. A build product that
+# .gitignore does not cover is untracked-but-unignored, so scripts/tree-hash.sh
+# counts it and the stamp stops matching the moment anyone runs
+# `make -C tests` -- which is how demo-rehearsal counted attempt 2 lost its
+# pairing. Lives HERE and not in tests/unit_tests.list on purpose: box-check
+# rsyncs the tree WITHOUT .git, so on the box this guard could only refuse for
+# an environmental reason, and a gate that is red for the wrong reason gets
+# switched off. This Mac and CI are the places it is both meaningful and able
+# to run.
+step "bash: .gitignore covers every tests/ build product (tree-hash integrity)"
+run bash tests/test_gitignore_build_products.sh
+
+# The summary format version is the one number in the docs with an
+# OPERATIONAL consequence: DEMO_RUNBOOK.md tells the operator which trace
+# directories to move aside, and a stale N leaves a directory the server
+# then refuses on the summary fast path -- the 900 s Overview silently
+# drops to raw, which is the paint latency the runbook exists to avoid.
+# It drifted twice in one night (v6 while the code was 8; then a v8
+# correction landing on a tree that had merged v9), so it is checked rather
+# than proofread.
+step "bash: the docs name the PGWT_SUMMARY_VERSION the code defines"
+run bash tests/test_docs_summary_version.sh
+
 step "snapshot-history guard self-test"
 run tests/test_check_snapshot_history.sh
 
 step "snapshot-history guard (this branch vs origin/master)"
 run scripts/check-snapshot-history.sh
+
+# Link-closure guard (#424, 2026-10-15). Adding one call to src/map_reader.c
+# compiled everywhere and broke the LINK of test_event_reader and
+# test_concurrent_rw on Linux, because both link map_reader.o for its
+# accumulator core alone. It cost two ephemeral VMs and two `box-check` exits
+# before anyone knew, with every test that ran passing. "It compiles" cannot
+# see that; comparing the TU's undefined-symbol set against the merge base
+# can, in about a second, here. The guard REFUSES (and so fails this step)
+# when it cannot resolve a base, when the base revision will not compile,
+# when the compiler is missing, or when the object it built is not the TU it
+# claims -- a closure check with no baseline approves everything.
+step "link-closure guard self-test"
+run tests/test_check_link_closure.sh
+
+step "link-closure guard (src/map_reader.c vs merge base)"
+run scripts/check-link-closure.sh
 
 step "web builder unit tests (node)"
 run node --test 'tests/web_unit/*.test.mjs'

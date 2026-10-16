@@ -1,0 +1,39 @@
+  test_data_categories
+════════════════════════════════════════
+=== test_data_categories ===
+--- 1+2: io_worker exclusion + categories ---
+  PASS: class AAS = 3.0 (io_worker excluded) (3)
+  PASS: max_aas excludes io_worker (3)
+  PASS: io_worker category slot = 1.0 (1)
+  PASS: autovac_worker -> maintenance = 1.0 (1)
+  PASS: checkpointer -> background = 1.0 (1)
+  PASS: client wait -> foreground = 1.0 (1)
+  PASS: DB Time = 15 s (io_worker excluded) (15000)
+  PASS: io_worker_busy_pct = 100 (1 worker, 5s/5s busy) (100)
+  PASS: io_worker category ms outside DB Time (5000)
+  PASS: maintenance category ms (5000)
+  PASS: one IO:DataFileRead row
+  PASS: top_events excludes the io_worker's 5 s (15000)
+  PASS: io_worker pid not listed as a session
+--- 3: CPU samples are first-class active time ---
+  PASS: window is sampled fidelity
+  PASS: sampled CPU AAS = 2.0 (two on-CPU clients) (1.96)
+  PASS: sampled io_worker slot = 1.0 (0.98)
+  PASS: CPU sample with query_id -> execution (0.98)
+  PASS: CPU sample without query_id -> command (0.98)
+  PASS: sampled DB Time = 10 s (2 pids x 5 s CPU) (9800)
+  PASS: CPU samples attribute to their query
+--- 4: CMD markers classify exact we==0 ---
+  PASS: in-command CPU only: AAS = 2s/5s = 0.4 (0.4)
+  PASS: DB Time = 2 s (post-command CPU is idle) (2000)
+  PASS: idle = 3 s (the out-of-command interval) (3000)
+--- 5: exit-record phantom CPU backstop (study defect 2) ---
+  PASS: AAS = 1.0: the phantom 5 s exit-CPU interval is dropped, the sampled pid remains (0.98)
+  PASS: no phantom CPU class AAS (0)
+  PASS: DB Time = 5 s (samples only, no phantom) (4900)
+
+26/26 tests passed
+
+════════════════════════════════════════
+  test_data_window_bound
+════════════════════════════════════════

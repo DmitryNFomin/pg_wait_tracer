@@ -305,6 +305,17 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     # once per route; its pure comparison core is gated separately in
     # `make check` and below as test_summary_raw_parity_lib.py.
     run_test "test_summary_raw_parity" python3 "$SCRIPT_DIR/test_summary_raw_parity.py"
+    # #424: the raw loader admits a non-sample record only when its CLOSE
+    # falls in [from, to]; the correct rule is overlap (close >= from AND
+    # start <= to). The parity gate above cannot see it -- its generator
+    # closes every interval at the shutdown flush and its QUIET tuple puts
+    # every window edge in a data hole. This one asserts CONSERVATION, which
+    # needs no reference path at all: cutting a window into adjacent parts
+    # must preserve total time per class and per event, because clipping is
+    # additive. Counts are asserted additive in the same probe -- that is the
+    # guard against a half fix that widens admission without making
+    # occurrences select on the record's own close timestamp.
+    run_test "test_window_additivity" python3 "$SCRIPT_DIR/test_window_additivity.py"
     run_test "test_data_markers" python3 "$SCRIPT_DIR/test_data_markers.py"
     # #274: executions/exec_scatter read the pre-window marker prefix from
     # the retained index; this is the differential proving it is the SAME
@@ -408,6 +419,14 @@ LIVE_TESTS=(
     "test_idle_exclusion|python3|test_idle_exclusion.py"
     "test_daemon_server|python3|test_daemon_server.py"
     "test_control|bash|test_control.sh"
+    # NOT registered: test_v9_open_cpu_wired.sh. The v9 open-CPU producer
+    # was REVERTED (agent/424-daemon fc7d7f5) once its counters showed it
+    # was never wired, so the check would be permanently red against a
+    # capability nobody invokes -- which is neither a product bug being
+    # fixed in src/ (the only thing KNOWN_FAILING is for) nor a gate worth
+    # 40 minutes a run. The script stays in tests/ as the ACCEPTANCE test
+    # for whoever re-wires it: run it by hand, and re-add this line in the
+    # same commit that makes it pass.
     "test_escalation|bash|test_escalation.sh"
     # Tiered-capture live tests (were built for A4/A5 but wired into
     # nothing — TST-7). test_cross_validate_tiered is the test that

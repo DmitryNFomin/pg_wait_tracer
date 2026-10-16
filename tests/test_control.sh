@@ -197,7 +197,23 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'summary_late_events_folded_total',
           # #128 follow-up: sampled idle readings that contradict the same
           # tick's cmd_open (never a command boundary).
-          'sampled_idle_in_command_total'):
+          'sampled_idle_in_command_total',
+          # #424 / summary v9: the open on-CPU producer. These seven were
+          # behind `#if PGWT_SUMMARY_VERSION >= 9` while the writer and the
+          # producer lived on separate branches; the guard is gone and so is
+          # the excuse for not asserting them. summary_open_cpu_credited_ns
+          # is the one that matters: present-and-numeric here, and NON-ZERO
+          # on a live capture with an in-flight CPU statement. Zero there
+          # with summary_open_cpu_refused_total non-zero is the signature of
+          # a producer that is not wired while every other test passes --
+          # which is exactly why the keys are named rather than globbed.
+          'summary_open_cpu_credited_ns',
+          'summary_open_cpu_measured_ns',
+          'summary_open_cpu_unknown_ns',
+          'summary_open_cpu_eff_rejected_total',
+          'summary_open_cpu_class_divergent_ns',
+          'summary_open_cpu_tier_mismatch_total',
+          'summary_open_cpu_overcredit_ns'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.

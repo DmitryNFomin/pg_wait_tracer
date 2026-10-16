@@ -36,6 +36,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_io_worker_summary test_io_worker_parity \
             test_cpu_split_parity \
             test_straddler_accounting \
+            test_open_cpu_accounting \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -44,7 +45,16 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             wait_cpu_scan wait_cpu_fixture \
             test_summary_tick_flush \
             test_block_agg bench_block_agg test_transitions_loader \
-            test_top_wait_backfill
+            test_top_wait_backfill \
+            test_tick_drain \
+            test_window_overlap \
+            test_open_overlay \
+            test_replay_window \
+            test_open_interval \
+            test_trace_closure \
+            test_open_ckpt \
+            trace_closure_probe \
+            open_ckpt_stub
 
 .PHONY: all clean check
 
@@ -73,6 +83,14 @@ test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(
 LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o))
 test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
+
+# #416: drive the REAL pgwt_handle_timer (the defect was the ORDER of the
+# steps inside it), replacing only the ring buffer. Same object set as
+# test_backend_lifecycle; the calloc'd skeleton makes every bpf_map__fd()
+# return -EINVAL, so the map reads inside the handler are empty rather than
+# faked and no bpf_* wrap is needed.
+test_tick_drain: test_tick_drain.c $(LIFECYCLE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=ring_buffer__consume $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
 	$(CC) $(CFLAGS) -o $@ $^
@@ -387,6 +405,31 @@ test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c \
 # recovery (kill -9 matrix), collision-safe archive names, size-cap
 # retention, meta/footer sanity caps, ~1 s SAMPLES batching. Server build
 # (no BPF skeleton) — the writers/readers are BPF-free.
+# test_trace_closure: #424 deliverable 1 — the header closure bits. Clean
+# close vs rotation vs crash recovery vs legacy, plus the bypass suite (a
+# gate that cannot read the file must refuse, never approve). Server build.
+test_trace_closure: test_trace_closure.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+# test_open_ckpt: #424 deliverable 2 — open-interval checkpoints as one
+# contract (identity, durable publication, recovery, suppression), with the
+# bypass suite for a sidecar that cannot be validated. Server build.
+test_open_ckpt: test_open_ckpt.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+# trace_closure_probe: prints a trace file's closure verdict and the
+# checkpoint beside it, using the production functions. A tool for
+# tests/crash_scenarios.sh, not a test — it is in TESTS (so it gets built)
+# and deliberately NOT in unit_tests.list (there is nothing to assert).
+trace_closure_probe: trace_closure_probe.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+# open_ckpt_stub: writes a valid checkpoint beside a LIVE capture, standing in
+# for the daemon producer that is not wired yet, so the crash-scenario script
+# can assert checkpoint survival end to end. Built, not in unit_tests.list.
+open_ckpt_stub: open_ckpt_stub.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
 test_durability: test_durability.c $(BUILD)/server_event_writer.o \
                  $(BUILD)/server_event_reader.o \
                  $(BUILD)/server_summary_writer.o \
@@ -669,6 +712,32 @@ test_straddler_accounting: test_straddler_accounting.c \
                    $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
+# test_open_cpu_accounting: #424 / summary v9 -- the residual v8 deliberately
+# left open. An OPEN ON-CPU interval must be credited to the seconds it
+# occupies WITHOUT destroying v7's measured-CPU split, which v8 argued was
+# impossible because a per-second credit has no cpu_ns. It has one now: the
+# producer passes the measurement it already computes for the live view
+# (pgwt_summary_note_open_ex + struct pgwt_summary_open_cpu). Asserted:
+# placement AND the split in the same fixture (ten seconds of 1 s each,
+# 6000 ms measured, 0 clamped), conservation with the two sides from
+# different provenance, either tick/close order, the CLASSIFICATION FREEZE
+# (the command-majority answer over the open prefix can flip before close
+# while written seconds are immutable, so one interval carries ONE label and
+# the divergence is counted), both measurement tiers and a tier flip, and
+# NON-VACUITY (no open CPU => bit-identical records). Bypass suite: the
+# observation withheld (reachability), stale, exit, mismatch, io_worker, an
+# illegal eff_we, a full table, missing/empty dir, a PREVIOUS-VERSION file, a
+# disabled writer, a sub-second gap, and the open-credit-only round trip.
+# Server build, no BPF, no live PG; ~0.3 s.
+test_open_cpu_accounting: test_open_cpu_accounting.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                   $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
 # test_exec_index: the EXECUTIONS INDEX (paint-latency plan, Phase 3,
 # src/exec_index.c). A differential against the real pgwt_compute_executions
 # over every block split of every fixture, asserting the ten boundary fields
@@ -707,11 +776,43 @@ TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
+
+# test_open_interval: #424's daemon half — the ONE open-stretch arithmetic
+# (src/open_interval.h) differenced against a verbatim copy of the pre-#424
+# flush_open_intervals loop body, the frozen {"cmd":"open_intervals"} wire
+# shape (src/open_snapshot.h), and the control socket's queued-write
+# transport (src/ctrl_outq.h) including the truncation the old
+# drop-on-EAGAIN sender produced. Sources compiled directly, no BPF, no
+# daemon: runs anywhere, Mac included.
+# The three headers ARE the module under test, so they are prerequisites:
+# without them an incremental build silently reruns a stale binary (found
+# by this test's own bypass suite, which scored 9 green mutations until
+# the dependency was added).
+# map_reader.c (-DPGWT_SERVER, the BPF-free core) and wait_event.c are linked
+# so the command-gate cross-check runs the REAL peek/majority functions and the
+# category strings are the real ones, rather than transcriptions that cannot
+# notice the originals changing. Still BPF-free: runs anywhere.
+test_open_interval: test_open_interval.c ../src/map_reader.c \
+                    ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c \
+                    ../src/open_interval.h ../src/open_snapshot.h \
+                    ../src/ctrl_outq.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_open_interval.c \
+	    ../src/map_reader.c ../src/wait_event.c ../src/idle_rule.c \
+	    ../src/cJSON.c
+
 # test_top_wait_backfill: #319 — handle_top_sessions' and handle_top_queries'
 # raw backfill of top_wait over the summary-derived page. Same server.c-
 # included recipe as test_transitions_loader (the real writer, the real
 # summary writer, the real handlers).
 test_top_wait_backfill: test_top_wait_backfill.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_window_overlap: #424 — the raw loader selected non-sample records by
+# CLOSE time, so a wait still running at the window's right edge contributed
+# nothing. Admission is now OVERLAP and the per-occurrence statistics are
+# gated on the close, together. Same server.c-included recipe (the real
+# writer, the real loader, the real compute).
+test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction
@@ -742,6 +843,30 @@ test_interval_index: test_interval_index.c ../src/interval_index.c \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+#
+# #424 live half: the request-scoped open-interval overlay (src/open_overlay.c).
+# Pure C plus cJSON and one AF_UNIX round-trip against a forked fixture
+# daemon -- no BPF, no libbpf, no PostgreSQL, no root, so it also builds and
+# runs on a developer Mac. Companion: tests/test_open_overlay_mutations.sh
+# breaks one guard at a time (the precedence rule, the snapshot clip, the
+# route/tier refusal, the absent-pids read as empty, the overall socket
+# deadline, ...) and requires THIS binary to go red for each.
+test_open_overlay: test_open_overlay.c ../src/open_overlay.c ../src/cJSON.c
+	$(CC) $(CFLAGS) -o $@ $^
+# test_replay_window: #424 — `--replay --from/--to` selects by OVERLAP and
+# clips, while per-occurrence statistics stay selected by the record's own
+# close timestamp. Covers BOTH halves (the record rule in pgwt_replay_events
+# and the block scan in pgwt_replay_file, which must look PAST --to or the
+# record rule is unreachable), plus a bypass suite for the lookahead budget,
+# an unreadable block header and a SAMPLES tail. Same build shape as
+# test_replay_fidelity: the daemon-flavour event_reader.c against the BPF-free
+# accumulator core, so no bpftool is needed.
+test_replay_window: test_replay_window.c ../src/event_reader.c \
+                    map_reader_core.o $(BUILD)/server_event_writer.o \
+                    $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                    $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -o $@ $^ -llz4 -lz
 
 clean:
 	rm -f $(TESTS) test_exec_index map_reader_core.o

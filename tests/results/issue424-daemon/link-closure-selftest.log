@@ -1,0 +1,22 @@
+  PASS: an unchanged TU passes (rc=0)
+  PASS: a NEW link-time dependency fails the guard (rc=1)
+  PASS: the failure NAMES the symbol that was added
+  PASS: a cosmetic edit does not fail the guard
+  PASS: an unresolvable base ref REFUSES (rc=2)
+  PASS: a ref that is not a commit REFUSES
+  PASS: a missing compiler REFUSES rather than passing (rc=2)
+  PASS: a TU absent at base REFUSES (rc=2)
+  PASS: a TU that does not define the anchor REFUSES (rc=2)
+  PASS: a base revision that will not compile REFUSES (rc=2)
+  PASS: a declared dependency whose provider IS linked everywhere passes (rc=0)
+  PASS: the acceptance is PRINTED, not silent
+  PASS: a -DPGWT_SERVER consumer of the same source is not implicated
+  PASS: an entry naming a provider nobody links FAILS (rc=1)
+  PASS: ...and NAMES the target that would not link
+  PASS: a target that drops the provider FAILS even with the entry present (rc=1)
+  PASS: ...and NAMES that target
+  PASS: with no allowlist the dependency is UNDECLARED and fails
+  PASS: with no Makefile to verify against, an entry REFUSES (rc=2)
+  PASS: the real invocation (src/map_reader.c, no args) passes: OK: map_reader.c references no symbol it did not reference at base
+  PASS: the real invocation confirmed its anchor, so it compiled the right TU
+21 passed, 0 failed

@@ -628,13 +628,21 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * the per-second credits and the at-close remainder partition
              * the interval with no gap and no overlap.
              *
-             * EXACT tiers only, by construction: pgwt_read_state_map is
-             * called only when the mode uses watchpoints (lightweight and
-             * sampled have no watchpoint-maintained intervals to report),
-             * and summaries are only computed from for EXACT-covered
-             * windows. A mode that never notes anything gets the v7
-             * accounting rule, which is correct for it rather than merely
-             * unchanged. */
+             * v9's open-CPU OBSERVATION was wired here and is deliberately
+             * NOT here now (#424). On a gate-2 capture with watchpoints
+             * attached and cpu_ns_total moving 0 -> 23.7 s, all three
+             * open-CPU counters read zero — credited, refused AND
+             * uncredited — which means the writer was never asked about an
+             * on-CPU open interval at all, not that it declined. Without a
+             * box this agent could not tell the remaining causes apart, and
+             * a producer whose only evidence is "it compiles" is not a
+             * wired producer. So v9's writer capability stays DORMANT and
+             * unclaimed rather than claimed and silently falling back; the
+             * v8 behaviour below is exactly what shipped before, and the
+             * refusal it produces for an on-CPU gap is counted
+             * (open_cpu_refused_total, cpu_open_uncredited_ns_total, both
+             * published by src/control.c). See the handover note in that
+             * file for the one measurement that tells the causes apart. */
             if (d->summary_writer)
                 pgwt_summary_note_open(d->summary_writer, snext, we,
                                        sval.last_ts,
@@ -748,6 +756,7 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                     .pa              = pa_cur,
                 };
                 pgwt_accum_add_interval(&d->accum, &iv);
+
             }
         } else if (dbg_scan) {
             lookup_failed++;
@@ -883,4 +892,5 @@ uint64_t pgwt_read_bpf_fail_counter(struct pgwt_daemon *d, uint32_t slot)
         total += per_cpu[i];
     return total;
 }
+
 #endif /* !PGWT_SERVER */

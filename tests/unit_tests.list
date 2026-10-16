@@ -31,7 +31,18 @@ test_live_accum
 # Windowed aggregates (time model / top events / sessions / queries) must
 # count only each event's in-window part, exactly as the AAS chart does --
 # the cross-tab disagreement that failed a 35-minute rehearsal at 1.28%.
+# Section 6 adds the RIGHT edge (#424): time is selected by overlap and
+# clipped, occurrences are selected by the record's own close timestamp.
 test_window_clip
+# #424's overlap-admission unit test, landed on agent/424-historical with
+# its tests/Makefile rule. Registered HERE because unit_tests.list is owned
+# by the gate branch and this version is the one kept when the two branches
+# are combined -- without the entry the binary is built by CI and run by
+# nothing, which is the TST-3 false negative this list exists to prevent.
+# NOTE: this branch must be COMBINED with agent/424-historical before any
+# box-check or merge. Alone, the C tier exits 127 on a binary that does not
+# exist yet -- correctly: a listed test that cannot run fails the gate.
+test_window_overlap
 # #387: absence is distinct from measured zero, including records selected
 # by end timestamp that have no in-window overlap.
 test_time_model_absence
@@ -401,6 +412,31 @@ test_cpu_split_parity
 # table, a missing trace dir (the read-back must REFUSE, not agree with
 # nothing) and a late first note. A gate that cannot see must never approve.
 test_straddler_accounting
+# #424 / summary v9: an OPEN ON-CPU interval must be credited to the seconds
+# it occupies WITHOUT destroying v7's measured-CPU split -- the residual v8
+# deliberately left open, which made an in-flight pure-CPU statement absent
+# from the CPU rows of the 15-minute Overview until it ended. The producer
+# supplies the observation v8 said could not exist (cumulative measured CPU
+# over the open prefix, plus its own command-gate classification) through
+# pgwt_summary_note_open_ex. Asserted: placement (ten seconds, 1 s each) AND
+# the split surviving (6000 ms measured, 0 clamped) in the same fixture;
+# conservation with the two sides read off DISK and out of the fixture's
+# literals, never one sum against itself; either order of (tick, close)
+# including a tick crediting past the close; the CLASSIFICATION FREEZE (the
+# open-prefix command-majority answer can flip before close, and a written
+# second is immutable, so one interval must carry ONE label -- divergence
+# counted in ns); the unknown tier and a tier flip (CPU* is measured +
+# unknown, so a flip must not double count); and NON-VACUITY -- a fixture
+# with no open CPU is BIT-IDENTICAL through the new entry point. Bypass
+# suite: the observation WITHHELD (the reachability probe -- it must degrade
+# to v8 exactly, or the gate measures nothing), a stale observation, an exit,
+# a mismatched note, an io_worker pid, an illegal eff_we, a full table, a
+# missing/empty trace dir and a PREVIOUS-VERSION file (the reader must
+# REFUSE, so evidence from the old accounting rule cannot green this one), a
+# disabled writer, a sub-second gap, and the open-credit-only round trip (an
+# events[] row with time and no count must survive, or the block header
+# desynchronises and whole seconds fail to decode).
+test_open_cpu_accounting
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second
@@ -523,8 +559,19 @@ test_exec_index
 #   wait INTERVALS themselves -- each one ONCE, in the block holding its END
 #   record, with its true start_ns UNCLIPPED -- and answers a window by
 #   calling the SHIPPING pgwt_compute_concurrency over the compacted set.
+#   VERSION 2 (#424): a window selects every interval that OVERLAPS it
+#   (end >= from AND start <= to, inclusive at both ends) and CLIPS one that
+#   is still open at `to` to the window edge, which is the corrected loader's
+#   rule; version 1 keyed on the end timestamp alone and lost those waits.
+#   Removing the row-level exclusion is only half of it -- the chunk
+#   prefilter's high side must test the chunk's earliest START, because a
+#   chunk whose intervals all END past `to` can still hold one that began
+#   before it, and keying on min_end_ns throws the same records away one
+#   level up.
 #   This test is a differential against that same function over the full raw
-#   record array (what src/server.c handle_concurrency does), over EVERY block
+#   record array as the CORRECTED loader hands it over -- one linear
+#   clip-at-`to` pass, sharing no selection code with the module -- over
+#   EVERY block
 #   cut of every fixture x six windows x two bucket resolutions, asserting
 #   peak_sessions[], peak_event[], bursts_total, num_bursts and every burst's
 #   timestamp/event/name/session count/pid list bit-exactly. Comparing peaks
@@ -533,28 +580,43 @@ test_exec_index
 #   The three modes, each with its own literal expectation: a CLIPPED start_ns
 #   (lower peaks in earlier buckets, onsets shifted later, bursts vanish); an
 #   interval counted TWICE (peaks survive via pid dedup, but one pid
-#   double-counts toward the burst threshold); and silently "fixing" the raw
-#   path's exclusion of waits still open at `to`.
+#   double-counts toward the burst threshold); and LOSING a wait still open
+#   at `to`, at the row level, at the chunk prefilter, in the clip itself or
+#   in the materialisation ORDER (the clipped row's own timestamp is no
+#   longer its end, so re-sorting the array by it, or by start_ns, changes
+#   which event owns a bucket). fx_faredge pins the far edge the way fx_edge
+#   pins the near one: a 4-pid burst whose members are all still waiting at
+#   `to`, one of them STARTING exactly at `to` -- a case peaks cannot see at
+#   all, because such a wait contributes to no bucket.
 #   Bypass suite, because this index's failure mode is answering "no
 #   concurrency" when it simply cannot see: a FILTERED request (version 1
 #   indexes the unfiltered set), an empty index, an unsealed one, an unknown
 #   version, a skipped or reordered block, an out-of-order record, a record
-#   outside its block's bounds, inverted block bounds, a hand-corrupted row
-#   order, a window not fully covered, an inverted window, num_buckets <= 0, a
-#   window selecting NOTHING, and every injected allocation failure must each
-#   REFUSE with their own reason and no result.
+#   outside its block's bounds, inverted block bounds, a row order corrupted
+#   WITHIN one chunk (where every chunk bound is still right, so only the
+#   sort check can see it), each of the four chunk prefilter bounds corrupted
+#   in the direction that loses rows, a window not fully covered, an inverted
+#   window, num_buckets <= 0, a window selecting NOTHING, and every injected
+#   allocation failure must each REFUSE with their own reason and no result.
 #   Non-vacuity ledger: counters for cross-block intervals, intervals starting
 #   before coverage, same pid selected from two blocks inside one bucket,
-#   intervals excluded for ending past `to`, bursts whose members live in two
-#   or more blocks, and bursts_total each FAIL the test when zero.
+#   intervals still open at `to` and clipped there, intervals rejected for
+#   STARTING after `to`, chunk scans stopped on the `to + max_duration`
+#   bound, chunks a version-1 end-range prefilter would have skipped whole,
+#   bursts whose members live in two or more blocks, and bursts_total each
+#   FAIL the test when zero.
 #   `./test_interval_index oneblock` feeds every fixture as a SINGLE block and
 #   MUST exit nonzero -- the ledger's own falsification. It is not a separate
 #   list entry because it is a deliberate failure, not a gate.
-#   Companion: tests/interval_index_mutations.py injects all 27 silent-wrong
-#   risks one at a time and requires this test to catch each (27/27), scoring
+#   Companion: tests/interval_index_mutations.py injects all 36 silent-wrong
+#   risks one at a time and requires this test to catch each (36/36), scoring
 #   BUILD-FAILED, NOT-APPLIED, TOOL-MISSING, BASELINE-RED and STAYED-GREEN as
-#   five distinct FAILURES; `--self-test` drives all five deliberately. Not in
-#   this list because it recompiles the module 28 times (~40 s) and is
+#   five distinct FAILURES; `--self-test` drives all five deliberately. Two
+#   of the 36 (M06i, M06j) corrupt the SHARED chunk-bound helper, so seal's
+#   own cross-check agrees with the corruption and only the differential can
+#   see them -- which is the point of keeping that arithmetic in one place
+#   rather than writing it twice and calling the agreement a check. Not in
+#   this list because it recompiles the module 37 times (~1 min) and is
 #   evidence, not a gate.
 test_interval_index
 # The allocator tuning pgwt-server applies at startup (src/alloc_tune.h): the
@@ -590,3 +652,121 @@ test_backend_lifecycle
 # whose magnitude changed. Pure Python, milliseconds -- so a regression in
 # the gate's own logic does not need a 40-minute box run to surface.
 test_summary_raw_parity_lib.py
+
+# #424 live half: the request-scoped OPEN-INTERVAL OVERLAY (src/open_overlay.c)
+# -- the client of the daemon's {"cmd":"open_intervals"} snapshot, the span
+# arithmetic ([max(open_start, from), min(to, T_snap)] through the daemon's own
+# (now_mono, now_wall) anchor), the uniform precedence rule (any admitted
+# non-marker record for that pid past the open stamp IS the close -- so a
+# window that ends before the open stamp empties itself through the clip
+# alone, and there is no near-now test anywhere in the module to regress),
+# the mandatory span filter for a filtered request, the refusal of a window
+# the snapshot never covered (unknown is not zero), the three-step command
+# classification (cmd_sweep_open, NOT the instantaneous cmd_open, with the
+# two fallbacks that are rules rather than derivations -- 144 gate states,
+# each also driven with the daemon's verdict flipped so the table cannot be
+# satisfied by copying it), the cross-checks against the producer's own
+# figures (cmd_in_window, cmd_open_ns, cpu_ns, open_count and the wall-vs-
+# anchor identity), the RAW-route
+# and EXACT-tier refusals (summary v8 already credits open waits per sealed
+# second, so synthesizing there double counts), and the degraded contract: when
+# the overlay is unavailable the in-flight contribution is ABSENT and labelled,
+# never a zero. Positive numbers come from a hand-computed oracle, not from a
+# second call of the code under test; additivity is deliberately not the
+# primary assertion because it accepts an all-zero overlay.
+test_open_overlay
+# The false-negative suite over the entry above: 34 mutations of
+# src/open_overlay.c, each of which must turn test_open_overlay RED, plus a
+# comment-only control that must leave it GREEN (otherwise "every edit fails"
+# would look exactly like "every guard works"). A mutation that does not
+# apply, does not compile, or HANGS is a failure, and a missing compiler
+# refuses instead of skipping. It found four blind spots in the unit test
+# itself before any of them was committed: an unmeasured-CPU sentinel that
+# survived the arithmetic by accident, a wall stamp that happened to be
+# exactly representable as a double, a sub-window CPU clamp that was
+# unreachable (deleted), and the gate reduction's CLAMP, which cannot change
+# the majority verdict and so was invisible until the fixture started
+# carrying the daemon's cmd_open_ns as well.
+test_open_overlay_mutations.sh
+# #424: `--replay --from/--to` was the last reader still adding duration_ns
+# WHOLE (left straddlers over-reported) and selecting on the close timestamp
+# alone (waits still running at --to contributed 0 -- and src/replay.c also
+# stopped at the last block before --to, so the record rule could never see
+# them). Time is now overlap-selected and clipped; count/histogram/min/max
+# stay selected by the record's own close, so widening admission cannot
+# double-count one close in two windows. Includes the bypass suite for the
+# budgeted right-edge scan: exhausted budget, unreadable block header, a
+# SAMPLES tail that must cost no budget, bad arguments, empty input.
+#
+# #429: and the lookup underneath all of that. block_index[] is written
+# in COMMIT order and nothing sorts it, so pgwt_reader_find_block's
+# binary search had no precondition -- on a lagging --mode full drain a
+# SAMPLES block commits with a far-future first timestamp and the next
+# TRANSITIONS block commits after it with an earlier one. The search then
+# returns an ARBITRARY block, and a window can come back EMPTY while
+# reporting itself complete. The fixture here interleaves the two streams
+# so commit order and timestamp order genuinely disagree, and ASSERTS
+# that they do before asserting anything else -- a fixture where the two
+# orders coincide passes while the code is broken.
+test_replay_window
+# #424 daemon half: the live open-interval snapshot. Pins (a) that the
+# per-pid open-stretch arithmetic shared by the de-escalation flush, the
+# shutdown flush and the new {"cmd":"open_intervals"} command is byte-for-byte
+# the pre-refactor arithmetic -- a differential against a verbatim copy of the
+# deleted loop body, with a coverage assertion so the comparison cannot be
+# vacuous and two mutation probes proving it can go red; (b) the frozen wire
+# shape the live server half codes against, including an unmeasured cpu_ns
+# being ABSENT rather than 0 and a degraded status carrying NO pids array;
+# (c) the transport -- 1024 backends serialise to ~390 KB, so the superseded
+# 64 KB buffer is demonstrably insufficient, and the old drop-on-EAGAIN
+# sender truncates a reply the queued sender delivers whole.
+test_open_interval
+
+# test_trace_closure (#424 deliverable 1): can a reader tell that a capture
+# ended uncleanly? A footer could never answer that -- rotation, crash
+# recovery and a clean close all write one -- so the writer now records WHY a
+# file ended in spare header flag bits. Three groups: the pure bit->verdict
+# mapping (a legacy file reads UNKNOWN, never clean; contradictory bits
+# resolve to UNCLEAN); the real lifecycle on real files (clean close,
+# rotation, mid-capture, SIGKILL + recovery, SIGKILL twice, a clean label
+# surviving the recovery that archives it, a CLEAN label contradicted by the
+# committed watermark, and a close whose flush was made to FAIL -- which is
+# the only case that distinguishes "checked and durable" from "always set the
+# bit"); and the bypass suite -- missing file, empty file, truncated header,
+# wrong magic with every bit set, a directory, and a capture that never
+# opened a file at all. A gate that cannot see must refuse, never approve.
+test_trace_closure
+
+# test_open_ckpt (#424 deliverable 2): the open-interval checkpoint as ONE
+# contract -- identity, durable publication, recovery, suppression. Covers the
+# standard CRC-32 check value (a sidecar must validate for any reader), every
+# named refusal reason, the suppression predicate on inputs where it must say
+# yes AND no (with an exact recovered-ns total, so "suppress everything" and
+# "suppress nothing" both fail), publish-before-watermark, a crash carrying the
+# sidecar to its archive, a clean close and a rotation DROPPING it (both would
+# double count against real closing records), an uncertified close KEEPING it,
+# and the bypass suite: a sidecar from another file, a flipped bit, a chopped
+# record array, an insane count, a text file, no sidecar at all, an empty
+# checkpoint superseding a non-empty one, and retention taking the sidecar with
+# its archive.
+test_open_ckpt
+
+# #416: a display tick must contain every record the producer has already
+# emitted. handle_timer built the display from the cumulative accumulator
+# plus a LIVE state_map read and did NOT drain the event ringbuf -- the epoll
+# loop drained afterwards, 64 callbacks at a time, against ~37,700 records/s.
+# A long wait's whole contribution rides on ONE record, so Timeout:PgSleep
+# lost 100% of an 8.6 s sleep (DB Time 50.1% short) while CPU* moved -0.6%,
+# i.e. invisibly. The trace on disk was correct throughout; the live-tier
+# assertion that should have caught it was a FLOOR (PgSleep > 2000 ms), which
+# passes on a 3 s truncation of the same 8.6 s record. This drives the REAL
+# pgwt_handle_timer with only ring_buffer__consume wrapped, and asserts
+# CONSERVATION: display total == emitted total, exactly. Includes a backlog
+# deeper than one 64-callback budget pass (a one-pass fix fails it), a second
+# tick proving the new drain site does not double count, and the bypass suite
+# -- a drain that delivers nothing (the positive case must be drain-sensitive
+# or this stays green), a handler that returns early (skip read as pass), an
+# empty ring (0 == 0 is not evidence), no ring at all, an endless producer
+# (the drain must stop BOUNDED, count the truncation and log it), and a
+# second truncation that must still be counted after the one-shot log.
+test_tick_drain

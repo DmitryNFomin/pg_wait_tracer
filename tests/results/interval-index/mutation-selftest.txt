@@ -2,12 +2,12 @@
 
 --- self-test case: compiler absent (127) (expect TOOL-MISSING) ---
 FAIL [self-test]: the compiler is missing or not executable (exit 127). Every mutant would be BUILD-FAILED, which is NOT a detection.
-cc not found: [Errno 2] No such file or directory: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-ogi5y6rh/no-such-cc'
+cc not found: [Errno 2] No such file or directory: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-fsmjvb3o/no-such-cc'
   -> harness reports 1 failure(s), TOOL-MISSING=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 1, 'BASELINE-RED': 0}  PASS
 
 --- self-test case: compiler not executable (126) (expect TOOL-MISSING) ---
 FAIL [self-test]: the compiler is missing or not executable (exit 126). Every mutant would be BUILD-FAILED, which is NOT a detection.
-cc not executable: [Errno 13] Permission denied: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-ogi5y6rh/noexec-cc'
+cc not executable: [Errno 13] Permission denied: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-fsmjvb3o/noexec-cc'
   -> harness reports 1 failure(s), TOOL-MISSING=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 1, 'BASELINE-RED': 0}  PASS
 
 --- self-test case: compiler exits 127 on every call (expect TOOL-MISSING) ---
@@ -17,7 +17,7 @@ FAIL [self-test]: the compiler is missing or not executable (exit 127). Every mu
 
 --- self-test case: test source missing (expect BASELINE-RED) ---
 FAIL [self-test]: pristine build failed — nothing below is evidence
-clang: error: no such file or directory: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-ogi5y6rh/nope.c'
+clang: error: no such file or directory: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-fsmjvb3o/nope.c'
 
   -> harness reports 1 failure(s), BASELINE-RED=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 0, 'BASELINE-RED': 1}  PASS
 
@@ -38,14 +38,14 @@ FAIL  ZZ syntax error: BUILD-FAILED — a mutation that cannot compile is NOT a 
 t is_unfiltered((((const struct pgwt_filter *f)
       |                             ^
       |                          int
-/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:436:2: error: expected ')'
-  436 | }
+/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:517:2: error: expected ')'
+  517 | }
       |  ^
-/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:261:25: note: to match this '('
-  261 | static int is_unfiltered((((const struct pgwt_filter *f)
+/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:310:25: note: to match this '('
+  310 | static int is_unfiltered((((const struct pgwt_filter *f)
       |                         ^
-/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:436:2: error: expected function body after function declarator
-  436 | }
+/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:517:2: error: expected function body after function declarator
+  517 | }
       |  ^
 5 errors generated.
 

@@ -161,7 +161,19 @@ static void test_file_roundtrip(void)
           "magic 0x%08x == 0x%08x", hdr.magic, PGWT_TRACE_MAGIC);
     CHECK(hdr.version == PGWT_TRACE_VERSION,
           "version %d == %d", hdr.version, PGWT_TRACE_VERSION);
-    CHECK(hdr.flags == PGWT_FLAG_LZ4, "flags 0x%04x == LZ4", hdr.flags);
+    /* #424: the flags field now also carries the closure bits (set when the
+     * file is finalized — this file was closed, so CLOSURE_TRACKED and
+     * CLOSED_CLEAN are present). The assertion keeps its original intent —
+     * LZ4 set, and NO bit outside the two known groups — rather than being
+     * loosened to "the LZ4 bit is somewhere in there": a stray bit in the
+     * remaining 11 would still fail here. The closure bits themselves are
+     * asserted in tests/test_trace_closure.c. */
+    CHECK((hdr.flags & PGWT_FLAG_LZ4) != 0, "flags 0x%04x has LZ4", hdr.flags);
+    CHECK((hdr.flags & ~(uint16_t)(PGWT_FLAG_LZ4 | PGWT_FLAG_CLOSURE_MASK)) == 0,
+          "flags 0x%04x carries no bit outside LZ4 + the closure mask",
+          hdr.flags);
+    CHECK((hdr.flags & PGWT_FLAG_CLOSED_CLEAN) != 0,
+          "flags 0x%04x marks this closed file CLEAN", hdr.flags);
     CHECK(hdr.pg_version == 18, "pg_version %d == 18", hdr.pg_version);
     CHECK(hdr.start_time_ns > 0, "start_time_ns > 0");
     CHECK(hdr.clock_offset_ns > 0, "clock_offset_ns > 0");

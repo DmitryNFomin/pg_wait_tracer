@@ -1,0 +1,13 @@
+BASELINE (dormant, clean tree)        exit=0  PROBE PASSED: both #if branches compile, each confirmed
+D1 the dormant v9 producer is re-wired in map_reader.c exit=1  RED
+      FAIL src/map_reader.c (v8): map_reader.c calls pgwt_summary_note_open_ex, but the v9 open-CPU producer is DORMANT by dec
+      FAIL src/map_reader.c (v9): map_reader.c calls pgwt_summary_note_open_ex, but the v9 open-CPU producer is DORMANT by dec
+D2 control.c's v9 metrics block leaks into the v8 build exit=1  RED
+      FAIL src/control.c (v8): the v9 metrics block leaked into the v8 build
+D3 a v9 counter field misspelled       exit=1  RED
+      FAIL src/control.c (v9)
+D4 the v9 metrics block renamed away (verification counter gone) exit=1  RED
+      FAIL src/control.c (v9): the v9 metrics block was NOT compiled
+D5 missing v9 header                  exit=2  CANNOT VERIFY: v9 header not found at /nonexistent-worktree/src/summary_writer.h
+D6 header is v8, not v9               exit=2  CANNOT VERIFY: /tmp/pgwtv8fake/src/summary_writer.h declares PGWT_SUMMARY_VERSION='8', not 9 —
+RESTORED                              exit=0  PROBE PASSED: both #if branches compile, each confirmed

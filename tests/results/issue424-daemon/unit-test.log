@@ -1,0 +1,19 @@
+=== test_open_interval ===
+test_builder_equivalence
+  coverage: 6912 cases, built=864 seed=3456 not_open=1728 marker=864, cpu unknown/zero/pos=432/264/168, flags cmd/synth=432/288
+  mutation probes: underflow=192 diffs, synth_flag=288 diffs
+test_json_shape
+test_empty_but_included
+test_degraded_statuses
+test_status_invariant
+test_cmd_gate_formula
+  96 gate cases, 40 nonzero, verdicts false/true=64/32, 0 peek diffs, 0 majority diffs
+test_missing_category_refuses
+test_full_house
+  1024 backends serialise to 589729 bytes (cap 1048576, 64 KB would be TRUNCATED)
+test_anchor_absent
+test_transport_queue
+  legacy sender: 16384 of 587147 bytes before EAGAIN (truncated)
+  queued sender: 587147 bytes delivered in 35 flushes
+  backlog cap: 3 replies (587147 bytes each) queued, then refused
+172 checks, 0 failed
