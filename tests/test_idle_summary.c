@@ -32,7 +32,8 @@
  *      "Idle 19500 ms / AAS 0.00". Pinned here and not only in
  *      test_idle_accounting because this is the path a 900 s window
  *      takes: fixing the raw path alone would leave the demo unchanged.
- *      pct_db_time stays 0 and is asserted so -- that one is correct.
+ *      pct_db_time stays the not-applicable sentinel and is asserted so
+ *      -- that one is correct (#435: the value was 0.0 before).
  *   4. the VERSION PREFLIGHT. Refusing v1/v2 in the reader is not enough:
  *      pgwt_visit_summaries SKIPS a file it cannot open, so a mixed window
  *      would come back as a plausible PARTIAL answer. The preflight must
@@ -767,7 +768,8 @@ static void test_summary_idle_rows(void)
     /* ── THE IDLE ROW'S AAS, ON THE PATH THE 900 s DEMO WINDOW TAKES ─────
      *
      * AAS is a RATE (time / wall clock) and is defined for idle time; only a
-     * SHARE OF DB TIME is not, which is why pct_db_time stays 0 and is
+     * SHARE OF DB TIME is not, which is why pct_db_time stays the
+     * not-applicable sentinel (#435, was 0.0) and is
      * asserted so below. emit_idle_rows hardcoded aas = 0 until 2026-10-07,
      * so this window rendered "Idle 19500 ms / AAS 0.00" -- and the summary
      * path is the one should_use_summaries picks for a window this long, so
@@ -820,9 +822,10 @@ static void test_summary_idle_rows(void)
               "\"%s\" summary aas=%.9f expected %.9f (%.1f ms / %.1f ms "
               "wall); 0.00 means the rate is still hardcoded",
               aas_rows[i].name, r->aas, want, aas_rows[i].ms, wall_ms);
-        CHECK(r->pct_db_time == 0.0,
-              "\"%s\" pct_db_time=%.4f must stay 0: idle time genuinely has "
-              "no share OF DB Time, and that is correct, not a bug",
+        CHECK(r->pct_db_time == PGWT_PCT_DB_IDLE,
+              "\"%s\" pct_db_time=%.4f must stay the not-applicable "
+              "sentinel (-1): idle time genuinely has no share OF DB Time, "
+              "and #435 made that a null on the wire, never a numeric 0",
               aas_rows[i].name, r->pct_db_time);
         /* Both paths, row by row: cross_validate compares them, and an AAS
          * that differed between them would be a drift the ms comparison above

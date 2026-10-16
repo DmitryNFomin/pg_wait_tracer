@@ -43,6 +43,13 @@ test_window_clip
 # box-check or merge. Alone, the C tier exits 127 on a binary that does not
 # exist yet -- correctly: a listed test that cannot run fails the gate.
 test_window_overlap
+# #435/#436/#441: the four semantics contracts that are properties of the
+# RESPONSE rather than of a compute result -- Overview's idle %DB as JSON null
+# (not a numeric 0), the Queries latency average suppressed where no
+# full-duration evidence exists, execution statistics suppressed under a pid
+# drill they are not scoped to, and the transition graph's node population
+# equal to its edge population under a filter.
+test_semantics_wire
 # #387: absence is distinct from measured zero, including records selected
 # by end timestamp that have no in-window overlap.
 test_time_model_absence

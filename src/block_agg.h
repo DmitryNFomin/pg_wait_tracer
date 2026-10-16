@@ -97,26 +97,28 @@
  *     REFUSAL (DECODE / negative status), never a zero. A caller that cannot
  *     see must fall back to raw.
  *
- * ── OPEN QUESTION, STILL OPEN AND NOW LARGER THAN IT LOOKED ──────────────
- * The raw `transitions` response in src/server.c builds its node totals from
- * ALL loaded records, including SAMPLE-flagged ones. This paragraph used to
- * say the difference was "bounded to that one zero-nanosecond node entry",
- * on the premise that a sample has duration_ns == 0. That premise is WRONG
- * for the records this handler sees: decode zeroes duration_ns
+ * ── OPEN QUESTION, STILL OPEN ────────────────────────────────────────────
+ * Whether a MIXED window's graph-node totals should include the sampled
+ * contribution. Decode zeroes a sample's duration_ns
  * (src/event_reader.c:338-341), but the exact-wins merge then emits each
  * surviving sample fragment with a POSITIVE duration_ns
- * (src/server.c:2434). So the difference is not one empty node — it is the
- * entire uncovered sampled contribution to the CPU node total in a MIXED
- * window.
+ * (src/server.c:2434), so the quantity at stake is the entire uncovered
+ * sampled contribution to the CPU node total — not one empty node, as an
+ * earlier version of this paragraph assumed.
  *
- * The wiring commit routed the raw node pass through
- * pgwt_block_agg_add_events (src/server.c), which applies C5 and therefore
- * drops those fragments. That is a change to a user-visible number, made
- * without a test pinning it, i.e. decided by accident — exactly what this
- * section said must not happen. It is referred to the owner rather than
- * defended or reverted on an implementer's authority. Whichever way it goes,
- * it needs a test that pins a MIXED-window node total; there is none today,
- * and that absence is the real defect here.
+ * Both the raw node pass and C5 currently DROP those fragments, so the two
+ * agree; what is missing is a test pinning a MIXED-window node total, and
+ * that absence is the real defect here. It is still referred to the owner
+ * rather than decided on an implementer's authority.
+ *
+ * #436 narrowed the raw node pass further and is NOT this question: it stopped
+ * the raw pass selecting records by this header's C5 predicate (which takes no
+ * filter) and moved it onto pgwt_transition_record_counts() — the edge
+ * population — so a filtered request can no longer publish node bars for
+ * records whose edges the same response excluded. Both predicates drop SAMPLE
+ * records, so #436 moved nothing in the sampled question above. tests/
+ * test_semantics_wire.c section 4 pins the filtered case; the mixed case
+ * remains unpinned.
  *
  * ── The one documented ASYMMETRY against the raw path ────────────────────
  * A window larger than load_max_events() is refused by the raw path with a

@@ -48,6 +48,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_top_wait_backfill \
             test_tick_drain \
             test_window_overlap \
+            test_semantics_wire \
             test_open_overlay \
             test_replay_window \
             test_open_interval \
@@ -813,6 +814,15 @@ test_top_wait_backfill: test_top_wait_backfill.c ../src/server.c $(TRANSITIONS_L
 # gated on the close, together. Same server.c-included recipe (the real
 # writer, the real loader, the real compute).
 test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_semantics_wire: #435/#436/#441 -- four contracts that live in the JSON
+# the client receives, not in a compute result. A compute-level assertion
+# cannot tell `0` from `null`, an absent key from a suppressed one, or a node
+# table built from one population from one built from another; those three
+# distinctions ARE the defects. Same server.c-included recipe as
+# test_window_overlap, so the real handlers, loader and routing gate run.
+test_semantics_wire: test_semantics_wire.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction

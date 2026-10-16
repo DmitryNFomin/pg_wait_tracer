@@ -36,13 +36,21 @@ int pgwt_block_agg_record_counts(const struct pgwt_trace_event *ev)
      * link the raw path does not — found by tests/test_block_agg.c §1 before
      * this module had it, which is why §1 exists.
      *
-     * NOTE the asymmetry, faithful to the product: the raw `transitions` node
-     * pass in src/server.c does NOT go through pgwt_filter_matches(), so such
-     * a record still contributes node time there. pgwt_block_agg_node_counts()
-     * therefore does NOT carry this refusal. On real traces timestamp_ns is
-     * CLOCK_REALTIME-derived (~1.8e18), so neither branch can fire; the
-     * aggregate mirrors the raw path anyway, because "cannot happen" is not a
-     * reason for two paths to answer differently. */
+     * HISTORY, because this comment used to say the opposite and a reader
+     * will want to know which is true. It used to note an asymmetry: the raw
+     * `transitions` node pass in src/server.c did NOT go through
+     * pgwt_filter_matches(), so an impossible record still contributed node
+     * time there, and pgwt_block_agg_node_counts() deliberately mirrored
+     * that. #436 removed the asymmetry from the other side instead: the raw
+     * node pass now selects records with pgwt_transition_record_counts()
+     * (src/compute.c), which IS the edge population and does call
+     * pgwt_filter_matches(), so the raw path refuses such a record on both
+     * sides of its own picture. pgwt_block_agg_node_counts() is left as it
+     * is -- it is the predicate for a WRITE-TIME aggregate that cannot know a
+     * request's filter, and it is only ever consulted by a path that is
+     * currently gated off (bagg_window_eligible returns 0). On real traces
+     * timestamp_ns is CLOCK_REALTIME-derived (~1.8e18), so neither branch can
+     * fire. */
     if (ev->duration_ns > ev->timestamp_ns)
         return 0;
     if (pgwt_is_hidden_event(ev->old_event) || pgwt_is_hidden_event(ev->new_event))
@@ -54,10 +62,17 @@ int pgwt_block_agg_record_counts(const struct pgwt_trace_event *ev)
     return 1;
 }
 
-/* C5. Wider than C4 on purpose: this is what the raw `transitions` response
- * sums per graph node (src/server.c handle_transitions' node pass), which
- * looks only at old_event. SAMPLE records are excluded — see the OPEN
- * QUESTION in block_agg.h. */
+/* C5. Wider than C4 on purpose: a node total looks only at old_event.
+ * SAMPLE records are excluded -- see the OPEN QUESTION in block_agg.h.
+ *
+ * #436: this is NO LONGER what the raw `transitions` response sums per graph
+ * node. That pass now selects with pgwt_transition_record_counts(), the edge
+ * population, because this predicate takes no filter and therefore could not
+ * narrow the node table when the request narrowed the edge table. This
+ * predicate remains the WRITE-TIME aggregate's rule, where no request filter
+ * exists to apply; a window with a filter is refused outright by C3
+ * (pgwt_block_agg_filter_supported), so the two never answer the same
+ * question with different populations. */
 int pgwt_block_agg_node_counts(const struct pgwt_trace_event *ev)
 {
     if (!ev)
