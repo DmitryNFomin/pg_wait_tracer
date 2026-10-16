@@ -1,0 +1,6 @@
+distinct pids in real server payload: 5 [ 1000, 2024, 3048, 4072, 5096 ]
+yAxis categories (lanes) the builder emits: [ 'PID 1000', 'PID 2024', 'PID 3048', 'PID 4072', 'PID 5096' ]
+lane count: 5
+aggregated (density collapse)? false
+bar rows emitted: 10
+distinct row indices actually drawn: [ 0, 1, 2, 3, 4 ]

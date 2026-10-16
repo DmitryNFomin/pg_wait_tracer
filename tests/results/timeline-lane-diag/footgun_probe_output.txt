@@ -1,0 +1,6 @@
+lanes: [ 'PID 1001', 'PID 1002' ]
+bar rows: [
+  { pidRowIdx: 0, name: 'CPU*' },
+  { pidRowIdx: 0, name: 'Lock:relation' }
+]
+--> pid 9999's Lock:relation bar landed on row 0 = lane "PID 1001" (PID 1001's lane), not refused.

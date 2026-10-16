@@ -1,0 +1,10 @@
+query_id-only filter (no pid): expected distinct PIDs = 5
+  response pids: [1000, 2024, 3048, 4072, 5096]
+  response pid count: 5
+  response bar count: 10
+  response total_count: 10
+  response truncated: False
+
+pid-filtered request for pid 5096 (single-session drilldown):
+  response pids: [5096]
+  response bar count: 2
