@@ -10,7 +10,9 @@
  */
 
 import { buildTableModel, buildTruncationRow } from '../lib/table.js';
-import { overviewConfig, compareOverviewConfig } from '../lib/builders/table-configs.js';
+import {
+    overviewConfig, compareOverviewConfig, createOverviewOrder,
+} from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
 import { settleBaseline } from '../lib/compare-request.js';
@@ -43,6 +45,25 @@ function summaryHtml(metrics) {
 }
 
 export function createOverviewView() {
+    // #440 (contract item 6): one hysteresis tracker for this mounted view's
+    // whole lifetime (view-local state, like views/waterfall.js's
+    // `selected`) — reset whenever the window/filters change or the user
+    // enters/leaves compare mode, never on a tick that is otherwise just a
+    // refresh. Compare mode's own delta table uses an EXPLICIT column sort
+    // (ctx.getSort/toggleSort) and must stay undamped (contract: explicit
+    // sort is never hysteresis-smoothed) — only the plain (non-compare)
+    // table below is run through it.
+    const order = createOverviewOrder();
+    let lastWindowKey = null;
+
+    function maybeResetOrder(ctx, compareNow) {
+        const key = JSON.stringify({
+            from: ctx.timeRange.from, to: ctx.timeRange.to,
+            filters: ctx.filters.snapshot(), compare: !!compareNow,
+        });
+        if (key !== lastWindowKey) { order.reset(); lastWindowKey = key; }
+    }
+
     return {
         id: 'overview',
 
@@ -71,8 +92,10 @@ export function createOverviewView() {
         build(data, ctx) {
             if (data && data.compare && data.baselineUnavailable) {
                 const primary = data.a;
+                maybeResetOrder(ctx, true);
                 return {
-                    table: buildTableModel(overviewConfig, primary && primary.rows, null),
+                    table: buildTableModel(overviewConfig,
+                        order.apply(primary && primary.rows), null),
                     summary: buildSummary(primary, ctx.server.numCpus),
                     hasRows: !!(primary && primary.rows && primary.rows.length),
                     paneFidelity: buildPaneFidelity(primary),
@@ -103,8 +126,11 @@ export function createOverviewView() {
                     baselinePredates: delta.baselineUnavailable,
                 };
             }
-            // Overview keeps its server-defined hierarchy: no client sort.
-            const table = buildTableModel(overviewConfig, data && data.rows, null);
+            // Overview keeps its server-defined hierarchy: no client sort,
+            // just the #440 hysteresis pass within each sibling group.
+            maybeResetOrder(ctx, false);
+            const table = buildTableModel(overviewConfig,
+                order.apply(data && data.rows), null);
             const summary = buildSummary(data, ctx.server.numCpus);
             return {
                 table, summary,

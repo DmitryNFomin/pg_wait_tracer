@@ -11,12 +11,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     buildTableModel, buildTruncationRow, buildBarSegments,
-    stackedBar, eventStackedBar,
+    stackedBar, eventStackedBar, createStableOrder, STABLE_ORDER_PASS_RATIO,
     BAR_MIN_SEG_PCT, BAR_BELOW_COLOR, BAR_OTHER_COLOR,
 } from '../../web/static/lib/table.js';
-import { overviewConfig, eventsConfig } from '../../web/static/lib/builders/table-configs.js';
+import {
+    overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
+    PCTL_OVERFLOW_SENTENCE, queriesConfig, makeQueriesConfig,
+    buildUnattributedNote, unattributedNoteHtml, createOverviewOrder,
+} from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
-import { WAIT_CLASSES, classColor, eventColor, fmtMs } from '../../web/static/lib/format.js';
+import { WAIT_CLASSES, classColor, eventColor, fmtMs, fmtUs } from '../../web/static/lib/format.js';
+import { states as tableConfigFixtures } from '../fixtures/table-configs.mjs';
 
 test('overview: rows keep server order (no sort) + clickable indent-1', () => {
     const rows = [
@@ -69,6 +74,343 @@ test('overview: "CPU (waiting for a core)" row is indent-1 but NOT clickable', (
     assert.ok(model.rows[1].cls.includes('clickable'), 'CPU (running) is clickable');
     assert.ok(!model.rows[2].cls.includes('clickable'),
         'CPU (waiting for a core) is not clickable (no server class_name)');
+});
+
+// ── #435/#425 (contract item 1): idle is excluded, never a measured 0% ─────
+
+test('#435 Idle row: %DB Time is "—" (excluded), not a 0% bar, even when the server sends numeric 0', () => {
+    // src/server.c:3533 currently sends pct:0 for Idle (a recorded
+    // contradiction with Events' own null, server.c:3661) -- the client
+    // rule must hold against THAT shape, not only a hypothetical null one.
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12760, pct: 100, aas: 3.54 },
+        { indent: 0, name: 'Idle', ms: 45000, pct: 0, aas: 0.0 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const idleHtml = model.rows[1].cells[2].html;
+    assert.ok(!idleHtml.includes('pct-bar'), idleHtml);
+    assert.ok(!idleHtml.includes('0.0%'), idleHtml);
+    assert.ok(idleHtml.includes('—'), idleHtml);   // em-dash
+    assert.ok(idleHtml.includes('Excluded from DB Time'), idleHtml);
+});
+
+test('#435 Idle row: %DB Time stays "—" if the server ever sends null instead', () => {
+    const rows = [{ indent: 0, name: 'Idle', ms: 45000, pct: null, aas: 0.0 }];
+    const model = buildTableModel(overviewConfig, rows, null);
+    assert.ok(model.rows[0].cells[2].html.includes('—'));
+});
+
+test('#435 Idle row: AAS column relabels as "idle occupancy", never bare active-session AAS', () => {
+    const rows = [{ indent: 0, name: 'Idle', ms: 45000, pct: 0, aas: 0.42 }];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const html = model.rows[0].cells[3].html;
+    assert.ok(html.includes('0.42'), html);
+    assert.ok(html.includes('Idle occupancy'), html);
+    assert.ok(!/^0\.42$/.test(html.replace(/<[^>]*>/g, '').trim()) ||
+        html.includes('title='), html);
+    assert.ok(html.includes('not active-session AAS'), html);
+});
+
+test('#435 Idle row: a missing AAS value stays "—", no fabricated relabel wrapper', () => {
+    const rows = [{ indent: 0, name: 'Idle', ms: 45000, pct: 0, aas: null }];
+    const model = buildTableModel(overviewConfig, rows, null);
+    assert.equal(model.rows[0].cells[3].html, '—');
+});
+
+test('#435 negative control: DB Time and a normal class row are UNCHANGED by the idle rule', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12760, pct: 100, aas: 3.54 },
+        { indent: 1, name: 'IO', ms: 3200, pct: 25.1, aas: 0.89 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    assert.ok(model.rows[0].cells[2].html.includes('100.0%'));
+    assert.ok(model.rows[1].cells[2].html.includes('pct-bar'));
+    assert.equal(model.rows[0].cells[3].html, '3.54');
+    assert.equal(model.rows[1].cells[3].html, '0.89');
+});
+
+// ── #440 (contract item 6): refresh ordering + near-tie hysteresis ─────────
+//
+// The fixture CONTRACTS.md names explicitly: shuffled identical input,
+// alternating 100/101, then 100/106, a selected-row deletion, then an
+// explicit re-sort. Identity = row.id; value = row.v (contribution stand-in).
+
+function rowsOf(pairs) {   // [[id, v], ...] -> row objects
+    return pairs.map(([id, v]) => ({ id, v }));
+}
+const byId = (id) => (r) => r.id === id;
+const idOrder = (rows) => rows.map((r) => r.id);
+
+function tracker() {
+    return createStableOrder({ idKey: (r) => r.id, valueKey: (r) => r.v });
+}
+
+test('refresh-near-ties: first render sorts by descending value, then identity', () => {
+    const t = tracker();
+    const out = t.apply(rowsOf([['c', 50], ['a', 90], ['b', 90]]));
+    // b/a tie at 90 -> identity tiebreak (a < b); c last.
+    assert.deepEqual(idOrder(out), ['a', 'b', 'c']);
+});
+
+test('refresh-near-ties: shuffled IDENTICAL input never reorders after the first render', () => {
+    const t = tracker();
+    const first = t.apply(rowsOf([['x', 10], ['y', 10], ['z', 10]]));
+    const established = idOrder(first);
+    // Same values, every tick, but the INPUT ARRAY ORDER is reshuffled --
+    // exactly what a server response with no ordering guarantee would do.
+    const shuffles = [
+        [['z', 10], ['x', 10], ['y', 10]],
+        [['y', 10], ['z', 10], ['x', 10]],
+        [['x', 10], ['z', 10], ['y', 10]],
+    ];
+    for (const s of shuffles) {
+        assert.deepEqual(idOrder(t.apply(rowsOf(s))), established,
+            'identical values must never jitter regardless of input order');
+    }
+});
+
+test('refresh-near-ties: alternating 100/101 (within 5%) -> no jitter across many ticks', () => {
+    const t = tracker();
+    const established = idOrder(t.apply(rowsOf([['a', 100], ['b', 95]])));
+    assert.deepEqual(established, ['a', 'b']);
+    // b's value alternates 95 <-> 101 (every value here is well within 1.05x
+    // of a's 100) across 6 ticks -- a real noisy-but-stable workload.
+    for (let i = 0; i < 6; i++) {
+        const bVal = i % 2 === 0 ? 101 : 95;
+        const out = t.apply(rowsOf([['a', 100], ['b', bVal]]));
+        assert.deepEqual(idOrder(out), ['a', 'b'],
+            `tick ${i} (b=${bVal}): must not jitter`);
+    }
+});
+
+test('refresh-near-ties: a swing to 106 (>5%) IS a material reorder', () => {
+    const t = tracker();
+    t.apply(rowsOf([['a', 100], ['b', 95]]));
+    // b jumps to 106: 106 > 100 * 1.05 (105) -- strictly past the threshold.
+    const out = t.apply(rowsOf([['a', 100], ['b', 106]]));
+    assert.deepEqual(idOrder(out), ['b', 'a'],
+        'b must pass a once it is genuinely, not marginally, ahead');
+});
+
+test('refresh-near-ties: 105 exactly does NOT pass (strictly greater, not >=)', () => {
+    const t = tracker();
+    t.apply(rowsOf([['a', 100], ['b', 95]]));
+    const out = t.apply(rowsOf([['a', 100], ['b', 105]]));
+    assert.deepEqual(idOrder(out), ['a', 'b']);
+});
+
+test('refresh-near-ties: a selected row\'s deletion drops it, keeps survivors\' order, no crash', () => {
+    const t = tracker();
+    t.apply(rowsOf([['a', 100], ['b', 95], ['c', 50]]));
+    const out = t.apply(rowsOf([['a', 100], ['c', 50]]));   // 'b' (selected) gone
+    assert.deepEqual(idOrder(out), ['a', 'c']);
+    assert.equal(out.find(byId('b')), undefined);
+});
+
+test('refresh-near-ties: a newcomer is ranked in before the hysteresis passes run', () => {
+    const t = tracker();
+    t.apply(rowsOf([['a', 100], ['b', 95]]));
+    // 'c' arrives at 200 -- far above both survivors; it must be able to
+    // reach the top in the SAME tick it appears, not be stuck appended last
+    // until a future tick "catches up" to it.
+    const out = t.apply(rowsOf([['a', 100], ['b', 95], ['c', 200]]));
+    assert.deepEqual(idOrder(out), ['c', 'a', 'b']);
+});
+
+test('refresh-near-ties: explicit re-sort (reset()) discards accumulated order', () => {
+    const t = tracker();
+    t.apply(rowsOf([['a', 100], ['b', 95]]));
+    // Without reset(), 'b' at 101 would NOT pass 'a' at 100 (within 5%).
+    const beforeReset = t.apply(rowsOf([['a', 100], ['b', 101]]));
+    assert.deepEqual(idOrder(beforeReset), ['a', 'b']);
+    t.reset();
+    const afterReset = t.apply(rowsOf([['a', 100], ['b', 101]]));
+    assert.deepEqual(idOrder(afterReset), ['b', 'a'],
+        'a fresh first-render sort must rank by the exact current value');
+});
+
+test('refresh-near-ties NEGATIVE CONTROL: plain exact-descending-every-tick jitters on 100/101', () => {
+    // This is the bug #440 fixes, reproduced with the policy literally
+    // replaced by "sort exact descending every tick" -- demonstrates the
+    // positive tests above are not vacuously true for ANY ordering.
+    const plainDescendingEveryTick = (rows) =>
+        rows.slice().sort((a, b) => b.v - a.v || String(a.id).localeCompare(String(b.id)))
+            .map((r) => r.id);
+    const seq = [
+        rowsOf([['a', 100], ['b', 95]]),
+        rowsOf([['a', 100], ['b', 101]]),   // within 5% -- must NOT reorder
+        rowsOf([['a', 100], ['b', 95]]),
+        rowsOf([['a', 100], ['b', 101]]),
+    ];
+    const orders = seq.map(plainDescendingEveryTick);
+    const allStable = orders.every((o) => JSON.stringify(o) === JSON.stringify(orders[0]));
+    assert.ok(!allStable,
+        'sanity: plain descending-every-tick DOES jitter on this input (' +
+        JSON.stringify(orders) + ') -- proves the policy, not the fixture, prevents it');
+    // And createStableOrder, fed the exact same sequence, does not jitter.
+    const t = tracker();
+    const stableOrders = seq.map((rows) => idOrder(t.apply(rows)));
+    const allStableReal = stableOrders.every(
+        (o) => JSON.stringify(o) === JSON.stringify(stableOrders[0]));
+    assert.ok(allStableReal, JSON.stringify(stableOrders));
+});
+
+// timeout: this exact case (two non-finite neighbors, -Infinity vs -Infinity)
+// is what makes `>` -> `>=` in the hysteresis pass loop forever instead of
+// just misbehaving -- -Infinity >= -Infinity is true, so every pass re-swaps
+// the same pair. Bounded here so that regression fails fast instead of
+// hanging the whole suite (verified: reverting to `>=` times out at 120s
+// under the bare `node --test` run, SIGKILLed, no assertion output at all).
+test('refresh-near-ties: unavailable (non-finite) values sort last and never pass', { timeout: 2000 }, () => {
+    const t = tracker();
+    const out = t.apply(rowsOf([['a', 100], ['b', NaN], ['c', null]]));
+    assert.deepEqual(idOrder(out), ['a', 'b', 'c']);   // b/c tie at -Infinity -> identity
+    const out2 = t.apply(rowsOf([['a', 100], ['b', NaN], ['c', null]]));
+    assert.deepEqual(idOrder(out2), ['a', 'b', 'c'], 'stays stable, no spurious reorder');
+});
+
+test('STABLE_ORDER_PASS_RATIO is the documented 1.05 draft threshold', () => {
+    assert.equal(STABLE_ORDER_PASS_RATIO, 1.05);
+});
+
+// ── #440: Overview sibling groups preserve hierarchy under hysteresis ───────
+
+function overviewRow(indent, name, ms) { return { indent, name, ms, pct: 0, aas: 0 }; }
+
+test('createOverviewOrder: DB Time/Idle bookends are NEVER ranked into the class pool', () => {
+    const o = createOverviewOrder();
+    // Idle's ms (45000) dwarfs every class -- it must NOT float to the top.
+    const rows = [
+        overviewRow(0, 'DB Time', 12760),
+        overviewRow(1, 'CPU', 4800),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(0, 'Idle', 45000),
+    ];
+    const out = o.apply(rows);
+    assert.deepEqual(out.map((r) => r.name), ['DB Time', 'CPU', 'IO', 'Idle']);
+});
+
+test('createOverviewOrder: a class\'s event children move WITH it and reorder only among siblings', () => {
+    const o = createOverviewOrder();
+    const rows = [
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(2, 'IO:DataFileRead', 2100),
+        overviewRow(2, 'IO:WalSync', 800),
+        overviewRow(1, 'Lock', 1500),
+        overviewRow(2, 'Lock:relation', 1500),
+    ];
+    const out = o.apply(rows);
+    assert.deepEqual(out.map((r) => r.name),
+        ['DB Time', 'IO', 'IO:DataFileRead', 'IO:WalSync', 'Lock', 'Lock:relation']);
+    // IO:WalSync jumps from 800 to 3000 (>5% past IO:DataFileRead's 2100) --
+    // it must pass its SIBLING within IO, and must not leak into Lock's group.
+    const rows2 = [
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(2, 'IO:DataFileRead', 2100),
+        overviewRow(2, 'IO:WalSync', 3000),
+        overviewRow(1, 'Lock', 1500),
+        overviewRow(2, 'Lock:relation', 1500),
+    ];
+    const out2 = o.apply(rows2);
+    assert.deepEqual(out2.map((r) => r.name),
+        ['DB Time', 'IO', 'IO:WalSync', 'IO:DataFileRead', 'Lock', 'Lock:relation']);
+});
+
+test('createOverviewOrder: a class swing past the 5% threshold reorders the class group', () => {
+    const o = createOverviewOrder();
+    o.apply([overviewRow(0, 'DB Time', 10000), overviewRow(1, 'CPU', 4800),
+        overviewRow(1, 'IO', 3200)]);
+    const out = o.apply([overviewRow(0, 'DB Time', 10000), overviewRow(1, 'CPU', 4800),
+        overviewRow(1, 'IO', 6000)]);   // 6000 > 4800*1.05 (5040)
+    assert.deepEqual(out.map((r) => r.name), ['DB Time', 'IO', 'CPU']);
+});
+
+test('createOverviewOrder.reset(): discards accumulated order for classes AND children', () => {
+    const o = createOverviewOrder();
+    o.apply([overviewRow(0, 'DB Time', 10000), overviewRow(1, 'CPU', 100),
+        overviewRow(1, 'IO', 95)]);
+    o.reset();
+    const out = o.apply([overviewRow(0, 'DB Time', 10000), overviewRow(1, 'CPU', 95),
+        overviewRow(1, 'IO', 100)]);
+    // A fresh first-render sort ranks IO ahead of CPU by the exact current
+    // value -- would still read CPU-first without the reset.
+    assert.deepEqual(out.map((r) => r.name), ['DB Time', 'IO', 'CPU']);
+});
+
+test('createOverviewOrder: a class that disappears and returns starts its child group fresh', () => {
+    const o = createOverviewOrder();
+    o.apply([overviewRow(0, 'DB Time', 10000), overviewRow(1, 'Lock', 500),
+        overviewRow(2, 'Lock:relation', 500)]);
+    o.apply([overviewRow(0, 'DB Time', 10000)]);   // Lock momentarily absent
+    const out = o.apply([overviewRow(0, 'DB Time', 10000), overviewRow(1, 'Lock', 500),
+        overviewRow(2, 'Lock:relation', 400), overviewRow(2, 'Lock:tuple', 500)]);
+    // A fresh child group sorts by current value, not stale history --
+    // Lock:tuple (new, higher) ranks first.
+    assert.deepEqual(out.map((r) => r.name),
+        ['DB Time', 'Lock', 'Lock:tuple', 'Lock:relation']);
+});
+
+// ── Review finding: Idle's own indent-2 children attached to the WRONG
+// parent (the preceding class), or vanished entirely when no class had
+// been seen yet. Contract §6 requires hierarchy to be preserved, not
+// reassigned -- and NEVER silently dropped. ───────────────────────────────
+
+test("Idle's indent-2 child attaches to IDLE, not to the preceding class", () => {
+    const o = createOverviewOrder();
+    const rows = [
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(2, 'IO:DataFileRead', 2100),
+        overviewRow(0, 'Idle', 45000),
+        overviewRow(2, 'Client:ClientRead', 39000),
+    ];
+    const out = o.apply(rows);
+    assert.deepEqual(out.map((r) => r.name),
+        ['DB Time', 'IO', 'IO:DataFileRead', 'Idle', 'Client:ClientRead']);
+    // Specifically: Client:ClientRead must NOT render under IO (before
+    // Idle) -- it must come AFTER Idle, as its own child.
+    const idleIdx = out.findIndex((r) => r.name === 'Idle');
+    const clientIdx = out.findIndex((r) => r.name === 'Client:ClientRead');
+    assert.ok(clientIdx > idleIdx,
+        `Client:ClientRead (${clientIdx}) must follow Idle (${idleIdx})`);
+});
+
+test('an indent-2 row with NO parent seen yet is never silently dropped', () => {
+    const o = createOverviewOrder();
+    // Pathological/defensive: an indent-2 row arrives before any indent-0
+    // or indent-1 row at all (should not happen from a real server, but a
+    // dropped row is worse than a defensively-placed one).
+    const rows = [
+        overviewRow(2, 'Orphan:child', 100),
+        overviewRow(0, 'DB Time', 10000),
+    ];
+    const out = o.apply(rows);
+    assert.ok(out.some((r) => r.name === 'Orphan:child'),
+        `Orphan:child must not vanish: ${JSON.stringify(out.map((r) => r.name))}`);
+});
+
+test("Idle's children get their OWN nested hysteresis, independent of any class", () => {
+    const o = createOverviewOrder();
+    o.apply([
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(0, 'Idle', 45000),
+        overviewRow(2, 'Client:ClientRead', 39000),
+        overviewRow(2, 'Timeout:PgSleep', 6000),
+    ]);
+    // Timeout:PgSleep jumps past ClientRead by >5% -- must reorder WITHIN
+    // Idle's children, independent of IO (which has none here).
+    const out = o.apply([
+        overviewRow(0, 'DB Time', 10000),
+        overviewRow(1, 'IO', 3200),
+        overviewRow(0, 'Idle', 45000),
+        overviewRow(2, 'Client:ClientRead', 39000),
+        overviewRow(2, 'Timeout:PgSleep', 42000),
+    ]);
+    assert.deepEqual(out.map((r) => r.name),
+        ['DB Time', 'IO', 'Idle', 'Timeout:PgSleep', 'Client:ClientRead']);
 });
 
 test('events: descending sort by count', () => {
@@ -335,8 +677,11 @@ test('#103 overflow percentile renders ">=", never an exact-looking number', () 
         assert.equal(cellText(html), '\u226516.4ms', `col ${ci}: ${html}`);
         // The disclosure is in words, not just the drill affordance: it
         // leads with the fact and points at the column that has the tail.
-        assert.ok(/title="At least 16\.4ms\./.test(html), html);
-        assert.ok(/title="[^"]*see Max for the real tail[^"]*"/.test(html), html);
+        // #437: the exact agreed sentence, verbatim.
+        assert.ok(html.includes('title="Percentiles marked ≥16.4 ms ' +
+            'fall in the open-ended ≥16.384 ms histogram bucket; ' +
+            'they are lower bounds, and their actual values are ' +
+            'unavailable.'), html);
     }
     // Max is the exact tail and stays exact.
     assert.ok(m.rows[0].cells[MAX_COL].html.includes('2.6s'),
@@ -384,7 +729,11 @@ test('#103 a NON-drillable overflow cell (CPU*) still discloses the bound', () =
     assert.ok(!cell.cls.includes('drillable'), cell.cls);
     assert.ok(!cell.html.includes('cell-drill'), cell.html);
     assert.ok(cell.html.includes('\u226516.4ms'), cell.html);
-    assert.ok(/title="At least 16\.4ms\./.test(cell.html), cell.html);
+    // #437: the exact agreed sentence, verbatim.
+    assert.ok(cell.html.includes('title="Percentiles marked \u226516.4 ms ' +
+        'fall in the open-ended \u226516.384 ms histogram bucket; they ' +
+        'are lower bounds, and their actual values are unavailable.'),
+        cell.html);
     // ...and it carries the quieter .pctl-overflow affordance (style.css),
     // not the drill's inline underline, so the bound still reads as
     // inspectable on a row that cannot be drilled.
@@ -423,6 +772,61 @@ test('#103 sort treats ">=16.4ms" as 16.4ms (the shown bound), not +Infinity', (
         ['Lock:relation', 'IO:DataFileRead']);
 });
 
+// ── #437: beside-table overflow disclosure (not only on hover) ─────────────
+
+test('buildOverflowNote: one overflowing row in the page -> the sentence', () => {
+    const note = buildOverflowNote([
+        evRow({ p95_us: 16384, p95_overflow: true }),
+        evRow({ name: 'IO:DataFileRead', event_id: 1 }),
+    ]);
+    assert.deepEqual(note, { text: PCTL_OVERFLOW_SENTENCE });
+    assert.ok(PCTL_OVERFLOW_SENTENCE.includes('lower bounds'));
+    assert.ok(PCTL_OVERFLOW_SENTENCE.includes('unavailable'));
+    // #437: "the true value is higher" wrongly excludes equality -- gone.
+    assert.ok(!PCTL_OVERFLOW_SENTENCE.includes('higher'));
+});
+
+test('buildOverflowNote: no row overflowed -> null (nothing extra to say)', () => {
+    assert.equal(buildOverflowNote([evRow({})]), null);
+    assert.equal(buildOverflowNote([]), null);
+    assert.equal(buildOverflowNote(null), null);
+});
+
+test('buildOverflowNote: a false overflow flag does not count as overflow', () => {
+    assert.equal(buildOverflowNote([evRow({ p99_overflow: false })]), null);
+});
+
+test('overflowNoteHtml: renders the sentence escaped; null model renders nothing', () => {
+    const html = overflowNoteHtml({ text: PCTL_OVERFLOW_SENTENCE });
+    assert.ok(html.includes('pctl-overflow-banner'), html);
+    assert.ok(html.includes(PCTL_OVERFLOW_SENTENCE), html);
+    assert.equal(overflowNoteHtml(null), '');
+});
+
+// #437 CONTRACTS.md item 4's "single fixture": the existing
+// events-overflow-pctl gallery/dev fixture, extended with the finite-bucket
+// CONTROL row (LWLock:LockManager) called for there -- same 16384 number as
+// an overflow row, but p99_overflow:false, so it must render WITHOUT ">=".
+test('events-overflow-pctl fixture: the finite-bucket control renders plain', () => {
+    const st = tableConfigFixtures['events-overflow-pctl'];
+    const model = buildTableModel(eventsConfig, st.rows, st.sort);
+    const control = model.rows.find(r => r.row.name === 'LWLock:LockManager');
+    assert.ok(control, 'fixture carries the finite-bucket control row');
+    assert.equal(cellText(control.cells[P99_COL].html), '16.4ms',
+        control.cells[P99_COL].html);
+    assert.ok(!control.cells[P99_COL].html.includes('≥'),
+        control.cells[P99_COL].html);
+    // Every genuinely overflowing row in the SAME fixture still shows ">=".
+    for (const name of ['Lock:relation', 'Timeout:CheckpointWriteDelay',
+                         'IO:DataFileRead', 'CPU*']) {
+        const row = model.rows.find(r => r.row.name === name);
+        assert.ok(cellText(row.cells[P99_COL].html).startsWith('≥'),
+            `${name}: ${row.cells[P99_COL].html}`);
+    }
+    // #437: the sentence is attached at the model/view level for this page.
+    assert.deepEqual(buildOverflowNote(st.rows), { text: PCTL_OVERFLOW_SENTENCE });
+});
+
 // ── U2 (U1-review F4): eventColor identity tints in the pctBar sites ────────
 
 test('events %DB bar uses the event identity tint, not the flat class hue', () => {
@@ -439,4 +843,84 @@ test('overview %DB bars: class rows keep class hue, event rows take the tint', (
     const m = buildTableModel(overviewConfig, rows, null);
     assert.ok(m.rows[0].cells[2].html.includes(classColor('IO')));
     assert.ok(m.rows[1].cells[2].html.includes(eventColor(null, 'IO:DataFileRead')));
+});
+
+// ── #439 (contract item 1/3): Queries' % column names its actual, NARROWER
+// denominator (query-attributed active time), never the Overview total ──────
+
+test('#439 Queries pct column is labeled "% attributed DB Time", not "%DB"', () => {
+    const headerLabels = queriesConfig.columns.map(c => c.label);
+    assert.ok(headerLabels.includes('% attributed DB Time'), headerLabels.join(', '));
+    assert.ok(!headerLabels.includes('%DB'), headerLabels.join(', '));
+});
+
+test('buildUnattributedNote: discloses the excluded time, pct and occurrence count', () => {
+    const note = buildUnattributedNote({
+        db_time_ms: 9500, unattributed_available: true,
+        unattributed_ms: 500, unattributed_count: 4,
+    });
+    assert.ok(note.text.includes(fmtMs(500)), note.text);
+    // 500 / (9500+500) = 5.0%
+    assert.ok(note.text.includes('5.0%'), note.text);
+    assert.ok(note.text.includes('4 occurrences'), note.text);
+    assert.ok(note.text.includes('not attributed to any query'), note.text);
+});
+
+test('buildUnattributedNote: unattributed_available:false is reported, not silently dropped', () => {
+    const note = buildUnattributedNote({ unattributed_available: false,
+        db_time_ms: 9500, unattributed_ms: 0, unattributed_count: 0 });
+    assert.ok(note, 'the false-availability case still returns a note');
+    assert.ok(note.text.includes('not available'), note.text);
+    assert.ok(!note.text.includes('0ms'), note.text);   // never a fabricated number
+});
+
+test('buildUnattributedNote: genuinely zero unattributed time -> no note (nothing to disclose)', () => {
+    assert.equal(buildUnattributedNote({
+        db_time_ms: 9500, unattributed_available: true,
+        unattributed_ms: 0, unattributed_count: 0,
+    }), null);
+});
+
+test('buildUnattributedNote: missing/malformed input -> null, never a crash or a fabricated note', () => {
+    assert.equal(buildUnattributedNote(null), null);
+    assert.equal(buildUnattributedNote({}), null);
+    assert.equal(buildUnattributedNote({ unattributed_ms: 'lots' }), null);
+    assert.equal(buildUnattributedNote({ unattributed_ms: -5 }), null);
+});
+
+test('unattributedNoteHtml: renders the note; null renders nothing', () => {
+    const html = unattributedNoteHtml({ text: '500ms unattributed.' });
+    assert.ok(html.includes('unattributed-note'), html);
+    assert.ok(html.includes('500ms unattributed.'), html);
+    assert.equal(unattributedNoteHtml(null), '');
+});
+
+// ── #441 (contract item 3): Queries' count/avg name what they actually are ──
+
+test('#441 exact fidelity: "Wait/CPU intervals" + "Avg interval", not "Waits"/"Avg Wait"', () => {
+    const cfg = makeQueriesConfig('exact');
+    const countCol = cfg.columns.find(c => c.key === 'count');
+    const avgCol = cfg.columns.find(c => c.key === 'avg_us');
+    assert.equal(countCol.label, 'Wait/CPU intervals');
+    assert.equal(avgCol.label, 'Avg interval');
+    assert.equal(avgCol.format({ avg_us: 50 }), fmtUs(50));
+});
+
+test('#441 sampled/mixed fidelity: "Observations"; Avg interval is unavailable, never invented', () => {
+    for (const fidelity of ['sampled', 'mixed']) {
+        const cfg = makeQueriesConfig(fidelity);
+        const countCol = cfg.columns.find(c => c.key === 'count');
+        const avgCol = cfg.columns.find(c => c.key === 'avg_us');
+        assert.equal(countCol.label, 'Observations', fidelity);
+        // #441 negative control: a sampled row CAN carry a numeric avg_us
+        // (the server might still send one) -- the column must still
+        // refuse to show it, proving this is a fidelity-gated suppression,
+        // not merely "format the field that happens to be present".
+        assert.equal(avgCol.format({ avg_us: 50 }), '—', fidelity);
+    }
+});
+
+test('#441 default queriesConfig export stays the exact-tier shape (gallery/back-compat)', () => {
+    const countCol = queriesConfig.columns.find(c => c.key === 'count');
+    assert.equal(countCol.label, 'Wait/CPU intervals');
 });

@@ -952,6 +952,13 @@ jobs:
         # starts passing is reported (XPASS) for promotion, never fatal.
         run: python3 tests/test_web_ui_chaos.py
 
+      - name: Waterfall drilled-readout fold check (issue #415)
+        # Same tier/precondition as the two suites above (python3 +
+        # playwright + mock_server.py) -- verifies the fix in the FULL
+        # application shell (breadcrumbs/controls/AAS chart), not the
+        # isolated fixture gallery that missed the original bug.
+        run: python3 tests/verify_waterfall_fold.py
+
       # U0 suite hygiene: every check() failure wrote a full-page screenshot +
       # console tail under tests/results/web_ui_failures/ — surface them.
       - name: Upload failure artifacts (screenshots + console tails)

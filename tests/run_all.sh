@@ -499,12 +499,19 @@ fi
 if [[ "${PGWT_RUN_WEB_UI:-}" != "1" ]]; then
     skip_test "test_web_ui" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
     skip_test "test_web_ui_chaos" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
+    skip_test "verify_waterfall_fold" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
 elif python3 -c "import playwright, websockets" 2>/dev/null; then
     run_test "test_web_ui" python3 "$SCRIPT_DIR/test_web_ui.py"
     run_test "test_web_ui_chaos" python3 "$SCRIPT_DIR/test_web_ui_chaos.py"
+    # #415: same tier/precondition as the two siblings above (python3 +
+    # playwright + mock_server.py, no PG/root/BPF) -- the drilled Waterfall
+    # readout stays above the fold in the FULL app shell, not just the
+    # isolated fixture gallery that missed it originally.
+    run_test "verify_waterfall_fold" python3 "$SCRIPT_DIR/verify_waterfall_fold.py"
 else
     skip_test "test_web_ui" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
     skip_test "test_web_ui_chaos" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
+    skip_test "verify_waterfall_fold" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
 fi
 
 # Visual-regression snapshots (Phase B4). Needs playwright + Pillow + numpy AND

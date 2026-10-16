@@ -12,24 +12,41 @@
  *   - Clicking a row drills into that pid (→ timeline, per the app PIVOT).
  */
 
-import { buildTableModel, buildTruncationRow } from '../lib/table.js';
+import {
+    buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
+    createOrderResetGate,
+} from '../lib/table.js';
 import { sessionsConfig } from '../lib/builders/table-configs.js';
 import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
 
 /* PURE: top_sessions response + sort -> render model. Exported for testing.
  * U2 (review P10): carries the pane fidelity badge (sampled/mixed numbers are
- * scaled estimates) and the server-flagged truncation row. */
-export function buildSessionsModel(data, sort) {
+ * scaled estimates) and the server-flagged truncation row.
+ * #440 (contract item 6): `orderTracker` applies the refresh-ordering
+ * hysteresis to the DEFAULT (no explicit column sort) order; optional so
+ * every existing caller/test that does not pass one keeps today's plain
+ * order (a REAL production call always passes one — createSessionsView()
+ * below). */
+export function buildSessionsModel(data, sort, orderTracker) {
     const rows = (data && data.rows) || [];
+    const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
     return {
         hasRows: rows.length > 0,
-        table: buildTableModel(sessionsConfig, rows, sort),
+        table: buildTableModel(sessionsConfig, ordered, sort),
         paneFidelity: buildPaneFidelity(data),
         truncation: buildTruncationRow(data),
     };
 }
 
 export function createSessionsView() {
+    // #440: one hysteresis tracker for this mounted view's whole lifetime --
+    // identity is pid (stable, unique per row), value is db_time_ms (the
+    // Sessions table's own DB-time contribution column).
+    const order = createStableOrder({
+        idKey: (r) => String(r.pid), valueKey: (r) => r.db_time_ms,
+    });
+    const resetIfChanged = createOrderResetGate();
+
     return {
         id: 'sessions',
 
@@ -43,7 +60,9 @@ export function createSessionsView() {
 
         build(data, ctx) {
             const sort = ctx.getSort('sessions');
-            return buildSessionsModel(data, sort);
+            resetIfChanged(order, { from: ctx.timeRange.from, to: ctx.timeRange.to,
+                filters: ctx.filters.snapshot(), sort });
+            return buildSessionsModel(data, sort, order);
         },
 
         mount(el, model, ctx) {

@@ -10,7 +10,7 @@
 
 export const states = {
     'overview': {
-        description: 'The time-model table: indents, class dots, pct bars, the Idle row at pct 0. #187: DB Time now includes the "CPU (waiting for a core)" row (mirrors tests/mock_server.py).',
+        description: 'The time-model table: indents, class dots, pct bars. #187: DB Time now includes the "CPU (waiting for a core)" row (mirrors tests/mock_server.py). #435: Idle renders "—" (excluded from DB Time) in %DB Time, never a measured 0%; its AAS cell is relabeled "idle occupancy" on hover, since no session is active while idle.',
         tags: ['HIERARCHY'],
         config: 'overview',
         sort: null,   // overview keeps server order
@@ -141,7 +141,7 @@ export const states = {
      * this state moved from mid-file to the end); the four that remain are
      * the compare cells the gallery renders last. */
     'events-overflow-pctl': {
-        description: 'Events table where percentiles saturate the latency histogram\'s OPEN-ENDED top bucket (#103): Avg/Max are seconds, so P50/P95/P99 must read ">=16.4ms" bounds (tooltip: "at least ... see Max"), never exact values. The last row is fully inside the histogram and is unchanged; CPU* overflows but is not drillable (no histogram pivot for event_id 0).',
+        description: 'Events table where percentiles saturate the latency histogram\'s OPEN-ENDED top bucket (#103/#437): Avg/Max are seconds, so P50/P95/P99 must read ">=16.4ms" bounds, never exact values, with the beside-table disclosure sentence shown next to the table (not only on hover). LWLock:LockManager is the finite-bucket CONTROL: its P99 reports the SAME 16384 number as an overflow row but p99_overflow is false, so it must render as a plain, exact "16.4ms" -- the flag, never the number, decides. The last row is fully inside the histogram and is unchanged; CPU* overflows but is not drillable (no histogram pivot for event_id 0).',
         tags: ['SEMANTICS', 'FEEDBACK'],
         config: 'events',
         sort: { key: 'total_ms', asc: false },
@@ -164,6 +164,19 @@ export const states = {
               p95_us: 8192, p99_us: 16384, max_us: 42000,
               p50_overflow: false, p95_overflow: false, p99_overflow: true,
               pct: 19.9, aas: 0.25 },
+            // #437 finite-bucket CONTROL: bucket 14 (8.2..16.384ms) reports
+            // the same 16384 edge value as the open-ended bucket 15 -- the
+            // comment on pctlCell() above explains why that number alone
+            // cannot distinguish them. p99_overflow:false here means this
+            // 16384 is the EXACT edge of a finite bucket, so it must render
+            // plain ("16.4ms"), with none of the overflow row's ">=" /
+            // disclosure -- same number, opposite rendering, decided only
+            // by the flag.
+            { name: 'LWLock:LockManager', event_id: 0x04000012, class: 'LWLock',
+              count: 12000, total_ms: 700, avg_us: 58.3, p50_us: 40,
+              p95_us: 9000, p99_us: 16384, max_us: 16384,
+              p50_overflow: false, p95_overflow: false, p99_overflow: false,
+              pct: 15.5, aas: 0.19 },
             // CPU* overflows too: discloses the bound, but no histogram drill.
             { name: 'CPU*', event_id: 0, class: 'CPU',
               count: 250000, total_ms: 500, avg_us: 19.2, p50_us: 12,

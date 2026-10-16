@@ -36,6 +36,35 @@ an event enters or leaves the top-N, the others must not reshuffle. Cross-check
 must belong to its class hue, identically to the same event anywhere else in
 the app.
 
+**Row order (#440, table views only — a DRAFT policy, not yet an existing
+repository rule elsewhere):** the drill-down tables (Overview/Events/
+Sessions/Queries, `lib/table.js`) apply the same stability principle to row
+ORDER. A re-sort by raw value on every refresh jitters: two rows within noise
+of each other swap rank every tick, reading as motion instead of a real
+change. `lib/table.js createStableOrder()` keeps a row's position unless its
+current value is strictly greater than 1.05x its predecessor's — the first
+render for a given identity set still ranks by descending value (then
+identity), and an explicit column sort (the user asking for the exact
+displayed order) is never dampened by this. Applied within Overview's
+indent-1 class / indent-2 event sibling groups (preserving the DB Time/Idle
+bookends and each group's children moving with it, `table-configs.js
+createOverviewOrder`), and flatly over the whole row set for the Events/
+Sessions/Queries tables (`lib/table.js applyDefaultOrder`, one tracker per
+mounted view — `views/{events,sessions,queries}.js createOverviewView()`'s
+siblings).
+
+**Check it:** `tests/web_unit/table.test.mjs`'s `refresh-near-ties` cases —
+shuffled identical input must never jitter; an alternating ~5%-noise value
+must not reorder; a genuine >5% swing must. Each of `events.test.mjs`/
+`sessions.test.mjs`/`queries.test.mjs` additionally carries a `#440 WIRING`
+case that exercises the real `createXView().build()` (not the pure builder
+with a hand-made tracker) — un-wiring that one call (dropping the tracker
+argument) is exactly the gap a 2026-10 review found: the pure-builder tests
+stayed green while three of the four production views silently never used
+the tracker at all. No gallery cell currently replays a refresh sequence
+(the gallery's fixtures are single static snapshots) — the Node unit tests
+are the check until one exists.
+
 **Historical instances:** index-keyed event colors and stack order (P2);
 index-keyed legend Set soloing the wrong series after a drill (P2); yMax
 breathing and bucket phase shimmer (P7); heatmap global recolor per tick (P8);
