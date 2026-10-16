@@ -37,6 +37,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_cpu_split_parity \
             test_straddler_accounting \
             test_open_cpu_accounting \
+            test_rotation_open_credit \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -730,6 +731,38 @@ test_straddler_accounting: test_straddler_accounting.c \
 # disabled writer, a sub-second gap, and the open-credit-only round trip.
 # Server build, no BPF, no live PG; ~0.3 s.
 test_open_cpu_accounting: test_open_cpu_accounting.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                   $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_rotation_open_credit: #430 -- an hourly rotation must not PAUSE
+# open-interval crediting. pgwt_summary_check_rotation leaves w->fp NULL for a
+# lazy reopen and writer_seal_through refused on a NULL fp, so every daemon
+# tick between the rotation and the next PUSHED record sealed nothing. #430
+# called that attribution-only; it is not, because pgwt_summary_close() also
+# returns early on a NULL fp, so a capture that stops inside the window never
+# writes those seconds at all. Asserted: EXACT conservation (sigma of the
+# pid's db_time off disk == the wall of the completed seconds the fixture's
+# tick schedule could seal; 11000 ms, parent tree 5000 ms), per-record
+# placement (every record exactly 1000 ms) and the per-FILE split (5 s in the
+# archived hour, 6 s in the file the seal reopened). The one input that greens
+# a careless fixture -- a record pushed right after the rotation, which is
+# what test_open_cpu_accounting's rotation leg does -- is included as the
+# reachability probe and is 11000 ms on BOTH trees. Bypass suite: a writer
+# that never opened a file (must invent nothing), nothing open after the
+# rotation (must create no file), a reopen that FAILS (counted, nothing
+# fabricated, the seconds stay owed and arrive later), a note that goes stale
+# mid-pause (crediting stops, expiry counted), the rotation ABSENT rather than
+# wrong, a missing/empty dir and a previous-version file (the read-back must
+# REFUSE), and a disabled writer. Rotation is forced via w->current_hour = -1,
+# the same deterministic seam test_open_cpu_accounting uses: no real hour
+# boundary is waited for and no assertion reads a clock. Server build, no BPF,
+# no live PG; ~0.1 s.
+test_rotation_open_credit: test_rotation_open_credit.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \

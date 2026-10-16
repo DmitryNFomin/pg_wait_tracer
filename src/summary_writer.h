@@ -460,21 +460,28 @@
  *     and a second that completed before the producer's first note still
  *     cannot be back-credited (open_credit_late_ns_total). Both are v8
  *     residuals, unchanged.
- *   - AN HOURLY ROTATION PAUSES CREDITING until the next pushed record.
- *     pgwt_summary_check_rotation closes the file and leaves w->fp NULL for
- *     open_summary_file to fill in lazily, and writer_seal_through refuses
- *     to invent records with no file -- so the ticks between the rotation
- *     and the next event seal nothing, and the seconds they covered are all
- *     credited in ONE pass when the next record arrives. This is a v8
- *     behaviour, identical for waits, and it moves ATTRIBUTION only: the
- *     window total is exact either way. Its v9-specific hazard -- one
- *     second receiving several seconds' worth of measured CPU against its
- *     own one second of wall -- is what the per-second slice cap in
- *     credit_open_cpu_measured exists for, and
- *     tests/test_open_cpu_accounting.c's rotation leg is where it was
- *     found. Reopening the file at rotation time would narrow the
- *     attribution residual for waits and gaps alike; it is #379's business,
- *     not this version's.
+ *   - AN HOURLY ROTATION USED TO PAUSE CREDITING until the next pushed
+ *     record; FIXED in #430, and the claim that it was attribution-only was
+ *     WRONG. pgwt_summary_check_rotation closes the file and leaves w->fp
+ *     NULL for open_summary_file to fill in lazily, and
+ *     writer_seal_through refused to invent records with no file -- so the
+ *     ticks between the rotation and the next event sealed nothing. If a
+ *     record did arrive, the seconds were credited in ONE pass and only
+ *     ATTRIBUTION moved. But pgwt_summary_close() also returns early on a
+ *     NULL fp, so a daemon STOPPED inside that window wrote none of those
+ *     seconds at all: on a 35-minute capture that rotates, the whole tail
+ *     after the boundary was LOST, not misattributed
+ *     (tests/test_rotation_open_credit.c §1 measures 6 of 11 s on disk
+ *     before the fix). writer_seal_through now reopens the file ITSELF once
+ *     it knows it has a second to write -- never before, so a writer whose
+ *     clocks were never anchored still invents nothing -- and both outcomes
+ *     are counted (open_seal_reopens_total,
+ *     open_seal_reopen_failures_total). The v9-specific hazard the pause
+ *     created -- one second receiving several seconds' worth of measured
+ *     CPU against its own one second of wall -- is what the per-second
+ *     slice cap in credit_open_cpu_measured exists for; the cap stays,
+ *     because the catch-up pass still happens whenever a seal is delayed
+ *     for any other reason (a failed write, open_fill_capped_total).
  *   - If the producer's prefix measurement for a tick EXCEEDS the closing
  *     record's own cpu_ns (schedstat jitter between the two reads), the
  *     over-credited part cannot be taken back out of an immutable second.
@@ -800,6 +807,23 @@ struct pgwt_summary_writer {
     FILE         *fp;
     char          current_path[512];
     int           current_hour;
+    /* #430: has a summary file EVER been opened by this writer? `fp == NULL`
+     * alone cannot answer that, and the seal needs the answer: NULL because
+     * nothing was ever opened means the clock anchor does not exist and no
+     * record may be invented, while NULL because pgwt_summary_check_rotation
+     * archived the file means the anchor is fine and the seal must reopen
+     * (see writer_seal_through / seal_can_write).
+     *
+     * `current_hour` looks like it could serve -- init sets -1,
+     * open_summary_file sets a real hour -- but it CANNOT: the deterministic
+     * rotation seam every test uses is to set current_hour = -1 so the
+     * cached hour differs from localtime(), and check_rotation itself never
+     * writes the field back. So after a forced rotation current_hour is -1
+     * with a file very much having been opened, i.e. exactly the state the
+     * sentinel is supposed to exclude. Measured: using current_hour left
+     * tests/test_rotation_open_credit.c §1 at 5000 of 11000 ms with the fix
+     * applied. A separate flag cannot be aliased by a seam. */
+    bool          file_ever_opened;
 
     /* Block index (footer) */
     struct pgwt_block_index_entry *block_index;
@@ -914,6 +938,29 @@ struct pgwt_summary_writer {
     uint64_t      open_cpu_refused_total;
     uint64_t      cpu_open_uncredited_ns_total;
     uint64_t      open_fill_capped_total;
+    /* #430: the SEAL's own file lifecycle. pgwt_summary_check_rotation closes
+     * the file and leaves w->fp NULL for a LAZY reopen, so the seal has to be
+     * able to reopen it itself -- otherwise every tick between the rotation
+     * and the next PUSHED record seals nothing (writer_seal_through). The two
+     * outcomes are not interchangeable, so they are two numbers:
+     *   seal_reopens_total          the seal reopened the file because it had
+     *                               a second to write and the rotation had
+     *                               closed it. Non-zero is the proof this
+     *                               path is REACHED; ZERO on a capture that
+     *                               rotated with an interval open means the
+     *                               pause is back and the gate stopped
+     *                               looking.
+     *   seal_reopen_failures_total  the reopen FAILED (no space, a
+     *                               current.summary that cannot be created).
+     *                               Nothing is fabricated and nothing is
+     *                               advanced: credited_until_ns is untouched,
+     *                               so the seconds stay OWED and a later
+     *                               successful seal still places them. This
+     *                               is therefore the number that says a
+     *                               window is short -- a gap as a number
+     *                               rather than a belief. */
+    uint64_t      open_seal_reopens_total;
+    uint64_t      open_seal_reopen_failures_total;
     /*   note_mismatch   a closing record whose pid had a note describing a
      *                   DIFFERENT interval (different wait id or start).
      *                   Nothing is subtracted in that case -- the record is

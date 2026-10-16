@@ -1097,6 +1097,7 @@ static int open_summary_file(struct pgwt_summary_writer *w)
     }
 
     w->num_blocks = 0;
+    w->file_ever_opened = true;   /* #430: the clock anchor now exists */
     return 0;
 }
 
@@ -1499,6 +1500,57 @@ static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
     return best;
 }
 
+/* Can the seal write RIGHT NOW, reopening the file if that is all that is
+ * missing? (#430)
+ *
+ * `w->fp == NULL` used to be read as one state and it is two:
+ *
+ *   NEVER ANCHORED -- no file has ever been opened and no offline producer
+ *     pinned the anchor, so clock_offset_* are zero and mono_to_wall would
+ *     stamp every record with garbage. Here the refusal is right, and it is
+ *     the only reason the original guard existed.
+ *
+ *   ROTATED -- a file WAS open, pgwt_summary_check_rotation archived it and
+ *     left fp NULL on purpose so open_summary_file fills it in lazily on the
+ *     next PUSHED record. The clocks are anchored and the open table, the
+ *     per-pid watermarks and the per-interval freeze all live on the writer,
+ *     not on the file. Refusing here made every tick in that window seal
+ *     nothing: crediting paused until a record happened to arrive, and if
+ *     the daemon stopped first (pgwt_summary_close also returns early on a
+ *     NULL fp) those seconds were never written at all.
+ *
+ * `file_ever_opened` separates them, and `current_hour` deliberately does
+ * NOT -- see the field's comment in summary_writer.h for why the obvious
+ * choice is the wrong one.
+ *
+ * This is called only once the caller KNOWS it has a second to write, so a
+ * quiet writer with nothing open never creates a file -- the empty-record
+ * refusal above it is unchanged. A failed reopen is COUNTED and credits
+ * nothing: credited_until_ns is not advanced, so the owed seconds are still
+ * owed and a later successful seal places them.
+ *
+ * It deliberately does NOT do what the push path does on an open failure --
+ * pgwt_summary_push_event sets w->enabled = false and gives up. A seal runs
+ * once per tick, so a disk that is full for a minute would permanently
+ * disable summaries for the rest of the capture; instead this retries each
+ * tick, and because nothing is advanced the retry is lossless. The cost is
+ * open_summary_file's own WARN once a second while the condition lasts,
+ * which is the loudness this project wants for a write it could not do, and
+ * it stops the instant the reopen succeeds. */
+static bool seal_can_write(struct pgwt_summary_writer *w)
+{
+    if (w->fp)
+        return true;
+    if (!w->file_ever_opened)
+        return false;      /* clocks never anchored: invent nothing */
+    if (open_summary_file(w) != 0) {
+        w->open_seal_reopen_failures_total++;
+        return false;
+    }
+    w->open_seal_reopens_total++;
+    return true;
+}
+
 /* Seal every second STRICTLY BEFORE `to_sec`: credit the open intervals into
  * it, write it, and open the next one if anything is still open there.
  *
@@ -1506,17 +1558,35 @@ static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
  * long interval appear in the seconds it spans even when no event closes in
  * them -- without it a 100 s ClientRead on an otherwise quiet system would
  * still land whole in its closing second, because nothing would have written
- * the 99 seconds before it. */
+ * the 99 seconds before it.
+ *
+ * #430: there is deliberately NO `if (!w->fp) return` here. That line was the
+ * defect, and an early-out spelling the same refusal a second time would be
+ * worse than the defect: the refusal would then live in two places, the one
+ * in seal_can_write would be unreachable, and the bypass leg written to prove
+ * the unanchored writer invents nothing would be satisfied by this line while
+ * testing none of the logic it names. MEASURED: with that early-out present,
+ * deleting seal_can_write's refusal outright left
+ * tests/test_rotation_open_credit.c §3 fully GREEN -- a dead gate. One
+ * refusal, one site. The loop below reaches seal_can_write only once it knows
+ * it has a second to write, so a writer with nothing open still creates no
+ * file and no record. */
 static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec)
 {
-    if (!w->fp)
-        return;            /* clocks not anchored yet: invent nothing */
     int guard = PGWT_SUMMARY_OPEN_FILL_MAX_SECONDS;
     for (;;) {
         uint64_t sec;
         if (w->accum_active) {
             sec = w->accum.second_mono_ns;
             if (sec >= to_sec)
+                return;
+            /* An ACTIVE accumulator with no file should not be reachable (the
+             * rotation closes the accumulator before it closes the file, and
+             * the push path opens the file first), but if it ever is, the old
+             * code dropped the second in silence: flush_accum returns 0 --
+             * SUCCESS -- when w->fp is NULL. Reopening here makes the
+             * unreachable case correct instead of quietly lossy. */
+            if (!seal_can_write(w))
                 return;
         } else {
             sec = earliest_open_second(w, to_sec);
@@ -1526,6 +1596,12 @@ static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec)
                 sec <= w->last_flushed_second_mono_ns)
                 sec = w->last_flushed_second_mono_ns + PGWT_NS_PER_SEC;
             if (sec >= to_sec)
+                return;
+            /* BEFORE second_wall_ns is derived: open_summary_file re-reads
+             * the clock anchor (unless an offline producer pinned it), and
+             * the record's wall must come from the anchor of the file it is
+             * actually written into. */
+            if (!seal_can_write(w))
                 return;
             w->accum.second_mono_ns = sec;
             w->accum.second_wall_ns = mono_to_wall(w, sec);

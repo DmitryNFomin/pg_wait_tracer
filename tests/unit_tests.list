@@ -437,6 +437,60 @@ test_straddler_accounting
 # events[] row with time and no count must survive, or the block header
 # desynchronises and whole seconds fail to decode).
 test_open_cpu_accounting
+# #430: an hourly ROTATION must not PAUSE open-interval crediting.
+# pgwt_summary_check_rotation archives the file and leaves w->fp NULL for a
+# lazy reopen on the next PUSHED record, and writer_seal_through refused
+# outright on a NULL fp -- so every daemon tick in that window sealed nothing
+# and the per-second credit of every open interval simply stopped. #430 filed
+# this as "attribution-only, totals over a window containing the close are
+# unaffected"; that is FALSE, and this test is the measurement.
+# pgwt_summary_close() also returns early on a NULL fp, so a capture that
+# STOPS inside the pause never writes those seconds at all: on this fixture
+# 11 s of a continuously-waiting backend elapse and the parent tree puts
+# 5000 ms of it on disk. Rotation is hourly on the wall clock and the demo
+# rehearsal capture is 35 minutes, so whether a demo hits this was decided by
+# the MINUTE it started -- an intermittent, unreproducible-after-the-fact
+# accounting fault in a recorded GIF.
+#
+# The gate is a CONSERVATION identity, not a floor: sigma of the pid's
+# db_time_ns summed off DISK through the shipping reader == the wall of the
+# completed seconds the fixture's literal tick schedule could seal, EXACTLY.
+# The two sides come from different places, so it cannot be satisfied by
+# comparing one sum with itself, and "PgSleep > 2000 ms"-shaped floors (the
+# assertion that let #416 live for months) would have passed on the parent
+# tree. It is also placement-sensitive: every record must carry exactly
+# 1000 ms, and the per-FILE split must be 5 s in the archived hour and 6 s in
+# the file the seal reopened -- so a catch-up pass that dumped the whole
+# pause into one second, a re-credit from the interval's start, or a
+# double-counted boundary second fails here rather than passing on the total.
+#
+# THE INPUT THAT GREENS A CARELESS FIXTURE is included deliberately as the
+# reachability probe: push a record right after the rotation and the lazy
+# reopen happens on the PUSH path, the owed seconds are caught up in one
+# pass, and the total is exact with the defect fully present. That is
+# precisely what test_open_cpu_accounting's rotation leg (3c) does, which is
+# why it could not see #430 -- verified by running it on both trees, 89
+# checks 0 failures and byte-identical numbers either way. If this probe were
+# red too, the conservation leg's red would be the harness and not the pause.
+#
+# Bypass suite, one leg per way this gate's DETECTION could be made
+# unreachable, each demonstrated red against a one-edit mutant of the fix: a
+# writer that never opened a file (no clock anchor exists, so it must invent
+# nothing and create no file); nothing open after the rotation (no file, no
+# empty record -- an idle daemon must not churn one file per hour); a reopen
+# that FAILS (a directory planted at current.summary, which fails as root
+# too) -- nothing credited, the failure COUNTED, and the seconds still OWED
+# so a later tick places all of them; a note that goes stale mid-pause (a pid
+# that died without an EXIT record: crediting stops inside the freshness
+# window and the expiry is counted); the rotation ABSENT rather than wrong
+# (same schedule, same 11 s, so the rotation is the only variable); a
+# missing dir, an empty dir and a PREVIOUS-VERSION file (the read-back must
+# REFUSE -- a gate that sums zero records agrees with everything); and a
+# disabled writer. The refusal lives in exactly ONE place for this reason:
+# the first draft kept a `if (!w->fp && !w->file_ever_opened) return` early
+# out as well, and deleting the real refusal then left the never-anchored leg
+# fully GREEN.
+test_rotation_open_credit
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second
