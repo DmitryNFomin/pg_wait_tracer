@@ -1,7 +1,11 @@
 # gate-integrity evidence (#431, #433, .gitignore evidence-class fix)
 
 ## make check
-Full `make check` passed on the final tree: stamp `40215eed717764a396cb940deb87087662219688`.
+Full `make check` passed on the final tree (after the orphan-scan round):
+stamp matches `scripts/tree-hash.sh`'s output on the committed tree (see the
+commit message / final report for the exact value -- verify with
+`cat .pgwt-check.stamp` vs `scripts/tree-hash.sh` on this tree, which must be
+equal).
 
 ## make box-check
 Ran on the persistent gate box (`root@2.28.45.47`, idle at load 0.10, lock
@@ -31,6 +35,13 @@ valid live-tier evidence for the final tree:
     `scripts/check.sh`, never into `tests/run_all.sh`)
   - `scripts/check.sh` (wires both new self-tests into `make check`)
   - `CLAUDE.md` (documents the new guard alongside its two siblings)
+  - the orphan-scan round (`scripts/check-runner-registration.py`'s orphan
+    scan, `Makefile` read-only addition as a 4th registration source,
+    `tests/test_check_runner_registration.sh`'s 8 new cases) -- same
+    Mac-side-only property: `make box-check` runs `tests/run_all.sh` on
+    Linux and never reads `scripts/check-runner-registration.py` or this
+    self-test at all, so none of this round's changes touch anything the
+    box exercises either.
 
 ## #431 -- check-test-registration.sh fails closed under `sh`/dash
 - `431-green.log` -- `tests/test_check_test_registration.sh` full run, fixed
@@ -45,26 +56,47 @@ valid live-tier evidence for the final tree:
   (`test_interval_index`) deleted from `tests/unit_tests.list` -- see the
   session transcript / report for the raw `sh`/`dash`/`bash` output).
 
-## #433 -- reconcile tests/run_all.sh vs tests/ci_smoke.sh membership
-- `433-green.log` -- `tests/test_check_runner_registration.sh`: 16/16 passed
-  (reconciled-GREEN, instance-3-shape comment-only RED, dropped-entry RED,
-  moved-entry RED, documented-exemption GREEN, unparseable-runner RED,
-  missing-runner RED, malformed-exemption RED).
+## #433 -- reconcile tests/run_all.sh vs tests/ci_smoke.sh membership, plus an orphan scan
+- `433-green.log` -- `tests/test_check_runner_registration.sh`: 24/24 passed
+  (16 reconciliation cases + 8 orphan-scan cases: orphan-file RED, same file
+  registered-into-check.sh GREEN, `.test.mjs` glob-discovery does-not-trip
+  GREEN, Makefile-only-registration GREEN, missing-`scripts/check.sh` RED).
 - `433-real-repo-finding.log` -- `scripts/check-runner-registration.sh` run
-  against THIS real repository (no repo-dir argument): correctly finds the
-  two real, pre-existing gaps the issue names in spirit --
-  `test_capture_smoke.py` and `test_uprobe_fired.py` are invoked only by
-  `tests/ci_smoke.sh`, not `tests/run_all.sh`. Left unfixed and
-  undocumented-as-exempted deliberately: fixing either means editing
-  `tests/run_all.sh` (a live-tier test-assertion change), out of scope for
-  this guard-building branch per the brief ("Do not touch ... any live-tier
-  test assertion").
+  against THIS real repository (no repo-dir argument): correctly finds
+  - the two real, pre-existing RECONCILIATION gaps the issue names in
+    spirit -- `test_capture_smoke.py` and `test_uprobe_fired.py` are
+    invoked only by `tests/ci_smoke.sh`, not `tests/run_all.sh`;
+  - four real, pre-existing ORPHANS (invoked by NO runner): and
+    `test_check_test_registration.sh` (#431's own self-test -- its header
+    says "run it by hand", same as `check-test-registration.sh`'s own live
+    invocation, but the orphan scan does not distinguish "deliberately
+    manual" from "forgotten" -- that judgment is the exemption list's job,
+    left to the issue owner per instruction), `test_gesture_gate.py` and
+    `test_startup_probe_degrade.py` (both have a "Usage: ..." docstring
+    describing a manual, env-var/root-gated invocation -- likely
+    deliberate manual tools, not bugs, but not mine to judge), and
+    `test_v9_open_cpu_wired.sh` (already extensively documented in both
+    `run_all.sh` and `ci_smoke.sh` as deliberately unregistered -- the
+    strongest exemption-list candidate of the four, left unexempted
+    anyway per instruction).
+  All six names left unfixed and NOT added to
+  `tests/runner_registration_exemptions.list`, per instruction ("do not fix
+  them and do not exempt them -- list them in your report").
+  One FALSE POSITIVE was found and fixed, not reported as a finding:
+  `test_check_lock.sh` is invoked by the root `Makefile`'s `check:` target
+  (`@bash tests/test_check_lock.sh`), a 4th registration path this guard did
+  not originally scan -- added as a required runner (`extract_bare_tests_path_registrations`
+  reused against `Makefile` the same way as `scripts/check.sh`) so this
+  specific false positive cannot recur; the self-test's Case 12 pins it.
 - Bypass-suite demonstrations (not saved as log files; done interactively
   and reported in the final report): disabling the guard's comment-strip
   step reproduces a false GREEN on the instance-3-shaped fixture (14/16);
   disabling the "mentions python3/bash but extracted nothing" parser
   self-check reproduces a false GREEN on the unparseable-ci_smoke.sh
-  fixture (14/16). Both restored before this commit.
+  fixture (14/16); disabling the orphan-scan computation entirely (`orphans
+  = []`) reproduces a false GREEN on the orphan-fixture case (22/24, the
+  orphan-fixture case and its "names the file" sub-assertion both flip to
+  FAIL). All three restored before this commit.
 
 ## .gitignore -- tests/results/ evidence directories ignored as a class
 - `gitignore-green.log` -- `tests/test_results_evidence_ignore.sh`: 5/5

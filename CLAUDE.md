@@ -214,20 +214,30 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
     immediately before the rsync that syncs that exact tree to the box —
     match those two values against the PR head before trusting a
     `box-check` log.
-  - `scripts/check-runner-registration.sh` (issue #433) — fails if a test
-    file `tests/ci_smoke.sh` actually invokes is not also invoked by
-    `tests/run_all.sh` (what `make box-check` runs), unless named with a
-    reason in `tests/runner_registration_exemptions.list`. "Actually
-    invokes", not "mentions": a filename inside a comment does not count
-    (the guard's hardest case — a naive grep gets this wrong). Mac-side,
-    seconds, no box; its self-test (synthetic fixtures) runs in `make check`,
-    but running it against THIS repo is still a manual reviewer step, same
-    as `check-test-registration.sh` above — wiring the live check into every
-    `make check` would turn the two real, already-filed gaps it currently
-    reports (`test_capture_smoke.py`, `test_uprobe_fired.py` — ci_smoke-only,
-    tracked by #433, not fixed by the guard that found them since fixing
-    them means editing `tests/run_all.sh`) into a permanent red for every
-    unrelated branch. Self-tests: `tests/test_check_runner_registration.sh`.
+  - `scripts/check-runner-registration.sh` (issue #433) — two checks: (1)
+    fails if a test file `tests/ci_smoke.sh` actually invokes is not also
+    invoked by `tests/run_all.sh` (what `make box-check` runs); (2) an
+    ORPHAN SCAN — fails if a `tests/test_*.py` / `tests/test_*.sh` file on
+    disk is invoked by NONE of `tests/run_all.sh` (directly, its
+    `LIVE_TESTS` array, or `tests/unit_tests.list`, which `run_all.sh`
+    executes line by line), `tests/ci_smoke.sh`, `scripts/check.sh`, or the
+    root `Makefile` — unless named with a reason in
+    `tests/runner_registration_exemptions.list`. Both checks: "actually
+    invokes", not "mentions" (a filename inside a comment does not count —
+    the hardest case, a naive grep gets this wrong) and a glob a runner
+    uses (`tests/web_unit/*.test.mjs`) registers every file it matches, not
+    individually. Mac-side, seconds, no box; its self-test (synthetic
+    fixtures) runs in `make check`, but running it against THIS repo is
+    still a manual reviewer step, same as `check-test-registration.sh`
+    above — wiring the live check into every `make check` would turn the
+    real, already-filed gaps it currently reports into a permanent red for
+    every unrelated branch: `test_capture_smoke.py` / `test_uprobe_fired.py`
+    (ci_smoke-only, tracked by #433, not fixed here since fixing them means
+    editing `tests/run_all.sh`), and orphans `test_check_test_registration.sh`,
+    `test_gesture_gate.py`, `test_startup_probe_degrade.py`,
+    `test_v9_open_cpu_wired.sh` (found by the orphan scan's first real run;
+    each may be a deliberate manual-only tool rather than a bug — a human
+    call, not this guard's). Self-tests: `tests/test_check_runner_registration.sh`.
 - **Adviser** (owner rules 2026-09-27 and 2026-09-29): consult BOTH by default:
   codex via `codex exec` is primary; Fable via `.claude/agents/adviser.md`
   is the standing second.

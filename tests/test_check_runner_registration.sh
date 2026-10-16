@@ -37,6 +37,21 @@ report() {
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
+# write_minimal_mac_runners <repo> -- scripts/check.sh and the root Makefile
+# must exist for every fixture now (both count as runners the orphan scan
+# reads), but most cases have nothing to say through them: a stub with no
+# python3/bash mention is TRIVIAL by this guard's own looks_nontrivial()
+# test, so it registers nothing and never trips the "mentions python3/bash
+# but extracted zero invocations" parser self-check either.
+write_minimal_mac_runners() {
+    local repo="$1"
+    mkdir -p "$repo/scripts"
+    printf '#!/usr/bin/env bash\n# stub for test_check_runner_registration.sh fixtures\n' \
+        > "$repo/scripts/check.sh"
+    printf '# stub Makefile for test_check_runner_registration.sh fixtures\ncheck:\n\t@true\n' \
+        > "$repo/Makefile"
+}
+
 # write_reconciled <repo> -- a minimal but realistic pair of runners where
 # test_a is invoked by both (directly in ci_smoke.sh, via the LIVE_TESTS
 # array in run_all.sh), test_b is a direct-invocation-only run_all.sh entry
@@ -46,6 +61,15 @@ trap 'rm -rf "$tmpdir"' EXIT
 write_reconciled() {
     local repo="$1"
     mkdir -p "$repo/tests"
+    write_minimal_mac_runners "$repo"
+    # Physical files, not just names mentioned in the runners below: the
+    # orphan scan globs tests/test_*.py / tests/test_*.sh ON DISK, so a
+    # fixture whose runners reference a name with no file behind it would
+    # never exercise that scan at all -- test_a.py and test_b.py must
+    # actually exist for cases 1-8 (which predate the orphan check) to keep
+    # covering it once it is added, not just the reconciliation check.
+    printf '# stub\n' > "$repo/tests/test_a.py"
+    printf '# stub\n' > "$repo/tests/test_b.py"
     cat > "$repo/tests/run_all.sh" <<'EOF'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -274,6 +298,110 @@ if grep -qi "malformed exemption" <<<"$out"; then
     report true "malformed-exemption failure names the reason"
 else
     report false "malformed-exemption failure names the reason; output: $out"
+fi
+
+# Case 9 (RED, the orphan scan itself): tests/test_orphan_fixture.sh exists
+# on disk and is invoked by NONE of run_all.sh, ci_smoke.sh, check.sh or the
+# Makefile -- a test nobody ever runs. Found for real, twice, while this
+# guard was being written (tests/test_check_runner_registration.sh and
+# tests/test_results_evidence_ignore.sh existed, unregistered, before being
+# wired into scripts/check.sh).
+repo9="$tmpdir/case9_orphan"
+write_reconciled "$repo9"
+printf '#!/usr/bin/env bash\necho orphan\n' > "$repo9/tests/test_orphan_fixture.sh"
+chmod +x "$repo9/tests/test_orphan_fixture.sh"
+out=$("$GUARD" "$repo9" 2>&1); rc=$?
+if [[ "$rc" == "1" ]]; then
+    report true "an orphan test file invoked by nothing is refused (exit 1)"
+else
+    report false "orphan test file refused (wanted exit 1, got $rc; output: $out)"
+fi
+if grep -q "test_orphan_fixture.sh" <<<"$out"; then
+    report true "failure names the orphan file (test_orphan_fixture.sh)"
+else
+    report false "failure names test_orphan_fixture.sh; output: $out"
+fi
+
+# Case 10 (GREEN, the quiet-after-registering control): the SAME file,
+# registered into scripts/check.sh this time -- must pass, and the fixture
+# must NOT also be reachable via the orphan's PREVIOUS zero-registration
+# state (i.e. registering it actually works, not just coincidentally
+# silencing something else).
+repo10="$tmpdir/case10_orphan_registered"
+write_reconciled "$repo10"
+printf '#!/usr/bin/env bash\necho orphan\n' > "$repo10/tests/test_orphan_fixture.sh"
+chmod +x "$repo10/tests/test_orphan_fixture.sh"
+cat > "$repo10/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+run() { :; }
+run bash tests/test_orphan_fixture.sh
+EOF
+out=$("$GUARD" "$repo10" 2>&1); rc=$?
+if [[ "$rc" == "0" ]]; then
+    report true "the same file, once registered into scripts/check.sh, passes (exit 0)"
+else
+    report false "registering the orphan into scripts/check.sh passes (wanted exit 0, got $rc; output: $out)"
+fi
+
+# Case 11 (GREEN, glob discovery must not trip the orphan scan):
+# tests/web_unit/*.test.mjs is glob-discovered by `node --test` in BOTH
+# scripts/check.sh and tests/run_all.sh (not individually registered) -- a
+# new .test.mjs file under tests/web_unit/ must not be flagged as an orphan
+# just because nothing names it literally.
+repo11="$tmpdir/case11_glob"
+write_reconciled "$repo11"
+mkdir -p "$repo11/tests/web_unit"
+printf "import test from 'node:test';\n" > "$repo11/tests/web_unit/example.test.mjs"
+cat > "$repo11/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+run() { :; }
+run node --test 'tests/web_unit/*.test.mjs'
+EOF
+out=$("$GUARD" "$repo11" 2>&1); rc=$?
+if [[ "$rc" == "0" ]]; then
+    report true "a .test.mjs file under tests/web_unit/, glob-discovered, does not trip the orphan scan (exit 0)"
+else
+    report false "glob-discovered .test.mjs file does not trip the orphan scan (wanted exit 0, got $rc; output: $out)"
+fi
+if grep -q "example.test.mjs" <<<"$out"; then
+    report false "example.test.mjs must not be named as a problem; output: $out"
+else
+    report true "example.test.mjs is not named as a problem anywhere in the output"
+fi
+
+# Case 12 (RED, Makefile as a 4th registration source): a test invoked only
+# via the root Makefile's `check:` target (the real test_check_lock.sh
+# shape -- this guard flagged it as an orphan before the Makefile was added
+# as a source) must NOT be flagged once the Makefile really does invoke it.
+repo12="$tmpdir/case12_makefile"
+write_reconciled "$repo12"
+printf '#!/usr/bin/env bash\necho lock\n' > "$repo12/tests/test_lock_fixture.sh"
+cat > "$repo12/Makefile" <<'EOF'
+check:
+	@bash tests/test_lock_fixture.sh
+EOF
+out=$("$GUARD" "$repo12" 2>&1); rc=$?
+if [[ "$rc" == "0" ]]; then
+    report true "a test invoked only via the root Makefile is not an orphan (exit 0)"
+else
+    report false "Makefile-only invocation recognized (wanted exit 0, got $rc; output: $out)"
+fi
+
+# Case 13 (RED, missing scripts/check.sh -- now a required runner): cannot
+# scan for orphans against a runner that does not exist; must refuse.
+repo13="$tmpdir/case13_missing_check_sh"
+write_reconciled "$repo13"
+rm -f "$repo13/scripts/check.sh"
+out=$("$GUARD" "$repo13" 2>&1); rc=$?
+if [[ "$rc" == "1" ]]; then
+    report true "missing scripts/check.sh is refused (exit 1)"
+else
+    report false "missing scripts/check.sh refused (wanted exit 1, got $rc; output: $out)"
+fi
+if grep -qi "scripts/check.sh.*not found" <<<"$out"; then
+    report true "missing-check.sh failure says so explicitly"
+else
+    report false "missing-check.sh failure says so explicitly; output: $out"
 fi
 
 echo
