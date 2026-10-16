@@ -9,10 +9,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     buildTransitionsOption, transitionsContext, buildVariantsHtml, buildVariantsPanel,
-    isIdleTransitionNode, p95TruncationMarker,
+    isIdleTransitionNode, p95TruncationMarker, findOmittedDominantNode,
+    restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder,
+    buildTransitionsDisclosure,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
+import { states as galleryStates } from '../../web/static/dev/fixtures/transitions.mjs';
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -418,4 +421,486 @@ test('hideIdle on idle-only data: visibleCount 0 but hiddenIdleLinks/-Value '
     assert.equal(shown.visibleCount, 2);
     assert.equal(shown.hiddenIdleLinks, 0);
     assert.equal(shown.hiddenIdleValue, 0);
+});
+
+// ── issue #436: clipping, omission disclosure, and the "Show all" restore ──
+
+// A rare-but-longest-duration Lock:relation next to a MORE frequent but
+// short-dwelling Timeout: the frequency threshold excludes both (by count),
+// but the contract says to NAME the one that dominates DB TIME, not the one
+// with the most (excluded) edges. If omission naming were accidentally
+// ranked by count among the excluded set, Timeout:VacuumDelay (5 edges)
+// would win over Lock:relation (2 edges) -- the wrong answer.
+function competingOmissionsData() {
+    return {
+        total: 2002,
+        nodes: [
+            { name: 'CPU*', total_ms: 1000, class: 'CPU', event_id: 0 },
+            { name: 'IO:DataFileRead', total_ms: 900, class: 'IO', event_id: 1 },
+            { name: 'Lock:relation', total_ms: 50000, class: 'Lock', event_id: 2 },
+            { name: 'Timeout:VacuumDelay', total_ms: 300, class: 'Timeout', event_id: 3 },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 1000, duration_ms: 900 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 990, duration_ms: 850 },
+            { source: 'CPU*', target: 'Lock:relation', value: 2, duration_ms: 50000 },
+            { source: 'Lock:relation', target: 'CPU*', value: 2, duration_ms: 48000 },
+            { source: 'CPU*', target: 'Timeout:VacuumDelay', value: 5, duration_ms: 300 },
+            { source: 'Timeout:VacuumDelay', target: 'CPU*', value: 5, duration_ms: 280 },
+        ],
+    };
+}
+
+test('findOmittedDominantNode: ranks excluded nodes by total_ms (DB time), '
+    + 'not by edge count -- the rarer-but-longer Lock:relation wins over the '
+    + 'more frequent but short Timeout', () => {
+    const data = competingOmissionsData();
+    const { nodeMap } = transitionsContext({ ...data, links: data.links });
+    // Both Lock:relation and Timeout:VacuumDelay are "omitted" here; Lock has
+    // FEWER incident edges (2 vs 5) but the larger total_ms.
+    const visible = new Set(['CPU*', 'IO:DataFileRead']);
+    const dominant = findOmittedDominantNode(nodeMap, visible);
+    assert.equal(dominant.name, 'Lock:relation');
+    assert.equal(dominant.ms, 50000);
+    // Negative control: ranking the SAME excluded set by edge count (the bug
+    // this guards against) would pick Timeout, not Lock -- proving the two
+    // criteria disagree on this fixture and the test is not vacuously true.
+    const byCountWinner = ['Lock:relation', 'Timeout:VacuumDelay']
+        .map(name => ({ name, count: data.links.filter(l => l.source === name || l.target === name)
+            .reduce((s, l) => s + l.value, 0) }))
+        .sort((a, b) => b.count - a.count)[0].name;
+    assert.equal(byCountWinner, 'Timeout:VacuumDelay');
+    assert.notEqual(dominant.name, byCountWinner);
+});
+
+test('findOmittedDominantNode: idle nodes are never named here -- the '
+    + '"Hide ClientRead" control already discloses that reason on its own', () => {
+    const nodeMap = {
+        'Client:ClientRead': { total_ms: 999999 },
+        'Lock:relation': { total_ms: 10 },
+    };
+    const dominant = findOmittedDominantNode(nodeMap, new Set());
+    assert.equal(dominant.name, 'Lock:relation', 'the idle node must be skipped even though it has far more total_ms');
+});
+
+test('findOmittedDominantNode: null when nothing non-idle is omitted', () => {
+    assert.equal(findOmittedDominantNode({ 'CPU*': { total_ms: 10 } }, new Set(['CPU*'])), null);
+    assert.equal(findOmittedDominantNode({}, new Set()), null);
+});
+
+test('buildTransitionsOption: threshold exclusion is reported SEPARATELY from '
+    + 'idle exclusion -- never merged into one count (#436)', () => {
+    const data = {
+        total: 10000,
+        nodes: [
+            { name: 'CPU*', total_ms: 1000, class: 'CPU' },
+            { name: 'Client:ClientRead', total_ms: 9000, class: 'Client' },
+            { name: 'IO:DataFileRead', total_ms: 900, class: 'IO' },
+            { name: 'Lock:relation', total_ms: 50000, class: 'Lock' },
+        ],
+        links: [
+            { source: 'Client:ClientRead', target: 'CPU*', value: 5000, duration_ms: 9000 },
+            { source: 'CPU*', target: 'Client:ClientRead', value: 4990, duration_ms: 8900 },
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 1000, duration_ms: 900 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 990, duration_ms: 850 },
+            { source: 'CPU*', target: 'Lock:relation', value: 2, duration_ms: 50000 },
+            { source: 'Lock:relation', target: 'CPU*', value: 2, duration_ms: 48000 },
+        ],
+    };
+    const built = buildTransitionsOption(data, 20, { width: 800, height: 550 }, null, true);
+    assert.equal(built.hiddenIdleLinks, 2, 'the two ClientRead<->CPU* edges');
+    assert.equal(built.hiddenIdleValue, 5000 + 4990);
+    assert.equal(built.hiddenThresholdLinks, 2, 'the two Lock:relation edges, below 20% of 1000');
+    assert.equal(built.hiddenThresholdValue, 2 + 2);
+    assert.equal(built.omittedDominant.name, 'Lock:relation');
+    assert.equal(built.shownLinks, 2);
+    assert.equal(built.totalLinks, 6, 'totalLinks counts every link the server returned (pre-idle-filter)');
+    // Negative control: a buggy merge would report one of these as the SUM
+    // of both causes (2 + 2 = 4) instead of keeping them apart.
+    assert.notEqual(built.hiddenIdleLinks, built.hiddenThresholdLinks + built.hiddenIdleLinks);
+});
+
+test('buildTransitionsOption: server truncation is disclosed independently '
+    + 'of idle/threshold exclusion, and is never "fixed" by either '
+    + '(#436 -- a cause this builder can only disclose, not recover from)', () => {
+    const data = {
+        total: 500, truncated: true, link_count: 3, total_link_count: 7,
+        nodes: [
+            { name: 'CPU*', total_ms: 100, class: 'CPU' },
+            { name: 'IO:DataFileRead', total_ms: 90, class: 'IO' },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 10, duration_ms: 90 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 10, duration_ms: 80 },
+        ],
+    };
+    // Nothing is idle- or threshold-excluded here (threshold 0, hideIdle off)
+    // yet serverTruncated must still read true -- it is a THIRD, independent
+    // cause.
+    const built = buildTransitionsOption(data, 0, { width: 400, height: 300 });
+    assert.equal(built.hiddenIdleLinks, 0);
+    assert.equal(built.hiddenThresholdLinks, 0);
+    assert.equal(built.serverTruncated, true);
+    assert.equal(built.serverShownLinkCount, 3);
+    assert.equal(built.serverTotalLinkCount, 7);
+});
+
+test('buildTransitionsOption: a server predating link_count/total_link_count/'
+    + 'truncated fields reports serverTruncated false, not a crash', () => {
+    const built = buildTransitionsOption({
+        total: 10,
+        nodes: [{ name: 'CPU*', total_ms: 5, class: 'CPU' }],
+        links: [{ source: 'CPU*', target: 'CPU*', value: 5, duration_ms: 1 }],
+    }, 0, { width: 200, height: 200 });
+    assert.equal(built.serverTruncated, false);
+    assert.equal(built.serverShownLinkCount, 1);
+    assert.equal(built.serverTotalLinkCount, 1);
+});
+
+test('buildTransitionsDisclosure: every present reason is named as its own '
+    + 'phrase, never collapsed into one combined number', () => {
+    const built = {
+        hiddenIdleLinks: 2, hiddenIdleValue: 48000,
+        hiddenThresholdLinks: 3, hiddenThresholdValue: 7,
+        serverTruncated: true, serverShownLinkCount: 50, serverTotalLinkCount: 66,
+        omittedDominant: { name: 'Lock:relation', ms: 50000 },
+    };
+    const text = buildTransitionsDisclosure(built, 97541);
+    assert.ok(text.includes('97,541 transitions'));
+    assert.ok(text.includes('48,000') && text.includes('idle'));
+    assert.ok(text.includes('7') && text.includes('simplify threshold'));
+    assert.ok(text.includes('50') && text.includes('66') && text.includes('server returned'));
+    assert.ok(text.includes('Lock:relation') && text.includes('Show all'));
+    // Negative control: a combined-count regression would report ONE number
+    // for idle+threshold together (2+3=5 links, 48000+7=48007 value) instead
+    // of two distinguishable phrases -- assert the two raw figures both
+    // survive untouched rather than a merged total.
+    assert.ok(!text.includes('48007'), 'idle and threshold figures must never be summed into one');
+});
+
+test('buildTransitionsDisclosure: nothing hidden -> just the total, no stale phrases', () => {
+    const built = {
+        hiddenIdleLinks: 0, hiddenIdleValue: 0,
+        hiddenThresholdLinks: 0, hiddenThresholdValue: 0,
+        serverTruncated: false, serverShownLinkCount: 4, serverTotalLinkCount: 4,
+        omittedDominant: null,
+    };
+    assert.equal(buildTransitionsDisclosure(built, 400), '400 transitions');
+});
+
+test('buildTransitionsDisclosure: a hostile omitted-dominant name renders as '
+    + 'plain text verbatim (the view assigns this to textContent, never '
+    + 'innerHTML -- escaping here would show the user literal "&lt;")', () => {
+    const built = {
+        hiddenIdleLinks: 0, hiddenIdleValue: 0,
+        hiddenThresholdLinks: 1, hiddenThresholdValue: 1,
+        serverTruncated: false, serverShownLinkCount: 1, serverTotalLinkCount: 1,
+        omittedDominant: { name: 'Lock:<script>x</script>', ms: 10 },
+    };
+    const text = buildTransitionsDisclosure(built, 10);
+    assert.ok(text.includes('Lock:<script>x</script>'));
+    assert.ok(!text.includes('&lt;'));
+});
+
+test('restoreAllTransitionsState ("Show all"): removes BOTH client exclusions, '
+    + 'and never claims to recover server-truncated links (#436)', () => {
+    const restore = restoreAllTransitionsState();
+    assert.deepEqual(restore, { threshold: 0, hideIdle: false });
+
+    const data = {
+        total: 10000, truncated: true, link_count: 6, total_link_count: 9,
+        nodes: [
+            { name: 'CPU*', total_ms: 1000, class: 'CPU' },
+            { name: 'Client:ClientRead', total_ms: 9000, class: 'Client' },
+            { name: 'IO:DataFileRead', total_ms: 900, class: 'IO' },
+            { name: 'Lock:relation', total_ms: 50000, class: 'Lock' },
+        ],
+        links: [
+            { source: 'Client:ClientRead', target: 'CPU*', value: 5000, duration_ms: 9000 },
+            { source: 'CPU*', target: 'Client:ClientRead', value: 4990, duration_ms: 8900 },
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 1000, duration_ms: 900 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 990, duration_ms: 850 },
+            { source: 'CPU*', target: 'Lock:relation', value: 2, duration_ms: 50000 },
+            { source: 'Lock:relation', target: 'CPU*', value: 2, duration_ms: 48000 },
+        ],
+    };
+    const before = buildTransitionsOption(data, 20, { width: 800, height: 550 }, null, true);
+    assert.ok(before.hiddenIdleLinks > 0 && before.hiddenThresholdLinks > 0);
+
+    const after = buildTransitionsOption(data, restore.threshold,
+        { width: 800, height: 550 }, null, restore.hideIdle);
+    assert.equal(after.hiddenIdleLinks, 0);
+    assert.equal(after.hiddenThresholdLinks, 0);
+    assert.equal(after.omittedDominant, null, 'Lock:relation is visible now, nothing left to name');
+    const names = after.option.series[0].data.map(n => n.name);
+    assert.ok(names.includes('Client:ClientRead'));
+    assert.ok(names.includes('Lock:relation'));
+    // The one honest limitation: restore cannot fetch links the server
+    // never returned.
+    assert.equal(after.serverTruncated, true, 'server truncation survives "Show all" unchanged');
+});
+
+test('negative control: edges are literal old_event/new_event pairs -- '
+    + 'CPU*-mediated A->CPU*->B is NEVER contracted into a synthesized '
+    + 'direct A->B edge (contract 5 / #436, "different product" scope)', () => {
+    // Input carries ONLY A->CPU* and CPU*->B, never A->B directly.
+    const data = {
+        total: 100,
+        nodes: [
+            { name: 'CPU*', total_ms: 50, class: 'CPU' },
+            { name: 'Lock:relation', total_ms: 30, class: 'Lock' },
+            { name: 'IO:DataFileRead', total_ms: 20, class: 'IO' },
+        ],
+        links: [
+            { source: 'Lock:relation', target: 'CPU*', value: 40, duration_ms: 30 },
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 40, duration_ms: 20 },
+        ],
+    };
+    const built = buildTransitionsOption(data, 0, { width: 400, height: 300 });
+    const pairs = built.option.series[0].links.map(l => l.source + '->' + l.target);
+    assert.deepEqual(pairs.sort(), ['CPU*->IO:DataFileRead', 'Lock:relation->CPU*'].sort());
+    assert.ok(!pairs.includes('Lock:relation->IO:DataFileRead'),
+        'a direct Lock:relation->IO:DataFileRead edge must never be synthesized '
+        + 'from the two hops through CPU*');
+});
+
+// ── #436: viewport fit (nodes, labels, edge arcs) ──────────────────────────
+
+/* Reproduces the PRE-#436 layout exactly (fixed padX=80/padY=60, row-major
+ * `col = i % cols, row = floor(i / cols)` cell assignment) so the viewport-
+ * fit check below can be run against it, demonstrating the clipping bug the
+ * fix addresses actually existed -- not a hypothetical. Kept local to this
+ * test file; it is not exported from the builder (dead code there). */
+function preFix436Layout(data, threshold, dims) {
+    const cW = dims.width, cH = dims.height;
+    const links = data.links;
+    const nodeMap = {};
+    data.nodes.forEach(n => { nodeMap[n.name] = n; });
+    const maxEdgeCount = Math.max(...links.map(l => l.value));
+    const minCount = maxEdgeCount * threshold / 100;
+    const visibleLinks = links.filter(l => l.value >= minCount);
+    const visibleNodes = new Set();
+    visibleLinks.forEach(l => { visibleNodes.add(l.source); visibleNodes.add(l.target); });
+    const maxNodeMs = Math.max(...[...visibleNodes].map(n => nodeMap[n]?.total_ms || 1));
+    const sortedNodes = [...visibleNodes]
+        .map(name => ({ name, ms: nodeMap[name]?.total_ms || 0 }))
+        .sort((a, b) => b.ms - a.ms);
+    const n = sortedNodes.length;
+    const cols = Math.ceil(Math.sqrt(n * 1.8));
+    const rows = Math.ceil(n / cols);
+    const padX = 80, padY = 60;
+    const cellW = (cW - padX * 2) / Math.max(cols - 1, 1);
+    const cellH = (cH - padY * 2) / Math.max(rows - 1, 1);
+    return sortedNodes.map((nd, i) => {
+        const size = Math.max(15, Math.min(120, 15 + Math.sqrt(nd.ms / maxNodeMs) * 105));
+        const col = i % cols, row = Math.floor(i / cols);
+        return { name: nd.name, x: padX + col * cellW, y: padY + row * cellH, symbolSize: size };
+    });
+}
+
+function footprintFits(node, dims) {
+    const fp = estimateNodeFootprint(node.name, node.symbolSize);
+    return node.x - fp.halfWidth >= -0.01 && node.x + fp.halfWidth <= dims.width + 0.01 &&
+        node.y - fp.top >= -0.01 && node.y + fp.bottom <= dims.height + 0.01;
+}
+
+test('#436 RED: the pre-fix layout actually clips (demonstrates the bug, '
+    + 'not a hypothetical) -- the dense fixture bottom-row node label '
+    + 'footprint overshoots the container height', () => {
+    const dims = { width: 620, height: 460 };
+    const data = {
+        total: 1000,
+        nodes: [
+            { name: 'CPU*', total_ms: 5200, class: 'CPU' },
+            { name: 'IO:DataFileRead', total_ms: 2100, class: 'IO' },
+            { name: 'LWLock:WALInsert', total_ms: 900, class: 'LWLock' },
+            { name: 'IO:WalSync', total_ms: 800, class: 'IO' },
+            { name: 'Lock:transactionid', total_ms: 1500, class: 'Lock' },
+            { name: 'LWLock:LockManager', total_ms: 210, class: 'LWLock' },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 1400, duration_ms: 1 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 1350, duration_ms: 1 },
+            { source: 'CPU*', target: 'LWLock:WALInsert', value: 800, duration_ms: 1 },
+            { source: 'LWLock:WALInsert', target: 'CPU*', value: 780, duration_ms: 1 },
+            { source: 'CPU*', target: 'IO:WalSync', value: 400, duration_ms: 1 },
+            { source: 'IO:WalSync', target: 'CPU*', value: 390, duration_ms: 1 },
+            { source: 'CPU*', target: 'Lock:transactionid', value: 220, duration_ms: 1 },
+            { source: 'Lock:transactionid', target: 'LWLock:LockManager', value: 90, duration_ms: 1 },
+            { source: 'LWLock:LockManager', target: 'CPU*', value: 88, duration_ms: 1 },
+        ],
+    };
+    const before = preFix436Layout(data, 0, dims);
+    assert.ok(before.some(nd => !footprintFits(nd, dims)),
+        'expected the OLD fixed-padding layout to clip at least one node/label '
+        + '-- if this fails, the fixture no longer demonstrates the bug');
+
+    const after = buildTransitionsOption(data, 0, dims);
+    for (const nd of after.option.series[0].data) {
+        assert.ok(footprintFits(nd, dims),
+            nd.name + ' footprint does not fit ' + JSON.stringify(dims) + ': ' +
+            JSON.stringify({ x: nd.x, y: nd.y, symbolSize: nd.symbolSize }));
+    }
+});
+
+test('#436: every laid-out node + its label fits the container for the dense '
+    + '18-node fixture at threshold 0 (max density, max label count)', () => {
+    const dims = { width: 620, height: 460 };
+    const nodes = [
+        { name: 'CPU*', total_ms: 5200, class: 'CPU' },
+        { name: 'Client:ClientRead', total_ms: 2600, class: 'Client' },
+        { name: 'IO:DataFileRead', total_ms: 2100, class: 'IO' },
+        { name: 'Lock:transactionid', total_ms: 1500, class: 'Lock' },
+        { name: 'LWLock:WALInsert', total_ms: 900, class: 'LWLock' },
+        { name: 'IO:WalSync', total_ms: 800, class: 'IO' },
+        { name: 'LWLock:WALWrite', total_ms: 640, class: 'LWLock' },
+        { name: 'Lock:tuple', total_ms: 480, class: 'Lock' },
+        { name: 'LWLock:BufferMapping', total_ms: 420, class: 'LWLock' },
+        { name: 'IO:WalWrite', total_ms: 350, class: 'IO' },
+        { name: 'Timeout:VacuumDelay', total_ms: 300, class: 'Timeout' },
+        { name: 'Lock:relation', total_ms: 260, class: 'Lock' },
+        { name: 'IO:DataFileExtend', total_ms: 240, class: 'IO' },
+        { name: 'LWLock:LockManager', total_ms: 210, class: 'LWLock' },
+        { name: 'IPC:BufferIO', total_ms: 190, class: 'IPC' },
+        { name: 'Extension:Extension', total_ms: 150, class: 'Extension' },
+        { name: 'IPC:MessageQueueReceive', total_ms: 120, class: 'IPC' },
+        { name: 'BufferPin:BufferPin', total_ms: 90, class: 'BufferPin' },
+    ];
+    const links = [];
+    for (let i = 1; i < nodes.length; i++) {
+        links.push({ source: 'CPU*', target: nodes[i].name, value: 1000 - i * 10, duration_ms: 1 });
+        links.push({ source: nodes[i].name, target: 'CPU*', value: 990 - i * 10, duration_ms: 1 });
+    }
+    links.push({ source: 'CPU*', target: 'CPU*', value: 300, duration_ms: 1 });
+    const data = { total: links.reduce((s, l) => s + l.value, 0), nodes, links };
+    const built = buildTransitionsOption(data, 0, dims);
+    assert.equal(built.visibleCount, 18);
+    for (const nd of built.option.series[0].data) {
+        assert.ok(footprintFits(nd, dims), nd.name + ' clips the ' + JSON.stringify(dims) + ' container');
+    }
+});
+
+test('computeGridOrder: rank 0 (most time-significant node) lands on the '
+    + 'cell closest to the grid center, not the (0,0) corner (#436/#438 -- '
+    + 'the CPU* hub no longer gets the worst cell in the layout)', () => {
+    const order = computeGridOrder(7, 4, 2); // 4x2 grid, center at (1.5, 0.5)
+    assert.notDeepEqual(order[0], { col: 0, row: 0 },
+        'the old row-major mapping always put index 0 at the literal corner');
+    // (1,0) and (2,0) are both distance 0.25+0.25=0.5 from the center along
+    // row 0; (1,1)/(2,1) tie too, at the same distance -- the deterministic
+    // tie-break (row asc, then col asc) must pick (1,0).
+    assert.deepEqual(order[0], { col: 1, row: 0 });
+    assert.equal(order.length, 7);
+    const seen = new Set(order.map(c => c.col + ',' + c.row));
+    assert.equal(seen.size, 7, 'every assigned cell must be distinct');
+});
+
+test('#436: cross-edge curveness is capped so its bow (curveness * pixel '
+    + 'distance) never exceeds the layout\'s own reserved margin -- long hub '
+    + 'fan-out edges flatten instead of arcing off-canvas', () => {
+    const dims = { width: 620, height: 460 };
+    const data = {
+        total: 1000,
+        nodes: [
+            { name: 'CPU*', total_ms: 5000, class: 'CPU' },
+            { name: 'A', total_ms: 400, class: 'IO' },
+            { name: 'B', total_ms: 390, class: 'Lock' },
+            { name: 'C', total_ms: 380, class: 'LWLock' },
+            { name: 'D', total_ms: 370, class: 'Timeout' },
+            { name: 'E', total_ms: 360, class: 'IPC' },
+        ],
+        links: [
+            { source: 'CPU*', target: 'A', value: 400, duration_ms: 1 },
+            { source: 'CPU*', target: 'B', value: 390, duration_ms: 1 },
+            { source: 'CPU*', target: 'C', value: 380, duration_ms: 1 },
+            { source: 'CPU*', target: 'D', value: 370, duration_ms: 1 },
+            { source: 'CPU*', target: 'E', value: 360, duration_ms: 1 },
+        ],
+    };
+    const built = buildTransitionsOption(data, 0, dims);
+    const safeMargin = Math.min(built.margins.padX, built.margins.padYTop, built.margins.padYBottom);
+    const posByName = {};
+    built.option.series[0].data.forEach(n => { posByName[n.name] = n; });
+    for (const l of built.option.series[0].links) {
+        if (l.source === l.target) continue;
+        const p1 = posByName[l.source], p2 = posByName[l.target];
+        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        const bow = l.lineStyle.curveness * dist;
+        assert.ok(bow <= safeMargin + 0.01,
+            l.source + '->' + l.target + ' bow ' + bow + ' exceeds margin ' + safeMargin);
+    }
+});
+
+// ── the gallery/fixture state itself (#436, contract 5): all three omission
+// causes plus the rare-but-longest-duration Lock:relation in ONE payload,
+// exactly as the brief asked ("extend threshold-simplified with...").
+
+test('fixture threshold-simplified: all three omission causes fire together, '
+    + 'Lock:relation is named as the omitted dominant wait (rare count, '
+    + 'longest dwell), and nothing clips at its DIMS', () => {
+    const st = galleryStates['threshold-simplified'];
+    const built = buildTransitionsOption(st.data, st.opts.threshold, st.opts.dims,
+        null, st.opts.hideIdle);
+    assert.ok(built.hiddenIdleLinks > 0, 'the ClientRead<->CPU* pacing loop must be idle-excluded');
+    assert.ok(built.hiddenThresholdLinks > 0, 'low-count edges must still be threshold-excluded');
+    assert.equal(built.serverTruncated, true, 'the fixture declares a server link cap');
+    assert.equal(built.omittedDominant.name, 'Lock:relation');
+    assert.equal(built.omittedDominant.ms, 52000);
+    for (const nd of built.option.series[0].data) {
+        assert.ok(footprintFits(nd, st.opts.dims), nd.name + ' clips the fixture viewport');
+    }
+    const text = buildTransitionsDisclosure(built, st.data.total);
+    assert.ok(text.includes('Lock:relation') && text.includes('Show all'));
+
+    // Restore ("Show all") actually brings Lock:relation onto the canvas,
+    // without claiming to have fixed the (unrelated) server truncation.
+    const restore = restoreAllTransitionsState();
+    const restored = buildTransitionsOption(st.data, restore.threshold, st.opts.dims,
+        null, restore.hideIdle);
+    assert.ok(restored.option.series[0].data.some(n => n.name === 'Lock:relation'));
+    assert.equal(restored.omittedDominant, null);
+    assert.equal(restored.serverTruncated, true);
+});
+
+// Negative control 1 (brief: "omit Lock:relation without disclosure ...
+// must be rejected"): a payload shaped exactly like the fixture but with
+// Lock:relation silently dropped from `data.nodes` (as a buggy server-side
+// change might do) must NOT be mistaken for "nothing omitted" — the server-
+// truncation disclosure must still fire because the fixture also sets
+// truncated:true independently of which specific node vanished.
+test('negative control: Lock:relation missing from the node catalog entirely '
+    + 'still leaves the independent server-truncation disclosure in place '
+    + '(an omission is never silently invisible merely because one path '
+    + 'did not catch it)', () => {
+    const st = galleryStates['threshold-simplified'];
+    const withoutLockRelation = {
+        ...st.data,
+        nodes: st.data.nodes.filter(n => n.name !== 'Lock:relation'),
+        links: st.data.links.filter(l => l.source !== 'Lock:relation' && l.target !== 'Lock:relation'),
+    };
+    const built = buildTransitionsOption(withoutLockRelation, st.opts.threshold, st.opts.dims,
+        null, st.opts.hideIdle);
+    // omittedDominant can no longer name Lock:relation -- it was never in
+    // the payload at all (that would be a server-side data bug, not
+    // something a client-side omission check could ever see) -- it instead
+    // correctly falls through to the next-largest STILL-omitted node. The
+    // point of this control: the independent truncation disclosure, which
+    // does not depend on any specific node, must still fire regardless.
+    assert.notEqual(built.omittedDominant.name, 'Lock:relation');
+    assert.equal(built.serverTruncated, true,
+        'server-truncation disclosure must not depend on which node triggered it');
+});
+
+// Negative control 2 (brief: "synthesize a direct wait->wait edge ...
+// must be rejected"): confirms the fixture's own CPU-mediated shape is
+// never collapsed into a direct Lock:relation<->IO:DataFileRead edge, which
+// no input link declares.
+test('negative control: the fixture never gains a synthesized direct '
+    + 'Lock:relation<->IO:DataFileRead edge (both hop through CPU* in the '
+    + 'input; #436 "different product" scope)', () => {
+    const st = galleryStates['threshold-simplified'];
+    const built = buildTransitionsOption(st.data, 0, st.opts.dims, null, false);
+    const pairs = new Set(built.option.series[0].links.map(l => l.source + '->' + l.target));
+    assert.ok(!pairs.has('Lock:relation->IO:DataFileRead'));
+    assert.ok(!pairs.has('IO:DataFileRead->Lock:relation'));
 });

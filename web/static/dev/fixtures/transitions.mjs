@@ -78,6 +78,43 @@ function denseDfg() {
 
 const DENSE = denseDfg();
 
+/* #436 ("threshold-simplified", extended per contract 5): the dense DFG
+ * plus
+ *   - a RARE-but-LONGEST-duration Lock:relation — the exact "a rare but
+ *     long Lock:relation disappears" case the issue names. Its edge COUNT
+ *     stays the original 55/54 (well below the 25%-of-1400 threshold, so it
+ *     is still excluded by the frequency criterion — that criterion is
+ *     unchanged, see transitions.js ~:18), but its DURATION is bumped to
+ *     the largest in the graph, so omittedDominant must name it instead of
+ *     dropping it silently.
+ *   - CPU-mediated paths (already true of DENSE: every edge routes through
+ *     CPU*) and pacing idle (DENSE's existing Client:ClientRead<->CPU*
+ *     loop) — exercised together by setting hideIdle:true below.
+ *   - server-side link-cap truncation (truncated/link_count/
+ *     total_link_count), the THIRD independent omission cause, declared
+ *     directly on the payload.
+ * One state exercising idle exclusion + threshold exclusion + server
+ * truncation + the named omitted-dominant wait together, as the contract
+ * asks for, instead of three separate fixtures that never interact. */
+function thresholdSimplifiedData() {
+    const nodes = DENSE.nodes.map(n => n.name === 'Lock:relation'
+        ? { ...n, total_ms: 52000 }   // now the single largest total_ms in the graph
+        : { ...n });
+    const links = DENSE.links.map(l => {
+        const isLockRelationEdge =
+            (l.source === 'CPU*' && l.target === 'Lock:relation') ||
+            (l.source === 'Lock:relation' && l.target === 'CPU*');
+        if (!isLockRelationEdge) return { ...l };
+        // Count (value) is UNCHANGED — still rare — only the dwell grows.
+        return { ...l, duration_ms: l.source === 'CPU*' ? 52000 : 50000 };
+    });
+    return {
+        total: DENSE.total, nodes, links,
+        truncated: true, link_count: links.length, total_link_count: links.length + 3,
+    };
+}
+const THRESHOLD_SIMPLIFIED = thresholdSimplifiedData();
+
 /* Idle-loop-dominant DFG (issue #107): shaped from the real box-check
  * EPHEMERAL capture that filed the issue — a pgbench + lock-contention + IO
  * workload where the Client:ClientRead<->CPU* loop's TRANSITION COUNT
@@ -183,10 +220,15 @@ export const states = {
         opts: { threshold: 0, dims: DIMS },
     },
     'threshold-simplified': {
-        description: 'Same dense DFG at threshold 25%: only the dominant edges/nodes survive.',
-        tags: ['HIERARCHY'],
-        data: DENSE,
-        opts: { threshold: 25, dims: DIMS },
+        description: '#436: dense DFG at threshold 25% with hideIdle on — exercises all three ' +
+            'omission causes together (idle-excluded ClientRead loop, threshold-excluded edges, ' +
+            'server link-cap truncation) plus the rare-but-longest-duration Lock:relation the ' +
+            'issue names: its count (55/54) stays below the cutoff so it is still omitted, but ' +
+            'its 52.0s/50.0s dwell is the largest in the graph — omittedDominant must name it, ' +
+            'and the disclosure line / "Show all" restore geometry are checked against this state.',
+        tags: ['HIERARCHY', 'FEEDBACK'],
+        data: THRESHOLD_SIMPLIFIED,
+        opts: { threshold: 25, dims: DIMS, hideIdle: true },
     },
     'idle-loop-dominant': {
         description: 'Issue #107, hideIdle OFF (the pre-fix default): the real-OLTP-shaped ClientRead<->CPU* loop dominates edge COUNT at the default 20% threshold, so Lock:relation/Timeout:PgSleep/IO:DataFileRead all drop below it — exactly the bug report ("only the ClientRead<->CPU* loop").',

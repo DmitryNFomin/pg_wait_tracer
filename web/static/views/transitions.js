@@ -34,7 +34,8 @@
  */
 
 import {
-    buildTransitionsOption, buildVariantsPanel,
+    buildTransitionsOption, buildVariantsPanel, buildTransitionsDisclosure,
+    restoreAllTransitionsState,
 } from '../lib/builders/transitions.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -189,35 +190,46 @@ export function createTransitionsView() {
         });
     }
 
-    /* FEEDBACK (docs/VISUAL_CHECKLIST.md): the total label must say WHY the
-     * graph is smaller than the server's raw total when idle waits are
-     * hidden — a silently-shrunk graph and a genuinely quiet window must not
-     * read the same. */
-    function updateTotalLabel(hiddenIdleValue) {
+    /* FEEDBACK (docs/VISUAL_CHECKLIST.md), #436: the total label must name
+     * WHY the graph is smaller than the server's raw total — and the three
+     * DISTINCT reasons (idle exclusion, threshold exclusion, server
+     * truncation) separately, plus the single named omitted-dominant wait
+     * if there is one. buildTransitionsDisclosure (pure, unit-tested) owns
+     * the text; this just assigns it to textContent (never innerHTML — see
+     * that function's doc comment on why a hostile node name is safe here
+     * unescaped). */
+    function updateTotalLabel(built) {
         const el = document.getElementById('dfg-total');
         if (!el || !dataRef) return;
-        const total = Number(dataRef.total) || 0;
-        let text = total.toLocaleString() + ' transitions';
-        if (hideIdle && hiddenIdleValue > 0) {
-            text += ' (' + Number(hiddenIdleValue).toLocaleString() + ' idle hidden)';
-        }
-        el.textContent = text;
+        el.textContent = buildTransitionsDisclosure(built, dataRef.total);
+    }
+
+    /* "Show all" (#436): visible only once there is something client-side
+     * exclusions could restore — a button that is always clickable but
+     * usually a no-op reads as broken. Toggling visibility here (not inside
+     * the pure builder) is a DOM-only presentation choice. */
+    function updateShowAllVisibility(built) {
+        const btn = document.getElementById('dfg-show-all');
+        if (!btn) return;
+        const canRestore = (built.hiddenIdleLinks > 0) || (built.hiddenThresholdLinks > 0);
+        btn.style.display = canRestore ? '' : 'none';
     }
 
     function renderDFG(threshold_) {
         const host = document.getElementById('dfg-container');
         if (!host || !dataRef) return;
         captureDragPositions();   // P5: read back BEFORE re-layout
-        const { option, visibleCount, hiddenIdleLinks, hiddenIdleValue } =
-            buildTransitionsOption(dataRef, threshold_, dfgDims(), dragPos, hideIdle);
-        updateTotalLabel(hiddenIdleValue);
+        const built = buildTransitionsOption(dataRef, threshold_, dfgDims(), dragPos, hideIdle);
+        const { option, visibleCount, hiddenIdleLinks } = built;
+        updateTotalLabel(built);
+        updateShowAllVisibility(built);
         if (visibleCount === 0) {
             disposeChart();
             host.innerHTML = hiddenIdleLinks > 0
                 ? '<p style="color:#666;padding:40px;text-align:center">No non-idle transitions above ' +
                     'threshold (' + hiddenIdleLinks.toLocaleString() + ' idle transition edge' +
                     (hiddenIdleLinks === 1 ? '' : 's') +
-                    ' hidden — turn off "Hide idle waits" to see them)</p>'
+                    ' hidden — turn off "Hide ClientRead" to see them)</p>'
                 : '<p style="color:#666;padding:40px;text-align:center">No transitions above threshold</p>';
             return;
         }
@@ -238,16 +250,28 @@ export function createTransitionsView() {
         if (document.getElementById('dfg-container')) return;
         disposeChart();   // shell is being rebuilt — any old chart DOM is gone
         el.innerHTML =
-            '<div style="padding:10px 20px;display:flex;align-items:center;gap:12px">' +
+            '<div style="padding:10px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">' +
                 '<span style="color:#888;font-size:12px">Simplify:</span>' +
                 '<input type="range" id="dfg-slider" min="0" max="100" value="' +
                     threshold + '" style="width:200px;accent-color:#4fc3f7">' +
                 '<span id="dfg-slider-val" style="color:#888;font-size:12px">' +
                     threshold + '%</span>' +
                 '<label style="color:#888;font-size:12px;display:flex;align-items:center;' +
-                    'gap:4px;margin-left:12px;cursor:pointer">' +
+                    'gap:4px;margin-left:12px;cursor:pointer" ' +
+                    'title="Hides Client:ClientRead edges/nodes only — the one idle wait this ' +
+                    'graph can identify from its payload">' +
                     '<input type="checkbox" id="dfg-hide-idle"' + (hideIdle ? ' checked' : '') + '>' +
-                    'Hide idle waits</label>' +
+                    'Hide ClientRead</label>' +
+                // #436: honest about what this restores — it removes the
+                // threshold + ClientRead filters so every link the SERVER
+                // already returned becomes visible; it cannot fetch links
+                // the server itself dropped (see serverTruncated in the
+                // disclosure text below).
+                '<button class="escalate-btn" id="dfg-show-all" type="button" ' +
+                    'style="display:none" title="Removes the simplify threshold and ' +
+                    '&quot;Hide ClientRead&quot; so every transition the server returned ' +
+                    'is shown. Cannot fetch links the server itself did not return.">' +
+                    'Show all</button>' +
                 '<span id="dfg-total" style="color:#666;font-size:11px;margin-left:8px"></span>' +
             '</div>' +
             '<div id="dfg-container" style="width:100%;height:550px;background:#1a1a2e"></div>' +
@@ -270,6 +294,18 @@ export function createTransitionsView() {
             scheduleRender(false);
             // Bookmarkable like sort/execution (P9) — a non-default value
             // (off) round-trips through the URL hash.
+            if (ctxRef && typeof ctxRef.updateHash === 'function') ctxRef.updateHash();
+        });
+
+        const showAllBtn = document.getElementById('dfg-show-all');
+        showAllBtn.addEventListener('click', () => {
+            const restore = restoreAllTransitionsState();
+            threshold = restore.threshold;
+            hideIdle = restore.hideIdle;
+            slider.value = String(threshold);
+            sliderVal.textContent = threshold + '%';
+            hideIdleCb.checked = hideIdle;
+            scheduleRender(false);
             if (ctxRef && typeof ctxRef.updateHash === 'function') ctxRef.updateHash();
         });
     }
