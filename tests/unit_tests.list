@@ -750,3 +750,23 @@ test_trace_closure
 # checkpoint superseding a non-empty one, and retention taking the sidecar with
 # its archive.
 test_open_ckpt
+
+# #416: a display tick must contain every record the producer has already
+# emitted. handle_timer built the display from the cumulative accumulator
+# plus a LIVE state_map read and did NOT drain the event ringbuf -- the epoll
+# loop drained afterwards, 64 callbacks at a time, against ~37,700 records/s.
+# A long wait's whole contribution rides on ONE record, so Timeout:PgSleep
+# lost 100% of an 8.6 s sleep (DB Time 50.1% short) while CPU* moved -0.6%,
+# i.e. invisibly. The trace on disk was correct throughout; the live-tier
+# assertion that should have caught it was a FLOOR (PgSleep > 2000 ms), which
+# passes on a 3 s truncation of the same 8.6 s record. This drives the REAL
+# pgwt_handle_timer with only ring_buffer__consume wrapped, and asserts
+# CONSERVATION: display total == emitted total, exactly. Includes a backlog
+# deeper than one 64-callback budget pass (a one-pass fix fails it), a second
+# tick proving the new drain site does not double count, and the bypass suite
+# -- a drain that delivers nothing (the positive case must be drain-sensitive
+# or this stays green), a handler that returns early (skip read as pass), an
+# empty ring (0 == 0 is not evidence), no ring at all, an endless producer
+# (the drain must stop BOUNDED, count the truncation and log it), and a
+# second truncation that must still be counted after the one-shot log.
+test_tick_drain
