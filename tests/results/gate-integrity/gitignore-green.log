@@ -1,0 +1,8 @@
+  PASS: a brand-new, never-used tests/results/ directory name is ignored
+  PASS: no tracked file under tests/results/ (or anywhere) is also ignored
+  PASS: a new file inside an existing tracked directory (sampler-294-residual) is not ignored
+  PASS: tests/results/HANDOVER-424.md is not ignored
+  PASS: tests/results/RELEASE-PLAN.md is not ignored
+
+5/5 passed
+EXIT=0

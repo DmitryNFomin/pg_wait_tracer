@@ -1,0 +1,11 @@
+FAIL: runner-registration guard: tests/ci_smoke.sh invokes these test files but tests/run_all.sh (what `make box-check` actually runs) does not -- a box-check "green" proves nothing about them:
+    test_capture_smoke.py
+    test_uprobe_fired.py
+  Either wire each one into tests/run_all.sh's LIVE_TESTS (same commit as whatever made it ci_smoke-only), or document why it is legitimately CI/nightly-only in tests/runner_registration_exemptions.list ('filename|reason', one per line).
+FAIL: runner-registration guard: these test files exist on disk under tests/ but are invoked by NONE of tests/run_all.sh, tests/ci_smoke.sh, or scripts/check.sh (and are not covered by a glob either runner uses) -- nothing runs them, ever:
+    test_check_test_registration.sh
+    test_gesture_gate.py
+    test_startup_probe_degrade.py
+    test_v9_open_cpu_wired.sh
+  Wire each one into the runner it belongs to, or document why it is deliberately unregistered in tests/runner_registration_exemptions.list ('filename|reason', one per line).
+EXIT=1

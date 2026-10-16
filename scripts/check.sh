@@ -104,6 +104,30 @@ run tests/test_check_link_closure.sh
 step "link-closure guard (src/map_reader.c vs merge base)"
 run scripts/check-link-closure.sh
 
+# Runner-registration guard (#433): tests/run_all.sh (make box-check) and
+# tests/ci_smoke.sh (CI/nightly) have independent membership, so a test
+# wired into ci_smoke.sh alone makes box-check "green" prove nothing about
+# it (three real incidents: test_v9_open_cpu_wired registered ci_smoke-only
+# twice over, and test_capture_smoke mentioned in run_all.sh only inside a
+# comment while ci_smoke.sh actually runs it). Only the SELF-TEST (synthetic
+# fixtures) runs here, not scripts/check-runner-registration.sh itself
+# against this real repo: that live run is a reviewer-run-by-hand evidence
+# guard, same as scripts/check-test-registration.sh -- wiring it into every
+# `make check` would turn a real, already-filed, out-of-scope registration
+# gap (test_capture_smoke.py / test_uprobe_fired.py, tracked by #433, not
+# fixed here since fixing it means editing tests/run_all.sh, a live-tier
+# test-assertion change) into a permanent red for every unrelated branch.
+step "runner-registration guard self-test"
+run tests/test_check_runner_registration.sh
+
+# tests/results/ evidence-directory ignore rule (companion to this guard's
+# own commit, same failure class as the tree-hash guards above): an agent
+# writing a brand-new tests/results/<name>/ directory must not move
+# scripts/tree-hash.sh's output, and a tracked tests/results/ file must
+# never become invisible to `git status` by also matching an ignore rule.
+step "tests/results/ evidence-directory ignore rule"
+run bash tests/test_results_evidence_ignore.sh
+
 step "web builder unit tests (node)"
 run node --test 'tests/web_unit/*.test.mjs'
 
