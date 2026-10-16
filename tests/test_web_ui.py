@@ -704,21 +704,33 @@ def test_transitions_tab(page):
     check(chart_status.startswith("ok"),
           f"Transitions DFG rendered with data ({chart_status})")
 
-    # #436: an ECharts option object is not proof of paint — measure every
-    # laid-out node's circle + label against the REAL container pixel box,
-    # using the browser's own canvas text metrics (not a client-side
-    # estimate) for label width. A node whose label is off-canvas fails
-    # this, not just a visually-inspected screenshot.
+    # #436 (adviser-review finding): an ECharts option object is not proof
+    # of paint, and raw getOption() x/y is not proof of PIXEL position
+    # either — ECharts' graph "view" coordinateSystem can (and, pre-fix,
+    # did) normalize those coordinates to a space the renderer draws in
+    # that differs from the data space the builder laid nodes out in. This
+    # reads the REAL rendered position via the series' own
+    # coordinateSystem.dataToPoint() — the exact function the renderer
+    # itself calls — plus the browser's own canvas text metrics (not a
+    # client-side estimate) for label width. A node whose RENDERED label is
+    # off-canvas fails this, not just a visually-inspected screenshot.
+    # tests/test_dfg_geometry.py carries the dedicated six-equal-duration
+    # negative control that isolates this exact mechanism; this is the
+    # same check against the live app's own canned data.
     clipped = page.evaluate("""
-        () => {
+        async () => {
+            const { isLayoutAnchorNode } = await import('/lib/builders/transitions.js');
             const el = document.getElementById('dfg-container');
             const c = echarts.getInstanceByDom(el);
             const opt = c.getOption();
             const nodes = (opt.series[0] && opt.series[0].data) || [];
+            const coordSys = c.getModel().getSeriesByIndex(0).coordinateSystem;
             const w = el.clientWidth, h = el.clientHeight;
             const probe = document.createElement('canvas').getContext('2d');
             const bad = [];
             for (const n of nodes) {
+                if (isLayoutAnchorNode(n.name)) continue;
+                const [px, py] = coordSys.dataToPoint([n.x, n.y]);
                 const label = n.label || {};
                 probe.font = (label.fontSize || 10) + 'px sans-serif';
                 const lines = String(label.formatter || '').split('\\n');
@@ -727,15 +739,17 @@ def test_transitions_tab(page):
                 const halfW = Math.max(radius, maxLineW / 2);
                 const lineHeight = label.lineHeight || 14;
                 const bottom = radius + 6 + lines.length * lineHeight;
-                if (n.x - halfW < -1 || n.x + halfW > w + 1 ||
-                    n.y - radius < -1 || n.y + bottom > h + 1) {
-                    bad.push({ name: n.name, x: n.x, y: n.y, halfW, bottom, w, h });
+                if (px - halfW < -1 || px + halfW > w + 1 ||
+                    py - radius < -1 || py + bottom > h + 1) {
+                    bad.push({ name: n.name, dataXY: [n.x, n.y], pixelXY: [px, py],
+                        halfW, bottom, w, h });
                 }
             }
             return bad;
         }
     """)
-    check(clipped == [], f"No DFG node/label clips the live container ({clipped})")
+    check(clipped == [], f"No DFG node/label clips the live container, measured via the "
+          f"real coordinateSystem (not getOption() x/y) ({clipped})")
 
     # #436: the hideIdle control is narrow (Client:ClientRead only, not every
     # idle classification) — named for exactly what it does rather than

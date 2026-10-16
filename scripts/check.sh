@@ -248,6 +248,8 @@ if [[ $FAST -eq 0 ]]; then
     #                                sampled +50/+51
     #     PGWT_CHIP_PORT  = base+60 test_chip_label_alignment.py: HTTP +60
     #                                (gallery.html is static — no WS pair)
+    #     PGWT_DFG_GEOM_PORT = base+65 test_dfg_geometry.py: HTTP +65
+    #                                (gallery.html is static — no WS pair)
     PORT_SPAN=70
     PGWT_PORT_BASE=$(python3 tests/free_ports.py "$PORT_SPAN") || { echo "free_ports: could not allocate $PORT_SPAN free ports"; exit 2; }
     [[ $PGWT_PORT_BASE =~ ^[0-9]+$ ]] || { echo "free_ports: non-numeric base '$PGWT_PORT_BASE'"; exit 2; }
@@ -255,7 +257,8 @@ if [[ $FAST -eq 0 ]]; then
     export PGWT_CHAOS_PORT=$((PGWT_PORT_BASE + 30))
     export PGWT_SNAP_PORT=$((PGWT_PORT_BASE + 40))
     export PGWT_CHIP_PORT=$((PGWT_PORT_BASE + 60))
-    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60)"
+    export PGWT_DFG_GEOM_PORT=$((PGWT_PORT_BASE + 65))
+    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60 DFG_GEOM=+65)"
 
     step "web UI suite vs mock_server.py (Playwright)"
     run python3 tests/test_web_ui.py
@@ -263,6 +266,8 @@ if [[ $FAST -eq 0 ]]; then
     run python3 tests/test_web_ui_chaos.py
     step "overlay chip label alignment at DSF 1/2 (issue #213)"
     run python3 tests/test_chip_label_alignment.py
+    step "DFG rendered-geometry guard: real coordinateSystem.dataToPoint, not getOption() (issue #436)"
+    run python3 tests/test_dfg_geometry.py
 
     # issue #245 (TTFP): _navigate_to_tab's ttfp_ms anchor and its wiring
     # into run_tab's build_tab_result call -- imports ui_live_smoke.py,

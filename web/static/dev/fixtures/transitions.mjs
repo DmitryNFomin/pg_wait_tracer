@@ -242,6 +242,38 @@ export const states = {
         data: IDLE_DOMINANT,
         opts: { threshold: 20, dims: DIMS, hideIdle: true },
     },
+    /* #436 adviser-review negative control: six nodes with IDENTICAL
+     * total_ms (so every symbolSize and footprint is identical too — no
+     * single dominant/huge node can mask the effect) at DIMS (620x460),
+     * threshold 0 (nothing hidden). The builder's PRE-transform-pin math
+     * read this as fitting; the live, fully-rendered coordinates did not
+     * (measured via chart.getModel().getSeriesByIndex(0).coordinateSystem
+     * .dataToPoint() against ECharts 5.5.1, web/static/vendor/echarts.min.js
+     * -- the bottom row landed ~5% further from center than its data
+     * coordinates, past the container's bottom edge) until the graph
+     * series pinned its own view box (left/top/width/height) AND its data
+     * bounding box (the two invisible layoutAnchorNodes) to make that
+     * mapping the identity transform. tests/test_dfg_geometry.py renders
+     * this cell for real and checks the RENDERED coordinates — a check a
+     * pure option-object inspection cannot perform. */
+    'six-equal-duration': {
+        description: '#436 adviser control: six equal-total_ms nodes at 620x460 — the real ' +
+            'rendered position differs from the pre-transform data position whenever the ' +
+            'graph series is not pinned to an identity view transform; see ' +
+            'tests/test_dfg_geometry.py for the render-based check.',
+        tags: ['ALIGNMENT'],
+        data: (() => {
+            const names = ['CPU*', 'A:Event', 'B:Event', 'C:Event', 'D:Event', 'E:Event'];
+            const nodes = names.map(name => ({ name, total_ms: 1000, class: 'CPU' }));
+            const links = [];
+            for (let i = 1; i < names.length; i++) {
+                links.push({ source: 'CPU*', target: names[i], value: 100, duration_ms: 1 });
+                links.push({ source: names[i], target: 'CPU*', value: 100, duration_ms: 1 });
+            }
+            return { total: links.reduce((s, l) => s + l.value, 0), nodes, links };
+        })(),
+        opts: { threshold: 0, dims: DIMS },
+    },
     'hostile-names': {
         description: 'Node names carrying <script>/quote payloads and unicode — labels and tooltips must render inert (UI-6).',
         tags: ['FEEDBACK', 'injection'],

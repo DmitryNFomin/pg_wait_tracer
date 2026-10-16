@@ -71,6 +71,31 @@ export function isIdleTransitionNode(name) {
     return IDLE_NODE_NAMES.has(name);
 }
 
+/* #436 (adviser-caught): two invisible nodes placed at the exact corners of
+ * the DFG's pixel box so ECharts' graph "view" coordinateSystem has no data
+ * extent to auto-fit beyond that box — see the long comment on the series
+ * config in buildTransitionsOption for the empirically-verified mechanism.
+ * NEVER part of the real node set: excluded from `ecNodes`/`visibleCount`/
+ * `sortedNodes`, carry no color/label/eventId, and are `silent` (no hover,
+ * click or drag — echarts does not dispatch pointer events to silent
+ * elements at all). Exported so tests can filter them out by name when
+ * iterating the option's rendered node list, rather than re-deriving a
+ * second guess at which entries are "real". */
+const LAYOUT_ANCHOR_NAMES = ['pgwt-layout-anchor-tl', 'pgwt-layout-anchor-br'];
+
+export function isLayoutAnchorNode(name) {
+    return LAYOUT_ANCHOR_NAMES.indexOf(name) !== -1;
+}
+
+function layoutAnchorNodes(cW, cH) {
+    return [
+        { name: LAYOUT_ANCHOR_NAMES[0], x: 0, y: 0, symbol: 'none', symbolSize: 0, silent: true,
+            label: { show: false }, tooltip: { show: false } },
+        { name: LAYOUT_ANCHOR_NAMES[1], x: cW, y: cH, symbol: 'none', symbolSize: 0, silent: true,
+            label: { show: false }, tooltip: { show: false } },
+    ];
+}
+
 /* Drop every link touching an idle node. Returns the survivors plus how much
  * was hidden (link count + summed transition count) so the view can say so
  * instead of silently shrinking the graph. */
@@ -371,7 +396,42 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
         },
         series: [{
             type: 'graph', layout: 'none', roam: true, draggable: true,
-            data: ecNodes, links: ecLinks,
+            // #436 (adviser-caught, post-review): ECharts' graph
+            // series, even with layout:'none', normalizes node x/y through
+            // its own "view" coordinateSystem, which by default FITS the
+            // laid-out nodes' own bounding box into the series' box
+            // (left/top/width/height — here the whole container), not a
+            // 1:1 pixel mapping. `boundingCoords` (the geo component's
+            // escape hatch) does NOT apply to graph series at all — verified
+            // empirically by setting it and observing byte-identical
+            // rendered coordinates with and without it. What DOES work,
+            // verified against this exact vendored build
+            // (web/static/vendor/echarts.min.js, ECharts 5.5.1) via
+            // `chart.getModel().getSeriesByIndex(0).coordinateSystem
+            // .dataToPoint([x,y])` on a real rendered instance:
+            //   1. `left:0, top:0, width:cW, height:cH` pins the series' own
+            //      box to the exact container rect (no ambiguous "center"
+            //      default, which carries its own ~80% shrink-to-fit
+            //      margin when width/height are left unset).
+            //   2. Two invisible (`symbol:'none', silent:true`) anchor
+            //      nodes at the box's exact top-left (0,0) and bottom-right
+            //      (cW,cH) corners (layoutAnchorNodes, appended below,
+            //      never part of `ecNodes`/visibleCount/sortedNodes) pin the
+            //      nodes' OWN bounding box to those same exact dimensions —
+            //      without this, box (1) alone still independently
+            //      stretches each axis to fill it non-uniformly, distorting
+            //      circles into ellipses.
+            // Together, both pinned boxes are identical in origin, size AND
+            // aspect ratio, so the fit computation's scale factor is
+            // exactly 1 on both axes: data coordinates become pixel
+            // coordinates, the invariant every padding/margin/curveness
+            // computation above assumes. test_web_ui.py's live clipping
+            // check now reads real `coordinateSystem.dataToPoint()` output
+            // (never raw getOption() x/y) specifically because this is true
+            // ONLY as a property of this series config, not of the option
+            // object in isolation.
+            left: 0, top: 0, width: cW, height: cH,
+            data: ecNodes.concat(layoutAnchorNodes(cW, cH)), links: ecLinks,
             edgeSymbol: ['none', 'arrow'], edgeSymbolSize: [0, 8],
             emphasis: { focus: 'adjacency', lineStyle: { width: 4, opacity: 1 } },
             lineStyle: { curveness: 0.3 },

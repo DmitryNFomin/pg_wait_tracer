@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import {
     buildTransitionsOption, transitionsContext, buildVariantsHtml, buildVariantsPanel,
     isIdleTransitionNode, p95TruncationMarker, findOmittedDominantNode,
-    restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder,
+    restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder, isLayoutAnchorNode,
     buildTransitionsDisclosure,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
@@ -92,7 +92,10 @@ test('cross-view identity: every node color equals eventColor(null, name)', () =
     // The AAS chart colors series with eventColor(null, name) — the DFG must
     // agree for the same event names no matter how it identifies the class.
     const { option } = buildTransitionsOption(data(), 0, { width: 800, height: 550 });
-    for (const n of option.series[0].data) {
+    // #436: layout-anchor nodes (identity-transform pins, never real wait
+    // events) carry no itemStyle/color at all -- this identity rule only
+    // applies to real nodes.
+    for (const n of option.series[0].data.filter(nd => !isLayoutAnchorNode(nd.name))) {
         assert.equal(n.itemStyle.color, eventColor(null, n.name), n.name);
     }
 });
@@ -736,7 +739,9 @@ test('#436 RED: the pre-fix layout actually clips (demonstrates the bug, '
         + '-- if this fails, the fixture no longer demonstrates the bug');
 
     const after = buildTransitionsOption(data, 0, dims);
-    for (const nd of after.option.series[0].data) {
+    // #436: layout-anchor nodes are a deliberate identity-transform pin,
+    // not a real laid-out wait event -- exclude them from the real-node fit check.
+    for (const nd of after.option.series[0].data.filter(n => !isLayoutAnchorNode(n.name))) {
         assert.ok(footprintFits(nd, dims),
             nd.name + ' footprint does not fit ' + JSON.stringify(dims) + ': ' +
             JSON.stringify({ x: nd.x, y: nd.y, symbolSize: nd.symbolSize }));
@@ -775,7 +780,7 @@ test('#436: every laid-out node + its label fits the container for the dense '
     const data = { total: links.reduce((s, l) => s + l.value, 0), nodes, links };
     const built = buildTransitionsOption(data, 0, dims);
     assert.equal(built.visibleCount, 18);
-    for (const nd of built.option.series[0].data) {
+    for (const nd of built.option.series[0].data.filter(n => !isLayoutAnchorNode(n.name))) {
         assert.ok(footprintFits(nd, dims), nd.name + ' clips the ' + JSON.stringify(dims) + ' container');
     }
 });
@@ -846,7 +851,7 @@ test('fixture threshold-simplified: all three omission causes fire together, '
     assert.equal(built.serverTruncated, true, 'the fixture declares a server link cap');
     assert.equal(built.omittedDominant.name, 'Lock:relation');
     assert.equal(built.omittedDominant.ms, 52000);
-    for (const nd of built.option.series[0].data) {
+    for (const nd of built.option.series[0].data.filter(n => !isLayoutAnchorNode(n.name))) {
         assert.ok(footprintFits(nd, st.opts.dims), nd.name + ' clips the fixture viewport');
     }
     const text = buildTransitionsDisclosure(built, st.data.total);
@@ -903,4 +908,48 @@ test('negative control: the fixture never gains a synthesized direct '
     const pairs = new Set(built.option.series[0].links.map(l => l.source + '->' + l.target));
     assert.ok(!pairs.has('Lock:relation->IO:DataFileRead'));
     assert.ok(!pairs.has('IO:DataFileRead->Lock:relation'));
+});
+
+// ── #436 adviser-review finding: the identity-transform pin ────────────────
+//
+// ECharts' graph "view" coordinateSystem normalizes node x/y through its own
+// fit-to-box transform UNLESS the series' box (left/top/width/height) is
+// pinned to the exact container AND the data's own bounding box is pinned to
+// match it (via two invisible corner nodes) -- see the long comment on the
+// series config in buildTransitionsOption, and tests/test_dfg_geometry.py
+// for the live, rendered-coordinate confirmation (a pure Node test cannot
+// render ECharts, so it can only check these CONFIGURATION values are
+// present -- it is a tripwire against silently dropping the pin, not a
+// substitute for the rendered check).
+
+test('#436: the series is pinned to an identity data->pixel transform '
+    + '(left/top/width/height match the container exactly, plus two '
+    + 'invisible corner anchors) -- without this, ECharts auto-fits node '
+    + 'positions to a DIFFERENT box than the one this builder laid out in '
+    + '(verified against a live render in tests/test_dfg_geometry.py)', () => {
+    const dims = { width: 620, height: 460 };
+    const built = buildTransitionsOption(data(), 0, dims);
+    const series = built.option.series[0];
+    assert.equal(series.left, 0);
+    assert.equal(series.top, 0);
+    assert.equal(series.width, dims.width);
+    assert.equal(series.height, dims.height);
+    const anchors = series.data.filter(n => isLayoutAnchorNode(n.name));
+    assert.equal(anchors.length, 2, 'exactly two layout-anchor nodes');
+    const xs = anchors.map(a => a.x).sort((a, b) => a - b);
+    const ys = anchors.map(a => a.y).sort((a, b) => a - b);
+    assert.deepEqual(xs, [0, dims.width]);
+    assert.deepEqual(ys, [0, dims.height]);
+    for (const a of anchors) {
+        assert.equal(a.silent, true, a.name + ' must never intercept hover/click/drag');
+        assert.equal(a.symbol, 'none', a.name + ' must never be visibly drawn');
+    }
+});
+
+test('negative control: isLayoutAnchorNode only matches the two reserved '
+    + 'anchor names -- a real wait-event name is never mistaken for one', () => {
+    assert.equal(isLayoutAnchorNode('CPU*'), false);
+    assert.equal(isLayoutAnchorNode('Lock:relation'), false);
+    assert.equal(isLayoutAnchorNode(''), false);
+    assert.equal(isLayoutAnchorNode(undefined), false);
 });
