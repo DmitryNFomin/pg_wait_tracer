@@ -947,9 +947,35 @@ static int diff_top_queries(const char *lbl,
         if (dne(a->total_ms, b->total_ms))
             D("query 0x%llx total_ms %.9f vs %.9f",
               (unsigned long long)a->query_id, a->total_ms, b->total_ms);
-        if (dne(a->avg_us, b->avg_us))
-            D("query 0x%llx avg_us %.9f vs %.9f",
-              (unsigned long long)a->query_id, a->avg_us, b->avg_us);
+        /* #441: avg_us is NOT a cross-path comparison any more, and comparing
+         * it as one was a false agreement. The raw path reports the mean FULL
+         * duration of the exact intervals; the summary path used to report
+         * in-window DB Time / interval count. Those are the same number only
+         * when nothing in the window is clipped and every record is exact --
+         * true of this fixture, which is exactly why the old equality check
+         * passed while the two paths computed different quantities.
+         *
+         * The summary records carry no full-duration sum
+         * (struct pgwt_summary_query), so the summary path now declares the
+         * column UNAVAILABLE. That is the contract this asserts, and it is
+         * STRICTER than the old equality: the raw side must have real
+         * evidence (exact_count > 0 and a positive average -- a silent
+         * regression to exact_count == 0 would blank the column in the UI
+         * and is caught here), and the summary side must be explicitly
+         * unavailable rather than carrying any number at all. */
+        if (a->exact_count == 0)
+            D("query 0x%llx: the RAW path lost its full-duration evidence "
+              "(exact_count 0) -- avg_us would render as unavailable",
+              (unsigned long long)a->query_id);
+        if (a->exact_count > 0 && !(a->avg_us > 0))
+            D("query 0x%llx: raw exact_count %llu but avg_us %.9f",
+              (unsigned long long)a->query_id,
+              (unsigned long long)a->exact_count, a->avg_us);
+        if (b->exact_count != 0 || b->avg_us != 0.0)
+            D("query 0x%llx: the SUMMARY path must declare avg_us "
+              "unavailable (exact_count 0, avg_us 0); got %llu / %.9f",
+              (unsigned long long)a->query_id,
+              (unsigned long long)b->exact_count, b->avg_us);
         if (dne(a->pct_db, b->pct_db))
             D("query 0x%llx pct_db %.9f vs %.9f",
               (unsigned long long)a->query_id, a->pct_db, b->pct_db);
@@ -1608,6 +1634,16 @@ static void test_mutation_probes(const struct fixture *fx)
               "one nanosecond in a single class column");
         MUT_Q(rows[0].query_id ^= 1ULL,      "a query present on one side only");
         MUT_Q(m.num_rows = sum.num_rows - 1, "a MISSING query row");
+        /* #441: the new avg_us contract, proven able to go red. The summary
+         * path must declare the latency average UNAVAILABLE; these are the
+         * two ways it could stop doing so -- a number in the column, and a
+         * nonzero denominator claiming evidence it does not have. Without
+         * these probes the comparator above could have been satisfied by
+         * never looking at the field at all. */
+        MUT_Q(rows[0].avg_us = 1e-9,
+              "the summary path emitting ANY latency average");
+        MUT_Q(rows[0].exact_count = 1,
+              "the summary path claiming full-duration evidence it has none of");
 #undef MUT_Q
         free(rows);
         free_q(&raw); free_q(&sum);

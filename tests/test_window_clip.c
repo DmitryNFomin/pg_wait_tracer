@@ -897,6 +897,315 @@ static void test_right_edge_bypass(void)
     free(t0.rows);
 }
 
+
+/* ── 7. #426: AAS top-N MEMBERSHIP is selected on contribution ──────────
+ *
+ * `rank-reversing-boundary`. pgwt_compute_aas plots per-bucket OVERLAP but
+ * used to rank candidates for the top-N cut by FULL duration
+ * (evt_ht[].total_ns += ev->duration_ns). Those two orders are the same for
+ * every interior event, which is why this went unnoticed: the only inputs
+ * that separate them are boundary straddlers.
+ *
+ * A: Lock:relation, 10 s long, ending 1 s after the window opens
+ *      -> full duration 10 s, CONTRIBUTION 1 s
+ * B: IO:DataFileRead, 2 s long, wholly inside
+ *      -> full duration 2 s, CONTRIBUTION 2 s
+ *
+ * With max_series = 1 the two selectors disagree by construction: by full
+ * duration A wins (10 > 2) and draws 1 s of area while B draws none; by
+ * contribution B wins (2 > 1), which is what the chart's own axis means.
+ *
+ * The fixture self-test below asserts BOTH inequalities, so the membership
+ * assertion cannot be satisfied by a no-op: this input is only green under
+ * contribution selection and only red under full-duration selection. The
+ * latency half of the #426 contract is asserted in the same breath -- A's
+ * Events-tab latency must still read the whole 10 s, because clipping is a
+ * rule about TIME IN WINDOW and never about how long a wait lasted.
+ */
+static void test_rank_reversing_boundary(void)
+{
+    printf("--- 7. #426: top-N membership follows contribution, not duration ---\n");
+
+    struct pgwt_trace_event evs[] = {
+        /* A: ends 1 s into the window, 10 s long  -> contribution 1 s */
+        mk(9001, LOCK_RELATION, WFROM + S(1), S(10), 0, PGWT_CPU_NS_UNKNOWN),
+        /* B: [WFROM+3, WFROM+5), 2 s long         -> contribution 2 s */
+        mk(9002, IO_READ,       WFROM + S(5), S(2),  0, PGWT_CPU_NS_UNKNOWN),
+    };
+
+    /* FIXTURE SELF-TEST: the two selectors must provably disagree here, or
+     * the assertions below prove nothing. */
+    uint64_t a_full = evs[0].duration_ns, b_full = evs[1].duration_ns;
+    uint64_t a_contrib = evs[0].timestamp_ns - WFROM;  /* A opens before `from` */
+    uint64_t b_contrib = evs[1].duration_ns;           /* wholly interior */
+    CHECK(a_full > b_full,
+          "fixture: by FULL DURATION A outranks B (10 s vs 2 s)");
+    CHECK(a_contrib < b_contrib,
+          "fixture: by CONTRIBUTION B outranks A (1 s vs 2 s) -- the two "
+          "selectors disagree, so this input can tell them apart");
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    struct pgwt_aas_result aas;
+    pgwt_compute_aas(evs, 2, &f, WFROM, WTO, 10, 1 /*detail*/, 1 /*max_series*/,
+                     &aas);
+    CHECK_U64(aas.num_event_series, 1,
+              "exactly one series survives the top-N=1 cut");
+    if (aas.num_event_series == 1) {
+        CHECK(aas.event_series[0].event_id == IO_READ,
+              "the SURVIVOR is B (IO:DataFileRead, 2 s in window), not A "
+              "(Lock:relation, 10 s long but 1 s in window)");
+        /* The ranking quantity itself, not just its argmax: compute.h
+         * documents total_aas as "sum across all buckets", which under
+         * full-duration accumulation was false for any straddler. */
+        CHECK_NUM(aas.event_series[0].total_aas, 2.0 / 10.0,
+                  "…and its total_aas is its in-window 2 s / 10 s window");
+    }
+    free(aas.buckets);
+    free(aas.event_aas);
+
+    /* With room for both, A's own ranking quantity must be its 1 s of
+     * contribution (0.1 AAS), not its 10 s of duration (1.0 AAS). This is
+     * the assertion that goes red on the full-duration site even if a future
+     * max_series default made membership moot. */
+    struct pgwt_aas_result aas2;
+    pgwt_compute_aas(evs, 2, &f, WFROM, WTO, 10, 1, 8, &aas2);
+    CHECK_U64(aas2.num_event_series, 2, "both events are series when N=8");
+    double a_aas = -1.0, b_aas = -1.0;
+    for (int i = 0; i < aas2.num_event_series; i++) {
+        if (aas2.event_series[i].event_id == LOCK_RELATION)
+            a_aas = aas2.event_series[i].total_aas;
+        if (aas2.event_series[i].event_id == IO_READ)
+            b_aas = aas2.event_series[i].total_aas;
+    }
+    CHECK_NUM(a_aas, 1.0 / 10.0,
+              "A's total_aas is 1 s / 10 s window (full duration reads 1.0)");
+    CHECK_NUM(b_aas, 2.0 / 10.0, "B's total_aas is 2 s / 10 s window");
+    CHECK(b_aas > a_aas,
+          "…so B outranks A on the quantity the chart actually plots");
+    CHECK(aas2.event_series[0].event_id == IO_READ,
+          "and the sorted array puts B first");
+    free(aas2.buckets);
+    free(aas2.event_aas);
+
+    /* THE OTHER HALF OF THE CONTRACT: A's latency is untouched. */
+    struct pgwt_events_result te;
+    pgwt_compute_top_events(evs, 2, &f, WFROM, WTO, 10000.0, &te);
+    const struct pgwt_event_row *ra = ev_row(&te, LOCK_RELATION);
+    CHECK(ra != NULL, "Events has A's row");
+    if (ra) {
+        CHECK_MS(ra->total_ms, 1000.0, "…A's Total is its 1 s in window");
+        CHECK(fabs(ra->avg_us - 10000000.0) < 1e-3,
+              "…and A's latency still reads the whole 10 s");
+    }
+    free(te.rows);
+}
+
+/* ── 8. #440: equal values come back in IDENTITY order, reproducibly ────
+ *
+ * cmp_event_row_desc / cmp_session_row_desc / cmp_query_row_desc ordered by
+ * value alone, which is not a total order over a set with ties, and qsort is
+ * not stable -- so the row order of a tie group was a function of the hash
+ * table's probe sequence and the partition, i.e. of nothing a caller can
+ * see. Under a max_rows cut that decides WHICH ROWS are returned, not just
+ * their order.
+ *
+ * Three events, three pids and three query ids, every one carrying exactly
+ * 1 s wholly inside the window: a perfect three-way tie on all three tables
+ * at once. The same multiset is fed in two different array orders, and both
+ * must come back in ascending identity order. Asserting the ORDER (rather
+ * than only that the two runs agree) is what makes this a gate: two runs
+ * could agree by accident on one input, but neither can land on ascending
+ * identity by accident on both permutations.
+ *
+ * Neither permutation is already in identity order as written, so a
+ * "preserve input order" implementation fails both.
+ */
+static void test_tie_break_is_identity(void)
+{
+    printf("--- 8. #440: ties resolve on identity, in both input orders ---\n");
+
+    /* The three event ids are chosen so that IDENTITY order and the
+     * accumulator's own COLLECTION order are exactly reversed, which is what
+     * makes the Events assertion a gate rather than a coincidence.
+     * pgwt_compute_top_events hashes `event_id & EVENT_HT_MASK`, and the
+     * class lives in the high byte, so an event's slot is its NUMBER:
+     *
+     *   TIE_LWLOCK 0x0100001E  slot 30   id rank 1
+     *   TIE_LOCK   0x03000014  slot 20   id rank 2
+     *   TIE_IO     0x0A00000A  slot 10   id rank 3
+     *
+     * so collecting the table in slot order yields IO, LOCK, LWLOCK -- the
+     * reverse of the required answer. The first draft of this section used
+     * Lock/Timeout/IO with slots 0/2/21, where slot order HAPPENED to equal
+     * id order, and the value-only comparator passed it. None of the three
+     * is idle or hidden (only Activity-class, Client:ClientRead and the six
+     * named Timeout pacing events are), so all three really do appear.
+     * Pids and qids ascend with their numbers. */
+    #define TIE_LWLOCK  EV(0x01u, 30)
+    #define TIE_LOCK    EV(CLASS_LOCK, 20)
+    #define TIE_IO      EV(CLASS_IO, 10)
+    struct pgwt_trace_event fwd[] = {
+        mk(7002, TIE_LOCK,   WFROM + S(2), S(1), 502, PGWT_CPU_NS_UNKNOWN),
+        mk(7003, TIE_IO,     WFROM + S(4), S(1), 503, PGWT_CPU_NS_UNKNOWN),
+        mk(7001, TIE_LWLOCK, WFROM + S(6), S(1), 501, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_trace_event rev[3];
+    for (int i = 0; i < 3; i++) rev[i] = fwd[2 - i];
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    const uint32_t want_ev[3]  = { TIE_LWLOCK, TIE_LOCK, TIE_IO };
+    const uint32_t want_pid[3] = { 7001, 7002, 7003 };
+    const uint64_t want_qid[3] = { 501, 502, 503 };
+
+    for (int perm = 0; perm < 2; perm++) {
+        const struct pgwt_trace_event *in = perm ? rev : fwd;
+
+        struct pgwt_events_result te;
+        pgwt_compute_top_events(in, 3, &f, WFROM, WTO, 10000.0, &te);
+        /* FIXTURE SELF-TEST: a tie this section cannot see is a tie it
+         * cannot test. All three rows must be present AND equal. */
+        int tie_rows = 0;
+        double first = -1.0;
+        int all_equal = 1;
+        for (int i = 0; i < te.num_rows; i++) {
+            for (int k = 0; k < 3; k++) {
+                if (te.rows[i].event_id != want_ev[k]) continue;
+                tie_rows++;
+                if (first < 0) first = te.rows[i].total_ms;
+                else if (fabs(te.rows[i].total_ms - first) > 1e-9)
+                    all_equal = 0;
+            }
+        }
+        CHECK_U64(tie_rows, 3, "all three tied event rows are present");
+        CHECK(all_equal && fabs(first - 1000.0) < 1e-6,
+              "…and they really TIE at 1000 ms (an untied fixture would be "
+              "ordered correctly by the old comparator too)");
+        /* The order of the tie group, extracted in served order. */
+        int seen = 0, order_ok = 1;
+        for (int i = 0; i < te.num_rows && seen < 3; i++) {
+            for (int k = 0; k < 3; k++) {
+                if (te.rows[i].event_id != want_ev[k]) continue;
+                if (te.rows[i].event_id != want_ev[seen]) order_ok = 0;
+                seen++;
+            }
+        }
+        CHECK(order_ok && seen == 3,
+              perm ? "Events tie group is event_id-ascending (reversed input)"
+                   : "Events tie group is event_id-ascending (as-written input)");
+        free(te.rows);
+
+        struct pgwt_sessions_result ts;
+        pgwt_compute_top_sessions(in, 3, &f, WFROM, WTO, 10000.0, &ts);
+        CHECK_U64(ts.num_rows, 3, "three tied session rows");
+        int s_ok = (ts.num_rows == 3);
+        for (int i = 0; i < ts.num_rows && i < 3; i++) {
+            if (ts.rows[i].pid != want_pid[i]) s_ok = 0;
+            if (fabs(ts.rows[i].db_time_ms - 1000.0) > 1e-6) s_ok = 0;
+        }
+        CHECK(s_ok, perm ? "Sessions ties are pid-ascending (reversed input)"
+                         : "Sessions ties are pid-ascending (as-written input)");
+        free(ts.rows);
+
+        struct pgwt_queries_result tq;
+        pgwt_compute_top_queries(in, 3, &f, WFROM, WTO, 10000.0, &tq);
+        CHECK_U64(tq.num_rows, 3, "three tied query rows");
+        int q_ok = (tq.num_rows == 3);
+        for (int i = 0; i < tq.num_rows && i < 3; i++) {
+            if (tq.rows[i].query_id != want_qid[i]) q_ok = 0;
+            if (fabs(tq.rows[i].total_ms - 1000.0) > 1e-6) q_ok = 0;
+        }
+        CHECK(q_ok, perm ? "Queries ties are query_id-ascending (reversed input)"
+                         : "Queries ties are query_id-ascending (as-written input)");
+        free(tq.rows);
+    }
+}
+
+/* ── 9. #441: the Queries latency average needs full-duration evidence ──
+ *
+ * `count` on a Queries row counts non-idle wait AND CPU intervals, exact and
+ * sampled alike (ASH math makes the count and the time valid). `avg_us` is a
+ * LATENCY and needs real durations, which a sampled record does not have --
+ * its duration_ns is a normalized sample period, so averaging it reports a
+ * wait the capture never measured. pgwt_compute_top_events has refused that
+ * since FID-3 via its own exact_count; pgwt_compute_top_queries did not.
+ *
+ * Fixture: query 801 is exact-only (two 10 ms intervals -> 10 ms average);
+ * query 802 is sampled-only (two 10 ms sample periods -> exact_count 0, so
+ * the average is UNAVAILABLE); query 803 is mixed, and its average must be
+ * taken over the exact observations ALONE (one 30 ms interval -> 30 ms),
+ * never over all of them. 803 is the row that distinguishes "gated the whole
+ * row" from "gated the right denominator": a fix that only skipped
+ * sampled-only rows would report 803 as (30+10)/2 = 20 ms.
+ */
+static void test_query_avg_needs_exact_evidence(void)
+{
+    printf("--- 9. #441: Queries avg is exact-only, or unavailable ---\n");
+
+    struct pgwt_trace_event evs[6];
+    int n = 0;
+    /* 801: exact, two 10 ms IO waits. */
+    evs[n++] = mk(8001, IO_READ, WFROM + S(1), 10000000ULL, 801,
+                  PGWT_CPU_NS_UNKNOWN);
+    evs[n++] = mk(8001, IO_READ, WFROM + S(2), 10000000ULL, 801,
+                  PGWT_CPU_NS_UNKNOWN);
+    /* 802: sampled, two 10 ms sample periods. */
+    evs[n] = mk(8002, IO_READ, WFROM + S(3), 10000000ULL, 802,
+                PGWT_CPU_NS_UNKNOWN);
+    evs[n].flags |= PGWT_EVENT_FLAG_SAMPLE;
+    n++;
+    evs[n] = mk(8002, IO_READ, WFROM + S(4), 10000000ULL, 802,
+                PGWT_CPU_NS_UNKNOWN);
+    evs[n].flags |= PGWT_EVENT_FLAG_SAMPLE;
+    n++;
+    /* 803: mixed -- one 30 ms exact wait and one 10 ms sample. */
+    evs[n++] = mk(8003, IO_READ, WFROM + S(5), 30000000ULL, 803,
+                  PGWT_CPU_NS_UNKNOWN);
+    evs[n] = mk(8003, IO_READ, WFROM + S(6), 10000000ULL, 803,
+                PGWT_CPU_NS_UNKNOWN);
+    evs[n].flags |= PGWT_EVENT_FLAG_SAMPLE;
+    n++;
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_queries_result tq;
+    pgwt_compute_top_queries(evs, n, &f, WFROM, WTO, 10000.0, &tq);
+
+    const struct pgwt_query_row *q1 = qrow(&tq, 801);
+    CHECK(q1 != NULL, "exact-only query 801 has a row");
+    if (q1) {
+        CHECK_U64(q1->count, 2, "…two intervals counted");
+        CHECK_U64(q1->exact_count, 2, "…both are exact, so both are evidence");
+        CHECK(fabs(q1->avg_us - 10000.0) < 1e-3,
+              "…average interval is the real 10 ms");
+    }
+
+    const struct pgwt_query_row *q2 = qrow(&tq, 802);
+    CHECK(q2 != NULL, "sampled-only query 802 still HAS a row (ASH math: its "
+                      "count and DB Time are valid)");
+    if (q2) {
+        CHECK_U64(q2->count, 2, "…its two sampled observations are counted");
+        CHECK_MS(q2->total_ms, 20.0, "…and its DB Time is real");
+        CHECK_U64(q2->exact_count, 0,
+                  "…but it carries NO full-duration evidence, so the latency "
+                  "average is unavailable (server.c emits null)");
+    }
+
+    const struct pgwt_query_row *q3 = qrow(&tq, 803);
+    CHECK(q3 != NULL, "mixed query 803 has a row");
+    if (q3) {
+        CHECK_U64(q3->count, 2, "…both observations counted");
+        CHECK_U64(q3->exact_count, 1, "…one of them is exact");
+        CHECK(fabs(q3->avg_us - 30000.0) < 1e-3,
+              "…and the average is over the EXACT one alone (30 ms), not over "
+              "both observations (which would read 20 ms)");
+    }
+    free(tq.rows);
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -912,9 +1221,15 @@ int main(void)
     test_right_edge_whole_window_spanner();
     test_right_edge_adjacent_sweep();
     test_right_edge_bypass();
+    test_rank_reversing_boundary();
+    test_tie_break_is_identity();
+    test_query_avg_needs_exact_evidence();
 
-    /* A suite that ran no assertions is a suite that proved nothing. */
-    if (checks < 80) {
+    /* A suite that ran no assertions is a suite that proved nothing. The
+     * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
+     * assertions, and a floor left at 80 would have let any one of the three
+     * silently stop running. */
+    if (checks < 130) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

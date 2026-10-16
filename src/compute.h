@@ -8,7 +8,14 @@
 /* Sentinel for %DB of idle-but-visible events (e.g. Client:ClientRead).
  * %DB = "share of DB Time" and applies only to non-idle (DB-Time) events;
  * idle events have time but no meaningful share, so their pct_db is set to
- * this sentinel and rendered as "—" (em-dash) / null (JSON). */
+ * this sentinel and rendered as "—" (em-dash) / null (JSON).
+ *
+ * #435: used by pgwt_event_row.pct_db (Events) AND pgwt_tm_row.pct_db_time
+ * (Overview). Overview's idle rows carried a numeric 0.0, which renders as a
+ * meaningful "0.0%" bar -- a reader sums a column of percentages and the Idle
+ * row contributes a measured-looking zero to it. NOT APPLICABLE and ZERO are
+ * different facts, and the whole point of this sentinel is that the wire can
+ * tell them apart. Any new %DB field joins this convention or says why. */
 #define PGWT_PCT_DB_IDLE (-1.0)
 #define PGWT_PCT_DB_IS_IDLE(p) ((p) < 0.0)
 
@@ -407,6 +414,17 @@ struct pgwt_query_row {
     uint64_t query_id;
     uint64_t count;
     double   total_ms;
+    /* #441: `count` counts non-idle wait AND CPU intervals (not pure waits);
+     * `avg_us` is the mean FULL duration of the EXACT ones among them, so it
+     * is an "average interval", never an average wait and never
+     * DB-Time/count. `exact_count` is the denominator that average was
+     * actually taken over: 0 means there is no full-duration evidence in this
+     * row at all (sampled-only, or the per-second summary path, which carries
+     * no full durations) and the latency column is UNAVAILABLE -- emitted as
+     * JSON null, exactly as pgwt_event_row.exact_count already gates the
+     * Events tab's latency columns. Reading `avg_us` without checking
+     * `exact_count` is the defect this field exists to prevent. */
+    uint64_t exact_count;
     double   avg_us;
     double   pct_db;
     char     top_wait[64];
@@ -508,6 +526,26 @@ struct pgwt_transitions_result {
     int    total_rows;                 /* distinct links before max_rows cap */
     uint64_t total_transitions;
 };
+
+/* #436: THE transition population, in one place.
+ *
+ * A record is in it iff it is an exact (non-sample) record, not admitted by
+ * right-edge overlap, passes the uniform filter (markers, impossible
+ * durations, class/event/pid/query), and both of its states are visible and
+ * real. Returns 1 for in, 0 for out.
+ *
+ * Exported because the graph's NODE totals and its EDGE counts are two
+ * readouts of the same population and used to be selected by two different
+ * predicates: pgwt_compute_transitions applied the filter, while the node
+ * pass in server.c's handle_transitions went through
+ * pgwt_block_agg_node_counts(), which does not take a filter at all. Under a
+ * class or event drill the node bars therefore summed records whose edges
+ * the same response had excluded -- nodes with no incident edge, and node
+ * totals larger than the sum of the edges leaving them, in one picture.
+ * Whatever this predicate says, both sides now say the same thing, because
+ * there is only one of it. */
+int pgwt_transition_record_counts(const struct pgwt_filter *f,
+                                  const struct pgwt_trace_event *ev);
 
 /* Compute top state transitions (old_event → new_event).
  * Returns pairs sorted by count descending, limited to max_rows. */

@@ -4061,7 +4061,15 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
         cJSON *r = cJSON_CreateObject();
         cJSON_AddStringToObject(r, "name", tm.rows[i].name);
         cJSON_AddNumberToObject(r, "ms", tm.rows[i].time_ms);
-        cJSON_AddNumberToObject(r, "pct", tm.rows[i].pct_db_time);
+        /* #435: idle rows carry PGWT_PCT_DB_IDLE -- "share of DB Time" does
+         * not apply to time excluded FROM DB Time. Emitted as JSON null, the
+         * same shape handle_top_events already sends for the same events, so
+         * pctBar() renders an em-dash instead of a measured-looking 0.0% bar
+         * on a row holding twenty minutes of ClientRead. */
+        if (PGWT_PCT_DB_IS_IDLE(tm.rows[i].pct_db_time))
+            cJSON_AddNullToObject(r, "pct");
+        else
+            cJSON_AddNumberToObject(r, "pct", tm.rows[i].pct_db_time);
         cJSON_AddNumberToObject(r, "aas", tm.rows[i].aas);
         cJSON_AddNumberToObject(r, "indent", tm.rows[i].indent);
         cJSON_AddItemToArray(rows, r);
@@ -4438,6 +4446,19 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                         res.rows[i].top_wait_id = raw_res.rows[j].top_wait_id;
                         memcpy(res.rows[i].top_wait, raw_res.rows[j].top_wait,
                               sizeof(res.rows[i].top_wait));
+                        /* #441: and the latency average, from the SAME raw
+                         * pass, for the SAME window and filter. The summary
+                         * records carry no full durations, so
+                         * pgwt_compute_top_queries_from_summaries now leaves
+                         * exact_count 0 (= unavailable) instead of dividing
+                         * in-window DB Time by an interval count and calling
+                         * the result a latency. Backfilling here means the
+                         * two paths do not merely "agree" by coincidence --
+                         * there is exactly ONE definition of this column,
+                         * computed in one place. A query the raw pass has no
+                         * row for keeps exact_count 0 and is emitted null. */
+                        res.rows[i].exact_count = raw_res.rows[j].exact_count;
+                        res.rows[i].avg_us      = raw_res.rows[j].avg_us;
                         break;
                     }
                 }
@@ -4457,6 +4478,28 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * unit test exercises the real code. */
     struct pgwt_lifecycle_result lcres;
     pgwt_compute_query_lifecycle(all_events, ecount, &lcres);
+
+    /* #441: the exec/plan statistics are WHOLE-QUERY, across every pid that
+     * ran the query, because `all_events` above is loaded with NO pid
+     * pushdown (pid 0) and pgwt_compute_query_lifecycle takes no filter --
+     * markers never pass pgwt_filter_matches, so there is nothing for a
+     * filter to apply to.
+     *
+     * For a CLASS or EVENT filter that is correct and deliberate: narrowing
+     * the wait profile to Lock must not change how long the query takes to
+     * execute, and silently rescoping execution timing to "executions that
+     * contained a Lock wait" would answer a different question under the same
+     * column heading. The response says so explicitly rather than leaving the
+     * reader to infer it.
+     *
+     * For a PID DRILL it is wrong and cannot be patched here: the markers
+     * carry a pid, but exec_count/avg_exec_ms are accumulated per query_id
+     * over all of them, so a per-pid answer would need the scan itself to be
+     * pid-scoped. Until it is, the statistics are SUPPRESSED -- a
+     * cluster-wide execution count sitting next to per-pid DB Time, under a
+     * drill the user explicitly asked for, is a wrong number presented as a
+     * scoped one. Absence is the honest answer; a wrong scope is not. */
+    int lifecycle_pid_unscoped = (req->filter.pid != 0);
 
     /* Per-query_id context + QUERY_SYNTH flag, in ONE pass over the same
      * events (src/query_ctx_index.h). Both used to be resolved inside the
@@ -4523,7 +4566,16 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
 
         cjson_add_uint64(r, "count", res.rows[i].count);
         cJSON_AddNumberToObject(r, "total_ms", res.rows[i].total_ms);
-        cJSON_AddNumberToObject(r, "avg_us", res.rows[i].avg_us);
+        /* #441: the average interval exists only where EXACT records
+         * contributed full durations. Over sampled data it would be an
+         * average of normalized sample periods, and over the per-second
+         * summaries it used to be in-window DB Time / interval count, which
+         * is not a latency at all. Null here, "—" in the UI (fmtUs), exactly
+         * as handle_top_events already does for its own avg_us. */
+        if (res.rows[i].exact_count > 0)
+            cJSON_AddNumberToObject(r, "avg_us", res.rows[i].avg_us);
+        else
+            cJSON_AddNullToObject(r, "avg_us");
         cJSON_AddNumberToObject(r, "pct", res.rows[i].pct_db);
 
         /* #319: emitted at the SAME POINT relative to the CPU-dominance
@@ -4616,9 +4668,19 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
 
         /* Exec/plan lifecycle stats from markers */
         {
-            struct pgwt_qid_lifecycle *lc =
+            struct pgwt_qid_lifecycle *lc = lifecycle_pid_unscoped ? NULL :
                 pgwt_lifecycle_lookup(&lcres, res.rows[i].query_id);
-            if (lc) {
+            if (lifecycle_pid_unscoped) {
+                /* #441: explicit nulls, not absent keys. The UI's "—" path
+                 * triggers on either, but a null states "we looked and
+                 * cannot answer this scoped" where a missing key is
+                 * indistinguishable from an older server that never sent
+                 * one. */
+                cJSON_AddNullToObject(r, "exec_count");
+                cJSON_AddNullToObject(r, "plan_count");
+                cJSON_AddNullToObject(r, "avg_exec_ms");
+                cJSON_AddNullToObject(r, "avg_plan_ms");
+            } else if (lc) {
                 cJSON_AddNumberToObject(r, "exec_count", lc->exec_count);
                 cJSON_AddNumberToObject(r, "plan_count", lc->plan_count);
                 if (lc->exec_count > 0) {
@@ -4668,6 +4730,17 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * deferral, so their rows DO carry late-reported ids) but have no
      * unattributed bucket, so the fast path cannot report what it dropped
      * — unattributed_available says which case this response is. */
+    /* #441: the SCOPE of the exec/plan columns, stated on the wire instead of
+     * assumed by the reader. "whole-query" means every pid that ran the
+     * query, which is what a class/event filter deliberately leaves alone;
+     * "unavailable" means a pid drill asked for a scope this scan cannot
+     * produce (see lifecycle_pid_unscoped above). */
+    cJSON_AddStringToObject(root, "exec_stats_scope",
+                            lifecycle_pid_unscoped ? "unavailable"
+                                                   : "whole-query");
+    if (lifecycle_pid_unscoped)
+        cJSON_AddStringToObject(root, "exec_stats_unavailable_reason",
+                                "execution statistics are not scoped to a pid");
     cJSON_AddBoolToObject(root, "unattributed_available", !from_summaries);
     cJSON_AddNumberToObject(root, "unattributed_ms", res.unattributed_ms);
     cJSON_AddNumberToObject(root, "unattributed_count",
@@ -6203,9 +6276,39 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
     uint64_t node_to   = req->to_ns ? req->to_ns : UINT64_MAX;
     struct pgwt_block_agg raw_nodes;
     pgwt_block_agg_init_window(&raw_nodes);
-    if (pgwt_block_agg_add_events(&raw_nodes, events, count,
-                                  node_from, node_to,
-                                  NULL) != PGWT_BAGG_OK) {
+    /* #436: SAME POPULATION as the edges.
+     *
+     * This used to be one pgwt_block_agg_add_events() call over every loaded
+     * record. That function's record test (pgwt_block_agg_node_counts) takes
+     * no filter, because a block aggregate is built once at write time and
+     * cannot know a future request's filter -- so under a class or event
+     * drill the node bars summed records whose edges pgwt_compute_transitions
+     * had just excluded: nodes with no incident edge, and node dwell totals
+     * exceeding the sum of the edges leaving them, in the same response.
+     *
+     * The per-record loop is written out here instead of calling
+     * add_events() because the extra condition is the request's filter,
+     * which add_events has no parameter for. The window test
+     * (pgwt_block_agg_in_window, C7 -- inclusive, on the record's close) and
+     * the accumulation (pgwt_block_agg_add_event) are still the aggregate
+     * module's own, so the two paths cannot drift on either. The predicate
+     * is pgwt_compute_transitions' own, exported, not a copy of it.
+     *
+     * NOT a widening: pgwt_transition_record_counts() is strictly narrower
+     * than pgwt_block_agg_node_counts() on every clause they share (both drop
+     * SAMPLE records, hidden old_events and markers), so this can only ever
+     * remove records from the node totals, never add one the edges lack. */
+    int node_rc = PGWT_BAGG_OK;
+    for (int i = 0; i < count; i++) {
+        if (!pgwt_block_agg_in_window(&events[i], node_from, node_to))
+            continue;
+        if (!pgwt_transition_record_counts(&req->filter, &events[i]))
+            continue;
+        node_rc = pgwt_block_agg_add_event(&raw_nodes, &events[i]);
+        if (node_rc != PGWT_BAGG_OK)
+            break;
+    }
+    if (node_rc != PGWT_BAGG_OK) {
         pgwt_block_agg_free(&raw_nodes);
         free(events);
         free(res.rows);
@@ -6912,12 +7015,19 @@ static void dump_summary(struct pgwt_server *srv)
 
     for (int i = 0; i < tm.num_rows; i++) {
         struct pgwt_tm_row *r = &tm.rows[i];
-        if (r->indent == 0)
-            printf("  %-32s %10.1f ms  %6.1f%%\n", r->name, r->time_ms, r->pct_db_time);
-        else if (r->indent == 1)
-            printf("    %-30s %10.1f ms  %6.1f%%\n", r->name, r->time_ms, r->pct_db_time);
+        /* #435: same not-applicable sentinel as the Top Events dump below.
+         * "%6.1f%%" on PGWT_PCT_DB_IDLE would print "  -1.0%". */
+        char pctbuf[16];
+        if (PGWT_PCT_DB_IS_IDLE(r->pct_db_time))
+            snprintf(pctbuf, sizeof(pctbuf), "%7s", "—");
         else
-            printf("      %-28s %10.1f ms  %6.1f%%\n", r->name, r->time_ms, r->pct_db_time);
+            snprintf(pctbuf, sizeof(pctbuf), "%6.1f%%", r->pct_db_time);
+        if (r->indent == 0)
+            printf("  %-32s %10.1f ms  %s\n", r->name, r->time_ms, pctbuf);
+        else if (r->indent == 1)
+            printf("    %-30s %10.1f ms  %s\n", r->name, r->time_ms, pctbuf);
+        else
+            printf("      %-28s %10.1f ms  %s\n", r->name, r->time_ms, pctbuf);
     }
     free(tm.rows);
 
