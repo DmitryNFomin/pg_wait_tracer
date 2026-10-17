@@ -132,6 +132,34 @@ test('non-idle event with numeric pct still renders a pct-bar', () => {
     assert.ok(cell.includes('16.8%'), `expected 16.8%, got: ${cell}`);
 });
 
+// AAS column is index 9 (one after %DB).
+const AAS_COL = 9;
+
+// #453: the Events tab is the OTHER half the pre-fix bug missed entirely
+// (table-configs.js:332 had no idle marking at all for AAS -- the bare rate
+// printed under "AAS" with zero visible marker).
+test('#453 idle-but-visible event (Client:ClientRead): AAS renders the ' +
+    'visible em-dash, occupancy labeled beside it, never the bare rate', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'Client:ClientRead', event_id: 0x06000000,
+             count: 42000, total_ms: 39000, pct: null, aas: 19.62 }),
+    ] }, null);
+    const cell = m.table.rows[0].cells[AAS_COL].html;
+    const plain = cell.replace(/<[^>]*>/g, '');
+    assert.notEqual(plain.trim(), '19.62', cell);
+    assert.ok(cell.includes('—'), cell);
+    assert.ok(cell.includes('19.62'), cell);
+    assert.ok(cell.includes('idle-excluded'), cell);
+});
+
+test('#453 non-idle event (numeric pct) AAS is UNCHANGED: bare rate, no marker', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'IO:DataFileRead', event_id: 0x01000015,
+             count: 100, total_ms: 2100, pct: 16.8, aas: 0.58 }),
+    ] }, null);
+    assert.equal(m.table.rows[0].cells[AAS_COL].html, '0.58');
+});
+
 // ── U2 review P10: pane fidelity badge ──────────────────────────────────────
 
 test('exact window: no badge, no percentile note, no truncation row', () => {

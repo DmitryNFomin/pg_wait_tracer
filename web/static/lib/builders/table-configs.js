@@ -132,6 +132,52 @@ const IDLE_PCT_HTML =
     '<span class="idle-excluded" title="Excluded from DB Time — not a ' +
     'measured zero share of it.">—</span>';
 
+/* #453: a row's %DB Time arrives as the server's PGWT_PCT_DB_IDLE sentinel,
+ * which the wire serializes as JSON `null` (src/server.c:4069 for Overview's
+ * time-model rows -- parent AND every indent-2 child alike, since
+ * emit_idle_rows in src/compute.c stamps the SAME sentinel on the Idle
+ * parent, its named children (e.g. "IO:DataFileRead" parked while idle) and
+ * the "Other (background)" remainder row; src/server.c:3661/1865/3031 send
+ * the identical sentinel for Events' idle-but-visible rows, e.g.
+ * Client:ClientRead). `pct == null` is therefore the one wire-level signal
+ * that is true for "excluded from DB Time" everywhere it can occur, and
+ * nowhere else (a real class/event with a genuine 0% share sends numeric
+ * 0, never null) -- unlike `isIdleRow` above, which only matches the
+ * Overview PARENT row by name/indent and silently let the parent's own
+ * children, and every row in the Events tab, fall through to the plain
+ * formatter below.
+ *
+ * `|| isIdleRow(r)` keeps the SAME defense isIdleRow exists for above
+ * (the %DB Time column, two lines up, cannot drop it either): a parent row
+ * can still arrive as the legacy numeric-0 shape (today's canned
+ * tests/mock_server.py time_model, matching the documented server.c:3533
+ * contradiction) rather than null. `pct == null` alone would read that row
+ * as a genuine, included, zero-sharing row and print its idle occupancy
+ * bare under "AAS" -- precisely the bug #453 exists to remove. */
+function isExcludedFromDbTime(r) {
+    return r.pct == null || isIdleRow(r);
+}
+
+const AAS_EXCLUDED_TITLE = 'Excluded from DB Time: this is idle occupancy ' +
+    '(time ÷ window), not an active-session average — no session is ' +
+    '"active" while idle.';
+
+/* #453 (GIF-visible fix): the pre-fix cell printed the bare rate (e.g.
+ * "24.62") under the "AAS" header with ONLY a hover tooltip relabeling it --
+ * a still frame (GIF, screenshot) shows nothing but a number nineteen times
+ * the real active-session load, indistinguishable from real AAS. The em-dash
+ * is now the headline glyph (matches the %DB Time treatment, and is visible
+ * with no interaction); the occupancy figure, when non-null, still prints
+ * beside it, labeled, so the information is not lost -- just never printed
+ * bare under an "AAS" header. */
+function idleAasCellHtml(aas) {
+    const dash = '<span class="idle-excluded" title="' +
+        esc(AAS_EXCLUDED_TITLE) + '">—</span>';
+    const v = fmtAas(aas);
+    if (v === '—') return dash;
+    return dash + ' <span class="idle-occ">(idle occ. ' + v + ')</span>';
+}
+
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
@@ -153,17 +199,16 @@ export const overviewConfig = {
             return pctBar(r.pct, color);
         }},
         { key: 'aas', label: 'AAS', cls: 'num', format: (r) => {
-            // #435: the column header says "AAS" for every row, but idle
-            // time/window is not an active-session average -- no session is
-            // "active" while idle. Keep showing the rate (contract allows
-            // it, unlike the pct share above) but relabel it on hover so it
-            // is never read as active-session AAS.
-            if (isIdleRow(r)) {
-                const v = fmtAas(r.aas);
-                return v === '—' ? v : '<span title="Idle occupancy ' +
-                    '(idle time ÷ window), not active-session AAS">' +
-                    v + '</span>';
-            }
+            // #453: the column header says "AAS" for every row, but any row
+            // excluded from DB Time (Idle's parent row AND its own
+            // indent-2 children -- "Other (background)", parked idle
+            // events) has no active-session average: no session is
+            // "active" while idle. A hover-only relabel does not survive a
+            // still frame (GIF/screenshot), so the cell itself renders the
+            // same em-dash the %DB Time column uses, with the occupancy
+            // rate (when present) printed visibly beside it, not hidden
+            // behind a tooltip.
+            if (isExcludedFromDbTime(r)) return idleAasCellHtml(r.aas);
             return fmtAas(r.aas);
         }},
     ],
@@ -329,7 +374,15 @@ export const eventsConfig = {
             const color = eventColor(null, r.name) || '#4fc3f7';
             return pctBar(r.pct, color);
         }},
-        { key: 'aas', label: 'AAS', cls: 'num', format: (r) => fmtAas(r.aas) },
+        { key: 'aas', label: 'AAS', cls: 'num', format: (r) => {
+            // #453: same idle-exclusion rule as Overview's AAS column, same
+            // pct==null signal (this table already uses it for the %DB
+            // column two lines up) -- the pre-fix cell printed the bare
+            // idle-occupancy rate (e.g. "19.62") under "AAS" with no visible
+            // marker at all.
+            if (isExcludedFromDbTime(r)) return idleAasCellHtml(r.aas);
+            return fmtAas(r.aas);
+        }},
     ],
     rowClass: () => 'clickable',
     onClick: (r) => ({ filterKey: 'event_id', filterValue: r.event_id, label: r.name }),
@@ -474,6 +527,30 @@ export function makeQueriesConfig(fidelity) {
  * every existing use). views/queries.js calls makeQueriesConfig(fidelityOf
  * (data)) instead, so the live tab's headers track the real response. */
 export const queriesConfig = makeQueriesConfig('exact');
+
+/* #455: `total_ms` ("DB Time") sums EVERY wait/CPU interval attributed to
+ * the query, including one taken before Exec ever starts -- a relation
+ * lock acquired during parse analysis (src/ parser, before Plan/Exec) is
+ * real DB Time but invisible to any Exec/Plan column, because those are
+ * timed from the EXEC_START/EXEC_END (PLAN_START/PLAN_END) markers alone.
+ * A query whose only cost is such a lock shows a large, correct "DB Time"
+ * beside a tiny, ALSO correct "Avg Exec" -- two numbers that are each
+ * individually honest but read as contradictory without this disclosure.
+ * STATIC (not data-dependent): both column families are always present in
+ * every fidelity tier (makeQueriesConfig only branches the LAST two
+ * columns), so the scope gap exists on every row, not just an overflowing
+ * one -- unlike buildOverflowNote/buildUnattributedNote above, there is no
+ * "nothing to disclose this tick" case. Never used to manufacture a
+ * latency number: the measured Avg Exec stays exactly what the server
+ * measured, scoped by this sentence, not replaced by DB Time / Execs. */
+export const QUERIES_SCOPE_NOTE_TEXT =
+    'DB Time includes waits acquired before execution starts (e.g. a ' +
+    'relation lock taken during parse analysis); Avg/p95/p99 Exec and ' +
+    'Plan measure executor/planner time only and do not include it.';
+
+export function queriesScopeNoteHtml() {
+    return '<div class="exec-scope-note">' + esc(QUERIES_SCOPE_NOTE_TEXT) + '</div>';
+}
 
 /* #439 beside-table disclosure: how much foreground time no query claimed
  * (query_id 0), separate from the attributed total the table's own %

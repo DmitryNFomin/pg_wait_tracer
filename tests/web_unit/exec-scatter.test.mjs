@@ -38,7 +38,8 @@ test('downsample line uses only server kept/total counts', () => {
     const m = buildExecScatterOption({ points: [
         { t: T, duration_ms: 1, pid: 1, query_id: '1' },
     ], total_count: 9_000, kept_count: 2_000, downsampled: true });
-    assert.equal(m.notes[0], 'Showing 2,000 of 9,000 executions (server-downsampled)');
+    assert.equal(m.notes[0], 'Showing 2,000 of 9,000 executions (outlier-' +
+        'preserving sample; point density does not represent frequency)');
     const unknown = buildExecScatterOption({ points: [
         { t: T, duration_ms: 1, pid: 1, query_id: '1' },
     ], downsampled: true });

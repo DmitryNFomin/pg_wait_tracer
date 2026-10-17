@@ -649,6 +649,16 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
   cursor: help;
 }
 
+/* #453: the idle-occupancy figure printed BESIDE the AAS column's em-dash
+ * (lib/builders/table-configs.js idleAasCellHtml) -- visibly labeled and
+ * visibly dimmer than a real AAS number, so it survives a still frame
+ * without being mistaken for active-session AAS. */
+.idle-occ {
+  color: #777;
+  font-size: 11px;
+  font-style: italic;
+}
+
 /* #439: Queries' unattributed-foreground disclosure, beside the table --
  * same slot/sizing family as .pctl-basis-note (lib/panels.js) and
  * .pctl-overflow-banner above. */
@@ -657,6 +667,17 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
   font-size: 11px;
   font-style: italic;
   margin: 6px 2px 0;
+}
+
+/* #455: the DB-Time-vs-Exec/Plan scope disclosure beside Queries' table --
+ * same slot/sizing family as .unattributed-note above (a distinct,
+ * independently-true fact: a query dominated by a pre-execution wait reads
+ * as a trivially fast query without this line). */
+.exec-scope-note {
+  color: #777;
+  font-size: 11px;
+  font-style: italic;
+  margin: 2px 2px 0;
 }
 
 /* Percentage bar */

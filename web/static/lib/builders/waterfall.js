@@ -135,6 +135,23 @@ export function executionListMaxHeight(geometry) {
         Math.min(EXECUTION_LIST_MAX_PX, Math.floor(available)));
 }
 
+/* #455: same scope gap as Queries' DB Time vs Avg Exec (table-configs.js
+ * QUERIES_SCOPE_NOTE_TEXT) -- `duration_ms` here is measured from this
+ * row's own EXEC_START/EXEC_END markers (fmtExecutionDuration above), so a
+ * wait acquired BEFORE execution starts (e.g. a relation lock taken during
+ * parse analysis) is real time this query spent but is in neither this
+ * Duration column nor Plan. STATIC, not data-dependent, for the same
+ * reason as the Queries note: both columns are always present, so the gap
+ * exists on every row, not just one tick's data shape. */
+export const EXEC_SCOPE_NOTE_TEXT =
+    'Duration and Plan measure executor/planner time only; a wait ' +
+    'acquired before execution starts (e.g. a relation lock taken during ' +
+    'parse analysis) is not included.';
+
+export function execScopeNoteHtml() {
+    return '<div class="exec-scope-note">' + esc(EXEC_SCOPE_NOTE_TEXT) + '</div>';
+}
+
 export const executionsConfig = {
     columns: [
         { key: 'start_ns', label: 'Start (UTC)', format: (r) =>

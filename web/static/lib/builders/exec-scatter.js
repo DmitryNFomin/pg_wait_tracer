@@ -55,8 +55,17 @@ export function buildExecScatterOption(data) {
     const notes = [];
     if (data && data.downsampled === true &&
         typeof data.kept_count === 'number' && typeof data.total_count === 'number') {
+        /* #455 (scatter item): the sampler (src/server.c:5506) reserves each
+         * time bucket's MAXIMUM, then reservoir-samples the remainder -- it
+         * is outlier-preserving, not uniform and not duration-stratified. A
+         * prior "(server-downsampled)" wording read as a uniform sample, so
+         * a 0.05%-of-executions duration band could show ~100 points on
+         * screen while a uniform sample of the same size would show ~1 --
+         * correct per-point data, misleading as a population density read.
+         * Do NOT change the algorithm here; only the disclosure. */
         notes.push('Showing ' + data.kept_count.toLocaleString() + ' of ' +
-            data.total_count.toLocaleString() + ' executions (server-downsampled)');
+            data.total_count.toLocaleString() + ' executions (outlier-' +
+            'preserving sample; point density does not represent frequency)');
     }
     if (inProgressCount)
         notes.push(inProgressCount.toLocaleString() + ' in-progress execution' +

@@ -6,7 +6,7 @@ import {
     executionListMaxHeight,
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
-    executionsStatusLabel,
+    executionsStatusLabel, execScopeNoteHtml,
 } from '../lib/builders/waterfall.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -63,6 +63,7 @@ export function createWaterfallView() {
             '<button id="executions-sort-toggle" class="link-button" type="button"></button>' +
             '<span id="executions-counts-label"></span>' +
             '</div>' +
+            ' ' + execScopeNoteHtml() +
             ' <div id="executions-table"></div>' +
             '</section>' +
             '<section class="waterfall-pane">' +
