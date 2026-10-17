@@ -268,6 +268,46 @@ def panel_capture_clip(box, viewport):
                                  viewport["width"], viewport["height"])
 
 
+def crop_png_bytes(full_png_bytes, clip):
+    """Crop an in-memory full-viewport PNG (e.g. Playwright's
+    page.screenshot(scale="css") with no clip) to `clip` -- the same
+    {"x", "y", "width", "height"} CSS-px dict panel_capture_clip returns,
+    which page.screenshot(clip=...) used to consume directly. Returns
+    cropped PNG bytes.
+
+    issue #459: a clipped CDP page.screenshot(clip=...) call disturbed the
+    video recorder attached to the SAME page/context (record_video_dir) --
+    proven by a controlled A/B (tests/results/artifact-footage/VERDICT.txt):
+    8/10 clipped blocks flagged vs 0/10 full-viewport blocks on an
+    otherwise-identical, continuously-recording page. The fix captures the
+    full viewport (still scale="css", so clip's CSS-px coordinates need no
+    DPR scaling against it) and performs the crop here, in Python, after the
+    CDP call returns -- same region compared, same per-frame cost class
+    (clip was already intersected with the viewport by
+    clip_rect_to_viewport, so a full-viewport capture is never more than a
+    few percent larger than the clip it replaces); only the screenshot()
+    call's own `clip=` argument is removed.
+
+    Raises ValueError if the rounded clip rect falls outside the decoded
+    image's bounds: a clip computed by panel_capture_clip is already bounded
+    by the SAME viewport this full capture used, so a mismatch here means
+    the two disagree about viewport size -- a real bug to surface loudly,
+    never a frame to silently clamp or drop."""
+    with Image.open(io.BytesIO(full_png_bytes)) as im:
+        width, height = im.size
+        left = round(clip["x"])
+        top = round(clip["y"])
+        right = left + round(clip["width"])
+        bottom = top + round(clip["height"])
+        if left < 0 or top < 0 or right > width or bottom > height:
+            raise ValueError(
+                f"clip {clip} out of bounds for {width}x{height} capture")
+        cropped = im.convert("RGB").crop((left, top, right, bottom))
+        out = io.BytesIO()
+        cropped.save(out, format="PNG")
+        return out.getvalue()
+
+
 def tick_hook_index(tick_baseline, i):
     """Index into window.__uiLiveTicks of the AAS send that iteration `i` of a
     tab's tick loop represents, given the baseline count recorded once after

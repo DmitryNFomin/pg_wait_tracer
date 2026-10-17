@@ -713,10 +713,29 @@ def _panel_clip_and_dims(page, tab_id):
 
 
 def _capture_with_clip(page, clip):
-    """page.screenshot(clip=clip, scale="css") for an already-computed clip
-    rect (a plain {"x","y","width","height"} dict, not an element handle --
-    see _panel_clip_and_dims), or None on any Playwright error/missing
-    clip. Never raises.
+    """Full-viewport page.screenshot(scale="css"), cropped in Python to an
+    already-computed clip rect (a plain {"x","y","width","height"} dict, not
+    an element handle -- see _panel_clip_and_dims) via lib.crop_png_bytes.
+    Returns None on any Playwright error/missing clip. Never raises for a
+    missing clip or a failed CDP call; DOES raise (via crop_png_bytes) if
+    the clip is out of bounds for the captured viewport -- see that
+    function's docstring.
+
+    issue #459: this used to call page.screenshot(clip=clip, scale="css")
+    directly. On a page whose context has record_video_dir attached (every
+    real caller here -- run_tab always sets it), that clipped CDP capture
+    call disturbed the video recorder on the SAME page: a controlled A/B
+    (tests/results/artifact-footage/VERDICT.txt) found 8 of 10 clipped
+    capture blocks flagged for a panel-collapsed-over-grey episode in the
+    recording, against 0 of 10 full-viewport blocks on an otherwise
+    identical, continuously-recording page. Capturing the full viewport and
+    cropping afterward removes the `clip=` argument from the CDP call
+    without touching anything else: same CSS-px region compared, same
+    navigation/timing/assertions, same per-frame cost class (clip was
+    already intersected with the viewport by clip_rect_to_viewport, so a
+    full-viewport capture is at most a few percent larger than the clip it
+    replaces -- never the whole-element capture issue #197 bounded this
+    against).
 
     issue #252 (performance): scale="css" (Playwright >=1.9, present since
     1.60.0 here) rasterises the screenshot at 1x CSS pixels regardless of
@@ -730,9 +749,10 @@ def _capture_with_clip(page, clip):
     if clip is None:
         return None
     try:
-        return page.screenshot(clip=clip, scale="css")
+        full = page.screenshot(scale="css")
     except PWError:
         return None
+    return lib.crop_png_bytes(full, clip)
 
 
 def _safe_panel_screenshot(page, tab_id):

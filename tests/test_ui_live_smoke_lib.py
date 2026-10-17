@@ -1097,6 +1097,76 @@ def test_panel_capture_clip_normal_case_matches_clip_rect_to_viewport():
           f"the normal case delegates to clip_rect_to_viewport unchanged ({got})")
 
 
+# ── crop_png_bytes (issue #459: clip moves from the CDP call to Python) ────
+#
+# ui_live_smoke.py's _capture_with_clip used to pass clip= straight to
+# page.screenshot(), which disturbed the video recorder attached to the same
+# page (tests/results/artifact-footage/VERDICT.txt: 8/10 clipped blocks
+# flagged vs 0/10 full-viewport blocks on an identical recording). The fix
+# captures the full viewport and crops here instead -- these tests pin the
+# crop arithmetic against a real PNG, independent of any browser.
+
+def _solid_png_bytes(width, height, fill, patch_box=None, patch_fill=None):
+    """A width x height PNG filled with `fill` (an (R,G,B) tuple), with an
+    optional distinct-coloured rectangular patch at patch_box=(left, top,
+    right, bottom) -- lets a test assert the crop returned exactly the
+    patch's pixels, not merely the right size."""
+    im = Image.new("RGB", (width, height), fill)
+    if patch_box is not None:
+        patch = Image.new("RGB", (patch_box[2] - patch_box[0],
+                                   patch_box[3] - patch_box[1]), patch_fill)
+        im.paste(patch, (patch_box[0], patch_box[1]))
+    out = io.BytesIO()
+    im.save(out, format="PNG")
+    return out.getvalue()
+
+
+def test_crop_png_bytes_extracts_exactly_the_clip_region():
+    # A 1710x981 "viewport" (the pinned demo size) with a distinct-coloured
+    # patch standing in for the panel; the clip names exactly that patch.
+    # What makes this assertion fail: a crop that is off by even one pixel
+    # in origin or size would pull in a `fill`-coloured pixel and break the
+    # all-patch-colour check below.
+    full = _solid_png_bytes(1710, 981, fill=(10, 10, 10),
+                             patch_box=(50, 60, 350, 260), patch_fill=(200, 50, 50))
+    clip = {"x": 50, "y": 60, "width": 300, "height": 200}
+    cropped = lib.crop_png_bytes(full, clip)
+    arr = lib.png_bytes_to_array(cropped)
+    check(arr.shape == (200, 300, 3),
+          f"cropped array has the clip's own height/width, not the full viewport's ({arr.shape})")
+    check(bool(np.all(arr == [200, 50, 50])),
+          "every pixel in the crop is the patch colour -- the crop landed "
+          "exactly on the patch, not shifted into the surrounding fill")
+
+
+def test_crop_png_bytes_out_of_bounds_clip_raises():
+    # What makes this fail: silently clamping (or returning whatever PIL's
+    # own crop() does with an out-of-range box, which pads with black rather
+    # than raising) would hide a real viewport/clip disagreement as a
+    # plausible-looking frame instead of surfacing the bug.
+    full = _solid_png_bytes(800, 600, fill=(0, 0, 0))
+    clip = {"x": 700, "y": 0, "width": 200, "height": 100}  # right edge = 900 > 800
+    raised = False
+    try:
+        lib.crop_png_bytes(full, clip)
+    except ValueError:
+        raised = True
+    check(raised, "a clip extending past the captured image's bounds raises, "
+                  "never silently clamps or pads")
+
+
+def test_crop_png_bytes_exact_full_frame_clip_is_identity():
+    # The clip == the whole viewport (a panel that fills it exactly): the
+    # crop must reproduce the source pixel-for-pixel, not merely by size.
+    full = _solid_png_bytes(400, 300, fill=(0, 0, 0),
+                             patch_box=(0, 0, 400, 150), patch_fill=(9, 9, 9))
+    clip = {"x": 0, "y": 0, "width": 400, "height": 300}
+    cropped = lib.crop_png_bytes(full, clip)
+    check(lib.frame_diff_ratio(lib.png_bytes_to_array(full),
+                                lib.png_bytes_to_array(cropped)) == 0.0,
+          "a full-viewport clip returns the source frame unchanged")
+
+
 # ── mount_is_fresh (issue #197: the stale-mount re-match defect) ───────────
 #
 # _wait_for_mount_at_or_after's ORIGINAL (issue #193 round 2) contract only
