@@ -7,7 +7,10 @@ import assert from 'node:assert/strict';
 import {
     buildQueriesModel, buildQueriesEmptyStateHtml, createQueriesView,
 } from '../../web/static/views/queries.js';
-import { queriesConfig, buildUnattributedNote } from '../../web/static/lib/builders/table-configs.js';
+import {
+    queriesConfig, buildUnattributedNote,
+    queriesScopeNoteHtml, QUERIES_SCOPE_NOTE_TEXT,
+} from '../../web/static/lib/builders/table-configs.js';
 import { createStableOrder } from '../../web/static/lib/table.js';
 
 function q(over) {
@@ -231,4 +234,16 @@ test('#439 empty-state pane: compare mode never shows the (compare-less) unattri
     const html = buildQueriesEmptyStateHtml({ compare: true, baselinePredates: true });
     assert.ok(html.includes('Baseline unavailable for comparison'), html);
     assert.ok(!html.includes('unattributed-note'), html);
+});
+
+// ── #455: DB Time (includes a pre-execution wait, e.g. a parse-time lock)
+// vs Avg/p95/p99 Exec and Plan (executor/planner time only) -- static
+// disclosure, independent of any one row's data. ────────────────────────
+
+test('#455 queriesScopeNoteHtml discloses DB Time includes a pre-execution wait', () => {
+    const html = queriesScopeNoteHtml();
+    assert.ok(html.includes(QUERIES_SCOPE_NOTE_TEXT), html);
+    assert.ok(/before execution/i.test(html), html);
+    assert.ok(/DB Time/.test(html), html);
+    assert.ok(html.includes('exec-scope-note'), html);
 });

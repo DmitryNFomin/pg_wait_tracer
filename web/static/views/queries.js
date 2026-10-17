@@ -20,7 +20,7 @@ import {
 } from '../lib/table.js';
 import {
     makeQueriesConfig, queriesConfig, compareQueriesConfig,
-    buildUnattributedNote, unattributedNoteHtml,
+    buildUnattributedNote, unattributedNoteHtml, queriesScopeNoteHtml,
 } from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
@@ -171,6 +171,12 @@ export function createQueriesView() {
             // #439: disclosed beside the table, not folded into %/omitted.
             if (!model.compare) el.insertAdjacentHTML('beforeend',
                 unattributedNoteHtml(model.unattributedNote));
+            // #455: DB Time and Exec/Plan time different things (a wait
+            // acquired before execution starts is in the former, never the
+            // latter) -- static, so it is shown every time the live
+            // (non-compare) columns are the ones with both families, not
+            // gated on any one row's data.
+            if (!model.compare) el.insertAdjacentHTML('beforeend', queriesScopeNoteHtml());
         },
 
         enter() { /* no chart */ },

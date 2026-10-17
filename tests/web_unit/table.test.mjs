@@ -100,24 +100,71 @@ test('#435 Idle row: %DB Time stays "—" if the server ever sends null instead'
     assert.ok(model.rows[0].cells[2].html.includes('—'));
 });
 
-test('#435 Idle row: AAS column relabels as "idle occupancy", never bare active-session AAS', () => {
-    const rows = [{ indent: 0, name: 'Idle', ms: 45000, pct: 0, aas: 0.42 }];
+// ── #453: AAS column must be VISIBLY different for excluded rows, not just
+// hover-relabeled -- a still frame (GIF/screenshot) cannot show a tooltip.
+
+test('#453 Idle row: AAS cell shows the SAME visible em-dash as %DB Time, ' +
+    'numeric occupancy labeled beside it, never bare under "AAS"', () => {
+    const rows = [{ indent: 0, name: 'Idle', ms: 888000, pct: 0, aas: 24.62 }];
     const model = buildTableModel(overviewConfig, rows, null);
     const html = model.rows[0].cells[3].html;
-    assert.ok(html.includes('0.42'), html);
-    assert.ok(html.includes('Idle occupancy'), html);
-    assert.ok(!/^0\.42$/.test(html.replace(/<[^>]*>/g, '').trim()) ||
-        html.includes('title='), html);
-    assert.ok(html.includes('not active-session AAS'), html);
+    const plain = html.replace(/<[^>]*>/g, '');
+    // The bare rate must never appear with nothing else around it -- that
+    // IS the #453 bug (reads identically to real active-session AAS).
+    assert.notEqual(plain.trim(), '24.62', html);
+    assert.ok(html.includes('—'), html);             // em-dash is the headline glyph
+    assert.ok(html.includes('24.62'), html);          // occupancy figure not lost
+    assert.ok(html.includes('idle-excluded'), html);
+    assert.ok(/idle occ/i.test(html), html);
+    assert.ok(/not an active-session average|not active-session AAS/i.test(html), html);
 });
 
-test('#435 Idle row: a missing AAS value stays "—", no fabricated relabel wrapper', () => {
+// Control: a fixture where Idle's AAS (24.62) is ~19x DB Time's real AAS
+// (1.28) -- demonstrating this is not a coincidence of small numbers. Both
+// cells render under the SAME "AAS" column header; the control FAILS if a
+// before/after plain-text strip of each cell is indistinguishable (the two
+// would read as the same KIND of number to a viewer).
+test('#453 control: Idle AAS (far exceeding real AAS) must not render ' +
+    'identically to a real AAS value under the same column', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12760, pct: 100, aas: 1.28 },
+        { indent: 0, name: 'Idle', ms: 888000, pct: 0, aas: 24.62 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const dbHtml = model.rows[0].cells[3].html;
+    const idleHtml = model.rows[1].cells[3].html;
+    assert.equal(dbHtml, '1.28');   // real AAS: plain number, unmarked
+    // Idle's cell must NOT be the same shape (a bare number) -- it carries
+    // the dash + idle-excluded marker the real AAS cell does not.
+    assert.notEqual(idleHtml, '24.62');
+    assert.ok(idleHtml.includes('idle-excluded'), idleHtml);
+    assert.ok(!dbHtml.includes('idle-excluded'), dbHtml);
+});
+
+test('#453 Idle row: a missing AAS value stays a bare "—", no fabricated occupancy number', () => {
     const rows = [{ indent: 0, name: 'Idle', ms: 45000, pct: 0, aas: null }];
     const model = buildTableModel(overviewConfig, rows, null);
-    assert.equal(model.rows[0].cells[3].html, '—');
+    const html = model.rows[0].cells[3].html;
+    assert.ok(html.includes('idle-excluded'), html);
+    // No labeled occupancy figure beside the dash -- there is no number to show.
+    assert.ok(!html.includes('idle-occ'), html);
 });
 
-test('#435 negative control: DB Time and a normal class row are UNCHANGED by the idle rule', () => {
+test("#453 Idle's own indent-2 child (e.g. \"Other (background)\") gets the " +
+    'SAME AAS treatment as the parent -- the pre-fix bug only covered the ' +
+    'Overview PARENT row', () => {
+    const rows = [
+        { indent: 0, name: 'Idle', ms: 888000, pct: null, aas: 24.62 },
+        { indent: 2, name: 'Other (background)', ms: 147600, pct: null, aas: 4.10 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const childHtml = model.rows[1].cells[3].html;
+    assert.ok(childHtml.includes('idle-excluded'), childHtml);
+    assert.ok(childHtml.includes('4.10'), childHtml);
+    assert.ok(!/^4\.10$/.test(childHtml.replace(/<[^>]*>/g, '').trim()), childHtml);
+});
+
+test('#453 negative control: DB Time and a normal class row are UNCHANGED by the idle rule', () => {
     const rows = [
         { indent: 0, name: 'DB Time', ms: 12760, pct: 100, aas: 3.54 },
         { indent: 1, name: 'IO', ms: 3200, pct: 25.1, aas: 0.89 },

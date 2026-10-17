@@ -8,6 +8,7 @@ import {
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     fmtExecutionDuration, executionsCountsLabel,
     executionsStatusLabel, executionsHasInferredEnd,
+    execScopeNoteHtml, EXEC_SCOPE_NOTE_TEXT,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -346,4 +347,15 @@ test('toggle target and toggle-button label are always the OTHER mode', () => {
                  'Show latest first');
     assert.equal(executionsSortToggleLabel(EXECUTIONS_SORT_RECENT),
                  'Show longest running first');
+});
+
+// ── #455: Duration/Plan scope disclosure (same gap as Queries' DB Time vs
+// Avg Exec -- a wait acquired before EXEC_START, e.g. a parse-time lock,
+// is in neither column). Static text, no data dependency.
+
+test('#455 execScopeNoteHtml discloses that a pre-execution wait is not in Duration/Plan', () => {
+    const html = execScopeNoteHtml();
+    assert.ok(html.includes(EXEC_SCOPE_NOTE_TEXT), html);
+    assert.ok(/before execution/i.test(html), html);
+    assert.ok(html.includes('exec-scope-note'), html);
 });

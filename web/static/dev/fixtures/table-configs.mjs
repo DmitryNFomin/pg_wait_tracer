@@ -10,12 +10,12 @@
 
 export const states = {
     'overview': {
-        description: 'The time-model table: indents, class dots, pct bars. #187: DB Time now includes the "CPU (waiting for a core)" row (mirrors tests/mock_server.py). #435: Idle renders "—" (excluded from DB Time) in %DB Time, never a measured 0%; its AAS cell is relabeled "idle occupancy" on hover, since no session is active while idle.',
+        description: 'The time-model table: indents, class dots, pct bars. #187: DB Time now includes the "CPU (waiting for a core)" row (mirrors tests/mock_server.py). #435: Idle renders "—" (excluded from DB Time) in %DB Time, never a measured 0%. #453: Idle\'s AAS cell (parent AND its own "Other (background)" child) renders the SAME visible em-dash, with the idle-occupancy rate printed labeled beside it -- never the bare rate under an "AAS" header, which a still frame cannot tell from real active-session load.',
         tags: ['HIERARCHY'],
         config: 'overview',
         sort: null,   // overview keeps server order
         rows: [
-            { indent: 0, name: 'DB Time',  ms: 12760, pct: 100.0, aas: 3.54 },
+            { indent: 0, name: 'DB Time',  ms: 12760, pct: 100.0, aas: 1.28 },
             { indent: 1, name: 'CPU (running)', ms: 4800, pct: 37.6, aas: 1.33 },
             { indent: 1, name: 'CPU (waiting for a core)', ms: 260, pct: 2.0, aas: 0.07 },
             { indent: 1, name: 'IO',       ms: 3200,  pct: 25.1,  aas: 0.89 },
@@ -23,11 +23,14 @@ export const states = {
             { indent: 2, name: 'IO:WalSync',      ms: 800,  pct: 6.3,  aas: 0.22 },
             { indent: 1, name: 'Lock',     ms: 1500,  pct: 11.8,  aas: 0.42 },
             { indent: 1, name: 'LWLock',   ms: 1200,  pct: 9.4,   aas: 0.33 },
-            { indent: 0, name: 'Idle',     ms: 45000, pct: 0,     aas: 0.0 },
+            // #453 repro shape: Idle's occupancy (24.62) is nineteen times
+            // DB Time's real AAS (1.28) above -- the exact #453 scenario.
+            { indent: 0, name: 'Idle',     ms: 888000, pct: null,  aas: 24.62 },
+            { indent: 2, name: 'Other (background)', ms: 147600, pct: null, aas: 4.10 },
         ],
     },
     'events-null-latency': {
-        description: 'Events table with an idle-but-visible row (pct null → "—") and a sampled-gated row (null percentiles → "—", FID-3).',
+        description: 'Events table with an idle-but-visible row (pct null → "—") and a sampled-gated row (null percentiles → "—", FID-3). #453: Client:ClientRead\'s AAS cell is the SAME visible em-dash as its %DB cell, with the idle-occupancy rate (19.62) printed labeled beside it -- not the bare rate under an "AAS" header.',
         tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
         config: 'events',
         sort: { key: 'total_ms', asc: false },
@@ -41,7 +44,7 @@ export const states = {
             // Idle-but-visible (Client:ClientRead): pct is null by design.
             { name: 'Client:ClientRead', event_id: 0x06000000, class: 'Client',
               count: 42000, total_ms: 39000, avg_us: 928.6, p50_us: 400,
-              p95_us: 3800, p99_us: 12000, max_us: 90000, pct: null, aas: 0.0 },
+              p95_us: 3800, p99_us: 12000, max_us: 90000, pct: null, aas: 19.62 },
             // Sampled-gated (FID-3): latency columns are null over sampled data.
             { name: 'Lock:relation', event_id: 0x03000000, class: 'Lock',
               count: 12000, total_ms: 1500, avg_us: null, p50_us: null,
