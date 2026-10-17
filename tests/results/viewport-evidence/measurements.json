@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "items": {
+    "415": {
+      "verdict": "PASS",
+      "scrollY": 0,
+      "innerHeight": 981,
+      "readoutBottom": 953,
+      "overflow_px": -28,
+      "readoutText": "Lock:transactionid\nPID 920775\nStart 11:22:50.490 UTC\nDuration 1.0s\nMeasured CPU 94\u00b5s",
+      "clickedWait": "Lock:transactionid",
+      "drilledRowIndex": 2
+    },
+    "436": {
+      "verdict": "PASS",
+      "sliderValue": "20",
+      "dfgTotalText": "3,466,745 transitions \u00b7 849,416 idle (ClientRead) hidden \u00b7 70,110 below the simplify threshold \u00b7 Lock:relation omitted (1533.6s total) \u2014 Show all to include it",
+      "bounds": {
+        "text": "3,466,745 transitions \u00b7 849,416 idle (ClientRead) hidden \u00b7 70,110 below the simplify threshold \u00b7 Lock:relation omitted (1533.6s total) \u2014 Show all to include it",
+        "top": 450.5,
+        "bottom": 463.5,
+        "left": 569.859375,
+        "right": 1381.921875,
+        "innerWidth": 1710,
+        "innerHeight": 981
+      },
+      "namesLockRelation": true,
+      "inViewport": true
+    }
+  }
+}

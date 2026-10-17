@@ -158,3 +158,4 @@ tests/results/*/
 !tests/results/ui_live_gate2_healthy_run1/
 !tests/results/ui_live_gate2_healthy_run2/
 !tests/results/verdict-hardening/
+!tests/results/viewport-evidence/
