@@ -179,6 +179,38 @@ test('legend bucket max is quantized to a fixed log grid and stable for a modest
     assert.equal(mA.option.visualMap.max, mB.option.visualMap.max);
 });
 
+// #438: CPU* is a literal intermediate state, not necessarily measured
+// running CPU -- the fix is explaining that wherever CPU* is actually
+// shown, not re-deriving a different (inferred wait-to-wait) metric.
+test('#438: a CPU* explanation note appears exactly when CPU* is a shown label', () => {
+    const withCpu = buildMatrixOption(payload(4)); // payload() alternates Lock:E/IO:E, no CPU*
+    assert.ok(!withCpu.notes.some(n => n.includes('CPU*')),
+        'no CPU* note when CPU* never appears on an axis');
+
+    const p = {
+        total: 10,
+        nodes: [
+            { name: 'CPU*', class: 'CPU', event_id: 0 },
+            { name: 'IO:A', class: 'IO', event_id: 1 },
+        ],
+        links: [{ source: 'CPU*', target: 'IO:A', value: 5, duration_ms: 1 }],
+    };
+    const m = buildMatrixOption(p);
+    assert.ok(m.labels.includes('CPU*'));
+    assert.ok(m.notes.some(n => n.includes('CPU*') && n.includes('literal intermediate state')),
+        'CPU* note must appear once CPU* is a shown label: ' + JSON.stringify(m.notes));
+    // Negative control: a note that merely says "CPU-centered" without the
+    // "literal intermediate state, not necessarily measured running CPU"
+    // wording would re-introduce the exact misreading #438 reports (that
+    // the matrix measures running CPU time) -- the check must be on that
+    // wording, not just on the presence of the substring "CPU*" (every note
+    // in this payload already contains "CPU*" via other paths in a denser
+    // fixture, so a bare substring check could pass without ever explaining
+    // anything).
+    assert.ok(!m.notes.some(n => n.includes('CPU*') && !n.includes('literal')),
+        'every CPU*-mentioning note must carry the explanation, not just the name');
+});
+
 test('axis names are positioned clear of tick labels, not at the clipped default end', () => {
     const m = buildMatrixOption(payload());
     assert.equal(m.option.xAxis.name, 'Source event');

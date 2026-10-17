@@ -304,6 +304,121 @@ else
     report true "no truncated 'test_bucke' name leaked into the output"
 fi
 
+
+# Case 10 (RED, issue #431): a guard that cannot run under the invoking
+# shell must refuse, not silently approve. Build a repo with a genuinely
+# dropped registration (same shape as Case 2), then invoke the guard
+# through EVERY form a caller actually uses: './script' (shebang honoured,
+# runs under bash), 'bash script' (explicit bash), and 'sh script' (the
+# blind spot -- on macOS /bin/sh IS bash so $BASH_VERSION stays set, but
+# invoked under that name `<(...)` process substitution resolves to a
+# failed command substitution whose exit status this guard used to never
+# check, so the comparison silently became "nothing missing"). None of the
+# three may print "OK" with exit 0 while the drop is real; './script' and
+# 'bash script' must additionally NAME the dropped entry (test_s2), and
+# 'sh script' must refuse with a named reason (it cannot complete the
+# comparison, so it cannot be expected to name the entry -- but it must not
+# approve).
+s2_repo="$tmpdir/shell_invocation"
+mkdir -p "$s2_repo/tests"
+git -C "$s2_repo" init -q -b master
+git -C "$s2_repo" config user.email test@example.com
+git -C "$s2_repo" config user.name "Test"
+write_fixture "$s2_repo" test_s1 test_s2 test_s3
+git -C "$s2_repo" add -A
+git -C "$s2_repo" commit -q -m "initial"
+git -C "$s2_repo" checkout -q -b feature/drop-s2
+write_fixture "$s2_repo" test_s1 test_s3
+git -C "$s2_repo" add -A
+
+out=$("$GUARD" "$s2_repo" 2>&1); rc=$?
+if [[ "$rc" != "0" ]] && ! grep -qx "OK: test-registration guard (base .*) — append-only invariant holds" <<<"$out"; then
+    report true "./script (shebang, bash) refuses the drop, no OK (exit $rc)"
+else
+    report false "./script (shebang) must refuse, not print OK (exit $rc; output: $out)"
+fi
+if grep -q "test_s2" <<<"$out"; then
+    report true "./script names the dropped entry (test_s2)"
+else
+    report false "./script names the dropped entry (test_s2); output: $out"
+fi
+
+out=$(bash "$GUARD" "$s2_repo" 2>&1); rc=$?
+if [[ "$rc" != "0" ]] && ! grep -qx "OK: test-registration guard (base .*) — append-only invariant holds" <<<"$out"; then
+    report true "'bash script' refuses the drop, no OK (exit $rc)"
+else
+    report false "'bash script' must refuse, not print OK (exit $rc; output: $out)"
+fi
+if grep -q "test_s2" <<<"$out"; then
+    report true "'bash script' names the dropped entry (test_s2)"
+else
+    report false "'bash script' names the dropped entry (test_s2); output: $out"
+fi
+
+out=$(sh "$GUARD" "$s2_repo" 2>&1); rc=$?
+if [[ "$rc" != "0" ]] && ! grep -qx "OK: test-registration guard (base .*) — append-only invariant holds" <<<"$out"; then
+    report true "'sh script' refuses the drop, no OK (exit $rc) -- issue #431's exact blind spot"
+else
+    report false "'sh script' must refuse, not print OK (exit $rc; output: $out) -- issue #431 regression"
+fi
+if grep -qi "refusing to approve blind" <<<"$out"; then
+    report true "'sh script' names a reason (\"refusing to approve blind\")"
+else
+    report false "'sh script' names a reason (\"refusing to approve blind\"); output: $out"
+fi
+
+# Case 11 (RED, issue #431, real dash): where a real dash binary is
+# available (the Linux gate boxes' actual /bin/sh -- distinct from macOS's
+# /bin/sh, which is bash), dash hard syntax-errors on `<(...)` before ever
+# reaching the comparison. The $BASH_VERSION guard at the top of the script
+# must refuse before dash's parser ever sees that construct. If no dash
+# binary exists on this machine, say so explicitly rather than silently
+# skipping (a skip that looks like a pass is exactly this issue's class).
+if command -v dash >/dev/null 2>&1; then
+    out=$(dash "$GUARD" "$s2_repo" 2>&1); rc=$?
+    if [[ "$rc" != "0" ]] && ! grep -qx "OK: test-registration guard (base .*) — append-only invariant holds" <<<"$out"; then
+        report true "'dash script' refuses the drop, no OK (exit $rc)"
+    else
+        report false "'dash script' must refuse, not print OK (exit $rc; output: $out)"
+    fi
+    if grep -qi "refusing to approve blind" <<<"$out"; then
+        report true "'dash script' names a reason (\"refusing to approve blind\")"
+    else
+        report false "'dash script' names a reason (\"refusing to approve blind\"); output: $out"
+    fi
+else
+    echo "  SKIP: no 'dash' binary on this machine -- case 11 (real-dash invocation) not exercised here (reported, not silently skipped)"
+fi
+
+# Case 12 (RED, adviser-found hole): the guard checks comm's own exit
+# status but, before this case, not the two process substitutions FEEDING
+# it -- a `sort` that fails (missing from PATH, or present but exiting
+# non-zero with no output) makes BOTH substitutions present an empty-but-
+# valid stream to comm, which then succeeds and reports "nothing missing"
+# for a comparison that never actually ran. Identical root cause to #431
+# itself (a failed producer whose exit status nobody checked), one step
+# further upstream -- so it belongs in this self-test permanently, not just
+# as a one-off repro. Shims a `sort` on PATH that exits 1 and writes
+# nothing, against the SAME s2_repo used above (test_s2 genuinely dropped).
+shim_dir="$tmpdir/sort_shim"
+mkdir -p "$shim_dir"
+cat > "$shim_dir/sort" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$shim_dir/sort"
+out=$(PATH="$shim_dir:$PATH" bash "$GUARD" "$s2_repo" 2>&1); rc=$?
+if [[ "$rc" != "0" ]] && ! grep -qx "OK: test-registration guard (base .*) — append-only invariant holds" <<<"$out"; then
+    report true "a failing 'sort' on PATH is refused, no OK (exit $rc)"
+else
+    report false "a failing 'sort' on PATH must be refused, not print OK (exit $rc; output: $out)"
+fi
+if grep -qi "refusing to approve blind" <<<"$out"; then
+    report true "failing-'sort' failure names a reason (\"refusing to approve blind\")"
+else
+    report false "failing-'sort' failure names a reason; output: $out"
+fi
+
 echo
 echo "$tests_passed/$tests_run passed"
 [[ $tests_failed -eq 0 ]]

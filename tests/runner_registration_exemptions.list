@@ -1,0 +1,22 @@
+# runner_registration_exemptions.list -- documented exceptions to the
+# invariant scripts/check-runner-registration.py enforces: every test file
+# tests/ci_smoke.sh actually invokes must also be invoked by
+# tests/run_all.sh (what `make box-check` actually runs), because
+# otherwise a box-check "green" proves nothing about a ci_smoke-only gate
+# (issue #433). A deliberate, legitimate exception goes here, one per line:
+#
+#   filename|reason
+#
+# '#' comments and blank lines are ignored. No entry here means "no known
+# legitimate exceptions" -- it does NOT mean the guard has nothing to check;
+# run scripts/check-runner-registration.sh and read its output.
+#
+# As of this file's creation (issue #433), two real, UNDOCUMENTED gaps
+# exist and are deliberately NOT listed below: tests/test_capture_smoke.py
+# and tests/test_uprobe_fired.py are both invoked only by tests/ci_smoke.sh.
+# Both look like genuine reconciliation gaps (not a deliberate CI-only
+# design -- see each file's own docstring), so they are left for
+# scripts/check-runner-registration.sh to report rather than silenced here;
+# fixing them means wiring them into tests/run_all.sh's LIVE_TESTS, which is
+# a live-tier test-assertion change out of scope for the guard-building
+# commit that added this file.

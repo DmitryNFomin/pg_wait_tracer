@@ -704,6 +704,87 @@ def test_transitions_tab(page):
     check(chart_status.startswith("ok"),
           f"Transitions DFG rendered with data ({chart_status})")
 
+    # #436 (adviser-review finding): an ECharts option object is not proof
+    # of paint, and raw getOption() x/y is not proof of PIXEL position
+    # either — ECharts' graph "view" coordinateSystem can (and, pre-fix,
+    # did) normalize those coordinates to a space the renderer draws in
+    # that differs from the data space the builder laid nodes out in. This
+    # reads the REAL rendered position via the series' own
+    # coordinateSystem.dataToPoint() — the exact function the renderer
+    # itself calls — plus the browser's own canvas text metrics (not a
+    # client-side estimate) for label width. A node whose RENDERED label is
+    # off-canvas fails this, not just a visually-inspected screenshot.
+    # tests/test_dfg_geometry.py carries the dedicated six-equal-duration
+    # negative control that isolates this exact mechanism; this is the
+    # same check against the live app's own canned data.
+    clipped = page.evaluate("""
+        async () => {
+            const { isLayoutAnchorNode } = await import('/lib/builders/transitions.js');
+            const el = document.getElementById('dfg-container');
+            const c = echarts.getInstanceByDom(el);
+            const opt = c.getOption();
+            const nodes = (opt.series[0] && opt.series[0].data) || [];
+            const coordSys = c.getModel().getSeriesByIndex(0).coordinateSystem;
+            const w = el.clientWidth, h = el.clientHeight;
+            const probe = document.createElement('canvas').getContext('2d');
+            const bad = [];
+            for (const n of nodes) {
+                if (isLayoutAnchorNode(n.name)) continue;
+                const [px, py] = coordSys.dataToPoint([n.x, n.y]);
+                const label = n.label || {};
+                probe.font = (label.fontSize || 10) + 'px sans-serif';
+                const lines = String(label.formatter || '').split('\\n');
+                const maxLineW = Math.max(0, ...lines.map(l => probe.measureText(l).width));
+                const radius = (n.symbolSize || 0) / 2;
+                const halfW = Math.max(radius, maxLineW / 2);
+                const lineHeight = label.lineHeight || 14;
+                const bottom = radius + 6 + lines.length * lineHeight;
+                if (px - halfW < -1 || px + halfW > w + 1 ||
+                    py - radius < -1 || py + bottom > h + 1) {
+                    bad.push({ name: n.name, dataXY: [n.x, n.y], pixelXY: [px, py],
+                        halfW, bottom, w, h });
+                }
+            }
+            return bad;
+        }
+    """)
+    check(clipped == [], f"No DFG node/label clips the live container, measured via the "
+          f"real coordinateSystem (not getOption() x/y) ({clipped})")
+
+    # #436: the hideIdle control is narrow (Client:ClientRead only, not every
+    # idle classification) — named for exactly what it does rather than
+    # implying more.
+    hide_idle_label = page.evaluate("""() => {
+        const cb = document.getElementById('dfg-hide-idle');
+        return cb && cb.parentElement ? cb.parentElement.textContent : '';
+    }""")
+    check("Hide ClientRead" in (hide_idle_label or ""),
+          f"hideIdle control is labeled specifically ('{hide_idle_label}')")
+
+    # #436: with the mock's canned data (hideIdle default ON), the
+    # ClientRead<->CPU* loop IS idle-excluded, so "Show all" must be the
+    # discoverable, visible restore affordance — not hidden as a no-op.
+    show_all = page.query_selector("#dfg-show-all")
+    check(show_all is not None and show_all.is_visible(),
+          "Show all is visible once something is client-side excluded")
+    total_text = page.text_content("#dfg-total") or ""
+    check("idle" in total_text.lower(),
+          f"disclosure line names the idle-exclusion reason ('{total_text}')")
+
+    # Clicking Show all removes BOTH client exclusions; the idle node must
+    # reappear (the one thing this restore action can actually do).
+    show_all.click()
+    page.wait_for_timeout(200)
+    after_names = page.evaluate("""
+        () => {
+            const c = echarts.getInstanceByDom(document.getElementById('dfg-container'));
+            const opt = c.getOption();
+            return (opt.series[0].data || []).map(n => n.name);
+        }
+    """)
+    check("Client:ClientRead" in after_names,
+          f"Show all restores the ClientRead node ({after_names})")
+
     # Resize storms use the SAME rAF layout coalescer as the simplify slider:
     # one chart resize + one setOption for a whole frame, not one full DFG
     # layout per DOM resize event.

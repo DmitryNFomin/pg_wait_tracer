@@ -1,0 +1,34 @@
+  PASS: clean tree, nothing changed (exit 0)
+  PASS: a dropped entry (test_b) is refused (exit 1)
+  PASS: failure names the actually-dropped entry (test_b)
+  PASS: restoring the dropped entry fixes it (exit 0)
+  PASS: adding a new entry (append-only) passes (exit 0)
+  PASS: a Makefile-only drop (test_b from TESTS) is refused (exit 1)
+  PASS: failure names the file (Makefile TESTS) and the dropped entry (test_b)
+  PASS: an unparseable base TESTS format is refused rather than silently passed (exit 1)
+  PASS: unparseable-base failure says so explicitly ("could not parse")
+  PASS: no resolvable base fails closed (exit 1)
+  PASS: no-base failure says so explicitly ("no comparable base")
+  PASS: base predating these files entirely still passes (nothing to drop) (exit 0)
+  PASS: dropping an entry ending in 't' (test_bucket) is still refused (exit 1)
+  PASS: failure names the dropped entry EXACTLY (test_bucket, not mangled to test_bucke)
+  PASS: no truncated 'test_bucke' name leaked into the output
+  PASS: ./script (shebang, bash) refuses the drop, no OK (exit 1)
+  PASS: ./script names the dropped entry (test_s2)
+  PASS: 'bash script' refuses the drop, no OK (exit 1)
+  PASS: 'bash script' names the dropped entry (test_s2)
+  FAIL: 'sh script' must refuse, not print OK (exit 0; output: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: syntax error near unexpected token `('
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: `comm -23 <(printf '%s\n' "$base_entries" | sed '/^$/d' | sort -u)                         <(printf '%s\n' "$current_entries" | sed '/^$/d' | sort -u)'
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: syntax error near unexpected token `('
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: `comm -23 <(printf '%s\n' "$base_entries" | sed '/^$/d' | sort -u)                         <(printf '%s\n' "$current_entries" | sed '/^$/d' | sort -u)'
+OK: test-registration guard (base 66d2266389f83bf24b71433d7431496dfe72e3b1) — append-only invariant holds) -- issue #431 regression
+  FAIL: 'sh script' names a reason ("refusing to approve blind"); output: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: syntax error near unexpected token `('
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: `comm -23 <(printf '%s\n' "$base_entries" | sed '/^$/d' | sort -u)                         <(printf '%s\n' "$current_entries" | sed '/^$/d' | sort -u)'
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: syntax error near unexpected token `('
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: command substitution: line 125: `comm -23 <(printf '%s\n' "$base_entries" | sed '/^$/d' | sort -u)                         <(printf '%s\n' "$current_entries" | sed '/^$/d' | sort -u)'
+OK: test-registration guard (base 66d2266389f83bf24b71433d7431496dfe72e3b1) — append-only invariant holds
+  PASS: 'dash script' refuses the drop, no OK (exit 2)
+  FAIL: 'dash script' names a reason ("refusing to approve blind"); output: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-aa42bb3e4002d85a9/tests/../scripts/check-test-registration.sh: 30: set: Illegal option -o pipefail
+
+20/23 passed
+EXIT=1

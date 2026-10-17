@@ -37,6 +37,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_cpu_split_parity \
             test_straddler_accounting \
             test_open_cpu_accounting \
+            test_rotation_open_credit \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -48,6 +49,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_top_wait_backfill \
             test_tick_drain \
             test_window_overlap \
+            test_semantics_wire \
             test_open_overlay \
             test_replay_window \
             test_open_interval \
@@ -738,6 +740,48 @@ test_open_cpu_accounting: test_open_cpu_accounting.c \
                    $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
+# test_rotation_open_credit: #430 -- an hourly rotation must not PAUSE
+# open-interval crediting. pgwt_summary_check_rotation leaves w->fp NULL for a
+# lazy reopen and writer_seal_through refused on a NULL fp, so every daemon
+# tick between the rotation and the next PUSHED record sealed nothing. #430
+# called that attribution-only; it is not, because pgwt_summary_close() also
+# returns early on a NULL fp, so a capture that stops inside the window never
+# writes those seconds at all. Asserted: EXACT conservation (sigma of the
+# pid's db_time off disk == the wall of the completed seconds the fixture's
+# tick schedule could seal; 11000 ms, parent tree 5000 ms), per-record
+# placement (every record exactly 1000 ms) and the per-FILE split (5 s in the
+# archived hour, 6 s in the file the seal reopened). The one input that greens
+# a careless fixture -- a record pushed right after the rotation, which is
+# what test_open_cpu_accounting's rotation leg does -- is included as the
+# reachability probe and is 11000 ms on BOTH trees. Bypass suite: a writer
+# that never opened a file (must invent nothing), nothing open after the
+# rotation (must create no file), a reopen that FAILS (counted, nothing
+# fabricated, the seconds stay owed and arrive later), a note that goes stale
+# mid-pause (crediting stops, expiry counted), the rotation ABSENT rather than
+# wrong, a missing/empty dir and a previous-version file (the read-back must
+# REFUSE), and a disabled writer.
+#
+# It also gates #447, which is why crediting the seconds was not enough on its
+# own: a reopened file's header is written at the reopen instant, ~1.1 s AFTER
+# the second the seal writes, and the reader prunes any file starting after
+# the window's end -- so the recovered second was written and still pruned out
+# of a query for its own second. §10 runs UNPINNED (a pinned fixture cannot
+# see this class at all) and reads a BOUNDED window equal to that one second;
+# §12 asserts the in-place header rewrite leaves the reader's
+# start_time_ns - clock_offset_ns at exactly 0. Both have a mutant control.
+# Rotation is forced via w->current_hour = -1,
+# the same deterministic seam test_open_cpu_accounting uses: no real hour
+# boundary is waited for and no assertion reads a clock. Server build, no BPF,
+# no live PG; ~0.1 s.
+test_rotation_open_credit: test_rotation_open_credit.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                   $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
 # test_exec_index: the EXECUTIONS INDEX (paint-latency plan, Phase 3,
 # src/exec_index.c). A differential against the real pgwt_compute_executions
 # over every block split of every fixture, asserting the ten boundary fields
@@ -813,6 +857,15 @@ test_top_wait_backfill: test_top_wait_backfill.c ../src/server.c $(TRANSITIONS_L
 # gated on the close, together. Same server.c-included recipe (the real
 # writer, the real loader, the real compute).
 test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_semantics_wire: #435/#436/#441 -- four contracts that live in the JSON
+# the client receives, not in a compute result. A compute-level assertion
+# cannot tell `0` from `null`, an absent key from a suppressed one, or a node
+# table built from one population from one built from another; those three
+# distinctions ARE the defects. Same server.c-included recipe as
+# test_window_overlap, so the real handlers, loader and routing gate run.
+test_semantics_wire: test_semantics_wire.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction

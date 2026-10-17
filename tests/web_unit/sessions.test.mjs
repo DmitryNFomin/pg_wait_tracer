@@ -4,14 +4,25 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSessionsModel } from '../../web/static/views/sessions.js';
+import { buildSessionsModel, createSessionsView } from '../../web/static/views/sessions.js';
 import { sessionsConfig } from '../../web/static/lib/builders/table-configs.js';
+import { createStableOrder } from '../../web/static/lib/table.js';
 
 function sess(over) {
     return Object.assign({
         pid: 0, type: 'client', user: 'postgres', db: 'testdb',
         db_time_ms: 0, cpu_pct: 0, wait_pct: 0, top_wait: 'CPU*',
     }, over);
+}
+
+// #440: a minimal fake view-manager ctx -- just enough for build(data, ctx)
+// (getSort/timeRange/filters.snapshot), no transport/DOM needed.
+function fakeCtx(sortState) {
+    return {
+        getSort: () => sortState,
+        timeRange: { from: 0, to: 1000 },
+        filters: { snapshot: () => ({}) },
+    };
 }
 
 test('no sort: server order; PID/Backend/Top Wait columns; all clickable', () => {
@@ -85,4 +96,76 @@ test('server-flagged truncation reaches the sessions model', () => {
     const m = buildSessionsModel(
         { truncated: true, rows: [sess({ pid: 1 })] }, null);
     assert.deepEqual(m.truncation, { omitted: null, text: '… more not shown' });
+});
+
+// ── #440 (coordinator finding): the production path must actually USE the
+// tracker it is handed. Mirrors events.test.mjs's wiring proof exactly --
+// if views/sessions.js stopped threading the tracker into rows before
+// buildTableModel, this is the test that goes red. ──────────────────────────
+
+test('#440 default order (no explicit sort) is damped by the tracker across ticks', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.pid), valueKey: (r) => r.db_time_ms,
+    });
+    buildSessionsModel({ rows: [
+        sess({ pid: 1, db_time_ms: 100 }), sess({ pid: 2, db_time_ms: 95 }),
+    ] }, null, tracker);
+    // pid 2 rises to 101 -- within 5% of pid 1's 100, must NOT reorder.
+    const m = buildSessionsModel({ rows: [
+        sess({ pid: 1, db_time_ms: 100 }), sess({ pid: 2, db_time_ms: 101 }),
+    ] }, null, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.pid), [1, 2]);
+});
+
+test('#440 a genuine >5% swing DOES reorder through the same tracker', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.pid), valueKey: (r) => r.db_time_ms,
+    });
+    buildSessionsModel({ rows: [
+        sess({ pid: 1, db_time_ms: 100 }), sess({ pid: 2, db_time_ms: 95 }),
+    ] }, null, tracker);
+    const m = buildSessionsModel({ rows: [
+        sess({ pid: 1, db_time_ms: 100 }), sess({ pid: 2, db_time_ms: 106 }),
+    ] }, null, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.pid), [2, 1]);
+});
+
+test('#440 an EXPLICIT column sort bypasses the tracker entirely (exact value order)', () => {
+    const tracker = createStableOrder({
+        idKey: (r) => String(r.pid), valueKey: (r) => r.db_time_ms,
+    });
+    buildSessionsModel({ rows: [
+        sess({ pid: 1, db_time_ms: 1000 }), sess({ pid: 2, db_time_ms: 1 }),
+    ] }, null, tracker);
+    const m = buildSessionsModel({ rows: [
+        sess({ pid: 1, db_time_ms: 50 }), sess({ pid: 2, db_time_ms: 100 }),
+    ] }, { key: 'db_time_ms', asc: false }, tracker);
+    assert.deepEqual(m.table.rows.map((r) => r.row.pid), [2, 1]);
+});
+
+test('#440 no tracker passed -> unchanged (plain) order, exactly today\'s behavior', () => {
+    const m = buildSessionsModel({ rows: [
+        sess({ pid: 1, db_time_ms: 50 }), sess({ pid: 2, db_time_ms: 100 }),
+    ] }, null);
+    assert.deepEqual(m.table.rows.map((r) => r.row.pid), [1, 2]);
+});
+
+// This is the test that actually closes the gap: it exercises the REAL
+// production object createSessionsView() returns. If its build() ever
+// stops passing its tracker into buildSessionsModel, THIS is the test that
+// goes red -- the ones above only prove buildSessionsModel CAN apply a
+// tracker it is handed, not that the view actually hands it one.
+test('#440 WIRING: createSessionsView().build() damps order across real build() calls', () => {
+    // Incoming row order flips tick-to-tick (see events.test.mjs's
+    // identical comment) -- only passes under real hysteresis.
+    const view = createSessionsView();
+    const ctx = fakeCtx(null);
+    view.build({ rows: [
+        sess({ pid: 1, db_time_ms: 100 }), sess({ pid: 2, db_time_ms: 95 }),
+    ] }, ctx);
+    const m = view.build({ rows: [
+        sess({ pid: 2, db_time_ms: 101 }), sess({ pid: 1, db_time_ms: 100 }),
+    ] }, ctx);
+    assert.deepEqual(m.table.rows.map((r) => r.row.pid), [1, 2],
+        'pid 2 at 101 is within 5% of pid 1\'s 100 -- must not jitter');
 });

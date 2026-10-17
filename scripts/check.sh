@@ -104,6 +104,30 @@ run tests/test_check_link_closure.sh
 step "link-closure guard (src/map_reader.c vs merge base)"
 run scripts/check-link-closure.sh
 
+# Runner-registration guard (#433): tests/run_all.sh (make box-check) and
+# tests/ci_smoke.sh (CI/nightly) have independent membership, so a test
+# wired into ci_smoke.sh alone makes box-check "green" prove nothing about
+# it (three real incidents: test_v9_open_cpu_wired registered ci_smoke-only
+# twice over, and test_capture_smoke mentioned in run_all.sh only inside a
+# comment while ci_smoke.sh actually runs it). Only the SELF-TEST (synthetic
+# fixtures) runs here, not scripts/check-runner-registration.sh itself
+# against this real repo: that live run is a reviewer-run-by-hand evidence
+# guard, same as scripts/check-test-registration.sh -- wiring it into every
+# `make check` would turn a real, already-filed, out-of-scope registration
+# gap (test_capture_smoke.py / test_uprobe_fired.py, tracked by #433, not
+# fixed here since fixing it means editing tests/run_all.sh, a live-tier
+# test-assertion change) into a permanent red for every unrelated branch.
+step "runner-registration guard self-test"
+run tests/test_check_runner_registration.sh
+
+# tests/results/ evidence-directory ignore rule (companion to this guard's
+# own commit, same failure class as the tree-hash guards above): an agent
+# writing a brand-new tests/results/<name>/ directory must not move
+# scripts/tree-hash.sh's output, and a tracked tests/results/ file must
+# never become invisible to `git status` by also matching an ignore rule.
+step "tests/results/ evidence-directory ignore rule"
+run bash tests/test_results_evidence_ignore.sh
+
 step "web builder unit tests (node)"
 run node --test 'tests/web_unit/*.test.mjs'
 
@@ -248,6 +272,17 @@ if [[ $FAST -eq 0 ]]; then
     #                                sampled +50/+51
     #     PGWT_CHIP_PORT  = base+60 test_chip_label_alignment.py: HTTP +60
     #                                (gallery.html is static — no WS pair)
+    #     PGWT_WATERFALL_PORT = base+65 verify_waterfall_fold.py (#415):
+    #                                HTTP +65/WS +66 (gap left after CHIP so
+    #                                a future WS-pair test can slot into +61)
+    #     PGWT_DFG_GEOM_PORT  = base+67 test_dfg_geometry.py: HTTP +67
+    #                                (gallery.html is static — no WS pair;
+    #                                merge note: agent/web-tables and
+    #                                agent/web-graph both independently
+    #                                claimed +65 — a genuine collision found
+    #                                at integration, not a design choice;
+    #                                moved DFG_GEOM here to the next free
+    #                                offset rather than picking a "winner")
     PORT_SPAN=70
     PGWT_PORT_BASE=$(python3 tests/free_ports.py "$PORT_SPAN") || { echo "free_ports: could not allocate $PORT_SPAN free ports"; exit 2; }
     [[ $PGWT_PORT_BASE =~ ^[0-9]+$ ]] || { echo "free_ports: non-numeric base '$PGWT_PORT_BASE'"; exit 2; }
@@ -255,7 +290,9 @@ if [[ $FAST -eq 0 ]]; then
     export PGWT_CHAOS_PORT=$((PGWT_PORT_BASE + 30))
     export PGWT_SNAP_PORT=$((PGWT_PORT_BASE + 40))
     export PGWT_CHIP_PORT=$((PGWT_PORT_BASE + 60))
-    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60)"
+    export PGWT_WATERFALL_PORT=$((PGWT_PORT_BASE + 65))
+    export PGWT_DFG_GEOM_PORT=$((PGWT_PORT_BASE + 67))
+    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60 WATERFALL=+65 DFG_GEOM=+67)"
 
     step "web UI suite vs mock_server.py (Playwright)"
     run python3 tests/test_web_ui.py
@@ -263,6 +300,14 @@ if [[ $FAST -eq 0 ]]; then
     run python3 tests/test_web_ui_chaos.py
     step "overlay chip label alignment at DSF 1/2 (issue #213)"
     run python3 tests/test_chip_label_alignment.py
+    # #415: the drilled Waterfall readout stays above the fold in the FULL
+    # application shell (breadcrumbs/controls/AAS chart included) at the
+    # pinned demo viewport -- the isolated fixture gallery is exactly what
+    # missed this originally (see the script's own docstring).
+    step "Waterfall drilled-readout fold check at the demo viewport (issue #415)"
+    run python3 tests/verify_waterfall_fold.py
+    step "DFG rendered-geometry guard: real coordinateSystem.dataToPoint, not getOption() (issue #436)"
+    run python3 tests/test_dfg_geometry.py
 
     # issue #245 (TTFP): _navigate_to_tab's ttfp_ms anchor and its wiring
     # into run_tab's build_tab_result call -- imports ui_live_smoke.py,

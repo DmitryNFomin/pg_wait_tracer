@@ -762,11 +762,21 @@ struct aas_event_accum {
 #define AAS_EVT_HT_SIZE 512
 #define AAS_EVT_HT_MASK (AAS_EVT_HT_SIZE - 1)
 
+/* TOTAL order: in-window AAS DESC, then event_id ASC (#440). Without the
+ * identity tie-break two events with equal contribution came back in whatever
+ * order qsort (not stable) made of the hash table's probe sequence, so top-N
+ * MEMBERSHIP at the cut line was not reproducible between two identical
+ * requests. The chart's series order is a presentation consequence of this
+ * array; the thing the tie-break actually pins is which event survives the
+ * `ns = min(n_all, max_series)` truncation below. */
 static int cmp_aas_event_series(const void *a, const void *b)
 {
-    double da = ((const struct pgwt_aas_event_series *)a)->total_aas;
-    double db = ((const struct pgwt_aas_event_series *)b)->total_aas;
-    return (db > da) - (db < da);
+    const struct pgwt_aas_event_series *x = a, *y = b;
+    if (x->total_aas != y->total_aas)
+        return x->total_aas < y->total_aas ? 1 : -1;
+    if (x->event_id != y->event_id)
+        return x->event_id < y->event_id ? -1 : 1;
+    return 0;
 }
 
 void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
@@ -904,7 +914,27 @@ void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
             while (evt_ht[h].total_ns > 0 && evt_ht[h].event_id != ev->old_event)
                 h = (h + 1) & AAS_EVT_HT_MASK;
             evt_ht[h].event_id = ev->old_event;
-            evt_ht[h].total_ns += ev->duration_ns;
+            /* #426: CONTRIBUTION, not full duration.
+             *
+             * This used to add ev->duration_ns. The bucket loop above plots
+             * `min(ev_end, b_end) - max(ev_start, b_start)` per bucket, and
+             * pass 2 below replots exactly that, so the selector and the plot
+             * ranked two different quantities: a 10 s lock that overlapped the
+             * window by 1 s outranked a 2 s wait wholly inside it, took the
+             * last top-N slot, and then drew 1 s of area while the wait it
+             * displaced drew nothing. The field this feeds is documented in
+             * compute.h as "sum across all buckets" — with full durations that
+             * was simply untrue for any straddler.
+             *
+             * `ev_start`/`ev_end` are the record's own interval; the record has
+             * already passed `ev_end > from_ns && ev_start < to_ns` above, so
+             * the clipped span is strictly positive and no max(0, ...) guard is
+             * reachable here. Clipping is deliberately NOT applied to the
+             * LATENCY columns (top_events' avg/p95/max keep full durations) —
+             * that separation is the #426 contract, not an oversight. */
+            uint64_t c_start = ev_start > from_ns ? ev_start : from_ns;
+            uint64_t c_end   = ev_end   < to_ns   ? ev_end   : to_ns;
+            evt_ht[h].total_ns += c_end - c_start;
         }
     }
 
@@ -1156,10 +1186,18 @@ static int cmp_idle_desc(const void *a, const void *b)
  * with IDLE_ROWS_RESERVED spare slots, which the _Static_assert above checks
  * against this function's worst case.
  *
- * pct_db_time is deliberately 0 on these rows: idle time has no share OF DB
- * Time (it is excluded from it), and reporting a percentage of a total it is
- * not part of is how an excluded number sneaks back into a reader's mental
- * sum. DO NOT "fix" it.
+ * pct_db_time is deliberately PGWT_PCT_DB_IDLE on these rows: idle time has no
+ * share OF DB Time (it is excluded from it), and reporting a percentage of a
+ * total it is not part of is how an excluded number sneaks back into a
+ * reader's mental sum. DO NOT give these rows a real percentage.
+ *
+ * #435: it was a numeric 0.0 until this change, which is the SAME MISTAKE one
+ * level down -- "excluded" was encoded as a measured zero, and the wire could
+ * not tell the two apart, so the Overview drew a 0.0% bar on a row carrying
+ * twenty minutes of time while the Events tab, over the same idle events,
+ * correctly sent null (handle_top_events, src/server.c). One sentinel, both
+ * tabs: server.c's handle_time_model emits JSON null for it and the CLI dump
+ * prints an em-dash, exactly as Events already did.
  *
  * aas is NOT in that category, and hardcoding it to 0 was a bug. AAS is a
  * RATE -- time over wall clock, "how many sessions' worth of time was this" --
@@ -1211,7 +1249,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
 
     snprintf(rows[nr].name, sizeof(rows[nr].name), "Idle");
     rows[nr].time_ms     = idle_time_ns / 1e6;
-    rows[nr].pct_db_time = 0.0;
+    rows[nr].pct_db_time = PGWT_PCT_DB_IDLE;
     rows[nr].aas         = IDLE_AAS(rows[nr].time_ms);
     rows[nr].indent      = 0;
     nr++;
@@ -1223,7 +1261,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
         pgwt_event_full_name(ia[i].event_id, buf, sizeof(buf));
         snprintf(rows[nr].name, sizeof(rows[nr].name), "%s", buf);
         rows[nr].time_ms     = ia[i].total_ns / 1e6;
-        rows[nr].pct_db_time = 0.0;
+        rows[nr].pct_db_time = PGWT_PCT_DB_IDLE;
         rows[nr].aas         = IDLE_AAS(rows[nr].time_ms);
         rows[nr].indent      = 2;
         nr++;
@@ -1244,7 +1282,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
     if (other > 0) {
         snprintf(rows[nr].name, sizeof(rows[nr].name), "Other (background)");
         rows[nr].time_ms     = other / 1e6;
-        rows[nr].pct_db_time = 0.0;
+        rows[nr].pct_db_time = PGWT_PCT_DB_IDLE;
         rows[nr].aas         = IDLE_AAS(rows[nr].time_ms);
         rows[nr].indent      = 2;
         nr++;
@@ -1687,11 +1725,26 @@ static double hist_percentile(const uint64_t hist[HISTOGRAM_BUCKETS],
     return (double)hist_upper_us[HISTOGRAM_BUCKETS - 1];
 }
 
+/* TOTAL order: in-window time DESC, then event_id ASC (#440).
+ *
+ * The three table comparators below (events / sessions / queries) all used to
+ * order by value alone, which is not a total order over a set with ties. qsort
+ * is not stable, so equal-valued rows came back in whatever order the hash
+ * table's probe sequence and the partition happened to produce: two identical
+ * requests over the same bytes could return the same rows in a different
+ * order, and under max_rows truncation they could return DIFFERENT ROWS. The
+ * tie-break is on IDENTITY, not on a second measurement, so it cannot itself
+ * tie and cannot change which row is "bigger" by any visible quantity.
+ * cmp_trans_desc (above) has had this shape since the block-aggregate
+ * cross-check needed it; these three are the same fix at the same depth. */
 static int cmp_event_row_desc(const void *a, const void *b)
 {
-    double da = ((const struct pgwt_event_row *)a)->total_ms;
-    double db = ((const struct pgwt_event_row *)b)->total_ms;
-    return (db > da) - (db < da);
+    const struct pgwt_event_row *x = a, *y = b;
+    if (x->total_ms != y->total_ms)
+        return x->total_ms < y->total_ms ? 1 : -1;
+    if (x->event_id != y->event_id)
+        return x->event_id < y->event_id ? -1 : 1;
+    return 0;
 }
 
 void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
@@ -1844,11 +1897,15 @@ struct session_accum {
  * BOTH session tables (raw and summary). Both grow now; the constant is
  * gone so nobody sizes a third table from it. */
 
+/* TOTAL order: DB Time DESC, then pid ASC (#440) — see cmp_event_row_desc. */
 static int cmp_session_row_desc(const void *a, const void *b)
 {
-    double da = ((const struct pgwt_session_row *)a)->db_time_ms;
-    double db = ((const struct pgwt_session_row *)b)->db_time_ms;
-    return (db > da) - (db < da);
+    const struct pgwt_session_row *x = a, *y = b;
+    if (x->db_time_ms != y->db_time_ms)
+        return x->db_time_ms < y->db_time_ms ? 1 : -1;
+    if (x->pid != y->pid)
+        return x->pid < y->pid ? -1 : 1;
+    return 0;
 }
 
 void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
@@ -1978,7 +2035,14 @@ struct query_accum {
     uint64_t query_id;
     uint64_t count;
     uint64_t total_ns;   /* time INSIDE the requested window (DB-Time column) */
-    uint64_t full_ns;    /* sum of full durations — the avg latency column */
+    /* #441: full durations and their count are EXACT-ONLY. A sampled record's
+     * duration_ns is a normalized sample period, so averaging it produces a
+     * latency the capture never measured -- the same fabrication
+     * pgwt_compute_top_events already refuses via its own exact_count. The
+     * two must be accumulated together or the average and its denominator can
+     * come from different populations. */
+    uint64_t full_ns;    /* sum of EXACT full durations — the avg column */
+    uint64_t exact_count;/* observations behind full_ns — 0 => unavailable */
     uint64_t class_ns[PGWT_NUM_CLASSES]; /* per-class time breakdown */
     /* Per-wait hash table — O(1) lookup */
     struct wait_ht_entry waits[WAIT_HT_SIZE];
@@ -1987,11 +2051,16 @@ struct query_accum {
 /* #327: `#define QUERY_HT_SIZE 2048` / `QUERY_HT_MASK` used to live here and
  * sized BOTH query tables (raw and summary). Both grow now. */
 
+/* TOTAL order: in-window time DESC, then query_id ASC (#440) — see
+ * cmp_event_row_desc. */
 static int cmp_query_row_desc(const void *a, const void *b)
 {
-    double da = ((const struct pgwt_query_row *)a)->total_ms;
-    double db = ((const struct pgwt_query_row *)b)->total_ms;
-    return (db > da) - (db < da);
+    const struct pgwt_query_row *x = a, *y = b;
+    if (x->total_ms != y->total_ms)
+        return x->total_ms < y->total_ms ? 1 : -1;
+    if (x->query_id != y->query_id)
+        return x->query_id < y->query_id ? -1 : 1;
+    return 0;
 }
 
 void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
@@ -2063,7 +2132,14 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
         if (event_instant_in_window(ev, from_ns, to_ns) &&
             (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)) {
             ht[h].count++;
-            ht[h].full_ns  += ev->duration_ns;
+            /* #441: only an EXACT record carries a real duration. `count`
+             * still counts the sampled observation -- ASH math makes the
+             * count and the time valid -- but it stops being the latency
+             * denominator. */
+            if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE)) {
+                ht[h].exact_count++;
+                ht[h].full_ns += ev->duration_ns;
+            }
         }
         ht[h].total_ns += clip_u;
         ht[h].class_ns[pgwt_wait_class_index(ev->old_event)] += clip_u;
@@ -2106,9 +2182,13 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
         r->count    = ht[i].count;
         r->total_ms = (double)ht[i].total_ns / 1e6;
         /* Latency, so from FULL durations (== total_ns for any window that
-         * does not cut an event, hence unchanged for whole-capture). */
-        r->avg_us   = ht[i].count > 0
-                     ? (double)ht[i].full_ns / (double)ht[i].count / 1000.0
+         * does not cut an event, hence unchanged for whole-capture), over the
+         * EXACT observations only (#441). exact_count == 0 means no
+         * full-duration evidence exists for this query in this window; the
+         * server emits null rather than an average over sample periods. */
+        r->exact_count = ht[i].exact_count;
+        r->avg_us   = ht[i].exact_count > 0
+                     ? (double)ht[i].full_ns / (double)ht[i].exact_count / 1000.0
                      : 0;
         r->pct_db   = db_time_ms > 0 ? r->total_ms / db_time_ms * 100.0 : 0;
 
@@ -3316,8 +3396,20 @@ void pgwt_compute_top_queries_from_summaries(
         row->query_id = ctx.ht[i].query_id;
         row->count    = ctx.ht[i].count;
         row->total_ms = (double)ctx.ht[i].total_ns / 1e6;
-        row->avg_us   = ctx.ht[i].count > 0
-                       ? (double)ctx.ht[i].total_ns / (double)ctx.ht[i].count / 1000.0 : 0;
+        /* #441: UNAVAILABLE, not a number.
+         *
+         * This used to be `total_ns / count`, i.e. in-window DB Time divided
+         * by an interval count -- which is not a latency at all, and
+         * disagreed with the raw path's mean-full-duration for the same
+         * query over the same window whenever the window clipped an interval
+         * or a summary second was partially covered. Two paths serving the
+         * same column must agree or the weaker one must decline; the
+         * per-second summary records carry no full-duration sum (see
+         * struct pgwt_summary_query in summary_writer.h), so there is no
+         * equivalent evidence here to agree WITH. exact_count stays 0 and
+         * server.c emits null. */
+        row->exact_count = 0;
+        row->avg_us      = 0;
         row->pct_db   = db_time_ms > 0 ? row->total_ms / db_time_ms * 100.0 : 0;
         row->top_wait_id = ctx.ht[i].top_wait_id;
         if (ctx.ht[i].top_wait_id == 0)
@@ -3461,6 +3553,39 @@ static int cmp_trans_desc(const void *a, const void *b)
     return 0;
 }
 
+/* #436: see the contract on the declaration in compute.h. Every `continue`
+ * that used to live inline in pgwt_compute_transitions' loop is here, in the
+ * same order, so the node pass in server.c can select the identical
+ * population instead of approximating it. */
+int pgwt_transition_record_counts(const struct pgwt_filter *f,
+                                  const struct pgwt_trace_event *ev)
+{
+    if (!ev)
+        return 0;
+    /* Exact-required view: normalized sample points are not state
+     * transitions. In a mixed window they remain available to sampled
+     * views only. */
+    if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
+        return 0;
+    /* #424: a transition IS the close of one state and the start of the
+     * next -- the purest INSTANT-selected quantity in the model. The caller
+     * has no [from, to] and the block aggregate that can serve it is keyed
+     * by CLOSE block, so without this line a record admitted by overlap
+     * would be counted here AND again in the window where it closes. */
+    if (event_right_open_flagged(ev))
+        return 0;
+    if (!pgwt_filter_matches(f, ev))
+        return 0;
+    /* Visibility filter: Client:ClientRead transitions stay in the graph. */
+    if (pgwt_is_hidden_event(ev->old_event) || pgwt_is_hidden_event(ev->new_event))
+        return 0;
+    if (ev->new_event == PGWT_EVENT_EXIT)
+        return 0;
+    if (PGWT_IS_MARKER(ev->old_event) || PGWT_IS_MARKER(ev->new_event))
+        return 0;
+    return 1;
+}
+
 void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,
                                const struct pgwt_filter *f, int max_rows,
                                struct pgwt_transitions_result *out)
@@ -3474,27 +3599,7 @@ void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
-        /* Exact-required view: normalized sample points are not state
-         * transitions. In a mixed window they remain available to sampled
-         * views only. */
-        if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
-            continue;
-        /* #424: a transition IS the close of one state and the start of the
-         * next -- the purest INSTANT-selected quantity in the model. This
-         * function has no [from, to] and the block aggregate that can serve
-         * it is keyed by CLOSE block, so without this line a record admitted
-         * by overlap would be counted here AND again in the window where it
-         * closes. */
-        if (event_right_open_flagged(ev))
-            continue;
-        if (!pgwt_filter_matches(f, ev))
-            continue;
-        /* Visibility filter: Client:ClientRead transitions stay in the graph. */
-        if (pgwt_is_hidden_event(ev->old_event) || pgwt_is_hidden_event(ev->new_event))
-            continue;
-        if (ev->new_event == PGWT_EVENT_EXIT)
-            continue;
-        if (PGWT_IS_MARKER(ev->old_event) || PGWT_IS_MARKER(ev->new_event))
+        if (!pgwt_transition_record_counts(f, ev))
             continue;
 
         uint32_t from = ev->old_event;

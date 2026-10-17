@@ -44,7 +44,8 @@
  *     over wall clock, and it was hardcoded to 0, so 807 s of checkpointer
  *     pacing rendered "AAS 0.00". Pins the exact rate on the parent and
  *     every child, that the children's rates sum to the parent's, that
- *     pct_db_time stays 0, and the four ways the pin could stop seeing (no
+ *     pct_db_time stays the not-applicable sentinel (#435: was 0.0), and
+ *     the four ways the pin could stop seeing (no
  *     denominator, no idle time, a single-child breakdown, and a constant
  *     that is not actually a division by the window).
  *  6. FALSE NEGATIVES. Every assertion above is satisfiable by an empty or
@@ -448,12 +449,20 @@ static void test_idle_row_named_children(void)
               idle->time_ms, tm.idle_time_ms);
         /* No share of a total it is not part of: reporting 68%% of DB Time
          * next to a row excluded from DB Time is how an excluded number gets
-         * added back into a reader's mental sum. KEEP THIS 0 -- it is correct,
-         * not a bug. AAS is the opposite case and is asserted in section 9:
-         * it is a RATE over wall clock, defined for idle time, and was
-         * hardcoded to 0 here until 2026-10-07. */
-        CHECK(idle->pct_db_time == 0.0,
-              "Idle pct_db_time=%.2f must be 0", idle->pct_db_time);
+         * added back into a reader's mental sum. #435: the ENCODING of that
+         * changed from a numeric 0.0 to PGWT_PCT_DB_IDLE -- "not applicable",
+         * which server.c emits as JSON null, because 0.0 renders as a
+         * measured-looking 0.0% bar and is indistinguishable on the wire from
+         * a real zero. The RULE is unchanged and still correct: never a
+         * percentage here. Asserted as `== PGWT_PCT_DB_IDLE` rather than
+         * `IS_IDLE()` so a drift to any other negative value is also red.
+         * AAS is the opposite case and is asserted in section 9: it is a RATE
+         * over wall clock, defined for idle time, and was hardcoded to 0 here
+         * until 2026-10-07. */
+        CHECK(idle->pct_db_time == PGWT_PCT_DB_IDLE,
+              "Idle pct_db_time=%.2f must be the not-applicable sentinel "
+              "%.2f (0.0 is a MEASURED zero and is what #435 removed)",
+              idle->pct_db_time, PGWT_PCT_DB_IDLE);
         CHECK(NEAR(idle->aas, FIX_IDLE_MS / FIX_WALL_MS),
               "Idle aas=%.6f expected %.6f (= %.1f ms / %.1f ms wall); 0.00 "
               "means the rate is still hardcoded", idle->aas,
@@ -473,8 +482,10 @@ static void test_idle_row_named_children(void)
     CHECK(c3 != NULL && NEAR(c3->time_ms, 150.0),
           "named child Timeout:VacuumDelay = 150 ms (got %.1f)",
           c3 ? c3->time_ms : -1);
-    if (c1) CHECK(c1->pct_db_time == 0.0,
-                  "idle children carry no %%DB (got %.2f)", c1->pct_db_time);
+    if (c1) CHECK(c1->pct_db_time == PGWT_PCT_DB_IDLE,
+                  "idle children carry no %%DB: expected the not-applicable "
+                  "sentinel %.2f, got %.2f (#435)",
+                  PGWT_PCT_DB_IDLE, c1->pct_db_time);
     if (c1) CHECK(NEAR(c1->aas, 800.0 / FIX_WALL_MS),
                   "...but they DO carry a rate: Timeout:CheckpointWriteDelay "
                   "aas=%.6f expected %.6f", c1->aas, 800.0 / FIX_WALL_MS);
@@ -1134,7 +1145,8 @@ static void test_bypass_suite(void)
  *
  * AAS = time / wall clock: "how many sessions' worth of time was this". It is
  * defined for ANY duration, idle or not; what is undefined for an idle row is
- * a SHARE OF DB TIME, which is why pct_db_time stays 0 above and here. Until
+ * a SHARE OF DB TIME, which is why pct_db_time stays PGWT_PCT_DB_IDLE above
+ * and here (#435: it was a numeric 0.0). Until
  * 2026-10-07 emit_idle_rows wrote `aas = 0.0` on the parent and on every
  * child, so a 900 s demo window rendered "Idle 1,207,000 ms / AAS 0.00" and
  * "Timeout:CheckpointWriteDelay 807,000 ms / AAS 0.00" -- which is not a
@@ -1239,10 +1251,13 @@ static void test_idle_aas_is_a_rate(void)
               idle_rows[i].ms, FIX_WALL_MS);
         /* pct_db_time is NOT the same case and must stay 0 -- asserted here
          * on every idle row so a future change that "makes the idle row
-         * consistent" cannot quietly take the percentage with it. */
-        CHECK(r->pct_db_time == 0.0,
-              "\"%s\" pct_db_time=%.4f must stay 0: idle time genuinely has "
-              "no share OF DB Time, and that is correct, not a bug",
+         * consistent" cannot quietly take the percentage with it. #435
+         * changed only the ENCODING of "no share" (0.0 -> PGWT_PCT_DB_IDLE,
+         * JSON null); a real percentage here is still the bug. */
+        CHECK(r->pct_db_time == PGWT_PCT_DB_IDLE,
+              "\"%s\" pct_db_time=%.4f must stay the not-applicable "
+              "sentinel (-1): idle time genuinely has no share OF DB Time, "
+              "and #435 made that a null on the wire, never a numeric 0",
               idle_rows[i].name, r->pct_db_time);
         if (idle_rows[i].indent == 2) {
             kids_aas += r->aas;

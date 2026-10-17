@@ -483,6 +483,11 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
   margin-left: 10px; color: #4fc3f7; font-size: 11px; font-weight: 400;
 }
 .view-title .link-button:hover { text-decoration: underline; }
+/* #415: the 310px here is the UPPER bound only -- views/waterfall.js
+ * lowers it (inline max-height) to whatever keeps the waterfall pane's
+ * readout above the fold at the current viewport. Left in CSS so the list
+ * is bounded and scrollable before any script runs, and so a viewport with
+ * room to spare renders exactly as it always has. */
 .execution-list { max-height: 310px; overflow: auto; border-bottom: 1px solid #343454; }
 .execution-list table { min-width: 820px; }
 tr.selected-execution td { background: #173653; }
@@ -623,6 +628,35 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
 .pctl-overflow {
   border-bottom: 1px dotted #55606e;
   cursor: help;
+}
+
+/* #437: the overflow sentence shown BESIDE the table (table-configs.js
+ * buildOverflowNote/overflowNoteHtml), not only in a per-cell tooltip --
+ * same slot/sizing family as .pctl-basis-note (lib/panels.js) but its own
+ * class, since it is a distinct fact (open-ended bucket vs sampled basis)
+ * that can be true at the same time as that note. */
+.pctl-overflow-banner {
+  color: #e0a030;
+  font-size: 11px;
+  font-style: italic;
+  margin: 6px 2px 0;
+}
+
+/* #435: Idle's %DB Time cell -- an em-dash, not a bar, so it never reads as
+ * a measured (and misleadingly small) share of DB Time. */
+.idle-excluded {
+  color: #666;
+  cursor: help;
+}
+
+/* #439: Queries' unattributed-foreground disclosure, beside the table --
+ * same slot/sizing family as .pctl-basis-note (lib/panels.js) and
+ * .pctl-overflow-banner above. */
+.unattributed-note {
+  color: #777;
+  font-size: 11px;
+  font-style: italic;
+  margin: 6px 2px 0;
 }
 
 /* Percentage bar */
