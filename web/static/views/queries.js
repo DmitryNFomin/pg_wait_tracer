@@ -139,14 +139,21 @@ export function buildQueriesBackendActivityHtml(data) {
         ['backend_activity_spans', 'spans'], ['backend_activity_inflight', 'in flight'],
         ['backend_activity_unmeasured', 'not measured'],
     ].filter(([key]) => Number.isFinite(data[key])).map(([key, label]) => data[key] + ' ' + label);
-    return '<section class="backend-activity-panel"><h3>Backend activity</h3>' +
+    // Reviewer finding: ONE collapsed container, the same default state
+    // Waterfall uses for this same concept (views/waterfall.js). Fifty
+    // force-expanded entries grew the table_queries gallery cell by 493 px
+    // and could only be collapsed by clicking every summary. The per-entry
+    // <details open> INSIDE stay expanded on purpose, so the spans are one
+    // click away rather than two.
+    return '<details class="backend-activity-panel">' +
+        '<summary>Backend activity — observed spans (' + entries.length + ')</summary>' +
         (data.backend_activity_scope ? '<p>Scope: ' + esc(data.backend_activity_scope) + '</p>' : '') +
         (counts.length ? '<p>' + counts.join(' · ') + '</p>' : '') +
         (!entries.length ? '<p>Not measured</p>' : '') +
         (entries.length > limit ? '<p>Showing ' + limit + ' of ' + entries.length + ' span entries.</p>' : '') +
         '<div class="backend-activity-spans">' + entries.slice(0, limit).map(({ row, label }) =>
             '<details open><summary>' + esc(label) + '</summary>' +
-            backendActivityHtml(row, true) + '</details>').join('') + '</div></section>';
+            backendActivityHtml(row, true) + '</details>').join('') + '</div></details>';
 }
 
 export function createQueriesView() {

@@ -27,6 +27,7 @@ import {
     backendActivityDrillModel,
 } from '../../web/static/lib/builders/backend-span.js';
 import { buildQueriesBackendActivityHtml } from '../../web/static/views/queries.js';
+import { makeQueriesConfig } from '../../web/static/lib/builders/table-configs.js';
 
 const WIRE = JSON.parse(readFileSync(new URL(
     './fixtures/mock_backend_activity.json', import.meta.url), 'utf8'));
@@ -136,4 +137,41 @@ test('envelope: a stated absence is rendered as such, with its reason '
     assert.match(html, /Not measured/);
     assert.match(html, /no span &lt;observed&gt;/);
     assert.equal(backendSpanEnvelope({ backend_activity: null }).present, true);
+});
+
+/* ── Reviewer findings on this branch ───────────────────────────────────────
+ * The same PR introduced the SAME concept on two surfaces with two different
+ * default states: Waterfall as one collapsed <details> (+17 px) and Queries
+ * as one force-expanded <details open> PER ENTRY (+493 px on the
+ * table_queries gallery cell), with no way to collapse short of clicking
+ * every summary. And the cell's `Closed · 0.4 s` sat beside `DB Time 4.2 s`
+ * with nothing visible saying one is an OBSERVED WALL-CLOCK SPAN and the
+ * other a SUMMED wait/CPU total -- the #455 gap traded for a new ambiguity.
+ */
+test('reviewer fix 1: the Queries panel is ONE collapsed section, the same '
+    + 'default state Waterfall uses for the identical concept', () => {
+    const html = buildQueriesBackendActivityHtml({
+        ...WIRE.top_queries_root,
+        rows: [WIRE.measured_row, WIRE.unmeasured_row],
+    });
+    // One container, collapsed: no `open` on the OUTER element.
+    assert.match(html, /^<details class="backend-activity-panel">/);
+    assert.doesNotMatch(html, /^<details[^>]*\sopen/);
+    assert.match(html, /<summary>Backend activity/);
+    // The information is one click away, not two: the per-entry details stay
+    // expanded INSIDE the collapsed section.
+    assert.equal((html.match(/<details open>/g) || []).length, 2);
+    assert.match(html, /Closed · 0\.4 s/);
+});
+
+test('reviewer fix 2: the Backend activity column says it is an OBSERVED '
+    + 'SPAN, so it cannot read as a second DB Time', () => {
+    const col = makeQueriesConfig('exact').columns
+        .find(c => c.key === 'backend_activity_span');
+    assert.ok(col, 'the Backend activity column exists');
+    assert.match(col.label, /observed span/);
+    // And the longer distinction is reachable without reading the
+    // Measurement/Completion jargon in the drill.
+    assert.match(col.label, /title="[^"]*wall-clock[^"]*"/);
+    assert.match(col.label, /title="[^"]*DB Time[^"]*"/);
 });

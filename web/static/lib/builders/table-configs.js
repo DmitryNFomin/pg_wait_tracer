@@ -535,7 +535,20 @@ export function makeQueriesConfig(fidelity) {
                   filterValue: r.query_id,
                   label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
             { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
-            { key: 'backend_activity_span', label: 'Backend activity', sortable: false,
+            /* Reviewer finding: `Closed · 0.4 s` renders directly beside
+             * `DB Time 4.2 s`, and nothing in the cell or the header said one
+             * is an OBSERVED WALL-CLOCK SPAN of one backend's activity while
+             * the other is a SUMMED wait + CPU total across every execution.
+             * Read as "another time next to DB Time" it trades #455's missing
+             * 714 s for a new ambiguity, so the qualifier is in the header
+             * text itself -- not left to be inferred from the drill's
+             * Measurement/Completion wording. */
+            { key: 'backend_activity_span', sortable: false,
+              label: 'Backend activity <span class="col-qualifier" title="' +
+                  'One backend&#39;s observed wall-clock activity span, from ' +
+                  'CMD_START/CMD_END timestamps. NOT comparable to DB Time, ' +
+                  'which sums wait and CPU time across every execution of ' +
+                  'this query, and never an average.">(observed span)</span>',
               cls: 'backend-activity-cell', format: (r) => backendActivityHtml(r) },
             { key: 'pct', label: QUERIES_PCT_LABEL, cls: 'num', format: (r) => fmtPct(r.pct) },
             { key: 'classes', label: 'Wait Profile', format: (r) =>

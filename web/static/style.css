@@ -978,6 +978,13 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
 .backend-activity-scope { color: var(--text-muted, #aaa); }
 .backend-activity-panel { margin: 12px 0; padding: 12px; border: 1px solid #444; }
 .backend-activity-panel h3, .backend-activity-panel p { margin: 0 0 8px; }
+/* Collapsed by default (reviewer finding): the same default state Waterfall
+ * uses for this concept. The summary is the only thing the pane pays for
+ * until the reader asks for the spans. */
+details.backend-activity-panel > summary { cursor: pointer; color: #bbb; }
+/* The header qualifier that keeps `Closed · 0.4 s` from reading as a second
+ * DB Time: visible, not a tooltip-only fact. */
+.col-qualifier { color: #888; font-weight: 400; font-size: 10px; white-space: nowrap; }
 /* The Waterfall instance carries no box of its own: that pane is already
  * 940 of the demo viewport's 981 px at 907e070, and #415 requires the
  * drilled readout above the fold with the pane NOT scrollable. The panel's

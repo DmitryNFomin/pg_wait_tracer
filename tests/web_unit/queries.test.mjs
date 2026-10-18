@@ -254,7 +254,13 @@ const span455 = { measurement: 'partial', completion: 'in_flight', pid: 1234,
 const scope455 = 'whole-query: observed command boundaries';
 function activityCell(row) {
     const model = buildQueriesModel({ rows: [q(row)] }, null);
-    const index = model.table.headers.findIndex(h => h.label === 'Backend activity');
+    // startsWith, not ===: the reviewer's fix 2 appended a visible
+    // "(observed span)" qualifier (with its title=) to the header text, so
+    // the exact-match lookup stopped finding the column. The assertion this
+    // helper guards -- the column sits immediately after DB Time -- is
+    // unchanged, and still fails if the column disappears or moves.
+    const index = model.table.headers.findIndex(
+        h => typeof h.label === 'string' && h.label.startsWith('Backend activity'));
     assert.equal(index, model.table.headers.findIndex(h => h.label === 'DB Time') + 1);
     return model.table.rows[0].cells[index].html;
 }
