@@ -8,6 +8,7 @@ import {
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     executionsStatusLabel, execScopeNoteHtml,
 } from '../lib/builders/waterfall.js';
+import { backendActivityHtml } from '../lib/builders/backend-span.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
 import { attachSelection } from '../lib/selection.js';
@@ -69,6 +70,7 @@ export function createWaterfallView() {
             '<section class="waterfall-pane">' +
             ' <div class="waterfall-banner"><span>Plain drag zooms this loaded execution; ' +
             'double-click restores it.</span><span id="waterfall-zoom-state"></span></div>' +
+            ' <div id="waterfall-backend-activity" class="backend-activity-panel"></div>' +
             ' <div id="waterfall-truncation"></div>' +
             ' <div id="waterfall-chart"></div>' +
             ' <div id="waterfall-readout" class="chart-readout">Click a bar to inspect it.</div>' +
@@ -248,7 +250,10 @@ export function createWaterfallView() {
                 executionEnd: data.detailEnd,
             }) : null;
             return { table, waterfall: wf, detail: data.detail,
-                selected: data.selected, detailEnd: data.detailEnd };
+                selected: data.selected, detailEnd: data.detailEnd,
+                backendActivity: data.selected ? '<strong>Containing leader backend activity</strong><br>' +
+                    backendActivityHtml(data.detail && Object.hasOwn(data.detail, 'backend_activity_span')
+                        ? data.detail : data.selected, true) : '' };
         },
 
         mount(el, model, ctx) {
@@ -262,6 +267,7 @@ export function createWaterfallView() {
             }
             ensureShell(el);
             updateSortControl();
+            document.getElementById('waterfall-backend-activity').innerHTML = model.backendActivity || '';
             const countsLabel = document.getElementById('executions-counts-label');
             if (countsLabel) {
                 const text = executionsStatusLabel(

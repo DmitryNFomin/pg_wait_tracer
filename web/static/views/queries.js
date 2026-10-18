@@ -23,6 +23,8 @@ import {
     buildUnattributedNote, unattributedNoteHtml, queriesScopeNoteHtml,
 } from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
+import { backendActivityHtml } from '../lib/builders/backend-span.js';
+import { esc } from '../lib/format.js';
 import { shiftWindow } from '../lib/camera.js';
 import { settleBaseline } from '../lib/compare-request.js';
 import { fidelityOf } from '../lib/builders/fidelity.js';
@@ -52,6 +54,7 @@ export function buildQueriesModel(data, sort, orderTracker) {
             queryConfig: config,
             paneFidelity: buildPaneFidelity(primary),
             unattributedNote: buildUnattributedNote(primary),
+            backendActivity: buildQueriesBackendActivityHtml(primary),
             truncation: buildTruncationRow(primary),
             baselineUnavailable: true,
         };
@@ -80,6 +83,7 @@ export function buildQueriesModel(data, sort, orderTracker) {
         queryConfig: config,
         paneFidelity: buildPaneFidelity(data),
         unattributedNote: buildUnattributedNote(data),
+        backendActivity: buildQueriesBackendActivityHtml(data),
         truncation: buildTruncationRow(data),
     };
 }
@@ -98,7 +102,42 @@ export function buildQueriesEmptyStateHtml(model) {
         '<div class="loading">' + (model.baselinePredates
             ? 'Baseline unavailable for comparison'
             : 'No data for selected range') + '</div>' +
-        (model.compare ? '' : unattributedNoteHtml(model.unattributedNote));
+        (model.compare ? '' : unattributedNoteHtml(model.unattributedNote) + (model.backendActivity || ''));
+}
+
+/* The panel is independent of rows/execution counts: a pre-executor wait
+ * can be the only captured activity. Cap DOM size and disclose the bound. */
+export function buildQueriesBackendActivityHtml(data) {
+    if (!data) return '';
+    const entries = [];
+    const add = (source, label) => {
+        if (!source) return;
+        if (Object.hasOwn(source, 'backend_activity_span')) entries.push({ row: source, label });
+        const detail = source.span_detail || source;
+        for (const key of ['scoped_spans', 'leader_spans', 'worker_spans']) {
+            for (const span of (Array.isArray(detail[key]) ? detail[key] : [])) {
+                entries.push({ row: { backend_activity_span: span,
+                    backend_activity_span_scope: source.backend_activity_span_scope || data.backend_activity_scope },
+                    label: label + ' · ' + key.replace('_spans', '') });
+            }
+        }
+    };
+    add(data, 'Selected scope');
+    for (const row of data.rows || []) add(row, 'Query ' + row.query_id);
+    if (!entries.length && data.backend_activity_available == null) return '';
+    const limit = 50;
+    const counts = [
+        ['backend_activity_spans', 'spans'], ['backend_activity_inflight', 'in flight'],
+        ['backend_activity_unmeasured', 'not measured'],
+    ].filter(([key]) => Number.isFinite(data[key])).map(([key, label]) => data[key] + ' ' + label);
+    return '<section class="backend-activity-panel"><h3>Backend activity</h3>' +
+        (data.backend_activity_scope ? '<p>Scope: ' + esc(data.backend_activity_scope) + '</p>' : '') +
+        (counts.length ? '<p>' + counts.join(' · ') + '</p>' : '') +
+        (!entries.length ? '<p>Not measured</p>' : '') +
+        (entries.length > limit ? '<p>Showing ' + limit + ' of ' + entries.length + ' span entries.</p>' : '') +
+        '<div class="backend-activity-spans">' + entries.slice(0, limit).map(({ row, label }) =>
+            '<details open><summary>' + esc(label) + '</summary>' +
+            backendActivityHtml(row, true) + '</details>').join('') + '</div></section>';
 }
 
 export function createQueriesView() {
@@ -170,7 +209,7 @@ export function createQueriesView() {
                                : paneFidelityBadgeHtml(model.paneFidelity)));
             // #439: disclosed beside the table, not folded into %/omitted.
             if (!model.compare) el.insertAdjacentHTML('beforeend',
-                unattributedNoteHtml(model.unattributedNote));
+                unattributedNoteHtml(model.unattributedNote) + (model.backendActivity || ''));
             // #455: DB Time and Exec/Plan time different things (a wait
             // acquired before execution starts is in the former, never the
             // latter) -- static, so it is shown every time the live

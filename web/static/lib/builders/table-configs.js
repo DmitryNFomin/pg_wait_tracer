@@ -21,6 +21,8 @@ import {
 } from '../format.js';
 import { dot, pctBar, stackedBar, eventStackedBar, createStableOrder } from '../table.js';
 
+import { backendActivityHtml } from './backend-span.js';
+
 const _dot = (name) => dot(name, classColor);
 
 function fmtSignedMs(ms) {
@@ -533,6 +535,8 @@ export function makeQueriesConfig(fidelity) {
                   filterValue: r.query_id,
                   label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
             { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
+            { key: 'backend_activity_span', label: 'Backend activity', sortable: false,
+              cls: 'backend-activity-cell', format: (r) => backendActivityHtml(r) },
             { key: 'pct', label: QUERIES_PCT_LABEL, cls: 'num', format: (r) => fmtPct(r.pct) },
             { key: 'classes', label: 'Wait Profile', format: (r) =>
                 r.events ? eventStackedBar(r.events, r.total_ms, eventColor, fmtMs)

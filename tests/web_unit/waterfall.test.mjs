@@ -359,3 +359,70 @@ test('#455 execScopeNoteHtml discloses that a pre-execution wait is not in Durat
     assert.ok(/before execution/i.test(html), html);
     assert.ok(html.includes('exec-scope-note'), html);
 });
+
+// Exercise the live view's model and mount, including empty event lanes.
+import { createWaterfallView } from '../../web/static/views/waterfall.js';
+function mountSpan455(row, extraDetail = {}) {
+    const elements = new Map();
+    const element = id => {
+        if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', style: {},
+            addEventListener() {}, getBoundingClientRect() { return { top: 0, bottom: 0, height: 0 }; } });
+        return elements.get(id);
+    };
+    Object.defineProperty(element('root'), 'innerHTML', { set(html) {
+        for (const match of html.matchAll(/id="([^"]+)"/g)) element(match[1]);
+    } });
+    const previous = globalThis.document;
+    globalThis.document = { getElementById: id => elements.get(id) || null,
+        querySelector: selector => selector === '.execution-list' ? null : element(selector) };
+    try {
+        const view = createWaterfallView();
+        const selected = { pid: 1234, start_ns: at(0), end_ns: at(20_000_000), ...row };
+        const data = { executions: { rows: [selected] }, selected, detailEnd: selected.end_ns,
+            detail: { leader: { pid: 1234, events: [] }, workers: [], ...extraDetail } };
+        const model = view.build(data);
+        view.mount(element('root'), model, { mountTable() {} });
+        return elements.get('waterfall-backend-activity').innerHTML;
+    } finally { globalThis.document = previous; }
+}
+const wfSpan455 = { measurement: 'partial', completion: 'in_flight', pid: 1234,
+    start_observed: true, end_observed: false, observed_elapsed_ms: 714000,
+    completed_duration_ms: 999999, executions_count: 0 };
+test('#455 gate 1: Waterfall mounts the selected leader null reason and scope', () => {
+    const html = mountSpan455({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'the backend span pass refused <unsafe>',
+        backend_activity_span_scope: 'whole-query' }, {
+        worker_spans: [{ ...wfSpan455, pid: 999 }] });
+    assert.match(html, /the backend span pass refused &lt;unsafe&gt;/);
+    assert.match(html, /whole-query/);
+    assert.doesNotMatch(html, /PID 999/);
+});
+test('#455 gates 2/3: Waterfall span survives zero executions/events and shows observed elapsed only', () => {
+    const html = mountSpan455({ backend_activity_span: wfSpan455 });
+    for (const text of ['PID 1234', '0 observed executions', '714.0 s observed',
+        'Measurement: Partial', 'Completion: In flight']) assert.ok(html.includes(text), html);
+    assert.doesNotMatch(html, /1000.0|999999|Closed/);
+});
+test('#455 gate 4: Waterfall readout ignores hostile aggregate totals', () => {
+    const base = { backend_activity_span: wfSpan455 };
+    const hostile = { ...base, db_time_ms: 720400, execs: 91,
+        backend_activity_span: { ...wfSpan455, db_time_ms: 720400, execs: 91 } };
+    assert.equal(mountSpan455(base), mountSpan455(hostile));
+    assert.doesNotMatch(mountSpan455(hostile), /7\.9/);
+});
+test('#455 gate 5: Waterfall renders nine distinct status states', () => {
+    const states = new Set();
+    for (const measurement of ['measured', 'partial', 'unmeasured'])
+        for (const completion of ['closed', 'in_flight', 'unknown'])
+            states.add(mountSpan455({ backend_activity_span: { ...wfSpan455, measurement, completion } }));
+    assert.equal(states.size, 9);
+});
+
+test('#455 execution detail is authoritative, including an explicit null span', () => {
+    const html = mountSpan455({ backend_activity_span: wfSpan455 }, {
+        backend_activity_span: null, backend_activity_unavailable_reason: 'detail pass refused',
+        backend_activity_span_scope: 'containing leader command' });
+    assert.match(html, /detail pass refused/);
+    assert.match(html, /containing leader command/);
+    assert.doesNotMatch(html, /714.0/);
+});

@@ -1,19 +1,13 @@
 /* Node unit tests for the pure backend-span builder
  * (lib/builders/backend-span.js) — the UI-side rendering rules for #455's
- * "Backend active span" feature. This module is PROVISIONAL and not yet
- * wired into the live Queries row/drill or Waterfall views: see the file's
- * own doc comment for why (no live backend-span branch/PR existed at the
- * time this was written to read the actual wire field names from).
- *
- * These tests prove the RULES both #455 briefs agree on hold over the
- * documented placeholder input shape, so wiring the real fields in later is
- * a rename, not a redesign.
+ * "Backend active span" feature and its wire envelope. The live Queries
+ * and Waterfall mount gates are in their respective view test files.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     backendActivityStatus, backendActivityLine, backendActivityDrillModel,
-    backendActivityDrillHtml, waterfallSpanReadout,
+    backendActivityDrillHtml, waterfallSpanReadout, backendActivityHtml,
 } from '../../web/static/lib/builders/backend-span.js';
 
 // ── Null/missing safety: never blank, never a crash ─────────────────────────
@@ -227,11 +221,47 @@ test('waterfallSpanReadout and the drill-panel HTML are IDENTICAL for the '
         backendActivityDrillHtml(backendActivityDrillModel(span)));
 });
 
-test('waterfallSpanReadout(null) renders the empty string, not a crash', () => {
+test('waterfallSpanReadout(null) renders Not measured, not a crash', () => {
     assert.equal(waterfallSpanReadout(null), backendActivityDrillHtml(backendActivityDrillModel(null)));
     assert.ok(waterfallSpanReadout(null).includes('Not measured'));
 });
 
 test('backendActivityDrillHtml(null): empty string, no crash', () => {
     assert.equal(backendActivityDrillHtml(null), '');
+});
+
+test('#455 gate 5: rendered measurement × completion matrix has nine distinct states', () => {
+    const states = new Set();
+    for (const measurement of ['measured', 'partial', 'unmeasured']) {
+        for (const completion of ['closed', 'in_flight', 'unknown']) {
+            const html = waterfallSpanReadout({ measurement, completion,
+                completed_duration_ms: 2000, observed_elapsed_ms: 1000 });
+            assert.ok(html.trim());
+            states.add(html);
+        }
+    }
+    assert.equal(states.size, 9);
+});
+
+test('#455 wire envelope: null reason and scope are visible and escaped', () => {
+    const html = backendActivityHtml({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'refused <script>',
+        backend_activity_span_scope: '<whole-query>' });
+    assert.match(html, /Not measured/);
+    assert.match(html, /refused &lt;script&gt;/);
+    assert.match(html, /Scope: &lt;whole-query&gt;/);
+});
+
+test('#455 wire envelope: hostile totals leave compact and detail HTML byte-identical', () => {
+    const span = { measurement: 'measured', completion: 'in_flight',
+        observed_elapsed_ms: 714000, completed_duration_ms: 999999, executions_count: 0 };
+    const base = { backend_activity_span: span };
+    const hostile = { db_time_ms: 720400, execs: 91, backend_activity_span: {
+        ...span, db_time_ms: 720400, execs: 91 } };
+    for (const detail of [false, true]) {
+        const html = backendActivityHtml(hostile, detail);
+        assert.equal(html, backendActivityHtml(base, detail));
+        assert.match(html, /714.0 s observed/);
+        assert.doesNotMatch(html, /7\.9|1000.0|999999/);
+    }
 });

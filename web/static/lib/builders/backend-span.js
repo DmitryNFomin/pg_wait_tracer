@@ -1,21 +1,10 @@
 /* pgwt — pure builder: backend active span rendering (issue #455's UI half).
  *
- * PROVISIONAL / NOT YET WIRED into the live Queries row cell, Queries drill
- * panel or Waterfall view. The backend half of #455 ("Task A: Backend active
- * span", branch agent/backend-span, src/backend_span.c) owns the actual wire
- * shape and had not landed a response contract this agent could read at the
- * time this module was written -- there was no live branch/PR to coordinate
- * the field names against, only the shared issue text both halves were
- * briefed from. Rather than guess field names into table-configs.js /
- * queries.js / waterfall.js and risk a silent dead cell (wrong names =>
- * nothing ever renders) or a collision with whatever the backend agent picks,
- * this module implements and tests the RENDERING RULES the issue mandates
- * over a documented placeholder input shape. Wiring it into the three live
- * surfaces becomes a rename to the real field names, not a redesign, once
- * the backend's response is known — see the PR body / design questions for
- * the owner.
+ * Shared by the Queries row, its bounded detail panel and Waterfall.
+ * The response wraps each span in backend_activity_span, with a nullable
+ * span, backend_activity_unavailable_reason and backend_activity_span_scope.
  *
- * ASSUMED INPUT SHAPE (`span`, nullable/partial fields allowed throughout):
+ * SPAN INPUT (`span`, nullable/partial fields allowed throughout):
  *   {
  *     measurement: 'measured' | 'partial' | 'unmeasured',
  *     completion:  'closed' | 'in_flight' | 'unknown',
@@ -46,6 +35,8 @@
  *     — the drill model always states a count (including 0), never omits
  *     the line because the count happens to be zero.
  */
+
+import { esc } from '../format.js';
 
 function fmtSpanSeconds(ms) {
     if (ms == null || !Number.isFinite(ms)) return null;
@@ -121,7 +112,7 @@ export function backendActivityDrillModel(span) {
 
 export function backendActivityDrillHtml(model) {
     if (!model) return '';
-    const parts = [model.headline];
+    const parts = [model.headline, backendActivityAxesHtml(model)];
     const meta = [];
     if (model.pid != null) meta.push('PID ' + model.pid);
     meta.push(model.startText);
@@ -138,4 +129,25 @@ export function backendActivityDrillHtml(model) {
  * identical fact. */
 export function waterfallSpanReadout(span) {
     return backendActivityDrillHtml(backendActivityDrillModel(span));
+}
+
+/* Keep both axes visible even when the duration headline is Not measured. */
+function backendActivityAxesHtml(status) {
+    const measurements = { measured: 'Measured', partial: 'Partial', unmeasured: 'Not measured' };
+    const completions = { closed: 'Closed', in_flight: 'In flight', unknown: 'Unknown' };
+    return 'Measurement: ' + (measurements[status.measurement] || 'Not measured') +
+        ' · Completion: ' + (completions[status.completion] || 'Unknown');
+}
+
+/* Wire envelope shared by the table and detail readouts. Server prose is
+ * escaped here; neither aggregate DB Time nor execution totals are read. */
+export function backendActivityHtml(row, detail = false) {
+    const span = row && row.backend_activity_span;
+    const content = span
+        ? (detail ? waterfallSpanReadout(span)
+            : backendActivityLine(span) + '<br>' + backendActivityAxesHtml(backendActivityStatus(span)))
+        : 'Not measured' + (row && row.backend_activity_unavailable_reason
+            ? '<br>' + esc(row.backend_activity_unavailable_reason) : '');
+    return content + (row && row.backend_activity_span_scope
+        ? '<br><span class="backend-activity-scope">Scope: ' + esc(row.backend_activity_span_scope) + '</span>' : '');
 }
