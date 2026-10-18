@@ -470,6 +470,36 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
   overflow-x: auto;
 }
 
+/* #454: Events-only. The percentile-bound disclosure (.pctl-overflow-banner,
+ * .pctl-basis-note) used to be appended AFTER every row inside
+ * #table-container, which has no height bound of its own -- on a dense
+ * fixture the note sat below however many rows the window returned, below
+ * the fold, reachable only by scrolling the WHOLE page past the table. It
+ * now lives in `.events-notes`, a sibling that never scrolls, ABOVE a
+ * bounded `.events-table-scroll` that owns its own scrollbar; the note is
+ * visible the instant the tab paints and the table's last row stays
+ * reachable by scrolling the (smaller) table body instead of the page.
+ * Deliberately scoped to these two classes, not `#table-container table` or
+ * `#table-container thead` globally -- sessions/queries/overview keep
+ * today's unbounded, whole-page-scrolls layout untouched. The 100vh calc is
+ * the header (~64px) + AAS chart strip + tabs + summary bar + this view's own
+ * top/bottom padding; 260px is a conservative accounting of that chrome
+ * (verified against the demo viewport in make ui-gallery, not computed from
+ * a DOM measurement -- there is no live layout to query from pure CSS). */
+.events-notes:empty { display: none; }
+.events-notes { padding-top: 10px; }
+.events-table-scroll {
+  max-height: calc(100vh - 260px);
+  min-height: 160px;
+  overflow: auto;
+}
+.events-table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #16213e;
+}
+
 /* B6 execution waterfall / scatter / transition matrix. */
 .view-title {
   padding: 10px 12px 7px;

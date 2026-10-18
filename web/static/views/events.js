@@ -142,7 +142,26 @@ export function createEventsView() {
                 return;
             }
             const config = model.compare ? compareEventsConfig : eventsConfig;
-            ctx.mountTable(el, config, model.table, {
+            /* #454: the percentile-bound disclosure must be visible WITHOUT
+             * scrolling a dense table to its last row, so it lives in a
+             * fixed-position band OUTSIDE the table's own scrolling body
+             * (.events-table-scroll, style.css) rather than appended after
+             * every row via insertAdjacentHTML('beforeend', ...) on `el`
+             * itself -- that put it below however many rows the window
+             * returned, unreachable on a dense fixture without scrolling
+             * the whole page past the table. `el` now holds two siblings:
+             * a non-scrolling notes band (top) and the bounded, independently
+             * scrollable table body (sticky header via style.css) -- the
+             * final row stays reachable by scrolling the table, not the page. */
+            el.innerHTML = '<div class="events-notes">' +
+                baselineUnavailableHtml(model.baselineUnavailable) +
+                (model.compare ? compareFidelityHtml(model.compareFidelity)
+                               : paneFidelityBadgeHtml(model.paneFidelity)) +
+                (model.compare ? '' : percentileBasisHtml(model.percentileBasis) +
+                                       overflowNoteHtml(model.overflowNote)) +
+                '</div><div class="events-table-scroll"></div>';
+            const scrollEl = el.querySelector('.events-table-scroll');
+            ctx.mountTable(scrollEl, config, model.table, {
                 sort: model.compare ? model.sort : ctx.getSort('events'),
                 onSort: (key) => { ctx.toggleSort('events', key); ctx.refresh(); },
                 onRowClick: (row) => {
@@ -154,13 +173,6 @@ export function createEventsView() {
                 truncation: model.truncation,
                 tooltipEl: ctx.tooltipEl,
             });
-            el.insertAdjacentHTML('afterbegin',
-                baselineUnavailableHtml(model.baselineUnavailable) +
-                (model.compare ? compareFidelityHtml(model.compareFidelity)
-                               : paneFidelityBadgeHtml(model.paneFidelity)));
-            if (!model.compare) el.insertAdjacentHTML('beforeend',
-                percentileBasisHtml(model.percentileBasis) +
-                overflowNoteHtml(model.overflowNote));
         },
 
         enter() { /* no chart */ },

@@ -155,8 +155,10 @@ ms); `gallery-transitions-variants-html` and
 clamps silently renormalize proportions, and sub-1% segments must not lie);
 `gallery-table-configs-events-overflow-pctl` (a percentile that landed in the
 latency histogram's OPEN-ENDED top bucket is a bound, not a value: it must read
-`≥16.4ms` and say why in its tooltip, while rows inside the histogram are
-untouched — printing it bare put `P50=P95=P99=16.4ms` next to an Avg of 1.8 s).
+`≥16.4ms` and say why in its tooltip; #454: every OTHER, finite bucket is a
+bound too, rendered `≤16.4ms` with its own explanation — printing either bare
+put `P50=P95=P99=16.4ms` next to an Avg of 1.8 s, or a `P50` reading above the
+row's own exact `Max`).
 
 **Historical instances:** rainbow heatmap ramp reusing class hues as intensity
 (P8); EVENT_PALETTE hues colliding with class meanings (P2); "Other"
