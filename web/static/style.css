@@ -978,6 +978,13 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
 .backend-activity-scope { color: var(--text-muted, #aaa); }
 .backend-activity-panel { margin: 12px 0; padding: 12px; border: 1px solid #444; }
 .backend-activity-panel h3, .backend-activity-panel p { margin: 0 0 8px; }
+/* The Waterfall instance carries no box of its own: that pane is already
+ * 940 of the demo viewport's 981 px at 907e070, and #415 requires the
+ * drilled readout above the fold with the pane NOT scrollable. The panel's
+ * 12px margins + 12px padding + border cost 50 px, which alone broke that
+ * guarantee; collapsed and borderless it costs ~14. */
+.backend-activity-inline { margin: 4px 0 0; padding: 0; border: 0; font-size: 11px; }
+.backend-activity-inline summary { cursor: pointer; color: #888; }
 .backend-activity-spans { max-height: 320px; overflow: auto; }
 .backend-activity-spans details { padding: 8px 0; border-top: 1px solid #444; }
 .backend-activity-spans summary { cursor: pointer; }

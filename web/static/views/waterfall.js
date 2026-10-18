@@ -70,10 +70,19 @@ export function createWaterfallView() {
             '<section class="waterfall-pane">' +
             ' <div class="waterfall-banner"><span>Plain drag zooms this loaded execution; ' +
             'double-click restores it.</span><span id="waterfall-zoom-state"></span></div>' +
-            ' <div id="waterfall-backend-activity" class="backend-activity-panel"></div>' +
             ' <div id="waterfall-truncation"></div>' +
             ' <div id="waterfall-chart"></div>' +
             ' <div id="waterfall-readout" class="chart-readout">Click a bar to inspect it.</div>' +
+            // Integration finding: this panel sat ABOVE the chart. Empty, it
+            // cost nothing -- and it WAS empty until piece 3 taught the mock
+            // (and the real server) to send execution_detail's
+            // backend_activity_span. Populated it is 134 px tall, which pushed
+            // the ECharts canvas from top=675 to top=747 in the gated
+            // 1280x900 viewport: canvas bottom 979, i.e. 79 px below the fold,
+            // and the per-bar readout became unreachable (tests/test_web_ui.py
+            // "bar click opened compact readout"). It belongs beside the
+            // per-bar readout anyway: both are detail about what is selected.
+            ' <div id="waterfall-backend-activity" class="backend-activity-inline"></div>' +
             '</section>';
         // Wired once against the persisted shell (like the chart's drag
         // listener above): sortMode is a `let` in this closure, so the
@@ -251,9 +260,20 @@ export function createWaterfallView() {
             }) : null;
             return { table, waterfall: wf, detail: data.detail,
                 selected: data.selected, detailEnd: data.detailEnd,
-                backendActivity: data.selected ? '<strong>Containing leader backend activity</strong><br>' +
-                    backendActivityHtml(data.detail && Object.hasOwn(data.detail, 'backend_activity_span')
-                        ? data.detail : data.selected, true) : '' };
+                // Collapsed by default: #415 requires the drilled readout
+                // above the fold AND the pane not scrollable at the demo
+                // viewport (981 px). Expanded, this panel is 134 px and
+                // breaks both -- measured, see the shell comment below.
+                // Collapsed it costs one summary line and the span is one
+                // click away, which keeps #455's information and #415's
+                // guarantee at the same time.
+                backendActivity: data.selected
+                    ? '<details><summary>Containing leader backend activity</summary>' +
+                        backendActivityHtml(
+                            data.detail && Object.hasOwn(data.detail, 'backend_activity_span')
+                                ? data.detail : data.selected, true) +
+                        '</details>'
+                    : '' };
         },
 
         mount(el, model, ctx) {
