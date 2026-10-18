@@ -50,6 +50,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_tick_drain \
             test_window_overlap \
             test_semantics_wire \
+            test_backend_span \
             test_open_overlay \
             test_replay_window \
             test_open_interval \
@@ -814,7 +815,12 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
 
 # Exercise the actual server gate/loader/response against reader-decoded
 # block aggregates from the same two-block file (command state crosses blocks).
+# backend_span.o is in this list because src/server.c calls pgwt_span_* since
+# #455: EVERY target that includes ../src/server.c links it, so leaving it out
+# breaks test_transitions_loader / test_top_wait_backfill / test_window_overlap
+# / test_semantics_wire / test_backend_span at link time, not at run time.
 TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
+    backend_span.o \
     event_reader.o event_writer.o summary_writer.o summary_reader.o \
     wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
@@ -867,6 +873,27 @@ test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_
 # test_window_overlap, so the real handlers, loader and routing gate run.
 test_semantics_wire: test_semantics_wire.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_backend_span: #455 -- the BACKEND ACTIVE SPAN. Drives the real
+# top_queries / span_detail / execution_detail handlers over a trace holding
+# the defect's own shape (91 completed short executions plus a different pid
+# blocked 714 s before executor entry), asserts the span's identity,
+# boundaries, status and ZERO contained executions exactly, then feeds the
+# SAME oracle five mutations (duration = DB Time / Execs, span withheld
+# without an EXEC_START, window end substituted for CMD_END, worker time
+# added to the leader, every CMD marker removed) and requires each to go
+# red. Section 7 is the bypass suite: empty input, unordered input, an
+# absent span, an unresolvable identity and an injected allocation failure
+# at every point must REFUSE with a reason, never approve.
+# backend_span.o comes from $(TRANSITIONS_LOADER_OBJS) (see the note there):
+# linking ../src/backend_span.c in on top of it would be a duplicate symbol.
+# Server build, no BPF, no live PG; ~2 s. `./test_backend_span bench`
+# measures the reducer over a synthetic 900 s capture; that number is
+# printed, never asserted.
+test_backend_span: test_backend_span.c ../src/server.c ../src/backend_span.c \
+                   $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< \
+	    $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction
 # (O(events in window) -> O(blocks x distinct pairs)). Deliberately NOT in
