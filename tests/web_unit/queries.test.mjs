@@ -53,9 +53,9 @@ test('events present -> event stacked bar; only classes -> class stacked bar', (
         events: [{ name: 'CPU*', ms: 60 }, { name: 'IO:DataFileRead', ms: 40 }] })] }, null);
     const withClasses = buildQueriesModel({ rows: [q({ total_ms: 100,
         classes: [60, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0] })] }, null);
-    // Waterfall is deliberately early, so Wait Profile is column 6 (index 5).
-    assert.ok(withEvents.table.rows[0].cells[5].html.includes('stacked-bar'));
-    assert.ok(withClasses.table.rows[0].cells[5].html.includes('stacked-bar'));
+    // Locate by label so adding adjacent diagnostic columns preserves this check.
+    assert.ok(withEvents.table.rows[0].cells[withEvents.table.headers.findIndex(h => h.label === 'Wait Profile')].html.includes('stacked-bar'));
+    assert.ok(withClasses.table.rows[0].cells[withClasses.table.headers.findIndex(h => h.label === 'Wait Profile')].html.includes('stacked-bar'));
 });
 
 test('long query text gets a qt-hover cell carrying the full text', () => {
@@ -246,4 +246,78 @@ test('#455 queriesScopeNoteHtml discloses DB Time includes a pre-execution wait'
     assert.ok(/before execution/i.test(html), html);
     assert.ok(/DB Time/.test(html), html);
     assert.ok(html.includes('exec-scope-note'), html);
+});
+
+const span455 = { measurement: 'partial', completion: 'in_flight', pid: 1234,
+    start_observed: false, end_observed: false, observed_elapsed_ms: 714000,
+    completed_duration_ms: 999999, executions_count: 0 };
+const scope455 = 'whole-query: observed command boundaries';
+function activityCell(row) {
+    const model = buildQueriesModel({ rows: [q(row)] }, null);
+    const index = model.table.headers.findIndex(h => h.label === 'Backend activity');
+    assert.equal(index, model.table.headers.findIndex(h => h.label === 'DB Time') + 1);
+    return model.table.rows[0].cells[index].html;
+}
+function mountQueries(data) {
+    const el = { innerHTML: '', insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
+    const view = createQueriesView();
+    const ctx = { ...fakeCtx(null), mountTable() {}, summaryEl: null };
+    view.mount(el, view.build(data, ctx), ctx);
+    return el.innerHTML;
+}
+test('#455 gate 1: null span renders the reason and visible scope in Queries row', () => {
+    const html = activityCell({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'the backend span pass refused <unsafe>',
+        backend_activity_span_scope: scope455 });
+    assert.match(html, /the backend span pass refused &lt;unsafe&gt;/);
+    assert.ok(html.includes(scope455));
+    assert.match(html, /Not measured/);
+});
+test('#455 gate 2: Queries drill mounts a full span with ZERO executions and preserves unattributed state', () => {
+    const html = mountQueries({ rows: [], backend_activity_available: true,
+        backend_activity_spans: 1, backend_activity_inflight: 1, backend_activity_unmeasured: 0,
+        backend_activity_scope: scope455, span_detail: { scoped_spans: [span455] },
+        unattributed_available: true, unattributed_ms: 5000, unattributed_count: 1 });
+    for (const text of ['Backend activity', 'PID 1234', '0 observed executions',
+        'Start not captured', 'end not observed', 'Partial', 'In flight', scope455,
+        'not attributed to any query']) assert.ok(html.includes(text), text + ': ' + html);
+});
+test('#455 gate 3: Queries in-flight cell shows observed elapsed, never completed duration', () => {
+    const html = activityCell({ backend_activity_span: span455 });
+    assert.match(html, /714.0 s observed/);
+    assert.doesNotMatch(html, /1000.0|999999|Closed/);
+});
+test('#455 gate 4: hostile totals cannot affect Backend activity cell or drill', () => {
+    const base = { backend_activity_span: span455, backend_activity_span_scope: scope455 };
+    const hostile = { ...base, db_time_ms: 720400, execs: 91,
+        backend_activity_span: { ...span455, db_time_ms: 720400, execs: 91 } };
+    assert.equal(activityCell(base), activityCell(hostile));
+    assert.equal(mountQueries({ rows: [q(base)] }), mountQueries({ rows: [q(hostile)] }));
+    assert.doesNotMatch(activityCell(hostile) + mountQueries({ rows: [q(hostile)] }), /7\.9/);
+});
+test('#455 gate 5: Queries cells distinguish all nine status combinations', () => {
+    const states = new Set();
+    for (const measurement of ['measured', 'partial', 'unmeasured'])
+        for (const completion of ['closed', 'in_flight', 'unknown'])
+            states.add(activityCell({ backend_activity_span: { ...span455, measurement, completion } }));
+    assert.equal(states.size, 9);
+});
+
+test('#455 populated Queries pane mounts row detail, including unavailable spans', () => {
+    const html = mountQueries({ rows: [q({ query_id: '42', backend_activity_span: null,
+        backend_activity_unavailable_reason: 'command boundaries were not captured',
+        backend_activity_span_scope: scope455 })] });
+    assert.match(html, /Query 42/);
+    assert.match(html, /command boundaries were not captured/);
+    assert.ok(html.includes(scope455));
+});
+test('#455 Queries drill lists leader/worker spans with an explicit rendering bound', () => {
+    const html = mountQueries({ rows: [], backend_activity_available: true,
+        span_detail: { leader_spans: [span455], worker_spans: Array.from({ length: 55 },
+            (_, i) => ({ ...span455, pid: 2000 + i })) } });
+    assert.match(html, /Showing 50 of 56 span entries/);
+    assert.match(html, /Selected scope · leader/);
+    assert.match(html, /Selected scope · worker/);
+    assert.equal((html.match(/<details open>/g) || []).length, 50);
+    assert.doesNotMatch(html, /PID 2054/);
 });

@@ -916,3 +916,12 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
 .unavailable-status { margin-top: 12px; font-size: 12px; min-height: 16px; }
 .unavailable-status.ok { color: #4f4; }
 .unavailable-status.err { color: #ff8a80; }
+
+/* Backend spans remain readable beside the numeric DB Time column. */
+.backend-activity-cell { min-width: 230px; max-width: 340px; white-space: normal; }
+.backend-activity-scope { color: var(--text-muted, #aaa); }
+.backend-activity-panel { margin: 12px 0; padding: 12px; border: 1px solid #444; }
+.backend-activity-panel h3, .backend-activity-panel p { margin: 0 0 8px; }
+.backend-activity-spans { max-height: 320px; overflow: auto; }
+.backend-activity-spans details { padding: 8px 0; border-top: 1px solid #444; }
+.backend-activity-spans summary { cursor: pointer; }
