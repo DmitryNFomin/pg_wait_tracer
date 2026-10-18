@@ -1,0 +1,114 @@
+Footage-only capture mode
+========================
+
+Usage (default is OFF):
+  python3 tests/ui_live_smoke.py --url http://localhost:8384/ \
+    --footage-only --out-dir tests/results/footage
+
+Direct callers: run_tab(..., footage_only=True).
+
+Footage takes zero page screenshots, including Timeline's extra pre-mount
+capture. It retains geometry/scroll preparation, navigation, readiness,
+blind-window canvas/DOM check, render checks, tick targets, fresh-mount waits,
+absolute sweep deadlines, legend checks, leak probes, and video finalization.
+The removed capture work no longer consumes time; no artificial delay replaces
+it. The capture helpers themselves are byte-identical to 907e070.
+
+Image-dependent results have ok=null and the literal explanation
+"not evaluated in footage mode": no_blink (including measured coverage),
+capture_budget, frame_dims and frame_spacing. blink_sweep carries the same
+explanation, as does each Timeline pre-mount diagnostic. The gate stays ok=false; known-failing exemptions cannot turn it
+green. footage_complete reports artifact completion separately. Exit 0 means
+the footage visit completed, its non-image checks succeeded, and its video was
+finalized; it is NOT a passing rehearsal. The counted rehearsals are the
+evidence. Footage is an artifact; the gate is separate.
+
+The CLI requires a separate output directory, rejects the gating directory,
+its ancestors/descendants and symlink aliases before deletion, and rejects
+--diag-data / --inject-blink-ms combinations before starting a browser/server.
+
+Fast checks
+-----------
+  python3 tests/test_ui_live_smoke_footage.py
+  python3 tests/test_ui_live_smoke_footage.py --mutations
+
+The registered suite exercises the actual run_tab and helpers with a browser
+protocol model, all 11 tabs, six ticks each. The baseline fixture preserves
+every executable statement of run_tab at 907e070; only comments and its long
+docstring were removed via ast.unparse. It needs no git history in CI.
+Capture helper SHA256 checks pin the shared capture functions separately.
+The model uses a 5s live cadence and a 90ms screenshot cost; these are modeled
+times, not measurements of Chromium or a live daemon.
+
+Observed RED -> GREEN
+---------------------
+Initial new tests against unchanged 907e070: three errors, each rejecting the
+absent footage_only argument. Implementing the flag made those tests green.
+
+1. Default screenshot count: duplicate each capture -> RED: 60 != 30,
+   "overview: default screenshot count changed". Restore -> GREEN.
+   Default timing: add 60ms before every capture -> RED:
+   "overview: default timing/protocol changed". Restore -> GREEN.
+   Final default comparison: exact protocol trace, modeled timestamps and
+   result payload equality to the baseline on all 11 tabs; 30 screenshots/tab,
+   36 for Timeline (336 total over 66 ticks).
+2. Footage: initially absent -> RED; implemented -> GREEN. Exactly zero
+   screenshots on all 11 tabs; six ticks/tab, navigation, mount-wait arguments
+   and consumed mounts unchanged; same absolute sweep deadlines.
+3. Negative A: leave exactly ONE screenshot live in footage -> RED:
+   "1 != 0 : overview: footage screenshot count". Restore -> GREEN.
+4. Negative B: omit frame_dims' explanation while leaving ok=null -> RED:
+   "None != 'not evaluated in footage mode' : overview: frame_dims needs
+   explicit report". Restore -> GREEN.
+5. Negative C: footage waits for every SECOND live tick -> RED: first target
+   2 at 11000ms vs target 1 at 6000ms, "overview: tick cadence/navigation".
+   Restore -> GREEN.
+
+All mutations operate on executable source in memory, exercise the same real
+run_tab, and require an AssertionError from the relevant guard. Unexpected
+exceptions or surviving mutations fail the mutation runner. No mutated source
+is left in the checkout.
+
+Final test output
+-----------------
+  test_ui_live_smoke_footage.py: Ran 11 tests ... OK
+  --mutations: 5/5 mutations rejected; 5/5 restored guards passed
+  test_ui_live_smoke_lib.py: Ran 414, passed 414, failed 0
+  test_ui_live_smoke_nav.py: Ran 46, passed 46, failed 0
+  test_demo_rehearsal_diag.py: 8/8 passed, 0 failed
+  test_demo_walk_recorder.py: Ran 43 tests ... OK
+  test_unit_import_guard.py: 19 Python imports checked; 66 shell/C entries skipped
+  git diff --check: clean
+
+Real-browser timing: BLOCKED, not GREEN
+--------------------------------------
+Playwright/Chromium were installed locally under tests/.footage-venv, but
+Chromium aborts before a page opens under this environment's macOS sandbox:
+  FATAL:base/apple/mach_port_rendezvous_mac.cc:159
+  bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer...:
+  Permission denied (1100)
+
+No real-browser timing samples were collected. Statistical indistinguishability
+of actual per-tick browser timing is therefore NOT established here, and no
+live footage/video quality claim is made. Exact modeled timing equality and
+unchanged capture source do not substitute for that measurement.
+
+The reproducible browser gate is supplied for an environment permitting
+Chromium (defaults: all 11 tabs, six ticks, three repetitions per mode):
+  python3 tests/footage_capture_gate.py --mock \
+    --out-dir tests/results/footage-browser-comparison
+Or replace --mock with --url pointing at the real UI. It retains per-visit
+videos, results, screenshot counts, navigation/tick/mount observations and raw
+per-tick timing. It compares original/default/footage visits and tests default
+capture-cost and first-sample timing distributions per tab. Statistical
+non-rejection is reported as such, not as proof of equivalence. It refuses
+missing samples and fails on browser launch errors; no timing.json is emitted
+on the blocked run.
+
+Retained evidence (relative to this file):
+  results/footage-mode/initial-red.txt
+  results/footage-mode/green.txt
+  results/footage-mode/mutations.txt
+  results/footage-mode/browser-blocked.txt
+  results/footage-mode/test_*.log
+  results/footage-mode/change.patch

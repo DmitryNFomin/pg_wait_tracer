@@ -1160,13 +1160,52 @@ def _assert_workload_alive(pgbench_pid, workload_pid, where):
             sys.exit(1)
 
 
+FOOTAGE_NOT_EVALUATED = "not evaluated in footage mode"
+
+
+def _wait_footage_offset(page, base_ts_ms, offset_ms):
+    """Keep the sweep's absolute deadlines without calling a capture API.
+
+    The gated _capture_at_offset stays untouched, including its cost.
+    No synthetic capture latency: only the removed captures cease to take time.
+    """
+    target_ms = base_ts_ms + offset_ms
+    now_ms = page.evaluate("Date.now()")
+    if target_ms > now_ms:
+        page.wait_for_timeout(target_ms - now_ms)
+        page.evaluate("Date.now()")
+
+
+def _mark_footage_result(result, ticks_observed, ticks_requested, video_path):
+    """Unevaluated image checks can never yield a green gate, even on errors."""
+    result["footage_only"] = True
+    result["footage_complete"] = (
+        video_path is not None and "error" not in result
+        and ticks_observed == ticks_requested
+        and all(result[key]["ok"] is True for key in
+                ("rendered", "clean", "no_leak", "color_stability", "first_paint")))
+    result["ok"] = False
+    result["known_failing"] = False
+    result["xpass"] = False
+    result["ticks_observed"] = ticks_observed
+    for key in ("no_blink", "capture_budget", "frame_dims", "frame_spacing"):
+        result[key]["ok"] = None
+        result[key]["detail"] = FOOTAGE_NOT_EVALUATED
+    result["no_blink"]["measured"].update(
+        ok=None, measured_count=0, detail=FOOTAGE_NOT_EVALUATED)
+    result["blink_sweep"]["detail"] = FOOTAGE_NOT_EVALUATED
+    for diagnostic in result["pre_mount_diagnostic"]:
+        diagnostic["note"] = FOOTAGE_NOT_EVALUATED
+
+
 # ── one tab's walk ───────────────────────────────────────────────────────────
 
 def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_threshold, viewport=None, device_scale_factor=None,
             inject_blink_ms=None, inject_tick=None,
             inject_blink_frac=DEFAULT_INJECT_BLINK_FRAC,
-            inject_frame_index=lib.INJECT_FRAME_INDEX, diag_data=False):
+            inject_frame_index=lib.INJECT_FRAME_INDEX, diag_data=False,
+            footage_only=False):
     """inject_blink_ms/inject_tick (issue #252 self-test, off by default --
     None/None, the value every real gating caller -- tests/ui_live_smoke.sh,
     demo_rehearsal.py -- passes, so this is a strict addition with no effect
@@ -1255,6 +1294,13 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     requested" / "assert the effective zoom too"): a request that never
     actually reached browser.new_context() must fail loudly here, not read
     as a silent, plausible-looking pass."""
+    # Footage is an artifact; the gate is separate. The footage walk's own
+    # checks are NOT the evidence -- the counted rehearsals are. Clipped
+    # screenshots disturb the attached video recorder; replacing them with
+    # full-viewport captures increases gated capture cost. Footage therefore
+    # performs zero CDP captures, without changing the normal capture path.
+    if footage_only and (diag_data or inject_blink_ms is not None):
+        raise ValueError("footage mode cannot evaluate screenshot diagnostics or blink injection")
     req_width = viewport["width"] if viewport else 1280
     req_height = viewport["height"] if viewport else 900
     req_dsf = device_scale_factor if device_scale_factor is not None else 1
@@ -1278,6 +1324,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     pgwt_errors = []
     tick_paths = []
     video_path = None
+    footage_ticks = 0
     # None until _navigate_to_tab's own return sets it below -- if a
     # SmokeFailure fires before then (or navigation itself fails), the
     # except branch below passes this unmeasured None through rather than
@@ -1447,7 +1494,10 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             pre_mount_frame = None
             pre_mount_seq_after = None
             if tab_id == "timeline":
-                pre_mount_frame, _pre_mount_dims = _safe_panel_screenshot(page, tab_id)
+                if not footage_only:
+                    pre_mount_frame, _pre_mount_dims = _safe_panel_screenshot(page, tab_id)
+                else:
+                    _panel_clip_and_dims(page, tab_id)  # retain the same scroll/geometry prep
                 m_after = _view_mount(page)
                 pre_mount_seq_after = m_after["seq"] if m_after is not None else None
 
@@ -1571,9 +1621,13 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 # lib.frame_data_certified). Both reads are skipped entirely
                 # unless --diag-data asked for them.
                 probe_before = _panel_data_probe(page, tab_id) if diag_data else None
-                frame, achieved, capture_ms, end_clock_ms = _capture_at_offset(
-                    page, tab_id, mount_at_ms, offset, sweep_clip,
-                    read_end_clock=injector is not None or diag_data)
+                if footage_only:
+                    _wait_footage_offset(page, mount_at_ms, offset)
+                    frame, achieved, capture_ms, end_clock_ms = None, None, None, None
+                else:
+                    frame, achieved, capture_ms, end_clock_ms = _capture_at_offset(
+                        page, tab_id, mount_at_ms, offset, sweep_clip,
+                        read_end_clock=injector is not None or diag_data)
                 probe_after = _panel_data_probe(page, tab_id) if diag_data else None
                 if injector is not None:
                     injector.after_frame(frame_index)
@@ -1622,8 +1676,11 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                     pre_mount_arr, sweep_first_arr, pre_mount_seq_after, mount["seq"])
                 pre_mount_diagnostics.append({"tick": i, **sig})
 
-            ratio, blink_note = lib.blink_sweep_gate_verdict(
-                sweep_arrays, seq_before_sweep, seq_after_sweep)
+            if footage_only:
+                ratio, blink_note = None, FOOTAGE_NOT_EVALUATED
+            else:
+                ratio, blink_note = lib.blink_sweep_gate_verdict(
+                    sweep_arrays, seq_before_sweep, seq_after_sweep)
             if blink_note:
                 print(f"  note [{tab_id}] tick {i}: {blink_note}")
             if ratio is None:
@@ -1706,12 +1763,13 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                           f"cells_differing={pr['data'].get('cells_differing')} "
                           f"sum {pr['data'].get('sum_a')}->{pr['data'].get('sum_b')}")
 
-            blink_sweep_ticks.append(
-                lib.build_sweep_tick_record(sweep_achieved_ms, sweep_arrays,
-                                            target_offsets_ms=sweep_offsets,
-                                            capture_ms=sweep_capture_ms,
-                                            mount_seq=mount["seq"],
-                                            panel_dims=sweep_dims))
+            if not footage_only:
+                blink_sweep_ticks.append(
+                    lib.build_sweep_tick_record(sweep_achieved_ms, sweep_arrays,
+                                                target_offsets_ms=sweep_offsets,
+                                                capture_ms=sweep_capture_ms,
+                                                mount_seq=mount["seq"],
+                                                panel_dims=sweep_dims))
 
             # The sweep's smallest-offset frame doubles as this tick's
             # artifact PNG (closest analogue to the old gating pair's
@@ -1722,6 +1780,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                     f.write(sweep_raw_frames[0])
                 tick_paths.append(tick_path)
 
+            if footage_only:
+                footage_ticks += 1
             legend = page.evaluate(LEGEND_COLORS_JS)
             if legend:
                 legend_ticks.append(legend)
@@ -1791,6 +1851,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 print(f"  note: could not finalize video for {tab_id}: {e}",
                       file=sys.stderr)
 
+    if footage_only:
+        _mark_footage_result(result, footage_ticks, ticks, video_path)
     result["artifacts"] = {"frames": tick_paths, "video": video_path}
     return result
 
@@ -1804,6 +1866,9 @@ def main():
                     "(phase 2: the real Go bridge)")
     ap.add_argument("--mock", action="store_true",
                     help="start tests/mock_server.py and walk against it")
+    ap.add_argument("--footage-only", action="store_true",
+                    help="record video with zero screenshots; image checks are "
+                         "not evaluated in footage mode (requires a non-gating --out-dir)")
     ap.add_argument("--out-dir", default=None,
                     help=f"artifact directory (default {RESULTS_DIR} for "
                     f"--url, {MOCK_RESULTS_DIR} for --mock -- kept separate "
@@ -1911,6 +1976,16 @@ def main():
     if bool(args.url) == bool(args.mock):
         ap.error("exactly one of --url or --mock is required")
 
+    if args.footage_only and (args.diag_data or args.inject_blink_ms is not None):
+        ap.error("--footage-only cannot be combined with --diag-data or --inject-blink-ms")
+    if args.footage_only:
+        if not args.out_dir:
+            ap.error("--footage-only requires a non-gating --out-dir")
+        gate_dir = os.path.realpath(RESULTS_DIR)
+        footage_dir = os.path.realpath(args.out_dir)
+        if os.path.commonpath([gate_dir, footage_dir]) in (gate_dir, footage_dir):
+            ap.error("--footage-only requires an --out-dir separate from the gating results tree")
+
     mock_proc = None
     if args.mock:
         mock_proc = start_mock_server(MOCK_PORT)
@@ -1989,12 +2064,16 @@ def main():
                                                   if inject_here else None),
                                      inject_blink_frac=args.inject_blink_frac,
                                      inject_frame_index=args.inject_frame,
-                                     diag_data=args.diag_data)
+                                     diag_data=args.diag_data,
+                                     footage_only=args.footage_only)
                     results.append(result)
                     _assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                            f"after tab {tab_id!r}")
                     kf_line = lib.known_failing_report_line(tab_id, result["ok"])
                     status = kf_line if kf_line else ("PASS" if result["ok"] else "FAIL")
+                    if args.footage_only:
+                        status = ("FOOTAGE RECORDED" if result["footage_complete"] else "FOOTAGE FAILED")
+                        print(f"  image checks: {FOOTAGE_NOT_EVALUATED}")
                     print(f"  {status} [{tab_id}] "
                           f"ticks={result['ticks_observed']} "
                           f"rendered={result['rendered']}")
@@ -2017,6 +2096,18 @@ def main():
 
     summary_path = os.path.join(out_dir, "summary.json")
     summary = lib.write_summary(summary_path, results)
+    if args.footage_only:
+        summary.update(footage_only=True, ok=False,
+                       detail=FOOTAGE_NOT_EVALUATED,
+                       footage_complete=bool(results) and all(
+                           r["footage_complete"] for r in results))
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"  footage: {'RECORDED' if summary['footage_complete'] else 'FAILED'}")
+        print(f"  image checks: {FOOTAGE_NOT_EVALUATED}")
+        print(f"  summary: {summary_path}")
+        return 0 if summary["footage_complete"] else 1
 
     # issue #252 self-test (off unless --inject-blink-ms was given): pull
     # the injected tab's self_test verdict up to a top-level summary.json

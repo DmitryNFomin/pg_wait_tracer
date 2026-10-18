@@ -219,6 +219,7 @@ test_replay_fidelity
 test_sampled_overhead_gate.py
 test_data_query_text_context.py
 test_ui_live_smoke_lib.py
+test_ui_live_smoke_footage.py
 # #202 review: the pure parsers behind test_multi_window's conservation
 # check. The old whole-output, last-writer-wins parse merged two ticks and
 # MANUFACTURED positive excess inside that check (+13.3% on the fixture).
