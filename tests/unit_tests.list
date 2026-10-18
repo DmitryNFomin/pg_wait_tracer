@@ -125,6 +125,18 @@ test_variants_p95
 # test exercises the real code rather than a copy. Includes the bypass suite
 # (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
 # allocation failures that must come back ABSENT rather than short).
+# Section 5 is #459: the same scan kept ONE open execution timestamp and ONE
+# query id per pid, so an inner EXEC_START overwrote the outer start, the
+# inner EXEC_END spent it, and the outer EXEC_END contributed nothing --
+# Avg Exec reported the INNER statement's duration as the whole query's,
+# while Waterfall (a per-pid STACK since #222) showed the right span beside
+# it; a PLAN_START inside an execution re-keyed it to the planned query.
+# Per-phase per-pid stacks now carry timestamp AND identity. Carries its own
+# bypass suite: three mutant oracles (pre-fix single slot, shared query id,
+# no CMD_END clear) that must each disagree with the real code, the FLAT
+# fixture that is blind to all three, allocation-failure refusals on the new
+# stacks, and a cross-check against pgwt_compute_executions with provenance
+# that nested and inferred rows really existed.
 test_pid_cap
 # #363: pgwt_tag_events was `void` and could stop partway — a working
 # allocation failure, or a window with more distinct pids than its per-pid

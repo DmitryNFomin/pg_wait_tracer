@@ -1,5 +1,7 @@
 /* test_pid_cap.c — #275: the two per-PID execution-lifecycle tables that
- * silently dropped every PID past the 512th.
+ * silently dropped every PID past the 512th, and #459 (section 5): the
+ * per-PID lifecycle state that could hold only ONE open execution, so a
+ * NESTED one hid the outer statement's whole duration.
  *
  * THE DEFECT. `handle_top_queries` (src/server.c) kept
  * `struct {...} pid_st[512]` with a linear probe and
@@ -509,9 +511,827 @@ static void s4_7_empty_and_absent_inputs(void)
     free(v.variants);
 }
 
+/* ── Section 5: #459 — nested executions ──────────────────────────────────
+ *
+ * THE DEFECT. pgwt_compute_query_lifecycle kept ONE open execution
+ * timestamp and ONE query id per pid:
+ *
+ *     if (m == EXEC_START) { st->exec_start_ns = ts; st->qid = qid; }
+ *     else if (m == EXEC_END && st->exec_start_ns) { ... st->exec_start_ns = 0; }
+ *     else if (m == PLAN_START) { st->plan_start_ns = ts; st->qid = qid; }
+ *
+ * An inner EXEC_START overwrote the outer start; the inner EXEC_END spent
+ * it and zeroed the slot; the outer EXEC_END then saw exec_start_ns == 0
+ * and contributed NOTHING. The Queries tab therefore reported the INNER
+ * statement's duration as the whole query's Avg Exec, and under-counted
+ * exec_count by the nesting depth -- while Waterfall
+ * (pgwt_compute_executions, same markers, same window, a per-pid STACK
+ * since #222) showed the correct outer span right beside it. PLAN_START
+ * re-keyed the SAME `qid` the open execution was using, so a re-plan
+ * inside an execution credited the execution to the plan's query.
+ *
+ * WHY THESE FIXTURES. The gate is the brief's: outer A 0-100 ms, inner B
+ * 20-30 ms must yield A = 100 ms and B = 10 ms; with one shared query id,
+ * count = 2, total = 110 ms, average = 55 ms (inclusive execution
+ * durations, NOT additive DB Time -- the inner 10 ms is also inside the
+ * outer 100 ms, and this scan's contract is per-execution timing, not a
+ * time budget). 100/20/30 are chosen so no two of the four candidate
+ * answers coincide: correct {10,100}; pre-fix {10} alone; "outer start
+ * paired with inner end" {30}; "inner start paired with outer end" {80}.
+ *
+ * SECTION 5.6 IS THE BYPASS SUITE and it runs every time: three MUTANT
+ * oracles live in this file (the verbatim pre-fix single-slot rule, a
+ * stacks-but-shared-query-id rule, and a stacks-but-no-CMD_END-clear
+ * rule) and each must DISAGREE with the real code on the fixture that
+ * targets it. 5.6 also pins the one fixture that CANNOT see any of it: a
+ * FLAT fixture of two disjoint executions (100 ms then 10 ms) produces
+ * count = 2, total = 110 -- byte-identical to the nested gate's correct
+ * answer -- so a gate written on flat executions is satisfied while every
+ * mutation is present. 5.7 covers allocation failure on the new stacks
+ * (ABSENT, never short), and 5.8 the cases where the thing being checked
+ * is absent or malformed rather than wrong: an END with no START, an END
+ * that precedes its START (an unsigned wrap that `ms < 0` cannot catch),
+ * query id 0, and a marker-free stream.
+ *
+ * Synthetic timestamps, in-memory arrays, no clock, no I/O, no threads.
+ * Nothing here can be flaky.
+ */
+
+#define MS_NS      1000000ULL
+#define NEST_PID   51000u
+#define QID_BOTH   0xA0A0A0A0A0ULL   /* outer and inner: the same query */
+#define QID_OUTER  0xA1A1A1A1A1ULL
+#define QID_INNER  0xB2B2B2B2B2ULL
+#define QID_PLANQ  0xC3C3C3C3C3ULL
+
+/* outer [0,100] ms with inner [20,30] ms strictly inside it, then the
+ * CMD_END a real backend emits when it goes idle (both stacks already
+ * empty here -- 5.4 is where CMD_END has something to abandon). */
+static struct fixture build_nested(uint64_t outer_qid, uint64_t inner_qid)
+{
+    struct fixture fx = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START, t0, 0, outer_qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START,
+            t0 + 20 * MS_NS, 0, inner_qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 30 * MS_NS, 0, inner_qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 100 * MS_NS, 0, outer_qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_CMD_END,
+            t0 + 101 * MS_NS, 0, outer_qid);
+    return fx;
+}
+
+/* Two DISJOINT executions, 100 ms then 10 ms, on one query id. Same
+ * count, same total and the same two samples as the nested gate above --
+ * which is exactly why a flat fixture proves nothing (5.6). */
+static struct fixture build_flat(uint64_t qid)
+{
+    struct fixture fx = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START, t0, 0, qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 100 * MS_NS, 0, qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START,
+            t0 + 120 * MS_NS, 0, qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 130 * MS_NS, 0, qid);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_CMD_END,
+            t0 + 131 * MS_NS, 0, qid);
+    return fx;
+}
+
+/* An execution on QID_OUTER spanning [0,100] ms with a PLAN on a
+ * DIFFERENT query id, [10,15] ms, nested inside it -- a re-plan on a
+ * cache invalidation, or a nested statement's plan. */
+static struct fixture build_plan_inside_exec(void)
+{
+    struct fixture fx = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START, t0, 0, QID_OUTER);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_PLAN_START,
+            t0 + 10 * MS_NS, 0, QID_PLANQ);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_PLAN_END,
+            t0 + 15 * MS_NS, 0, QID_PLANQ);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 100 * MS_NS, 0, QID_OUTER);
+    return fx;
+}
+
+/* An execution that never reaches EXEC_END (an ERROR longjmp, a cancel,
+ * statement_timeout, or a dropped marker), its CMD_END, and then a
+ * genuine 20 ms execution on the same pid and query. */
+static struct fixture build_orphan_then_real(void)
+{
+    struct fixture fx = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START, t0, 0, QID_BOTH);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_CMD_END,
+            t0 + 50 * MS_NS, 0, QID_BOTH);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START,
+            t0 + 100 * MS_NS, 0, QID_BOTH);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 120 * MS_NS, 0, QID_BOTH);
+    return fx;
+}
+
+/* The orphan case the CMD_END clear is actually load-bearing for: a
+ * statement abandoned with no EXEC_END, its CMD_END, and then a LATER
+ * statement whose own EXEC_START was lost (a ringbuf drop) but whose
+ * EXEC_END arrives. With the stacks cleared at CMD_END the stray END pops
+ * nothing and contributes nothing. Without the clear, it pops the DEAD
+ * statement's start and credits 120 ms of someone else's command to the
+ * abandoned query -- pgwt_tag_events' own CMD_END handling exists for
+ * exactly this leak ("an EXEC_END lost to a ringbuf drop must not leak the
+ * window across statements", src/compute.c).
+ *
+ * Note which fixtures are BLIND to this: because the stacks are LIFO, a
+ * later statement that DOES have its own EXEC_START pops its own entry and
+ * leaves the orphan harmlessly underneath -- so build_orphan_then_real()
+ * above answers identically with and without the clear. Only an UNBALANCED
+ * end can reach the abandoned entry. */
+static struct fixture build_orphan_lost_start(void)
+{
+    struct fixture fx = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START, t0, 0, QID_OUTER);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_CMD_END,
+            t0 + 50 * MS_NS, 0, QID_OUTER);
+    fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 120 * MS_NS, 0, QID_INNER);
+    return fx;
+}
+
+/* Read one query's exec totals out of the real result. */
+static void real_exec(struct pgwt_lifecycle_result *r, uint64_t qid,
+                      int *count, double *total)
+{
+    struct pgwt_qid_lifecycle *lc = pgwt_lifecycle_lookup(r, qid);
+    *count = lc ? lc->exec_count : 0;
+    *total = lc ? lc->exec_total_ms : 0.0;
+}
+
+/* ── The mutant oracles (section 5.6) ─────────────────────────────────────
+ * Each is a complete alternative rule over the same event array, so the
+ * assertion "the real code disagrees with mutant M on fixture F" is the
+ * negative control for M, checked on every run rather than once by hand.
+ */
+#define ORACLE_PREFIX     0   /* one slot + one shared qid: the pre-#459 code */
+#define ORACLE_SHARED_QID 1   /* stacks, but ONE qid slot shared with PLAN */
+#define ORACLE_NO_CMDEND  2   /* stacks + per-entry qid, but CMD_END ignored */
+
+#define ORACLE_MAX_QID 64
+#define ORACLE_MAX_PID 16
+#define ORACLE_DEPTH   256
+
+struct oracle_qid { uint64_t qid; int exec_count, plan_count;
+                    double exec_total, plan_total; };
+struct oracle_out { struct oracle_qid q[ORACLE_MAX_QID]; int n; };
+
+static struct oracle_qid *oracle_slot(struct oracle_out *o, uint64_t qid)
+{
+    for (int i = 0; i < o->n; i++)
+        if (o->q[i].qid == qid) return &o->q[i];
+    if (o->n >= ORACLE_MAX_QID) { fprintf(stderr, "oracle qid overflow\n");
+                                  exit(2); }
+    struct oracle_qid *s = &o->q[o->n++];
+    memset(s, 0, sizeof(*s));
+    s->qid = qid;
+    return s;
+}
+
+static void oracle_run(const struct pgwt_trace_event *ev, int n, int mode,
+                       struct oracle_out *o)
+{
+    struct {
+        uint32_t pid; int used;
+        uint64_t exec_one, plan_one, shared_qid;          /* ORACLE_PREFIX */
+        uint64_t es[ORACLE_DEPTH], eq[ORACLE_DEPTH]; int ne;
+        uint64_t ps[ORACLE_DEPTH], pq[ORACLE_DEPTH]; int np;
+    } st[ORACLE_MAX_PID];
+    memset(st, 0, sizeof(st));
+    memset(o, 0, sizeof(*o));
+
+    for (int i = 0; i < n; i++) {
+        uint32_t m = ev[i].old_event;
+        if (!PGWT_IS_MARKER(m)) continue;
+        int pi = -1;
+        for (int k = 0; k < ORACLE_MAX_PID; k++) {
+            if (st[k].used && st[k].pid == ev[i].pid) { pi = k; break; }
+            if (!st[k].used) { st[k].used = 1; st[k].pid = ev[i].pid;
+                               pi = k; break; }
+        }
+        if (pi < 0) { fprintf(stderr, "oracle pid overflow\n"); exit(2); }
+
+        if (m == PGWT_MARKER_EXEC_START) {
+            if (mode == ORACLE_PREFIX) {
+                st[pi].exec_one = ev[i].timestamp_ns;
+                st[pi].shared_qid = ev[i].query_id;
+            } else {
+                if (st[pi].ne >= ORACLE_DEPTH) { fprintf(stderr,
+                        "oracle depth\n"); exit(2); }
+                st[pi].es[st[pi].ne] = ev[i].timestamp_ns;
+                st[pi].eq[st[pi].ne] = ev[i].query_id;
+                st[pi].ne++;
+                if (mode == ORACLE_SHARED_QID)
+                    st[pi].shared_qid = ev[i].query_id;
+            }
+        } else if (m == PGWT_MARKER_EXEC_END) {
+            uint64_t start, qid;
+            if (mode == ORACLE_PREFIX) {
+                if (!st[pi].exec_one) continue;
+                start = st[pi].exec_one;
+                qid = st[pi].shared_qid;
+                st[pi].exec_one = 0;
+            } else {
+                if (st[pi].ne <= 0) continue;
+                st[pi].ne--;
+                start = st[pi].es[st[pi].ne];
+                qid = mode == ORACLE_SHARED_QID ? st[pi].shared_qid
+                                                : st[pi].eq[st[pi].ne];
+            }
+            if (ev[i].timestamp_ns < start || qid == 0) continue;
+            struct oracle_qid *s = oracle_slot(o, qid);
+            s->exec_count++;
+            s->exec_total += (double)(ev[i].timestamp_ns - start) / 1e6;
+        } else if (m == PGWT_MARKER_PLAN_START) {
+            if (mode == ORACLE_PREFIX) {
+                st[pi].plan_one = ev[i].timestamp_ns;
+                st[pi].shared_qid = ev[i].query_id;
+            } else {
+                if (st[pi].np >= ORACLE_DEPTH) { fprintf(stderr,
+                        "oracle depth\n"); exit(2); }
+                st[pi].ps[st[pi].np] = ev[i].timestamp_ns;
+                st[pi].pq[st[pi].np] = ev[i].query_id;
+                st[pi].np++;
+                if (mode == ORACLE_SHARED_QID)
+                    st[pi].shared_qid = ev[i].query_id;
+            }
+        } else if (m == PGWT_MARKER_PLAN_END) {
+            uint64_t start, qid;
+            if (mode == ORACLE_PREFIX) {
+                if (!st[pi].plan_one) continue;
+                start = st[pi].plan_one;
+                qid = st[pi].shared_qid;
+                st[pi].plan_one = 0;
+            } else {
+                if (st[pi].np <= 0) continue;
+                st[pi].np--;
+                start = st[pi].ps[st[pi].np];
+                qid = mode == ORACLE_SHARED_QID ? st[pi].shared_qid
+                                                : st[pi].pq[st[pi].np];
+            }
+            if (ev[i].timestamp_ns < start || qid == 0) continue;
+            struct oracle_qid *s = oracle_slot(o, qid);
+            s->plan_count++;
+            s->plan_total += (double)(ev[i].timestamp_ns - start) / 1e6;
+        } else if (m == PGWT_MARKER_CMD_END && mode != ORACLE_NO_CMDEND) {
+            /* ORACLE_PREFIX never looked at CMD_END either, but leaving its
+             * single slot set would make it a DIFFERENT mutant than the one
+             * that shipped; clear it so 5.6's pre-fix numbers are the ones
+             * the old code really produced. */
+            st[pi].exec_one = 0;
+            st[pi].plan_one = 0;
+            st[pi].ne = 0;
+            st[pi].np = 0;
+        }
+    }
+}
+
+static void oracle_exec(const struct oracle_out *o, uint64_t qid,
+                        int *count, double *total)
+{
+    *count = 0; *total = 0.0;
+    for (int i = 0; i < o->n; i++)
+        if (o->q[i].qid == qid) { *count = o->q[i].exec_count;
+                                  *total = o->q[i].exec_total; return; }
+}
+
+/* ── 5.1 the gate ─────────────────────────────────────────────────────── */
+
+static void s5_1_nested_same_query(void)
+{
+    printf("\n5.1 #459 gate: outer [0,100] ms, inner [20,30] ms, one query\n");
+
+    struct fixture fx = build_nested(QID_BOTH, QID_BOTH);
+    struct pgwt_lifecycle_result r;
+    pgwt_compute_query_lifecycle(fx.ev, fx.n, &r);
+    CHECK(!r.failed, "nested scan did not fail");
+
+    struct pgwt_qid_lifecycle *lc = pgwt_lifecycle_lookup(&r, QID_BOTH);
+    CHECK(lc != NULL, "the nested query is present");
+    if (lc) {
+        CHECK_INT(lc->exec_count, 2,
+                  "count = 2: the OUTER end contributes too (pre-fix: 1)");
+        CHECK_DBL(lc->exec_total_ms, 110.0, 1e-9,
+                  "total = 110 ms = 100 (outer) + 10 (inner)");
+        CHECK_DBL(lc->exec_total_ms / lc->exec_count, 55.0, 1e-9,
+                  "average = 55 ms (server.c divides total by count)");
+        CHECK_INT(lc->exec_nsamples, 2, "both durations sampled");
+        if (lc->exec_nsamples == 2) {
+            pgwt_sort_doubles_asc(lc->exec_times, lc->exec_nsamples);
+            CHECK_DBL(lc->exec_times[0], 10.0, 1e-9,
+                      "inner sample = 10 ms exactly");
+            CHECK_DBL(lc->exec_times[1], 100.0, 1e-9,
+                      "outer sample = 100 ms exactly (not 80, not 30)");
+        }
+        /* The three wrong pairings this fixture is shaped to separate. */
+        int saw_80 = 0, saw_30 = 0;
+        for (int i = 0; i < lc->exec_nsamples; i++) {
+            if (fabs(lc->exec_times[i] - 80.0) < 1e-9) saw_80 = 1;
+            if (fabs(lc->exec_times[i] - 30.0) < 1e-9) saw_30 = 1;
+        }
+        CHECK(!saw_80, "no 80 ms sample (inner start paired with outer end)");
+        CHECK(!saw_30, "no 30 ms sample (outer start paired with inner end)");
+    }
+    pgwt_lifecycle_free(&r);
+    free(fx.ev);
+}
+
+/* ── 5.2 outer and inner are DIFFERENT queries ────────────────────────── */
+
+static void s5_2_nested_distinct_queries(void)
+{
+    printf("\n5.2 nesting across two query ids: each keeps its own span\n");
+
+    struct fixture fx = build_nested(QID_OUTER, QID_INNER);
+    struct pgwt_lifecycle_result r;
+    pgwt_compute_query_lifecycle(fx.ev, fx.n, &r);
+
+    int oc, ic; double ot, it;
+    real_exec(&r, QID_OUTER, &oc, &ot);
+    real_exec(&r, QID_INNER, &ic, &it);
+    CHECK_INT(oc, 1, "outer query: one execution (pre-fix: zero, ABSENT)");
+    CHECK_DBL(ot, 100.0, 1e-9, "outer query: 100 ms");
+    CHECK_INT(ic, 1, "inner query: one execution");
+    CHECK_DBL(it, 10.0, 1e-9, "inner query: 10 ms");
+    pgwt_lifecycle_free(&r);
+    free(fx.ev);
+}
+
+/* ── 5.3 a PLAN inside an execution must not re-key it ────────────────── */
+
+static void s5_3_plan_does_not_rekey_exec(void)
+{
+    printf("\n5.3 PLAN_START inside an open execution: separate identities\n");
+
+    struct fixture fx = build_plan_inside_exec();
+    struct pgwt_lifecycle_result r;
+    pgwt_compute_query_lifecycle(fx.ev, fx.n, &r);
+
+    struct pgwt_qid_lifecycle *outer = pgwt_lifecycle_lookup(&r, QID_OUTER);
+    struct pgwt_qid_lifecycle *planq = pgwt_lifecycle_lookup(&r, QID_PLANQ);
+    CHECK(outer != NULL,
+          "the EXECUTING query is present (pre-fix: credited to the PLAN's "
+          "query id, so this lookup was NULL)");
+    if (outer) {
+        CHECK_INT(outer->exec_count, 1, "executing query: one execution");
+        CHECK_DBL(outer->exec_total_ms, 100.0, 1e-9,
+                  "executing query: the full 100 ms");
+        CHECK_INT(outer->plan_count, 0,
+                  "executing query: no planning charged to it");
+    }
+    CHECK(planq != NULL, "the planned query is present");
+    if (planq) {
+        CHECK_INT(planq->plan_count, 1, "planned query: one plan");
+        CHECK_DBL(planq->plan_total_ms, 5.0, 1e-9, "planned query: 5 ms");
+        CHECK_INT(planq->exec_count, 0,
+                  "planned query: no EXECUTION charged to it (pre-fix: 1 "
+                  "execution of 100 ms)");
+    }
+    pgwt_lifecycle_free(&r);
+    free(fx.ev);
+}
+
+/* ── 5.4 CMD_END abandons, and does NOT count ─────────────────────────── */
+
+static void s5_4_cmd_end_abandons(void)
+{
+    printf("\n5.4 CMD_END drops abandoned entries without counting them\n");
+
+    struct fixture fx = build_orphan_then_real();
+    struct pgwt_lifecycle_result r;
+    pgwt_compute_query_lifecycle(fx.ev, fx.n, &r);
+    struct pgwt_qid_lifecycle *lc = pgwt_lifecycle_lookup(&r, QID_BOTH);
+    CHECK(lc != NULL, "the query that DID complete once is present");
+    if (lc) {
+        CHECK_INT(lc->exec_count, 1,
+                  "exactly one completed pair: the orphan is not counted");
+        CHECK_DBL(lc->exec_total_ms, 20.0, 1e-9,
+                  "20 ms, the measured pair -- not 120 ms (the real END "
+                  "popping the orphan's start) and not 50 ms (an inferred "
+                  "end at CMD_END)");
+    }
+    pgwt_lifecycle_free(&r);
+    free(fx.ev);
+
+    /* Nested, where only the INNER statement finished before the command
+     * died: the inner pair counts, the outer is abandoned and absent. */
+    struct fixture fx2 = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    fx_push(&fx2, &cap, NEST_PID, PGWT_MARKER_EXEC_START, t0, 0, QID_OUTER);
+    fx_push(&fx2, &cap, NEST_PID, PGWT_MARKER_EXEC_START,
+            t0 + 20 * MS_NS, 0, QID_INNER);
+    fx_push(&fx2, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 30 * MS_NS, 0, QID_INNER);
+    fx_push(&fx2, &cap, NEST_PID, PGWT_MARKER_CMD_END,
+            t0 + 40 * MS_NS, 0, QID_OUTER);
+    pgwt_compute_query_lifecycle(fx2.ev, fx2.n, &r);
+    int oc, ic; double ot, it;
+    real_exec(&r, QID_OUTER, &oc, &ot);
+    real_exec(&r, QID_INNER, &ic, &it);
+    CHECK(pgwt_lifecycle_lookup(&r, QID_OUTER) == NULL,
+          "the cancelled OUTER statement is absent, not an inferred 40 ms");
+    CHECK_INT(oc, 0, "cancelled outer: no execution counted");
+    CHECK_INT(ic, 1, "the inner statement that did finish still counts");
+    CHECK_DBL(it, 10.0, 1e-9, "inner: 10 ms");
+    pgwt_lifecycle_free(&r);
+    free(fx2.ev);
+
+    /* The leak the clear prevents: an abandoned statement, its CMD_END,
+     * then a stray EXEC_END from the NEXT command whose start was dropped.
+     * Nothing may be charged to either query. */
+    struct fixture fx3 = build_orphan_lost_start();
+    pgwt_compute_query_lifecycle(fx3.ev, fx3.n, &r);
+    CHECK(pgwt_lifecycle_lookup(&r, QID_OUTER) == NULL,
+          "a stray END after CMD_END charges the abandoned query NOTHING "
+          "(without the clear: 120 ms of another command's time)");
+    CHECK(pgwt_lifecycle_lookup(&r, QID_INNER) == NULL,
+          "...and nothing to the query the stray END named either");
+    CHECK_INT(r.n, 0, "the table is empty, not a zero row");
+    pgwt_lifecycle_free(&r);
+    free(fx3.ev);
+}
+
+/* ── 5.5 depth past the stack's initial capacity ──────────────────────── */
+
+#define DEEP 64
+
+static void s5_5_deep_nesting(void)
+{
+    printf("\n5.5 nesting %d deep (the stack starts at 8 and must grow)\n",
+           DEEP);
+
+    /* Execution k spans [k, 200-k] ms, so k nests strictly inside k-1 and
+     * every duration (200 - 2k ms) is distinct: a dropped level moves the
+     * total AND the sample set, never only the count. */
+    struct fixture fx = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    for (int k = 0; k < DEEP; k++)
+        fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_START,
+                t0 + (uint64_t)k * MS_NS, 0, QID_BOTH);
+    for (int k = DEEP - 1; k >= 0; k--)
+        fx_push(&fx, &cap, NEST_PID, PGWT_MARKER_EXEC_END,
+                t0 + (uint64_t)(200 - k) * MS_NS, 0, QID_BOTH);
+
+    struct pgwt_lifecycle_result r;
+    pgwt_compute_query_lifecycle(fx.ev, fx.n, &r);
+    CHECK(!r.failed, "deep scan did not fail");
+    struct pgwt_qid_lifecycle *lc = pgwt_lifecycle_lookup(&r, QID_BOTH);
+    CHECK(lc != NULL, "deep fixture produces an entry");
+    if (lc) {
+        CHECK_INT(lc->exec_count, DEEP, "every nesting level counted");
+        double want = 0;
+        for (int k = 0; k < DEEP; k++) want += (double)(200 - 2 * k);
+        CHECK_DBL(lc->exec_total_ms, want, 1e-9,
+                  "total is the sum of all 64 inclusive spans");
+        CHECK_INT(lc->exec_nsamples, DEEP, "every level sampled");
+        if (lc->exec_nsamples == DEEP) {
+            pgwt_sort_doubles_asc(lc->exec_times, lc->exec_nsamples);
+            CHECK_DBL(lc->exec_times[0], (double)(200 - 2 * (DEEP - 1)),
+                      1e-9, "innermost span is the smallest sample");
+            CHECK_DBL(lc->exec_times[DEEP - 1], 200.0, 1e-9,
+                      "outermost span is 200 ms");
+        }
+    }
+    pgwt_lifecycle_free(&r);
+    free(fx.ev);
+}
+
+/* ── 5.6 bypass suite: the mutants, and the fixture blind to all of them ─ */
+
+static void s5_6_negative_controls(void)
+{
+    printf("\n5.6 negative controls: each mutation must change the answer\n");
+
+    struct fixture nested = build_nested(QID_BOTH, QID_BOTH);
+    struct fixture flat   = build_flat(QID_BOTH);
+    struct fixture planfx = build_plan_inside_exec();
+    struct fixture orphan = build_orphan_lost_start();
+
+    struct pgwt_lifecycle_result rn, rf, rp, ro;
+    pgwt_compute_query_lifecycle(nested.ev, nested.n, &rn);
+    pgwt_compute_query_lifecycle(flat.ev,   flat.n,   &rf);
+    pgwt_compute_query_lifecycle(planfx.ev, planfx.n, &rp);
+    pgwt_compute_query_lifecycle(orphan.ev, orphan.n, &ro);
+
+    struct oracle_out o;
+    int rc, oc; double rt, ot;
+
+    /* Control 1 — restore the single execution timestamp. */
+    oracle_run(nested.ev, nested.n, ORACLE_PREFIX, &o);
+    real_exec(&rn, QID_BOTH, &rc, &rt);
+    oracle_exec(&o, QID_BOTH, &oc, &ot);
+    CHECK_INT(oc, 1, "single-slot mutant counts ONE execution on the "
+                     "nested fixture (the shipped defect)");
+    CHECK_DBL(ot, 10.0, 1e-9, "...and reports only the inner 10 ms");
+    CHECK(rc != oc && fabs(rt - ot) > 1e-9,
+          "CONTROL 1: the real code disagrees with the single-slot mutant "
+          "-- restoring one timestamp makes 5.1 fail");
+
+    /* Control 2 — restore the shared plan/exec query-id slot. */
+    oracle_run(planfx.ev, planfx.n, ORACLE_SHARED_QID, &o);
+    real_exec(&rp, QID_OUTER, &rc, &rt);
+    oracle_exec(&o, QID_OUTER, &oc, &ot);
+    CHECK_INT(oc, 0, "shared-qid mutant loses the executing query entirely");
+    CHECK_INT(rc, 1, "the real code keeps it");
+    CHECK(rc != oc,
+          "CONTROL 2: the real code disagrees with the shared-qid mutant "
+          "-- restoring one qid slot makes 5.3 fail");
+    oracle_exec(&o, QID_PLANQ, &oc, &ot);
+    CHECK(oc == 1 && fabs(ot - 100.0) < 1e-9,
+          "...and charges the outer 100 ms execution to the PLANNED query");
+
+    /* Control 3 — stop clearing abandoned entries at CMD_END. Needs an
+     * UNBALANCED end (see build_orphan_lost_start): with LIFO stacks a
+     * balanced later statement pops its own entry and cannot see the
+     * orphan, so the fixture has to be the stray-END one. */
+    oracle_run(orphan.ev, orphan.n, ORACLE_NO_CMDEND, &o);
+    real_exec(&ro, QID_OUTER, &rc, &rt);
+    oracle_exec(&o, QID_OUTER, &oc, &ot);
+    CHECK(oc == 1 && fabs(ot - 120.0) < 1e-9,
+          "no-CMD_END mutant pairs the stray END with the ORPHAN's start "
+          "and charges the abandoned query 120 ms");
+    CHECK_INT(rc, 0, "the real code charges it nothing");
+    CHECK(rc != oc && fabs(rt - ot) > 1e-9,
+          "CONTROL 3: the real code disagrees -- dropping the CMD_END clear "
+          "makes 5.4 fail");
+    /* And the clear must not be a blanket "drop everything": the same
+     * mutant AGREES on the balanced fixture, which is why 5.4 keeps both. */
+    struct fixture balanced = build_orphan_then_real();
+    struct pgwt_lifecycle_result rb;
+    pgwt_compute_query_lifecycle(balanced.ev, balanced.n, &rb);
+    oracle_run(balanced.ev, balanced.n, ORACLE_NO_CMDEND, &o);
+    real_exec(&rb, QID_BOTH, &rc, &rt);
+    oracle_exec(&o, QID_BOTH, &oc, &ot);
+    CHECK(rc == oc && fabs(rt - ot) < 1e-9,
+          "balanced orphan fixture: the no-CMD_END mutant AGREES (LIFO "
+          "already protects it) -- pinned so it is not mistaken for the "
+          "control");
+    pgwt_lifecycle_free(&rb);
+    free(balanced.ev);
+
+    /* THE BLIND FIXTURE. Two disjoint executions give count = 2 and
+     * total = 110 under the real code AND under every mutant above, so a
+     * gate built on flat executions is satisfied with all three defects
+     * present. Pinned here so nobody "simplifies" 5.1 into it. */
+    real_exec(&rf, QID_BOTH, &rc, &rt);
+    CHECK(rc == 2 && fabs(rt - 110.0) < 1e-9,
+          "flat fixture: count 2, total 110 -- identical to the nested "
+          "gate's CORRECT answer");
+    for (int mode = ORACLE_PREFIX; mode <= ORACLE_NO_CMDEND; mode++) {
+        oracle_run(flat.ev, flat.n, mode, &o);
+        oracle_exec(&o, QID_BOTH, &oc, &ot);
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "flat fixture: mutant %d agrees with the real code "
+                 "(count %d, total %.1f) -- a flat gate sees NOTHING",
+                 mode, oc, ot);
+        CHECK(oc == rc && fabs(ot - rt) < 1e-9, msg);
+    }
+
+    pgwt_lifecycle_free(&rn);
+    pgwt_lifecycle_free(&rf);
+    pgwt_lifecycle_free(&rp);
+    pgwt_lifecycle_free(&ro);
+    free(nested.ev); free(flat.ev); free(planfx.ev); free(orphan.ev);
+}
+
+/* ── 5.7 the new stacks' allocation failures refuse ───────────────────── */
+
+static void s5_7_stack_alloc_failure_refuses(void)
+{
+    printf("\n5.7 the per-pid phase stacks: allocation failure is a REFUSAL\n");
+
+    /* A dropped push is worse than a missing one: the next END would pop
+     * someone else's start. So the push has no "skip it" path at all --
+     * only a refusal. Both stacks allocate on their FIRST push (cap 0), so
+     * the injection is reached by the first marker of its kind. */
+    struct fixture fx = build_plan_inside_exec();
+
+    static const struct { const char *point; const char *what; } cases[] = {
+        { "lifecycle_exec_stack", "execution stack growth" },
+        { "lifecycle_plan_stack", "planning stack growth" },
+    };
+    for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        setenv("PGWT_TEST_ALLOC_FAIL", cases[c].point, 1);
+        struct pgwt_lifecycle_result r;
+        pgwt_compute_query_lifecycle(fx.ev, fx.n, &r);
+        unsetenv("PGWT_TEST_ALLOC_FAIL");
+        char msg[200];
+        snprintf(msg, sizeof(msg), "%s failure sets failed=1", cases[c].what);
+        CHECK(r.failed == 1, msg);
+        snprintf(msg, sizeof(msg), "%s failure yields NO partial table",
+                 cases[c].what);
+        CHECK(r.slots == NULL && r.n == 0, msg);
+        pgwt_lifecycle_free(&r);
+    }
+
+    /* The injection must be able to do nothing, or the two refusals above
+     * could be coming from somewhere else entirely. */
+    setenv("PGWT_TEST_ALLOC_FAIL", "lifecycle_no_such_stack", 1);
+    struct pgwt_lifecycle_result ok;
+    pgwt_compute_query_lifecycle(fx.ev, fx.n, &ok);
+    unsetenv("PGWT_TEST_ALLOC_FAIL");
+    CHECK(!ok.failed, "an unknown injection point changes nothing");
+    struct pgwt_qid_lifecycle *lc = pgwt_lifecycle_lookup(&ok, QID_OUTER);
+    CHECK(lc && lc->exec_count == 1 && fabs(lc->exec_total_ms - 100.0) < 1e-9,
+          "...and the uninjected answer is still the complete one");
+    pgwt_lifecycle_free(&ok);
+    free(fx.ev);
+}
+
+/* ── 5.8 absent and malformed, never wrong ────────────────────────────── */
+
+static void s5_8_absent_and_malformed(void)
+{
+    printf("\n5.8 absent / malformed marker streams\n");
+
+    uint64_t t0 = 1000000000ULL;
+
+    /* An EXEC_END with nothing open (a window that opens mid-execution, or
+     * a dropped EXEC_START): nothing, and certainly not a sample measured
+     * from zero. */
+    struct fixture a = {0}; int ca = 0;
+    fx_push(&a, &ca, NEST_PID, PGWT_MARKER_EXEC_END, t0, 0, QID_BOTH);
+    fx_push(&a, &ca, NEST_PID, PGWT_MARKER_EXEC_END, t0 + MS_NS, 0, QID_BOTH);
+    struct pgwt_lifecycle_result r;
+    pgwt_compute_query_lifecycle(a.ev, a.n, &r);
+    CHECK(!r.failed && pgwt_lifecycle_lookup(&r, QID_BOTH) == NULL,
+          "two ENDs with no START: absent, not a 1-second execution");
+    pgwt_lifecycle_free(&r);
+    free(a.ev);
+
+    /* An END that PRECEDES its start. The subtraction is unsigned, so the
+     * `ms < 0` filter in lifecycle_sample cannot see this -- it wraps to
+     * ~1.8e13 ms and would sit in the p99 forever. */
+    struct fixture b = {0}; int cb = 0;
+    fx_push(&b, &cb, NEST_PID, PGWT_MARKER_EXEC_START,
+            t0 + 50 * MS_NS, 0, QID_BOTH);
+    fx_push(&b, &cb, NEST_PID, PGWT_MARKER_EXEC_END,
+            t0 + 10 * MS_NS, 0, QID_BOTH);
+    pgwt_compute_query_lifecycle(b.ev, b.n, &r);
+    CHECK(pgwt_lifecycle_lookup(&r, QID_BOTH) == NULL,
+          "an END before its START is dropped, not wrapped into a "
+          "1.8e13 ms sample");
+    pgwt_lifecycle_free(&r);
+    free(b.ev);
+
+    /* Query id 0 keeps the pre-existing filtering policy: that pair is
+     * dropped, and dropping it must not disturb the one beside it. */
+    struct fixture c = build_nested(0, QID_INNER);
+    pgwt_compute_query_lifecycle(c.ev, c.n, &r);
+    int ic; double it;
+    real_exec(&r, QID_INNER, &ic, &it);
+    CHECK(pgwt_lifecycle_lookup(&r, 0) == NULL,
+          "query id 0 is still filtered out (policy unchanged)");
+    CHECK(ic == 1 && fabs(it - 10.0) < 1e-9,
+          "the qid-0 outer pair does not disturb the inner one");
+    pgwt_lifecycle_free(&r);
+    free(c.ev);
+
+    /* No markers at all: the lifecycle answer is ABSENT. */
+    struct fixture d = {0}; int cd = 0;
+    fx_push(&d, &cd, NEST_PID, WAIT_EVENT, t0, 1000, QID_BOTH);
+    pgwt_compute_query_lifecycle(d.ev, d.n, &r);
+    CHECK(!r.failed && r.n == 0,
+          "a marker-free window produces an EMPTY table, not a zero row");
+    pgwt_lifecycle_free(&r);
+    free(d.ev);
+}
+
+/* ── 5.9 the same markers through Waterfall must agree ────────────────── */
+
+static void s5_9_waterfall_crosscheck(void)
+{
+    printf("\n5.9 valid completed pairs agree with pgwt_compute_executions\n");
+
+    /* Three pids: each runs a nested pair (outer containing inner) and one
+     * flat execution, and pid 3 additionally abandons a statement that its
+     * CMD_END closes. Durations are distinct per pid so a swapped pairing
+     * on either side moves a total.
+     *
+     * The two computations are INDEPENDENT code paths over one array:
+     * pgwt_compute_query_lifecycle accumulates per query id, and
+     * pgwt_compute_executions materialises one row per execution. They are
+     * allowed to disagree about an INFERRED end (Waterfall shows such a row
+     * with end_inferred=1; the lifecycle scan drops it) -- so this compares
+     * MEASURED pairs only, and asserts below that an inferred row really
+     * existed to be excluded. */
+    struct fixture fx = {0};
+    int cap = 0;
+    uint64_t t0 = 1000000000ULL;
+    const uint64_t qid[3] = { 0x111ULL, 0x222ULL, 0x333ULL };
+    for (int p = 0; p < 3; p++) {
+        uint32_t pid = NEST_PID + (uint32_t)p;
+        uint64_t base = t0 + (uint64_t)p * 1000 * MS_NS;
+        uint64_t outer = (uint64_t)(40 + 10 * p);      /* ms */
+        uint64_t inner = (uint64_t)(5 + p);            /* ms */
+        fx_push(&fx, &cap, pid, PGWT_MARKER_EXEC_START, base, 0, qid[p]);
+        fx_push(&fx, &cap, pid, PGWT_MARKER_EXEC_START,
+                base + 10 * MS_NS, 0, qid[p]);
+        fx_push(&fx, &cap, pid, PGWT_MARKER_EXEC_END,
+                base + (10 + inner) * MS_NS, 0, qid[p]);
+        fx_push(&fx, &cap, pid, PGWT_MARKER_EXEC_END,
+                base + outer * MS_NS, 0, qid[p]);
+        fx_push(&fx, &cap, pid, PGWT_MARKER_CMD_END,
+                base + (outer + 1) * MS_NS, 0, qid[p]);
+        /* flat execution, 7+p ms */
+        fx_push(&fx, &cap, pid, PGWT_MARKER_EXEC_START,
+                base + 100 * MS_NS, 0, qid[p]);
+        fx_push(&fx, &cap, pid, PGWT_MARKER_EXEC_END,
+                base + (uint64_t)(107 + p) * MS_NS, 0, qid[p]);
+        fx_push(&fx, &cap, pid, PGWT_MARKER_CMD_END,
+                base + 110 * MS_NS, 0, qid[p]);
+        if (p == 2) {
+            /* abandoned statement: no EXEC_END, closed by CMD_END */
+            fx_push(&fx, &cap, pid, PGWT_MARKER_EXEC_START,
+                    base + 200 * MS_NS, 0, qid[p]);
+            fx_push(&fx, &cap, pid, PGWT_MARKER_CMD_END,
+                    base + 260 * MS_NS, 0, qid[p]);
+        }
+    }
+
+    struct pgwt_lifecycle_result r;
+    pgwt_compute_query_lifecycle(fx.ev, fx.n, &r);
+    CHECK(!r.failed, "lifecycle scan did not fail");
+
+    struct pgwt_executions_result xr;
+    pgwt_compute_executions(fx.ev, fx.n, t0 - 1000 * MS_NS,
+                            t0 + 10000 * MS_NS, NULL, NULL, 0, &xr);
+    CHECK(!xr.failed, "Waterfall extraction did not fail");
+
+    /* PROVENANCE: the comparison is only worth anything if Waterfall
+     * actually produced nested rows and an inferred one. */
+    int measured = 0, inferred = 0, nested = 0, in_progress = 0;
+    for (int i = 0; i < xr.num_rows; i++) {
+        if (xr.rows[i].in_progress) { in_progress++; continue; }
+        if (xr.rows[i].end_inferred) { inferred++; continue; }
+        measured++;
+        for (int j = 0; j < xr.num_rows; j++) {
+            if (j == i || xr.rows[j].pid != xr.rows[i].pid) continue;
+            if (xr.rows[j].in_progress) continue;
+            if (xr.rows[j].start_ns < xr.rows[i].start_ns &&
+                xr.rows[i].end_ns < xr.rows[j].end_ns) { nested++; break; }
+        }
+    }
+    CHECK_INT(xr.num_rows, 10, "Waterfall found every execution");
+    CHECK_INT(measured, 9, "9 measured pairs (3 pids x 3, minus the orphan)");
+    CHECK_INT(nested, 3, "3 of them are strictly nested inside another -- "
+                         "the comparison is NOT over a flat fixture");
+    CHECK_INT(inferred, 1, "1 CMD_END-closed row exists to be excluded");
+    CHECK_INT(in_progress, 0, "no row left open");
+
+    /* Per query id: the lifecycle totals must equal the sum of Waterfall's
+     * measured rows, and the counts must match. */
+    for (int p = 0; p < 3; p++) {
+        int wc = 0; double wt = 0;
+        for (int i = 0; i < xr.num_rows; i++) {
+            if (xr.rows[i].in_progress || xr.rows[i].end_inferred) continue;
+            if (xr.rows[i].query_id != qid[p]) continue;
+            wc++;
+            wt += (double)(xr.rows[i].end_ns - xr.rows[i].start_ns) / 1e6;
+        }
+        int lcc; double lct;
+        real_exec(&r, qid[p], &lcc, &lct);
+        char msg[180];
+        snprintf(msg, sizeof(msg),
+                 "qid 0x%llx: lifecycle count == Waterfall measured count",
+                 (unsigned long long)qid[p]);
+        CHECK_INT(lcc, wc, msg);
+        snprintf(msg, sizeof(msg),
+                 "qid 0x%llx: lifecycle total == sum of Waterfall spans",
+                 (unsigned long long)qid[p]);
+        CHECK_DBL(lct, wt, 1e-9, msg);
+        CHECK(wc == 3, "...and that count is 3, not 0 (non-vacuous)");
+    }
+
+    free(xr.rows);
+    pgwt_lifecycle_free(&r);
+    free(fx.ev);
+}
+
 int main(void)
 {
-    printf("=== test_pid_cap (#275) ===\n");
+    printf("=== test_pid_cap (#275, #459) ===\n");
     printf("NPIDS=%d (the pre-fix cap was 512)\n", NPIDS);
     if (NPIDS <= 512) {
         printf("REFUSE: the fixture does not exceed the old 512 cap, so it "
@@ -529,6 +1349,15 @@ int main(void)
     s4_5_variants_pid_first_seen_on_a_wait();
     s4_6_alloc_failure_refuses();
     s4_7_empty_and_absent_inputs();
+    s5_1_nested_same_query();
+    s5_2_nested_distinct_queries();
+    s5_3_plan_does_not_rekey_exec();
+    s5_4_cmd_end_abandons();
+    s5_5_deep_nesting();
+    s5_6_negative_controls();
+    s5_7_stack_alloc_failure_refuses();
+    s5_8_absent_and_malformed();
+    s5_9_waterfall_crosscheck();
 
     printf("\n=== %d checks, %d failures ===\n", checks, failures);
     return failures ? 1 : 0;

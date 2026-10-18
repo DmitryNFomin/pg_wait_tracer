@@ -5164,6 +5164,50 @@ void pgwt_lifecycle_free(struct pgwt_lifecycle_result *r)
     memset(r, 0, sizeof(*r));
 }
 
+/* One still-open exec/plan marker for a pid: when the phase started and
+ * which query the marker named AT that point. #459: identity travels with
+ * the entry so an inner phase can never re-key an outer one. */
+struct lc_open_phase {
+    uint64_t start_ns;
+    uint64_t qid;
+};
+
+/* Push a freshly-opened phase. -1 only on allocation failure, which the
+ * caller turns into a refusal -- never a dropped entry, because a dropped
+ * push makes the NEXT end pop someone else's start. */
+static int lifecycle_push(struct lc_open_phase **stack, int *n, int *cap,
+                          uint64_t start_ns, uint64_t qid,
+                          const char *fail_point)
+{
+    if (*n >= *cap) {
+        int nc = *cap ? *cap * 2 : 8;
+        struct lc_open_phase *tmp =
+            pgwt_test_alloc_fail(fail_point) ? NULL
+            : realloc(*stack, (size_t)nc * sizeof(**stack));
+        if (!tmp)
+            return -1;
+        *stack = tmp;
+        *cap = nc;
+    }
+    (*stack)[*n].start_ns = start_ns;
+    (*stack)[*n].qid = qid;
+    (*n)++;
+    return 0;
+}
+
+/* Pop the INNERMOST still-open phase into *out. 0 when the stack was empty
+ * -- an END with no matching START (a marker lost to a ringbuf drop, or a
+ * window whose first event is already inside an execution) contributes
+ * nothing, exactly as the old `&& pid_st[pi].exec_start_ns` guard did. */
+static int lifecycle_pop(struct lc_open_phase *stack, int *n,
+                         struct lc_open_phase *out)
+{
+    if (*n <= 0)
+        return 0;
+    *out = stack[--(*n)];
+    return 1;
+}
+
 /* Append one duration sample, keeping the written region contiguous. */
 static void lifecycle_sample(double **times, int *nsamples, int *cap,
                              double ms)
@@ -5189,11 +5233,40 @@ void pgwt_compute_query_lifecycle(const struct pgwt_trace_event *events,
 
     /* Per-pid open-marker state. #275: was `pid_st[512]` + linear probe +
      * `if (pi < 0) continue;`. Unbounded now; a pid gets a slot on its
-     * first marker, exactly as before. */
+     * first marker, exactly as before.
+     *
+     * #459: the two `uint64_t *_start_ns` scalars and the ONE shared `qid`
+     * that used to live here were each a silent wrong answer.
+     *
+     *  - A single exec slot cannot hold a NESTED execution. PortalRun
+     *    genuinely nests (SQL-level EXECUTE of a prepared statement from
+     *    inside plpgsql, a DO block, a function body), and
+     *    pgwt_compute_executions -- the Waterfall tab, same markers, same
+     *    window -- has used a per-pid STACK for exactly that since #222.
+     *    With one slot, an inner EXEC_START OVERWROTE the outer start, the
+     *    inner EXEC_END consumed it and zeroed the slot, and the outer
+     *    EXEC_END then found `exec_start_ns == 0` and contributed NOTHING.
+     *    So Avg Exec reported the INNER statement's duration as if it were
+     *    the whole query's, and exec_count under-counted by the nesting
+     *    depth -- both in the flattering direction, both while Waterfall
+     *    showed the correct outer span beside them.
+     *
+     *  - One `qid` shared between the exec and plan slots let a PLAN_START
+     *    arriving INSIDE an open execution (re-planning on a cache
+     *    invalidation, a nested statement's plan) re-key the still-open
+     *    execution: the outer execution's duration was then credited to
+     *    whatever query the inner PLAN named. Identity now travels with
+     *    each stack entry, so neither phase can re-key the other.
+     *
+     * Stacks are unbounded for the same reason the tables above are: the
+     * nesting depth of a real backend is not something this scan gets to
+     * cap, and an allocation failure comes back as a REFUSAL (out->failed,
+     * goto oom) rather than a short answer that looks complete. */
     struct lc_pid_state {
         uint32_t pid;
-        uint64_t exec_start_ns, plan_start_ns;
-        uint64_t qid;
+        struct lc_open_phase *exec, *plan;  /* innermost last (LIFO) */
+        int n_exec, cap_exec;
+        int n_plan, cap_plan;
     };
     struct lc_pid_state *pid_st = NULL;
     int npids = 0, cap_pids = 0;
@@ -5226,43 +5299,96 @@ void pgwt_compute_query_lifecycle(const struct pgwt_trace_event *events,
             pid_st[pi].pid = ev->pid;
         }
 
+        struct lc_open_phase op;
         if (m == PGWT_MARKER_EXEC_START) {
-            pid_st[pi].exec_start_ns = ev->timestamp_ns;
-            pid_st[pi].qid = ev->query_id;
-        } else if (m == PGWT_MARKER_EXEC_END && pid_st[pi].exec_start_ns) {
-            double ms = (ev->timestamp_ns - pid_st[pi].exec_start_ns) / 1e6;
-            uint64_t qid = pid_st[pi].qid;
-            pid_st[pi].exec_start_ns = 0;
-            if (qid == 0) continue;
-            struct pgwt_qid_lifecycle *lc = lifecycle_slot(out, qid);
+            if (lifecycle_push(&pid_st[pi].exec, &pid_st[pi].n_exec,
+                               &pid_st[pi].cap_exec, ev->timestamp_ns,
+                               ev->query_id, "lifecycle_exec_stack") != 0)
+                goto oom;
+        } else if (m == PGWT_MARKER_EXEC_END) {
+            if (!lifecycle_pop(pid_st[pi].exec, &pid_st[pi].n_exec, &op))
+                continue;
+            /* A pop can only pair with an EARLIER push for this pid when
+             * the stream is time-ordered, which the loader guarantees; a
+             * hand-built or reordered stream must not turn an unsigned
+             * wrap into a multi-million-millisecond "execution" (ms < 0 in
+             * lifecycle_sample cannot catch that -- the subtraction is
+             * unsigned and wraps positive). pgwt_compute_executions guards
+             * its own pops the same way. */
+            if (ev->timestamp_ns < op.start_ns)
+                continue;
+            double ms = (ev->timestamp_ns - op.start_ns) / 1e6;
+            if (op.qid == 0) continue;
+            struct pgwt_qid_lifecycle *lc = lifecycle_slot(out, op.qid);
             if (!lc) goto oom;
             lc->exec_count++;
             lc->exec_total_ms += ms;
             lifecycle_sample(&lc->exec_times, &lc->exec_nsamples,
                              &lc->exec_cap, ms);
         } else if (m == PGWT_MARKER_PLAN_START) {
-            pid_st[pi].plan_start_ns = ev->timestamp_ns;
-            pid_st[pi].qid = ev->query_id;
-        } else if (m == PGWT_MARKER_PLAN_END && pid_st[pi].plan_start_ns) {
-            double ms = (ev->timestamp_ns - pid_st[pi].plan_start_ns) / 1e6;
-            uint64_t qid = pid_st[pi].qid;
-            pid_st[pi].plan_start_ns = 0;
-            if (qid == 0) continue;
-            struct pgwt_qid_lifecycle *lc = lifecycle_slot(out, qid);
+            if (lifecycle_push(&pid_st[pi].plan, &pid_st[pi].n_plan,
+                               &pid_st[pi].cap_plan, ev->timestamp_ns,
+                               ev->query_id, "lifecycle_plan_stack") != 0)
+                goto oom;
+        } else if (m == PGWT_MARKER_PLAN_END) {
+            if (!lifecycle_pop(pid_st[pi].plan, &pid_st[pi].n_plan, &op))
+                continue;
+            if (ev->timestamp_ns < op.start_ns)
+                continue;
+            double ms = (ev->timestamp_ns - op.start_ns) / 1e6;
+            if (op.qid == 0) continue;
+            struct pgwt_qid_lifecycle *lc = lifecycle_slot(out, op.qid);
             if (!lc) goto oom;
             lc->plan_count++;
             lc->plan_total_ms += ms;
             lifecycle_sample(&lc->plan_times, &lc->plan_nsamples,
                              &lc->plan_cap, ms);
+        } else if (m == PGWT_MARKER_CMD_END) {
+            /* Command termination: ABANDON whatever is still open for this
+             * pid. src/bpf/pg_wait_tracer.bpf.c emits CMD_END only on the
+             * pgstat_report_activity flip to IDLE, so the backend cannot
+             * still be executing anything -- every entry left on either
+             * stack belongs to a statement that ended WITHOUT its own END
+             * marker (an ERROR longjmp, a cancel, statement_timeout, a
+             * client disconnect, or a dropped marker).
+             *
+             * Dropped, NOT counted. pgwt_compute_executions closes such a
+             * row with end_inferred=1 because the Waterfall tab shows that
+             * row either way and the bit says the end was deduced. This
+             * scan has no such bit: a lifecycle sample feeds exec_count,
+             * Avg Exec and p95/p99 (src/server.c handle_top_queries). An
+             * inferred end mixed into those would charge the gap between
+             * the real failure and the idle transition to execution time,
+             * and label a cancelled statement a completed one inside an
+             * average. So only a measured EXEC_START/EXEC_END pair counts;
+             * #459's gate asserts a CMD_END-closed orphan contributes
+             * nothing.
+             *
+             * CMD_START is deliberately NOT a clear point: it fires on the
+             * flip to ACTIVE, which a nested portal does not emit, so the
+             * only thing it could clear is a command whose CMD_END was
+             * lost -- and pgwt_compute_executions keeps those rows open
+             * until a CMD_END too. Clearing here and not there would make
+             * the two computations disagree on the same trace. */
+            pid_st[pi].n_exec = 0;
+            pid_st[pi].n_plan = 0;
         }
     }
 
+    for (int p = 0; p < npids; p++) {
+        free(pid_st[p].exec);
+        free(pid_st[p].plan);
+    }
     free(pid_st);
     pgwt_pid_index_free(&pid_ix);
     return;
 
 oom:
     /* Never a partial table: #275 is a short answer presented as complete. */
+    for (int p = 0; p < npids; p++) {
+        free(pid_st[p].exec);
+        free(pid_st[p].plan);
+    }
     free(pid_st);
     pgwt_pid_index_free(&pid_ix);
     pgwt_lifecycle_free(out);
