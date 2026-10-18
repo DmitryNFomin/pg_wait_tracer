@@ -35,7 +35,7 @@
 
 import {
     buildTransitionsOption, buildVariantsPanel, buildTransitionsDisclosure,
-    restoreAllTransitionsState,
+    restoreAllTransitionsState, TRANSITIONS_SEMANTICS_NOTE,
 } from '../lib/builders/transitions.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -273,6 +273,15 @@ export function createTransitionsView() {
                     'is shown. Cannot fetch links the server itself did not return.">' +
                     'Show all</button>' +
                 '<span id="dfg-total" style="color:#666;font-size:11px;margin-left:8px"></span>' +
+            '</div>' +
+            // #456: a PERSISTENT, always-visible reading key — distinct from
+            // dfg-total's dynamic summary (omission counts, which change per
+            // render) and never conditional on anything being hidden. Plain
+            // esc() even though the string is a built-in constant, not
+            // server data, matching this file's existing habit for anything
+            // landing in innerHTML.
+            '<div id="dfg-semantics-note" style="padding:0 20px 8px;color:#888;' +
+                'font-size:11px;font-style:italic">' + esc(TRANSITIONS_SEMANTICS_NOTE) +
             '</div>' +
             '<div id="dfg-container" style="width:100%;height:550px;background:#1a1a2e"></div>' +
             '<div id="dfg-variants"></div>';

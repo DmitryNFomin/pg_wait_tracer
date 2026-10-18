@@ -11,7 +11,7 @@ import {
     buildTransitionsOption, transitionsContext, buildVariantsHtml, buildVariantsPanel,
     isIdleTransitionNode, p95TruncationMarker, findOmittedDominantNode,
     restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder, isLayoutAnchorNode,
-    buildTransitionsDisclosure,
+    buildTransitionsDisclosure, findDominantSourceDwellNode, TRANSITIONS_SEMANTICS_NOTE,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
@@ -491,6 +491,99 @@ test('findOmittedDominantNode: null when nothing non-idle is omitted', () => {
     assert.equal(findOmittedDominantNode({}, new Set()), null);
 });
 
+// ── #456 (review finding): deterministic tie-break, independent of input
+// iteration order — duration desc, then numeric event_id asc, then name asc.
+
+test('#456 findOmittedDominantNode: an exact total_ms tie is broken by '
+    + 'event_id ascending, the SAME winner regardless of nodeMap key order', () => {
+    const a = { total_ms: 5000, event_id: 30 };   // 'Zeta:Low' — higher name, LOWER id
+    const b = { total_ms: 5000, event_id: 10 };   // 'Alpha:High' — lower name, lower id -> winner
+    const order1 = findOmittedDominantNode(
+        { 'Zeta:Low': a, 'Alpha:High': b }, new Set());
+    const order2 = findOmittedDominantNode(
+        { 'Alpha:High': b, 'Zeta:Low': a }, new Set());
+    assert.equal(order1.name, 'Alpha:High', 'lower event_id wins the tie');
+    assert.equal(order2.name, 'Alpha:High', 'same winner regardless of key order');
+    assert.equal(order1.ms, 5000);
+});
+
+test('#456 findOmittedDominantNode: no event_id on either side falls back '
+    + 'to name ascending, deterministically across permutations', () => {
+    const nodeMapA = { 'Zeta:NoId': { total_ms: 100 }, 'Alpha:NoId': { total_ms: 100 } };
+    const nodeMapB = { 'Alpha:NoId': { total_ms: 100 }, 'Zeta:NoId': { total_ms: 100 } };
+    assert.equal(findOmittedDominantNode(nodeMapA, new Set()).name, 'Alpha:NoId');
+    assert.equal(findOmittedDominantNode(nodeMapB, new Set()).name, 'Alpha:NoId');
+});
+
+test('#456 findOmittedDominantNode: a node WITH a numeric event_id beats '
+    + 'one without, on a duration tie, regardless of order', () => {
+    const withId = { total_ms: 42, event_id: 5 };
+    const withoutId = { total_ms: 42 };   // no event_id field at all
+    assert.equal(findOmittedDominantNode(
+        { 'HasId:Thing': withId, 'NoId:Thing': withoutId }, new Set()).name, 'HasId:Thing');
+    assert.equal(findOmittedDominantNode(
+        { 'NoId:Thing': withoutId, 'HasId:Thing': withId }, new Set()).name, 'HasId:Thing');
+});
+
+test('#456 RED-DEMONSTRATED: the OLD "first key seen wins" rule disagreed '
+    + 'with the new rule on this exact fixture (regression pin, not a '
+    + 'hypothetical) -- Object.keys order alone used to decide the winner', () => {
+    const a = { total_ms: 5000, event_id: 30 };
+    const b = { total_ms: 5000, event_id: 10 };
+    // Under the OLD rule (`ms > best.ms` only, first-seen wins ties), the
+    // FIRST key in insertion order would win regardless of event_id -- i.e.
+    // 'Zeta:Low' in this map, 'Alpha:High' in the reversed one. The NEW rule
+    // ignores insertion order entirely and always returns 'Alpha:High'.
+    const firstKeyWins = Object.keys({ 'Zeta:Low': a, 'Alpha:High': b })[0];
+    assert.equal(firstKeyWins, 'Zeta:Low',
+        'sanity: the old rule would have picked this (order-dependent) name');
+    assert.equal(findOmittedDominantNode({ 'Zeta:Low': a, 'Alpha:High': b }, new Set()).name,
+        'Alpha:High', 'the NEW rule disagrees with insertion order -- proves it is not vacuous');
+});
+
+test('#456 buildTransitionsOption layout: an exact total_ms tie between two '
+    + 'laid-out nodes places them in event_id order, regardless of which '
+    + 'link came first in the response', () => {
+    // Two nodes, SAME total_ms (5000), different event_id. Two responses
+    // carry the identical node set but list their links in opposite order —
+    // under the pre-#456 rule, [...visibleNodes] (a Set) would pick up
+    // insertion order from whichever link's source/target was walked first,
+    // changing sortedNodes' tie order and therefore node layout position.
+    const base = {
+        nodes: [
+            { name: 'Zeta:Low', total_ms: 5000, event_id: 30, class: 'Lock' },
+            { name: 'Alpha:High', total_ms: 5000, event_id: 10, class: 'Lock' },
+        ],
+    };
+    const dataForward = { ...base, links: [
+        { source: 'Zeta:Low', target: 'Alpha:High', value: 10, duration_ms: 100 },
+    ] };
+    const dataReverse = { ...base, links: [
+        { source: 'Alpha:High', target: 'Zeta:Low', value: 10, duration_ms: 100 },
+    ] };
+    const dims = { width: 800, height: 550 };
+    const optForward = buildTransitionsOption(dataForward, 0, dims, null, false);
+    const optReverse = buildTransitionsOption(dataReverse, 0, dims, null, false);
+    // The two invisible corner anchor nodes (identity data->pixel transform,
+    // see the #436 test above) are not part of the dominance ordering.
+    const realNodes = (opt) => opt.option.series[0].data
+        .filter(n => !isLayoutAnchorNode(n.name));
+    const namesForward = realNodes(optForward).map(n => n.name);
+    const namesReverse = realNodes(optReverse).map(n => n.name);
+    assert.deepEqual(namesForward, ['Alpha:High', 'Zeta:Low'],
+        'lower event_id (10) ranks first on the total_ms tie');
+    assert.deepEqual(namesReverse, namesForward,
+        'the SAME order regardless of which link (and therefore which node '
+        + 'the Set saw first) the response listed first');
+    // The two nodes' laid-out positions must also match exactly (same rank
+    // -> same grid cell), not just the same name order.
+    const posForward = Object.fromEntries(
+        realNodes(optForward).map(n => [n.name, { x: n.x, y: n.y }]));
+    const posReverse = Object.fromEntries(
+        realNodes(optReverse).map(n => [n.name, { x: n.x, y: n.y }]));
+    assert.deepEqual(posForward, posReverse);
+});
+
 test('buildTransitionsOption: threshold exclusion is reported SEPARATELY from '
     + 'idle exclusion -- never merged into one count (#436)', () => {
     const data = {
@@ -952,4 +1045,109 @@ test('negative control: isLayoutAnchorNode only matches the two reserved '
     assert.equal(isLayoutAnchorNode('Lock:relation'), false);
     assert.equal(isLayoutAnchorNode(''), false);
     assert.equal(isLayoutAnchorNode(undefined), false);
+});
+
+// ── #456: persistent duration disclosure (the dominant source-dwell node is
+// named + its visible/omitted status stated EVERY render, not only when the
+// threshold/idle filters hide something) ───────────────────────────────────
+
+test('findDominantSourceDwellNode: names the globally largest non-idle '
+    + 'node and reports it VISIBLE when nothing hides it', () => {
+    const nodeMap = {
+        'CPU*': { total_ms: 500, event_id: 0 },
+        'IO:DataFileRead': { total_ms: 200, event_id: 20 },
+    };
+    const d = findDominantSourceDwellNode(nodeMap, new Set(['CPU*', 'IO:DataFileRead']));
+    assert.equal(d.name, 'CPU*');
+    assert.equal(d.ms, 500);
+    assert.equal(d.visible, true);
+});
+
+test('findDominantSourceDwellNode: reports OMITTED when the dominant node '
+    + 'is not in the visible set', () => {
+    const nodeMap = {
+        'CPU*': { total_ms: 500, event_id: 0 },
+        'Lock:relation': { total_ms: 900, event_id: 50 },
+    };
+    const d = findDominantSourceDwellNode(nodeMap, new Set(['CPU*']));
+    assert.equal(d.name, 'Lock:relation');
+    assert.equal(d.visible, false);
+});
+
+test('findDominantSourceDwellNode: idle nodes are never the dominant node, '
+    + 'even with the largest total_ms', () => {
+    const nodeMap = {
+        'Client:ClientRead': { total_ms: 999999, event_id: 99 },
+        'Lock:relation': { total_ms: 10, event_id: 1 },
+    };
+    const d = findDominantSourceDwellNode(nodeMap, new Set());
+    assert.equal(d.name, 'Lock:relation');
+});
+
+test('findDominantSourceDwellNode: null when there is no non-idle node with time', () => {
+    assert.equal(findDominantSourceDwellNode({}, new Set()), null);
+    assert.equal(findDominantSourceDwellNode(
+        { 'Client:ClientRead': { total_ms: 500 } }, new Set()), null);
+});
+
+test('buildTransitionsDisclosure: dominant-dwell node is named PERSISTENTLY '
+    + 'when nothing is hidden (the pre-#456 bug: the line said nothing at '
+    + 'all about which node dominates dwell time in this case)', () => {
+    const built = {
+        hiddenIdleLinks: 0, hiddenIdleValue: 0,
+        hiddenThresholdLinks: 0, hiddenThresholdValue: 0,
+        serverTruncated: false, serverShownLinkCount: 4, serverTotalLinkCount: 4,
+        omittedDominant: null,
+        dominantSourceDwell: { name: 'CPU*', ms: 500000, visible: true },
+    };
+    const text = buildTransitionsDisclosure(built, 400);
+    assert.ok(text.includes('CPU*') && text.includes('largest source-dwell node'),
+        text);
+    assert.ok(text.includes('shown'), text);
+});
+
+test('buildTransitionsDisclosure: when the dominant node is omitted, the '
+    + 'existing omittedDominant "Show all" phrase covers it -- no duplicate '
+    + 'second phrase for the same node', () => {
+    const built = {
+        hiddenIdleLinks: 0, hiddenIdleValue: 0,
+        hiddenThresholdLinks: 2, hiddenThresholdValue: 2,
+        serverTruncated: false, serverShownLinkCount: 4, serverTotalLinkCount: 4,
+        omittedDominant: { name: 'Lock:relation', ms: 50000 },
+        dominantSourceDwell: { name: 'Lock:relation', ms: 50000, visible: false },
+    };
+    const text = buildTransitionsDisclosure(built, 400);
+    // "Lock:relation" must appear in the omitted phrase (with its Show-all
+    // cue); it must NOT also appear inside a second "largest source-dwell"
+    // phrase -- that would be the same fact stated twice.
+    assert.ok(text.includes('Lock:relation omitted') && text.includes('Show all'), text);
+    assert.ok(!text.includes('largest source-dwell node'), text);
+});
+
+test('buildTransitionsOption: dominantSourceDwell reaches the real response '
+    + 'shape end to end, via buildTransitionsDisclosure', () => {
+    const data = {
+        total: 10,
+        nodes: [
+            { name: 'CPU*', total_ms: 100, event_id: 0, class: 'CPU' },
+            { name: 'IO:DataFileRead', total_ms: 90, event_id: 20, class: 'IO' },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 10, duration_ms: 90 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 10, duration_ms: 80 },
+        ],
+    };
+    const built = buildTransitionsOption(data, 0, { width: 400, height: 300 });
+    assert.equal(built.dominantSourceDwell.name, 'CPU*');
+    assert.equal(built.dominantSourceDwell.visible, true);
+    const text = buildTransitionsDisclosure(built, data.total);
+    assert.ok(text.includes('CPU*') && text.includes('largest source-dwell node'), text);
+});
+
+test('TRANSITIONS_SEMANTICS_NOTE: states the size/edge-meaning distinction '
+    + 'and explicitly disclaims a DB-Time ranking', () => {
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.includes('source-state dwell time'));
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.includes('transition counts'));
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.toLowerCase().includes('not a ranking'));
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.toLowerCase().includes('db time'));
 });
