@@ -16,7 +16,7 @@ import {
 } from '../../web/static/lib/table.js';
 import {
     overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
-    PCTL_OVERFLOW_SENTENCE, queriesConfig, makeQueriesConfig,
+    PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, queriesConfig, makeQueriesConfig,
     buildUnattributedNote, unattributedNoteHtml, createOverviewOrder,
 } from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
@@ -735,23 +735,33 @@ test('#103 overflow percentile renders ">=", never an exact-looking number', () 
         m.rows[0].cells[MAX_COL].html);
 });
 
-test('#103 a normal-bucket percentile is unchanged (no ">=", same tooltip)', () => {
+// #454: a normal-bucket (non-overflow) percentile is STILL a bound -- every
+// one of the 16 histogram buckets (hist_upper_us, src/compute.c:1673) is an
+// edge, not an exact observed duration, so a finite percentile now renders
+// "<=" with its own (distinct from #437's ">=") disclosure sentence. The
+// pre-#454 behavior this replaces printed the bare number here, which is
+// exactly the #454 bug: a Count=1 live capture read "Max ~1.0ms / P50=2.0ms"
+// with nothing marking the 2.0ms as a rounded bound bigger than Max.
+test('#454 a normal-bucket percentile renders "<=", its own bound disclosure', () => {
     const m = buildTableModel(eventsConfig, [evRow({
         p50_us: 8, p95_us: 40, p99_us: 8192,
         p50_overflow: false, p95_overflow: false, p99_overflow: false,
     })], null);
     const p99 = m.rows[0].cells[P99_COL].html;
-    assert.equal(cellText(p99), '8.2ms', p99);
-    assert.ok(p99.includes('View the latency distribution of'), p99);
-    assert.equal(cellText(m.rows[0].cells[P50_COL].html), '8\u00b5s',
+    assert.equal(cellText(p99), '\u22648.2ms', p99);
+    assert.ok(p99.includes(PCTL_FINITE_BOUND_SENTENCE), p99);
+    assert.ok(!p99.includes(PCTL_OVERFLOW_SENTENCE), p99);
+    assert.ok(p99.includes('Click to see its latency distribution.'), p99);
+    assert.equal(cellText(m.rows[0].cells[P50_COL].html), '\u22648\u00b5s',
         m.rows[0].cells[P50_COL].html);
 });
 
-test('#103 rows with no overflow flags at all behave exactly as before', () => {
+test('#103/#454 rows with no overflow flags at all are finite bounds, never ">="', () => {
     // Old server / compare-baseline rows: absent key is not an overflow.
     const m = buildTableModel(eventsConfig, [evRow({ p95_us: 16384 })], null);
     const html = m.rows[0].cells[P95_COL].html;
-    assert.ok(html.includes('16.4ms') && !html.includes('\u2265'), html);
+    assert.ok(html.includes('\u226416.4ms'), html);
+    assert.ok(!html.includes('\u2265'), html);
 });
 
 test('#103 an overflow cell keeps its drill affordance and pivot intent', () => {
@@ -821,26 +831,43 @@ test('#103 sort treats ">=16.4ms" as 16.4ms (the shown bound), not +Infinity', (
 
 // ── #437: beside-table overflow disclosure (not only on hover) ─────────────
 
-test('buildOverflowNote: one overflowing row in the page -> the sentence', () => {
+// #454: both rows here carry FINITE percentiles too (the overflowing row's
+// p50/p99 are untouched defaults, 8/90, non-overflow; the second row is
+// entirely finite) -- so the note is now the TWO sentences together, not
+// just the overflow one alone.
+test('buildOverflowNote: one overflowing row + finite rows -> both sentences', () => {
     const note = buildOverflowNote([
         evRow({ p95_us: 16384, p95_overflow: true }),
         evRow({ name: 'IO:DataFileRead', event_id: 1 }),
     ]);
-    assert.deepEqual(note, { text: PCTL_OVERFLOW_SENTENCE });
+    assert.deepEqual(note,
+        { text: PCTL_FINITE_BOUND_SENTENCE + ' ' + PCTL_OVERFLOW_SENTENCE });
     assert.ok(PCTL_OVERFLOW_SENTENCE.includes('lower bounds'));
     assert.ok(PCTL_OVERFLOW_SENTENCE.includes('unavailable'));
     // #437: "the true value is higher" wrongly excludes equality -- gone.
     assert.ok(!PCTL_OVERFLOW_SENTENCE.includes('higher'));
 });
 
-test('buildOverflowNote: no row overflowed -> null (nothing extra to say)', () => {
-    assert.equal(buildOverflowNote([evRow({})]), null);
-    assert.equal(buildOverflowNote([]), null);
-    assert.equal(buildOverflowNote(null), null);
+// #454: no row OVERFLOWED, but evRow({}) still carries finite percentiles
+// (p50/p95/p99 8/40/90) -- those are bounds too, so the note is the finite
+// sentence alone, never null. Only a page with NO percentile data anywhere
+// (every value null) has nothing to disclose.
+test('buildOverflowNote: no row overflowed, but finite percentiles present -> finite sentence only', () => {
+    assert.deepEqual(buildOverflowNote([evRow({})]), { text: PCTL_FINITE_BOUND_SENTENCE });
 });
 
-test('buildOverflowNote: a false overflow flag does not count as overflow', () => {
-    assert.equal(buildOverflowNote([evRow({ p99_overflow: false })]), null);
+test('buildOverflowNote: empty/null input or no percentile data anywhere -> null', () => {
+    assert.equal(buildOverflowNote([]), null);
+    assert.equal(buildOverflowNote(null), null);
+    assert.equal(buildOverflowNote([evRow({
+        p50_us: null, p95_us: null, p99_us: null,
+    })]), null);
+});
+
+test('buildOverflowNote: a false overflow flag does not count as overflow (finite sentence only)', () => {
+    const note = buildOverflowNote([evRow({ p99_overflow: false })]);
+    assert.deepEqual(note, { text: PCTL_FINITE_BOUND_SENTENCE });
+    assert.ok(!note.text.includes(PCTL_OVERFLOW_SENTENCE));
 });
 
 test('overflowNoteHtml: renders the sentence escaped; null model renders nothing', () => {
@@ -850,16 +877,17 @@ test('overflowNoteHtml: renders the sentence escaped; null model renders nothing
     assert.equal(overflowNoteHtml(null), '');
 });
 
-// #437 CONTRACTS.md item 4's "single fixture": the existing
+// #437/#454 CONTRACTS.md item 4's "single fixture": the existing
 // events-overflow-pctl gallery/dev fixture, extended with the finite-bucket
 // CONTROL row (LWLock:LockManager) called for there -- same 16384 number as
-// an overflow row, but p99_overflow:false, so it must render WITHOUT ">=".
-test('events-overflow-pctl fixture: the finite-bucket control renders plain', () => {
+// an overflow row, but p99_overflow:false, so #454 renders it "<=" (a
+// finite bound), never the overflow row's ">=".
+test('events-overflow-pctl fixture: the finite-bucket control renders "<=", not ">="', () => {
     const st = tableConfigFixtures['events-overflow-pctl'];
     const model = buildTableModel(eventsConfig, st.rows, st.sort);
     const control = model.rows.find(r => r.row.name === 'LWLock:LockManager');
     assert.ok(control, 'fixture carries the finite-bucket control row');
-    assert.equal(cellText(control.cells[P99_COL].html), '16.4ms',
+    assert.equal(cellText(control.cells[P99_COL].html), '≤16.4ms',
         control.cells[P99_COL].html);
     assert.ok(!control.cells[P99_COL].html.includes('≥'),
         control.cells[P99_COL].html);
@@ -870,8 +898,10 @@ test('events-overflow-pctl fixture: the finite-bucket control renders plain', ()
         assert.ok(cellText(row.cells[P99_COL].html).startsWith('≥'),
             `${name}: ${row.cells[P99_COL].html}`);
     }
-    // #437: the sentence is attached at the model/view level for this page.
-    assert.deepEqual(buildOverflowNote(st.rows), { text: PCTL_OVERFLOW_SENTENCE });
+    // #454: the fixture has BOTH overflowing rows and finite-bound rows, so
+    // the beside-table note is both sentences together.
+    assert.deepEqual(buildOverflowNote(st.rows),
+        { text: PCTL_FINITE_BOUND_SENTENCE + ' ' + PCTL_OVERFLOW_SENTENCE });
 });
 
 // ── U2 (U1-review F4): eventColor identity tints in the pctBar sites ────────

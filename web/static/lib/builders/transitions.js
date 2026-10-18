@@ -71,6 +71,22 @@ export function isIdleTransitionNode(name) {
     return IDLE_NODE_NAMES.has(name);
 }
 
+/* #456: a persistent, always-visible reading key for the DFG (views/
+ * transitions.js renders this verbatim, unconditionally — not only when
+ * something is hidden, unlike buildTransitionsDisclosure's dynamic summary
+ * line below). Two things a viewer otherwise infers wrong by analogy with
+ * the AAS/Events tabs, where size/color already mean "contribution to DB
+ * Time": here node SIZE is source-state DWELL TIME (how long the process
+ * sat in that state before transitioning — contract 5 above), while edge
+ * width/the Simplify threshold both rank by TRANSITION COUNT, a different
+ * quantity entirely. A big node next to thin edges is not a contradiction;
+ * it is the "rare but long-dwelling" case #436's omittedDominant/
+ * findDominantSourceDwellNode exist to name. */
+export const TRANSITIONS_SEMANTICS_NOTE =
+    'Node size represents source-state dwell time in counted transitions. ' +
+    'Edges and Simplify use transition counts. This graph is not a ranking ' +
+    'of window DB Time.';
+
 /* #436 (adviser-caught): two invisible nodes placed at the exact corners of
  * the DFG's pixel box so ECharts' graph "view" coordinateSystem has no data
  * extent to auto-fit beyond that box — see the long comment on the series
@@ -127,22 +143,80 @@ export function transitionsContext(data) {
     return { maxEdgeCount, nodeMap };
 }
 
-/* #436: among nodes NOT laid out (hidden by the threshold cutoff — idle
+/* #456 (review finding): two order-sensitive tie sites in this file used to
+ * keep whichever name happened to be visited FIRST on an exact duration tie
+ * -- here, that was Object.keys(nodeMap)'s iteration order; at the grid
+ * layout below (sortedNodes), it was the order nodes were first added to
+ * the `visibleNodes` Set while walking `visibleLinks`. Both are the
+ * server's / a fixture's ARRAY order, not a property of the data itself.
+ * Two requests carrying the identical node set (same durations) could
+ * therefore name a different "omitted dominant" node, or lay nodes out in a
+ * different grid position, purely because the server returned its
+ * links/nodes in a different order -- indistinguishable, from the browser,
+ * from the graph actually changing between two renders of the SAME
+ * underlying data (the #456 "frozen trace, different render" symptom this
+ * removes one possible cause of). TOTAL order for both sites, matching the
+ * server-side total-order fix already applied to events/sessions/queries
+ * (compute.c:1728 cmp_event_row_desc and siblings): duration descending,
+ * then numeric event identity (event_id) ascending, then name ascending as
+ * a last-resort deterministic fallback for the (should not happen on a real
+ * server, but must still be total) case of two nodes sharing both an ms
+ * value and an event_id, or either/both missing one. */
+export function compareTransitionNodesByDominance(a, b) {
+    if (a.ms !== b.ms) return b.ms - a.ms;
+    const aId = a.eventId, bId = b.eventId;
+    if (aId != null && bId != null && aId !== bId) return aId - bId;
+    if (aId != null && bId == null) return -1;   // a numeric identity beats none
+    if (aId == null && bId != null) return 1;
+    return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+}
+
+/* #436/#456: among nodes NOT laid out (hidden by the threshold cutoff — idle
  * nodes are excluded here because the "Hide ClientRead" control already
  * names and counts that reason on its own, see hiddenIdleLinks/-Value), find
  * the single one with the largest total_ms. That is the "dominant-duration
  * wait" the bug report means: one whose EDGE COUNT is too low to clear the
  * frequency threshold even though its DWELL TIME dominates. Returns null
  * when nothing of the sort is hidden (nothing to name). `nodeMap` is built
- * from the full (pre-idle-filter) node list — see buildTransitionsOption. */
+ * from the full (pre-idle-filter) node list — see buildTransitionsOption.
+ * Ties are broken by compareOmissionCandidates (#456) — deterministic
+ * regardless of nodeMap's iteration order. */
 export function findOmittedDominantNode(nodeMap, visibleNodes) {
     let best = null;
     for (const name of Object.keys(nodeMap)) {
         if (visibleNodes.has(name) || isIdleTransitionNode(name)) continue;
-        const ms = (nodeMap[name] && nodeMap[name].total_ms) || 0;
-        if (ms > 0 && (!best || ms > best.ms)) best = { name, ms };
+        const node = nodeMap[name];
+        const ms = (node && node.total_ms) || 0;
+        if (ms <= 0) continue;
+        const eventId = node && node.event_id != null ? node.event_id : null;
+        const candidate = { name, ms, eventId };
+        if (!best || compareTransitionNodesByDominance(candidate, best) < 0) best = candidate;
     }
-    return best;
+    return best ? { name: best.name, ms: best.ms } : null;
+}
+
+/* #456: the PERSISTENT counterpart to findOmittedDominantNode above. The old
+ * disclosure only ever named a dominant-dwell node when the threshold/idle
+ * filters hid one — a window where nothing is hidden said nothing at all
+ * about which node dominates source-state dwell, even though that fact is
+ * exactly as true (and exactly as easy to misread against edge width) when
+ * every node is visible. Scans the SAME population as
+ * findOmittedDominantNode (every non-idle node with total_ms > 0, same
+ * deterministic tie-break) but over ALL of it, not just the hidden part, and
+ * reports whether the winner happens to be visible or omitted right now. */
+export function findDominantSourceDwellNode(nodeMap, visibleNodes) {
+    let best = null;
+    for (const name of Object.keys(nodeMap)) {
+        if (isIdleTransitionNode(name)) continue;
+        const node = nodeMap[name];
+        const ms = (node && node.total_ms) || 0;
+        if (ms <= 0) continue;
+        const eventId = node && node.event_id != null ? node.event_id : null;
+        const candidate = { name, ms, eventId };
+        if (!best || compareTransitionNodesByDominance(candidate, best) < 0) best = candidate;
+    }
+    if (!best) return null;
+    return { name: best.name, ms: best.ms, visible: visibleNodes.has(best.name) };
 }
 
 /* "Show all" (#436): the one restore action that is actually honest about
@@ -271,6 +345,9 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
         serverTotalLinkCount: Number.isFinite(Number(data && data.total_link_count))
             ? Number(data.total_link_count) : rawLinks.length,
         omittedDominant: findOmittedDominantNode(nodeMap, visibleNodes),
+        // #456: persistent, computed regardless of whether anything is
+        // actually hidden right now — see findDominantSourceDwellNode.
+        dominantSourceDwell: findDominantSourceDwellNode(nodeMap, visibleNodes),
     };
 
     if (visibleNodes.size === 0) {
@@ -279,9 +356,16 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
 
     const maxNodeMs = Math.max(...[...visibleNodes].map(n => (nodeMap[n]?.total_ms || 1)));
     const maxLinkVal = Math.max(...visibleLinks.map(l => l.value));
+    // #456: duration descending, numeric event identity ascending, name
+    // fallback -- see compareTransitionNodesByDominance above. The old
+    // `.sort((a,b) => b.ms - a.ms)` left ties ordered by [...visibleNodes]'s
+    // Set-insertion order, itself driven by the server's `links` array
+    // order, not by anything about the nodes themselves.
     const sortedNodes = [...visibleNodes]
-        .map(name => ({ name, ms: (nodeMap[name]?.total_ms || 0) }))
-        .sort((a, b) => b.ms - a.ms);
+        .map(name => ({ name, ms: (nodeMap[name]?.total_ms || 0),
+            eventId: (nodeMap[name] && nodeMap[name].event_id != null)
+                ? nodeMap[name].event_id : null }))
+        .sort(compareTransitionNodesByDominance);
     const n = sortedNodes.length;
     const cols = Math.ceil(Math.sqrt(n * 1.8));
     const rows = Math.ceil(n / cols);
@@ -474,6 +558,17 @@ export function buildTransitionsDisclosure(built, serverTotal) {
     if (built.omittedDominant) {
         parts.push(built.omittedDominant.name + ' omitted (' +
             fmtMs(built.omittedDominant.ms) + ' total) — Show all to include it');
+    }
+    // #456: PERSISTENT — stated every render, not only when something is
+    // hidden (unlike the omittedDominant phrase above, which only fires when
+    // the dominant-dwell node happens to be one of the excluded ones). When
+    // the globally dominant node IS the omitted one, omittedDominant above
+    // already names it with the "Show all" cue, so this only adds a second
+    // phrase for the VISIBLE case — the one buildTransitionsDisclosure used
+    // to say nothing about at all.
+    if (built.dominantSourceDwell && built.dominantSourceDwell.visible) {
+        parts.push(built.dominantSourceDwell.name + ' is the largest source-dwell node (' +
+            fmtMs(built.dominantSourceDwell.ms) + '), shown');
     }
     return parts.join(' · ');
 }

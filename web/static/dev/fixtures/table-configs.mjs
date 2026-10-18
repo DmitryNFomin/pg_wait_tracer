@@ -144,7 +144,7 @@ export const states = {
      * this state moved from mid-file to the end); the four that remain are
      * the compare cells the gallery renders last. */
     'events-overflow-pctl': {
-        description: 'Events table where percentiles saturate the latency histogram\'s OPEN-ENDED top bucket (#103/#437): Avg/Max are seconds, so P50/P95/P99 must read ">=16.4ms" bounds, never exact values, with the beside-table disclosure sentence shown next to the table (not only on hover). LWLock:LockManager is the finite-bucket CONTROL: its P99 reports the SAME 16384 number as an overflow row but p99_overflow is false, so it must render as a plain, exact "16.4ms" -- the flag, never the number, decides. The last row is fully inside the histogram and is unchanged; CPU* overflows but is not drillable (no histogram pivot for event_id 0).',
+        description: 'Events table where percentiles saturate the latency histogram\'s OPEN-ENDED top bucket (#103/#437): Avg/Max are seconds, so P50/P95/P99 must read ">=16.4ms" bounds, never exact values, with the beside-table disclosure sentence shown next to the table (not only on hover). #454: every OTHER (finite) bucket is a bound too -- LWLock:LockManager\'s P99 reports the SAME 16384 number as an overflow row but p99_overflow is false, so it renders "<=16.4ms" (bound, not exact) while the true overflow rows render ">=16.4ms" -- the flag, never the number, decides WHICH qualifier, but every finite percentile now carries one. The last row (LWLock:WALWrite) is fully inside the histogram and still gets the "<=" qualifier on every percentile cell -- #454 removed the old "entirely inside the histogram = unchanged" exemption, since hist_percentile() (src/compute.c:1718) always returns a bucket edge, not an exact value, for every bucket. CPU* overflows too: discloses the bound, but no histogram drill (event_id 0).',
         tags: ['SEMANTICS', 'FEEDBACK'],
         config: 'events',
         sort: { key: 'total_ms', asc: false },
@@ -161,20 +161,20 @@ export const states = {
               p50_us: 16384, p95_us: 16384, p99_us: 16384, max_us: 105400,
               p50_overflow: true, p95_overflow: true, p99_overflow: true,
               pct: 26.6, aas: 0.33 },
-            // Partial: only the tail leaves the histogram — P50/P95 stay exact.
+            // Partial: only the tail leaves the histogram — P50/P95 are
+            // finite bucket edges (#454: "<=", not exact), P99 overflows ">=".
             { name: 'IO:DataFileRead', event_id: 0x01000015, class: 'IO',
               count: 85000, total_ms: 900, avg_us: 24.7, p50_us: 15,
               p95_us: 8192, p99_us: 16384, max_us: 42000,
               p50_overflow: false, p95_overflow: false, p99_overflow: true,
               pct: 19.9, aas: 0.25 },
-            // #437 finite-bucket CONTROL: bucket 14 (8.2..16.384ms) reports
-            // the same 16384 edge value as the open-ended bucket 15 -- the
-            // comment on pctlCell() above explains why that number alone
-            // cannot distinguish them. p99_overflow:false here means this
-            // 16384 is the EXACT edge of a finite bucket, so it must render
-            // plain ("16.4ms"), with none of the overflow row's ">=" /
-            // disclosure -- same number, opposite rendering, decided only
-            // by the flag.
+            // #437/#454 finite-bucket CONTROL: bucket 14 (8.2..16.384ms)
+            // reports the same 16384 edge value as the open-ended bucket 15
+            // -- the comment on pctlCell() above explains why that number
+            // alone cannot distinguish them. p99_overflow:false here means
+            // this 16384 is the EXACT edge of a FINITE bucket, so it renders
+            // "<=16.4ms" (a bound, #454), never the open row's ">=16.4ms" --
+            // same number, different qualifier, decided only by the flag.
             { name: 'LWLock:LockManager', event_id: 0x04000012, class: 'LWLock',
               count: 12000, total_ms: 700, avg_us: 58.3, p50_us: 40,
               p95_us: 9000, p99_us: 16384, max_us: 16384,
@@ -186,7 +186,10 @@ export const states = {
               p95_us: 45, p99_us: 16384, max_us: 90000,
               p50_overflow: false, p95_overflow: false, p99_overflow: true,
               pct: 11.1, aas: 0.14 },
-            // Entirely inside the histogram: rendering unchanged by #103.
+            // Entirely inside the histogram: #454 removed the "unchanged by
+            // #103" exemption here -- every cell still gets its own "<="
+            // bound qualifier, since hist_percentile() never returns an
+            // exact value for any bucket, finite or open-ended.
             { name: 'LWLock:WALWrite', event_id: 0x04000008, class: 'LWLock',
               count: 30000, total_ms: 300, avg_us: 40.0, p50_us: 25,
               p95_us: 100, p99_us: 400, max_us: 8000,
