@@ -270,10 +270,14 @@ function zoomAttrs(tsNs, bucketNs) {
         ' title="Zoom to +/-5 buckets around this moment"';
 }
 
-/* PURE: the two HTML tables under the chart. Exported for testing — same
- * content as the old adapter's #burst-table, plus the wire-2 zoom attributes
- * on every peak/burst row. */
-export function buildConcurrencyTables(model) {
+/* PURE: the Top Peak Moments panel, standalone (#442/review finding: the
+ * 640px scroll cap used to enclose BOTH tables below the chart, so Burst
+ * Events — the chart's own red markers explicitly point at it — never came
+ * above the fold on a dense fixture (ten peaks fits in 640px; 300 bursts does
+ * not, so the peaks table silently ate the whole budget). Split into two
+ * independently-bounded panels (views/concurrency.js) so each gets its own
+ * scrollbar and its own space, instead of one cap shared unevenly. */
+export function buildPeaksPanelHtml(model) {
     let html = '<h3 style="color:#ccc;margin:10px 0 5px">Top Peak Moments</h3>' +
         // #384: this table and the chart's line are ONE series; the caption
         // says so, so a reader who finds 13 here looks for 13 on the line
@@ -289,7 +293,12 @@ export function buildConcurrencyTables(model) {
             '</td><td><b>' + p.max + '</b></td></tr>';
     });
     html += '</tbody></table>';
+    return html;
+}
 
+/* PURE: the Burst Events panel, standalone -- see buildPeaksPanelHtml above. */
+export function buildBurstsPanelHtml(model) {
+    let html = '';
     if (model.bursts.length > 0) {
         html += '<h3 style="color:#ccc;margin:15px 0 5px">Burst Events ' +
             '<span style="color:#666;font-size:12px">(4+ sessions within 10ms)</span></h3>' +
@@ -313,4 +322,16 @@ export function buildConcurrencyTables(model) {
         html += '<p style="color:#666;margin-top:15px">No burst events detected</p>';
     }
     return html;
+}
+
+/* PURE: the two HTML tables under the chart, concatenated. Kept for callers
+ * that still want one combined blob (dev/gallery.js's single-cell render,
+ * and the existing test suite's substring assertions over the combined
+ * markup) — BYTE-IDENTICAL to the old single-function output, since it is
+ * exactly buildPeaksPanelHtml + buildBurstsPanelHtml with nothing between
+ * them removed or reordered. views/concurrency.js (the one place the two
+ * tables used to share a single scroll container) now calls the two panel
+ * functions directly and mounts them into separate DOM containers instead. */
+export function buildConcurrencyTables(model) {
+    return buildPeaksPanelHtml(model) + buildBurstsPanelHtml(model);
 }
