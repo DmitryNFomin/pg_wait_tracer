@@ -1,0 +1,319 @@
+{
+ "_source": "generated from tests/mock_server.py by tests/test_mock_backend_activity_fixture.py -- regenerate with --write, never by hand",
+ "execution_detail": {
+  "backend_activity_span": {
+   "client_pause_ms": 0.0,
+   "completed_duration_ms": 420.0,
+   "completion": "closed",
+   "duration_additive": false,
+   "duration_source": "timestamps",
+   "end_ns": "1792316000420000000",
+   "escalation_inside": false,
+   "exec_ends": 1,
+   "exec_starts": 1,
+   "gap_inside": false,
+   "identity": "1001:1792316000000000000",
+   "is_worker": false,
+   "kind": "Closed",
+   "leader_pid": null,
+   "malformed": false,
+   "measurement": "measured",
+   "multi_exec": false,
+   "multi_query": false,
+   "observed_elapsed_ms": 420.0,
+   "pid": 1001,
+   "plan_starts": 1,
+   "queries": [
+    {
+     "exec_starts": 1,
+     "query_id": "3886912043147135675",
+     "records": 7
+    }
+   ],
+   "queries_dropped": 0,
+   "reason": null,
+   "records": 7,
+   "sampled_inside": false,
+   "scope_note": "one backend activity span may include multiple statements, multiple executions and client pauses; it is kept whole and its duration is not additive across query rows",
+   "start_ns": "1792316000000000000"
+  },
+  "backend_activity_span_scope": "the span was reconstructed from markers in a bounded window around this execution; a command still open past that bound reads in flight with its reason, and the window edge is never used as a boundary"
+ },
+ "measured_row": {
+  "avg_exec_ms": 0.092,
+  "avg_plan_ms": 0.011,
+  "avg_us": 93.3,
+  "backend_activity": {
+   "leader_spans": 1,
+   "source": "closed",
+   "span": {
+    "client_pause_ms": 0.0,
+    "completed_duration_ms": 420.0,
+    "completion": "closed",
+    "duration_additive": false,
+    "duration_source": "timestamps",
+    "end_ns": "1792316000420000000",
+    "escalation_inside": false,
+    "exec_ends": 1,
+    "exec_starts": 1,
+    "gap_inside": false,
+    "identity": "1001:1792316000000000000",
+    "is_worker": false,
+    "kind": "Closed",
+    "leader_pid": null,
+    "malformed": false,
+    "measurement": "measured",
+    "multi_exec": false,
+    "multi_query": false,
+    "observed_elapsed_ms": 420.0,
+    "pid": 1001,
+    "plan_starts": 1,
+    "queries": [
+     {
+      "exec_starts": 1,
+      "query_id": "3886912043147135675",
+      "records": 7
+     }
+    ],
+    "queries_dropped": 0,
+    "reason": null,
+    "records": 7,
+    "sampled_inside": false,
+    "scope_note": "one backend activity span may include multiple statements, multiple executions and client pauses; it is kept whole and its duration is not additive across query rows",
+    "start_ns": "1792316000000000000"
+   },
+   "workers": {
+    "added_to_leader": false,
+    "observed_max_ms": 900.0,
+    "spans": 2
+   }
+  },
+  "classes": [
+   2000,
+   1200,
+   500,
+   300,
+   0,
+   0,
+   100,
+   0,
+   0,
+   100,
+   0
+  ],
+  "count": 45000,
+  "events": [
+   {
+    "id": 0,
+    "ms": 2000,
+    "name": "CPU*"
+   },
+   {
+    "id": 16777237,
+    "ms": 1200,
+    "name": "IO:DataFileRead"
+   },
+   {
+    "id": 50331648,
+    "ms": 500,
+    "name": "Lock:relation"
+   },
+   {
+    "id": 67108872,
+    "ms": 300,
+    "name": "LWLock:WALWrite"
+   },
+   {
+    "id": 167772160,
+    "ms": 100,
+    "name": "Extension:Extension"
+   },
+   {
+    "id": 150994946,
+    "ms": 100,
+    "name": "Timeout:PgSleep"
+   }
+  ],
+  "exec_count": 45000,
+  "exec_total_ms": 4150.0,
+  "p95_exec_ms": 0.31,
+  "p95_plan_ms": 0.04,
+  "p99_exec_ms": 1.2,
+  "p99_plan_ms": 0.09,
+  "pct": 33.6,
+  "plan_count": 45000,
+  "query_id": "3886912043147135675",
+  "text": "UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2",
+  "top_wait": "IO:DataFileRead",
+  "top_wait_id": 16777237,
+  "total_ms": 4200
+ },
+ "span_detail": {
+  "available": true,
+  "closed": 2,
+  "empty_state": null,
+  "id": 2,
+  "in_flight": 1,
+  "partial": 1,
+  "prefix_path": "loaded",
+  "records_outside_commands": 0,
+  "scope": {
+   "note": "backend activity spans in this window; a wait class or event filter selects which spans appear and never shortens one",
+   "pid": 1001,
+   "query_id": null,
+   "unattributed": false
+  },
+  "scoped_spans": 1,
+  "spans": [
+   {
+    "span": {
+     "client_pause_ms": 0.0,
+     "completed_duration_ms": 420.0,
+     "completion": "closed",
+     "duration_additive": false,
+     "duration_source": "timestamps",
+     "end_ns": "1792316000420000000",
+     "escalation_inside": false,
+     "exec_ends": 1,
+     "exec_starts": 1,
+     "gap_inside": false,
+     "identity": "1001:1792316000000000000",
+     "is_worker": false,
+     "kind": "Closed",
+     "leader_pid": null,
+     "malformed": false,
+     "measurement": "measured",
+     "multi_exec": false,
+     "multi_query": false,
+     "observed_elapsed_ms": 420.0,
+     "pid": 1001,
+     "plan_starts": 1,
+     "queries": [
+      {
+       "exec_starts": 1,
+       "query_id": "100",
+       "records": 7
+      }
+     ],
+     "queries_dropped": 0,
+     "reason": null,
+     "records": 7,
+     "sampled_inside": false,
+     "scope_note": "one backend activity span may include multiple statements, multiple executions and client pauses; it is kept whole and its duration is not additive across query rows",
+     "start_ns": "1792316000000000000"
+    }
+   }
+  ],
+  "total_spans": 3,
+  "truncated": false,
+  "unmeasured": 0,
+  "worker_spans": 2
+ },
+ "top_queries_root": {
+  "backend_activity_available": true,
+  "backend_activity_inflight": 1,
+  "backend_activity_scope": "whole-query",
+  "backend_activity_spans": 3,
+  "backend_activity_unmeasured": 0
+ },
+ "unmeasured_row": {
+  "avg_us": 68.9,
+  "backend_activity": {
+   "leader_spans": 1,
+   "source": "not_measured",
+   "span": {
+    "client_pause_ms": 0.0,
+    "completed_duration_ms": null,
+    "completion": "unknown",
+    "duration_additive": false,
+    "duration_source": "timestamps",
+    "end_ns": null,
+    "escalation_inside": false,
+    "exec_ends": 0,
+    "exec_starts": 0,
+    "gap_inside": false,
+    "identity": "1001:~1792316000000000000",
+    "is_worker": false,
+    "kind": "Not measured",
+    "leader_pid": null,
+    "malformed": false,
+    "measurement": "unmeasured",
+    "multi_exec": false,
+    "multi_query": false,
+    "observed_elapsed_ms": 420.0,
+    "pid": 1001,
+    "plan_starts": 0,
+    "queries": [
+     {
+      "exec_starts": 1,
+      "query_id": "5371305355164922084",
+      "records": 7
+     }
+    ],
+    "queries_dropped": 0,
+    "reason": "no CMD_START/CMD_END markers cover this activity: not measured",
+    "records": 7,
+    "sampled_inside": false,
+    "scope_note": "one backend activity span may include multiple statements, multiple executions and client pauses; it is kept whole and its duration is not additive across query rows",
+    "start_ns": null
+   },
+   "workers": {
+    "added_to_leader": false,
+    "observed_max_ms": 900.0,
+    "spans": 2
+   }
+  },
+  "classes": [
+   1500,
+   900,
+   200,
+   300,
+   0,
+   0,
+   100,
+   0,
+   0,
+   100,
+   0
+  ],
+  "count": 45000,
+  "events": [
+   {
+    "id": 0,
+    "ms": 1500,
+    "name": "CPU*"
+   },
+   {
+    "id": 16777237,
+    "ms": 900,
+    "name": "IO:DataFileRead"
+   },
+   {
+    "id": 50331648,
+    "ms": 200,
+    "name": "Lock:relation"
+   },
+   {
+    "id": 67108872,
+    "ms": 300,
+    "name": "LWLock:WALWrite"
+   },
+   {
+    "id": 167772160,
+    "ms": 100,
+    "name": "Extension:Extension"
+   },
+   {
+    "id": 150994946,
+    "ms": 100,
+    "name": "Timeout:PgSleep"
+   }
+  ],
+  "pct": 24.8,
+  "query_id": "5371305355164922084",
+  "text": "SELECT abalance FROM pgbench_accounts WHERE aid = $1",
+  "top_wait": "IO:DataFileRead",
+  "top_wait_id": 16777237,
+  "total_ms": 3100
+ }
+}

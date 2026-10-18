@@ -220,6 +220,18 @@ test_sampled_overhead_gate.py
 test_data_query_text_context.py
 test_ui_live_smoke_lib.py
 test_ui_live_smoke_footage.py
+# Integration finding (#455): the two halves of the backend active span were
+# briefed from the issue text, not from each other, so the UI read
+# `backend_activity_span` / `start_observed` / `executions_count` while the
+# server emits `backend_activity: {span}` / `start_ns` / `exec_starts` -- and
+# the Queries cell drew "Not measured" over a measured, closed, 420 ms span
+# while every Node unit test stayed green on the UI half's own placeholder
+# shape. tests/web_unit/backend-span-wire.test.mjs renders the REAL shape
+# from a checked-in fixture; this guard keeps that fixture equal to what
+# tests/mock_server.py serves, because a stale fixture is how the gate would
+# go blind a second time. It REFUSES (never approves) on a missing, empty,
+# unparseable or vacuous fixture and on a mock that cannot answer.
+test_mock_backend_activity_fixture.py
 # #202 review: the pure parsers behind test_multi_window's conservation
 # check. The old whole-output, last-writer-wins parse merged two ticks and
 # MANUFACTURED positive excess inside that check (+13.3% on the fixture).

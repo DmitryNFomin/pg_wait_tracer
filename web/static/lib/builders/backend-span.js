@@ -38,6 +38,62 @@
 
 import { esc } from '../format.js';
 
+/* ── The shape the server ACTUALLY sends (integration finding, #455) ────────
+ * The two halves of #455 were briefed from the issue text, not from each
+ * other, so the field list above is the UI half's placeholder shape. What
+ * src/backend_span.c's add_span_object() emits differs in four names, and
+ * the Queries row wraps the span one level deeper than execution_detail
+ * does:
+ *
+ *   boundaries        start_ns / end_ns -- ns as JSON STRINGS, or null
+ *                     (never a boolean `start_observed`/`end_observed`)
+ *   executions        exec_starts / exec_ends  (not `executions_count`)
+ *   multi-statement   multi_exec / multi_query (not `multi_statement`)
+ *   Queries row       backend_activity: { source, span, leader_spans, workers }
+ *   execution_detail  backend_activity_span: { ... } (directly on the root)
+ *
+ * Read literally, the renderers found none of their fields on a real row and
+ * drew the string "Not measured" over a measured, closed, 420 ms span -- the
+ * silent dead cell piece 1's provisional note warned about. These two
+ * adapters translate; they never INVENT. A field the server did not send
+ * stays absent, so "Not measured" still means not measured. */
+export function normalizeBackendSpan(span) {
+    if (!span || typeof span !== 'object') return null;
+    const out = { ...span };
+    if (typeof out.start_observed !== 'boolean') out.start_observed = out.start_ns != null;
+    if (typeof out.end_observed !== 'boolean') out.end_observed = out.end_ns != null;
+    if (typeof out.executions_count !== 'number' && typeof out.exec_starts === 'number') {
+        out.executions_count = out.exec_starts;
+    }
+    if (typeof out.multi_statement !== 'boolean' &&
+        (typeof out.multi_exec === 'boolean' || typeof out.multi_query === 'boolean')) {
+        out.multi_statement = out.multi_exec === true || out.multi_query === true;
+    }
+    return out;
+}
+
+/* The span plus its absence reason and scope, from EITHER envelope. `present`
+ * separates "this object carries no backend-activity information at all"
+ * (a response from before #455, or an unrelated row) from "it carries the
+ * information and the answer is null" -- the caller must not render a panel
+ * for the first and must render the stated absence for the second. */
+export function backendSpanEnvelope(src) {
+    const o = (src && typeof src === 'object') ? src : null;
+    const hasDirect = !!o && Object.hasOwn(o, 'backend_activity_span');
+    const hasWrapped = !!o && Object.hasOwn(o, 'backend_activity');
+    const raw = hasDirect ? o.backend_activity_span
+        : hasWrapped ? (o.backend_activity && o.backend_activity.span) || null
+        : null;
+    const str = (v) => (typeof v === 'string' && v ? v : null);
+    return {
+        present: hasDirect || hasWrapped,
+        span: normalizeBackendSpan(raw),
+        source: hasWrapped && o.backend_activity ? str(o.backend_activity.source) : null,
+        reason: o ? str(o.backend_activity_unavailable_reason) : null,
+        scope: o ? (str(o.backend_activity_span_scope) || str(o.backend_activity_scope)) : null,
+    };
+}
+
 function fmtSpanSeconds(ms) {
     if (ms == null || !Number.isFinite(ms)) return null;
     return (ms / 1000).toFixed(1) + ' s';
@@ -86,7 +142,10 @@ export function backendActivityLine(span) {
  * MUST produce a complete, renderable model with ZERO executions (brief
  * item 0): `executionsCount: 0` is a real answer, not an omitted field, so
  * the caller never has to special-case "no executions" as "no data". */
-export function backendActivityDrillModel(span) {
+export function backendActivityDrillModel(rawSpan) {
+    // Accepts either envelope's span, in the server's names or the
+    // placeholder ones -- see normalizeBackendSpan.
+    const span = normalizeBackendSpan(rawSpan);
     const { measurement, completion } = backendActivityStatus(span || {});
     const headline = backendActivityLine(span);
     const pid = span && typeof span.pid === 'number' ? span.pid : null;
@@ -142,12 +201,11 @@ function backendActivityAxesHtml(status) {
 /* Wire envelope shared by the table and detail readouts. Server prose is
  * escaped here; neither aggregate DB Time nor execution totals are read. */
 export function backendActivityHtml(row, detail = false) {
-    const span = row && row.backend_activity_span;
+    const { span, reason, scope } = backendSpanEnvelope(row);
     const content = span
         ? (detail ? waterfallSpanReadout(span)
             : backendActivityLine(span) + '<br>' + backendActivityAxesHtml(backendActivityStatus(span)))
-        : 'Not measured' + (row && row.backend_activity_unavailable_reason
-            ? '<br>' + esc(row.backend_activity_unavailable_reason) : '');
-    return content + (row && row.backend_activity_span_scope
-        ? '<br><span class="backend-activity-scope">Scope: ' + esc(row.backend_activity_span_scope) + '</span>' : '');
+        : 'Not measured' + (reason ? '<br>' + esc(reason) : '');
+    return content + (scope
+        ? '<br><span class="backend-activity-scope">Scope: ' + esc(scope) + '</span>' : '');
 }

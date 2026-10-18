@@ -23,7 +23,7 @@ import {
     buildUnattributedNote, unattributedNoteHtml, queriesScopeNoteHtml,
 } from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
-import { backendActivityHtml } from '../lib/builders/backend-span.js';
+import { backendActivityHtml, backendSpanEnvelope } from '../lib/builders/backend-span.js';
 import { esc } from '../lib/format.js';
 import { shiftWindow } from '../lib/camera.js';
 import { settleBaseline } from '../lib/compare-request.js';
@@ -112,13 +112,22 @@ export function buildQueriesBackendActivityHtml(data) {
     const entries = [];
     const add = (source, label) => {
         if (!source) return;
-        if (Object.hasOwn(source, 'backend_activity_span')) entries.push({ row: source, label });
+        // Either envelope: `backend_activity_span` (execution_detail) or
+        // `backend_activity: {span}` (a Queries row) -- see
+        // backendSpanEnvelope. Reading only the first name drew
+        // "Not measured" over every measured row (integration finding).
+        if (backendSpanEnvelope(source).present) entries.push({ row: source, label });
         const detail = source.span_detail || source;
-        for (const key of ['scoped_spans', 'leader_spans', 'worker_spans']) {
-            for (const span of (Array.isArray(detail[key]) ? detail[key] : [])) {
+        // `spans` is what span_detail actually returns, each item wrapping its
+        // span under `.span`; the other three are NUMBERS in that response,
+        // kept here only for a caller that groups spans under them.
+        for (const key of ['spans', 'scoped_spans', 'leader_spans', 'worker_spans']) {
+            for (const item of (Array.isArray(detail[key]) ? detail[key] : [])) {
+                const span = item && typeof item === 'object' && Object.hasOwn(item, 'span')
+                    ? item.span : item;
                 entries.push({ row: { backend_activity_span: span,
                     backend_activity_span_scope: source.backend_activity_span_scope || data.backend_activity_scope },
-                    label: label + ' · ' + key.replace('_spans', '') });
+                    label: label + ' · ' + (key.replace(/_?spans$/, '') || 'span') });
             }
         }
     };
