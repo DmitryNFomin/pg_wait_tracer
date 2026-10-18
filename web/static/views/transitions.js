@@ -35,7 +35,7 @@
 
 import {
     buildTransitionsOption, buildVariantsPanel, buildTransitionsDisclosure,
-    restoreAllTransitionsState,
+    restoreAllTransitionsState, transitionsDataError,
 } from '../lib/builders/transitions.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -56,6 +56,7 @@ export function createTransitionsView() {
     let chart = null;      // ECharts instance — owned here, nowhere else
     let dataRef = null;    // current transitions payload (slider/resize re-render)
     let ctxRef = null;     // last ctx (slider rAF + click pivot need it)
+    let mountEl = null;    // current pane, including the invalid-data state
     let threshold = DEFAULT_THRESHOLD;  // survives refreshes AND tab switches
     // Issue #107 / owner decision 2026-09-17 "option B": default ON — hide
     // Client:ClientRead edges so the volume-ranking threshold above ranks
@@ -79,6 +80,25 @@ export function createTransitionsView() {
     // click) must still be rejected here even though transport.request()
     // already cancels the prior pending request on the same channel.
     let variantsGen = 0;
+
+    function clearRenderData() {
+        if (rafId != null) {
+            if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(rafId);
+            else clearTimeout(rafId);
+        }
+        rafId = null;
+        resizePending = false;
+        dataRef = null;
+        variantsGen++;
+    }
+
+    function showDataError(el, error) {
+        clearRenderData();
+        disposeChart();
+        el.innerHTML = '<p role="alert" style="color:#f88;padding:20px">' +
+            'Transitions data incomplete: ' + esc(error) +
+            '. Graph and omitted-wait disclosure cannot be shown. Refresh to retry.</p>';
+    }
 
     function disposeChart() {
         if (chart) { chart.dispose(); chart = null; }
@@ -218,6 +238,8 @@ export function createTransitionsView() {
     function renderDFG(threshold_) {
         const host = document.getElementById('dfg-container');
         if (!host || !dataRef) return;
+        const error = transitionsDataError(dataRef);
+        if (error) { showDataError(mountEl, error); return; }
         captureDragPositions();   // P5: read back BEFORE re-layout
         const built = buildTransitionsOption(dataRef, threshold_, dfgDims(), dragPos, hideIdle);
         const { option, visibleCount, hiddenIdleLinks } = built;
@@ -410,6 +432,8 @@ export function createTransitionsView() {
             // EXACT-required (A3): a sampled-only window returns the structured
             // "unavailable" marker for transitions — show the escalate panel.
             if (isUnavailable(t)) return { unavailable: t };
+            const dataError = transitionsDataError(t);
+            if (dataError) return { dataError };
             const hasLinks = !!(t && t.links && t.links.length > 0);
             return {
                 transitions: t,
@@ -419,6 +443,10 @@ export function createTransitionsView() {
         },
 
         mount(el, model, ctx) {
+            // A refresh replaces the payload even when it is empty, unavailable
+            // or invalid. No queued slider/resize may resurrect its predecessor.
+            clearRenderData();
+            mountEl = el;
             ctxRef = ctx;
             if (model.unavailable) {
                 disposeChart();
@@ -426,6 +454,9 @@ export function createTransitionsView() {
                 return;
             }
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
+
+            const dataError = model.dataError || transitionsDataError(model.transitions);
+            if (dataError) { showDataError(el, dataError); return; }
 
             if (!model.hasLinks) {
                 disposeChart();
@@ -466,13 +497,10 @@ export function createTransitionsView() {
         },
 
         leave() {
-            if (rafId != null && typeof cancelAnimationFrame === 'function') {
-                cancelAnimationFrame(rafId);
-            }
-            rafId = null;
-            resizePending = false;
+            clearRenderData();
             disposeChart();
-            dataRef = null;
+            mountEl = null;
+            ctxRef = null;
             // dragPos survives leave() on purpose: hand-placed nodes are keyed
             // by event name, and the user's arrangement should greet them when
             // they tab back mid-investigation.

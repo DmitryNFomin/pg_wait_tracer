@@ -113,16 +113,44 @@ function filterIdleLinks(links, hideIdle) {
     return { links: kept, hiddenLinks, hiddenValue };
 }
 
+/* #456: the view must distinguish an incomplete response from an empty graph
+ * or a graph with no omitted waits. Return a reason for its visible error
+ * panel; the pure builder enforces the same contract for other callers. */
+export function transitionsDataError(data) {
+    if (!data || !Array.isArray(data.nodes)) return 'missing nodes array';
+    if (!Array.isArray(data.links)) return 'missing links array';
+    const names = new Set();
+    for (const node of data.nodes) {
+        if (!node || typeof node.name !== 'string' || !node.name ||
+            !Number.isFinite(node.total_ms) || node.total_ms < 0) {
+            return 'invalid node name or dwell time';
+        }
+        if (names.has(node.name)) return 'duplicate node: ' + node.name;
+        names.add(node.name);
+    }
+    // Check ALL endpoints, before idle/simplify filtering can conceal a missing
+    // catalog entry. Links carry counts, not the complete node dwell catalog;
+    // synthesizing nodes from them would silently lose omittedDominant (#456).
+    for (const link of data.links) {
+        if (!link || typeof link.source !== 'string' || typeof link.target !== 'string') {
+            return 'invalid link endpoints';
+        }
+        for (const name of [link.source, link.target]) {
+            if (!names.has(name)) return 'missing node: ' + name;
+        }
+    }
+    return null;
+}
+
 /* Build the layout-independent pieces: the maximum edge count and a name->node
- * lookup. Cheap, exported so the slider re-render can reuse it. Operates on
- * whatever `links` data carries — callers that want idle edges excluded from
- * the max/threshold ranking pass pre-filtered data (buildTransitionsOption
- * does, via filterIdleLinks, before this runs). */
+ * lookup. Callers may pass idle-filtered links, but must retain the complete
+ * node catalog. buildTransitionsOption validates the raw links first. */
 export function transitionsContext(data) {
-    const links = (data && data.links) || [];
-    const nodes = (data && data.nodes) || [];
+    const error = transitionsDataError(data);
+    if (error) throw new Error('Transitions data incomplete: ' + error);
+    const { links, nodes } = data;
     const maxEdgeCount = links.length ? Math.max(...links.map(l => l.value)) : 0;
-    const nodeMap = {};
+    const nodeMap = Object.create(null);
     nodes.forEach(n => { nodeMap[n.name] = n; });
     return { maxEdgeCount, nodeMap };
 }
@@ -240,6 +268,8 @@ export function computeGridOrder(n, cols, rows) {
  * threshold (findOmittedDominantNode) so a rare-but-dominant wait is named
  * instead of silently vanishing. */
 export function buildTransitionsOption(data, threshold, dims, posOverrides, hideIdle) {
+    const error = transitionsDataError(data);
+    if (error) throw new Error('Transitions data incomplete: ' + error);
     dims = dims || {};
     const cW = dims.width || 800, cH = dims.height || 550;
     const rawLinks = (data && data.links) || [];
