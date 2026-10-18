@@ -1200,6 +1200,61 @@ static void test_bypass(const char *dir_a)
           pgwt_span_qid_lookup(&fake, 7) == NULL,
           "7e: a FAILED result answers nothing at all");
 
+    /* 7i. THE UNATTRIBUTED SELECTION'S POSITIVE CONTROL. Section 2 asserts
+     *     the unattributed drill's EMPTY STATE, and an empty-state assertion
+     *     is satisfied by a selector that can never select anything -- the
+     *     exact false negative this suite exists for. Here one span holds a
+     *     record with NO query id and another holds an attributed one, and
+     *     the unattributed scope must return the first and ONLY the first.
+     *     A wait with no attributable query id stays reachable; no
+     *     association is invented for it. */
+    {
+        static struct pgwt_trace_event two[6];
+        memset(two, 0, sizeof(two));
+        /* pid 801: attributed. */
+        two[0].timestamp_ns = 1000; two[0].pid = 801;
+        two[0].old_event = two[0].new_event = PGWT_MARKER_CMD_START;
+        two[1].timestamp_ns = 1100; two[1].pid = 801;
+        two[1].old_event = EV_LOCK; two[1].duration_ns = 100;
+        two[1].query_id = 4242;
+        two[2].timestamp_ns = 1200; two[2].pid = 801;
+        two[2].old_event = two[2].new_event = PGWT_MARKER_CMD_END;
+        /* pid 802: a wait with NO attributable query id. */
+        two[3].timestamp_ns = 2000; two[3].pid = 802;
+        two[3].old_event = two[3].new_event = PGWT_MARKER_CMD_START;
+        two[4].timestamp_ns = 2500; two[4].pid = 802;
+        two[4].old_event = EV_LOCK; two[4].duration_ns = 500;
+        two[4].query_id = 0;
+        two[4].flags = PGWT_EVENT_FLAG_QUERY_UNATTRIB;
+        two[5].timestamp_ns = 2600; two[5].pid = 802;
+        two[5].old_event = two[5].new_event = PGWT_MARKER_CMD_END;
+
+        struct pgwt_span_params up = {0};
+        up.unattributed_only = 1;
+        pgwt_span_reduce(two, 6, &up, &r);
+        CHECK(!r.failed && r.total_spans == 2,
+              "7i: both spans were produced");
+        CHECK(r.scoped_spans == 1 && r.num_selected == 1,
+              "7i: the unattributed scope selects exactly ONE of them "
+              "(scoped=%d) -- the selector does select", r.scoped_spans);
+        CHECK(r.num_selected == 1 && r.selected[0].pid == 802 &&
+              r.selected[0].n_qids == 0,
+              "7i: and it is the pid whose wait had no attributable query "
+              "id, with no association invented for it");
+        CHECK(r.num_selected == 1 &&
+              r.selected[0].end_ns - r.selected[0].start_ns == 600,
+              "7i: carrying its own measured 600 ns duration, so the "
+              "unattributed drill is not an empty shell");
+        pgwt_span_free(&r);
+
+        /* And the contrast: with no scope, BOTH are selected. */
+        pgwt_span_reduce(two, 6, NULL, &r);
+        CHECK(!r.failed && r.scoped_spans == 2 && r.num_selected == 2,
+              "7i: without the unattributed scope BOTH spans are selected "
+              "-- so 7i's '1' is the FILTER and not the fixture");
+        pgwt_span_free(&r);
+    }
+
     /* 7h. The row index is searched by BISECTION (pgwt_span_qid_lookup),
      *     which is correct only on an ascending array -- and a miss reads
      *     exactly like "this query has no span", which is the #455 defect
@@ -1444,7 +1499,7 @@ int main(int argc, char **argv)
      * suite contains did not test what it claims, and a floor that does not
      * move with the suite lets a whole section stop running unnoticed --
      * which is the same false negative as a gate that cannot fail. */
-    if (checks < 127) {
+    if (checks < 132) {
         printf("FAIL: only %d assertions ran -- a section did not execute\n",
                checks);
         return 1;
