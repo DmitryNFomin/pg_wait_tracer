@@ -1151,3 +1151,252 @@ test('TRANSITIONS_SEMANTICS_NOTE: states the size/edge-meaning distinction '
     assert.ok(TRANSITIONS_SEMANTICS_NOTE.toLowerCase().includes('not a ranking'));
     assert.ok(TRANSITIONS_SEMANTICS_NOTE.toLowerCase().includes('db time'));
 });
+
+// #456: frozen buckets:200 response from issue456-restart-replay/out200/run00.json
+// (all ten captured responses are byte-identical). Keep the full catalog/links:
+// pruning the fixture to the displayed graph would hide the regression itself.
+import { readFileSync } from 'node:fs';
+import { createTransitionsView } from '../../web/static/views/transitions.js';
+import { Transport } from '../../web/static/lib/transport.js';
+import { ViewManager } from '../../web/static/lib/view-manager.js';
+import { FilterStack, TimeRange, ServerInfo } from '../../web/static/lib/state.js';
+
+function replay456() {
+    return JSON.parse(readFileSync(new URL(
+        '../../web/static/dev/fixtures/issue456-transitions.json', import.meta.url), 'utf8'));
+}
+
+function assertReplay456(payload) {
+    // Population assertions precede determinism: ten empty graphs cannot pass.
+    assert.ok(payload.nodes.length > 0);
+    assert.equal(payload.links.length, 80);
+    assert.equal(payload.links.reduce((sum, link) => sum + link.value, 0), 3466745);
+    const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+    assert.equal(payload.total, 3466745);
+    assert.equal(built.hiddenIdleValue, 849416);
+    assert.equal(built.hiddenThresholdValue, 70110);
+    assert.ok(built.visibleCount > 0);
+    assert.ok(built.shownLinks > 0);
+    assert.deepEqual(built.omittedDominant, { name: 'Lock:relation', ms: 1533607.757399 });
+    assert.equal(payload.nodes.length, 41);
+    assert.equal(built.option.series[0].data.some(n => n.name === 'Lock:relation'), false);
+    const text = buildTransitionsDisclosure(built, payload.total);
+    assert.match(text, /Lock:relation omitted \(1533\.6s total\)/);
+    assert.match(text, /849,416 idle \(ClientRead\) hidden/);
+    assert.match(text, /70,110 below the simplify threshold/);
+    const restored = buildTransitionsOption(payload, 0, {}, null, false);
+    assert.equal(restored.option.series[0].data.find(n => n.name === 'Lock:relation').value,
+        1533607.757399);
+    return { built, text };
+}
+
+// Deliberately small DOM/chart boundary: run the REAL view, transport and view
+// manager. innerHTML replacement removes descendants, just as a browser does.
+function viewHarness456(t) {
+    const elements = new Map();
+    const frames = new Map();
+    const paints = [];
+    let nextFrame = 0;
+    class Element {
+        constructor(id) {
+            this.id = id; this.style = {}; this.listeners = {}; this.children = [];
+            this.textContent = ''; this.clientWidth = 800; this.clientHeight = 550;
+        }
+        addEventListener(name, fn) { this.listeners[name] = fn; }
+        set innerHTML(html) {
+            for (const child of this.children) { child.innerHTML = ''; elements.delete(child.id); }
+            this.children = []; this.html = html; this.textContent = '';
+            for (const match of html.matchAll(/id="([^"]+)"/g)) {
+                const child = new Element(match[1]);
+                elements.set(child.id, child); this.children.push(child);
+            }
+        }
+        get innerHTML() { return this.html || ''; }
+    }
+    const originals = new Map();
+    function stubGlobal(name, value) {
+        originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+        Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+    }
+    stubGlobal('document', { getElementById: id => elements.get(id) || null });
+    stubGlobal('requestAnimationFrame', fn => {
+        frames.set(++nextFrame, fn); return nextFrame;
+    });
+    stubGlobal('cancelAnimationFrame', id => frames.delete(id));
+    stubGlobal('WebSocket', { OPEN: 1 });
+    const ws = {
+        readyState: 1, sent: [],
+        addEventListener(name, fn) { if (name === 'message') this.deliver = body => fn({ data: JSON.stringify(body) }); },
+        send(msg) { this.sent.push(JSON.parse(msg)); },
+    };
+    const transport = new Transport(); transport.attach(ws);
+    const ctx = {
+        transport, timeRange: new TimeRange(new ServerInfo()), filters: new FilterStack(),
+        channel: name => 'transitions.' + name,
+        getEscalationStatus: () => ({ escalation_supported: false }),
+        echarts: { init() { return {
+            on() {}, getZr() { return { on() {} }; }, dispose() {}, resize() {},
+            getOption() { return paints.at(-1); }, setOption(option) { paints.push(option); },
+        }; } },
+    };
+    const view = createTransitionsView();
+    const root = new Element('root');
+    const manager = new ViewManager(ctx); manager.register(view); manager.setContainer(root);
+    t.after(() => {
+        view.leave(); transport.rejectAll('test complete');
+        for (const [name, descriptor] of originals) {
+            if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+            else delete globalThis[name];
+        }
+    });
+    return { view, root, ctx, ws, manager, paints, frames, elements,
+        mount(payload) { view.mount(root, view.build({ transitions: payload }), ctx); },
+        flush() { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn()); },
+    };
+}
+
+test('#456 frozen replay names the omitted Lock:relation with exact dwell and visibility', () => {
+    assertReplay456(replay456());
+});
+
+test('#456 nodes-less response is visibly refused by the view, never rendered as a graph', t => {
+    const h = viewHarness456(t);
+    const payload = replay456(); delete payload.nodes;
+    h.mount(payload);
+    assert.match(h.root.innerHTML, /role="alert"/);
+    assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    assert.match(h.root.innerHTML, /missing nodes/);
+    assert.equal(h.paints.length, 0);
+    assert.equal(h.elements.has('dfg-total'), false);
+});
+
+test('#456 missing Lock:relation keeps the headline totals but is visibly refused', t => {
+    const h = viewHarness456(t);
+    const payload = replay456();
+    const before = JSON.stringify(payload.links);
+    payload.nodes = payload.nodes.filter(n => n.name !== 'Lock:relation');
+    assert.equal(JSON.stringify(payload.links), before);
+    assert.equal(payload.total, 3466745);
+    h.mount(payload);
+    assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    assert.match(h.root.innerHTML, /missing node: Lock:relation/);
+    assert.equal(h.paints.length, 0);
+});
+
+test('#456 builder refuses incomplete catalogs before idle or simplify filtering', () => {
+    const payload = replay456();
+    delete payload.nodes;
+    assert.throws(() => buildTransitionsOption(payload, 20, {}, null, true), /missing nodes/);
+    for (const name of ['Lock:relation', 'Client:ClientRead', 'CPU*']) {
+        const partial = replay456(); partial.nodes = partial.nodes.filter(n => n.name !== name);
+        assert.throws(() => buildTransitionsOption(partial, 20, {}, null, true), /missing node:/);
+    }
+});
+
+test('#456 refresh clears the old payload and queued render before mounting empty data', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456());
+    h.view.resize();
+    assert.equal(h.frames.size, 1);
+    h.mount({ nodes: [], links: [], total: 0 });
+    assert.equal(h.frames.size, 0, 'empty mount must cancel old render');
+    h.view.setHideIdle(false);
+    assert.equal(h.frames.size, 0, 'empty mount must release dataRef');
+    assert.match(h.root.innerHTML, /No transitions found/);
+});
+
+test('#456 malformed refresh replaces the old graph and cannot revive it on slider/resize', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456()); h.view.resize();
+    const payload = replay456(); delete payload.nodes;
+    h.mount(payload);
+    h.view.setHideIdle(false); h.view.resize(); h.flush();
+    assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    assert.equal(h.paints.length, 1);
+    assert.equal(h.frames.size, 0);
+});
+
+test('#456 ten fresh view/transport sessions preserve nonempty frozen payload and disclosure', async t => {
+    let expected;
+    for (let run = 0; run < 10; run++) {
+        await t.test('session ' + run, async t => {
+            const h = viewHarness456(t);
+            h.ctx.timeRange.set(100, 200);
+            const mounting = h.manager.switchTo('transitions');
+            const request = h.ws.sent.at(-1);
+            assert.deepEqual(request, { id: 1, cmd: 'transitions', from: 100, to: 200, filters: {}, buckets: 200 });
+            // Interleave a different table channel's nodes-less response.
+            const other = h.ctx.transport.request('events.table', 'events', {});
+            h.ws.deliver({ id: h.ws.sent.at(-1).id, rows: [{ name: 'unrelated' }] });
+            await other;
+            const payload = replay456(); const { text } = assertReplay456(payload);
+            h.ws.deliver({ ...payload, id: request.id }); await mounting;
+            assert.equal(h.elements.get('dfg-total').textContent, text);
+            assert.ok(h.paints[0].series[0].data.length > 2);
+            const snapshot = JSON.stringify({ text, option: h.paints[0] });
+            if (run === 0) expected = snapshot;
+            assert.equal(snapshot, expected);
+
+            // A superseded request must not supply the next refresh's body.
+            const stale = h.manager.refresh(); const oldId = h.ws.sent.at(-1).id;
+            h.ctx.timeRange.set(300, 400); h.ctx.filters.drill('pid', 17, 'pid 17', 'transitions');
+            const fresh = h.manager.refresh(); const current = h.ws.sent.at(-1);
+            assert.deepEqual(current.filters, { pid: 17 });
+            assert.equal(current.from, 300); assert.equal(current.to, 400);
+            h.ws.deliver({ id: oldId, links: payload.links, total: payload.total });
+            h.ws.deliver({ ...payload, id: current.id });
+            await Promise.all([stale, fresh]);
+            assert.equal(h.paints.length, 2);
+            assert.equal(h.elements.get('dfg-total').textContent, text);
+        });
+    }
+});
+
+
+test('#456 unavailable refresh also releases the old payload and pending frame', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456()); h.view.resize();
+    h.mount({ code: 'full_fidelity_required', unavailable: 'Exact data required', fidelity: 'sampled' });
+    h.view.setHideIdle(false);
+    assert.equal(h.frames.size, 0);
+    assert.match(h.root.innerHTML, /unavailable-panel/);
+    assert.equal(h.elements.has('dfg-total'), false);
+});
+
+test('#456 catalog mutation after mount is visibly refused on the next render', t => {
+    const h = viewHarness456(t);
+    const payload = replay456(); h.mount(payload);
+    payload.nodes = payload.nodes.filter(n => n.name !== 'Lock:relation');
+    h.view.resize(); h.flush();
+    assert.match(h.root.innerHTML, /missing node: Lock:relation/);
+    assert.equal(h.paints.length, 1);
+});
+
+test('#456 invalid dwell, duplicate names, empty catalog and missing links are not empty graphs', t => {
+    const h = viewHarness456(t);
+    for (const mutate of [
+        p => { p.nodes = []; },
+        p => { p.nodes = null; },
+        p => { p.nodes.push({ ...p.nodes[0] }); },
+        p => { delete p.nodes[0].total_ms; },
+        p => { p.nodes[0].total_ms = NaN; },
+        p => { p.nodes[0].total_ms = -1; },
+        p => { delete p.links; },
+    ]) {
+        const payload = replay456(); mutate(payload); h.mount(payload);
+        assert.match(h.root.innerHTML, /role="alert"/);
+        assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    }
+    assert.equal(h.paints.length, 0);
+    h.mount(replay456());
+    assert.match(h.elements.get('dfg-total').textContent, /Lock:relation omitted/);
+    assert.equal(h.paints.length, 1, 'a valid refresh recovers');
+});
+
+test('#456 missing hostile endpoint is escaped in the visible error', t => {
+    const h = viewHarness456(t);
+    const payload = replay456(); payload.links[0].source = '<img src=x onerror=alert(1)>';
+    h.mount(payload);
+    assert.match(h.root.innerHTML, /missing node: &lt;img/);
+    assert.ok(!h.root.innerHTML.includes('<img'));
+});
