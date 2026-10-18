@@ -130,6 +130,7 @@ USER_OBJS  = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(USER_SRCS))
 # pgwt-server: lightweight replay server (no BPF dependencies)
 SERVER_SRCS = $(SRC_DIR)/server.c \
               $(SRC_DIR)/compute.c \
+              $(SRC_DIR)/backend_span.c \
               $(SRC_DIR)/open_overlay.c \
               $(SRC_DIR)/block_agg.c \
               $(SRC_DIR)/event_reader.c \

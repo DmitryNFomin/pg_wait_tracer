@@ -870,3 +870,14 @@ test_open_ckpt
 # (the drain must stop BOUNDED, count the truncation and log it), and a
 # second truncation that must still be counted after the one-shot log.
 test_tick_drain
+# #455: the BACKEND ACTIVE SPAN. Queries' top row read DB Time 720.4 s beside
+# Execs 91 / Avg Exec 33 us because the 714 s pre-executor Lock:relation is
+# taken before query__execute__start, where no latency column can see it --
+# and the only arithmetic the response offered, DB Time / Execs = 7.9 s,
+# divides one session's wait by ninety-one OTHER sessions' executions. This
+# test reproduces that exact shape, asserts the span's identity, boundaries,
+# status and zero contained executions, and requires five mutations of the
+# fix (including deriving the duration from DB Time / Execs) to fail the same
+# oracle. Its bypass suite requires a refusal, never an approval, from every
+# way the pass can be made blind.
+test_backend_span

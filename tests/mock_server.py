@@ -380,6 +380,95 @@ _CANNED["top_sessions"] = {
     ],
 }
 
+# #455 Backend activity: ONE canned span shape, shared by top_queries' rows
+# and execution_detail, because the real server serialises both through the
+# same add_span_object() -- two mock shapes could drift apart in a way the
+# real server cannot. Every key the real server always emits is present here;
+# test_protocol_drift caught the whole object as real-server-only, which is
+# exactly what that gate is for.
+#
+# The values describe a CLOSED, fully measured span: both CMD boundaries
+# observed, so `completed_duration_ms` is a number. The real server emits
+# JSON null there (and in start_ns/end_ns) when a boundary was NOT observed,
+# and the drift checker merges a null into the same schema as its typed
+# sibling -- the same rule the idle-%DB note above relies on.
+def _mock_span(pid=1001, qid="3886912043147135675"):
+    return {
+        "identity": "%d:1792316000000000000" % pid,
+        "pid": pid,
+        "kind": "Closed",
+        "measurement": "measured",
+        "completion": "closed",
+        "start_ns": "1792316000000000000",
+        "end_ns": "1792316000420000000",
+        "observed_elapsed_ms": 420.0,
+        "completed_duration_ms": 420.0,
+        "exec_starts": 1,
+        "exec_ends": 1,
+        "plan_starts": 1,
+        "records": 7,
+        "client_pause_ms": 0.0,
+        "multi_exec": False,
+        "multi_query": False,
+        "is_worker": False,
+        "leader_pid": None,
+        "gap_inside": False,
+        "sampled_inside": False,
+        "escalation_inside": False,
+        "malformed": False,
+        "reason": None,
+        "queries": [{"query_id": qid, "records": 7, "exec_starts": 1}],
+        "queries_dropped": 0,
+        # Stated on the wire by the real server so no consumer sums one span
+        # across the several query rows it can legitimately appear under, and
+        # so a gate can assert that no duration came from DB Time / Execs.
+        "duration_additive": False,
+        "duration_source": "timestamps",
+        "scope_note": "one backend activity span may include multiple "
+                      "statements, multiple executions and client pauses; it "
+                      "is kept whole and its duration is not additive across "
+                      "query rows",
+    }
+
+
+# `measured=False` is the UNMEASURED span: no CMD marker covered the
+# activity, so BOTH boundaries and the completed duration are JSON null, the
+# `reason` is a string saying why, and the kind reads "Not measured" -- never
+# a blank and never a zero. The observed elapsed survives, because it comes
+# from the records' own timestamps.
+def _mock_span_unmeasured(pid, qid):
+    sp = _mock_span(pid, qid)
+    sp.update({
+        "kind": "Not measured",
+        "measurement": "unmeasured",
+        "completion": "unknown",
+        "start_ns": None,
+        "end_ns": None,
+        "completed_duration_ms": None,
+        "exec_starts": 0,
+        "exec_ends": 0,
+        "plan_starts": 0,
+        "reason": "no CMD_START/CMD_END markers cover this activity: "
+                  "not measured",
+    })
+    sp["identity"] = "%d:~1792316000000000000" % pid
+    return sp
+
+
+def _mock_backend_activity(pid=1001, qid="3886912043147135675",
+                           measured=True):
+    return {
+        "source": "closed" if measured else "not_measured",
+        "span": (_mock_span(pid, qid) if measured
+                 else _mock_span_unmeasured(pid, qid)),
+        "leader_spans": 1,
+        # Worker activity is its OWN number and is never added to the
+        # leader's wall time -- `added_to_leader` says so on the wire.
+        "workers": {"spans": 2, "observed_max_ms": 900.0,
+                    "added_to_leader": False},
+    }
+
+
 _CANNED["top_queries"] = {
     "db_time_ms": 12500,
     # Issue #128: foreground non-idle time no command claimed (reported, not
@@ -398,6 +487,18 @@ _CANNED["top_queries"] = {
     # test_protocol_drift caught the field as real-server-only, which is
     # exactly what that gate is for.
     "exec_stats_scope": "whole-query",
+    # #455: whether the backend-span pass answered, what it found, and the
+    # SCOPE it answered in. "whole-query" here for the same reason
+    # exec_stats_scope is: this mock serves the unfiltered shape. The real
+    # server sends "pid" under a drill, and
+    # backend_activity_unavailable_reason instead of the counts when the pass
+    # REFUSED (it never returns a short answer that reads like a complete
+    # one).
+    "backend_activity_available": True,
+    "backend_activity_spans": 3,
+    "backend_activity_inflight": 1,
+    "backend_activity_unmeasured": 0,
+    "backend_activity_scope": "whole-query",
     "rows": [
         {"query_id": "3886912043147135675", "text": "UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2",
          "total_ms": 4200, "pct": 33.6, "count": 45000, "avg_us": 93.3,
@@ -482,6 +583,23 @@ _CANNED["variants"] = {
         ],
     },
 }
+
+# #455: every top_queries row carries `backend_activity`. Attached in a loop
+# rather than written into each literal above so a row cannot be forgotten --
+# the real server attaches it to EVERY row (as an object, or as JSON null
+# with backend_activity_unavailable_reason when no span was observed for that
+# query), and a mock that carried it on some rows only would hide a schema
+# drift on the others.
+#
+# The FIRST row gets the closed, fully measured span; the rest get the
+# NOT MEASURED one. That mix is not decoration: a real Queries page carries
+# both (only some backends have CMD markers in the window), the real server's
+# merged row schema therefore has a string `reason` and null boundaries, and a
+# mock that served only the measured shape drifted on exactly that field --
+# caught by test_protocol_drift, which is what that gate is for.
+for _i, _r in enumerate(_CANNED["top_queries"]["rows"]):
+    _r["backend_activity"] = _mock_backend_activity(
+        qid=_r.get("query_id", "100"), measured=(_i == 0))
 
 _CANNED["heatmap"] = {
     "bucket_ns": _BUCKET_NS,
@@ -983,6 +1101,20 @@ def _handle_request_inner(cmd, req_id, msg):
                 "completed_count": len(rows) - open_count, "truncated": False}
 
     if cmd == "execution_detail":
+        # #455: the containing leader span, in the SAME representation
+        # Queries uses. Spread into every return path below (including the
+        # empty-detail one) because the real server emits the pair on all of
+        # them -- either the span object, or null WITH its reason.
+        def _mock_exec_span(_pid):
+            return {
+                "backend_activity_span": _mock_span(_pid),
+                "backend_activity_span_scope":
+                    "the span was reconstructed from markers in a bounded "
+                    "window around this execution; a command still open past "
+                    "that bound reads in flight with its reason, and the "
+                    "window edge is never used as a boundary",
+            }
+
         filters = msg.get("filters", {})
         pid = filters.get("pid", 1000)
         qid = str(filters.get("query_id", "100"))
@@ -995,7 +1127,8 @@ def _handle_request_inner(cmd, req_id, msg):
                     "leader": {"pid": pid, "query_id": qid, "events": [],
                                "total_count": 0, "truncated": False},
                     "workers": [], "plan": None,
-                    "total_count": 0, "kept_count": 0, "truncated": False}
+                    "total_count": 0, "kept_count": 0, "truncated": False,
+                    **_mock_exec_span(pid)}
         if pid == 1002:
             events = [
                 {"we": 0x0100004e, "name": "IO:WalSync",
@@ -1009,7 +1142,8 @@ def _handle_request_inner(cmd, req_id, msg):
                                "events": events, "total_count": 2,
                                "truncated": False},
                     "workers": [], "plan": None,
-                    "total_count": 2, "kept_count": 2, "truncated": False}
+                    "total_count": 2, "kept_count": 2, "truncated": False,
+                    **_mock_exec_span(pid)}
         event = {"we": 0x01000015, "name": "IO:DataFileRead",
                  "start_ns": start, "dur_ns": "10000000", "cpu_ns": None}
         return {"id": req_id, "query_id": qid,
@@ -1027,7 +1161,57 @@ def _handle_request_inner(cmd, req_id, msg):
                 ],
                 "plan": {"start_ns": str(_EXEC_BASE_NS - 2_000_000),
                          "end_ns": str(_EXEC_BASE_NS - 1_000_000)},
-                "total_count": 4, "kept_count": 4, "truncated": False}
+                "total_count": 4, "kept_count": 4, "truncated": False,
+                **_mock_exec_span(pid)}
+
+    if cmd == "span_detail":
+        # #455: the bounded backend-activity drill. Three scopes, matching
+        # src/server.c handle_span_detail: a pid, a query id, or
+        # `unattributed: true`. The unattributed scope returns a span with NO
+        # association -- a wait with no attributable query id stays reachable
+        # without one being invented for it -- and an EMPTY scope returns the
+        # empty-state MESSAGE rather than a bare empty list, because "nothing
+        # matched" and "the server did not look" are different answers.
+        filters = msg.get("filters", {})
+        pid = filters.get("pid") or 0
+        qid = filters.get("query_id")
+        unattr = bool(msg.get("unattributed", False))
+        if unattr:
+            span = _mock_span(1004, "0")
+            span["queries"] = []
+            span["identity"] = "1004:1792316000000000000"
+            spans = [{"span": span}]
+        elif pid == 9999:
+            spans = []          # a pid with no observed activity
+        else:
+            spans = [{"span": _mock_span(pid or 1001,
+                                         str(qid) if qid else "100")}]
+        return {
+            "id": req_id,
+            "prefix_path": "loaded",
+            "scope": {
+                "pid": pid or None,
+                "query_id": (str(qid) if (qid and not unattr) else None),
+                "unattributed": unattr,
+                "note": "backend activity spans in this window; a wait class "
+                        "or event filter selects which spans appear and never "
+                        "shortens one",
+            },
+            "available": True,
+            "spans": spans,
+            "total_spans": 3,
+            "scoped_spans": len(spans),
+            "truncated": False,
+            "closed": 2,
+            "in_flight": 1,
+            "partial": 1,
+            "unmeasured": 0,
+            "worker_spans": 2,
+            "records_outside_commands": 0,
+            "empty_state": (None if spans else
+                            "no backend activity span matched this scope in "
+                            "this window"),
+        }
 
     if cmd == "exec_scatter":
         # #222 review item 3 fix-up: pid 1002's "t" MUST equal the
