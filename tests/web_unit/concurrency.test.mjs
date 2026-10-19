@@ -362,3 +362,86 @@ test('#276 badge: missing or malformed fields render exactly as before', () => {
     assert.equal(burstPidSampleMarker({ pids: [1, 2] }), '');              // no count
     assert.equal(burstPidSampleMarker({ sessions: '9', pids: [1] }), '');  // not a number
 });
+
+// ── review finding (separate from the owner-held #442 threshold): the 640px
+// scroll cap used to wrap BOTH tables in one container, so Burst Events never
+// reached the fold on a dense fixture. buildPeaksPanelHtml/buildBurstsPanelHtml
+// are the two panels views/concurrency.js now mounts into separate, independently
+// scrollable containers -- these tests prove each is TRULY standalone (not just
+// a cosmetic split that still concatenates the other's content internally) and
+// that the split preserves every row, including the exact zoom range of the
+// LAST one, over a dense (300-bucket, 300-burst) fixture. ─────────────────────
+
+import { buildPeaksPanelHtml, buildBurstsPanelHtml } from '../../web/static/lib/builders/concurrency.js';
+
+function denseBurstData() {
+    // 300 buckets, 1s apart; EVERY bucket has a burst (not just a sampled
+    // few) -- the "300 bursts" dense scenario the gate names. max cycles so
+    // more than 10 buckets qualify for the top-10 peaks table.
+    const bucketNs = 1_000_000_000;
+    const base = 1_700_000_000_000_000_000;
+    const peaks = [];
+    const bursts = [];
+    for (let i = 0; i < 300; i++) {
+        const t = base + i * bucketNs;
+        const max = 2 + (i % 20);   // plenty of distinct values > 1
+        peaks.push({ t, t_ms: Math.floor(t / 1e6), max, event: 'LWLock:BufferMapping' });
+        const ts = t + 500_000_000;
+        bursts.push({ timestamp_ns: ts, timestamp_ms: Math.floor(ts / 1e6),
+            event: 'IO:DataFileRead', sessions: 4 + (i % 6),
+            pids: [1000 + i, 1001 + i, 1002 + i, 1003 + i] });
+    }
+    return { bucket_ns: bucketNs, peaks, bursts, bursts_total: 300, bursts_truncated: false };
+}
+
+test('#442-review: buildPeaksPanelHtml carries no <h3> Burst Events heading (true separation)', () => {
+    const model = buildConcurrencyOption(denseBurstData());
+    const html = buildPeaksPanelHtml(model);
+    assert.ok(html.includes('<h3'), html.slice(0, 200));
+    assert.ok(html.includes('Top Peak Moments'), html.slice(0, 200));
+    // TOP_PEAKS_CAPTION's text legitimately CROSS-REFERENCES "Burst Events"
+    // in prose ("...listed separately under Burst Events") -- the thing that
+    // must be absent is the OTHER panel's <h3> HEADING, not the phrase.
+    assert.equal((html.match(/<h3/g) || []).length, 1,
+        'peaks panel must carry exactly its own heading, not the bursts one too');
+    assert.ok(!/<h3[^>]*>Burst Events/.test(html),
+        'peaks panel must not carry the bursts heading');
+    // Exactly the top 10 by max, as the model already guarantees. One extra
+    // <tr> is the <thead> header row, hence -1.
+    assert.equal((html.match(/<tr/g) || []).length - 1, 10);
+});
+
+test('#442-review: buildBurstsPanelHtml never mentions Top Peak Moments (true separation)', () => {
+    const model = buildConcurrencyOption(denseBurstData());
+    const html = buildBurstsPanelHtml(model);
+    assert.ok(html.includes('Burst Events'), html.slice(0, 200));
+    assert.ok(!html.includes('Top Peak Moments'), 'bursts panel must not carry the peaks heading');
+});
+
+test('#442-review: every one of 300 bursts survives the split, none dropped', () => {
+    const model = buildConcurrencyOption(denseBurstData());
+    assert.equal(model.bursts.length, 300);
+    const html = buildBurstsPanelHtml(model);
+    // -1 for the <thead> header row.
+    assert.equal((html.match(/<tr/g) || []).length - 1, 300,
+        'the burst table must render all 300 rows, not a 640px-shaped subset');
+});
+
+test('#442-review: the LAST burst row carries its exact zoom range', () => {
+    const data = denseBurstData();
+    const model = buildConcurrencyOption(data);
+    const html = buildBurstsPanelHtml(model);
+    const last = data.bursts[data.bursts.length - 1];
+    const pad = 5 * model.bucketNs;
+    const expectedFrom = last.timestamp_ns - pad;
+    const expectedTo = last.timestamp_ns + pad;
+    assert.ok(html.includes('data-from="' + expectedFrom + '" data-to="' + expectedTo + '"'),
+        `expected exact zoom range for the final burst (from=${expectedFrom}, to=${expectedTo}) ` +
+        `not found in rendered HTML`);
+});
+
+test('#442-review: buildConcurrencyTables (combined) is still exactly the two panels concatenated', () => {
+    const model = buildConcurrencyOption(denseBurstData());
+    assert.equal(buildConcurrencyTables(model),
+        buildPeaksPanelHtml(model) + buildBurstsPanelHtml(model));
+});

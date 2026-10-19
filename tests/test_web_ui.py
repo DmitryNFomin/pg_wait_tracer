@@ -2131,6 +2131,154 @@ def test_burst_row_zoom(page):
     check(hist >= 1, f"zoom recorded in history (len={hist})")
 
 
+def test_concurrency_panels_side_by_side(page):
+    """review finding (separate from the owner-held #442 threshold): the two
+    Concurrency tables used to share ONE 640px-capped scroll container, so
+    Burst Events (what the chart's red markers point at) never came above
+    the fold on a dense fixture. Peaks and Bursts are now two independently
+    bounded panels: side by side at a wide (demo-class) viewport, both
+    reachable by scrolling the TABLE, not the page; a narrow viewport
+    instead shows an always-visible Peaks/Bursts selector with counts, one
+    panel at a time."""
+    print("--- Test: Concurrency panels — side by side + narrow selector ---")
+
+    browser = page.context.browser
+
+    # ── Wide (demo-class) viewport: both panels in the viewport, side by
+    # side, each independently scrollable to its own final row. ────────────
+    wide_ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                                    device_scale_factor=2)
+    wide_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    wp = wide_ctx.new_page()
+    guard = ConsoleErrorGuard(wp)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(wp, guard)
+    try:
+        wp.goto(MOCK_URL)
+        wp.wait_for_selector("#status.connected", timeout=10000)
+        wp.click("#live-btn")
+        wp.wait_for_timeout(300)
+        wp.click(".tab[data-tab='concurrency']")
+        wp.wait_for_selector("#peaks-table table", timeout=10000)
+        wp.wait_for_selector("#burst-table", timeout=10000)
+        wp.wait_for_timeout(500)
+
+        geo = wp.evaluate("""() => {
+            const sel = document.querySelector('.concurrency-panel-selector');
+            const peaks = document.getElementById('peaks-table');
+            const bursts = document.getElementById('burst-table');
+            const pr = peaks.getBoundingClientRect();
+            const br = bursts.getBoundingClientRect();
+            return {
+                selectorHidden: getComputedStyle(sel).display === 'none',
+                sideBySide: br.left >= pr.right - 1,
+                peaksInViewport: pr.top >= 0 && pr.top < window.innerHeight,
+                burstsInViewport: br.top >= 0 && br.top < window.innerHeight,
+            };
+        }""")
+        check(geo["selectorHidden"], "wide viewport: Peaks/Bursts selector hidden")
+        check(geo["sideBySide"], "wide viewport: peaks and bursts panels sit side by side")
+        check(geo["peaksInViewport"] and geo["burstsInViewport"],
+              f"wide viewport: BOTH panel entry points visible without "
+              f"scrolling the page ({geo})")
+
+        # Each panel is independently scrollable to ITS OWN final row —
+        # scrolling one must not be required to move the page.
+        reach = wp.evaluate("""() => {
+            function lastRowVisible(id) {
+                const el = document.getElementById(id);
+                const rows = el.querySelectorAll('tbody tr');
+                if (rows.length === 0) return null;
+                el.scrollTop = el.scrollHeight;
+                const last = rows[rows.length - 1];
+                const lr = last.getBoundingClientRect();
+                const er = el.getBoundingClientRect();
+                return lr.bottom <= er.bottom + 1 && lr.top >= er.top - 1;
+            }
+            return { peaks: lastRowVisible('peaks-table'),
+                     bursts: lastRowVisible('burst-table') };
+        }""")
+        check(reach["peaks"] is True,
+              f"peaks panel: final row reachable by scrolling the TABLE ({reach})")
+        check(reach["bursts"] is True,
+              f"bursts panel: final row reachable by scrolling the TABLE ({reach})")
+
+        # A burst row's click still zooms to its EXACT ns range (P3 wire 2),
+        # now from inside the dedicated bursts panel.
+        row = wp.query_selector("#burst-table tr.row-zoom[data-from]")
+        check(row is not None, "burst row carries the zoom-intent attributes")
+        if row:
+            row.click()
+            wp.wait_for_timeout(500)
+            zoomed = wp.evaluate("""() => {
+                const tr = document.querySelector('#burst-table tr.row-zoom[data-from]');
+                return { okFrom: window.__pgwt.timeRange.from === Number(tr.dataset.from),
+                         okTo: window.__pgwt.timeRange.to === Number(tr.dataset.to) };
+            }""")
+            check(zoomed["okFrom"] and zoomed["okTo"],
+                  "burst row click zoomed to exactly its own data-from..data-to")
+
+        assert_no_console_errors(wp, guard, "concurrency-wide")
+    finally:
+        set_failure_capture(*prev_capture)
+        wide_ctx.close()
+
+    # ── Narrow viewport: always-visible Peaks/Bursts selector with counts,
+    # one panel visible at a time. ──────────────────────────────────────────
+    narrow_ctx = browser.new_context(viewport={"width": 700, "height": 800})
+    narrow_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    np_ = narrow_ctx.new_page()
+    guard2 = ConsoleErrorGuard(np_)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(np_, guard2)
+    try:
+        np_.goto(MOCK_URL)
+        np_.wait_for_selector("#status.connected", timeout=10000)
+        np_.click("#live-btn")
+        np_.wait_for_timeout(300)
+        np_.click(".tab[data-tab='concurrency']")
+        np_.wait_for_selector("#peaks-table table", timeout=10000)
+        np_.wait_for_timeout(500)
+
+        state = np_.evaluate("""() => {
+            const sel = document.querySelector('.concurrency-panel-selector');
+            const peaksBtn = sel.querySelector('[data-panel="peaks"]');
+            const burstsBtn = sel.querySelector('[data-panel="bursts"]');
+            return {
+                selectorVisible: getComputedStyle(sel).display !== 'none',
+                peaksCountText: peaksBtn.textContent,
+                burstsCountText: burstsBtn.textContent,
+                peaksHidden: document.getElementById('peaks-table')
+                    .classList.contains('cp-hidden'),
+                burstsHidden: document.getElementById('burst-table')
+                    .classList.contains('cp-hidden'),
+            };
+        }""")
+        check(state["selectorVisible"], "narrow viewport: Peaks/Bursts selector is visible")
+        check(re.search(r"\d", state["peaksCountText"]) is not None,
+              f"Peaks button states a count ({state['peaksCountText']!r})")
+        check(re.search(r"\d", state["burstsCountText"]) is not None,
+              f"Bursts button states a count ({state['burstsCountText']!r})")
+        check(not state["peaksHidden"] and state["burstsHidden"],
+              f"narrow viewport defaults to showing Peaks, Bursts hidden ({state})")
+
+        np_.click('.cp-select[data-panel="bursts"]')
+        np_.wait_for_timeout(200)
+        state2 = np_.evaluate("""() => ({
+            peaksHidden: document.getElementById('peaks-table')
+                .classList.contains('cp-hidden'),
+            burstsHidden: document.getElementById('burst-table')
+                .classList.contains('cp-hidden'),
+        })""")
+        check(state2["peaksHidden"] and not state2["burstsHidden"],
+              f"selecting Bursts shows bursts, hides peaks ({state2})")
+
+        assert_no_console_errors(np_, guard2, "concurrency-narrow")
+    finally:
+        set_failure_capture(*prev_capture)
+        narrow_ctx.close()
+
+
 def test_timeline_drag_zoom(page):
     """U2.c (P3 wire 3): the session timeline is drag-zoomable — a plain drag
     on the chart narrows the window (shared selection overlay → ctx.onZoom →
@@ -2805,6 +2953,88 @@ def test_percentile_cell_pivot(page):
     breadcrumb = page.text_content("#breadcrumb") or ""
     check("IO:DataFileRead" in breadcrumb,
           f"breadcrumb labels the drilled event ('{breadcrumb.strip()[:50]}')")
+
+
+def test_events_dense_note_and_scroll(page):
+    """#454: the percentile-bound disclosure (.pctl-overflow-banner /
+    .pctl-basis-note, lib/builders/table-configs.js) must be visible WITHOUT
+    scrolling the page, and a dense table's final row must still be
+    reachable — by scrolling the TABLE (.events-table-scroll), not the page.
+    The mock's canned top_events is only a handful of rows, so this clones
+    the live row set to a dense (200-row) fixture via a runtime DOM mutation
+    (no mock_server.py / snapshot-baseline change) purely to exercise the
+    CSS/layout mechanism at both the demo viewport and a smaller one."""
+    print("--- Test: Events dense note + table-scroll reachability ---")
+
+    for width, height, dpr in ((1710, 981, 2), (1280, 800, 1)):
+        browser = page.context.browser
+        ctx = browser.new_context(viewport={"width": width, "height": height},
+                                   device_scale_factor=dpr)
+        ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+        p = ctx.new_page()
+        guard = ConsoleErrorGuard(p)
+        prev_capture = (_capture["page"], _capture["guard"])
+        set_failure_capture(p, guard)
+        try:
+            p.goto(MOCK_URL)
+            p.wait_for_selector("#status.connected", timeout=10000)
+            p.click("#live-btn")
+            p.wait_for_timeout(300)
+            p.click(".tab[data-tab='events']")
+            p.wait_for_selector(".events-table-scroll table tbody tr", timeout=10000)
+
+            # Clone the existing rows up to 200 — a dense fixture, purely at
+            # the DOM level (never persisted, never a snapshot input).
+            info = p.evaluate("""() => {
+                const scroll = document.querySelector('.events-table-scroll');
+                const tbody = scroll.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                const base = rows[rows.length - 1];
+                let i = 0;
+                while (tbody.querySelectorAll('tr').length < 200) {
+                    const clone = base.cloneNode(true);
+                    clone.setAttribute('data-dense-clone', String(i++));
+                    tbody.appendChild(clone);
+                }
+                const notes = document.querySelector('.events-notes');
+                const notesRect = notes ? notes.getBoundingClientRect() : null;
+                return {
+                    notesVisibleWithoutScroll: !!notesRect &&
+                        notesRect.top >= 0 && notesRect.top < window.innerHeight,
+                    notesText: notes ? notes.textContent : null,
+                    rowCount: tbody.querySelectorAll('tr').length,
+                };
+            }""")
+            check(info["notesVisibleWithoutScroll"],
+                  f"Events notes band visible without scrolling the page "
+                  f"at {width}x{height} DPR{dpr} (rowCount={info['rowCount']})")
+            check(bool(info["notesText"]) and len(info["notesText"]) > 0,
+                  f"Events notes band has visible explanatory text ('{(info['notesText'] or '')[:80]}')")
+
+            # Scroll the TABLE (not the page) to its last row.
+            reach = p.evaluate("""() => {
+                const scroll = document.querySelector('.events-table-scroll');
+                const rows = scroll.querySelectorAll('tbody tr');
+                const last = rows[rows.length - 1];
+                scroll.scrollTop = scroll.scrollHeight;
+                const lr = last.getBoundingClientRect();
+                const sr = scroll.getBoundingClientRect();
+                return {
+                    lastRowReachable: lr.bottom <= sr.bottom + 1 && lr.top >= sr.top - 1,
+                    pageScrollY: window.scrollY,
+                };
+            }""")
+            check(reach["lastRowReachable"],
+                  f"final row reachable by scrolling .events-table-scroll "
+                  f"at {width}x{height} DPR{dpr} ({reach})")
+            check(reach["pageScrollY"] == 0,
+                  f"reaching the final row did not require scrolling the PAGE "
+                  f"({reach})")
+
+            assert_no_console_errors(p, guard, f"events-dense-{width}x{height}")
+        finally:
+            set_failure_capture(*prev_capture)
+            ctx.close()
 
 
 def test_filter_bar_chips_and_badges(page):
@@ -3650,10 +3880,12 @@ def main():
                 # Track U Phase U2: the OEM investigation loop (P3/P8/P9)
                 test_aas_click_drill,
                 test_burst_row_zoom,
+                test_concurrency_panels_side_by_side,
                 test_timeline_drag_zoom,
                 test_heatmap_cell_drill,
                 test_dfg_node_drill,
                 test_percentile_cell_pivot,
+                test_events_dense_note_and_scroll,
                 test_filter_bar_chips_and_badges,
                 test_histogram_dropdown_writethrough,
                 test_histogram_clear_invalidates_strip,

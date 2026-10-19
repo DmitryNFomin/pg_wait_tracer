@@ -16,6 +16,7 @@
 #include "query_ctx_index.h"
 #include "pid_index.h"
 #include "alloc_tune.h"
+#include "backend_span.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -505,6 +506,11 @@ struct pgwt_request {
     uint64_t end_ns;
     char     detail[16];       /* "events" for per-event AAS breakdown */
     char     sort[16];         /* "executions": "duration_desc" or "" (start_desc) */
+    int      unattributed;    /* "span_detail": only spans with NO query
+                               * association -- the Unattributed activity
+                               * disclosure. A wait with no attributable
+                               * query id stays reachable without inventing
+                               * an association for it. */
     struct pgwt_filter filter;
 };
 
@@ -570,6 +576,10 @@ static void parse_request(const char *line, struct pgwt_request *req)
     cJSON *buckets = cJSON_GetObjectItem(root, "buckets");
     if (cJSON_IsNumber(buckets))
         req->num_buckets = (int)buckets->valuedouble;
+
+    cJSON *unattr = cJSON_GetObjectItem(root, "unattributed");
+    if (cJSON_IsBool(unattr))
+        req->unattributed = cJSON_IsTrue(unattr) ? 1 : 0;
 
     cJSON *limit = cJSON_GetObjectItem(root, "limit");
     if (cJSON_IsNumber(limit))
@@ -4383,6 +4393,226 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
     free(res.rows);
 }
 
+/* -- #455: REAL capture gaps, from the exact coverage --------------------
+ *
+ * "Never bridge a known gap into a fully measured span." The gaps that are
+ * actually knowable here are the HOLES IN EXACT COVERAGE: the daemon was
+ * stopped, the tier was sampled, or a generation boundary (restart +
+ * truncate) fell inside. `srv->gens[g].exact` is already the sorted, merged
+ * exact coverage per clock generation, so a hole is the space between two
+ * consecutive entries, plus the space between one generation's coverage and
+ * the next.
+ *
+ * TRUNCATION IS CONSERVATIVE, NEVER PERMISSIVE. If there are more holes than
+ * `max`, the surplus is collapsed into ONE gap running from the first
+ * unrepresented hole to `to`. That marks MORE spans partial than strictly
+ * necessary and never fewer: a gap list that silently ran out of room would
+ * hand back `measured` for a span straddling a hole, which is the exact
+ * wrong answer this exists to prevent.
+ *
+ * Returns the number of gaps written. The returned reasons are static
+ * strings owned by this function's storage class, so the array may outlive
+ * the call.
+ */
+static const char *SPAN_GAP_COVERAGE =
+    "a hole in exact coverage falls inside this span: it is not bridged "
+    "into a fully measured duration";
+static const char *SPAN_GAP_RESTART =
+    "a capture generation boundary (daemon restart) falls inside this span: "
+    "it is not bridged into a fully measured duration";
+
+static int server_exact_gaps(struct pgwt_server *srv,
+                             uint64_t from, uint64_t to,
+                             struct pgwt_span_gap *out, int max)
+{
+    int n = 0;
+    if (max <= 0 || to <= from)
+        return 0;
+    uint64_t prev_end = 0;
+    int have_prev = 0;
+    int prev_gen = -1;
+    for (int g = 0; g < srv->num_gens; g++) {
+        const struct pgwt_gen_cov *gc = &srv->gens[g];
+        int64_t off = gc->canon_offset;
+        for (int i = 0; i < gc->n_exact; i++) {
+            if ((int64_t)gc->exact[i].end_ns + off <= 0)
+                continue;
+            uint64_t ws = (uint64_t)((int64_t)gc->exact[i].start_ns + off);
+            uint64_t we = (uint64_t)((int64_t)gc->exact[i].end_ns + off);
+            if (have_prev && ws > prev_end) {
+                uint64_t gs = prev_end > from ? prev_end : from;
+                uint64_t ge = ws < to ? ws : to;
+                if (ge > gs) {
+                    if (n >= max) {
+                        /* Collapse the rest, conservatively. */
+                        out[max - 1].from_ns = gs;
+                        out[max - 1].to_ns = to;
+                        out[max - 1].reason = SPAN_GAP_COVERAGE;
+                        return max;
+                    }
+                    out[n].from_ns = gs;
+                    out[n].to_ns = ge;
+                    out[n].reason = (prev_gen >= 0 && prev_gen != g)
+                                  ? SPAN_GAP_RESTART : SPAN_GAP_COVERAGE;
+                    n++;
+                }
+            }
+            if (!have_prev || we > prev_end) {
+                prev_end = we;
+                have_prev = 1;
+                prev_gen = g;
+            }
+        }
+    }
+    return n;
+}
+
+/* -- #455: the BACKEND ACTIVE SPAN on the wire ----------------------------
+ *
+ * Queries' top row read `DB Time 720.4 s` beside `Execs 91, Avg Exec 33 us`
+ * because the 714 s `Lock:relation` behind that DB Time is taken in parse
+ * analysis, BEFORE `query__execute__start`, where no latency column can see
+ * it. The only arithmetic the response offered, DB Time / Execs = 7.9 s, is a
+ * number nobody experienced -- it divides one session's wait by ninety-one
+ * OTHER sessions' executions. `Backend activity` answers the question that
+ * was actually being asked, and every number in it comes from a record
+ * TIMESTAMP (src/backend_span.h, "the one forbidden operation").
+ *
+ * `duration_source` is on the wire deliberately: it is the one field a gate
+ * can read to assert that no consumer substituted an accumulated-time
+ * quotient for an observed interval.
+ */
+
+static void add_span_object(cJSON *parent, const char *key,
+                            const struct pgwt_backend_span *s)
+{
+    cJSON *o = cJSON_AddObjectToObject(parent, key);
+    char ident[48];
+    cJSON_AddStringToObject(o, "identity",
+                            pgwt_span_identity(s, ident, sizeof(ident)));
+    cJSON_AddNumberToObject(o, "pid", s->pid);
+    cJSON_AddStringToObject(o, "kind", pgwt_span_kind_name(s));
+    cJSON_AddStringToObject(o, "measurement",
+                            pgwt_span_measurement_name(s->measurement));
+    cJSON_AddStringToObject(o, "completion",
+                            pgwt_span_completion_name(s->completion));
+    /* Boundaries: present ONLY when observed. A null here is "we did not see
+     * it", which is exactly what "end not observed by window end" means --
+     * the window edge is never written into either field. */
+    if (s->start_observed)
+        cjson_add_uint64_string(o, "start_ns", s->start_ns);
+    else
+        cJSON_AddNullToObject(o, "start_ns");
+    if (s->end_observed)
+        cjson_add_uint64_string(o, "end_ns", s->end_ns);
+    else
+        cJSON_AddNullToObject(o, "end_ns");
+
+    uint64_t ns = 0;
+    if (pgwt_span_observed_elapsed_ns(s, &ns))
+        cJSON_AddNumberToObject(o, "observed_elapsed_ms", (double)ns / 1e6);
+    else
+        cJSON_AddNullToObject(o, "observed_elapsed_ms");
+    /* The completed duration exists only with BOTH boundaries observed.
+     * Substituting the window end here is the #455 mutation 3 defect. */
+    if (pgwt_span_completed_duration_ns(s, &ns))
+        cJSON_AddNumberToObject(o, "completed_duration_ms", (double)ns / 1e6);
+    else
+        cJSON_AddNullToObject(o, "completed_duration_ms");
+
+    /* ZERO contained executions is the #455 case, not an error and not an
+     * absence: a number, always. */
+    cJSON_AddNumberToObject(o, "exec_starts", s->n_exec_starts);
+    cJSON_AddNumberToObject(o, "exec_ends", s->n_exec_ends);
+    cJSON_AddNumberToObject(o, "plan_starts", s->n_plan_starts);
+    cJSON_AddNumberToObject(o, "records", s->n_records);
+    cJSON_AddNumberToObject(o, "client_pause_ms",
+                            (double)s->client_pause_ns / 1e6);
+    cJSON_AddBoolToObject(o, "multi_exec", s->multi_exec);
+    cJSON_AddBoolToObject(o, "multi_query", s->multi_qid);
+    cJSON_AddBoolToObject(o, "is_worker", s->is_worker);
+    if (s->leader_pid)
+        cJSON_AddNumberToObject(o, "leader_pid", s->leader_pid);
+    else
+        cJSON_AddNullToObject(o, "leader_pid");
+    cJSON_AddBoolToObject(o, "gap_inside", s->gap_inside);
+    cJSON_AddBoolToObject(o, "sampled_inside", s->sampled_inside);
+    cJSON_AddBoolToObject(o, "escalation_inside", s->escalation_inside);
+    cJSON_AddBoolToObject(o, "malformed", s->malformed);
+    if (s->reason)
+        cJSON_AddStringToObject(o, "reason", s->reason);
+    else
+        cJSON_AddNullToObject(o, "reason");
+
+    cJSON *qs = cJSON_AddArrayToObject(o, "queries");
+    for (uint32_t i = 0; i < s->n_qids; i++) {
+        cJSON *q = cJSON_CreateObject();
+        cjson_add_query_id_string(q, "query_id", s->qids[i].query_id);
+        cJSON_AddNumberToObject(q, "records", s->qids[i].n_records);
+        cJSON_AddNumberToObject(q, "exec_starts", s->qids[i].n_exec_starts);
+        cJSON_AddItemToArray(qs, q);
+    }
+    cJSON_AddNumberToObject(o, "queries_dropped", s->n_qids_dropped);
+    /* One span can sit under several query rows with this same identity.
+     * Stated on the wire so no consumer sums it across them. */
+    cJSON_AddBoolToObject(o, "duration_additive", 0);
+    cJSON_AddStringToObject(o, "duration_source", "timestamps");
+    if (s->multi_exec || s->multi_qid || s->client_pause_ns > 0)
+        cJSON_AddStringToObject(o, "scope_note",
+            "one backend activity span may include multiple statements, "
+            "multiple executions and client pauses; it is kept whole and its "
+            "duration is not additive across query rows");
+}
+
+/* The compact row summary attached to every Queries row. `source` names
+ * WHICH span was chosen so the reader never has to guess whether a number
+ * is an in-flight observation or a completed measurement -- and there is no
+ * average anywhere in it, by construction. */
+static void add_span_row_summary(cJSON *r, const struct pgwt_span_result *sp,
+                                 uint64_t query_id)
+{
+    if (!sp || sp->failed) {
+        cJSON_AddNullToObject(r, "backend_activity");
+        cJSON_AddStringToObject(r, "backend_activity_unavailable_reason",
+                                sp && sp->refusal_reason
+                                    ? sp->refusal_reason
+                                    : "the backend span pass did not run");
+        return;
+    }
+    const struct pgwt_span_qid_slot *slot = pgwt_span_qid_lookup(sp, query_id);
+    const struct pgwt_backend_span *pick = pgwt_span_row_pick(slot);
+    if (!pick) {
+        /* No span evidence for this query id at all. Absence, stated -- not
+         * a zero, and not a blank. */
+        cJSON_AddNullToObject(r, "backend_activity");
+        cJSON_AddStringToObject(r, "backend_activity_unavailable_reason",
+                                slot && slot->has_worker
+                                    ? "only parallel-worker activity was "
+                                      "observed for this query: leader "
+                                      "evidence is unavailable"
+                                    : "no backend activity span was observed "
+                                      "for this query in this window");
+        return;
+    }
+    cJSON *b = cJSON_AddObjectToObject(r, "backend_activity");
+    cJSON_AddStringToObject(b, "source",
+                            slot->has_inflight ? "in_flight"
+                            : slot->has_closed ? "closed" : "not_measured");
+    add_span_object(b, "span", pick);
+    cJSON_AddNumberToObject(b, "leader_spans", slot->n_leader_spans);
+    /* Worker activity, SEPARATELY. Never added to the leader's wall time:
+     * two independent numbers, which is #455 mutation 4. */
+    if (slot->has_worker) {
+        cJSON *w = cJSON_AddObjectToObject(b, "workers");
+        cJSON_AddNumberToObject(w, "spans", slot->n_worker_spans);
+        cJSON_AddNumberToObject(w, "observed_max_ms",
+                                (double)slot->worker_observed_max_ns / 1e6);
+        cJSON_AddBoolToObject(w, "added_to_leader", 0);
+    } else {
+        cJSON_AddNullToObject(b, "workers");
+    }
+}
+
 static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req)
 {
     server_refresh_query_texts(srv);
@@ -4538,6 +4768,43 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         else                add_fidelity(err, &linfo);
         emit_json(err);
         return;
+    }
+
+    /* #455: the BACKEND ACTIVE SPAN pass, over the SAME `all_events` array
+     * the lifecycle and context passes above already walk -- one extra
+     * linear pass, no second load and NO PER-QUERY RESCAN (the row loop
+     * below answers each row by one hash lookup). That ordering is the
+     * #265/#275 lesson: query_context_for_events() used to run twice per
+     * row and cost 1778 ms of this very response.
+     *
+     * A refusal here does NOT fail the request: the span pass is additive
+     * to the Queries answer, so its unavailability is reported per row (and
+     * once at the top level) while DB Time, the class breakdown and the
+     * execution statistics stay exactly as they were. The reason travels
+     * with it -- a row that reads "unavailable" says why.
+     *
+     * The pid filter is passed through because a pid SCOPES the pass: under
+     * a drill, backend activity is the drilled backend's, in step with the
+     * DB Time beside it. Class/event filters are deliberately NOT passed:
+     * narrowing the wait profile must not shorten a backend's wall-clock
+     * activity, and `backend_activity_filter_note` says so on the wire. */
+    struct pgwt_span_result spanres;
+    {
+        int n_links = 0;
+        struct pgwt_backend_link *links = server_backend_links(srv, &n_links);
+        struct pgwt_span_gap gaps[64];
+        int n_gaps = server_exact_gaps(srv, from, to, gaps,
+                                       (int)(sizeof(gaps)/sizeof(gaps[0])));
+        struct pgwt_span_params sp = {0};
+        sp.window_from_ns = from;
+        sp.window_to_ns = to;
+        sp.pid = req->filter.pid;
+        sp.links = links;
+        sp.n_links = n_links < 0 ? 0 : n_links;
+        sp.gaps = gaps;
+        sp.n_gaps = n_gaps;
+        pgwt_span_reduce(all_events, ecount, &sp, &spanres);
+        free(links);
     }
 
     /* Helper: compute percentile from sorted array */
@@ -4719,7 +4986,35 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
             }
         }
 
+        /* #455: Backend activity, beside DB Time. */
+        add_span_row_summary(r, &spanres, res.rows[i].query_id);
+
         cJSON_AddItemToArray(rows, r);
+    }
+
+    /* #455 top level: whether the pass answered at all, and the SCOPE of
+     * what it answered. A class/event filter selects which spans appear but
+     * never shortens one -- stated here instead of left to be inferred. */
+    cJSON_AddBoolToObject(root, "backend_activity_available", !spanres.failed);
+    if (spanres.failed)
+        cJSON_AddStringToObject(root, "backend_activity_unavailable_reason",
+                                spanres.refusal_reason
+                                    ? spanres.refusal_reason
+                                    : "the backend span pass refused");
+    else {
+        cJSON_AddNumberToObject(root, "backend_activity_spans",
+                                spanres.total_spans);
+        cJSON_AddNumberToObject(root, "backend_activity_inflight",
+                                spanres.n_inflight);
+        cJSON_AddNumberToObject(root, "backend_activity_unmeasured",
+                                spanres.n_unmeasured);
+        cJSON_AddStringToObject(root, "backend_activity_scope",
+                                req->filter.pid ? "pid" : "whole-query");
+        if (has_event_filter)
+            cJSON_AddStringToObject(root, "backend_activity_filter_note",
+                "the wait class/event filter selects which backend activity "
+                "spans appear; it never shortens a span's observed wall "
+                "duration");
     }
 
     cJSON_AddNumberToObject(root, "db_time_ms", res.db_time_ms);
@@ -4748,6 +5043,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddNumberToObject(root, "backfilled_ms", res.backfilled_ms);
     emit_json(root);
 
+    pgwt_span_free(&spanres);
     pgwt_lifecycle_free(&lcres);
     pgwt_query_ctx_index_free(&qctx);
     free(all_events);
@@ -5421,12 +5717,37 @@ static void handle_execution_detail(struct pgwt_server *srv,
         free(window_events);
         return;
     }
-    int count = context_count + window_count;
+    /* #455: a bounded POST-window marker pass, pid-scoped and symmetric
+     * with the pre-scan above. Without it the CMD_END of a command that
+     * finished one millisecond after this execution lies outside the
+     * request's window, and the containing span correctly but uselessly
+     * reads "still open at the end of the processed stream" for every
+     * completed statement. The bound is the SAME EXEC_PLAN_LOOKBACK_NS the
+     * pre-scan uses; a command still open past it keeps the in-flight label
+     * WITH ITS REASON, which is the honest answer and never a substituted
+     * boundary. */
+    uint64_t post_to = req->end_ns + EXEC_PLAN_LOOKBACK_NS;
+    int post_count = 0;
+    struct pgwt_load_info post_info = {0};
+    struct pgwt_trace_event *post = server_load_markers_fi(
+        srv, req->end_ns + 1, post_to, req->filter.pid,
+        &post_count, &post_info);
+    if (post_info.overloaded || post_info.allocation_failed) {
+        /* The span context is additive: a refusal here must not fail the
+         * execution detail itself. Drop the post pass and let the span
+         * report its unobserved end with the reason. */
+        free(post);
+        post = NULL;
+        post_count = 0;
+    }
+
+    int count = context_count + window_count + post_count;
     struct pgwt_trace_event *combined = realloc(
         events, (count > 0 ? count : 1) * sizeof(*combined));
     if (!combined) {
         free(events);
         free(window_events);
+        free(post);
         emit_execution_compute_failed(req, &window_info);
         return;
     }
@@ -5434,7 +5755,11 @@ static void handle_execution_detail(struct pgwt_server *srv,
     if (window_count > 0)
         memcpy(events + context_count, window_events,
                window_count * sizeof(*window_events));
+    if (post_count > 0)
+        memcpy(events + context_count + window_count, post,
+               post_count * sizeof(*post));
     free(window_events);
+    free(post);
 
     int n_links = 0;
     struct pgwt_backend_link *links = server_backend_links(srv, &n_links);
@@ -5444,18 +5769,44 @@ static void handle_execution_detail(struct pgwt_server *srv,
         return;
     }
     struct pgwt_execution_detail_result detail;
-    pgwt_compute_execution_detail(events, count, req->filter.pid,
+    /* The execution-detail compute sees EXACTLY the array it saw before
+     * #455 -- the context prefix plus the window, and not one record of the
+     * post-window marker pass. Changing what it sees would be a behaviour
+     * change riding along inside a feature addition. */
+    pgwt_compute_execution_detail(events, context_count + window_count,
+                                  req->filter.pid,
                                   req->start_ns, req->end_ns,
                                   &req->filter,
                                   links, n_links, EXEC_DETAIL_LANE_CAP, &detail);
+    /* #455: the CONTAINING leader span, from the same array (context
+     * markers + this execution's window) before it is freed. pid-scoped,
+     * so the worker lanes below stay the separate thing they are. */
+    struct pgwt_span_result spanres;
+    {
+        struct pgwt_span_gap gaps[64];
+        int n_gaps = server_exact_gaps(srv, req->start_ns, req->end_ns, gaps,
+                                       (int)(sizeof(gaps)/sizeof(gaps[0])));
+        struct pgwt_span_params sp = {0};
+        sp.gaps = gaps;
+        sp.n_gaps = n_gaps;
+        sp.window_from_ns = req->start_ns;
+        sp.window_to_ns = req->end_ns;
+        sp.pid = req->filter.pid;
+        sp.max_selected = 16;
+        sp.links = links;
+        sp.n_links = n_links < 0 ? 0 : n_links;
+        pgwt_span_reduce(events, count, &sp, &spanres);
+    }
     free(links);
     free(events);
     if (detail.failed) {
+        pgwt_span_free(&spanres);
         pgwt_free_execution_detail(&detail);
         emit_execution_compute_failed(req, &window_info);
         return;
     }
     if (!detail.found_execution) {
+        pgwt_span_free(&spanres);
         pgwt_free_execution_detail(&detail);
         emit_execution_not_found(req, &window_info);
         return;
@@ -5486,8 +5837,207 @@ static void handle_execution_detail(struct pgwt_server *srv,
     cJSON_AddNumberToObject(root, "kept_count", detail.kept_events);
     cJSON_AddBoolToObject(root, "truncated",
                           detail.kept_events < detail.total_events);
+    /* #455: the containing leader span, in the SAME representation Queries
+     * uses, so the two surfaces cannot drift into two definitions. Absent
+     * is said out loud with its reason -- never an empty object and never a
+     * zero duration. */
+    if (spanres.failed) {
+        cJSON_AddNullToObject(root, "backend_activity_span");
+        cJSON_AddStringToObject(root, "backend_activity_unavailable_reason",
+                                spanres.refusal_reason
+                                    ? spanres.refusal_reason
+                                    : "the backend span pass refused");
+    } else {
+        const struct pgwt_backend_span *cs =
+            pgwt_span_containing(&spanres, req->filter.pid, req->start_ns);
+        if (cs) {
+            add_span_object(root, "backend_activity_span", cs);
+            cJSON_AddStringToObject(root, "backend_activity_span_scope",
+                "the span was reconstructed from markers in a bounded "
+                "window around this execution; a command still open past "
+                "that bound reads in flight with its reason, and the "
+                "window edge is never used as a boundary");
+        }
+        else {
+            cJSON_AddNullToObject(root, "backend_activity_span");
+            cJSON_AddStringToObject(root,
+                "backend_activity_unavailable_reason",
+                "no observed backend activity span contains this execution: "
+                "the command boundaries around it were not captured");
+        }
+    }
     emit_json(root);
+    pgwt_span_free(&spanres);
     pgwt_free_execution_detail(&detail);
+}
+
+/* -- #455: `span_detail`, the bounded backend-activity drill -------------
+ *
+ * The panel behind `Backend activity`. It must work with ZERO EXEC_START
+ * markers -- the #455 backend never entered the executor, so a drill that
+ * needs an execution to open cannot show the thing the operator clicked.
+ * Scope: `filters.pid` (a pid scopes the whole pass), `filters.query_id`
+ * (select spans associated with that query), or `unattributed: true` (spans
+ * with NO association -- the existing Unattributed activity disclosure,
+ * including its empty state).
+ */
+static void handle_span_detail(struct pgwt_server *srv,
+                               struct pgwt_request *req)
+{
+    server_refresh_backends(srv);
+    uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
+    uint64_t to   = req->to_ns   ? req->to_ns   : srv->latest_wall_ns;
+
+    /* Pre-window command context through the SAME prefix pass `executions`
+     * uses (server_load_exec_prefix -> the retained-marker index, or the
+     * exact full decode when the index refuses). A command already open
+     * when the window began has its CMD_START out there, and there is no
+     * safe bound on how far: an arbitrary lookback cutoff silently converts
+     * a fully measured span into a "start not captured" one, which is a
+     * wrong answer wearing the right label. No cutoff is added here. */
+    /* #274: marker retention ON before the first load, exactly as
+     * load_execution_rows does, so the coverage refresh that load performs
+     * retains this request's prefix. */
+    {
+        const char *env = getenv("PGWT_EXEC_PREFIX_INDEX");
+        if (!(env && env[0] == '0'))
+            srv->retain_exec_marks = 1;
+    }
+
+    int pcount = 0;
+    struct pgwt_load_info pinfo = {0};
+    struct pgwt_trace_event *prefix = NULL;
+    if (from > srv->earliest_wall_ns)
+        prefix = server_load_exec_prefix(srv, from - 1, req->filter.pid,
+                                         &pcount, &pinfo);
+    if (reject_overload(srv, req, prefix, &pinfo))
+        return;
+
+    int wcount = 0;
+    struct pgwt_load_info winfo = {0};
+    struct pgwt_trace_event *wev =
+        server_load_events_fi(srv, from, to, req->filter.pid, &wcount, &winfo);
+    if (winfo.overloaded || winfo.allocation_failed) {
+        free(prefix);
+        reject_overload(srv, req, wev, &winfo);
+        return;
+    }
+
+    int count = pcount + wcount;
+    struct pgwt_trace_event *events =
+        malloc((size_t)(count > 0 ? count : 1) * sizeof(*events));
+    if (!events) {
+        free(prefix);
+        free(wev);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "memory allocation failed");
+        cJSON_AddStringToObject(err, "code", "allocation_failed");
+        cJSON_AddStringToObject(err, "hint",
+                                "retry the request or reduce the time range");
+        add_fidelity(err, &winfo);
+        emit_json(err);
+        return;
+    }
+    if (pcount > 0) memcpy(events, prefix, (size_t)pcount * sizeof(*events));
+    if (wcount > 0) memcpy(events + pcount, wev,
+                           (size_t)wcount * sizeof(*events));
+    free(prefix);
+    free(wev);
+
+    int n_links = 0;
+    struct pgwt_backend_link *links = server_backend_links(srv, &n_links);
+    struct pgwt_span_result spanres;
+    {
+        struct pgwt_span_gap gaps[64];
+        int n_gaps = server_exact_gaps(srv, from, to, gaps,
+                                       (int)(sizeof(gaps)/sizeof(gaps[0])));
+        struct pgwt_span_params sp = {0};
+        sp.gaps = gaps;
+        sp.n_gaps = n_gaps;
+        sp.window_from_ns = from;
+        sp.window_to_ns = to;
+        sp.pid = req->filter.pid;
+        sp.query_id = req->unattributed ? 0 : req->filter.query_id;
+        sp.unattributed_only = req->unattributed;
+        sp.max_selected = req->limit > 0 ? req->limit : 20;
+        sp.links = links;
+        sp.n_links = n_links < 0 ? 0 : n_links;
+        pgwt_span_reduce(events, count, &sp, &spanres);
+    }
+    free(links);
+    free(events);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    add_fidelity(root, &winfo);
+    cJSON_AddStringToObject(root, "prefix_path",
+                            pinfo.has_transitions || pcount > 0 ? "loaded"
+                                                                : "none");
+
+    cJSON *scope = cJSON_AddObjectToObject(root, "scope");
+    if (req->filter.pid) cJSON_AddNumberToObject(scope, "pid", req->filter.pid);
+    else                 cJSON_AddNullToObject(scope, "pid");
+    if (!req->unattributed && req->filter.query_id)
+        cjson_add_query_id_string(scope, "query_id", req->filter.query_id);
+    else
+        cJSON_AddNullToObject(scope, "query_id");
+    cJSON_AddBoolToObject(scope, "unattributed", req->unattributed);
+    cJSON_AddStringToObject(scope, "note",
+        req->unattributed
+            ? "backend activity with no attributable query id, by pid: the "
+              "wait is shown without inventing an association for it"
+        : req->filter.pid
+            ? "backend activity for this pid only; a pid scopes which spans "
+              "are selected, never how long one lasted"
+            : "backend activity spans in this window; a wait class or event "
+              "filter selects which spans appear and never shortens one");
+
+    if (spanres.failed) {
+        /* A pass that could not see everything REFUSES. It never returns a
+         * shorter list that reads like a complete one. */
+        cJSON_AddBoolToObject(root, "available", 0);
+        cJSON_AddStringToObject(root, "unavailable_reason",
+                                spanres.refusal_reason
+                                    ? spanres.refusal_reason
+                                    : "the backend span pass refused");
+        cJSON_AddNullToObject(root, "spans");
+        emit_json(root);
+        pgwt_span_free(&spanres);
+        return;
+    }
+
+    cJSON_AddBoolToObject(root, "available", 1);
+    cJSON *arr = cJSON_AddArrayToObject(root, "spans");
+    for (int i = 0; i < spanres.num_selected; i++) {
+        cJSON *item = cJSON_CreateObject();
+        add_span_object(item, "span", &spanres.selected[i]);
+        cJSON_AddItemToArray(arr, item);
+    }
+    cJSON_AddNumberToObject(root, "total_spans", spanres.total_spans);
+    cJSON_AddNumberToObject(root, "scoped_spans", spanres.scoped_spans);
+    cJSON_AddBoolToObject(root, "truncated", spanres.truncated);
+    cJSON_AddNumberToObject(root, "closed", spanres.n_closed);
+    cJSON_AddNumberToObject(root, "in_flight", spanres.n_inflight);
+    cJSON_AddNumberToObject(root, "partial", spanres.n_partial);
+    cJSON_AddNumberToObject(root, "unmeasured", spanres.n_unmeasured);
+    cJSON_AddNumberToObject(root, "worker_spans", spanres.n_worker_spans);
+    cJSON_AddNumberToObject(root, "records_outside_commands",
+                            spanres.n_outside_records);
+    /* The EMPTY STATE is a message, not an empty list left to speak for
+     * itself: "nothing matched" and "the server did not look" are different
+     * answers and the disclosure has to distinguish them. */
+    if (spanres.scoped_spans == 0)
+        cJSON_AddStringToObject(root, "empty_state",
+            req->unattributed
+                ? "no unattributed backend activity was observed in this "
+                  "window"
+                : "no backend activity span matched this scope in this "
+                  "window");
+    else
+        cJSON_AddNullToObject(root, "empty_state");
+    emit_json(root);
+    pgwt_span_free(&spanres);
 }
 
 static uint64_t scatter_rand(uint64_t x)
@@ -6873,6 +7423,8 @@ static void dispatch(struct pgwt_server *srv, struct pgwt_request *req,
         handle_executions(srv, req);
     else if (strcmp(req->cmd, "execution_detail") == 0)
         handle_execution_detail(srv, req);
+    else if (strcmp(req->cmd, "span_detail") == 0)
+        handle_span_detail(srv, req);
     else if (strcmp(req->cmd, "exec_scatter") == 0)
         handle_exec_scatter(srv, req);
     else if (strcmp(req->cmd, "transitions") == 0)

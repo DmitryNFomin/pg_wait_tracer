@@ -125,6 +125,18 @@ test_variants_p95
 # test exercises the real code rather than a copy. Includes the bypass suite
 # (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
 # allocation failures that must come back ABSENT rather than short).
+# Section 5 is #459: the same scan kept ONE open execution timestamp and ONE
+# query id per pid, so an inner EXEC_START overwrote the outer start, the
+# inner EXEC_END spent it, and the outer EXEC_END contributed nothing --
+# Avg Exec reported the INNER statement's duration as the whole query's,
+# while Waterfall (a per-pid STACK since #222) showed the right span beside
+# it; a PLAN_START inside an execution re-keyed it to the planned query.
+# Per-phase per-pid stacks now carry timestamp AND identity. Carries its own
+# bypass suite: three mutant oracles (pre-fix single slot, shared query id,
+# no CMD_END clear) that must each disagree with the real code, the FLAT
+# fixture that is blind to all three, allocation-failure refusals on the new
+# stacks, and a cross-check against pgwt_compute_executions with provenance
+# that nested and inferred rows really existed.
 test_pid_cap
 # #363: pgwt_tag_events was `void` and could stop partway — a working
 # allocation failure, or a window with more distinct pids than its per-pid
@@ -207,6 +219,19 @@ test_replay_fidelity
 test_sampled_overhead_gate.py
 test_data_query_text_context.py
 test_ui_live_smoke_lib.py
+test_ui_live_smoke_footage.py
+# Integration finding (#455): the two halves of the backend active span were
+# briefed from the issue text, not from each other, so the UI read
+# `backend_activity_span` / `start_observed` / `executions_count` while the
+# server emits `backend_activity: {span}` / `start_ns` / `exec_starts` -- and
+# the Queries cell drew "Not measured" over a measured, closed, 420 ms span
+# while every Node unit test stayed green on the UI half's own placeholder
+# shape. tests/web_unit/backend-span-wire.test.mjs renders the REAL shape
+# from a checked-in fixture; this guard keeps that fixture equal to what
+# tests/mock_server.py serves, because a stale fixture is how the gate would
+# go blind a second time. It REFUSES (never approves) on a missing, empty,
+# unparseable or vacuous fixture and on a mock that cannot answer.
+test_mock_backend_activity_fixture.py
 # #202 review: the pure parsers behind test_multi_window's conservation
 # check. The old whole-output, last-writer-wins parse merged two ticks and
 # MANUFACTURED positive excess inside that check (+13.3% on the fixture).
@@ -858,3 +883,14 @@ test_open_ckpt
 # (the drain must stop BOUNDED, count the truncation and log it), and a
 # second truncation that must still be counted after the one-shot log.
 test_tick_drain
+# #455: the BACKEND ACTIVE SPAN. Queries' top row read DB Time 720.4 s beside
+# Execs 91 / Avg Exec 33 us because the 714 s pre-executor Lock:relation is
+# taken before query__execute__start, where no latency column can see it --
+# and the only arithmetic the response offered, DB Time / Execs = 7.9 s,
+# divides one session's wait by ninety-one OTHER sessions' executions. This
+# test reproduces that exact shape, asserts the span's identity, boundaries,
+# status and zero contained executions, and requires five mutations of the
+# fix (including deriving the duration from DB Time / Execs) to fail the same
+# oracle. Its bypass suite requires a refusal, never an approval, from every
+# way the pass can be made blind.
+test_backend_span

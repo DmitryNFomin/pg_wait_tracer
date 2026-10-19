@@ -11,7 +11,7 @@ import {
     buildTransitionsOption, transitionsContext, buildVariantsHtml, buildVariantsPanel,
     isIdleTransitionNode, p95TruncationMarker, findOmittedDominantNode,
     restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder, isLayoutAnchorNode,
-    buildTransitionsDisclosure,
+    buildTransitionsDisclosure, findDominantSourceDwellNode, TRANSITIONS_SEMANTICS_NOTE,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
@@ -491,6 +491,99 @@ test('findOmittedDominantNode: null when nothing non-idle is omitted', () => {
     assert.equal(findOmittedDominantNode({}, new Set()), null);
 });
 
+// ── #456 (review finding): deterministic tie-break, independent of input
+// iteration order — duration desc, then numeric event_id asc, then name asc.
+
+test('#456 findOmittedDominantNode: an exact total_ms tie is broken by '
+    + 'event_id ascending, the SAME winner regardless of nodeMap key order', () => {
+    const a = { total_ms: 5000, event_id: 30 };   // 'Zeta:Low' — higher name, LOWER id
+    const b = { total_ms: 5000, event_id: 10 };   // 'Alpha:High' — lower name, lower id -> winner
+    const order1 = findOmittedDominantNode(
+        { 'Zeta:Low': a, 'Alpha:High': b }, new Set());
+    const order2 = findOmittedDominantNode(
+        { 'Alpha:High': b, 'Zeta:Low': a }, new Set());
+    assert.equal(order1.name, 'Alpha:High', 'lower event_id wins the tie');
+    assert.equal(order2.name, 'Alpha:High', 'same winner regardless of key order');
+    assert.equal(order1.ms, 5000);
+});
+
+test('#456 findOmittedDominantNode: no event_id on either side falls back '
+    + 'to name ascending, deterministically across permutations', () => {
+    const nodeMapA = { 'Zeta:NoId': { total_ms: 100 }, 'Alpha:NoId': { total_ms: 100 } };
+    const nodeMapB = { 'Alpha:NoId': { total_ms: 100 }, 'Zeta:NoId': { total_ms: 100 } };
+    assert.equal(findOmittedDominantNode(nodeMapA, new Set()).name, 'Alpha:NoId');
+    assert.equal(findOmittedDominantNode(nodeMapB, new Set()).name, 'Alpha:NoId');
+});
+
+test('#456 findOmittedDominantNode: a node WITH a numeric event_id beats '
+    + 'one without, on a duration tie, regardless of order', () => {
+    const withId = { total_ms: 42, event_id: 5 };
+    const withoutId = { total_ms: 42 };   // no event_id field at all
+    assert.equal(findOmittedDominantNode(
+        { 'HasId:Thing': withId, 'NoId:Thing': withoutId }, new Set()).name, 'HasId:Thing');
+    assert.equal(findOmittedDominantNode(
+        { 'NoId:Thing': withoutId, 'HasId:Thing': withId }, new Set()).name, 'HasId:Thing');
+});
+
+test('#456 RED-DEMONSTRATED: the OLD "first key seen wins" rule disagreed '
+    + 'with the new rule on this exact fixture (regression pin, not a '
+    + 'hypothetical) -- Object.keys order alone used to decide the winner', () => {
+    const a = { total_ms: 5000, event_id: 30 };
+    const b = { total_ms: 5000, event_id: 10 };
+    // Under the OLD rule (`ms > best.ms` only, first-seen wins ties), the
+    // FIRST key in insertion order would win regardless of event_id -- i.e.
+    // 'Zeta:Low' in this map, 'Alpha:High' in the reversed one. The NEW rule
+    // ignores insertion order entirely and always returns 'Alpha:High'.
+    const firstKeyWins = Object.keys({ 'Zeta:Low': a, 'Alpha:High': b })[0];
+    assert.equal(firstKeyWins, 'Zeta:Low',
+        'sanity: the old rule would have picked this (order-dependent) name');
+    assert.equal(findOmittedDominantNode({ 'Zeta:Low': a, 'Alpha:High': b }, new Set()).name,
+        'Alpha:High', 'the NEW rule disagrees with insertion order -- proves it is not vacuous');
+});
+
+test('#456 buildTransitionsOption layout: an exact total_ms tie between two '
+    + 'laid-out nodes places them in event_id order, regardless of which '
+    + 'link came first in the response', () => {
+    // Two nodes, SAME total_ms (5000), different event_id. Two responses
+    // carry the identical node set but list their links in opposite order —
+    // under the pre-#456 rule, [...visibleNodes] (a Set) would pick up
+    // insertion order from whichever link's source/target was walked first,
+    // changing sortedNodes' tie order and therefore node layout position.
+    const base = {
+        nodes: [
+            { name: 'Zeta:Low', total_ms: 5000, event_id: 30, class: 'Lock' },
+            { name: 'Alpha:High', total_ms: 5000, event_id: 10, class: 'Lock' },
+        ],
+    };
+    const dataForward = { ...base, links: [
+        { source: 'Zeta:Low', target: 'Alpha:High', value: 10, duration_ms: 100 },
+    ] };
+    const dataReverse = { ...base, links: [
+        { source: 'Alpha:High', target: 'Zeta:Low', value: 10, duration_ms: 100 },
+    ] };
+    const dims = { width: 800, height: 550 };
+    const optForward = buildTransitionsOption(dataForward, 0, dims, null, false);
+    const optReverse = buildTransitionsOption(dataReverse, 0, dims, null, false);
+    // The two invisible corner anchor nodes (identity data->pixel transform,
+    // see the #436 test above) are not part of the dominance ordering.
+    const realNodes = (opt) => opt.option.series[0].data
+        .filter(n => !isLayoutAnchorNode(n.name));
+    const namesForward = realNodes(optForward).map(n => n.name);
+    const namesReverse = realNodes(optReverse).map(n => n.name);
+    assert.deepEqual(namesForward, ['Alpha:High', 'Zeta:Low'],
+        'lower event_id (10) ranks first on the total_ms tie');
+    assert.deepEqual(namesReverse, namesForward,
+        'the SAME order regardless of which link (and therefore which node '
+        + 'the Set saw first) the response listed first');
+    // The two nodes' laid-out positions must also match exactly (same rank
+    // -> same grid cell), not just the same name order.
+    const posForward = Object.fromEntries(
+        realNodes(optForward).map(n => [n.name, { x: n.x, y: n.y }]));
+    const posReverse = Object.fromEntries(
+        realNodes(optReverse).map(n => [n.name, { x: n.x, y: n.y }]));
+    assert.deepEqual(posForward, posReverse);
+});
+
 test('buildTransitionsOption: threshold exclusion is reported SEPARATELY from '
     + 'idle exclusion -- never merged into one count (#436)', () => {
     const data = {
@@ -952,4 +1045,358 @@ test('negative control: isLayoutAnchorNode only matches the two reserved '
     assert.equal(isLayoutAnchorNode('Lock:relation'), false);
     assert.equal(isLayoutAnchorNode(''), false);
     assert.equal(isLayoutAnchorNode(undefined), false);
+});
+
+// ── #456: persistent duration disclosure (the dominant source-dwell node is
+// named + its visible/omitted status stated EVERY render, not only when the
+// threshold/idle filters hide something) ───────────────────────────────────
+
+test('findDominantSourceDwellNode: names the globally largest non-idle '
+    + 'node and reports it VISIBLE when nothing hides it', () => {
+    const nodeMap = {
+        'CPU*': { total_ms: 500, event_id: 0 },
+        'IO:DataFileRead': { total_ms: 200, event_id: 20 },
+    };
+    const d = findDominantSourceDwellNode(nodeMap, new Set(['CPU*', 'IO:DataFileRead']));
+    assert.equal(d.name, 'CPU*');
+    assert.equal(d.ms, 500);
+    assert.equal(d.visible, true);
+});
+
+test('findDominantSourceDwellNode: reports OMITTED when the dominant node '
+    + 'is not in the visible set', () => {
+    const nodeMap = {
+        'CPU*': { total_ms: 500, event_id: 0 },
+        'Lock:relation': { total_ms: 900, event_id: 50 },
+    };
+    const d = findDominantSourceDwellNode(nodeMap, new Set(['CPU*']));
+    assert.equal(d.name, 'Lock:relation');
+    assert.equal(d.visible, false);
+});
+
+test('findDominantSourceDwellNode: idle nodes are never the dominant node, '
+    + 'even with the largest total_ms', () => {
+    const nodeMap = {
+        'Client:ClientRead': { total_ms: 999999, event_id: 99 },
+        'Lock:relation': { total_ms: 10, event_id: 1 },
+    };
+    const d = findDominantSourceDwellNode(nodeMap, new Set());
+    assert.equal(d.name, 'Lock:relation');
+});
+
+test('findDominantSourceDwellNode: null when there is no non-idle node with time', () => {
+    assert.equal(findDominantSourceDwellNode({}, new Set()), null);
+    assert.equal(findDominantSourceDwellNode(
+        { 'Client:ClientRead': { total_ms: 500 } }, new Set()), null);
+});
+
+test('buildTransitionsDisclosure: dominant-dwell node is named PERSISTENTLY '
+    + 'when nothing is hidden (the pre-#456 bug: the line said nothing at '
+    + 'all about which node dominates dwell time in this case)', () => {
+    const built = {
+        hiddenIdleLinks: 0, hiddenIdleValue: 0,
+        hiddenThresholdLinks: 0, hiddenThresholdValue: 0,
+        serverTruncated: false, serverShownLinkCount: 4, serverTotalLinkCount: 4,
+        omittedDominant: null,
+        dominantSourceDwell: { name: 'CPU*', ms: 500000, visible: true },
+    };
+    const text = buildTransitionsDisclosure(built, 400);
+    assert.ok(text.includes('CPU*') && text.includes('largest source-dwell node'),
+        text);
+    assert.ok(text.includes('shown'), text);
+});
+
+test('buildTransitionsDisclosure: when the dominant node is omitted, the '
+    + 'existing omittedDominant "Show all" phrase covers it -- no duplicate '
+    + 'second phrase for the same node', () => {
+    const built = {
+        hiddenIdleLinks: 0, hiddenIdleValue: 0,
+        hiddenThresholdLinks: 2, hiddenThresholdValue: 2,
+        serverTruncated: false, serverShownLinkCount: 4, serverTotalLinkCount: 4,
+        omittedDominant: { name: 'Lock:relation', ms: 50000 },
+        dominantSourceDwell: { name: 'Lock:relation', ms: 50000, visible: false },
+    };
+    const text = buildTransitionsDisclosure(built, 400);
+    // "Lock:relation" must appear in the omitted phrase (with its Show-all
+    // cue); it must NOT also appear inside a second "largest source-dwell"
+    // phrase -- that would be the same fact stated twice.
+    assert.ok(text.includes('Lock:relation omitted') && text.includes('Show all'), text);
+    assert.ok(!text.includes('largest source-dwell node'), text);
+});
+
+test('buildTransitionsOption: dominantSourceDwell reaches the real response '
+    + 'shape end to end, via buildTransitionsDisclosure', () => {
+    const data = {
+        total: 10,
+        nodes: [
+            { name: 'CPU*', total_ms: 100, event_id: 0, class: 'CPU' },
+            { name: 'IO:DataFileRead', total_ms: 90, event_id: 20, class: 'IO' },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 10, duration_ms: 90 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 10, duration_ms: 80 },
+        ],
+    };
+    const built = buildTransitionsOption(data, 0, { width: 400, height: 300 });
+    assert.equal(built.dominantSourceDwell.name, 'CPU*');
+    assert.equal(built.dominantSourceDwell.visible, true);
+    const text = buildTransitionsDisclosure(built, data.total);
+    assert.ok(text.includes('CPU*') && text.includes('largest source-dwell node'), text);
+});
+
+test('TRANSITIONS_SEMANTICS_NOTE: states the size/edge-meaning distinction '
+    + 'and explicitly disclaims a DB-Time ranking', () => {
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.includes('source-state dwell time'));
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.includes('transition counts'));
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.toLowerCase().includes('not a ranking'));
+    assert.ok(TRANSITIONS_SEMANTICS_NOTE.toLowerCase().includes('db time'));
+});
+
+// #456: frozen buckets:200 response from issue456-restart-replay/out200/run00.json
+// (all ten captured responses are byte-identical). Keep the full catalog/links:
+// pruning the fixture to the displayed graph would hide the regression itself.
+import { readFileSync } from 'node:fs';
+import { createTransitionsView } from '../../web/static/views/transitions.js';
+import { Transport } from '../../web/static/lib/transport.js';
+import { ViewManager } from '../../web/static/lib/view-manager.js';
+import { FilterStack, TimeRange, ServerInfo } from '../../web/static/lib/state.js';
+
+function replay456() {
+    return JSON.parse(readFileSync(new URL(
+        '../../web/static/dev/fixtures/issue456-transitions.json', import.meta.url), 'utf8'));
+}
+
+function assertReplay456(payload) {
+    // Population assertions precede determinism: ten empty graphs cannot pass.
+    assert.ok(payload.nodes.length > 0);
+    assert.equal(payload.links.length, 80);
+    assert.equal(payload.links.reduce((sum, link) => sum + link.value, 0), 3466745);
+    const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+    assert.equal(payload.total, 3466745);
+    assert.equal(built.hiddenIdleValue, 849416);
+    assert.equal(built.hiddenThresholdValue, 70110);
+    assert.ok(built.visibleCount > 0);
+    assert.ok(built.shownLinks > 0);
+    assert.deepEqual(built.omittedDominant, { name: 'Lock:relation', ms: 1533607.757399 });
+    assert.equal(payload.nodes.length, 41);
+    assert.equal(built.option.series[0].data.some(n => n.name === 'Lock:relation'), false);
+    const text = buildTransitionsDisclosure(built, payload.total);
+    assert.match(text, /Lock:relation omitted \(1533\.6s total\)/);
+    assert.match(text, /849,416 idle \(ClientRead\) hidden/);
+    assert.match(text, /70,110 below the simplify threshold/);
+    const restored = buildTransitionsOption(payload, 0, {}, null, false);
+    assert.equal(restored.option.series[0].data.find(n => n.name === 'Lock:relation').value,
+        1533607.757399);
+    return { built, text };
+}
+
+// Deliberately small DOM/chart boundary: run the REAL view, transport and view
+// manager. innerHTML replacement removes descendants, just as a browser does.
+function viewHarness456(t) {
+    const elements = new Map();
+    const frames = new Map();
+    const paints = [];
+    let nextFrame = 0;
+    class Element {
+        constructor(id) {
+            this.id = id; this.style = {}; this.listeners = {}; this.children = [];
+            this.textContent = ''; this.clientWidth = 800; this.clientHeight = 550;
+        }
+        addEventListener(name, fn) { this.listeners[name] = fn; }
+        set innerHTML(html) {
+            for (const child of this.children) { child.innerHTML = ''; elements.delete(child.id); }
+            this.children = []; this.html = html; this.textContent = '';
+            for (const match of html.matchAll(/id="([^"]+)"/g)) {
+                const child = new Element(match[1]);
+                elements.set(child.id, child); this.children.push(child);
+            }
+        }
+        get innerHTML() { return this.html || ''; }
+    }
+    const originals = new Map();
+    function stubGlobal(name, value) {
+        originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+        Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+    }
+    stubGlobal('document', { getElementById: id => elements.get(id) || null });
+    stubGlobal('requestAnimationFrame', fn => {
+        frames.set(++nextFrame, fn); return nextFrame;
+    });
+    stubGlobal('cancelAnimationFrame', id => frames.delete(id));
+    stubGlobal('WebSocket', { OPEN: 1 });
+    const ws = {
+        readyState: 1, sent: [],
+        addEventListener(name, fn) { if (name === 'message') this.deliver = body => fn({ data: JSON.stringify(body) }); },
+        send(msg) { this.sent.push(JSON.parse(msg)); },
+    };
+    const transport = new Transport(); transport.attach(ws);
+    const ctx = {
+        transport, timeRange: new TimeRange(new ServerInfo()), filters: new FilterStack(),
+        channel: name => 'transitions.' + name,
+        getEscalationStatus: () => ({ escalation_supported: false }),
+        echarts: { init() { return {
+            on() {}, getZr() { return { on() {} }; }, dispose() {}, resize() {},
+            getOption() { return paints.at(-1); }, setOption(option) { paints.push(option); },
+        }; } },
+    };
+    const view = createTransitionsView();
+    const root = new Element('root');
+    const manager = new ViewManager(ctx); manager.register(view); manager.setContainer(root);
+    t.after(() => {
+        view.leave(); transport.rejectAll('test complete');
+        for (const [name, descriptor] of originals) {
+            if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+            else delete globalThis[name];
+        }
+    });
+    return { view, root, ctx, ws, manager, paints, frames, elements,
+        mount(payload) { view.mount(root, view.build({ transitions: payload }), ctx); },
+        flush() { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn()); },
+    };
+}
+
+test('#456 frozen replay names the omitted Lock:relation with exact dwell and visibility', () => {
+    assertReplay456(replay456());
+});
+
+test('#456 nodes-less response is visibly refused by the view, never rendered as a graph', t => {
+    const h = viewHarness456(t);
+    const payload = replay456(); delete payload.nodes;
+    h.mount(payload);
+    assert.match(h.root.innerHTML, /role="alert"/);
+    assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    assert.match(h.root.innerHTML, /missing nodes/);
+    assert.equal(h.paints.length, 0);
+    assert.equal(h.elements.has('dfg-total'), false);
+});
+
+test('#456 missing Lock:relation keeps the headline totals but is visibly refused', t => {
+    const h = viewHarness456(t);
+    const payload = replay456();
+    const before = JSON.stringify(payload.links);
+    payload.nodes = payload.nodes.filter(n => n.name !== 'Lock:relation');
+    assert.equal(JSON.stringify(payload.links), before);
+    assert.equal(payload.total, 3466745);
+    h.mount(payload);
+    assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    assert.match(h.root.innerHTML, /missing node: Lock:relation/);
+    assert.equal(h.paints.length, 0);
+});
+
+test('#456 builder refuses incomplete catalogs before idle or simplify filtering', () => {
+    const payload = replay456();
+    delete payload.nodes;
+    assert.throws(() => buildTransitionsOption(payload, 20, {}, null, true), /missing nodes/);
+    for (const name of ['Lock:relation', 'Client:ClientRead', 'CPU*']) {
+        const partial = replay456(); partial.nodes = partial.nodes.filter(n => n.name !== name);
+        assert.throws(() => buildTransitionsOption(partial, 20, {}, null, true), /missing node:/);
+    }
+});
+
+test('#456 refresh clears the old payload and queued render before mounting empty data', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456());
+    h.view.resize();
+    assert.equal(h.frames.size, 1);
+    h.mount({ nodes: [], links: [], total: 0 });
+    assert.equal(h.frames.size, 0, 'empty mount must cancel old render');
+    h.view.setHideIdle(false);
+    assert.equal(h.frames.size, 0, 'empty mount must release dataRef');
+    assert.match(h.root.innerHTML, /No transitions found/);
+});
+
+test('#456 malformed refresh replaces the old graph and cannot revive it on slider/resize', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456()); h.view.resize();
+    const payload = replay456(); delete payload.nodes;
+    h.mount(payload);
+    h.view.setHideIdle(false); h.view.resize(); h.flush();
+    assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    assert.equal(h.paints.length, 1);
+    assert.equal(h.frames.size, 0);
+});
+
+test('#456 ten fresh view/transport sessions preserve nonempty frozen payload and disclosure', async t => {
+    let expected;
+    for (let run = 0; run < 10; run++) {
+        await t.test('session ' + run, async t => {
+            const h = viewHarness456(t);
+            h.ctx.timeRange.set(100, 200);
+            const mounting = h.manager.switchTo('transitions');
+            const request = h.ws.sent.at(-1);
+            assert.deepEqual(request, { id: 1, cmd: 'transitions', from: 100, to: 200, filters: {}, buckets: 200 });
+            // Interleave a different table channel's nodes-less response.
+            const other = h.ctx.transport.request('events.table', 'events', {});
+            h.ws.deliver({ id: h.ws.sent.at(-1).id, rows: [{ name: 'unrelated' }] });
+            await other;
+            const payload = replay456(); const { text } = assertReplay456(payload);
+            h.ws.deliver({ ...payload, id: request.id }); await mounting;
+            assert.equal(h.elements.get('dfg-total').textContent, text);
+            assert.ok(h.paints[0].series[0].data.length > 2);
+            const snapshot = JSON.stringify({ text, option: h.paints[0] });
+            if (run === 0) expected = snapshot;
+            assert.equal(snapshot, expected);
+
+            // A superseded request must not supply the next refresh's body.
+            const stale = h.manager.refresh(); const oldId = h.ws.sent.at(-1).id;
+            h.ctx.timeRange.set(300, 400); h.ctx.filters.drill('pid', 17, 'pid 17', 'transitions');
+            const fresh = h.manager.refresh(); const current = h.ws.sent.at(-1);
+            assert.deepEqual(current.filters, { pid: 17 });
+            assert.equal(current.from, 300); assert.equal(current.to, 400);
+            h.ws.deliver({ id: oldId, links: payload.links, total: payload.total });
+            h.ws.deliver({ ...payload, id: current.id });
+            await Promise.all([stale, fresh]);
+            assert.equal(h.paints.length, 2);
+            assert.equal(h.elements.get('dfg-total').textContent, text);
+        });
+    }
+});
+
+
+test('#456 unavailable refresh also releases the old payload and pending frame', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456()); h.view.resize();
+    h.mount({ code: 'full_fidelity_required', unavailable: 'Exact data required', fidelity: 'sampled' });
+    h.view.setHideIdle(false);
+    assert.equal(h.frames.size, 0);
+    assert.match(h.root.innerHTML, /unavailable-panel/);
+    assert.equal(h.elements.has('dfg-total'), false);
+});
+
+test('#456 catalog mutation after mount is visibly refused on the next render', t => {
+    const h = viewHarness456(t);
+    const payload = replay456(); h.mount(payload);
+    payload.nodes = payload.nodes.filter(n => n.name !== 'Lock:relation');
+    h.view.resize(); h.flush();
+    assert.match(h.root.innerHTML, /missing node: Lock:relation/);
+    assert.equal(h.paints.length, 1);
+});
+
+test('#456 invalid dwell, duplicate names, empty catalog and missing links are not empty graphs', t => {
+    const h = viewHarness456(t);
+    for (const mutate of [
+        p => { p.nodes = []; },
+        p => { p.nodes = null; },
+        p => { p.nodes.push({ ...p.nodes[0] }); },
+        p => { delete p.nodes[0].total_ms; },
+        p => { p.nodes[0].total_ms = NaN; },
+        p => { p.nodes[0].total_ms = -1; },
+        p => { delete p.links; },
+    ]) {
+        const payload = replay456(); mutate(payload); h.mount(payload);
+        assert.match(h.root.innerHTML, /role="alert"/);
+        assert.match(h.root.innerHTML, /Transitions data incomplete/);
+    }
+    assert.equal(h.paints.length, 0);
+    h.mount(replay456());
+    assert.match(h.elements.get('dfg-total').textContent, /Lock:relation omitted/);
+    assert.equal(h.paints.length, 1, 'a valid refresh recovers');
+});
+
+test('#456 missing hostile endpoint is escaped in the visible error', t => {
+    const h = viewHarness456(t);
+    const payload = replay456(); payload.links[0].source = '<img src=x onerror=alert(1)>';
+    h.mount(payload);
+    assert.match(h.root.innerHTML, /missing node: &lt;img/);
+    assert.ok(!h.root.innerHTML.includes('<img'));
 });

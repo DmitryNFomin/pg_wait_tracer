@@ -283,15 +283,77 @@ test('#103 overflow percentiles reach the assembled model as ">=" bounds', () =>
         'their actual values are unavailable.' });
 });
 
-// #437 negative control: no row overflowed -> no banner. Without this, a
-// banner that always renders regardless of data would pass the positive
-// test above too (it does not check for ABSENCE anywhere else).
-test('#437 no overflow anywhere in the page -> no beside-table note', () => {
+// #454: every FINITE percentile is a histogram bucket upper edge too, not
+// just the open-ended overflow tail -- a window with ordinary, non-overflow
+// percentiles now ALSO gets a beside-table disclosure (the finite-bound
+// sentence, distinct from #437's overflow sentence). Before #454 this was
+// `null` (see git history / the superseded test this replaces) -- a window
+// with real percentile numbers and nothing disclosed about their meaning is
+// exactly the #454 bug.
+test('#454 ordinary (non-overflow) percentiles still get a beside-table bound note', () => {
     const m = buildEventsModel({ rows: [
         ev({ name: 'IO:DataFileRead', event_id: 0x01000015,
              p50_us: 8, p95_us: 40, p99_us: 90 }),
     ] }, null);
+    assert.deepEqual(m.overflowNote, { text:
+        'Percentiles marked ≤ are the upper edge of the histogram ' +
+        'bucket the value fell in, not the exact observed duration; a ' +
+        'rounded bound can read above Max when few samples exist. The ' +
+        'exact tail lives in Max.' });
+});
+
+// True negative control: NO percentile data anywhere (sampled-only window,
+// every p50/p95/p99 null) -> no note at all. Without this, a note that
+// always renders regardless of data would pass the positive test above too.
+test('#454 no percentile data anywhere -> no beside-table note', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'CPU*', event_id: 0, p50_us: null, p95_us: null, p99_us: null }),
+    ] }, null);
     assert.equal(m.overflowNote, null);
+});
+
+// #454 gate case: the live capture that opened the issue -- Count=1, exact
+// Max ~1.0 ms, every percentile landing on the bucket-10 edge (2048 us ==
+// 2.0 ms), a bound VISIBLY BIGGER than the row's own exact Max. Finite edge
+// must render qualified ("<=2.0ms"), unchanged numerically, not clamped to
+// Max, and the cell's underlying sort value must still be the raw 2048.
+test('#454 Count=1 finite edge exceeding Max renders "<=2.0ms", unclamped, sort value intact', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'Lock:tuple', event_id: 0x03000001, count: 1,
+             total_ms: 1, max_us: 1000,
+             p50_us: 2048, p95_us: 2048, p99_us: 2048,
+             p50_overflow: false, p95_overflow: false, p99_overflow: false }),
+    ] }, null);
+    for (const ci of [4, 5, 6]) {
+        const html = m.table.rows[0].cells[ci].html;
+        assert.ok(html.includes('≤2.0ms'), `col ${ci}: ${html}`);
+        assert.ok(!html.includes('≤2.0ms'.replace('2.0', '1.0')), html);
+        // #454: never clamp to Max -- the bound stays 2.0ms even though
+        // Max (exact) is only 1.0ms.
+    }
+    assert.ok(m.table.rows[0].cells[7].html.includes('1.0ms'),
+        m.table.rows[0].cells[7].html);
+    // Sort value is the raw row field, never altered by the cell's display.
+    assert.equal(m.table.rows[0].row.p50_us, 2048);
+});
+
+// #454 gate case: bucket 14 (finite, upper edge 16384) and bucket 15
+// (open-ended) can report the IDENTICAL 16384 number -- only the qualifier
+// (driven by the `_overflow` flag) may tell them apart. This is the
+// regression a "qualify anything >= 16384" shortcut would fail: it would
+// print both rows the SAME way.
+test('#454 bucket 14 (finite) and bucket 15 (overflow) both carry 16384 but render differently', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'LWLock:LockManager', event_id: 0x04000012,
+             p99_us: 16384, p99_overflow: false }),
+        ev({ name: 'Lock:relation', event_id: 0x03000000,
+             p99_us: 16384, p99_overflow: true }),
+    ] }, null);
+    const finiteCell = m.table.rows[0].cells[6].html;
+    const overflowCell = m.table.rows[1].cells[6].html;
+    assert.ok(finiteCell.includes('≤16.4ms'), finiteCell);
+    assert.ok(overflowCell.includes('≥16.4ms'), overflowCell);
+    assert.notEqual(finiteCell, overflowCell);
 });
 
 test('percentile cells in the assembled model carry the histogram pivot intent', () => {

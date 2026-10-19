@@ -1,0 +1,737 @@
+{
+ "fidelity": "exact",
+ "link_count": 80,
+ "links": [
+  {
+   "duration_ms": 37829732.52438,
+   "source": "Client:ClientRead",
+   "target": "CPU*",
+   "value": 521952
+  },
+  {
+   "duration_ms": 13021.141285,
+   "source": "IO:DataFileRead",
+   "target": "CPU*",
+   "value": 334773
+  },
+  {
+   "duration_ms": 60941.830607,
+   "source": "CPU*",
+   "target": "IO:DataFileRead",
+   "value": 334057
+  },
+  {
+   "duration_ms": 300097.661974,
+   "source": "CPU*",
+   "target": "Client:ClientRead",
+   "value": 327464
+  },
+  {
+   "duration_ms": 5741.35272,
+   "source": "CPU*",
+   "target": "IO:DataFileWrite",
+   "value": 185026
+  },
+  {
+   "duration_ms": 6686.803108,
+   "source": "IO:DataFileWrite",
+   "target": "CPU*",
+   "value": 185026
+  },
+  {
+   "duration_ms": 10289.952501,
+   "source": "CPU*",
+   "target": "IO:BufFileRead",
+   "value": 169224
+  },
+  {
+   "duration_ms": 1920.721786,
+   "source": "IO:BufFileRead",
+   "target": "CPU*",
+   "value": 169224
+  },
+  {
+   "duration_ms": 13362.441581,
+   "source": "CPU*",
+   "target": "IO:BufFileWrite",
+   "value": 169191
+  },
+  {
+   "duration_ms": 3244.935005,
+   "source": "IO:BufFileWrite",
+   "target": "CPU*",
+   "value": 169191
+  },
+  {
+   "duration_ms": 2480.982803,
+   "source": "CPU*",
+   "target": "IO:DataFileFlush",
+   "value": 160291
+  },
+  {
+   "duration_ms": 7905.365263,
+   "source": "IO:DataFileFlush",
+   "target": "CPU*",
+   "value": 160291
+  },
+  {
+   "duration_ms": 7235.579106,
+   "source": "IO:WalWrite",
+   "target": "CPU*",
+   "value": 127908
+  },
+  {
+   "duration_ms": 12360.814707,
+   "source": "CPU*",
+   "target": "IO:WalWrite",
+   "value": 127679
+  },
+  {
+   "duration_ms": 1418.025893,
+   "source": "CPU*",
+   "target": "IO:WalSync",
+   "value": 127669
+  },
+  {
+   "duration_ms": 107363.355705,
+   "source": "IO:WalSync",
+   "target": "CPU*",
+   "value": 127669
+  },
+  {
+   "duration_ms": 466.497656,
+   "source": "CPU*",
+   "target": "Timeout:CheckpointWriteDelay",
+   "value": 14968
+  },
+  {
+   "duration_ms": 1501764.714739,
+   "source": "Timeout:CheckpointWriteDelay",
+   "target": "CPU*",
+   "value": 14967
+  },
+  {
+   "duration_ms": 12161.436686,
+   "source": "LWLock:LockManager",
+   "target": "CPU*",
+   "value": 9307
+  },
+  {
+   "duration_ms": 170425.13562,
+   "source": "CPU*",
+   "target": "LWLock:LockManager",
+   "value": 9273
+  },
+  {
+   "duration_ms": 7177.853707,
+   "source": "LWLock:WALWrite",
+   "target": "CPU*",
+   "value": 6106
+  },
+  {
+   "duration_ms": 784.916994,
+   "source": "CPU*",
+   "target": "LWLock:WALWrite",
+   "value": 5884
+  },
+  {
+   "duration_ms": 4461.037231,
+   "source": "Timeout:VacuumDelay",
+   "target": "CPU*",
+   "value": 1879
+  },
+  {
+   "duration_ms": 331.094187,
+   "source": "CPU*",
+   "target": "Timeout:VacuumDelay",
+   "value": 1878
+  },
+  {
+   "duration_ms": 223.783454,
+   "source": "IO:AioIoCompletion",
+   "target": "CPU*",
+   "value": 816
+  },
+  {
+   "duration_ms": 250.523688,
+   "source": "CPU*",
+   "target": "IO:AioIoCompletion",
+   "value": 815
+  },
+  {
+   "duration_ms": 196846.497476,
+   "source": "Lock:transactionid",
+   "target": "CPU*",
+   "value": 683
+  },
+  {
+   "duration_ms": 227.613555,
+   "source": "CPU*",
+   "target": "Lock:transactionid",
+   "value": 678
+  },
+  {
+   "duration_ms": 1533607.757399,
+   "source": "Lock:relation",
+   "target": "CPU*",
+   "value": 392
+  },
+  {
+   "duration_ms": 41.521625,
+   "source": "CPU*",
+   "target": "Lock:relation",
+   "value": 391
+  },
+  {
+   "duration_ms": 23.209604,
+   "source": "IO:DataFileExtend",
+   "target": "CPU*",
+   "value": 317
+  },
+  {
+   "duration_ms": 93.161718,
+   "source": "CPU*",
+   "target": "IO:DataFileExtend",
+   "value": 313
+  },
+  {
+   "duration_ms": 195.25044,
+   "source": "CPU*",
+   "target": "IO:RelationMapRead",
+   "value": 216
+  },
+  {
+   "duration_ms": 4.327208,
+   "source": "IO:RelationMapRead",
+   "target": "CPU*",
+   "value": 216
+  },
+  {
+   "duration_ms": 57.015751,
+   "source": "CPU*",
+   "target": "Lock:advisory",
+   "value": 180
+  },
+  {
+   "duration_ms": 141269.949755,
+   "source": "Lock:advisory",
+   "target": "CPU*",
+   "value": 180
+  },
+  {
+   "duration_ms": 2.655239,
+   "source": "CPU*",
+   "target": "IO:DataFileSync",
+   "value": 112
+  },
+  {
+   "duration_ms": 60.19347,
+   "source": "IO:DataFileSync",
+   "target": "CPU*",
+   "value": 112
+  },
+  {
+   "duration_ms": 124.555633,
+   "source": "CPU*",
+   "target": "IO:SlruWrite",
+   "value": 68
+  },
+  {
+   "duration_ms": 3.203669,
+   "source": "IO:SlruWrite",
+   "target": "CPU*",
+   "value": 68
+  },
+  {
+   "duration_ms": 10.41654,
+   "source": "CPU*",
+   "target": "LWLock:BufferContent",
+   "value": 32
+  },
+  {
+   "duration_ms": 0.542234,
+   "source": "LWLock:BufferContent",
+   "target": "CPU*",
+   "value": 32
+  },
+  {
+   "duration_ms": 5.013526,
+   "source": "LWLock:WALInsert",
+   "target": "CPU*",
+   "value": 31
+  },
+  {
+   "duration_ms": 4.153189,
+   "source": "CPU*",
+   "target": "LWLock:WALInsert",
+   "value": 29
+  },
+  {
+   "duration_ms": 0.797637,
+   "source": "CPU*",
+   "target": "LWLock:XidGen",
+   "value": 21
+  },
+  {
+   "duration_ms": 0.30264,
+   "source": "LWLock:XidGen",
+   "target": "CPU*",
+   "value": 21
+  },
+  {
+   "duration_ms": 0.149612,
+   "source": "CPU*",
+   "target": "LWLock:ProcArray",
+   "value": 9
+  },
+  {
+   "duration_ms": 39.619136,
+   "source": "LWLock:ProcArray",
+   "target": "CPU*",
+   "value": 9
+  },
+  {
+   "duration_ms": 34.174595,
+   "source": "Timeout:SpinDelay",
+   "target": "CPU*",
+   "value": 9
+  },
+  {
+   "duration_ms": 132.647454,
+   "source": "CPU*",
+   "target": "Timeout:SpinDelay",
+   "value": 8
+  },
+  {
+   "duration_ms": 0.819938,
+   "source": "CPU*",
+   "target": "LWLock:XactSLRU",
+   "value": 6
+  },
+  {
+   "duration_ms": 0.069672,
+   "source": "LWLock:XactSLRU",
+   "target": "CPU*",
+   "value": 6
+  },
+  {
+   "duration_ms": 0.043921,
+   "source": "CPU*",
+   "target": "IO:ControlFileSyncUpdate",
+   "value": 5
+  },
+  {
+   "duration_ms": 0.154059,
+   "source": "CPU*",
+   "target": "IO:ControlFileWriteUpdate",
+   "value": 5
+  },
+  {
+   "duration_ms": 0.390681,
+   "source": "CPU*",
+   "target": "IO:SlruFlushSync",
+   "value": 5
+  },
+  {
+   "duration_ms": 0.205137,
+   "source": "CPU*",
+   "target": "IO:SlruRead",
+   "value": 5
+  },
+  {
+   "duration_ms": 6.55059,
+   "source": "IO:ControlFileSyncUpdate",
+   "target": "CPU*",
+   "value": 5
+  },
+  {
+   "duration_ms": 0.245946,
+   "source": "IO:ControlFileWriteUpdate",
+   "target": "CPU*",
+   "value": 5
+  },
+  {
+   "duration_ms": 7.183053,
+   "source": "IO:SlruFlushSync",
+   "target": "CPU*",
+   "value": 5
+  },
+  {
+   "duration_ms": 1.471207,
+   "source": "IO:SlruRead",
+   "target": "CPU*",
+   "value": 5
+  },
+  {
+   "duration_ms": 2.624922,
+   "source": "CPU*",
+   "target": "IPC:BufferIO",
+   "value": 4
+  },
+  {
+   "duration_ms": 9.799561,
+   "source": "IPC:BufferIO",
+   "target": "CPU*",
+   "value": 4
+  },
+  {
+   "duration_ms": 0.09456,
+   "source": "CPU*",
+   "target": "LWLock:AioWorkerSubmissionQueue",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.338589,
+   "source": "CPU*",
+   "target": "LWLock:BufferMapping",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.443886,
+   "source": "CPU*",
+   "target": "Lock:extend",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.393572,
+   "source": "CPU*",
+   "target": "Lock:tuple",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.028298,
+   "source": "CPU*",
+   "target": "IO:WalInitSync",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.398949,
+   "source": "CPU*",
+   "target": "IO:WalInitWrite",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.032056,
+   "source": "LWLock:AioWorkerSubmissionQueue",
+   "target": "CPU*",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.01821,
+   "source": "LWLock:BufferMapping",
+   "target": "CPU*",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.286372,
+   "source": "Lock:extend",
+   "target": "CPU*",
+   "value": 2
+  },
+  {
+   "duration_ms": 1.340284,
+   "source": "Lock:tuple",
+   "target": "CPU*",
+   "value": 2
+  },
+  {
+   "duration_ms": 30.010155,
+   "source": "IO:WalInitSync",
+   "target": "CPU*",
+   "value": 2
+  },
+  {
+   "duration_ms": 42.758524,
+   "source": "IO:WalInitWrite",
+   "target": "CPU*",
+   "value": 2
+  },
+  {
+   "duration_ms": 0.022988,
+   "source": "CPU*",
+   "target": "LWLock:WALBufMapping",
+   "value": 1
+  },
+  {
+   "duration_ms": 0.010759,
+   "source": "CPU*",
+   "target": "LWLock:CheckpointerComm",
+   "value": 1
+  },
+  {
+   "duration_ms": 0.009736,
+   "source": "CPU*",
+   "target": "IPC:ProcarrayGroupUpdate",
+   "value": 1
+  },
+  {
+   "duration_ms": 0.006638,
+   "source": "LWLock:WALBufMapping",
+   "target": "CPU*",
+   "value": 1
+  },
+  {
+   "duration_ms": 0.322451,
+   "source": "LWLock:CheckpointerComm",
+   "target": "CPU*",
+   "value": 1
+  },
+  {
+   "duration_ms": 10.522249,
+   "source": "IPC:ProcarrayGroupUpdate",
+   "target": "CPU*",
+   "value": 1
+  }
+ ],
+ "nodes": [
+  {
+   "class": "Client",
+   "event_id": 100663296,
+   "name": "Client:ClientRead",
+   "total_ms": 37829732.52438
+  },
+  {
+   "class": "Lock",
+   "event_id": 50331648,
+   "name": "Lock:relation",
+   "total_ms": 1533607.757399
+  },
+  {
+   "class": "Timeout",
+   "event_id": 150994945,
+   "name": "Timeout:CheckpointWriteDelay",
+   "total_ms": 1501764.714739
+  },
+  {
+   "class": "cpu",
+   "event_id": 0,
+   "name": "CPU*",
+   "total_ms": 579847.149319
+  },
+  {
+   "class": "Lock",
+   "event_id": 50331653,
+   "name": "Lock:transactionid",
+   "total_ms": 196846.497476
+  },
+  {
+   "class": "Lock",
+   "event_id": 50331658,
+   "name": "Lock:advisory",
+   "total_ms": 141269.949755
+  },
+  {
+   "class": "IO",
+   "event_id": 167772238,
+   "name": "IO:WalSync",
+   "total_ms": 107363.355705
+  },
+  {
+   "class": "IO",
+   "event_id": 167772181,
+   "name": "IO:DataFileRead",
+   "total_ms": 13021.141285
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777283,
+   "name": "LWLock:LockManager",
+   "total_ms": 12161.436686
+  },
+  {
+   "class": "IO",
+   "event_id": 167772178,
+   "name": "IO:DataFileFlush",
+   "total_ms": 7905.365263
+  },
+  {
+   "class": "IO",
+   "event_id": 167772240,
+   "name": "IO:WalWrite",
+   "total_ms": 7235.579106
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777224,
+   "name": "LWLock:WALWrite",
+   "total_ms": 7177.853707
+  },
+  {
+   "class": "IO",
+   "event_id": 167772184,
+   "name": "IO:DataFileWrite",
+   "total_ms": 6686.803108
+  },
+  {
+   "class": "Timeout",
+   "event_id": 150994951,
+   "name": "Timeout:VacuumDelay",
+   "total_ms": 4461.037231
+  },
+  {
+   "class": "IO",
+   "event_id": 167772168,
+   "name": "IO:BufFileWrite",
+   "total_ms": 3244.935005
+  },
+  {
+   "class": "IO",
+   "event_id": 167772166,
+   "name": "IO:BufFileRead",
+   "total_ms": 1920.721786
+  },
+  {
+   "class": "IO",
+   "event_id": 167772160,
+   "name": "IO:AioIoCompletion",
+   "total_ms": 223.783454
+  },
+  {
+   "class": "IO",
+   "event_id": 167772182,
+   "name": "IO:DataFileSync",
+   "total_ms": 60.19347
+  },
+  {
+   "class": "IO",
+   "event_id": 167772234,
+   "name": "IO:WalInitWrite",
+   "total_ms": 42.758524
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777220,
+   "name": "LWLock:ProcArray",
+   "total_ms": 39.619136
+  },
+  {
+   "class": "Timeout",
+   "event_id": 150994950,
+   "name": "Timeout:SpinDelay",
+   "total_ms": 34.174595
+  },
+  {
+   "class": "IO",
+   "event_id": 167772233,
+   "name": "IO:WalInitSync",
+   "total_ms": 30.010155
+  },
+  {
+   "class": "IO",
+   "event_id": 167772177,
+   "name": "IO:DataFileExtend",
+   "total_ms": 23.209604
+  },
+  {
+   "class": "IPC",
+   "event_id": 134217769,
+   "name": "IPC:ProcarrayGroupUpdate",
+   "total_ms": 10.522249
+  },
+  {
+   "class": "IPC",
+   "event_id": 134217736,
+   "name": "IPC:BufferIO",
+   "total_ms": 9.799561
+  },
+  {
+   "class": "IO",
+   "event_id": 167772210,
+   "name": "IO:SlruFlushSync",
+   "total_ms": 7.183053
+  },
+  {
+   "class": "IO",
+   "event_id": 167772171,
+   "name": "IO:ControlFileSyncUpdate",
+   "total_ms": 6.55059
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777277,
+   "name": "LWLock:WALInsert",
+   "total_ms": 5.013526
+  },
+  {
+   "class": "IO",
+   "event_id": 167772200,
+   "name": "IO:RelationMapRead",
+   "total_ms": 4.327208
+  },
+  {
+   "class": "IO",
+   "event_id": 167772213,
+   "name": "IO:SlruWrite",
+   "total_ms": 3.203669
+  },
+  {
+   "class": "IO",
+   "event_id": 167772211,
+   "name": "IO:SlruRead",
+   "total_ms": 1.471207
+  },
+  {
+   "class": "Lock",
+   "event_id": 50331652,
+   "name": "Lock:tuple",
+   "total_ms": 1.340284
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777278,
+   "name": "LWLock:BufferContent",
+   "total_ms": 0.542234
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777233,
+   "name": "LWLock:CheckpointerComm",
+   "total_ms": 0.322451
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777219,
+   "name": "LWLock:XidGen",
+   "total_ms": 0.30264
+  },
+  {
+   "class": "Lock",
+   "event_id": 50331649,
+   "name": "Lock:extend",
+   "total_ms": 0.286372
+  },
+  {
+   "class": "IO",
+   "event_id": 167772173,
+   "name": "IO:ControlFileWriteUpdate",
+   "total_ms": 0.245946
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777308,
+   "name": "LWLock:XactSLRU",
+   "total_ms": 0.069672
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777269,
+   "name": "LWLock:AioWorkerSubmissionQueue",
+   "total_ms": 0.032056
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777282,
+   "name": "LWLock:BufferMapping",
+   "total_ms": 0.01821
+  },
+  {
+   "class": "LWLock",
+   "event_id": 16777223,
+   "name": "LWLock:WALBufMapping",
+   "total_ms": 0.006638
+  }
+ ],
+ "total": 3466745,
+ "total_link_count": 80,
+ "truncated": false
+}

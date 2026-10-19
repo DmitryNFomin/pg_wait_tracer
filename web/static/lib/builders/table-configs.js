@@ -21,6 +21,8 @@ import {
 } from '../format.js';
 import { dot, pctBar, stackedBar, eventStackedBar, createStableOrder } from '../table.js';
 
+import { backendActivityHtml } from './backend-span.js';
+
 const _dot = (name) => dot(name, classColor);
 
 function fmtSignedMs(ms) {
@@ -87,28 +89,50 @@ function histogramIntent(key) {
  * sentence is also shown BESIDE the table (buildOverflowNote/overflowNoteHtml
  * below), not only on hover: a tooltip is undiscoverable until someone
  * hovers the exact cell, and this fact changes how every percentile in the
- * table should be read. */
+ * table should be read.
+ *
+ * #454: #437 only qualified the OPEN-ended bucket. Every OTHER (finite)
+ * bucket is exactly as approximate — hist_percentile() (src/compute.c:1718)
+ * ALWAYS returns a bucket's upper edge, never the exact observed duration,
+ * for every one of the 16 buckets, not just the last. The live capture that
+ * opened #454 was a Count=1 row: Max ~1.0 ms (the one exact observation) next
+ * to P50/P95/P99 all reading the bucket-10 edge 2048 us (~2.0 ms) bare — a
+ * percentile printed BIGGER than the row's own exact Max, with nothing
+ * marking it as a rounded bound rather than a measurement. Finite buckets
+ * now render "<=" (vs #437's ">=" for the open-ended tail) so the two
+ * directions of approximation read as what they are: a finite bucket's true
+ * value is AT OR BELOW its edge, the open bucket's true value is AT OR
+ * ABOVE 16.384 ms. Bucket 14 (finite, 8.2..16.384 ms) and bucket 15
+ * (open-ended) can report the identical 16384 number; only the qualifier
+ * (driven by `<pctl>_overflow`, same as #437) tells them apart. */
 export const PCTL_OVERFLOW_SENTENCE =
     'Percentiles marked ≥16.4 ms fall in the open-ended ≥16.384 ms ' +
     'histogram bucket; they are lower bounds, and their actual values are ' +
     'unavailable.';
 
+export const PCTL_FINITE_BOUND_SENTENCE =
+    'Percentiles marked ≤ are the upper edge of the histogram bucket the ' +
+    'value fell in, not the exact observed duration; a rounded bound can ' +
+    'read above Max when few samples exist. The exact tail lives in Max.';
+
 function pctlCell(key) {
     const intent = histogramIntent(key);
     const overflowKey = key.replace(/_us$/, '_overflow');
     return (r) => {
-        const overflow = r[key] != null && r[overflowKey] === true;
-        const v = (overflow ? '≥' : '') + fmtUs(r[key]);
+        if (r[key] == null) return fmtUs(r[key]);   // '—': no distribution
+        const overflow = r[overflowKey] === true;
+        const v = (overflow ? '≥' : '≤') + fmtUs(r[key]);
         const drillable = !!intent(r);
-        if (!drillable && !overflow) return v;
-        const title = overflow
-            ? PCTL_OVERFLOW_SENTENCE + (drillable
-                ? ' Click to see its latency distribution.' : '')
-            : 'View the latency distribution of ' + r.name;
+        const sentence = overflow ? PCTL_OVERFLOW_SENTENCE : PCTL_FINITE_BOUND_SENTENCE;
+        const title = sentence + (drillable
+            ? ' Click to see its latency distribution.' : '');
         /* Drillable cells keep the inline drill affordance; a bound on a
          * non-drillable row gets the quieter .pctl-overflow underline
          * (style.css, mirrored in dev/gallery.html) so it still reads as
-         * inspectable rather than as flat text. */
+         * inspectable rather than as flat text. #454: every percentile is
+         * now a bound (finite or open-ended), so this span is no longer
+         * conditional on overflow -- the plain, unqualified return path is
+         * gone. */
         return '<span class="' + (drillable ? 'cell-drill' : 'pctl-overflow') +
                '"' + (drillable ? ' style="border-bottom:1px dotted #778"' : '') +
                ' title="' + esc(title) + '">' + v + '</span>';
@@ -388,16 +412,36 @@ export const eventsConfig = {
     onClick: (r) => ({ filterKey: 'event_id', filterValue: r.event_id, label: r.name }),
 };
 
-/* #437: the disclosure beside the table, not only on hover. PURE — the view
- * (views/events.js) renders whatever this returns next to the mounted table,
- * the same spot it already uses for the percentile-basis footnote
+const PCTL_KEYS = ['p50_us', 'p95_us', 'p99_us'];
+
+/* #437/#454: the disclosure beside the table, not only on hover. PURE — the
+ * view (views/events.js) renders whatever this returns next to the mounted
+ * table, the same spot it already uses for the percentile-basis footnote
  * (lib/panels.js's buildPercentileBasis/percentileBasisHtml), so a reader
- * sees it without hovering any one cell. Null when nothing in the current
- * page overflowed, so an exact/no-tail window shows nothing extra. */
+ * sees it without hovering any one cell. Null only when the page has NO
+ * percentile data at all (every p50/p95/p99 null -- e.g. a sampled-only
+ * window, FID-3), since #454 made every finite percentile a bound too: there
+ * is no longer a case with real percentile numbers and nothing to disclose.
+ * Two independent facts, so both sentences can appear together (a page can
+ * have both a finite-bucket row and an overflowing one, as the live #454
+ * capture did). */
 export function buildOverflowNote(rows) {
-    const hasOverflow = (rows || []).some((r) =>
-        r.p50_overflow === true || r.p95_overflow === true || r.p99_overflow === true);
-    return hasOverflow ? { text: PCTL_OVERFLOW_SENTENCE } : null;
+    rows = rows || [];
+    let hasOverflow = false;
+    let hasFiniteBound = false;
+    for (const r of rows) {
+        for (const key of PCTL_KEYS) {
+            if (r[key] == null) continue;
+            const overflowKey = key.replace(/_us$/, '_overflow');
+            if (r[overflowKey] === true) hasOverflow = true;
+            else hasFiniteBound = true;
+        }
+    }
+    if (!hasOverflow && !hasFiniteBound) return null;
+    const texts = [];
+    if (hasFiniteBound) texts.push(PCTL_FINITE_BOUND_SENTENCE);
+    if (hasOverflow) texts.push(PCTL_OVERFLOW_SENTENCE);
+    return { text: texts.join(' ') };
 }
 
 export function overflowNoteHtml(model) {
@@ -491,6 +535,21 @@ export function makeQueriesConfig(fidelity) {
                   filterValue: r.query_id,
                   label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
             { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
+            /* Reviewer finding: `Closed · 0.4 s` renders directly beside
+             * `DB Time 4.2 s`, and nothing in the cell or the header said one
+             * is an OBSERVED WALL-CLOCK SPAN of one backend's activity while
+             * the other is a SUMMED wait + CPU total across every execution.
+             * Read as "another time next to DB Time" it trades #455's missing
+             * 714 s for a new ambiguity, so the qualifier is in the header
+             * text itself -- not left to be inferred from the drill's
+             * Measurement/Completion wording. */
+            { key: 'backend_activity_span', sortable: false,
+              label: 'Backend activity <span class="col-qualifier" title="' +
+                  'One backend&#39;s observed wall-clock activity span, from ' +
+                  'CMD_START/CMD_END timestamps. NOT comparable to DB Time, ' +
+                  'which sums wait and CPU time across every execution of ' +
+                  'this query, and never an average.">(observed span)</span>',
+              cls: 'backend-activity-cell', format: (r) => backendActivityHtml(r) },
             { key: 'pct', label: QUERIES_PCT_LABEL, cls: 'num', format: (r) => fmtPct(r.pct) },
             { key: 'classes', label: 'Wait Profile', format: (r) =>
                 r.events ? eventStackedBar(r.events, r.total_ms, eventColor, fmtMs)

@@ -470,6 +470,36 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
   overflow-x: auto;
 }
 
+/* #454: Events-only. The percentile-bound disclosure (.pctl-overflow-banner,
+ * .pctl-basis-note) used to be appended AFTER every row inside
+ * #table-container, which has no height bound of its own -- on a dense
+ * fixture the note sat below however many rows the window returned, below
+ * the fold, reachable only by scrolling the WHOLE page past the table. It
+ * now lives in `.events-notes`, a sibling that never scrolls, ABOVE a
+ * bounded `.events-table-scroll` that owns its own scrollbar; the note is
+ * visible the instant the tab paints and the table's last row stays
+ * reachable by scrolling the (smaller) table body instead of the page.
+ * Deliberately scoped to these two classes, not `#table-container table` or
+ * `#table-container thead` globally -- sessions/queries/overview keep
+ * today's unbounded, whole-page-scrolls layout untouched. The 100vh calc is
+ * the header (~64px) + AAS chart strip + tabs + summary bar + this view's own
+ * top/bottom padding; 260px is a conservative accounting of that chrome
+ * (verified against the demo viewport in make ui-gallery, not computed from
+ * a DOM measurement -- there is no live layout to query from pure CSS). */
+.events-notes:empty { display: none; }
+.events-notes { padding-top: 10px; }
+.events-table-scroll {
+  max-height: calc(100vh - 260px);
+  min-height: 160px;
+  overflow: auto;
+}
+.events-table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #16213e;
+}
+
 /* B6 execution waterfall / scatter / transition matrix. */
 .view-title {
   padding: 10px 12px 7px;
@@ -503,17 +533,43 @@ tr.selected-execution td { background: #173653; }
 #waterfall-chart { min-height: 240px; padding: 4px 10px; }
 #scatter-chart { height: 480px; padding: 4px 10px; }
 #matrix-chart { height: 660px; padding: 4px 10px; }
-/* #276: the Burst Events table is now one row per bucket that had a burst --
- * up to the chart's own bucket count, which is 300 at a wide viewport, and
- * measured ~8,800 px tall there. Bound the PANEL, never the row count: the
- * rows the server just started reporting honestly (it declares the rest in
+/* #276/review-finding (separate from the owner-held #442 threshold issue):
+ * the Burst Events table is one row per bucket that had a burst -- up to the
+ * chart's own bucket count, which is 300 at a wide viewport, and measured
+ * ~8,800 px tall there. Bound the PANEL, never the row count: the rows the
+ * server just started reporting honestly (it declares the rest in
  * bursts_total) must all stay reachable, and silently dropping them is the
  * defect class #276 exists to remove. A px value, not vh: the snapshot
  * baselines are captured at a fixed viewport and 640 px sits above the
  * tallest committed cell (concurrency_burst_table.png is 499 px), so no
  * baseline moves and no scrollbar appears until there is something to
- * scroll. */
-#burst-table { max-height: 640px; overflow: auto; }
+ * scroll.
+ *
+ * Peaks and Bursts used to share ONE such container (#burst-table held both
+ * tables stacked), so the 640px cap was spent on whichever table came first
+ * in the DOM -- ten peak rows fit easily, so Burst Events (what the chart's
+ * red markers point at) silently never reached the fold on a dense fixture.
+ * `.concurrency-panels` now lays the two OUT side by side (views/concurrency.js),
+ * each in its own `.concurrency-panel` with the SAME 640px budget -- doubling
+ * the total space used, deliberately, since the two tables no longer compete
+ * for one. A narrow viewport has no room for two columns of table text, so it
+ * shows one panel at a time behind the always-visible Peaks/Bursts selector
+ * instead of squeezing both. */
+.concurrency-panel-selector { display: none; gap: 8px; padding: 10px 10px 0; }
+.cp-select {
+  background: #1e1e3a; border: 1px solid #333; color: #aaa;
+  padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.cp-select.active { color: #4fc3f7; border-color: #4fc3f7; }
+.concurrency-panels {
+  display: flex; gap: 16px; padding: 10px; align-items: flex-start;
+}
+.concurrency-panel { flex: 1 1 0; min-width: 0; max-height: 640px; overflow: auto; }
+@media (max-width: 900px) {
+  .concurrency-panel-selector { display: flex; }
+  .concurrency-panels { flex-direction: column; }
+  .concurrency-panel.cp-hidden { display: none; }
+}
 .chart-readout {
   display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
   min-height: 34px; padding: 7px 14px; color: #aaa; font-size: 11px;
@@ -916,3 +972,26 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
 .unavailable-status { margin-top: 12px; font-size: 12px; min-height: 16px; }
 .unavailable-status.ok { color: #4f4; }
 .unavailable-status.err { color: #ff8a80; }
+
+/* Backend spans remain readable beside the numeric DB Time column. */
+.backend-activity-cell { min-width: 230px; max-width: 340px; white-space: normal; }
+.backend-activity-scope { color: var(--text-muted, #aaa); }
+.backend-activity-panel { margin: 12px 0; padding: 12px; border: 1px solid #444; }
+.backend-activity-panel h3, .backend-activity-panel p { margin: 0 0 8px; }
+/* Collapsed by default (reviewer finding): the same default state Waterfall
+ * uses for this concept. The summary is the only thing the pane pays for
+ * until the reader asks for the spans. */
+details.backend-activity-panel > summary { cursor: pointer; color: #bbb; }
+/* The header qualifier that keeps `Closed · 0.4 s` from reading as a second
+ * DB Time: visible, not a tooltip-only fact. */
+.col-qualifier { color: #888; font-weight: 400; font-size: 10px; white-space: nowrap; }
+/* The Waterfall instance carries no box of its own: that pane is already
+ * 940 of the demo viewport's 981 px at 907e070, and #415 requires the
+ * drilled readout above the fold with the pane NOT scrollable. The panel's
+ * 12px margins + 12px padding + border cost 50 px, which alone broke that
+ * guarantee; collapsed and borderless it costs ~14. */
+.backend-activity-inline { margin: 4px 0 0; padding: 0; border: 0; font-size: 11px; }
+.backend-activity-inline summary { cursor: pointer; color: #888; }
+.backend-activity-spans { max-height: 320px; overflow: auto; }
+.backend-activity-spans details { padding: 8px 0; border-top: 1px solid #444; }
+.backend-activity-spans summary { cursor: pointer; }

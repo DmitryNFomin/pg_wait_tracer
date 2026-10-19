@@ -7,13 +7,32 @@ function ns(v) {
     return Number.isFinite(n) ? n : null;
 }
 
+/* #455 (scatter item): "Duration" here used to mean something narrower than
+ * it reads as — see EXEC_SCATTER_SCOPE_NOTE below — so the tooltip now names
+ * the SAME quantity the renamed y-axis (buildExecScatterOption) does:
+ * execution duration, not total wait-to-completion time. */
 export function scatterTooltipFormatter(params) {
     const d = params.data;
     return '<b>PID ' + esc(String(d[2])) + '</b><br>' +
         'Start: ' + fmtTime(ns(d[4]), 1_000_000) + ' UTC<br>' +
-        'Duration: <b>' + fmtMs(d[1]) + '</b><br>' +
+        'Execution duration: <b>' + fmtMs(d[1]) + '</b><br>' +
         'Query: ' + esc(String(d[3] || '0'));
 }
+
+/* #455 (scatter item): the scatter plots query__execute__start..end — it
+ * EXCLUDES any wait taken before the executor is entered (parse-analysis
+ * relation locks are the case the #455 investigation named: #455's backend
+ * half attributes exactly that pre-execution time to a span the scatter
+ * cannot see). Without this, a query dominated by a pre-execution wait reads
+ * here as a trivially fast execution, the same "7.9s divided by 91 others'
+ * executions" shape the Queries-row fix (#455's other half) exists for.
+ * UNCONDITIONAL: true of every point on this chart, every time, not a
+ * caveat that only sometimes applies — so it is never gated behind a
+ * downsampled/in-progress/exclusion count the way the OTHER notes below
+ * are. */
+export const EXEC_SCATTER_SCOPE_NOTE =
+    'Excludes waiting before execution starts, including relation locks ' +
+    'acquired during parse analysis.';
 
 /* Exact execution identity intent. start/end stay decimal strings. The
  * waterfall reconciles it with the authoritative executions row before
@@ -52,7 +71,10 @@ export function buildExecScatterOption(data) {
         }
         plotted.push([t / 1e6, duration, p.pid, p.query_id, String(p.t)]);
     }
-    const notes = [];
+    // #455: unconditional and FIRST — true of this chart always, independent
+    // of data shape, so it survives both the empty-data early return below
+    // and the ordinary/downsampled/all-in-progress success paths alike.
+    const notes = [EXEC_SCATTER_SCOPE_NOTE];
     if (data && data.downsampled === true &&
         typeof data.kept_count === 'number' && typeof data.total_count === 'number') {
         /* #455 (scatter item): the sampler (src/server.c:5506) reserves each
@@ -96,7 +118,10 @@ export function buildExecScatterOption(data) {
             splitLine: { lineStyle: { color: '#292944' } },
         },
         yAxis: {
-            type: 'log', name: 'Duration (ms)', nameTextStyle: { color: '#777' },
+            // #455: "Duration" alone read as end-to-end wait-to-completion
+            // time; renamed to match EXEC_SCATTER_SCOPE_NOTE and the tooltip
+            // label above -- this axis is EXECUTION duration only.
+            type: 'log', name: 'Execution duration (ms)', nameTextStyle: { color: '#777' },
             axisLabel: { color: '#888', fontSize: 10 },
             axisLine: { lineStyle: { color: '#333' } },
             splitLine: { lineStyle: { color: '#292944' } },

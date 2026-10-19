@@ -36,6 +36,13 @@ MARKER_EXEC_START = 0xFFFFFFF0
 MARKER_EXEC_END   = 0xFFFFFFF1
 MARKER_PLAN_START = 0xFFFFFFF2
 MARKER_PLAN_END   = 0xFFFFFFF3
+# #455: the command boundaries the backend-activity span is measured from.
+# Without them pid 1000's span is UNMEASURED (both boundaries null, no
+# completed duration), which is a real and separately-tested state but not
+# the one the mock's canned span describes -- and a fixture that only ever
+# produces the degenerate state would let the measured shape drift unnoticed.
+MARKER_CMD_START  = 0xFFFFFFF6
+MARKER_CMD_END    = 0xFFFFFFF7
 
 BASE = 10_000_000_000_000  # 10000s in ns (> 1hr, see server_harness)
 MS = 1_000_000
@@ -121,7 +128,12 @@ SCENARIO = {
         # PID 1000 lifecycle: plan+exec span around the wait sequence above,
         # then a second short plan+exec of the same query (different wait
         # pattern → second variant; 2 samples → p95/p99 lifecycle fields)
-        + [_marker(1000, 100, BASE - 2 * MS, MARKER_PLAN_START),
+        # #455: ONE command window around BOTH executions, so the real
+        # server's containing span is CLOSED, fully MEASURED and
+        # multi-execution -- the shape mock_server.py's _mock_span() serves.
+        + [_marker(1000, 100, BASE - 3 * MS, MARKER_CMD_START),
+           _marker(1000, 100, BASE + 36 * MS, MARKER_CMD_END),
+           _marker(1000, 100, BASE - 2 * MS, MARKER_PLAN_START),
            _marker(1000, 100, BASE - 1 * MS, MARKER_PLAN_END),
            _marker(1000, 100, BASE, MARKER_EXEC_START),
            _marker(1000, 100, BASE + 30 * MS + 1000, MARKER_EXEC_END),
