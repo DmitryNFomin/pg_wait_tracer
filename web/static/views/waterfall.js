@@ -3,7 +3,7 @@
 
 import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
-    executionListMaxHeight,
+    executionListMaxHeight, containingActivityWindow, waterfallContextHtml,
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     executionsStatusLabel, execScopeNoteHtml,
@@ -68,6 +68,7 @@ export function createWaterfallView() {
             ' <div id="executions-table"></div>' +
             '</section>' +
             '<section class="waterfall-pane">' +
+            ' <div id="waterfall-context" class="waterfall-context"></div>' +
             ' <div class="waterfall-banner"><span>Plain drag zooms this loaded execution; ' +
             'double-click restores it.</span><span id="waterfall-zoom-state"></span></div>' +
             ' <div id="waterfall-truncation"></div>' +
@@ -102,7 +103,12 @@ export function createWaterfallView() {
         if (toggle) toggle.textContent = executionsSortToggleLabel(sortMode);
     }
 
-    function chooseExecution(rows) {
+    function chooseExecution(rows, filters) {
+        const matches = r => (filters.pid == null || Number(r.pid) === Number(filters.pid)) &&
+            (filters.query_id == null || String(r.query_id) === String(filters.query_id));
+        rows = rows.filter(matches);
+        if (pendingSelection && !matches(pendingSelection)) pendingSelection = null;
+        if (selected && !matches(selected)) selected = null;
         if (pendingSelection) {
             const authoritative = rows.find(r => sameExecution(r, pendingSelection));
             selected = authoritative || pendingSelection;
@@ -207,7 +213,10 @@ export function createWaterfallView() {
         id: 'waterfall',
         pausesLive: true,
 
-        /* Called only by app.js's registered scatter-execution pivot. */
+        // A new query drill must not retain a previous execution selection.
+        selectQuery() { pendingSelection = null; selected = null; },
+
+        /* Explicit execution selection from scatter or the executions list. */
         selectExecution(intent) {
             if (!intent || !intent.pid || !intent.start_ns) return;
             pendingSelection = {
@@ -237,17 +246,29 @@ export function createWaterfallView() {
                 });
             if (isUnavailable(executions))
                 return { executions, detail: null, selected: null, windowTo };
-            const chosen = chooseExecution(executions.rows || []);
+            const chosen = chooseExecution(executions.rows || [], ctx.filters.snapshot());
             if (!chosen) return { executions, detail: null, selected: null, windowTo };
             const detailEnd = chosen.end_ns != null
                 ? String(chosen.end_ns) : String(Math.round(ctx.timeRange.to));
-            const detailFilters = Object.assign({}, ctx.filters.snapshot(), { pid: chosen.pid });
+            const detailFilters = { pid: chosen.pid, query_id: chosen.query_id };
             const detail = await ctx.transport.request(ctx.channel('detail'),
                 'execution_detail', {
                     filters: detailFilters, start_ns: String(chosen.start_ns),
                     end_ns: detailEnd,
                 });
-            return { executions, detail, selected: chosen, detailEnd, windowTo };
+            const activityWindow = containingActivityWindow(detail, chosen);
+            let activityTimeline = null;
+            if (activityWindow) {
+                try {
+                    activityTimeline = await ctx.transport.request(ctx.channel('activity-timeline'),
+                        'session_timeline', activityWindow);
+                } catch (err) {
+                    if (err.name === 'CancelledError') throw err;
+                    // Evidence failure must not erase a valid executor chart.
+                    // The visible context refuses to claim pre-execution timing.
+                }
+            }
+            return { executions, detail, activityTimeline, selected: chosen, detailEnd, windowTo };
         },
 
         build(data) {
@@ -260,13 +281,9 @@ export function createWaterfallView() {
             }) : null;
             return { table, waterfall: wf, detail: data.detail,
                 selected: data.selected, detailEnd: data.detailEnd,
-                // Collapsed by default: #415 requires the drilled readout
-                // above the fold AND the pane not scrollable at the demo
-                // viewport (981 px). Expanded, this panel is 134 px and
-                // breaks both -- measured, see the shell comment below.
-                // Collapsed it costs one summary line and the span is one
-                // click away, which keeps #455's information and #415's
-                // guarantee at the same time.
+                context: waterfallContextHtml(data.detail, data.selected, data.activityTimeline),
+                // Keep only detailed metadata collapsed; identity, wait, span and
+                // scope live in the always-visible context inside the pane.
                 backendActivity: data.selected
                     ? '<details><summary>Containing leader backend activity</summary>' +
                         backendActivityHtml(
@@ -287,6 +304,7 @@ export function createWaterfallView() {
             }
             ensureShell(el);
             updateSortControl();
+            document.getElementById('waterfall-context').innerHTML = model.context || '';
             document.getElementById('waterfall-backend-activity').innerHTML = model.backendActivity || '';
             const countsLabel = document.getElementById('executions-counts-label');
             if (countsLabel) {

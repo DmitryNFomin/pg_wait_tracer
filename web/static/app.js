@@ -838,7 +838,7 @@ const PIVOTS = {
     'heatmap-cell':    { tab: 'queries' },
     'dfg-event':       { tab: 'queries' },
     'burst-zoom':      { tab: null },
-    'query-executions': { tab: 'waterfall' },
+    'query-executions': { tab: 'waterfall', intentMethod: 'selectQuery' },
     'scatter-execution': { tab: 'waterfall', intentMethod: 'selectExecution' },
     'waterfall-execution': { tab: 'waterfall', intentMethod: 'selectExecution' },
     'matrix-cell':     { tab: 'queries' },
@@ -871,6 +871,12 @@ function pivotDrill(intent) {
             let changed = false;
             for (const key of removeKeys) {
                 changed = filters.removeFilter(key, vm.activeId()) || changed;
+            }
+            // Preserve an existing session drill. Without one, the Queries
+            // span's PID is the explicit backend context for this drill.
+            if (intent.pivot === 'query-executions' && intent.pid != null &&
+                filters.snapshot().pid == null) {
+                filters.drill('pid', intent.pid, 'PID ' + intent.pid, vm.activeId());
             }
             if (intent.filterKey) {
                 filters.drill(intent.filterKey, intent.filterValue, intent.label,

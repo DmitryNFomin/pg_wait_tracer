@@ -49,9 +49,12 @@ import argparse
 import json
 import os
 import sys
+import subprocess
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_web_ui import start_mock_server, stop_mock_server, app_url  # noqa: E402
+from web_unit.span_browser import run_span_gates
 
 try:
     from playwright.sync_api import sync_playwright
@@ -63,7 +66,7 @@ except ImportError:
 PORT = int(os.environ.get("PGWT_WATERFALL_PORT", "18977"))
 
 
-def run():
+def run(red_green=False):
     proc = start_mock_server(port=PORT)
     try:
         with sync_playwright() as p:
@@ -129,6 +132,29 @@ def run():
                     "not_scrollable": not_scrollable,
                     "scroll_y_zero": scroll_y_zero,
                 }
+                if red_green:
+                    # Serve original web assets over the same real mock shell.
+                    # No checkout/reset and no edits to another agent's files.
+                    ref = '48e1bce'
+                    paths = subprocess.check_output(
+                        ['git', 'diff', '--name-only', ref, '--', 'web/'], text=True).splitlines()
+                    original = { '/' + path.removeprefix('web/'):
+                        subprocess.check_output(['git', 'show', ref + ':' + path])
+                        for path in paths if path.endswith(('.js', '.css')) }
+                    old = ctx.new_page()
+                    def baseline_route(route):
+                        path = urlparse(route.request.url).path
+                        if path in original:
+                            route.fulfill(body=original[path], content_type=(
+                                'text/css' if path.endswith('.css') else 'application/javascript'))
+                        else:
+                            route.continue_()
+                    old.route('**/static/**', baseline_route)
+                    try:
+                        result['baseline'] = run_span_gates(old, app_url(PORT), expect_red=True)
+                    finally:
+                        old.close()
+                result["span_gates"] = run_span_gates(page, app_url(PORT))
                 return result
             finally:
                 browser.close()
@@ -140,8 +166,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=None,
                      help="write the JSON result here too")
+    ap.add_argument('--red-green', action='store_true',
+                    help='first assert all three gates fail against original 48e1bce web assets')
     args = ap.parse_args()
-    result = run()
+    result = run(red_green=args.red_green)
     print(json.dumps(result, indent=2))
     if args.out:
         with open(args.out, "w") as f:

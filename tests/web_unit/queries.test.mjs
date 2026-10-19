@@ -254,14 +254,9 @@ const span455 = { measurement: 'partial', completion: 'in_flight', pid: 1234,
 const scope455 = 'whole-query: observed command boundaries';
 function activityCell(row) {
     const model = buildQueriesModel({ rows: [q(row)] }, null);
-    // startsWith, not ===: the reviewer's fix 2 appended a visible
-    // "(observed span)" qualifier (with its title=) to the header text, so
-    // the exact-match lookup stopped finding the column. The assertion this
-    // helper guards -- the column sits immediately after DB Time -- is
-    // unchanged, and still fails if the column disappears or moves.
-    const index = model.table.headers.findIndex(
-        h => typeof h.label === 'string' && h.label.startsWith('Backend activity'));
-    assert.equal(index, model.table.headers.findIndex(h => h.label === 'DB Time') + 1);
+    const index = model.table.headers.findIndex(h => h.label === 'Query Text');
+    assert.ok(index >= 0);
+    assert.ok(!model.table.headers.some(h => h.key === 'backend_activity_span'));
     return model.table.rows[0].cells[index].html;
 }
 function mountQueries(data) {
@@ -271,12 +266,16 @@ function mountQueries(data) {
     view.mount(el, view.build(data, ctx), ctx);
     return el.innerHTML;
 }
-test('#455 gate 1: null span renders the reason and visible scope in Queries row', () => {
+test('#455 gate 1: null span is explicit in identity; reason and scope remain in details', () => {
     const html = activityCell({ backend_activity_span: null,
         backend_activity_unavailable_reason: 'the backend span pass refused <unsafe>',
         backend_activity_span_scope: scope455 });
-    assert.match(html, /the backend span pass refused &lt;unsafe&gt;/);
-    assert.ok(html.includes(scope455));
+    assert.match(html, /Backend span unavailable/);
+    const detail = mountQueries({ rows: [q({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'the backend span pass refused <unsafe>',
+        backend_activity_span_scope: scope455 })] });
+    assert.match(detail, /the backend span pass refused &lt;unsafe&gt;/);
+    assert.ok(detail.includes(scope455));
     assert.match(html, /Not measured/);
 });
 test('#455 gate 2: Queries drill mounts a full span with ZERO executions and preserves unattributed state', () => {
