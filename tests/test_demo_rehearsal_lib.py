@@ -1348,6 +1348,288 @@ def test_resolve_tag_null_when_nothing_available():
           f"empty CLI tag and no auto-detected tag -> still null ({tag!r})")
 
 
+# ── evaluate_execution_cardinality (#464) ────────────────────────────────
+#
+# The recorded defect, verbatim from the archived rehearsal
+# (tests/results/demo-video-48e1bce): the DML query carried exec_count 368
+# against plan_count 184, the SELECT 91 against 91. Both counted rehearsals
+# PASSED in that state, because nothing looked at counts.
+
+RECORDED_DML_ROW = {"query_id": "6618837284", "exec_count": 368,
+                    "plan_count": 184,
+                    "text": "UPDATE pgbench_accounts SET abalance = "
+                            "abalance + $1 WHERE aid = $2"}
+RECORDED_SELECT_ROW = {"query_id": "1193740", "exec_count": 91,
+                       "plan_count": 91,
+                       "text": "SELECT abalance FROM pgbench_accounts "
+                               "WHERE aid = $1"}
+
+
+def test_exec_cardinality_recorded_368_184_fails():
+    # Negative control 2 from the brief: feed the evaluator the number the
+    # rehearsal actually recorded. If this passes, the gate is decoration.
+    r = lib.evaluate_execution_cardinality([RECORDED_DML_ROW,
+                                            RECORDED_SELECT_ROW])
+    check(not r["ok"],
+          f"recorded 368/184 must FAIL (got ok={r['ok']}, {r['detail']})")
+    check(any("368" in f for f in r["failures"]),
+          f"failure names the doubled count ({r['failures']})")
+    check(r["evaluated"] == 2,
+          f"both rows evaluated, so the SELECT is not what failed "
+          f"({r['evaluated']})")
+
+
+def test_exec_cardinality_select_alone_passes():
+    # The control that CANNOT see the defect: a SELECT never reaches the
+    # second probe site, so 91/91 was correct before the fix and after it.
+    # If this failed, the check would be measuring something else.
+    r = lib.evaluate_execution_cardinality([RECORDED_SELECT_ROW])
+    check(r["ok"], f"91/91 must pass ({r['detail']})")
+
+
+def test_exec_cardinality_equal_counts_pass_and_edge_slack_is_small():
+    rows = [{"text": "UPDATE t SET v = 1", "exec_count": 24,
+             "plan_count": 24}]
+    check(lib.evaluate_execution_cardinality(rows)["ok"],
+          "24/24 passes")
+    # One open plan at each window edge is tolerated; a factor is not.
+    for execs, want_ok in ((26, True), (27, False), (22, True), (21, False)):
+        rows = [{"text": "UPDATE t SET v = 1", "exec_count": execs,
+                 "plan_count": 24}]
+        got = lib.evaluate_execution_cardinality(rows)["ok"]
+        check(got is want_ok,
+              f"exec {execs} vs plan 24 -> ok={got}, expected {want_ok}")
+    check(lib.EXEC_CARDINALITY_EDGE_SLACK == 2,
+          f"edge slack stays at window edges, not a tolerance "
+          f"({lib.EXEC_CARDINALITY_EDGE_SLACK})")
+
+
+def test_exec_cardinality_independent_n_catches_uniform_doubling():
+    # Negative control 3: Plans preserved, Execs doubled -- the shape an
+    # extended/prepared cohort has, where exec == plan cannot apply and
+    # plan <= exec passes at ANY multiple. Only the independently counted N
+    # can see it.
+    doubled = [{"text": "EXECUTE-equivalent UPDATE t SET v = 1 WHERE id = 9",
+                "exec_count": 48, "plan_count": 6}]
+    loose = lib.evaluate_execution_cardinality(doubled)
+    check(not loose["ok"],
+          "48 execs against 6 plans fails the ratio leg too")
+    # And the leg that matters for prepared statements, where plans are
+    # legitimately few: exec must equal the client's own count.
+    prepared = [{"text": "UPDATE t SET v = 1 WHERE id = 9",
+                 "exec_count": 48, "plan_count": 48}]
+    r = lib.evaluate_execution_cardinality(prepared, expected={"id = 9": 24})
+    check(not r["ok"],
+          f"exec 48 against an independently counted N=24 must FAIL "
+          f"({r['detail']})")
+    ok_rows = [{"text": "UPDATE t SET v = 1 WHERE id = 9",
+                "exec_count": 24, "plan_count": 24}]
+    check(lib.evaluate_execution_cardinality(
+              ok_rows, expected={"id = 9": 24})["ok"],
+          "exec 24 == N=24 passes")
+
+
+def test_exec_cardinality_missing_expected_row_fails():
+    # "The statement I issued 24 times produced no row" is what a refusing
+    # or mis-attached capture looks like. It must never read as agreement.
+    r = lib.evaluate_execution_cardinality(
+        [{"text": "SELECT 1", "exec_count": 3, "plan_count": 3}],
+        expected={"UPDATE pgwt464": 24})
+    check(not r["ok"], f"absent expected statement must FAIL ({r['detail']})")
+    check(any("no evaluable row" in f for f in r["failures"]),
+          f"failure says the row is missing ({r['failures']})")
+
+
+def test_exec_cardinality_refuses_when_it_cannot_see():
+    # Every way the evaluator could be handed nothing to look at. Each must
+    # REFUSE -- an empty verdict is the false negative, not a safe default.
+    cases = {
+        "empty list": [],
+        "rows absent (None)": None,
+        "not iterable": 7,
+        "all utility statements": [
+            {"text": "SET application_name = 'x'", "exec_count": 9,
+             "plan_count": 0},
+            {"text": "EXECUTE p464(9)", "exec_count": 24, "plan_count": 0},
+            {"text": "BEGIN", "exec_count": 4, "plan_count": 0}],
+        "no planning captured": [
+            {"text": "UPDATE t SET v = 1", "exec_count": 24,
+             "plan_count": 0}],
+        "counts unparseable": [
+            {"text": "UPDATE t SET v = 1", "exec_count": "24",
+             "plan_count": None}],
+        "counts negative": [
+            {"text": "UPDATE t SET v = 1", "exec_count": -1,
+             "plan_count": 24}],
+        "rows are not dicts": ["UPDATE t SET v = 1", None],
+    }
+    for label, rows in cases.items():
+        r = lib.evaluate_execution_cardinality(rows)
+        check(not r["ok"], f"{label} -> REFUSE, not pass (ok={r['ok']})")
+        check(r["evaluated"] == 0,
+              f"{label} -> evaluated 0 (got {r['evaluated']})")
+
+
+def test_exec_cardinality_unparseable_count_is_not_zero():
+    # The specific way "unparseable" becomes a pass: treating a missing or
+    # string count as 0 makes exec == plan == 0 and the row agrees with
+    # itself. The real row next to it must still be judged.
+    rows = [{"text": "UPDATE t SET v = 1", "exec_count": None,
+             "plan_count": None},
+            {"text": "UPDATE u SET v = 1", "exec_count": 48,
+             "plan_count": 24}]
+    r = lib.evaluate_execution_cardinality(rows)
+    check(not r["ok"], "an unreadable row does not shelter a doubled one")
+    check(r["evaluated"] == 1,
+          f"only the readable row is evaluated ({r['evaluated']})")
+    check(any("not usable counts" in s for s in r["skipped"]),
+          f"the unreadable row is reported as skipped ({r['skipped']})")
+
+
+def test_exec_cardinality_abandoned_plans_are_skipped_not_failed():
+    # Measured on gate-1: a deliberately failing `UPDATE ... SET v = v / 0`
+    # reports exec_count 0 against plan_count 4 -- planned, then errored
+    # before EXEC_DONE. The brief scopes the equality to complete,
+    # successful statements, so this is a SKIP, and it must not drag down a
+    # run whose real statements are fine.
+    rows = [{"text": "UPDATE pgwt464_f SET v = v / 0 WHERE id = 5",
+             "exec_count": 0, "plan_count": 4},
+            {"text": "UPDATE pgwt464_u SET v = v + 1 WHERE id = 7",
+             "exec_count": 16, "plan_count": 16}]
+    r = lib.evaluate_execution_cardinality(rows)
+    check(r["ok"], f"an abandoned-plan row is skipped, not failed "
+                   f"({r['detail']})")
+    check(r["evaluated"] == 1,
+          f"only the successful statement is evaluated ({r['evaluated']})")
+    check(any("abandoned plans" in s for s in r["skipped"]),
+          f"the skip says why ({r['skipped']})")
+    # But if the execution probes stopped firing ALTOGETHER, every plannable
+    # row lands in that bucket -- and then there is nothing to evaluate, so
+    # the verdict must be a refusal, not the pass the skip would otherwise
+    # imply. This is the pairing that makes the skip above safe.
+    allzero = [{"text": "UPDATE pgwt464_u SET v = v + 1", "exec_count": 0,
+                "plan_count": 16},
+               {"text": "SELECT count(*) FROM pgwt464_s", "exec_count": 0,
+                "plan_count": 16}]
+    r = lib.evaluate_execution_cardinality(allzero)
+    check(not r["ok"],
+          f"all executions missing -> REFUSE, never a pass ({r['detail']})")
+    # And a cohort with an independently counted N that produced no
+    # evaluable row is a FAILURE even though the row exists.
+    r = lib.evaluate_execution_cardinality(
+        rows, expected={"pgwt464_f": 4})
+    check(not r["ok"],
+          f"an expected cohort with zero completed executions FAILS "
+          f"({r['detail']})")
+
+
+def test_exec_cardinality_ambiguous_cohort_fails():
+    # Two rows matching one expected key means the cohort was not isolated,
+    # so "which one is the 24?" has no answer. Refuse rather than pick.
+    rows = [{"text": "UPDATE pgwt464 SET v = v + 1 WHERE id = 7",
+             "exec_count": 24, "plan_count": 24},
+            {"text": "UPDATE pgwt464 SET v = v + 1 WHERE id = 7 -- copy",
+             "exec_count": 24, "plan_count": 24}]
+    r = lib.evaluate_execution_cardinality(rows, expected={"pgwt464": 24})
+    check(not r["ok"], f"ambiguous cohort match must FAIL ({r['detail']})")
+
+
+# ── build_demo_summary: required-check MEMBERSHIP (#464) ─────────────────
+
+def _passing_walk():
+    return [{"pass": "early", "tabs": {"overview": {"ok": True}}}]
+
+
+def test_required_check_membership_rejects_a_deleted_check():
+    # Negative control 4: remove the check from extra_checks. Before this,
+    # build_demo_summary iterated extra_checks and so could only fail on an
+    # entry that was PRESENT and failing -- a deleted one disappeared from
+    # the verdict and the run printed PASS.
+    required = ("alpha", "beta")
+    full = {"alpha": {"ok": True}, "beta": {"ok": True}}
+    s = lib.build_demo_summary(_passing_walk(), full, required_checks=required)
+    check(s["ok"], f"all required checks present -> PASS ({s['failed']})")
+    check(s["missing_required_checks"] == [],
+          "nothing reported missing when nothing is missing")
+
+    del full["beta"]
+    s = lib.build_demo_summary(_passing_walk(), full, required_checks=required)
+    check(not s["ok"], "a deleted required check must FAIL the verdict")
+    check("missing_required_check:beta" in s["failed"],
+          f"the missing check is named ({s['failed']})")
+    check(s["missing_required_checks"] == ["beta"],
+          f"summary.json records which one ({s['missing_required_checks']})")
+
+
+def test_required_check_membership_is_not_satisfied_by_a_renamed_check():
+    # The "some entry changed somewhere" false negative: the dict is
+    # non-empty and every entry passes, so the count-based floor
+    # (len(extra_checks) > 0) is satisfied while the check that matters is
+    # gone under a different key.
+    s = lib.build_demo_summary(
+        _passing_walk(),
+        {"execution_cardinalty": {"ok": True}},   # typo, deliberately
+        required_checks=("execution_cardinality",))
+    check(not s["ok"], "a typo'd key does not satisfy membership")
+    check("missing_required_check:execution_cardinality" in s["failed"],
+          f"the required name is named ({s['failed']})")
+
+
+def test_required_check_membership_still_fails_a_present_failing_check():
+    # Membership must ADD to the old behaviour, not replace it.
+    s = lib.build_demo_summary(
+        _passing_walk(), {"execution_cardinality": {"ok": False}},
+        required_checks=("execution_cardinality",))
+    check(not s["ok"], "a present-but-failing required check still fails")
+    check("execution_cardinality" in s["failed"],
+          f"and by its own name, not as 'missing' ({s['failed']})")
+    check("missing_required_check:execution_cardinality" not in s["failed"],
+          "a present check is never reported as missing")
+
+
+def test_required_check_list_is_not_empty():
+    # An empty REQUIRED_EXTRA_CHECKS makes the membership gate unreachable
+    # while leaving every call site looking wired.
+    check(len(lib.REQUIRED_EXTRA_CHECKS) > 0,
+          "REQUIRED_EXTRA_CHECKS is non-empty")
+    check("execution_cardinality" in lib.REQUIRED_EXTRA_CHECKS,
+          "#464's cardinality check is mandatory")
+    check(len(set(lib.REQUIRED_EXTRA_CHECKS))
+          == len(lib.REQUIRED_EXTRA_CHECKS),
+          "no duplicate names (a duplicate hides a drop)")
+
+
+def test_required_check_names_all_exist_in_demo_rehearsal():
+    # The gate's other unreachable path: a required name nobody ever
+    # inserts would fail EVERY run, which gets "fixed" by deleting the
+    # requirement. Every name must correspond to a real
+    # extra_checks[...] assignment in demo_rehearsal.py.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "demo_rehearsal.py")
+    with open(path) as fh:
+        source = fh.read()
+    for name in lib.REQUIRED_EXTRA_CHECKS:
+        check(f'extra_checks["{name}"]' in source,
+              f"demo_rehearsal.py actually inserts {name!r}")
+
+
+def test_demo_rehearsal_passes_required_checks_to_build_demo_summary():
+    # The wiring guard. build_demo_summary's `required_checks` defaults to
+    # None (off) so the older unit tests above can drive it with a
+    # one-element dict -- which means the whole membership gate is
+    # unreachable if the real call site stops passing it. An unused
+    # parameter is just a differently shaped absence.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "demo_rehearsal.py")
+    with open(path) as fh:
+        source = fh.read()
+    check("required_checks=drlib.REQUIRED_EXTRA_CHECKS" in source,
+          "demo_rehearsal.py passes required_checks=REQUIRED_EXTRA_CHECKS")
+    check(source.count("drlib.build_demo_summary(") == 1,
+          "exactly one build_demo_summary call site, so the guard above "
+          "covers all of them")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

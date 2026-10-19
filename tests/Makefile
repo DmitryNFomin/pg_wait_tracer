@@ -19,6 +19,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_synthetic_query \
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
+            test_exec_sites_pie test_exec_sites_nopie \
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture test_live_accum test_window_clip test_time_model_absence \
             test_executions_attribution \
@@ -317,6 +318,23 @@ test_discovery_pie: $(DISCOVERY_TEST_DEPS)
 	$(CC) $(CFLAGS) -DPGWT_TEST_EXPECT_PIE=1 -fPIE -pie -o $@ $^ -lelf -lz
 
 test_discovery_nopie: $(DISCOVERY_TEST_DEPS)
+	$(CC) $(CFLAGS) -DPGWT_TEST_EXPECT_PIE=0 -fno-pie -no-pie -o $@ $^ -lelf -lz
+
+# test_exec_sites: #464 canonical USDT execution-probe selection. Same
+# PIE/non-PIE double build as test_discovery, for the same reason — the
+# link-time-to-runtime translation an admitted site needs is the #24 axis,
+# and the test carries its OWN .note.stapsdt entries so the ELF parser is
+# exercised against a real note table rather than a fixture. Only
+# discovery.c is needed (no daemon.h, no BPF skeleton, no wait-event
+# tables): the selector is pure and the parser needs libelf alone.
+EXEC_SITES_TEST_DEPS = test_exec_sites.c ../src/discovery.c ../src/spawn.c \
+                       ../src/backend_status_layout.c \
+                       ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c
+
+test_exec_sites_pie: $(EXEC_SITES_TEST_DEPS)
+	$(CC) $(CFLAGS) -DPGWT_TEST_EXPECT_PIE=1 -fPIE -pie -o $@ $^ -lelf -lz
+
+test_exec_sites_nopie: $(EXEC_SITES_TEST_DEPS)
 	$(CC) $(CFLAGS) -DPGWT_TEST_EXPECT_PIE=0 -fno-pie -no-pie -o $@ $^ -lelf -lz
 
 # test_trace_v2: format round-trip (v2 typed blocks). Built against the

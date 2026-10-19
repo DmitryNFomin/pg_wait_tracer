@@ -87,6 +87,14 @@ WATERFALL_LIVE_WINDOW_S = 900
 # buckets than requested.
 AAS_CROSS_TAB_NUM_BUCKETS = 60
 
+# #464's execution-cardinality check reads top_queries over the WHOLE
+# capture window. 200 is well above the distinct-statement count any demo
+# workload reaches (pgbench's seven plus this harness's own loop), so the
+# evaluated set is the full statement population rather than a truncated
+# head -- a truncated list could hide the doubled query behind rows that
+# happen to be ranked above it.
+EXEC_CARDINALITY_QUERY_LIMIT = 200
+
 # issue #223: the pinned demo-client viewport -- docs/DEMO_REHEARSAL_CRITERIA.md
 # "Pin: 1710 x 981 CSS at devicePixelRatio 2", measured in
 # docs/chrome-demo-viewport-2026-09-28.md. Only this script passes a
@@ -674,6 +682,43 @@ def main():
 
         extra_checks["waterfall_query_latency"] = _waterfall_latency_check(srv, from_ns, to_ns)
 
+        # Execution cardinality (#464). Nothing in this harness used to
+        # look at execution COUNTS -- only at durations, conservation and
+        # cross-tab agreement, none of which move when a count doubles --
+        # so both counted rehearsals passed while every DML statement was
+        # being recorded twice (Execs 368 against Plans 184 for the DML
+        # query; 91 against 91 for the SELECT that never reaches the second
+        # probe site). Mandatory, via drlib.REQUIRED_EXTRA_CHECKS: a
+        # missing entry here now fails the run by name, which is exactly
+        # the hole that let the absence of this check go unnoticed.
+        #
+        # Scope: the queries this workload issues through the simple
+        # protocol, each with both boundaries captured in the window.
+        # evaluate_execution_cardinality skips utility statements, rows with
+        # no planning pass and rows whose counts did not parse, and REFUSES
+        # (ok=False) when that leaves nothing -- a row list it cannot read
+        # must not read as agreement. The independently counted half of the
+        # gate lives in tests/test_execution_cardinality.py, which can tell
+        # the client how many statements it sent; this one catches a
+        # systematic plan/exec divergence on the real demo workload.
+        exec_card_resp = srv.query(
+            "top_queries", from_=from_ns, to_=to_ns,
+            limit=EXEC_CARDINALITY_QUERY_LIMIT,
+            timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+        exec_card_err = _error_or_none(exec_card_resp,
+                                       "top_queries (execution cardinality)")
+        if exec_card_err is not None:
+            exec_card = {"ok": False,
+                         "detail": f"query error: {exec_card_err!r}",
+                         "evaluated": 0}
+        else:
+            exec_card = drlib.evaluate_execution_cardinality(
+                exec_card_resp.get("rows"))
+        print(f"demo_rehearsal: execution_cardinality: "
+              f"{'PASS' if exec_card['ok'] else 'FAIL'} -- "
+              f"{exec_card['detail']}")
+        extra_checks["execution_cardinality"] = exec_card
+
         # Cross-tab agreement (criteria doc §5): top_events answers the
         # Top Events tab and carries its OWN top-level db_time_ms (not a
         # sum of its own possibly-truncated row list -- src/server.c
@@ -822,8 +867,15 @@ def main():
               f"decomposed (the rest REFUSED -- see each window's reason); "
               f"per-window records in {decomp_path}")
 
-    summary = drlib.build_demo_summary(pass_results, extra_checks,
-                                       expected_tabs_per_pass=len(lib.TABS))
+    summary = drlib.build_demo_summary(
+        pass_results, extra_checks,
+        expected_tabs_per_pass=len(lib.TABS),
+        # #464: fail by NAME on any mandatory check that was never
+        # inserted. Iterating extra_checks can only catch an entry that is
+        # present and failing, so until now deleting a check -- or never
+        # reaching the line that adds it -- removed it from the verdict and
+        # the run still printed PASS.
+        required_checks=drlib.REQUIRED_EXTRA_CHECKS)
     summary["duration_min"] = args.duration_min
     summary["ticks_per_tab"] = ticks
     summary["plan_degraded"] = ticks < lib.MIN_TICKS or len(passes) < 3

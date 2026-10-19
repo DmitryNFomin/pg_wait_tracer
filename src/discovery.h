@@ -136,6 +136,126 @@ int pgwt_detect_activity_offset(const char *pg_binary, int pg_major);
  * On multiple instances, prints a list to stderr. */
 pid_t pgwt_auto_discover_postmaster(bool verbose);
 
+/* ── USDT probe-site resolution (#464) ───────────────────────────────────
+ *
+ * PostgreSQL emits the query__execute__start / query__execute__done USDT
+ * probes from TWO code sites for plannable non-SELECT work: once around
+ * PortalRun, and again inside the static helper PortalRunMulti calls. A
+ * SELECT never reaches the second site, which is why DML doubled (Execs 368
+ * / Plans 184) and SELECTs did not (91 / 91). libbpf's
+ * bpf_program__attach_usdt() attaches by probe NAME, so it instruments both
+ * sites and the BPF side cannot tell them apart.
+ *
+ * The fix admits ONE canonical execution boundary — the pair inside the
+ * PortalRun function — and drops the inner pair before any marker is
+ * emitted or any phase state is touched. These helpers resolve the sites
+ * FROM THE RUNNING BINARY; measured on gate-1 2026-10-19 against the
+ * PG13/16/17/18 Ubuntu packages (tests/results/issue464/probe-sites.txt):
+ *
+ *   PG18  query__execute__start @ 0x5a6bc0  (no containing FUNC symbol)
+ *         query__execute__done  @ 0x5a6c2f  (no containing FUNC symbol)
+ *         query__execute__start @ 0x5a6eb8  inside PortalRun [0x5a6e70+1167)
+ *         query__execute__done  @ 0x5a711e  inside PortalRun
+ *
+ * Note the empirical surprise the brief warned about: the inner pair lives
+ * in a STATIC function, and the shipped packages carry ZERO local FUNC
+ * symbols, so the excluded site matches no symbol at all. The selector
+ * therefore keys on "inside the canonical function's range", never on the
+ * excluded site having a resolvable name.
+ */
+#define PGWT_MAX_USDT_SITES 32
+
+/* The canonical execution boundary. PortalRun is a GLOBAL symbol in every
+ * packaged build checked (PG13-18), including fully stripped ones. */
+#define PGWT_EXEC_CANONICAL_FN "PortalRun"
+
+struct pgwt_usdt_site {
+    uint64_t elf_addr;      /* probe location, link-time vaddr, base-corrected */
+    uint64_t runtime_addr;  /* elf_addr - elf_base + load_base (0 = unresolved) */
+    int      marker;        /* caller's tag: which marker this site emits */
+    int      canonical;     /* 1 = inside the canonical function range */
+};
+
+/* Why a resolution was refused. Refusal means "attach NOTHING and say so";
+ * it never degrades into admitting every site. */
+enum pgwt_exec_site_refusal {
+    PGWT_EXEC_SITES_OK = 0,
+    PGWT_EXEC_SITES_NO_BINARY,       /* binary missing/unreadable/not ELF */
+    PGWT_EXEC_SITES_NO_NOTES,        /* no matching stapsdt notes at all */
+    PGWT_EXEC_SITES_NO_FUNCTION,     /* canonical FUNC symbol unresolvable */
+    PGWT_EXEC_SITES_NO_CANONICAL,    /* notes exist, none inside the function */
+    PGWT_EXEC_SITES_AMBIGUOUS,       /* != 1 canonical site for a marker */
+    PGWT_EXEC_SITES_NO_LOAD_BASE,    /* runtime load base unresolvable */
+    PGWT_EXEC_SITES_OVERFLOW,        /* more notes than PGWT_MAX_USDT_SITES */
+};
+
+const char *pgwt_exec_site_refusal_str(enum pgwt_exec_site_refusal r);
+
+struct pgwt_exec_site_plan {
+    struct pgwt_usdt_site sites[PGWT_MAX_USDT_SITES];
+    int n_sites;
+    uint64_t fn_lo, fn_hi;      /* canonical function [lo, hi), link-time */
+    int n_canonical;            /* admitted sites */
+    int n_excluded;             /* sites seen and deliberately dropped */
+    int n_start_canonical;
+    int n_done_canonical;
+    enum pgwt_exec_site_refusal refusal;
+};
+
+/* Marker tags for pgwt_usdt_site.marker. Deliberately NOT the BPF marker
+ * constants (those live in pg_wait_tracer.h): the selector is pure and must
+ * stay buildable in a unit test that links no BPF headers. */
+#define PGWT_SITE_EXEC_START 1
+#define PGWT_SITE_EXEC_DONE  2
+
+/* Enumerate `.note.stapsdt` entries matching provider/name.
+ *
+ * Appends to plan->sites (tagging each with `marker`), applying the standard
+ * stapsdt base correction: addr = loc + (sh_addr(".stapsdt.base") - note_base)
+ * when that section exists, and loc unchanged when it does not. Malformed
+ * notes (bad note name, descsz too small for three addresses, unterminated
+ * strings) are skipped, never guessed at.
+ *
+ * Returns the number of sites appended, or -1 on an unreadable/non-ELF file
+ * or on overflow (plan->refusal = PGWT_EXEC_SITES_OVERFLOW). A return of 0
+ * is NOT an error here — pgwt_exec_sites_select() turns it into
+ * PGWT_EXEC_SITES_NO_NOTES. */
+int pgwt_elf_usdt_sites(const char *binary, const char *provider,
+                        const char *name, int marker,
+                        struct pgwt_exec_site_plan *plan);
+
+/* Resolve a FUNC symbol's link-time range [lo, hi). Requires STT_FUNC with
+ * a NON-ZERO st_size: a sizeless symbol cannot bound anything, and treating
+ * it as [v, v) would silently admit no site (or, with a sloppy comparison,
+ * every site). Returns 0 on success, -1 if unresolvable. */
+int pgwt_elf_func_range(const char *binary, const char *symbol,
+                        uint64_t *lo, uint64_t *hi);
+
+/* PURE: classify plan->sites against plan->fn_lo/fn_hi and decide the
+ * verdict. No I/O, no globals — this is the function tests/test_exec_sites.c
+ * drives directly. Sets canonical flags, the four counters and
+ * plan->refusal; returns 0 when admitted, -1 when refused. */
+int pgwt_exec_sites_select(struct pgwt_exec_site_plan *plan);
+
+/* PURE: link-time vaddr -> runtime vaddr, the same arithmetic
+ * pgwt_resolve_symbol() uses (PIE: elf_base 0; non-PIE: elf_base == load_base).
+ * Returns 0 (never a wild address) when load_base is 0 or the subtraction
+ * would underflow. */
+uint64_t pgwt_site_runtime_addr(uint64_t elf_addr, uint64_t elf_base,
+                                uint64_t load_base);
+
+/* Full resolution for the exec probes: enumerate both probe names, resolve
+ * the canonical function, select, and translate to runtime addresses for
+ * `pid`. Returns 0 on success (plan->refusal == PGWT_EXEC_SITES_OK), -1 on
+ * refusal with plan->refusal set. On refusal the caller MUST NOT attach the
+ * execution probes at all. */
+int pgwt_resolve_exec_sites(const char *binary, pid_t pid,
+                            struct pgwt_exec_site_plan *plan);
+
+/* Expose the ELF base vaddr (lowest PT_LOAD p_vaddr) for callers that need
+ * to redo the translation themselves; 0 for PIE. */
+uint64_t pgwt_elf_base_vaddr(const char *binary);
+
 /* Forward declaration */
 struct pgwt_daemon;
 

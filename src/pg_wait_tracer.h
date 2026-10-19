@@ -264,6 +264,14 @@ struct pgwt_trace_event {
 #define PGWT_MARKER_PLAN_START   0xFFFFFFF2U  /* query planning start (pg_plan_query entry) */
 #define PGWT_MARKER_PLAN_END     0xFFFFFFF3U  /* query planning end (pg_plan_query return) */
 
+/* #464: capacity of the BPF exec_site_allow map (runtime probe address ->
+ * admitted marker). Two entries is the whole steady-state need (one
+ * canonical START, one canonical DONE); the headroom exists only so the
+ * admit-all test mutant, which loads every site the binary declares, is a
+ * map-population difference rather than a capacity failure that would look
+ * like the fix working. */
+#define PGWT_EXEC_SITE_ALLOW_MAX   16
+
 /* Escalation window markers (A4). Written by the daemon (pid = 0, a value no
  * PG backend uses) when a tiered-mode full-fidelity window opens/closes, so a
  * reader/UI can show WHY exact data exists for a time range. Convention

@@ -792,6 +792,110 @@ static void handle_signal(struct pgwt_daemon *d)
     d->running = false;
 }
 
+/* #464: resolve the canonical query__execute__* probe sites from the running
+ * binary and publish them into the BPF exec_site_allow map.
+ *
+ * Returns 0 when the allowlist is in place and the caller may attach the
+ * execution probes; -1 when the canonical boundary could not be established
+ * or the map could not be written, in which case the caller MUST NOT attach
+ * them. There is deliberately no "attach everything anyway" branch: with
+ * both sites live every plannable non-SELECT statement is counted twice, and
+ * the two counted demo rehearsals both passed in exactly that state, so a
+ * silent fallback is the failure mode this code exists to remove. Absent
+ * execution telemetry is visible in the tabs ("not measured"); doubled
+ * execution telemetry is not visible at all.
+ *
+ * PGWT_TEST_EXEC_SITE_ADMIT_ALL=1 publishes EVERY declared site instead of
+ * only the canonical ones. That is the #464 mutant: it reproduces the
+ * pre-fix double count through the shipped filter path (a map-population
+ * difference, nothing else), so the live cardinality gate can be shown
+ * going red against a product that is actually broken. It is loud on
+ * stderr and, like the other PGWT_TEST_* hooks in this tree, exists only
+ * for the gate.
+ */
+static int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin)
+{
+    struct pgwt_exec_site_plan plan;
+    if (pgwt_resolve_exec_sites(bin, d->postmaster_pid, &plan) != 0) {
+        fprintf(stderr, "ERROR: execution phase markers REFUSED: %s "
+                "(%s, %d probe site(s) seen) — Executions/Avg Exec will be "
+                "absent for this capture rather than double-counted\n",
+                pgwt_exec_site_refusal_str(plan.refusal),
+                PGWT_EXEC_CANONICAL_FN, plan.n_sites);
+        return -1;
+    }
+
+    const char *admit_all_env = getenv("PGWT_TEST_EXEC_SITE_ADMIT_ALL");
+    int admit_all = admit_all_env && admit_all_env[0] == '1';
+    if (admit_all) {
+        uint64_t elf_base = pgwt_elf_base_vaddr(bin);
+        uint64_t load_base = pgwt_find_load_base(d->postmaster_pid, bin);
+        if (load_base == 0) {
+            fprintf(stderr, "ERROR: PGWT_TEST_EXEC_SITE_ADMIT_ALL: no load "
+                            "base; refusing\n");
+            return -1;
+        }
+        for (int i = 0; i < plan.n_sites; i++)
+            if (!plan.sites[i].canonical)
+                plan.sites[i].runtime_addr = pgwt_site_runtime_addr(
+                    plan.sites[i].elf_addr, elf_base, load_base);
+        fprintf(stderr, "WARN: PGWT_TEST_EXEC_SITE_ADMIT_ALL=1 — publishing "
+                "ALL %d execution probe sites (#464 mutant: expect every "
+                "plannable non-SELECT statement to be counted twice)\n",
+                plan.n_sites);
+    }
+
+    int map_fd = bpf_map__fd(d->skel->maps.exec_site_allow);
+    if (map_fd < 0) {
+        fprintf(stderr, "ERROR: execution phase markers REFUSED: "
+                        "exec_site_allow map unavailable\n");
+        return -1;
+    }
+
+    int published = 0;
+    for (int i = 0; i < plan.n_sites; i++) {
+        const struct pgwt_usdt_site *s = &plan.sites[i];
+        if (!admit_all && !s->canonical)
+            continue;
+        if (s->runtime_addr == 0)
+            continue;
+        uint32_t marker = (s->marker == PGWT_SITE_EXEC_START)
+                        ? PGWT_MARKER_EXEC_START : PGWT_MARKER_EXEC_END;
+        uint64_t key = s->runtime_addr;
+        if (bpf_map_update_elem(map_fd, &key, &marker, BPF_ANY) != 0) {
+            fprintf(stderr, "ERROR: execution phase markers REFUSED: cannot "
+                    "publish site 0x%llx: %s\n",
+                    (unsigned long long)key, strerror(errno));
+            return -1;
+        }
+        published++;
+    }
+    /* An empty allowlist would make the handlers emit nothing while the
+     * links looked healthy — the same silent-zero shape as a mis-resolved
+     * uprobe. Refuse instead. */
+    if (published == 0) {
+        fprintf(stderr, "ERROR: execution phase markers REFUSED: allowlist "
+                        "published 0 sites\n");
+        return -1;
+    }
+
+    fprintf(stderr, "INFO: execution phase markers: %d site(s) admitted "
+            "(%s canonical), %d excluded\n",
+            published, PGWT_EXEC_CANONICAL_FN,
+            admit_all ? 0 : plan.n_excluded);
+    for (int i = 0; i < plan.n_sites; i++) {
+        const struct pgwt_usdt_site *s = &plan.sites[i];
+        if (!d->verbose)
+            break;
+        fprintf(stderr, "INFO:   %s site elf 0x%llx runtime 0x%llx %s\n",
+                s->marker == PGWT_SITE_EXEC_START ? "exec_start" : "exec_done",
+                (unsigned long long)s->elf_addr,
+                (unsigned long long)s->runtime_addr,
+                s->canonical ? "ADMITTED" : "excluded");
+    }
+    return 0;
+}
+
 int pgwt_daemon_init(struct pgwt_daemon *d)
 {
     int err;
@@ -1101,21 +1205,35 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     if (d->mode == PGWT_MODE_FULL && !d->lightweight_mode &&
         !d->skip_usdt && d->pg_binary_saved) {
         const char *bin = d->pg_binary_saved;
-        d->skel->links.on_exec_start = bpf_program__attach_usdt(
-            d->skel->progs.on_exec_start, -1, bin,
-            "postgresql", "query__execute__start", NULL);
-        d->skel->links.on_exec_done = bpf_program__attach_usdt(
-            d->skel->progs.on_exec_done, -1, bin,
-            "postgresql", "query__execute__done", NULL);
+        /* #464: the execution probes are attached by NAME, which covers
+         * BOTH of PostgreSQL's query__execute__* sites — the PortalRun pair
+         * and the inner pair in the static helper PortalRunMulti calls.
+         * Every plannable non-SELECT statement therefore produced two
+         * nested EXEC_START/EXEC_END pairs (Execs 368 against Plans 184;
+         * SELECTs, which never reach the second site, 91/91). Resolve the
+         * canonical sites from this binary and publish the allowlist the
+         * BPF handlers filter on BEFORE attaching. On refusal, attach
+         * NOTHING: execution telemetry is absent and loud, never doubled
+         * and quiet. */
+        if (pgwt_publish_exec_sites(d, bin) == 0) {
+            d->skel->links.on_exec_start = bpf_program__attach_usdt(
+                d->skel->progs.on_exec_start, -1, bin,
+                "postgresql", "query__execute__start", NULL);
+            d->skel->links.on_exec_done = bpf_program__attach_usdt(
+                d->skel->progs.on_exec_done, -1, bin,
+                "postgresql", "query__execute__done", NULL);
+            if (!d->skel->links.on_exec_start || !d->skel->links.on_exec_done)
+                fprintf(stderr, "WARN: optional full-mode execution USDT "
+                        "phase markers unavailable\n");
+        }
         d->skel->links.on_plan_start = bpf_program__attach_usdt(
             d->skel->progs.on_plan_start, -1, bin,
             "postgresql", "query__plan__start", NULL);
         d->skel->links.on_plan_done = bpf_program__attach_usdt(
             d->skel->progs.on_plan_done, -1, bin,
             "postgresql", "query__plan__done", NULL);
-        if (!d->skel->links.on_exec_start || !d->skel->links.on_exec_done ||
-            !d->skel->links.on_plan_start || !d->skel->links.on_plan_done)
-            fprintf(stderr, "WARN: optional full-mode plan/exec USDT phase "
+        if (!d->skel->links.on_plan_start || !d->skel->links.on_plan_done)
+            fprintf(stderr, "WARN: optional full-mode plan USDT phase "
                     "markers unavailable\n");
     }
 

@@ -978,7 +978,226 @@ def tab_coverage_check_ok(results, expected_tabs=None):
     return False, "; ".join(parts)
 
 
-def build_demo_summary(pass_results, extra_checks, expected_tabs_per_pass=None):
+# ── Execution cardinality (#464) ─────────────────────────────────────────
+#
+# PostgreSQL emits query__execute__start/done from TWO code sites for
+# plannable non-SELECT work (around PortalRun, and again inside the static
+# helper PortalRunMulti calls); the daemon attached by probe NAME, so every
+# DML statement was counted twice. The recorded shape, from
+# tests/results/demo-video-48e1bce: Execs 368 against Plans 184 for the DML
+# query, and 91 against 91 for the SELECT that never reaches the second
+# site. BOTH counted rehearsals passed in that state, because nothing
+# anywhere checked execution CARDINALITY -- only durations, conservation and
+# cross-tab agreement, none of which change when a count doubles.
+#
+# This evaluator is the ratio half of the gate: for a complete, successful,
+# plannable statement captured with BOTH its planning and its execution
+# boundaries, one planning pass corresponds to one execution. The live gate
+# (tests/test_execution_cardinality.py) adds the half this one cannot
+# provide -- an independently counted N, from the client that issued the
+# statements -- because an equality between two numbers the capture itself
+# produced cannot catch a defect that scales both.
+
+# Window edges, nothing else. A plan whose execution started before `from`
+# (or an execution whose plan ended after `to`) contributes to one count and
+# not the other, at most once per edge per query. This is NOT a tolerance
+# for runner noise: the defect it has to catch is a FACTOR, and 368 vs 184
+# fails a slack of 2 by 182.
+EXEC_CARDINALITY_EDGE_SLACK = 2
+
+# First words that make a statement a utility command rather than a
+# plannable one. Utility statements go through PortalRun with no
+# pg_plan_query pass at all (plan_count 0) and some, like EXECUTE, run a
+# cached plan -- the equality does not apply to either, so they are skipped
+# EXPLICITLY and reported as skipped, never silently folded into a pass.
+_UTILITY_FIRST_WORDS = frozenset("""
+    alter analyze begin call checkpoint close cluster comment commit copy
+    create deallocate declare discard do drop end execute explain fetch
+    grant import listen load lock move notify prepare reassign refresh
+    reindex release reset revoke rollback savepoint security set show start
+    truncate unlisten vacuum
+""".split())
+
+
+def _as_count(value):
+    """A count that is really a count: a non-negative integer. None,
+    absent, a string, a float with a fraction or a negative number all mean
+    "this row cannot be evaluated", never 0 -- a row whose counts could not
+    be parsed must be reported as unevaluable, because treating an
+    unparseable field as zero makes exec == plan == 0 and reads as a pass."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        if value < 0 or value != int(value):
+            return None
+        return int(value)
+    return None
+
+
+def _first_word(text):
+    if not isinstance(text, str):
+        return ""
+    for token in text.strip().split():
+        return token.strip("(").lower()
+    return ""
+
+
+def evaluate_execution_cardinality(rows, expected=None,
+                                   edge_slack=EXEC_CARDINALITY_EDGE_SLACK):
+    """Did each captured plannable statement execute once per planning pass?
+
+    `rows` is top_queries' row list (each a dict with `text`, `query_id`,
+    `exec_count`, `plan_count` exactly as src/server.c serialises them).
+
+    `expected` is the independent cohort count, when the caller has one:
+    {substring_of_the_statement_text: N}. Every key MUST match exactly one
+    evaluable row and that row's exec_count MUST equal N. This is the half
+    that catches uniform doubling -- `exec == plan` alone passes at 2N/2N,
+    and `plan <= exec` (the only inequality a prepared-protocol cohort can
+    assert) passes at any multiple. A missing key is a FAILURE, not a skip:
+    "the statement I issued 24 times produced no row" is the shape a
+    refusing capture has, and it must not read as agreement.
+
+    Returns a dict with ok / detail / evaluated / failures / skipped. `ok`
+    is False when there is nothing to evaluate: a row list that is empty,
+    all-utility or all-unparseable cannot see a doubling, and a gate that
+    cannot see must refuse.
+    """
+    if rows is None:
+        return {"ok": False, "detail": "no rows (query refused or errored)",
+                "evaluated": 0, "failures": ["rows_absent"], "skipped": []}
+    try:
+        row_list = list(rows)
+    except TypeError:
+        return {"ok": False, "detail": f"rows not iterable: {rows!r}",
+                "evaluated": 0, "failures": ["rows_unusable"], "skipped": []}
+
+    failures = []
+    skipped = []
+    evaluated = []
+
+    for row in row_list:
+        if not isinstance(row, dict):
+            skipped.append(f"non-dict row {row!r}")
+            continue
+        text = row.get("text") or row.get("query_text") or ""
+        label = (text.strip().replace("\n", " ")[:60]
+                 or f"query_id={row.get('query_id')}")
+        word = _first_word(text)
+        if not word:
+            skipped.append(f"{label}: no statement text captured")
+            continue
+        if word in _UTILITY_FIRST_WORDS:
+            skipped.append(f"{label}: utility statement ({word})")
+            continue
+        execs = _as_count(row.get("exec_count"))
+        plans = _as_count(row.get("plan_count"))
+        if execs is None or plans is None:
+            skipped.append(f"{label}: exec_count={row.get('exec_count')!r} "
+                           f"plan_count={row.get('plan_count')!r} "
+                           f"not usable counts")
+            continue
+        if plans == 0:
+            # Planning boundaries absent: a cached/generic plan, or a window
+            # that opened mid-statement. Nothing to compare against.
+            skipped.append(f"{label}: no planning pass captured "
+                           f"(exec_count={execs})")
+            continue
+        if execs == 0:
+            # ABANDONED PLANS, which the brief's scope excludes explicitly:
+            # every occurrence of this statement was planned and then
+            # errored or was cancelled before EXEC_DONE, so it has no
+            # completed execution to compare the plan against. Measured on
+            # gate-1: a deliberately failing `UPDATE ... SET v = v / 0`
+            # reports exec_count 0 against plan_count 4.
+            #
+            # This is safe to skip ONLY because of the refusal below: if the
+            # execution probes stopped firing altogether, EVERY plannable
+            # row lands here, nothing is left to evaluate, and the verdict
+            # is a refusal rather than a pass. A partial loss is caught by
+            # the independent-N leg, where a cohort that produced no
+            # evaluable row is a failure and not a skip.
+            skipped.append(f"{label}: planned {plans}x with no completed "
+                           f"execution (abandoned plans / errors)")
+            continue
+        evaluated.append((label, execs, plans, row))
+        if execs > plans + edge_slack:
+            failures.append(f"{label}: exec_count {execs} exceeds plan_count "
+                            f"{plans} by more than {edge_slack} "
+                            f"(ratio {execs / plans:.2f})")
+        elif execs + edge_slack < plans:
+            failures.append(f"{label}: exec_count {execs} falls short of "
+                            f"plan_count {plans} by more than {edge_slack}")
+
+    expected = expected or {}
+    for needle, want in expected.items():
+        matches = [e for e in evaluated if needle in e[0] or needle in
+                   (e[3].get("text") or e[3].get("query_text") or "")]
+        if not matches:
+            failures.append(f"expected statement {needle!r} (N={want}) "
+                            f"produced no evaluable row")
+            continue
+        if len(matches) > 1:
+            failures.append(f"expected statement {needle!r} matched "
+                            f"{len(matches)} rows; cohort is not isolated")
+            continue
+        label, execs, plans, _row = matches[0]
+        if execs != want:
+            failures.append(f"{label}: exec_count {execs} != independently "
+                            f"counted N={want}")
+
+    if not evaluated:
+        return {"ok": False,
+                "detail": f"nothing evaluable among {len(row_list)} row(s); "
+                          f"skipped: {skipped[:6]}",
+                "evaluated": 0,
+                "failures": failures + ["no_evaluable_rows"],
+                "skipped": skipped}
+
+    ok = not failures
+    detail = (f"{len(evaluated)} plannable statement(s) evaluated, "
+              f"{len(skipped)} skipped"
+              if ok else "; ".join(failures[:6]))
+    return {"ok": ok, "detail": detail, "evaluated": len(evaluated),
+            "failures": failures, "skipped": skipped,
+            "rows": [{"label": e[0], "exec_count": e[1], "plan_count": e[2]}
+                     for e in evaluated]}
+
+
+# Every check demo_rehearsal.py MUST have inserted into extra_checks before
+# build_demo_summary() may return ok=True.
+#
+# Why this exists: build_demo_summary iterates extra_checks and fails on any
+# entry whose "ok" is false -- which means DELETING a check, or never
+# reaching the code that inserts it (an early `continue`, a swallowed
+# exception, a renamed key), removed it from the verdict silently. The run
+# still printed "DEMO REHEARSAL: PASS". That is how #464's double count
+# survived two counted rehearsals in a different way than the missing
+# cardinality check did: the gate was not wrong, it was absent, and absence
+# was indistinguishable from agreement.
+#
+# Membership is checked by NAME against this list, so a check that is not
+# inserted fails the run exactly as loudly as one that is inserted and
+# fails. Adding a mandatory check means adding its name here in the same
+# commit.
+REQUIRED_EXTRA_CHECKS = (
+    "capture_has_events",
+    "tab_coverage",
+    "time_model_conserves",
+    "waterfall_query_latency",
+    "execution_cardinality",
+    "cross_tab_db_time_agreement",
+    "cross_tab_aas_agreement",
+    "capture_freshness",
+    "daemon_integrity",
+    "daemon_log_clean",
+)
+
+
+def build_demo_summary(pass_results, extra_checks, expected_tabs_per_pass=None,
+                       required_checks=None):
     """pass_results: list of {"pass": name, "tabs": {tab_id: tab_result}}
     (tab_result is exactly ui_live_smoke_lib.build_tab_result's output).
     extra_checks: dict of check_name -> {"ok": bool, ...}.
@@ -1003,6 +1222,19 @@ def build_demo_summary(pass_results, extra_checks, expected_tabs_per_pass=None):
     failed = []
     total_tabs = 0
     incomplete_passes = []
+    # Required-check MEMBERSHIP, before anything else (#464). Iterating
+    # extra_checks can only find an entry that is there and failing; it
+    # cannot find one that was never inserted, so deleting a mandatory
+    # check used to pass silently. `required_checks` defaults to None for
+    # the unit tests that drive this function with a one-element dict, but
+    # demo_rehearsal.py passes REQUIRED_EXTRA_CHECKS and
+    # tests/test_rehearsal_verdict_hardening.py asserts that it does -- an
+    # unused parameter is just a differently shaped absence.
+    missing_required = []
+    if required_checks:
+        present = set(extra_checks or {})
+        missing_required = [name for name in required_checks
+                            if name not in present]
     for p in pass_results:
         n = len(p["tabs"])
         total_tabs += n
@@ -1017,15 +1249,22 @@ def build_demo_summary(pass_results, extra_checks, expected_tabs_per_pass=None):
             failed.append(name)
     for entry in incomplete_passes:
         failed.append(f"incomplete_pass:{entry}")
+    for name in missing_required:
+        failed.append(f"missing_required_check:{name}")
     ok = (len(failed) == 0 and len(pass_results) > 0
           and len(extra_checks) > 0 and total_tabs > 0
-          and len(incomplete_passes) == 0)
+          and len(incomplete_passes) == 0
+          and len(missing_required) == 0)
     return {
         "ok": ok,
         "passes": {p["pass"]: p["tabs"] for p in pass_results},
         "checks": extra_checks,
         "failed": failed,
         "total_tabs_walked": total_tabs,
+        # Recorded in summary.json so a reader can tell "every mandatory
+        # check ran" from "nobody asked for any".
+        "required_checks": list(required_checks or ()),
+        "missing_required_checks": missing_required,
     }
 
 

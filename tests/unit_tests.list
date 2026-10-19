@@ -215,6 +215,19 @@ test_wait_cpu_scan.py
 test_pg13_resolve
 test_discovery_pie
 test_discovery_nopie
+# #464: PostgreSQL emits query__execute__start/done from TWO sites for
+# plannable non-SELECT work, libbpf attaches USDT probes by NAME, and so
+# every DML statement was counted twice (UPDATE exec 40 / plan 20 at N=20 on
+# gate-1; SELECTs, which never reach the second site, 20/20). This covers the
+# userspace half: the ELF note parser, the pure canonical-site selector, and
+# the bypass suite for every way the selector could APPROVE without having
+# seen anything (no notes, unresolvable PortalRun, a sizeless FUNC symbol, a
+# truncated note descriptor, sites all outside the canonical range, half a
+# pair, two canonical starts, an upstream refusal being cleared). Built twice
+# (PIE / non-PIE) because an admitted site is only useful after the #24
+# link-time-to-runtime translation.
+test_exec_sites_pie
+test_exec_sites_nopie
 test_replay_fidelity
 test_sampled_overhead_gate.py
 test_data_query_text_context.py
