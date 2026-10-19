@@ -231,7 +231,10 @@ export function createQueriesView() {
             // latter) -- static, so it is shown every time the live
             // (non-compare) columns are the ones with both families, not
             // gated on any one row's data.
-            if (!model.compare) el.insertAdjacentHTML('beforeend', queriesScopeNoteHtml());
+            if (!model.compare) {
+                el.querySelector?.('table')?.classList.add('queries-table');
+                el.insertAdjacentHTML('afterbegin', queriesScopeNoteHtml());
+            }
         },
 
         enter() { /* no chart */ },

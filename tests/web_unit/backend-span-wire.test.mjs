@@ -51,7 +51,7 @@ test('Queries cell: a measured, closed span renders its duration -- NOT the '
     + 'bare string "Not measured"', () => {
     const html = backendActivityHtml(WIRE.measured_row);
     assert.match(html, /Closed · 0\.4 s/);
-    assert.match(html, /Measurement: Measured · Completion: Closed/);
+    assert.match(html, /Measurement: Measured · Backend activity boundary: Closed/);
     assert.notEqual(html, 'Not measured');
 });
 
@@ -164,14 +164,11 @@ test('reviewer fix 1: the Queries panel is ONE collapsed section, the same '
     assert.match(html, /Closed · 0\.4 s/);
 });
 
-test('reviewer fix 2: the Backend activity column says it is an OBSERVED '
-    + 'SPAN, so it cannot read as a second DB Time', () => {
-    const col = makeQueriesConfig('exact').columns
-        .find(c => c.key === 'backend_activity_span');
-    assert.ok(col, 'the Backend activity column exists');
-    assert.match(col.label, /observed span/);
-    // And the longer distinction is reachable without reading the
-    // Measurement/Completion jargon in the drill.
-    assert.match(col.label, /title="[^"]*wall-clock[^"]*"/);
-    assert.match(col.label, /title="[^"]*DB Time[^"]*"/);
+test('Queries selected span is visible in its identity cell, without a standalone column', () => {
+    const cols = makeQueriesConfig('exact').columns;
+    assert.ok(!cols.some(c => c.key === 'backend_activity_span'));
+    const html = cols.find(c => c.key === 'text').format(WIRE.measured_row);
+    assert.match(html, /Longest measured closed backend span: 0\.4 s/);
+    assert.match(html, /PID 1001/);
+    assert.doesNotMatch(html, /Measurement:|Completion:/);
 });
