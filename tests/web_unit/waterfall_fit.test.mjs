@@ -68,6 +68,22 @@ test('a viewport that genuinely cannot fit both keeps the list usable', () => {
     assert.ok(readoutBottom(tiny, EXECUTION_LIST_MIN_PX) > tiny.viewportHeight);
 });
 
+test('visible context shares the minimum list budget without being counted twice', () => {
+    // Reviewer measured the context adding 58px with the list stuck at
+    // 120px: document bottom 1009 at the 981px viewport. The pane includes
+    // context; reserve the 8px fold margin by yielding another 36px of list.
+    // A representative decomposition of that 1009px total; only the sum
+    // outside the list affects its budget.
+    const geometry = { viewportHeight: 981, listTop: 468, paneHeight: 401,
+        trailingBelowPane: 20, contextHeight: 58 };
+    const height = executionListMaxHeight(geometry);
+    assert.equal(height, 84);
+    assert.equal(geometry.listTop + height + geometry.paneHeight + 20, 973);
+    assert.equal(executionListMaxHeight({ ...geometry, contextHeight: 0 }), 120);
+    assert.equal(executionListMaxHeight({ ...geometry, viewportHeight: 1500 }), 310);
+    assert.equal(executionListMaxHeight({ ...geometry, viewportHeight: 600 }), 62);
+});
+
 /* ── unreachable-detection suite: every way the computation can be made
  * blind must produce null (leave the CSS cap alone), never a number. A
  * made-up height is worse than the old fixed one: it would look like the
