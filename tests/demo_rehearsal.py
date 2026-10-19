@@ -156,7 +156,7 @@ def _assert_daemon_alive(daemon_pid, where):
 
 def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                 pgbench_pid, workload_pid, daemon_pid, t0,
-                viewport, device_scale_factor, diag_data=False):
+                viewport, device_scale_factor, diag_data=False, footage_only=False):
     pass_results = []
     sweep_coverage = []
     for name, target_offset_s in passes:
@@ -182,12 +182,14 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
         tab_results = {}
         for tab_id in lib.TABS:
             print(f"  --- {tab_id} ---")
+            # Omit the new keyword on counted runs to preserve their call contract.
             result = live_smoke.run_tab(browser, tab_id, url, pass_out_dir,
                                         ticks, first_data_timeout,
                                         lib.BLINK_THRESHOLD,
                                         viewport=viewport,
                                         device_scale_factor=device_scale_factor,
-                                        diag_data=diag_data)
+                                        diag_data=diag_data,
+                                        **({"footage_only": True} if footage_only else {}))
             tab_results[tab_id] = result
             live_smoke._assert_workload_alive(
                 pgbench_pid, workload_pid, f"pass {name!r} tab {tab_id!r}")
@@ -195,11 +197,16 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
             # Each tab sweep needs early-window evidence from at least one
             # tick; isolated late ticks remain visible (scheduling tail #397).
             second_target_ms = lib.SWEEP_OFFSETS_MS[1]
-            coverage = drlib.summarize_sweep_offset_coverage(
-                tab_id, name, result.get("blink_sweep", {}).get("ticks"),
-                second_target_ms)
+            if footage_only:
+                coverage = {"tab": tab_id, "pass": name, "ticks": [], "ok": None,
+                            "detail": live_smoke.FOOTAGE_NOT_EVALUATED}
+            else:
+                coverage = drlib.summarize_sweep_offset_coverage(
+                    tab_id, name, result.get("blink_sweep", {}).get("ticks"),
+                    second_target_ms)
             sweep_coverage.append(coverage)
             result["sweep_offset_coverage"] = coverage
+            # Unevaluated footage coverage cannot turn a tab (or the aggregate) green.
             result["ok"] = bool(result["ok"] and coverage["ok"])
             kf_line = lib.known_failing_report_line(tab_id, result["ok"])
             # A KNOWN-FAILING line would be misleading here -- this harness
@@ -463,11 +470,22 @@ def build_arg_parser():
                     "it is OFF for a counted attempt and exists so a blink "
                     "seen during a rehearsal can be traced to the data "
                     "behind the frame instead of being re-guessed")
+    ap.add_argument("--footage-only", action="store_true",
+                    help="record video without screenshots; screenshot checks are "
+                         "not evaluated and the rehearsal cannot pass its gate")
     return ap
 
 
 def main():
-    args = build_arg_parser().parse_args()
+    ap = build_arg_parser()
+    args, unknown = ap.parse_known_args()
+    # Blink injection is not a rehearsal option. Explain the incompatible
+    # footage combination explicitly, before any capture setup can run.
+    if args.footage_only and (args.diag_data or any(
+            arg.startswith("--inject-") for arg in unknown)):
+        ap.error("--footage-only cannot be combined with --diag-data or blink injection (--inject-*)")
+    if unknown:
+        ap.error("unrecognized arguments: " + " ".join(unknown))
 
     duration_s = args.duration_min * 60.0
     ticks, passes = drlib.plan_passes(duration_s)
@@ -547,7 +565,8 @@ def main():
                 viewport={"width": args.viewport_width,
                           "height": args.viewport_height},
                 device_scale_factor=args.device_scale_factor,
-                diag_data=args.diag_data)
+                diag_data=args.diag_data,
+                footage_only=args.footage_only)
         finally:
             browser.close()
 

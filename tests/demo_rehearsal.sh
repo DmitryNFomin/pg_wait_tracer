@@ -40,7 +40,7 @@
 # cleanup() below already detects a leaked child and exits 1 but does NOT
 # kill it, exactly like tests/ui_live_smoke.sh's own cleanup() documents.
 #
-# Usage: tests/demo_rehearsal.sh [--pid POSTMASTER_PID] [--pg-version N] [--tag TAG]
+# Usage: tests/demo_rehearsal.sh [--pid POSTMASTER_PID] [--pg-version N] [--tag TAG] [--footage-only]
 # Env: DURATION_MIN (default 35), PGWT_DEMO_PORT (default 8385)
 set -uo pipefail
 
@@ -65,12 +65,14 @@ PG_MAJOR=""
 # ad-hoc run (no --tag given) still honestly records tag: null, never a
 # guessed value.
 TAG=""
+FOOTAGE_CLI_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid) PM_PID="$2"; shift 2 ;;
         --pg-version) PG_MAJOR="$2"; shift 2 ;;
         --tag) TAG="$2"; shift 2 ;;
-        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N] [--tag TAG]"; exit 1 ;;
+        --footage-only) FOOTAGE_CLI_ARGS=(--footage-only); shift ;;
+        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N] [--tag TAG] [--footage-only]"; exit 1 ;;
     esac
 done
 
@@ -396,7 +398,7 @@ python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --duration-min "$DURATION_MIN" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
     --daemon-pid "$TRACER_PID" --postmaster-pid "$PM_PID" \
-    "${DIAG_CLI_ARGS[@]+${DIAG_CLI_ARGS[@]}}" "${TAG_CLI_ARGS[@]}"
+    "${DIAG_CLI_ARGS[@]+${DIAG_CLI_ARGS[@]}}" "${TAG_CLI_ARGS[@]}" "${FOOTAGE_CLI_ARGS[@]+${FOOTAGE_CLI_ARGS[@]}}"
 DEMO_RC=$?
 
 exit "$DEMO_RC"
