@@ -20,6 +20,9 @@ function sess(over) {
 function fakeCtx(sortState) {
     return {
         getSort: () => sortState,
+        // #474: orderResetKey(ctx) calls ctx.isLiveTick() unconditionally;
+        // this fixture is never live, so it is always false.
+        isLiveTick: () => false,
         timeRange: { from: 0, to: 1000 },
         filters: { snapshot: () => ({}) },
     };
