@@ -3823,7 +3823,18 @@ def test_compare_echarts_renderer_note(page):
 # reset the tracker every 5s and this defect was invisible until now.
 
 def test_sessions_order_survives_live_near_tie_ticks(page):
-    """#474: Sessions row order survives 3 near-tie live ticks unchanged."""
+    """#474: Sessions row order survives near-tie live ticks unchanged.
+
+    The FIRST live tick is excluded from the comparison on purpose: entering
+    live mode is itself a real window-shape transition (the reset key's
+    pre-live form is the raw {from,to} window; its in-live form is
+    {live,spanSecs} -- see orderResetKey), so a reset on that one transition
+    is expected and correct, exactly like #440's unit-level gate tests only
+    ever compare LIVE tick to LIVE tick, never pre-live to live. The
+    regression this guards is a reset on every SUBSEQUENT tick while
+    already live, which is what a raw {from,to} reset key (the pre-#474
+    bug) produces, since both edges advance every tick.
+    """
     print("--- Test #474: Sessions order survives live near-tie ticks ---")
     page.goto(NEARTIE_URL)
     page.wait_for_selector("#status.connected", timeout=10000)
@@ -3841,19 +3852,29 @@ def test_sessions_order_survives_live_near_tie_ticks(page):
 
     # Each live tick advances window.__pgwt.timeRange.to (app.js
     # anchorLive); wait on that instead of a fixed sleep (deterministic,
-    # no retries) for exactly 3 ticks.
-    to = page.evaluate("window.__pgwt.timeRange.to")
-    for _ in range(3):
+    # no retries). 300ms settle after each tick lets the tick-triggered
+    # table refresh (async fetch + repaint) land before reading the DOM.
+    def wait_for_next_tick(prev_to):
         page.wait_for_function(
-            "prev => window.__pgwt.timeRange.to > prev", arg=to, timeout=20000)
-        to = page.evaluate("window.__pgwt.timeRange.to")
+            "prev => window.__pgwt.timeRange.to > prev", arg=prev_to, timeout=20000)
+        page.wait_for_timeout(300)
+        return page.evaluate("window.__pgwt.timeRange.to")
 
-    # Let the tick-triggered table refresh settle.
-    page.wait_for_function(
-        "() => document.querySelectorAll('table tbody tr td:first-child').length > 0")
+    # Capture EVERY tick's order, not just the first and last: the +-3%
+    # swing alternates sign every tick, so a bug that resets (and re-sorts
+    # by raw value) on every tick only flips the row order on an ODD number
+    # of elapsed ticks -- comparing tick 1 to tick 3 (2 apart, same parity)
+    # would miss it entirely. Comparing every adjacent pair catches a flip
+    # regardless of parity.
+    to = page.evaluate("window.__pgwt.timeRange.to")
+    to = wait_for_next_tick(to)   # tick 1: entering live mode, may reset once
+    order1 = pid_order()
+    to = wait_for_next_tick(to)   # tick 2: must NOT reset
+    order2 = pid_order()
+    to = wait_for_next_tick(to)   # tick 3: must NOT reset
     order3 = pid_order()
-    check(order3 == order0,
-          f"row order stable across 3 near-tie live ticks ({order0} -> {order3})")
+    check(order1 == order2 == order3,
+          f"row order stable across live ticks 1,2,3 ({order1}, {order2}, {order3})")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
