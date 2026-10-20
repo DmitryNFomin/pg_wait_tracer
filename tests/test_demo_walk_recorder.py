@@ -334,12 +334,15 @@ class RecorderTests(unittest.TestCase):
             for code in (2,3,4,5,6,7,8):
                 def refuse(args,staging):
                     (staging/"partial.gif").write_bytes(b"partial")
+                    (staging/"frames").mkdir()
+                    (staging/"frames"/"000000.jpg").write_bytes(b"fake-frame")
                     raise lib.Refusal(code,f"test refusal {code}")
                 with patch.object(driver,"RESULTS",root),patch.object(driver,"record",refuse),patch.object(sys,"argv",["recorder","--mock","--run-id",f"refused-{code}"]):
                     self.assertEqual(driver.main(),code)
                 self.assertFalse((root/f"refused-{code}").exists())
                 self.assertFalse(list(root.glob(".*")))
-                self.assertEqual(json.loads((root/f"refused-{code}.refusal.json").read_text())["exit_code"],code)
+                self.assertTrue((root/f"refused-{code}.refused"/"frames"/"000000.jpg").exists())
+                self.assertEqual(json.loads((root/f"refused-{code}.refused"/"refusal.json").read_text())["exit_code"],code)
 
     def _minimal_walk(self, window=None):
         observation = {"panel": {"detail": "ok"}, "headlines": [], "table_rows": [], "readouts": []}
