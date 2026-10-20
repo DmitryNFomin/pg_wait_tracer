@@ -52,6 +52,7 @@ export function buildTableModel(config, rows, sort) {
         key: col.key,
         label: col.label,
         cls: col.cls || '',
+        title: col.title || '',
         sortable: col.sortable !== false,
         arrow: (sort && sort.key === col.key)
             ? (sort.asc ? ' ▲' : ' ▼') : '',
@@ -244,6 +245,7 @@ function tableHtml(model, truncation) {
     let html = '<table><thead><tr>';
     for (const h of model.headers) {
         html += '<th class="' + h.cls + '"' +
+                (h.title ? ' title="' + esc(h.title) + '"' : '') +
                 (h.sortable ? ' data-sort="' + h.key + '"' : '') + '>' +
                 h.label + h.arrow + '</th>';
     }
