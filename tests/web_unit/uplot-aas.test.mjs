@@ -32,6 +32,7 @@ import {
     buildUplotSpec, stackSeries, hitTest, overlayGeometry, buildCompareGeometry,
     diffStripLayout, diffStripXPosition, diffStripVisibleMax,
     utcTzDate, withAlpha, AREA_FILL_ALPHA, NCPUS_COLOR,
+    NOT_CAPTURED_BAND_COLOR, NOT_CAPTURED_BORDER,
 } from '../../web/static/lib/uplot-aas.js';
 import {
     buildAasOption, AAS_ANNOTATION_SERIES,
@@ -606,6 +607,31 @@ test('exact window: no fidelity rects; N-CPUs hline iff numCpus > 0', () => {
     }]);
     const noCpus = overlayGeometry(data, { numCpus: 0, win }, null);
     assert.deepEqual(noCpus.hlines, []);
+});
+
+// ── #472(i): the AAS pane must disclose a window that extends before the
+// server's actual capture start -- a "not captured" rect for
+// [win.from, captureFromNs), painted like Histogram/Concurrency's existing
+// "Not captured" band (same gray, same dashed border), not a metric change:
+// nothing here alters a number, only what gets drawn over the honest gap.
+
+test('#472(i) notcaptured rect: window extends before server.fromNs (captureFromNs)', () => {
+    const data = { bucket_ns: 1e9, max_aas: 1, fidelity: 'exact', buckets: classBuckets(2) };
+    const win = { from: 2e15, to: 3e15 };
+    const geo = overlayGeometry(data, { numCpus: 0, win, captureFromNs: 2.3e15 }, null);
+    assert.equal(geo.rects.length, 1);
+    assert.deepEqual(geo.rects[0], {
+        kind: 'notcaptured', x0: 2e9, x1: 2.3e9,
+        fill: NOT_CAPTURED_BAND_COLOR, stroke: NOT_CAPTURED_BORDER, dash: [4, 4],
+    });
+});
+
+test('#472(i) negative control: captureFromNs at or before win.from draws nothing', () => {
+    const data = { bucket_ns: 1e9, max_aas: 1, fidelity: 'exact', buckets: classBuckets(2) };
+    const win = { from: 2e15, to: 3e15 };
+    assert.deepEqual(overlayGeometry(data, { numCpus: 0, win, captureFromNs: 2e15 }, null).rects, []);
+    assert.deepEqual(overlayGeometry(data, { numCpus: 0, win, captureFromNs: 1.5e15 }, null).rects, []);
+    assert.deepEqual(overlayGeometry(data, { numCpus: 0, win }, null).rects, []);
 });
 
 /* U2 (review P7): with the CURRENT y scale top supplied (scaleWindow.yMax —

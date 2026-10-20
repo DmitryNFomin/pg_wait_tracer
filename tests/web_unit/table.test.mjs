@@ -514,6 +514,34 @@ test('buildSummary: empty data -> empty metrics', () => {
     assert.deepEqual(buildSummary({ rows: [] }, 4), []);
 });
 
+// ── #472(ii): AAS discloses a window mostly before capture started ─────────
+// Disclosure only -- the AAS NUMBER itself (dbRow.aas, computed server-side
+// over whatever was actually captured) is UNCHANGED; this only appends a
+// visible note when the window the user asked for is mostly uncaptured, so
+// a low/zero AAS does not read as "the database was idle" when it actually
+// reads "there is almost no data here yet".
+
+test('#472(ii) buildSummary: captured < 90% of window appends a disclosure to AAS', () => {
+    const data = { rows: [{ indent: 0, name: 'DB Time', ms: 12500, aas: 3.47 }] };
+    // 900s window, capture only started 35s before the window's end.
+    const window = { from: 0, to: 900e9, captureFromNs: 865e9 };
+    const s = buildSummary(data, 4, window);
+    assert.equal(s.find(m => m.label === 'AAS').value, '3.47 · captured 35s of 900s');
+});
+
+test('#472(ii) buildSummary: captured >= 90% of window -> no disclosure suffix', () => {
+    const data = { rows: [{ indent: 0, name: 'DB Time', ms: 1000, aas: 1.0 }] };
+    // 900s window, captured the last 850s (94.4%) -- comfortably above 90%.
+    const window = { from: 0, to: 900e9, captureFromNs: 50e9 };
+    const s = buildSummary(data, 4, window);
+    assert.equal(s.find(m => m.label === 'AAS').value, '1.00');
+});
+
+test('#472(ii) buildSummary: no window argument is unchanged (back-compat)', () => {
+    const data = { rows: [{ indent: 0, name: 'DB Time', ms: 1000, aas: 1.0 }] };
+    assert.equal(buildSummary(data, 4).find(m => m.label === 'AAS').value, '1.00');
+});
+
 // ── U2 review P11: stacked-bar truth ────────────────────────────────────────
 
 test('bar segments: below-threshold and other are SEPARATE labeled facts', () => {
