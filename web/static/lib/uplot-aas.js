@@ -102,6 +102,8 @@ export const AREA_FILL_ALPHA = 0.85;
 
 /* N-CPUs reference line color (same as the ECharts markLine). */
 export const NCPUS_COLOR = '#E53935';
+export const NOT_CAPTURED_BAND_COLOR = 'rgba(136, 136, 136, 0.10)';
+export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
 
 /* ── y-axis policy (Track U Phase U2, review P7) ─────────────────────────────
  * yMax = max(maxAas*1.2, min(numCpus*1.5, maxAas*4), 1) — the capacity
@@ -777,6 +779,17 @@ export function overlayGeometry(data, opts, scaleWindow) {
         });
     }
 
+    if (opts.captureFromNs != null && opts.captureFromNs > win.from) {
+        rects.push({
+            kind: 'notcaptured',
+            x0: nsToMs(win.from),
+            x1: nsToMs(Math.min(opts.captureFromNs, axisToNs)),
+            fill: NOT_CAPTURED_BAND_COLOR,
+            stroke: NOT_CAPTURED_BORDER,
+            dash: [4, 4],
+        });
+    }
+
     const esc = buildEscalationAnnotation(opts.escalationStatus,
         { from: win.from, to: win.to });
     if (esc) {
@@ -853,6 +866,22 @@ export function overlayGeometry(data, opts, scaleWindow) {
     }
 
     return { rects, vlines, hlines };
+}
+
+/* #473-1: the "N CPUs" reference-line chip was painted flush against the
+ * right plot edge, where it can collide with whatever else occupies the
+ * top-right corner (the escalation-edge label from the vlines loop below,
+ * a fidelity annotation, etc). Moved to the LEFT edge instead. Kept
+ * KIND-AWARE on purpose: only `kind: 'ncpus'` moves -- `kind:
+ * 'ncpus-offscale'` (the P7 top-edge affordance for a reference line above
+ * the current y-scale) is a distinct affordance this fix is not about, and
+ * keeps its existing right-aligned position unchanged. */
+export function ncpusLabelRect(l, box, y, textWidth, pad) {
+    const w = textWidth + 2 * pad;
+    const lh = 12 * (box.dpr || 1) + 2 * pad;
+    const lx = l.kind === 'ncpus' ? box.left + pad : box.left + box.width - w;
+    const ly = Math.max(box.top, y - lh);
+    return { x: lx, y: ly, w, h: lh };
 }
 
 /* ── Draw hooks (thin canvas painters over the pure geometry) ────────────────
@@ -972,14 +1001,12 @@ export function drawOverlayLines(u, geo) {
             ctx.setLineDash([]);
         }
         if (l.label) {
-            const w = ctx.measureText(l.label).width + 2 * pad;
-            const lh = 12 * dpr + 2 * pad;
-            const lx = left + width - w;
-            const ly = Math.max(top, y - lh);
+            const textWidth = ctx.measureText(l.label).width;
+            const r = ncpusLabelRect(l, { left, top, width, dpr }, y, textWidth, pad);
             ctx.fillStyle = l.color;
-            ctx.fillRect(lx, ly, w, lh);
+            ctx.fillRect(r.x, r.y, r.w, r.h);
             ctx.fillStyle = '#fff';
-            ctx.fillText(l.label, lx + pad, ly + pad);
+            ctx.fillText(l.label, r.x + pad, r.y + pad);
         }
     }
     ctx.restore();

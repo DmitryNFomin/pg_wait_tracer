@@ -54,6 +54,18 @@ test('y categories are "PID <n>" in pids order; x spans the view window', () => 
     assert.equal(option.series[0].type, 'custom');
 });
 
+// ── #473-3: a narrow/zoomed Timeline window packs many x-axis tick labels
+// into a small width; ECharts draws every generated tick label regardless
+// of overlap unless told otherwise, producing overlapping/illegible text.
+// hideOverlap is a native ECharts axisLabel flag (ECharts decides which
+// generated labels to hide post-layout) -- a one-line opt-in, no new
+// layout/formatting logic of our own.
+
+test('#473-3 xAxis.axisLabel.hideOverlap is enabled (overlapping tick text is suppressed, not drawn)', () => {
+    const { option } = buildTimelineOption(data(), { from: 5, to: 900 });
+    assert.equal(option.xAxis.axisLabel.hideOverlap, true);
+});
+
 test('chartHeight scales with pid count; truncation surfaced', () => {
     const m = buildTimelineOption(data(), { from: 0, to: 1 });
     assert.equal(m.chartHeight, Math.max(200, 2 * 50 + 80));  // 200

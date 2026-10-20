@@ -47,8 +47,8 @@ FIXTURE = r"""() => {
 
 def visible_queries(page):
     texts = page.locator('#table-container tbody tr.clickable').all_inner_texts()
-    expected = ['Longest measured closed backend span: 9.9 s',
-                'Longest observed in-flight backend span: 9.9 s so far',
+    expected = ['Longest measured closed backend span: 9.9s',
+                'Longest observed in-flight backend span: 9.9s so far',
                 'Partial backend span', 'Backend span unavailable: Not measured']
     for i, text in enumerate(expected):
         assert text in texts[i], f'row {i}: missing visible {text!r}: {texts[i]}'
@@ -102,7 +102,7 @@ def waterfall_context(page, crop=None):
     crop = crop or pane.bounding_box()
     essential = page.locator('#waterfall-context')
     text = essential.inner_text() if essential.count() else ''
-    for phrase in ['PID 661380', 'Query ' + qid, 'Containing backend activity:', '9.9 s',
+    for phrase in ['PID 661380', 'Query ' + qid, 'Containing backend activity:', '9.9s',
                    'Lock:relation', 'Relation wait occurred before execution', 'bars show executor phase only']:
         assert phrase in text, f'missing visible Waterfall context: {phrase}'
     assert 'Lock:advisory' not in text and 'Longest' not in text, text

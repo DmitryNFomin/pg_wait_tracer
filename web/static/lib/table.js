@@ -52,6 +52,7 @@ export function buildTableModel(config, rows, sort) {
         key: col.key,
         label: col.label,
         cls: col.cls || '',
+        title: col.title || '',
         sortable: col.sortable !== false,
         arrow: (sort && sort.key === col.key)
             ? (sort.asc ? ' ▲' : ' ▼') : '',
@@ -177,6 +178,24 @@ export function applyDefaultOrder(tracker, rows, sort) {
     return tracker.apply(rows || []);
 }
 
+/* #474: the reset key a table view's createOrderResetGate call should use.
+ * During a live tick (ctx.isLiveTick(), app.js:322 -- true while the
+ * window is following "now") the window's absolute edges advance on every
+ * refresh tick by design; keying the reset on those edges (the pre-#474
+ * bug) resets the hysteresis tracker every tick, discarding it entirely in
+ * the one mode it exists for. The key is instead {live:true, spanSecs} --
+ * stable while live mode just slides forward, and only a genuine SPAN
+ * change (the user picks a different "last N min") produces a new key.
+ * Outside a live tick (manual navigation, zoom, or live mode off) the key
+ * is the raw window, unchanged from pre-#474 behavior -- any edge move
+ * there IS a real navigation and must reset. */
+export function orderResetKey(ctx) {
+    if (ctx.isLiveTick && ctx.isLiveTick()) {
+        return { live: true, spanSecs: ctx.timeRange.liveRangeSecs };
+    }
+    return { from: ctx.timeRange.from, to: ctx.timeRange.to };
+}
+
 /* Shared "reset on window/filter change or explicit re-sort" gate (contract
  * item 6): returns a function a view calls every build() with whatever
  * facts should force a fresh first-render ranking (window, filters, the
@@ -226,6 +245,7 @@ function tableHtml(model, truncation) {
     let html = '<table><thead><tr>';
     for (const h of model.headers) {
         html += '<th class="' + h.cls + '"' +
+                (h.title ? ' title="' + esc(h.title) + '"' : '') +
                 (h.sortable ? ' data-sort="' + h.key + '"' : '') + '>' +
                 h.label + h.arrow + '</th>';
     }

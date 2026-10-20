@@ -11,16 +11,16 @@ const render = s => makeQueriesConfig('exact').columns.map(c => c.format?.({
 })).join(' ').replace(/<[^>]*>/g, ''); // text nodes only; titles are not visible copy
 
 test('Queries measured closed: visible longest selection, PID, boundary scope', () => {
-    assert.match(render(span), /Longest measured closed backend span: 9\.9 s/);
+    assert.match(render(span), /Longest measured closed backend span: 9\.9s/);
     assert.match(render(span), /PID 661380/);
 });
 test('Queries in flight: observed elapsed even with a completed duration populated', () => {
     const html = render({ ...span, completion: 'in_flight', completed_duration_ms: 555000 });
-    assert.match(html, /Longest observed in-flight backend span: 9\.9 s so far/);
+    assert.match(html, /Longest observed in-flight backend span: 9\.9s so far/);
     assert.doesNotMatch(html, /555\.0|measured closed/);
 });
 test('Queries partial and unavailable remain explicit', () => {
-    assert.match(render({ ...span, measurement: 'partial', completion: 'unknown' }), /Partial.*9\.9 s observed/);
+    assert.match(render({ ...span, measurement: 'partial', completion: 'unknown' }), /Partial.*9\.9s observed/);
     assert.match(render(null), /Backend span unavailable: Not measured/);
 });
 test('Queries span occupies identity cell, never its own column', () => {
@@ -207,4 +207,37 @@ test('failed activity evidence preserves the selected executor and refuses timin
     assert.equal(model.waterfall.hasData, true);
     assert.match(model.context, /Wait evidence unavailable/);
     assert.doesNotMatch(model.context, /occurred before/);
+});
+
+// ── #477: the server already explains why a containing span is unavailable
+// (src/server.c:5845-5849, backend_activity_unavailable_reason) -- the
+// Waterfall context line discarded it, rendering a bare "Not measured" that
+// reads as "this panel is broken" instead of "the span pass refused, for a
+// stated reason". backendSpanEnvelope already extracts the reason
+// (backend-span.js); waterfallContextHtml already destructures the same
+// envelope for `span` -- it just never read `.reason`.
+
+test('#477 waterfall context discloses the server reason when the containing span is unavailable', () => {
+    const html = waterfallContextHtml({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'the backend span pass refused' }, execution, timeline);
+    assert.match(html, /Containing backend activity: Not measured — the backend span pass refused/);
+});
+
+test('#477 negative control: no reason on the payload -> plain "Not measured", no dangling separator', () => {
+    const html = waterfallContextHtml({ backend_activity_span: null }, execution, timeline);
+    assert.match(html, /Containing backend activity: Not measured/);
+    assert.doesNotMatch(html, / — /);
+});
+
+test('#477 a long server reason is clamped, never blows the fixed-height Waterfall fold (#462)', () => {
+    const html = waterfallContextHtml({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'x'.repeat(200) }, execution, timeline);
+    // Bound by exact substring, not a regex up to the next HTML tag -- a
+    // clamp that still terminates only at the next markup boundary (not at
+    // 80 real characters) would pass a tag-bounded check without actually
+    // being bounded in TEXT length, which is what the fixed-height fold
+    // (#462) cares about.
+    assert.ok(html.includes('Not measured — ' + 'x'.repeat(80) + '…'), html);
+    assert.ok(!html.includes('x'.repeat(81)),
+        'the full 200-char reason must not appear unclamped: ' + html);
 });

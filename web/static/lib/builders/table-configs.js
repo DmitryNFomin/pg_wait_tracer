@@ -25,6 +25,18 @@ import { queryBackendSpanHtml, backendSpanEnvelope } from './backend-span.js';
 
 const _dot = (name) => dot(name, classColor);
 
+/* #439-label: "Other (background)" (src/compute.c:1283, the hidden-
+ * Activity parking remainder under Idle) reads as if it contradicts
+ * #453's "background non-idle work IS inside DB Time" (compute.c:745,
+ * PGWT_CAT_BG) -- same English words, two different, unrelated
+ * quantities. Relabeled for clarity; the server's row.name string and
+ * every other consumer of it (filters, drill intents) are UNCHANGED --
+ * this is a display-only remap at render time. */
+function overviewDisplayName(name) {
+    if (name === 'Other (background)') return 'Background idle (parked)';
+    return name;
+}
+
 function fmtSignedMs(ms) {
     if (!Number.isFinite(ms)) return '—';
     if (ms === 0) return fmtMs(0);
@@ -205,8 +217,9 @@ function idleAasCellHtml(aas) {
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
-            if (r.indent >= 1) return _dot(r.name) + esc(r.name);
-            return esc(r.name);
+            const label = overviewDisplayName(r.name);
+            if (r.indent >= 1) return _dot(r.name) + esc(label);
+            return esc(label);
         }},
         { key: 'ms', label: 'Time', cls: 'num', format: (r) => fmtMs(r.ms) },
         { key: 'pct', label: '%DB Time', cls: 'num', format: (r) => {
@@ -455,7 +468,9 @@ export const sessionsConfig = {
         { key: 'type', label: 'Backend', format: (r) => esc(r.type || 'unknown') },
         { key: 'user', label: 'User', format: (r) => esc(r.user || '') },
         { key: 'db', label: 'Database', format: (r) => esc(r.db || '') },
-        { key: 'db_time_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.db_time_ms) },
+        { key: 'db_time_ms', label: 'DB Time', cls: 'num',
+          title: 'non-idle time of this process; background processes included.',
+          format: (r) => fmtMs(r.db_time_ms) },
         // #187: was a hardcoded literal that silently went stale when the
         // owner recoloured 'cpu' (dark green for "running"); classColor('cpu')
         // stays in sync with WAIT_CLASSES by construction.
@@ -544,9 +559,13 @@ export function makeQueriesConfig(fidelity) {
                 r.exec_count != null ? fmtCount(r.exec_count) : '—' },
             { key: 'plan_count', label: 'Plans', cls: 'num', format: (r) =>
                 r.plan_count != null ? fmtCount(r.plan_count) : '—' },
-            { key: 'plan_ratio', label: 'Plan%', cls: 'num', format: (r) =>
-                (r.exec_count > 0 && r.plan_count != null)
-                    ? (r.plan_count / r.exec_count * 100).toFixed(0) + '%' : '—' },
+            { key: 'plan_ratio', label: 'Plan%', cls: 'num', format: (r) => {
+                if (!(r.exec_count > 0 && r.plan_count != null)) return '—';
+                const ratio = (Math.min(r.plan_count, r.exec_count) / r.exec_count * 100).toFixed(0) + '%';
+                return r.plan_count > r.exec_count
+                    ? '<span title="' + esc(r.plan_count + ' plans for executions still in flight') + '">' + ratio + '</span>'
+                    : ratio;
+            } },
             { key: 'avg_exec_ms', label: 'Avg Exec', cls: 'num', format: (r) =>
                 r.avg_exec_ms != null ? fmtMs(r.avg_exec_ms) : '—' },
             { key: 'p95_exec_ms', label: 'p95 Exec', cls: 'num', format: (r) =>

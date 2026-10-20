@@ -315,6 +315,10 @@ export function createActiveView() {
             numCpus: ctx.server.numCpus,
             win: { from: ctx.timeRange.from, to: ctx.timeRange.to },
             escalationStatus: ctx.getEscalationStatus ? ctx.getEscalationStatus() : null,
+            // #472(i): discloses a window that extends before the server's
+            // actual capture start as a "not captured" band, same honesty
+            // rule as the fidelity shading above.
+            captureFromNs: ctx.server.fromNs,
         };
         if (ctx.camera) {
             const q = ctx.camera.quantize(targetBuckets());

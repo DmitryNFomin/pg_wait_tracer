@@ -13,6 +13,7 @@ import { buildTableModel, buildTruncationRow } from '../table.js';
 import { backendSpanEnvelope, backendActivityLine } from './backend-span.js';
 
 export const PLAN_COLOR = '#9b7bd3';
+export const PLAN_LABEL_MIN_WIDTH = 28;
 
 function ns(v) {
     if (v == null || v === '') return null;
@@ -69,6 +70,21 @@ export function fmtExecutionDuration(row, windowTo) {
                 + 'query-end signal.' };
     }
     return { text, tooltip: null };
+}
+
+/* #478-axis (review follow-up): the "Zoomed: X-Y UTC" banner directly
+ * above the x-axis had the SAME hardcoded-1ms bug the axis itself was
+ * just fixed for -- pure so it is unit-testable without the view's DOM/
+ * ECharts machinery, and so the banner's bucket can never drift from the
+ * axis's again (both read model.tickBucketNs, computed once). */
+export function zoomLabelText(currentWindow, model) {
+    if (!currentWindow || (currentWindow.from === model.fullFrom &&
+        currentWindow.to === model.fullTo)) {
+        return 'Full execution';
+    }
+    const bucket = model.tickBucketNs != null ? model.tickBucketNs : 1_000_000;
+    return 'Zoomed: ' + fmtTimeNs(currentWindow.from, bucket) +
+        '–' + fmtTimeNs(currentWindow.to, bucket) + ' UTC';
 }
 
 function durationCellHtml(r) {
@@ -221,7 +237,10 @@ export function waterfallContextHtml(detail, selected, timeline) {
         : relation.length && !relationInBars
             ? 'Lock:relation is not represented by these executor bars; pre-execution timing is not established.'
             : 'Bars show executor phase only; pre-execution wait timing is not established.';
-    const line = span?.measurement === 'partial'
+    const line = !span && envelope.reason
+        ? 'Not measured — ' + (envelope.reason.length > 80
+            ? envelope.reason.slice(0, 80) + '…' : envelope.reason)
+        : span?.measurement === 'partial'
         ? 'Partial · ' + backendActivityLine(span) : backendActivityLine(span);
     // Keep the summary bounded even for a busy backend; preserve the relation
     // thread when present. This is observed evidence, not a dominant-wait rank.
@@ -422,8 +441,8 @@ export function waterfallRenderItem(params, api) {
     const band = api.size([0, 1])[1];
     const kind = api.value(9);
     const color = api.value(10) || '#888';
-    const height = band * (kind === 'plan' ? 0.82 : 0.58);
-    return {
+    const height = band * 0.58;
+    const rect = {
         type: 'rect',
         shape: {
             x: start[0], y: start[1] - height / 2,
@@ -433,6 +452,18 @@ export function waterfallRenderItem(params, api) {
             ? { fill: color, opacity: 0.55, stroke: '#cbb8ef', lineWidth: 1 }
             : { fill: color },
         styleEmphasis: { fill: color, opacity: 0.9, stroke: '#fff', lineWidth: 1 },
+    };
+    if (kind !== 'plan' || rect.shape.width < PLAN_LABEL_MIN_WIDTH) return rect;
+    return {
+        type: 'group',
+        children: [rect, {
+            type: 'text',
+            silent: true,
+            style: {
+                text: 'Plan', x: start[0] + 3, y: start[1],
+                fill: '#e0d8ed', fontSize: 10, verticalAlign: 'middle',
+            },
+        }],
     };
 }
 
@@ -542,6 +573,7 @@ export function buildWaterfallOption(data, opts) {
             windowTo: toNs == null ? null : String(toNs) };
     }
 
+    const tickBucketNs = Math.max(1, Math.round(Number(toNs - fromNs) / 6));
     const option = {
         backgroundColor: 'transparent', animation: false, useUTC: true,
         tooltip: {
@@ -549,11 +581,11 @@ export function buildWaterfallOption(data, opts) {
             textStyle: { color: '#e0e0e0', fontSize: 12 },
             formatter: waterfallTooltipFormatter,
         },
-        grid: { left: 145, right: 24, top: 22, bottom: 44 },
+        grid: { left: 145, right: 64, top: 22, bottom: 44 },
         xAxis: {
             type: 'value', min: axis(fromNs), max: axis(toNs),
             axisLabel: { color: '#888', fontSize: 10,
-                formatter: (v) => fmtTimeNs(origin + BigInt(Math.round(v)), 1_000_000) },
+                formatter: (v) => fmtTimeNs(origin + BigInt(Math.round(v)), tickBucketNs) },
             axisLine: { lineStyle: { color: '#333' } },
         },
         yAxis: {
@@ -568,7 +600,8 @@ export function buildWaterfallOption(data, opts) {
     };
     return {
         option, hasData: true, lanes: labels, bars, fullFrom, fullTo,
-        axisOrigin: String(origin), windowFrom: String(fromNs), windowTo: String(toNs),
+        axisOrigin: String(origin), tickBucketNs,
+        windowFrom: String(fromNs), windowTo: String(toNs),
         chartHeight: Math.max(240, lanes.length * 54 + 100),
         count: keptCount, total_count: totalCount, kept_count: keptCount,
         truncated: !!(data && data.truncated), laneTruncations,

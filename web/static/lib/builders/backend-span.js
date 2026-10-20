@@ -36,7 +36,7 @@
  *     the line because the count happens to be zero.
  */
 
-import { esc } from '../format.js';
+import { esc, fmtMs } from '../format.js';
 
 /* ── The shape the server ACTUALLY sends (integration finding, #455) ────────
  * The two halves of #455 were briefed from the issue text, not from each
@@ -94,11 +94,6 @@ export function backendSpanEnvelope(src) {
     };
 }
 
-function fmtSpanSeconds(ms) {
-    if (ms == null || !Number.isFinite(ms)) return null;
-    return (ms / 1000).toFixed(1) + ' s';
-}
-
 /* Queries selects the longest in-flight span first, then the longest fully
  * measured closed span. Waterfall selects a CONTAINING span: keep this
  * wording local to Queries, never in the shared drill renderer. */
@@ -109,7 +104,7 @@ export function queryBackendSpanLine(span) {
     if (!span || measurement === 'unmeasured') {
         return 'Backend span unavailable: Not measured' + (span ? ' · ' + boundary : '');
     }
-    const elapsed = fmtSpanSeconds(span.observed_elapsed_ms);
+    const elapsed = Number.isFinite(span.observed_elapsed_ms) ? fmtMs(span.observed_elapsed_ms) : null;
     if (measurement === 'partial') {
         return 'Partial backend span (' + boundary + '): ' +
             (elapsed == null ? 'elapsed not measured' : elapsed + ' observed');
@@ -119,7 +114,7 @@ export function queryBackendSpanLine(span) {
             (elapsed == null ? 'elapsed not measured' : elapsed + ' so far');
     }
     if (completion === 'closed') {
-        const duration = fmtSpanSeconds(span.completed_duration_ms);
+        const duration = Number.isFinite(span.completed_duration_ms) ? fmtMs(span.completed_duration_ms) : null;
         return 'Longest measured closed backend span: ' + (duration || 'Not measured');
     }
     return 'Backend span (unknown boundary): ' +
@@ -157,17 +152,17 @@ export function backendActivityLine(span) {
     if (measurement === 'unmeasured') return 'Not measured';
 
     if (completion === 'closed') {
-        const dur = fmtSpanSeconds(span.completed_duration_ms);
+        const dur = Number.isFinite(span.completed_duration_ms) ? fmtMs(span.completed_duration_ms) : null;
         if (dur == null) return 'Not measured';
         return 'Closed · ' + dur;
     }
     if (completion === 'in_flight') {
-        const elapsed = fmtSpanSeconds(span.observed_elapsed_ms);
+        const elapsed = Number.isFinite(span.observed_elapsed_ms) ? fmtMs(span.observed_elapsed_ms) : null;
         return 'In flight' + (elapsed != null ? ' · ' + elapsed + ' observed' : '');
     }
     // completion === 'unknown': we know SOMETHING was measured (measurement
     // is not 'unmeasured' here) but not whether the span closed.
-    const elapsed = fmtSpanSeconds(span.observed_elapsed_ms);
+    const elapsed = Number.isFinite(span.observed_elapsed_ms) ? fmtMs(span.observed_elapsed_ms) : null;
     return 'Not measured' + (elapsed != null ? ' · ' + elapsed + ' observed' : '');
 }
 

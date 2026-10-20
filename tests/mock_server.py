@@ -105,6 +105,18 @@ _EXEC_BASE_NS = _TO_NS - 950_000_000
 _COMPARE_MODE = os.environ.get("PGWT_MOCK_COMPARE", "0") not in ("0", "", "false")
 _INFO_TICKS = 0
 
+# #474: drives a real live-tick clock (like _COMPARE_MODE's) plus a pair of
+# NEAR-TIED top_sessions rows that swap which one leads by +-3% on alternating
+# info ticks -- a deterministic probe for the Sessions hysteresis tracker
+# (lib/table.js createStableOrder) surviving the live refresh loop. #440
+# shipped this hysteresis with no test driving an actual live tick, so a
+# call site resetting the tracker on every tick (because its reset key was
+# the raw, ever-advancing {from,to} window rather than orderResetKey's
+# live-stable key) went undetected: see tests/test_web_ui.py's
+# test_sessions_order_survives_live_near_tie_ticks.
+_NEARTIE_MODE = os.environ.get("PGWT_MOCK_NEARTIE", "0") not in ("0", "", "false")
+_NEARTIE_TICKS = 0
+
 
 def _is_compare_baseline(msg):
     """Test-only discriminator for U4's second use of the SAME commands.
@@ -927,11 +939,14 @@ def handle_request(msg):
 
 def _handle_request_inner(cmd, req_id, msg):
     if cmd == "info":
-        global _INFO_TICKS
+        global _INFO_TICKS, _NEARTIE_TICKS
         resp = {"id": req_id, **_CANNED["info"]}
         if _COMPARE_MODE:
             resp["now_ns"] = _TO_NS + _INFO_TICKS * 30_000_000_000
             _INFO_TICKS += 1
+        if _NEARTIE_MODE:
+            resp["now_ns"] = _TO_NS + _NEARTIE_TICKS * 30_000_000_000
+            _NEARTIE_TICKS += 1
         return resp
 
     if cmd == "aas":
@@ -980,7 +995,27 @@ def _handle_request_inner(cmd, req_id, msg):
                 "rows": rows}
 
     if cmd == "top_sessions":
-        return {"id": req_id, **_CANNED["top_sessions"]}
+        resp = {"id": req_id, **_CANNED["top_sessions"]}
+        if _NEARTIE_MODE:
+            # Two rows (pid 1001, 1002) stay ~3% apart and swap which one
+            # leads by +-3% on alternating ticks -- close enough to flip
+            # rank on a naive re-sort, but within
+            # createStableOrder's STABLE_ORDER_PASS_RATIO (1.05) band, so a
+            # correctly-surviving hysteresis tracker must keep the original
+            # order the WHOLE time. Every other row stays far enough below
+            # (<=2500ms) to never interfere.
+            swing = 0.03 if (_NEARTIE_TICKS % 2 == 0) else -0.03
+            base_a, base_b = 5000.0, 4850.0
+            rows = []
+            for r in resp["rows"]:
+                r = dict(r)
+                if r["pid"] == 1001:
+                    r["db_time_ms"] = round(base_a * (1 + swing), 1)
+                elif r["pid"] == 1002:
+                    r["db_time_ms"] = round(base_b * (1 - swing), 1)
+                rows.append(r)
+            resp = dict(resp, rows=rows)
+        return resp
 
     if cmd == "top_queries":
         return {"id": req_id, **_CANNED["top_queries"]}

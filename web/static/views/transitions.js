@@ -308,6 +308,15 @@ export function createTransitionsView() {
             '<div id="dfg-container" style="width:100%;height:550px;background:#1a1a2e"></div>' +
             '<div id="dfg-variants"></div>';
 
+        const dfgContainer = document.getElementById('dfg-container');
+        if (dfgContainer && typeof dfgContainer.getBoundingClientRect === 'function' &&
+            typeof window !== 'undefined' && Number.isFinite(window.innerHeight) &&
+            window.innerHeight > 0) {
+            const top = dfgContainer.getBoundingClientRect().top;
+            const h = Math.max(100, Math.min(550, window.innerHeight - top - 8));
+            dfgContainer.style.height = h + 'px';
+        }
+
         const slider = document.getElementById('dfg-slider');
         const sliderVal = document.getElementById('dfg-slider-val');
         // P5: rAF-throttled — the old handler ran a full dispose/init/layout

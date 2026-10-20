@@ -827,6 +827,44 @@ def test_transitions_tab(page):
           "Variants section rendered below the DFG after the click")
 
 
+def test_transitions_dfg_fits_demo_viewport(page):
+    """#475-1: the DFG container's own fixed height can push its bottom
+    edge below the pinned demo viewport's fold (1710x981 CSS @ DPR2),
+    independent of whether individual nodes clip INSIDE the container --
+    test_transitions_tab's clip check above measures only that
+    (container-relative pixels via coordinateSystem.dataToPoint()), never
+    whether the container itself fits the PAGE."""
+    print("--- Test #475-1: Transitions DFG fits the demo viewport ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.click("#live-btn")
+        p.wait_for_timeout(300)
+        p.click(".tab[data-tab='transitions']")
+        p.wait_for_selector("#dfg-container", timeout=10000)
+        p.wait_for_timeout(1500)   # let the graph actually render
+
+        geo = p.evaluate("""() => {
+            const el = document.getElementById('dfg-container');
+            const r = el.getBoundingClientRect();
+            return { bottom: r.bottom, innerHeight: window.innerHeight };
+        }""")
+        check(geo["bottom"] <= geo["innerHeight"],
+              f"#475-1: DFG container bottom sits above the fold at 1710x981 ({geo})")
+        assert_no_console_errors(p, guard, "transitions-dfg-fold")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_time_picker(page):
     """13. Time picker opens and quick range buttons work."""
     print("--- Test 13: Time Picker ---")
@@ -2182,6 +2220,19 @@ def test_concurrency_panels_side_by_side(page):
               f"wide viewport: BOTH panel entry points visible without "
               f"scrolling the page ({geo})")
 
+        # #473-5: the chart above the panels used to be a fixed 350px,
+        # leaving too little room for the Peaks panel to show more than a
+        # couple of rows before the fold at this viewport -- at least the
+        # 3rd row must be visible without scrolling the panel's own table.
+        peaks3 = wp.evaluate("""() => {
+            const rows = document.querySelectorAll('#peaks-table tbody tr');
+            if (rows.length < 3) return null;
+            return { bottom: rows[2].getBoundingClientRect().bottom,
+                     innerHeight: window.innerHeight };
+        }""")
+        check(peaks3 is not None and peaks3["bottom"] <= peaks3["innerHeight"],
+              f"#473-5: 3rd #peaks-table row sits above the fold ({peaks3})")
+
         # Each panel is independently scrollable to ITS OWN final row —
         # scrolling one must not be required to move the page.
         reach = wp.evaluate("""() => {
@@ -2818,6 +2869,66 @@ def test_matrix_view(page):
           f"matrix cell drilled the TARGET event id ({filters})")
 
 
+def test_matrix_scatter_notes_never_overlap_their_chart(page):
+    """#475-3 + #476: .chart-notes used to be position:absolute over the
+    chart host (style.css .scatter-shell/.matrix-shell > .chart-notes), so
+    a longer note (more transitions dropped, more excluded points) could
+    grow to cover chart content -- a note resizing the READING of the
+    chart even though it never resizes the chart's own fixed-height host
+    (#171). Notes now render BELOW the chart host in DOM order with no
+    absolute positioning; this pins actual disjoint bounding boxes on both
+    tabs that produce real note text (matrix: server link cap; scatter: one
+    excluded in-progress point), at the pinned demo viewport."""
+    print("--- Test #475-3/#476: chart notes never overlap their chart ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+
+    def disjoint(notes_id, chart_id):
+        geo = p.evaluate("""([notesId, chartId]) => {
+            const n = document.getElementById(notesId);
+            const c = document.getElementById(chartId);
+            if (!n || !c) return null;
+            const nr = n.getBoundingClientRect(), cr = c.getBoundingClientRect();
+            const overlap = !(nr.right <= cr.left || cr.right <= nr.left ||
+                nr.bottom <= cr.top || cr.bottom <= nr.top);
+            return { notes: [nr.left, nr.top, nr.right, nr.bottom],
+                     chart: [cr.left, cr.top, cr.right, cr.bottom], overlap,
+                     notesText: n.textContent.trim() };
+        }""", [notes_id, chart_id])
+        return geo
+
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.click("#live-btn")
+        p.wait_for_timeout(300)
+
+        p.click(".tab[data-tab='matrix']")
+        p.wait_for_selector("#matrix-chart canvas", timeout=10000)
+        p.wait_for_timeout(700)
+        mgeo = disjoint("matrix-notes", "matrix-chart")
+        check(mgeo is not None and mgeo["notesText"] != "" and not mgeo["overlap"],
+              f"#475-3/#476: matrix notes bbox does not overlap the chart bbox ({mgeo})")
+
+        p.click(".tab[data-tab='scatter']")
+        p.wait_for_selector("#scatter-chart canvas", timeout=10000)
+        p.wait_for_timeout(700)
+        sgeo = disjoint("scatter-notes", "scatter-chart")
+        check(sgeo is not None and sgeo["notesText"] != "" and not sgeo["overlap"],
+              f"#475-3/#476: scatter notes bbox does not overlap the chart bbox ({sgeo})")
+
+        assert_no_console_errors(p, guard, "matrix-scatter-notes-overlap")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_chart_views_update_in_place_on_tick(page):
     """#171: scatter/matrix/waterfall must update their EXISTING ECharts
     instance on a live tick, not tear the panel's host div down and rebuild
@@ -3437,6 +3548,8 @@ B5_PORT = MOCK_PORT + 10
 B5_URL = app_url(B5_PORT)
 COMPARE_PORT = MOCK_PORT + 20
 COMPARE_URL = app_url(COMPARE_PORT)
+NEARTIE_PORT = MOCK_PORT + 30
+NEARTIE_URL = app_url(NEARTIE_PORT)
 
 
 def test_b5_sampled_shading(page):
@@ -3810,6 +3923,71 @@ def test_compare_echarts_renderer_note(page):
           "ECharts still renders investigation window A")
 
 
+# ── #474: live-tick refresh must not defeat the Sessions hysteresis ──────────
+# Runs against a THIRD mock (PGWT_MOCK_NEARTIE=1): two top_sessions rows
+# (pid 1001, 1002) start ~3% apart and swap which one leads by +-3% on
+# alternating live-info ticks -- close enough to flip a naive re-sort, but
+# inside createStableOrder's pass-ratio band, so a correctly surviving
+# hysteresis tracker renders the SAME row order throughout. #440 added that
+# hysteresis with no test driving an actual live tick; every call site fed
+# the reset gate the raw, ever-advancing {from,to} window, so a live tick
+# reset the tracker every 5s and this defect was invisible until now.
+
+def test_sessions_order_survives_live_near_tie_ticks(page):
+    """#474: Sessions row order survives near-tie live ticks unchanged.
+
+    The FIRST live tick is excluded from the comparison on purpose: entering
+    live mode is itself a real window-shape transition (the reset key's
+    pre-live form is the raw {from,to} window; its in-live form is
+    {live,spanSecs} -- see orderResetKey), so a reset on that one transition
+    is expected and correct, exactly like #440's unit-level gate tests only
+    ever compare LIVE tick to LIVE tick, never pre-live to live. The
+    regression this guards is a reset on every SUBSEQUENT tick while
+    already live, which is what a raw {from,to} reset key (the pre-#474
+    bug) produces, since both edges advance every tick.
+    """
+    print("--- Test #474: Sessions order survives live near-tie ticks ---")
+    page.goto(NEARTIE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='sessions']")
+    page.wait_for_selector("table tbody tr", timeout=10000)
+
+    def pid_order():
+        return page.eval_on_selector_all(
+            "table tbody tr td:first-child",
+            "els => els.map(e => e.textContent.trim())")
+
+    order0 = pid_order()
+    check("1001" in order0 and "1002" in order0,
+          f"near-tie rows present before any live tick ({order0})")
+
+    # Each live tick advances window.__pgwt.timeRange.to (app.js
+    # anchorLive); wait on that instead of a fixed sleep (deterministic,
+    # no retries). 300ms settle after each tick lets the tick-triggered
+    # table refresh (async fetch + repaint) land before reading the DOM.
+    def wait_for_next_tick(prev_to):
+        page.wait_for_function(
+            "prev => window.__pgwt.timeRange.to > prev", arg=prev_to, timeout=20000)
+        page.wait_for_timeout(300)
+        return page.evaluate("window.__pgwt.timeRange.to")
+
+    # Capture EVERY tick's order, not just the first and last: the +-3%
+    # swing alternates sign every tick, so a bug that resets (and re-sorts
+    # by raw value) on every tick only flips the row order on an ODD number
+    # of elapsed ticks -- comparing tick 1 to tick 3 (2 apart, same parity)
+    # would miss it entirely. Comparing every adjacent pair catches a flip
+    # regardless of parity.
+    to = page.evaluate("window.__pgwt.timeRange.to")
+    to = wait_for_next_tick(to)   # tick 1: entering live mode, may reset once
+    order1 = pid_order()
+    to = wait_for_next_tick(to)   # tick 2: must NOT reset
+    order2 = pid_order()
+    to = wait_for_next_tick(to)   # tick 3: must NOT reset
+    order3 = pid_order()
+    check(order1 == order2 == order3,
+          f"row order stable across live ticks 1,2,3 ({order1}, {order2}, {order3})")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -3851,6 +4029,7 @@ def main():
                 test_histogram_tab,
                 test_timeline_tab,
                 test_transitions_tab,
+                test_transitions_dfg_fits_demo_viewport,
                 test_time_picker,
                 test_zoom_out,
                 test_auto_refresh,
@@ -3898,6 +4077,7 @@ def main():
                 test_query_to_waterfall_pivot,
                 test_scatter_view,
                 test_matrix_view,
+                test_matrix_scatter_notes_never_overlap_their_chart,
                 test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
             ]
@@ -3967,6 +4147,27 @@ def main():
             finally:
                 set_failure_capture(page, guard)
                 stop_mock_server(compare_proc)
+
+            # #474 near-tie mock: a THIRD mock with a live clock + two
+            # near-tied top_sessions rows that swap lead by +-3% per tick,
+            # in its own browser context (own WS-port redirect) so it never
+            # disturbs the primary suite's live mode.
+            neartie_proc = start_mock_server(
+                extra_env={"PGWT_MOCK_NEARTIE": "1"}, port=NEARTIE_PORT)
+            try:
+                neartie_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+                neartie_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+                neartie_page = neartie_ctx.new_page()
+                neartie_guard = ConsoleErrorGuard(neartie_page)
+                set_failure_capture(neartie_page, neartie_guard)
+                test_sessions_order_survives_live_near_tie_ticks(neartie_page)
+                assert_no_console_errors(
+                    neartie_page, neartie_guard,
+                    "test_sessions_order_survives_live_near_tie_ticks")
+                neartie_ctx.close()
+            finally:
+                set_failure_capture(page, guard)
+                stop_mock_server(neartie_proc)
 
             # Reconnection test (kills/restarts mock server) — connection
             # failures during the outage are expected, everything else fails.

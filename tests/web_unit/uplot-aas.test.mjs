@@ -32,6 +32,7 @@ import {
     buildUplotSpec, stackSeries, hitTest, overlayGeometry, buildCompareGeometry,
     diffStripLayout, diffStripXPosition, diffStripVisibleMax,
     utcTzDate, withAlpha, AREA_FILL_ALPHA, NCPUS_COLOR,
+    NOT_CAPTURED_BAND_COLOR, NOT_CAPTURED_BORDER, ncpusLabelRect,
 } from '../../web/static/lib/uplot-aas.js';
 import {
     buildAasOption, AAS_ANNOTATION_SERIES,
@@ -608,6 +609,31 @@ test('exact window: no fidelity rects; N-CPUs hline iff numCpus > 0', () => {
     assert.deepEqual(noCpus.hlines, []);
 });
 
+// ── #472(i): the AAS pane must disclose a window that extends before the
+// server's actual capture start -- a "not captured" rect for
+// [win.from, captureFromNs), painted like Histogram/Concurrency's existing
+// "Not captured" band (same gray, same dashed border), not a metric change:
+// nothing here alters a number, only what gets drawn over the honest gap.
+
+test('#472(i) notcaptured rect: window extends before server.fromNs (captureFromNs)', () => {
+    const data = { bucket_ns: 1e9, max_aas: 1, fidelity: 'exact', buckets: classBuckets(2) };
+    const win = { from: 2e15, to: 3e15 };
+    const geo = overlayGeometry(data, { numCpus: 0, win, captureFromNs: 2.3e15 }, null);
+    assert.equal(geo.rects.length, 1);
+    assert.deepEqual(geo.rects[0], {
+        kind: 'notcaptured', x0: 2e9, x1: 2.3e9,
+        fill: NOT_CAPTURED_BAND_COLOR, stroke: NOT_CAPTURED_BORDER, dash: [4, 4],
+    });
+});
+
+test('#472(i) negative control: captureFromNs at or before win.from draws nothing', () => {
+    const data = { bucket_ns: 1e9, max_aas: 1, fidelity: 'exact', buckets: classBuckets(2) };
+    const win = { from: 2e15, to: 3e15 };
+    assert.deepEqual(overlayGeometry(data, { numCpus: 0, win, captureFromNs: 2e15 }, null).rects, []);
+    assert.deepEqual(overlayGeometry(data, { numCpus: 0, win, captureFromNs: 1.5e15 }, null).rects, []);
+    assert.deepEqual(overlayGeometry(data, { numCpus: 0, win }, null).rects, []);
+});
+
 /* U2 (review P7): with the CURRENT y scale top supplied (scaleWindow.yMax —
  * the view passes u.scales.y.max, i.e. the hysteresis-applied top), an
  * N-CPUs reference ABOVE it becomes the explicit 'ncpus-offscale' top-edge
@@ -751,4 +777,34 @@ test('overlayGeometry marks viewport-clamped rect sides (F3)', () => {
     const half = overlayGeometry(data, opts, { min: 2.2e9, max: 8e9 });
     assert.equal(half.rects[0].clampedLeft, true);
     assert.equal(half.rects[0].clampedRight, false);
+});
+
+// ── #473-1: the "N CPUs" reference-line chip must never collide with the
+// top-right annotation space -- painted flush against the right plot edge,
+// it can land under/over whatever else occupies the top-right corner
+// (the live escalation-edge label, drawn by a SEPARATE loop over `vlines`,
+// routinely sits there too). ncpusLabelRect is kind-aware ON PURPOSE: only
+// `kind: 'ncpus'` moves to the left edge. `kind: 'ncpus-offscale'` (the P7
+// top-edge affordance for a reference line above the current y-scale) KEEPS
+// its existing right-aligned position -- it is a distinct affordance this
+// defect is not about, and moving it was never asked for.
+
+const BOX = { left: 50, top: 10, width: 400, dpr: 1 };
+
+test('#473-1 ncpusLabelRect: kind "ncpus" sits at the LEFT edge, never intersecting a top-right annotation rect', () => {
+    const r = ncpusLabelRect({ kind: 'ncpus' }, BOX, BOX.top, 40, 2);
+    assert.equal(r.x, BOX.left + 2);
+    // A stand-in top-right annotation chip (e.g. the escalation-edge label
+    // or a fidelity badge), flush right at the top of the plot.
+    const topRight = { x: BOX.left + BOX.width - 60, y: BOX.top, w: 60, h: 14 };
+    const noOverlap = r.x + r.w <= topRight.x || topRight.x + topRight.w <= r.x ||
+        r.y + r.h <= topRight.y || topRight.y + topRight.h <= r.y;
+    assert.ok(noOverlap, 'ncpus label rect ' + JSON.stringify(r) +
+        ' must not intersect the top-right annotation ' + JSON.stringify(topRight));
+});
+
+test('#473-1 ncpusLabelRect: kind "ncpus-offscale" is UNCHANGED (still right-aligned)', () => {
+    const r = ncpusLabelRect({ kind: 'ncpus-offscale' }, BOX, BOX.top, 40, 2);
+    const w = 40 + 2 * 2;
+    assert.equal(r.x, BOX.left + BOX.width - w);
 });

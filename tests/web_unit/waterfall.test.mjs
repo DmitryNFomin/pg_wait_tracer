@@ -8,7 +8,7 @@ import {
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     fmtExecutionDuration, executionsCountsLabel,
     executionsStatusLabel, executionsHasInferredEnd,
-    execScopeNoteHtml, EXEC_SCOPE_NOTE_TEXT,
+    execScopeNoteHtml, EXEC_SCOPE_NOTE_TEXT, zoomLabelText,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -95,6 +95,103 @@ test('UTC x-axis formatter and animation/clip pins', () => {
         fmtTimeNs(String(START), 1_000_000));
 });
 
+// ── #478-axis: zoomed into a sub-millisecond execution, the x-axis must not
+// repeat the same label -- the formatter hardcoded millisecond precision
+// (fmtTimeNs(..., 1_000_000)) regardless of how fine the visible span
+// actually is. fmtTimeNs already emits microsecond (6-digit) precision when
+// handed a bucket under 1ms (format.js); the fix passes the REAL tick span
+// instead of the hardcoded constant.
+
+function tinyDetail() {
+    return {
+        query_id: '42',
+        leader: { pid: 1000, total_count: 1, truncated: false, events: [
+            { we: 0, name: 'CPU*', start_ns: at(0), dur_ns: '1000000', cpu_ns: '1000000' },
+        ]},
+        workers: [],
+    };
+}
+
+test('#478-axis: a 1ms span across 6 ticks produces 6 DISTINCT labels', () => {
+    const m = buildWaterfallOption(tinyDetail(), {
+        executionStart: String(START), executionEnd: at(1_000_000),
+    });
+    const ticks = [0, 200000, 400000, 600000, 800000, 1000000];
+    const labels = ticks.map(v => m.option.xAxis.axisLabel.formatter(v));
+    assert.equal(new Set(labels).size, 6, labels.join(', '));
+});
+
+test('#478-axis negative control: restoring hardcoded millisecond precision '
+    + 'collapses the same 6 ticks into fewer distinct labels', () => {
+    const ticks = [0, 200000, 400000, 600000, 800000, 1000000];
+    const naive = ticks.map(v => fmtTimeNs(String(START + BigInt(v)), 1_000_000));
+    assert.ok(new Set(naive).size < 6, naive.join(', '));
+});
+
+// ── #478-axis (review follow-up): the "Zoomed: X-Y UTC" banner directly
+// above the x-axis had the SAME hardcoded-1ms bug the axis itself just had
+// fixed -- a sub-millisecond zoom showed two IDENTICAL timestamps. The
+// model's own tickBucketNs (same value the axis formatter now uses) is
+// reused here rather than invented separately, so the two can never drift
+// apart again.
+
+test('#478-axis zoomLabelText: a sub-millisecond zoom shows two DISTINCT timestamps', () => {
+    // WITHIN a single whole millisecond (2.100ms-2.600ms) on purpose -- a
+    // window straddling a millisecond boundary would show distinct values
+    // even under the OLD hardcoded 1ms bucket by sheer luck of landing on
+    // opposite sides of the boundary, which would make this assertion
+    // pass whether or not the fix (reusing model.tickBucketNs) is wired
+    // in at all. See the negative control below for the direct comparison.
+    const zoomed = buildWaterfallOption(detail(), {
+        from: at(2_100_000), to: at(2_600_000),
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const currentWindow = { from: zoomed.windowFrom, to: zoomed.windowTo };
+    const text = zoomLabelText(currentWindow, zoomed);
+    assert.ok(text.startsWith('Zoomed: ') && text.endsWith(' UTC'), text);
+    const [from, to] = text.slice('Zoomed: '.length, -' UTC'.length).split('–');
+    assert.notEqual(from, to, text);
+});
+
+test('#478-axis negative control: the OLD hardcoded-1ms bucket collapses the '
+    + 'same sub-millisecond zoom to two IDENTICAL timestamps', () => {
+    // Deliberately WITHIN a single whole millisecond (2.100ms-2.600ms, a
+    // 500us span) -- a window straddling a millisecond boundary (like the
+    // positive test's 2.000ms-3.000ms) would show distinct values even
+    // under the OLD 3-digit-precision bucket by sheer luck of landing on
+    // opposite sides of the boundary, which would make this negative
+    // control pass for the wrong reason.
+    const zoomed = buildWaterfallOption(detail(), {
+        from: at(2_100_000), to: at(2_600_000),
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const naiveFrom = fmtTimeNs(zoomed.windowFrom, 1_000_000);
+    const naiveTo = fmtTimeNs(zoomed.windowTo, 1_000_000);
+    assert.equal(naiveFrom, naiveTo, naiveFrom + ' vs ' + naiveTo);
+});
+
+test('#478-axis zoomLabelText: unchanged "Full execution" when the window equals the full extent', () => {
+    const full = buildWaterfallOption(detail(), { executionStart: String(START),
+        executionEnd: at(20_000_000) });
+    const currentWindow = { from: full.windowFrom, to: full.windowTo };
+    assert.equal(zoomLabelText(currentWindow, full), 'Full execution');
+    assert.equal(zoomLabelText(null, full), 'Full execution');
+});
+
+// ── #473-4: the right-most x-axis tick ("to" the full window end, the
+// widest label when fine precision applies after #478-axis) clipped
+// against the chart's own right edge -- a WIDTH-only fix (grid.right),
+// #462's fixed-height fold budget is untouched by a grid margin.
+
+test('#473-4 grid.right gives the right-edge tick label enough room (width-only; height unchanged)', () => {
+    const m = buildWaterfallOption(detail(), { executionStart: String(START),
+        executionEnd: at(20_000_000) });
+    assert.equal(m.option.grid.right, 64);
+    assert.equal(m.option.grid.left, 145);
+    assert.equal(m.option.grid.top, 22);
+    assert.equal(m.option.grid.bottom, 44);
+});
+
 test('renderItem gives micro bars a visible 1px width', () => {
     const tuple = [10, 10, 0, 'CPU*', 0, '10', '0', null, 1, 'event', '#abc'];
     const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
@@ -102,6 +199,80 @@ test('renderItem gives micro bars a visible 1px width', () => {
     assert.equal(shape.shape.width, 1);
     assert.equal(shape.shape.height, 11.6);
     assert.equal(shape.style.fill, '#abc');
+});
+
+// ── #478-planmarker: the Plan phase band must never overflow into the
+// event band it shares a lane/y-position with (the pre-fix 0.82 vs 0.58
+// height factors made it visibly spill over the CPU segment it sits next
+// to), and an unlabeled coloured rectangle communicates nothing on its
+// own -- it needs an on-screen "Plan" label when there is room for one.
+//
+// Data-honesty note (verified against the retained counted1 trace,
+// pgwt-server built from b7228ea, 48 executions / 0 overlaps / typical
+// ~5us plan-to-exec gap): plan_end_ns <= exec_start_ns always holds. The
+// geometry test below pins that the DRAWN plan bar never extends past
+// either the executor interval's own start OR the first drawn event --
+// this is presentation work confirming an already-honest relationship,
+// not a data-bug workaround.
+
+test('#478-planmarker: Plan band height no longer exceeds the event band height', () => {
+    const api = (tuple) => ({ value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] });
+    const planShape = waterfallRenderItem({}, api([10, 50, 0, 'Plan phase', null, '10', '40', null, 1, 'plan', PLAN_COLOR]));
+    const eventShape = waterfallRenderItem({}, api([10, 50, 0, 'CPU*', 0, '10', '40', null, 1, 'event', '#abc']));
+    const planRect = planShape.type === 'group' ? planShape.children.find(c => c.type === 'rect') : planShape;
+    assert.ok(planRect.shape.height <= eventShape.shape.height,
+        'plan height (' + planRect.shape.height + ') must not exceed event height (' + eventShape.shape.height + ')');
+});
+
+test('#478-planmarker: a wide Plan bar renders a visible on-screen "Plan" label, not a bare overlay', () => {
+    const tuple = [10, 200, 0, 'Plan phase', null, '10', '40', null, 1, 'plan', PLAN_COLOR];
+    const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
+    const shape = waterfallRenderItem({}, api);
+    assert.equal(shape.type, 'group', 'a labeled plan item is a group (rect + text), not a bare rect');
+    const text = shape.children.find(c => c.type === 'text');
+    assert.ok(text, 'a labeled group must contain a text child');
+    assert.match(text.style.text, /Plan/i);
+    const rect = shape.children.find(c => c.type === 'rect');
+    assert.ok(rect, 'the rect is still present alongside the label');
+});
+
+test('#478-planmarker: a too-narrow Plan bar skips the label rather than overflowing its own sliver', () => {
+    const tuple = [10, 15, 0, 'Plan phase', null, '10', '1', null, 1, 'plan', PLAN_COLOR];
+    const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
+    const shape = waterfallRenderItem({}, api);
+    assert.equal(shape.type, 'rect', 'too narrow for a label: falls back to the bare rect');
+});
+
+test('#478-planmarker: event bars are completely unaffected (still a bare rect, same style/height)', () => {
+    const tuple = [10, 200, 0, 'CPU*', 0, '10', '190', null, 1, 'event', '#abc'];
+    const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
+    const shape = waterfallRenderItem({}, api);
+    assert.equal(shape.type, 'rect');
+    assert.equal(shape.style.fill, '#abc');
+});
+
+test('#478-planmarker: the drawn Plan bar never extends past the executor interval start or the first drawn event', () => {
+    const m = buildWaterfallOption(detail(), {
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const plan = m.bars.find(b => b[9] === 'plan');
+    const firstEvent = m.bars.filter(b => b[9] === 'event').sort((a, b) => a[0] - b[0])[0];
+    const execStartAxis = Number(BigInt(String(START)) - BigInt(m.fullFrom));
+    assert.ok(plan[1] <= execStartAxis,
+        'plan end (' + plan[1] + ') must not extend past the executor interval start (' + execStartAxis + ')');
+    assert.ok(plan[1] <= firstEvent[0],
+        'plan end (' + plan[1] + ') must not extend past the first drawn event (' + firstEvent[0] + ')');
+});
+
+test('#478-planmarker negative control: a plan.end_ns pushed past exec start IS caught by the geometry gate', () => {
+    const badDetail = { ...detail(), plan: { start_ns: at(-4_000_000), end_ns: at(5_000_000) } };
+    const m = buildWaterfallOption(badDetail, {
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const plan = m.bars.find(b => b[9] === 'plan');
+    const execStartAxis = Number(BigInt(String(START)) - BigInt(m.fullFrom));
+    assert.ok(plan[1] > execStartAxis,
+        'sanity: this fixture DOES push plan past exec start, proving the gate above can fail');
 });
 
 test('honest payload counts and per-lane truncation are carried without invention', () => {
@@ -399,7 +570,7 @@ test('#455 gate 1: Waterfall mounts the selected leader null reason and scope', 
 });
 test('#455 gates 2/3: Waterfall span survives zero executions/events and shows observed elapsed only', () => {
     const html = mountSpan455({ backend_activity_span: wfSpan455 });
-    for (const text of ['PID 1234', '0 observed executions', '714.0 s observed',
+    for (const text of ['PID 1234', '0 observed executions', '714.0s observed',
         'Measurement: Partial', 'Backend activity boundary: In flight']) assert.ok(html.includes(text), html);
     assert.doesNotMatch(html, /1000.0|999999|Closed/);
 });

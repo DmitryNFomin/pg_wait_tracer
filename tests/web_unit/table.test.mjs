@@ -13,11 +13,12 @@ import {
     buildTableModel, buildTruncationRow, buildBarSegments,
     stackedBar, eventStackedBar, createStableOrder, STABLE_ORDER_PASS_RATIO,
     BAR_MIN_SEG_PCT, BAR_BELOW_COLOR, BAR_OTHER_COLOR,
+    createOrderResetGate, orderResetKey,
 } from '../../web/static/lib/table.js';
 import {
     overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
     PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, queriesConfig, makeQueriesConfig,
-    buildUnattributedNote, unattributedNoteHtml, createOverviewOrder,
+    buildUnattributedNote, unattributedNoteHtml, createOverviewOrder, sessionsConfig,
 } from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
 import { WAIT_CLASSES, classColor, eventColor, fmtMs, fmtUs } from '../../web/static/lib/format.js';
@@ -513,6 +514,34 @@ test('buildSummary: empty data -> empty metrics', () => {
     assert.deepEqual(buildSummary({ rows: [] }, 4), []);
 });
 
+// ── #472(ii): AAS discloses a window mostly before capture started ─────────
+// Disclosure only -- the AAS NUMBER itself (dbRow.aas, computed server-side
+// over whatever was actually captured) is UNCHANGED; this only appends a
+// visible note when the window the user asked for is mostly uncaptured, so
+// a low/zero AAS does not read as "the database was idle" when it actually
+// reads "there is almost no data here yet".
+
+test('#472(ii) buildSummary: captured < 90% of window appends a disclosure to AAS', () => {
+    const data = { rows: [{ indent: 0, name: 'DB Time', ms: 12500, aas: 3.47 }] };
+    // 900s window, capture only started 35s before the window's end.
+    const window = { from: 0, to: 900e9, captureFromNs: 865e9 };
+    const s = buildSummary(data, 4, window);
+    assert.equal(s.find(m => m.label === 'AAS').value, '3.47 · captured 35s of 900s');
+});
+
+test('#472(ii) buildSummary: captured >= 90% of window -> no disclosure suffix', () => {
+    const data = { rows: [{ indent: 0, name: 'DB Time', ms: 1000, aas: 1.0 }] };
+    // 900s window, captured the last 850s (94.4%) -- comfortably above 90%.
+    const window = { from: 0, to: 900e9, captureFromNs: 50e9 };
+    const s = buildSummary(data, 4, window);
+    assert.equal(s.find(m => m.label === 'AAS').value, '1.00');
+});
+
+test('#472(ii) buildSummary: no window argument is unchanged (back-compat)', () => {
+    const data = { rows: [{ indent: 0, name: 'DB Time', ms: 1000, aas: 1.0 }] };
+    assert.equal(buildSummary(data, 4).find(m => m.label === 'AAS').value, '1.00');
+});
+
 // ── U2 review P11: stacked-bar truth ────────────────────────────────────────
 
 test('bar segments: below-threshold and other are SEPARATE labeled facts', () => {
@@ -931,6 +960,40 @@ test('#439 Queries pct column is labeled "% attributed DB Time", not "%DB"', () 
     assert.ok(!headerLabels.includes('%DB'), headerLabels.join(', '));
 });
 
+// ── #439-label: "Other (background)" is NOT a contradiction of #453's
+// "excluded from DB Time" rule -- compute.c:745 classifies background
+// non-idle work as PGWT_CAT_BG (genuinely inside DB Time), while this row
+// is the UNRELATED hidden-Activity parking remainder under Idle
+// (PGWT_PCT_DB_IDLE, compute.c:1283). Same English words, two different
+// quantities -- the label is what is misleading, not the semantics. Fixed
+// by relabeling only; no src/ change, no wire field renamed.
+
+test('#439-label Overview renders "Other (background)" as "Background idle (parked)"', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 0, name: 'Idle', ms: 3000, pct: null, aas: null },
+        { indent: 2, name: 'Other (background)', ms: 1476, pct: null, aas: 4.10 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const html = model.rows[2].cells[0].html;
+    assert.ok(html.includes('Background idle (parked)'), html);
+    assert.ok(!html.includes('Other (background)'), html);
+});
+
+test('#439-label Sessions DB Time header discloses background processes are included', () => {
+    const headerCol = sessionsConfig.columns.find(c => c.key === 'db_time_ms');
+    assert.equal(headerCol.label, 'DB Time');
+    assert.ok(headerCol.title && headerCol.title.length > 0, headerCol.title);
+    assert.ok(headerCol.title.includes('non-idle time of this process'), headerCol.title);
+    assert.ok(headerCol.title.includes('background processes included'), headerCol.title);
+    // The header model (what mountTable actually paints into <th title="...">)
+    // must carry it through -- a column-config-only title that buildTableModel
+    // drops would never reach the DOM.
+    const model = buildTableModel(sessionsConfig, [{ pid: 1, db_time_ms: 100 }], null);
+    const header = model.headers.find(h => h.key === 'db_time_ms');
+    assert.equal(header.title, headerCol.title);
+});
+
 test('buildUnattributedNote: discloses the excluded time, pct and occurrence count', () => {
     const note = buildUnattributedNote({
         db_time_ms: 9500, unattributed_available: true,
@@ -1000,4 +1063,90 @@ test('#441 sampled/mixed fidelity: "Observations"; Avg interval is unavailable, 
 test('#441 default queriesConfig export stays the exact-tier shape (gallery/back-compat)', () => {
     const countCol = queriesConfig.columns.find(c => c.key === 'count');
     assert.equal(countCol.label, 'Wait/CPU intervals');
+});
+
+// ── #471: Plan% must never exceed 100% -- a query with more plan events ──
+// than executions (a plan was recorded for an execution still in flight,
+// not yet counted as a completed exec) is a real, expected state, not a
+// data error; the ratio is clamped at the natural ceiling (every execution
+// has at most one plan counted against it) and the overflow is disclosed
+// via title text rather than a misleading ">100%" style number.
+
+test('#471 Plan% caps at 100% (never 200%) when plan_count > exec_count, and discloses why', () => {
+    const cfg = makeQueriesConfig('exact');
+    const planRatioCol = cfg.columns.find(c => c.key === 'plan_ratio');
+    const html = planRatioCol.format({ exec_count: 1, plan_count: 2 });
+    assert.ok(html.includes('100%'), html);
+    assert.ok(!html.includes('200%'), html);
+    assert.ok(html.includes('2 plans for executions still in flight'), html);
+});
+
+test('#471 Plan% normal case (plan_count <= exec_count) is the plain ratio, no overflow note', () => {
+    const cfg = makeQueriesConfig('exact');
+    const planRatioCol = cfg.columns.find(c => c.key === 'plan_ratio');
+    assert.equal(planRatioCol.format({ exec_count: 10, plan_count: 5 }), '50%');
+});
+
+test('#471 Plans column keeps the RAW uncapped count even when plan_count > exec_count', () => {
+    const cfg = makeQueriesConfig('exact');
+    const plansCol = cfg.columns.find(c => c.key === 'plan_count');
+    assert.equal(plansCol.format({ plan_count: 2, exec_count: 1 }), '2');
+});
+
+// ── #474: the live-tick refresh loop must not defeat its own hysteresis ──
+//
+// #440 added createStableOrder's near-tie hysteresis plus createOrderResetGate
+// to reset it on a REAL window/filter change. But every call site fed the
+// gate raw {from, to} -- and in live mode `to` (and `from`) advance on EVERY
+// 5s refresh tick, so the gate's key changed every tick and reset() fired
+// every tick, silently defeating the hysteresis it was supposed to apply.
+// #440 shipped with no test exercising a live tick, so this regression was
+// invisible on the unit suite (static {from,to} inputs never "tick").
+// orderResetKey(ctx) is the fix's pure key function: during a live tick
+// (ctx.isLiveTick()) the key is {live:true, spanSecs} -- stable while the
+// live window just slides forward -- and only the SPAN (not the absolute
+// edges) changing, or leaving live mode, produces a new key.
+
+function fakeLiveCtx(from, to, liveRangeSecs) {
+    return { isLiveTick: () => true, timeRange: { from, to, liveRangeSecs } };
+}
+function fakeStaticCtx(from, to) {
+    return { isLiveTick: () => false, timeRange: { from, to, liveRangeSecs: 900 } };
+}
+
+test('#474 orderResetKey: a live tick advancing from/to keeps the SAME key (span unchanged)', () => {
+    const k1 = orderResetKey(fakeLiveCtx(100, 1000, 900));
+    const k2 = orderResetKey(fakeLiveCtx(130, 1030, 900));
+    assert.deepEqual(k1, k2, 'advancing from/to on a live tick must not change the reset key');
+});
+
+test('#474 orderResetKey: a span change produces a DIFFERENT key even during a live tick', () => {
+    const k1 = orderResetKey(fakeLiveCtx(100, 1000, 900));
+    const k2 = orderResetKey(fakeLiveCtx(100, 1000, 300));
+    assert.notDeepEqual(k1, k2, 'a real span change must still change the reset key');
+});
+
+test('#474 orderResetKey: outside a live tick, the key is the raw window (explicit navigation resets)', () => {
+    const k1 = orderResetKey(fakeStaticCtx(100, 1000));
+    const k2 = orderResetKey(fakeStaticCtx(200, 1100));
+    assert.notDeepEqual(k1, k2, 'a non-live window change must reset (unchanged pre-#474 behavior)');
+});
+
+test('#474 createOrderResetGate + orderResetKey: live ticks do not reset order; a real span change does', () => {
+    const resetIfChanged = createOrderResetGate();
+    let resets = 0;
+    const tracker = { reset: () => { resets++; } };
+    const filters = 'f1';
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(100, 1000, 900)), filters });
+    assert.equal(resets, 1, 'first call always establishes the baseline key');
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(130, 1030, 900)), filters });
+    assert.equal(resets, 1, 'advancing from/to on a live tick must not reset');
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(160, 1060, 900)), filters });
+    assert.equal(resets, 1, 'a second live tick still must not reset');
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(160, 1060, 300)), filters });
+    assert.equal(resets, 2, 'a real span change must reset');
 });

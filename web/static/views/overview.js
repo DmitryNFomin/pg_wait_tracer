@@ -9,7 +9,7 @@
  * config and turned into navigation by the shared onRowClick wiring.
  */
 
-import { buildTableModel, buildTruncationRow } from '../lib/table.js';
+import { buildTableModel, buildTruncationRow, orderResetKey } from '../lib/table.js';
 import {
     overviewConfig, compareOverviewConfig, createOverviewOrder,
 } from '../lib/builders/table-configs.js';
@@ -24,14 +24,23 @@ import {
 import { fmtMs, fmtAas } from '../lib/format.js';
 
 /* PURE: time_model response -> summary metrics array. Exported for testing. */
-export function buildSummary(data, numCpus) {
+export function buildSummary(data, numCpus, window) {
     if (!data || !data.rows || data.rows.length === 0) return [];
     const dbRow = data.rows[0];  // "DB Time" always first
     const idleRow = data.rows.find(r => r.indent === 0 && r.name.indexOf('Idle') >= 0);
 
     const out = [{ label: 'DB Time', value: fmtMs(dbRow.ms) }];
     if (data.wall_ms) out.push({ label: 'Wall', value: fmtMs(data.wall_ms) });
-    out.push({ label: 'AAS', value: fmtAas(dbRow.aas) });
+    let aas = fmtAas(dbRow.aas);
+    if (window && window.captureFromNs != null) {
+        const windowSpan = window.to - window.from;
+        const capturedSpan = Math.max(0, window.to - Math.max(window.from, window.captureFromNs));
+        if (windowSpan > 0 && capturedSpan / windowSpan < 0.9) {
+            const fmtSeconds = ns => Math.round(ns / 1e9) + 's';
+            aas += ' · captured ' + fmtSeconds(capturedSpan) + ' of ' + fmtSeconds(windowSpan);
+        }
+    }
+    out.push({ label: 'AAS', value: aas });
     if (idleRow) out.push({ label: 'Idle', value: fmtMs(idleRow.ms) });
     out.push({ label: 'CPUs', value: String(numCpus) });
     return out;
@@ -58,7 +67,7 @@ export function createOverviewView() {
 
     function maybeResetOrder(ctx, compareNow) {
         const key = JSON.stringify({
-            from: ctx.timeRange.from, to: ctx.timeRange.to,
+            window: orderResetKey(ctx),
             filters: ctx.filters.snapshot(), compare: !!compareNow,
         });
         if (key !== lastWindowKey) { order.reset(); lastWindowKey = key; }
@@ -96,7 +105,9 @@ export function createOverviewView() {
                 return {
                     table: buildTableModel(overviewConfig,
                         order.apply(primary && primary.rows), null),
-                    summary: buildSummary(primary, ctx.server.numCpus),
+                    summary: buildSummary(primary, ctx.server.numCpus, {
+                        from: ctx.timeRange.from, to: ctx.timeRange.to,
+                        captureFromNs: ctx.server.fromNs }),
                     hasRows: !!(primary && primary.rows && primary.rows.length),
                     paneFidelity: buildPaneFidelity(primary),
                     truncation: buildTruncationRow(primary),
@@ -131,7 +142,9 @@ export function createOverviewView() {
             maybeResetOrder(ctx, false);
             const table = buildTableModel(overviewConfig,
                 order.apply(data && data.rows), null);
-            const summary = buildSummary(data, ctx.server.numCpus);
+            const summary = buildSummary(data, ctx.server.numCpus, {
+                from: ctx.timeRange.from, to: ctx.timeRange.to,
+                captureFromNs: ctx.server.fromNs });
             return {
                 table, summary,
                 hasRows: !!(data && data.rows && data.rows.length),

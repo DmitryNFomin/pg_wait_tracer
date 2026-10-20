@@ -589,7 +589,6 @@ tr.selected-execution td { background: #173653; }
 }
 .panel-caption:empty { display: none; }
 .scatter-shell > .chart-notes, .matrix-shell > .chart-notes {
-  position: absolute; top: 37px; right: 20px; z-index: 4;
   max-width: 520px; border-radius: 3px; background: rgba(49,43,24,0.92);
   pointer-events: none;
 }
