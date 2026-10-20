@@ -95,6 +95,19 @@ test('closed with no completed_duration_ms (should not happen, but must not '
     assert.ok(!line.includes('NaN'));
 });
 
+// ── #475-2: a sub-millisecond span must never render as "0.0 s" ────────────
+// The old local fmtSpanSeconds(ms) always divided by 1000 and fixed to one
+// decimal, so anything under 50ms rounds to "0.0 s" -- a real, non-zero span
+// reads as zero. format.js's shared fmtMs is already unit-adaptive (us/ms/s)
+// and is used everywhere else in this codebase for exactly this reason.
+
+test('#475-2 a 0.3ms closed span renders "300µs", never "0.0 s"', () => {
+    const span = { measurement: 'measured', completion: 'closed', completed_duration_ms: 0.3 };
+    const line = backendActivityLine(span);
+    assert.ok(line.includes('300µs'), line);
+    assert.ok(!line.includes('0.0 s'), line);
+});
+
 // ── unmeasured / unknown corners ─────────────────────────────────────────────
 
 test('measurement unmeasured: always "Not measured", regardless of completion', () => {
