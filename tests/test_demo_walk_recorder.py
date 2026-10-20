@@ -314,6 +314,20 @@ class RecorderTests(unittest.TestCase):
         result = lib.motion_gate(pictures,"clip.gif","sampled crop")
         self.assertGreater(result["best_consecutive_changed_fraction"],0.5)
 
+    def test_young_capture_refusal_is_none_when_capture_covers_the_window_start(self):
+        window_from_ns = 1_000_000_000_000
+        for server_from_ns in (window_from_ns - 42_000_000_000, window_from_ns):
+            with self.subTest(server_from_ns=server_from_ns):
+                self.assertIsNone(lib.young_capture_refusal(server_from_ns, window_from_ns))
+
+    def test_young_capture_refusal_names_the_age_when_capture_starts_after_window(self):
+        window_from_ns = 1_000_000_000_000
+        server_from_ns = window_from_ns + 42_000_000_000
+        refusal = lib.young_capture_refusal(server_from_ns, window_from_ns)
+        self.assertIsInstance(refusal, lib.Refusal)
+        self.assertEqual(refusal.code, 9)
+        self.assertIn("42.0s", str(refusal))
+
     def test_recorded_chart_must_visibly_change(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);(root/"frames").mkdir()
