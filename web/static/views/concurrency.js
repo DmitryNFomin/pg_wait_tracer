@@ -47,7 +47,7 @@ export function createConcurrencyView() {
         if (document.getElementById('concurrency-chart')) return;
         disposeChart();   // shell is being rebuilt — any old chart DOM is gone
         el.innerHTML =
-            '<div id="concurrency-chart" style="width:100%;height:350px;"></div>' +
+            '<div id="concurrency-chart" style="width:100%;height:270px;"></div>' +
             '<div class="concurrency-panel-selector">' +
                 '<button type="button" class="cp-select active" data-panel="peaks">' +
                     'Peaks (<span class="cp-count-peaks">0</span>)</button>' +
