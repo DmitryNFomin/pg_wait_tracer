@@ -22,6 +22,12 @@ archived recording for a recording of the live rolling-window gesture.
 `--mock` always serves data anchored to wall-clock "now", so `--archived`
 with `--mock` is refused rather than silently doing nothing useful.
 
+`--allow-young` (default off): overrides the refusal when the capture's own
+data starts after the rendered window's start. That early part of the window
+has no underlying data yet, so the chart can look mostly empty. Wait for the
+capture to warm up before recording, or pass `--allow-young` to proceed with
+that visible gap. The refusal reports the missing range in seconds.
+
 **`--archived` cannot produce a GIF, by design.** The trace's own span is
 fixed, so nothing in the window advances: the Overview AAS chart's pixels
 never visibly change, and `chart_change()`'s motion gate (the same gate a
@@ -238,7 +244,8 @@ or malformed frames, gaps or dropped video frames; 6 configuration, runbook
 drift, output/codec verification or invalid/oversized GIF.
 New codes: **7 GIF frame count gate** (sampled or decoded); **8 GIF motion
 gate** (first/last, or the single biggest consecutive-pair jump; sampled
-crop, palette or decoded — see the motion gate description above).
+crop, palette or decoded — see the motion gate description above); **9 capture
+younger than the rendered window** (`--allow-young` overrides).
 Existing codes retain their meanings. An empty-motion GIF is an observed
 artifact refusal, with the failed check named in the diagnostic.
 The distinction between 2 and 3 is observed-negative versus unobserved, rather

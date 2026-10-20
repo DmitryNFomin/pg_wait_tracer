@@ -92,6 +92,23 @@ class Refusal(Exception):
         self.code = code
 
 
+def young_capture_refusal(server_from_ns,window_from_ns):
+    """Refuse when the capture starts strictly after the rendered window.
+
+    The window's early range then has no underlying data, not merely idle
+    data, which made a prior real demo recording's chart mostly empty.
+    Return Refusal(9, ...) naming the age in seconds to one decimal place,
+    or None when the capture already covers the window's start.
+    """
+    if server_from_ns <= window_from_ns:
+        return None
+    age_s = (server_from_ns - window_from_ns) / 1e9
+    return Refusal(9,f"capture is younger than the rendered window by {age_s:.1f}s "
+                   f"(server.fromNs={server_from_ns}, window.from={window_from_ns}); "
+                   "the window's early range has no underlying data yet -- wait for "
+                   "the capture to warm up, or pass --allow-young to override")
+
+
 def frame_indices(frames, start, end):
     return [f["index"] for f in frames if start <= f["timestamp_s"] <= end]
 
