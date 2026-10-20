@@ -2869,6 +2869,66 @@ def test_matrix_view(page):
           f"matrix cell drilled the TARGET event id ({filters})")
 
 
+def test_matrix_scatter_notes_never_overlap_their_chart(page):
+    """#475-3 + #476: .chart-notes used to be position:absolute over the
+    chart host (style.css .scatter-shell/.matrix-shell > .chart-notes), so
+    a longer note (more transitions dropped, more excluded points) could
+    grow to cover chart content -- a note resizing the READING of the
+    chart even though it never resizes the chart's own fixed-height host
+    (#171). Notes now render BELOW the chart host in DOM order with no
+    absolute positioning; this pins actual disjoint bounding boxes on both
+    tabs that produce real note text (matrix: server link cap; scatter: one
+    excluded in-progress point), at the pinned demo viewport."""
+    print("--- Test #475-3/#476: chart notes never overlap their chart ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+
+    def disjoint(notes_id, chart_id):
+        geo = p.evaluate("""([notesId, chartId]) => {
+            const n = document.getElementById(notesId);
+            const c = document.getElementById(chartId);
+            if (!n || !c) return null;
+            const nr = n.getBoundingClientRect(), cr = c.getBoundingClientRect();
+            const overlap = !(nr.right <= cr.left || cr.right <= nr.left ||
+                nr.bottom <= cr.top || cr.bottom <= nr.top);
+            return { notes: [nr.left, nr.top, nr.right, nr.bottom],
+                     chart: [cr.left, cr.top, cr.right, cr.bottom], overlap,
+                     notesText: n.textContent.trim() };
+        }""", [notes_id, chart_id])
+        return geo
+
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.click("#live-btn")
+        p.wait_for_timeout(300)
+
+        p.click(".tab[data-tab='matrix']")
+        p.wait_for_selector("#matrix-chart canvas", timeout=10000)
+        p.wait_for_timeout(700)
+        mgeo = disjoint("matrix-notes", "matrix-chart")
+        check(mgeo is not None and mgeo["notesText"] != "" and not mgeo["overlap"],
+              f"#475-3/#476: matrix notes bbox does not overlap the chart bbox ({mgeo})")
+
+        p.click(".tab[data-tab='scatter']")
+        p.wait_for_selector("#scatter-chart canvas", timeout=10000)
+        p.wait_for_timeout(700)
+        sgeo = disjoint("scatter-notes", "scatter-chart")
+        check(sgeo is not None and sgeo["notesText"] != "" and not sgeo["overlap"],
+              f"#475-3/#476: scatter notes bbox does not overlap the chart bbox ({sgeo})")
+
+        assert_no_console_errors(p, guard, "matrix-scatter-notes-overlap")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_chart_views_update_in_place_on_tick(page):
     """#171: scatter/matrix/waterfall must update their EXISTING ECharts
     instance on a live tick, not tear the panel's host div down and rebuild
@@ -4017,6 +4077,7 @@ def main():
                 test_query_to_waterfall_pivot,
                 test_scatter_view,
                 test_matrix_view,
+                test_matrix_scatter_notes_never_overlap_their_chart,
                 test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
             ]
