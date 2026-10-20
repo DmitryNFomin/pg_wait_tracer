@@ -136,8 +136,14 @@ test('#478-axis negative control: restoring hardcoded millisecond precision '
 // apart again.
 
 test('#478-axis zoomLabelText: a sub-millisecond zoom shows two DISTINCT timestamps', () => {
+    // WITHIN a single whole millisecond (2.100ms-2.600ms) on purpose -- a
+    // window straddling a millisecond boundary would show distinct values
+    // even under the OLD hardcoded 1ms bucket by sheer luck of landing on
+    // opposite sides of the boundary, which would make this assertion
+    // pass whether or not the fix (reusing model.tickBucketNs) is wired
+    // in at all. See the negative control below for the direct comparison.
     const zoomed = buildWaterfallOption(detail(), {
-        from: at(2_000_000), to: at(2_000_000 + 1_000_000),
+        from: at(2_100_000), to: at(2_600_000),
         executionStart: String(START), executionEnd: at(20_000_000),
     });
     const currentWindow = { from: zoomed.windowFrom, to: zoomed.windowTo };
@@ -149,8 +155,14 @@ test('#478-axis zoomLabelText: a sub-millisecond zoom shows two DISTINCT timesta
 
 test('#478-axis negative control: the OLD hardcoded-1ms bucket collapses the '
     + 'same sub-millisecond zoom to two IDENTICAL timestamps', () => {
+    // Deliberately WITHIN a single whole millisecond (2.100ms-2.600ms, a
+    // 500us span) -- a window straddling a millisecond boundary (like the
+    // positive test's 2.000ms-3.000ms) would show distinct values even
+    // under the OLD 3-digit-precision bucket by sheer luck of landing on
+    // opposite sides of the boundary, which would make this negative
+    // control pass for the wrong reason.
     const zoomed = buildWaterfallOption(detail(), {
-        from: at(2_000_000), to: at(2_000_000 + 1_000_000),
+        from: at(2_100_000), to: at(2_600_000),
         executionStart: String(START), executionEnd: at(20_000_000),
     });
     const naiveFrom = fmtTimeNs(zoomed.windowFrom, 1_000_000);
