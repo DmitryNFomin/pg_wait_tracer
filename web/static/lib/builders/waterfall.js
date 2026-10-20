@@ -221,7 +221,10 @@ export function waterfallContextHtml(detail, selected, timeline) {
         : relation.length && !relationInBars
             ? 'Lock:relation is not represented by these executor bars; pre-execution timing is not established.'
             : 'Bars show executor phase only; pre-execution wait timing is not established.';
-    const line = span?.measurement === 'partial'
+    const line = !span && envelope.reason
+        ? 'Not measured — ' + (envelope.reason.length > 80
+            ? envelope.reason.slice(0, 80) + '…' : envelope.reason)
+        : span?.measurement === 'partial'
         ? 'Partial · ' + backendActivityLine(span) : backendActivityLine(span);
     // Keep the summary bounded even for a busy backend; preserve the relation
     // thread when present. This is observed evidence, not a dominant-wait rank.
