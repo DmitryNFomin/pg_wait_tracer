@@ -189,7 +189,7 @@ export function applyDefaultOrder(tracker, rows, sort) {
  * is the raw window, unchanged from pre-#474 behavior -- any edge move
  * there IS a real navigation and must reset. */
 export function orderResetKey(ctx) {
-    if (ctx.isLiveTick()) {
+    if (ctx.isLiveTick && ctx.isLiveTick()) {
         return { live: true, spanSecs: ctx.timeRange.liveRangeSecs };
     }
     return { from: ctx.timeRange.from, to: ctx.timeRange.to };
