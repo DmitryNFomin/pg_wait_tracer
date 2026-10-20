@@ -232,7 +232,12 @@ test('#477 negative control: no reason on the payload -> plain "Not measured", n
 test('#477 a long server reason is clamped, never blows the fixed-height Waterfall fold (#462)', () => {
     const html = waterfallContextHtml({ backend_activity_span: null,
         backend_activity_unavailable_reason: 'x'.repeat(200) }, execution, timeline);
-    const m = html.match(/Not measured — ([^<]*)/);
-    assert.ok(m, html);
-    assert.ok(m[1].length <= 81, 'clamped reason length: ' + m[1].length);
+    // Bound by exact substring, not a regex up to the next HTML tag -- a
+    // clamp that still terminates only at the next markup boundary (not at
+    // 80 real characters) would pass a tag-bounded check without actually
+    // being bounded in TEXT length, which is what the fixed-height fold
+    // (#462) cares about.
+    assert.ok(html.includes('Not measured — ' + 'x'.repeat(80) + '…'), html);
+    assert.ok(!html.includes('x'.repeat(81)),
+        'the full 200-char reason must not appear unclamped: ' + html);
 });
