@@ -415,6 +415,10 @@ LIVE_TESTS=(
     # with PGWT_TEST_EXEC_SITE_ADMIT_ALL=1, so every run also proves the
     # gate still sees the defect.
     "test_execution_cardinality|python3|test_execution_cardinality.py|14"
+    # #479: check-runner-registration.py requires every ci_smoke test here too.
+    # make box-check runs run_all.sh, NOT ci_smoke.sh: a ci_smoke-only gate
+    # never runs in an agent's pre-PR check (#433, three times over).
+    "test_execution_span_live|python3|test_execution_span_live.py"
     "test_cross_pg_wait_sampling|python3|test_cross_pg_wait_sampling.py"
     "test_event_classes|python3|test_event_classes.py"
     "test_multi_window|python3|test_multi_window.py"
