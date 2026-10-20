@@ -2182,6 +2182,19 @@ def test_concurrency_panels_side_by_side(page):
               f"wide viewport: BOTH panel entry points visible without "
               f"scrolling the page ({geo})")
 
+        # #473-5: the chart above the panels used to be a fixed 350px,
+        # leaving too little room for the Peaks panel to show more than a
+        # couple of rows before the fold at this viewport -- at least the
+        # 3rd row must be visible without scrolling the panel's own table.
+        peaks3 = wp.evaluate("""() => {
+            const rows = document.querySelectorAll('#peaks-table tbody tr');
+            if (rows.length < 3) return null;
+            return { bottom: rows[2].getBoundingClientRect().bottom,
+                     innerHeight: window.innerHeight };
+        }""")
+        check(peaks3 is not None and peaks3["bottom"] <= peaks3["innerHeight"],
+              f"#473-5: 3rd #peaks-table row sits above the fold ({peaks3})")
+
         # Each panel is independently scrollable to ITS OWN final row —
         # scrolling one must not be required to move the page.
         reach = wp.evaluate("""() => {
