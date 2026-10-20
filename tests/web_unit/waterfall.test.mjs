@@ -95,6 +95,39 @@ test('UTC x-axis formatter and animation/clip pins', () => {
         fmtTimeNs(String(START), 1_000_000));
 });
 
+// ── #478-axis: zoomed into a sub-millisecond execution, the x-axis must not
+// repeat the same label -- the formatter hardcoded millisecond precision
+// (fmtTimeNs(..., 1_000_000)) regardless of how fine the visible span
+// actually is. fmtTimeNs already emits microsecond (6-digit) precision when
+// handed a bucket under 1ms (format.js); the fix passes the REAL tick span
+// instead of the hardcoded constant.
+
+function tinyDetail() {
+    return {
+        query_id: '42',
+        leader: { pid: 1000, total_count: 1, truncated: false, events: [
+            { we: 0, name: 'CPU*', start_ns: at(0), dur_ns: '1000000', cpu_ns: '1000000' },
+        ]},
+        workers: [],
+    };
+}
+
+test('#478-axis: a 1ms span across 6 ticks produces 6 DISTINCT labels', () => {
+    const m = buildWaterfallOption(tinyDetail(), {
+        executionStart: String(START), executionEnd: at(1_000_000),
+    });
+    const ticks = [0, 200000, 400000, 600000, 800000, 1000000];
+    const labels = ticks.map(v => m.option.xAxis.axisLabel.formatter(v));
+    assert.equal(new Set(labels).size, 6, labels.join(', '));
+});
+
+test('#478-axis negative control: restoring hardcoded millisecond precision '
+    + 'collapses the same 6 ticks into fewer distinct labels', () => {
+    const ticks = [0, 200000, 400000, 600000, 800000, 1000000];
+    const naive = ticks.map(v => fmtTimeNs(String(START + BigInt(v)), 1_000_000));
+    assert.ok(new Set(naive).size < 6, naive.join(', '));
+});
+
 test('renderItem gives micro bars a visible 1px width', () => {
     const tuple = [10, 10, 0, 'CPU*', 0, '10', '0', null, 1, 'event', '#abc'];
     const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
