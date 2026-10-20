@@ -566,7 +566,7 @@ export function buildWaterfallOption(data, opts) {
             textStyle: { color: '#e0e0e0', fontSize: 12 },
             formatter: waterfallTooltipFormatter,
         },
-        grid: { left: 145, right: 24, top: 22, bottom: 44 },
+        grid: { left: 145, right: 64, top: 22, bottom: 44 },
         xAxis: {
             type: 'value', min: axis(fromNs), max: axis(toNs),
             axisLabel: { color: '#888', fontSize: 10,
