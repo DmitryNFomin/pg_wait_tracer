@@ -838,7 +838,7 @@ const PIVOTS = {
     'heatmap-cell':    { tab: 'queries' },
     'dfg-event':       { tab: 'queries' },
     'burst-zoom':      { tab: null },
-    'query-executions': { tab: 'waterfall' },
+    'query-executions': { tab: 'waterfall', intentMethod: 'selectQuery' },
     'scatter-execution': { tab: 'waterfall', intentMethod: 'selectExecution' },
     'waterfall-execution': { tab: 'waterfall', intentMethod: 'selectExecution' },
     'matrix-cell':     { tab: 'queries' },

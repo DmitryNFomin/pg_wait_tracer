@@ -553,6 +553,71 @@ def snap_fidelity_suite(page):
         capture_failure(page, "fidelity_metrics_panel", "metrics button hidden")
 
 
+def assert_gallery_query_span_parity(page):
+    """Compare rendered fixture CSS with the real Queries view before capture.
+
+    This also gates --update-snapshots: a divergent fixture must never become
+    an accepted baseline. Check both the outer sub-line and its span/PID lines.
+    """
+    measure = """el => {
+        const lines = [...el.children];
+        const sql = el.previousElementSibling.getBoundingClientRect();
+        const rects = lines.map(line => line.getBoundingClientRect());
+        return {
+            display: getComputedStyle(el).display,
+            lines: lines.map(line => getComputedStyle(line).display),
+            stacked: el.getBoundingClientRect().top >= sql.bottom &&
+                rects.every((r, i) => i === 0 || r.top >= rects[i - 1].bottom),
+        };
+    }"""
+    fixture = page.locator(
+        "#gallery-table-configs-queries-hostile-sql .query-backend-span")
+    fixture.first.wait_for(state="visible")
+    app = page.context.new_page()
+    try:
+        open_app(app, MOCK_URL)
+        app.click(".tab[data-tab='queries']")
+        served = app.locator("#table-container .query-backend-span").first
+        served.wait_for(state="visible")
+        expected = served.evaluate(measure)
+        assert expected == {
+            "display": "block", "lines": ["block", "block"], "stacked": True,
+        }, f"served query span must be stacked: {expected}"
+        def assert_matches():
+            for actual in fixture.evaluate_all(f"els => els.map({measure})"):
+                assert actual == expected, (
+                    f"gallery query span differs from served app: "
+                    f"gallery={actual}, app={expected}")
+
+        assert_matches()
+        # Negative controls: removing either real fixture rule must trip the
+        # SAME assertion. Restore the stylesheet before any snapshot is taken.
+        style = page.locator("head > style").first
+        original = style.text_content()
+        for selector in (".query-backend-span", ".query-backend-span > span"):
+            try:
+                removed = style.evaluate("""(el, selector) => {
+                    const rules = [...el.sheet.cssRules];
+                    const index = rules.findIndex(r => r.selectorText === selector);
+                    if (index < 0) return false;
+                    el.sheet.deleteRule(index);
+                    return true;
+                }""", selector)
+                assert removed, f"negative control rule missing: {selector}"
+                try:
+                    assert_matches()
+                except AssertionError:
+                    print(f"  PASS: removing {selector} fails the parity check")
+                else:
+                    raise AssertionError(f"negative control passed: {selector}")
+            finally:
+                style.evaluate("(el, css) => { el.textContent = css; }", original)
+        assert_matches()
+        print(f"  PASS: gallery query span matches served app: {expected}")
+    finally:
+        app.close()
+
+
 def snap_gallery_suite(page):
     """U1 gallery-cell snapshots (docs/VISUALIZATION_REVIEW.md §6 item 8).
 
@@ -610,6 +675,8 @@ def snap_gallery_suite(page):
         if not selected(name):
             continue
         load_isolated(cell_id)
+        if cell_id == "gallery-table-configs-queries-hostile-sql":
+            assert_gallery_query_span_parity(page)
         snapshot(page, name, f"#{cell_id}",
                  pixel_threshold=GALLERY_PIXEL_THRESHOLD,
                  max_diff_ratio=GALLERY_MAX_DIFF_RATIO)

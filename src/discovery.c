@@ -210,6 +210,359 @@ uint64_t pgwt_resolve_symbol(const char *binary, const char *symbol,
     return sym_val - elf_base + load_base;
 }
 
+uint64_t pgwt_elf_base_vaddr(const char *binary)
+{
+    return elf_base_vaddr(binary);
+}
+
+/* ── #464: canonical USDT execution-probe sites ────────────────────────── */
+
+const char *pgwt_exec_site_refusal_str(enum pgwt_exec_site_refusal r)
+{
+    switch (r) {
+    case PGWT_EXEC_SITES_OK:            return "ok";
+    case PGWT_EXEC_SITES_NO_BINARY:     return "binary unreadable or not ELF";
+    case PGWT_EXEC_SITES_NO_NOTES:      return "no query__execute__* stapsdt notes";
+    case PGWT_EXEC_SITES_NO_FUNCTION:   return "canonical function symbol unresolvable";
+    case PGWT_EXEC_SITES_NO_CANONICAL:  return "no probe site inside the canonical function";
+    case PGWT_EXEC_SITES_AMBIGUOUS:     return "not exactly one canonical site per marker";
+    case PGWT_EXEC_SITES_NO_LOAD_BASE:  return "runtime load base unresolvable";
+    case PGWT_EXEC_SITES_OVERFLOW:      return "more probe sites than the allowlist holds";
+    }
+    return "unknown";
+}
+
+uint64_t pgwt_site_runtime_addr(uint64_t elf_addr, uint64_t elf_base,
+                                uint64_t load_base)
+{
+    /* load_base 0 means "not found in the target's maps" everywhere else in
+     * this file; never translate against it — a bogus allowlist entry would
+     * silently match nothing (zero executions) or, worse, something. */
+    if (elf_addr == 0 || load_base == 0)
+        return 0;
+    if (elf_addr < elf_base)
+        return 0;
+    return elf_addr - elf_base + load_base;
+}
+
+int pgwt_elf_func_range(const char *binary, const char *symbol,
+                        uint64_t *lo, uint64_t *hi)
+{
+    if (lo) *lo = 0;
+    if (hi) *hi = 0;
+    if (!binary || !symbol || !lo || !hi)
+        return -1;
+    if (elf_version(EV_CURRENT) == EV_NONE)
+        return -1;
+
+    int fd = open(binary, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    Elf *elf = elf_begin(fd, ELF_C_READ, NULL);
+    if (!elf) {
+        close(fd);
+        return -1;
+    }
+
+    int rc = -1;
+    Elf_Scn *scn = NULL;
+    while ((scn = elf_nextscn(elf, scn)) != NULL) {
+        GElf_Shdr shdr;
+        if (gelf_getshdr(scn, &shdr) == NULL)
+            continue;
+        if (shdr.sh_type != SHT_SYMTAB && shdr.sh_type != SHT_DYNSYM)
+            continue;
+        if (shdr.sh_entsize == 0)
+            continue;
+        Elf_Data *data = elf_getdata(scn, NULL);
+        if (!data)
+            continue;
+        int nsyms = (int)(shdr.sh_size / shdr.sh_entsize);
+        for (int i = 0; i < nsyms; i++) {
+            GElf_Sym sym;
+            if (gelf_getsym(data, i, &sym) == NULL)
+                continue;
+            if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
+                continue;
+            /* A sizeless FUNC symbol cannot bound a range. Refuse rather
+             * than invent one: [v, v) admits nothing and [v, +inf) admits
+             * everything, and both read as success to the caller. */
+            if (sym.st_size == 0 || sym.st_value == 0)
+                continue;
+            const char *name = elf_strptr(elf, shdr.sh_link, sym.st_name);
+            if (!name || strcmp(name, symbol) != 0)
+                continue;
+            *lo = sym.st_value;
+            *hi = sym.st_value + sym.st_size;
+            rc = 0;
+            goto done;
+        }
+    }
+done:
+    elf_end(elf);
+    close(fd);
+    return rc;
+}
+
+/* sh_addr of a named section, 0 if absent. */
+static uint64_t elf_section_addr(Elf *elf, const char *want)
+{
+    size_t shstrndx = 0;
+    if (elf_getshdrstrndx(elf, &shstrndx) != 0)
+        return 0;
+    Elf_Scn *scn = NULL;
+    while ((scn = elf_nextscn(elf, scn)) != NULL) {
+        GElf_Shdr shdr;
+        if (gelf_getshdr(scn, &shdr) == NULL)
+            continue;
+        const char *name = elf_strptr(elf, shstrndx, shdr.sh_name);
+        if (name && strcmp(name, want) == 0)
+            return shdr.sh_addr;
+    }
+    return 0;
+}
+
+/* A NUL-terminated string living entirely inside [p, end). NULL if it runs
+ * off the end — a truncated note is skipped, never read past. */
+static const char *bounded_str(const char *p, const char *end)
+{
+    for (const char *q = p; q < end; q++)
+        if (*q == '\0')
+            return p;
+    return NULL;
+}
+
+int pgwt_elf_usdt_sites(const char *binary, const char *provider,
+                        const char *name, int marker,
+                        struct pgwt_exec_site_plan *plan)
+{
+    if (!binary || !provider || !name || !plan)
+        return -1;
+    if (elf_version(EV_CURRENT) == EV_NONE)
+        return -1;
+
+    int fd = open(binary, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    Elf *elf = elf_begin(fd, ELF_C_READ, NULL);
+    if (!elf) {
+        close(fd);
+        return -1;
+    }
+    if (elf_kind(elf) != ELF_K_ELF) {
+        elf_end(elf);
+        close(fd);
+        return -1;
+    }
+
+    /* stapsdt base correction. sdt.h records, per note, the link-time
+     * address of the `_.stapsdt.base` anchor; a prelinked/relocated image
+     * shifts the real text without rewriting the notes, and the difference
+     * between the anchor's CURRENT sh_addr and the note's recorded base is
+     * exactly that shift. When the section is absent there is nothing to
+     * correct against and the location is used as recorded (what libbpf
+     * does too) — not guessed at. */
+    uint64_t anchor = elf_section_addr(elf, ".stapsdt.base");
+
+    int added = 0;
+    int rc_overflow = 0;
+    size_t shstrndx = 0;
+    elf_getshdrstrndx(elf, &shstrndx);
+
+    Elf_Scn *scn = NULL;
+    while ((scn = elf_nextscn(elf, scn)) != NULL) {
+        GElf_Shdr shdr;
+        if (gelf_getshdr(scn, &shdr) == NULL)
+            continue;
+        if (shdr.sh_type != SHT_NOTE)
+            continue;
+        const char *sname = elf_strptr(elf, shstrndx, shdr.sh_name);
+        if (!sname || strcmp(sname, ".note.stapsdt") != 0)
+            continue;
+        Elf_Data *data = elf_getdata(scn, NULL);
+        if (!data || !data->d_buf)
+            continue;
+
+        const char *buf = (const char *)data->d_buf;
+        size_t len = data->d_size;
+        size_t off = 0;
+        while (off + 12 <= len) {
+            uint32_t namesz, descsz, type;
+            memcpy(&namesz, buf + off, 4);
+            memcpy(&descsz, buf + off + 4, 4);
+            memcpy(&type, buf + off + 8, 4);
+            size_t nm_off = off + 12;
+            size_t nm_pad = (namesz + 3u) & ~3u;
+            size_t ds_off = nm_off + nm_pad;
+            size_t ds_pad = (descsz + 3u) & ~3u;
+            size_t next = ds_off + ds_pad;
+            /* Any arithmetic that leaves the section is a malformed note
+             * table: stop, do not resynchronise on a guess. */
+            if (next <= off || ds_off > len || next > len)
+                break;
+            off = next;
+
+            if (type != 3 /* NT_STAPSDT */)
+                continue;
+            if (namesz != 8 || strncmp(buf + nm_off, "stapsdt", 8) != 0)
+                continue;
+            /* loc + base + semaphore, then three NUL-terminated strings. */
+            if (descsz < 3 * sizeof(uint64_t) + 3)
+                continue;
+
+            uint64_t loc = 0, note_base = 0;
+            memcpy(&loc, buf + ds_off, 8);
+            memcpy(&note_base, buf + ds_off + 8, 8);
+
+            const char *p = buf + ds_off + 24;
+            const char *dend = buf + ds_off + descsz;
+            const char *prov = bounded_str(p, dend);
+            if (!prov) continue;
+            const char *pname = bounded_str(prov + strlen(prov) + 1, dend);
+            if (!pname) continue;
+
+            if (strcmp(prov, provider) != 0 || strcmp(pname, name) != 0)
+                continue;
+            if (loc == 0)
+                continue;   /* 0 is the ELF header, never a probe */
+
+            if (plan->n_sites >= PGWT_MAX_USDT_SITES) {
+                rc_overflow = 1;
+                break;
+            }
+            uint64_t addr = loc;
+            if (anchor != 0 && anchor >= note_base)
+                addr = loc + (anchor - note_base);
+            else if (anchor != 0)
+                addr = loc - (note_base - anchor);
+
+            struct pgwt_usdt_site *s = &plan->sites[plan->n_sites++];
+            s->elf_addr = addr;
+            s->runtime_addr = 0;
+            s->marker = marker;
+            s->canonical = 0;
+            added++;
+        }
+        if (rc_overflow)
+            break;
+    }
+
+    elf_end(elf);
+    close(fd);
+
+    if (rc_overflow) {
+        plan->refusal = PGWT_EXEC_SITES_OVERFLOW;
+        return -1;
+    }
+    return added;
+}
+
+int pgwt_exec_sites_select(struct pgwt_exec_site_plan *plan)
+{
+    if (!plan)
+        return -1;
+    plan->n_canonical = plan->n_excluded = 0;
+    plan->n_start_canonical = plan->n_done_canonical = 0;
+
+    if (plan->refusal != PGWT_EXEC_SITES_OK)
+        return -1;                       /* an earlier stage already refused */
+    if (plan->n_sites <= 0) {
+        plan->refusal = PGWT_EXEC_SITES_NO_NOTES;
+        return -1;
+    }
+    /* An unresolved or empty function range would classify every site as
+     * non-canonical; say WHY rather than reporting "no canonical site". */
+    if (plan->fn_lo == 0 || plan->fn_hi <= plan->fn_lo) {
+        plan->refusal = PGWT_EXEC_SITES_NO_FUNCTION;
+        return -1;
+    }
+
+    for (int i = 0; i < plan->n_sites; i++) {
+        struct pgwt_usdt_site *s = &plan->sites[i];
+        s->canonical = (s->elf_addr >= plan->fn_lo &&
+                        s->elf_addr < plan->fn_hi) ? 1 : 0;
+        if (!s->canonical) {
+            plan->n_excluded++;
+            continue;
+        }
+        plan->n_canonical++;
+        if (s->marker == PGWT_SITE_EXEC_START)
+            plan->n_start_canonical++;
+        else if (s->marker == PGWT_SITE_EXEC_DONE)
+            plan->n_done_canonical++;
+    }
+
+    if (plan->n_canonical == 0) {
+        plan->refusal = PGWT_EXEC_SITES_NO_CANONICAL;
+        return -1;
+    }
+    /* EXACTLY one start and one done. Two canonical starts would mean the
+     * canonical boundary itself is not a boundary (a second instrumentation
+     * pair inside PortalRun, or an inlined clone sharing its symbol range),
+     * and admitting both is precisely the double-count this exists to kill.
+     * Refuse and be loud; never pick one arbitrarily. */
+    if (plan->n_start_canonical != 1 || plan->n_done_canonical != 1) {
+        plan->refusal = PGWT_EXEC_SITES_AMBIGUOUS;
+        return -1;
+    }
+    return 0;
+}
+
+int pgwt_resolve_exec_sites(const char *binary, pid_t pid,
+                            struct pgwt_exec_site_plan *plan)
+{
+    if (!plan)
+        return -1;
+    memset(plan, 0, sizeof(*plan));
+    if (!binary || !binary[0]) {
+        plan->refusal = PGWT_EXEC_SITES_NO_BINARY;
+        return -1;
+    }
+
+    int a = pgwt_elf_usdt_sites(binary, "postgresql", "query__execute__start",
+                                PGWT_SITE_EXEC_START, plan);
+    if (a < 0) {
+        if (plan->refusal == PGWT_EXEC_SITES_OK)
+            plan->refusal = PGWT_EXEC_SITES_NO_BINARY;
+        return -1;
+    }
+    int b = pgwt_elf_usdt_sites(binary, "postgresql", "query__execute__done",
+                                PGWT_SITE_EXEC_DONE, plan);
+    if (b < 0) {
+        if (plan->refusal == PGWT_EXEC_SITES_OK)
+            plan->refusal = PGWT_EXEC_SITES_NO_BINARY;
+        return -1;
+    }
+
+    if (pgwt_elf_func_range(binary, PGWT_EXEC_CANONICAL_FN,
+                            &plan->fn_lo, &plan->fn_hi) != 0) {
+        /* No notes at all is a more useful diagnosis than "no PortalRun". */
+        plan->refusal = (plan->n_sites == 0) ? PGWT_EXEC_SITES_NO_NOTES
+                                             : PGWT_EXEC_SITES_NO_FUNCTION;
+        return -1;
+    }
+    if (pgwt_exec_sites_select(plan) != 0)
+        return -1;
+
+    uint64_t elf_base = elf_base_vaddr(binary);
+    uint64_t load_base = pgwt_find_load_base(pid, binary);
+    if (load_base == 0) {
+        plan->refusal = PGWT_EXEC_SITES_NO_LOAD_BASE;
+        return -1;
+    }
+    for (int i = 0; i < plan->n_sites; i++) {
+        if (!plan->sites[i].canonical)
+            continue;
+        plan->sites[i].runtime_addr =
+            pgwt_site_runtime_addr(plan->sites[i].elf_addr, elf_base, load_base);
+        if (plan->sites[i].runtime_addr == 0) {
+            plan->refusal = PGWT_EXEC_SITES_NO_LOAD_BASE;
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* Extract the pathname field from a /proc/<pid>/maps line, in place.
  * Format: "address perms offset dev inode   pathname\n" — the pathname is
  * everything after the 5th field (it may itself contain spaces). Returns

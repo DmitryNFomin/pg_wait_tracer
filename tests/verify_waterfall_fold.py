@@ -21,6 +21,12 @@ original commit measured as 90px over) so the executions list + chart
 combination actually exercises executionListMaxHeight(), not a short list
 that was never near the old 310px cap.
 
+Also checks the unfiltered snapshot view at 1280x800 DPR1 (header plus one
+full execution row) and 1710x981 DPR2 (two full rows and an exact 981px fold).
+Restoring the 60px floor in the served module must fail the small-viewport
+visibility assertion and leave the demo geometry unchanged. Reports actual
+header/row heights and the minimum list height including its title and note.
+
 Wired into scripts/check.sh (every `make check`, unconditional -- the gate
 the pre-push hook enforces) and, behind the SAME PGWT_RUN_WEB_UI=1 opt-in as
 its siblings test_web_ui.py/test_web_ui_chaos.py, into tests/run_all.sh
@@ -46,12 +52,17 @@ Usage:
     PGWT_WATERFALL_PORT=18866 python3 tests/verify_waterfall_fold.py
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
+import subprocess
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_web_ui import start_mock_server, stop_mock_server, app_url  # noqa: E402
+from web_unit.span_browser import run_span_gates
+from web_unit.execution_list_browser import run_execution_list_gates
 
 try:
     from playwright.sync_api import sync_playwright
@@ -63,7 +74,35 @@ except ImportError:
 PORT = int(os.environ.get("PGWT_WATERFALL_PORT", "18977"))
 
 
-def run():
+def chart_metrics(page):
+    return page.evaluate("""() => {
+        const host = document.querySelector('#waterfall-chart');
+        const chart = echarts.getInstanceByDom(host);
+        const data = chart.getModel().getSeriesByIndex(0).getData();
+        const bars = [];
+        for (let i = 0; i < data.count(); i++) {
+            const graphic = data.getItemGraphicEl(i);
+            if (!graphic || graphic.ignore || graphic.invisible) continue;
+            const box = graphic.getBoundingRect();
+            if (box.width > 0 && box.height > 0) bars.push({i, box});
+        }
+        const widest = bars.sort((a, b) => b.box.width - a.box.width)[0];
+        const tuple = widest && chart.getOption().series[0].data[widest.i];
+        const canvas = host.querySelector('canvas').getBoundingClientRect();
+        const point = tuple && chart.convertToPixel({gridIndex: 0},
+            [(tuple[0] + tuple[1]) / 2, tuple[2]]);
+        return {
+            height: host.getBoundingClientRect().height,
+            minimum_height: parseFloat(getComputedStyle(host).minHeight),
+            canvas_height: canvas.height, rendered_bars: bars.length,
+            minimum_bar_height: bars.length ? Math.min(...bars.map(b => b.box.height)) : 0,
+            click: point ? {x: canvas.left + point[0], y: canvas.top + point[1],
+                name: tuple[3]} : null,
+        };
+    }""")
+
+
+def run(red_green=False):
     proc = start_mock_server(port=PORT)
     try:
         with sync_playwright() as p:
@@ -129,6 +168,80 @@ def run():
                     "not_scrollable": not_scrollable,
                     "scroll_y_zero": scroll_y_zero,
                 }
+                result["chart"] = chart_metrics(page)
+                for _ in range(3):
+                    page.evaluate("window.dispatchEvent(new Event('resize'))")
+                    page.wait_for_timeout(100)
+                resized = chart_metrics(page)
+                result["chart"]["stable_after_resize"] = all(
+                    resized[key] == result["chart"][key] for key in
+                    ["height", "canvas_height", "rendered_bars", "minimum_bar_height"])
+                click = resized["click"]
+                if click:
+                    page.mouse.click(click["x"], click["y"])
+                inspected = page.locator("#waterfall-readout .wf-inspect-name")
+                result["chart"]["readout_clickable"] = (
+                    bool(click) and inspected.count() == 1 and
+                    inspected.inner_text() == click["name"])
+                clicked_box = page.locator("#waterfall-readout").bounding_box()
+                result["chart"]["readout_bottom_after_click"] = (
+                    clicked_box["y"] + clicked_box["height"])
+                result["chart"]["scroll_height_after_click"] = page.evaluate(
+                    "document.documentElement.scrollHeight")
+                result["chart"]["scroll_y_after_click"] = page.evaluate("scrollY")
+                chart_ok = (
+                    resized["height"] >= resized["minimum_height"] and
+                    resized["rendered_bars"] > 0 and resized["minimum_bar_height"] > 0 and
+                    result["chart"]["stable_after_resize"] and
+                    result["chart"]["readout_clickable"] and
+                    result["chart"]["readout_bottom_after_click"] <= metrics["innerHeight"] and
+                    result["chart"]["scroll_height_after_click"] <= metrics["innerHeight"] and
+                    result["chart"]["scroll_y_after_click"] == 0)
+                result["chart"]["ok"] = chart_ok
+                result["ok"] = result["ok"] and chart_ok
+                if red_green:
+                    # Serve original web assets over the same real mock shell.
+                    # No checkout/reset and no edits to another agent's files.
+                    ref = '48e1bce'
+                    paths = subprocess.check_output(
+                        ['git', 'ls-tree', '-r', '--name-only', ref, '--', 'web/static/'],
+                        text=True).splitlines()
+                    original = { '/' + path.removeprefix('web/static/'):
+                        subprocess.check_output(['git', 'show', ref + ':' + path])
+                        for path in paths if path.endswith(('.js', '.css')) }
+                    changed = subprocess.check_output(
+                        ['git', 'diff', '--name-only', ref, '--', 'web/static/'],
+                        text=True).splitlines()
+                    required = {'/' + path.removeprefix('web/static/') for path in changed
+                                if path.endswith(('.js', '.css'))}
+                    assert required, 'no changed assets: baseline comparison would prove nothing'
+                    served = {}
+                    old = ctx.new_page()
+                    def baseline_route(route):
+                        path = urlparse(route.request.url).path
+                        if path in original:
+                            route.fulfill(body=original[path], content_type=(
+                                'text/css' if path.endswith('.css') else 'application/javascript'))
+                            served[path] = hashlib.sha256(original[path]).hexdigest()
+                        elif path.endswith(('.js', '.css')):
+                            # A new asset absent from the baseline must never
+                            # leak current code into the old application.
+                            route.fulfill(status=404, body='Not present in baseline ' + ref)
+                        else:
+                            route.continue_()
+                    old.route('**/*', baseline_route)
+                    try:
+                        result['baseline'] = run_span_gates(old, app_url(PORT), expect_red=True)
+                        assert required <= served.keys(), (
+                            'baseline did not serve changed assets: ' + repr(sorted(required - served.keys())))
+                        result['baseline']['ref'] = ref
+                        result['baseline']['served_asset_sha256'] = {
+                            path: served[path] for path in sorted(required)}
+                    finally:
+                        old.close()
+                result["span_gates"] = run_span_gates(page, app_url(PORT))
+                result["execution_list_gates"] = run_execution_list_gates(browser, app_url(PORT))
+                result["ok"] = result["ok"] and result["execution_list_gates"]["ok"]
                 return result
             finally:
                 browser.close()
@@ -140,8 +253,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=None,
                      help="write the JSON result here too")
+    ap.add_argument('--red-green', action='store_true',
+                    help='first assert all three gates fail against original 48e1bce web assets')
     args = ap.parse_args()
-    result = run()
+    result = run(red_green=args.red_green)
     print(json.dumps(result, indent=2))
     if args.out:
         with open(args.out, "w") as f:

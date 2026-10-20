@@ -140,6 +140,33 @@ struct {
     __type(value, u64);
 } uprobe_fire_counts SEC(".maps");
 
+/* #464: the canonical execution-probe allowlist.
+ *
+ * PostgreSQL emits query__execute__start/done from TWO sites for plannable
+ * non-SELECT work (around PortalRun, and again inside the static helper
+ * PortalRunMulti calls), and libbpf attaches USDT probes by NAME — so both
+ * sites run these programs and every DML statement produced two nested
+ * EXEC_START/EXEC_END pairs (Execs 368 against Plans 184; SELECTs, which
+ * never reach the second site, were 91/91).
+ *
+ * Key: the RUNTIME virtual address of an admitted probe location, computed
+ * in userspace from the ELF note table (src/discovery.c
+ * pgwt_resolve_exec_sites) and written here before attach. Value: the
+ * PGWT_MARKER_* this site is allowed to emit, so a site admitted as a START
+ * can never be accepted by the DONE handler.
+ *
+ * FAIL-SAFE BY CONSTRUCTION: an empty or unpopulated map admits NOTHING.
+ * There is no "filter off" flag to get stuck in the open position — if the
+ * daemon cannot establish the canonical sites it refuses to attach these
+ * programs at all (see daemon.c), and if it attached them without filling
+ * this map the handlers would emit nothing rather than emit everything. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, PGWT_EXEC_SITE_ALLOW_MAX);
+    __type(key, u64);
+    __type(value, u32);
+} exec_site_allow SEC(".maps");
+
 /* Ring buffer for lifecycle events — pollable via epoll */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -829,9 +856,34 @@ static __always_inline void emit_marker(u32 marker)
     emit_event(&evt);
 }
 
+/* #464: is THIS firing site an admitted canonical execution boundary?
+ *
+ * PT_REGS_IP on a uprobe is the instrumented instruction's runtime virtual
+ * address — the probe location itself — which is what userspace wrote into
+ * exec_site_allow. The check runs BEFORE emit_marker, so an excluded site
+ * touches no phase state (note_phase_edge), consumes no pending plan and
+ * emits no marker: the inner PortalRunMulti pair becomes invisible to every
+ * downstream consumer rather than being compensated for later.
+ *
+ * Returns false when the map has no entry for this address, which is also
+ * what an unpopulated map does for every address. "Cannot see" refuses. */
+static __always_inline bool exec_site_admitted(struct pt_regs *ctx, u32 marker)
+{
+    u64 ip = PT_REGS_IP(ctx);
+    u32 *admitted = bpf_map_lookup_elem(&exec_site_allow, &ip);
+    if (!admitted)
+        return false;
+    /* A START site must not be accepted by the DONE handler: the two notes
+     * sit 0x266 bytes apart inside the same function, and a mix-up would
+     * pair a start with itself. */
+    return *admitted == marker;
+}
+
 SEC("usdt")
 int BPF_USDT(on_exec_start)
 {
+    if (!exec_site_admitted(ctx, PGWT_MARKER_EXEC_START))
+        return 0;
     emit_marker(PGWT_MARKER_EXEC_START);
     return 0;
 }
@@ -839,6 +891,8 @@ int BPF_USDT(on_exec_start)
 SEC("usdt")
 int BPF_USDT(on_exec_done)
 {
+    if (!exec_site_admitted(ctx, PGWT_MARKER_EXEC_END))
+        return 0;
     emit_marker(PGWT_MARKER_EXEC_END);
     return 0;
 }

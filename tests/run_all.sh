@@ -404,6 +404,17 @@ LIVE_TESTS=(
     # covered separately by test_capture_smoke's PG13 branch (synthetic
     # grouping keys, no compute_query_id dependency).
     "test_query_event|python3|test_query_event.py|14"
+    # #464: execution CARDINALITY against an independently counted cohort.
+    # PostgreSQL emits query__execute__start/done from two sites for
+    # plannable non-SELECT work and the daemon attached by probe name, so
+    # every DML statement was counted twice (Execs 368 / Plans 184 in the
+    # archived rehearsal; 91/91 for the SELECT that never reaches the
+    # second site) -- and BOTH counted rehearsals passed, because nothing
+    # checked counts. Needs compute_query_id (PG14+): the cohorts are
+    # matched by normalised statement text. Captures twice, the second time
+    # with PGWT_TEST_EXEC_SITE_ADMIT_ALL=1, so every run also proves the
+    # gate still sees the defect.
+    "test_execution_cardinality|python3|test_execution_cardinality.py|14"
     "test_cross_pg_wait_sampling|python3|test_cross_pg_wait_sampling.py"
     "test_event_classes|python3|test_event_classes.py"
     "test_multi_window|python3|test_multi_window.py"

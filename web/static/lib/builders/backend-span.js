@@ -99,6 +99,40 @@ function fmtSpanSeconds(ms) {
     return (ms / 1000).toFixed(1) + ' s';
 }
 
+/* Queries selects the longest in-flight span first, then the longest fully
+ * measured closed span. Waterfall selects a CONTAINING span: keep this
+ * wording local to Queries, never in the shared drill renderer. */
+export function queryBackendSpanLine(span) {
+    const { measurement, completion } = backendActivityStatus(span);
+    const boundary = { closed: 'closed', in_flight: 'in flight', unknown: 'unknown boundary' }[completion]
+        || 'unknown boundary';
+    if (!span || measurement === 'unmeasured') {
+        return 'Backend span unavailable: Not measured' + (span ? ' · ' + boundary : '');
+    }
+    const elapsed = fmtSpanSeconds(span.observed_elapsed_ms);
+    if (measurement === 'partial') {
+        return 'Partial backend span (' + boundary + '): ' +
+            (elapsed == null ? 'elapsed not measured' : elapsed + ' observed');
+    }
+    if (completion === 'in_flight') {
+        return 'Longest observed in-flight backend span: ' +
+            (elapsed == null ? 'elapsed not measured' : elapsed + ' so far');
+    }
+    if (completion === 'closed') {
+        const duration = fmtSpanSeconds(span.completed_duration_ms);
+        return 'Longest measured closed backend span: ' + (duration || 'Not measured');
+    }
+    return 'Backend span (unknown boundary): ' +
+        (elapsed == null ? 'Not measured' : elapsed + ' observed');
+}
+
+export function queryBackendSpanHtml(row) {
+    const { span } = backendSpanEnvelope(row);
+    return '<span class="query-backend-span"><span>' + esc(queryBackendSpanLine(span)) +
+        '</span><span>' + (span && span.pid != null ? 'PID ' + esc(String(span.pid)) : 'PID unavailable') +
+        '</span></span>';
+}
+
 /* PURE: the two-axis status, independent fields intact. Exported so a
  * caller that wants to branch on measurement/completion separately (e.g. a
  * future styling rule: color by measurement, icon by completion) never has
@@ -195,7 +229,7 @@ function backendActivityAxesHtml(status) {
     const measurements = { measured: 'Measured', partial: 'Partial', unmeasured: 'Not measured' };
     const completions = { closed: 'Closed', in_flight: 'In flight', unknown: 'Unknown' };
     return 'Measurement: ' + (measurements[status.measurement] || 'Not measured') +
-        ' · Completion: ' + (completions[status.completion] || 'Unknown');
+        ' · Backend activity boundary: ' + (completions[status.completion] || 'Unknown');
 }
 
 /* Wire envelope shared by the table and detail readouts. Server prose is

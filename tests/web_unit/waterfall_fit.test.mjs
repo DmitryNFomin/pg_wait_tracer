@@ -11,11 +11,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    executionListMaxHeight,
+    executionListMaxHeight, waterfallChartFitHeight,
     EXECUTION_LIST_MAX_PX, EXECUTION_LIST_MIN_PX, EXECUTION_LIST_FOLD_MARGIN_PX,
 } from '../../web/static/lib/builders/waterfall.js';
 
 const DEMO = { viewportHeight: 981, listTop: 435, paneHeight: 304, trailingBelowPane: 20 };
+
+test('the chart absorbs the 19px drilled overflow without changing the list floor', () => {
+    const geometry = { viewportHeight: 981, listTop: 468, paneHeight: 401,
+        trailingBelowPane: 20, contextHeight: 58, rowListHeights: [110.5, 139.5] };
+    const listHeight = executionListMaxHeight(geometry);
+    const pageHeight = geometry.listTop + listHeight + geometry.paneHeight + 20;
+    const chartHeight = waterfallChartFitHeight(262, 240, pageHeight - 981);
+    assert.equal(listHeight, 111);
+    assert.equal(chartHeight, 243);
+    assert.equal(pageHeight - (262 - chartHeight), 981);
+});
+
+test('chart fit preserves its minimum and leaves an impossible fold visible', () => {
+    assert.equal(waterfallChartFitHeight(262, 240, 23), 240);
+    assert.equal(1004 - (262 - waterfallChartFitHeight(262, 240, 23)), 982);
+    assert.equal(waterfallChartFitHeight(240, 240, 171), 240);
+});
+
+test('chart fit restores its natural height with spare room and rounds overflow up', () => {
+    assert.equal(waterfallChartFitHeight(262, 240, 0), 262);
+    assert.equal(waterfallChartFitHeight(262, 240, -100), 262);
+    assert.equal(waterfallChartFitHeight(262, 240, 18.5), 243);
+});
 
 function readoutBottom(geometry, listHeight) {
     // The pane sits directly under the list, and the readout is its last
@@ -66,6 +89,46 @@ test('a viewport that genuinely cannot fit both keeps the list usable', () => {
     const tiny = Object.assign({}, DEMO, { viewportHeight: 600 });
     assert.equal(executionListMaxHeight(tiny), EXECUTION_LIST_MIN_PX);
     assert.ok(readoutBottom(tiny, EXECUTION_LIST_MIN_PX) > tiny.viewportHeight);
+});
+
+test('visible context shares the minimum list budget without being counted twice', () => {
+    // Context can share the minimum budget only while a header and full
+    // execution row remain visible. Prefer a usable list when both panes
+    // cannot fit, even if the available budget is smaller than the floor.
+    const geometry = { viewportHeight: 981, listTop: 468, paneHeight: 401,
+        trailingBelowPane: 20, contextHeight: 58, rowListHeights: [110.5, 139.5] };
+    const height = executionListMaxHeight(geometry);
+    assert.equal(height, Math.ceil(geometry.rowListHeights[0]));
+    assert.equal(geometry.listTop + height + geometry.paneHeight + 20, 1000);
+    assert.equal(executionListMaxHeight({ ...geometry, contextHeight: 0 }), 120);
+    assert.equal(executionListMaxHeight({ ...geometry, viewportHeight: 1500 }), 310);
+    assert.equal(executionListMaxHeight({ ...geometry, viewportHeight: 600 }), 111);
+    assert.equal(executionListMaxHeight({ ...geometry, contextHeight: 200 }), 111);
+});
+
+test('snapshot floor rounds the measured first row and border up', () => {
+    const geometry = { viewportHeight: 800, listTop: 435, paneHeight: 379,
+        trailingBelowPane: 20, contextHeight: 58, rowListHeights: [544.5 - 435 + 1] };
+    assert.equal(executionListMaxHeight(geometry), 111);
+    // A changed font or wrapped title must change the floor too.
+    assert.equal(executionListMaxHeight({ ...geometry, rowListHeights: [127.25] }), 128);
+});
+
+test('demo finishes its second row within the fold cushion', () => {
+    const geometry = { viewportHeight: 981, listTop: 435, paneHeight: 379,
+        trailingBelowPane: 20, contextHeight: 58,
+        rowListHeights: [544.5 - 435 + 1, 573.5 - 435 + 1] };
+    const height = executionListMaxHeight(geometry);
+    assert.equal(height, 140);
+    assert.ok(geometry.listTop + height + geometry.paneHeight + geometry.trailingBelowPane
+        <= geometry.viewportHeight);
+    // The second row cannot be completed if that would break the fold.
+    assert.equal(executionListMaxHeight({ ...geometry, paneHeight: 386.5 }), 131);
+});
+
+test('missing row measurements retain the old usable minimum', () => {
+    assert.equal(executionListMaxHeight({ ...DEMO, viewportHeight: 600,
+        contextHeight: 58 }), EXECUTION_LIST_MIN_PX);
 });
 
 /* ── unreachable-detection suite: every way the computation can be made

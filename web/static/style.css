@@ -973,8 +973,17 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
 .unavailable-status.ok { color: #4f4; }
 .unavailable-status.err { color: #ff8a80; }
 
-/* Backend spans remain readable beside the numeric DB Time column. */
-.backend-activity-cell { min-width: 230px; max-width: 340px; white-space: normal; }
+/* Query identity owns the compact span; statistical columns keep their values. */
+.queries-table th, .queries-table td { padding: 6px; }
+.queries-table th { white-space: normal; }
+.queries-table .sticky-col-0 { min-width: 0; }
+.queries-table .sticky-col-1 { position: static; width: 350px; min-width: 350px; max-width: 350px; }
+.queries-table .qt-hover { display: block; overflow: hidden; text-overflow: ellipsis; }
+.query-backend-span { display: block; white-space: normal; font-size: 11px; line-height: 1.4; color: #bbb; }
+.query-backend-span > span { display: block; }
+.queries-scope { margin: 8px 0; color: #bbb; font-size: 12px; font-style: normal; }
+.waterfall-context { font-size: 12px; line-height: 1.5; margin-bottom: 4px; }
+.waterfall-context [data-context] { display: block; }
 .backend-activity-scope { color: var(--text-muted, #aaa); }
 .backend-activity-panel { margin: 12px 0; padding: 12px; border: 1px solid #444; }
 .backend-activity-panel h3, .backend-activity-panel p { margin: 0 0 8px; }
