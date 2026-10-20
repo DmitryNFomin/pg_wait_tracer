@@ -3,7 +3,7 @@
 
 import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
-    executionListMaxHeight,
+    executionListMaxHeight, waterfallChartFitHeight, containingActivityWindow, waterfallContextHtml,
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     executionsStatusLabel, execScopeNoteHtml,
@@ -21,10 +21,12 @@ function sameExecution(a, b) {
 
 export function createWaterfallView() {
     let chart = null;
+    let naturalChartHeight = null;
     let detachSelection = null;
     let ctxRef = null;
     let selected = null;
     let pendingSelection = null;
+    let preferredPid = null;
     let detailRef = null;
     let detailOpts = null;
     let currentWindow = null;
@@ -43,6 +45,7 @@ export function createWaterfallView() {
     function disposeChart() {
         if (detachSelection) { detachSelection(); detachSelection = null; }
         if (chart) { chart.dispose(); chart = null; }
+        naturalChartHeight = null;
     }
 
     /* #171: build the executions-list + waterfall-pane shell ONCE (the
@@ -68,6 +71,7 @@ export function createWaterfallView() {
             ' <div id="executions-table"></div>' +
             '</section>' +
             '<section class="waterfall-pane">' +
+            ' <div id="waterfall-context" class="waterfall-context"></div>' +
             ' <div class="waterfall-banner"><span>Plain drag zooms this loaded execution; ' +
             'double-click restores it.</span><span id="waterfall-zoom-state"></span></div>' +
             ' <div id="waterfall-truncation"></div>' +
@@ -102,7 +106,12 @@ export function createWaterfallView() {
         if (toggle) toggle.textContent = executionsSortToggleLabel(sortMode);
     }
 
-    function chooseExecution(rows) {
+    function chooseExecution(rows, filters) {
+        const matches = r => (filters.pid == null || Number(r.pid) === Number(filters.pid)) &&
+            (filters.query_id == null || String(r.query_id) === String(filters.query_id));
+        rows = rows.filter(matches);
+        if (pendingSelection && !matches(pendingSelection)) pendingSelection = null;
+        if (selected && !matches(selected)) selected = null;
         if (pendingSelection) {
             const authoritative = rows.find(r => sameExecution(r, pendingSelection));
             selected = authoritative || pendingSelection;
@@ -116,7 +125,12 @@ export function createWaterfallView() {
         /* Not rows[0]: the newest execution on a real workload usually has
          * no events, no workers and no plan, and an empty detail leaves the
          * panel with no chart at all (issue #101). */
-        selected = pickDefaultExecution(rows);
+        // A query's longest backend span need not own an execution of that
+        // query. Prefer its PID only within the already-filtered executions;
+        // keep explicit session filters authoritative and allow query fallback.
+        const preferred = preferredPid == null ? [] :
+            rows.filter(r => Number(r.pid) === Number(preferredPid));
+        selected = pickDefaultExecution(preferred.length ? preferred : rows);
         return selected;
     }
 
@@ -136,23 +150,56 @@ export function createWaterfallView() {
     /* #415: give the executions list exactly the height left over once the
      * waterfall pane below it is fully on screen -- see
      * executionListMaxHeight() in lib/builders/waterfall.js for why the
-     * list is the part that yields and why one pass is enough. Runs after
-     * renderDetail(), because the pane's height is the chart's height and
-     * that is only known once the chart has been sized for this
-     * execution's lane count. */
+     * list yields down to its measured row floor. Then #462 takes any
+     * remaining overflow from the chart, respecting its CSS minimum.
+     * Always budget from the natural chart height so repeated resizes
+     * cannot trade the recovered chart space back into the list. */
     function fitExecutionList() {
         const list = document.querySelector('.execution-list');
         const pane = document.querySelector('.waterfall-pane');
         if (!list || !pane || pane.style.display === 'none') return;
+        const host = document.getElementById('waterfall-chart');
+        if (chart && naturalChartHeight != null) {
+            host.style.height = naturalChartHeight + 'px';
+        }
         const paneBox = pane.getBoundingClientRect();
+        const listBox = list.getBoundingClientRect();
+        const style = getComputedStyle(list);
+        const borderBottom = parseFloat(style.borderBottomWidth) || 0;
+        const borderTop = parseFloat(style.borderTopWidth) || 0;
+        const scrollbarHeight = Math.max(0,
+            list.offsetHeight - list.clientHeight - borderTop - borderBottom);
+        const rowListHeights = [...list.querySelectorAll('tbody tr.clickable')]
+            .map(row => row.getBoundingClientRect().bottom - listBox.top +
+                list.scrollTop + borderBottom + scrollbarHeight);
+        const context = document.getElementById('waterfall-context');
+        const contextHeight = context ? context.getBoundingClientRect().height +
+            (parseFloat(getComputedStyle(context).marginBottom) || 0) : 0;
         const px = executionListMaxHeight({
             viewportHeight: window.innerHeight,
-            listTop: list.getBoundingClientRect().top,
+            listTop: listBox.top,
             paneHeight: paneBox.height,
-            trailingBelowPane: document.documentElement.scrollHeight
-                - (paneBox.bottom + window.scrollY),
+            contextHeight,
+            rowListHeights,
+            // The container owns the trailing padding. document.scrollHeight
+            // is at least the viewport height, so it also counts unused space
+            // and would shrink the list again on every resize.
+            trailingBelowPane: list.parentElement.getBoundingClientRect().bottom
+                - paneBox.bottom,
         });
         list.style.maxHeight = px == null ? '' : px + 'px';
+        if (chart && naturalChartHeight != null && px != null) {
+            // Measure after applying the list cap: a short list can be
+            // smaller than its cap. The container includes trailing padding.
+            const overflow = list.parentElement.getBoundingClientRect().bottom
+                - window.innerHeight;
+            const minimum = parseFloat(getComputedStyle(host).minHeight);
+            if (Number.isFinite(minimum)) {
+                host.style.height = waterfallChartFitHeight(
+                    naturalChartHeight, minimum, overflow) + 'px';
+            }
+        }
+        if (chart) chart.resize();
     }
 
     function updateZoomLabel(model) {
@@ -179,7 +226,8 @@ export function createWaterfallView() {
         }
         currentWindow = { from: model.windowFrom, to: model.windowTo };
         axisOriginRef = model.axisOrigin;
-        host.style.height = model.chartHeight + 'px';
+        naturalChartHeight = model.chartHeight;
+        host.style.height = naturalChartHeight + 'px';
         if (!chart) {
             host.innerHTML = '';   // clear a leftover "no events"/"select an execution" placeholder
             chart = ctxRef.echarts.init(host, 'dark');
@@ -201,13 +249,20 @@ export function createWaterfallView() {
         }
         chart.setOption(model.option, true);
         updateZoomLabel(model);
+        fitExecutionList();
     }
 
     const view = {
         id: 'waterfall',
         pausesLive: true,
 
-        /* Called only by app.js's registered scatter-execution pivot. */
+        // A new query drill must not retain a previous execution selection.
+        selectQuery(intent) {
+            pendingSelection = null; selected = null;
+            preferredPid = intent?.pid ?? null;
+        },
+
+        /* Explicit execution selection from scatter or the executions list. */
         selectExecution(intent) {
             if (!intent || !intent.pid || !intent.start_ns) return;
             pendingSelection = {
@@ -237,17 +292,29 @@ export function createWaterfallView() {
                 });
             if (isUnavailable(executions))
                 return { executions, detail: null, selected: null, windowTo };
-            const chosen = chooseExecution(executions.rows || []);
+            const chosen = chooseExecution(executions.rows || [], ctx.filters.snapshot());
             if (!chosen) return { executions, detail: null, selected: null, windowTo };
             const detailEnd = chosen.end_ns != null
                 ? String(chosen.end_ns) : String(Math.round(ctx.timeRange.to));
-            const detailFilters = Object.assign({}, ctx.filters.snapshot(), { pid: chosen.pid });
+            const detailFilters = { pid: chosen.pid, query_id: chosen.query_id };
             const detail = await ctx.transport.request(ctx.channel('detail'),
                 'execution_detail', {
                     filters: detailFilters, start_ns: String(chosen.start_ns),
                     end_ns: detailEnd,
                 });
-            return { executions, detail, selected: chosen, detailEnd, windowTo };
+            const activityWindow = containingActivityWindow(detail, chosen);
+            let activityTimeline = null;
+            if (activityWindow) {
+                try {
+                    activityTimeline = await ctx.transport.request(ctx.channel('activity-timeline'),
+                        'session_timeline', activityWindow);
+                } catch (err) {
+                    if (err.name === 'CancelledError') throw err;
+                    // Evidence failure must not erase a valid executor chart.
+                    // The visible context refuses to claim pre-execution timing.
+                }
+            }
+            return { executions, detail, activityTimeline, selected: chosen, detailEnd, windowTo };
         },
 
         build(data) {
@@ -260,13 +327,9 @@ export function createWaterfallView() {
             }) : null;
             return { table, waterfall: wf, detail: data.detail,
                 selected: data.selected, detailEnd: data.detailEnd,
-                // Collapsed by default: #415 requires the drilled readout
-                // above the fold AND the pane not scrollable at the demo
-                // viewport (981 px). Expanded, this panel is 134 px and
-                // breaks both -- measured, see the shell comment below.
-                // Collapsed it costs one summary line and the span is one
-                // click away, which keeps #455's information and #415's
-                // guarantee at the same time.
+                context: waterfallContextHtml(data.detail, data.selected, data.activityTimeline),
+                // Keep only detailed metadata collapsed; identity, wait, span and
+                // scope live in the always-visible context inside the pane.
                 backendActivity: data.selected
                     ? '<details><summary>Containing leader backend activity</summary>' +
                         backendActivityHtml(
@@ -287,6 +350,7 @@ export function createWaterfallView() {
             }
             ensureShell(el);
             updateSortControl();
+            document.getElementById('waterfall-context').innerHTML = model.context || '';
             document.getElementById('waterfall-backend-activity').innerHTML = model.backendActivity || '';
             const countsLabel = document.getElementById('executions-counts-label');
             if (countsLabel) {
@@ -299,7 +363,7 @@ export function createWaterfallView() {
             const pane = document.querySelector('.waterfall-pane');
             if (!model.table.hasRows) {
                 disposeChart();
-                tableHost.innerHTML = '<div class="loading">No executions for selected range</div>';
+                tableHost.innerHTML = '<div class="loading">No executions match the selected query/session filters and time range.</div>';
                 pane.style.display = 'none';
                 return;
             }
@@ -313,7 +377,9 @@ export function createWaterfallView() {
             if (!model.detail || !model.waterfall) {
                 disposeChart();
                 document.getElementById('waterfall-chart').innerHTML =
-                    '<div class="loading">Select an execution</div>';
+                    '<div class="loading">' + (model.selected
+                        ? 'No detail was returned for the selected execution.'
+                        : 'No execution matches the selected query/session filters and time range.') + '</div>';
                 return;
             }
             detailRef = model.detail;
@@ -338,7 +404,6 @@ export function createWaterfallView() {
             document.getElementById('waterfall-truncation').className = lines.length
                 ? 'honesty-note' : '';
             renderDetail(model.waterfall.fullFrom, model.waterfall.fullTo);
-            fitExecutionList();
         },
 
         enter(ctx) { ctxRef = ctx; },
@@ -346,8 +411,9 @@ export function createWaterfallView() {
             disposeChart(); detailRef = null; currentWindow = null;
             axisOriginRef = null;
             pendingSelection = null; selected = null;
+            preferredPid = null;
         },
-        resize() { if (chart) chart.resize(); fitExecutionList(); },
+        resize() { fitExecutionList(); },
     };
     return view;
 }

@@ -400,7 +400,7 @@ test('#455 gate 1: Waterfall mounts the selected leader null reason and scope', 
 test('#455 gates 2/3: Waterfall span survives zero executions/events and shows observed elapsed only', () => {
     const html = mountSpan455({ backend_activity_span: wfSpan455 });
     for (const text of ['PID 1234', '0 observed executions', '714.0 s observed',
-        'Measurement: Partial', 'Completion: In flight']) assert.ok(html.includes(text), html);
+        'Measurement: Partial', 'Backend activity boundary: In flight']) assert.ok(html.includes(text), html);
     assert.doesNotMatch(html, /1000.0|999999|Closed/);
 });
 test('#455 gate 4: Waterfall readout ignores hostile aggregate totals', () => {

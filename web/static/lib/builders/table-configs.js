@@ -21,7 +21,7 @@ import {
 } from '../format.js';
 import { dot, pctBar, stackedBar, eventStackedBar, createStableOrder } from '../table.js';
 
-import { backendActivityHtml } from './backend-span.js';
+import { queryBackendSpanHtml, backendSpanEnvelope } from './backend-span.js';
 
 const _dot = (name) => dot(name, classColor);
 
@@ -520,36 +520,22 @@ export function makeQueriesConfig(fidelity) {
             { key: 'query_id', label: 'Query ID', cls: 'sticky-col sticky-col-0', format: (r) =>
                 '<span class="query-id">' + r.query_id + '</span>' },
             { key: 'text', label: 'Query Text', cls: 'sticky-col sticky-col-1', format: (r) => {
-                if (!r.text) return '<span style="color:#555">—</span>';
+                if (!r.text) return '<span style="color:#555">—</span>' + queryBackendSpanHtml(r);
                 const truncated = esc(r.text.substring(0, 80)) +
                     (r.text.length > 80 ? '...' : '');
                 return '<span class="qt-hover" data-fulltext="' +
                     esc(r.text).replace(/"/g, '&quot;') + '">' +
-                    _dot(r.top_wait) + truncated + '</span>';
+                    _dot(r.top_wait) + truncated + '</span>' + queryBackendSpanHtml(r);
             }},
             { key: '_executions', label: 'Waterfall', sortable: false,
               cls: 'query-executions-cell',
               format: () => '<span class="cell-drill query-executions-action" ' +
                   'title="Open individual executions">Executions →</span>',
               intent: (r) => ({ pivot: 'query-executions', filterKey: 'query_id',
-                  filterValue: r.query_id,
+                  removeKey: ['event_id', 'class'],
+                  filterValue: r.query_id, pid: backendSpanEnvelope(r).span?.pid,
                   label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
             { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
-            /* Reviewer finding: `Closed · 0.4 s` renders directly beside
-             * `DB Time 4.2 s`, and nothing in the cell or the header said one
-             * is an OBSERVED WALL-CLOCK SPAN of one backend's activity while
-             * the other is a SUMMED wait + CPU total across every execution.
-             * Read as "another time next to DB Time" it trades #455's missing
-             * 714 s for a new ambiguity, so the qualifier is in the header
-             * text itself -- not left to be inferred from the drill's
-             * Measurement/Completion wording. */
-            { key: 'backend_activity_span', sortable: false,
-              label: 'Backend activity <span class="col-qualifier" title="' +
-                  'One backend&#39;s observed wall-clock activity span, from ' +
-                  'CMD_START/CMD_END timestamps. NOT comparable to DB Time, ' +
-                  'which sums wait and CPU time across every execution of ' +
-                  'this query, and never an average.">(observed span)</span>',
-              cls: 'backend-activity-cell', format: (r) => backendActivityHtml(r) },
             { key: 'pct', label: QUERIES_PCT_LABEL, cls: 'num', format: (r) => fmtPct(r.pct) },
             { key: 'classes', label: 'Wait Profile', format: (r) =>
                 r.events ? eventStackedBar(r.events, r.total_ms, eventColor, fmtMs)
@@ -608,7 +594,13 @@ export const QUERIES_SCOPE_NOTE_TEXT =
     'Plan measure executor/planner time only and do not include it.';
 
 export function queriesScopeNoteHtml() {
-    return '<div class="exec-scope-note">' + esc(QUERIES_SCOPE_NOTE_TEXT) + '</div>';
+    return '<div class="exec-scope-note queries-scope">' +
+        '<div><strong>Execution statistics: Completed executor phase only.</strong> ' +
+        'Planning statistics: completed planner phase only.</div>' +
+        '<div>Backend spans: backend activity, not statement latency; ' +
+        'longest observed in-flight span takes precedence over longest measured closed span. ' +
+        'DB Time sums attributed wait/CPU time across executions.</div>' +
+        '<div>' + esc(QUERIES_SCOPE_NOTE_TEXT) + '</div></div>';
 }
 
 /* #439 beside-table disclosure: how much foreground time no query claimed

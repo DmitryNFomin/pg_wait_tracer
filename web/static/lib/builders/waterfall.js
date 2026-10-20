@@ -10,6 +10,7 @@
 
 import { eventColor, fmtTimeNs, fmtUs, fmtMs, esc } from '../format.js';
 import { buildTableModel, buildTruncationRow } from '../table.js';
+import { backendSpanEnvelope, backendActivityLine } from './backend-span.js';
 
 export const PLAN_COLOR = '#9b7bd3';
 
@@ -96,11 +97,11 @@ function durationCellHtml(r) {
  * EXECUTION_LIST_MAX_PX keeps the previous fixed cap as the UPPER bound, so
  * a viewport with room to spare renders exactly as it did before (no
  * snapshot moves for the short-table case); EXECUTION_LIST_MIN_PX keeps the
- * list usable (header + ~3 rows) when there is not enough room for both,
+ * list usable when there is not enough room for both,
  * which is a genuinely-does-not-fit layout, NOT something to hide by
  * collapsing the list to nothing. FOLD_MARGIN_PX keeps the pane's bottom
- * edge off the fold itself: at devicePixelRatio 2 a sub-pixel rounding in
- * either direction must not be what decides whether a scrollbar appears.
+ * edge off the fold itself. A complete row may use that cushion, but only
+ * within the rounded-down budget for the entire page.
  *
  * Returns null when the geometry cannot be read (no numbers, nonsense
  * numbers). The caller then leaves the CSS cap in place rather than writing
@@ -111,6 +112,12 @@ function durationCellHtml(r) {
 export const EXECUTION_LIST_MAX_PX = 310;
 export const EXECUTION_LIST_MIN_PX = 120;
 export const EXECUTION_LIST_FOLD_MARGIN_PX = 8;
+
+// #462: once the list reaches its measured row floor, only the chart may
+// yield. Keep its existing CSS minimum even when the page cannot fit.
+export function waterfallChartFitHeight(naturalHeight, minimumHeight, overflow) {
+    return Math.max(minimumHeight, naturalHeight - Math.max(0, Math.ceil(overflow)));
+}
 
 export function executionListMaxHeight(geometry) {
     const g = geometry || {};
@@ -131,8 +138,26 @@ export function executionListMaxHeight(geometry) {
         ? g.trailingBelowPane : 0;
     const available = g.viewportHeight - g.listTop - g.paneHeight - trailing
         - EXECUTION_LIST_FOLD_MARGIN_PX;
-    return Math.max(EXECUTION_LIST_MIN_PX,
-        Math.min(EXECUTION_LIST_MAX_PX, Math.floor(available)));
+    // The always-visible context is already part of paneHeight. It also
+    // consumes the old minimum's budget: keeping a rigid 120px list floor
+    // made the page overflow even though the arithmetic above saw the pane.
+    // Row requirements include the title, scope note, header, bottom border
+    // and any horizontal scrollbar. Round requirements UP so fractional row
+    // boundaries remain inside the integer clientHeight clipping boundary.
+    const rowHeights = (Array.isArray(g.rowListHeights) ? g.rowListHeights : [])
+        .filter(v => ok(v) && v > 0).map(Math.ceil);
+    const context = ok(g.contextHeight) && g.contextHeight > 0 ? g.contextHeight : 0;
+    const minimum = Math.max(rowHeights[0] ?? EXECUTION_LIST_MIN_PX,
+        Math.ceil(EXECUTION_LIST_MIN_PX - context));
+    let cap = Math.min(EXECUTION_LIST_MAX_PX, Math.floor(available));
+    // Finish a row that falls in the fold cushion rather than clipping it
+    // by a fraction of a pixel. Round the hard budget DOWN: completing a
+    // row must never push the page past the fold.
+    const hardCap = Math.min(EXECUTION_LIST_MAX_PX,
+        Math.floor(available + EXECUTION_LIST_FOLD_MARGIN_PX));
+    const nextRow = rowHeights.find(height => height > cap);
+    if (nextRow != null && nextRow <= hardCap) cap = nextRow;
+    return Math.max(minimum, cap);
 }
 
 /* #455: same scope gap as Queries' DB Time vs Avg Exec (table-configs.js
@@ -150,6 +175,64 @@ export const EXEC_SCOPE_NOTE_TEXT =
 
 export function execScopeNoteHtml() {
     return '<div class="exec-scope-note">' + esc(EXEC_SCOPE_NOTE_TEXT) + '</div>';
+}
+
+/* Evidence is requested for this PID's containing activity, independently
+ * of query/event filters (pre-executor waits may have query_id 0). Never
+ * promote a query-wide wait aggregate to evidence about one execution. */
+export function containingActivityWindow(detail, selected) {
+    const { span } = backendSpanEnvelope(detail);
+    if (!span || Number(span.pid) !== Number(selected?.pid)) return null;
+    const start = nsBig(span.start_ns), end = nsBig(span.end_ns);
+    const execStart = nsBig(selected.start_ns), execEnd = nsBig(selected.end_ns);
+    if (start == null || end == null || execStart == null || execEnd == null ||
+        end <= start || execStart < start || execEnd < execStart || execEnd > end) return null;
+    return { from: String(start), to: String(end), filters: { pid: Number(selected.pid) } };
+}
+
+export function waterfallContextHtml(detail, selected, timeline) {
+    if (!selected) return '';
+    const envelope = backendSpanEnvelope(detail);
+    const span = Number(envelope.span?.pid) === Number(selected.pid) ? envelope.span : null;
+    const window = containingActivityWindow(detail, selected);
+    const start = window ? nsBig(window.from) : null, end = window ? nsBig(window.to) : null;
+    const execStart = nsBig(selected.start_ns);
+    const waits = window ? (timeline?.events || []).filter(e => {
+        const s = nsBig(e.s), d = nsBig(e.d);
+        return Number(e.p) === Number(selected.pid) && typeof e.n === 'string' &&
+            e.n.includes(':') && !e.n.startsWith('Client:') && s != null && d > 0n &&
+            s >= start && s + d <= end;
+    }) : [];
+    const names = [...new Set(waits.map(e => e.n))];
+    const relation = waits.filter(e => e.n === 'Lock:relation');
+    const relationInBars = (detail?.leader?.events || []).some(e => e.name === 'Lock:relation');
+    // session_timeline sends JSON numbers, unlike execution_detail's exact
+    // ns strings. Bound their rounding error before comparing boundaries;
+    // adjacent timestamps that rounded together cannot prove "before".
+    const rounding = v => typeof v === 'number' && !Number.isSafeInteger(v)
+        ? BigInt(Math.ceil(Math.abs(v) * Number.EPSILON)) : 0n;
+    const provenBefore = relation.length > 0 && timeline?.fidelity === 'exact' &&
+        timeline.truncated === false && !timeline.right_edge_truncated && span?.measurement === 'measured' &&
+        !span.gap_inside && !span.sampled_inside && !span.malformed && !relationInBars &&
+        relation.every(e => nsBig(e.s) - rounding(e.s) >= start &&
+            nsBig(e.s) + nsBig(e.d) + rounding(e.s) + rounding(e.d) <= execStart);
+    const scope = provenBefore
+        ? 'Relation wait occurred before execution; bars show executor phase only.'
+        : relation.length && !relationInBars
+            ? 'Lock:relation is not represented by these executor bars; pre-execution timing is not established.'
+            : 'Bars show executor phase only; pre-execution wait timing is not established.';
+    const line = span?.measurement === 'partial'
+        ? 'Partial · ' + backendActivityLine(span) : backendActivityLine(span);
+    // Keep the summary bounded even for a busy backend; preserve the relation
+    // thread when present. This is observed evidence, not a dominant-wait rank.
+    const shownNames = relation.length ? ['Lock:relation', ...names.filter(n => n !== 'Lock:relation')] : names;
+    const waitText = shownNames.slice(0, 3).join(', ') + (shownNames.length > 3
+        ? ' (+' + (shownNames.length - 3) + ' other wait names)' : '');
+    return '<div data-context>PID ' + esc(String(selected.pid)) + ' · Query ' + esc(String(selected.query_id || '0')) +
+        ' · Executor interval: ' + esc(fmtExecutionDuration(selected).text) + '</div>' +
+        '<div data-context>Containing backend activity: ' + esc(line) + ' · ' +
+        esc(names.length ? 'Observed waits: ' + waitText : 'Wait evidence unavailable') + '</div>' +
+        '<div data-context>' + esc(scope) + ' Planner phase is marked separately.</div>';
 }
 
 export const executionsConfig = {
