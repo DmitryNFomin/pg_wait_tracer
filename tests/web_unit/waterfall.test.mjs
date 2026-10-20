@@ -8,7 +8,7 @@ import {
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     fmtExecutionDuration, executionsCountsLabel,
     executionsStatusLabel, executionsHasInferredEnd,
-    execScopeNoteHtml, EXEC_SCOPE_NOTE_TEXT,
+    execScopeNoteHtml, EXEC_SCOPE_NOTE_TEXT, zoomLabelText,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -126,6 +126,44 @@ test('#478-axis negative control: restoring hardcoded millisecond precision '
     const ticks = [0, 200000, 400000, 600000, 800000, 1000000];
     const naive = ticks.map(v => fmtTimeNs(String(START + BigInt(v)), 1_000_000));
     assert.ok(new Set(naive).size < 6, naive.join(', '));
+});
+
+// ── #478-axis (review follow-up): the "Zoomed: X-Y UTC" banner directly
+// above the x-axis had the SAME hardcoded-1ms bug the axis itself just had
+// fixed -- a sub-millisecond zoom showed two IDENTICAL timestamps. The
+// model's own tickBucketNs (same value the axis formatter now uses) is
+// reused here rather than invented separately, so the two can never drift
+// apart again.
+
+test('#478-axis zoomLabelText: a sub-millisecond zoom shows two DISTINCT timestamps', () => {
+    const zoomed = buildWaterfallOption(detail(), {
+        from: at(2_000_000), to: at(2_000_000 + 1_000_000),
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const currentWindow = { from: zoomed.windowFrom, to: zoomed.windowTo };
+    const text = zoomLabelText(currentWindow, zoomed);
+    assert.ok(text.startsWith('Zoomed: ') && text.endsWith(' UTC'), text);
+    const [from, to] = text.slice('Zoomed: '.length, -' UTC'.length).split('–');
+    assert.notEqual(from, to, text);
+});
+
+test('#478-axis negative control: the OLD hardcoded-1ms bucket collapses the '
+    + 'same sub-millisecond zoom to two IDENTICAL timestamps', () => {
+    const zoomed = buildWaterfallOption(detail(), {
+        from: at(2_000_000), to: at(2_000_000 + 1_000_000),
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const naiveFrom = fmtTimeNs(zoomed.windowFrom, 1_000_000);
+    const naiveTo = fmtTimeNs(zoomed.windowTo, 1_000_000);
+    assert.equal(naiveFrom, naiveTo, naiveFrom + ' vs ' + naiveTo);
+});
+
+test('#478-axis zoomLabelText: unchanged "Full execution" when the window equals the full extent', () => {
+    const full = buildWaterfallOption(detail(), { executionStart: String(START),
+        executionEnd: at(20_000_000) });
+    const currentWindow = { from: full.windowFrom, to: full.windowTo };
+    assert.equal(zoomLabelText(currentWindow, full), 'Full execution');
+    assert.equal(zoomLabelText(null, full), 'Full execution');
 });
 
 // ── #473-4: the right-most x-axis tick ("to" the full window end, the
