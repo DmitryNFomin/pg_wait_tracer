@@ -292,7 +292,7 @@ test('#455 gate 2: Queries drill mounts a full span with ZERO executions and pre
 });
 test('#455 gate 3: Queries in-flight cell shows observed elapsed, never completed duration', () => {
     const html = activityCell({ backend_activity_span: span455 });
-    assert.match(html, /714.0 s observed/);
+    assert.match(html, /714.0s observed/);
     assert.doesNotMatch(html, /1000.0|999999|Closed/);
 });
 test('#455 gate 4: hostile totals cannot affect Backend activity cell or drill', () => {

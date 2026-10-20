@@ -54,7 +54,7 @@ test('in_flight: observed elapsed time only, completed_duration_ms is IGNORED '
         observed_elapsed_ms: 714000, completed_duration_ms: 999999 };
     const line = backendActivityLine(span);
     assert.ok(line.includes('In flight'), line);
-    assert.ok(line.includes('714.0 s observed'), line);
+    assert.ok(line.includes('714.0s observed'), line);
     assert.ok(!line.includes('999999') && !line.includes('1000.0'),
         'completed_duration_ms must never leak into an in-flight line: ' + line);
 });
@@ -84,7 +84,7 @@ test('in_flight with no observed elapsed time yet: "In flight" alone, never a bl
 test('closed: exact completed duration, never computed from DB Time / Execs '
     + '(this module has no such fields to divide in the first place)', () => {
     const span = { measurement: 'measured', completion: 'closed', completed_duration_ms: 714200 };
-    assert.equal(backendActivityLine(span), 'Closed · 714.2 s');
+    assert.equal(backendActivityLine(span), 'Closed · 714.2s');
 });
 
 test('closed with no completed_duration_ms (should not happen, but must not '
@@ -123,7 +123,7 @@ test('completion unknown (but something WAS measured): "Not measured" '
     const withElapsed = backendActivityLine(
         { measurement: 'partial', completion: 'unknown', observed_elapsed_ms: 2000 });
     assert.ok(withElapsed.startsWith('Not measured'), withElapsed);
-    assert.ok(withElapsed.includes('2.0 s observed'), withElapsed);
+    assert.ok(withElapsed.includes('2.0s observed'), withElapsed);
     const withoutElapsed = backendActivityLine(
         { measurement: 'partial', completion: 'unknown', observed_elapsed_ms: null });
     assert.equal(withoutElapsed, 'Not measured');
@@ -274,7 +274,7 @@ test('#455 wire envelope: hostile totals leave compact and detail HTML byte-iden
     for (const detail of [false, true]) {
         const html = backendActivityHtml(hostile, detail);
         assert.equal(html, backendActivityHtml(base, detail));
-        assert.match(html, /714.0 s observed/);
+        assert.match(html, /714.0s observed/);
         assert.doesNotMatch(html, /7\.9|1000.0|999999/);
     }
 });

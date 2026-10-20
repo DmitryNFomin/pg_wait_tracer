@@ -50,7 +50,7 @@ test('the fixture carries a MEASURED row span -- without it every case '
 test('Queries cell: a measured, closed span renders its duration -- NOT the '
     + 'bare string "Not measured"', () => {
     const html = backendActivityHtml(WIRE.measured_row);
-    assert.match(html, /Closed · 0\.4 s/);
+    assert.match(html, /Closed · 420\.0ms/);
     assert.match(html, /Measurement: Measured · Backend activity boundary: Closed/);
     assert.notEqual(html, 'Not measured');
 });
@@ -105,7 +105,7 @@ test('Queries panel: the measured row produces a span entry, not an empty '
         rows: [WIRE.measured_row, WIRE.unmeasured_row],
     });
     assert.match(html, /backend-activity-panel/);
-    assert.match(html, /Closed · 0\.4 s/);
+    assert.match(html, /Closed · 420\.0ms/);
     assert.match(html, /1 observed execution/);
     // "Not measured" as the WHOLE panel body is the dead-panel symptom.
     assert.ok(!/<p>Not measured<\/p>/.test(html), html.slice(0, 200));
@@ -118,12 +118,12 @@ test('Queries panel: span_detail\'s spans[] array renders its entries', () => {
     assert.ok(WIRE.span_detail.spans.length > 0);
     assert.equal((html.match(/<details open>/g) || []).length,
         WIRE.span_detail.spans.length);
-    assert.match(html, /Closed · 0\.4 s/);
+    assert.match(html, /Closed · 420\.0ms/);
 });
 
 test('Waterfall: execution_detail\'s own envelope renders with its scope', () => {
     const html = backendActivityHtml(WIRE.execution_detail, true);
-    assert.match(html, /Closed · 0\.4 s/);
+    assert.match(html, /Closed · 420\.0ms/);
     assert.match(html, /1 observed execution/);
     assert.match(html, /backend-activity-scope/);
 });
@@ -161,14 +161,14 @@ test('reviewer fix 1: the Queries panel is ONE collapsed section, the same '
     // The information is one click away, not two: the per-entry details stay
     // expanded INSIDE the collapsed section.
     assert.equal((html.match(/<details open>/g) || []).length, 2);
-    assert.match(html, /Closed · 0\.4 s/);
+    assert.match(html, /Closed · 420\.0ms/);
 });
 
 test('Queries selected span is visible in its identity cell, without a standalone column', () => {
     const cols = makeQueriesConfig('exact').columns;
     assert.ok(!cols.some(c => c.key === 'backend_activity_span'));
     const html = cols.find(c => c.key === 'text').format(WIRE.measured_row);
-    assert.match(html, /Longest measured closed backend span: 0\.4 s/);
+    assert.match(html, /Longest measured closed backend span: 420\.0ms/);
     assert.match(html, /PID 1001/);
     assert.doesNotMatch(html, /Measurement:|Completion:/);
 });

@@ -11,16 +11,16 @@ const render = s => makeQueriesConfig('exact').columns.map(c => c.format?.({
 })).join(' ').replace(/<[^>]*>/g, ''); // text nodes only; titles are not visible copy
 
 test('Queries measured closed: visible longest selection, PID, boundary scope', () => {
-    assert.match(render(span), /Longest measured closed backend span: 9\.9 s/);
+    assert.match(render(span), /Longest measured closed backend span: 9\.9s/);
     assert.match(render(span), /PID 661380/);
 });
 test('Queries in flight: observed elapsed even with a completed duration populated', () => {
     const html = render({ ...span, completion: 'in_flight', completed_duration_ms: 555000 });
-    assert.match(html, /Longest observed in-flight backend span: 9\.9 s so far/);
+    assert.match(html, /Longest observed in-flight backend span: 9\.9s so far/);
     assert.doesNotMatch(html, /555\.0|measured closed/);
 });
 test('Queries partial and unavailable remain explicit', () => {
-    assert.match(render({ ...span, measurement: 'partial', completion: 'unknown' }), /Partial.*9\.9 s observed/);
+    assert.match(render({ ...span, measurement: 'partial', completion: 'unknown' }), /Partial.*9\.9s observed/);
     assert.match(render(null), /Backend span unavailable: Not measured/);
 });
 test('Queries span occupies identity cell, never its own column', () => {
