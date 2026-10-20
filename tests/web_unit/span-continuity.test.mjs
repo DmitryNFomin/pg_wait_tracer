@@ -208,3 +208,31 @@ test('failed activity evidence preserves the selected executor and refuses timin
     assert.match(model.context, /Wait evidence unavailable/);
     assert.doesNotMatch(model.context, /occurred before/);
 });
+
+// ── #477: the server already explains why a containing span is unavailable
+// (src/server.c:5845-5849, backend_activity_unavailable_reason) -- the
+// Waterfall context line discarded it, rendering a bare "Not measured" that
+// reads as "this panel is broken" instead of "the span pass refused, for a
+// stated reason". backendSpanEnvelope already extracts the reason
+// (backend-span.js); waterfallContextHtml already destructures the same
+// envelope for `span` -- it just never read `.reason`.
+
+test('#477 waterfall context discloses the server reason when the containing span is unavailable', () => {
+    const html = waterfallContextHtml({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'the backend span pass refused' }, execution, timeline);
+    assert.match(html, /Containing backend activity: Not measured — the backend span pass refused/);
+});
+
+test('#477 negative control: no reason on the payload -> plain "Not measured", no dangling separator', () => {
+    const html = waterfallContextHtml({ backend_activity_span: null }, execution, timeline);
+    assert.match(html, /Containing backend activity: Not measured/);
+    assert.doesNotMatch(html, / — /);
+});
+
+test('#477 a long server reason is clamped, never blows the fixed-height Waterfall fold (#462)', () => {
+    const html = waterfallContextHtml({ backend_activity_span: null,
+        backend_activity_unavailable_reason: 'x'.repeat(200) }, execution, timeline);
+    const m = html.match(/Not measured — ([^<]*)/);
+    assert.ok(m, html);
+    assert.ok(m[1].length <= 81, 'clamped reason length: ' + m[1].length);
+});
