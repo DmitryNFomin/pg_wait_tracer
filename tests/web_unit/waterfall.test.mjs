@@ -137,6 +137,80 @@ test('renderItem gives micro bars a visible 1px width', () => {
     assert.equal(shape.style.fill, '#abc');
 });
 
+// ── #478-planmarker: the Plan phase band must never overflow into the
+// event band it shares a lane/y-position with (the pre-fix 0.82 vs 0.58
+// height factors made it visibly spill over the CPU segment it sits next
+// to), and an unlabeled coloured rectangle communicates nothing on its
+// own -- it needs an on-screen "Plan" label when there is room for one.
+//
+// Data-honesty note (verified against the retained counted1 trace,
+// pgwt-server built from b7228ea, 48 executions / 0 overlaps / typical
+// ~5us plan-to-exec gap): plan_end_ns <= exec_start_ns always holds. The
+// geometry test below pins that the DRAWN plan bar never extends past
+// either the executor interval's own start OR the first drawn event --
+// this is presentation work confirming an already-honest relationship,
+// not a data-bug workaround.
+
+test('#478-planmarker: Plan band height no longer exceeds the event band height', () => {
+    const api = (tuple) => ({ value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] });
+    const planShape = waterfallRenderItem({}, api([10, 50, 0, 'Plan phase', null, '10', '40', null, 1, 'plan', PLAN_COLOR]));
+    const eventShape = waterfallRenderItem({}, api([10, 50, 0, 'CPU*', 0, '10', '40', null, 1, 'event', '#abc']));
+    const planRect = planShape.type === 'group' ? planShape.children.find(c => c.type === 'rect') : planShape;
+    assert.ok(planRect.shape.height <= eventShape.shape.height,
+        'plan height (' + planRect.shape.height + ') must not exceed event height (' + eventShape.shape.height + ')');
+});
+
+test('#478-planmarker: a wide Plan bar renders a visible on-screen "Plan" label, not a bare overlay', () => {
+    const tuple = [10, 200, 0, 'Plan phase', null, '10', '40', null, 1, 'plan', PLAN_COLOR];
+    const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
+    const shape = waterfallRenderItem({}, api);
+    assert.equal(shape.type, 'group', 'a labeled plan item is a group (rect + text), not a bare rect');
+    const text = shape.children.find(c => c.type === 'text');
+    assert.ok(text, 'a labeled group must contain a text child');
+    assert.match(text.style.text, /Plan/i);
+    const rect = shape.children.find(c => c.type === 'rect');
+    assert.ok(rect, 'the rect is still present alongside the label');
+});
+
+test('#478-planmarker: a too-narrow Plan bar skips the label rather than overflowing its own sliver', () => {
+    const tuple = [10, 15, 0, 'Plan phase', null, '10', '1', null, 1, 'plan', PLAN_COLOR];
+    const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
+    const shape = waterfallRenderItem({}, api);
+    assert.equal(shape.type, 'rect', 'too narrow for a label: falls back to the bare rect');
+});
+
+test('#478-planmarker: event bars are completely unaffected (still a bare rect, same style/height)', () => {
+    const tuple = [10, 200, 0, 'CPU*', 0, '10', '190', null, 1, 'event', '#abc'];
+    const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
+    const shape = waterfallRenderItem({}, api);
+    assert.equal(shape.type, 'rect');
+    assert.equal(shape.style.fill, '#abc');
+});
+
+test('#478-planmarker: the drawn Plan bar never extends past the executor interval start or the first drawn event', () => {
+    const m = buildWaterfallOption(detail(), {
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const plan = m.bars.find(b => b[9] === 'plan');
+    const firstEvent = m.bars.filter(b => b[9] === 'event').sort((a, b) => a[0] - b[0])[0];
+    const execStartAxis = Number(BigInt(String(START)) - BigInt(m.fullFrom));
+    assert.ok(plan[1] <= execStartAxis,
+        'plan end (' + plan[1] + ') must not extend past the executor interval start (' + execStartAxis + ')');
+    assert.ok(plan[1] <= firstEvent[0],
+        'plan end (' + plan[1] + ') must not extend past the first drawn event (' + firstEvent[0] + ')');
+});
+
+test('#478-planmarker negative control: a plan.end_ns pushed past exec start IS caught by the geometry gate', () => {
+    const badDetail = { ...detail(), plan: { start_ns: at(-4_000_000), end_ns: at(5_000_000) } };
+    const m = buildWaterfallOption(badDetail, {
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const plan = m.bars.find(b => b[9] === 'plan');
+    const execStartAxis = Number(BigInt(String(START)) - BigInt(m.fullFrom));
+    assert.ok(plan[1] > execStartAxis,
+        'sanity: this fixture DOES push plan past exec start, proving the gate above can fail');
+});
+
 test('honest payload counts and per-lane truncation are carried without invention', () => {
     const d = detail();
     d.total_count = 12; d.kept_count = 4; d.truncated = true;
