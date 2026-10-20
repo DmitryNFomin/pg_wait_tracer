@@ -6,7 +6,7 @@ import {
     executionListMaxHeight, waterfallChartFitHeight, containingActivityWindow, waterfallContextHtml,
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
-    executionsStatusLabel, execScopeNoteHtml,
+    executionsStatusLabel, execScopeNoteHtml, zoomLabelText,
 } from '../lib/builders/waterfall.js';
 import { backendActivityHtml } from '../lib/builders/backend-span.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
@@ -205,13 +205,7 @@ export function createWaterfallView() {
     function updateZoomLabel(model) {
         const el = document.getElementById('waterfall-zoom-state');
         if (!el || !model) return;
-        if (!currentWindow || (currentWindow.from === model.fullFrom &&
-            currentWindow.to === model.fullTo)) {
-            el.textContent = 'Full execution';
-        } else {
-            el.textContent = 'Zoomed: ' + fmtTimeNs(currentWindow.from, 1_000_000) +
-                '–' + fmtTimeNs(currentWindow.to, 1_000_000) + ' UTC';
-        }
+        el.textContent = zoomLabelText(currentWindow, model);
     }
 
     function renderDetail(from, to) {

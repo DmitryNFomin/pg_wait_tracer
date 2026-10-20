@@ -72,6 +72,21 @@ export function fmtExecutionDuration(row, windowTo) {
     return { text, tooltip: null };
 }
 
+/* #478-axis (review follow-up): the "Zoomed: X-Y UTC" banner directly
+ * above the x-axis had the SAME hardcoded-1ms bug the axis itself was
+ * just fixed for -- pure so it is unit-testable without the view's DOM/
+ * ECharts machinery, and so the banner's bucket can never drift from the
+ * axis's again (both read model.tickBucketNs, computed once). */
+export function zoomLabelText(currentWindow, model) {
+    if (!currentWindow || (currentWindow.from === model.fullFrom &&
+        currentWindow.to === model.fullTo)) {
+        return 'Full execution';
+    }
+    const bucket = model.tickBucketNs != null ? model.tickBucketNs : 1_000_000;
+    return 'Zoomed: ' + fmtTimeNs(currentWindow.from, bucket) +
+        '–' + fmtTimeNs(currentWindow.to, bucket) + ' UTC';
+}
+
 function durationCellHtml(r) {
     const d = fmtExecutionDuration(r, r._windowTo);
     if (!d.tooltip) return d.text;
@@ -585,7 +600,8 @@ export function buildWaterfallOption(data, opts) {
     };
     return {
         option, hasData: true, lanes: labels, bars, fullFrom, fullTo,
-        axisOrigin: String(origin), windowFrom: String(fromNs), windowTo: String(toNs),
+        axisOrigin: String(origin), tickBucketNs,
+        windowFrom: String(fromNs), windowTo: String(toNs),
         chartHeight: Math.max(240, lanes.length * 54 + 100),
         count: keptCount, total_count: totalCount, kept_count: keptCount,
         truncated: !!(data && data.truncated), laneTruncations,
