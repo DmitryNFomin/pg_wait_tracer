@@ -1001,3 +1001,31 @@ test('#441 default queriesConfig export stays the exact-tier shape (gallery/back
     const countCol = queriesConfig.columns.find(c => c.key === 'count');
     assert.equal(countCol.label, 'Wait/CPU intervals');
 });
+
+// ── #471: Plan% must never exceed 100% -- a query with more plan events ──
+// than executions (a plan was recorded for an execution still in flight,
+// not yet counted as a completed exec) is a real, expected state, not a
+// data error; the ratio is clamped at the natural ceiling (every execution
+// has at most one plan counted against it) and the overflow is disclosed
+// via title text rather than a misleading ">100%" style number.
+
+test('#471 Plan% caps at 100% (never 200%) when plan_count > exec_count, and discloses why', () => {
+    const cfg = makeQueriesConfig('exact');
+    const planRatioCol = cfg.columns.find(c => c.key === 'plan_ratio');
+    const html = planRatioCol.format({ exec_count: 1, plan_count: 2 });
+    assert.ok(html.includes('100%'), html);
+    assert.ok(!html.includes('200%'), html);
+    assert.ok(html.includes('2 plans for executions still in flight'), html);
+});
+
+test('#471 Plan% normal case (plan_count <= exec_count) is the plain ratio, no overflow note', () => {
+    const cfg = makeQueriesConfig('exact');
+    const planRatioCol = cfg.columns.find(c => c.key === 'plan_ratio');
+    assert.equal(planRatioCol.format({ exec_count: 10, plan_count: 5 }), '50%');
+});
+
+test('#471 Plans column keeps the RAW uncapped count even when plan_count > exec_count', () => {
+    const cfg = makeQueriesConfig('exact');
+    const plansCol = cfg.columns.find(c => c.key === 'plan_count');
+    assert.equal(plansCol.format({ plan_count: 2, exec_count: 1 }), '2');
+});
