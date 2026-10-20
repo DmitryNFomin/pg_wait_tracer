@@ -544,9 +544,13 @@ export function makeQueriesConfig(fidelity) {
                 r.exec_count != null ? fmtCount(r.exec_count) : '—' },
             { key: 'plan_count', label: 'Plans', cls: 'num', format: (r) =>
                 r.plan_count != null ? fmtCount(r.plan_count) : '—' },
-            { key: 'plan_ratio', label: 'Plan%', cls: 'num', format: (r) =>
-                (r.exec_count > 0 && r.plan_count != null)
-                    ? (r.plan_count / r.exec_count * 100).toFixed(0) + '%' : '—' },
+            { key: 'plan_ratio', label: 'Plan%', cls: 'num', format: (r) => {
+                if (!(r.exec_count > 0 && r.plan_count != null)) return '—';
+                const ratio = (Math.min(r.plan_count, r.exec_count) / r.exec_count * 100).toFixed(0) + '%';
+                return r.plan_count > r.exec_count
+                    ? '<span title="' + esc(r.plan_count + ' plans for executions still in flight') + '">' + ratio + '</span>'
+                    : ratio;
+            } },
             { key: 'avg_exec_ms', label: 'Avg Exec', cls: 'num', format: (r) =>
                 r.avg_exec_ms != null ? fmtMs(r.avg_exec_ms) : '—' },
             { key: 'p95_exec_ms', label: 'p95 Exec', cls: 'num', format: (r) =>
