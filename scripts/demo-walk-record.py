@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
 from demo_walk_record_lib import (Refusal, chart_change, compose, coverage, frame_indices,
-                                  MOTION_LEVEL, sample_indices, save_walk, write_analysis, write_gif)
+                                  MOTION_LEVEL, sample_indices, save_walk, write_analysis, write_gif,
+                                  young_capture_refusal)
 from PIL import Image, ImageChops
 
 WIDTH, HEIGHT, DPR = 1710, 981, 2
@@ -896,6 +897,12 @@ def record(args, staging):
                 window_info["span_s"] = (window_info["to_ns"]-window_info["from_ns"])/1e9
             elif page.evaluate("window.__pgwt.timeRange.to-window.__pgwt.timeRange.from") != 900_000_000_000:
                 raise Refusal(3,"15-minute range was not achieved")
+            window_from_ns = page.evaluate("window.__pgwt.timeRange.from")
+            server_from_ns = page.evaluate("window.__pgwt.server.fromNs")
+            if not args.allow_young:
+                refusal = young_capture_refusal(server_from_ns,window_from_ns)
+                if refusal:
+                    raise refusal
             capture.pulse()
             walk = {"schema_version":1,"complete":False,"run_id":args.run_id,
                 "source":"mock_server.py with changing Overview fixture" if args.mock else "real bridge",
@@ -1012,6 +1019,10 @@ def main():
                               "in it advances, so the Overview AAS chart cannot visibly change, so the "
                               "walk will always refuse at that motion gate before ever cutting a GIF. "
                               "Record real demo GIFs against a LIVE capture (no --archived).")
+    parser.add_argument("--allow-young",action="store_true",
+                         help="override the young-capture refusal: proceed even when the "
+                              "capture's own data starts after the rendered window's start "
+                              "(the window's early range will then visibly have no data)")
     args=parser.parse_args()
     staging=None
     try:
@@ -1037,8 +1048,10 @@ def main():
     except Refusal as exc:
         print(f"REFUSED ({exc.code}): {exc}",file=sys.stderr)
         if staging:
-            (RESULTS/f"{args.run_id}.refusal.json").write_text(json.dumps({"complete":False,"exit_code":exc.code,
+            refused=RESULTS/f"{args.run_id}.refused"
+            (staging/"refusal.json").write_text(json.dumps({"complete":False,"exit_code":exc.code,
                 "reason":str(exc),"console_errors":getattr(exc,"errors",[])},indent=2)+"\n")
+            os.rename(staging,refused); staging=None
         return exc.code
     except (ValueError,OSError,KeyError,TypeError) as exc:
         print(f"REFUSED (6): artifact/configuration failure: {exc}",file=sys.stderr)
