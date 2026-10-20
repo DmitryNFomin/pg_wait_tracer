@@ -545,6 +545,7 @@ export function buildWaterfallOption(data, opts) {
             windowTo: toNs == null ? null : String(toNs) };
     }
 
+    const tickBucketNs = Math.max(1, Math.round(Number(toNs - fromNs) / 6));
     const option = {
         backgroundColor: 'transparent', animation: false, useUTC: true,
         tooltip: {
@@ -556,7 +557,7 @@ export function buildWaterfallOption(data, opts) {
         xAxis: {
             type: 'value', min: axis(fromNs), max: axis(toNs),
             axisLabel: { color: '#888', fontSize: 10,
-                formatter: (v) => fmtTimeNs(origin + BigInt(Math.round(v)), 1_000_000) },
+                formatter: (v) => fmtTimeNs(origin + BigInt(Math.round(v)), tickBucketNs) },
             axisLine: { lineStyle: { color: '#333' } },
         },
         yAxis: {
