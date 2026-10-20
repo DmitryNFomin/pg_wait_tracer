@@ -1037,8 +1037,10 @@ def main():
     except Refusal as exc:
         print(f"REFUSED ({exc.code}): {exc}",file=sys.stderr)
         if staging:
-            (RESULTS/f"{args.run_id}.refusal.json").write_text(json.dumps({"complete":False,"exit_code":exc.code,
+            refused=RESULTS/f"{args.run_id}.refused"
+            (staging/"refusal.json").write_text(json.dumps({"complete":False,"exit_code":exc.code,
                 "reason":str(exc),"console_errors":getattr(exc,"errors",[])},indent=2)+"\n")
+            os.rename(staging,refused); staging=None
         return exc.code
     except (ValueError,OSError,KeyError,TypeError) as exc:
         print(f"REFUSED (6): artifact/configuration failure: {exc}",file=sys.stderr)

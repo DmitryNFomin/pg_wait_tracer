@@ -87,8 +87,13 @@ Python ffmpeg wrapper, or additional encoder package is used.
 Output is `tests/results/demo_walk/<run-id>/`: `frames/*.jpg`, `walk.webm`,
 `walk.json`, `analysis.md`, `headline.gif` and `drill-down.gif`. A successful
 run is published by renaming its staging directory only after **all** checks.
-On refusal the staging directory is deleted, including media; only
-`<run-id>.refusal.json` remains. Existing successful runs are never overwritten.
+On refusal (issue #421) the staging directory is renamed to
+`<run-id>.refused/`, never deleted: `frames/*.jpg`, any partial GIFs and
+`walk.webm` survive alongside a new `refusal.json` written inside that
+directory, so a failed recording's diagnostic evidence does not cost a full
+re-record to recover. `<run-id>/` (the normal successful-publish name) is
+still never created on a refusal — a refusal must never look like a
+successful run. Existing successful runs are never overwritten.
 The committed `.gitignore` in the output directory ignores all generated files.
 
 Every tab's JSON records the dwell bounds, coverage, frame indices, visible
