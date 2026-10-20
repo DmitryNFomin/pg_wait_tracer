@@ -827,6 +827,44 @@ def test_transitions_tab(page):
           "Variants section rendered below the DFG after the click")
 
 
+def test_transitions_dfg_fits_demo_viewport(page):
+    """#475-1: the DFG container's own fixed height can push its bottom
+    edge below the pinned demo viewport's fold (1710x981 CSS @ DPR2),
+    independent of whether individual nodes clip INSIDE the container --
+    test_transitions_tab's clip check above measures only that
+    (container-relative pixels via coordinateSystem.dataToPoint()), never
+    whether the container itself fits the PAGE."""
+    print("--- Test #475-1: Transitions DFG fits the demo viewport ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.click("#live-btn")
+        p.wait_for_timeout(300)
+        p.click(".tab[data-tab='transitions']")
+        p.wait_for_selector("#dfg-container", timeout=10000)
+        p.wait_for_timeout(1500)   # let the graph actually render
+
+        geo = p.evaluate("""() => {
+            const el = document.getElementById('dfg-container');
+            const r = el.getBoundingClientRect();
+            return { bottom: r.bottom, innerHeight: window.innerHeight };
+        }""")
+        check(geo["bottom"] <= geo["innerHeight"],
+              f"#475-1: DFG container bottom sits above the fold at 1710x981 ({geo})")
+        assert_no_console_errors(p, guard, "transitions-dfg-fold")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_time_picker(page):
     """13. Time picker opens and quick range buttons work."""
     print("--- Test 13: Time Picker ---")
@@ -3931,6 +3969,7 @@ def main():
                 test_histogram_tab,
                 test_timeline_tab,
                 test_transitions_tab,
+                test_transitions_dfg_fits_demo_viewport,
                 test_time_picker,
                 test_zoom_out,
                 test_auto_refresh,
