@@ -37,8 +37,8 @@ export function createExecScatterView() {
             '<div class="scatter-shell">' +
             ' <div class="waterfall-banner">Plain drag zooms time; a 2D box also constrains latency. ' +
             'Double-click zooms out.</div>' +
-            ' <div id="scatter-notes" class="chart-notes"></div>' +
             ' <div id="scatter-chart"></div>' +
+            ' <div id="scatter-notes" class="chart-notes"></div>' +
             ' <div id="scatter-readout" class="chart-readout"></div>' +
             '</div>';
     }

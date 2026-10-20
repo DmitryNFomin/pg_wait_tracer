@@ -23,8 +23,8 @@ export function createMatrixView() {
             '<div class="matrix-shell">' +
             ' <div class="view-title">Transition matrix <span>cell color is log-scaled count; ' +
             'label color is event identity</span></div>' +
-            ' <div id="matrix-notes" class="chart-notes"></div>' +
             ' <div id="matrix-chart"></div>' +
+            ' <div id="matrix-notes" class="chart-notes"></div>' +
             '</div>';
     }
 
