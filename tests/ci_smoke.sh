@@ -205,6 +205,8 @@ else
             python3 "$SCRIPT_DIR/test_capture_smoke.py" --mode full --pid "$PM_PID"
         run_section "deterministic accuracy: exact counts/durations (--mode full)" \
             python3 "$SCRIPT_DIR/test_deterministic.py" --pid "$PM_PID"
+        run_section "execution-detail containing span on a real capture (#479)" \
+            python3 "$SCRIPT_DIR/test_execution_span_live.py" --pid "$PM_PID"
         # NOT invoked here: tests/test_v9_open_cpu_wired.sh. The v9 open-CPU
         # producer was reverted (agent/424-daemon fc7d7f5), so the check has
         # no wired producer to confirm and BOTH its outcomes are non-zero --
