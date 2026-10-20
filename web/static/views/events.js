@@ -23,7 +23,7 @@
 
 import {
     buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
-    createOrderResetGate,
+    createOrderResetGate, orderResetKey,
 } from '../lib/table.js';
 import {
     eventsConfig, compareEventsConfig, buildOverflowNote, overflowNoteHtml,
@@ -124,7 +124,7 @@ export function createEventsView() {
 
         build(data, ctx) {
             const sort = ctx.getSort('events');
-            resetIfChanged(order, { from: ctx.timeRange.from, to: ctx.timeRange.to,
+            resetIfChanged(order, { window: orderResetKey(ctx),
                 filters: ctx.filters.snapshot(), sort });
             return buildEventsModel(data, sort, order);
         },

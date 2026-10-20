@@ -14,7 +14,7 @@
 
 import {
     buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
-    createOrderResetGate,
+    createOrderResetGate, orderResetKey,
 } from '../lib/table.js';
 import { sessionsConfig } from '../lib/builders/table-configs.js';
 import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
@@ -60,7 +60,7 @@ export function createSessionsView() {
 
         build(data, ctx) {
             const sort = ctx.getSort('sessions');
-            resetIfChanged(order, { from: ctx.timeRange.from, to: ctx.timeRange.to,
+            resetIfChanged(order, { window: orderResetKey(ctx),
                 filters: ctx.filters.snapshot(), sort });
             return buildSessionsModel(data, sort, order);
         },

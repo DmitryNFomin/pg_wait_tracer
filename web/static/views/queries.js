@@ -16,7 +16,7 @@
 
 import {
     buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
-    createOrderResetGate,
+    createOrderResetGate, orderResetKey,
 } from '../lib/table.js';
 import {
     makeQueriesConfig, queriesConfig, compareQueriesConfig,
@@ -192,7 +192,7 @@ export function createQueriesView() {
 
         build(data, ctx) {
             const sort = ctx.getSort('queries');
-            resetIfChanged(order, { from: ctx.timeRange.from, to: ctx.timeRange.to,
+            resetIfChanged(order, { window: orderResetKey(ctx),
                 filters: ctx.filters.snapshot(), sort });
             return buildQueriesModel(data, sort, order);
         },

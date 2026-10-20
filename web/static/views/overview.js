@@ -9,7 +9,7 @@
  * config and turned into navigation by the shared onRowClick wiring.
  */
 
-import { buildTableModel, buildTruncationRow } from '../lib/table.js';
+import { buildTableModel, buildTruncationRow, orderResetKey } from '../lib/table.js';
 import {
     overviewConfig, compareOverviewConfig, createOverviewOrder,
 } from '../lib/builders/table-configs.js';
@@ -58,7 +58,7 @@ export function createOverviewView() {
 
     function maybeResetOrder(ctx, compareNow) {
         const key = JSON.stringify({
-            from: ctx.timeRange.from, to: ctx.timeRange.to,
+            window: orderResetKey(ctx),
             filters: ctx.filters.snapshot(), compare: !!compareNow,
         });
         if (key !== lastWindowKey) { order.reset(); lastWindowKey = key; }
