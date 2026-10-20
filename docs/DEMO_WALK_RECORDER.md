@@ -22,6 +22,12 @@ archived recording for a recording of the live rolling-window gesture.
 `--mock` always serves data anchored to wall-clock "now", so `--archived`
 with `--mock` is refused rather than silently doing nothing useful.
 
+`--allow-young` (default off): overrides the refusal when the capture's own
+data starts after the rendered window's start. That early part of the window
+has no underlying data yet, so the chart can look mostly empty. Wait for the
+capture to warm up before recording, or pass `--allow-young` to proceed with
+that visible gap. The refusal reports the missing range in seconds.
+
 **`--archived` cannot produce a GIF, by design.** The trace's own span is
 fixed, so nothing in the window advances: the Overview AAS chart's pixels
 never visibly change, and `chart_change()`'s motion gate (the same gate a
@@ -87,8 +93,13 @@ Python ffmpeg wrapper, or additional encoder package is used.
 Output is `tests/results/demo_walk/<run-id>/`: `frames/*.jpg`, `walk.webm`,
 `walk.json`, `analysis.md`, `headline.gif` and `drill-down.gif`. A successful
 run is published by renaming its staging directory only after **all** checks.
-On refusal the staging directory is deleted, including media; only
-`<run-id>.refusal.json` remains. Existing successful runs are never overwritten.
+On refusal (issue #421) the staging directory is renamed to
+`<run-id>.refused/`, never deleted: `frames/*.jpg`, any partial GIFs and
+`walk.webm` survive alongside a new `refusal.json` written inside that
+directory, so a failed recording's diagnostic evidence does not cost a full
+re-record to recover. `<run-id>/` (the normal successful-publish name) is
+still never created on a refusal — a refusal must never look like a
+successful run. Existing successful runs are never overwritten.
 The committed `.gitignore` in the output directory ignores all generated files.
 
 Every tab's JSON records the dwell bounds, coverage, frame indices, visible
@@ -233,7 +244,8 @@ or malformed frames, gaps or dropped video frames; 6 configuration, runbook
 drift, output/codec verification or invalid/oversized GIF.
 New codes: **7 GIF frame count gate** (sampled or decoded); **8 GIF motion
 gate** (first/last, or the single biggest consecutive-pair jump; sampled
-crop, palette or decoded — see the motion gate description above).
+crop, palette or decoded — see the motion gate description above); **9 capture
+younger than the rendered window** (`--allow-young` overrides).
 Existing codes retain their meanings. An empty-motion GIF is an observed
 artifact refusal, with the failed check named in the diagnostic.
 The distinction between 2 and 3 is observed-negative versus unobserved, rather

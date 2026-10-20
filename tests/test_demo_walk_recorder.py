@@ -314,6 +314,20 @@ class RecorderTests(unittest.TestCase):
         result = lib.motion_gate(pictures,"clip.gif","sampled crop")
         self.assertGreater(result["best_consecutive_changed_fraction"],0.5)
 
+    def test_young_capture_refusal_is_none_when_capture_covers_the_window_start(self):
+        window_from_ns = 1_000_000_000_000
+        for server_from_ns in (window_from_ns - 42_000_000_000, window_from_ns):
+            with self.subTest(server_from_ns=server_from_ns):
+                self.assertIsNone(lib.young_capture_refusal(server_from_ns, window_from_ns))
+
+    def test_young_capture_refusal_names_the_age_when_capture_starts_after_window(self):
+        window_from_ns = 1_000_000_000_000
+        server_from_ns = window_from_ns + 42_000_000_000
+        refusal = lib.young_capture_refusal(server_from_ns, window_from_ns)
+        self.assertIsInstance(refusal, lib.Refusal)
+        self.assertEqual(refusal.code, 9)
+        self.assertIn("42.0s", str(refusal))
+
     def test_recorded_chart_must_visibly_change(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);(root/"frames").mkdir()
@@ -334,12 +348,15 @@ class RecorderTests(unittest.TestCase):
             for code in (2,3,4,5,6,7,8):
                 def refuse(args,staging):
                     (staging/"partial.gif").write_bytes(b"partial")
+                    (staging/"frames").mkdir()
+                    (staging/"frames"/"000000.jpg").write_bytes(b"fake-frame")
                     raise lib.Refusal(code,f"test refusal {code}")
                 with patch.object(driver,"RESULTS",root),patch.object(driver,"record",refuse),patch.object(sys,"argv",["recorder","--mock","--run-id",f"refused-{code}"]):
                     self.assertEqual(driver.main(),code)
                 self.assertFalse((root/f"refused-{code}").exists())
                 self.assertFalse(list(root.glob(".*")))
-                self.assertEqual(json.loads((root/f"refused-{code}.refusal.json").read_text())["exit_code"],code)
+                self.assertTrue((root/f"refused-{code}.refused"/"frames"/"000000.jpg").exists())
+                self.assertEqual(json.loads((root/f"refused-{code}.refused"/"refusal.json").read_text())["exit_code"],code)
 
     def _minimal_walk(self, window=None):
         observation = {"panel": {"detail": "ok"}, "headlines": [], "table_rows": [], "readouts": []}
