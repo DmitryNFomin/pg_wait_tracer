@@ -102,6 +102,8 @@ export const AREA_FILL_ALPHA = 0.85;
 
 /* N-CPUs reference line color (same as the ECharts markLine). */
 export const NCPUS_COLOR = '#E53935';
+export const NOT_CAPTURED_BAND_COLOR = 'rgba(136, 136, 136, 0.10)';
+export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
 
 /* ── y-axis policy (Track U Phase U2, review P7) ─────────────────────────────
  * yMax = max(maxAas*1.2, min(numCpus*1.5, maxAas*4), 1) — the capacity
@@ -773,6 +775,17 @@ export function overlayGeometry(data, opts, scaleWindow) {
             x1: nsToMs(b.to != null ? b.to : axisToNs),
             fill: mixed ? MIXED_BAND_COLOR : SAMPLED_BAND_COLOR,
             stroke: mixed ? MIXED_BORDER : SAMPLED_BORDER,
+            dash: [4, 4],
+        });
+    }
+
+    if (opts.captureFromNs != null && opts.captureFromNs > win.from) {
+        rects.push({
+            kind: 'notcaptured',
+            x0: nsToMs(win.from),
+            x1: nsToMs(Math.min(opts.captureFromNs, axisToNs)),
+            fill: NOT_CAPTURED_BAND_COLOR,
+            stroke: NOT_CAPTURED_BORDER,
             dash: [4, 4],
         });
     }
