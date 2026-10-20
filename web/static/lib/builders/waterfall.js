@@ -13,6 +13,7 @@ import { buildTableModel, buildTruncationRow } from '../table.js';
 import { backendSpanEnvelope, backendActivityLine } from './backend-span.js';
 
 export const PLAN_COLOR = '#9b7bd3';
+export const PLAN_LABEL_MIN_WIDTH = 28;
 
 function ns(v) {
     if (v == null || v === '') return null;
@@ -425,8 +426,8 @@ export function waterfallRenderItem(params, api) {
     const band = api.size([0, 1])[1];
     const kind = api.value(9);
     const color = api.value(10) || '#888';
-    const height = band * (kind === 'plan' ? 0.82 : 0.58);
-    return {
+    const height = band * 0.58;
+    const rect = {
         type: 'rect',
         shape: {
             x: start[0], y: start[1] - height / 2,
@@ -436,6 +437,18 @@ export function waterfallRenderItem(params, api) {
             ? { fill: color, opacity: 0.55, stroke: '#cbb8ef', lineWidth: 1 }
             : { fill: color },
         styleEmphasis: { fill: color, opacity: 0.9, stroke: '#fff', lineWidth: 1 },
+    };
+    if (kind !== 'plan' || rect.shape.width < PLAN_LABEL_MIN_WIDTH) return rect;
+    return {
+        type: 'group',
+        children: [rect, {
+            type: 'text',
+            silent: true,
+            style: {
+                text: 'Plan', x: start[0] + 3, y: start[1],
+                fill: '#e0d8ed', fontSize: 10, verticalAlign: 'middle',
+            },
+        }],
     };
 }
 
