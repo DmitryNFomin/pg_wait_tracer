@@ -1352,8 +1352,8 @@ static void test_bypass(const char *dir_a)
           "never an empty list that reads as 'nothing was happening'");
     cJSON_Delete(resp);
 
-    /* 7g. execution_detail with no containing span: explicit unavailable,
-     *     never the nearest span and never a zero. */
+    /* 7g. execution_detail must carry the observed containing span. A
+     *     refusal or an error response cannot skip these assertions. */
     memset(&req, 0, sizeof(req));
     req.id = 11;
     req.filter.pid = PID_FAST;
@@ -1361,31 +1361,328 @@ static void test_bypass(const char *dir_a)
     req.end_ns = WALL(fx_base) + 50 * US;
     resp = call_handler(handle_execution_detail, srv, &req);
     CHECK(resp != NULL, "7g: execution_detail answers");
-    if (resp && cJSON_GetObjectItem(resp, "backend_activity_span")) {
-        cJSON *s = cJSON_GetObjectItem(resp, "backend_activity_span");
-        if (cJSON_IsObject(s)) {
-            CHECK((uint32_t)jnum(s, "pid") == PID_FAST,
-                  "7g: the containing span is the LEADER's own");
-            CHECK(jnum(s, "completed_duration_ms") == 1.0,
-                  "7g: and its duration is the 1 ms command, measured from "
-                  "the CMD markers around this execution -- BOTH of which "
-                  "lie outside the clicked execution's own window, so the "
-                  "pre- and post-window marker passes both had to work");
-            CHECK(streq(jstr(s, "measurement"), "measured") &&
-                  streq(jstr(s, "completion"), "closed"),
-                  "7g: measured and closed -- not 'open at the end of the "
-                  "processed stream', which is what a request-window-only "
-                  "reconstruction reports for every completed statement");
-            CHECK(jstr(resp, "backend_activity_span_scope") != NULL,
-                  "7g: and the response states how the span was scoped");
-        } else {
-            CHECK(jstr(resp, "backend_activity_unavailable_reason") != NULL,
-                  "7g: an absent containing span is stated with a reason");
-        }
-    }
+    cJSON *s7 = resp ? cJSON_GetObjectItem(resp, "backend_activity_span") : NULL;
+    int have_span = (s7 != NULL && cJSON_IsObject(s7));
+    CHECK(have_span,
+          "7g: the containing span is a NON-NULL object -- a JSON null with a "
+          "reason, or an error response with no such key at all, is exactly what "
+          "#479 produced on every live execution, and this assertion used to "
+          "accept both");
+    if (resp && !(s7 && cJSON_IsObject(s7)))
+        printf("     (reason: %s)\n",
+               jstr(resp, "backend_activity_unavailable_reason")
+                   ? jstr(resp, "backend_activity_unavailable_reason")
+                   : "(none)");
+    CHECK(have_span && (uint32_t)jnum(s7, "pid") == PID_FAST,
+          "7g: the containing span is the LEADER's own");
+    CHECK(have_span && jnum(s7, "completed_duration_ms") == 1.0,
+          "7g: and its duration is the 1 ms command, measured from "
+          "the CMD markers around this execution -- BOTH of which "
+          "lie outside the clicked execution's own window, so the "
+          "pre- and post-window marker passes both had to work");
+    CHECK(have_span && streq(jstr(s7, "measurement"), "measured") &&
+          streq(jstr(s7, "completion"), "closed"),
+          "7g: measured and closed -- not 'open at the end of the "
+          "processed stream', which is what a request-window-only "
+          "reconstruction reports for every completed statement");
+    CHECK(jstr(resp, "backend_activity_span_scope") != NULL,
+          "7g: and the response states how the span was scoped");
     cJSON_Delete(resp);
     server_destroy(srv);
     free(srv);
+}
+
+/* ── fixture S: #479's window/post seam ───────────────────────────────── */
+
+#define PID_SORD   801          /* the clicked execution's leader */
+#define PID_SIDLE  802          /* holds a ClientRead across the right edge */
+#define QID_SORD   0x7777777777777777ULL
+
+static uint64_t fx_s_base;      /* fixture S origin, MONO */
+static uint64_t fx_s_wall_off;  /* MONO -> WALL, calibrated like fx_wall_off */
+#define SWALL(mono) ((mono) + fx_s_wall_off)
+
+static void build_fixture_straddle(const char *dir)
+{
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 180000, 0, NULL) != 0) {
+        printf("  FATAL: writer init (s)\n"); exit(2);
+    }
+    uint64_t t0 = fx_s_base;
+    wmark(&w, t0, PID_SORD, PGWT_MARKER_CMD_START, 0);
+    wmark(&w, t0 + 1 * MS, PID_SORD, PGWT_MARKER_EXEC_START, QID_SORD);
+    wpush(&w, t0 + 5 * MS, PID_SORD, EV_IO, 0, 2 * MS, QID_SORD);
+    wmark(&w, t0 + 9 * MS, PID_SORD, PGWT_MARKER_EXEC_END, QID_SORD);
+    wmark(&w, t0 + 10 * MS, PID_SORD, PGWT_MARKER_CMD_END, QID_SORD);
+    /* The straddler: a ClientRead on ANOTHER pid that opens one second
+     * before this command and closes thirty seconds after it -- the exact
+     * shape an idle session has in every real capture. */
+    wpush(&w, t0 + 30 * ONE_SEC, PID_SIDLE, EV_CLIENT_READ, 0,
+          31 * ONE_SEC, 0);
+    pgwt_writer_close(&w);
+}
+
+/* Reproduce the handler's three loads and concatenate WITHOUT sorting, so
+ * the refusal and its bypass exercise the same seam as the real request. */
+static struct pgwt_trace_event *straddle_concat(struct pgwt_server *srv,
+                                                struct pgwt_request *req,
+                                                int counts[3], int *count)
+{
+    struct pgwt_load_info info[3] = {{0}};
+    uint64_t context_from = req->start_ns > EXEC_PLAN_LOOKBACK_NS
+                          ? req->start_ns - EXEC_PLAN_LOOKBACK_NS : 0;
+    struct pgwt_trace_event *chunks[3];
+    chunks[0] = server_load_markers_fi(srv, context_from, req->start_ns - 1,
+                                      PID_SORD, &counts[0], &info[0]);
+    chunks[1] = server_load_events_fi(srv, req->start_ns, req->end_ns, 0,
+                                     &counts[1], &info[1]);
+    chunks[2] = server_load_markers_fi(srv, req->end_ns + 1,
+                                      req->end_ns + EXEC_PLAN_LOOKBACK_NS,
+                                      PID_SORD, &counts[2], &info[2]);
+    *count = counts[0] + counts[1] + counts[2];
+    struct pgwt_trace_event *events =
+        malloc((size_t)(*count > 0 ? *count : 1) * sizeof(*events));
+    if (!events) { printf("  FATAL: concat allocation (s)\n"); exit(2); }
+    int at = 0;
+    for (int i = 0; i < 3; i++) {
+        if (counts[i] > 0)
+            memcpy(events + at, chunks[i], (size_t)counts[i] * sizeof(*events));
+        at += counts[i];
+        free(chunks[i]);
+    }
+    return events;
+}
+
+static int first_inversion(const struct pgwt_trace_event *events, int count)
+{
+    for (int i = 1; i < count; i++)
+        if (events[i - 1].timestamp_ns > events[i].timestamp_ns)
+            return i;
+    return -1;
+}
+
+static void test_straddler_order(struct pgwt_server *srv_s)
+{
+    printf("--- 9. #479: straddlers must not kill the containing span ---\n");
+    fx_s_wall_off = srv_s->earliest_wall_ns - fx_s_base;
+    uint64_t t0 = fx_s_base;
+    struct pgwt_request req = {0};
+    req.id = 479;
+    req.filter.pid = PID_SORD;
+    req.start_ns = SWALL(t0 + 1 * MS);
+    req.end_ns = SWALL(t0 + 9 * MS);
+
+    /* 9a. The hazard is PRESENT, not assumed. The real loader retains the
+     * straddler's own late closing timestamp in the execution window. */
+    int wn = 0;
+    struct pgwt_load_info wi = {0};
+    struct pgwt_trace_event *we = server_load_events_fi(
+        srv_s, req.start_ns, req.end_ns, 0, &wn, &wi);
+    CHECK(we != NULL && wn > 0,
+          "9a: the real window load has records -- an empty fixture would "
+          "exercise no ordering hazard");
+    CHECK(wi.straddlers_admitted >= 1,
+          "9a: the window load ADMITS a right-edge straddler, so the condition "
+          "#479 is about is present in this fixture rather than assumed; "
+          "with the lookahead off (9d) this is 0 and section 9 would be "
+          "testing nothing");
+    int late = 0;
+    uint64_t latest = req.end_ns;
+    for (int i = 0; we && i < wn; i++) {
+        if (we[i].timestamp_ns > req.end_ns) {
+            late++;
+            if (we[i].timestamp_ns > latest) latest = we[i].timestamp_ns;
+        }
+    }
+    CHECK(late >= 1,
+          "9a: the window carries a closing timestamp past its end -- "
+          "without that late timestamp the seam cannot invert");
+    printf("     (%d records past the window; latest %.2f ms past its end)\n",
+           late, (double)(latest - req.end_ns) / 1e6);
+    free(we);
+
+    /* 9b. The unsorted concatenation must refuse for EXACTLY #479's reason,
+     * before pid selection can hide the other backend's late timestamp. */
+    int counts[3] = {0};
+    int count = 0;
+    struct pgwt_trace_event *events = straddle_concat(srv_s, &req, counts, &count);
+    CHECK(counts[0] > 0 && counts[1] > 0 && counts[2] > 0,
+          "9b: all three chunks contributed: a zero-length post chunk would "
+          "make the seam monotone and this section would prove nothing");
+    int inversion = first_inversion(events, count);
+    CHECK(inversion >= 0,
+          "9b: the concatenation really is out of order at the window/post "
+          "seam -- a monotone fixture would never reproduce #479");
+    if (inversion >= 0)
+        printf("     (first inversion at %d: %llu > %llu)\n", inversion,
+               (unsigned long long)events[inversion - 1].timestamp_ns,
+               (unsigned long long)events[inversion].timestamp_ns);
+    struct pgwt_span_params sp = {0};
+    sp.window_from_ns = req.start_ns;
+    sp.window_to_ns = req.end_ns;
+    sp.pid = req.filter.pid;
+    sp.max_selected = 16;
+    struct pgwt_span_result res;
+    pgwt_span_reduce(events, count, &sp, &res);
+    CHECK(res.failed && streq(res.refusal_reason,
+          "the event array is not ordered by timestamp: span boundaries "
+          "would be invented rather than observed"),
+          "9b: the unsorted concatenation refuses for EXACTLY #479's "
+          "ordering reason -- a different refusal would not pin this bug");
+    pgwt_span_free(&res);
+    free(events);
+
+    /* 9c. Every assertion runs even on an error or a null span. Observed
+     * command markers, outside the execution window, supply both bounds. */
+    cJSON *resp = call_handler(handle_execution_detail, srv_s, &req);
+    CHECK(resp != NULL && cJSON_GetObjectItem(resp, "error") == NULL,
+          "9c: execution_detail answers without an error -- an error response "
+          "cannot stand in for the containing span");
+    if (resp && cJSON_GetObjectItem(resp, "error"))
+        printf("     (error: %s)\n", jstr(resp, "error"));
+    cJSON *s = resp ? cJSON_GetObjectItem(resp, "backend_activity_span") : NULL;
+    int have_span9 = (s != NULL && cJSON_IsObject(s));
+    CHECK(have_span9,
+          "9c: this is the assertion #479 makes red: before the fix the "
+          "handler fed pgwt_span_reduce the unordered array from 9b and "
+          "every live execution came back null-with-a-reason");
+    if (resp && !(s && cJSON_IsObject(s)))
+        printf("     (reason: %s)\n",
+               jstr(resp, "backend_activity_unavailable_reason")
+                   ? jstr(resp, "backend_activity_unavailable_reason") : "(none)");
+    CHECK(have_span9 && (uint32_t)jnum(s, "pid") == PID_SORD,
+          "9c: the containing span belongs to the clicked leader -- the "
+          "other pid's straddler cannot supply its identity");
+    char want_start[32], want_end[32], window_end[32];
+    snprintf(want_start, sizeof(want_start), "%llu",
+             (unsigned long long)SWALL(t0));
+    snprintf(want_end, sizeof(want_end), "%llu",
+             (unsigned long long)SWALL(t0 + 10 * MS));
+    snprintf(window_end, sizeof(window_end), "%llu",
+             (unsigned long long)req.end_ns);
+    CHECK(have_span9 && streq(jstr(s, "start_ns"), want_start),
+          "9c: start_ns is the observed CMD_START -- this also pins the "
+          "mono-to-wall calibration, so a wrong anchor cannot pass");
+    CHECK(have_span9 && streq(jstr(s, "end_ns"), want_end),
+          "9c: end_ns is the observed CMD_END -- the other pid's straddler "
+          "must never become this command's boundary");
+    CHECK(have_span9 && jnum(s, "completed_duration_ms") == 10.0 &&
+          streq(jstr(s, "duration_source"), "timestamps"),
+          "9c: the command lasts exactly 10 ms from timestamps -- the "
+          "execution window or a late straddler cannot supply its duration");
+    CHECK(have_span9 && streq(jstr(s, "measurement"), "measured") &&
+          streq(jstr(s, "completion"), "closed"),
+          "9c: the containing span is measured and closed -- losing either "
+          "context marker would misreport this completed command");
+    CHECK(have_span9 && jstr(s, "end_ns") != NULL &&
+          !streq(jstr(s, "end_ns"), window_end),
+          "9c: end_ns is not the execution window end -- a request edge "
+          "must never substitute for an observed command boundary");
+    CHECK(cJSON_IsObject(cJSON_GetObjectItem(resp, "leader")) &&
+          jnum(resp, "kept_count") > 0,
+          "9c: the leader lane and kept records remain present -- the span "
+          "is additive and must not collapse the rest of the answer");
+    cJSON_Delete(resp);
+
+    /* 9d. Removing only the straddler makes the original concatenation
+     * valid. Restore and prove the lookahead so later work cannot go blind. */
+    setenv("PGWT_STRADDLE_LOOKAHEAD_NS", "0", 1);
+    wn = 0;
+    memset(&wi, 0, sizeof(wi));
+    we = server_load_events_fi(srv_s, req.start_ns, req.end_ns, 0, &wn, &wi);
+    late = 0;
+    for (int i = 0; we && i < wn; i++)
+        if (we[i].timestamp_ns > req.end_ns) late++;
+    CHECK(we != NULL && wn > 0 && wi.straddlers_admitted == 0 && late == 0,
+          "9d: disabling lookahead removes both admission and late records "
+          "from a nonempty window -- otherwise the bypass removes no hazard");
+    free(we);
+    events = straddle_concat(srv_s, &req, counts, &count);
+    pgwt_span_reduce(events, count, &sp, &res);
+    CHECK(counts[0] > 0 && counts[1] > 0 && counts[2] > 0 &&
+          first_inversion(events, count) < 0 && !res.failed,
+          "9d: all three chunks are ascending and reduce without failure, "
+          "so 9b's refusal is caused by the admitted straddler and by "
+          "nothing else in this fixture");
+    pgwt_span_free(&res);
+    free(events);
+    resp = call_handler(handle_execution_detail, srv_s, &req);
+    s = resp ? cJSON_GetObjectItem(resp, "backend_activity_span") : NULL;
+    CHECK(cJSON_IsObject(s) && (uint32_t)jnum(s, "pid") == PID_SORD &&
+          streq(jstr(s, "start_ns"), want_start) &&
+          streq(jstr(s, "end_ns"), want_end) &&
+          jnum(s, "completed_duration_ms") == 10.0,
+          "9d: without the straddler the handler still returns the same "
+          "non-null 10 ms span -- the fix must preserve pre-#479 behaviour");
+    cJSON_Delete(resp);
+    unsetenv("PGWT_STRADDLE_LOOKAHEAD_NS");
+    wn = 0;
+    memset(&wi, 0, sizeof(wi));
+    we = server_load_events_fi(srv_s, req.start_ns, req.end_ns, 0, &wn, &wi);
+    CHECK(wi.straddlers_admitted >= 1,
+          "9d: restoring lookahead admits the straddler again -- a leaked "
+          "environment variable must not silently disable the later hazard");
+    free(we);
+
+    /* 9e. This injection belongs to the span sort, not the loader's sorts:
+     * a loader refusal would blank the tab and test the wrong call site. */
+    setenv("PGWT_TEST_LOAD_ALLOC_FAIL", "span_sort", 1);
+    resp = call_handler(handle_execution_detail, srv_s, &req);
+    unsetenv("PGWT_TEST_LOAD_ALLOC_FAIL");
+    CHECK(is_json_null(resp, "backend_activity_span") &&
+          streq(jstr(resp, "backend_activity_unavailable_reason"),
+                "the span context could not be sorted into timestamp order"),
+          "9e: the ordering failure returns a null span with its EXACT "
+          "span-sort reason -- a loader refusal or some other reason "
+          "would test the wrong failure");
+    CHECK(resp != NULL && cJSON_GetObjectItem(resp, "error") == NULL &&
+          cJSON_IsObject(cJSON_GetObjectItem(resp, "leader")) &&
+          jnum(resp, "kept_count") > 0,
+          "9e: refusing an unordered span keeps the leader and records "
+          "without an error -- an additive refusal must not blank the tab");
+    cJSON_Delete(resp);
+
+    /* 9f. Three ascending runs at scale, with 64 late window records
+     * outranking the post markers. Allocate once, sort once, never gate on
+     * a shared runner's clock. Hooks identify the path that actually ran. */
+    const int pre = 64, window = 1000000, post = 64;
+    int total = pre + window + post;
+    events = calloc((size_t)total, sizeof(*events));
+    if (!events) {
+        printf("  skip SORT COST: cannot allocate %d events\n", total);
+        return;
+    }
+    for (int i = 0; i < pre; i++) {
+        events[i].timestamp_ns = (uint64_t)i * US;
+        events[i].pid = PID_SORD;
+        events[i].old_event = events[i].new_event = PGWT_MARKER_CMD_START;
+    }
+    for (int i = 0; i < window; i++) {
+        struct pgwt_trace_event *e = &events[pre + i];
+        e->timestamp_ns = (uint64_t)(pre + i) * US;
+        e->pid = i >= window - 64 ? PID_SIDLE : PID_SORD;
+        e->old_event = EV_IO;
+        if (i >= window - 64) e->timestamp_ns += 30 * ONE_SEC;
+    }
+    for (int i = 0; i < post; i++) {
+        struct pgwt_trace_event *e = &events[pre + window + i];
+        e->timestamp_ns = (uint64_t)(pre + window + i) * US;
+        e->pid = PID_SORD;
+        e->old_event = e->new_event = PGWT_MARKER_CMD_END;
+    }
+    struct pgwt_event_sort_hooks hooks = {0};
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    int sort_rc = pgwt_stable_sort_events(events, total, &hooks);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    double ms = (double)(b.tv_sec - a.tv_sec) * 1e3 +
+                (double)(b.tv_nsec - a.tv_nsec) / 1e6;
+    printf("  SORT COST: %d events, %.2f ms, moves=%ld, fell_back=%d\n",
+           total, ms, hooks.moves, hooks.fell_back);
+    printf("  (printed, never asserted: a wall-clock gate on a shared runner is "
+           "runner noise)\n");
+    if (sort_rc != 0) printf("  skip SORT COST result: sort allocation failed\n");
+    free(events);
 }
 
 /* ── bench: the reducer against a 900-second capture ──────────────────── */
@@ -1493,13 +1790,25 @@ int main(int argc, char **argv)
 
     test_bypass(dir_a);
 
+    char dir_s[] = "/tmp/pgwt_span_s_XXXXXX";
+    if (!mkdtemp(dir_s)) { printf("FATAL: mkdtemp s\n"); return 2; }
+    fx_s_base = fx_base + 2 * ONE_SEC;
+    build_fixture_straddle(dir_s);
+    struct pgwt_server *srv_s = calloc(1, sizeof(*srv_s));
+    if (!srv_s || server_init(srv_s, dir_s) != 0) {
+        printf("FATAL: server_init s\n"); return 2;
+    }
+    test_straddler_order(srv_s);
+    server_destroy(srv_s);
+    free(srv_s);
+
     if (resp_a_row) cJSON_Delete(resp_a_row);
 
-    /* NON-VACUITY LEDGER. A run that executed fewer assertions than the
-     * suite contains did not test what it claims, and a floor that does not
-     * move with the suite lets a whole section stop running unnoticed --
-     * which is the same false negative as a gate that cannot fail. */
-    if (checks < 132) {
+    /* NON-VACUITY LEDGER. The floor moves with the suite's measured check
+     * count, with no slack. A run that executed fewer assertions did not
+     * test what it claims: a whole section stopping unnoticed is the same
+     * false negative as a gate that cannot fail. */
+    if (checks < 155) {
         printf("FAIL: only %d assertions ran -- a section did not execute\n",
                checks);
         return 1;

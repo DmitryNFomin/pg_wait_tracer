@@ -5778,11 +5778,27 @@ static void handle_execution_detail(struct pgwt_server *srv,
                                   req->start_ns, req->end_ns,
                                   &req->filter,
                                   links, n_links, EXEC_DETAIL_LANE_CAP, &detail);
+    /* #424's right-edge lookahead admits other pids' straddlers with their
+     * own closing timestamps past end_ns, while the pid-scoped post chunk
+     * starts at end_ns+1. Concatenating these three already-sorted runs can
+     * therefore be unordered; merging them is a sort by construction. The
+     * pid's own straddlers then become evidence instead of an ordering
+     * violation. This runs after the compute call precisely because the
+     * comment above forbids changing that function's input. A sort failure
+     * refuses the span with a reason rather than falling through with an
+     * array whose order is unknown. */
+    int span_sort_failed = test_load_alloc_failure("span_sort") ||
+                           stable_sort_events(events, count) != 0;
     /* #455: the CONTAINING leader span, from the same array (context
      * markers + this execution's window) before it is freed. pid-scoped,
      * so the worker lanes below stay the separate thing they are. */
     struct pgwt_span_result spanres;
-    {
+    memset(&spanres, 0, sizeof(spanres));
+    if (span_sort_failed) {
+        spanres.failed = 1;
+        spanres.refusal_reason =
+            "the span context could not be sorted into timestamp order";
+    } else {
         struct pgwt_span_gap gaps[64];
         int n_gaps = server_exact_gaps(srv, req->start_ns, req->end_ns, gaps,
                                        (int)(sizeof(gaps)/sizeof(gaps[0])));
