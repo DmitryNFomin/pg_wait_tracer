@@ -3437,6 +3437,8 @@ B5_PORT = MOCK_PORT + 10
 B5_URL = app_url(B5_PORT)
 COMPARE_PORT = MOCK_PORT + 20
 COMPARE_URL = app_url(COMPARE_PORT)
+NEARTIE_PORT = MOCK_PORT + 30
+NEARTIE_URL = app_url(NEARTIE_PORT)
 
 
 def test_b5_sampled_shading(page):
@@ -3810,6 +3812,50 @@ def test_compare_echarts_renderer_note(page):
           "ECharts still renders investigation window A")
 
 
+# ── #474: live-tick refresh must not defeat the Sessions hysteresis ──────────
+# Runs against a THIRD mock (PGWT_MOCK_NEARTIE=1): two top_sessions rows
+# (pid 1001, 1002) start ~3% apart and swap which one leads by +-3% on
+# alternating live-info ticks -- close enough to flip a naive re-sort, but
+# inside createStableOrder's pass-ratio band, so a correctly surviving
+# hysteresis tracker renders the SAME row order throughout. #440 added that
+# hysteresis with no test driving an actual live tick; every call site fed
+# the reset gate the raw, ever-advancing {from,to} window, so a live tick
+# reset the tracker every 5s and this defect was invisible until now.
+
+def test_sessions_order_survives_live_near_tie_ticks(page):
+    """#474: Sessions row order survives 3 near-tie live ticks unchanged."""
+    print("--- Test #474: Sessions order survives live near-tie ticks ---")
+    page.goto(NEARTIE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='sessions']")
+    page.wait_for_selector("table tbody tr", timeout=10000)
+
+    def pid_order():
+        return page.eval_on_selector_all(
+            "table tbody tr td:first-child",
+            "els => els.map(e => e.textContent.trim())")
+
+    order0 = pid_order()
+    check("1001" in order0 and "1002" in order0,
+          f"near-tie rows present before any live tick ({order0})")
+
+    # Each live tick advances window.__pgwt.timeRange.to (app.js
+    # anchorLive); wait on that instead of a fixed sleep (deterministic,
+    # no retries) for exactly 3 ticks.
+    to = page.evaluate("window.__pgwt.timeRange.to")
+    for _ in range(3):
+        page.wait_for_function(
+            "prev => window.__pgwt.timeRange.to > prev", arg=to, timeout=20000)
+        to = page.evaluate("window.__pgwt.timeRange.to")
+
+    # Let the tick-triggered table refresh settle.
+    page.wait_for_function(
+        "() => document.querySelectorAll('table tbody tr td:first-child').length > 0")
+    order3 = pid_order()
+    check(order3 == order0,
+          f"row order stable across 3 near-tie live ticks ({order0} -> {order3})")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -3967,6 +4013,27 @@ def main():
             finally:
                 set_failure_capture(page, guard)
                 stop_mock_server(compare_proc)
+
+            # #474 near-tie mock: a THIRD mock with a live clock + two
+            # near-tied top_sessions rows that swap lead by +-3% per tick,
+            # in its own browser context (own WS-port redirect) so it never
+            # disturbs the primary suite's live mode.
+            neartie_proc = start_mock_server(
+                extra_env={"PGWT_MOCK_NEARTIE": "1"}, port=NEARTIE_PORT)
+            try:
+                neartie_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+                neartie_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+                neartie_page = neartie_ctx.new_page()
+                neartie_guard = ConsoleErrorGuard(neartie_page)
+                set_failure_capture(neartie_page, neartie_guard)
+                test_sessions_order_survives_live_near_tie_ticks(neartie_page)
+                assert_no_console_errors(
+                    neartie_page, neartie_guard,
+                    "test_sessions_order_survives_live_near_tie_ticks")
+                neartie_ctx.close()
+            finally:
+                set_failure_capture(page, guard)
+                stop_mock_server(neartie_proc)
 
             # Reconnection test (kills/restarts mock server) — connection
             # failures during the outage are expected, everything else fails.

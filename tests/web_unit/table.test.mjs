@@ -13,6 +13,7 @@ import {
     buildTableModel, buildTruncationRow, buildBarSegments,
     stackedBar, eventStackedBar, createStableOrder, STABLE_ORDER_PASS_RATIO,
     BAR_MIN_SEG_PCT, BAR_BELOW_COLOR, BAR_OTHER_COLOR,
+    createOrderResetGate, orderResetKey,
 } from '../../web/static/lib/table.js';
 import {
     overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
@@ -1028,4 +1029,62 @@ test('#471 Plans column keeps the RAW uncapped count even when plan_count > exec
     const cfg = makeQueriesConfig('exact');
     const plansCol = cfg.columns.find(c => c.key === 'plan_count');
     assert.equal(plansCol.format({ plan_count: 2, exec_count: 1 }), '2');
+});
+
+// ── #474: the live-tick refresh loop must not defeat its own hysteresis ──
+//
+// #440 added createStableOrder's near-tie hysteresis plus createOrderResetGate
+// to reset it on a REAL window/filter change. But every call site fed the
+// gate raw {from, to} -- and in live mode `to` (and `from`) advance on EVERY
+// 5s refresh tick, so the gate's key changed every tick and reset() fired
+// every tick, silently defeating the hysteresis it was supposed to apply.
+// #440 shipped with no test exercising a live tick, so this regression was
+// invisible on the unit suite (static {from,to} inputs never "tick").
+// orderResetKey(ctx) is the fix's pure key function: during a live tick
+// (ctx.isLiveTick()) the key is {live:true, spanSecs} -- stable while the
+// live window just slides forward -- and only the SPAN (not the absolute
+// edges) changing, or leaving live mode, produces a new key.
+
+function fakeLiveCtx(from, to, liveRangeSecs) {
+    return { isLiveTick: () => true, timeRange: { from, to, liveRangeSecs } };
+}
+function fakeStaticCtx(from, to) {
+    return { isLiveTick: () => false, timeRange: { from, to, liveRangeSecs: 900 } };
+}
+
+test('#474 orderResetKey: a live tick advancing from/to keeps the SAME key (span unchanged)', () => {
+    const k1 = orderResetKey(fakeLiveCtx(100, 1000, 900));
+    const k2 = orderResetKey(fakeLiveCtx(130, 1030, 900));
+    assert.deepEqual(k1, k2, 'advancing from/to on a live tick must not change the reset key');
+});
+
+test('#474 orderResetKey: a span change produces a DIFFERENT key even during a live tick', () => {
+    const k1 = orderResetKey(fakeLiveCtx(100, 1000, 900));
+    const k2 = orderResetKey(fakeLiveCtx(100, 1000, 300));
+    assert.notDeepEqual(k1, k2, 'a real span change must still change the reset key');
+});
+
+test('#474 orderResetKey: outside a live tick, the key is the raw window (explicit navigation resets)', () => {
+    const k1 = orderResetKey(fakeStaticCtx(100, 1000));
+    const k2 = orderResetKey(fakeStaticCtx(200, 1100));
+    assert.notDeepEqual(k1, k2, 'a non-live window change must reset (unchanged pre-#474 behavior)');
+});
+
+test('#474 createOrderResetGate + orderResetKey: live ticks do not reset order; a real span change does', () => {
+    const resetIfChanged = createOrderResetGate();
+    let resets = 0;
+    const tracker = { reset: () => { resets++; } };
+    const filters = 'f1';
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(100, 1000, 900)), filters });
+    assert.equal(resets, 1, 'first call always establishes the baseline key');
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(130, 1030, 900)), filters });
+    assert.equal(resets, 1, 'advancing from/to on a live tick must not reset');
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(160, 1060, 900)), filters });
+    assert.equal(resets, 1, 'a second live tick still must not reset');
+
+    resetIfChanged(tracker, { window: orderResetKey(fakeLiveCtx(160, 1060, 300)), filters });
+    assert.equal(resets, 2, 'a real span change must reset');
 });
