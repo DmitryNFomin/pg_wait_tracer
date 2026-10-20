@@ -444,7 +444,8 @@ export function buildTimelineOption(data, opts) {
         grid: { ...TIMELINE_GRID },
         xAxis: {
             type: 'value', min: opts.from, max: opts.to,
-            axisLabel: { color: '#888', fontSize: 10, formatter: (v) => fmtTime(v) },
+            axisLabel: { color: '#888', fontSize: 10, formatter: (v) => fmtTime(v),
+                hideOverlap: true },
             axisLine: { lineStyle: { color: '#333' } },
         },
         yAxis: {
