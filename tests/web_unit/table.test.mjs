@@ -18,7 +18,7 @@ import {
 import {
     overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
     PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, queriesConfig, makeQueriesConfig,
-    buildUnattributedNote, unattributedNoteHtml, createOverviewOrder,
+    buildUnattributedNote, unattributedNoteHtml, createOverviewOrder, sessionsConfig,
 } from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
 import { WAIT_CLASSES, classColor, eventColor, fmtMs, fmtUs } from '../../web/static/lib/format.js';
@@ -930,6 +930,40 @@ test('#439 Queries pct column is labeled "% attributed DB Time", not "%DB"', () 
     const headerLabels = queriesConfig.columns.map(c => c.label);
     assert.ok(headerLabels.includes('% attributed DB Time'), headerLabels.join(', '));
     assert.ok(!headerLabels.includes('%DB'), headerLabels.join(', '));
+});
+
+// ── #439-label: "Other (background)" is NOT a contradiction of #453's
+// "excluded from DB Time" rule -- compute.c:745 classifies background
+// non-idle work as PGWT_CAT_BG (genuinely inside DB Time), while this row
+// is the UNRELATED hidden-Activity parking remainder under Idle
+// (PGWT_PCT_DB_IDLE, compute.c:1283). Same English words, two different
+// quantities -- the label is what is misleading, not the semantics. Fixed
+// by relabeling only; no src/ change, no wire field renamed.
+
+test('#439-label Overview renders "Other (background)" as "Background idle (parked)"', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 0, name: 'Idle', ms: 3000, pct: null, aas: null },
+        { indent: 2, name: 'Other (background)', ms: 1476, pct: null, aas: 4.10 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const html = model.rows[2].cells[0].html;
+    assert.ok(html.includes('Background idle (parked)'), html);
+    assert.ok(!html.includes('Other (background)'), html);
+});
+
+test('#439-label Sessions DB Time header discloses background processes are included', () => {
+    const headerCol = sessionsConfig.columns.find(c => c.key === 'db_time_ms');
+    assert.equal(headerCol.label, 'DB Time');
+    assert.ok(headerCol.title && headerCol.title.length > 0, headerCol.title);
+    assert.ok(headerCol.title.includes('non-idle time of this process'), headerCol.title);
+    assert.ok(headerCol.title.includes('background processes included'), headerCol.title);
+    // The header model (what mountTable actually paints into <th title="...">)
+    // must carry it through -- a column-config-only title that buildTableModel
+    // drops would never reach the DOM.
+    const model = buildTableModel(sessionsConfig, [{ pid: 1, db_time_ms: 100 }], null);
+    const header = model.headers.find(h => h.key === 'db_time_ms');
+    assert.equal(header.title, headerCol.title);
 });
 
 test('buildUnattributedNote: discloses the excluded time, pct and occurrence count', () => {
