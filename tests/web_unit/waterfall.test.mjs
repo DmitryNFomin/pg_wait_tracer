@@ -128,6 +128,20 @@ test('#478-axis negative control: restoring hardcoded millisecond precision '
     assert.ok(new Set(naive).size < 6, naive.join(', '));
 });
 
+// ── #473-4: the right-most x-axis tick ("to" the full window end, the
+// widest label when fine precision applies after #478-axis) clipped
+// against the chart's own right edge -- a WIDTH-only fix (grid.right),
+// #462's fixed-height fold budget is untouched by a grid margin.
+
+test('#473-4 grid.right gives the right-edge tick label enough room (width-only; height unchanged)', () => {
+    const m = buildWaterfallOption(detail(), { executionStart: String(START),
+        executionEnd: at(20_000_000) });
+    assert.equal(m.option.grid.right, 64);
+    assert.equal(m.option.grid.left, 145);
+    assert.equal(m.option.grid.top, 22);
+    assert.equal(m.option.grid.bottom, 44);
+});
+
 test('renderItem gives micro bars a visible 1px width', () => {
     const tuple = [10, 10, 0, 'CPU*', 0, '10', '0', null, 1, 'event', '#abc'];
     const api = { value: (i) => tuple[i], coord: ([x]) => [x, 50], size: () => [0, 20] };
