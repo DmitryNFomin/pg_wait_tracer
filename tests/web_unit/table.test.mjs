@@ -19,6 +19,7 @@ import {
     overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
     PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, queriesConfig, makeQueriesConfig,
     buildUnattributedNote, unattributedNoteHtml, createOverviewOrder, sessionsConfig,
+    childRemainderRow,
 } from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
 import { WAIT_CLASSES, classColor, eventColor, fmtMs, fmtUs } from '../../web/static/lib/format.js';
@@ -340,9 +341,13 @@ test('createOverviewOrder: DB Time/Idle bookends are NEVER ranked into the class
 
 test('createOverviewOrder: a class\'s event children move WITH it and reorder only among siblings', () => {
     const o = createOverviewOrder();
+    // IO's parent ms (2900) is the EXACT sum of its two children below --
+    // #484's remainder row only fires on a real gap, and this test is about
+    // ordering, not about exercising that row (see the dedicated #484 tests
+    // above for the gap case itself).
     const rows = [
         overviewRow(0, 'DB Time', 10000),
-        overviewRow(1, 'IO', 3200),
+        overviewRow(1, 'IO', 2900),
         overviewRow(2, 'IO:DataFileRead', 2100),
         overviewRow(2, 'IO:WalSync', 800),
         overviewRow(1, 'Lock', 1500),
@@ -353,9 +358,12 @@ test('createOverviewOrder: a class\'s event children move WITH it and reorder on
         ['DB Time', 'IO', 'IO:DataFileRead', 'IO:WalSync', 'Lock', 'Lock:relation']);
     // IO:WalSync jumps from 800 to 3000 (>5% past IO:DataFileRead's 2100) --
     // it must pass its SIBLING within IO, and must not leak into Lock's group.
+    // IO's own ms is unchanged at 2900 here deliberately: the children now
+    // SUM TO MORE than their parent (an impossible-in-practice case), which
+    // must never render a (nonsensical, negative) remainder either.
     const rows2 = [
         overviewRow(0, 'DB Time', 10000),
-        overviewRow(1, 'IO', 3200),
+        overviewRow(1, 'IO', 2900),
         overviewRow(2, 'IO:DataFileRead', 2100),
         overviewRow(2, 'IO:WalSync', 3000),
         overviewRow(1, 'Lock', 1500),
@@ -407,11 +415,14 @@ test('createOverviewOrder: a class that disappears and returns starts its child 
 
 test("Idle's indent-2 child attaches to IDLE, not to the preceding class", () => {
     const o = createOverviewOrder();
+    // Both parents' ms match their sole child exactly (#484: a real gap
+    // would add a remainder row here and break the exact name-list
+    // assertion below -- this test is about attachment, not the gap case).
     const rows = [
         overviewRow(0, 'DB Time', 10000),
-        overviewRow(1, 'IO', 3200),
+        overviewRow(1, 'IO', 2100),
         overviewRow(2, 'IO:DataFileRead', 2100),
-        overviewRow(0, 'Idle', 45000),
+        overviewRow(0, 'Idle', 39000),
         overviewRow(2, 'Client:ClientRead', 39000),
     ];
     const out = o.apply(rows);
@@ -459,6 +470,89 @@ test("Idle's children get their OWN nested hysteresis, independent of any class"
     ]);
     assert.deepEqual(out.map((r) => r.name),
         ['DB Time', 'IO', 'Idle', 'Timeout:PgSleep', 'Client:ClientRead']);
+});
+
+// ── #484: a parent must equal the sum of what is shown. compute.c caps a
+// class's children at 5 server-side with no total_count/omitted-identity
+// sent for the rest (unlike the table-level truncated/total_count pair
+// buildTruncationRow reads -- time_model never emits that shape), so the
+// ONLY exact fact available client-side is ms: row.ms minus the sum of the
+// children actually rendered. These assert the STRONGER property the
+// reviewer asked for -- the full rendered row set sums to the parent --
+// not merely "a remainder row exists" (a weaker assertion that would pass
+// even if the remainder carried the wrong number). ───────────────────────
+
+function sumRenderedChildren(out, parentName) {
+    const i = out.findIndex((r) => r.name === parentName);
+    let sum = 0;
+    for (let j = i + 1; j < out.length && out[j].indent >= 2; j++) sum += out[j].ms;
+    return sum;
+}
+
+test('createOverviewOrder: a class whose children are capped gets a remainder row, and the parent equals the sum of every rendered row', () => {
+    const o = createOverviewOrder();
+    // The exact #484 GIF numbers (ms, not seconds): IO 70300 with 5 children
+    // summing to 67800 -- a 2500ms gap the shipped frame left unexplained.
+    const rows = [
+        overviewRow(0, 'DB Time', 70300),
+        overviewRow(1, 'IO', 70300),
+        overviewRow(2, 'IO:BufFileWrite', 50200),
+        overviewRow(2, 'IO:DataFileRead', 6500),
+        overviewRow(2, 'IO:WalWrite', 4000),
+        overviewRow(2, 'IO:DataFileWrite', 3700),
+        overviewRow(2, 'IO:SLRURead', 3400),
+    ];
+    const out = o.apply(rows);
+    const io = out.find((r) => r.name === 'IO');
+    assert.equal(sumRenderedChildren(out, 'IO'), io.ms,
+        'rendered children (including any remainder) must sum to the parent');
+    const remainder = out.find((r) => r.isRemainder);
+    assert.ok(remainder, 'a 2500ms gap must produce a remainder row');
+    assert.equal(remainder.ms, 2500);
+    assert.equal(remainder.indent, 2);
+});
+
+test('createOverviewOrder: children that already sum to their parent get no remainder row', () => {
+    const o = createOverviewOrder();
+    // Matches the brief's own Lock counter-example: exact reconciliation,
+    // no row. A spurious near-zero row here would be the bypass this test
+    // exists to catch -- the gate must be silent exactly when there is
+    // nothing to disclose.
+    const rows = [
+        overviewRow(0, 'DB Time', 875400),
+        overviewRow(1, 'Lock', 875400),
+        overviewRow(2, 'Lock:relation', 716600),
+        overviewRow(2, 'Lock:tuple', 92400),
+        overviewRow(2, 'Lock:transactionid', 66400),
+        overviewRow(2, 'Lock:page', 846),
+    ];
+    const out = o.apply(rows);
+    assert.equal(sumRenderedChildren(out, 'Lock'), 716600 + 92400 + 66400 + 846);
+    assert.ok(!out.some((r) => r.isRemainder), 'exact reconciliation must not add a row');
+});
+
+test('childRemainderRow: pure edge cases (bypass suite)', () => {
+    // No children at all -- nothing truncated, nothing to disclose.
+    assert.equal(childRemainderRow({ name: 'IO', ms: 100 }, []), null);
+    assert.equal(childRemainderRow({ name: 'IO', ms: 100 }, null), null);
+    // Exact reconciliation -- diff is 0.
+    assert.equal(childRemainderRow({ name: 'IO', ms: 100 },
+        [{ ms: 60 }, { ms: 40 }]), null);
+    // Sub-rounding noise (fmtMs shows nothing below ~0.001ms) must not
+    // produce a spurious row.
+    assert.equal(childRemainderRow({ name: 'IO', ms: 100 },
+        [{ ms: 60 }, { ms: 39.99999 }]), null);
+    // Children summing to MORE than the parent (should not happen from a
+    // real server, but must never render a negative-looking remainder).
+    assert.equal(childRemainderRow({ name: 'IO', ms: 100 },
+        [{ ms: 60 }, { ms: 60 }]), null);
+    // The real #484 case: a non-trivial, exact gap.
+    const r = childRemainderRow({ name: 'IO', ms: 70300 },
+        [{ ms: 50200 }, { ms: 6500 }, { ms: 4000 }, { ms: 3700 }, { ms: 3400 }]);
+    assert.ok(r);
+    assert.equal(r.ms, 2500);
+    assert.equal(r.indent, 2);
+    assert.equal(r.isRemainder, true);
 });
 
 test('events: descending sort by count', () => {
