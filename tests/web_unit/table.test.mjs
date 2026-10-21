@@ -178,6 +178,33 @@ test('#453 negative control: DB Time and a normal class row are UNCHANGED by the
     assert.equal(model.rows[1].cells[3].html, '0.89');
 });
 
+// ── #457: isIdleRow must match the LITERAL server idle row name, never a
+// substring -- a latent false positive, not yet live (no such row exists in
+// today's server output), but #453 made it load-bearing: a false match no
+// longer just mislabels a percentage, it blanks AAS too. A real indent-0
+// row named e.g. "IdleInTransaction" is a genuine, active, DB-Time-bearing
+// wait state and must render its real pct/AAS, not Idle's em-dash. ──────────
+
+test('#457 a real row whose name merely CONTAINS "Idle" (IdleInTransaction) ' +
+    'is NOT excluded from DB Time -- its pct and AAS render normally', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12760, pct: 100, aas: 3.54 },
+        { indent: 0, name: 'IdleInTransaction', ms: 3200, pct: 25.1, aas: 0.89 },
+        { indent: 0, name: 'Idle', ms: 888000, pct: 0, aas: 24.62 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    // IdleInTransaction: a real pct bar and a real AAS number, same as any
+    // other included row -- NOT the idle-excluded em-dash treatment.
+    assert.ok(model.rows[1].cells[2].html.includes('pct-bar'), model.rows[1].cells[2].html);
+    assert.ok(!model.rows[1].cells[2].html.includes('idle-excluded'), model.rows[1].cells[2].html);
+    assert.equal(model.rows[1].cells[3].html, '0.89');
+    assert.ok(!model.rows[1].cells[3].html.includes('idle-excluded'), model.rows[1].cells[3].html);
+    // The REAL Idle row (exact name) must still get the em-dash treatment --
+    // this fix must not weaken the #435/#453 protection it sits beside.
+    assert.ok(model.rows[2].cells[2].html.includes('idle-excluded'), model.rows[2].cells[2].html);
+    assert.ok(model.rows[2].cells[3].html.includes('idle-excluded'), model.rows[2].cells[3].html);
+});
+
 // ── #440 (contract item 6): refresh ordering + near-tie hysteresis ─────────
 //
 // The fixture CONTRACTS.md names explicitly: shuffled identical input,
@@ -628,6 +655,31 @@ test('buildSummary: exact metric set + values', () => {
 test('buildSummary: empty data -> empty metrics', () => {
     assert.deepEqual(buildSummary(null, 4), []);
     assert.deepEqual(buildSummary({ rows: [] }, 4), []);
+});
+
+// #457: the summary bar's own idle-row finder has the SAME substring bug as
+// isIdleRow in table-configs.js -- a real "IdleInTransaction" row must never
+// be picked up as "the" Idle summary metric (it is a different, real wait
+// state; reporting its time as "Idle" would misreport the summary bar).
+test('#457 buildSummary never mistakes a substring match for the real Idle row', () => {
+    const data = { wall_ms: 3600000, rows: [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 0, name: 'IdleInTransaction', ms: 9000, pct: 10, aas: 0.5 },
+    ] };
+    const s = buildSummary(data, 4);
+    assert.ok(!s.some(m => m.label === 'Idle'),
+        'no real "Idle" row present -- IdleInTransaction must not stand in for it: ' +
+        JSON.stringify(s));
+});
+
+test('#457 buildSummary still reports the real Idle row by its exact name', () => {
+    const data = { wall_ms: 3600000, rows: [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 0, name: 'IdleInTransaction', ms: 9000, pct: 10, aas: 0.5 },
+        { indent: 0, name: 'Idle', ms: 45000 },
+    ] };
+    const s = buildSummary(data, 4);
+    assert.deepEqual(s.find(m => m.label === 'Idle'), { label: 'Idle', value: '45.0s' });
 });
 
 // ── #472(ii): AAS discloses a window mostly before capture started ─────────
