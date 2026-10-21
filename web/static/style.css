@@ -630,6 +630,13 @@ tr.clickable:hover td { background: #2a3a6a; }
 .delta-status.gone { color: #9ba3b0; border: 1px solid #505967; }
 .truncation-row:hover td { background: transparent; }
 
+/* #484: the Overview per-class remainder row -- same muted, non-data
+ * treatment the table-level truncation-row above gets (color/style match
+ * table.js's tableHtml inline style), applied per-row instead of as a
+ * single whole-table banner since this one is nested under its own class. */
+.remainder-row td { color: #666; font-style: italic; font-size: 11px; }
+.remainder-row:hover td { background: transparent; }
+
 /* Sticky columns for wide tables (queries tab) */
 .sticky-col {
   position: sticky;

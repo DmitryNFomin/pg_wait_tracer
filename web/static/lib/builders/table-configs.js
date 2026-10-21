@@ -260,6 +260,11 @@ export const overviewConfig = {
             if (classFilterName(r.name) != null) c += ' clickable';
         }
         if (r.indent === 2) c += ' indent-2';
+        // #484: muted, non-data styling for the remainder row -- same visual
+        // treatment buildTruncationRow's rows get (table.js tableHtml),
+        // reused via this class rather than that function (see
+        // childRemainderRow's comment on why they are separate idioms).
+        if (r.isRemainder) c += ' remainder-row';
         return c;
     },
     onClick: (r) => {
@@ -328,12 +333,56 @@ function splitOverviewRows(rows) {
     return { pre, classes, post };
 }
 
+/* #484: a parent's `ms` is always the UNCAPPED class total (compute.c sums
+ * classes[c].total_ns over every event in the class); its indent-2 children
+ * are capped at 5 server-side (compute.c "sub_count < 5") with no
+ * `total_count`/omitted-identity sent for the rest (unlike the table-level
+ * truncated/total_count pair buildTruncationRow above reads -- time_model
+ * never emits that shape, so this is deliberately a NEW, separate idiom, not
+ * a reuse). The one fact the client has exactly, for every row regardless of
+ * why or whether it was capped, is ms -- so the remainder is always
+ * `row.ms - sum(children shown)`, never a recomputed estimate and never an
+ * invented omitted-count (same "never an invented N" discipline as
+ * buildTruncationRow's own fallback text). This is deliberately NOT gated on
+ * "was this class actually capped": no such flag exists in the payload, and
+ * computing it from the arithmetic gap instead also catches a hypothetical
+ * accounting bug in an un-capped class whose children happen not to sum to
+ * their parent -- the same shape of defense #435/#453 use elsewhere in this
+ * file. pct/aas are left null rather than scaled: compute.c derives both
+ * from ms by a per-row constant (db_time_ms, wall_ms) so a linear scale
+ * would be numerically exact, but the remainder is a synthetic bucket with
+ * no real event identity behind it, and isExcludedFromDbTime() already
+ * treats `pct == null` as "no breakdown for this row" -- reusing that path
+ * renders the same em-dash idle rows get, instead of a second ad hoc case. */
+const CHILD_REMAINDER_EPS_MS = 0.05; // sub-0.05ms is fmtMs rounding noise, not a real gap
+
+export function childRemainderRow(row, children) {
+    if (!row || !children || !children.length) return null;
+    let shown = 0;
+    for (const c of children) shown += (typeof c.ms === 'number' ? c.ms : 0);
+    const diff = (typeof row.ms === 'number' ? row.ms : 0) - shown;
+    if (!(diff > CHILD_REMAINDER_EPS_MS)) return null;
+    return {
+        name: '… other (not shown)',
+        isRemainder: true,
+        ms: diff,
+        pct: null,
+        aas: null,
+        indent: 2,
+    };
+}
+
 /* PURE: flatten a list of { row, children } groups, applying (and lazily
  * creating/pruning) a per-group-identity child hysteresis tracker from
  * `childOrders` -- shared between the class pool and the pre/post bookends
  * so Idle's children get exactly the same nested-hysteresis treatment a
  * class's children get, keyed by the SAME map (row names are unique across
- * the whole table). */
+ * the whole table). The #484 remainder row (above) is computed from the
+ * group's REAL children (pre-tracker; the tracker only reorders, never
+ * drops, so the sum is identical either side of it) and appended AFTER the
+ * tracker's output -- it never enters the hysteresis tracker itself, so it
+ * is always last and is recomputed fresh every tick rather than carrying
+ * stale identity across ticks. */
 function flattenOverviewGroups(groups, childOrders, out) {
     const seenNames = new Set(groups.map((g) => g.row.name));
     for (const name of Array.from(childOrders.keys())) {
@@ -348,6 +397,8 @@ function flattenOverviewGroups(groups, childOrders, out) {
             childOrders.set(g.row.name, tracker);
         }
         for (const kid of tracker.apply(g.children)) out.push(kid);
+        const remainder = childRemainderRow(g.row, g.children);
+        if (remainder) out.push(remainder);
     }
 }
 
