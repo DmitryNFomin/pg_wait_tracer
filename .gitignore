@@ -136,11 +136,13 @@ tests/results/*/
 !tests/results/issue376-measurement/
 !tests/results/issue379-measurement/
 !tests/results/issue408-measurement/
+!tests/results/issue410-measurement/
 !tests/results/issue424-daemon/
 !tests/results/issue424-durability/
 !tests/results/issue424-fix/
 !tests/results/issue424-index/
 !tests/results/issue424-integration/
+!tests/results/issue486-measurement/
 !tests/results/overhead-envelope/
 !tests/results/probe-bounds/
 !tests/results/probe-bounds-diagnosis/
