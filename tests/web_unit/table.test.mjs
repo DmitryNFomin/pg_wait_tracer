@@ -555,6 +555,28 @@ test('childRemainderRow: pure edge cases (bypass suite)', () => {
     assert.equal(r.isRemainder, true);
 });
 
+// Review finding: the remainder row's AAS cell used to fall through
+// isExcludedFromDbTime() (pct == null is true for it too) straight into
+// idleAasCellHtml(), which hardcodes "this is idle occupancy ... no session
+// is 'active' while idle" -- FALSE for #484's remainder, which is real DB
+// time in the class, merely not broken out by event name. The em-dash is
+// still right (no per-row AAS is knowable for an unnamed bucket); the
+// STORY behind it must not borrow Idle's.
+test("#484 remainder row's AAS cell tells its OWN story, not Idle's", () => {
+    const remainder = childRemainderRow({ name: 'IO', ms: 70300 },
+        [{ ms: 50200 }, { ms: 6500 }, { ms: 4000 }, { ms: 3700 }, { ms: 3400 }]);
+    const rows = [{ indent: 1, name: 'IO', ms: 70300, pct: 100, aas: 1.0 }, remainder];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const html = model.rows[1].cells[3].html;
+    assert.ok(html.includes('—'), html);   // still an em-dash: no per-row AAS to show
+    // Must NOT claim this time is idle / excluded from DB Time -- it is the
+    // opposite: real, counted DB time, just not itemized by event.
+    assert.ok(!/idle/i.test(html), html);
+    assert.ok(!/active-session average/i.test(html), html);
+    // Must say what it actually is.
+    assert.ok(/not broken out by event|per-event|event cap/i.test(html), html);
+});
+
 test('events: descending sort by count', () => {
     const rows = [
         { name: 'A', event_id: 1, count: 10, total_ms: 1, avg_us: 1, p50_us: 1,
