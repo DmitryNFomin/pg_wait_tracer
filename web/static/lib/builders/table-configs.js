@@ -127,13 +127,15 @@ export const PCTL_FINITE_BOUND_SENTENCE =
     'value fell in, not the exact observed duration; a rounded bound can ' +
     'read above Max when few samples exist. The exact tail lives in Max.';
 
+export const PCTL_UNRESOLVED_TEXT = 'Unresolved';
+
 function pctlCell(key) {
     const intent = histogramIntent(key);
     const overflowKey = key.replace(/_us$/, '_overflow');
     return (r) => {
         if (r[key] == null) return fmtUs(r[key]);   // '—': no distribution
         const overflow = r[overflowKey] === true;
-        const v = (overflow ? '≥' : '≤') + fmtUs(r[key]);
+        const v = overflow ? PCTL_UNRESOLVED_TEXT : '≤' + fmtUs(r[key]);
         const drillable = !!intent(r);
         const sentence = overflow ? PCTL_OVERFLOW_SENTENCE : PCTL_FINITE_BOUND_SENTENCE;
         const title = sentence + (drillable
