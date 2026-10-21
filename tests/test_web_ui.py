@@ -507,6 +507,13 @@ def test_sessions_table(page):
     rows = page.query_selector_all("#table-container table tbody tr")
     check(len(rows) >= 4, f"Sessions has {len(rows)} rows (expected >= 4)")
 
+    # #439: the cross-tab scope note (DB Time here vs Overview's) must
+    # actually reach the real app's DOM, not just exist as an unused
+    # pure-HTML builder function.
+    caption = page.text_content("#table-container .panel-caption") or ""
+    check("Overview" in caption and "bgwriter" in caption,
+          f"Sessions shows the DB Time scope note against Overview ('{caption}')")
+
     # Click a session -> should drill to Timeline
     rows[0].click()
     page.wait_for_timeout(1000)
