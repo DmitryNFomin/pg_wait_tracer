@@ -564,6 +564,61 @@ static void test_scan_trace_files_unknown_placement(void)
     CHECK(!pgwt_trace_file_quick_skip(two, 2, 0, 1ULL),
           "an unknown-placement neighbour never causes a quick-skip");
 
+    /* The short-read case above is ABSENT data; these two are WRONG data of
+     * exactly the right length -- a different way the header validation can
+     * fail, sharing the same fallback but exercised through a different
+     * predicate (magic, then version) rather than fread() itself. Both must
+     * land on the identical disabled/listed outcome, never on whatever
+     * garbage start_time_ns the bytes happen to contain. */
+    cleanup_test_dir();
+    setup_test_dir();
+    snprintf(p, sizeof(p), "%s/2025-04-02_14.trace.lz4", TEST_DIR);
+    fp = fopen(p, "wb");
+    CHECK(fp != NULL, "create wrong-magic archive");
+    if (fp) {
+        struct pgwt_trace_file_header hdr = {
+            .magic = 0xDEADBEEFU,           /* full-length, wrong magic */
+            .version = PGWT_TRACE_VERSION,
+            .pg_version = 18,
+            .start_time_ns = 9999999999ULL, /* must NOT surface anywhere */
+        };
+        fwrite(&hdr, sizeof(hdr), 1, fp);
+        fclose(fp);
+    }
+    n = pgwt_scan_trace_files(TEST_DIR, entries, 8);
+    CHECK(n == 1, "wrong-magic archive still LISTED (%d)", n);
+    CHECK(n == 1 && entries[0].placement_unknown,
+          "...marked placement_unknown (bad magic, not a short read)");
+    CHECK(n == 1 && entries[0].start_wall_ns == 0,
+          "...start_wall_ns == 0, not the header's bogus %llu",
+          n == 1 ? (unsigned long long)entries[0].start_wall_ns : 1ULL);
+
+    cleanup_test_dir();
+    setup_test_dir();
+    snprintf(p, sizeof(p), "%s/2025-04-02_15.trace.lz4", TEST_DIR);
+    fp = fopen(p, "wb");
+    CHECK(fp != NULL, "create future-version archive");
+    if (fp) {
+        struct pgwt_trace_file_header hdr = {
+            .magic = PGWT_TRACE_MAGIC,
+            .version = PGWT_TRACE_VERSION + 1,  /* this build cannot read it */
+            .pg_version = 18,
+            .start_time_ns = 8888888888ULL,     /* must NOT surface anywhere */
+        };
+        fwrite(&hdr, sizeof(hdr), 1, fp);
+        fclose(fp);
+    }
+    n = pgwt_scan_trace_files(TEST_DIR, entries, 8);
+    CHECK(n == 1, "future-version archive still LISTED (%d)", n);
+    CHECK(n == 1 && entries[0].placement_unknown,
+          "...marked placement_unknown (unsupported version, not a short "
+          "read): pgwt_reader_open refuses this version (unknown layout) "
+          "and the scanner must agree rather than read a field whose "
+          "offset a future layout could move");
+    CHECK(n == 1 && entries[0].start_wall_ns == 0,
+          "...start_wall_ns == 0, not the header's bogus %llu",
+          n == 1 ? (unsigned long long)entries[0].start_wall_ns : 1ULL);
+
     cleanup_test_dir();
 }
 
