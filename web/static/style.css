@@ -531,7 +531,19 @@ tr.selected-execution td { background: #173653; }
   border-bottom: 1px solid #2a405a; font-size: 11px;
 }
 #waterfall-chart { min-height: 240px; padding: 4px 10px; }
-#scatter-chart { height: 480px; padding: 4px 10px; }
+/* Scatter item 2 (video review): the two-line disclosure in #scatter-notes
+ * (EXEC_SCATTER_SCOPE_NOTE plus the downsampled-sample caveat,
+ * lib/builders/exec-scatter.js) sits BELOW this fixed-height chart in DOM
+ * order (#475-3/#476 -- do not move it back to an absolute overlay). At the
+ * pinned 1710x981 demo viewport the notes element's own bottom edge measured
+ * 983px against a 981px innerHeight even with the SHORT two-line note this
+ * repo's mock fixture produces (see tests/test_web_ui.py's
+ * test_scatter_notes_fully_above_fold) -- 2px of clip that becomes much more
+ * with the longer "Showing N of M executions (outlier-preserving sample...)"
+ * line a downsampled capture adds. 420px (was 480px) matches the #473-5
+ * precedent for Concurrency's chart (e165ec2, 270px) -- shrink the chart,
+ * not the disclosure -- and leaves margin for the longer note too. */
+#scatter-chart { height: 420px; padding: 4px 10px; }
 #matrix-chart { height: 660px; padding: 4px 10px; }
 /* #276/review-finding (separate from the owner-held #442 threshold issue):
  * the Burst Events table is one row per bucket that had a burst -- up to the
