@@ -454,7 +454,12 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * what this daemon does until the v9 writer and the live-loop observation
      * are in the same build. Non-zero here with
      * summary_open_cpu_credited_ns at 0 is the honest signature of that
-     * state, and cpu_open_uncredited_ns is how much time it cost. */
+     * state. summary_cpu_open_uncredited_ns_total (note: wire key is
+     * "cpu_open_", the FIELD is cpu_open_uncredited_ns_total -- neither
+     * matches the summary_open_cpu_* naming used two lines below) is how
+     * much WALL time those refused gaps cost, summed over the whole
+     * capture at the moment each one closes -- not a per-window figure and
+     * not a measured-CPU quantity (#428). */
     cjson_add_uint64(root, "summary_open_cpu_refused_total",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_refused_total : 0);
