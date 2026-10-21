@@ -723,6 +723,17 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
   cursor: help;
 }
 
+/* #484 review finding: the remainder row's AAS em-dash is the SAME visual
+ * treatment as .idle-excluded (dim, hover-explained), but it must not SHARE
+ * that class -- its title says the opposite thing (real, counted DB time,
+ * just not broken out by event, vs. idle's "excluded, not active-session
+ * average"), and a class literally named "idle-excluded" on a non-idle row
+ * is itself the kind of mismatch this fix exists to remove. */
+.no-breakdown {
+  color: #666;
+  cursor: help;
+}
+
 /* #453: the idle-occupancy figure printed BESIDE the AAS column's em-dash
  * (lib/builders/table-configs.js idleAasCellHtml) -- visibly labeled and
  * visibly dimmer than a real AAS number, so it survives a still frame

@@ -214,6 +214,29 @@ function idleAasCellHtml(aas) {
     return dash + ' <span class="idle-occ">(idle occ. ' + v + ')</span>';
 }
 
+/* Review finding on #484: isExcludedFromDbTime()'s `pct == null` test is
+ * ALSO true for the remainder row (pct is deliberately left null, see
+ * childRemainderRow's own comment), so the AAS column used to fall through
+ * to idleAasCellHtml() above and print "this is idle occupancy ... no
+ * session is 'active' while idle" on a row that is the OPPOSITE of idle: it
+ * is real, counted DB time in the class, merely not broken out by event
+ * name (the per-class event list is capped server-side). The em-dash glyph
+ * is still right -- there is no single event's AAS to show for an unnamed
+ * bucket -- but the STORY must be the remainder's own, not Idle's borrowed
+ * one. Styled the same as .idle-excluded (dim, cursor:help) via a SEPARATE
+ * .no-breakdown class, deliberately not sharing the class name either --
+ * "idle-excluded" literally on a non-idle row would be the same mismatch
+ * one level down (visible to anyone inspecting the DOM), even though
+ * nothing about the class itself is rendered to a viewer. */
+const REMAINDER_AAS_TITLE = 'Real DB time in this class, not broken out by ' +
+    'event: the per-class event list is capped. See the Events tab for ' +
+    'every event name.';
+
+function remainderAasCellHtml() {
+    return '<span class="no-breakdown" title="' +
+        esc(REMAINDER_AAS_TITLE) + '">—</span>';
+}
+
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
@@ -245,6 +268,13 @@ export const overviewConfig = {
             // same em-dash the %DB Time column uses, with the occupancy
             // rate (when present) printed visibly beside it, not hidden
             // behind a tooltip.
+            //
+            // #484 review finding: the remainder row ALSO has pct == null
+            // (deliberately -- see childRemainderRow), which trips the SAME
+            // isExcludedFromDbTime() check below -- but it is not idle, it
+            // is real DB time just not itemized by event. Checked first, so
+            // it never falls into idleAasCellHtml()'s idle-specific story.
+            if (r.isRemainder) return remainderAasCellHtml();
             if (isExcludedFromDbTime(r)) return idleAasCellHtml(r.aas);
             return fmtAas(r.aas);
         }},
