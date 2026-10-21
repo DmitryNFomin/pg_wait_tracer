@@ -2715,6 +2715,100 @@ def test_waterfall_view(page):
           f"bar click opened compact readout ('{readout[:90]}')")
 
 
+def test_waterfall_drilled_view_keeps_a_16px_fold_reserve(page):
+    """#462: tests/verify_waterfall_fold.py's own fold check
+    (readout_bottom <= innerHeight, scroll_height <= innerHeight) passes
+    with ZERO pixels of margin once the backend-activity panel is
+    populated (measured: readout_bottom 914, scroll_height 981 against a
+    981px viewport) -- a check that passes at exactly zero margin cannot
+    tell "fits" from "about to stop fitting": the very next element added
+    to the Waterfall view breaks the fold the same way #415 originally did.
+    `scrollHeight <= innerHeight` alone cannot measure reserve, only its
+    absence; this asserts the actual gap explicitly. Negative control: a
+    synthetic element pinned to the viewport bottom (zero reserve by
+    construction) must fail this exact assertion -- proving the check can
+    see the defect it is written to catch, not just repeat the old
+    boolean."""
+    print("--- Test #462: Waterfall drilled view keeps a 16px fold reserve ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+    try:
+        # Same drilled scenario as tests/verify_waterfall_fold.py: pid 1000
+        # is a leader + 2 workers (a 3-lane chart) WITH a populated
+        # backend-activity panel -- the exact combination #462 was found in
+        # (each piece alone was harmless; populated together they are not).
+        p.goto(MOCK_URL + "#tab=waterfall&live=1&span=900&f.pid=1000")
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.wait_for_selector("#waterfall-chart canvas", timeout=10000)
+        p.wait_for_timeout(500)  # let fitExecutionList() settle
+
+        geo = p.evaluate("""() => ({
+            innerHeight: window.innerHeight,
+            scrollHeight: document.documentElement.scrollHeight,
+        })""")
+        margin = geo["innerHeight"] - geo["scrollHeight"]
+        check(margin >= 16,
+              f"#462: the drilled Waterfall view keeps >=16px of fold reserve "
+              f"(innerHeight={geo['innerHeight']}, scrollHeight={geo['scrollHeight']}, "
+              f"margin={margin})")
+
+        # Preserve two complete execution rows (#473 margin note): the fix
+        # must not come at the cost of the execution list collapsing to a
+        # single row again. Checked on the DEFAULT (unfiltered) view, which
+        # is where #473 measured "header + exactly 2 full rows" -- pid 1000
+        # above has only ONE execution of its own (the other two lanes are
+        # worker backend-activity, not separate executions), so it is the
+        # wrong population to measure row count against. A FRESH page (not
+        # a hash-only re-navigation of `p`) avoids any SPA router state
+        # left over from the pid filter above.
+        p2 = ctx.new_page()
+        guard2 = ConsoleErrorGuard(p2)
+        set_failure_capture(p2, guard2)
+        try:
+            p2.goto(MOCK_URL + "#tab=waterfall&live=1&span=900")
+            p2.wait_for_selector("#status.connected", timeout=10000)
+            p2.wait_for_selector("#waterfall-chart canvas", timeout=10000)
+            p2.wait_for_timeout(500)
+            full_rows = p2.evaluate("""() => {
+                const rows = [...document.querySelectorAll('.execution-list tbody tr.clickable')];
+                const list = document.querySelector('.execution-list');
+                const listBottom = list.getBoundingClientRect().bottom;
+                return rows.filter(r => r.getBoundingClientRect().bottom <= listBottom + 0.5).length;
+            }""")
+            check(full_rows >= 2, f"#473: at least two complete execution rows remain visible ({full_rows})")
+            assert_no_console_errors(p2, guard2, "waterfall-fold-reserve-rowcount")
+        finally:
+            set_failure_capture(p, guard)
+            p2.close()
+
+        # Negative control: pin a synthetic element flush with the viewport
+        # bottom (zero reserve BY CONSTRUCTION) and confirm THIS SAME
+        # assertion then correctly reports a failing (< 16) margin -- proves
+        # the check can see the defect, not just always pass.
+        synthetic_margin = p.evaluate("""() => {
+            const probe = document.createElement('div');
+            probe.id = 'pgwt-test-fold-probe';
+            probe.style.cssText = 'position:fixed;left:0;right:0;bottom:0;height:1px;';
+            document.body.appendChild(probe);
+            const h = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+            document.body.removeChild(probe);
+            return window.innerHeight - h;
+        }""")
+        check(synthetic_margin < 16,
+              f"negative control: a viewport-bottom-pinned probe correctly reads < 16px margin ({synthetic_margin})")
+
+        assert_no_console_errors(p, guard, "waterfall-fold-reserve")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_query_to_waterfall_pivot(page):
     """The dedicated query cell reaches waterfall while the normal row drill
     remains the existing query→Events behavior (covered by test_query_drill)."""
@@ -4178,6 +4272,7 @@ def main():
                 test_url_state_roundtrip,
                 # U3 Stage 2: the three B6 analysis views.
                 test_waterfall_view,
+                test_waterfall_drilled_view_keeps_a_16px_fold_reserve,
                 test_query_to_waterfall_pivot,
                 test_scatter_view,
                 test_matrix_view,
