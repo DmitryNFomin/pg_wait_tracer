@@ -531,7 +531,29 @@ tr.selected-execution td { background: #173653; }
   border-bottom: 1px solid #2a405a; font-size: 11px;
 }
 #waterfall-chart { min-height: 240px; padding: 4px 10px; }
-#scatter-chart { height: 480px; padding: 4px 10px; }
+/* Scatter item 2 (video review): the disclosure in #scatter-notes
+ * (EXEC_SCATTER_SCOPE_NOTE plus the downsampled-sample caveat,
+ * lib/builders/exec-scatter.js) plus #scatter-readout right below it
+ * (.chart-readout, always present with a 34px min-height even empty) sit
+ * BELOW this fixed-height chart in DOM order (#475-3/#476 -- do not move
+ * them back to an absolute overlay).
+ *
+ * Two measured passes, not one -- the first (420px) was wrong:
+ *   - 480px (original): mock's own SHORT two-line text -- page bottom 983
+ *     of 981 innerHeight, 2px clipped.
+ *   - 420px (first attempt): same short text -- bottom 923, looked fine,
+ *     but the gate was checking #scatter-notes' own box, not the real page
+ *     bottom (#scatter-readout extends past it). The REAL three-line
+ *     disclosure ("Showing N of M executions (outlier-preserving
+ *     sample...)" -- what a downsampled capture actually sends) pushed the
+ *     true page bottom (#table-container) to 990, 9px past the fold, while
+ *     #scatter-notes alone still measured inside it -- a gate that cannot
+ *     see the actual overflow source approves a page that still clips.
+ *   - 380px (this value), measured against the REAL three-line text with
+ *     the corrected scrollHeight-based gate (tests/test_web_ui.py
+ *     test_scatter_notes_fully_above_fold): real content bottom 950 of 981,
+ *     31px of genuine headroom -- not another knife's-edge number. */
+#scatter-chart { height: 380px; padding: 4px 10px; }
 #matrix-chart { height: 660px; padding: 4px 10px; }
 /* #276/review-finding (separate from the owner-held #442 threshold issue):
  * the Burst Events table is one row per bucket that had a burst -- up to the
@@ -630,6 +652,13 @@ tr.clickable:hover td { background: #2a3a6a; }
 .delta-status.gone { color: #9ba3b0; border: 1px solid #505967; }
 .truncation-row:hover td { background: transparent; }
 
+/* #484: the Overview per-class remainder row -- same muted, non-data
+ * treatment the table-level truncation-row above gets (color/style match
+ * table.js's tableHtml inline style), applied per-row instead of as a
+ * single whole-table banner since this one is nested under its own class. */
+.remainder-row td { color: #666; font-style: italic; font-size: 11px; }
+.remainder-row:hover td { background: transparent; }
+
 /* Sticky columns for wide tables (queries tab) */
 .sticky-col {
   position: sticky;
@@ -700,6 +729,17 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
 /* #435: Idle's %DB Time cell -- an em-dash, not a bar, so it never reads as
  * a measured (and misleadingly small) share of DB Time. */
 .idle-excluded {
+  color: #666;
+  cursor: help;
+}
+
+/* #484 review finding: the remainder row's AAS em-dash is the SAME visual
+ * treatment as .idle-excluded (dim, hover-explained), but it must not SHARE
+ * that class -- its title says the opposite thing (real, counted DB time,
+ * just not broken out by event, vs. idle's "excluded, not active-session
+ * average"), and a class literally named "idle-excluded" on a non-idle row
+ * is itself the kind of mismatch this fix exists to remove. */
+.no-breakdown {
   color: #666;
   cursor: help;
 }

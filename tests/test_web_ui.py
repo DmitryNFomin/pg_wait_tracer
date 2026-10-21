@@ -2929,6 +2929,73 @@ def test_matrix_scatter_notes_never_overlap_their_chart(page):
         ctx.close()
 
 
+def test_scatter_notes_fully_above_fold(page):
+    """Video review (two independent reviewers): Scatter's sampling
+    disclosure ("Excludes waiting before execution starts ... Showing N of M
+    executions (outlier-preserving sample; point density does not represent
+    frequency)") is #scatter-notes, which #475-3/#476 already moved BELOW
+    #scatter-chart in DOM order (test_matrix_scatter_notes_never_overlap...
+    above covers that it no longer overlaps the chart). What #475-3 did NOT
+    guarantee is that the whole page stays inside the pinned 1710x981 demo
+    viewport -- #scatter-chart's fixed CSS height pushed the shell past the
+    fold instead, clipping the final line (one reviewer saw it mid-word, the
+    other saw the closing "frequency)" fall below it).
+
+    Review finding: an EARLIER version of this test checked only
+    #scatter-notes' own bottom edge, which can read "above the fold" (e.g.
+    936px of 981) while the page still scrolls, because #scatter-readout
+    (.chart-readout, style.css: `min-height: 34px`, ALWAYS present even
+    empty) sits right below the notes and pushes the true page bottom
+    further down -- #table-container (the real last-element bottom)
+    measured 990px, 9px PAST the fold, while #scatter-notes alone measured
+    well within it. The gate must check what verify_waterfall_fold.py
+    already checks for Waterfall: document.documentElement.scrollHeight
+    against window.innerHeight -- "does the page scroll at all", not "is
+    this one element's own box above a line" -- the same class of gap
+    #415's integration brief named for the gallery vs. the real app shell.
+
+    mock_server.py's exec_scatter now returns the REAL three-line
+    disclosure shape (downsampled=True, realistic kept/total counts) rather
+    than a two-line stand-in -- the stand-in gate passed at 420px even
+    though the real bug report's longer text still clipped by 9px."""
+    print("--- Test: Scatter's sampling disclosure stays above the fold ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.click("#live-btn")
+        p.wait_for_timeout(300)
+        p.click(".tab[data-tab='scatter']")
+        p.wait_for_selector("#scatter-chart canvas", timeout=10000)
+        p.wait_for_timeout(700)
+        geo = p.evaluate("""() => {
+            const n = document.getElementById('scatter-notes');
+            if (!n) return null;
+            const r = n.getBoundingClientRect();
+            return { notesBottom: r.bottom, innerHeight: window.innerHeight,
+                      text: n.textContent.trim(),
+                      scrollHeight: document.documentElement.scrollHeight };
+        }""")
+        check(geo is not None and geo["text"] != "" and
+              geo["scrollHeight"] <= geo["innerHeight"],
+              f"scatter disclosure fits without scrolling the page "
+              f"(scrollHeight={geo and geo['scrollHeight']}, "
+              f"innerHeight={geo and geo['innerHeight']}, "
+              f"notesBottom={geo and geo['notesBottom']}, text={geo and geo['text']!r})")
+
+        assert_no_console_errors(p, guard, "scatter-notes-fold")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_chart_views_update_in_place_on_tick(page):
     """#171: scatter/matrix/waterfall must update their EXISTING ECharts
     instance on a live tick, not tear the panel's host div down and rebuild
@@ -4078,6 +4145,7 @@ def main():
                 test_scatter_view,
                 test_matrix_view,
                 test_matrix_scatter_notes_never_overlap_their_chart,
+                test_scatter_notes_fully_above_fold,
                 test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
             ]

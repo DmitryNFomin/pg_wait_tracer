@@ -1259,6 +1259,18 @@ def _handle_request_inner(cmd, req_id, msg):
         # out waiting for "tr.selected-execution" (make check, 2026-09-30).
         # pid 1000 and pid 1004 aligned too, for the same reason, even
         # though nothing here currently clicks them.
+        # downsampled=True + realistic kept/total counts (review finding on
+        # the Scatter disclosure-clip fix): the real bug report's disclosure
+        # is THREE lines -- EXEC_SCATTER_SCOPE_NOTE, the "Showing N of M
+        # executions (outlier-preserving sample...)" line this triggers, and
+        # the in-progress-excluded line below -- not the two-line stand-in a
+        # plain `downsampled: False` produces. A fold-visibility gate driven
+        # by the two-line text can go green while the real three-line text
+        # still clips (exactly what happened on the first pass of this fix:
+        # 420px passed the mock's own short text but still clips 9px with
+        # this longer, real one). `points` is UNCHANGED (3 canned points,
+        # exact pid/t values other tests pivot and match by) -- only the
+        # disclosure-driving counts below are now realistic.
         return {"id": req_id, "points": [
             {"t": str(_EXEC_BASE_NS), "duration_ms": 30.001,
              "pid": 1000, "query_id": "100", "in_progress": False},
@@ -1266,7 +1278,7 @@ def _handle_request_inner(cmd, req_id, msg):
              "pid": 1002, "query_id": "200", "in_progress": False},
             {"t": str(_EXEC_BASE_NS - 50_000_000), "duration_ms": None,
              "pid": 1004, "query_id": "300", "in_progress": True},
-        ], "total_count": 3, "kept_count": 3, "downsampled": False}
+        ], "total_count": 48213, "kept_count": 2000, "downsampled": True}
 
     if cmd == "transitions":
         # event_id mirrors server.c's DFG node JSON (U2 / P3 wire 5: node
