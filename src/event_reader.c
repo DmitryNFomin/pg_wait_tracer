@@ -587,6 +587,13 @@ bool pgwt_trace_file_quick_skip(const struct pgwt_trace_file_entry *entries,
         return false;
     if (idx < 0 || idx + 1 >= n)
         return false;
+    /* The ENTRY ITSELF, not just its successor: the scanner's insertion
+     * sort puts a start_wall_ns==0 (placement_unknown) entry FIRST, so an
+     * unplaceable file lands at a low idx -- exactly where this predicate
+     * is asked "can I skip this one?" most often. Its own coverage being
+     * unknown is reason enough to refuse, regardless of what comes after. */
+    if (entries[idx].placement_unknown)
+        return false;
     const struct pgwt_trace_file_entry *next = &entries[idx + 1];
     if (next->placement_unknown || next->start_wall_ns == 0)
         return false;
