@@ -161,7 +161,7 @@ function pctlCell(key) {
  * back if the server-side 0 reappears after a refactor. Matches the
  * existing idle-row finder in views/overview.js's buildSummary(). */
 function isIdleRow(r) {
-    return r.indent === 0 && typeof r.name === 'string' && r.name.indexOf('Idle') >= 0;
+    return r.indent === 0 && typeof r.name === 'string' && r.name === 'Idle';
 }
 
 const IDLE_PCT_HTML =
