@@ -17,7 +17,8 @@ import {
 } from '../../web/static/lib/table.js';
 import {
     overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
-    PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, queriesConfig, makeQueriesConfig,
+    PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, PCTL_UNRESOLVED_TEXT,
+    queriesConfig, makeQueriesConfig,
     buildUnattributedNote, unattributedNoteHtml, createOverviewOrder, sessionsConfig,
     childRemainderRow,
 } from '../../web/static/lib/builders/table-configs.js';
@@ -910,15 +911,25 @@ test('CPU* (event_id 0) percentile cells are not drillable (not a wait event)', 
 /* The cell's visible text, with markup (and its title attribute) stripped. */
 const cellText = (html) => html.replace(/<[^>]*>/g, '');
 
-test('#103 overflow percentile renders ">=", never an exact-looking number', () => {
+// #437: a saturated percentile used to render ">=16.4ms" -- a number-shaped
+// value sitting next to an avg of 1.8s and a max of 2.6s in the SAME row,
+// which reads as a measurement contradicting its own neighbours rather than
+// as "unresolved". The standing rule (docs/VISUAL_CHECKLIST.md SEMANTICS) is
+// that absence is reported, never rendered as a measured-looking value, so
+// an overflowing cell's VISIBLE text is now the literal word "Unresolved" --
+// never a number -- while the histogram drill, the lower-bound explanation
+// (title) and Max (the real, exact tail) are all retained unchanged.
+test('#437 overflow percentile renders "Unresolved", never a number', () => {
     const m = buildTableModel(eventsConfig, [evRow({
         p50_us: 16384, p95_us: 16384, p99_us: 16384, max_us: 2600000,
         p50_overflow: true, p95_overflow: true, p99_overflow: true,
     })], null);
     for (const ci of [P50_COL, P95_COL, P99_COL]) {
         const html = m.rows[0].cells[ci].html;
-        // The rendered text is the bound, never the bare number.
-        assert.equal(cellText(html), '\u226516.4ms', `col ${ci}: ${html}`);
+        // The rendered text is the literal word, never a number -- "16.4"
+        // must not appear anywhere in the visible text.
+        assert.equal(cellText(html), PCTL_UNRESOLVED_TEXT, `col ${ci}: ${html}`);
+        assert.ok(!cellText(html).includes('16.4'), `col ${ci} still shows a number: ${html}`);
         // The disclosure is in words, not just the drill affordance: it
         // leads with the fact and points at the column that has the tail.
         // #437: the exact agreed sentence, verbatim.
@@ -982,7 +993,8 @@ test('#103 a NON-drillable overflow cell (CPU*) still discloses the bound', () =
     assert.equal(cell.intent, null);
     assert.ok(!cell.cls.includes('drillable'), cell.cls);
     assert.ok(!cell.html.includes('cell-drill'), cell.html);
-    assert.ok(cell.html.includes('\u226516.4ms'), cell.html);
+    assert.equal(cellText(cell.html), PCTL_UNRESOLVED_TEXT, cell.html);
+    assert.ok(!cellText(cell.html).includes('16.4'), cell.html);
     // #437: the exact agreed sentence, verbatim.
     assert.ok(cell.html.includes('title="Percentiles marked \u226516.4 ms ' +
         'fall in the open-ended \u226516.384 ms histogram bucket; they ' +
@@ -1088,11 +1100,12 @@ test('events-overflow-pctl fixture: the finite-bucket control renders "<=", not 
         control.cells[P99_COL].html);
     assert.ok(!control.cells[P99_COL].html.includes('≥'),
         control.cells[P99_COL].html);
-    // Every genuinely overflowing row in the SAME fixture still shows ">=".
+    // Every genuinely overflowing row in the SAME fixture reads "Unresolved"
+    // (#437), never a number -- and never the finite control's "<=" either.
     for (const name of ['Lock:relation', 'Timeout:CheckpointWriteDelay',
                          'IO:DataFileRead', 'CPU*']) {
         const row = model.rows.find(r => r.row.name === name);
-        assert.ok(cellText(row.cells[P99_COL].html).startsWith('≥'),
+        assert.equal(cellText(row.cells[P99_COL].html), PCTL_UNRESOLVED_TEXT,
             `${name}: ${row.cells[P99_COL].html}`);
     }
     // #454: the fixture has BOTH overflowing rows and finite-bound rows, so
