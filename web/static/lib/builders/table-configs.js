@@ -552,7 +552,7 @@ export const sessionsConfig = {
         { key: 'user', label: 'User', format: (r) => esc(r.user || '') },
         { key: 'db', label: 'Database', format: (r) => esc(r.db || '') },
         { key: 'db_time_ms', label: 'DB Time', cls: 'num',
-          title: 'non-idle time of this process; background processes included.',
+          title: 'non-idle time of this process; background processes included. This is a different scope from DB Time in Overview.',
           format: (r) => fmtMs(r.db_time_ms) },
         // #187: was a hardcoded literal that silently went stale when the
         // owner recoloured 'cpu' (dark green for "running"); classColor('cpu')
@@ -674,6 +674,16 @@ export function makeQueriesConfig(fidelity) {
  * every existing use). views/queries.js calls makeQueriesConfig(fidelityOf
  * (data)) instead, so the live tab's headers track the real response. */
 export const queriesConfig = makeQueriesConfig('exact');
+
+export const SESSIONS_SCOPE_NOTE_TEXT =
+    'DB Time in Sessions is the non-idle time of this process, including ' +
+    'bgwriter, walwriter, checkpointer, and autovacuum. Overview uses a ' +
+    'different, system-wide DB Time total that excludes the parked-idle ' +
+    'time of background processes.';
+
+export function sessionsScopeNoteHtml() {
+    return '<div class="panel-caption">' + esc(SESSIONS_SCOPE_NOTE_TEXT) + '</div>';
+}
 
 /* #455: `total_ms` ("DB Time") sums EVERY wait/CPU interval attributed to
  * the query, including one taken before Exec ever starts -- a relation

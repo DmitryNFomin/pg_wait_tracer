@@ -16,7 +16,7 @@ import {
     buildTableModel, buildTruncationRow, createStableOrder, applyDefaultOrder,
     createOrderResetGate, orderResetKey,
 } from '../lib/table.js';
-import { sessionsConfig } from '../lib/builders/table-configs.js';
+import { sessionsConfig, sessionsScopeNoteHtml } from '../lib/builders/table-configs.js';
 import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
 
 /* PURE: top_sessions response + sort -> render model. Exported for testing.
@@ -84,6 +84,7 @@ export function createSessionsView() {
             });
             el.insertAdjacentHTML('afterbegin',
                 paneFidelityBadgeHtml(model.paneFidelity));
+            el.insertAdjacentHTML('afterbegin', sessionsScopeNoteHtml());
         },
 
         enter() { /* no chart */ },
