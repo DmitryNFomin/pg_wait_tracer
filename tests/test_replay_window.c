@@ -894,6 +894,62 @@ int main(void)
         free(a);
     }
 
+    /* CASE 13: #405 — pgwt_trace_file_quick_skip, factored out of
+     * src/replay.c's file loop so the TZ-placement fix's actual consumer
+     * logic is pinned here without linking the daemon.
+     *
+     * The bug this predicate used to embody: an archived file's
+     * start_wall_ns came from mktime() on its NAME, read in whatever
+     * timezone the replay happened to run in, instead of from its header.
+     * That is now fixed one layer down (pgwt_scan_trace_files); this case
+     * pins the SEPARATE guarantee that unknown placement on either side of
+     * the comparison can never cause a skip — the bypass suite for the
+     * "disable, don't guess" half of the fix. */
+    printf("CASE 13: #405 — quick-skip predicate refuses on unknown "
+           "placement, not just computes a wrong one\n");
+    {
+        struct pgwt_trace_file_entry e[3];
+        memset(e, 0, sizeof(e));
+        e[0].start_wall_ns = 1000;
+        e[1].start_wall_ns = 2000;
+        e[2].start_wall_ns = 3000;
+
+        CHECK(pgwt_trace_file_quick_skip(e, 3, 0, 2500) == true,
+              "ordinary case: file 0 ends before --from (2500) -> skip it");
+        CHECK(pgwt_trace_file_quick_skip(e, 3, 0, 1500) == false,
+              "ordinary case: file 1 starts (2000) after --from (1500) -> "
+              "keep file 0");
+
+        CHECK(pgwt_trace_file_quick_skip(e, 3, 0, 0) == false,
+              "from_wall_ns == 0 (no lower bound) -> never skip");
+
+        CHECK(pgwt_trace_file_quick_skip(e, 3, 2, 9999) == false,
+              "idx+1 == n (no successor to compare against) -> never skip");
+        CHECK(pgwt_trace_file_quick_skip(e, 3, -1, 9999) == false,
+              "negative idx -> refuse, not undefined behaviour");
+        CHECK(pgwt_trace_file_quick_skip(e, 0, 0, 9999) == false,
+              "EMPTY scan result (n=0) -> never skip -- the gate must refuse "
+              "when it has nothing to check, not approve by default");
+
+        struct pgwt_trace_file_entry u[2];
+        memset(u, 0, sizeof(u));
+        u[0].start_wall_ns = 1000;
+        u[1].start_wall_ns = 0;
+        u[1].placement_unknown = true;
+        CHECK(pgwt_trace_file_quick_skip(u, 2, 0, 2500) == false,
+              "successor's placement_unknown=true -> never skip, even "
+              "though 2500 > its start_wall_ns of 0");
+
+        struct pgwt_trace_file_entry z[2];
+        memset(z, 0, sizeof(z));
+        z[0].start_wall_ns = 1000;
+        z[1].start_wall_ns = 0;
+        z[1].placement_unknown = false;  /* zero but NOT flagged unknown */
+        CHECK(pgwt_trace_file_quick_skip(z, 2, 0, 2500) == false,
+              "successor's start_wall_ns == 0 alone (unflagged) -> still "
+              "never trusted as a bound");
+    }
+
     free(all);
     free(w);
 

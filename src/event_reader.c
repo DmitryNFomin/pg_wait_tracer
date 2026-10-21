@@ -501,19 +501,56 @@ int pgwt_scan_trace_files(const char *trace_dir,
             sscanf(ent->d_name, "%4d-%2d-%2d_%2d.trace.lz4",
                    &e->year, &e->month, &e->day, &e->hour) == 4) {
             snprintf(e->path, sizeof(e->path), "%s/%s", trace_dir, ent->d_name);
-            struct tm tm = {0};
-            tm.tm_year = e->year - 1900;
-            tm.tm_mon  = e->month - 1;
-            tm.tm_mday = e->day;
-            tm.tm_hour = e->hour;
-            tm.tm_isdst = -1;
-            time_t t = mktime(&tm);
-            e->start_wall_ns = (uint64_t)t * 1000000000ULL;
+            e->placement_unknown = false;
+
+            /* #405: this USED to derive the archive's placement from its
+             * NAME via mktime() — but the name is formatted by the WRITER's
+             * localtime_r at rotation (event_writer.c), so a reader in a
+             * different timezone parses the identical digits as a different
+             * instant. A replay bounded by --from/--to then silently drops
+             * whatever file that shift displaces past the window edge: no
+             * error, just missing data (src/replay.c's quick filter trusts
+             * this value to decide a file need not even be opened).
+             *
+             * The header's start_time_ns is CLOCK_REALTIME at file creation
+             * (event_writer.h) — the same absolute instant everywhere, and
+             * it is written uncompressed at the front of the file
+             * (event_writer.c), so reading it here costs one small fread,
+             * no LZ4 decompression. Trust it, not the name.
+             *
+             * If the header cannot be read or validated, do NOT fall back
+             * to the name: that fallback IS the TZ bug this replaces, just
+             * on a smaller set of files. Disable replay for this one file
+             * instead — placement_unknown stays visible on the entry (still
+             * listed, never silently dropped) and src/replay.c refuses to
+             * use it rather than guess. */
+            uint64_t hdr_start_ns = 0;
+            FILE *fp = fopen(e->path, "rb");
+            if (fp) {
+                struct pgwt_trace_file_header hdr;
+                if (fread(&hdr, sizeof(hdr), 1, fp) == 1 &&
+                    hdr.magic == PGWT_TRACE_MAGIC &&
+                    hdr.version >= 2 && hdr.version <= PGWT_TRACE_VERSION)
+                    hdr_start_ns = hdr.start_time_ns;
+                fclose(fp);
+            }
+            if (hdr_start_ns > 0) {
+                e->start_wall_ns = hdr_start_ns;
+            } else {
+                fprintf(stderr,
+                        "WARN: cannot establish time placement for %s from "
+                        "its header — replay for this file is disabled "
+                        "rather than guessed from its name (#405)\n",
+                        e->path);
+                e->start_wall_ns = 0;
+                e->placement_unknown = true;
+            }
             n++;
         } else if (strcmp(ent->d_name, "current.trace") == 0) {
             snprintf(e->path, sizeof(e->path), "%s/%s", trace_dir, ent->d_name);
             e->year = e->month = e->day = e->hour = 0;
             e->start_wall_ns = 0;
+            e->placement_unknown = false;
             FILE *fp = fopen(e->path, "rb");
             if (fp) {
                 struct pgwt_trace_file_header hdr;
@@ -541,6 +578,19 @@ int pgwt_scan_trace_files(const char *trace_dir,
     }
 
     return n;
+}
+
+bool pgwt_trace_file_quick_skip(const struct pgwt_trace_file_entry *entries,
+                                int n, int idx, uint64_t from_wall_ns)
+{
+    if (from_wall_ns == 0)
+        return false;
+    if (idx < 0 || idx + 1 >= n)
+        return false;
+    const struct pgwt_trace_file_entry *next = &entries[idx + 1];
+    if (next->placement_unknown || next->start_wall_ns == 0)
+        return false;
+    return next->start_wall_ns < from_wall_ns;
 }
 
 /* ── Time parser ───────────────────────────────────────── */
