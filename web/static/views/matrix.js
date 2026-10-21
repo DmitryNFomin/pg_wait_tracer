@@ -23,6 +23,7 @@ export function createMatrixView() {
             '<div class="matrix-shell">' +
             ' <div class="view-title">Transition matrix <span>cell color is log-scaled count; ' +
             'label color is event identity</span></div>' +
+            ' <div id="matrix-cpu-note" class="panel-caption"></div>' +
             ' <div id="matrix-chart"></div>' +
             ' <div id="matrix-notes" class="chart-notes"></div>' +
             '</div>';
@@ -61,6 +62,7 @@ export function createMatrixView() {
                 return;
             }
             ensureShell(el);
+            document.getElementById('matrix-cpu-note').textContent = model.cpuNote || '';
             document.getElementById('matrix-notes').textContent = model.notes.join(' · ');
             const host = document.getElementById('matrix-chart');
             if (!chart) {
