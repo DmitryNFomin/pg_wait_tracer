@@ -2936,6 +2936,36 @@ def test_matrix_scatter_notes_never_overlap_their_chart(page):
         ctx.close()
 
 
+def test_matrix_cpu_note_sits_above_the_canvas(page):
+    """#438/#473-1: the CPU* explanation ("CPU* is a literal intermediate
+    state ... not necessarily measured running CPU") used to be folded into
+    the SAME below-canvas #matrix-notes slot as the volume/link-cap
+    disclosures -- below the fold at the demo viewport, so a viewer never
+    saw why the matrix looks like a degenerate L (only CPU* populated).
+    It now has its own slot, #matrix-cpu-note, placed ABOVE #matrix-chart
+    in DOM order; this pins the real top-vs-top ordering in an actual
+    render, not just the pure builder's cpuNote field."""
+    print("--- Test #438/#473-1: Matrix CPU* note sits above the canvas ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='matrix']")
+    page.wait_for_selector("#matrix-chart canvas", timeout=5000)
+    page.wait_for_timeout(700)
+    geo = page.evaluate("""() => {
+        const note = document.getElementById('matrix-cpu-note');
+        const chart = document.getElementById('matrix-chart');
+        if (!note || !chart) return null;
+        const nr = note.getBoundingClientRect(), cr = chart.getBoundingClientRect();
+        return { noteTop: nr.top, chartTop: cr.top, text: note.textContent.trim() };
+    }""")
+    check(geo is not None and geo["text"] != "", f"#matrix-cpu-note exists with text ({geo})")
+    check(geo is not None and "literal intermediate state" in geo["text"] and
+          "CPU*" in geo["text"],
+          f"#matrix-cpu-note carries the actual explanation, not just the name ({geo})")
+    check(geo is not None and geo["noteTop"] < geo["chartTop"],
+          f"#matrix-cpu-note sits ABOVE #matrix-chart in the real page ({geo})")
+
+
 def test_scatter_notes_fully_above_fold(page):
     """Video review (two independent reviewers): Scatter's sampling
     disclosure ("Excludes waiting before execution starts ... Showing N of M
@@ -4152,6 +4182,7 @@ def main():
                 test_scatter_view,
                 test_matrix_view,
                 test_matrix_scatter_notes_never_overlap_their_chart,
+                test_matrix_cpu_note_sits_above_the_canvas,
                 test_scatter_notes_fully_above_fold,
                 test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
