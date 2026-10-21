@@ -129,10 +129,22 @@ export const EXECUTION_LIST_MAX_PX = 310;
 export const EXECUTION_LIST_MIN_PX = 120;
 export const EXECUTION_LIST_FOLD_MARGIN_PX = 8;
 
+// #462: the fold reserve `waterfallChartFitHeight` leaves BEYOND the
+// literal viewport edge once it has shrunk the chart -- zero overflow
+// used to mean "fully done", which is indistinguishable from "about to
+// overflow the instant anything else is added to the pane". Shrinking
+// the chart this much further (when it has the slack) converts "just
+// barely fits" into "fits with real headroom", while a page that
+// already has plenty of room (very negative overflow) is completely
+// unaffected -- see the function body.
+export const WATERFALL_FOLD_RESERVE_PX = 16;
+
 // #462: once the list reaches its measured row floor, only the chart may
-// yield. Keep its existing CSS minimum even when the page cannot fit.
+// yield. Target a WATERFALL_FOLD_RESERVE_PX margin past the fold, keeping
+// its existing CSS minimum even when the page cannot fit.
 export function waterfallChartFitHeight(naturalHeight, minimumHeight, overflow) {
-    return Math.max(minimumHeight, naturalHeight - Math.max(0, Math.ceil(overflow)));
+    return Math.max(minimumHeight,
+        naturalHeight - Math.max(0, Math.ceil(overflow) + WATERFALL_FOLD_RESERVE_PX));
 }
 
 export function executionListMaxHeight(geometry) {
