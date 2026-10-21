@@ -2929,6 +2929,58 @@ def test_matrix_scatter_notes_never_overlap_their_chart(page):
         ctx.close()
 
 
+def test_scatter_notes_fully_above_fold(page):
+    """Video review (two independent reviewers): Scatter's sampling
+    disclosure ("Excludes waiting before execution starts ... Showing N of M
+    executions (outlier-preserving sample; point density does not represent
+    frequency)") is #scatter-notes, which #475-3/#476 already moved BELOW
+    #scatter-chart in DOM order (test_matrix_scatter_notes_never_overlap...
+    above covers that it no longer overlaps the chart). What #475-3 did NOT
+    guarantee is that the notes element's OWN bottom edge stays inside the
+    pinned 1710x981 demo viewport -- #scatter-chart's fixed CSS height just
+    pushed the shell past the fold instead, clipping the final line (one
+    reviewer saw it mid-word, the other saw the closing "frequency)" fall
+    below it). Measured BEFORE this test's fix: 983px bottom against a 981px
+    innerHeight -- clipped by 2px even with this repo's SHORT two-line mock
+    note; the longer three-line disclosure a downsampled capture produces
+    clips by far more. This asserts the element's bottom edge is above (<=)
+    window.innerHeight, not merely that it exists or does not overlap the
+    chart -- a complete disclosure, not a half-visible one."""
+    print("--- Test: Scatter's sampling disclosure stays above the fold ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.click("#live-btn")
+        p.wait_for_timeout(300)
+        p.click(".tab[data-tab='scatter']")
+        p.wait_for_selector("#scatter-chart canvas", timeout=10000)
+        p.wait_for_timeout(700)
+        geo = p.evaluate("""() => {
+            const n = document.getElementById('scatter-notes');
+            if (!n) return null;
+            const r = n.getBoundingClientRect();
+            return { bottom: r.bottom, innerHeight: window.innerHeight,
+                      text: n.textContent.trim() };
+        }""")
+        check(geo is not None and geo["text"] != "" and
+              geo["bottom"] <= geo["innerHeight"],
+              f"scatter disclosure stays above the fold (bottom={geo and geo['bottom']}, "
+              f"innerHeight={geo and geo['innerHeight']}, text={geo and geo['text']!r})")
+
+        assert_no_console_errors(p, guard, "scatter-notes-fold")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_chart_views_update_in_place_on_tick(page):
     """#171: scatter/matrix/waterfall must update their EXISTING ECharts
     instance on a live tick, not tear the panel's host div down and rebuild
@@ -4078,6 +4130,7 @@ def main():
                 test_scatter_view,
                 test_matrix_view,
                 test_matrix_scatter_notes_never_overlap_their_chart,
+                test_scatter_notes_fully_above_fold,
                 test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
             ]
