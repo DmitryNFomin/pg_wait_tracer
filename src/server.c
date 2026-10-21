@@ -9,6 +9,7 @@
 #include "summary_reader.h"
 #include "compute.h"
 #include "wait_event.h"
+#include "idle_rule.h"
 #include "cmdline.h"
 #include "cJSON.h"
 #include "percentile.h"
@@ -6692,6 +6693,13 @@ static void emit_transitions_response(struct pgwt_request *req,
         /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
          * emit the id the table is already keyed by (0 = CPU*). */
         cJSON_AddNumberToObject(node, "event_id", nodes_arr[i].event_id);
+        /* #487: the server-authoritative idle verdict. The Timeout half of
+         * pgwt_is_idle_event() depends on the runtime pacing mask
+         * (idle_rule.c's timeout_pacing_mask, installed from the trace's
+         * PostgreSQL major or observed dynamic names) — the client has no
+         * way to derive this itself, so it must ride on the wire. */
+        cJSON_AddBoolToObject(node, "idle",
+                              pgwt_is_idle_event(nodes_arr[i].event_id));
         const char *colon = strchr(name, ':');
         if (colon) {
             char cls[32];
