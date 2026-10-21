@@ -948,6 +948,25 @@ int main(void)
         CHECK(pgwt_trace_file_quick_skip(z, 2, 0, 2500) == false,
               "successor's start_wall_ns == 0 alone (unflagged) -> still "
               "never trusted as a bound");
+
+        /* THE ENTRY'S OWN placement_unknown, not just its successor's.
+         * event_reader.h documents "unknown placement -- on EITHER the
+         * entry at idx or its successor -- never causes a skip", and the
+         * scanner's insertion sort puts a start_wall_ns==0 entry FIRST
+         * (lowest key), so an unplaceable file lands at a LOW idx -- exactly
+         * where a caller is most likely to ask "can I skip this one?". A
+         * predicate that only checks the successor misses this file
+         * entirely: its successor here is perfectly well-placed (2000) and
+         * before --from (2500), so a successor-only check says "skip",
+         * silently discarding a file whose true coverage is unknown. */
+        struct pgwt_trace_file_entry own[2];
+        memset(own, 0, sizeof(own));
+        own[0].start_wall_ns = 0;
+        own[0].placement_unknown = true;
+        own[1].start_wall_ns = 2000;
+        CHECK(pgwt_trace_file_quick_skip(own, 2, 0, 2500) == false,
+              "the entry's OWN placement_unknown=true -> never skip it, "
+              "even though its successor (2000) is before --from (2500)");
     }
 
     free(all);
