@@ -20,7 +20,7 @@ import {
     PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, PCTL_UNRESOLVED_TEXT,
     queriesConfig, makeQueriesConfig,
     buildUnattributedNote, unattributedNoteHtml, createOverviewOrder, sessionsConfig,
-    childRemainderRow,
+    childRemainderRow, sessionsScopeNoteHtml, SESSIONS_SCOPE_NOTE_TEXT,
 } from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
 import { WAIT_CLASSES, classColor, eventColor, fmtMs, fmtUs } from '../../web/static/lib/format.js';
@@ -1173,6 +1173,38 @@ test('#439-label Sessions DB Time header discloses background processes are incl
     const model = buildTableModel(sessionsConfig, [{ pid: 1, db_time_ms: 100 }], null);
     const header = model.headers.find(h => h.key === 'db_time_ms');
     assert.equal(header.title, headerCol.title);
+});
+
+// ── #439 (Sessions half): Sessions' "DB Time" is per-PROCESS non-idle time,
+// a genuinely different SCOPE from Overview's system-wide DB Time, which
+// excludes background processes' parked-idle time entirely ("Background
+// idle (parked)" -- #439-label above). A viewer moving from Sessions (where
+// bgwriter/walwriter/checkpointer/autovacuum carry a real DB Time) to
+// Overview (where the same processes' time sits OUTSIDE DB Time) must not
+// read the two numbers as contradicting each other -- the scope title says
+// what THIS column measures, and the cross-tab note says it on its own,
+// not only inside a column tooltip nobody has to hover. ──────────────────
+
+test('#439 Sessions DB Time header title also names its scope against Overview', () => {
+    const headerCol = sessionsConfig.columns.find(c => c.key === 'db_time_ms');
+    // The #439-label test above already pins these two substrings; this
+    // fix must ADD the cross-tab disclosure without breaking that gate.
+    assert.ok(headerCol.title.includes('non-idle time of this process'), headerCol.title);
+    assert.ok(headerCol.title.includes('background processes included'), headerCol.title);
+    assert.ok(/overview/i.test(headerCol.title), headerCol.title);
+    assert.ok(/different scope|different total|not the same/i.test(headerCol.title),
+        headerCol.title);
+});
+
+test('sessionsScopeNoteHtml: discloses the cross-tab scope gap against Overview', () => {
+    const html = sessionsScopeNoteHtml();
+    assert.ok(html.includes(SESSIONS_SCOPE_NOTE_TEXT), html);
+    assert.ok(/overview/i.test(SESSIONS_SCOPE_NOTE_TEXT), SESSIONS_SCOPE_NOTE_TEXT);
+    // Names the actual background processes, not just "background work" --
+    // a viewer comparing tabs needs to know WHICH rows disagree.
+    for (const proc of ['bgwriter', 'walwriter', 'checkpointer', 'autovacuum']) {
+        assert.ok(SESSIONS_SCOPE_NOTE_TEXT.includes(proc), proc);
+    }
 });
 
 test('buildUnattributedNote: discloses the excluded time, pct and occurrence count', () => {
