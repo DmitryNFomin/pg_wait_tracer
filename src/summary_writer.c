@@ -2184,7 +2184,13 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
          * and sampled tiers, a gap that opened and closed between two
          * ticks); it does not redefine it, so the number stays comparable
          * across versions and `credited > 0 && uncredited > 0` is a
-         * meaningful "some producers observe, some do not". */
+         * meaningful "some producers observe, some do not".
+         *   This add is unconditional on any window: the counter keeps
+         * accumulating for the lifetime of the writer, so it answers "how
+         * much gap time has this capture failed to credit so far", never
+         * "how much is missing from the window a client just queried" --
+         * that would need a separate, window-scoped deficit of measured
+         * CPU, which this is not (#428). */
         if (already == 0 && evt->duration_ns > PGWT_NS_PER_SEC &&
             summary_wait_class_index(evt->old_event) == PGWT_CLASS_CPU)
             w->cpu_open_uncredited_ns_total += evt->duration_ns;
