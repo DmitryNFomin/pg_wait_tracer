@@ -54,6 +54,48 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'latest' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.ref != 'refs/heads/master' }}
 
+# ─── RUNNER IMAGE PIN (ubuntu-24.04, not ubuntu-latest) ──────────────────────
+# Every hosted job below pins `runs-on: ubuntu-24.04`. Do NOT "modernise" this
+# back to `ubuntu-latest`.
+#
+# Why: on 2026-10-21 GitHub rolled `ubuntu-latest` to Ubuntu 26.04
+# (image version 20261021.171.10). Within one image roll, four gating jobs
+# went red at once (run 39765852420; master's 06:48 push run passed on the old
+# image, the 08:42 scheduled run failed on the new one):
+#   web-ui     — `ERROR: Playwright does not support chromium on
+#                ubuntu26.04-x64` / `Cannot install dependencies for
+#                ubuntu26.04-x64 with Playwright 1.60.0!`
+#   snapshots  — `playwright==1.60.0 (from versions: none)`: actions/setup-python
+#                resolves its CPython build from the HOST image, so a 26.04 host
+#                handed the v1.60.0-noble (24.04) container a Python whose `ssl`
+#                module could not load ("pip is configured with locations that
+#                require TLS/SSL, however the ssl module in Python is not
+#                available") — pip could then reach no index at all.
+#   build-and-unit / protocol-drift — the newer GCC promotes
+#                -Wimplicit-function-declaration to an error (that one was a
+#                real latent bug in tests/gen_test_traces.c and is fixed, not
+#                pinned around).
+#
+# The pin is NOT a workaround for the compiler change; it exists for Playwright.
+# `playwright` is pinned to 1.60.0 because the committed visual baselines
+# (tests/web_snapshots/VERSION, 47 PNGs) are byte-compared against glyphs
+# rendered by exactly that version's chromium build, and `playwright install`
+# pins the browser per Playwright VERSION. Moving the runner image forward
+# forces a Playwright bump, and a Playwright bump invalidates every baseline.
+#
+# What must be true before this moves (ALL of them):
+#   1. The Playwright version pinned in tests/web_snapshots/VERSION supports
+#      the newer runner image (`playwright install --with-deps chromium`
+#      succeeds there), AND
+#   2. `mcr.microsoft.com/playwright:v<that version>-<that distro>` exists for
+#      the `snapshots` container, AND
+#   3. if either has to change, the baselines are regenerated in the SAME PR
+#      (workflow_dispatch `update_snapshots=true`) and VERSION updated with them.
+# Until then: bump the pinned label deliberately (e.g. ubuntu-26.04) only
+# together with 1-3 above. tests/test_ci_runner_pin.sh (in `make check`) fails
+# if any workflow job drifts back to `ubuntu-latest`.
+# ─────────────────────────────────────────────────────────────────────────────
+
 jobs:
   changed_files:
     # Drives how much of the self-hosted gate-box capture matrix runs below.
@@ -75,7 +117,7 @@ jobs:
     # other trigger has no clean diff to classify and defaults to "run
     # everything" — the safe direction is to over-cover, never under-cover.
     name: changed-files
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
     outputs:
       src_changed: ${{ steps.filter.outputs.src_changed }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
@@ -151,7 +193,7 @@ jobs:
 
   build-and-unit:
     name: build-and-unit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
     steps:
       - uses: actions/checkout@v4
 
@@ -191,7 +233,7 @@ jobs:
         # tests/test_ui_live_smoke_lib.py (in unit_tests.list, issue #93)
         # decodes/diffs PNGs with these; nothing else in this job's
         # unit_tests.list entries needs them. setup-python (not the runner's
-        # bare system python3) -- ubuntu-latest (24.04) is PEP-668
+        # bare system python3) -- ubuntu-24.04 is PEP-668
         # externally-managed, so a bare `pip install` against the system
         # interpreter aborts outright; the other two pip-using jobs in this
         # file already use actions/setup-python for the same reason.
@@ -265,7 +307,7 @@ jobs:
     # job for a fork PR is the wrong shape — GitHub scores a skipped required
     # check as passing, so a fork PR would be mergeable with zero capture/
     # overhead coverage. Instead the job always runs; `runs-on` itself picks
-    # `ubuntu-latest` for a fork PR (never touches the self-hosted label, so
+    # `ubuntu-24.04` for a fork PR (never touches the self-hosted label, so
     # the gate box is unreachable for fork code even for job scheduling) and
     # the first step below is the ONLY step that executes there — it fails
     # loudly, so the required check is red, not green-by-omission, until a
@@ -273,7 +315,7 @@ jobs:
     # runs on a hosted runner, so it needs no group either.
     name: sampled-overhead (PG 17)
     needs: changed_files
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('["self-hosted","gate-box"]') }}
     env:
       PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-sampled-overhead
     # timeout-minutes: the gate itself takes ~9 min on the box; the rest is
@@ -281,7 +323,7 @@ jobs:
     # `make box-check` runs hold for 45-80 min each. Queueing is the design.
     timeout-minutes: 180
     steps:
-      # The ONLY step that runs for a fork PR (on ubuntu-latest, per
+      # The ONLY step that runs for a fork PR (on ubuntu-24.04, per
       # runs-on above): fails on purpose so the required check is red, not
       # skipped-therefore-green. Skipped entirely (a no-op) for every other
       # trigger.
@@ -561,7 +603,7 @@ jobs:
     # job for a fork PR is the wrong shape — GitHub scores a skipped required
     # check as passing, so a fork PR would be mergeable with zero capture
     # coverage. Instead the job always runs; `runs-on` itself picks
-    # `ubuntu-latest` for a fork PR (never touches the self-hosted label, so
+    # `ubuntu-24.04` for a fork PR (never touches the self-hosted label, so
     # the gate box is unreachable for fork code even for job scheduling) and
     # the first step below is the ONLY step that executes there — it fails
     # loudly, so the required check is red, not green-by-omission, until a
@@ -575,7 +617,7 @@ jobs:
     # them is the design (a 15-min bound turned master red on 2026-09-18).
     name: capture-smoke (PG ${{ matrix.pg }})
     needs: changed_files
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('["self-hosted","gate-box"]') }}
     env:
       PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-capture-${{ matrix.pg }}
     timeout-minutes: 180
@@ -584,7 +626,7 @@ jobs:
       matrix:
         pg: [13, 16, 17, 18]
     steps:
-      # The ONLY step that runs for a fork PR (on ubuntu-latest, per
+      # The ONLY step that runs for a fork PR (on ubuntu-24.04, per
       # runs-on above): fails on purpose so the required check is red, not
       # skipped-therefore-green. Skipped entirely (a no-op) for every other
       # trigger.
@@ -816,7 +858,7 @@ jobs:
   mode4-hunt:
     name: mode4-hunt
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode4_hunt }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
     steps:
       - uses: actions/checkout@v4
 
@@ -924,7 +966,7 @@ jobs:
 
   web-ui:
     name: web-ui
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
     steps:
       - uses: actions/checkout@v4
 
@@ -971,7 +1013,7 @@ jobs:
 
   protocol-drift:
     name: protocol-drift
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
     steps:
       - uses: actions/checkout@v4
 
@@ -1010,12 +1052,24 @@ jobs:
     # image tag instead of a live apt mirror. `--with-deps` is dropped — the
     # image already ships every OS dependency Chromium needs.
     name: snapshots
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
     container:
       image: mcr.microsoft.com/playwright:v1.60.0-noble
     steps:
       - uses: actions/checkout@v4
 
+      # This job runs in a container, but its Python comes from the HOST: the
+      # runner bind-mounts /opt/hostedtoolcache as /__t, and setup-python
+      # resolves CPython out of that cache. So the host image and this
+      # container are coupled, which is how the 2026-10-21 roll broke this
+      # job: both the green 24.04 run and the red 26.04 run reported the same
+      # "Successfully set up CPython (3.12.15)" at /__t/Python/3.12.15/x64,
+      # but on a 26.04 host that build's _ssl extension could not load inside
+      # noble ("Disabling truststore since ssl support is missing"), pip could
+      # not reach pypi at all, and `playwright==1.60.0` became
+      # "(from versions: none)" -- a TLS failure wearing a version-pin error's
+      # clothes. The host pin above is what keeps this build noble-compatible;
+      # the python-version here was never the problem (3.12.15 both times).
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

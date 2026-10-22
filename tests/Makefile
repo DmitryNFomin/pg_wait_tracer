@@ -2,7 +2,15 @@
 # Requires: main project already built (make in parent dir)
 
 CC       ?= gcc
-CFLAGS    = -g -O2 -Wall -I../src -I../include
+# -Werror=implicit-function-declaration: an implicit declaration is a missing
+# #include, and C99 made it invalid — but GCC only warns by default, so
+# tests/gen_test_traces.c called unlink() with no <unistd.h> for months and
+# nothing noticed until GitHub's runner image rolled to a GCC that errors
+# (CI run 39765852420). ci.yml now pins ubuntu-24.04, which would make that
+# class of bug invisible again — this flag keeps it fatal on every compiler
+# we build with. tests/test_ci_runner_pin.sh asserts it is still here and
+# that every recipe below still passes $(CFLAGS).
+CFLAGS    = -g -O2 -Wall -Werror=implicit-function-declaration -I../src -I../include
 BUILD     = ../build
 
 # libbpf link flags. Defaults to the system shared library; the top-level

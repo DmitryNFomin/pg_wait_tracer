@@ -38,7 +38,10 @@ concurrency:
 jobs:
   matrix:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    # PINNED to ubuntu-24.04, not ubuntu-latest: the hosted runner provides the
+    # kernel these privileged containers share, and ci.yml pins the same label
+    # (see its RUNNER IMAGE PIN header for what must be true before it moves).
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
