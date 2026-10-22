@@ -746,8 +746,12 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
 struct pgwt_exec_event {
     uint32_t event_id;
     char     name[64];
-    uint64_t start_ns;        /* raw interval start; may precede the window */
-    uint64_t duration_ns;     /* raw duration; the client clips visually */
+    uint64_t start_ns;        /* #496: CLIPPED to the execution window — the
+                               * slice start, which never precedes it */
+    uint64_t duration_ns;     /* #496: the slice INSIDE the execution window,
+                               * not the event's whole wall time; cpu_ns is
+                               * prorated onto the same slice. Both are set in
+                               * detail_lane_add() in compute.c */
     uint64_t cpu_ns;
     int      has_cpu;
 };
