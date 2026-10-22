@@ -918,3 +918,13 @@ test_backend_span
 # is vacuously true), the response must be shown to be neither an error nor a
 # fidelity refusal, and an empty trace dir must refuse rather than approve.
 test_lock_chain_disclosure
+# #498: the system_event view had no Off-CPU* row, so its %DB column could
+# not sum to 100% while time_model's -- same trace, same numbers -- did.
+# Off-CPU* is the on-CPU interval's wall minus its measured cpu ns and is not
+# a wait event, so it lives only in the time model. Drives the real printers
+# with stdout captured and sums the printed column against the literal 100.0.
+# Bypass suite: an empty accumulator must make the conservation verdict
+# REFUSE rather than approve, a zero DB Time must read short, the 20-row cap
+# must not hide the row, and a zero residual (legacy/sampled tier) must print
+# NO row rather than a 0.0% one.
+test_system_event_offcpu
