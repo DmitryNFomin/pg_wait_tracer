@@ -469,7 +469,7 @@ per interval, no screen clearing).
 | `--trace-dir <DIR>` | `-T` | disabled | Directory for trace files (enables recording) |
 | `--trace-retention <H>` | `-R` | 24 | Keep trace files for H hours |
 | `--retention-gb <G>` | — | off | Also cap total trace-dir size at G GiB (fractional allowed); oldest archives deleted first, the live current files never |
-| `--trace-group <GROUP>` | — | `dba` | Unix group for trace file access |
+| `--trace-group <GROUP>` | — | `dba` if that group exists, else the group PostgreSQL runs under | Unix group allowed to read trace files. The default is resolved against this host, so traces are readable by the PostgreSQL service account rather than root-only when no `dba` group was created. A group named explicitly is never substituted: if it does not exist the daemon warns and the traces stay root-only |
 
 ### Replay
 

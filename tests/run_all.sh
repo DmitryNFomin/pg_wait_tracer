@@ -434,6 +434,15 @@ LIVE_TESTS=(
     "test_idle_exclusion|python3|test_idle_exclusion.py"
     "test_daemon_server|python3|test_daemon_server.py"
     "test_control|bash|test_control.sh"
+    # #499 + #500: after a traced run against a trace dir that did NOT exist
+    # yet, the wait_event_names.json sidecar must be there, and a non-root
+    # account in the resolved trace group must be able to open the trace. Both
+    # halves need the real binary: #499 is a startup-order defect (discovery
+    # writes the sidecar before the writer's mkdir ran) that no unit test can
+    # see, and every other live test hides it by passing a `mktemp -d`
+    # directory to -T. Carries its own negative control (a root:root 0640 file
+    # in the same directory the same reader must still be refused).
+    "test_trace_sidecar_perms|bash|test_trace_sidecar_perms.sh"
     # NOT registered: test_v9_open_cpu_wired.sh. The v9 open-CPU producer
     # was REVERTED (agent/424-daemon fc7d7f5) once its counters showed it
     # was never wired, so the check would be permanently red against a
