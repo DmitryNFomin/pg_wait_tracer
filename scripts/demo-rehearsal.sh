@@ -230,6 +230,19 @@ PG_VERSION_CONFIRMED=""
 PROVENANCE_FILE=""
 BOX_LOCK_QUEUE_LINE=""
 
+# Issue #518: detached checkouts all have branch name HEAD, and even the SHA
+# alone collides across counted attempts at the same commit. Give each launch
+# its own directory so rsync --delete cannot remove another run's traces.
+# remote_dir is still written verbatim to $STATE_FILE's REMOTE_DIR field;
+# --collect just reads it back, so reattachment is unaffected by its derivation.
+compute_remote_dir() {
+    local candidate_sha
+    candidate_sha=$(git rev-parse HEAD 2>/dev/null) || return 1
+    [[ -n "$candidate_sha" ]] || return 1
+    printf 'pgwt-demo-rehearsal-%s-%s-%s-%s\n' \
+        "$candidate_sha" "$demo_rehearsal_start_epoch" "$$" "$RANDOM"
+}
+
 # Keep the launcher's checkout identity outside the remote Python result:
 # the rsynced tree has no .git, and --collect may run from another checkout.
 # The state file names this sidecar so collection never re-identifies a run
@@ -735,8 +748,10 @@ if [[ "$MODE" == "launch" ]]; then
         # never used to rebuild target again (see TARGET below).
         target="$PGWT_BOX"
         server_ip="${PGWT_BOX#*@}"
-        branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '_')
-        remote_dir="pgwt-demo-rehearsal-${branch:-detached}"
+        if ! remote_dir=$(compute_remote_dir); then
+            echo "demo-rehearsal: could not determine candidate SHA for an isolated remote directory -- refusing to launch" | tee -a "$log" >&2
+            exit 1
+        fi
         ssh_strict=""
         echo "demo-rehearsal: targeting persistent box $target (PGWT_BOX) -- remote_dir=$remote_dir, sharing box-check.sh's own flock (/tmp/pgwt-box-check.lock) so this queues behind CI/other agents rather than colliding" | tee -a "$log"
     else

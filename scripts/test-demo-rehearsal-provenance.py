@@ -6,6 +6,7 @@ Optional launcher path allows checking the pre-change version for red evidence.
 """
 
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -16,7 +17,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCHER = Path(sys.argv.pop(1)) if len(sys.argv) > 1 else ROOT / "scripts/demo-rehearsal.sh"
+LAUNCHER = (Path(sys.argv.pop(1))
+            if len(sys.argv) > 1 and not sys.argv[1].startswith("-")
+            else ROOT / "scripts/demo-rehearsal.sh")
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -323,6 +326,142 @@ rc=$?
 """)
         self.assertFalse((self.repo / "tests/results/demo_rehearsal").exists())
         self.assertFalse((self.repo / "tests/results/.demo_rehearsal_staging").exists())
+
+
+class RemoteDirIsolationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        source = LAUNCHER.read_text()
+        helper = source[source.index("compute_remote_dir() {"):].split("\n}\n", 1)[0] + "\n}\n"
+        self.helpers = self.base / "remote-dir-helpers.sh"
+        self.helpers.write_text(helper)
+        self.repo = self.base / "checkout-1"
+        self.repo.mkdir()
+        self.git(self.repo, "init", "-q")
+        (self.repo / "payload").write_text("candidate\n")
+        self.git(self.repo, "add", "payload")
+        self.git(self.repo, "-c", "user.name=Fixture", "-c",
+                 "user.email=fixture@example.invalid", "commit", "-qm", "candidate")
+        self.sha = self.git(self.repo, "rev-parse", "HEAD")
+        self.assertRegex(self.sha, r"^[0-9a-f]{40}$")
+        self.other_repo = self.base / "checkout-2"
+        self.git(self.base, "clone", "-q", str(self.repo), str(self.other_repo))
+        for repo in (self.repo, self.other_repo):
+            self.git(repo, "checkout", "--detach", "-q", self.sha)
+            self.assertEqual(self.git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
+            self.assertEqual(self.git(repo, "rev-parse", "HEAD"), self.sha)
+        self.remote_root = self.base / "remote-root"
+        self.remote_root.mkdir()
+
+    def git(self, repo, *args):
+        return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+    def shell(self, repo, commands):
+        return subprocess.run(
+            ["bash", "-c", "set -euo pipefail\nsource " +
+             shlex.quote(str(self.helpers)) + "\n" + commands],
+            cwd=repo, env={**os.environ, "demo_rehearsal_start_epoch": "1234567890"},
+            text=True, capture_output=True)
+
+    def remote_dir(self, repo, commands="compute_remote_dir"):
+        # Each call is a separate launcher process: real $$ and $RANDOM,
+        # with the same epoch even for launches in the same second.
+        result = self.shell(repo, commands)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        return result.stdout.strip()
+
+    def sync_snapshot(self, remote_dir, run):
+        snapshot = self.base / f"snapshot-{run}"
+        snapshot.mkdir()
+        (snapshot / "payload").write_text(f"snapshot for {run}\n")
+        destination = self.remote_root / remote_dir
+        destination.mkdir(exist_ok=True)
+        # Real destructive rsync against a local stand-in for the SSH target.
+        subprocess.run(["rsync", "-az", "--delete", str(snapshot) + "/",
+                        str(destination) + "/"], check=True, capture_output=True, text=True)
+        return destination
+
+    def retain_trace(self, destination, run):
+        sentinel = destination / "tests/results/demo_rehearsal/trace" / f"sentinel-{run}.marker"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(f"retained trace for {run}\n")
+        return sentinel
+
+    def test_persistent_launch_uses_compute_remote_dir(self):
+        source = LAUNCHER.read_text()
+        launch = source.index('if [[ "$MODE" == "launch" ]]; then')
+        persistent = source.index('if [[ "$PERSISTENT" == "1" ]]; then', launch)
+        start = source.index('server_id="persistent"', persistent)
+        end = source.index('echo "demo-rehearsal: targeting persistent box', start)
+        block = source[start:end]
+        # Helper-only checks cannot catch a bypass at the real launch call site.
+        self.assertIn("compute_remote_dir", block)
+        self.assertNotIn("git rev-parse --abbrev-ref HEAD", block)
+
+    def test_separate_invocations_at_same_detached_sha_and_epoch_are_unique(self):
+        # Use the SAME checkout as well as the same SHA and epoch here.
+        first = self.remote_dir(self.repo)
+        second = self.remote_dir(self.repo)
+        self.assertNotEqual(first, second)
+        for value in (first, second):
+            self.assertIn(self.sha, value)
+            self.assertNotIn("HEAD", value)
+            self.assertNotIn("detached", value)
+            self.assertRegex(value, rf"^pgwt-demo-rehearsal-{self.sha}-1234567890-[0-9]+-[0-9]+$")
+
+    def test_missing_candidate_sha_fails_without_printing_a_directory(self):
+        outside_repo = self.shell(self.base, "compute_remote_dir")
+        self.assertNotEqual(outside_repo.returncode, 0)
+        self.assertEqual(outside_repo.stdout, "")
+        # Also reject empty success and output accompanied by a failed exit.
+        for git_body in ("return 0", "echo HEAD; return 1"):
+            with self.subTest(git_body=git_body):
+                result = self.shell(self.repo, "git() { " + git_body + "; }\ncompute_remote_dir")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+
+    def test_real_rsync_preserves_both_traces_and_state_reattachment(self):
+        first = self.remote_dir(self.repo)
+        sentinel1 = self.retain_trace(self.sync_snapshot(first, "run1"), "run1")
+        second = self.remote_dir(self.other_repo)
+        self.assertNotEqual(first, second)
+        destination2 = self.sync_snapshot(second, "run2")
+        self.assertTrue(sentinel1.exists())
+        sentinel2 = self.retain_trace(destination2, "run2")
+        self.assertTrue(sentinel2.exists())
+
+        for run, remote_dir, own, other in (
+                ("run1", first, sentinel1, sentinel2),
+                ("run2", second, sentinel2, sentinel1)):
+            with self.subTest(run=run):
+                state = self.base / f"{run}.state"
+                state.write_text(f"REMOTE_DIR={remote_dir}\n")
+                result = self.shell(self.base, "source " + shlex.quote(str(state)) +
+                                    '\nprintf \'%s\\n\' "$REMOTE_DIR"')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), remote_dir)
+                reattached = self.remote_root / result.stdout.strip()
+                own_relative = Path("tests/results/demo_rehearsal/trace") / own.name
+                other_relative = own_relative.with_name(other.name)
+                self.assertEqual((reattached / own_relative).read_text(), f"retained trace for {run}\n")
+                self.assertFalse((reattached / other_relative).exists())
+
+    def test_old_branch_mutant_reproduces_destructive_rsync(self):
+        mutant = ('branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | tr \'/\' \'_\'); '
+                  'echo "pgwt-demo-rehearsal-${branch:-detached}"')
+        first = self.remote_dir(self.repo, mutant)
+        sentinel1 = self.retain_trace(self.sync_snapshot(first, "run1"), "run1")
+        self.assertTrue(sentinel1.exists())
+        second = self.remote_dir(self.other_repo, mutant)
+        self.assertEqual(first, "pgwt-demo-rehearsal-HEAD")
+        self.assertEqual(first, second)
+        destination2 = self.sync_snapshot(second, "run2")
+        self.assertFalse(sentinel1.exists())
+        sentinel2 = self.retain_trace(destination2, "run2")
+        self.assertTrue(sentinel2.exists())
 
 
 if __name__ == "__main__":
