@@ -1,0 +1,23 @@
+{
+  "ground_truth_exec_pairs": 15,
+  "outgoing_request": {
+    "cmd": "executions",
+    "limit": 100,
+    "filters": {
+      "query_id": 777
+    }
+  },
+  "executions_response": {
+    "total_count": 15,
+    "open_count": 0,
+    "completed_count": 15,
+    "truncated": false,
+    "len_rows": 15
+  },
+  "top_queries_exec_count": 15,
+  "agreement": {
+    "executions.total_count == ground_truth": true,
+    "top_queries.exec_count == ground_truth": true,
+    "top_queries.exec_count == executions.total_count": true
+  }
+}

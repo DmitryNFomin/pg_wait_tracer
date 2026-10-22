@@ -1,0 +1,12 @@
+  window=fractional_bounds  buckets=10   bucket_ns=16000000000  raw.max_aas=2.96975    summary.max_aas=4.501      diff%=51.6
+  window=fractional_bounds  buckets=160  bucket_ns=1000000000   raw.max_aas=3.501      summary.max_aas=42.501     diff%=1114.0
+  window=interior_160s      buckets=10   bucket_ns=16000000000  raw.max_aas=3.001      summary.max_aas=4.3135     diff%=43.7
+  window=interior_160s      buckets=160  bucket_ns=1000000000   raw.max_aas=3.501      summary.max_aas=42.501     diff%=1114.0
+  window=shift_1s           buckets=10   bucket_ns=16000000000  raw.max_aas=2.9385     summary.max_aas=4.501      diff%=53.2
+  window=shift_1s           buckets=160  bucket_ns=1000000000   raw.max_aas=3.501      summary.max_aas=42.501     diff%=1114.0
+  window=to_capture_close   buckets=10   bucket_ns=17100000000  raw.max_aas=2.813859649122807 summary.max_aas=4.123801169590643 diff%=46.6
+  window=to_capture_close   buckets=171  bucket_ns=1000000000   raw.max_aas=3.501      summary.max_aas=42.501     diff%=1114.0
+  window=straddle_130s      buckets=10   bucket_ns=13000000000  raw.max_aas=2.885615384615385 summary.max_aas=2.885615384615385 diff%=0.0
+  window=straddle_130s      buckets=130  bucket_ns=1000000000   raw.max_aas=3.501      summary.max_aas=4.501      diff%=28.6
+
+wrote /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a06d5ccd33f873c25/tests/results/issue410-measurement/results.json

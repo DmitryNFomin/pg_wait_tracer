@@ -1371,9 +1371,14 @@ two ways, and the default `tiered` mode uses both:
 (`--sample-rate`, default 10 Hz). There is no watchpoint, no debug exception,
 and nothing injected into PostgreSQL — the cost falls entirely on the daemon
 (~0.6% of one core at 10 Hz), so PostgreSQL sees ~0% impact. This produces
-ASH-style estimates of where time is spent. The estimates are accurate: at
-10 Hz the per-event time share agrees with the exact tier to within ~1
-percentage point and the top-5 events match (see Cross-validation below).
+ASH-style estimates of where time is spent. The top-5 wait-event ranking
+matches the exact tier's (5/5 events, every rate, every run measured), but
+the CPU-share *magnitude* disagreement is workload- and hardware-dependent,
+not a flat ~1 point: measured worst case at the shipped 10 Hz rate is **7.2
+percentage points** on one gate box and **2.1** on another (pgbench, 8
+clients, 60 s windows). See [Cross-validation: sampling vs
+exact](#cross-validation-sampling-vs-exact) below for the full per-rate
+table and what still drives the gap.
 
 **Full tier (exact, during escalation).** A **CPU hardware debug register**
 (watchpoint) traps every write to `wait_event_info` in each backend. PostgreSQL
