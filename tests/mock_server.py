@@ -1299,10 +1299,10 @@ def _handle_request_inner(cmd, req_id, msg):
         # 8" note text depends only on those, not on which nodes carry them.
         return {"id": req_id, "total": 1800, "link_count": 5,
                 "total_link_count": 8, "truncated": True, "nodes": [
-            {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0},
-            {"name": "Client:ClientRead", "total_ms": 9153, "class": "Client", "event_id": 0x06000000},
-            {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015},
-            {"name": "LWLock:WALInsert", "total_ms": 900, "class": "LWLock", "event_id": 0x04000007},
+            {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0, "idle": False},
+            {"name": "Client:ClientRead", "total_ms": 9153, "class": "Client", "event_id": 0x06000000, "idle": True},
+            {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015, "idle": False},
+            {"name": "LWLock:WALInsert", "total_ms": 900, "class": "LWLock", "event_id": 0x04000007, "idle": False},
         ], "links": [
             {"source": "Client:ClientRead", "target": "CPU*", "value": 900, "duration_ms": 9000.0},
             {"source": "CPU*", "target": "Client:ClientRead", "value": 560, "duration_ms": 5000.0},

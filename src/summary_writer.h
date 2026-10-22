@@ -938,8 +938,17 @@ struct pgwt_summary_writer {
      *                   before being refreshed -- the fail-safe firing.
      *   table_full      note_open refused because every slot was taken.
      *   io_worker_refused / cpu_refused  notes the rule declines to spread.
-     *   cpu_uncredited_ns  wall of on-CPU gaps left whole-at-close: the
-     *                   measured #379 residual v8 does not close. */
+     *   cpu_open_uncredited_ns_total (field below; BREAKS the summary_open_*
+     *                   wire naming above -- its control-socket key is
+     *                   summary_cpu_open_uncredited_ns_total, "cpu_open_"
+     *                   first, not "open_cpu_"). It is the #379 residual:
+     *                   CUMULATIVE over the whole capture, not scoped to any
+     *                   later-queried window, and it is the gap's WALL time
+     *                   recorded once, AT CLOSE -- not a measured-CPU
+     *                   quantity and not what is currently missing from an
+     *                   in-flight window. See the increment site
+     *                   (pgwt_summary_push_event, "#379 residual") for the
+     *                   exact condition. */
     uint64_t      open_credited_ns_total;
     uint64_t      open_credit_records_total;
     uint64_t      open_credit_late_ns_total;
