@@ -93,7 +93,8 @@ test('empty executions and unmatched filters explain why no chart is shown', () 
         for (const rows of [[], [{ ...execution, query_id: '999' }]]) {
             const elements = new Map();
             const element = id => {
-                if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', style: {} });
+                if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', style: {},
+                    classList: { remove() {} } });
                 return elements.get(id);
             };
             globalThis.document = { getElementById: element, querySelector: element };

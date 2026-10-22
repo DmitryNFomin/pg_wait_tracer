@@ -17,9 +17,10 @@ docs/chrome-demo-viewport-2026-09-28.md) and measures, in actual Chrome:
     matching the original commit's own measurement)
 
 It drills into pid 1000 (leader + 2 workers -- a 3-lane chart, the shape the
-original commit measured as 90px over) so the executions list + chart
-combination actually exercises executionListMaxHeight(), not a short list
-that was never near the old 310px cap.
+original commit measured as 90px over) and supplies a capped 100-row response
+through the real transport/model/mount path. This exercises the visible
+executions disclosure together with executionListMaxHeight(), rather than
+a short mock list that was never near the old 310px cap.
 
 Also checks the unfiltered snapshot view at 1280x800 DPR1 (header plus one
 full execution row) and 1710x981 DPR2 (two full rows and an exact 981px fold).
@@ -62,7 +63,10 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_web_ui import start_mock_server, stop_mock_server, app_url  # noqa: E402
 from web_unit.span_browser import run_span_gates
-from web_unit.execution_list_browser import run_execution_list_gates
+from web_unit.execution_list_browser import (
+    run_execution_list_gates, run_execution_disclosure_gates,
+    install_dense_execution_fixture, assert_execution_disclosure, assert_scroll_affordance,
+)
 
 try:
     from playwright.sync_api import sync_playwright
@@ -118,28 +122,11 @@ def run(red_green=False):
                 page.wait_for_selector("#waterfall-chart canvas", timeout=10000)
                 page.wait_for_timeout(300)  # let fitExecutionList() settle
 
-                # The mock's `executions` fixture is only 4 rows -- nowhere
-                # near the old fixed 310px cap the original commit measured
-                # against ("a 30-row executions page"). Simulate that page
-                # directly in the DOM (purely a layout probe; it does not
-                # touch the data layer the mock answers with) so the list
-                # box is tall enough for a 310px fixed cap, or
-                # executionListMaxHeight()'s dynamic one, to actually matter.
-                injected = page.evaluate("""(n) => {
-                    const tbody = document.querySelector('#executions-table tbody');
-                    if (!tbody) return 0;
-                    const cols = tbody.closest('table').querySelectorAll('thead th').length;
-                    let added = 0;
-                    for (let i = 0; i < n; i++) {
-                        const tr = document.createElement('tr');
-                        tr.innerHTML = '<td>synthetic row ' + i + '</td>'.repeat(cols);
-                        tbody.appendChild(tr);
-                        added++;
-                    }
-                    window.dispatchEvent(new Event('resize'));
-                    return added;
-                }""", 40)
-                page.wait_for_timeout(200)
+                # A real capped response exercises model -> header -> table
+                # and spends the chart's recovered space on its disclosure.
+                response = install_dense_execution_fixture(page)
+                disclosure = assert_execution_disclosure(page, response)
+                disclosure['scroll_affordance'] = assert_scroll_affordance(page, True)
 
                 readout = page.query_selector("#waterfall-readout")
                 if readout is None:
@@ -158,7 +145,8 @@ def run(red_green=False):
                 scroll_y_zero = metrics["scrollY"] == 0
                 result = {
                     "ok": bool(above_fold and not_scrollable and scroll_y_zero),
-                    "injected_rows": injected,
+                    "fixture_rows": len(response['rows']),
+                    "disclosure": disclosure,
                     "readout_bottom": readout_bottom,
                     "viewport_height": metrics["innerHeight"],
                     "scroll_height": metrics["scrollHeight"],
@@ -241,7 +229,9 @@ def run(red_green=False):
                         old.close()
                 result["span_gates"] = run_span_gates(page, app_url(PORT))
                 result["execution_list_gates"] = run_execution_list_gates(browser, app_url(PORT))
-                result["ok"] = result["ok"] and result["execution_list_gates"]["ok"]
+                result["execution_disclosure_gates"] = run_execution_disclosure_gates(browser, app_url(PORT))
+                result["ok"] = (result["ok"] and result["execution_list_gates"]["ok"]
+                                and result["execution_disclosure_gates"]["ok"])
                 return result
             finally:
                 browser.close()

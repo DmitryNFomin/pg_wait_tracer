@@ -68,6 +68,7 @@ export function createWaterfallView() {
             '<span id="executions-counts-label"></span>' +
             '</div>' +
             ' ' + execScopeNoteHtml() +
+            ' <div id="executions-disclosure" class="exec-scope-note" hidden></div>' +
             ' <div id="executions-table"></div>' +
             '</section>' +
             '<section class="waterfall-pane">' +
@@ -188,6 +189,7 @@ export function createWaterfallView() {
                 - paneBox.bottom,
         });
         list.style.maxHeight = px == null ? '' : px + 'px';
+        list.classList.toggle('list-has-more', list.scrollHeight > list.clientHeight);
         if (chart && naturalChartHeight != null && px != null) {
             // Measure after applying the list cap: a short list can be
             // smaller than its cap. The container includes trailing padding.
@@ -344,6 +346,9 @@ export function createWaterfallView() {
             }
             ensureShell(el);
             updateSortControl();
+            const disclosure = document.getElementById('executions-disclosure');
+            disclosure.textContent = model.table.disclosure || '';
+            disclosure.hidden = !model.table.disclosure;
             document.getElementById('waterfall-context').innerHTML = model.context || '';
             document.getElementById('waterfall-backend-activity').innerHTML = model.backendActivity || '';
             const countsLabel = document.getElementById('executions-counts-label');
@@ -356,6 +361,7 @@ export function createWaterfallView() {
             const tableHost = document.getElementById('executions-table');
             const pane = document.querySelector('.waterfall-pane');
             if (!model.table.hasRows) {
+                document.querySelector('.execution-list').classList.remove('list-has-more');
                 disposeChart();
                 tableHost.innerHTML = '<div class="loading">No executions match the selected query/session filters and time range.</div>';
                 pane.style.display = 'none';
@@ -366,7 +372,6 @@ export function createWaterfallView() {
                 onRowClick: (row) => ctx.onDrill(Object.assign({
                     pivot: 'waterfall-execution',
                 }, row)),
-                truncation: model.table.truncation,
             });
             if (!model.detail || !model.waterfall) {
                 disposeChart();

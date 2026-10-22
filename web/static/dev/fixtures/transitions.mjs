@@ -15,24 +15,24 @@ const DIMS = { width: 620, height: 460 };
 /* 18 nodes across 9 classes, 27 links incl. self-loops — a rich DFG. */
 function denseDfg() {
     const nodes = [
-        { name: 'CPU*',                    total_ms: 5200, class: 'CPU' },
-        { name: 'Client:ClientRead',       total_ms: 2600, class: 'Client' },
-        { name: 'IO:DataFileRead',         total_ms: 2100, class: 'IO' },
-        { name: 'Lock:transactionid',      total_ms: 1500, class: 'Lock' },
-        { name: 'LWLock:WALInsert',        total_ms: 900,  class: 'LWLock' },
-        { name: 'IO:WalSync',              total_ms: 800,  class: 'IO' },
-        { name: 'LWLock:WALWrite',         total_ms: 640,  class: 'LWLock' },
-        { name: 'Lock:tuple',              total_ms: 480,  class: 'Lock' },
-        { name: 'LWLock:BufferMapping',    total_ms: 420,  class: 'LWLock' },
-        { name: 'IO:WalWrite',             total_ms: 350,  class: 'IO' },
-        { name: 'Timeout:VacuumDelay',     total_ms: 300,  class: 'Timeout' },
-        { name: 'Lock:relation',           total_ms: 260,  class: 'Lock' },
-        { name: 'IO:DataFileExtend',       total_ms: 240,  class: 'IO' },
-        { name: 'LWLock:LockManager',      total_ms: 210,  class: 'LWLock' },
-        { name: 'IPC:BufferIO',            total_ms: 190,  class: 'IPC' },
-        { name: 'Extension:Extension',     total_ms: 150,  class: 'Extension' },
-        { name: 'IPC:MessageQueueReceive', total_ms: 120,  class: 'IPC' },
-        { name: 'BufferPin:BufferPin',     total_ms: 90,   class: 'BufferPin' },
+        { name: 'CPU*',                    idle: false, total_ms: 5200, class: 'CPU' },
+        { name: 'Client:ClientRead',       idle: true, total_ms: 2600, class: 'Client' },
+        { name: 'IO:DataFileRead',         idle: false, total_ms: 2100, class: 'IO' },
+        { name: 'Lock:transactionid',      idle: false, total_ms: 1500, class: 'Lock' },
+        { name: 'LWLock:WALInsert',        idle: false, total_ms: 900,  class: 'LWLock' },
+        { name: 'IO:WalSync',              idle: false, total_ms: 800,  class: 'IO' },
+        { name: 'LWLock:WALWrite',         idle: false, total_ms: 640,  class: 'LWLock' },
+        { name: 'Lock:tuple',              idle: false, total_ms: 480,  class: 'Lock' },
+        { name: 'LWLock:BufferMapping',    idle: false, total_ms: 420,  class: 'LWLock' },
+        { name: 'IO:WalWrite',             idle: false, total_ms: 350,  class: 'IO' },
+        { name: 'Timeout:VacuumDelay',     idle: false, total_ms: 300,  class: 'Timeout' },
+        { name: 'Lock:relation',           idle: false, total_ms: 260,  class: 'Lock' },
+        { name: 'IO:DataFileExtend',       idle: false, total_ms: 240,  class: 'IO' },
+        { name: 'LWLock:LockManager',      idle: false, total_ms: 210,  class: 'LWLock' },
+        { name: 'IPC:BufferIO',            idle: false, total_ms: 190,  class: 'IPC' },
+        { name: 'Extension:Extension',     idle: false, total_ms: 150,  class: 'Extension' },
+        { name: 'IPC:MessageQueueReceive', idle: false, total_ms: 120,  class: 'IPC' },
+        { name: 'BufferPin:BufferPin',     idle: false, total_ms: 90,   class: 'BufferPin' },
     ];
     const links = [
         { source: 'CPU*', target: 'IO:DataFileRead',        value: 1400, duration_ms: 2100 },
@@ -125,11 +125,11 @@ const THRESHOLD_SIMPLIFIED = thresholdSimplifiedData();
  * Lock:relation 28.7%/Timeout 68% of DB time on that capture). */
 function idleDominantDfg() {
     const nodes = [
-        { name: 'CPU*',              total_ms: 10000,  class: 'CPU' },
-        { name: 'Client:ClientRead', total_ms: 915300, class: 'Client' },
-        { name: 'Lock:relation',     total_ms: 28700,  class: 'Lock' },
-        { name: 'Timeout:PgSleep',   total_ms: 68000,  class: 'Timeout' },
-        { name: 'IO:DataFileRead',   total_ms: 5200,   class: 'IO' },
+        { name: 'CPU*',              idle: false, total_ms: 10000,  class: 'CPU' },
+        { name: 'Client:ClientRead', idle: true, total_ms: 915300, class: 'Client' },
+        { name: 'Lock:relation',     idle: false, total_ms: 28700,  class: 'Lock' },
+        { name: 'Timeout:PgSleep',   idle: false, total_ms: 68000,  class: 'Timeout' },
+        { name: 'IO:DataFileRead',   idle: false, total_ms: 5200,   class: 'IO' },
     ];
     const links = [
         { source: 'Client:ClientRead', target: 'CPU*', value: 48000, duration_ms: 915300 },
@@ -208,7 +208,7 @@ export const states = {
         tags: ['ALIGNMENT'],
         data: {
             total: 120,
-            nodes: [{ name: 'CPU*', total_ms: 4800, class: 'CPU' }],
+            nodes: [{ name: 'CPU*', idle: false, total_ms: 4800, class: 'CPU' }],
             links: [{ source: 'CPU*', target: 'CPU*', value: 120, duration_ms: 700 }],
         },
         opts: { threshold: 0, dims: DIMS },
@@ -264,7 +264,7 @@ export const states = {
         tags: ['ALIGNMENT'],
         data: (() => {
             const names = ['CPU*', 'A:Event', 'B:Event', 'C:Event', 'D:Event', 'E:Event'];
-            const nodes = names.map(name => ({ name, total_ms: 1000, class: 'CPU' }));
+            const nodes = names.map(name => ({ name, total_ms: 1000, class: 'CPU', idle: false }));
             const links = [];
             for (let i = 1; i < names.length; i++) {
                 links.push({ source: 'CPU*', target: names[i], value: 100, duration_ms: 1 });
@@ -280,10 +280,10 @@ export const states = {
         data: {
             total: 300,
             nodes: [
-                { name: 'CPU*', total_ms: 900, class: 'CPU' },
-                { name: 'Lock:<script>document.title="pwned"</script>', total_ms: 700, class: 'Lock' },
-                { name: 'Extension:日本語イベント🐧', total_ms: 400, class: 'Extension' },
-                { name: 'IO:"><img src=x onerror=alert(1)>', total_ms: 200, class: 'IO' },
+                { name: 'CPU*', idle: false, total_ms: 900, class: 'CPU' },
+                { name: 'Lock:<script>document.title="pwned"</script>', idle: false, total_ms: 700, class: 'Lock' },
+                { name: 'Extension:日本語イベント🐧', idle: false, total_ms: 400, class: 'Extension' },
+                { name: 'IO:"><img src=x onerror=alert(1)>', idle: false, total_ms: 200, class: 'IO' },
             ],
             links: [
                 { source: 'CPU*', target: 'Lock:<script>document.title="pwned"</script>', value: 120, duration_ms: 700 },

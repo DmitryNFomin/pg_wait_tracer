@@ -15,6 +15,22 @@ import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 const START = 1_719_792_000_000_000_123n;
 const at = (delta) => String(START + BigInt(delta));
 
+test('#486 executions disclosure uses rendered rows and exact filtered total', () => {
+    const rows = Array.from({ length: 100 }, () => ({ pid: 7, start_ns: at(0) }));
+    const model = buildExecutionsModel({ rows, truncated: true, total_count: 265756 });
+    assert.equal(model.disclosure, 'Showing 100 of 265,756');
+});
+
+test('#486 executions disclosure is absent for fitting or untrusted totals', () => {
+    const rows = [{ pid: 7, start_ns: at(0) }];
+    for (const extra of [
+        { truncated: false, total_count: 5 }, { total_count: 5 },
+        { truncated: true, total_count: 1 }, { truncated: true, total_count: 0 },
+        { truncated: true }, { truncated: true, total_count: '5' },
+        { truncated: true, total_count: NaN }, { truncated: true, total_count: Infinity },
+    ]) assert.equal(buildExecutionsModel({ rows, ...extra }).disclosure, null);
+});
+
 function detail() {
     return {
         query_id: '42',
@@ -302,7 +318,7 @@ test('executions table renders in-progress honestly and derives only known trunc
     assert.ok(m.table.rows[0].cells[0].html.includes('Started before selected window'));
     assert.equal(m.table.headers[5].label, 'Leader events');
     assert.ok(m.table.rows[0].cls.includes('selected-execution'));
-    assert.equal(m.truncation.omitted, 4);
+    assert.equal(m.disclosure, 'Showing 1 of 5');
 });
 
 // #222 review (blocker follow-up): the Duration cell must say WHY an open
