@@ -932,8 +932,11 @@ test('#437 overflow percentile renders "Unresolved", never a number', () => {
         assert.ok(!cellText(html).includes('16.4'), `col ${ci} still shows a number: ${html}`);
         // The disclosure is in words, not just the drill affordance: it
         // leads with the fact and points at the column that has the tail.
-        // #437: the exact agreed sentence, verbatim.
-        assert.ok(html.includes('title="Percentiles marked ≥16.4 ms ' +
+        // #437 (review follow-up): the sentence must name the ACTUAL
+        // marking a viewer sees on screen ("Unresolved"), not the bound-
+        // shaped number it replaced -- otherwise the banner names a
+        // marking that appears nowhere on the page.
+        assert.ok(html.includes('title="Percentiles marked Unresolved ' +
             'fall in the open-ended ≥16.384 ms histogram bucket; ' +
             'they are lower bounds, and their actual values are ' +
             'unavailable.'), html);
@@ -996,7 +999,7 @@ test('#103 a NON-drillable overflow cell (CPU*) still discloses the bound', () =
     assert.equal(cellText(cell.html), PCTL_UNRESOLVED_TEXT, cell.html);
     assert.ok(!cellText(cell.html).includes('16.4'), cell.html);
     // #437: the exact agreed sentence, verbatim.
-    assert.ok(cell.html.includes('title="Percentiles marked \u226516.4 ms ' +
+    assert.ok(cell.html.includes('title="Percentiles marked Unresolved ' +
         'fall in the open-ended \u226516.384 ms histogram bucket; they ' +
         'are lower bounds, and their actual values are unavailable.'),
         cell.html);

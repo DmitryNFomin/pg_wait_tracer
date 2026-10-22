@@ -118,7 +118,7 @@ function histogramIntent(key) {
  * (open-ended) can report the identical 16384 number; only the qualifier
  * (driven by `<pctl>_overflow`, same as #437) tells them apart. */
 export const PCTL_OVERFLOW_SENTENCE =
-    'Percentiles marked ≥16.4 ms fall in the open-ended ≥16.384 ms ' +
+    'Percentiles marked Unresolved fall in the open-ended ≥16.384 ms ' +
     'histogram bucket; they are lower bounds, and their actual values are ' +
     'unavailable.';
 

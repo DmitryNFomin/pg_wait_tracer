@@ -272,7 +272,7 @@ test('#103 overflow percentiles reach the assembled model as ">=" bounds', () =>
         assert.ok(!html.replace(/<[^>]*>/g, '').includes('16.4'), `col ${ci} still shows a number: ${html}`);
         // #437: the exact agreed sentence, verbatim -- "the true value is
         // higher" (the pre-#437 wording) wrongly excluded equality.
-        assert.ok(html.includes('Percentiles marked \u226516.4 ms fall in the ' +
+        assert.ok(html.includes('Percentiles marked Unresolved fall in the ' +
             'open-ended \u226516.384 ms histogram bucket; they are lower ' +
             'bounds, and their actual values are unavailable.'), html);
     }
@@ -283,7 +283,7 @@ test('#103 overflow percentiles reach the assembled model as ">=" bounds', () =>
         m.table.rows[0].cells[7].html);
     // #437: shown BESIDE the table too, not only in the per-cell tooltip.
     assert.deepEqual(m.overflowNote, { text:
-        'Percentiles marked \u226516.4 ms fall in the open-ended ' +
+        'Percentiles marked Unresolved fall in the open-ended ' +
         '\u226516.384 ms histogram bucket; they are lower bounds, and ' +
         'their actual values are unavailable.' });
 });
