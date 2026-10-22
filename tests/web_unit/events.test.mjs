@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEventsModel, createEventsView } from '../../web/static/views/events.js';
-import { eventsConfig } from '../../web/static/lib/builders/table-configs.js';
+import { eventsConfig, PCTL_UNRESOLVED_TEXT } from '../../web/static/lib/builders/table-configs.js';
 import { createStableOrder } from '../../web/static/lib/table.js';
 import {
     buildPaneFidelity, paneFidelityBadgeHtml,
@@ -267,7 +267,9 @@ test('#103 overflow percentiles reach the assembled model as ">=" bounds', () =>
     ] }, null);
     for (const ci of [4, 5, 6]) {
         const html = m.table.rows[0].cells[ci].html;
-        assert.ok(html.includes('\u226516.4ms'), `col ${ci}: ${html}`);
+        assert.equal((html.replace(/<[^>]*>/g, '')), PCTL_UNRESOLVED_TEXT,
+            `col ${ci}: ${html}`);
+        assert.ok(!html.replace(/<[^>]*>/g, '').includes('16.4'), `col ${ci} still shows a number: ${html}`);
         // #437: the exact agreed sentence, verbatim -- "the true value is
         // higher" (the pre-#437 wording) wrongly excluded equality.
         assert.ok(html.includes('Percentiles marked \u226516.4 ms fall in the ' +
@@ -354,8 +356,9 @@ test('#454 bucket 14 (finite) and bucket 15 (overflow) both carry 16384 but rend
     ] }, null);
     const finiteCell = m.table.rows[0].cells[6].html;
     const overflowCell = m.table.rows[1].cells[6].html;
+    const cellText = (html) => html.replace(/<[^>]*>/g, '');
     assert.ok(finiteCell.includes('≤16.4ms'), finiteCell);
-    assert.ok(overflowCell.includes('≥16.4ms'), overflowCell);
+    assert.equal(cellText(overflowCell), PCTL_UNRESOLVED_TEXT, overflowCell);
     assert.notEqual(finiteCell, overflowCell);
 });
 
