@@ -30,6 +30,8 @@ import mock_server
 # Event IDs for the fixture (PG18 numbering, class_byte << 24 | event_num)
 LOCK_TXN = 0x03000008    # Lock:transactionid
 IO_WRITE = 0x0A000018    # IO:DataFileWrite
+LOCK_RELATION = 0x03000000               # Lock:relation
+TIMEOUT_CHECKPOINT_WRITE_DELAY = 0x09000001  # Timeout:CheckpointWriteDelay (pacing)
 
 # Lifecycle markers (src/pg_wait_tracer.h) — drive variants + exec/plan stats
 MARKER_EXEC_START = 0xFFFFFFF0
@@ -85,6 +87,7 @@ SCENARIO = {
         {"pid": 1004, "type": "client", "user": "u", "db": "d"},
         {"pid": 1005, "type": "client", "user": "u", "db": "d"},
         {"pid": 1006, "type": "parallel_worker", "leader_pid": 1000},
+        {"pid": 1010, "type": "client", "user": "u", "db": "d"},
     ],
     "queries": [
         {"id": 100, "text": "SELECT 1"},
@@ -125,6 +128,11 @@ SCENARIO = {
         # PID 1006 is a parallel worker for leader 1000 (B6 leader_pid lane).
         + [{"pid": 1006, "ts": BASE + 11 * MS, "dur": 3 * MS,
             "old": IO_DATA_FILE_READ, "new": CPU, "qid": 100}]
+        # PID 1010: #487 fixture — one pacing Timeout node (idle==true) and one
+        # Lock node (idle==false), so the transitions `idle` field can be
+        # checked against two cases the client cannot derive on its own.
+        + _seq(1010, 100, BASE, [(TIMEOUT_CHECKPOINT_WRITE_DELAY, 3),
+                                 (LOCK_RELATION, 3)])
         # PID 1000 lifecycle: plan+exec span around the wait sequence above,
         # then a second short plan+exec of the same query (different wait
         # pattern → second variant; 2 samples → p95/p99 lifecycle fields)
@@ -306,6 +314,35 @@ def mock_query(cmd, req_id, **kwargs):
     return mock_server.handle_request(msg)
 
 
+def check_transitions_idle_flag(t, srv):
+    """#487: every transitions node must carry an authoritative `idle` boolean,
+    because the Timeout half of pgwt_is_idle_event() depends on a runtime-only
+    pacing mask the client cannot replicate. Named per the two cases that
+    exercise both branches: a pacing Timeout (idle) and a Lock (never idle)."""
+    real = srv.query("transitions")
+    t.check("error" not in real,
+            "[transitions idle] real server answered without error"
+            + (f" (got: {real.get('error')})" if "error" in real else ""))
+    if "error" in real:
+        return
+    by_name = {n["name"]: n for n in real.get("nodes", [])}
+    cases = [
+        ("Timeout:CheckpointWriteDelay", True),
+        ("Lock:relation", False),
+    ]
+    for name, expected in cases:
+        t.check(name in by_name,
+                f"[transitions idle] node {name!r} present in response")
+        if name not in by_name:
+            continue
+        node = by_name[name]
+        t.check("idle" in node,
+                f"[transitions idle] {name!r} node carries an idle field")
+        t.check(node.get("idle") is expected,
+                f"[transitions idle] {name!r} idle == {expected} "
+                f"(got {node.get('idle')!r})")
+
+
 def main():
     t = TestRunner("test_protocol_drift")
     trace_dir = generate_traces(SCENARIO)
@@ -330,6 +367,7 @@ def main():
                 t.check(not diffs, f"[{label}] response schemas match")
                 for d in diffs:
                     print(f"    DRIFT: {d}")
+            check_transitions_idle_flag(t, srv)
     finally:
         cleanup_traces(trace_dir)
 
