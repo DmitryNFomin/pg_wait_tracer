@@ -68,6 +68,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>      /* unlink() in rotate_output() */
 #include <sys/stat.h>
 #include <errno.h>
 #include <getopt.h>

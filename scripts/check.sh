@@ -120,6 +120,22 @@ run scripts/check-link-closure.sh
 step "runner-registration guard self-test"
 run tests/test_check_runner_registration.sh
 
+# Runner-image pin guard (2026-10-22). GitHub rolled `ubuntu-latest` to Ubuntu
+# 26.04 and four gating jobs went red at once (run 39765852420): Playwright
+# 1.60.0 has no chromium for ubuntu26.04-x64, setup-python handed the
+# v1.60.0-noble container a Python with no working ssl module, and the newer
+# GCC made tests/gen_test_traces.c's implicit unlink() declaration fatal. The
+# Playwright version is pinned to the one the 47 committed snapshot baselines
+# were rendered with, so the image is pinned instead -- and this guard refuses
+# a tree that drifts back to a floating label, or that loses
+# -Werror=implicit-function-declaration (the flag that keeps the
+# implicit-declaration class fatal on the older, pinned GCC too).
+step "runner-image pin guard self-test (bypass suite)"
+run bash tests/test_check_runner_pin.sh
+
+step "runner-image pin guard (this tree)"
+run bash scripts/check-runner-pin.sh
+
 # tests/results/ evidence-directory ignore rule (companion to this guard's
 # own commit, same failure class as the tree-hash guards above): an agent
 # writing a brand-new tests/results/<name>/ directory must not move
