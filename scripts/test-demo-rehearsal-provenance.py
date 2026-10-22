@@ -406,22 +406,42 @@ class RemoteDirIsolationTests(unittest.TestCase):
         stub_bin = self.base / "bin"
         stub_bin.mkdir()
         # Leave git real: the launcher must identify each detached checkout.
-        for name in ("ssh", "rsync", "security"):
+        stubs = {
+            "ssh": """#!/bin/bash
+case "${*: -1}" in
+    'df -Pk '*) echo 104857600 ;;
+    *mkdir*) exit 0 ;;
+    uptime) echo 'up at fixture start' ;;
+    hostname) echo fixture-box ;;
+    *) exit 1 ;;
+esac
+""",
+            "rsync": """#!/bin/bash
+printf '%s\\n' "${@: -1}" >> rsync-calls.log
+exit 0
+""",
+            "security": "#!/bin/sh\nexit 1\n",
+        }
+        for name, body in stubs.items():
             stub = stub_bin / name
-            stub.write_text("#!/bin/sh\nexit 1\n")
+            stub.write_text(body)
             stub.chmod(0o755)
         remote_dirs = []
         for repo in (self.repo, self.other_repo):
             (repo / "scripts").mkdir()
             launcher = repo / "scripts/demo-rehearsal.sh"
             launcher.write_text(LAUNCHER.read_text())
+            shutil.copy(ROOT / "scripts/tree-hash.sh", repo / "scripts/tree-hash.sh")
+            shutil.copy(ROOT / "scripts/hash-synced-tree.sh", repo / "scripts/hash-synced-tree.sh")
             result = subprocess.run(
                 ["bash", str(launcher)], cwd=repo,
                 env={**os.environ, "PGWT_BOX": "fixture-box",
                      "PATH": str(stub_bin) + os.pathsep + os.environ["PATH"],
+                     "MIN_FREE_DISK_MB": "5120",
                      "DEMO_REHEARSAL_STATE_FILE": str(repo / "tests/results/state.sh")},
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
             self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("remote tree hash unavailable -- refusing to launch", result.stdout)
             match = re.search(r"remote_dir=(pgwt-demo-rehearsal-[^,\s]+)", result.stdout)
             self.assertIsNotNone(match, result.stdout)
             remote_dirs.append(match.group(1))
@@ -430,6 +450,22 @@ class RemoteDirIsolationTests(unittest.TestCase):
         self.assertNotEqual(*remote_dirs)
         for remote_dir in remote_dirs:
             self.assertRegex(remote_dir, rf"^pgwt-demo-rehearsal-{self.sha}-[0-9]+-[0-9]+-[0-9]+$")
+
+        # Observe the destructive up-rsync's real input, including any
+        # reassignment after the launcher echoed its computed remote_dir.
+        destinations = []
+        for repo in (self.repo, self.other_repo):
+            calls_log = repo / "rsync-calls.log"
+            self.assertTrue(calls_log.is_file(), f"missing rsync capture: {calls_log}")
+            calls = calls_log.read_text().splitlines()
+            self.assertEqual(len(calls), 1,
+                             f"{calls_log}: expected exactly one up-rsync call, got {calls!r}")
+            destinations.append(calls[0])
+        self.assertNotEqual(*destinations,
+                            msg=f"echoed remote_dirs={remote_dirs!r}; "
+                                f"captured rsync destinations={destinations!r}")
+        for remote_dir, destination in zip(remote_dirs, destinations):
+            self.assertEqual(destination, f"fixture-box:{remote_dir}/")
 
     def test_separate_invocations_at_same_detached_sha_and_epoch_are_unique(self):
         # Use the SAME checkout as well as the same SHA and epoch here.
