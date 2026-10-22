@@ -7,7 +7,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
-    CPU, IO_DATA_FILE_READ, LWLOCK_WAL_WRITE,
+    CPU, IO_DATA_FILE_READ, IO_DATA_FILE_WRITE, IO_WAL_SYNC, LWLOCK_WAL_WRITE,
 )
 from demo_rehearsal_lib import WATERFALL_QUERY_THRESHOLD_S
 
@@ -149,10 +149,10 @@ def test_lifecycle_and_detail(t):
             t.check_eq(len(leader_events), 2, "leader waterfall has two events")
             clipped = next((e for e in leader_events
                             if e.get("we") == IO_DATA_FILE_READ), {})
-            t.check_eq(clipped.get("start_ns"), str(BASE - 2 * MS),
-                       "overlapping event preserves its pre-window raw start")
-            t.check_eq(clipped.get("dur_ns"), str(4 * MS),
-                       "waterfall duration is a nanosecond string")
+            t.check_eq(clipped.get("start_ns"), str(BASE),
+                       "overlapping event start is clipped to EXEC_START")
+            t.check_eq(clipped.get("dur_ns"), str(2 * MS),
+                       "waterfall duration is clipped to the execution window")
             t.check(isinstance(clipped.get("cpu_ns"), str),
                     "measured cpu_ns is a string")
             t.check(all(isinstance(e.get("start_ns"), str) and
@@ -182,6 +182,119 @@ def test_lifecycle_and_detail(t):
                                 end_ns=str(BASE + 40 * MS))
             t.check(no_plan.get("plan") is None,
                     "detail without a planning phase reports plan null")
+    finally:
+        cleanup_traces(trace_dir)
+
+
+def detail_clipping_scenario(unit):
+    events = [
+        marker(1200, BASE, EXEC_START, 120),
+        # Leader left straddler: both duration and measured CPU must shrink.
+        {"pid": 1200, "ts": BASE + 2 * unit, "dur": 4 * unit,
+         "old": IO_DATA_FILE_READ, "new": CPU, "qid": 120, "cpu": 3 * unit},
+        # Worker measured, UNKNOWN, and measured-zero CPU left straddlers.
+        {"pid": 1300, "ts": BASE + 3 * unit, "dur": 5 * unit,
+         "old": IO_DATA_FILE_READ, "new": CPU, "qid": 120, "cpu": 4 * unit},
+        {"pid": 1300, "ts": BASE + 4 * unit, "dur": 6 * unit,
+         "old": LWLOCK_WAL_WRITE, "new": CPU, "qid": 120},
+        {"pid": 1300, "ts": BASE + 5 * unit, "dur": 7 * unit,
+         "old": CPU, "new": IO_DATA_FILE_READ, "qid": 120, "cpu": 0},
+        # Entirely inside: all three values must remain unchanged.
+        {"pid": 1200, "ts": BASE + 6 * unit, "dur": unit,
+         "old": CPU, "new": IO_DATA_FILE_READ, "qid": 120, "cpu": unit // 2},
+        # Inexact: (500000000001 * 7) / 9 floors to 388888888889.
+        # The intermediate product is ~3.5e23, exercising the 128-bit path.
+        {"pid": 1200, "ts": BASE + 7 * unit, "dur": 9 * unit,
+         "old": LWLOCK_WAL_WRITE, "new": CPU, "qid": 120,
+         "cpu": 5 * unit + 1},
+        marker(1200, BASE + 10 * unit, EXEC_END, 120),
+    ]
+    # Both lanes contain right- and both-boundary straddlers. In close-time
+    # order EXEC_END precedes these, so none can reach detail_lane_add.
+    for pid in (1200, 1300):
+        events.extend([
+            {"pid": pid, "ts": BASE + 12 * unit, "dur": 4 * unit,
+             "old": IO_DATA_FILE_WRITE, "new": CPU, "qid": 120,
+             "cpu": 3 * unit},
+            {"pid": pid, "ts": BASE + 12 * unit, "dur": 14 * unit,
+             "old": IO_WAL_SYNC, "new": CPU, "qid": 120, "cpu": 7 * unit},
+        ])
+    return {
+        "cpu_measured": 1,
+        "backends": [
+            {"pid": 1200, "type": "client", "user": "u", "db": "d"},
+            {"pid": 1300, "type": "parallel_worker", "leader_pid": 1200},
+        ],
+        "queries": [{"id": 120, "text": "SELECT clipping_work()"}],
+        "events": sorted(events, key=lambda e: e["ts"]),
+    }
+
+
+def test_detail_clipping(t):
+    print("\n### leader and worker detail clipping through the server ###")
+    unit = 100_000 * MS  # Products of CPU and clipped duration exceed uint64.
+    trace_dir = generate_traces(detail_clipping_scenario(unit))
+    try:
+        with ServerHarness(trace_dir) as srv:
+            # Extend past EXEC_END so straddler absence tests inside_exec,
+            # rather than excluding their close timestamps from the read.
+            detail = srv.query("execution_detail", pid=1200,
+                               start_ns=str(BASE),
+                               end_ns=str(BASE + 20 * unit))
+        leader = detail.get("leader")
+        worker = next((w for w in detail.get("workers", [])
+                       if w.get("pid") == 1300), None)
+        # Assert each lane separately; parallel lane totals can exceed wall.
+        for label, pid, lane, expected in (
+            ("leader", 1200, leader, [
+                ("measured left straddler", IO_DATA_FILE_READ,
+                 BASE, 200_000_000_000, 150_000_000_000),
+                ("entirely inside", CPU, BASE + 500_000_000_000,
+                 100_000_000_000, 50_000_000_000),
+                ("inexact left straddler", LWLOCK_WAL_WRITE,
+                 BASE, 700_000_000_000, 388_888_888_889),
+            ]),
+            ("worker", 1300, worker, [
+                ("measured left straddler", IO_DATA_FILE_READ,
+                 BASE, 300_000_000_000, 240_000_000_000),
+                ("UNKNOWN CPU left straddler", LWLOCK_WAL_WRITE,
+                 BASE, 400_000_000_000, None),
+                ("measured-zero CPU left straddler", CPU,
+                 BASE, 500_000_000_000, 0),
+            ]),
+        ):
+            t.check(lane is not None, f"{label} lane is present")
+            if lane is None:
+                continue
+            t.check_eq(lane.get("pid"), pid, f"{label} lane has its own pid")
+            if label == "worker":
+                t.check(lane is not leader, "worker lane is distinct from leader")
+            events = {}
+            for event in lane.get("events", []):
+                events.setdefault(event["we"], []).append(event)
+            for shape, we, start, duration, cpu in expected:
+                msg = f"{label} {shape} event {we}"
+                t.check(we in events, f"{msg} is present")
+                if we not in events:
+                    continue
+                t.check_eq(len(events[we]), 1, f"{msg} appears exactly once")
+                if len(events[we]) != 1:
+                    continue
+                event = events[we][0]
+                t.check_eq(event.get("start_ns"), str(start),
+                           f"{msg}: exact start_ns")
+                t.check_eq(event.get("dur_ns"), str(duration),
+                           f"{msg}: exact dur_ns")
+                t.check("cpu_ns" in event, f"{msg}: cpu_ns is explicit")
+                t.check_eq(event.get("cpu_ns"),
+                           None if cpu is None else str(cpu),
+                           f"{msg}: exact cpu_ns (floor, string zero, or null)")
+            for shape, we in (("right-boundary", IO_DATA_FILE_WRITE),
+                              ("both-boundary", IO_WAL_SYNC)):
+                t.check(we not in events,
+                        f"{label} {shape} event {we} is absent: "
+                        "EXEC_END closed inside_exec before this event's close, "
+                        "even though the requested window reaches past it")
     finally:
         cleanup_traces(trace_dir)
 
@@ -1007,6 +1120,7 @@ def test_sampled_refusal(t):
 def main():
     t = TestRunner("test_data_executions")
     test_lifecycle_and_detail(t)
+    test_detail_clipping(t)
     test_scatter(t)
     test_straddling_and_marker_identity(t)
     test_execution_filters(t)
