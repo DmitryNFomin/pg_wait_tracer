@@ -6972,6 +6972,27 @@ static void handle_fingerprints(struct pgwt_server *srv, struct pgwt_request *re
     emit_json(root);
 }
 
+/* #497: how the lock_chains "blocker" was arrived at, shipped WITH the data.
+ *
+ * PGWT_LOCK_BLOCKER_BASIS is a machine-readable tag on every row, because the
+ * row is what a client renders: a disclosure that lives only at the top of the
+ * response is one a per-row renderer never reads. PGWT_LOCK_BLOCKER_NOTE is
+ * the prose, once per response.
+ *
+ * The wording is deliberate. "Likely holder" would be a probability claim the
+ * pick cannot support: candidates are on-CPU intervals only, so a holder that
+ * is waiting, idle in transaction, or prepared is invisible rather than
+ * unlikely, and no lock identity is compared at all. "Overlapping candidate;
+ * blocker unverified" says what was measured (overlap) and what was not
+ * (ownership). ASCII only -- this goes on the wire. */
+#define PGWT_LOCK_BLOCKER_BASIS "cpu-overlap"
+#define PGWT_LOCK_BLOCKER_NOTE \
+    "overlapping candidate; blocker unverified -- each 'blocker' is the pid " \
+    "whose on-CPU overlap with the wait was longest, not a session shown to " \
+    "hold the lock. No lock identity is compared, and candidates are on-CPU " \
+    "intervals only, so a holder that is itself waiting, idle in " \
+    "transaction, or a prepared transaction never appears here."
+
 static void handle_lock_chains(struct pgwt_server *srv, struct pgwt_request *req)
 {
     int count;
@@ -6998,11 +7019,17 @@ static void handle_lock_chains(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
     add_right_edge_note(root, &linfo);
 
+    /* Unconditional, chains empty or not: the basis of a view does not
+     * depend on how many rows it happened to produce, and a field that comes
+     * and goes is a field clients stop handling. */
+    cJSON_AddStringToObject(root, "blocker_note", PGWT_LOCK_BLOCKER_NOTE);
+
     cJSON *chains = cJSON_AddArrayToObject(root, "chains");
     for (int i = 0; i < res.num_links; i++) {
         cJSON *c = cJSON_CreateObject();
         cJSON_AddNumberToObject(c, "waiter", res.links[i].waiter_pid);
         cJSON_AddNumberToObject(c, "blocker", res.links[i].blocker_pid);
+        cJSON_AddStringToObject(c, "blocker_basis", PGWT_LOCK_BLOCKER_BASIS);
         cJSON_AddStringToObject(c, "lock", res.links[i].lock_name);
         cJSON_AddNumberToObject(c, "wait_ms",
                                 (double)res.links[i].wait_ns / 1e6);

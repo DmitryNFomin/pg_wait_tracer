@@ -632,7 +632,9 @@ void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
 
 struct pgwt_lock_chain_link {
     uint32_t waiter_pid;
-    uint32_t blocker_pid;     /* PID that was on CPU while waiter waited on Lock */
+    /* #497: NOT a verified holder. The pid whose on-CPU interval overlapped
+     * the wait the most -- an overlapping candidate, blocker unverified. */
+    uint32_t blocker_pid;
     uint32_t lock_event;      /* Lock:transactionid, Lock:tuple, etc. */
     char     lock_name[64];
     uint64_t wait_ns;         /* how long the waiter waited */
@@ -644,9 +646,16 @@ struct pgwt_lock_chains_result {
     int    num_links;
 };
 
-/* Detect lock chains: find sessions waiting on Lock events and identify
- * which other session was likely the blocker (on CPU during the same interval).
- * Returns waiter→blocker links sorted by wait_ns descending. */
+/* Detect lock chains: find sessions waiting on Lock events and pair each with
+ * the pid whose on-CPU interval overlapped that wait the most.
+ *
+ * #497 -- WHAT THIS IS NOT. There is no lock tag and no ownership edge here,
+ * and the candidate set is on-CPU intervals ONLY, so a holder that is itself
+ * waiting, idle in transaction, or a prepared transaction is not merely less
+ * likely to be picked: it can never be picked. The result is an OVERLAPPING
+ * CANDIDATE with the blocker UNVERIFIED, which is what every caller must say
+ * out loud (pgwt-server ships blocker_basis / blocker_note per response).
+ * Returns waiter→candidate links sorted by wait_ns descending. */
 void pgwt_compute_lock_chains(const struct pgwt_trace_event *events, int count,
                                const struct pgwt_filter *f, int max_links,
                                struct pgwt_lock_chains_result *out);

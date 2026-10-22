@@ -217,6 +217,16 @@ def _aas_event_series():
 
 _CANNED = {}
 
+# #497: mirrors PGWT_LOCK_BLOCKER_NOTE in src/server.c. The lock_chains
+# "blocker" is the pid with the longest on-CPU overlap, not a verified holder.
+_LOCK_BLOCKER_NOTE = (
+    "overlapping candidate; blocker unverified -- each 'blocker' is the pid "
+    "whose on-CPU overlap with the wait was longest, not a session shown to "
+    "hold the lock. No lock identity is compared, and candidates are on-CPU "
+    "intervals only, so a holder that is itself waiting, idle in "
+    "transaction, or a prepared transaction never appears here."
+)
+
 # Protocol revision the mock speaks — mirrors PGWT_PROTOCOL_REV in
 # src/pg_wait_tracer.h. test_protocol_drift.py enforces that the real server's
 # `info` response carries the same (server_version + protocol) shape.
@@ -1312,9 +1322,18 @@ def _handle_request_inner(cmd, req_id, msg):
         ]}
 
     if cmd == "lock_chains":
-        return {"id": req_id, "chains": [
-            {"waiter": 1001, "blocker": 1000, "lock": "Lock:transactionid", "wait_ms": 45.2, "timestamp_ns": 1711936100000000000},
-            {"waiter": 1003, "blocker": 1002, "lock": "Lock:tuple", "wait_ms": 12.8, "timestamp_ns": 1711936200000000000},
+        # #497: blocker_basis (per row) and blocker_note (per response) are
+        # part of the lock_chains schema in src/server.c, so they are part of
+        # it here too -- test_protocol_drift.py compares key sets exactly, and
+        # a mock that omits a disclosure field is a mock a UI can be built
+        # against without ever seeing it.
+        return {"id": req_id,
+                "blocker_note": _LOCK_BLOCKER_NOTE,
+                "chains": [
+            {"waiter": 1001, "blocker": 1000, "blocker_basis": "cpu-overlap",
+             "lock": "Lock:transactionid", "wait_ms": 45.2, "timestamp_ns": 1711936100000000000},
+            {"waiter": 1003, "blocker": 1002, "blocker_basis": "cpu-overlap",
+             "lock": "Lock:tuple", "wait_ms": 12.8, "timestamp_ns": 1711936200000000000},
         ]}
 
     if cmd == "interference":

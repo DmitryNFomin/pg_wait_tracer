@@ -907,3 +907,14 @@ test_tick_drain
 # oracle. Its bypass suite requires a refusal, never an approval, from every
 # way the pass can be made blind.
 test_backend_span
+# #497: lock_chains presents an on-CPU-OVERLAP pick as the "blocker". No lock
+# identity is compared and the candidate set is on-CPU intervals only, so a
+# holder that is itself waiting, idle-in-transaction, or a prepared
+# transaction cannot be returned however certainly it holds the lock. Scope
+# is disclosure, not correctness: the response must carry a per-ROW basis
+# (a note only at the top of the response is one a row renderer never reads)
+# and prose naming both structural limits. Bypass suite: the note must also
+# ship on a result with zero chains (otherwise "every row carries the field"
+# is vacuously true), the response must be shown to be neither an error nor a
+# fidelity refusal, and an empty trace dir must refuse rather than approve.
+test_lock_chain_disclosure
