@@ -17,9 +17,10 @@ import {
 } from '../../web/static/lib/table.js';
 import {
     overviewConfig, eventsConfig, buildOverflowNote, overflowNoteHtml,
-    PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, queriesConfig, makeQueriesConfig,
+    PCTL_OVERFLOW_SENTENCE, PCTL_FINITE_BOUND_SENTENCE, PCTL_UNRESOLVED_TEXT,
+    queriesConfig, makeQueriesConfig,
     buildUnattributedNote, unattributedNoteHtml, createOverviewOrder, sessionsConfig,
-    childRemainderRow,
+    childRemainderRow, sessionsScopeNoteHtml, SESSIONS_SCOPE_NOTE_TEXT,
 } from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
 import { WAIT_CLASSES, classColor, eventColor, fmtMs, fmtUs } from '../../web/static/lib/format.js';
@@ -176,6 +177,33 @@ test('#453 negative control: DB Time and a normal class row are UNCHANGED by the
     assert.ok(model.rows[1].cells[2].html.includes('pct-bar'));
     assert.equal(model.rows[0].cells[3].html, '3.54');
     assert.equal(model.rows[1].cells[3].html, '0.89');
+});
+
+// ── #457: isIdleRow must match the LITERAL server idle row name, never a
+// substring -- a latent false positive, not yet live (no such row exists in
+// today's server output), but #453 made it load-bearing: a false match no
+// longer just mislabels a percentage, it blanks AAS too. A real indent-0
+// row named e.g. "IdleInTransaction" is a genuine, active, DB-Time-bearing
+// wait state and must render its real pct/AAS, not Idle's em-dash. ──────────
+
+test('#457 a real row whose name merely CONTAINS "Idle" (IdleInTransaction) ' +
+    'is NOT excluded from DB Time -- its pct and AAS render normally', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12760, pct: 100, aas: 3.54 },
+        { indent: 0, name: 'IdleInTransaction', ms: 3200, pct: 25.1, aas: 0.89 },
+        { indent: 0, name: 'Idle', ms: 888000, pct: 0, aas: 24.62 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    // IdleInTransaction: a real pct bar and a real AAS number, same as any
+    // other included row -- NOT the idle-excluded em-dash treatment.
+    assert.ok(model.rows[1].cells[2].html.includes('pct-bar'), model.rows[1].cells[2].html);
+    assert.ok(!model.rows[1].cells[2].html.includes('idle-excluded'), model.rows[1].cells[2].html);
+    assert.equal(model.rows[1].cells[3].html, '0.89');
+    assert.ok(!model.rows[1].cells[3].html.includes('idle-excluded'), model.rows[1].cells[3].html);
+    // The REAL Idle row (exact name) must still get the em-dash treatment --
+    // this fix must not weaken the #435/#453 protection it sits beside.
+    assert.ok(model.rows[2].cells[2].html.includes('idle-excluded'), model.rows[2].cells[2].html);
+    assert.ok(model.rows[2].cells[3].html.includes('idle-excluded'), model.rows[2].cells[3].html);
 });
 
 // ── #440 (contract item 6): refresh ordering + near-tie hysteresis ─────────
@@ -630,6 +658,31 @@ test('buildSummary: empty data -> empty metrics', () => {
     assert.deepEqual(buildSummary({ rows: [] }, 4), []);
 });
 
+// #457: the summary bar's own idle-row finder has the SAME substring bug as
+// isIdleRow in table-configs.js -- a real "IdleInTransaction" row must never
+// be picked up as "the" Idle summary metric (it is a different, real wait
+// state; reporting its time as "Idle" would misreport the summary bar).
+test('#457 buildSummary never mistakes a substring match for the real Idle row', () => {
+    const data = { wall_ms: 3600000, rows: [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 0, name: 'IdleInTransaction', ms: 9000, pct: 10, aas: 0.5 },
+    ] };
+    const s = buildSummary(data, 4);
+    assert.ok(!s.some(m => m.label === 'Idle'),
+        'no real "Idle" row present -- IdleInTransaction must not stand in for it: ' +
+        JSON.stringify(s));
+});
+
+test('#457 buildSummary still reports the real Idle row by its exact name', () => {
+    const data = { wall_ms: 3600000, rows: [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 0, name: 'IdleInTransaction', ms: 9000, pct: 10, aas: 0.5 },
+        { indent: 0, name: 'Idle', ms: 45000 },
+    ] };
+    const s = buildSummary(data, 4);
+    assert.deepEqual(s.find(m => m.label === 'Idle'), { label: 'Idle', value: '45.0s' });
+});
+
 // ── #472(ii): AAS discloses a window mostly before capture started ─────────
 // Disclosure only -- the AAS NUMBER itself (dbRow.aas, computed server-side
 // over whatever was actually captured) is UNCHANGED; this only appends a
@@ -858,19 +911,32 @@ test('CPU* (event_id 0) percentile cells are not drillable (not a wait event)', 
 /* The cell's visible text, with markup (and its title attribute) stripped. */
 const cellText = (html) => html.replace(/<[^>]*>/g, '');
 
-test('#103 overflow percentile renders ">=", never an exact-looking number', () => {
+// #437: a saturated percentile used to render ">=16.4ms" -- a number-shaped
+// value sitting next to an avg of 1.8s and a max of 2.6s in the SAME row,
+// which reads as a measurement contradicting its own neighbours rather than
+// as "unresolved". The standing rule (docs/VISUAL_CHECKLIST.md SEMANTICS) is
+// that absence is reported, never rendered as a measured-looking value, so
+// an overflowing cell's VISIBLE text is now the literal word "Unresolved" --
+// never a number -- while the histogram drill, the lower-bound explanation
+// (title) and Max (the real, exact tail) are all retained unchanged.
+test('#437 overflow percentile renders "Unresolved", never a number', () => {
     const m = buildTableModel(eventsConfig, [evRow({
         p50_us: 16384, p95_us: 16384, p99_us: 16384, max_us: 2600000,
         p50_overflow: true, p95_overflow: true, p99_overflow: true,
     })], null);
     for (const ci of [P50_COL, P95_COL, P99_COL]) {
         const html = m.rows[0].cells[ci].html;
-        // The rendered text is the bound, never the bare number.
-        assert.equal(cellText(html), '\u226516.4ms', `col ${ci}: ${html}`);
+        // The rendered text is the literal word, never a number -- "16.4"
+        // must not appear anywhere in the visible text.
+        assert.equal(cellText(html), PCTL_UNRESOLVED_TEXT, `col ${ci}: ${html}`);
+        assert.ok(!cellText(html).includes('16.4'), `col ${ci} still shows a number: ${html}`);
         // The disclosure is in words, not just the drill affordance: it
         // leads with the fact and points at the column that has the tail.
-        // #437: the exact agreed sentence, verbatim.
-        assert.ok(html.includes('title="Percentiles marked ≥16.4 ms ' +
+        // #437 (review follow-up): the sentence must name the ACTUAL
+        // marking a viewer sees on screen ("Unresolved"), not the bound-
+        // shaped number it replaced -- otherwise the banner names a
+        // marking that appears nowhere on the page.
+        assert.ok(html.includes('title="Percentiles marked Unresolved ' +
             'fall in the open-ended ≥16.384 ms histogram bucket; ' +
             'they are lower bounds, and their actual values are ' +
             'unavailable.'), html);
@@ -930,9 +996,10 @@ test('#103 a NON-drillable overflow cell (CPU*) still discloses the bound', () =
     assert.equal(cell.intent, null);
     assert.ok(!cell.cls.includes('drillable'), cell.cls);
     assert.ok(!cell.html.includes('cell-drill'), cell.html);
-    assert.ok(cell.html.includes('\u226516.4ms'), cell.html);
+    assert.equal(cellText(cell.html), PCTL_UNRESOLVED_TEXT, cell.html);
+    assert.ok(!cellText(cell.html).includes('16.4'), cell.html);
     // #437: the exact agreed sentence, verbatim.
-    assert.ok(cell.html.includes('title="Percentiles marked \u226516.4 ms ' +
+    assert.ok(cell.html.includes('title="Percentiles marked Unresolved ' +
         'fall in the open-ended \u226516.384 ms histogram bucket; they ' +
         'are lower bounds, and their actual values are unavailable.'),
         cell.html);
@@ -1036,11 +1103,12 @@ test('events-overflow-pctl fixture: the finite-bucket control renders "<=", not 
         control.cells[P99_COL].html);
     assert.ok(!control.cells[P99_COL].html.includes('≥'),
         control.cells[P99_COL].html);
-    // Every genuinely overflowing row in the SAME fixture still shows ">=".
+    // Every genuinely overflowing row in the SAME fixture reads "Unresolved"
+    // (#437), never a number -- and never the finite control's "<=" either.
     for (const name of ['Lock:relation', 'Timeout:CheckpointWriteDelay',
                          'IO:DataFileRead', 'CPU*']) {
         const row = model.rows.find(r => r.row.name === name);
-        assert.ok(cellText(row.cells[P99_COL].html).startsWith('≥'),
+        assert.equal(cellText(row.cells[P99_COL].html), PCTL_UNRESOLVED_TEXT,
             `${name}: ${row.cells[P99_COL].html}`);
     }
     // #454: the fixture has BOTH overflowing rows and finite-bound rows, so
@@ -1108,6 +1176,38 @@ test('#439-label Sessions DB Time header discloses background processes are incl
     const model = buildTableModel(sessionsConfig, [{ pid: 1, db_time_ms: 100 }], null);
     const header = model.headers.find(h => h.key === 'db_time_ms');
     assert.equal(header.title, headerCol.title);
+});
+
+// ── #439 (Sessions half): Sessions' "DB Time" is per-PROCESS non-idle time,
+// a genuinely different SCOPE from Overview's system-wide DB Time, which
+// excludes background processes' parked-idle time entirely ("Background
+// idle (parked)" -- #439-label above). A viewer moving from Sessions (where
+// bgwriter/walwriter/checkpointer/autovacuum carry a real DB Time) to
+// Overview (where the same processes' time sits OUTSIDE DB Time) must not
+// read the two numbers as contradicting each other -- the scope title says
+// what THIS column measures, and the cross-tab note says it on its own,
+// not only inside a column tooltip nobody has to hover. ──────────────────
+
+test('#439 Sessions DB Time header title also names its scope against Overview', () => {
+    const headerCol = sessionsConfig.columns.find(c => c.key === 'db_time_ms');
+    // The #439-label test above already pins these two substrings; this
+    // fix must ADD the cross-tab disclosure without breaking that gate.
+    assert.ok(headerCol.title.includes('non-idle time of this process'), headerCol.title);
+    assert.ok(headerCol.title.includes('background processes included'), headerCol.title);
+    assert.ok(/overview/i.test(headerCol.title), headerCol.title);
+    assert.ok(/different scope|different total|not the same/i.test(headerCol.title),
+        headerCol.title);
+});
+
+test('sessionsScopeNoteHtml: discloses the cross-tab scope gap against Overview', () => {
+    const html = sessionsScopeNoteHtml();
+    assert.ok(html.includes(SESSIONS_SCOPE_NOTE_TEXT), html);
+    assert.ok(/overview/i.test(SESSIONS_SCOPE_NOTE_TEXT), SESSIONS_SCOPE_NOTE_TEXT);
+    // Names the actual background processes, not just "background work" --
+    // a viewer comparing tabs needs to know WHICH rows disagree.
+    for (const proc of ['bgwriter', 'walwriter', 'checkpointer', 'autovacuum']) {
+        assert.ok(SESSIONS_SCOPE_NOTE_TEXT.includes(proc), proc);
+    }
 });
 
 test('buildUnattributedNote: discloses the excluded time, pct and occurrence count', () => {

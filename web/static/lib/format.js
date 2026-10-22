@@ -157,7 +157,7 @@ export function eventTintStep(name) {
     return h % EVENT_TINTS.length;
 }
 
-function rgbToHsl(r, g, b) {
+export function rgbToHsl(r, g, b) {
     r /= 255; g /= 255; b /= 255;
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
     const l = (max + min) / 2;
@@ -173,7 +173,7 @@ function rgbToHsl(r, g, b) {
     return [h, s, l];
 }
 
-function hslToRgb(h, s, l) {
+export function hslToRgb(h, s, l) {
     if (s === 0) {
         const v = Math.round(l * 255);
         return [v, v, v];

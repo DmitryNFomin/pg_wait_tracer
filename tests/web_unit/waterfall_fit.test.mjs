@@ -13,19 +13,58 @@ import assert from 'node:assert/strict';
 import {
     executionListMaxHeight, waterfallChartFitHeight,
     EXECUTION_LIST_MAX_PX, EXECUTION_LIST_MIN_PX, EXECUTION_LIST_FOLD_MARGIN_PX,
+    WATERFALL_FOLD_RESERVE_PX,
 } from '../../web/static/lib/builders/waterfall.js';
 
 const DEMO = { viewportHeight: 981, listTop: 435, paneHeight: 304, trailingBelowPane: 20 };
 
-test('the chart absorbs the 19px drilled overflow without changing the list floor', () => {
+// #462: the OLD waterfallChartFitHeight targeted exactly ZERO overflow --
+// "the page just barely fits" was treated as success, which is exactly the
+// defect #462 reports (readout_bottom 914, scroll_height 981 against a
+// 981px viewport: the page fits with not one spare pixel, so the NEXT
+// element added anywhere in the Waterfall view breaks the fold the same
+// way #415 originally did). It now targets a 16px RESERVE past the fold,
+// not bare non-overflow -- shrinking the chart far enough that
+// innerHeight - finalPageBottom >= WATERFALL_FOLD_RESERVE_PX whenever the
+// chart has that much slack above its CSS minimum.
+test('#462 a page that exactly fit (zero overflow) now gets a real 16px reserve, not zero', () => {
+    // Plenty of slack above the 240px CSS minimum (natural 300px) so the
+    // full reserve is achievable -- this is the clean case the real
+    // live-smoke geometry hits (overflow was already ~0 before this fix).
+    const chartHeight = waterfallChartFitHeight(300, 240, 0);
+    assert.equal(chartHeight, 300 - WATERFALL_FOLD_RESERVE_PX);
+    // A page that previously ended EXACTLY at the viewport bottom (overflow
+    // 0 means naturalBottom === innerHeight) now ends 16px above it.
+    const naturalBottom = 981; // == innerHeight -- the old "fits exactly" case
+    const finalBottom = naturalBottom - (300 - chartHeight);
+    assert.equal(981 - finalBottom, WATERFALL_FOLD_RESERVE_PX);
+});
+
+test('#462 negative control: a viewport with plenty of room is UNTOUCHED (no needless shrink)', () => {
+    // overflow very negative (lots of spare room already) -- the chart must
+    // restore its full natural height exactly as before this fix, so no
+    // snapshot with a short table or a tall window moves because of it.
+    assert.equal(waterfallChartFitHeight(262, 240, -100), 262);
+});
+
+test('the chart absorbs the 19px drilled overflow, clamped by its own CSS minimum ' +
+    '(only 3px of the 16px reserve survives -- an honest, not a guessed, degenerate case)', () => {
     const geometry = { viewportHeight: 981, listTop: 468, paneHeight: 401,
         trailingBelowPane: 20, contextHeight: 58, rowListHeights: [110.5, 139.5] };
     const listHeight = executionListMaxHeight(geometry);
     const pageHeight = geometry.listTop + listHeight + geometry.paneHeight + 20;
     const chartHeight = waterfallChartFitHeight(262, 240, pageHeight - 981);
-    assert.equal(listHeight, 111);
-    assert.equal(chartHeight, 243);
-    assert.equal(pageHeight - (262 - chartHeight), 981);
+    assert.equal(listHeight, 111);   // list sizing (#415) is untouched by #462's reserve
+    // Before #462's reserve this returned 243 (262-19) and left ZERO
+    // margin at the fold (pageHeight - (262-243) === 981, see git history);
+    // wanting a 35px shrink (19 overflow + 16 reserve) but only having 22px
+    // of slack above the 240px minimum, the chart clamps to its minimum --
+    // genuinely not enough room for the full reserve, which is reported
+    // honestly as a smaller (3px) margin, never guessed at as the full 16.
+    assert.equal(chartHeight, 240);
+    const finalBottom = pageHeight - (262 - chartHeight);
+    assert.equal(finalBottom, 978);
+    assert.equal(981 - finalBottom, 3, 'the achievable margin here is 3px, not the full 16px reserve');
 });
 
 test('chart fit preserves its minimum and leaves an impossible fold visible', () => {
@@ -34,10 +73,14 @@ test('chart fit preserves its minimum and leaves an impossible fold visible', ()
     assert.equal(waterfallChartFitHeight(240, 240, 171), 240);
 });
 
-test('chart fit restores its natural height with spare room and rounds overflow up', () => {
-    assert.equal(waterfallChartFitHeight(262, 240, 0), 262);
+test('chart fit rounds overflow up before adding the reserve, clamped by the CSS minimum', () => {
+    // #462: overflow=0 no longer means "restore natural height" -- see the
+    // dedicated 16px-reserve test above for that case with enough slack.
+    // Here 262px of natural height only has 22px of slack above the 240px
+    // minimum, so even a small overflow clamps to the minimum once the
+    // 16px reserve is folded in (19 (ceil 18.5) + 16 = 35 > 22 of slack).
     assert.equal(waterfallChartFitHeight(262, 240, -100), 262);
-    assert.equal(waterfallChartFitHeight(262, 240, 18.5), 243);
+    assert.equal(waterfallChartFitHeight(262, 240, 18.5), 240);
 });
 
 function readoutBottom(geometry, listHeight) {

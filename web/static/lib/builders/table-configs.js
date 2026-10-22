@@ -118,7 +118,7 @@ function histogramIntent(key) {
  * (open-ended) can report the identical 16384 number; only the qualifier
  * (driven by `<pctl>_overflow`, same as #437) tells them apart. */
 export const PCTL_OVERFLOW_SENTENCE =
-    'Percentiles marked ≥16.4 ms fall in the open-ended ≥16.384 ms ' +
+    'Percentiles marked Unresolved fall in the open-ended ≥16.384 ms ' +
     'histogram bucket; they are lower bounds, and their actual values are ' +
     'unavailable.';
 
@@ -127,13 +127,15 @@ export const PCTL_FINITE_BOUND_SENTENCE =
     'value fell in, not the exact observed duration; a rounded bound can ' +
     'read above Max when few samples exist. The exact tail lives in Max.';
 
+export const PCTL_UNRESOLVED_TEXT = 'Unresolved';
+
 function pctlCell(key) {
     const intent = histogramIntent(key);
     const overflowKey = key.replace(/_us$/, '_overflow');
     return (r) => {
         if (r[key] == null) return fmtUs(r[key]);   // '—': no distribution
         const overflow = r[overflowKey] === true;
-        const v = (overflow ? '≥' : '≤') + fmtUs(r[key]);
+        const v = overflow ? PCTL_UNRESOLVED_TEXT : '≤' + fmtUs(r[key]);
         const drillable = !!intent(r);
         const sentence = overflow ? PCTL_OVERFLOW_SENTENCE : PCTL_FINITE_BOUND_SENTENCE;
         const title = sentence + (drillable
@@ -161,7 +163,7 @@ function pctlCell(key) {
  * back if the server-side 0 reappears after a refactor. Matches the
  * existing idle-row finder in views/overview.js's buildSummary(). */
 function isIdleRow(r) {
-    return r.indent === 0 && typeof r.name === 'string' && r.name.indexOf('Idle') >= 0;
+    return r.indent === 0 && typeof r.name === 'string' && r.name === 'Idle';
 }
 
 const IDLE_PCT_HTML =
@@ -550,7 +552,7 @@ export const sessionsConfig = {
         { key: 'user', label: 'User', format: (r) => esc(r.user || '') },
         { key: 'db', label: 'Database', format: (r) => esc(r.db || '') },
         { key: 'db_time_ms', label: 'DB Time', cls: 'num',
-          title: 'non-idle time of this process; background processes included.',
+          title: 'non-idle time of this process; background processes included. This is a different scope from DB Time in Overview.',
           format: (r) => fmtMs(r.db_time_ms) },
         // #187: was a hardcoded literal that silently went stale when the
         // owner recoloured 'cpu' (dark green for "running"); classColor('cpu')
@@ -672,6 +674,16 @@ export function makeQueriesConfig(fidelity) {
  * every existing use). views/queries.js calls makeQueriesConfig(fidelityOf
  * (data)) instead, so the live tab's headers track the real response. */
 export const queriesConfig = makeQueriesConfig('exact');
+
+export const SESSIONS_SCOPE_NOTE_TEXT =
+    'DB Time in Sessions is the non-idle time of this process, including ' +
+    'bgwriter, walwriter, checkpointer, and autovacuum. Overview uses a ' +
+    'different, system-wide DB Time total that excludes the parked-idle ' +
+    'time of background processes.';
+
+export function sessionsScopeNoteHtml() {
+    return '<div class="panel-caption">' + esc(SESSIONS_SCOPE_NOTE_TEXT) + '</div>';
+}
 
 /* #455: `total_ms` ("DB Time") sums EVERY wait/CPU interval attributed to
  * the query, including one taken before Exec ever starts -- a relation

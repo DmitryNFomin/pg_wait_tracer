@@ -5,7 +5,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildSessionsModel, createSessionsView } from '../../web/static/views/sessions.js';
-import { sessionsConfig } from '../../web/static/lib/builders/table-configs.js';
+import {
+    sessionsConfig, sessionsScopeNoteHtml, SESSIONS_SCOPE_NOTE_TEXT,
+} from '../../web/static/lib/builders/table-configs.js';
 import { createStableOrder } from '../../web/static/lib/table.js';
 
 function sess(over) {
@@ -171,4 +173,29 @@ test('#440 WIRING: createSessionsView().build() damps order across real build() 
     ] }, ctx);
     assert.deepEqual(m.table.rows.map((r) => r.row.pid), [1, 2],
         'pid 2 at 101 is within 5% of pid 1\'s 100 -- must not jitter');
+});
+
+// #439 (Sessions half): this is the test that closes the gap the same way
+// #440's WIRING test above does -- it exercises the REAL mount() the view
+// manager calls, not just the pure HTML-string builder in isolation. A note
+// that exists but is never inserted into the DOM discloses nothing to an
+// actual viewer.
+function mountSessions(data) {
+    const el = { innerHTML: '', insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
+    const view = createSessionsView();
+    const ctx = { ...fakeCtx(null), mountTable() {}, summaryEl: null };
+    view.mount(el, view.build(data, ctx), ctx);
+    return el.innerHTML;
+}
+
+test('#439 Sessions mount() actually inserts the cross-tab scope note into the DOM', () => {
+    const html = mountSessions({ rows: [sess({ pid: 4870, type: 'checkpointer',
+        user: '', db: '', db_time_ms: 1200 })] });
+    assert.ok(html.includes(SESSIONS_SCOPE_NOTE_TEXT), html);
+    assert.equal(html.includes(sessionsScopeNoteHtml()), true, html);
+});
+
+test('#439 Sessions mount() with no rows still shows the empty state (note is not required there)', () => {
+    const html = mountSessions({ rows: [] });
+    assert.ok(html.includes('No data for selected range'), html);
 });

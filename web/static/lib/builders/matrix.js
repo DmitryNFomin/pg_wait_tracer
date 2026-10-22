@@ -1,9 +1,47 @@
 /* pgwt — pure builder: transitions payload -> top-N transition heatmap. */
 
-import { eventColor, fmtMs, esc } from '../format.js';
+import { eventColor, fmtMs, esc, rgbToHsl, hslToRgb } from '../format.js';
 
 export const MATRIX_COLORS =
     ['#763e84', '#a04ab5', '#bb6ecf', '#d496e3', '#eac3f4'];
+
+const MATRIX_BG = [0x1a, 0x1a, 0x2e];
+function srgbChannel(c) {
+    c /= 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function relLuminance(r, g, b) {
+    return 0.2126 * srgbChannel(r) + 0.7152 * srgbChannel(g) + 0.0722 * srgbChannel(b);
+}
+function contrastRatio(l1, l2) {
+    const hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05);
+}
+const MATRIX_BG_LUM = relLuminance(...MATRIX_BG);
+const MATRIX_CONTRAST_FLOOR = 3.0;
+
+/* #473 item 2: several per-event tints (IO's darker steps especially)
+ * fall under 2:1 contrast against the app's #1a1a2e background --
+ * effectively invisible axis labels. Lifts ONLY lightness (hue and
+ * saturation untouched, so a class's identity hue is preserved) just
+ * far enough to clear a 3:1 floor; a color that already clears it is
+ * returned completely unchanged. */
+export function contrastFloorColor(rgbString, minRatio = MATRIX_CONTRAST_FLOOR) {
+    const m = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(rgbString);
+    if (!m) return rgbString;
+    const r = +m[1], g = +m[2], b = +m[3];
+    if (contrastRatio(relLuminance(r, g, b), MATRIX_BG_LUM) >= minRatio) return rgbString;
+    const [h, s, l0] = rgbToHsl(r, g, b);
+    let lo = l0, hi = 1.0;
+    for (let i = 0; i < 30; i++) {
+        const mid = (lo + hi) / 2;
+        const [rr, gg, bb] = hslToRgb(h, s, mid);
+        if (contrastRatio(relLuminance(rr, gg, bb), MATRIX_BG_LUM) >= minRatio) hi = mid;
+        else lo = mid;
+    }
+    const [rr, gg, bb] = hslToRgb(h, s, hi);
+    return 'rgb(' + rr + ',' + gg + ',' + bb + ')';
+}
 
 function nodeCatalog(data) {
     const map = {};
@@ -156,10 +194,9 @@ export function buildMatrixOption(data, opts) {
     // leaving a CPU-saturated-looking row/column unexplained. Conditioned on
     // `labels` (what is ON the axes right now), not on the raw node catalog,
     // so the note never appears for a window where CPU* did not make top-N.
-    if (labels.includes('CPU*')) {
-        notes.push('CPU* is a literal intermediate state between waits, not ' +
-            'necessarily measured running CPU');
-    }
+    const cpuNote = labels.includes('CPU*')
+        ? 'CPU* is a literal intermediate state between waits, not ' +
+            'necessarily measured running CPU' : null;
     const option = {
         backgroundColor: 'transparent', animation: false,
         tooltip: {
@@ -180,7 +217,7 @@ export function buildMatrixOption(data, opts) {
             type: 'category', name: 'Source event', nameLocation: 'middle',
             nameGap: 95, nameTextStyle: { color: '#888' }, data: labels,
             axisLabel: { interval: 0, rotate: 48, fontSize: 10,
-                color: (v) => labelColors[v] || '#aaa' },
+                color: (v) => contrastFloorColor(labelColors[v] || '#aaa') },
             axisLine: { lineStyle: { color: '#333' } }, splitArea: { show: false },
         },
         yAxis: {
@@ -188,7 +225,7 @@ export function buildMatrixOption(data, opts) {
             nameGap: 190, nameRotate: 90, nameTextStyle: { color: '#888' },
             data: labels, inverse: true,
             axisLabel: { interval: 0, fontSize: 10,
-                color: (v) => labelColors[v] || '#aaa' },
+                color: (v) => contrastFloorColor(labelColors[v] || '#aaa') },
             axisLine: { lineStyle: { color: '#333' } }, splitArea: { show: false },
         },
         visualMap: {
@@ -210,7 +247,7 @@ export function buildMatrixOption(data, opts) {
         }],
     };
     return { option, hasData: cells.length > 0, labels, labelColors,
-        hiddenCount, visibleCount: labels.length, notes, cells, rawMax, bucketMax,
+        hiddenCount, visibleCount: labels.length, notes, cpuNote, cells, rawMax, bucketMax,
         shownVolume, hiddenVolume, totalVolume,
         serverTruncated: !!(data && data.truncated) };
 }

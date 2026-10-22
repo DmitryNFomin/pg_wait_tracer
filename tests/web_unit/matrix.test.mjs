@@ -182,10 +182,18 @@ test('legend bucket max is quantized to a fixed log grid and stable for a modest
 // #438: CPU* is a literal intermediate state, not necessarily measured
 // running CPU -- the fix is explaining that wherever CPU* is actually
 // shown, not re-deriving a different (inferred wait-to-wait) metric.
-test('#438: a CPU* explanation note appears exactly when CPU* is a shown label', () => {
+//
+// #438/#473-1 (video review): the explanation used to be appended into the
+// SAME `notes` array as the hidden-count/link-cap disclosures, which the
+// view renders BELOW the chart canvas (#matrix-notes) -- below the fold at
+// the demo viewport, so a viewer never saw why the matrix looks like a
+// degenerate L. It is now its own `cpuNote` field, kept OUT of `notes`
+// entirely, so the view can place it ABOVE the canvas while the volume/
+// link-cap disclosures stay in their existing below-canvas slot.
+test('#438: cpuNote is set exactly when CPU* is a shown label, and is NEVER folded into notes', () => {
     const withCpu = buildMatrixOption(payload(4)); // payload() alternates Lock:E/IO:E, no CPU*
-    assert.ok(!withCpu.notes.some(n => n.includes('CPU*')),
-        'no CPU* note when CPU* never appears on an axis');
+    assert.equal(withCpu.cpuNote, null, 'no CPU* note when CPU* never appears on an axis');
+    assert.ok(!withCpu.notes.some(n => n.includes('CPU*')));
 
     const p = {
         total: 10,
@@ -197,18 +205,116 @@ test('#438: a CPU* explanation note appears exactly when CPU* is a shown label',
     };
     const m = buildMatrixOption(p);
     assert.ok(m.labels.includes('CPU*'));
-    assert.ok(m.notes.some(n => n.includes('CPU*') && n.includes('literal intermediate state')),
-        'CPU* note must appear once CPU* is a shown label: ' + JSON.stringify(m.notes));
+    assert.ok(typeof m.cpuNote === 'string' && m.cpuNote.includes('CPU*') &&
+        m.cpuNote.includes('literal intermediate state'),
+        'cpuNote must appear once CPU* is a shown label: ' + JSON.stringify(m.cpuNote));
     // Negative control: a note that merely says "CPU-centered" without the
     // "literal intermediate state, not necessarily measured running CPU"
     // wording would re-introduce the exact misreading #438 reports (that
-    // the matrix measures running CPU time) -- the check must be on that
-    // wording, not just on the presence of the substring "CPU*" (every note
-    // in this payload already contains "CPU*" via other paths in a denser
-    // fixture, so a bare substring check could pass without ever explaining
-    // anything).
-    assert.ok(!m.notes.some(n => n.includes('CPU*') && !n.includes('literal')),
-        'every CPU*-mentioning note must carry the explanation, not just the name');
+    // the matrix measures running CPU time).
+    assert.ok(!(m.cpuNote.includes('CPU*') && !m.cpuNote.includes('literal')),
+        'the CPU* note must carry the explanation, not just the name');
+    // The volume/link-cap `notes` array must never carry the CPU* text --
+    // it stays a SEPARATE field the view can position independently.
+    assert.ok(!m.notes.some(n => n.includes('CPU*')),
+        'notes (rendered below the chart) must not duplicate cpuNote: ' + JSON.stringify(m.notes));
+});
+
+test('#438 cpuNote coexists with an unrelated notes entry (hidden-count disclosure)', () => {
+    const p = {
+        total: 10,
+        nodes: [
+            { name: 'CPU*', class: 'CPU', event_id: 0 },
+            { name: 'IO:A', class: 'IO', event_id: 1 },
+            { name: 'Lock:B', class: 'Lock', event_id: 2 },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:A', value: 5, duration_ms: 1 },
+            { source: 'IO:A', target: 'Lock:B', value: 3, duration_ms: 1 },
+        ],
+    };
+    const m = buildMatrixOption(p, { limit: 2 });
+    assert.ok(m.cpuNote && m.cpuNote.includes('literal intermediate state'));
+    assert.ok(m.notes.some(n => n.includes('outside the top 2')),
+        'the unrelated hidden-count note must still be in notes: ' + JSON.stringify(m.notes));
+    assert.ok(!m.notes.some(n => n.includes('CPU*')));
+});
+
+// #473 item 2 (video review): several IO event names render dark blue on
+// the #1a1a2e navy background and are effectively invisible (IO:DataFileWrite,
+// IO:WalWrite, IO:WalSync, IO:DataFilePrefetch, IO:AioIoCompletion,
+// IO:DataFileSync -- f010/f036). The fix is a contrast FLOOR applied to the
+// axis label color, not a palette change -- identity (same class hue) must
+// survive. GATE: assert the builder's axisLabel.color OUTPUT directly --
+// ECharts draws labels to a <canvas>, so a pixel-level assertion on the
+// rendered page would be reading the wrong element entirely (the DOM/canvas
+// pixels are not inspectable the way a CSS color string is).
+//
+// The WCAG contrast-ratio math below is written independently of whatever
+// matrix.js uses internally (it is the public, standard formula) -- an
+// assertion that imported matrix.js's OWN ratio helper to check matrix.js's
+// own output could pass a broken floor that still agreed with itself.
+function srgbChannel(c) { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+function relLuminance(r, g, b) { return 0.2126 * srgbChannel(r) + 0.7152 * srgbChannel(g) + 0.0722 * srgbChannel(b); }
+function contrastRatio(l1, l2) { const hi = Math.max(l1, l2), lo = Math.min(l1, l2); return (hi + 0.05) / (lo + 0.05); }
+const MATRIX_BG_LUM = relLuminance(0x1a, 0x1a, 0x2e);
+function parseRgb(s) {
+    const m = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(s);
+    assert.ok(m, `not an rgb(...) string: ${s}`);
+    return [+m[1], +m[2], +m[3]];
+}
+function contrastOf(rgbString) {
+    const [r, g, b] = parseRgb(rgbString);
+    return contrastRatio(relLuminance(r, g, b), MATRIX_BG_LUM);
+}
+
+function ioMatrixPayload() {
+    return {
+        total: 100,
+        nodes: [
+            { name: 'IO:DataFileWrite', class: 'IO', event_id: 1 },
+            { name: 'IO:WalSync', class: 'IO', event_id: 2 },
+            { name: 'Lock:relation', class: 'Lock', event_id: 3 },
+        ],
+        links: [
+            { source: 'IO:DataFileWrite', target: 'IO:WalSync', value: 5, duration_ms: 1 },
+            { source: 'IO:WalSync', target: 'Lock:relation', value: 3, duration_ms: 1 },
+        ],
+    };
+}
+
+test('#473-2 a low-contrast IO axis label is lifted to a readable floor (>= 3:1 vs #1a1a2e)', () => {
+    const m = buildMatrixOption(ioMatrixPayload());
+    const rawDataFileWrite = eventColor('IO', 'IO:DataFileWrite');
+    const rawWalSync = eventColor('IO', 'IO:WalSync');
+    // Confirms the fixture actually exercises the defect: the UNFLOORED
+    // color really is below the floor (the negative control for this gate).
+    assert.ok(contrastOf(rawDataFileWrite) < 3.0,
+        `fixture choice is stale -- IO:DataFileWrite's raw color is no ` +
+        `longer low-contrast (${contrastOf(rawDataFileWrite).toFixed(2)}:1)`);
+    assert.ok(contrastOf(rawWalSync) < 3.0,
+        `fixture choice is stale -- IO:WalSync's raw color is no longer ` +
+        `low-contrast (${contrastOf(rawWalSync).toFixed(2)}:1)`);
+
+    for (const name of ['IO:DataFileWrite', 'IO:WalSync']) {
+        const floored = m.option.xAxis.axisLabel.color(name);
+        assert.ok(contrastOf(floored) >= 3.0 - 1e-6,
+            `${name}: ${floored} contrast ${contrastOf(floored).toFixed(2)}:1, below the 3:1 floor`);
+        // Identity preserved: still a blue (IO) swatch, not reassigned to
+        // another class's hue -- blue channel strictly dominant.
+        const [r, g, b] = parseRgb(floored);
+        assert.ok(b > r && b > g, `${name}: ${floored} is no longer blue-dominant (lost IO identity)`);
+        // Y axis must apply the identical floor (shares labelColors).
+        assert.equal(m.option.yAxis.axisLabel.color(name), floored);
+    }
+});
+
+test('#473-2 negative control: a color that already clears the floor is left byte-identical', () => {
+    const m = buildMatrixOption(ioMatrixPayload());
+    const raw = eventColor('Lock', 'Lock:relation');
+    assert.ok(contrastOf(raw) >= 3.0, `fixture choice is stale -- Lock:relation is now low-contrast`);
+    assert.equal(m.option.xAxis.axisLabel.color('Lock:relation'), raw,
+        'a color that already meets the floor must be returned unchanged, not nudged');
 });
 
 test('axis names are positioned clear of tick labels, not at the clipped default end', () => {

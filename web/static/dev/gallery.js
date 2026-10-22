@@ -521,6 +521,7 @@ function renderMatrix(body, foot, state) {
     if (!m.hasData) { emptyCard(body, 'No transitions found'); return; }
     makeChart(div('chart', body), m.option, 500);
     factLine(foot, 'events: ' + m.visibleCount + ' · cells: ' + m.cells.length +
+        (m.cpuNote ? ' · ' + m.cpuNote : '') +
         (m.notes.length ? ' · ' + m.notes.join(' · ') : ''));
 }
 

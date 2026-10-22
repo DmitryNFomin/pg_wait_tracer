@@ -507,6 +507,13 @@ def test_sessions_table(page):
     rows = page.query_selector_all("#table-container table tbody tr")
     check(len(rows) >= 4, f"Sessions has {len(rows)} rows (expected >= 4)")
 
+    # #439: the cross-tab scope note (DB Time here vs Overview's) must
+    # actually reach the real app's DOM, not just exist as an unused
+    # pure-HTML builder function.
+    caption = page.text_content("#table-container .panel-caption") or ""
+    check("Overview" in caption and "bgwriter" in caption,
+          f"Sessions shows the DB Time scope note against Overview ('{caption}')")
+
     # Click a session -> should drill to Timeline
     rows[0].click()
     page.wait_for_timeout(1000)
@@ -2708,6 +2715,159 @@ def test_waterfall_view(page):
           f"bar click opened compact readout ('{readout[:90]}')")
 
 
+def _waterfall_fold_margin(p):
+    """innerHeight minus the bottom of the real last content element
+    (#table-container). NOT document.documentElement.scrollHeight: this
+    app's html/body stretch to fill the viewport (min-height: 100vh-style
+    layout), so scrollHeight reads back as window.innerHeight itself
+    whenever content is SHORTER than the viewport -- it cannot distinguish
+    "content fills the viewport exactly" from "content is well short of it
+    with the body merely stretched". Only an actual element's own
+    bounding-box bottom measures real content height (same technique
+    test_scatter_notes_fully_above_fold already documents needing, for the
+    identical reason)."""
+    return p.evaluate("""() => {
+        const el = document.querySelector('#table-container');
+        return { innerHeight: window.innerHeight,
+                 contentBottom: el ? el.getBoundingClientRect().bottom : null };
+    }""")
+
+
+def test_waterfall_drilled_view_keeps_a_fold_reserve(page):
+    """#462: tests/verify_waterfall_fold.py's own fold check passed with
+    ZERO pixels of margin once the backend-activity panel is populated
+    (measured: readout_bottom 914, scroll_height 981 against a 981px
+    viewport) -- a check that passes at exactly zero margin cannot tell
+    "fits" from "about to stop fitting": the very next element added to the
+    Waterfall view breaks the fold the same way #415 originally did.
+
+    waterfallChartFitHeight() now targets a 16px reserve past the fold
+    rather than bare non-overflow -- but at the PINNED demo viewport
+    (1710x981) this exact populated scenario (pid 1000: a 3-lane chart
+    whose natural height is 262px, CSS floor 240px -- only 22px of
+    shrinkable slack) cannot reach the full 16px: the chart's own
+    readability floor binds first, so only 3px of the 16 is achievable
+    here. That is a real, confirmed structural limit of THIS content
+    volume against the pinned viewport, not a measurement artifact (verified
+    directly: measured content bottom 978 after the fix vs 981 -- the exact
+    zero-margin value -- before it) and not this fix's job to remove (doing
+    so would mean shrinking the chart's 240px readability floor globally,
+    or trimming the always-visible backend-activity text, well outside this
+    fix's two-line scope in lib/builders/waterfall.js). Flagged as an open
+    question for review rather than silently relaxing the headline
+    assertion, which instead runs at a SECOND viewport where the chart
+    genuinely has the slack to deliver the full 16px -- proving the
+    mechanism itself, not just this one tight geometry."""
+    print("--- Test #462: Waterfall drilled view keeps a fold reserve ---")
+    browser = page.context.browser
+
+    # Headline: a viewport with real slack (same content, 1000px tall
+    # instead of 981) must get the FULL 16px reserve -- proves the
+    # mechanism, not just "better than zero" in a floor-bound corner. 1000px
+    # is also the DISCRIMINATING case, not just a roomier one: at exactly
+    # this height the OLD formula's own overflow was already <= 0 (it never
+    # shrank the chart at all, landing EXACTLY on the viewport edge --
+    # margin 0, measured directly against the pre-#462 code) while the NEW
+    # one still carves out the full 16px, because it reserves margin even
+    # when the raw overflow was already "fine". A taller viewport would also
+    # pass under the OLD code (not a red/green discriminator); this one
+    # would not.
+    ctx_tall = browser.new_context(viewport={"width": 1710, "height": 1000},
+                                    device_scale_factor=2)
+    ctx_tall.add_init_script(UNHANDLED_REJECTION_HOOK)
+    pt = ctx_tall.new_page()
+    guard_t = ConsoleErrorGuard(pt)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(pt, guard_t)
+    try:
+        pt.goto(MOCK_URL + "#tab=waterfall&live=1&span=900&f.pid=1000")
+        pt.wait_for_selector("#status.connected", timeout=10000)
+        pt.wait_for_selector("#waterfall-chart canvas", timeout=10000)
+        pt.wait_for_timeout(500)
+        geo = _waterfall_fold_margin(pt)
+        margin = geo["innerHeight"] - geo["contentBottom"]
+        check(margin >= 16,
+              f"#462: with real slack, the drilled Waterfall view reaches the "
+              f"full 16px fold reserve (innerHeight={geo['innerHeight']}, "
+              f"contentBottom={geo['contentBottom']}, margin={margin})")
+
+        # Negative control: pin a synthetic element flush with the viewport
+        # bottom (zero reserve BY CONSTRUCTION) and confirm the SAME
+        # measurement technique then correctly reports a failing (< 16)
+        # margin -- proves the check can see the defect it exists to catch,
+        # not just always pass.
+        synthetic_margin = pt.evaluate("""() => {
+            const probe = document.createElement('div');
+            probe.id = 'pgwt-test-fold-probe';
+            probe.style.cssText = 'position:fixed;left:0;right:0;bottom:0;height:1px;';
+            document.body.appendChild(probe);
+            const bottom = probe.getBoundingClientRect().bottom;
+            document.body.removeChild(probe);
+            return window.innerHeight - bottom;
+        }""")
+        check(synthetic_margin < 16,
+              f"negative control: a viewport-bottom-pinned probe correctly reads < 16px margin ({synthetic_margin})")
+        assert_no_console_errors(pt, guard_t, "waterfall-fold-reserve-tall")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx_tall.close()
+
+    # At the PINNED demo viewport: the specific #462/#415 zero-margin defect
+    # (margin === 0 exactly) must be gone, even though the full 16px is not
+    # reachable here (see docstring) -- a real, confirmed, non-zero
+    # improvement, not the same number restated.
+    ctx_pinned = browser.new_context(viewport={"width": 1710, "height": 981},
+                                      device_scale_factor=2)
+    ctx_pinned.add_init_script(UNHANDLED_REJECTION_HOOK)
+    pp = ctx_pinned.new_page()
+    guard_p = ConsoleErrorGuard(pp)
+    set_failure_capture(pp, guard_p)
+    try:
+        pp.goto(MOCK_URL + "#tab=waterfall&live=1&span=900&f.pid=1000")
+        pp.wait_for_selector("#status.connected", timeout=10000)
+        pp.wait_for_selector("#waterfall-chart canvas", timeout=10000)
+        pp.wait_for_timeout(500)
+        geo = _waterfall_fold_margin(pp)
+        margin = geo["innerHeight"] - geo["contentBottom"]
+        check(margin > 0,
+              f"#462: the exact zero-margin defect is gone at the pinned demo "
+              f"viewport, even though the full 16px reserve is not reachable "
+              f"here (innerHeight={geo['innerHeight']}, "
+              f"contentBottom={geo['contentBottom']}, margin={margin})")
+
+        # Preserve two complete execution rows (#473 margin note): the fix
+        # must not come at the cost of the execution list collapsing to a
+        # single row again. Checked on the DEFAULT (unfiltered) view, which
+        # is where #473 measured "header + exactly 2 full rows" -- pid 1000
+        # above has only ONE execution of its own (the other two lanes are
+        # worker backend-activity, not separate executions), so it is the
+        # wrong population to measure row count against.
+        p2 = ctx_pinned.new_page()
+        guard2 = ConsoleErrorGuard(p2)
+        set_failure_capture(p2, guard2)
+        try:
+            p2.goto(MOCK_URL + "#tab=waterfall&live=1&span=900")
+            p2.wait_for_selector("#status.connected", timeout=10000)
+            p2.wait_for_selector("#waterfall-chart canvas", timeout=10000)
+            p2.wait_for_timeout(500)
+            full_rows = p2.evaluate("""() => {
+                const rows = [...document.querySelectorAll('.execution-list tbody tr.clickable')];
+                const list = document.querySelector('.execution-list');
+                const listBottom = list.getBoundingClientRect().bottom;
+                return rows.filter(r => r.getBoundingClientRect().bottom <= listBottom + 0.5).length;
+            }""")
+            check(full_rows >= 2, f"#473: at least two complete execution rows remain visible ({full_rows})")
+            assert_no_console_errors(p2, guard2, "waterfall-fold-reserve-rowcount")
+        finally:
+            set_failure_capture(pp, guard_p)
+            p2.close()
+
+        assert_no_console_errors(pp, guard_p, "waterfall-fold-reserve-pinned")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx_pinned.close()
+
+
 def test_query_to_waterfall_pivot(page):
     """The dedicated query cell reaches waterfall while the normal row drill
     remains the existing query→Events behavior (covered by test_query_drill)."""
@@ -2927,6 +3087,36 @@ def test_matrix_scatter_notes_never_overlap_their_chart(page):
     finally:
         set_failure_capture(*prev_capture)
         ctx.close()
+
+
+def test_matrix_cpu_note_sits_above_the_canvas(page):
+    """#438/#473-1: the CPU* explanation ("CPU* is a literal intermediate
+    state ... not necessarily measured running CPU") used to be folded into
+    the SAME below-canvas #matrix-notes slot as the volume/link-cap
+    disclosures -- below the fold at the demo viewport, so a viewer never
+    saw why the matrix looks like a degenerate L (only CPU* populated).
+    It now has its own slot, #matrix-cpu-note, placed ABOVE #matrix-chart
+    in DOM order; this pins the real top-vs-top ordering in an actual
+    render, not just the pure builder's cpuNote field."""
+    print("--- Test #438/#473-1: Matrix CPU* note sits above the canvas ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='matrix']")
+    page.wait_for_selector("#matrix-chart canvas", timeout=5000)
+    page.wait_for_timeout(700)
+    geo = page.evaluate("""() => {
+        const note = document.getElementById('matrix-cpu-note');
+        const chart = document.getElementById('matrix-chart');
+        if (!note || !chart) return null;
+        const nr = note.getBoundingClientRect(), cr = chart.getBoundingClientRect();
+        return { noteTop: nr.top, chartTop: cr.top, text: note.textContent.trim() };
+    }""")
+    check(geo is not None and geo["text"] != "", f"#matrix-cpu-note exists with text ({geo})")
+    check(geo is not None and "literal intermediate state" in geo["text"] and
+          "CPU*" in geo["text"],
+          f"#matrix-cpu-note carries the actual explanation, not just the name ({geo})")
+    check(geo is not None and geo["noteTop"] < geo["chartTop"],
+          f"#matrix-cpu-note sits ABOVE #matrix-chart in the real page ({geo})")
 
 
 def test_scatter_notes_fully_above_fold(page):
@@ -4141,10 +4331,12 @@ def main():
                 test_url_state_roundtrip,
                 # U3 Stage 2: the three B6 analysis views.
                 test_waterfall_view,
+                test_waterfall_drilled_view_keeps_a_fold_reserve,
                 test_query_to_waterfall_pivot,
                 test_scatter_view,
                 test_matrix_view,
                 test_matrix_scatter_notes_never_overlap_their_chart,
+                test_matrix_cpu_note_sits_above_the_canvas,
                 test_scatter_notes_fully_above_fold,
                 test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
