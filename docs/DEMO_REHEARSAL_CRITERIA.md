@@ -1148,9 +1148,16 @@ that captured nothing used to score clean) is now FIXED on
   2. Two clean rehearsals, each paired with its own signed Mac walk, run
      against the **same candidate master commit**
      — pinned by its **sha**, not a tag (none exists yet) — from a worktree
-     checked out at that sha, never from a moving master HEAD.
+     checked out at that sha, never from a moving master HEAD. **[AMENDMENT
+     2026-10-22: the rehearsals stay capture-side-first, unchanged; the Mac
+     walk's place in the overall sequence moves — see below.]**
   3. The two paired Mac-side video walks and their analyses are signed off
      against that same sha; a single later walk cannot cover both attempts.
+     **[AMENDMENT 2026-10-22: this step's TIMING moves to after GIF cutting
+     and three-way video/GIF analysis — see below. Its content does not
+     change: still two distinct signed Mac walks, both against this same
+     sha, and "a single later walk cannot cover both attempts" still
+     binds.]**
   4. **Owner's sign-off.**
   5. GIF cut, from that same sha's rehearsal/walk material.
   6. **Owner tags** the rehearsed commit — naming, after the fact, the sha
@@ -1184,6 +1191,71 @@ that captured nothing used to score clean) is now FIXED on
 
   **Caps are unchanged**: at most 4 counted attempts, at most 2 voided (both
   stated below, unmodified by this amendment).
+
+  **AMENDMENT (owner, 2026-10-22): the owner's own actions — the two signed
+  Mac walks, sign-off, and tagging — move to AFTER the lead and both
+  advisers have fully analysed the recorded video AND the cut GIFs,
+  superseding steps 2-6 of the sequence above for ORDERING only.** The
+  owner's ruling, verbatim: *"Any of my Actions should only after full video
+  analisys by you fable and astra, and sant for gif. So if point 5 means
+  it's me zitting and testing than it should go after 6"*.
+
+  **What carries over unchanged.** Steps 2 and 3 above are annotated in
+  place, not deleted, because the pairing requirement they state does not
+  weaken here. It is still **two distinct signed Mac walks**, both against
+  the **same candidate sha**, and the existing prohibition stands exactly as
+  written: "a single later walk cannot cover both attempts." Say this
+  outright, because leaving steps 2-3's old wording — "each paired with its
+  own signed Mac walk" — unannotated would let a future reader re-derive
+  interleaving (walk immediately after rehearsal 1, walk immediately after
+  rehearsal 2) and use that to justify pausing a rehearsal mid-flight to
+  demand a walk. Nothing of the kind is intended: both walks still happen,
+  still paired one-to-one with the two capture attempts by attempt
+  identity, exactly as before — only their position in the overall sequence
+  moves, from immediately after each capture to after both captures, both
+  GIFs, and the three-way analysis.
+
+  **The new sequence, superseding steps 1-6 above for ordering (the old
+  steps' own numbering and content stand as written above; this is an
+  independent 1-8 list for the reordered flow, not a renumbering of them):**
+  1. Demo-blocking fixes land on master.
+  2. Two clean rehearsals, **capture-side only**, both against the **same
+     candidate master commit** — pinned by its **sha**, not a tag — from a
+     worktree checked out at that sha, never from a moving master HEAD.
+  3. Record the video, box-side (`--footage-only`;
+     `scripts/demo-walk-record.py`'s own `walk.webm`) — no owner action here.
+  4. Cut both GIFs from that same recorded material.
+  5. **Full analysis of the video and the GIFs by all three reviewers** —
+     the lead plus both advisers (codex and Fable) — against that same sha.
+  6. **The owner's two signed Mac walks**, both against that same sha, one
+     per rehearsal attempt by identity — the same pairing steps 2-3 above
+     required, only later in the sequence.
+  7. **Owner's sign-off.**
+  8. **Owner tags** the rehearsed commit.
+
+  **Why this order is better, not merely different.** Under the old
+  ordering a defect first visible only in the video/GIF analysis could
+  surface AFTER the owner had already spent both signed Mac walks on that
+  sha, so fixing it cost a re-record plus a fresh pair of owner walks. Under
+  the new ordering the same defect is caught by step 5's analysis before
+  the owner has spent any of their own time on that sha, so the same fix
+  costs only a re-record. This also answers an adviser's objection raised
+  while this change was made: discovering a false answer after two green
+  runs wastes the capture AND the owner's two walks under the old order;
+  under the new order it wastes only the capture.
+
+  **Dependency check, verified, that makes this reorder safe.** The GIFs
+  are cut from `scripts/demo-walk-record.py`'s own recorded `walk.webm` —
+  the automated box-side capture (`write_gif` runs against `capture.frames`
+  read from that file) — never from the owner's Mac walk video. So step 4's
+  "that same recorded material" is the recorder's own walk, not anything
+  the owner produces in step 6; moving the owner's walks later creates no
+  circular dependency between step 6 and the GIFs analysed in step 5.
+
+  **Caps are still untouched by this amendment**: at most 4 counted
+  attempts, at most 2 voided, and two clean attempts still count as
+  consecutive only if they ran on the same sha — all restated above,
+  unmodified again.
 
 ### Attempt record, pre-registered before attempt 1
 
