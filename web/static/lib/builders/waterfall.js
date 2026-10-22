@@ -9,7 +9,7 @@
  */
 
 import { eventColor, fmtTimeNs, fmtUs, fmtMs, esc } from '../format.js';
-import { buildTableModel, buildTruncationRow } from '../table.js';
+import { buildTableModel } from '../table.js';
 import { backendSpanEnvelope, backendActivityLine } from './backend-span.js';
 
 export const PLAN_COLOR = '#9b7bd3';
@@ -375,8 +375,13 @@ export function buildExecutionsModel(data, selected, windowTo) {
             _windowTo: windowTo }));
     return {
         hasRows: rows.length > 0,
+        // #486: this is the capped, filtered executions slice. Keep its
+        // exact counts visible above the table, independently of scrolling.
+        disclosure: data && data.truncated === true &&
+            Number.isFinite(data.total_count) && data.total_count > rows.length
+            ? 'Showing ' + rows.length.toLocaleString() + ' of ' + data.total_count.toLocaleString()
+            : null,
         table: buildTableModel(executionsConfig, rows, null),
-        truncation: buildTruncationRow(Object.assign({}, data, { rows })),
         count: rows.length,
         total_count: data && typeof data.total_count === 'number'
             ? data.total_count : null,

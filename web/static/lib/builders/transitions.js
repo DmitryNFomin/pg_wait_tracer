@@ -61,10 +61,8 @@ import { eventColor, fmtMs, esc as escHtml } from '../format.js';
  *     the call site) — never backfilled from CPU/wait counts elsewhere.
  */
 
-/* Idle/client wait nodes, as far as they can reach this payload. Mirrors
- * pgwt_is_idle_event() (src/wait_event.c): Activity-class waits are already
- * excluded server-side from the DFG's node/link JSON (pgwt_is_hidden_event),
- * so Client:ClientRead is the only idle node this builder ever sees. */
+/* The "Hide ClientRead" control is intentionally scoped to this name.
+ * Dominant-dwell rankings below use the server's idle flag instead. */
 const IDLE_NODE_NAMES = new Set(['Client:ClientRead']);
 
 export function isIdleTransitionNode(name) {
@@ -199,9 +197,7 @@ export function compareTransitionNodesByDominance(a, b) {
     return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
 }
 
-/* #436/#456: among nodes NOT laid out (hidden by the threshold cutoff — idle
- * nodes are excluded here because the "Hide ClientRead" control already
- * names and counts that reason on its own, see hiddenIdleLinks/-Value), find
+/* #436/#456: among nodes NOT laid out (hidden by the threshold cutoff), find
  * the single one with the largest total_ms. That is the "dominant-duration
  * wait" the bug report means: one whose EDGE COUNT is too low to clear the
  * frequency threshold even though its DWELL TIME dominates. Returns null
@@ -212,8 +208,11 @@ export function compareTransitionNodesByDominance(a, b) {
 export function findOmittedDominantNode(nodeMap, visibleNodes) {
     let best = null;
     for (const name of Object.keys(nodeMap)) {
-        if (visibleNodes.has(name) || isIdleTransitionNode(name)) continue;
         const node = nodeMap[name];
+        // #487: fail closed per candidate. Only an explicit server false is
+        // eligible; missing/non-boolean idle status is unknown, never inferred
+        // from a name. Other known non-idle candidates can still be ranked.
+        if (visibleNodes.has(name) || !node || node.idle !== false) continue;
         const ms = (node && node.total_ms) || 0;
         if (ms <= 0) continue;
         const eventId = node && node.event_id != null ? node.event_id : null;
@@ -235,8 +234,10 @@ export function findOmittedDominantNode(nodeMap, visibleNodes) {
 export function findDominantSourceDwellNode(nodeMap, visibleNodes) {
     let best = null;
     for (const name of Object.keys(nodeMap)) {
-        if (isIdleTransitionNode(name)) continue;
         const node = nodeMap[name];
+        // Same fail-closed candidate policy as findOmittedDominantNode: an
+        // older payload without a boolean idle flag cannot silently rank.
+        if (!node || node.idle !== false) continue;
         const ms = (node && node.total_ms) || 0;
         if (ms <= 0) continue;
         const eventId = node && node.event_id != null ? node.event_id : null;

@@ -519,6 +519,10 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
  * is bounded and scrollable before any script runs, and so a viewport with
  * room to spare renders exactly as it always has. */
 .execution-list { max-height: 310px; overflow: auto; border-bottom: 1px solid #343454; }
+.execution-list.list-has-more {
+  border-bottom-color: #657b96;
+  box-shadow: inset 0 -10px 10px -10px #4fc3f7;
+}
 .execution-list table { min-width: 820px; }
 tr.selected-execution td { background: #173653; }
 .execution-open { color: #ffd166; font-size: 11px; }
@@ -531,6 +535,11 @@ tr.selected-execution td { background: #173653; }
   border-bottom: 1px solid #2a405a; font-size: 11px;
 }
 #waterfall-chart { min-height: 240px; padding: 4px 10px; }
+/* #462/#486: reserve room for the executions disclosure on short screens.
+ * Tall viewports retain the original 240px floor. */
+@media (max-height: 1000px) {
+  #waterfall-chart { min-height: 216px; }
+}
 /* Scatter item 2 (video review): the disclosure in #scatter-notes
  * (EXEC_SCATTER_SCOPE_NOTE plus the downsampled-sample caveat,
  * lib/builders/exec-scatter.js) plus #scatter-readout right below it

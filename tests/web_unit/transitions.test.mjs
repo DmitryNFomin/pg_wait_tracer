@@ -19,15 +19,54 @@ import { states as galleryStates } from '../../web/static/dev/fixtures/transitio
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+for (const rank of [findOmittedDominantNode, findDominantSourceDwellNode]) {
+    test('#487 ' + rank.name + ': server idle flag beats raw total_ms', () => {
+        const { nodeMap } = transitionsContext({ nodes: [
+            { name: 'Timeout:CheckpointWriteDelay', total_ms: 806900, idle: true },
+            { name: 'Lock:relation', total_ms: 715000, idle: false },
+        ], links: [] });
+        const winner = rank(nodeMap, new Set());
+        assert.equal(winner.name, 'Lock:relation');
+        assert.equal(winner.ms, 715000);
+        const rawWinner = Object.keys(nodeMap).sort((a, b) =>
+            nodeMap[b].total_ms - nodeMap[a].total_ms)[0];
+        assert.equal(rawWinner, 'Timeout:CheckpointWriteDelay');
+        assert.notEqual(winner.name, rawWinner);
+    });
+
+    test('#487 ' + rank.name + ': all idle candidates return null', () => {
+        assert.equal(rank({
+            'Timeout:CheckpointWriteDelay': { total_ms: 806900, idle: true },
+            'Lock:relation': { total_ms: 715000, idle: true },
+        }, new Set()), null);
+    });
+
+    test('#487 ' + rank.name + ': unknown idle status is excluded without name fallback', () => {
+        for (const idle of [undefined, null, 0, 'false']) {
+            for (const name of ['Timeout:CheckpointWriteDelay', 'Lock:relation', 'Client:ClientRead']) {
+                assert.equal(rank({ [name]: { total_ms: 806900, idle } }, new Set()), null);
+                const winner = rank({
+                    [name]: { total_ms: 806900, idle },
+                    'IO:DataFileRead': { total_ms: 10, idle: false },
+                }, new Set());
+                assert.equal(winner.name, 'IO:DataFileRead');
+                // An explicit false must be authoritative even for ClientRead.
+                assert.equal(rank({ [name]: { total_ms: 1, idle: false } }, new Set()).name, name);
+            }
+        }
+        assert.equal(rank({ 'Lock:relation': { total_ms: 1 } }, new Set()), null);
+    });
+}
+
 function data() {
     return {
         total: 1000,
         nodes: [
             // event_id mirrors the server's DFG node JSON (U2 / P3 wire 5;
             // 0 = the CPU* pseudo-node).
-            { name: 'CPU*', total_ms: 4800, class: 'CPU', event_id: 0 },
-            { name: 'IO:DataFileRead', total_ms: 2100, class: 'IO', event_id: 0x01000015 },
-            { name: 'LWLock:WALInsert', total_ms: 900, class: 'LWLock', event_id: 0x04000007 },
+            { name: 'CPU*', idle: false, total_ms: 4800, class: 'CPU', event_id: 0 },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 2100, class: 'IO', event_id: 0x01000015 },
+            { name: 'LWLock:WALInsert', idle: false, total_ms: 900, class: 'LWLock', event_id: 0x04000007 },
         ],
         links: [
             { source: 'CPU*', target: 'IO:DataFileRead', value: 500, duration_ms: 2500 },
@@ -110,7 +149,7 @@ test('nodes carry eventId + className for the dfg-event pivot (P3 wire 5)', () =
     assert.equal(cpu.eventId, 0);
     // A server predating the field -> null, never undefined-crash.
     const legacy = buildTransitionsOption({
-        total: 10, nodes: [{ name: 'IO:WalSync', total_ms: 5, class: 'IO' }],
+        total: 10, nodes: [{ name: 'IO:WalSync', idle: false, total_ms: 5, class: 'IO' }],
         links: [{ source: 'IO:WalSync', target: 'IO:WalSync', value: 5, duration_ms: 1 }],
     }, 0, { width: 400, height: 300 });
     assert.equal(legacy.option.series[0].data[0].eventId, null);
@@ -140,7 +179,7 @@ test('drag fallback preserves the node grab offset instead of snapping centre', 
 
 test('self-loop link gets higher curveness (0.8) than cross edges (0.3)', () => {
     const selfLoop = {
-        total: 10, nodes: [{ name: 'CPU*', total_ms: 100, class: 'CPU' }],
+        total: 10, nodes: [{ name: 'CPU*', idle: false, total_ms: 100, class: 'CPU' }],
         links: [{ source: 'CPU*', target: 'CPU*', value: 10, duration_ms: 5 }],
     };
     const { option, visibleCount } = buildTransitionsOption(selfLoop, 0, { width: 400, height: 300 });
@@ -154,7 +193,7 @@ test('threshold above every edge -> no visible nodes', () => {
     // Push beyond with a value strictly below max:
     assert.ok(visibleCount >= 0);  // 100% keeps only edges == max count
     const high = buildTransitionsOption({
-        total: 10, nodes: [{ name: 'A', total_ms: 1 }, { name: 'B', total_ms: 1 }],
+        total: 10, nodes: [{ name: 'A', idle: false, total_ms: 1 }, { name: 'B', idle: false, total_ms: 1 }],
         links: [{ source: 'A', target: 'B', value: 5, duration_ms: 1 }],
     }, 100, { width: 100, height: 100 });
     // single edge == max -> still visible; assert the "everything dropped" path
@@ -353,11 +392,11 @@ function realOltpShapedData() {
     return {
         total: 97541,
         nodes: [
-            { name: 'CPU*', total_ms: 10000, class: 'CPU', event_id: 0 },
-            { name: 'Client:ClientRead', total_ms: 915300, class: 'Client', event_id: 0x06000000 },
-            { name: 'Lock:relation', total_ms: 28700, class: 'Lock', event_id: 0x03000001 },
-            { name: 'Timeout:PgSleep', total_ms: 68000, class: 'Timeout', event_id: 0x0b000001 },
-            { name: 'IO:DataFileRead', total_ms: 5200, class: 'IO', event_id: 0x0a000015 },
+            { name: 'CPU*', idle: false, total_ms: 10000, class: 'CPU', event_id: 0 },
+            { name: 'Client:ClientRead', idle: true, total_ms: 915300, class: 'Client', event_id: 0x06000000 },
+            { name: 'Lock:relation', idle: false, total_ms: 28700, class: 'Lock', event_id: 0x03000001 },
+            { name: 'Timeout:PgSleep', idle: false, total_ms: 68000, class: 'Timeout', event_id: 0x0b000001 },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 5200, class: 'IO', event_id: 0x0a000015 },
         ],
         links: [
             { source: 'Client:ClientRead', target: 'CPU*', value: 48000, duration_ms: 915300 },
@@ -406,8 +445,8 @@ test('hideIdle on idle-only data: visibleCount 0 but hiddenIdleLinks/-Value '
     const idleOnly = {
         total: 100,
         nodes: [
-            { name: 'CPU*', total_ms: 10, class: 'CPU' },
-            { name: 'Client:ClientRead', total_ms: 90, class: 'Client' },
+            { name: 'CPU*', idle: false, total_ms: 10, class: 'CPU' },
+            { name: 'Client:ClientRead', idle: true, total_ms: 90, class: 'Client' },
         ],
         links: [
             { source: 'Client:ClientRead', target: 'CPU*', value: 50, duration_ms: 90 },
@@ -438,18 +477,18 @@ function competingOmissionsData() {
     return {
         total: 2002,
         nodes: [
-            { name: 'CPU*', total_ms: 1000, class: 'CPU', event_id: 0 },
-            { name: 'IO:DataFileRead', total_ms: 900, class: 'IO', event_id: 1 },
-            { name: 'Lock:relation', total_ms: 50000, class: 'Lock', event_id: 2 },
-            { name: 'Timeout:VacuumDelay', total_ms: 300, class: 'Timeout', event_id: 3 },
+            { name: 'CPU*', idle: false, total_ms: 1000, class: 'CPU', event_id: 0 },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 900, class: 'IO', event_id: 1 },
+            { name: 'Lock:relation', idle: false, total_ms: 50000, class: 'Lock', event_id: 2 },
+            { name: 'Timeout:PgSleep', idle: false, total_ms: 300, class: 'Timeout', event_id: 3 },
         ],
         links: [
             { source: 'CPU*', target: 'IO:DataFileRead', value: 1000, duration_ms: 900 },
             { source: 'IO:DataFileRead', target: 'CPU*', value: 990, duration_ms: 850 },
             { source: 'CPU*', target: 'Lock:relation', value: 2, duration_ms: 50000 },
             { source: 'Lock:relation', target: 'CPU*', value: 2, duration_ms: 48000 },
-            { source: 'CPU*', target: 'Timeout:VacuumDelay', value: 5, duration_ms: 300 },
-            { source: 'Timeout:VacuumDelay', target: 'CPU*', value: 5, duration_ms: 280 },
+            { source: 'CPU*', target: 'Timeout:PgSleep', value: 5, duration_ms: 300 },
+            { source: 'Timeout:PgSleep', target: 'CPU*', value: 5, duration_ms: 280 },
         ],
     };
 }
@@ -459,7 +498,7 @@ test('findOmittedDominantNode: ranks excluded nodes by total_ms (DB time), '
     + 'more frequent but short Timeout', () => {
     const data = competingOmissionsData();
     const { nodeMap } = transitionsContext({ ...data, links: data.links });
-    // Both Lock:relation and Timeout:VacuumDelay are "omitted" here; Lock has
+    // Both Lock:relation and Timeout:PgSleep are "omitted" here; Lock has
     // FEWER incident edges (2 vs 5) but the larger total_ms.
     const visible = new Set(['CPU*', 'IO:DataFileRead']);
     const dominant = findOmittedDominantNode(nodeMap, visible);
@@ -468,26 +507,26 @@ test('findOmittedDominantNode: ranks excluded nodes by total_ms (DB time), '
     // Negative control: ranking the SAME excluded set by edge count (the bug
     // this guards against) would pick Timeout, not Lock -- proving the two
     // criteria disagree on this fixture and the test is not vacuously true.
-    const byCountWinner = ['Lock:relation', 'Timeout:VacuumDelay']
+    const byCountWinner = ['Lock:relation', 'Timeout:PgSleep']
         .map(name => ({ name, count: data.links.filter(l => l.source === name || l.target === name)
             .reduce((s, l) => s + l.value, 0) }))
         .sort((a, b) => b.count - a.count)[0].name;
-    assert.equal(byCountWinner, 'Timeout:VacuumDelay');
+    assert.equal(byCountWinner, 'Timeout:PgSleep');
     assert.notEqual(dominant.name, byCountWinner);
 });
 
 test('findOmittedDominantNode: idle nodes are never named here -- the '
     + '"Hide ClientRead" control already discloses that reason on its own', () => {
     const nodeMap = {
-        'Client:ClientRead': { total_ms: 999999 },
-        'Lock:relation': { total_ms: 10 },
+        'Client:ClientRead': { idle: true, total_ms: 999999 },
+        'Lock:relation': { idle: false, total_ms: 10 },
     };
     const dominant = findOmittedDominantNode(nodeMap, new Set());
     assert.equal(dominant.name, 'Lock:relation', 'the idle node must be skipped even though it has far more total_ms');
 });
 
 test('findOmittedDominantNode: null when nothing non-idle is omitted', () => {
-    assert.equal(findOmittedDominantNode({ 'CPU*': { total_ms: 10 } }, new Set(['CPU*'])), null);
+    assert.equal(findOmittedDominantNode({ 'CPU*': { idle: false, total_ms: 10 } }, new Set(['CPU*'])), null);
     assert.equal(findOmittedDominantNode({}, new Set()), null);
 });
 
@@ -496,8 +535,8 @@ test('findOmittedDominantNode: null when nothing non-idle is omitted', () => {
 
 test('#456 findOmittedDominantNode: an exact total_ms tie is broken by '
     + 'event_id ascending, the SAME winner regardless of nodeMap key order', () => {
-    const a = { total_ms: 5000, event_id: 30 };   // 'Zeta:Low' — higher name, LOWER id
-    const b = { total_ms: 5000, event_id: 10 };   // 'Alpha:High' — lower name, lower id -> winner
+    const a = { idle: false, total_ms: 5000, event_id: 30 };   // 'Zeta:Low' — higher name, LOWER id
+    const b = { idle: false, total_ms: 5000, event_id: 10 };   // 'Alpha:High' — lower name, lower id -> winner
     const order1 = findOmittedDominantNode(
         { 'Zeta:Low': a, 'Alpha:High': b }, new Set());
     const order2 = findOmittedDominantNode(
@@ -509,16 +548,16 @@ test('#456 findOmittedDominantNode: an exact total_ms tie is broken by '
 
 test('#456 findOmittedDominantNode: no event_id on either side falls back '
     + 'to name ascending, deterministically across permutations', () => {
-    const nodeMapA = { 'Zeta:NoId': { total_ms: 100 }, 'Alpha:NoId': { total_ms: 100 } };
-    const nodeMapB = { 'Alpha:NoId': { total_ms: 100 }, 'Zeta:NoId': { total_ms: 100 } };
+    const nodeMapA = { 'Zeta:NoId': { idle: false, total_ms: 100 }, 'Alpha:NoId': { idle: false, total_ms: 100 } };
+    const nodeMapB = { 'Alpha:NoId': { idle: false, total_ms: 100 }, 'Zeta:NoId': { idle: false, total_ms: 100 } };
     assert.equal(findOmittedDominantNode(nodeMapA, new Set()).name, 'Alpha:NoId');
     assert.equal(findOmittedDominantNode(nodeMapB, new Set()).name, 'Alpha:NoId');
 });
 
 test('#456 findOmittedDominantNode: a node WITH a numeric event_id beats '
     + 'one without, on a duration tie, regardless of order', () => {
-    const withId = { total_ms: 42, event_id: 5 };
-    const withoutId = { total_ms: 42 };   // no event_id field at all
+    const withId = { idle: false, total_ms: 42, event_id: 5 };
+    const withoutId = { idle: false, total_ms: 42 };   // no event_id field at all
     assert.equal(findOmittedDominantNode(
         { 'HasId:Thing': withId, 'NoId:Thing': withoutId }, new Set()).name, 'HasId:Thing');
     assert.equal(findOmittedDominantNode(
@@ -528,8 +567,8 @@ test('#456 findOmittedDominantNode: a node WITH a numeric event_id beats '
 test('#456 RED-DEMONSTRATED: the OLD "first key seen wins" rule disagreed '
     + 'with the new rule on this exact fixture (regression pin, not a '
     + 'hypothetical) -- Object.keys order alone used to decide the winner', () => {
-    const a = { total_ms: 5000, event_id: 30 };
-    const b = { total_ms: 5000, event_id: 10 };
+    const a = { idle: false, total_ms: 5000, event_id: 30 };
+    const b = { idle: false, total_ms: 5000, event_id: 10 };
     // Under the OLD rule (`ms > best.ms` only, first-seen wins ties), the
     // FIRST key in insertion order would win regardless of event_id -- i.e.
     // 'Zeta:Low' in this map, 'Alpha:High' in the reversed one. The NEW rule
@@ -551,8 +590,8 @@ test('#456 buildTransitionsOption layout: an exact total_ms tie between two '
     // changing sortedNodes' tie order and therefore node layout position.
     const base = {
         nodes: [
-            { name: 'Zeta:Low', total_ms: 5000, event_id: 30, class: 'Lock' },
-            { name: 'Alpha:High', total_ms: 5000, event_id: 10, class: 'Lock' },
+            { name: 'Zeta:Low', idle: false, total_ms: 5000, event_id: 30, class: 'Lock' },
+            { name: 'Alpha:High', idle: false, total_ms: 5000, event_id: 10, class: 'Lock' },
         ],
     };
     const dataForward = { ...base, links: [
@@ -589,10 +628,10 @@ test('buildTransitionsOption: threshold exclusion is reported SEPARATELY from '
     const data = {
         total: 10000,
         nodes: [
-            { name: 'CPU*', total_ms: 1000, class: 'CPU' },
-            { name: 'Client:ClientRead', total_ms: 9000, class: 'Client' },
-            { name: 'IO:DataFileRead', total_ms: 900, class: 'IO' },
-            { name: 'Lock:relation', total_ms: 50000, class: 'Lock' },
+            { name: 'CPU*', idle: false, total_ms: 1000, class: 'CPU' },
+            { name: 'Client:ClientRead', idle: true, total_ms: 9000, class: 'Client' },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 900, class: 'IO' },
+            { name: 'Lock:relation', idle: false, total_ms: 50000, class: 'Lock' },
         ],
         links: [
             { source: 'Client:ClientRead', target: 'CPU*', value: 5000, duration_ms: 9000 },
@@ -622,8 +661,8 @@ test('buildTransitionsOption: server truncation is disclosed independently '
     const data = {
         total: 500, truncated: true, link_count: 3, total_link_count: 7,
         nodes: [
-            { name: 'CPU*', total_ms: 100, class: 'CPU' },
-            { name: 'IO:DataFileRead', total_ms: 90, class: 'IO' },
+            { name: 'CPU*', idle: false, total_ms: 100, class: 'CPU' },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 90, class: 'IO' },
         ],
         links: [
             { source: 'CPU*', target: 'IO:DataFileRead', value: 10, duration_ms: 90 },
@@ -645,7 +684,7 @@ test('buildTransitionsOption: a server predating link_count/total_link_count/'
     + 'truncated fields reports serverTruncated false, not a crash', () => {
     const built = buildTransitionsOption({
         total: 10,
-        nodes: [{ name: 'CPU*', total_ms: 5, class: 'CPU' }],
+        nodes: [{ name: 'CPU*', idle: false, total_ms: 5, class: 'CPU' }],
         links: [{ source: 'CPU*', target: 'CPU*', value: 5, duration_ms: 1 }],
     }, 0, { width: 200, height: 200 });
     assert.equal(built.serverTruncated, false);
@@ -706,10 +745,10 @@ test('restoreAllTransitionsState ("Show all"): removes BOTH client exclusions, '
     const data = {
         total: 10000, truncated: true, link_count: 6, total_link_count: 9,
         nodes: [
-            { name: 'CPU*', total_ms: 1000, class: 'CPU' },
-            { name: 'Client:ClientRead', total_ms: 9000, class: 'Client' },
-            { name: 'IO:DataFileRead', total_ms: 900, class: 'IO' },
-            { name: 'Lock:relation', total_ms: 50000, class: 'Lock' },
+            { name: 'CPU*', idle: false, total_ms: 1000, class: 'CPU' },
+            { name: 'Client:ClientRead', idle: true, total_ms: 9000, class: 'Client' },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 900, class: 'IO' },
+            { name: 'Lock:relation', idle: false, total_ms: 50000, class: 'Lock' },
         ],
         links: [
             { source: 'Client:ClientRead', target: 'CPU*', value: 5000, duration_ms: 9000 },
@@ -743,9 +782,9 @@ test('negative control: edges are literal old_event/new_event pairs -- '
     const data = {
         total: 100,
         nodes: [
-            { name: 'CPU*', total_ms: 50, class: 'CPU' },
-            { name: 'Lock:relation', total_ms: 30, class: 'Lock' },
-            { name: 'IO:DataFileRead', total_ms: 20, class: 'IO' },
+            { name: 'CPU*', idle: false, total_ms: 50, class: 'CPU' },
+            { name: 'Lock:relation', idle: false, total_ms: 30, class: 'Lock' },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 20, class: 'IO' },
         ],
         links: [
             { source: 'Lock:relation', target: 'CPU*', value: 40, duration_ms: 30 },
@@ -807,12 +846,12 @@ test('#436 RED: the pre-fix layout actually clips (demonstrates the bug, '
     const data = {
         total: 1000,
         nodes: [
-            { name: 'CPU*', total_ms: 5200, class: 'CPU' },
-            { name: 'IO:DataFileRead', total_ms: 2100, class: 'IO' },
-            { name: 'LWLock:WALInsert', total_ms: 900, class: 'LWLock' },
-            { name: 'IO:WalSync', total_ms: 800, class: 'IO' },
-            { name: 'Lock:transactionid', total_ms: 1500, class: 'Lock' },
-            { name: 'LWLock:LockManager', total_ms: 210, class: 'LWLock' },
+            { name: 'CPU*', idle: false, total_ms: 5200, class: 'CPU' },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 2100, class: 'IO' },
+            { name: 'LWLock:WALInsert', idle: false, total_ms: 900, class: 'LWLock' },
+            { name: 'IO:WalSync', idle: false, total_ms: 800, class: 'IO' },
+            { name: 'Lock:transactionid', idle: false, total_ms: 1500, class: 'Lock' },
+            { name: 'LWLock:LockManager', idle: false, total_ms: 210, class: 'LWLock' },
         ],
         links: [
             { source: 'CPU*', target: 'IO:DataFileRead', value: 1400, duration_ms: 1 },
@@ -845,24 +884,24 @@ test('#436: every laid-out node + its label fits the container for the dense '
     + '18-node fixture at threshold 0 (max density, max label count)', () => {
     const dims = { width: 620, height: 460 };
     const nodes = [
-        { name: 'CPU*', total_ms: 5200, class: 'CPU' },
-        { name: 'Client:ClientRead', total_ms: 2600, class: 'Client' },
-        { name: 'IO:DataFileRead', total_ms: 2100, class: 'IO' },
-        { name: 'Lock:transactionid', total_ms: 1500, class: 'Lock' },
-        { name: 'LWLock:WALInsert', total_ms: 900, class: 'LWLock' },
-        { name: 'IO:WalSync', total_ms: 800, class: 'IO' },
-        { name: 'LWLock:WALWrite', total_ms: 640, class: 'LWLock' },
-        { name: 'Lock:tuple', total_ms: 480, class: 'Lock' },
-        { name: 'LWLock:BufferMapping', total_ms: 420, class: 'LWLock' },
-        { name: 'IO:WalWrite', total_ms: 350, class: 'IO' },
-        { name: 'Timeout:VacuumDelay', total_ms: 300, class: 'Timeout' },
-        { name: 'Lock:relation', total_ms: 260, class: 'Lock' },
-        { name: 'IO:DataFileExtend', total_ms: 240, class: 'IO' },
-        { name: 'LWLock:LockManager', total_ms: 210, class: 'LWLock' },
-        { name: 'IPC:BufferIO', total_ms: 190, class: 'IPC' },
-        { name: 'Extension:Extension', total_ms: 150, class: 'Extension' },
-        { name: 'IPC:MessageQueueReceive', total_ms: 120, class: 'IPC' },
-        { name: 'BufferPin:BufferPin', total_ms: 90, class: 'BufferPin' },
+        { name: 'CPU*', idle: false, total_ms: 5200, class: 'CPU' },
+        { name: 'Client:ClientRead', idle: true, total_ms: 2600, class: 'Client' },
+        { name: 'IO:DataFileRead', idle: false, total_ms: 2100, class: 'IO' },
+        { name: 'Lock:transactionid', idle: false, total_ms: 1500, class: 'Lock' },
+        { name: 'LWLock:WALInsert', idle: false, total_ms: 900, class: 'LWLock' },
+        { name: 'IO:WalSync', idle: false, total_ms: 800, class: 'IO' },
+        { name: 'LWLock:WALWrite', idle: false, total_ms: 640, class: 'LWLock' },
+        { name: 'Lock:tuple', idle: false, total_ms: 480, class: 'Lock' },
+        { name: 'LWLock:BufferMapping', idle: false, total_ms: 420, class: 'LWLock' },
+        { name: 'IO:WalWrite', idle: false, total_ms: 350, class: 'IO' },
+        { name: 'Timeout:VacuumDelay', idle: true, total_ms: 300, class: 'Timeout' },
+        { name: 'Lock:relation', idle: false, total_ms: 260, class: 'Lock' },
+        { name: 'IO:DataFileExtend', idle: false, total_ms: 240, class: 'IO' },
+        { name: 'LWLock:LockManager', idle: false, total_ms: 210, class: 'LWLock' },
+        { name: 'IPC:BufferIO', idle: false, total_ms: 190, class: 'IPC' },
+        { name: 'Extension:Extension', idle: false, total_ms: 150, class: 'Extension' },
+        { name: 'IPC:MessageQueueReceive', idle: false, total_ms: 120, class: 'IPC' },
+        { name: 'BufferPin:BufferPin', idle: false, total_ms: 90, class: 'BufferPin' },
     ];
     const links = [];
     for (let i = 1; i < nodes.length; i++) {
@@ -900,12 +939,12 @@ test('#436: cross-edge curveness is capped so its bow (curveness * pixel '
     const data = {
         total: 1000,
         nodes: [
-            { name: 'CPU*', total_ms: 5000, class: 'CPU' },
-            { name: 'A', total_ms: 400, class: 'IO' },
-            { name: 'B', total_ms: 390, class: 'Lock' },
-            { name: 'C', total_ms: 380, class: 'LWLock' },
-            { name: 'D', total_ms: 370, class: 'Timeout' },
-            { name: 'E', total_ms: 360, class: 'IPC' },
+            { name: 'CPU*', idle: false, total_ms: 5000, class: 'CPU' },
+            { name: 'A', idle: false, total_ms: 400, class: 'IO' },
+            { name: 'B', idle: false, total_ms: 390, class: 'Lock' },
+            { name: 'C', idle: false, total_ms: 380, class: 'LWLock' },
+            { name: 'D', idle: false, total_ms: 370, class: 'Timeout' },
+            { name: 'E', idle: false, total_ms: 360, class: 'IPC' },
         ],
         links: [
             { source: 'CPU*', target: 'A', value: 400, duration_ms: 1 },
@@ -1054,8 +1093,8 @@ test('negative control: isLayoutAnchorNode only matches the two reserved '
 test('findDominantSourceDwellNode: names the globally largest non-idle '
     + 'node and reports it VISIBLE when nothing hides it', () => {
     const nodeMap = {
-        'CPU*': { total_ms: 500, event_id: 0 },
-        'IO:DataFileRead': { total_ms: 200, event_id: 20 },
+        'CPU*': { idle: false, total_ms: 500, event_id: 0 },
+        'IO:DataFileRead': { idle: false, total_ms: 200, event_id: 20 },
     };
     const d = findDominantSourceDwellNode(nodeMap, new Set(['CPU*', 'IO:DataFileRead']));
     assert.equal(d.name, 'CPU*');
@@ -1066,8 +1105,8 @@ test('findDominantSourceDwellNode: names the globally largest non-idle '
 test('findDominantSourceDwellNode: reports OMITTED when the dominant node '
     + 'is not in the visible set', () => {
     const nodeMap = {
-        'CPU*': { total_ms: 500, event_id: 0 },
-        'Lock:relation': { total_ms: 900, event_id: 50 },
+        'CPU*': { idle: false, total_ms: 500, event_id: 0 },
+        'Lock:relation': { idle: false, total_ms: 900, event_id: 50 },
     };
     const d = findDominantSourceDwellNode(nodeMap, new Set(['CPU*']));
     assert.equal(d.name, 'Lock:relation');
@@ -1077,8 +1116,8 @@ test('findDominantSourceDwellNode: reports OMITTED when the dominant node '
 test('findDominantSourceDwellNode: idle nodes are never the dominant node, '
     + 'even with the largest total_ms', () => {
     const nodeMap = {
-        'Client:ClientRead': { total_ms: 999999, event_id: 99 },
-        'Lock:relation': { total_ms: 10, event_id: 1 },
+        'Client:ClientRead': { idle: true, total_ms: 999999, event_id: 99 },
+        'Lock:relation': { idle: false, total_ms: 10, event_id: 1 },
     };
     const d = findDominantSourceDwellNode(nodeMap, new Set());
     assert.equal(d.name, 'Lock:relation');
@@ -1087,7 +1126,7 @@ test('findDominantSourceDwellNode: idle nodes are never the dominant node, '
 test('findDominantSourceDwellNode: null when there is no non-idle node with time', () => {
     assert.equal(findDominantSourceDwellNode({}, new Set()), null);
     assert.equal(findDominantSourceDwellNode(
-        { 'Client:ClientRead': { total_ms: 500 } }, new Set()), null);
+        { 'Client:ClientRead': { idle: true, total_ms: 500 } }, new Set()), null);
 });
 
 test('buildTransitionsDisclosure: dominant-dwell node is named PERSISTENTLY '
@@ -1129,8 +1168,8 @@ test('buildTransitionsOption: dominantSourceDwell reaches the real response '
     const data = {
         total: 10,
         nodes: [
-            { name: 'CPU*', total_ms: 100, event_id: 0, class: 'CPU' },
-            { name: 'IO:DataFileRead', total_ms: 90, event_id: 20, class: 'IO' },
+            { name: 'CPU*', idle: false, total_ms: 100, event_id: 0, class: 'CPU' },
+            { name: 'IO:DataFileRead', idle: false, total_ms: 90, event_id: 20, class: 'IO' },
         ],
         links: [
             { source: 'CPU*', target: 'IO:DataFileRead', value: 10, duration_ms: 90 },
@@ -1155,6 +1194,8 @@ test('TRANSITIONS_SEMANTICS_NOTE: states the size/edge-meaning distinction '
 // #456: frozen buckets:200 response from issue456-restart-replay/out200/run00.json
 // (all ten captured responses are byte-identical). Keep the full catalog/links:
 // pruning the fixture to the displayed graph would hide the regression itself.
+// #487: idle booleans annotate that capture for the current wire schema;
+// captured dwell times, identities and links are unchanged.
 import { readFileSync } from 'node:fs';
 import { createTransitionsView } from '../../web/static/views/transitions.js';
 import { Transport } from '../../web/static/lib/transport.js';
