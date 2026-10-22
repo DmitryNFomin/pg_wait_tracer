@@ -264,7 +264,7 @@ export const states = {
         tags: ['ALIGNMENT'],
         data: (() => {
             const names = ['CPU*', 'A:Event', 'B:Event', 'C:Event', 'D:Event', 'E:Event'];
-            const nodes = names.map(name => ({ name, total_ms: 1000, class: 'CPU' }));
+            const nodes = names.map(name => ({ name, total_ms: 1000, class: 'CPU', idle: false }));
             const links = [];
             for (let i = 1; i < names.length; i++) {
                 links.push({ source: 'CPU*', target: names[i], value: 100, duration_ms: 1 });

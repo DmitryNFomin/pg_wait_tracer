@@ -139,6 +139,20 @@ export function transitionsDataError(data) {
             !Number.isFinite(node.total_ms) || node.total_ms < 0) {
             return 'invalid node name or dwell time';
         }
+        // #487 follow-up: findOmittedDominantNode/findDominantSourceDwellNode
+        // require an explicit `idle` boolean per candidate and fail closed
+        // (exclude) when it is missing -- but exclusion alone is not enough
+        // on a PARTIAL catalog. A 715000ms node with no idle verdict gets
+        // excluded while a genuinely-idle 10ms node with idle:false (a
+        // contradiction, but the field is only ever trusted, never
+        // cross-checked) would then be announced as "largest source-dwell"
+        // -- an unqualified false superlative, not a silent omission. Reject
+        // the WHOLE payload the moment any node's idle verdict is unknown,
+        // one node or all of them, rather than let the ranking quietly pick
+        // from whatever is left.
+        if (typeof node.idle !== 'boolean') {
+            return 'node missing idle verdict: ' + node.name;
+        }
         if (names.has(node.name)) return 'duplicate node: ' + node.name;
         names.add(node.name);
     }

@@ -12,6 +12,7 @@ import {
     isIdleTransitionNode, p95TruncationMarker, findOmittedDominantNode,
     restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder, isLayoutAnchorNode,
     buildTransitionsDisclosure, findDominantSourceDwellNode, TRANSITIONS_SEMANTICS_NOTE,
+    transitionsDataError,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
@@ -57,6 +58,73 @@ for (const rank of [findOmittedDominantNode, findDominantSourceDwellNode]) {
         assert.equal(rank({ 'Lock:relation': { total_ms: 1 } }, new Set()), null);
     });
 }
+
+// #487 review follow-up: findOmittedDominantNode/findDominantSourceDwellNode
+// fail closed PER CANDIDATE (proven above: an unknown-idle node is excluded,
+// never named). But on a PARTIAL catalog that just means the real answer goes
+// quiet while a small, definitely-non-idle node wins by default -- the
+// disclosure then calls that 10ms node "largest source-dwell", an unqualified
+// FALSE SUPERLATIVE, which is worse than showing nothing. The fix lives one
+// layer up: transitionsDataError (and therefore buildTransitionsOption, which
+// calls it before any ranking runs) rejects the WHOLE payload the moment any
+// node's idle verdict is unknown -- total absence or just one node among many.
+test('#487 follow-up: transitionsDataError rejects a node with a non-boolean idle field', () => {
+    assert.equal(transitionsDataError({
+        nodes: [{ name: 'CPU*', total_ms: 10, idle: false }],
+        links: [],
+    }), null, 'sanity: a fully-flagged catalog is not itself rejected');
+    for (const idle of [undefined, null, 0, 'false', 'true']) {
+        const data = { nodes: [{ name: 'CPU*', total_ms: 10, idle }], links: [] };
+        assert.equal(transitionsDataError(data), 'node missing idle verdict: CPU*');
+    }
+});
+
+test('#487 follow-up: a PARTIAL catalog -- one real, large-total_ms node with '
+    + 'no idle verdict, sitting alongside a small node that DOES carry idle:false '
+    + '-- must not let the small node be silently crowned dominant. The whole '
+    + 'payload is refused instead of naming a false superlative.', () => {
+    // The adviser's own numbers (coordinator relay): a 715,000ms node with an
+    // unknown idle verdict next to a 10ms node explicitly flagged non-idle.
+    const payload = {
+        total: 1000, links: [],
+        nodes: [
+            { name: 'Lock:relation', total_ms: 715000 },   // idle field OMITTED
+            { name: 'IO:DataFileRead', total_ms: 10, idle: false },
+        ],
+    };
+
+    assert.equal(transitionsDataError(payload), 'node missing idle verdict: Lock:relation');
+    assert.throws(
+        () => buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true),
+        /node missing idle verdict: Lock:relation/,
+        'buildTransitionsOption must refuse before omittedDominant/dominantSourceDwell ever run');
+
+    // Negative control named explicitly: if the exclusion-only fix (what
+    // findOmittedDominantNode already does on its own, demonstrated in the
+    // "unknown idle status is excluded without name fallback" test above)
+    // were the WHOLE fix, the ranking would still run on this payload and
+    // the 10ms node would win -- reproduce that exact wrong outcome here so
+    // the claim is not hypothetical. Built by hand (not transitionsContext,
+    // which now also refuses this payload -- that's the point of the fix,
+    // not something to route around to get a nodeMap).
+    const nodeMap = Object.fromEntries(payload.nodes.map(n => [n.name, n]));
+    const wronglyRanked = findOmittedDominantNode(nodeMap, new Set());
+    assert.equal(wronglyRanked.name, 'IO:DataFileRead');
+    assert.equal(wronglyRanked.ms, 10,
+        'demonstrates the bug this payload would otherwise produce: a 10ms node '
+        + 'silently wins once the real 715,000ms dominant node is excluded for an '
+        + 'unknown idle verdict -- exactly the false superlative the full-payload '
+        + 'refusal above must prevent from ever reaching buildTransitionsOption');
+});
+
+test('#487 follow-up: total absence (every node missing idle) is refused the same way '
+    + 'as a single missing node, not just the all-flagged or none-flagged ends', () => {
+    const payload = replay456();
+    for (const n of payload.nodes) delete n.idle;
+    assert.match(transitionsDataError(payload), /^node missing idle verdict: /);
+    assert.throws(() => buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true),
+        /node missing idle verdict:/);
+});
 
 function data() {
     return {
