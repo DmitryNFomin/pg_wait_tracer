@@ -8,6 +8,7 @@ Optional launcher path allows checking the pre-change version for red evidence.
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -397,9 +398,38 @@ class RemoteDirIsolationTests(unittest.TestCase):
         start = source.index('server_id="persistent"', persistent)
         end = source.index('echo "demo-rehearsal: targeting persistent box', start)
         block = source[start:end]
-        # Helper-only checks cannot catch a bypass at the real launch call site.
+        # Cheap wiring check; the subprocess test below also checks the value.
         self.assertIn("compute_remote_dir", block)
         self.assertNotIn("git rev-parse --abbrev-ref HEAD", block)
+
+    def test_real_persistent_launches_at_same_detached_sha_are_unique(self):
+        stub_bin = self.base / "bin"
+        stub_bin.mkdir()
+        # Leave git real: the launcher must identify each detached checkout.
+        for name in ("ssh", "rsync", "security"):
+            stub = stub_bin / name
+            stub.write_text("#!/bin/sh\nexit 1\n")
+            stub.chmod(0o755)
+        remote_dirs = []
+        for repo in (self.repo, self.other_repo):
+            (repo / "scripts").mkdir()
+            launcher = repo / "scripts/demo-rehearsal.sh"
+            launcher.write_text(LAUNCHER.read_text())
+            result = subprocess.run(
+                ["bash", str(launcher)], cwd=repo,
+                env={**os.environ, "PGWT_BOX": "fixture-box",
+                     "PATH": str(stub_bin) + os.pathsep + os.environ["PATH"],
+                     "DEMO_REHEARSAL_STATE_FILE": str(repo / "tests/results/state.sh")},
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            match = re.search(r"remote_dir=(pgwt-demo-rehearsal-[^,\s]+)", result.stdout)
+            self.assertIsNotNone(match, result.stdout)
+            remote_dirs.append(match.group(1))
+        # Check runtime isolation before format so an override reports both
+        # colliding values directly, even if it also omits the candidate SHA.
+        self.assertNotEqual(*remote_dirs)
+        for remote_dir in remote_dirs:
+            self.assertRegex(remote_dir, rf"^pgwt-demo-rehearsal-{self.sha}-[0-9]+-[0-9]+-[0-9]+$")
 
     def test_separate_invocations_at_same_detached_sha_and_epoch_are_unique(self):
         # Use the SAME checkout as well as the same SHA and epoch here.
@@ -462,6 +492,115 @@ class RemoteDirIsolationTests(unittest.TestCase):
         self.assertFalse(sentinel1.exists())
         sentinel2 = self.retain_trace(destination2, "run2")
         self.assertTrue(sentinel2.exists())
+
+
+class PersistentDiskPreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        source = LAUNCHER.read_text()
+        start = source.index("        # BEGIN persistent disk preflight")
+        end = source.index("        # END persistent disk preflight", start)
+        self.block = self.base / "disk-preflight.sh"
+        self.block.write_text(source[start:end])
+        self.invocations = 0
+
+    def probe(self, output, *, ssh_rc=0, floor=None):
+        self.invocations += 1
+        scratch = self.base / str(self.invocations)
+        scratch.mkdir()
+        env = dict(os.environ)
+        env.pop("MIN_FREE_DISK_MB", None)
+        if floor is not None:
+            env["MIN_FREE_DISK_MB"] = str(floor)
+        env.update(FIXTURE_DF_OUTPUT=output, FIXTURE_SSH_RC=str(ssh_rc))
+        result = subprocess.run(
+            ["bash", "-c", """
+set -uo pipefail
+target=user@fixture-box
+log=preflight.log
+: > "$log"
+ssh() {
+    printf '%s\n' "$*" >> probe-calls
+    printf '%s' "$FIXTURE_DF_OUTPUT"
+    return "$FIXTURE_SSH_RC"
+}
+source """ + shlex.quote(str(self.block)) + """
+touch proceeded
+"""], cwd=scratch, env=env, text=True, capture_output=True, timeout=5)
+        calls = scratch / "probe-calls"
+        if calls.exists():
+            self.assertEqual(calls.read_text().splitlines(), [
+                "-o BatchMode=yes -o ConnectTimeout=10 user@fixture-box "
+                "df -Pk . 2>/dev/null | awk 'NR==2{print $4}'"])
+        return result, (scratch / "preflight.log").read_text(), (scratch / "proceeded").exists()
+
+    def test_sufficient_space_proceeds_and_logs_measurement(self):
+        result, log, proceeded = self.probe(str(100000 * 1024))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(proceeded)
+        self.assertIn("free disk 100000 MB, floor 5120 MB", log)
+
+    def test_low_space_refuses_before_proceeding(self):
+        result, log, proceeded = self.probe(str(200 * 1024))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(proceeded)
+        for output in (log, result.stderr):
+            for detail in ("REFUSING", "user@fixture-box", "200 MB", "5120 MB",
+                           "MIN_FREE_DISK_MB", "pgwt-demo-rehearsal-*", "issue #518",
+                           "nothing prunes them yet", "manual cleanup"):
+                self.assertIn(detail, output)
+
+    def test_invalid_or_failed_probe_refuses_before_proceeding(self):
+        for output, ssh_rc in (("garbage", 0), ("", 0), ("", 255),
+                               (str(100000 * 1024), 255), ("-1", 0),
+                               ("123\n456", 0), (" 123", 0)):
+            with self.subTest(output=output, ssh_rc=ssh_rc):
+                result, log, proceeded = self.probe(output, ssh_rc=ssh_rc)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(proceeded)
+                for message in (log, result.stderr):
+                    self.assertIn("user@fixture-box", message)
+                    self.assertIn("REFUSING", message)
+                    self.assertIn("refusing rather than guessing", message)
+
+    def test_floor_override_can_allow_or_refuse_launch(self):
+        for free_mb, floor, allowed in ((200, 100, True), (6000, 7000, False)):
+            with self.subTest(free_mb=free_mb, floor=floor):
+                result, log, proceeded = self.probe(str(free_mb * 1024), floor=floor)
+                self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                self.assertEqual(proceeded, allowed)
+                self.assertIn(f"{free_mb} MB", log)
+                self.assertIn(f"{floor} MB", log)
+
+    def test_floor_boundary_uses_kb_without_rounding_up(self):
+        for free_kb, allowed in ((5120 * 1024, True), (5120 * 1024 - 1, False), (0, False)):
+            with self.subTest(free_kb=free_kb):
+                result, log, proceeded = self.probe(str(free_kb))
+                self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                self.assertEqual(proceeded, allowed)
+
+    def test_invalid_floor_refuses_before_proceeding(self):
+        for floor in ("garbage", "-1"):
+            with self.subTest(floor=floor):
+                result, log, proceeded = self.probe(str(100000 * 1024), floor=floor)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(proceeded)
+                self.assertIn("MIN_FREE_DISK_MB must be a non-negative integer", log)
+
+    def test_preflight_is_persistent_only_and_precedes_state_creation(self):
+        source = LAUNCHER.read_text()
+        launch = source.index('if [[ "$MODE" == "launch" ]]; then')
+        persistent = source.index('if [[ "$PERSISTENT" == "1" ]]; then', launch)
+        targeting = source.index('echo "demo-rehearsal: targeting persistent box', persistent)
+        start = source.index("        # BEGIN persistent disk preflight", targeting)
+        end = source.index("        # END persistent disk preflight", start)
+        ephemeral = source.index('\n    else\n', persistent)
+        state = source.index('cat > "$STATE_FILE"', launch)
+        self.assertLess(targeting, start)
+        self.assertLess(end, ephemeral)
+        self.assertLess(ephemeral, state)
 
 
 if __name__ == "__main__":

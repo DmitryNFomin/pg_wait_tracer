@@ -102,6 +102,10 @@
 #                  with PGWT_BOX set. Prefer pgwt-gate over pgwt-gate-2 --
 #                  gate-2 produced two unrelated timing failures (#237);
 #                  check both are actually idle before choosing.
+#   MIN_FREE_DISK_MB minimum free space on a persistent box before launch
+#                  (default 5120, 5 GiB). Each retained run costs ~200 MB
+#                  plus its built tree; leave headroom for capture and CI.
+#                  Ignored for throwaway VMs, which start fresh each run.
 #   PG             PostgreSQL major version to require (default 18, the
 #                  criteria doc's pin). tests/demo_rehearsal.sh's own
 #                  --pg-version flag is now plumbed through from here
@@ -754,6 +758,28 @@ if [[ "$MODE" == "launch" ]]; then
         fi
         ssh_strict=""
         echo "demo-rehearsal: targeting persistent box $target (PGWT_BOX) -- remote_dir=$remote_dir, sharing box-check.sh's own flock (/tmp/pgwt-box-check.lock) so this queues behind CI/other agents rather than colliding" | tee -a "$log"
+        # BEGIN persistent disk preflight (issue #518)
+        # Refuse before writing state or creating the remote directory.
+        # Retained run directories accumulate; automatic pruning/deletion
+        # needs its own dedicated red/green treatment and is out of scope.
+        MIN_FREE_DISK_MB="${MIN_FREE_DISK_MB:-5120}"
+        if [[ ! "$MIN_FREE_DISK_MB" =~ ^[0-9]+$ ]]; then
+            echo "demo-rehearsal: REFUSING launch on $target -- MIN_FREE_DISK_MB must be a non-negative integer (got '$MIN_FREE_DISK_MB')" | tee -a "$log" >&2
+            exit 1
+        fi
+        if ! free_disk_kb=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$target" \
+            "df -Pk . 2>/dev/null | awk 'NR==2{print \$4}'" 2>>"$log") ||
+            [[ ! "$free_disk_kb" =~ ^[0-9]+$ ]]; then
+            echo "demo-rehearsal: REFUSING launch on $target -- free-disk probe failed or returned an invalid KB value ('$free_disk_kb'); refusing rather than guessing" | tee -a "$log" >&2
+            exit 1
+        fi
+        free_disk_mb=$((10#$free_disk_kb / 1024))
+        if (( 10#$free_disk_kb < 10#$MIN_FREE_DISK_MB * 1024 )); then
+            echo "demo-rehearsal: REFUSING launch on $target -- free disk $free_disk_mb MB is below the $MIN_FREE_DISK_MB MB floor (override with MIN_FREE_DISK_MB). pgwt-demo-rehearsal-* directories accumulate on this persistent box (issue #518); nothing prunes them yet, so the box needs manual cleanup" | tee -a "$log" >&2
+            exit 1
+        fi
+        echo "demo-rehearsal: disk preflight on $target -- free disk $free_disk_mb MB, floor $MIN_FREE_DISK_MB MB (MIN_FREE_DISK_MB)" | tee -a "$log"
+        # END persistent disk preflight
     else
         created_epoch=$(date +%s)
         labels="pgwt=ephemeral,created=$created_epoch,owner=$owner,task=demo-rehearsal"
