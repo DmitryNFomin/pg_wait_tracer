@@ -358,6 +358,82 @@ class RecorderTests(unittest.TestCase):
                 self.assertTrue((root/f"refused-{code}.refused"/"frames"/"000000.jpg").exists())
                 self.assertEqual(json.loads((root/f"refused-{code}.refused"/"refusal.json").read_text())["exit_code"],code)
 
+    def test_repeated_refusals_preserve_both_attempts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            run_id="repeated-refusal"
+            def first_refusal(args,staging):
+                (staging/"frames").mkdir()
+                (staging/"frames"/"000000.jpg").write_bytes(b"first-frame")
+                raise lib.Refusal(2,"first message")
+            def second_refusal(args,staging):
+                (staging/"frames").mkdir()
+                (staging/"frames"/"000000.jpg").write_bytes(b"second-frame")
+                raise lib.Refusal(3,"second message")
+            with patch.object(driver,"RESULTS",root), \
+                 patch.object(sys,"argv",["recorder","--mock","--run-id",run_id]), \
+                 patch.object(sys,"stderr",io.StringIO()):
+                with patch.object(driver,"record",first_refusal):
+                    self.assertEqual(driver.main(),2)
+                first=root/f"{run_id}.refused"
+                self.assertTrue(first.is_dir())
+                self.assertEqual((first/"frames"/"000000.jpg").read_bytes(),b"first-frame")
+                refusal=json.loads((first/"refusal.json").read_text())
+                self.assertEqual(refusal["exit_code"],2)
+                self.assertEqual(refusal["reason"],"first message")
+                original={p.relative_to(first):p.read_bytes() for p in first.rglob("*") if p.is_file()}
+
+                with patch.object(driver,"record",second_refusal):
+                    self.assertEqual(driver.main(),3)
+
+            self.assertEqual({p.relative_to(first):p.read_bytes() for p in first.rglob("*") if p.is_file()},original)
+            attempts=[p for p in root.glob(f"{run_id}.refused*") if p.is_dir()]
+            self.assertEqual(len(attempts),2)
+            second=next(p for p in attempts if p != first)
+            self.assertEqual((second/"frames"/"000000.jpg").read_bytes(),b"second-frame")
+            refusal=json.loads((second/"refusal.json").read_text())
+            self.assertEqual(refusal["exit_code"],3)
+            self.assertEqual(refusal["reason"],"second message")
+            self.assertFalse((root/run_id).exists())
+            self.assertFalse(list(root.glob(".*")))
+
+    def test_preservation_failure_leaves_staging_intact(self):
+        for step in ("write_text","rename"):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)
+                staging_paths=[]
+                before={}
+                def contents(staging):
+                    return {p.relative_to(staging):None if p.is_dir() else p.read_bytes()
+                            for p in staging.rglob("*")}
+                def refuse(args,staging):
+                    staging_paths.append(staging)
+                    (staging/"frames").mkdir()
+                    (staging/"frames"/"000000.jpg").write_bytes(b"diagnostic-frame")
+                    raise lib.Refusal(4,"recording failed")
+                def fail_preservation(*args,**kwargs):
+                    before.update(contents(staging_paths[0]))
+                    raise OSError(f"simulated {step} failure")
+                failure=patch.object(Path,"write_text",fail_preservation) if step == "write_text" else \
+                        patch.object(driver.os,"rename",fail_preservation)
+                with patch.object(driver,"RESULTS",root),patch.object(driver,"record",refuse), \
+                     patch.object(sys,"argv",["recorder","--mock","--run-id","preservation-failure"]), \
+                     patch.object(sys,"stderr",io.StringIO()) as stderr, failure:
+                    self.assertEqual(driver.main(),4)
+
+                self.assertEqual(len(staging_paths),1)
+                staging=staging_paths[0]
+                self.assertTrue(staging.is_dir())
+                self.assertEqual(contents(staging),before)
+                self.assertEqual((staging/"frames"/"000000.jpg").read_bytes(),b"diagnostic-frame")
+                if step == "rename":
+                    refusal=json.loads((staging/"refusal.json").read_text())
+                    self.assertEqual(refusal["reason"],"recording failed")
+                    self.assertEqual(refusal["exit_code"],4)
+                self.assertIn("WARNING",stderr.getvalue())
+                self.assertIn(str(staging),stderr.getvalue())
+                self.assertIn(f"simulated {step} failure",stderr.getvalue())
+
     def _minimal_walk(self, window=None):
         observation = {"panel": {"detail": "ok"}, "headlines": [], "table_rows": [], "readouts": []}
         tab = {"tab": "overview", "dwell": {"start_s": 0.0, "end_s": 1.0}, "frame_indices": [0],

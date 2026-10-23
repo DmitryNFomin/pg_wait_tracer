@@ -56,6 +56,15 @@ def video_verify_timeout_ms(duration_ms):
     return max(VERIFY_MIN_MS, VERIFY_MS_PER_VIDEO_SECOND * duration_ms / 1000)
 
 
+def refusal_path(run_id):
+    refused = RESULTS / f"{run_id}.refused"
+    suffix = 2
+    while refused.exists():
+        refused = RESULTS / f"{run_id}.refused.{suffix}"
+        suffix += 1
+    return refused
+
+
 AMBIGUITIES = [
     "Section 4 specifies no per-tab dwell times; explicit default is 10 seconds per tab, overridable by --dwells JSON.",
     "Section 4 says 'in the order the UI lists them' but Timeline requires a return to Sessions after Histogram; the numbered order is retained and that return is a navigation step.",
@@ -1048,10 +1057,16 @@ def main():
     except Refusal as exc:
         print(f"REFUSED ({exc.code}): {exc}",file=sys.stderr)
         if staging:
-            refused=RESULTS/f"{args.run_id}.refused"
-            (staging/"refusal.json").write_text(json.dumps({"complete":False,"exit_code":exc.code,
-                "reason":str(exc),"console_errors":getattr(exc,"errors",[])},indent=2)+"\n")
-            os.rename(staging,refused); staging=None
+            try:
+                refused=refusal_path(args.run_id)
+                (staging/"refusal.json").write_text(json.dumps({"complete":False,"exit_code":exc.code,
+                    "reason":str(exc),"console_errors":getattr(exc,"errors",[])},indent=2)+"\n")
+                os.rename(staging,refused)
+            except OSError as preservation_error:
+                print(f"WARNING: could not preserve refusal diagnostics: {preservation_error}; "
+                      f"staging left intact at {staging}",file=sys.stderr)
+            # Renamed on success; on failure leave the staging contents untouched.
+            staging=None
         return exc.code
     except (ValueError,OSError,KeyError,TypeError) as exc:
         print(f"REFUSED (6): artifact/configuration failure: {exc}",file=sys.stderr)
