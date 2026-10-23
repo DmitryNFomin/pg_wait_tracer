@@ -253,6 +253,24 @@ class RehearsalUIGates(unittest.TestCase):
                     self.assertFalse(result['ok'])
                     self.assertTrue(result['detail'])
 
+    def test_ui_evaluator_refuses_caller_required_controls_bypass(self):
+        measured = ui_measurements()['execution_truncation_disclosure']
+        cases = [
+            ('shrunken_controls', 'execution_truncation_disclosure', ('disclosure_title_only',)),
+            ('empty_controls', 'execution_truncation_disclosure', ()),
+            ('renamed_control', 'execution_truncation_disclosure',
+             ('chart_floor_240', 'made_up_control')),
+            ('unknown_gate', 'not_a_gate', ()),
+        ]
+        for bypass, name, required in cases:
+            with self.subTest(bypass=bypass):
+                # Both control-name checks agree with the caller's supplied bar.
+                controls = {control: {'ok': False, 'detail': 'observed assertion failure: ' + control}
+                            for control in required}
+                result = demo.evaluate_ui_gate(name, measured, controls, required)
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['detail'], 'unknown gate or incorrect required controls')
+
     def test_ui_evaluator_refuses_broken_product_measurements(self):
         cases = [
             ('waterfall_fold', ('scroll_height',), 982),
