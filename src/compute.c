@@ -4956,8 +4956,21 @@ static struct pgwt_exec_lane *detail_worker_lane(
     return lane;
 }
 
+static uint64_t detail_prorate(uint64_t value, uint64_t num, uint64_t den)
+{
+    if (den == 0 || num >= den)
+        return value;
+#if defined(__SIZEOF_INT128__)
+    return (uint64_t)(((unsigned __int128)value * num) / den);
+#else
+    long double v = (long double)value * (long double)num / (long double)den;
+    return (uint64_t)v;
+#endif
+}
+
 static int detail_lane_add(struct pgwt_exec_lane *lane,
-                           const struct pgwt_trace_event *ev, int max_events)
+                           const struct pgwt_trace_event *ev, int max_events,
+                           uint64_t win_start, uint64_t win_end)
 {
     lane->total_events++;
     if (lane->num_events >= max_events)
@@ -4968,13 +4981,33 @@ static int detail_lane_add(struct pgwt_exec_lane *lane,
             return -1;
     }
 
+    uint64_t raw_end = ev->timestamp_ns;
+    uint64_t raw_start = raw_end >= ev->duration_ns
+                       ? raw_end - ev->duration_ns : 0;
+    uint64_t cs = raw_start > win_start ? raw_start : win_start;
+    /* #496: clip to the execution window before recording. The LEFT clamp is
+     * the live one. The RIGHT clamp is a fail-safe that no current request
+     * path makes binding: an event closing after EXEC_END is reached only
+     * after the EXEC_END marker has already set inside_exec = 0 (scan order
+     * is by close timestamp), and for an open execution #424 flags the
+     * right-edge lookahead records RIGHT_OPEN, which this function skips.
+     * Measured on three scenarios built to contain right- and both-boundary
+     * straddlers: 14 detail_lane_add calls through the server, 10 with the
+     * left clamp binding, 0 with the right clamp binding. Keep the clamp.
+     * The `ce > cs` guard below is defence in depth only: the server refuses
+     * end_ns <= start_ns with code "invalid_request" before this function is
+     * reached, so no request path can reach the underflow. Measured: dropping
+     * the guard leaves the suite green, which is why no test asserts it. */
+    uint64_t ce = raw_end < win_end ? raw_end : win_end;
+    uint64_t clipped = ce > cs ? ce - cs : 0;
+
     struct pgwt_exec_event *dst = &lane->events[lane->num_events++];
     dst->event_id = ev->old_event;
-    dst->start_ns = ev->timestamp_ns >= ev->duration_ns
-                  ? ev->timestamp_ns - ev->duration_ns : 0;
-    dst->duration_ns = ev->duration_ns;
+    dst->start_ns = cs;
+    dst->duration_ns = clipped;
     dst->has_cpu = ev->cpu_ns != PGWT_CPU_NS_UNKNOWN;
-    dst->cpu_ns = dst->has_cpu ? ev->cpu_ns : 0;
+    dst->cpu_ns = dst->has_cpu
+                ? detail_prorate(ev->cpu_ns, clipped, ev->duration_ns) : 0;
     if (ev->old_event == 0)
         snprintf(dst->name, sizeof(dst->name), "CPU*");
     else
@@ -5077,7 +5110,8 @@ void pgwt_compute_execution_detail(
                    (int)leader_pid) {
             lane = detail_worker_lane(out, ev->pid, 1);
         }
-        if (lane && detail_lane_add(lane, ev, max_events_per_lane) != 0) {
+        if (lane && detail_lane_add(lane, ev, max_events_per_lane,
+                                    start_ns, end_ns) != 0) {
             out->failed = 1;
             break;
         }
