@@ -91,16 +91,51 @@ rates (measured on Hetzner cx43, 8 vCPU/16 GB RAM — see
 
 ## Demo
 
+### Tour of the web UI
+
+![pgwt web UI tour — all eleven tabs](demos/pgwt-tour.gif)
+
+A 38-second **edited tour** of all eleven tabs: Overview, Events, Sessions,
+Queries, Histogram, Timeline, Transitions, Matrix, Concurrency, Waterfall and
+Latency. Hard cuts between tabs, not one continuous live recording: each stop
+is a short excerpt of its own recording — a chart refresh, or the table scroll
+on Overview / Events / Sessions / Queries. Motion runs at 0.4–0.8x of the 25 fps
+capture and the waiting in between is cut, which is how 11 tabs fit in 38
+seconds. Measured over the finished loop: 15.2 s of motion, 21.7 s of holds,
+longest hold 1.6 s. It is 1280x734, scaled down from the full 1710x980
+viewport — nothing is cropped.
+
+The workload is **synthetic**: pgbench plus a purpose-built lock and IO
+generator. `_smoke_lock_wait`, `_smoke_row_lock_wait` and `_smoke_io_load` are
+test fixtures, not anyone's schema. Every panel reads a **15-minute rolling
+window**, and the wall clock differs between tabs because each tab was captured
+as its own page load.
+
+Two things in the tour can look like bugs and are not:
+
+- **Transitions can omit the window's largest wait.** That graph thresholds
+  edges by transition *count* (default: 20% of the busiest edge), so a wait made
+  of a few very long events drops below the line even when it dominates by time.
+  The tab says so itself — the summary under the graph names the omitted event
+  and its total — and the **Show all** button puts it back.
+- **Matrix looks L-shaped around `CPU*`.** Most wait transitions in this
+  workload pass through running-on-CPU, so that row and column carry nearly
+  everything. That is a property of what PostgreSQL does between waits, not a
+  rule the view enforces: a direct wait-to-wait transition is supported and
+  appears as an ordinary interior cell when it occurs.
+
+### Recorded walkthroughs
+
 Captured from a 60-second pgbench TPC-B workload (8 clients, scale 10) on a
 tiny VM (2 vCPUs, Rocky 9 + PostgreSQL 18), with a few injected `LOCK TABLE`
 statements to add lock contention. ~7M wait-event transitions captured. See
 [`demos/README.md`](demos/README.md) for the recording tooling (one
-`make all` reproduces both gifs from a fresh VM).
+`make all` reproduces both gifs below from a fresh VM).
 
 **Web investigation client** (`pgwt`) — drag-zoom AAS chart → drill into
 Events / Sessions / Queries → wait-event transition graph:
-
-![pgwt web UI](demos/web.gif)
+[`demos/web.gif`](demos/web.gif) (3.6 MB; not inlined, the tour above covers
+the same ground).
 
 **Text dump** (`pgwt-server --dump`) — time model + top events + top sessions
 + top queries from any trace file, no TUI required:
