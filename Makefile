@@ -84,7 +84,9 @@ BPF_CFLAGS = -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) \
              -I$(INC_DIR) -I$(SRC_DIR) \
              -I/usr/include/$(shell uname -m)-linux-gnu
 
-CFLAGS     = -g -O2 -Wall -Wextra -Wno-unused-parameter \
+# Missing includes in src/ built by this Makefile must fail on older GCC too,
+# where implicit function declarations would otherwise only produce warnings.
+CFLAGS     = -g -O2 -Wall -Wextra -Wno-unused-parameter -Werror=implicit-function-declaration \
              -DPGWT_BUILD_VERSION='"$(PGWT_BUILD_VERSION)"' \
              $(LIBBPF_INC) \
              -I$(INC_DIR) -I$(SRC_DIR)
