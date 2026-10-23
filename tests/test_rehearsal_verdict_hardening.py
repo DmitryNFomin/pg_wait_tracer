@@ -361,7 +361,7 @@ class RehearsalUIGates(unittest.TestCase):
         module = MagicMock(sync_playwright=lambda: manager)
         with patch.dict(sys.modules, {'playwright': MagicMock(), 'playwright.sync_api': module}), \
                 patch.object(gates, 'run_waterfall_fold_gate',
-                             side_effect=exception, return_value=measured['waterfall_fold']), \
+                             side_effect=exception, return_value=measured['waterfall_fold']) as fold, \
                 patch.object(gates, 'run_execution_list_gates',
                              side_effect=AssertionError('untruncated gate is mock-only')) as lists, \
                 patch.object(gates, 'run_execution_disclosure_gates',
@@ -369,10 +369,29 @@ class RehearsalUIGates(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             result = dr._run_ui_gates('http://live-bridge:8384/')
         lists.assert_not_called()
+        if not launch_error:
+            fold.assert_called_once_with(launcher.return_value, 'http://live-bridge:8384/',
+                                         navigate=gates.goto_waterfall_by_tab_click)
         if not exception and not launch_error:
             disclosures.assert_called_once_with(launcher.return_value, 'http://live-bridge:8384/',
-                                                 include_fitting=False)
+                                                 include_fitting=False,
+                                                 navigate=gates.goto_waterfall_by_tab_click)
+        for check in result.values():
+            self.assertEqual(check['navigation'], 'tab_click')
         return result
+
+    def test_tab_click_navigation_has_one_canvas_wait_and_no_fallback(self):
+        tree = ast.parse((ROOT / 'tests/web_unit/execution_list_browser.py').read_text())
+        navigator = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                         and node.name == 'goto_waterfall_by_tab_click')
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.For, ast.While))
+                             for node in ast.walk(navigator)))
+        canvas_waits = [node for node in ast.walk(navigator)
+                        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == 'wait_for_selector' and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == '#waterfall-chart canvas']
+        self.assertEqual(len(canvas_waits), 1)
 
     def test_ui_registration_retains_measurements_controls_and_live_url(self):
         checks = self.run_browser_stub()
@@ -430,6 +449,7 @@ class RehearsalUIGates(unittest.TestCase):
         self.assertEqual(set(checks), set(self.names))
         self.assertTrue(all(not check['ok'] and 'ModuleNotFoundError' in check['detail']
                             for check in checks.values()))
+        self.assertTrue(all(check['navigation'] == 'tab_click' for check in checks.values()))
 
 
 class ArtifactSurvival(unittest.TestCase):

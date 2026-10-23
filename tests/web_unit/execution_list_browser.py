@@ -10,6 +10,20 @@ def waterfall_url(url, hash_filter=''):
     return url + '#tab=waterfall&live=1&span=900' + ('&' + hash_filter if hash_filter else '')
 
 
+def goto_waterfall_by_hash(page, url, hash_filter=''):
+    page.goto(waterfall_url(url, hash_filter))
+    page.wait_for_selector('#status.connected')
+    page.wait_for_selector('#waterfall-chart canvas')
+
+
+def goto_waterfall_by_tab_click(page, url):
+    page.goto(url)
+    page.wait_for_selector('#status.connected')
+    page.wait_for_selector('#table-container table tbody tr')
+    page.click(".tab[data-tab='waterfall']")
+    page.wait_for_selector('#waterfall-chart canvas')
+
+
 def _asset_source(relative):
     path = Path(__file__).resolve().parents[2] / 'web/static' / relative
     if not path.is_file():
@@ -108,13 +122,15 @@ def assert_scroll_affordance(page, expected):
     return metrics
 
 
-def run_execution_disclosure_gates(browser, url, *, hash_filter='', include_fitting=True):
+def run_execution_disclosure_gates(browser, url, *, hash_filter='', include_fitting=True,
+                                   navigate=goto_waterfall_by_hash):
     results = {}
+    navigation_kwargs = {'hash_filter': hash_filter} if hash_filter else {}
     for name, width, height, dpr in [('snapshot', 1280, 800, 1), ('demo', 1710, 981, 2)]:
         ctx = browser.new_context(viewport={'width': width, 'height': height}, device_scale_factor=dpr)
         try:
             page = ctx.new_page()
-            page.goto(waterfall_url(url, hash_filter))
+            navigate(page, url, **navigation_kwargs)
             _wait_for_execution_list(page)
             response = install_dense_execution_fixture(page)
             results[name] = assert_execution_disclosure(page, response)
@@ -169,7 +185,7 @@ def run_execution_disclosure_gates(browser, url, *, hash_filter='', include_fitt
             served.append(route.request.url)
             route.fulfill(body=reverted, content_type='application/javascript')
         page.route('**/lib/builders/waterfall.js', restore_floor)
-        page.goto(waterfall_url(url, hash_filter))
+        navigate(page, url, **navigation_kwargs)
         _wait_for_execution_list(page)
         install_dense_execution_fixture(page)
         metrics = execution_list_metrics(page)
@@ -194,8 +210,8 @@ def run_execution_disclosure_gates(browser, url, *, hash_filter='', include_fitt
     ctx = browser.new_context(viewport={'width': 1710, 'height': 1400}, device_scale_factor=2)
     try:
         page = ctx.new_page()
-        page.goto(url + '#tab=waterfall&live=1&span=900')
-        page.wait_for_selector('#waterfall-chart canvas')
+        navigate(page, url)
+        _wait_for_execution_list(page)
         page.wait_for_timeout(300)
         assert page.locator('#executions-table tbody tr.clickable').count() == 4, 'default mock must render four rows'
         disclosure = page.locator('#executions-disclosure')
@@ -366,7 +382,7 @@ def assert_waterfall_fold(result):
             f'readout_bottom={readout_bottom}, viewport_height={height}')
 
 
-def _measure_waterfall_fold(browser, url, viewport, hash_filter, stylesheet=None):
+def _measure_waterfall_fold(browser, url, viewport, hash_filter, stylesheet=None, *, navigate):
     width, height, dpr = viewport
     ctx = browser.new_context(viewport={'width': width, 'height': height}, device_scale_factor=dpr)
     served = []
@@ -378,7 +394,8 @@ def _measure_waterfall_fold(browser, url, viewport, hash_filter, stylesheet=None
                 route.fulfill(body=stylesheet, content_type='text/css')
             page.route('**/style.css', restore_chart_floor)
         driven_url = waterfall_url(url, hash_filter)
-        page.goto(driven_url)
+        navigation_kwargs = {'hash_filter': hash_filter} if hash_filter else {}
+        navigate(page, url, **navigation_kwargs)
         _wait_for_execution_list(page)
         response = install_dense_execution_fixture(page)
         # #514: the chart-floor control isolates fold overflow; a disclosure
@@ -430,13 +447,14 @@ def _measure_waterfall_fold(browser, url, viewport, hash_filter, stylesheet=None
         ctx.close()
 
 
-def run_waterfall_fold_gate(browser, url, *, viewport=(1710, 981, 2), hash_filter=''):
+def run_waterfall_fold_gate(browser, url, *, viewport=(1710, 981, 2), hash_filter='',
+                            navigate=goto_waterfall_by_hash):
     """Share the real-shell fold and chart-floor control with rehearsal (#514).
 
     The mock caller supplies f.pid=1000; the live bridge has no such PID.
     Only a failure of the fold assertion counts as negative-control evidence.
     """
-    result = _measure_waterfall_fold(browser, url, viewport, hash_filter)
+    result = _measure_waterfall_fold(browser, url, viewport, hash_filter, navigate=navigate)
     failures = {}
     try:
         assert_waterfall_fold(result)
@@ -448,7 +466,8 @@ def run_waterfall_fold_gate(browser, url, *, viewport=(1710, 981, 2), hash_filte
                r'#waterfall-chart\s*\{\s*min-height:\s*216px;\s*\}\s*\}')
     reverted, count = re.subn(pattern, '', source)
     assert count == 1, 'cannot restore the 240px Waterfall chart floor'
-    control = _measure_waterfall_fold(browser, url, viewport, hash_filter, reverted)
+    control = _measure_waterfall_fold(browser, url, viewport, hash_filter, reverted,
+                                      navigate=navigate)
     result['chart_floor_240'] = control
     result['negative_control_failures'] = {}
     try:

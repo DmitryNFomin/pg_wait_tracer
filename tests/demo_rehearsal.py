@@ -113,12 +113,15 @@ def _run_ui_gates(url):
         from playwright.sync_api import sync_playwright
         from web_unit.execution_list_browser import (
             run_waterfall_fold_gate, run_execution_disclosure_gates, waterfall_url,
+            goto_waterfall_by_tab_click,
         )
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
-                measurements = {'waterfall_fold': run_waterfall_fold_gate(browser, url)}
-                capped = run_execution_disclosure_gates(browser, url, include_fitting=False)
+                measurements = {'waterfall_fold': run_waterfall_fold_gate(
+                    browser, url, navigate=goto_waterfall_by_tab_click)}
+                capped = run_execution_disclosure_gates(
+                    browser, url, include_fitting=False, navigate=goto_waterfall_by_tab_click)
                 measurements.update(execution_list_full_rows=capped,
                                     execution_truncation_disclosure=capped)
                 for name, measured in measurements.items():
@@ -149,6 +152,7 @@ def _run_ui_gates(url):
                     checks[name] = drlib.evaluate_ui_gate(
                         name, measured, controls, drlib.UI_GATE_CONTROLS[name])
                     checks[name]['url'] = waterfall_url(url)
+                    checks[name]['navigation'] = 'tab_click'
             finally:
                 browser.close()
     except Exception as exc:
@@ -156,6 +160,7 @@ def _run_ui_gates(url):
         detail = f'{type(exc).__name__}: {exc}'
         checks = {name: {'ok': False, 'detail': detail,
                          'url': url + '#tab=waterfall&live=1&span=900',
+                         'navigation': 'tab_click',
                          'negative_control_failures': {}}
                   for name in drlib.UI_GATE_CONTROLS}
     for name, check in checks.items():

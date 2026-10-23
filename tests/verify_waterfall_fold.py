@@ -65,7 +65,7 @@ from test_web_ui import start_mock_server, stop_mock_server, app_url  # noqa: E4
 from web_unit.span_browser import run_span_gates
 from web_unit.execution_list_browser import (
     run_execution_list_gates, run_execution_disclosure_gates,
-    run_waterfall_fold_gate,
+    run_waterfall_fold_gate, goto_waterfall_by_hash,
 )
 
 try:
@@ -84,7 +84,8 @@ def run(red_green=False):
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
-                result = run_waterfall_fold_gate(browser, app_url(PORT), hash_filter='f.pid=1000')
+                result = run_waterfall_fold_gate(browser, app_url(PORT), hash_filter='f.pid=1000',
+                                                 navigate=goto_waterfall_by_hash)
                 ctx = browser.new_context(
                     viewport={"width": 1710, "height": 981}, device_scale_factor=2)
                 page = ctx.new_page()
@@ -134,7 +135,8 @@ def run(red_green=False):
                 result["span_gates"] = run_span_gates(page, app_url(PORT))
                 result["execution_list_gates"] = run_execution_list_gates(browser, app_url(PORT))
                 result["execution_disclosure_gates"] = run_execution_disclosure_gates(
-                    browser, app_url(PORT), hash_filter='f.pid=1000')
+                    browser, app_url(PORT), hash_filter='f.pid=1000',
+                    navigate=goto_waterfall_by_hash)
                 result["ok"] = (result["ok"] and result["execution_list_gates"]["ok"]
                                 and result["execution_disclosure_gates"]["ok"])
                 return result
