@@ -1512,10 +1512,50 @@ transition rate.
 | **Sampled** (default tier) | **~0%** |
 
 The `--lightweight` and `--skip-query-id` flags save only 1-3 percentage points
-because the bottleneck is the hardware debug exception itself (~200-300 ns per
-fire), not the BPF work done inside it. This worst case is exactly why the full
-tier is gated behind escalation by default — you only pay it during the bounded
-window you asked for.
+because the bottleneck is the hardware debug exception itself, not the BPF work
+done inside it — see [What one watchpoint fire costs](#what-one-watchpoint-fire-costs).
+This worst case is exactly why the full tier is gated behind escalation by
+default — you only pay it during the bounded window you asked for.
+
+#### What one watchpoint fire costs
+
+Earlier revisions of this README put the per-fire cost at a few hundred
+nanoseconds. **That figure was wrong by 20-35x and has been withdrawn**
+([#505](https://github.com/DmitryNFomin/pg_wait_tracer/issues/505)).
+
+Directly measured, n=3 per box, on a bare watchpoint with no BPF and no
+PostgreSQL attached:
+
+| Box | CPU | ns per fire |
+|---|---|---:|
+| Hetzner cx33 (gate-1) | Intel Xeon Skylake | 6,699 |
+| Hetzner cx33 (gate-2) | AMD EPYC Rome | 5,235 |
+| Hetzner cx33 (gate-3) | AMD EPYC Genoa | 4,669 |
+
+Two things make a single number misleading, so we no longer quote one:
+
+- **It is not a constant.** Cost per fire rises as the fire rate falls —
+  5.26 us at ~190K fires/s, 14.23 us at ~5K fires/s — because a hot exception
+  path amortises better. Any figure quoted needs its fire rate attached.
+- **All three boxes are KVM guests.** Bare metal or another hypervisor may
+  differ, and we cannot measure the host side from inside a guest.
+
+**The microsecond scale is what the TPS table above actually requires.** The
+following is arithmetic, not a measurement — and it crosses boxes, since the
+TPS runs are cx43 and the per-fire figures cx33 — but it is the right order of
+magnitude, which a few hundred nanoseconds is not:
+
+| | read-heavy | write-heavy |
+|---|---:|---:|
+| transitions/sec ÷ TPS = fires per txn | 220K / 108K = **2** | 40K / 5K = **8** |
+| txn duration (8 clients ÷ TPS) | **74 us** | **1.6 ms** |
+| fires x 5.3 us added per txn | 10.6 us → **~13%** | 42 us → **~2.6%** |
+| **measured TPS overhead** | **29%** | **6%** |
+
+The debug exception alone accounts for roughly **half** the measured loss in
+both workloads, with a consistent ~2x residual. At 250 ns per fire the same
+arithmetic gives 0.7% and 0.1% — two orders of magnitude short of what was
+measured.
 
 #### Cross-validation: sampling vs exact
 
@@ -1580,15 +1620,23 @@ per second see higher overhead:
 
 **Where the cost comes from:**
 
-- **~70% — hardware debug exception**: CPU enters debug exception handler on
-  every write to the watched address. This is unavoidable — it happens before
-  any BPF code runs. Context switch save/restore of debug registers adds further
-  cost.
-- **~25% — lock amplification**: the debug exception fires while a backend holds
-  LWLocks or other internal locks. The extra ~200-300 ns extends lock hold times,
-  causing cascading contention under high concurrency.
-- **~5% — BPF + userspace**: ring buffer output, query_id probe reads, and
-  userspace consumption are a negligible fraction.
+An earlier revision of this README split the cost 70% / 25% / 5% between the
+debug exception, lock amplification and BPF. **That split was never measured**
+and has been withdrawn with the per-fire figure it rested on
+([#505](https://github.com/DmitryNFomin/pg_wait_tracer/issues/505)). What we can
+support:
+
+- **The debug exception accounts for roughly half**, in both workloads, by the
+  arithmetic in [What one watchpoint fire costs](#what-one-watchpoint-fire-costs).
+  The CPU enters the debug exception handler on every write to the watched
+  address, before any BPF code runs; context switch save/restore of the debug
+  registers adds further cost.
+- **The remainder is not decomposed.** Extended lock hold times are a plausible
+  mechanism — the exception fires while a backend holds LWLocks or other
+  internal locks — but we have not measured their contribution.
+- **BPF work is the small part, and this part *is* measured.** Removing it
+  recovers 1-3 pp of the 29% and 1-2 pp of the 6% (`--lightweight`,
+  `--skip-query-id` in the tables above).
 
 ### Performance tuning flags
 
@@ -1634,7 +1682,8 @@ The following optimizations are applied automatically:
 ### Future: PostgreSQL-native wait event timing
 
 The hardware watchpoint overhead is fundamentally limited by the CPU debug
-exception cost (~200-300 ns per fire). A
+exception cost — single-digit microseconds per fire on the VMs we measure on,
+see [What one watchpoint fire costs](#what-one-watchpoint-fire-costs). A
 [proposed PostgreSQL patch](https://github.com/DmitryNFomin/postgres/pull/1)
 adds Oracle-style internal wait event instrumentation — two VDSO
 `clock_gettime()` calls per event (~70-100 ns total) — achieving near-zero
@@ -1700,13 +1749,16 @@ directory, toggling GUCs between server restarts, 5 rounds:
 Result: **< 0.5% difference** between GUC off and all features enabled.
 All three configurations are within run-to-run variance — indistinguishable.
 
-**Comparison with hardware watchpoints** (from earlier benchmarks, same
-environment):
+**Comparison with hardware watchpoints.** The worst-case overhead column comes
+from the earlier same-environment benchmarks; the watchpoint per-event figure is
+the separate cx33 microbenchmark described in
+[What one watchpoint fire costs](#what-one-watchpoint-fire-costs), and the patch
+figure is an estimate for two VDSO calls, not a measurement:
 
 | Approach | Worst-case overhead | Per-event cost |
 |---|:---:|---|
 | PG patch (all features ON) | **< 0.5%** | ~70-100 ns (VDSO, no kernel trap) |
-| pg_wait_tracer (hardware watchpoint) | **29%** | ~200-300 ns (CPU #DB exception) |
+| pg_wait_tracer (hardware watchpoint) | **29%** | 4.7-6.7 us measured (CPU #DB exception, KVM guests) |
 
 The reason the patch overhead is near-zero despite ~220K events/sec: VDSO
 `clock_gettime(CLOCK_MONOTONIC)` reads a memory-mapped kernel page without
