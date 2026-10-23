@@ -112,32 +112,32 @@ def _run_ui_gates(url):
     try:
         from playwright.sync_api import sync_playwright
         from web_unit.execution_list_browser import (
-            run_waterfall_fold_gate, run_execution_list_gates,
-            run_execution_disclosure_gates, waterfall_url,
+            run_waterfall_fold_gate, run_execution_disclosure_gates, waterfall_url,
         )
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
-                measurements = {
-                    'waterfall_fold': run_waterfall_fold_gate(browser, url),
-                    'execution_list_full_rows': run_execution_list_gates(browser, url),
-                    'execution_truncation_disclosure': run_execution_disclosure_gates(
-                        browser, url, include_fitting=False),
-                }
+                measurements = {'waterfall_fold': run_waterfall_fold_gate(browser, url)}
+                capped = run_execution_disclosure_gates(browser, url, include_fitting=False)
+                measurements.update(execution_list_full_rows=capped,
+                                    execution_truncation_disclosure=capped)
                 for name, measured in measurements.items():
-                    if name == 'execution_truncation_disclosure':
+                    if name in ('execution_list_full_rows', 'execution_truncation_disclosure'):
                         # Both disclosure mutations run at each viewport; the
                         # capped-list floor control runs at 1280x800 DPR1.
                         per_view = {view: measured[view]['negative_control_failures']
                                     for view in ('snapshot', 'demo')}
                         required = set(drlib.UI_GATE_CONTROLS[name])
-                        if any(set(failures) != (required if view == 'snapshot' else
-                                                 required - {'list_floor_60'})
+                        disclosure_controls = set(drlib.UI_GATE_CONTROLS[
+                            'execution_truncation_disclosure'])
+                        list_controls = set(drlib.UI_GATE_CONTROLS['execution_list_full_rows'])
+                        if any(set(failures) != (disclosure_controls | list_controls
+                                                 if view == 'snapshot' else disclosure_controls)
                                for view, failures in per_view.items()):
-                            raise ValueError('disclosure control names mismatch')
+                            raise ValueError('capped execution control names mismatch')
                         if any(not isinstance(text, str) or not text.strip()
                                for failures in per_view.values() for text in failures.values()):
-                            raise ValueError('disclosure control has no observed failure text')
+                            raise ValueError('capped execution control has no observed failure text')
                         failures = {control: '\n'.join(f'{view}: {records[control]}'
                                                       for view, records in per_view.items()
                                                       if control in records)

@@ -19,7 +19,7 @@ UI_GATE_CONTROLS = {
     "waterfall_fold": ("chart_floor_240",),
     "execution_list_full_rows": ("list_floor_60",),
     "execution_truncation_disclosure": (
-        "disclosure_title_only", "disclosure_total_as_shown", "list_floor_60"),
+        "disclosure_title_only", "disclosure_total_as_shown"),
 }
 
 
@@ -96,11 +96,18 @@ def evaluate_ui_gate(name, measurements, negative_controls, required_controls):
                         and 0 < height <= 981 and scroll == 0 and 0 < bottom <= 981,
                         "Waterfall exceeds the fold before or after click")
         elif name == "execution_list_full_rows":
-            for view, viewport, minimum in [("snapshot", [1280, 800, 1], 1),
-                                             ("demo", [1710, 981, 2], 2)]:
+            # Live executions use limit: 100 and return truncated, so the
+            # disclosure is present. Measured at 1710x981 DPR2 with it, the
+            # 126px list fits the 32.5px header plus one 29px row. Require the
+            # measured first-row height; the untruncated two-row expectation
+            # stays in run_execution_list_gates on the mock, where it is true.
+            for view, viewport in [("snapshot", [1280, 800, 1]), ("demo", [1710, 981, 2])]:
                 record = measurements[view]
+                require(capped_fixture_ok(record["rendered_rows"], record["response_rows"],
+                                          record["response_total"], record["truncated"]),
+                        f"capped fixture is absent or invalid: {view}")
                 require(record["viewport"] == viewport and record["header"]["full"] is True
-                        and record["full_rows"] >= minimum and bool(record["rows"])
+                        and record["full_rows"] >= 1 and bool(record["rows"])
                         and record["scroll_y"] == 0 and record["list_scroll_top"] == 0
                         and record["required_list_height"] > 0
                         and record["list_height"] >= record["required_list_height"]

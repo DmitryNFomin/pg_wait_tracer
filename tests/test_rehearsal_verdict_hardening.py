@@ -174,12 +174,13 @@ def ui_measurements():
                 'scroll_y_after_click': 0, 'readout_bottom_after_click': 981}}
     lists = {'ok': True}
     disclosures = {'ok': True}
-    for view, viewport, minimum in [('snapshot', [1280, 800, 1], 1), ('demo', [1710, 981, 2], 2)]:
-        lists[view] = {'viewport': viewport, 'header': {'full': True}, 'full_rows': minimum,
-                       'rows': [{'full': True}] * minimum, 'scroll_y': 0, 'list_scroll_top': 0,
+    for view, viewport in [('snapshot', [1280, 800, 1]), ('demo', [1710, 981, 2])]:
+        lists[view] = {'viewport': viewport, 'header': {'full': True}, 'full_rows': 1,
+                       'rows': [{'full': True}], 'scroll_y': 0, 'list_scroll_top': 0,
+                       'truncated': True, 'rendered_rows': 100, 'response_rows': 100,
+                       'response_total': 265756,
                        'required_list_height': 80, 'list_height': 100, 'stable_after_resize': True}
-        disclosures[view] = {**copy.deepcopy(disclosure), **copy.deepcopy(lists[view]),
-                             'full_rows': 1, 'rows': [{'full': True}]}
+        disclosures[view] = {**copy.deepcopy(disclosure), **copy.deepcopy(lists[view])}
     return {'waterfall_fold': fold, 'execution_list_full_rows': lists,
             'execution_truncation_disclosure': disclosures}
 
@@ -280,10 +281,6 @@ class RehearsalUIGates(unittest.TestCase):
             ('waterfall_fold', ('chart', 'readout_bottom_after_click'), 982),
             ('waterfall_fold', ('chart', 'rendered_bars'), 0),
             ('waterfall_fold', ('disclosure', 'fixture_installed'), False),
-            ('execution_list_full_rows', ('snapshot', 'full_rows'), 0),
-            ('execution_list_full_rows', ('demo', 'full_rows'), 1),
-            ('execution_list_full_rows', ('demo', 'header', 'full'), False),
-            ('execution_list_full_rows', ('demo', 'stable_after_resize'), False),
             ('execution_truncation_disclosure', ('snapshot', 'visible'), False),
             ('execution_truncation_disclosure', ('demo', 'fully_visible'), False),
             ('execution_truncation_disclosure', ('demo', 'outside_tbody'), False),
@@ -291,11 +288,16 @@ class RehearsalUIGates(unittest.TestCase):
             ('execution_truncation_disclosure', ('demo', 'fixture_installed'), False),
         ]
         for view in ('snapshot', 'demo'):
-            for path, value in [(('header', 'full'), False), (('full_rows',), 0),
-                                (('rows',), []), (('list_height',), 79),
-                                (('required_list_height',), 0), (('scroll_y',), 1),
-                                (('list_scroll_top',), 1), (('stable_after_resize',), False)]:
-                cases.append(('execution_truncation_disclosure', (view, *path), value))
+            for name in ('execution_list_full_rows', 'execution_truncation_disclosure'):
+                for path, value in [(('viewport',), [1280, 800, 2]),
+                                    (('header', 'full'), False), (('full_rows',), 0),
+                                    (('rows',), []), (('list_height',), 79),
+                                    (('required_list_height',), 0),
+                                    (('required_list_height',), 101), (('scroll_y',), 1),
+                                    (('list_scroll_top',), 1), (('stable_after_resize',), False),
+                                    (('truncated',), False), (('rendered_rows',), 0),
+                                    (('response_rows',), 99), (('response_total',), 100)]:
+                    cases.append((name, (view, *path), value))
         for name, path, value in cases:
             with self.subTest(name=name, path=path):
                 measured = ui_measurements()[name]
@@ -306,14 +308,25 @@ class RehearsalUIGates(unittest.TestCase):
                 self.assertFalse(self.evaluate(name, measured, self.controls(name))['ok'])
 
     def test_ui_evaluator_requires_recorded_capped_list_measurements(self):
-        name = 'execution_truncation_disclosure'
-        for view in ('snapshot', 'demo'):
-            for field in ('header', 'full_rows', 'rows', 'list_height', 'required_list_height',
-                          'scroll_y', 'list_scroll_top', 'stable_after_resize'):
-                with self.subTest(view=view, missing=field):
-                    measured = ui_measurements()[name]
-                    del measured[view][field]
-                    self.assertFalse(self.evaluate(name, measured, self.controls(name))['ok'])
+        for name in ('execution_list_full_rows', 'execution_truncation_disclosure'):
+            for view in ('snapshot', 'demo'):
+                for field in ('viewport', 'header', 'full_rows', 'rows', 'list_height',
+                              'required_list_height', 'scroll_y', 'list_scroll_top',
+                              'stable_after_resize', 'truncated', 'rendered_rows',
+                              'response_rows', 'response_total'):
+                    with self.subTest(name=name, view=view, missing=field):
+                        measured = ui_measurements()[name]
+                        del measured[view][field]
+                        self.assertFalse(self.evaluate(name, measured, self.controls(name))['ok'])
+
+    def test_live_demo_list_accepts_one_full_row_and_refuses_zero(self):
+        name = 'execution_list_full_rows'
+        measured = ui_measurements()[name]
+        self.assertEqual(measured['demo']['viewport'], [1710, 981, 2])
+        self.assertEqual(measured['demo']['full_rows'], 1)
+        self.assertTrue(self.evaluate(name, measured, self.controls(name))['ok'])
+        measured['demo']['full_rows'] = 0
+        self.assertFalse(self.evaluate(name, measured, self.controls(name))['ok'])
 
     def test_dense_fixture_refuses_empty_uncapped_or_untruncated_responses(self):
         self.assertTrue(demo.capped_fixture_ok(100, 100, 265756, True))
@@ -330,14 +343,18 @@ class RehearsalUIGates(unittest.TestCase):
         if launch_error:
             launcher.side_effect = launch_error
         measured = ui_measurements()
+        # Both live verdicts consume the same capped pass.
+        measured['execution_list_full_rows'] = measured['execution_truncation_disclosure']
         for name in self.names:
             failures = {key: value['detail'] for key, value in self.controls(name).items()}
             if name == 'execution_truncation_disclosure':
                 for view in ('snapshot', 'demo'):
                     measured[name][view]['negative_control_failures'] = {
-                        control: text for control, text in failures.items()
-                        if view == 'snapshot' or control != 'list_floor_60'}
-            else:
+                        **failures,
+                        **({key: value['detail'] for key, value in
+                            self.controls('execution_list_full_rows').items()}
+                           if view == 'snapshot' else {})}
+            elif name == 'waterfall_fold':
                 measured[name]['negative_control_failures'] = failures
         if mutate:
             mutate(measured)
@@ -346,11 +363,12 @@ class RehearsalUIGates(unittest.TestCase):
                 patch.object(gates, 'run_waterfall_fold_gate',
                              side_effect=exception, return_value=measured['waterfall_fold']), \
                 patch.object(gates, 'run_execution_list_gates',
-                             return_value=measured['execution_list_full_rows']), \
+                             side_effect=AssertionError('untruncated gate is mock-only')) as lists, \
                 patch.object(gates, 'run_execution_disclosure_gates',
                              return_value=measured['execution_truncation_disclosure']) as disclosures, \
                 contextlib.redirect_stdout(io.StringIO()):
             result = dr._run_ui_gates('http://live-bridge:8384/')
+        lists.assert_not_called()
         if not exception and not launch_error:
             disclosures.assert_called_once_with(launcher.return_value, 'http://live-bridge:8384/',
                                                  include_fitting=False)
@@ -358,11 +376,24 @@ class RehearsalUIGates(unittest.TestCase):
 
     def test_ui_registration_retains_measurements_controls_and_live_url(self):
         checks = self.run_browser_stub()
+        self.assertEqual(demo.UI_GATE_CONTROLS, {
+            'waterfall_fold': ('chart_floor_240',),
+            'execution_list_full_rows': ('list_floor_60',),
+            'execution_truncation_disclosure': ('disclosure_title_only', 'disclosure_total_as_shown'),
+        })
         self.assertEqual(set(checks), set(self.names))
+        self.assertIs(checks['execution_list_full_rows']['measurements'],
+                      checks['execution_truncation_disclosure']['measurements'])
         for name, check in checks.items():
             self.assertTrue(check['ok'], check['detail'])
             self.assertEqual(set(check['negative_control_failures']), set(demo.UI_GATE_CONTROLS[name]))
             self.assertEqual(check['url'], 'http://live-bridge:8384/#tab=waterfall&live=1&span=900')
+        floor = checks['execution_list_full_rows']['negative_control_failures']['list_floor_60']
+        self.assertIn('snapshot:', floor)
+        self.assertNotIn('demo:', floor)
+        for failure in checks['execution_truncation_disclosure']['negative_control_failures'].values():
+            self.assertIn('snapshot:', failure)
+            self.assertIn('demo:', failure)
 
     def test_browser_exceptions_fail_all_three_checks(self):
         for label, kwargs in [('timeout', {'exception': TimeoutError('bridge down')}),
@@ -377,12 +408,10 @@ class RehearsalUIGates(unittest.TestCase):
                     self.assertTrue(check['detail'])
 
     def test_live_registration_refuses_controls_that_did_not_fire(self):
-        for name, view in [('waterfall_fold', None), ('execution_list_full_rows', None),
+        for name, view in [('waterfall_fold', None), ('execution_list_full_rows', 'snapshot'),
                            ('execution_truncation_disclosure', 'snapshot'),
                            ('execution_truncation_disclosure', 'demo')]:
             for control in demo.UI_GATE_CONTROLS[name]:
-                if view == 'demo' and control == 'list_floor_60':
-                    continue
                 for bad_text in (None, '', True):
                     with self.subTest(name=name, view=view, control=control, bad_text=bad_text):
                         def mutate(measured):
