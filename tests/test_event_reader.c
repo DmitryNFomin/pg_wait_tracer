@@ -444,22 +444,29 @@ static void test_scan_trace_files(void)
     };
     CHECK(write_test_file(&evt, 1, 18) == 0, "write current.trace");
 
-    /* Create fake hourly files (just need the name pattern to match scan) */
+    /* Create fake hourly files with a real header each. #405: the scanner
+     * now takes placement from the HEADER, not the name, so these headers
+     * are given start_time_ns values that deliberately do NOT match their
+     * "_10"/"_11"/"_12" names — if the scanner silently fell back to the
+     * name for any of them, the assertions below would catch it. */
     const char *fake_files[] = {
         "2025-01-15_10.trace.lz4",
         "2025-01-15_11.trace.lz4",
         "2025-01-15_12.trace.lz4",
     };
+    const uint64_t fake_start_ns[] = {
+        5000000000ULL, 6000000000ULL, 7000000000ULL,
+    };
     for (int i = 0; i < 3; i++) {
         char p[512];
         snprintf(p, sizeof(p), "%s/%s", TEST_DIR, fake_files[i]);
-        /* Write a minimal valid trace file header */
         FILE *fp = fopen(p, "wb");
         if (fp) {
             struct pgwt_trace_file_header hdr = {
                 .magic = PGWT_TRACE_MAGIC,
                 .version = PGWT_TRACE_VERSION,
                 .pg_version = 18,
+                .start_time_ns = fake_start_ns[i],
             };
             fwrite(&hdr, sizeof(hdr), 1, fp);
             fclose(fp);
@@ -469,9 +476,8 @@ static void test_scan_trace_files(void)
     struct pgwt_trace_file_entry entries[16];
     int n = pgwt_scan_trace_files(TEST_DIR, entries, 16);
 
-    /* Should find current.trace + 3 hourly files = 4 */
-    /* (hourly files match filename pattern but current.trace has valid header) */
-    CHECK(n >= 1, "scan found %d files (expected >= 1)", n);
+    /* current.trace + 3 hourly files, every matching name always listed. */
+    CHECK(n == 4, "scan found %d files (expected 4)", n);
 
     /* current.trace should be in the list */
     int found_current = 0;
@@ -479,9 +485,26 @@ static void test_scan_trace_files(void)
         if (strstr(entries[i].path, "current.trace")) {
             found_current = 1;
             CHECK(entries[i].start_wall_ns > 0, "current.trace has start_wall_ns");
+            CHECK(!entries[i].placement_unknown,
+                  "current.trace placement is known");
         }
     }
     CHECK(found_current, "current.trace found in scan");
+
+    /* Each hourly entry takes its placement from the HEADER, not the name. */
+    for (int f = 0; f < 3; f++) {
+        const struct pgwt_trace_file_entry *e = NULL;
+        for (int i = 0; i < n; i++)
+            if (strstr(entries[i].path, fake_files[f])) e = &entries[i];
+        CHECK(e != NULL, "%s found in scan", fake_files[f]);
+        CHECK(e && !e->placement_unknown,
+              "%s: placement known (valid header)", fake_files[f]);
+        CHECK(e && e->start_wall_ns == fake_start_ns[f],
+              "%s: start_wall_ns=%llu from header (expected %llu, NOT the "
+              "name's hour)", fake_files[f],
+              e ? (unsigned long long)e->start_wall_ns : 0ULL,
+              (unsigned long long)fake_start_ns[f]);
+    }
 
     /* Verify sorted by start_wall_ns */
     int sorted = 1;
@@ -492,6 +515,256 @@ static void test_scan_trace_files(void)
         }
     }
     CHECK(sorted, "entries sorted by start_wall_ns");
+
+    cleanup_test_dir();
+}
+
+/* ── Test 7a: #405 bypass — a header that cannot be read must disable the
+ * file, never fall back to guessing from its (TZ-dependent) name ──────── */
+
+static void test_scan_trace_files_unknown_placement(void)
+{
+    printf("--- Scan trace files: unreadable header is disabled, not guessed ---\n");
+    cleanup_test_dir();
+    setup_test_dir();
+
+    /* A name that matches the archive pattern but whose header is too short
+     * to read at all -- the case this is checking is ABSENT placement data,
+     * not merely wrong data. The old mktime-from-name code did not care: it
+     * would have derived a (possibly TZ-shifted) start from "2025-03-01_09"
+     * regardless. The fix must not do that either. */
+    char p[512];
+    snprintf(p, sizeof(p), "%s/2025-03-01_09.trace.lz4", TEST_DIR);
+    FILE *fp = fopen(p, "wb");
+    CHECK(fp != NULL, "create truncated archive");
+    if (fp) {
+        /* 4 bytes: shorter than sizeof(struct pgwt_trace_file_header), so
+         * the header fread() itself fails -- not just a magic mismatch. */
+        uint32_t partial = PGWT_TRACE_MAGIC;
+        fwrite(&partial, sizeof(partial), 1, fp);
+        fclose(fp);
+    }
+
+    struct pgwt_trace_file_entry entries[8];
+    int n = pgwt_scan_trace_files(TEST_DIR, entries, 8);
+    CHECK(n == 1, "the unreadable archive is still LISTED (%d), not hidden",
+          n);
+    CHECK(n == 1 && entries[0].placement_unknown,
+          "...marked placement_unknown");
+    CHECK(n == 1 && entries[0].start_wall_ns == 0,
+          "...with start_wall_ns == 0, not a (possibly TZ-shifted) guess "
+          "derived from its name (got %llu)",
+          n == 1 ? (unsigned long long)entries[0].start_wall_ns : 1ULL);
+
+    /* And src/replay.c's consumer-side disable must never be fooled into
+     * treating this entry as a safe bound for a NEIGHBOUR either: with this
+     * entry as `next`, quick_skip must refuse to use it regardless of
+     * from_wall_ns. */
+    struct pgwt_trace_file_entry two[2] = { entries[0], entries[0] };
+    CHECK(!pgwt_trace_file_quick_skip(two, 2, 0, 1ULL),
+          "an unknown-placement neighbour never causes a quick-skip");
+
+    /* The short-read case above is ABSENT data; these two are WRONG data of
+     * exactly the right length -- a different way the header validation can
+     * fail, sharing the same fallback but exercised through a different
+     * predicate (magic, then version) rather than fread() itself. Both must
+     * land on the identical disabled/listed outcome, never on whatever
+     * garbage start_time_ns the bytes happen to contain. */
+    cleanup_test_dir();
+    setup_test_dir();
+    snprintf(p, sizeof(p), "%s/2025-04-02_14.trace.lz4", TEST_DIR);
+    fp = fopen(p, "wb");
+    CHECK(fp != NULL, "create wrong-magic archive");
+    if (fp) {
+        struct pgwt_trace_file_header hdr = {
+            .magic = 0xDEADBEEFU,           /* full-length, wrong magic */
+            .version = PGWT_TRACE_VERSION,
+            .pg_version = 18,
+            .start_time_ns = 9999999999ULL, /* must NOT surface anywhere */
+        };
+        fwrite(&hdr, sizeof(hdr), 1, fp);
+        fclose(fp);
+    }
+    n = pgwt_scan_trace_files(TEST_DIR, entries, 8);
+    CHECK(n == 1, "wrong-magic archive still LISTED (%d)", n);
+    CHECK(n == 1 && entries[0].placement_unknown,
+          "...marked placement_unknown (bad magic, not a short read)");
+    CHECK(n == 1 && entries[0].start_wall_ns == 0,
+          "...start_wall_ns == 0, not the header's bogus %llu",
+          n == 1 ? (unsigned long long)entries[0].start_wall_ns : 1ULL);
+
+    cleanup_test_dir();
+    setup_test_dir();
+    snprintf(p, sizeof(p), "%s/2025-04-02_15.trace.lz4", TEST_DIR);
+    fp = fopen(p, "wb");
+    CHECK(fp != NULL, "create future-version archive");
+    if (fp) {
+        struct pgwt_trace_file_header hdr = {
+            .magic = PGWT_TRACE_MAGIC,
+            .version = PGWT_TRACE_VERSION + 1,  /* this build cannot read it */
+            .pg_version = 18,
+            .start_time_ns = 8888888888ULL,     /* must NOT surface anywhere */
+        };
+        fwrite(&hdr, sizeof(hdr), 1, fp);
+        fclose(fp);
+    }
+    n = pgwt_scan_trace_files(TEST_DIR, entries, 8);
+    CHECK(n == 1, "future-version archive still LISTED (%d)", n);
+    CHECK(n == 1 && entries[0].placement_unknown,
+          "...marked placement_unknown (unsupported version, not a short "
+          "read): pgwt_reader_open refuses this version (unknown layout) "
+          "and the scanner must agree rather than read a field whose "
+          "offset a future layout could move");
+    CHECK(n == 1 && entries[0].start_wall_ns == 0,
+          "...start_wall_ns == 0, not the header's bogus %llu",
+          n == 1 ? (unsigned long long)entries[0].start_wall_ns : 1ULL);
+
+    cleanup_test_dir();
+}
+
+/* ── Test 7b: #405 — archive placement must survive a reader in a
+ * different timezone from the writer ───────────────────────────────── */
+
+/* pgwt_scan_trace_files derives an archived file's placement from its NAME
+ * ("YYYY-MM-DD_HH.trace.lz4"), via mktime() in the READER's current
+ * timezone. The name is written by the CAPTURE box's localtime_r, so a
+ * reader in a different zone parses the same digits as a different instant
+ * — the identical #402 displacement already fixed on the summary-file side
+ * (tests/test_idle_summary.c's "routing_tz" case), here for traces.
+ *
+ * This reproduces it at the exact point of consequence: src/replay.c's
+ * "quick filter" (`files[fi+1].start_wall_ns < from_wall` => skip file fi)
+ * decides whether an hourly file is read at all. We fabricate two archived
+ * files with KNOWN, true (header) start times one hour apart, pick --from
+ * inside the first file's true coverage, and show that the scan's own
+ * reported start_wall_ns values flip that decision from "keep" to "wrongly
+ * skip" under TZ=Asia/Kolkata (+5:30, no DST, so the offset is exact and
+ * stable) — reproducing a needed file being silently dropped. */
+
+static void write_fake_trace_header(const char *path, uint64_t start_time_ns)
+{
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return;
+    struct pgwt_trace_file_header hdr = {
+        .magic = PGWT_TRACE_MAGIC,
+        .version = PGWT_TRACE_VERSION,
+        .pg_version = 18,
+        .start_time_ns = start_time_ns,
+    };
+    fwrite(&hdr, sizeof(hdr), 1, fp);
+    fclose(fp);
+}
+
+/* Name an archived file the way the writer does: localtime_r of its true
+ * start, truncated to the hour. Called with TZ=UTC in effect (the fixture's
+ * assumed capture-box zone) so the name reflects a UTC hour exactly. */
+static void archive_name_for(uint64_t start_time_ns, char *out, size_t outsz)
+{
+    time_t sec = (time_t)(start_time_ns / 1000000000ULL);
+    struct tm tm;
+    localtime_r(&sec, &tm);
+    snprintf(out, outsz, "%04d-%02d-%02d_%02d.trace.lz4",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour);
+}
+
+/* The quick-filter predicate exactly as src/replay.c applies it: file `fi`
+ * is skipped when the NEXT file's reported start is already before `from`. */
+static int replay_would_skip(uint64_t next_start_wall_ns, uint64_t from_wall_ns)
+{
+    return next_start_wall_ns > 0 && next_start_wall_ns < from_wall_ns;
+}
+
+static void test_scan_trace_files_timezone(void)
+{
+    printf("--- Scan trace files: reader timezone != writer timezone (#405) ---\n");
+    cleanup_test_dir();
+    setup_test_dir();
+
+    /* Fixed, round-hour UTC instants so the fixture is deterministic and
+     * never depends on wall-clock "now". 2025-06-15T10:00:00Z / 11:00:00Z. */
+    const uint64_t T0 = 1749981600ULL;          /* file A's TRUE start */
+    const uint64_t T1 = T0 + 3600ULL;           /* file B's TRUE start, 1h later */
+    const uint64_t FROM = T0 + 1800ULL;         /* --from: 30 min into file A */
+
+    char name_a[64], name_b[64];
+    char *saved_tz = getenv("TZ");
+    char saved_copy[128] = "";
+    int had_tz = (saved_tz != NULL);
+    if (had_tz) snprintf(saved_copy, sizeof(saved_copy), "%s", saved_tz);
+
+    /* Name the archives as a UTC capture box would (localtime_r there). */
+    setenv("TZ", "UTC", 1);
+    tzset();
+    archive_name_for(T0 * 1000000000ULL, name_a, sizeof(name_a));
+    archive_name_for(T1 * 1000000000ULL, name_b, sizeof(name_b));
+
+    char path_a[700], path_b[700];
+    snprintf(path_a, sizeof(path_a), "%s/%s", TEST_DIR, name_a);
+    snprintf(path_b, sizeof(path_b), "%s/%s", TEST_DIR, name_b);
+    write_fake_trace_header(path_a, T0 * 1000000000ULL);
+    write_fake_trace_header(path_b, T1 * 1000000000ULL);
+
+    /* The reader is now 5.5h east of the writer. */
+    setenv("TZ", "Asia/Kolkata", 1);
+    tzset();
+
+    /* NON-VACUITY: if TZ made no difference here, the rest of this test
+     * would pass on the old, buggy scanner too and prove nothing. Asia/Kolkata
+     * has no DST, so this offset is exact and never flaky. */
+    struct tm tmb;
+    memset(&tmb, 0, sizeof(tmb));
+    int y = 0, mo = 0, d = 0, h = 0;
+    CHECK(sscanf(name_b, "%4d-%2d-%2d_%2d.trace.lz4", &y, &mo, &d, &h) == 4,
+          "archived name parses: %s", name_b);
+    tmb.tm_year = y - 1900; tmb.tm_mon = mo - 1; tmb.tm_mday = d;
+    tmb.tm_hour = h; tmb.tm_isdst = -1;
+    time_t name_b_local = mktime(&tmb);
+    uint64_t buggy_b_wall_ns = (uint64_t)name_b_local * 1000000000ULL;
+    CHECK(buggy_b_wall_ns != T1 * 1000000000ULL,
+          "under TZ=Asia/Kolkata the NAME-derived start for %s (%llu) must "
+          "differ from its true header start (%llu) -- a 0h offset here "
+          "would make this fixture assert nothing",
+          name_b, (unsigned long long)buggy_b_wall_ns,
+          (unsigned long long)(T1 * 1000000000ULL));
+
+    struct pgwt_trace_file_entry entries[8];
+    int n = pgwt_scan_trace_files(TEST_DIR, entries, 8);
+    CHECK(n == 2, "scan finds both archived files (%d)", n);
+
+    const struct pgwt_trace_file_entry *ea = NULL, *eb = NULL;
+    for (int i = 0; i < n; i++) {
+        if (strstr(entries[i].path, name_a)) ea = &entries[i];
+        if (strstr(entries[i].path, name_b)) eb = &entries[i];
+    }
+    CHECK(ea != NULL && eb != NULL, "both archived entries identified");
+
+    /* THE FIX'S TARGET: the scanner must report the HEADER's start_time_ns,
+     * which is the same absolute instant on every host, not the name read
+     * in whatever zone the reader happens to be in. */
+    CHECK(ea && ea->start_wall_ns == T0 * 1000000000ULL,
+          "file A: scanner reports %llu, header says %llu (TZ-independent)",
+          ea ? (unsigned long long)ea->start_wall_ns : 0ULL,
+          (unsigned long long)(T0 * 1000000000ULL));
+    CHECK(eb && eb->start_wall_ns == T1 * 1000000000ULL,
+          "file B: scanner reports %llu, header says %llu (TZ-independent)",
+          eb ? (unsigned long long)eb->start_wall_ns : 0ULL,
+          (unsigned long long)(T1 * 1000000000ULL));
+
+    /* THE CONSEQUENCE: src/replay.c's quick filter must NOT conclude file A
+     * is entirely before --from. File A truly covers [T0, T1) and FROM=T0+30m
+     * sits inside it, so file A is needed. On the buggy scanner, file B's
+     * mis-shifted start_wall_ns lands far enough in the past (TZ offset
+     * dwarfs the 1h file spacing) that the filter wrongly fires. */
+    CHECK(eb && !replay_would_skip(eb->start_wall_ns, FROM * 1000000000ULL),
+          "replay's quick filter must KEEP file A (needed) -- it would skip "
+          "it if file B's reported start (%llu) were still before --from "
+          "(%llu)",
+          eb ? (unsigned long long)eb->start_wall_ns : 0ULL,
+          (unsigned long long)(FROM * 1000000000ULL));
+
+    if (had_tz) setenv("TZ", saved_copy, 1);
+    else unsetenv("TZ");
+    tzset();
 
     cleanup_test_dir();
 }
@@ -581,6 +854,8 @@ int main(void)
     test_time_parser();
     test_clock_conversion();
     test_scan_trace_files();
+    test_scan_trace_files_unknown_placement();
+    test_scan_trace_files_timezone();
     test_replay_time_model();
 
     printf("\n=== %d / %d tests passed ===\n", tests_passed, tests_run);

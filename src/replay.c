@@ -71,16 +71,30 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
 
     uint64_t total_events = 0;
     int files_read = 0;
+    int files_disabled = 0;
     bool pg_version_set = false;
     struct pgwt_replay_stats rstats = {0};
     int lookahead = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
 
     for (int fi = 0; fi < nfiles; fi++) {
-        /* Quick filter: skip files that end before our --from time */
-        if (from_wall > 0 && fi + 1 < nfiles &&
-            files[fi + 1].start_wall_ns > 0 &&
-            files[fi + 1].start_wall_ns < from_wall)
+        /* Quick filter: skip files that end before our --from time. Factored
+         * into event_reader.c (pgwt_trace_file_quick_skip) so it is pinned
+         * by tests/test_replay_window.c without linking the daemon. */
+        if (pgwt_trace_file_quick_skip(files, nfiles, fi, from_wall))
             continue;
+
+        /* #405: a file whose header could not place it in time is disabled
+         * rather than guessed at — src/event_reader.c already refused to
+         * fall back to its (TZ-dependent) name. Say so where the user will
+         * actually see it, not just in a scan-time stderr line they may
+         * have scrolled past. */
+        if (files[fi].placement_unknown) {
+            files_disabled++;
+            if (d->verbose)
+                fprintf(stderr, "WARN: %s excluded from this replay — time "
+                        "placement unknown (#405)\n", files[fi].path);
+            continue;
+        }
 
         struct pgwt_event_reader reader;
         if (pgwt_reader_open(&reader, files[fi].path) != 0)
@@ -189,6 +203,18 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
                "are missing from\n"
                "      these numbers (corrupt or truncated trace file).\n\n",
                (unsigned long long)rstats.blocks_unreadable);
+    }
+
+    /* #405: a visible refusal beats a silent omission — this file's data is
+     * NOT in the numbers below, and that is stated here rather than left to
+     * a stderr line during the scan that --verbose would show but a default
+     * run would not. */
+    if (files_disabled > 0) {
+        printf("NOTE: %d trace file(s) excluded from this replay: their "
+               "time placement could\n"
+               "      not be established from their header. Their data is "
+               "NOT included in\n"
+               "      these numbers.\n\n", files_disabled);
     }
 
     /* Fidelity notice (FID-5): a tiered trace is mostly SAMPLES records.
