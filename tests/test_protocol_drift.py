@@ -323,9 +323,25 @@ def check_transitions_idle_flag(t, srv):
     t.check("error" not in real,
             "[transitions idle] real server answered without error"
             + (f" (got: {real.get('error')})" if "error" in real else ""))
+    mock = mock_query("transitions", req_id=real.get("id", 0))
+    t.check("error" not in mock,
+            "[transitions idle] mock answered without error"
+            + (f" (got: {mock.get('error')})" if "error" in mock else ""))
+    for source, response in (("real", real), ("mock", mock)):
+        if "error" in response:
+            continue
+        nodes = response.get("nodes", [])
+        t.check(len(nodes) > 0,
+                f"[transitions idle] {source} nodes array is non-empty")
+        for node in nodes:
+            idle = node.get("idle")
+            t.check(isinstance(idle, bool),
+                    f"[transitions idle] {source} node "
+                    f"{node.get('name', '<unnamed>')!r} idle is a boolean "
+                    f"(got {idle!r})")
     if "error" in real:
         return
-    by_name = {n["name"]: n for n in real.get("nodes", [])}
+    by_name = {n.get("name", "<unnamed>"): n for n in real.get("nodes", [])}
     cases = [
         ("Timeout:CheckpointWriteDelay", True),
         ("Lock:relation", False),
