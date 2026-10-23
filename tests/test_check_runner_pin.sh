@@ -15,9 +15,9 @@
 #                    CFLAGS, no compile recipes, and a `grep` dependency that
 #                    exits 126/127 or is missing from PATH entirely.
 #
-# No network, no git, does not read this repository's own state: every case
-# builds a throwaway tree under `mktemp -d` and points the guard at it via its
-# `[repo-dir]` argument.
+# The existing guard cases use throwaway trees via its `[repo-dir]` argument.
+# Independent root-Makefile checks below also read this repository's real
+# Makefile and compile an invented undeclared-function probe with its CFLAGS.
 #
 # Usage: tests/test_check_runner_pin.sh      (wired into `make check`)
 set -uo pipefail
@@ -257,10 +257,192 @@ jobs:
 YML
 expect_ok "$R" "FP1 pinned value whose comment names ubuntu-latest"
 
+# check_makefile_cflags <makefile> <flags-variable>
+# Independent of GUARD, which only checks tests/Makefile. CANNOT-SEE inputs
+# refuse: missing files, ambiguous/absent definitions, or no $(CC) recipes.
+# Join continuations before inspecting definitions and recipes; comments and
+# BPF_CFLAGS must not satisfy either the flag or the $(CFLAGS) requirement.
+check_makefile_cflags() {
+    local mk="$1" flags_var="$2"
+    if [[ ! -f "$mk" || ! -r "$mk" ]]; then
+        echo "REFUSE: cannot read Makefile $mk" >&2
+        return 1
+    fi
+    if [[ ! "$flags_var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        echo "REFUSE: invalid CFLAGS variable name: $flags_var" >&2
+        return 1
+    fi
+    if ! command -v awk >/dev/null 2>&1; then
+        echo "REFUSE: awk not found — cannot inspect $mk" >&2
+        return 1
+    fi
+    awk -v flags_var="$flags_var" -v flag='-Werror=implicit-function-declaration' '
+        function reject(message) {
+            print message > "/dev/stderr"
+            failed = 1
+        }
+        function inspect(line, value) {
+            sub(/[[:space:]]*#.*/, "", line)
+            if (line !~ /^\t/ && line ~ assignment) {
+                definitions++
+                value = line
+                sub(assignment, "", value)
+                if (value ~ "(^|[[:space:]])" flag "([[:space:]]|$)")
+                    has_flag = 1
+            }
+            if (line ~ /^\t/ && index(line, "$(CC)")) {
+                recipes++
+                if (!index(line, "$(" flags_var ")"))
+                    reject("FAIL: " FILENAME ":" first_line \
+                           " $(CC) recipe does not pass $(" flags_var "): " line)
+            }
+        }
+        BEGIN { assignment = "^[ ]*" flags_var "[[:space:]]*[:?+!]*=" }
+        {
+            if (pending == "") first_line = NR
+            if (sub(/\\$/, "")) {
+                pending = pending $0 " "
+            } else {
+                inspect(pending $0)
+                pending = ""
+            }
+        }
+        END {
+            if (pending != "")
+                reject("REFUSE: " FILENAME " has an unfinished continuation")
+            if (definitions != 1)
+                reject("REFUSE: " FILENAME " expected exactly 1 " flags_var \
+                       " definition; found " (definitions + 0))
+            else if (!has_flag)
+                reject("FAIL: " FILENAME " " flags_var " is missing " flag)
+            if (!recipes)
+                reject("REFUSE: " FILENAME " has no $(CC) compile recipes")
+            if (failed) exit 1
+            print "implicit-decl flag: " recipes " $(CC) recipe(s) checked, all pass $(" flags_var ")"
+        }
+    ' "$mk"
+}
+
+expect_root_fail() {  # <makefile> <substring> <what>
+    local mk="$1" needle="$2" what="$3" result status
+    result="$(check_makefile_cflags "$mk" CFLAGS 2>&1)"; status=$?
+    if (( status != 0 )) && [[ "$result" == *"$needle"* ]]; then
+        report true "$what (exit $status, matched '$needle')"
+    else
+        report false "$what — expected nonzero exit and '$needle'; got exit $status: $result"
+    fi
+}
+
+echo
+echo "== root Makefile: live CFLAGS gate (unconditional) =="
+ROOT_MK="$SCRIPT_DIR/../Makefile"
+out="$(check_makefile_cflags "$ROOT_MK" CFLAGS 2>&1)"; code=$?
+if (( code == 0 )); then
+    report true "live root Makefile: $out"
+else
+    report false "live root Makefile (exit $code): $out"
+fi
+
+echo
+echo "== root Makefile: broken or absent awk must REFUSE =="
+for rc_stub in 127 126; do
+    stub="$tmpdir/stub_awk_$rc_stub"; mkdir -p "$stub"
+    printf '#!/bin/sh\nexit %s\n' "$rc_stub" > "$stub/awk"
+    chmod +x "$stub/awk"
+    out="$(PATH="$stub:$PATH" check_makefile_cflags "$ROOT_MK" CFLAGS 2>&1)"; code=$?
+    if (( code != 0 )); then
+        report true "live root Makefile: awk dependency exiting $rc_stub refuses (exit $code)"
+    else
+        report false "live root Makefile: awk dependency exiting $rc_stub — expected a refusal; got exit $code: $out"
+    fi
+done
+
+empty="$tmpdir/empty_awk_path"; mkdir -p "$empty"
+out="$(PATH="$empty" check_makefile_cflags "$ROOT_MK" CFLAGS 2>&1)"; code=$?
+if (( code != 0 )) && [[ "$out" == *"REFUSE: awk not found"* ]]; then
+    report true "live root Makefile: awk absent from PATH refuses (exit $code)"
+else
+    report false "live root Makefile: awk absent from PATH — expected a refusal; got exit $code: $out"
+fi
+
+echo
+echo "== root Makefile: compiler RED halves with the actual CFLAGS =="
+cat > "$tmpdir/implicit-probe.c" <<'C'
+int main(void) { return pgwt_test_undeclared_probe_512(); }
+C
+# Let make extract/expand CC and CFLAGS from the real Makefile, preserving
+# continuations, variable references and shell quoting (no eval or hardcoded
+# replacement CFLAGS). Only these phony targets run; src/ is not built here.
+# Modern clang/GCC already error by default. Start BOTH runs in warning mode
+# to model older GCC: the shipped CFLAGS must override that mode in run 1,
+# while removing exactly the required token must leave run 2 non-fatal.
+cat > "$tmpdir/implicit-probe.mk" <<'MK'
+.PHONY: pgwt-probe-strict-512 pgwt-probe-warning-512
+pgwt-probe-strict-512:
+	$(CC) -Wno-error=implicit-function-declaration $(CFLAGS) -c "$(PGWT_PROBE_SRC)" -o /dev/null
+pgwt-probe-warning-512:
+	$(CC) -Wno-error=implicit-function-declaration $(filter-out -Werror=implicit-function-declaration,$(CFLAGS)) -c "$(PGWT_PROBE_SRC)" -o /dev/null
+MK
+for mode in strict warning; do
+    out="$(make --no-print-directory -s -C "$SCRIPT_DIR/.." \
+        -f "$ROOT_MK" -f "$tmpdir/implicit-probe.mk" \
+        "PGWT_PROBE_SRC=$tmpdir/implicit-probe.c" "pgwt-probe-$mode-512" 2>&1)"; code=$?
+    diagnostic=false
+    if [[ "$out" == *pgwt_test_undeclared_probe_512* ||
+          "$out" == *"implicit declaration"* || "$out" == *"implicitly declared"* ]]; then
+        diagnostic=true
+    fi
+    if [[ "$mode" == strict ]] && (( code != 0 )) && [[ "$diagnostic" == true ]]; then
+        report true "root CFLAGS reject the undeclared probe (exit $code, diagnostic matched)"
+    elif [[ "$mode" == warning ]] && (( code == 0 )) && [[ "$diagnostic" == true ]]; then
+        report true "same probe without the CFLAGS flag is only a warning (exit 0, diagnostic matched)"
+    else
+        report false "root CFLAGS probe ($mode) — unexpected exit $code or diagnostic: $out"
+    fi
+done
+
+echo
+echo "== root Makefile: static RED and CANNOT-SEE fixtures =="
+# RED independent of any compiler: mutate only the real CFLAGS definition.
+sed '/^CFLAGS[[:space:]]*=/s/-Werror=implicit-function-declaration//g' \
+    "$ROOT_MK" > "$tmpdir/root-no-flag.mk"
+expect_root_fail "$tmpdir/root-no-flag.mk" 'missing -Werror=implicit-function-declaration' \
+    "root gate rejects a dropped flag without invoking a compiler (el8 case)"
+
+printf 'CFLAGS = -Werror=implicit-function-declaration\nall:\n\t@true\n' \
+    > "$tmpdir/root-no-recipes.mk"
+expect_root_fail "$tmpdir/root-no-recipes.mk" 'no $(CC) compile recipes' \
+    'root gate refuses a Makefile with no $(CC) recipes'
+expect_root_fail "$tmpdir/root-absent.mk" 'REFUSE' 'root gate refuses a missing Makefile'
+
+cp "$ROOT_MK" "$tmpdir/root-ambiguous.mk"
+printf '\nCFLAGS = -O0\n' >> "$tmpdir/root-ambiguous.mk"
+expect_root_fail "$tmpdir/root-ambiguous.mk" 'expected exactly 1' \
+    'root gate refuses ambiguous CFLAGS definitions'
+printf 'all:\n\t$(CC) $(CFLAGS) -c probe.c\n' > "$tmpdir/root-no-definition.mk"
+expect_root_fail "$tmpdir/root-no-definition.mk" 'expected exactly 1' \
+    'root gate refuses an absent CFLAGS definition'
+
+cp "$ROOT_MK" "$tmpdir/root-bypass.mk"
+printf '\nbypass:\n\t$(CC) $(BPF_CFLAGS) -c probe.c\n' >> "$tmpdir/root-bypass.mk"
+expect_root_fail "$tmpdir/root-bypass.mk" 'does not pass $(CFLAGS)' \
+    'root gate rejects a recipe passing only BPF_CFLAGS'
+
+# Exercise both arguments and continuation handling on a positive fixture.
+printf 'USER_CFLAGS = -Wall \\\n -Werror=implicit-function-declaration\nall:\n\t$(CC) \\\n $(USER_CFLAGS) -c probe.c\n' \
+    > "$tmpdir/root-custom.mk"
+out="$(check_makefile_cflags "$tmpdir/root-custom.mk" USER_CFLAGS 2>&1)"; code=$?
+if (( code == 0 )); then
+    report true 'root gate supports another CFLAGS variable and continued recipes'
+else
+    report false "root gate with USER_CFLAGS and continuations (exit $code): $out"
+fi
+
 echo
 echo "runner-pin guard self-test: $((tests_run - tests_failed))/$tests_run passed"
 if (( tests_failed > 0 )); then
     echo "runner-pin guard self-test: FAILED"
     exit 1
 fi
+echo "runner-pin guard self-test: all tests passed"
 exit 0
