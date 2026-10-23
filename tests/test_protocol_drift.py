@@ -318,14 +318,42 @@ def check_transitions_idle_flag(t, srv):
     """#487: every transitions node must carry an authoritative `idle` boolean,
     because the Timeout half of pgwt_is_idle_event() depends on a runtime-only
     pacing mask the client cannot replicate. Named per the two cases that
-    exercise both branches: a pacing Timeout (idle) and a Lock (never idle)."""
+    exercise both branches: a pacing Timeout (idle) and a Lock (never idle).
+
+    #501: the per-node loop below checks every node in both the real server's
+    and mock_server's responses for TYPE only -- `isinstance(idle, bool)` --
+    so a partial catalog (a node present without the flag, or with a
+    non-boolean value) cannot slip through unnoticed. It does NOT check that
+    an unnamed node's idle VALUE is correct; only the two named cases above
+    are value-pinned. Recomputing the correct value for every node here would
+    mean duplicating pgwt_is_idle_event()'s classification logic in the test,
+    which would only prove two copies of the same rule agree. The "present
+    but wrong" case -- e.g. an incomplete pacing mask making a Timeout node's
+    idle flag present and boolean but wrong -- is tracked separately as #515,
+    not covered by this function."""
     real = srv.query("transitions")
     t.check("error" not in real,
             "[transitions idle] real server answered without error"
             + (f" (got: {real.get('error')})" if "error" in real else ""))
+    mock = mock_query("transitions", req_id=real.get("id", 0))
+    t.check("error" not in mock,
+            "[transitions idle] mock answered without error"
+            + (f" (got: {mock.get('error')})" if "error" in mock else ""))
+    for source, response in (("real", real), ("mock", mock)):
+        if "error" in response:
+            continue
+        nodes = response.get("nodes", [])
+        t.check(len(nodes) > 0,
+                f"[transitions idle] {source} nodes array is non-empty")
+        for node in nodes:
+            idle = node.get("idle")
+            t.check(isinstance(idle, bool),
+                    f"[transitions idle] {source} node "
+                    f"{node.get('name', '<unnamed>')!r} idle is a boolean "
+                    f"(got {idle!r})")
     if "error" in real:
         return
-    by_name = {n["name"]: n for n in real.get("nodes", [])}
+    by_name = {n.get("name", "<unnamed>"): n for n in real.get("nodes", [])}
     cases = [
         ("Timeout:CheckpointWriteDelay", True),
         ("Lock:relation", False),
