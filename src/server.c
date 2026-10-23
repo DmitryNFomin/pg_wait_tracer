@@ -6643,6 +6643,27 @@ static void emit_transitions_response(struct pgwt_request *req,
         return;
     }
 
+    /* Classification status for the encountered Timeout NODE ids. No Timeout
+     * nodes means vacuously complete (nothing to classify), not "the catalog is
+     * good". The raw node pass applies the request filter, and
+     * pgwt_block_agg_add_event() accumulates old_event nodes, covering every
+     * link's source event; raw res link rows are request-filtered and capped.
+     * Link-only targets cannot reach a rendered graph unclassified:
+     * transitionsDataError() in web/static/lib/builders/transitions.js checks
+     * BOTH endpoints of every link against the node-name set and rejects the
+     * WHOLE payload with 'missing node: ' + name if either is absent, before
+     * any graph is built. Thus checking node ids suffices for the idle
+     * verdicts below. */
+    int idle_classification_complete = 1;
+    for (int i = 0; i < n_nodes; i++) {
+        uint32_t event_id = nodes_arr[i].event_id;
+        if (WE_CLASS(event_id) == PG_WAIT_TIMEOUT &&
+            !pgwt_timeout_id_is_classifiable(WE_EVENT(event_id))) {
+            idle_classification_complete = 0;
+            break;
+        }
+    }
+
     uint64_t total       = use_res ? res->total_transitions
                                    : win->total_transitions;
     int      total_links = use_res ? res->total_rows : n_pairs;
@@ -6657,6 +6678,10 @@ static void emit_transitions_response(struct pgwt_request *req,
     cJSON_AddNumberToObject(root, "link_count", shown);
     cJSON_AddNumberToObject(root, "total_link_count", total_links);
     cJSON_AddBoolToObject(root, "truncated", shown < total_links);
+    /* Trust status is deterministic for a window + catalog, on both paths;
+     * unlike the HOW diagnostics below it is unconditional payload data. */
+    cJSON_AddBoolToObject(root, "idle_classification_complete",
+                          idle_classification_complete);
     /* PROVENANCE, and OPT-IN. How the answer was produced — 0/0 is the raw
      * path — so a reviewer or a test can tell the fast path actually ran
      * instead of inferring it from a latency number.

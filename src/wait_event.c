@@ -541,6 +541,8 @@ static void select_version_tables(int pg_major)
     }
 }
 
+static uint32_t timeout_coverage_mask = 0;
+
 /* Rebuild the Timeout pacing mask FROM THE ACTIVE NAME TABLE (see
  * src/idle_rule.h). Derived from names, never from hardcoded ids, so it is
  * right by construction on every version — including the dynamic names loaded
@@ -581,11 +583,13 @@ static void rebuild_idle_mask(void)
                             dyn_max[PG_WAIT_TIMEOUT] >= 0);
     int verified = PGWT_TIMEOUT_TABLE_VERIFIED(pg_version);
     if (!observed_timeout && !verified) {
+        timeout_coverage_mask = 0;
         pgwt_idle_rule_set_timeout_mask(0);
         return;
     }
 
     uint32_t mask = 0;
+    uint32_t cov = 0;
     for (int id = 0; id < 32; id++) {
         const char *n;
         if (verified) {
@@ -599,10 +603,24 @@ static void rebuild_idle_mask(void)
             n = (id <= dyn_max[PG_WAIT_TIMEOUT])
                     ? dyn_names[PG_WAIT_TIMEOUT][id] : NULL;
         }
+        if (n)
+            cov |= 1u << id;
         if (n && pgwt_timeout_name_is_pacing(n))
             mask |= 1u << id;
     }
+    timeout_coverage_mask = cov;
     pgwt_idle_rule_set_timeout_mask(mask);
+}
+
+/* Coverage is a by-product of the same loop that builds the pacing mask,
+ * computed from the same resolved name n, so they cannot disagree about
+ * which ids can be classified. An uninitialised process reports zero
+ * coverage, matching the empty mask. A missed rebuild_idle_mask() call now
+ * leaves both equally stale instead of letting the flag claim coverage the
+ * mask never received. */
+int pgwt_timeout_id_is_classifiable(uint32_t id)
+{
+    return id < 32 && ((timeout_coverage_mask >> id) & 1u);
 }
 
 void pgwt_init_event_names(int pg_major)
