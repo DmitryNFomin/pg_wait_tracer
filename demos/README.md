@@ -28,6 +28,7 @@ Recording tooling for the demo gifs in the project README.
 | | |
 |---|---|
 | Recorded against | master `045406f` |
+| Browser viewport | 1710x981 (the project's pinned demo viewport) |
 | Source footage | 11 tabs, 10,006 frames at 1710x980, 25 fps |
 | Output | 1280x734, 148 frames, 37.9 s, 5,154,759 bytes |
 | sha256 | `b3e576b54b078ac7ab56f61f023f5a41f39fb9f50611844adc9fdc9db9a252c2` |
@@ -35,8 +36,9 @@ Recording tooling for the demo gifs in the project README.
 It is an **edit**, not a single take: one capture per tab, each its own page
 load, cut together with hard transitions. Motion passages are slowed to 0.4-0.8x
 of the 25 fps capture and the waiting between them is removed, which is why 11
-tabs fit in 38 seconds. Nothing is cropped — the 1710x980 viewport is scaled
-down whole.
+tabs fit in 38 seconds. Nothing is cropped — the 1710x980 frame is scaled
+down whole — the 1280x734 output preserves the captured frame's aspect ratio
+(1.336 vs 1.335).
 
 The workload is pgbench plus a purpose-built lock and IO generator; the tables
 named `_smoke_lock_wait`, `_smoke_row_lock_wait` and `_smoke_io_load` are test
