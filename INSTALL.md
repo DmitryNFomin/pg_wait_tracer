@@ -320,12 +320,17 @@ This produces the `web/pgwt` binary. Run it from your laptop after `cd web`:
 - `pgwt-server` binary on the DB server (either in PATH or specified with
   `--server-path`)
 - Trace files on the DB server (produced by `pg_wait_tracer --daemon -T <dir>`)
-- SSH user must be in the trace file group (default `dba`) — see below
+- SSH user must be in the trace file group (default: `dba` if it exists,
+  otherwise the group PostgreSQL runs under) — see below
 
 **Setting up trace file access for non-root users:**
 
 The daemon runs as root but creates trace files readable by a configurable Unix
-group (default: `dba`). SSH users connecting via `pgwt` need to be in this group:
+group. The default is the first group that actually exists on the host:
+`dba` if the site created one, otherwise the group PostgreSQL itself runs
+under (usually `postgres`) — so a non-root reader such as the PostgreSQL
+service account can open a trace without any extra setup. SSH users
+connecting via `pgwt` need to be in that group:
 
 ```bash
 # Create the group (once)
@@ -337,9 +342,13 @@ sudo usermod -aG dba youruser
 # The user must log out and back in for the group change to take effect
 ```
 
-The daemon sets permissions automatically:
-- Trace directory: `0750` (`rwxr-x---`), owned by `root:dba`
-- Trace files: `0640` (`rw-r-----`), owned by `root:dba`
+The daemon sets permissions automatically (`<group>` = the resolved trace
+group; `wait_event_names.json` gets the same treatment):
+- Trace directory: `0750` (`rwxr-x---`), owned by `root:<group>`
+- Trace files: `0640` (`rw-r-----`), owned by `root:<group>`
+
+If the group named with `--trace-group` does not exist, the daemon says so
+and leaves the files root-owned: nothing but root can read that trace.
 
 To use a different group name:
 ```bash

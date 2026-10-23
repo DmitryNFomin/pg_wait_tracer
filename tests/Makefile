@@ -20,6 +20,7 @@ LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
+            test_trace_perms \
             test_exact_probe \
             test_effective_cores \
             test_coop test_bucket \
@@ -113,6 +114,16 @@ test_spawn: test_spawn.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_event_writer: test_event_writer.c $(BUILD)/event_writer.o
+	$(CC) $(CFLAGS) -o $@ $^ -llz4
+
+# test_trace_perms: #499 (the name sidecar needs the trace dir to exist
+# before discovery writes it) and #500 (a non-root process must be able to
+# open the trace). wait_event.o for pgwt_write_names_json — the sidecar is
+# the artifact #499 is about — and its own link closure (idle_rule, spawn,
+# cJSON), exactly as test_wait_event needs.
+test_trace_perms: test_trace_perms.c $(BUILD)/event_writer.o \
+                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                  $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
 
 # summary_writer.o since #379: the daemon build of map_reader.c calls

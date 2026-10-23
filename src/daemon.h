@@ -342,7 +342,13 @@ struct pgwt_daemon {
     const char *trace_dir;                  /* NULL = disabled */
     int         trace_retention;            /* hours, default 24 */
     double      trace_retention_gb;          /* size cap in GiB, 0 = off (DUR-3) */
-    const char *trace_group;                /* group for trace files, default "dba" */
+    /* Group allowed to read trace files. NULL only when --trace-dir is off
+     * or no candidate group exists on this host (#500): the default is
+     * resolved by pgwt_default_trace_group() to a group that actually
+     * EXISTS — "dba" when the site created it, else the group PostgreSQL
+     * runs under. It used to be the literal "dba" unconditionally, which
+     * left every trace root-only on a host without that group. */
+    const char *trace_group;
     struct pgwt_event_writer *event_writer;     /* NULL if disabled */
     struct pgwt_summary_writer *summary_writer; /* NULL if disabled */
     struct pgwt_query_text_capture *query_text_capture; /* NULL if disabled */

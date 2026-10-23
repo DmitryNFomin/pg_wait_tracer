@@ -928,3 +928,15 @@ test_lock_chain_disclosure
 # must not hide the row, and a zero residual (legacy/sampled tier) must print
 # NO row rather than a 0.0% one.
 test_system_event_offcpu
+# #499 + #500: the trace sidecar and who can read a trace.
+#   #499 is a startup ORDER bug — discovery writes wait_event_names.json
+#   before the trace directory exists, so every -T run lost the capture's
+#   wait-event name provenance. Every pre-existing test created its trace
+#   dir with mktemp -d first, which is exactly why none of them saw it.
+#   #500 is reader ACCESS, not mode bits: the default group "dba" exists
+#   on almost no host, so traces were root:root 0640 and no non-root
+#   replay or demo service could open them. 0640 is the mode in both the
+#   broken and the fixed case, so this test opens the file as a real
+#   non-root uid (root only) and checks a root:root control file in the
+#   same directory stays refused.
+test_trace_perms
