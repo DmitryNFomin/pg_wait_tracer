@@ -32,6 +32,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -460,6 +462,110 @@ func TestServerEmitsIDFirstInvariant(t *testing.T) {
 
 // ── Version handshake (T7 / TST-11) ─────────────────────────────────────────
 
+// #487 requires idle on every transitions node; #515 requires the response's
+// idle_classification_complete readiness field. Pin their minimum separately
+// from the production constants so lowering all three still fails the gate.
+const requiredProtocolRev = 2
+
+var (
+	headerProtocolRevRE = regexp.MustCompile(`(?m)^#define[ \t]+PGWT_PROTOCOL_REV[ \t]+([0-9]+)[ \t]*$`)
+	mockProtocolRevRE   = regexp.MustCompile(`(?m)^PROTOCOL_REV[ \t]*=[ \t]*([0-9]+)[ \t]*$`)
+)
+
+func parseRevConstant(content, label string, re *regexp.Regexp) (int, error) {
+	matches := re.FindAllStringSubmatch(content, -1)
+	if len(matches) != 1 {
+		return 0, fmt.Errorf("%s: pattern %s matched %d definitions, want exactly one", label, re.String(), len(matches))
+	}
+	if len(matches[0]) != 2 {
+		return 0, fmt.Errorf("%s: pattern %s must capture one revision", label, re.String())
+	}
+	rev, err := strconv.Atoi(matches[0][1])
+	if err != nil {
+		return 0, fmt.Errorf("%s: revision %q is not a base-10 int: %w", label, matches[0][1], err)
+	}
+	return rev, nil
+}
+
+func readRevConstant(path, label string, re *regexp.Regexp) (int, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("%s: read %s: %w", label, path, err)
+	}
+	return parseRevConstant(string(content), label, re)
+}
+
+func TestProtocolRevThreeCopyAgreement(t *testing.T) {
+	headerRev, err := readRevConstant("../src/pg_wait_tracer.h", "C header", headerProtocolRevRE)
+	if err != nil {
+		t.Fatalf("read header revision: %v", err)
+	}
+	mockRev, err := readRevConstant("../tests/mock_server.py", "Python mock", mockProtocolRevRE)
+	if err != nil {
+		t.Fatalf("read mock revision: %v", err)
+	}
+	if headerRev != protocolRev {
+		t.Errorf("C header protocol %d != client protocolRev %d", headerRev, protocolRev)
+	}
+	if mockRev != protocolRev {
+		t.Errorf("Python mock protocol %d != client protocolRev %d", mockRev, protocolRev)
+	}
+	if protocolRev < requiredProtocolRev {
+		t.Errorf("client protocolRev %d < required protocol %d", protocolRev, requiredProtocolRev)
+	}
+}
+
+func TestParseRevConstantRefusesWhenBlind(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		label   string
+		re      *regexp.Regexp
+	}{
+		{"empty content", "", "C header", headerProtocolRevRE},
+		{"constant renamed", "#define RENAMED_PROTOCOL_REV 7\n", "C header", headerProtocolRevRE},
+		{"C comment only", "/* PGWT_PROTOCOL_REV 7 */\n", "C header", headerProtocolRevRE},
+		{"Python comment only", "# PROTOCOL_REV = 7\n", "Python mock", mockProtocolRevRE},
+		{"two C definitions", "#define PGWT_PROTOCOL_REV 2\n#define PGWT_PROTOCOL_REV 7\n", "C header", headerProtocolRevRE},
+		{"two Python definitions", "PROTOCOL_REV = 2\nPROTOCOL_REV = 7\n", "Python mock", mockProtocolRevRE},
+		{"non-numeric definition", "#define PGWT_PROTOCOL_REV FOO\n", "C header", headerProtocolRevRE},
+		{"non-numeric capture", "#define PGWT_PROTOCOL_REV FOO\n", "C header", regexp.MustCompile(`(?m)^#define[ \t]+PGWT_PROTOCOL_REV[ \t]+(\S+)[ \t]*$`)},
+		{"integer overflow", "PROTOCOL_REV = 999999999999999999999999999999\n", "Python mock", mockProtocolRevRE},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseRevConstant(c.content, c.label, c.re)
+			if err == nil {
+				t.Fatal("unreadable revision must return an error")
+			}
+			if !strings.Contains(err.Error(), c.label) {
+				t.Errorf("error %q missing label %q", err, c.label)
+			}
+			if len(c.re.FindAllStringSubmatch(c.content, -1)) == 0 && !strings.Contains(err.Error(), c.re.String()) {
+				t.Errorf("error %q missing pattern %q", err, c.re.String())
+			}
+		})
+	}
+	for _, c := range []struct {
+		name string
+		path string
+	}{
+		{"missing file", filepath.Join(t.TempDir(), "missing.h")},
+		{"unreadable file", t.TempDir()}, // A directory cannot be read as a file, even as root.
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			const label = "C header"
+			rev, err := readRevConstant(c.path, label, headerProtocolRevRE)
+			if err == nil || rev != 0 {
+				t.Fatalf("readRevConstant = (%d, %v), want (0, error)", rev, err)
+			}
+			if !strings.Contains(err.Error(), label) {
+				t.Errorf("error %q missing label %q", err, label)
+			}
+		})
+	}
+}
+
 // versionSkewWarning is a pure function: exhaustively pin every branch of the
 // warn-on-mismatch matrix (warn, never refuse — skew is the normal state).
 func TestVersionSkewWarning(t *testing.T) {
@@ -475,6 +581,9 @@ func TestVersionSkewWarning(t *testing.T) {
 		{"exact match", "v0.13", 1, "v0.13", 1, false, ""},
 		{"version skew, same protocol", "v0.13", 1, "v0.12", 1, true, "version skew"},
 		{"protocol skew", "v0.14", 2, "v0.13", 1, true, "PROTOCOL skew"},
+		// Both sides report "unknown" because the gate box has no .git, so
+		// only the protocol arm can catch this.
+		{"equal unknown versions, rev-1 server", "unknown", protocolRev, "unknown", 1, true, "PROTOCOL skew"},
 		{"server predates handshake", "v0.13", 1, "", -1, true, "did not report a version"},
 	}
 	for _, c := range cases {
@@ -493,6 +602,9 @@ func TestVersionSkewWarning(t *testing.T) {
 // The real server must report server_version + protocol in `info` so the
 // handshake has something to compare against. Pins the C-side surface
 // (src/server.c handle_info) that the client warning path depends on.
+// requireIntegration gates this test: it skips on a Mac without the built
+// binaries. TestProtocolRevThreeCopyAgreement covers source agreement there;
+// the Python drift test repeats the runtime minimum assertion on the box.
 func TestServerInfoReportsVersionAndProtocol(t *testing.T) {
 	srv, _, _ := testBridge(t, "tok123")
 	conn := dial(t, srv, "tok123")
@@ -505,8 +617,13 @@ func TestServerInfoReportsVersionAndProtocol(t *testing.T) {
 		t.Errorf("info response missing protocol: %v", m)
 	} else if err := json.Unmarshal(raw, &proto); err != nil {
 		t.Errorf("protocol not a number: %s", raw)
-	} else if proto != protocolRev {
-		t.Errorf("server protocol %d != client protocolRev %d", proto, protocolRev)
+	} else {
+		if proto != protocolRev {
+			t.Errorf("server protocol %d != client protocolRev %d", proto, protocolRev)
+		}
+		if proto < requiredProtocolRev {
+			t.Errorf("server protocol %d < required protocol %d", proto, requiredProtocolRev)
+		}
 	}
 }
 

@@ -27,6 +27,11 @@ from server_harness import (
 )
 import mock_server
 
+# #487 requires idle on every transitions node; #515 requires the response's
+# idle_classification_complete readiness field. Pin the minimum independently
+# of the mock so lowering all production constants still fails the gate.
+REQUIRED_PROTOCOL_REV = 2
+
 # Event IDs for the fixture (PG18 numbering, class_byte << 24 | event_num)
 LOCK_TXN = 0x03000008    # Lock:transactionid
 IO_WRITE = 0x0A000018    # IO:DataFileWrite
@@ -314,6 +319,34 @@ def mock_query(cmd, req_id, **kwargs):
     return mock_server.handle_request(msg)
 
 
+def check_protocol_revision(t, srv):
+    """The real server's reported protocol is the C side at runtime (the
+    binary), which the Go source-level agreement test cannot see. Required
+    transitions fields (#487, #515) need both agreement and a pinned minimum.
+    """
+    real = srv.query("info")
+    mock = mock_query("info", req_id=real.get("id", 0))
+    for source, response in (("real", real), ("mock", mock)):
+        t.check("error" not in response,
+                f"[protocol revision] {source} answered without error"
+                + (f" (got: {response.get('error')})"
+                   if "error" in response else ""))
+        t.check("protocol" in response,
+                f"[protocol revision] {source} info carries protocol")
+        protocol = response.get("protocol")
+        valid = isinstance(protocol, int) and not isinstance(protocol, bool)
+        t.check(valid,
+                f"[protocol revision] {source} protocol is an integer "
+                f"(got {protocol!r})")
+        if source == "real" and valid:
+            t.check(protocol == mock_server.PROTOCOL_REV,
+                    f"[protocol revision] real protocol {protocol} == mock "
+                    f"PROTOCOL_REV {mock_server.PROTOCOL_REV}")
+            t.check(protocol >= REQUIRED_PROTOCOL_REV,
+                    f"[protocol revision] real protocol {protocol} >= "
+                    f"required protocol {REQUIRED_PROTOCOL_REV}")
+
+
 def check_transitions_idle_flag(t, srv):
     """#487: every transitions node must carry an authoritative `idle` boolean,
     because the Timeout half of pgwt_is_idle_event() depends on a runtime-only
@@ -396,6 +429,7 @@ def main():
                 for d in diffs:
                     print(f"    DRIFT: {d}")
             check_transitions_idle_flag(t, srv)
+            check_protocol_revision(t, srv)
     finally:
         cleanup_traces(trace_dir)
 

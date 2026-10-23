@@ -32,7 +32,9 @@ var staticFiles embed.FS
 // PGWT_PROTOCOL_REV in src/pg_wait_tracer.h (and tests/mock_server.py).
 var buildVersion = "dev"
 
-const protocolRev = 1
+// Rev 2 requires idle on every transitions node (#487) and the transitions
+// response's idle_classification_complete readiness field (#515).
+const protocolRev = 2
 
 // clientVersion resolves the version to report: the linker-embedded one, or
 // (for plain `go build` without ldflags) the VCS revision Go stamps into the
