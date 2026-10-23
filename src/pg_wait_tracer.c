@@ -1,6 +1,7 @@
 /* pg_wait_tracer.c — Main entry point: argument parsing, discovery, startup */
 #include "daemon.h"
 #include "discovery.h"
+#include "event_writer.h"
 #include "replay.h"
 #include "wait_event.h"
 
@@ -45,7 +46,9 @@ static void usage(const char *prog)
         "      --retention-gb <G>     Also cap total trace-dir size at G GiB\n"
         "                             (oldest archives deleted first; fractional\n"
         "                             values allowed; default: no size cap)\n"
-        "      --trace-group <GROUP>  Group for trace file access (default: dba)\n"
+        "      --trace-group <GROUP>  Group that may read trace files (default:\n"
+        "                             dba if it exists, else the group\n"
+        "                             PostgreSQL runs under)\n"
         "\n"
         "Replay (offline analysis — no root, no PostgreSQL needed):\n"
         "      --replay               Replay trace files instead of live tracing\n"
@@ -495,9 +498,24 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Default trace group to "dba" when trace recording is enabled */
-    if (d->trace_dir && !d->trace_group)
-        d->trace_group = "dba";
+    /* #500: the default used to be the literal group "dba", which exists on
+     * almost no PostgreSQL host — getgrnam() then failed and the WARN fired on
+     * every run. What that left behind, measured rather than assumed: the
+     * trace DIRECTORY stays 0750 root:root and the files keep fopen's
+     * umask-derived mode (0644 under the daemon's usual umask), because the
+     * 0640 chmod + chown only run once a group resolved. So a non-root reader
+     * is denied at the directory and cannot open anything inside it — a
+     * non-root pgwt-server replay or demo service account could not read its
+     * own capture. Default to a group that actually exists; an explicit
+     * --trace-group is never second-guessed. */
+    if (d->trace_dir && !d->trace_group) {
+        d->trace_group = pgwt_default_trace_group();
+        if (!d->trace_group)
+            fprintf(stderr, "WARN: no default trace group exists on this host "
+                    "(tried dba and the postgres account's group) — trace "
+                    "files will be root-only; pass --trace-group <group> to "
+                    "let a non-root reader open them\n");
+    }
 
     /* TTY auto-detect: tui for terminal, text for pipe */
     if (!format_set)
@@ -693,6 +711,21 @@ int main(int argc, char **argv)
     sigaddset(&shutdown_mask, SIGTERM);
     if (sigprocmask(SIG_BLOCK, &shutdown_mask, NULL) != 0) {
         perror("sigprocmask");
+        free(d);
+        return 1;
+    }
+
+    /* #499: the trace directory must exist BEFORE discovery runs. The last
+     * thing pgwt_discover() does is write wait_event_names.json into it (the
+     * sidecar carrying this capture's wait-event name provenance, dynamic on
+     * PG17+), and the mkdir used to live only in pgwt_writer_init(), which
+     * pgwt_daemon_init() calls AFTER discovery. Against a not-yet-existing
+     * trace dir the sidecar write therefore failed on every single run.
+     * Creating the directory here (idempotent — pgwt_writer_init still calls
+     * the same function) is the whole fix. */
+    if (d->trace_dir &&
+        pgwt_trace_dir_prepare(d->trace_dir, d->trace_group, NULL) != 0) {
+        fprintf(stderr, "FATAL: cannot use trace directory %s\n", d->trace_dir);
         free(d);
         return 1;
     }

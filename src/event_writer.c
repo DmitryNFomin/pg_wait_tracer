@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <grp.h>
+#include <pwd.h>
 #include <lz4.h>
 
 /* ── Varint (unsigned LEB128) ─────────────────────────────── */
@@ -1112,6 +1113,105 @@ static int finalize_current_file(struct pgwt_event_writer *w,
 
 /* ── Public API ───────────────────────────────────────────── */
 
+/* Give one already-created file in the trace directory the same owner group
+ * and mode as every trace file (0640, group-readable). No-op when no trace
+ * group resolved. Returns 0 when nothing needed doing or it succeeded. */
+static int apply_trace_file_perms(const char *path, gid_t gid)
+{
+    if (gid == (gid_t)-1) return 0;
+    if (chown(path, (uid_t)-1, gid) != 0 || chmod(path, 0640) != 0) {
+        if (errno == ENOENT) return 0;   /* nothing there to fix */
+        fprintf(stderr, "WARN: cannot give %s to gid %u mode 0640 (%s) — "
+                "a non-root reader may not be able to open it\n",
+                path, (unsigned)gid, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+/* See event_writer.h for why this is separate from pgwt_writer_init (#499). */
+int pgwt_trace_dir_prepare(const char *trace_dir, const char *group_name,
+                           gid_t *out_gid)
+{
+    gid_t gid = (gid_t)-1;
+
+    /* Resolve trace group name → GID. An explicitly named group that does
+     * not exist is never substituted (#500): handing the trace to some other
+     * group than the operator asked for is worse than refusing. */
+    if (group_name) {
+        struct group *gr = getgrnam(group_name);
+        if (gr) {
+            gid = gr->gr_gid;
+        } else {
+            fprintf(stderr, "WARN: trace group '%s' does not exist on this "
+                    "host — trace files stay root-owned, so a non-root reader "
+                    "(pgwt-server replay, demo service) cannot open them; "
+                    "create the group or pass --trace-group <existing group>\n",
+                    group_name);
+        }
+    }
+
+    if (out_gid) *out_gid = gid;
+
+    /* Create trace directory with group-readable permissions */
+    if (mkdir(trace_dir, 0750) != 0 && errno != EEXIST) {
+        fprintf(stderr, "ERROR: cannot create trace directory %s: %s\n",
+                trace_dir, strerror(errno));
+        return -1;
+    }
+
+    /* EEXIST is not enough: the path could be a regular file, in which case
+     * nothing below can be written and the caller must hear about it now. */
+    struct stat st;
+    if (stat(trace_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "ERROR: trace path %s is not a directory\n", trace_dir);
+        return -1;
+    }
+
+    if (gid != (gid_t)-1) {
+        if (chown(trace_dir, (uid_t)-1, gid) != 0 || chmod(trace_dir, 0750) != 0)
+            fprintf(stderr, "WARN: cannot give trace directory %s to gid %u "
+                    "(%s) — a non-root reader may not be able to enter it\n",
+                    trace_dir, (unsigned)gid, strerror(errno));
+    }
+    return 0;
+}
+
+const char *pgwt_default_trace_group(void)
+{
+    static char chosen[64];
+
+    /* "dba" first: it is what every released version documented and defaulted
+     * to, so a site that created it keeps exactly the behaviour it has. */
+    static const char *const literal_candidates[] = { "dba", "postgres", NULL };
+
+    if (getgrnam(literal_candidates[0])) {
+        snprintf(chosen, sizeof(chosen), "%s", literal_candidates[0]);
+        return chosen;
+    }
+
+    /* Then the group PostgreSQL itself runs under — the account that a
+     * non-root pgwt-server replay or demo service reads the trace as. Resolved
+     * through the postgres user's primary gid rather than assuming the group
+     * is also called "postgres". */
+    struct passwd *pw = getpwnam("postgres");
+    if (pw) {
+        struct group *gr = getgrgid(pw->pw_gid);
+        if (gr) {
+            snprintf(chosen, sizeof(chosen), "%s", gr->gr_name);
+            return chosen;
+        }
+    }
+
+    for (int i = 1; literal_candidates[i]; i++) {
+        if (getgrnam(literal_candidates[i])) {
+            snprintf(chosen, sizeof(chosen), "%s", literal_candidates[i]);
+            return chosen;
+        }
+    }
+    return NULL;
+}
+
 int pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
                      int pg_version, int retention_hours,
                      const char *group_name)
@@ -1124,23 +1224,17 @@ int pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
     w->current_hour = -1;
     w->trace_gid = (gid_t)-1;
 
-    /* Resolve trace group name → GID */
-    if (group_name) {
-        struct group *gr = getgrnam(group_name);
-        if (gr) {
-            w->trace_gid = gr->gr_gid;
-        } else {
-            fprintf(stderr, "WARN: group '%s' not found — "
-                    "trace files will be readable by root only\n", group_name);
-        }
-    }
+    if (pgwt_trace_dir_prepare(w->trace_dir, group_name, &w->trace_gid) != 0)
+        return -1;
 
-    /* Create trace directory with group-readable permissions */
-    mkdir(w->trace_dir, 0750);  /* ignore EEXIST */
-    if (w->trace_gid != (gid_t)-1) {
-        chown(w->trace_dir, (uid_t)-1, w->trace_gid);
-        chmod(w->trace_dir, 0750);
-    }
+    /* The name sidecar is written by pgwt_discover(), BEFORE this runs (#499),
+     * with fopen()'s umask-derived mode and no group. Give it the trace-file
+     * treatment so the reader that can open the trace can also read its name
+     * provenance (#500). */
+    char names_path[sizeof(w->trace_dir) + 32];
+    snprintf(names_path, sizeof(names_path), "%s/wait_event_names.json",
+             w->trace_dir);
+    apply_trace_file_perms(names_path, w->trace_gid);
 
     /* DUR-1: recover (finalize + archive) any current.trace a previous
      * daemon left behind — never truncate it. */

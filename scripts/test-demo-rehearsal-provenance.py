@@ -6,7 +6,9 @@ Optional launcher path allows checking the pre-change version for red evidence.
 """
 
 import json
+import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -16,7 +18,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCHER = Path(sys.argv.pop(1)) if len(sys.argv) > 1 else ROOT / "scripts/demo-rehearsal.sh"
+LAUNCHER = (Path(sys.argv.pop(1))
+            if len(sys.argv) > 1 and not sys.argv[1].startswith("-")
+            else ROOT / "scripts/demo-rehearsal.sh")
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -323,6 +327,316 @@ rc=$?
 """)
         self.assertFalse((self.repo / "tests/results/demo_rehearsal").exists())
         self.assertFalse((self.repo / "tests/results/.demo_rehearsal_staging").exists())
+
+
+class RemoteDirIsolationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        source = LAUNCHER.read_text()
+        helper = source[source.index("compute_remote_dir() {"):].split("\n}\n", 1)[0] + "\n}\n"
+        self.helpers = self.base / "remote-dir-helpers.sh"
+        self.helpers.write_text(helper)
+        self.repo = self.base / "checkout-1"
+        self.repo.mkdir()
+        self.git(self.repo, "init", "-q")
+        (self.repo / "payload").write_text("candidate\n")
+        self.git(self.repo, "add", "payload")
+        self.git(self.repo, "-c", "user.name=Fixture", "-c",
+                 "user.email=fixture@example.invalid", "commit", "-qm", "candidate")
+        self.sha = self.git(self.repo, "rev-parse", "HEAD")
+        self.assertRegex(self.sha, r"^[0-9a-f]{40}$")
+        self.other_repo = self.base / "checkout-2"
+        self.git(self.base, "clone", "-q", str(self.repo), str(self.other_repo))
+        for repo in (self.repo, self.other_repo):
+            self.git(repo, "checkout", "--detach", "-q", self.sha)
+            self.assertEqual(self.git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
+            self.assertEqual(self.git(repo, "rev-parse", "HEAD"), self.sha)
+        self.remote_root = self.base / "remote-root"
+        self.remote_root.mkdir()
+
+    def git(self, repo, *args):
+        return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+    def shell(self, repo, commands):
+        return subprocess.run(
+            ["bash", "-c", "set -euo pipefail\nsource " +
+             shlex.quote(str(self.helpers)) + "\n" + commands],
+            cwd=repo, env={**os.environ, "demo_rehearsal_start_epoch": "1234567890"},
+            text=True, capture_output=True)
+
+    def remote_dir(self, repo, commands="compute_remote_dir"):
+        # Each call is a separate launcher process: real $$ and $RANDOM,
+        # with the same epoch even for launches in the same second.
+        result = self.shell(repo, commands)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        return result.stdout.strip()
+
+    def sync_snapshot(self, remote_dir, run):
+        snapshot = self.base / f"snapshot-{run}"
+        snapshot.mkdir()
+        (snapshot / "payload").write_text(f"snapshot for {run}\n")
+        destination = self.remote_root / remote_dir
+        destination.mkdir(exist_ok=True)
+        # Real destructive rsync against a local stand-in for the SSH target.
+        subprocess.run(["rsync", "-az", "--delete", str(snapshot) + "/",
+                        str(destination) + "/"], check=True, capture_output=True, text=True)
+        return destination
+
+    def retain_trace(self, destination, run):
+        sentinel = destination / "tests/results/demo_rehearsal/trace" / f"sentinel-{run}.marker"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(f"retained trace for {run}\n")
+        return sentinel
+
+    def test_persistent_launch_uses_compute_remote_dir(self):
+        source = LAUNCHER.read_text()
+        launch = source.index('if [[ "$MODE" == "launch" ]]; then')
+        persistent = source.index('if [[ "$PERSISTENT" == "1" ]]; then', launch)
+        start = source.index('server_id="persistent"', persistent)
+        end = source.index('echo "demo-rehearsal: targeting persistent box', start)
+        block = source[start:end]
+        # Cheap wiring check; the subprocess test below also checks the value.
+        self.assertIn("compute_remote_dir", block)
+        self.assertNotIn("git rev-parse --abbrev-ref HEAD", block)
+
+    def test_real_persistent_launches_at_same_detached_sha_are_unique(self):
+        stub_bin = self.base / "bin"
+        stub_bin.mkdir()
+        # Leave git real: the launcher must identify each detached checkout.
+        stubs = {
+            "ssh": """#!/bin/bash
+case "${*: -1}" in
+    'df -Pk '*) echo 104857600 ;;
+    *mkdir*) exit 0 ;;
+    uptime) echo 'up at fixture start' ;;
+    hostname) echo fixture-box ;;
+    *) exit 1 ;;
+esac
+""",
+            "rsync": """#!/bin/bash
+printf '%s\\n' "${@: -1}" >> rsync-calls.log
+exit 0
+""",
+            "security": "#!/bin/sh\nexit 1\n",
+        }
+        for name, body in stubs.items():
+            stub = stub_bin / name
+            stub.write_text(body)
+            stub.chmod(0o755)
+        remote_dirs = []
+        for repo in (self.repo, self.other_repo):
+            (repo / "scripts").mkdir()
+            launcher = repo / "scripts/demo-rehearsal.sh"
+            launcher.write_text(LAUNCHER.read_text())
+            shutil.copy(ROOT / "scripts/tree-hash.sh", repo / "scripts/tree-hash.sh")
+            shutil.copy(ROOT / "scripts/hash-synced-tree.sh", repo / "scripts/hash-synced-tree.sh")
+            result = subprocess.run(
+                ["bash", str(launcher)], cwd=repo,
+                env={**os.environ, "PGWT_BOX": "fixture-box",
+                     "PATH": str(stub_bin) + os.pathsep + os.environ["PATH"],
+                     "MIN_FREE_DISK_MB": "5120",
+                     "DEMO_REHEARSAL_STATE_FILE": str(repo / "tests/results/state.sh")},
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("remote tree hash unavailable -- refusing to launch", result.stdout)
+            match = re.search(r"remote_dir=(pgwt-demo-rehearsal-[^,\s]+)", result.stdout)
+            self.assertIsNotNone(match, result.stdout)
+            remote_dirs.append(match.group(1))
+        # Check runtime isolation before format so an override reports both
+        # colliding values directly, even if it also omits the candidate SHA.
+        self.assertNotEqual(*remote_dirs)
+        for remote_dir in remote_dirs:
+            self.assertRegex(remote_dir, rf"^pgwt-demo-rehearsal-{self.sha}-[0-9]+-[0-9]+-[0-9]+$")
+
+        # Observe the destructive up-rsync's real input, including any
+        # reassignment after the launcher echoed its computed remote_dir.
+        destinations = []
+        for repo in (self.repo, self.other_repo):
+            calls_log = repo / "rsync-calls.log"
+            self.assertTrue(calls_log.is_file(), f"missing rsync capture: {calls_log}")
+            calls = calls_log.read_text().splitlines()
+            self.assertEqual(len(calls), 1,
+                             f"{calls_log}: expected exactly one up-rsync call, got {calls!r}")
+            destinations.append(calls[0])
+        self.assertNotEqual(*destinations,
+                            msg=f"echoed remote_dirs={remote_dirs!r}; "
+                                f"captured rsync destinations={destinations!r}")
+        for remote_dir, destination in zip(remote_dirs, destinations):
+            self.assertEqual(destination, f"fixture-box:{remote_dir}/")
+
+    def test_separate_invocations_at_same_detached_sha_and_epoch_are_unique(self):
+        # Use the SAME checkout as well as the same SHA and epoch here.
+        first = self.remote_dir(self.repo)
+        second = self.remote_dir(self.repo)
+        self.assertNotEqual(first, second)
+        for value in (first, second):
+            self.assertIn(self.sha, value)
+            self.assertNotIn("HEAD", value)
+            self.assertNotIn("detached", value)
+            self.assertRegex(value, rf"^pgwt-demo-rehearsal-{self.sha}-1234567890-[0-9]+-[0-9]+$")
+
+    def test_missing_candidate_sha_fails_without_printing_a_directory(self):
+        outside_repo = self.shell(self.base, "compute_remote_dir")
+        self.assertNotEqual(outside_repo.returncode, 0)
+        self.assertEqual(outside_repo.stdout, "")
+        # Also reject empty success and output accompanied by a failed exit.
+        for git_body in ("return 0", "echo HEAD; return 1"):
+            with self.subTest(git_body=git_body):
+                result = self.shell(self.repo, "git() { " + git_body + "; }\ncompute_remote_dir")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+
+    def test_real_rsync_preserves_both_traces_and_state_reattachment(self):
+        first = self.remote_dir(self.repo)
+        sentinel1 = self.retain_trace(self.sync_snapshot(first, "run1"), "run1")
+        second = self.remote_dir(self.other_repo)
+        self.assertNotEqual(first, second)
+        destination2 = self.sync_snapshot(second, "run2")
+        self.assertTrue(sentinel1.exists())
+        sentinel2 = self.retain_trace(destination2, "run2")
+        self.assertTrue(sentinel2.exists())
+
+        for run, remote_dir, own, other in (
+                ("run1", first, sentinel1, sentinel2),
+                ("run2", second, sentinel2, sentinel1)):
+            with self.subTest(run=run):
+                state = self.base / f"{run}.state"
+                state.write_text(f"REMOTE_DIR={remote_dir}\n")
+                result = self.shell(self.base, "source " + shlex.quote(str(state)) +
+                                    '\nprintf \'%s\\n\' "$REMOTE_DIR"')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), remote_dir)
+                reattached = self.remote_root / result.stdout.strip()
+                own_relative = Path("tests/results/demo_rehearsal/trace") / own.name
+                other_relative = own_relative.with_name(other.name)
+                self.assertEqual((reattached / own_relative).read_text(), f"retained trace for {run}\n")
+                self.assertFalse((reattached / other_relative).exists())
+
+    def test_old_branch_mutant_reproduces_destructive_rsync(self):
+        mutant = ('branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | tr \'/\' \'_\'); '
+                  'echo "pgwt-demo-rehearsal-${branch:-detached}"')
+        first = self.remote_dir(self.repo, mutant)
+        sentinel1 = self.retain_trace(self.sync_snapshot(first, "run1"), "run1")
+        self.assertTrue(sentinel1.exists())
+        second = self.remote_dir(self.other_repo, mutant)
+        self.assertEqual(first, "pgwt-demo-rehearsal-HEAD")
+        self.assertEqual(first, second)
+        destination2 = self.sync_snapshot(second, "run2")
+        self.assertFalse(sentinel1.exists())
+        sentinel2 = self.retain_trace(destination2, "run2")
+        self.assertTrue(sentinel2.exists())
+
+
+class PersistentDiskPreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        source = LAUNCHER.read_text()
+        start = source.index("        # BEGIN persistent disk preflight")
+        end = source.index("        # END persistent disk preflight", start)
+        self.block = self.base / "disk-preflight.sh"
+        self.block.write_text(source[start:end])
+        self.invocations = 0
+
+    def probe(self, output, *, ssh_rc=0, floor=None):
+        self.invocations += 1
+        scratch = self.base / str(self.invocations)
+        scratch.mkdir()
+        env = dict(os.environ)
+        env.pop("MIN_FREE_DISK_MB", None)
+        if floor is not None:
+            env["MIN_FREE_DISK_MB"] = str(floor)
+        env.update(FIXTURE_DF_OUTPUT=output, FIXTURE_SSH_RC=str(ssh_rc))
+        result = subprocess.run(
+            ["bash", "-c", """
+set -uo pipefail
+target=user@fixture-box
+log=preflight.log
+: > "$log"
+ssh() {
+    printf '%s\n' "$*" >> probe-calls
+    printf '%s' "$FIXTURE_DF_OUTPUT"
+    return "$FIXTURE_SSH_RC"
+}
+source """ + shlex.quote(str(self.block)) + """
+touch proceeded
+"""], cwd=scratch, env=env, text=True, capture_output=True, timeout=5)
+        calls = scratch / "probe-calls"
+        if calls.exists():
+            self.assertEqual(calls.read_text().splitlines(), [
+                "-o BatchMode=yes -o ConnectTimeout=10 user@fixture-box "
+                "df -Pk . 2>/dev/null | awk 'NR==2{print $4}'"])
+        return result, (scratch / "preflight.log").read_text(), (scratch / "proceeded").exists()
+
+    def test_sufficient_space_proceeds_and_logs_measurement(self):
+        result, log, proceeded = self.probe(str(100000 * 1024))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(proceeded)
+        self.assertIn("free disk 100000 MB, floor 5120 MB", log)
+
+    def test_low_space_refuses_before_proceeding(self):
+        result, log, proceeded = self.probe(str(200 * 1024))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(proceeded)
+        for output in (log, result.stderr):
+            for detail in ("REFUSING", "user@fixture-box", "200 MB", "5120 MB",
+                           "MIN_FREE_DISK_MB", "pgwt-demo-rehearsal-*", "issue #518",
+                           "nothing prunes them yet", "manual cleanup"):
+                self.assertIn(detail, output)
+
+    def test_invalid_or_failed_probe_refuses_before_proceeding(self):
+        for output, ssh_rc in (("garbage", 0), ("", 0), ("", 255),
+                               (str(100000 * 1024), 255), ("-1", 0),
+                               ("123\n456", 0), (" 123", 0)):
+            with self.subTest(output=output, ssh_rc=ssh_rc):
+                result, log, proceeded = self.probe(output, ssh_rc=ssh_rc)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(proceeded)
+                for message in (log, result.stderr):
+                    self.assertIn("user@fixture-box", message)
+                    self.assertIn("REFUSING", message)
+                    self.assertIn("refusing rather than guessing", message)
+
+    def test_floor_override_can_allow_or_refuse_launch(self):
+        for free_mb, floor, allowed in ((200, 100, True), (6000, 7000, False)):
+            with self.subTest(free_mb=free_mb, floor=floor):
+                result, log, proceeded = self.probe(str(free_mb * 1024), floor=floor)
+                self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                self.assertEqual(proceeded, allowed)
+                self.assertIn(f"{free_mb} MB", log)
+                self.assertIn(f"{floor} MB", log)
+
+    def test_floor_boundary_uses_kb_without_rounding_up(self):
+        for free_kb, allowed in ((5120 * 1024, True), (5120 * 1024 - 1, False), (0, False)):
+            with self.subTest(free_kb=free_kb):
+                result, log, proceeded = self.probe(str(free_kb))
+                self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                self.assertEqual(proceeded, allowed)
+
+    def test_invalid_floor_refuses_before_proceeding(self):
+        for floor in ("garbage", "-1"):
+            with self.subTest(floor=floor):
+                result, log, proceeded = self.probe(str(100000 * 1024), floor=floor)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(proceeded)
+                self.assertIn("MIN_FREE_DISK_MB must be a non-negative integer", log)
+
+    def test_preflight_is_persistent_only_and_precedes_state_creation(self):
+        source = LAUNCHER.read_text()
+        launch = source.index('if [[ "$MODE" == "launch" ]]; then')
+        persistent = source.index('if [[ "$PERSISTENT" == "1" ]]; then', launch)
+        targeting = source.index('echo "demo-rehearsal: targeting persistent box', persistent)
+        start = source.index("        # BEGIN persistent disk preflight", targeting)
+        end = source.index("        # END persistent disk preflight", start)
+        ephemeral = source.index('\n    else\n', persistent)
+        state = source.index('cat > "$STATE_FILE"', launch)
+        self.assertLess(targeting, start)
+        self.assertLess(end, ephemeral)
+        self.assertLess(ephemeral, state)
 
 
 if __name__ == "__main__":

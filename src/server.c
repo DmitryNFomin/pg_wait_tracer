@@ -6643,6 +6643,27 @@ static void emit_transitions_response(struct pgwt_request *req,
         return;
     }
 
+    /* Classification status for the encountered Timeout NODE ids. No Timeout
+     * nodes means vacuously complete (nothing to classify), not "the catalog is
+     * good". The raw node pass applies the request filter, and
+     * pgwt_block_agg_add_event() accumulates old_event nodes, covering every
+     * link's source event; raw res link rows are request-filtered and capped.
+     * Link-only targets cannot reach a rendered graph unclassified:
+     * transitionsDataError() in web/static/lib/builders/transitions.js checks
+     * BOTH endpoints of every link against the node-name set and rejects the
+     * WHOLE payload with 'missing node: ' + name if either is absent, before
+     * any graph is built. Thus checking node ids suffices for the idle
+     * verdicts below. */
+    int idle_classification_complete = 1;
+    for (int i = 0; i < n_nodes; i++) {
+        uint32_t event_id = nodes_arr[i].event_id;
+        if (WE_CLASS(event_id) == PG_WAIT_TIMEOUT &&
+            !pgwt_timeout_id_is_classifiable(WE_EVENT(event_id))) {
+            idle_classification_complete = 0;
+            break;
+        }
+    }
+
     uint64_t total       = use_res ? res->total_transitions
                                    : win->total_transitions;
     int      total_links = use_res ? res->total_rows : n_pairs;
@@ -6657,6 +6678,10 @@ static void emit_transitions_response(struct pgwt_request *req,
     cJSON_AddNumberToObject(root, "link_count", shown);
     cJSON_AddNumberToObject(root, "total_link_count", total_links);
     cJSON_AddBoolToObject(root, "truncated", shown < total_links);
+    /* Trust status is deterministic for a window + catalog, on both paths;
+     * unlike the HOW diagnostics below it is unconditional payload data. */
+    cJSON_AddBoolToObject(root, "idle_classification_complete",
+                          idle_classification_complete);
     /* PROVENANCE, and OPT-IN. How the answer was produced — 0/0 is the raw
      * path — so a reviewer or a test can tell the fast path actually ran
      * instead of inferring it from a latency number.
@@ -6972,6 +6997,27 @@ static void handle_fingerprints(struct pgwt_server *srv, struct pgwt_request *re
     emit_json(root);
 }
 
+/* #497: how the lock_chains "blocker" was arrived at, shipped WITH the data.
+ *
+ * PGWT_LOCK_BLOCKER_BASIS is a machine-readable tag on every row, because the
+ * row is what a client renders: a disclosure that lives only at the top of the
+ * response is one a per-row renderer never reads. PGWT_LOCK_BLOCKER_NOTE is
+ * the prose, once per response.
+ *
+ * The wording is deliberate. "Likely holder" would be a probability claim the
+ * pick cannot support: candidates are on-CPU intervals only, so a holder that
+ * is waiting, idle in transaction, or prepared is invisible rather than
+ * unlikely, and no lock identity is compared at all. "Overlapping candidate;
+ * blocker unverified" says what was measured (overlap) and what was not
+ * (ownership). ASCII only -- this goes on the wire. */
+#define PGWT_LOCK_BLOCKER_BASIS "cpu-overlap"
+#define PGWT_LOCK_BLOCKER_NOTE \
+    "overlapping candidate; blocker unverified -- each 'blocker' is the pid " \
+    "whose on-CPU overlap with the wait was longest, not a session shown to " \
+    "hold the lock. No lock identity is compared, and candidates are on-CPU " \
+    "intervals only, so a holder that is itself waiting, idle in " \
+    "transaction, or a prepared transaction never appears here."
+
 static void handle_lock_chains(struct pgwt_server *srv, struct pgwt_request *req)
 {
     int count;
@@ -6998,11 +7044,17 @@ static void handle_lock_chains(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
     add_right_edge_note(root, &linfo);
 
+    /* Unconditional, chains empty or not: the basis of a view does not
+     * depend on how many rows it happened to produce, and a field that comes
+     * and goes is a field clients stop handling. */
+    cJSON_AddStringToObject(root, "blocker_note", PGWT_LOCK_BLOCKER_NOTE);
+
     cJSON *chains = cJSON_AddArrayToObject(root, "chains");
     for (int i = 0; i < res.num_links; i++) {
         cJSON *c = cJSON_CreateObject();
         cJSON_AddNumberToObject(c, "waiter", res.links[i].waiter_pid);
         cJSON_AddNumberToObject(c, "blocker", res.links[i].blocker_pid);
+        cJSON_AddStringToObject(c, "blocker_basis", PGWT_LOCK_BLOCKER_BASIS);
         cJSON_AddStringToObject(c, "lock", res.links[i].lock_name);
         cJSON_AddNumberToObject(c, "wait_ms",
                                 (double)res.links[i].wait_ns / 1e6);

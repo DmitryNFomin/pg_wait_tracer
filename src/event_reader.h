@@ -5,6 +5,7 @@
 #include "event_writer.h"
 #include "pg_wait_tracer.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -139,12 +140,32 @@ struct pgwt_trace_file_entry {
     char     path[512];
     uint64_t start_wall_ns;
     int      year, month, day, hour;
+    /* #405: true when neither the file's header nor (deliberately — see
+     * pgwt_scan_trace_files) its name could place it in time. start_wall_ns
+     * is 0 in that case. The entry is still LISTED (never dropped, so it
+     * stays visible rather than becoming an invisible gap), but a caller
+     * must refuse to use it for an answer rather than guess. */
+    bool     placement_unknown;
 };
 
 /* Scan trace_dir for trace files. Returns count, sorted by time ascending. */
 int pgwt_scan_trace_files(const char *trace_dir,
                            struct pgwt_trace_file_entry *entries,
                            int max_entries);
+
+/* True if, given `entries` sorted ascending by start_wall_ns (as
+ * pgwt_scan_trace_files returns them), the file at `idx` can be skipped by a
+ * replay bounded below by `from_wall_ns` (0 = no lower bound): the file
+ * immediately after it already starts at or after `from_wall_ns`, so nothing
+ * in `entries[idx]` can still be open there.
+ *
+ * An unknown placement — on EITHER the entry at `idx` or its successor —
+ * never causes a skip: unknown coverage counts against skipping, never for
+ * it, same rule pgwt_summaries_window_current uses for summaries. This is
+ * the exact predicate src/replay.c's file loop applies; factored out here so
+ * it can be pinned without linking the daemon (tests/test_replay_window.c). */
+bool pgwt_trace_file_quick_skip(const struct pgwt_trace_file_entry *entries,
+                                int n, int idx, uint64_t from_wall_ns);
 
 /* Parse time string → nanoseconds since Unix epoch.
  * Supports: ISO 8601 ("2025-02-25T14:30:00"), relative ("1h", "30m"), "now". */

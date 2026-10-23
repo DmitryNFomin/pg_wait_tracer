@@ -27,6 +27,11 @@ from server_harness import (
 )
 import mock_server
 
+# #487 requires idle on every transitions node; #515 requires the response's
+# idle_classification_complete readiness field. Pin the minimum independently
+# of the mock so lowering all production constants still fails the gate.
+REQUIRED_PROTOCOL_REV = 2
+
 # Event IDs for the fixture (PG18 numbering, class_byte << 24 | event_num)
 LOCK_TXN = 0x03000008    # Lock:transactionid
 IO_WRITE = 0x0A000018    # IO:DataFileWrite
@@ -314,18 +319,74 @@ def mock_query(cmd, req_id, **kwargs):
     return mock_server.handle_request(msg)
 
 
+def check_protocol_revision(t, srv):
+    """The real server's reported protocol is the C side at runtime (the
+    binary), which the Go source-level agreement test cannot see. Required
+    transitions fields (#487, #515) need both agreement and a pinned minimum.
+    """
+    real = srv.query("info")
+    mock = mock_query("info", req_id=real.get("id", 0))
+    for source, response in (("real", real), ("mock", mock)):
+        t.check("error" not in response,
+                f"[protocol revision] {source} answered without error"
+                + (f" (got: {response.get('error')})"
+                   if "error" in response else ""))
+        t.check("protocol" in response,
+                f"[protocol revision] {source} info carries protocol")
+        protocol = response.get("protocol")
+        valid = isinstance(protocol, int) and not isinstance(protocol, bool)
+        t.check(valid,
+                f"[protocol revision] {source} protocol is an integer "
+                f"(got {protocol!r})")
+        if source == "real" and valid:
+            t.check(protocol == mock_server.PROTOCOL_REV,
+                    f"[protocol revision] real protocol {protocol} == mock "
+                    f"PROTOCOL_REV {mock_server.PROTOCOL_REV}")
+            t.check(protocol >= REQUIRED_PROTOCOL_REV,
+                    f"[protocol revision] real protocol {protocol} >= "
+                    f"required protocol {REQUIRED_PROTOCOL_REV}")
+
+
 def check_transitions_idle_flag(t, srv):
     """#487: every transitions node must carry an authoritative `idle` boolean,
     because the Timeout half of pgwt_is_idle_event() depends on a runtime-only
     pacing mask the client cannot replicate. Named per the two cases that
-    exercise both branches: a pacing Timeout (idle) and a Lock (never idle)."""
+    exercise both branches: a pacing Timeout (idle) and a Lock (never idle).
+
+    #501: the per-node loop below checks every node in both the real server's
+    and mock_server's responses for TYPE only -- `isinstance(idle, bool)` --
+    so a partial catalog (a node present without the flag, or with a
+    non-boolean value) cannot slip through unnoticed. It does NOT check that
+    an unnamed node's idle VALUE is correct; only the two named cases above
+    are value-pinned. Recomputing the correct value for every node here would
+    mean duplicating pgwt_is_idle_event()'s classification logic in the test,
+    which would only prove two copies of the same rule agree. The "present
+    but wrong" case -- e.g. an incomplete pacing mask making a Timeout node's
+    idle flag present and boolean but wrong -- is tracked separately as #515,
+    not covered by this function."""
     real = srv.query("transitions")
     t.check("error" not in real,
             "[transitions idle] real server answered without error"
             + (f" (got: {real.get('error')})" if "error" in real else ""))
+    mock = mock_query("transitions", req_id=real.get("id", 0))
+    t.check("error" not in mock,
+            "[transitions idle] mock answered without error"
+            + (f" (got: {mock.get('error')})" if "error" in mock else ""))
+    for source, response in (("real", real), ("mock", mock)):
+        if "error" in response:
+            continue
+        nodes = response.get("nodes", [])
+        t.check(len(nodes) > 0,
+                f"[transitions idle] {source} nodes array is non-empty")
+        for node in nodes:
+            idle = node.get("idle")
+            t.check(isinstance(idle, bool),
+                    f"[transitions idle] {source} node "
+                    f"{node.get('name', '<unnamed>')!r} idle is a boolean "
+                    f"(got {idle!r})")
     if "error" in real:
         return
-    by_name = {n["name"]: n for n in real.get("nodes", [])}
+    by_name = {n.get("name", "<unnamed>"): n for n in real.get("nodes", [])}
     cases = [
         ("Timeout:CheckpointWriteDelay", True),
         ("Lock:relation", False),
@@ -368,6 +429,7 @@ def main():
                 for d in diffs:
                     print(f"    DRIFT: {d}")
             check_transitions_idle_flag(t, srv)
+            check_protocol_revision(t, srv)
     finally:
         cleanup_traces(trace_dir)
 

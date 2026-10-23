@@ -501,19 +501,56 @@ int pgwt_scan_trace_files(const char *trace_dir,
             sscanf(ent->d_name, "%4d-%2d-%2d_%2d.trace.lz4",
                    &e->year, &e->month, &e->day, &e->hour) == 4) {
             snprintf(e->path, sizeof(e->path), "%s/%s", trace_dir, ent->d_name);
-            struct tm tm = {0};
-            tm.tm_year = e->year - 1900;
-            tm.tm_mon  = e->month - 1;
-            tm.tm_mday = e->day;
-            tm.tm_hour = e->hour;
-            tm.tm_isdst = -1;
-            time_t t = mktime(&tm);
-            e->start_wall_ns = (uint64_t)t * 1000000000ULL;
+            e->placement_unknown = false;
+
+            /* #405: this USED to derive the archive's placement from its
+             * NAME via mktime() — but the name is formatted by the WRITER's
+             * localtime_r at rotation (event_writer.c), so a reader in a
+             * different timezone parses the identical digits as a different
+             * instant. A replay bounded by --from/--to then silently drops
+             * whatever file that shift displaces past the window edge: no
+             * error, just missing data (src/replay.c's quick filter trusts
+             * this value to decide a file need not even be opened).
+             *
+             * The header's start_time_ns is CLOCK_REALTIME at file creation
+             * (event_writer.h) — the same absolute instant everywhere, and
+             * it is written uncompressed at the front of the file
+             * (event_writer.c), so reading it here costs one small fread,
+             * no LZ4 decompression. Trust it, not the name.
+             *
+             * If the header cannot be read or validated, do NOT fall back
+             * to the name: that fallback IS the TZ bug this replaces, just
+             * on a smaller set of files. Disable replay for this one file
+             * instead — placement_unknown stays visible on the entry (still
+             * listed, never silently dropped) and src/replay.c refuses to
+             * use it rather than guess. */
+            uint64_t hdr_start_ns = 0;
+            FILE *fp = fopen(e->path, "rb");
+            if (fp) {
+                struct pgwt_trace_file_header hdr;
+                if (fread(&hdr, sizeof(hdr), 1, fp) == 1 &&
+                    hdr.magic == PGWT_TRACE_MAGIC &&
+                    hdr.version >= 2 && hdr.version <= PGWT_TRACE_VERSION)
+                    hdr_start_ns = hdr.start_time_ns;
+                fclose(fp);
+            }
+            if (hdr_start_ns > 0) {
+                e->start_wall_ns = hdr_start_ns;
+            } else {
+                fprintf(stderr,
+                        "WARN: cannot establish time placement for %s from "
+                        "its header — replay for this file is disabled "
+                        "rather than guessed from its name (#405)\n",
+                        e->path);
+                e->start_wall_ns = 0;
+                e->placement_unknown = true;
+            }
             n++;
         } else if (strcmp(ent->d_name, "current.trace") == 0) {
             snprintf(e->path, sizeof(e->path), "%s/%s", trace_dir, ent->d_name);
             e->year = e->month = e->day = e->hour = 0;
             e->start_wall_ns = 0;
+            e->placement_unknown = false;
             FILE *fp = fopen(e->path, "rb");
             if (fp) {
                 struct pgwt_trace_file_header hdr;
@@ -541,6 +578,26 @@ int pgwt_scan_trace_files(const char *trace_dir,
     }
 
     return n;
+}
+
+bool pgwt_trace_file_quick_skip(const struct pgwt_trace_file_entry *entries,
+                                int n, int idx, uint64_t from_wall_ns)
+{
+    if (from_wall_ns == 0)
+        return false;
+    if (idx < 0 || idx + 1 >= n)
+        return false;
+    /* The ENTRY ITSELF, not just its successor: the scanner's insertion
+     * sort puts a start_wall_ns==0 (placement_unknown) entry FIRST, so an
+     * unplaceable file lands at a low idx -- exactly where this predicate
+     * is asked "can I skip this one?" most often. Its own coverage being
+     * unknown is reason enough to refuse, regardless of what comes after. */
+    if (entries[idx].placement_unknown)
+        return false;
+    const struct pgwt_trace_file_entry *next = &entries[idx + 1];
+    if (next->placement_unknown || next->start_wall_ns == 0)
+        return false;
+    return next->start_wall_ns < from_wall_ns;
 }
 
 /* ── Time parser ───────────────────────────────────────── */
@@ -727,6 +784,22 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
             else                        st->straddlers_admitted++;
         }
 
+        uint64_t cpu_add = add_ns, offcpu_add = 0;
+        if (we == 0 && !sampled && evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+            /* #495: match map_reader.c's measured CPU split and compute.c's
+             * window scaling. Clamp skew before scaling; measured zero is
+             * real zero, while UNKNOWN keeps legacy whole-gap CPU. Samples
+             * keep their whole sample-period weight as CPU, with no off-CPU.
+             * System/PID event tables still carry wall for the CPU row,
+             * unlike map_reader.c's add_event_stats: that known divergence
+             * remains for a separate issue. */
+            uint64_t m = evt->cpu_ns < occ_ns ? evt->cpu_ns : occ_ns;
+            cpu_add = occ_ns
+                ? (uint64_t)(((unsigned __int128)m * add_ns) / occ_ns) : 0;
+            if (cpu_add > add_ns) cpu_add = add_ns;
+            offcpu_add = add_ns - cpu_add;
+        }
+
         /* Per-PID accumulation */
         struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
         if (pa) {
@@ -743,7 +816,7 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                 }
             }
             if (we == 0)
-                pa->cpu_time_ns += add_ns;
+                pa->cpu_time_ns += cpu_add;
             else if (!pgwt_is_idle_event(we))
                 pa->wait_time_ns += add_ns;
             if (!pgwt_is_idle_event(we))
@@ -764,8 +837,17 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
             }
         }
 
-        /* Time model */
-        pgwt_update_time_model(&acc->tm, we, add_ns);
+        /* #495: split inline as in map_reader.c; pgwt_update_time_model
+         * accepts only wall time and cannot express measured off-CPU.
+         * Wait-labelled spin stays observability only (compute.c): every
+         * other label keeps its full wall contribution. */
+        if (we == 0) {
+            acc->tm.cpu_time_ns += cpu_add;
+            acc->tm.offcpu_time_ns += offcpu_add;
+            acc->tm.db_time_ns += add_ns;
+        } else {
+            pgwt_update_time_model(&acc->tm, we, add_ns);
+        }
 
         /* Query events */
         if (evt->query_id != 0) {

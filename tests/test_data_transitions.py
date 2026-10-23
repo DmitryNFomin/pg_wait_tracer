@@ -8,14 +8,18 @@ dwell. See the comment block above check_restart_determinism().
 """
 import hashlib
 import json
+import subprocess
+import tempfile
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
-    ServerHarness, generate_traces, cleanup_traces, TestRunner,
-    CPU, IO_DATA_FILE_READ, LOCK_RELATION, CLASS_LWLOCK, make_event_id,
+    ServerHarness, generate_traces, cleanup_traces, TestRunner, GEN_BIN,
+    CPU, IO_DATA_FILE_READ, LOCK_RELATION, CLASS_LWLOCK, CLASS_TIMEOUT,
+    make_event_id,
 )
 
 BASE_TS = 10_000_000_000_000
+cov515_section_ran = False
 
 # Use numeric event IDs
 IO_WRITE = 0x0A000018   # IO:DataFileWrite
@@ -153,6 +157,7 @@ def _canon(resp):
         "link_count": resp.get("link_count"),
         "total_link_count": resp.get("total_link_count"),
         "truncated": resp.get("truncated"),
+        "idle_classification_complete": resp["idle_classification_complete"],
         "fidelity": resp.get("fidelity"),
         "nodes": resp.get("nodes"),
         "links": resp.get("links"),
@@ -217,6 +222,8 @@ def check_restart_determinism(t):
         # anything, so the expected population is asserted first and
         # exactly.
         first = runs[0]
+        _check_idle_classification(t, first, True,
+                                   "456 restart payload without Timeout nodes")
         expect_total = 2 * HOT_N + 2 * LOCK_N + 2 * TIE_N
         t.check_eq(first.get("total"), expect_total,
                    f"456.1 nonempty: total transitions = {expect_total}")
@@ -321,6 +328,95 @@ def check_restart_determinism(t):
         cleanup_traces(dir_b)
 
 
+# ── #515: classification coverage of the encountered Timeout node ids ───
+def _check_idle_classification(t, payload, expected, state):
+    key = "idle_classification_complete"
+    t.check(key in payload, f"{state}: classification status is present")
+    if key in payload:
+        t.check(isinstance(payload[key], bool),
+                f"{state}: classification status is a bool")
+        t.check(payload[key] is expected,
+                f"{state}: classification complete is {expected}")
+
+
+def check_idle_classification_coverage(t):
+    global cov515_section_ran
+    cov515_section_ran = True
+    print("--- #515: transitions idle classification coverage ---")
+    timeout_1 = make_event_id(CLASS_TIMEOUT, 1)
+    timeout_2 = make_event_id(CLASS_TIMEOUT, 2)
+    timeout_5 = make_event_id(CLASS_TIMEOUT, 5)
+    timeout_12 = make_event_id(CLASS_TIMEOUT, 12)
+    partial_names = {
+        "names_source": "observed", "pg_version": 16,
+        "Timeout": ["BaseBackupThrottle", "CheckpointWriteDelay", "PgSleep"],
+    }
+    cases = [
+        ("PG18 covered ids 1,2", 18, [timeout_1, timeout_2], None, True,
+         {timeout_1: True, timeout_2: False}),
+        ("PG18 uncovered id 12", 18, [timeout_12], None, False,
+         {timeout_12: False}),
+        # #515: the idle verdict is present and boolean, but untrustworthy.
+        ("PG16 empty provenance id 1", 16, [timeout_1], None, False,
+         {timeout_1: False}),
+        # A nonempty mask would wrongly approve this partial catalog:
+        # id 1 is rescued by its observed name, while id 5 is uncovered.
+        ("PG16 partial sidecar ids 1,5", 16, [timeout_1, timeout_5],
+         partial_names, False, {timeout_1: True, timeout_5: False}),
+        # Deliberately vacuous: this flag describes the ids ENCOUNTERED,
+        # not the mask. PG16's empty mask has nothing to classify here.
+        ("PG16 no Timeout nodes", 16, [IO_DATA_FILE_READ], None, True,
+         {CPU: False, IO_DATA_FILE_READ: False}),
+    ]
+    for state, major, event_ids, sidecar, expected, idle_verdicts in cases:
+        trace_dir = tempfile.mkdtemp(prefix="pgwt_515_")
+        try:
+            events = []
+            ts = BASE_TS
+            for event_id in event_ids:
+                ts += MS
+                events.append(_ev(1000, ts, MS, CPU, event_id))
+                ts += MS
+                events.append(_ev(1000, ts, MS, event_id, CPU))
+            scenario = {
+                "backends": [{"pid": 1000, "type": "client", "user": "u",
+                              "db": "d"}],
+                "queries": [{"id": 100, "text": "SELECT 1"}],
+                "events": events,
+            }
+            # The harness generator wrapper does not expose --pg-version.
+            result = subprocess.run(
+                [GEN_BIN, "-o", trace_dir, "--pg-version", str(major),
+                 "--inline", json.dumps(scenario)],
+                capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"{state}: gen_test_traces failed:\n"
+                    f"stdout: {result.stdout}\nstderr: {result.stderr}")
+            if sidecar is not None:
+                with open(os.path.join(trace_dir, "wait_event_names.json"),
+                          "w") as f:
+                    json.dump(sidecar, f)
+            with ServerHarness(trace_dir) as srv:
+                payload = srv.query("transitions")
+                _check_idle_classification(t, payload, expected, state)
+                nodes = payload["nodes"]
+                t.check(bool(nodes) and all(
+                    "idle" in n and isinstance(n["idle"], bool) for n in nodes),
+                    f"{state}: every node retains a boolean idle verdict")
+                for event_id, want_idle in idle_verdicts.items():
+                    node = next((n for n in nodes
+                                 if n["event_id"] == event_id), None)
+                    t.check(node is not None,
+                            f"{state}: event {event_id:#x} node is present")
+                    if node is not None:
+                        t.check(node["idle"] is want_idle,
+                                f"{state}: event {event_id:#x} idle stays "
+                                f"{want_idle}")
+        finally:
+            cleanup_traces(trace_dir)
+
+
 t = TestRunner("test_data_transitions")
 trace_dir = generate_traces(SCENARIO)
 
@@ -382,5 +478,9 @@ finally:
     cleanup_traces(trace_dir)
 
 check_restart_determinism(t)
+check_idle_classification_coverage(t)
+t.check(cov515_section_ran,
+        "#515 coverage section ran -- a rebase that drops the call silently "
+        "shrinks this gate instead of failing")
 
 sys.exit(0 if t.summary() else 1)

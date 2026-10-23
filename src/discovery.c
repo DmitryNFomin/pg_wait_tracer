@@ -1344,17 +1344,30 @@ int pgwt_discover(struct pgwt_daemon *d)
      * version-selected hardcoded tables otherwise); without it a PG13
      * trace was silently decoded with PG18 tables by pgwt-server (the #8
      * mislabeling class — caught by the CI capture-smoke PG13 cell). */
-    if (d->trace_dir && pgwt_write_names_json(d->trace_dir) != 0) {
-        /* Not fatal -- the capture is still worth having -- but it must not be
-         * silent: without the sidecar, pgwt-server cannot establish this
-         * trace's major or its name provenance, so it will refuse to classify
-         * Timeout events at all (every pacing wait stays in DB Time). On an
-         * unverified major that is the difference between a correct answer and
-         * a quietly wrong one, so the operator needs to know now, while the
-         * directory is still writable. */
-        fprintf(stderr, "WARN: could not write %s/wait_event_names.json -- "
-                "pgwt-server will not be able to classify Timeout pacing "
-                "waits for this trace\n", d->trace_dir);
+    if (d->trace_dir) {
+        errno = 0;
+        if (pgwt_write_names_json(d->trace_dir) != 0) {
+            /* Not fatal -- the capture is still worth having -- but it must
+             * not be silent. #499: this WARN used to claim pgwt-server "will
+             * not be able to classify Timeout pacing waits", which is FALSE
+             * and pointed two investigations at the wrong defect.
+             * pgwt_init_event_names_for_trace() falls back to the trace
+             * header's PG major, and pgwt_init_event_names() installs the
+             * pacing mask together with the tables, so Timeout pacing stays
+             * classified on a sidecar-less v3 trace. What is actually lost is
+             * NAME PROVENANCE: the sidecar is the only carrier of the names
+             * this PostgreSQL build reported for itself (dynamic, PG17+), so
+             * the trace gets read with whatever this pgwt build hardcodes for
+             * that major instead. */
+            fprintf(stderr, "WARN: could not write %s/wait_event_names.json "
+                    "(%s) -- this trace will be read with pgwt's hardcoded "
+                    "PG%d name tables instead of the names this server "
+                    "reports for itself; Timeout pacing classification is "
+                    "unaffected (it comes from the trace header's major)\n",
+                    d->trace_dir,
+                    errno ? strerror(errno) : "no errno reported",
+                    d->pg_major_version);
+        }
     }
 
     /* Resolve the wait_event_info access path. Per-version strategy:

@@ -26,11 +26,14 @@ typedef uint64_t u64;
  * speaks and the Go client consumes). A skewed Mac-client/Linux-server pair
  * is the NORMAL deployment state, so the server reports this in every `info`
  * response and the client warns loudly on mismatch — warn, never refuse.
- * Bump ONLY on a breaking protocol change (renamed/retyped fields, changed
- * command semantics); additive fields do not bump it. Keep in sync with
+ * Bump on a breaking protocol change (renamed/retyped fields, changed command
+ * semantics, or a field the client is entitled to require). Optional additive
+ * fields do not bump it. Rev 2 requires `idle` on every transitions node
+ * (#487) and `idle_classification_complete` readiness on the transitions
+ * response (#515). Keep in sync with
  * `protocolRev` in web/main.go and PROTOCOL_REV in tests/mock_server.py
  * (tests/test_protocol_drift.py enforces the mock side). */
-#define PGWT_PROTOCOL_REV    1
+#define PGWT_PROTOCOL_REV    2
 
 /* ── Histogram ────────────────────────────────────────────── */
 #define HISTOGRAM_BUCKETS    16

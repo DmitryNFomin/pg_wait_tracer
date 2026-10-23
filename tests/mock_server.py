@@ -217,10 +217,22 @@ def _aas_event_series():
 
 _CANNED = {}
 
+# #497: mirrors PGWT_LOCK_BLOCKER_NOTE in src/server.c. The lock_chains
+# "blocker" is the pid with the longest on-CPU overlap, not a verified holder.
+_LOCK_BLOCKER_NOTE = (
+    "overlapping candidate; blocker unverified -- each 'blocker' is the pid "
+    "whose on-CPU overlap with the wait was longest, not a session shown to "
+    "hold the lock. No lock identity is compared, and candidates are on-CPU "
+    "intervals only, so a holder that is itself waiting, idle in "
+    "transaction, or a prepared transaction never appears here."
+)
+
 # Protocol revision the mock speaks — mirrors PGWT_PROTOCOL_REV in
 # src/pg_wait_tracer.h. test_protocol_drift.py enforces that the real server's
 # `info` response carries the same (server_version + protocol) shape.
-PROTOCOL_REV = 1
+# Rev 2 requires idle on every transitions node (#487) and the transitions
+# response's idle_classification_complete readiness field (#515).
+PROTOCOL_REV = 2
 
 _CANNED["info"] = {
     "from_ns": _FROM_NS,
@@ -1298,7 +1310,12 @@ def _handle_request_inner(cmd, req_id, msg):
         # (1670) are unchanged — test_matrix_view's "1,670 of 1,800" / "5 of
         # 8" note text depends only on those, not on which nodes carry them.
         return {"id": req_id, "total": 1800, "link_count": 5,
-                "total_link_count": 8, "truncated": True, "nodes": [
+                "total_link_count": 8, "truncated": True,
+                # CPU/Client/IO/LWLock only: no Timeout ids are encountered
+                # in this window, so nothing to classify is vacuously complete.
+                # tests/test_protocol_drift.py compares this protocol surface;
+                # keep it in sync with emit_transitions_response() in src/server.c.
+                "idle_classification_complete": True, "nodes": [
             {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0, "idle": False},
             {"name": "Client:ClientRead", "total_ms": 9153, "class": "Client", "event_id": 0x06000000, "idle": True},
             {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015, "idle": False},
@@ -1312,9 +1329,18 @@ def _handle_request_inner(cmd, req_id, msg):
         ]}
 
     if cmd == "lock_chains":
-        return {"id": req_id, "chains": [
-            {"waiter": 1001, "blocker": 1000, "lock": "Lock:transactionid", "wait_ms": 45.2, "timestamp_ns": 1711936100000000000},
-            {"waiter": 1003, "blocker": 1002, "lock": "Lock:tuple", "wait_ms": 12.8, "timestamp_ns": 1711936200000000000},
+        # #497: blocker_basis (per row) and blocker_note (per response) are
+        # part of the lock_chains schema in src/server.c, so they are part of
+        # it here too -- test_protocol_drift.py compares key sets exactly, and
+        # a mock that omits a disclosure field is a mock a UI can be built
+        # against without ever seeing it.
+        return {"id": req_id,
+                "blocker_note": _LOCK_BLOCKER_NOTE,
+                "chains": [
+            {"waiter": 1001, "blocker": 1000, "blocker_basis": "cpu-overlap",
+             "lock": "Lock:transactionid", "wait_ms": 45.2, "timestamp_ns": 1711936100000000000},
+            {"waiter": 1003, "blocker": 1002, "blocker_basis": "cpu-overlap",
+             "lock": "Lock:tuple", "wait_ms": 12.8, "timestamp_ns": 1711936200000000000},
         ]}
 
     if cmd == "interference":

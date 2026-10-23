@@ -184,6 +184,40 @@ struct pgwt_event_writer {
 
 /* ── Public API ───────────────────────────────────────────── */
 
+/* Trace-directory preparation and trace-group resolution.
+ *
+ * #499: the trace directory must exist before ANYTHING writes into it.
+ * src/discovery.c writes wait_event_names.json (the sidecar carrying this
+ * capture's wait-event name provenance) at the end of pgwt_discover(), which
+ * runs BEFORE pgwt_daemon_init() -> pgwt_writer_init(). While mkdir() lived
+ * only in pgwt_writer_init, every run against a not-yet-existing trace dir
+ * lost that sidecar. Call this once at startup, before discovery;
+ * pgwt_writer_init calls it again (it is idempotent) so a library/test caller
+ * that only uses the writer still gets its directory.
+ *
+ * Returns 0 when trace_dir exists and is a directory afterwards, -1 otherwise
+ * (a -1 means no trace can be written at all, so callers fail fast rather
+ * than discovering it at the first event). *out_gid, when non-NULL, receives
+ * the resolved trace-group gid, or (gid_t)-1 when no group resolved — in
+ * which case trace files stay root-owned and NO non-root reader can open
+ * them. A group_name that does not exist is NOT silently replaced: it warns
+ * and leaves the gid unresolved. */
+int  pgwt_trace_dir_prepare(const char *trace_dir, const char *group_name,
+                            gid_t *out_gid);
+
+/* #500: the default trace group when --trace-group was not given. Returns
+ * the first candidate group that actually EXISTS on this host, or NULL when
+ * none does (caller warns; traces stay root-only). The historical default was
+ * the literal string "dba", which exists on almost no PostgreSQL host, so
+ * getgrnam() failed, no chown/chmod ran, and the trace directory stayed 0750
+ * root:root — the postgres account a non-root pgwt-server replay or demo
+ * service runs as was then denied at the DIRECTORY and could open nothing
+ * inside it (measured: the files themselves keep fopen's umask-derived mode,
+ * 0644 under the daemon's usual umask, so the file bits were never the
+ * blocker). The returned pointer is static storage owned by this module,
+ * valid until the next call. */
+const char *pgwt_default_trace_group(void);
+
 int  pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
                       int pg_version, int retention_hours,
                       const char *group_name);

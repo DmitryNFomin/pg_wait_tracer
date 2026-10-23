@@ -469,7 +469,7 @@ per interval, no screen clearing).
 | `--trace-dir <DIR>` | `-T` | disabled | Directory for trace files (enables recording) |
 | `--trace-retention <H>` | `-R` | 24 | Keep trace files for H hours |
 | `--retention-gb <G>` | — | off | Also cap total trace-dir size at G GiB (fractional allowed); oldest archives deleted first, the live current files never |
-| `--trace-group <GROUP>` | — | `dba` | Unix group for trace file access |
+| `--trace-group <GROUP>` | — | `dba` if that group exists, else the group PostgreSQL runs under | Unix group allowed to read trace files. The default is resolved against this host, so traces are readable by the PostgreSQL service account rather than root-only when no `dba` group was created. A group named explicitly is never substituted: if it does not exist the daemon warns and the traces stay root-only |
 
 ### Replay
 
@@ -654,12 +654,20 @@ identify which specific events consume the most time.
 
 | Column | Description |
 |--------|-------------|
-| Wait Event | Event name as `Class:Event` (e.g. `IO:DataFileRead`) or `CPU*` |
-| Total Waits | Number of occurrences |
+| Wait Event | Event name as `Class:Event` (e.g. `IO:DataFileRead`), or the derived rows `CPU*` and `Off-CPU*` |
+| Total Waits | Number of occurrences (— for `Off-CPU*`, which is a residual duration, not a countable event) |
 | Total (ms) | Cumulative duration |
-| Avg (us) | Average duration per occurrence |
-| Max (us) | Longest single occurrence |
+| Avg (us) | Average duration per occurrence (— for `Off-CPU*`) |
+| Max (us) | Longest single occurrence (— for `Off-CPU*`) |
 | % DB | Fraction of DB Time |
+
+`Off-CPU*` (#498) is `CPU*`'s measured sibling: the part of an on-CPU
+interval's wall clock the backend was not actually on a CPU for (runqueue,
+cgroup throttling, unaccounted). With it, `CPU* + Off-CPU* + Σ waits` is the
+whole of DB Time, so this view's `% DB` column adds up exactly as
+`time_model`'s does. It is absent in the legacy/sampled shape, where the
+residual is structurally zero, and it does not count against the view's
+20-row cap.
 
 **Example:**
 
@@ -672,6 +680,7 @@ pg_wait_tracer — System Events (cumulative)    Backends: 12
   ────────────────────────────────────────────────────────────────────────────────────────
   CPU*                          43460        5498.6      126.5     10630.2   21.9%
   IO:DataFileRead                8234        3262.8      396.2     45623.1   13.0%
+  Off-CPU*                          —        2890.4          —            —   11.5%
   Lock:Transaction                567        2104.3     3712.2    892100.5    8.4%
   LWLock:WALInsert               4812        1823.2      378.9      8934.2    7.3%
   Client:ClientRead              1203         882.1      733.1     25410.3      —
@@ -994,9 +1003,17 @@ same wait event within 10ms — "thundering herd" detection.
 
 ### Lock Chains
 
-Infers waiter→blocker relationships from trace data. For each Lock-class wait,
-identifies which other PID was most likely holding the lock (on CPU during the
-same time interval). Available via `lock_chains` server endpoint.
+For each Lock-class wait, pairs the waiter with the PID whose **on-CPU**
+interval overlapped that wait the longest. Available via the `lock_chains`
+server endpoint.
+
+That pid is an *overlapping candidate*, not a verified holder (#497), and the
+response says so on every row (`blocker_basis`: `cpu-overlap`) and once in
+prose (`blocker_note`). No lock identity is compared, and candidates are
+on-CPU intervals only — so a holder that is itself waiting (e.g. on WAL),
+sitting idle-in-transaction, or a prepared transaction contributes no
+candidate at all and can never be reported, however certainly it holds the
+lock.
 
 ### Interference Scoring
 
