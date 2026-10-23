@@ -220,7 +220,9 @@ _CANNED = {}
 # Protocol revision the mock speaks — mirrors PGWT_PROTOCOL_REV in
 # src/pg_wait_tracer.h. test_protocol_drift.py enforces that the real server's
 # `info` response carries the same (server_version + protocol) shape.
-PROTOCOL_REV = 1
+# Rev 2 requires idle on every transitions node (#487) and the transitions
+# response's idle_classification_complete readiness field (#515).
+PROTOCOL_REV = 2
 
 _CANNED["info"] = {
     "from_ns": _FROM_NS,
