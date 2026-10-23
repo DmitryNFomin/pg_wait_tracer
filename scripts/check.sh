@@ -133,6 +133,11 @@ run tests/test_check_runner_registration.sh
 step "runner-image pin guard self-test (bypass suite)"
 run bash tests/test_check_runner_pin.sh
 
+# Promoted from an untracked results directory; closes the numpy-presence
+# false-negative in the frame detector's bypass probes (issue #519).
+step "frame-verify probe suite (bypass suite for scripts/frame_verify.py, #519)"
+run python3 tests/test_frame_verify_probes.py
+
 step "runner-image pin guard (this tree)"
 run bash scripts/check-runner-pin.sh
 
