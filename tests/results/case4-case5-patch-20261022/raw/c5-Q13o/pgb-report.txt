@@ -1,0 +1,15 @@
+pgbench (20devel)
+transaction type: ../report.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 95 s
+number of transactions actually processed: 15
+number of failed transactions: 0 (0.000%)
+latency average = 414.980 ms
+latency stddev = 146.117 ms
+rate limit schedule lag: avg 34.949 (max 315.790) ms
+initial connection time = 4.213 ms
+tps = 0.172122 (without initial connection time)

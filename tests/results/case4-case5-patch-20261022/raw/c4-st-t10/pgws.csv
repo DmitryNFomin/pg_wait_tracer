@@ -1,0 +1,6 @@
+IO,DataFileRead,47671
+Client,ClientRead,4230
+CPU,CPU,1639
+IO,AioIoCompletion,2
+LWLock,pg_stat_statements,1
+Timeout,SpinDelay,1

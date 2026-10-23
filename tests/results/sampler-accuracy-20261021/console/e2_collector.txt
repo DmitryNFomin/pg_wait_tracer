@@ -1,0 +1,19 @@
+# E2: pg_wait_sampling collector rounds (distinct history ts) in a 60 s window; loadavg printed after each run
+idle rounds=6004
+0.08 0.74 1.29 1/219 1920525
+sel-c4 rounds=6005 tps = 46694.875217 (without initial connection time)
+3.72 1.76 1.61 1/218 1922604
+sel-c8 rounds=6005 tps = 41306.779745 (without initial connection time)
+6.54 3.26 2.16 1/217 1925041
+sel-c16 rounds=6007 tps = 40689.296707 (without initial connection time)
+13.93 6.39 3.35 1/219 1927014
+tpcb-c8 rounds=6003 tps = 4595.954156 (without initial connection time)
+7.07 6.07 3.51 1/215 1929390
+tpcb-c16 rounds=6004 tps = 4771.459846 (without initial connection time)
+8.64 6.81 3.98 1/215 1931637
+idle      rounds=6004 achieved=100.0Hz gap p50=10.13ms p90=10.16 p99=10.21 p99.9=11.26 max=12.92ms  >15ms=0.00% >20ms=0.00% >50ms=0
+sel-c4    rounds=6005 achieved=100.0Hz gap p50=10.09ms p90=10.17 p99=10.24 p99.9=11.99 max=13.82ms  >15ms=0.00% >20ms=0.00% >50ms=0
+sel-c8    rounds=6005 achieved=100.0Hz gap p50=10.10ms p90=10.22 p99=10.36 p99.9=11.28 max=11.82ms  >15ms=0.00% >20ms=0.00% >50ms=0
+sel-c16   rounds=6007 achieved=100.0Hz gap p50=10.15ms p90=10.34 p99=10.60 p99.9=12.18 max=14.63ms  >15ms=0.00% >20ms=0.00% >50ms=0
+tpcb-c8   rounds=6003 achieved=100.0Hz gap p50=10.10ms p90=10.21 p99=10.38 p99.9=11.60 max=12.48ms  >15ms=0.00% >20ms=0.00% >50ms=0
+tpcb-c16  rounds=6004 achieved=100.0Hz gap p50=10.11ms p90=10.31 p99=10.63 p99.9=12.02 max=13.20ms  >15ms=0.00% >20ms=0.00% >50ms=0

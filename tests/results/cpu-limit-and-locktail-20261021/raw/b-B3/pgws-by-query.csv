@@ -1,0 +1,30 @@
+,Client,ClientRead,85616
+,CPU,CPU,4964
+,IO,WalSync,2950
+,LWLock,WALWrite,1890
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,Lock,transactionid,888
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,CPU,CPU,367
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,CPU,CPU,299
+SELECT abalance FROM pgbench_accounts WHERE aid = $1,CPU,CPU,288
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,CPU,CPU,223
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,Lock,transactionid,145
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",CPU,CPU,116
+,IO,WalWrite,88
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,Lock,tuple,79
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,IO,DataFileRead,29
+,LWLock,ProcArray,27
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,LockManager,8
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,Lock,tuple,4
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",IO,DataFileExtend,3
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,LWLock,WALInsert,2
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,LWLock,LockManager,2
+,LWLock,LockManager,2
+,LWLock,WALInsert,2
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,Timeout,SpinDelay,1
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,LWLock,BufferContent,1
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,LWLock,XidGen,1
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,WALInsert,1
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",IO,DataFileWrite,1
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,BufferContent,1
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,LWLock,LockManager,1
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,Timeout,SpinDelay,1

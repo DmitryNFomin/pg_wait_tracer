@@ -1,0 +1,2 @@
+2026-10-21 21:14:19.132 UTC [2337112] LOG:  checkpoint complete: wrote 1981 buffers (12.1%), wrote 12 SLRU buffers; 0 WAL file(s) added, 0 removed, 17 recycled; write=269.958 s, sync=0.007 s, total=270.018 s; sync files=17, longest=0.002 s, average=0.001 s; distance=283902 kB, estimate=305836 kB; lsn=42/C6AB2B8, redo lsn=41/FA6731C0
+2026-10-21 21:14:49.286 UTC [2337112] LOG:  checkpoint starting: time

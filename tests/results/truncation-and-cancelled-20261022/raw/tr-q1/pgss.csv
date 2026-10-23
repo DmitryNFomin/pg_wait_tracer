@@ -1,0 +1,8 @@
+SELECT payload FROM t WHERE id = $1,2396563,47881.1,0.020,49.41,-4621018123696140640
+delete from t where id > $1,1,5677.1,5677.059,5677.06,-3101880389919668912
+"SELECT extract($1 from clock_timestamp())::numeric(20,6), a.",59990,4937.9,0.082,1.92,-5731038835712744177
+"SELECT extract($1 from clock_timestamp())::numeric(20,3), p.",1500,52.5,0.035,0.65,-5469575749507106836
+"copy (select pid, coalesce(event_type,'CPU'), coalesce(event",1,10.3,10.260,10.26,7426517111630195950
+"copy (select ts, pid, coalesce(event_type,'CPU'), coalesce(e",1,5.3,5.334,5.33,-7182333318657368681
+"copy (select left(regexp_replace(s.query,'\s+',' ','g'),60),",1,2.6,2.625,2.63,8142635007637014521
+select pg_stat_statements_reset(),1,0.1,0.143,0.14,-2540336765997748665

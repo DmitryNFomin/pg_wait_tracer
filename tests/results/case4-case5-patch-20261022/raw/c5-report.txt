@@ -1,0 +1,124 @@
+=== c5-Q0o  cpu.max   window 60.0s  txns 84176 (1403/s)
+  latency ms: p50 1.72  p90 2.63  p99 5.20  p99.9 24.51  max 52.9
+  cgroup: CPU used 0.92 cores; throttled in 0/0 periods (0%)
+  kernel, 16 client backends: on-CPU 0.85  waiting for a CPU (run-delay) 0.20  (session-equivalents)
+  pg_wait_sampling: 100.1 samples/s per backend; active AAS (samples x 10 ms) 1.79
+      CPU:CPU                       33.6%  AAS 0.60
+      IO:WalSync                    31.5%  AAS 0.56
+      LWLock:WALWrite               23.3%  AAS 0.42
+      Lock:transactionid             9.6%  AAS 0.17
+      IO:WalWrite                    1.1%  AAS 0.02
+      Lock:tuple                     0.6%  AAS 0.01
+      IO:DataFileRead                0.2%  AAS 0.00
+=== c5-Q0t  cpu.max   window 60.0s  txns 84213 (1403/s)
+  latency ms: p50 1.74  p90 2.68  p99 7.45  p99.9 45.53  max 88.3
+  cgroup: CPU used 0.94 cores; throttled in 0/0 periods (0%)
+  kernel, 16 client backends: on-CPU 0.88  waiting for a CPU (run-delay) 0.21  (session-equivalents)
+  pg_wait_sampling: 100.1 samples/s per backend; active AAS (samples x 10 ms) 1.92
+      CPU:CPU                       32.5%  AAS 0.62
+      IO:WalSync                    29.9%  AAS 0.57
+      LWLock:WALWrite               24.3%  AAS 0.47
+      Lock:transactionid            10.8%  AAS 0.21
+      Lock:tuple                     1.0%  AAS 0.02
+      IO:WalWrite                    0.9%  AAS 0.02
+      IO:DataFileRead                0.2%  AAS 0.00
+  patch stats, client backends: waiting (excl. ClientRead) 1.24 sessions; ClientRead 14.10
+      IO:WalSync                    45.0%  sessions 0.56  calls 68976  avg 488 us  max 32.4 ms
+      LWLock:WALWrite               35.3%  sessions 0.44  calls 63073  avg 418 us  max 32.3 ms
+      Lock:transactionid            16.2%  sessions 0.20  calls 13843  avg 874 us  max 44.8 ms
+      IO:WalWrite                    1.5%  sessions 0.02  calls 68982  avg 17 us  max 0.6 ms
+      Lock:tuple                     1.5%  sessions 0.02  calls 1064  avg 1049 us  max 27.9 ms
+      IO:DataFileRead                0.3%  sessions 0.00  calls 19194  avg 10 us  max 0.3 ms
+  patch rings: 67404 transactions in window (records lost to ring wrap: 0); slowest 1% = 674, server time p50 8.6 ms
+      dominant wait: Lock:transactionid 45%, LWLock:WALWrite 39%, IO:WalSync 9%, Lock:tuple 7%
+      wait share of their server time: 89%: Lock:transactionid 39%, LWLock:WALWrite 36%, IO:WalSync 7%, Lock:tuple 7%
+=== c5-Q13o  cpu.max 130000 100000  window 60.0s  txns 84313 (1405/s)
+  latency ms: p50 1.72  p90 3.21  p99 144.35  p99.9 296.06  max 349.8
+  cgroup: CPU used 0.92 cores; throttled in 45/601 periods (7%)
+  kernel, 16 client backends: on-CPU 0.85  waiting for a CPU (run-delay) 0.66  (session-equivalents)
+  pg_wait_sampling: 97.9 samples/s per backend; active AAS (samples x 10 ms) 2.10
+      CPU:CPU                       30.3%  AAS 0.64
+      IO:WalSync                    25.9%  AAS 0.54
+      LWLock:WALWrite               23.8%  AAS 0.50
+      Lock:transactionid            16.5%  AAS 0.35
+      Lock:tuple                     1.8%  AAS 0.04
+      IO:WalWrite                    0.8%  AAS 0.02
+      LWLock:LockManager             0.3%  AAS 0.01
+=== c5-Q13o2  cpu.max 130000 100000  window 60.0s  txns 84238 (1404/s)
+  latency ms: p50 1.74  p90 3.55  p99 172.45  p99.9 310.58  max 380.0
+  cgroup: CPU used 0.92 cores; throttled in 58/601 periods (10%)
+  kernel, 16 client backends: on-CPU 0.84  waiting for a CPU (run-delay) 0.86  (session-equivalents)
+  pg_wait_sampling: 97.4 samples/s per backend; active AAS (samples x 10 ms) 2.15
+      CPU:CPU                       29.9%  AAS 0.64
+      IO:WalSync                    25.5%  AAS 0.55
+      LWLock:WALWrite               23.9%  AAS 0.51
+      Lock:transactionid            16.6%  AAS 0.36
+      Lock:tuple                     2.4%  AAS 0.05
+      IO:WalWrite                    0.7%  AAS 0.01
+      LWLock:LockManager             0.4%  AAS 0.01
+=== c5-Q13t  cpu.max 130000 100000  window 60.0s  txns 84043 (1401/s)
+  latency ms: p50 1.79  p90 6.02  p99 137.39  p99.9 218.44  max 258.0
+  cgroup: CPU used 0.95 cores; throttled in 69/601 periods (11%)
+  kernel, 16 client backends: on-CPU 0.86  waiting for a CPU (run-delay) 0.89  (session-equivalents)
+  pg_wait_sampling: 97.3 samples/s per backend; active AAS (samples x 10 ms) 2.44
+      CPU:CPU                       27.5%  AAS 0.67
+      LWLock:WALWrite               25.3%  AAS 0.62
+      IO:WalSync                    23.6%  AAS 0.58
+      Lock:transactionid            19.1%  AAS 0.47
+      Lock:tuple                     2.8%  AAS 0.07
+      IO:WalWrite                    0.7%  AAS 0.02
+      LWLock:WALInsert               0.3%  AAS 0.01
+  patch stats, client backends: waiting (excl. ClientRead) 1.90 sessions; ClientRead 13.40
+      LWLock:WALWrite               34.8%  sessions 0.66  calls 68599  avg 577 us  max 67.4 ms
+      IO:WalSync                    30.4%  sessions 0.58  calls 65553  avg 527 us  max 78.3 ms
+      Lock:transactionid            28.1%  sessions 0.53  calls 19113  avg 1672 us  max 85.3 ms
+      Lock:tuple                     4.5%  sessions 0.09  calls 2069  avg 2474 us  max 67.5 ms
+      IO:WalWrite                    1.1%  sessions 0.02  calls 65560  avg 18 us  max 64.9 ms
+      LWLock:WALInsert               0.5%  sessions 0.01  calls 553  avg 1047 us  max 60.6 ms
+  patch rings: 67296 transactions in window (records lost to ring wrap: 0); slowest 1% = 672, server time p50 58.9 ms
+      dominant wait: Lock:transactionid 45%, LWLock:WALWrite 36%, IO:WalSync 10%, Lock:tuple 8%
+      wait share of their server time: 79%: Lock:transactionid 37%, LWLock:WALWrite 27%, Lock:tuple 9%, IO:WalSync 5%
+=== c5-Q13t2  cpu.max 130000 100000  window 60.0s  txns 84260 (1404/s)
+  latency ms: p50 1.84  p90 7.06  p99 131.02  p99.9 189.39  max 239.3
+  cgroup: CPU used 0.97 cores; throttled in 62/601 periods (10%)
+  kernel, 16 client backends: on-CPU 0.89  waiting for a CPU (run-delay) 0.91  (session-equivalents)
+  pg_wait_sampling: 96.6 samples/s per backend; active AAS (samples x 10 ms) 2.34
+      CPU:CPU                       28.7%  AAS 0.67
+      LWLock:WALWrite               24.0%  AAS 0.56
+      IO:WalSync                    24.0%  AAS 0.56
+      Lock:transactionid            19.5%  AAS 0.46
+      Lock:tuple                     2.5%  AAS 0.06
+      IO:WalWrite                    0.7%  AAS 0.02
+      LWLock:LockManager             0.2%  AAS 0.00
+  patch stats, client backends: waiting (excl. ClientRead) 1.93 sessions; ClientRead 13.36
+      LWLock:WALWrite               34.0%  sessions 0.66  calls 68667  avg 574 us  max 65.6 ms
+      Lock:transactionid            30.0%  sessions 0.58  calls 19635  avg 1771 us  max 76.6 ms
+      IO:WalSync                    29.9%  sessions 0.58  calls 65756  avg 527 us  max 64.7 ms
+      Lock:tuple                     4.3%  sessions 0.08  calls 2187  avg 2272 us  max 67.7 ms
+      IO:WalWrite                    1.0%  sessions 0.02  calls 65764  avg 18 us  max 13.5 ms
+      LWLock:LockManager             0.5%  sessions 0.01  calls 1756  avg 302 us  max 64.9 ms
+  patch rings: 66193 transactions in window (records lost to ring wrap: 0); slowest 1% = 661, server time p50 64.1 ms
+      dominant wait: Lock:transactionid 49%, LWLock:WALWrite 33%, IO:WalSync 12%, Lock:tuple 6%
+      wait share of their server time: 71%: Lock:transactionid 35%, LWLock:WALWrite 22%, Lock:tuple 6%, IO:WalSync 6%
+=== c5-Q25t  cpu.max 250000 100000  window 60.0s  txns 84155 (1402/s)
+  latency ms: p50 1.71  p90 2.60  p99 5.26  p99.9 15.41  max 39.3
+  cgroup: CPU used 0.96 cores; throttled in 7/601 periods (1%)
+  kernel, 16 client backends: on-CPU 0.88  waiting for a CPU (run-delay) 0.22  (session-equivalents)
+  pg_wait_sampling: 100.1 samples/s per backend; active AAS (samples x 10 ms) 1.80
+      CPU:CPU                       34.8%  AAS 0.63
+      IO:WalSync                    31.0%  AAS 0.56
+      LWLock:WALWrite               23.0%  AAS 0.41
+      Lock:transactionid             9.1%  AAS 0.16
+      IO:WalWrite                    0.9%  AAS 0.02
+      Lock:tuple                     0.8%  AAS 0.01
+      LWLock:ProcArray               0.1%  AAS 0.00
+  patch stats, client backends: waiting (excl. ClientRead) 1.13 sessions; ClientRead 14.24
+      IO:WalSync                    48.4%  sessions 0.54  calls 69749  avg 469 us  max 20.7 ms
+      LWLock:WALWrite               34.1%  sessions 0.38  calls 61082  avg 377 us  max 21.7 ms
+      Lock:transactionid            14.2%  sessions 0.16  calls 13309  avg 723 us  max 22.7 ms
+      IO:WalWrite                    1.7%  sessions 0.02  calls 69756  avg 16 us  max 0.6 ms
+      Lock:tuple                     1.0%  sessions 0.01  calls 971  avg 724 us  max 18.6 ms
+      IO:DataFileRead                0.3%  sessions 0.00  calls 19404  avg 10 us  max 0.5 ms
+  patch rings: 67339 transactions in window (records lost to ring wrap: 0); slowest 1% = 673, server time p50 5.7 ms
+      dominant wait: Lock:transactionid 45%, LWLock:WALWrite 37%, IO:WalSync 12%, Lock:tuple 6%
+      wait share of their server time: 80%: LWLock:WALWrite 32%, Lock:transactionid 32%, IO:WalSync 10%, Lock:tuple 5%

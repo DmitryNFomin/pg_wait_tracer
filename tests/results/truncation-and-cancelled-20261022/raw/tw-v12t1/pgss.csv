@@ -1,0 +1,10 @@
+SELECT payload FROM t WHERE id = $1,2401396,44716.9,0.019,7.57,-4621018123696140640
+delete from t where id > $1,1,6105.4,6105.357,6105.36,-3101880389919668912
+"copy (select 43375, * from pg_wait_event_trace_by_statement(",1,826.6,826.582,826.58,-4396224454002043297
+"copy (select 43390, * from pg_wait_event_trace_by_statement(",1,784.8,784.844,784.84,-5892119329993543789
+"copy (select 43388, * from pg_wait_event_trace_by_statement(",1,783.3,783.269,783.27,-8686083855844952236
+"copy (select 43381, * from pg_wait_event_trace_by_statement(",1,760.1,760.076,760.08,-326375299115305261
+"copy (select 43387, * from pg_wait_event_trace_by_statement(",1,759.2,759.226,759.23,5048686340361070404
+"copy (select 43379, * from pg_wait_event_trace_by_statement(",1,758.8,758.793,758.79,7927122903726052781
+"copy (select 43385, * from pg_wait_event_trace_by_statement(",1,757.1,757.115,757.11,7402484258956458739
+"copy (select 43376, * from pg_wait_event_trace_by_statement(",1,753.6,753.601,753.60,-2492228325415768970

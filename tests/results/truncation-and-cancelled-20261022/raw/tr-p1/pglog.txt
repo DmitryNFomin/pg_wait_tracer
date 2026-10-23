@@ -1,0 +1,50 @@
+2026-10-22 06:21:28.004 UTC [2046]  LOG:  automatic analyze of table "tr.pg_catalog.pg_attribute"
+	I/O timings: read: 1.353 ms, write: 0.000 ms
+	avg read rate: 16.741 MB/s, avg write rate: 3.627 MB/s
+	buffer usage: 1005 hits, 60 reads, 13 dirtied
+	WAL usage: 78 records, 13 full page images, 96615 bytes, 0 buffers full
+	system usage: CPU: user: 0.01 s, system: 0.00 s, elapsed: 0.02 s
+2026-10-22 06:22:28.178 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:22:30.303 UTC [1890]  LOG:  checkpoint complete: wrote 45373 buffers (17.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=2.050 s, sync=0.005 s, total=2.125 s; sync files=51, longest=0.001 s, average=0.001 s; distance=545110 kB, estimate=545110 kB; lsn=44/83754B98, redo lsn=44/64FFE690
+2026-10-22 06:22:30.367 UTC [1890]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 06:22:30.367 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:22:30.367 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:22:32.362 UTC [1890]  LOG:  checkpoint complete: wrote 44760 buffers (17.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=1.880 s, sync=0.002 s, total=1.995 s; sync files=2, longest=0.002 s, average=0.001 s; distance=540682 kB, estimate=544668 kB; lsn=44/A4000058, redo lsn=44/860010C0
+2026-10-22 06:22:38.082 UTC [1890]  LOG:  checkpoints are occurring too frequently (8 seconds apart)
+2026-10-22 06:22:38.082 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:22:38.082 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:22:39.459 UTC [1890]  LOG:  checkpoint complete: wrote 43293 buffers (16.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 31 recycled; write=1.191 s, sync=0.086 s, total=1.377 s; sync files=4, longest=0.086 s, average=0.022 s; distance=540750 kB, estimate=544276 kB; lsn=44/C7003178, redo lsn=44/A7014988
+2026-10-22 06:22:39.459 UTC [1890]  LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-10-22 06:22:39.459 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:22:39.459 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:22:40.800 UTC [1890]  LOG:  checkpoint complete: wrote 38883 buffers (14.8%), wrote 0 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.050 s, sync=0.003 s, total=1.341 s; sync files=1, longest=0.003 s, average=0.003 s; distance=573265 kB, estimate=573265 kB; lsn=44/E8005C40, redo lsn=44/C9FE9168
+2026-10-22 06:22:40.850 UTC [1890]  LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-10-22 06:22:40.850 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:22:40.850 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:22:43.605 UTC [2095]  LOG:  automatic vacuum of table "tr.public.t": index scans: 1
+	pages: 133333 removed, 133334 remain, 133334 scanned (50.00% of total), 0 eagerly scanned
+	tuples: 10000000 removed, 10000000 remain, 0 are dead but not yet removable
+	removable cutoff: 317997175, which was 1 XIDs old when operation ended
+	new relfrozenxid: 317997175, which is 7 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	visibility map: 133334 pages set all-visible, 133334 pages set all-frozen (0 were all-visible)
+	index scan needed: 133334 pages from table (50.00% of total) had 10000000 dead item identifiers removed
+	index "t_pkey": pages: 54839 in total, 27415 newly deleted, 27415 currently deleted, 0 reusable
+	I/O timings: read: 138.807 ms, write: 253.258 ms
+	avg read rate: 164.875 MB/s, avg write rate: 363.722 MB/s
+	buffer usage: 688882 hits, 118542 reads, 261509 dirtied
+	WAL usage: 615485 records, 294162 full page images, 1364565052 bytes, 99756 buffers full
+	system usage: CPU: user: 1.58 s, system: 1.43 s, elapsed: 5.61 s
+2026-10-22 06:22:44.476 UTC [2095]  LOG:  automatic analyze of table "tr.public.t"
+	I/O timings: read: 631.972 ms, write: 0.014 ms
+	avg read rate: 28.224 MB/s, avg write rate: 0.117 MB/s
+	buffer usage: 27191 hits, 3143 reads, 13 dirtied
+	WAL usage: 23 records, 12 full page images, 80384 bytes, 0 buffers full
+	system usage: CPU: user: 0.21 s, system: 0.07 s, elapsed: 0.86 s
+2026-10-22 06:26:25.638 UTC [2256] psql ERROR:  relation "pg_wait_sampling_profile" does not exist at character 86
+2026-10-22 06:26:25.638 UTC [2256] psql STATEMENT:  copy (select pid, coalesce(event_type,'CPU'), coalesce(event,'CPU'), sum(count) from pg_wait_sampling_profile group by 1,2,3 order by 4 desc) to stdout with csv
+2026-10-22 06:26:25.669 UTC [2258] psql ERROR:  relation "pg_wait_sampling_profile" does not exist at character 138
+2026-10-22 06:26:25.669 UTC [2258] psql STATEMENT:  copy (select left(regexp_replace(s.query,'\s+',' ','g'),60), coalesce(p.event_type,'CPU'), coalesce(p.event,'CPU'), sum(p.count)
+	   from pg_wait_sampling_profile p left join pg_stat_statements s on s.queryid = p.queryid group by 1,2,3 order by 4 desc) to stdout with csv
+2026-10-22 06:26:25.713 UTC [2260] psql ERROR:  relation "pg_wait_sampling_history" does not exist at character 87
+2026-10-22 06:26:25.713 UTC [2260] psql STATEMENT:  copy (select ts, pid, coalesce(event_type,'CPU'), coalesce(event,'CPU'), queryid from pg_wait_sampling_history) to stdout with csv

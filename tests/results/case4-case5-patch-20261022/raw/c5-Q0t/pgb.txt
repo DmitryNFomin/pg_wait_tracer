@@ -1,0 +1,15 @@
+pgbench (20devel)
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 10
+query mode: prepared
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 95 s
+number of transactions actually processed: 133312
+number of failed transactions: 0 (0.000%)
+latency average = 2.028 ms
+latency stddev = 2.378 ms
+rate limit schedule lag: avg 0.194 (max 69.519) ms
+initial connection time = 20.926 ms
+tps = 1403.369757 (without initial connection time)

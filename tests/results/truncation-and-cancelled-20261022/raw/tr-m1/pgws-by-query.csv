@@ -1,0 +1,43 @@
+,Client,ClientRead,480691
+,Activity,IoWorkerMain,89987
+,Activity,LogicalLauncherMain,30015
+,Activity,AutovacuumMain,30014
+,Activity,WalWriterMain,29926
+,Timeout,CheckpointWriteDelay,23500
+,Activity,BgwriterMain,18139
+,CPU,CPU,14589
+SELECT payload FROM t WHERE id = $1,CPU,CPU,12762
+,Activity,BgwriterHibernate,11873
+,Activity,CheckpointerMain,6270
+SELECT payload FROM t WHERE id = $1,IO,DataFileRead,1410
+,Lock,relation,795
+delete from t where id > $1,CPU,CPU,322
+,IO,WalSync,206
+,Timeout,VacuumTruncate,147
+,IO,DataFileWrite,127
+delete from t where id > $1,IO,WalWrite,92
+delete from t where id > $1,IO,WalSync,81
+,IO,WalWrite,75
+,IO,DataFileRead,62
+delete from t where id > $1,LWLock,WALWrite,57
+,IO,DataFileFlush,57
+delete from t where id > $1,IO,DataFileRead,51
+,LWLock,WALWrite,45
+,IO,AioIoCompletion,40
+,IO,DataFileSync,33
+,IO,DataFileTruncate,21
+,IO,WalInitSync,11
+,Timeout,SpinDelay,9
+delete from t where id > $1,IO,DataFileWrite,6
+,IO,WalInitWrite,6
+SELECT payload FROM t WHERE id = $1,IO,AioIoCompletion,3
+,LWLock,LockManager,3
+,IO,DataFilePrefetch,2
+delete from t where id > $1,IO,WalInitSync,2
+delete from t where id > $1,LWLock,WALBufMapping,2
+SELECT payload FROM t WHERE id = $1,LWLock,LockManager,1
+,IO,ControlFileSyncUpdate,1
+"SELECT extract($1 from clock_timestamp())::numeric(20,3), p.",CPU,CPU,1
+"copy (select pid, coalesce(event_type,'CPU'), coalesce(event",IPC,MessageQueueReceive,1
+delete from t where id > $1,IO,WalInitWrite,1
+SELECT payload FROM t WHERE id = $1,LWLock,BufferMapping,1

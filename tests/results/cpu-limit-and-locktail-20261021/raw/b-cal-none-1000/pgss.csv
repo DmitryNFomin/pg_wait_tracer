@@ -1,0 +1,8 @@
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,30125,1897.2,0.063,7.25
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,30125,1473.8,0.049,2.95
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,30126,807.6,0.027,5.56
+SELECT abalance FROM pgbench_accounts WHERE aid = $1,30126,307.1,0.010,0.23
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",30125,283.3,0.009,1.24
+"copy (select left(regexp_replace(s.query,'\s+',' ','g'),70), coalesce(",1,3.8,3.844,3.84
+"copy (select pid, coalesce(event_type,'CPU'), coalesce(event,'CPU'), s",1,1.9,1.892,1.89
+select pg_stat_statements_reset(),1,0.1,0.088,0.09

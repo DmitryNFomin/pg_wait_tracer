@@ -1,0 +1,17 @@
+CPU,CPU,32698
+Lock,transactionid,26084
+LWLock,WALWrite,15157
+Client,ClientRead,14776
+IO,WalSync,5061
+Lock,tuple,3336
+LWLock,LockManager,332
+IO,WalWrite,125
+IO,DataFileRead,115
+IO,DataFileWrite,106
+LWLock,ProcArray,43
+LWLock,BufferContent,33
+LWLock,WALInsert,28
+Timeout,SpinDelay,18
+IPC,ProcarrayGroupUpdate,5
+IO,DataFileExtend,2
+LWLock,XidGen,1

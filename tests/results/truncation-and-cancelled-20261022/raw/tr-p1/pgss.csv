@@ -1,0 +1,4 @@
+SELECT payload FROM t WHERE id = $1,2400896,52277.9,0.022,38.84,-4621018123696140640
+delete from t where id > $1,1,6770.3,6770.348,6770.35,-3101880389919668912
+"SELECT extract($1 from clock_timestamp())::numeric(20,3), p.",1500,60.3,0.040,0.47,-5469575749507106836
+select pg_stat_statements_reset(),1,0.9,0.915,0.91,-2540336765997748665

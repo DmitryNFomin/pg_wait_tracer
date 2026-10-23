@@ -1,0 +1,21 @@
+\set s random(1, 901)
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 0 AND :s + 4;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 5 AND :s + 9;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 10 AND :s + 14;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 15 AND :s + 19;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 20 AND :s + 24;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 25 AND :s + 29;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 30 AND :s + 34;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 35 AND :s + 39;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 40 AND :s + 44;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 45 AND :s + 49;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 50 AND :s + 54;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 55 AND :s + 59;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 60 AND :s + 64;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 65 AND :s + 69;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 70 AND :s + 74;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 75 AND :s + 79;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 80 AND :s + 84;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 85 AND :s + 89;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 90 AND :s + 94;
+UPDATE stock s SET reserved = (SELECT count(*) FROM orders o WHERE o.item_id = s.item_id) WHERE s.item_id BETWEEN :s + 95 AND :s + 99;

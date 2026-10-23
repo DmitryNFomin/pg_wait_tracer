@@ -1,0 +1,29 @@
+,Client,ClientRead,77897
+,LWLock,WALWrite,3191
+,IO,WalSync,2941
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,Lock,transactionid,2511
+,CPU,CPU,2244
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,Lock,transactionid,607
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,Lock,tuple,425
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,CPU,CPU,404
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,CPU,CPU,343
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,CPU,CPU,260
+SELECT abalance FROM pgbench_accounts WHERE aid = $1,CPU,CPU,180
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",CPU,CPU,161
+,IO,WalWrite,58
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,LockManager,46
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,Lock,tuple,33
+,LWLock,ProcArray,19
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,IO,DataFileRead,19
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,BufferMapping,16
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,LWLock,LockManager,12
+,LWLock,WALInsert,9
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,BufferContent,3
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,LWLock,LockManager,3
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,LWLock,BufferContent,2
+,LWLock,LockManager,2
+,IPC,ProcarrayGroupUpdate,2
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,WALInsert,1
+,Timeout,SpinDelay,1
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",IO,DataFileExtend,1
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,IO,DataFileWrite,1

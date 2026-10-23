@@ -1,0 +1,10 @@
+create table catalog (id bigint primary key, name text, descr text) with (fillfactor = 100);
+insert into catalog select g, 'item ' || g, repeat(md5(g::text), 12) from generate_series(1, 3000000) g;
+create table stock (item_id int primary key, qty int not null default 1000000, reserved int not null default 0);
+insert into stock (item_id) select generate_series(1, 1000);
+create table orders (order_id bigint primary key, item_id int not null, amount int);
+insert into orders select g, 1 + (g % 1000), 1 from generate_series(1, 2000000) g;
+create index on orders (item_id);
+vacuum analyze catalog, stock, orders;
+create extension if not exists pg_stat_statements; create extension if not exists pg_wait_sampling; create extension if not exists pg_prewarm;
+select pg_size_pretty(pg_relation_size('catalog')) cat, pg_size_pretty(pg_relation_size('orders_item_id_idx')) ord_idx;

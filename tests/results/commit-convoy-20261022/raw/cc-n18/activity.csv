@@ -1,0 +1,27 @@
+27832,client backend,req
+27833,client backend,req
+27834,client backend,req
+27835,client backend,req
+27836,client backend,req
+27837,client backend,req
+27838,client backend,req
+27839,client backend,req
+27840,client backend,req
+27841,client backend,req
+27842,client backend,req
+27843,client backend,req
+27844,client backend,req
+27845,client backend,req
+27846,client backend,req
+27847,client backend,req
+27862,client backend,histpoll
+27934,client backend,psql
+27112,autovacuum launcher,""
+27114,logical replication launcher,""
+27113,pg_wait_sampling collector,pg_wait_sampling collector
+27105,io worker,""
+27106,io worker,""
+27107,io worker,""
+27109,background writer,""
+27111,walwriter,""
+27108,checkpointer,""

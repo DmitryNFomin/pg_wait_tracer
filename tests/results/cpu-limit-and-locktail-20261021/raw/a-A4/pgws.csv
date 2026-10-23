@@ -1,0 +1,16 @@
+Client,ClientRead,39194
+CPU,CPU,4175
+IO,AioIoCompletion,2269
+IO,WalSync,1553
+LWLock,WALWrite,535
+IO,DataFileWrite,99
+IO,DataFileRead,90
+Lock,transactionid,63
+IO,WalWrite,44
+LWLock,BufferMapping,18
+LWLock,ProcArray,7
+LWLock,AioWorkerSubmissionQueue,3
+Timeout,SpinDelay,2
+LWLock,XactSLRU,2
+IPC,BufferIo,1
+LWLock,BufferContent,1

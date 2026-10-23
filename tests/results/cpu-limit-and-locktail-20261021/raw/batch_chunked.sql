@@ -1,0 +1,21 @@
+\set x random(1, 980000)
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 0 AND :x + 999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 1000 AND :x + 1999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 2000 AND :x + 2999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 3000 AND :x + 3999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 4000 AND :x + 4999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 5000 AND :x + 5999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 6000 AND :x + 6999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 7000 AND :x + 7999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 8000 AND :x + 8999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 9000 AND :x + 9999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 10000 AND :x + 10999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 11000 AND :x + 11999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 12000 AND :x + 12999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 13000 AND :x + 13999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 14000 AND :x + 14999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 15000 AND :x + 15999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 16000 AND :x + 16999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 17000 AND :x + 17999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 18000 AND :x + 18999; COMMIT;
+BEGIN; UPDATE pgbench_accounts SET abalance = abalance WHERE aid BETWEEN :x + 19000 AND :x + 19999; COMMIT;

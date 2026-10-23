@@ -1,0 +1,5 @@
+2026-10-21 21:04:44.745 UTC [2353219] postgres@postgres ERROR:  canceling statement due to user request
+2026-10-21 21:04:44.745 UTC [2353219] postgres@postgres STATEMENT:  SELECT pg_sleep(120) /* pgwt-layout-active-a-2353213 */;
+2026-10-21 21:04:44.879 UTC [2353219] postgres@postgres ERROR:  canceling statement due to user request
+2026-10-21 21:04:44.879 UTC [2353219] postgres@postgres STATEMENT:  SELECT 1 FROM pg_sleep(120) /* pgwt-layout-active-b-2353213 */;
+2026-10-21 21:04:49.452 UTC [2337112] LOG:  checkpoint starting: time

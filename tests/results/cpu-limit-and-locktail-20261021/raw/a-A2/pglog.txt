@@ -1,0 +1,6 @@
+2026-10-21 21:20:02.355 UTC [2377926] postgres@postgres ERROR:  canceling statement due to user request
+2026-10-21 21:20:02.355 UTC [2377926] postgres@postgres STATEMENT:  SELECT pg_sleep(120) /* pgwt-layout-active-a-2377918 */;
+2026-10-21 21:20:02.491 UTC [2377926] postgres@postgres ERROR:  canceling statement due to user request
+2026-10-21 21:20:02.491 UTC [2377926] postgres@postgres STATEMENT:  SELECT 1 FROM pg_sleep(120) /* pgwt-layout-active-b-2377918 */;
+2026-10-21 21:20:40.837 UTC [2337112] LOG:  checkpoint complete: wrote 1083 buffers (6.6%), wrote 8 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=152.912 s, sync=0.210 s, total=153.199 s; sync files=7, longest=0.171 s, average=0.030 s; distance=532355 kB, estimate=532355 kB; lsn=42/4C103398, redo lsn=42/2E056858
+2026-10-21 21:20:48.858 UTC [2337112] LOG:  checkpoint starting: wal

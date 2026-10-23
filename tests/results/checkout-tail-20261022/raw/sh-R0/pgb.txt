@@ -1,0 +1,15 @@
+pgbench (20devel)
+transaction type: ../checkout.sql
+scaling factor: 1
+query mode: prepared
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 150 s
+number of transactions actually processed: 298881
+number of failed transactions: 0 (0.000%)
+latency average = 1.577 ms
+latency stddev = 0.561 ms
+rate limit schedule lag: avg 0.097 (max 23.920) ms
+initial connection time = 25.399 ms
+tps = 1992.773553 (without initial connection time)

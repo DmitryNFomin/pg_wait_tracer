@@ -1,0 +1,18 @@
+# E6: injected advisory-lock waits (holder holds 0.2/1/2/5/10/20 ms at random), victim logs each wait's t0/t1.
+# seen = a pg_wait_sampling history row for the victim pid with event 'advisory' and ts in [t0 - 1 ms, t1].
+== idle: 3827 lock waits > 0.05 ms, seen by pg_wait_sampling: 2061
+   0.05- 0.5 ms  n=  300  seen=  2.3%  expected min(1,d/10ms)=  1.9%  mean=0.19 ms
+    0.5-   1 ms  n=  397  seen=  8.6%  expected min(1,d/10ms)=  7.8%  mean=0.78 ms
+      1-   2 ms  n=  507  seen= 18.5%  expected min(1,d/10ms)= 15.5%  mean=1.55 ms
+      2-   5 ms  n=  774  seen= 32.0%  expected min(1,d/10ms)= 35.2%  mean=3.52 ms
+      5-  10 ms  n=  739  seen= 77.0%  expected min(1,d/10ms)= 75.6%  mean=7.56 ms
+     10-  20 ms  n= 1044  seen= 99.9%  expected min(1,d/10ms)=100.0%  mean=16.22 ms
+     20- inf ms  n=   66  seen=100.0%  expected min(1,d/10ms)=100.0%  mean=20.17 ms
+== tpcb-c8: 3689 lock waits > 0.05 ms, seen by pg_wait_sampling: 1985
+   0.05- 0.5 ms  n=  295  seen=  3.7%  expected min(1,d/10ms)=  2.2%  mean=0.22 ms
+    0.5-   1 ms  n=  239  seen=  7.1%  expected min(1,d/10ms)=  7.5%  mean=0.75 ms
+      1-   2 ms  n=  524  seen= 14.3%  expected min(1,d/10ms)= 15.2%  mean=1.52 ms
+      2-   5 ms  n=  858  seen= 33.8%  expected min(1,d/10ms)= 33.7%  mean=3.37 ms
+      5-  10 ms  n=  748  seen= 76.1%  expected min(1,d/10ms)= 74.3%  mean=7.43 ms
+     10-  20 ms  n=  949  seen= 99.8%  expected min(1,d/10ms)=100.0%  mean=15.96 ms
+     20- inf ms  n=   76  seen=100.0%  expected min(1,d/10ms)=100.0%  mean=20.62 ms

@@ -1,0 +1,41 @@
+2026-10-22 06:33:20.260 UTC [2763] pgwt-layout-validation-1886-2734 ERROR:  canceling statement due to user request
+2026-10-22 06:33:20.260 UTC [2763] pgwt-layout-validation-1886-2734 STATEMENT:  SELECT pg_sleep(120) /* pgwt-layout-active-a-2734 */;
+2026-10-22 06:33:20.404 UTC [2763] pgwt-layout-validation-1886-2734 ERROR:  canceling statement due to user request
+2026-10-22 06:33:20.404 UTC [2763] pgwt-layout-validation-1886-2734 STATEMENT:  SELECT 1 FROM pg_sleep(120) /* pgwt-layout-active-b-2734 */;
+2026-10-22 06:34:23.245 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:34:26.680 UTC [1890]  LOG:  checkpoint complete: wrote 43222 buffers (16.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=3.294 s, sync=0.003 s, total=3.435 s; sync files=8, longest=0.002 s, average=0.001 s; distance=540941 kB, estimate=540941 kB; lsn=45/EB9133E8, redo lsn=45/CD002A40
+2026-10-22 06:34:26.918 UTC [1890]  LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-10-22 06:34:26.918 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:34:26.918 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:34:30.311 UTC [1890]  LOG:  checkpoint complete: wrote 42323 buffers (16.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=3.242 s, sync=0.019 s, total=3.394 s; sync files=2, longest=0.019 s, average=0.010 s; distance=557057 kB, estimate=557057 kB; lsn=46/D9D2080, redo lsn=45/EF002F90
+2026-10-22 06:34:38.467 UTC [1890]  LOG:  checkpoints are occurring too frequently (12 seconds apart)
+2026-10-22 06:34:38.467 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:34:38.467 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:34:41.347 UTC [1890]  LOG:  checkpoint complete: wrote 42399 buffers (16.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=2.624 s, sync=0.151 s, total=2.881 s; sync files=4, longest=0.150 s, average=0.038 s; distance=541043 kB, estimate=555455 kB; lsn=46/2F109A88, redo lsn=46/1005FDD8
+2026-10-22 06:34:41.439 UTC [1890]  LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-10-22 06:34:41.439 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:34:41.439 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:34:43.450 UTC [1890]  LOG:  checkpoint complete: wrote 16209 buffers (6.2%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=1.886 s, sync=0.012 s, total=2.011 s; sync files=1, longest=0.012 s, average=0.012 s; distance=541331 kB, estimate=554043 kB; lsn=46/5054C518, redo lsn=46/31104AC0
+2026-10-22 06:34:43.573 UTC [1890]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 06:34:43.573 UTC [1890]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 06:34:43.578 UTC [1890]  LOG:  checkpoint starting: wal
+2026-10-22 06:34:55.723 UTC [2822]  LOG:  automatic vacuum of table "tr.public.t": index scans: 1
+	pages: 133333 removed, 133334 remain, 133334 scanned (50.00% of total), 0 eagerly scanned
+	tuples: 10000000 removed, 10000000 remain, 0 are dead but not yet removable
+	removable cutoff: 317997190, which was 1 XIDs old when operation ended
+	new relfrozenxid: 317997190, which is 22 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	visibility map: 133334 pages set all-visible, 133334 pages set all-frozen (0 were all-visible)
+	index scan needed: 133334 pages from table (50.00% of total) had 10000000 dead item identifiers removed
+	index "t_pkey": pages: 54839 in total, 27415 newly deleted, 27415 currently deleted, 0 reusable
+	I/O timings: read: 966.946 ms, write: 1963.399 ms
+	avg read rate: 72.112 MB/s, avg write rate: 116.536 MB/s
+	buffer usage: 646961 hits, 160818 reads, 259888 dirtied
+	WAL usage: 615769 records, 294304 full page images, 1365741482 bytes, 90054 buffers full
+	system usage: CPU: user: 5.98 s, system: 2.21 s, elapsed: 17.42 s
+2026-10-22 06:34:56.135 UTC [2822]  LOG:  automatic analyze of table "tr.public.t"
+	I/O timings: read: 223.319 ms, write: 0.038 ms
+	avg read rate: 15.587 MB/s, avg write rate: 0.247 MB/s
+	buffer usage: 29514 hits, 820 reads, 13 dirtied
+	WAL usage: 23 records, 12 full page images, 80368 bytes, 0 buffers full
+	system usage: CPU: user: 0.15 s, system: 0.05 s, elapsed: 0.41 s

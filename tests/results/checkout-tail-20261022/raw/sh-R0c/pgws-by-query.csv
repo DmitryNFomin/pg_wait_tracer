@@ -1,0 +1,15 @@
+,Client,ClientRead,165250
+,LWLock,WALWrite,8781
+,IO,WalSync,7854
+,CPU,CPU,4111
+"SELECT name, descr FROM catalog WHERE id = $1",IO,DataFileRead,3294
+"SELECT name, descr FROM catalog WHERE id = $1",CPU,CPU,1012
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,CPU,CPU,881
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,Lock,transactionid,616
+,IO,WalWrite,221
+,LWLock,ProcArray,31
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,Buffer,BufferExclusive,4
+,LWLock,WALInsert,3
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,LWLock,LockManager,2
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,Lock,tuple,2
+,IPC,ProcarrayGroupUpdate,2

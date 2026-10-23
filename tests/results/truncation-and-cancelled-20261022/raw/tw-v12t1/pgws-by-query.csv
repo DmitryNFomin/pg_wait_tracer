@@ -1,0 +1,120 @@
+,Client,ClientRead,493601
+,Activity,IoWorkerMain,117155
+,Activity,LogicalLauncherMain,30009
+,Activity,AutovacuumMain,30009
+,Activity,WalWriterMain,29923
+,Timeout,CheckpointWriteDelay,23063
+,Activity,BgwriterMain,19540
+,Activity,BgwriterHibernate,10456
+,CPU,CPU,9808
+,Activity,CheckpointerMain,6729
+SELECT payload FROM t WHERE id = $1,CPU,CPU,5954
+,Lock,relation,627
+delete from t where id > $1,CPU,CPU,310
+SELECT payload FROM t WHERE id = $1,IO,DataFileRead,302
+,IO,WalSync,159
+,IO,DataFileWrite,111
+delete from t where id > $1,IO,WalWrite,90
+delete from t where id > $1,IO,WalSync,84
+,IO,WalWrite,79
+delete from t where id > $1,IO,DataFileRead,73
+"copy (select 43390, * from pg_wait_event_trace_by_statement(",CPU,CPU,72
+"copy (select 43388, * from pg_wait_event_trace_by_statement(",CPU,CPU,71
+"copy (select 43376, * from pg_wait_event_trace_by_statement(",CPU,CPU,71
+"copy (select 43374, * from pg_wait_event_trace_by_statement(",CPU,CPU,70
+"copy (select 43382, * from pg_wait_event_trace_by_statement(",CPU,CPU,70
+"copy (select 43375, * from pg_wait_event_trace_by_statement(",CPU,CPU,69
+"copy (select 43380, * from pg_wait_event_trace_by_statement(",CPU,CPU,68
+"copy (select 43381, * from pg_wait_event_trace_by_statement(",CPU,CPU,68
+"copy (select 43383, * from pg_wait_event_trace_by_statement(",CPU,CPU,67
+"copy (select 43377, * from pg_wait_event_trace_by_statement(",CPU,CPU,67
+,IO,DataFileFlush,66
+"copy (select 43384, * from pg_wait_event_trace_by_statement(",CPU,CPU,66
+"copy (select 43387, * from pg_wait_event_trace_by_statement(",CPU,CPU,66
+"copy (select 43385, * from pg_wait_event_trace_by_statement(",CPU,CPU,66
+"copy (select 43389, * from pg_wait_event_trace_by_statement(",CPU,CPU,65
+"copy (select 43379, * from pg_wait_event_trace_by_statement(",CPU,CPU,63
+"copy (select 43386, * from pg_wait_event_trace_by_statement(",CPU,CPU,60
+delete from t where id > $1,LWLock,WALWrite,53
+,Timeout,VacuumTruncate,45
+,IO,DataFileRead,41
+,LWLock,WALWrite,41
+,IO,DataFileTruncate,18
+,IO,DataFileSync,12
+"copy (select 43375, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,12
+"copy (select 43379, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,11
+"copy (select 43385, * from pg_get_wait_event_trace(22)) to s",CPU,CPU,11
+,IO,WalInitSync,11
+"copy (select 43381, * from pg_get_wait_event_trace(19)) to s",CPU,CPU,10
+"copy (select 43382, * from pg_get_wait_event_trace(23)) to s",CPU,CPU,10
+"copy (select 43389, * from pg_get_wait_event_trace(27)) to s",CPU,CPU,10
+"copy (select 43379, * from pg_get_wait_event_trace(16)) to s",CPU,CPU,9
+"copy (select 43377, * from pg_get_wait_event_trace(18)) to s",CPU,CPU,9
+"copy (select 43383, * from pg_get_wait_event_trace(20)) to s",CPU,CPU,9
+"copy (select 43375, * from pg_get_wait_event_trace(13)) to s",CPU,CPU,9
+"copy (select 43374, * from pg_get_wait_event_trace(12)) to s",CPU,CPU,9
+"copy (select 43388, * from pg_get_wait_event_trace(26)) to s",CPU,CPU,9
+"copy (select 43380, * from pg_get_wait_event_trace(17)) to s",CPU,CPU,9
+"copy (select 43384, * from pg_get_wait_event_trace(21)) to s",CPU,CPU,9
+"copy (select 43386, * from pg_get_wait_event_trace(24)) to s",CPU,CPU,9
+"copy (select 43389, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,9
+"copy (select 43390, * from pg_get_wait_event_trace(28)) to s",CPU,CPU,9
+"copy (select 43386, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,8
+"copy (select 43387, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,8
+"copy (select 43376, * from pg_get_wait_event_trace(14)) to s",CPU,CPU,8
+,IO,DsmAllocate,8
+"copy (select 43387, * from pg_get_wait_event_trace(25)) to s",CPU,CPU,8
+"copy (select 43385, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,7
+"copy (select 43381, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,7
+"copy (select 43384, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,7
+,IO,AioIoCompletion,7
+"copy (select 43380, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,6
+,IO,DataFilePrefetch,6
+,Timeout,SpinDelay,6
+"copy (select 43388, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,5
+"copy (select 43386, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,5
+"copy (select 43383, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,5
+"copy (select 43377, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,5
+"copy (select 43382, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,5
+,IO,WalInitWrite,5
+"copy (select 43376, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,5
+"copy (select 43390, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,4
+,LWLock,DSMRegistryHash,4
+"copy (select 43390, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,3
+"copy (select 43385, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,3
+"copy (select 43383, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,3
+,LWLock,pg_wait_event_tracing_trace,3
+"copy (select 43374, * from pg_wait_event_trace_by_statement(",IO,BuffileWrite,3
+,LWLock,WALBufMapping,2
+"copy (select 43379, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,2
+"copy (select 43387, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,2
+"copy (select 43388, * from pg_get_wait_event_trace(26)) to s",IO,BuffileWrite,2
+"copy (select 43376, * from pg_get_wait_event_trace(14)) to s",IO,BuffileWrite,2
+"copy (select 43384, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,2
+"copy (select 43388, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,2
+"copy (select 43374, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,2
+"copy (select 43374, * from pg_get_wait_event_trace(12)) to s",IO,BuffileWrite,1
+"copy (select 43381, * from pg_get_wait_event_trace(19)) to s",IO,BuffileWrite,1
+copy (select w.* from pg_stat_get_wait_event_timing() w join,CPU,CPU,1
+"copy (select 43375, * from pg_get_wait_event_trace(13)) to s",IO,BuffileRead,1
+"copy (select 43383, * from pg_get_wait_event_trace(20)) to s",IO,BuffileRead,1
+"copy (select 43389, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,1
+delete from t where id > $1,LWLock,WALBufMapping,1
+,LWLock,ProcArray,1
+"copy (select 43380, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,1
+,LWLock,BufferMapping,1
+"copy (select 43379, * from pg_get_wait_event_trace(16)) to s",IO,BuffileRead,1
+"copy (select 43387, * from pg_get_wait_event_trace(25)) to s",IO,BuffileWrite,1
+"copy (select pid, procnumber from pg_stat_activity a, latera",CPU,CPU,1
+"copy (select 43377, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,1
+SELECT payload FROM t WHERE id = $1,LWLock,BufferMapping,1
+"copy (select pid, coalesce(event_type,'CPU'), coalesce(event",CPU,CPU,1
+"copy (select 43384, * from pg_get_wait_event_trace(21)) to s",IO,BuffileRead,1
+"copy (select 43380, * from pg_get_wait_event_trace(17)) to s",IO,BuffileWrite,1
+"copy (select 43385, * from pg_get_wait_event_trace(22)) to s",IO,BuffileWrite,1
+"copy (select 43387, * from pg_get_wait_event_trace(25)) to s",IO,BuffileRead,1
+"copy (select 43375, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,1
+,LWLock,WALInsert,1
+"copy (select 43381, * from pg_wait_event_trace_by_statement(",IO,BuffileRead,1
+"copy (select 43377, * from pg_get_wait_event_trace(18)) to s",IO,BuffileRead,1
+"copy (select 43383, * from pg_get_wait_event_trace(20)) to s",IO,BuffileWrite,1

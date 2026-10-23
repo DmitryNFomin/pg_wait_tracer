@@ -1,0 +1,12 @@
+# E5: two sessions sleep for 30 s each: 'long' = pg_sleep(0.05) loop, 'short' = pg_sleep(0.0005) loop.
+# true_waits / true_wait_s from the sessions' own clock_timestamp(); sampled_* from pg_wait_sampling_profile (reset before).
+== idle
+ mode  | true_waits | true_wait_s | sampled_pgsleep | sampled_all
+-------+------------+-------------+-----------------+-------------
+ long  |        598 |       30.00 |            2999 |        3001
+ short |      27114 |       29.95 |            2962 |        3000
+== tpcb-c8
+ mode  | true_waits | true_wait_s | sampled_pgsleep | sampled_all
+-------+------------+-------------+-----------------+-------------
+ long  |        598 |       30.02 |            2999 |        3003
+ short |      25932 |       29.94 |            2965 |        3001

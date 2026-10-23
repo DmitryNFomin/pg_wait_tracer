@@ -1,0 +1,25 @@
+28004,client backend,req
+28006,client backend,req
+28005,client backend,req
+28007,client backend,req
+28008,client backend,req
+28009,client backend,req
+28011,client backend,req
+28010,client backend,req
+28012,client backend,req
+28013,client backend,req
+28014,client backend,req
+28016,client backend,req
+28015,client backend,req
+28017,client backend,req
+28018,client backend,req
+28019,client backend,req
+28250,client backend,psql
+27976,autovacuum launcher,""
+27977,pg_wait_sampling collector,pg_wait_sampling collector
+27978,logical replication launcher,""
+27970,io worker,""
+27969,io worker,""
+27971,checkpointer,""
+27972,background writer,""
+27975,walwriter,""

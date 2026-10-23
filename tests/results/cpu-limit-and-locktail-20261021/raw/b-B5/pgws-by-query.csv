@@ -1,0 +1,31 @@
+,Client,ClientRead,85190
+,CPU,CPU,2083
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,CPU,CPU,487
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,Lock,transactionid,361
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,CPU,CPU,354
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,CPU,CPU,299
+SELECT abalance FROM pgbench_accounts WHERE aid = $1,CPU,CPU,191
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,Lock,transactionid,141
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",CPU,CPU,132
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,Lock,tuple,90
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,LWLock,WALInsert,73
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,Timeout,SpinDelay,36
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,LockManager,15
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,LWLock,WALInsert,14
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,IO,DataFileRead,14
+,LWLock,ProcArray,12
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,LWLock,BufferContent,6
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,LWLock,LockManager,5
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,WALInsert,5
+,LWLock,WALInsert,4
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,LWLock,LockManager,4
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,LWLock,BufferContent,4
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",LWLock,WALInsert,3
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,Lock,tuple,3
+,Timeout,SpinDelay,2
+,IPC,XactGroupUpdate,2
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",Timeout,SpinDelay,2
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,Timeout,SpinDelay,1
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,LWLock,XidGen,1
+,IPC,ProcarrayGroupUpdate,1
+,LWLock,LockManager,1

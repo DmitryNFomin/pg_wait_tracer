@@ -1,0 +1,29 @@
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=2075832 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: full exact probe bundle attached from startup
+pg_wait_tracer v0.1 — postmaster PID 1917249
+Tracing 13 backends | 60s interval | Ctrl-C to stop
+Live CPU* gate: markers (CMD_START/CMD_END sweep, majority rule)
+
+
+--- 2026-10-21 18:01:51 ---
+════════════════════════════════════════════════════════════════════════════════
+pg_wait_tracer — Time Model    Backends: 13    Interval: 60s
+════════════════════════════════════════════════════════════════════════════════
+
+  Stat Name                               Time (ms)  % DB Time
+  �───────────────────────────────────────────────────────────────── �───────────────────────────────────────────────────────── ��────────────────────────────────────────────────────────
+  DB Time                                  303062.4     100.0%
+    CPU*                                    18353.6       6.1%
+    Off-CPU*                               224125.4      74.0%
+    Extension                               60583.1      20.0%
+      Extension:Extension                   60583.1     20.0%
+    LWLock                                      0.2       0.0%
+    IO                                          0.0       0.0%
+
+  (Activity/Idle — excluded from DB Time)     303050.6        —
+
+
+pg_wait_tracer: shutting down

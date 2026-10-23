@@ -1,0 +1,10 @@
+pg_wait_tracer v0.1 — replay mode (PG18)
+
+
+--- 2026-10-21 18:36:56 ---
+════════════════════════════════════════════════════════════════════════════════
+pg_wait_tracer — Event Histogram    Backends: 0    Interval: 0s
+════════════════════════════════════════════════════════════════════════════════
+
+  Event 'DataFileRead' not found (no data yet?).
+
