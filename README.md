@@ -91,16 +91,52 @@ rates (measured on Hetzner cx43, 8 vCPU/16 GB RAM — see
 
 ## Demo
 
+### Tour of the web UI
+
+![pgwt web UI tour — all eleven tabs](demos/pgwt-tour.gif)
+
+A 38-second **edited tour** of all eleven tabs: Overview, Events, Sessions,
+Queries, Histogram, Timeline, Transitions, Matrix, Concurrency, Waterfall and
+Latency. Hard cuts between tabs, not one continuous live recording: each stop
+is a short excerpt of its own recording — a chart refresh, or the table scroll
+on Overview / Events / Sessions / Queries. Motion runs at 0.4–0.8x of the 25 fps
+capture and the waiting in between is cut, which is how 11 tabs fit in 38
+seconds. Measured over the finished loop: 15.2 s of motion, 21.7 s of holds,
+longest hold 1.6 s. It is 1280x734, scaled down from the full captured frame —
+nothing is cropped. The browser viewport is the project's pinned 1710x981; the
+recorded video is 1710x980.
+
+The workload is **synthetic**: pgbench plus a purpose-built lock and IO
+generator. `_smoke_lock_wait`, `_smoke_row_lock_wait` and `_smoke_io_load` are
+test fixtures, not anyone's schema. Every panel reads a **15-minute rolling
+window**, and the wall clock differs between tabs because each tab was captured
+as its own page load.
+
+Two things in the tour can look like bugs and are not:
+
+- **Transitions can omit the window's largest wait.** That graph thresholds
+  edges by transition *count* (default: 20% of the busiest edge), so a wait made
+  of a few very long events drops below the line even when it dominates by time.
+  The tab says so itself — the summary under the graph names the omitted event
+  and its total — and the **Show all** button puts it back.
+- **Matrix looks L-shaped around `CPU*`.** Most wait transitions in this
+  workload pass through running-on-CPU, so that row and column carry nearly
+  everything. That is a property of what PostgreSQL does between waits, not a
+  rule the view enforces: a direct wait-to-wait transition is supported and
+  appears as an ordinary interior cell when it occurs.
+
+### Recorded walkthroughs
+
 Captured from a 60-second pgbench TPC-B workload (8 clients, scale 10) on a
 tiny VM (2 vCPUs, Rocky 9 + PostgreSQL 18), with a few injected `LOCK TABLE`
 statements to add lock contention. ~7M wait-event transitions captured. See
 [`demos/README.md`](demos/README.md) for the recording tooling (one
-`make all` reproduces both gifs from a fresh VM).
+`make all` reproduces both gifs below from a fresh VM).
 
 **Web investigation client** (`pgwt`) — drag-zoom AAS chart → drill into
 Events / Sessions / Queries → wait-event transition graph:
-
-![pgwt web UI](demos/web.gif)
+[`demos/web.gif`](demos/web.gif) (4.3 MB; not inlined, the tour above covers
+the same ground).
 
 **Text dump** (`pgwt-server --dump`) — time model + top events + top sessions
 + top queries from any trace file, no TUI required:
@@ -1444,10 +1480,11 @@ tier** — used always-on with `--mode full`, or only during bounded escalation
 windows in the default `tiered` mode.
 
 The full tier uses CPU hardware debug registers (watchpoints) to trap every
-write to `wait_event_info`. Its overhead is proportional to the **wait event
-transition rate** — how many times per second backends change wait state. The
-cost is almost entirely in the CPU's hardware debug exception handler, not in
-BPF or userspace processing.
+write to `wait_event_info`. Its overhead rises with the **wait event transition
+rate** — how many times per second backends change wait state. Removing the BPF
+work recovers only 1-3 percentage points (see `--lightweight` and
+`--skip-query-id` below), so most of the cost lies outside BPF and userspace
+processing; we have not decomposed what the rest is.
 
 **Benchmark environment:** Hetzner cx43 (8 vCPU, 16 GB RAM), Rocky 9.7,
 PostgreSQL 18, pgbench scale 100, 8 clients, 60-second runs, 5 repetitions.
@@ -1477,10 +1514,78 @@ transition rate.
 | **Sampled** (default tier) | **~0%** |
 
 The `--lightweight` and `--skip-query-id` flags save only 1-3 percentage points
-because the bottleneck is the hardware debug exception itself (~200-300 ns per
-fire), not the BPF work done inside it. This worst case is exactly why the full
-tier is gated behind escalation by default — you only pay it during the bounded
-window you asked for.
+because the bottleneck is the hardware debug exception itself, not the BPF work
+done inside it — see [What one watchpoint fire costs](#what-one-watchpoint-fire-costs).
+This worst case is exactly why the full tier is gated behind escalation by
+default — you only pay it during the bounded window you asked for.
+
+#### What one watchpoint fire costs
+
+Earlier revisions of this README put the per-fire cost at a few hundred
+nanoseconds. **That figure was wrong by more than an order of magnitude and has
+been withdrawn** ([#505](https://github.com/DmitryNFomin/pg_wait_tracer/issues/505)).
+Everything below is measured on a bare watchpoint with no PostgreSQL attached,
+3 runs per point; full data and method in
+[`tests/results/issue502-intel-comparison/`](tests/results/issue502-intel-comparison/README.md).
+
+**Per fire, in a tight write loop** (2 M writes, `HW_BREAKPOINT_W`, user-space
+only, no BPF). Two independent harnesses agree within 3-6%:
+
+| Box | CPU | median ns per fire |
+|---|---|---:|
+| gate-1 | Intel Xeon Skylake, KVM | 6,699 |
+| gate-2 | AMD EPYC-Rome, KVM | 5,235 |
+| gate-3 | AMD EPYC-Genoa, KVM | 4,669 |
+
+Intel is the *most* expensive of the three, so there is no cheap vendor and no
+AMD-specific explanation.
+
+**The cost is not a constant — it rises sharply as the fire rate falls, and the
+rate that matters is per-process:**
+
+| fires/s, one process | Intel | AMD EPYC-Rome |
+|---|---:|---:|
+| 5,000 | 22.29 us | 14.23 us |
+| 30,000 | 12.04 us | 6.04 us |
+| ~150-190K (tight loop) | 6.58 us | 5.26 us |
+
+A process that sleeps between fires pays several times the tight-loop cost. If
+PostgreSQL backends sleep between fires — which fits how wait events work,
+though these runs did not measure backend sleep behaviour directly — then the
+figure that applies to a real backend is the expensive end of that range, not
+the cheap one. We have not established the cause of the rate dependence either.
+
+Two components *were* separated, and they are not the ones this README used to
+name:
+
+- **BPF is not the cost.** At a paced 30K/s: 18.36 us/write with a BPF program
+  attached vs 18.35 us/write with the default perf handler and no BPF at all
+  (gate-1; gate-2 10.84 vs 10.95). n=3 each.
+- **Arming costs nothing per write and everything per context switch.** A
+  watchpoint armed on an address that is *never* written adds zero per write in
+  a tight loop, but 6.4-8.7 us (Intel) / 3.4-4.7 us (AMD) per schedule-in. At
+  gate-2's production switch rate that is 7-10% of the total — small, but not
+  zero, which is how the issue had it recorded.
+
+**These microbenchmarks do not decompose the workload overhead measured above,
+and this README no longer tries to.** The obvious arithmetic
+(transitions/sec ÷ TPS x cost-per-fire) fails on two premises:
+
+- **A recorded transition is not a watchpoint fire.** The watchpoint fires on
+  every write to `wait_event_info`, including a write of the value already
+  there; the BPF handler drops those before anything is recorded
+  (`src/bpf/pg_wait_tracer.bpf.c`, "Skip redundant writes"). Every
+  transitions/sec figure here is a **lower bound** on fires/sec.
+- **Aggregate rate is not per-process rate.** The table above is one process;
+  a workload's transitions/sec is summed over eight backends, which does not
+  determine the spacing any single backend sees — and the spacing is what the
+  cost depends on. A per-context-switch term, proportional to schedule-ins
+  rather than fires, does not fit a per-fire model at all.
+
+What the measurements establish without any model: one fire costs between
+**5.3 us** (tight loop, AMD) and **22.3 us** (5K fires/s, Intel) on the boxes we
+own. That is 20-35x the withdrawn figure at the tight-loop rates where it was
+first measured, and roughly 47-110x at 5,000 fires/s.
 
 #### Cross-validation: sampling vs exact
 
@@ -1533,8 +1638,10 @@ the exact tier when you need a trustworthy CPU number rather than the ranking.
 
 #### What drives overhead
 
-Overhead scales linearly with transitions/sec. Workloads with more transitions
-per second see higher overhead:
+Overhead rises with transitions/sec — across the two workloads above, 5.5x the
+transition rate came with 4.8x the overhead, which is suggestive but is two
+points on two different workloads, not a demonstrated linear law. Workloads
+with more transitions per second see higher overhead:
 
 - **Low overhead** (<10%): write-heavy OLTP, long-running queries, workloads
   where data fits in shared_buffers (buffer hits don't trigger wait events)
@@ -1545,15 +1652,21 @@ per second see higher overhead:
 
 **Where the cost comes from:**
 
-- **~70% — hardware debug exception**: CPU enters debug exception handler on
-  every write to the watched address. This is unavoidable — it happens before
-  any BPF code runs. Context switch save/restore of debug registers adds further
-  cost.
-- **~25% — lock amplification**: the debug exception fires while a backend holds
-  LWLocks or other internal locks. The extra ~200-300 ns extends lock hold times,
-  causing cascading contention under high concurrency.
-- **~5% — BPF + userspace**: ring buffer output, query_id probe reads, and
-  userspace consumption are a negligible fraction.
+An earlier revision of this README split the cost 70% / 25% / 5% between the
+debug exception, lock amplification and BPF. **That split was never measured**
+and has been withdrawn with the per-fire figure it rested on
+([#505](https://github.com/DmitryNFomin/pg_wait_tracer/issues/505)). Exactly one
+part of it was ever measured, and it is the only part stated here:
+
+- **BPF and userspace are not the cost.** Measured directly: attaching the BPF
+  program changes the per-write cost by 0.01 us
+  ([above](#what-one-watchpoint-fire-costs)). The TPS tables agree — removing
+  that work recovers only 1-3 pp of the 29% and 1-2 pp of the 6%.
+- **Debug-register save/restore per context switch is real but minor** — 7-10%
+  of the total at gate-2's production switch rate.
+- **The rest is not decomposed.** The trap itself and extended lock hold times
+  (the exception can fire while a backend holds LWLocks) are both plausible
+  contributors. We have not measured their shares and do not claim them.
 
 ### Performance tuning flags
 
@@ -1599,7 +1712,9 @@ The following optimizations are applied automatically:
 ### Future: PostgreSQL-native wait event timing
 
 The hardware watchpoint overhead is fundamentally limited by the CPU debug
-exception cost (~200-300 ns per fire). A
+exception cost — 5.3 to 22.3 us per fire on the VMs we measure on, depending on
+the per-process fire rate; see
+[What one watchpoint fire costs](#what-one-watchpoint-fire-costs). A
 [proposed PostgreSQL patch](https://github.com/DmitryNFomin/postgres/pull/1)
 adds Oracle-style internal wait event instrumentation — two VDSO
 `clock_gettime()` calls per event (~70-100 ns total) — achieving near-zero
@@ -1665,13 +1780,16 @@ directory, toggling GUCs between server restarts, 5 rounds:
 Result: **< 0.5% difference** between GUC off and all features enabled.
 All three configurations are within run-to-run variance — indistinguishable.
 
-**Comparison with hardware watchpoints** (from earlier benchmarks, same
-environment):
+**Comparison with hardware watchpoints.** The worst-case overhead column comes
+from the earlier same-environment benchmarks; the watchpoint per-event figure is
+the separate cx33 microbenchmark described in
+[What one watchpoint fire costs](#what-one-watchpoint-fire-costs), and the patch
+figure is an estimate for two VDSO calls, not a measurement:
 
 | Approach | Worst-case overhead | Per-event cost |
 |---|:---:|---|
 | PG patch (all features ON) | **< 0.5%** | ~70-100 ns (VDSO, no kernel trap) |
-| pg_wait_tracer (hardware watchpoint) | **29%** | ~200-300 ns (CPU #DB exception) |
+| pg_wait_tracer (hardware watchpoint) | **29%** | 5.3-22.3 us measured (CPU #DB exception, KVM guests, rate-dependent) |
 
 The reason the patch overhead is near-zero despite ~220K events/sec: VDSO
 `clock_gettime(CLOCK_MONOTONIC)` reads a memory-mapped kernel page without
