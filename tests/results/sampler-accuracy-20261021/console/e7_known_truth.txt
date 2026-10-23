@@ -1,0 +1,22 @@
+# E7: 4 victims (1 ms busy loop + pg_sleep(0.001)), 60 s, background pgbench -S -c N -j 4.
+# truth_sleep_pct = victims' own sleep time / wall (wait-label occupancy). pgws = pg_wait_sampling_profile for victim pids.
+# psa = pg_stat_activity poller (DO loop, pg_stat_clear_snapshot + insert, pg_sleep(0.01)), share among state='active' rows.
+c0 done  load=0.88
+c4 done tps = 35716.299662 (without initial connection time) load=4.93
+c8 done tps = 36419.958907 (without initial connection time) load=9.07
+c16 done tps = 35929.894951 (without initial connection time) load=15.31
+c32 done tps = 36571.029301 (without initial connection time) load=28.82
+ run | truth_sleep_pct | pgws_sleep_pct | psa_sleep_pct_active | psa_rows | psa_nonactive_pct | pgws_samples | iters
+-----+-----------------+----------------+----------------------+----------+-------------------+--------------+-------
+ c0  |            67.3 |           66.9 |                 67.7 |    22616 |               0.0 |        24002 | 78174
+ c4  |            74.8 |           78.1 |                 79.2 |    21932 |               0.0 |        24004 | 58476
+ c8  |            71.9 |           72.5 |                 75.3 |    21692 |               0.0 |        24006 | 57123
+ c16 |            72.0 |           72.6 |                 73.8 |    21016 |               0.0 |        24009 | 50308
+ c32 |            75.5 |           75.9 |                 76.3 |    19072 |               0.0 |        24017 | 33263
+
+# /proc/<pid>/schedstat deltas over 56 s for the 4 victims
+c0: victims=4 over 56 s: on-CPU 75.8 s, run-queue 0.6 s (0.3% of victim wall)
+c4: victims=4 over 56 s: on-CPU 54.2 s, run-queue 59.8 s (26.7% of victim wall)
+c8: victims=4 over 56 s: on-CPU 35.0 s, run-queue 81.5 s (36.4% of victim wall)
+c16: victims=4 over 56 s: on-CPU 22.9 s, run-queue 106.2 s (47.4% of victim wall)
+c32: victims=4 over 56 s: on-CPU 14.9 s, run-queue 146.7 s (65.5% of victim wall)

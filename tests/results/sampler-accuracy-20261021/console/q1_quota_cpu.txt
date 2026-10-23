@@ -1,0 +1,19 @@
+# Q1: 4 pure-CPU victims (wait_event_info 0 throughout), 60 s window, systemd CPUQuota on postgresql@18-main.
+none victims=2036068,2036071,2036069,2036070 window=60.005 throttled_s=0.0 cpu.max=
+100 victims=2038050,2038047,2038048,2038049 window=60.004 throttled_s=179.22 cpu.max=100000 100000
+50 victims=2040199,2040200,2040201,2040202 window=60.004 throttled_s=209.68 cpu.max=50000 100000
+25 victims=2042277,2042278,2042279,2042280 window=60.003 throttled_s=224.82 cpu.max=25000 100000
+quota=none  window=60.0s rounds=6000 (100.0 Hz) gap p50=10.1 p99=11.8 max=13.2 ms
+   truth: 4 victims busy 240 session-s (wait_event 0 all the time); kernel on-CPU 236.6s, run-queue 3.5s, other -0.0s
+   pg_wait_sampling: victim samples=24000 (CPU 24000); nominal DB time = samples x 10 ms = 240.0 s = 100% of truth; AAS nominal 4.00 vs true 4.00
+quota=100   window=60.0s rounds=2350 (39.2 Hz) gap p50=10.1 p99=87.8 max=88.0 ms
+   truth: 4 victims busy 240 session-s (wait_event 0 all the time); kernel on-CPU 59.9s, run-queue 180.1s, other 0.0s
+   pg_wait_sampling: victim samples=9400 (CPU 9400); nominal DB time = samples x 10 ms = 94.0 s = 39% of truth; AAS nominal 1.57 vs true 4.00
+quota=50    window=60.0s rounds=1398 (23.3 Hz) gap p50=10.1 p99=98.0 max=100.9 ms
+   truth: 4 victims busy 240 session-s (wait_event 0 all the time); kernel on-CPU 29.9s, run-queue 210.1s, other 0.0s
+   pg_wait_sampling: victim samples=5592 (CPU 5592); nominal DB time = samples x 10 ms = 55.9 s = 23% of truth; AAS nominal 0.93 vs true 4.00
+quota=25    window=60.0s rounds=1192 (19.9 Hz) gap p50=95.0 p99=98.9 max=102.0 ms
+   truth: 4 victims busy 240 session-s (wait_event 0 all the time); kernel on-CPU 14.9s, run-queue 225.1s, other 0.0s
+   pg_wait_sampling: victim samples=4768 (CPU 4768); nominal DB time = samples x 10 ms = 47.7 s = 20% of truth; AAS nominal 0.79 vs true 4.00
+# Note: the "reverted cpu.max=25000 100000" line printed by q1.sh was read before systemd applied the revert;
+# CPUQuotaPerSecUSec=infinity was verified afterwards and the cpu.max file no longer existed.

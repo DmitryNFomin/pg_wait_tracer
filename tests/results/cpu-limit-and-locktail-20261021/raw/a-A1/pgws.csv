@@ -1,0 +1,16 @@
+Client,ClientRead,41497
+CPU,CPU,3636
+IO,WalSync,1567
+LWLock,WALWrite,657
+IO,AioIoCompletion,338
+IO,DataFileRead,201
+IO,DataFileWrite,53
+IO,WalWrite,45
+Lock,transactionid,44
+IO,WalInitWrite,9
+IO,WalInitSync,9
+LWLock,WALInsert,3
+LWLock,BufferMapping,2
+Timeout,SpinDelay,1
+LWLock,ProcArray,1
+IO,DataFileExtend,1

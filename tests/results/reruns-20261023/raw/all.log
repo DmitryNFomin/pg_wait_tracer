@@ -1,0 +1,37 @@
+wet-v12 f8abf1f pg_wait_event_tracing: trace level
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+Running as unit: pgwet.service; invocation ID: 399f4576880d44748efb1275410fcc11
+  heap   |  idx   
+---------+--------
+ 2758 MB | 257 MB
+(1 row)
+
+   cat   | ord_idx 
+---------+---------
+ 1302 MB | 14 MB
+(1 row)
+
+io_method|worker
+pg_wait_event_tracing.capture|off
+pg_wait_event_tracing.trace_ring_size|4096
+shared_buffers|16384
+MemoryMax=1258291200
+SETUP-DONE
+R0-1 done: tps = 2001.876674 (without initial connection time) | job tps = 4.788657 (without initial connection time)
+F2-1 done: tps = 1994.788240 (without initial connection time) | job tps = 5.482141 (without initial connection time)
+R0-2 done: tps = 1996.319162 (without initial connection time) | job tps = 4.673956 (without initial connection time)
+F2-2 done: tps = 1990.741909 (without initial connection time) | job tps = 4.483049 (without initial connection time)
+R0-3 done: tps = 1999.887370 (without initial connection time) | job tps = 4.685363 (without initial connection time)
+F2-3 done: tps = 1999.031065 (without initial connection time) | job tps = 5.266087 (without initial connection time)
+C1-DONE
+bl-o10-1 done: requests 380545, timeouts 89
+bl-n10-1 done: requests 350739, timeouts 22
+bl-t10-1 done: requests 350859, timeouts 85
+bl-n10-2 done: requests 368504, timeouts 39
+bl-t10-2 done: requests 357501, timeouts 201
+bl-o10-2 done: requests 358372, timeouts 29
+bl-t10-3 done: requests 354466, timeouts 106
+bl-o10-3 done: requests 366005, timeouts 4
+bl-n10-3 done: requests 360501, timeouts 20
+ALL-DONE

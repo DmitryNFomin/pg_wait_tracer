@@ -1,0 +1,9 @@
+IO,DataFileRead,42603
+Client,ClientRead,2994
+CPU,CPU,2355
+IO,DataFileWrite,57
+IO,AioIoCompletion,27
+LWLock,BufferMapping,6
+IO,WalSync,3
+Timeout,SpinDelay,2
+IO,WalWrite,1

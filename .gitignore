@@ -160,3 +160,12 @@ tests/results/*/
 !tests/results/ui_live_gate2_healthy_run1/
 !tests/results/ui_live_gate2_healthy_run2/
 !tests/results/verdict-hardening/
+# Wait-events blog evidence, 2026-10-21..23 (raw logs: release evidence-20261023)
+!tests/results/checkout-tail-20261022/
+!tests/results/reruns-20261023/
+!tests/results/truncation-and-cancelled-20261022/
+!tests/results/commit-convoy-20261022/
+!tests/results/case3-repro-20261021/
+!tests/results/case4-case5-patch-20261022/
+!tests/results/sampler-accuracy-20261021/
+!tests/results/cpu-limit-and-locktail-20261021/

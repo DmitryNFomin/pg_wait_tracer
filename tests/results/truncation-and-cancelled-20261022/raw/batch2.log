@@ -1,0 +1,3 @@
+o1 done: tps = 8007.984737 (without initial connection time) | size after 2083 MB | still-waiting lines 0 | truncate lines 1
+q1 done: tps = 7988.952474 (without initial connection time) | size after 1042 MB | still-waiting lines 0 | truncate lines 1
+m1 done: tps = 8000.420379 (without initial connection time) | size after 1042 MB | still-waiting lines 0 | truncate lines 1

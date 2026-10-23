@@ -1,0 +1,18 @@
+sh-R0b   slow  968 | peak concurrent slow clients 18 | stall intervals (>= 20)  0,     0 ms | slow outside stalls  968
+sh-R0c   slow  972 | peak concurrent slow clients 18 | stall intervals (>= 20)  0,     0 ms | slow outside stalls  972
+sh-R1b   slow 1055 | peak concurrent slow clients 11 | stall intervals (>= 20)  0,     0 ms | slow outside stalls 1055
+sh-F1a   slow  688 | peak concurrent slow clients  6 | stall intervals (>= 20)  0,     0 ms | slow outside stalls  688
+sh-F1b   slow  954 | peak concurrent slow clients 10 | stall intervals (>= 20)  0,     0 ms | slow outside stalls  954
+sh-F2    slow  388 | peak concurrent slow clients 14 | stall intervals (>= 20)  0,     0 ms | slow outside stalls  388
+sh-R0-1  slow  125 | peak concurrent slow clients  4 | stall intervals (>= 20)  0,     0 ms | slow outside stalls  125
+sh-R0-2  slow  779 | peak concurrent slow clients 114 | stall intervals (>= 20) 10,   180 ms | slow outside stalls  300
+sh-R0-3  slow  832 | peak concurrent slow clients 157 | stall intervals (>= 20)  9,   170 ms | slow outside stalls  334
+sh-F2-1  slow    0 | peak concurrent slow clients  0 | stall intervals (>= 20)  0,     0 ms | slow outside stalls    0
+sh-F2-2  slow  381 | peak concurrent slow clients 165 | stall intervals (>= 20)  2,   153 ms | slow outside stalls   24
+sh-F2-3  slow  539 | peak concurrent slow clients 61 | stall intervals (>= 20)  7,    77 ms | slow outside stalls  245
+sh-R0-1: kept 125; distance to a stall {'>=2s': 125}; busiest 100 ms bin 4; bins with >=10: 0 requests in 0 bins
+sh-R0-2: kept 300; distance to a stall {'>=2s': 192, '<2s': 59, '<0.5s': 49}; busiest 100 ms bin 31; bins with >=10: 102 requests in 6 bins
+sh-R0-3: kept 334; distance to a stall {'<0.5s': 89, '<2s': 40, '>=2s': 205}; busiest 100 ms bin 26; bins with >=10: 164 requests in 9 bins
+sh-F2-1: kept 0; distance to a stall {}; busiest 100 ms bin 0; bins with >=10: 0 requests in 0 bins
+sh-F2-2: kept 24; distance to a stall {'>=2s': 5, '<0.5s': 19}; busiest 100 ms bin 12; bins with >=10: 12 requests in 1 bins
+sh-F2-3: kept 245; distance to a stall {'>=2s': 87, '<0.5s': 158}; busiest 100 ms bin 45; bins with >=10: 222 requests in 9 bins

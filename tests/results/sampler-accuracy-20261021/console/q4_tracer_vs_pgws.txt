@@ -1,0 +1,52 @@
+# Q4: CPUQuota=50%, 4 pure-CPU victims, 60 s; /root/pg_wait_tracer (build of 2026-10-14) run from a root ssh session
+# (cgroup 0::/user.slice/...), i.e. outside postgresql@18-main's cgroup. Each rep: one run --mode sampled
+# --sample-rate 100, then one run --mode full, each --count 1 --interval 60; pg_wait_sampling_profile reset at start of
+# each run and read for the victim pids (CPU|samples). Truth: 4 x 60 = 240 session-s, all wait_event 0.
+
+## rep 1
+== sampled
+  DB Time                                  305988.2     100.0%
+    CPU*                                   244835.6      80.0%
+    Extension                               61152.6      20.0%
+      Extension:Extension                   61152.6     20.0%
+  (Activity/Idle — excluded from DB Time)     305862.9        —
+-- pg_wait_sampling over the same ~60 s (victims): CPU|4900
+== full
+  DB Time                                  303344.9     100.0%
+    CPU*                                    23575.5       7.8%
+    Off-CPU*                               219092.9      72.2%
+    Extension                               60582.3      20.0%
+      Extension:Extension                   60582.3     20.0%
+    IO                                         93.8       0.0%
+    LWLock                                      0.4       0.0%
+  (Activity/Idle — excluded from DB Time)     302938.8        —
+-- pg_wait_sampling over the same ~60 s (victims): CPU|4952
+
+## rep 2
+== sampled
+  DB Time                                  305515.5     100.0%
+    CPU*                                   244435.0      80.0%
+    Extension                               61080.6      20.0%
+CPU|4912
+== full
+  DB Time                                  303167.3     100.0%
+    CPU*                                    27424.5       9.0%
+    Off-CPU*                               215153.9      71.0%
+    Extension                               60585.9      20.0%
+CPU|4972
+
+## rep 3 (also in raw/sampler-e2/q4-sampled.txt, q4-full.txt, q4-pgws-*.txt)
+== sampled
+  DB Time                                  305833.3     100.0%
+    CPU*                                   244679.6      80.0%
+    Extension                               61153.7      20.0%
+CPU|5654
+== full
+  DB Time                                  303062.4     100.0%
+    CPU*                                    18353.6       6.1%
+    Off-CPU*                               224125.4      74.0%
+    Extension                               60583.1      20.0%
+CPU|5519
+
+# Extension:Extension (~60 s) is the pg_wait_sampling collector's own latch wait, counted as DB time by
+# pg_wait_tracer; it is not part of the victims' 240 s.

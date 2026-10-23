@@ -1,0 +1,42 @@
+WARN: could not write trace/wait_event_names.json -- pgwt-server will not be able to classify Timeout pacing waits for this trace
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=2353219 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: full exact probe bundle attached from startup
+WARN: group 'dba' not found — trace files will be readable by root only
+pg_wait_tracer v0.1 — postmaster PID 2337108
+Tracing 26 backends | 60s interval | Ctrl-C to stop
+Live CPU* gate: markers (CMD_START/CMD_END sweep, majority rule)
+
+
+--- 2026-10-21 21:05:45 ---
+════════════════════════════════════════════════════════════════════════════════
+pg_wait_tracer — System Events    Backends: 26    Interval: 60s
+════════════════════════════════════════════════════════════════════════════════
+
+  Wait Event                  Total Waits     Total (ms)   Avg (us)     Max (us)      % DB
+  ────────────────────────────────────────────────────────────── �───────────────────────────────────────────────────────── ────────────────────────────────────────────────────────── ��──────────────────────────────────────────────────────── �───────────────────────────────────────────────────────── �────────────────────────────────────────────────────────
+  Client:ClientRead                175847       305529.0     1737.5   15579684.3       —
+  Lock:transactionid                48565       296355.5     6102.2     100269.1     42.4%
+  LWLock:WALWrite                   74475       165635.9     2224.0      80844.3     23.7%
+  Extension:Extension                4001        60519.5    15126.1      86078.9      8.6%
+  Timeout:CheckpointWriteDelay          545        55653.0   102115.5     176860.6       —
+  Lock:tuple                         7368        44147.9     5991.8     100122.6      6.3%
+  IO:WalSync                        21939        43599.0     1987.3      78899.4      6.2%
+  CPU*                             379901        30319.4       79.8      73486.6      4.3%
+  IO:AioIoCompletion                 1195         8413.1     7040.3      80431.4      1.2%
+  LWLock:LockManager                 4886         5241.1     1072.7      76903.3      0.7%
+  IO:DataFileWrite                  23310         1346.2       57.8      77413.7      0.2%
+  IO:DataFileRead                   45803         1338.1       29.2      75282.5      0.2%
+  IO:DataFileFlush                  17944         1259.7       70.2      86498.3      0.2%
+  LWLock:WALInsert                    614         1204.4     1961.6      76835.6      0.2%
+  IO:WalWrite                       21971          763.4       34.7      71348.4      0.1%
+  Timeout:VacuumDelay                 123          735.4     5979.3      74926.6       —
+  IPC:BgWorkerShutdown                 23          325.7    14159.3      79097.7      0.0%
+  LWLock:BufferContent               1163          308.7      265.5      77684.3      0.0%
+  LWLock:BufferMapping                 69          270.0     3913.4      75889.9      0.0%
+  Timeout:SpinDelay                    48          268.4     5591.6      71118.7      0.0%
+
+
+pg_wait_tracer: shutting down

@@ -1,0 +1,37 @@
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=2109796 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: full exact probe bundle attached from startup
+pg_wait_tracer v0.1 — postmaster PID 2101443
+Tracing 25 backends | 60s interval | Ctrl-C to stop
+Live CPU* gate: markers (CMD_START/CMD_END sweep, majority rule)
+
+
+--- 2026-10-21 18:24:11 ---
+════════════════════════════════════════════════════════════════════════════════
+pg_wait_tracer — Time Model    Backends: 26    Interval: 60s
+════════════════════════════════════════════════════════════════════════════════
+
+  Stat Name                               Time (ms)  % DB Time
+  �───────────────────────────────────────────────────────────────── �───────────────────────────────────────────────────────── ��────────────────────────────────────────────────────────
+  DB Time                                  667740.0     100.0%
+    CPU*                                    56278.6       8.4%
+    Off-CPU*                                34840.7       5.2%
+    Lock                                   306934.2      46.0%
+      Lock:transactionid                   268624.4     40.2%
+      Lock:tuple                            38309.8      5.7%
+    LWLock                                 154389.9      23.1%
+      LWLock:WALWrite                      150389.9     22.5%
+    Extension                               60498.2       9.1%
+      Extension:Extension                   60498.2      9.1%
+    IO                                      50012.9       7.5%
+      IO:WalSync                            45324.4      6.8%
+    Timeout                                  4766.4       0.7%
+      Timeout:CheckpointWriteDelay          60597.4       —
+    IPC                                        19.2       0.0%
+
+  (Activity/Idle — excluded from DB Time)     676064.1        —
+
+
+pg_wait_tracer: shutting down

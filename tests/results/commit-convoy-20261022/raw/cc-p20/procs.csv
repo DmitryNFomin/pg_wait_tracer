@@ -1,0 +1,26 @@
+28029,client backend,23
+28004,client backend,6
+28177,client backend,24
+28018,client backend,20
+27969,io worker,137
+28010,client backend,13
+27977,background worker,118
+28013,client backend,15
+28015,client backend,18
+27975,walwriter,140
+28014,client backend,16
+27971,checkpointer,138
+28016,client backend,17
+27978,background worker,119
+28011,client backend,12
+28019,client backend,21
+28006,client backend,7
+28005,client backend,8
+28008,client backend,10
+28007,client backend,9
+28009,client backend,11
+27970,io worker,136
+27972,background writer,139
+28012,client backend,14
+28017,client backend,19
+27976,autovacuum launcher,100

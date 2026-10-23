@@ -1,0 +1,15 @@
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,87010,13592.9,0.156,68.04
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,87001,3399.9,0.039,2.08
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,87003,3302.7,0.038,28.14
+"SELECT bid, count(*), sum(abalance), avg(abalance) FROM pgbench_accoun",12,1248.0,104.004,123.78
+"copy (select 16890, * from pg_get_wait_event_trace(35)) to stdout with",10,836.0,83.605,116.26
+SELECT abalance FROM pgbench_accounts WHERE aid = $1,87001,819.6,0.009,0.65
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",87010,790.9,0.009,1.27
+"copy (select 16877, * from pg_get_wait_event_trace(41)) to stdout with",10,787.0,78.697,132.42
+"copy (select 16891, * from pg_get_wait_event_trace(48)) to stdout with",10,780.1,78.010,107.32
+"copy (select 16884, * from pg_get_wait_event_trace(72)) to stdout with",10,775.9,77.590,123.81
+"copy (select 16878, * from pg_get_wait_event_trace(32)) to stdout with",10,774.8,77.481,98.98
+"copy (select 16889, * from pg_get_wait_event_trace(44)) to stdout with",10,772.1,77.212,105.06
+"copy (select 16885, * from pg_get_wait_event_trace(73)) to stdout with",10,764.6,76.461,109.32
+"copy (select 16880, * from pg_get_wait_event_trace(68)) to stdout with",10,756.9,75.695,105.63
+"copy (select 16879, * from pg_get_wait_event_trace(67)) to stdout with",10,750.6,75.061,112.49

@@ -1,0 +1,40 @@
+,Client,ClientRead,492994
+,Activity,IoWorkerMain,184809
+,Activity,LogicalLauncherMain,30005
+,Activity,AutovacuumMain,30005
+,Activity,WalWriterMain,29912
+,Timeout,CheckpointWriteDelay,23075
+,Activity,BgwriterMain,18803
+,Activity,BgwriterHibernate,11174
+,CPU,CPU,9795
+,Activity,CheckpointerMain,6707
+SELECT payload FROM t WHERE id = $1,CPU,CPU,5975
+,Lock,relation,787
+SELECT payload FROM t WHERE id = $1,IO,DataFileRead,706
+delete from t where id > $1,CPU,CPU,304
+,IO,WalSync,170
+,IO,DataFileWrite,130
+delete from t where id > $1,IO,WalWrite,87
+,Timeout,VacuumTruncate,80
+delete from t where id > $1,IO,WalSync,79
+delete from t where id > $1,IO,DataFileRead,71
+,IO,WalWrite,65
+,IO,DataFileFlush,63
+delete from t where id > $1,LWLock,WALWrite,59
+,IO,DataFileRead,56
+,LWLock,WALWrite,47
+,IO,DataFileTruncate,22
+,IO,WalInitSync,15
+,IO,DataFileSync,12
+,Timeout,SpinDelay,11
+,IO,WalInitWrite,11
+,IO,DataFilePrefetch,5
+SELECT payload FROM t WHERE id = $1,IO,AioIoCompletion,4
+delete from t where id > $1,LWLock,WALBufMapping,2
+,IO,AioIoCompletion,2
+"SELECT extract($1 from clock_timestamp())::numeric(20,3), p.",CPU,CPU,1
+,LWLock,WALInsert,1
+,IO,SlruFlushSync,1
+,LWLock,ProcArray,1
+delete from t where id > $1,IO,WalInitWrite,1
+delete from t where id > $1,IO,WalInitSync,1

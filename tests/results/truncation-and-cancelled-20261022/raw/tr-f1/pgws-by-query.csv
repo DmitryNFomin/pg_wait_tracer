@@ -1,0 +1,42 @@
+,Client,ClientRead,476238
+,Activity,IoWorkerMain,89954
+,Activity,AutovacuumMain,30015
+,Activity,LogicalLauncherMain,30015
+,Activity,WalWriterMain,29856
+,Timeout,CheckpointWriteDelay,22338
+,CPU,CPU,19994
+,Activity,BgwriterMain,18306
+,Activity,BgwriterHibernate,11622
+SELECT payload FROM t WHERE id = $1,CPU,CPU,10050
+,Activity,CheckpointerMain,7180
+,Lock,relation,3290
+SELECT payload FROM t WHERE id = $1,IO,DataFileRead,1151
+,Timeout,VacuumTruncate,759
+delete from t where id > $1,CPU,CPU,509
+,IO,DataFileWrite,430
+delete from t where id > $1,IO,WalWrite,224
+,IO,WalSync,211
+,IO,WalWrite,175
+,IO,DataFileRead,131
+delete from t where id > $1,IO,DataFileRead,117
+delete from t where id > $1,LWLock,WALWrite,100
+delete from t where id > $1,IO,WalSync,60
+,LWLock,WALWrite,60
+,IO,DataFileFlush,41
+,IO,DataFilePrefetch,31
+,LWLock,LockManager,21
+,IO,DataFileTruncate,20
+,IO,AioIoCompletion,20
+,IO,DataFileSync,19
+,Timeout,PgSleep,15
+,IO,WalInitWrite,9
+,IO,WalInitSync,6
+delete from t where id > $1,LWLock,WALBufMapping,5
+,LWLock,WALBufMapping,5
+delete from t where id > $1,IO,DataFileWrite,4
+,Timeout,SpinDelay,3
+"copy (select pid, coalesce(event_type,'CPU'), coalesce(event",CPU,CPU,1
+"WITH target AS (SELECT pid,datid,usesysid,query_id,state FRO",IO,DataFileRead,1
+,LWLock,WALInsert,1
+"copy (select pid, coalesce(event_type,'CPU'), coalesce(event",IPC,MessageQueueInternal,1
+delete from t where id > $1,LWLock,BufferMapping,1

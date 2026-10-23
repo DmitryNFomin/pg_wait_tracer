@@ -1,0 +1,30 @@
+WARN: could not write trace/wait_event_names.json -- pgwt-server will not be able to classify Timeout pacing waits for this trace
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=2132798 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: full exact probe bundle attached from startup
+WARN: group 'dba' not found — trace files will be readable by root only
+pg_wait_tracer v0.1 — postmaster PID 2101443
+Tracing 17 backends | 60s interval | Ctrl-C to stop
+Live CPU* gate: markers (CMD_START/CMD_END sweep, majority rule)
+
+
+--- 2026-10-21 18:38:15 ---
+════════════════════════════════════════════════════════════════════════════════
+pg_wait_tracer — System Events    Backends: 17    Interval: 60s
+════════════════════════════════════════════════════════════════════════════════
+
+  Wait Event                  Total Waits     Total (ms)   Avg (us)     Max (us)      % DB
+  ────────────────────────────────────────────────────────────── �───────────────────────────────────────────────────────── ────────────────────────────────────────────────────────── ��──────────────────────────────────────────────────────── �───────────────────────────────────────────────────────── �────────────────────────────────────────────────────────
+  IO:DataFileRead                  225780       443449.8     1964.1      97361.2     84.9%
+  Extension:Extension                6000        60475.5    10079.3      61061.8     11.6%
+  Client:ClientRead                126681        18356.7      144.9      63466.8       —
+  CPU*                             285803        17764.5       62.2      61112.2      3.4%
+  IO:AioIoCompletion                   34           80.7     2374.1       8736.4      0.0%
+  IO:RelationMapRead                    8            7.8      976.8       4611.4      0.0%
+  Timeout:SpinDelay                     1            1.1     1125.9       1125.9      0.0%
+  LWLock:BufferMapping                 79            0.8       10.0         49.6      0.0%
+
+
+pg_wait_tracer: shutting down

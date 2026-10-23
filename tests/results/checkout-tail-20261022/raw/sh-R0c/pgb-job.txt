@@ -1,0 +1,15 @@
+pgbench (20devel)
+transaction type: ../restock.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 150 s
+number of transactions actually processed: 687
+number of failed transactions: 0 (0.000%)
+latency average = 19.307 ms
+latency stddev = 5.885 ms
+rate limit schedule lag: avg 1.182 (max 34.744) ms
+initial connection time = 4.629 ms
+tps = 4.584481 (without initial connection time)

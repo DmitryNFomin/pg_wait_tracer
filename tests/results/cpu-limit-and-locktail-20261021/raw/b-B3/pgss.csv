@@ -1,0 +1,13 @@
+UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2,85419,11825.3,0.138,16.27
+UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2,85419,3281.2,0.038,3.24
+UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2,85419,3247.8,0.038,25.25
+"SELECT bid, count(*), sum(abalance), avg(abalance) FROM pgbench_accoun",11,2142.9,194.808,260.85
+SELECT abalance FROM pgbench_accounts WHERE aid = $1,85419,861.6,0.010,2.52
+"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES ($1, ",85419,752.9,0.009,0.74
+"copy (select left(regexp_replace(s.query,'\s+',' ','g'),70), coalesce(",1,4.3,4.290,4.29
+"copy (select pid, coalesce(event_type,'CPU'), coalesce(event,'CPU'), s",1,2.5,2.533,2.53
+"WITH target AS (SELECT pid,datid,usesysid,query_id,state FROM pg_stat_",4,0.7,0.173,0.20
+select pg_stat_statements_reset(),1,0.1,0.113,0.11
+SET compute_query_id=$1,1,0.0,0.005,0.00
+"SELECT $1,pg_backend_pid(),pg_size_bytes(current_setting($2))",1,0.0,0.021,0.02
+SELECT $1 /* pgwt-layout-idle-2357916 */,1,0.0,0.003,0.00

@@ -1,0 +1,15 @@
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: ../restock.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 150 s
+number of transactions actually processed: 784
+number of failed transactions: 0 (0.000%)
+latency average = 20.029 ms
+latency stddev = 5.256 ms
+rate limit schedule lag: avg 0.858 (max 30.865) ms
+initial connection time = 13.371 ms
+tps = 5.232664 (without initial connection time)

@@ -1,0 +1,8 @@
+"SELECT name, descr FROM catalog WHERE id = $1",243763,42877.6,0.176,6.09,302596
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,243763,13194.5,0.054,22.78,6
+UPDATE stock s SET reserved = (SELECT count(*) FRO,579,9705.3,16.762,31.83,1927
+"copy (select 32744, 'req', * from pg_get_wait_even",1,119.1,119.119,119.12,0
+"copy (select 32748, 'req', * from pg_get_wait_even",1,114.4,114.351,114.35,1
+"copy (select 32743, 'req', * from pg_get_wait_even",1,111.0,111.043,111.04,0
+"copy (select 32745, 'req', * from pg_get_wait_even",1,110.4,110.430,110.43,0
+"copy (select 32746, 'req', * from pg_get_wait_even",1,110.2,110.159,110.16,0

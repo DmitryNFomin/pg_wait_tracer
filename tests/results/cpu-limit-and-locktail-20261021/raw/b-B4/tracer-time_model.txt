@@ -1,0 +1,39 @@
+WARN: could not write trace/wait_event_names.json -- pgwt-server will not be able to classify Timeout pacing waits for this trace
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=2362008 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: sampled exact probes detached: validated PgBackendStatus attribution is authoritative
+WARN: group 'dba' not found — trace files will be readable by root only
+pg_wait_tracer v0.1 — postmaster PID 2337108
+Tracing 26 backends | 60s interval | Ctrl-C to stop
+Live CPU* gate: n/a (sampled tier: sampler gate)
+
+
+--- 2026-10-21 21:10:58 ---
+════════════════════════════════════════════════════════════════════════════════
+pg_wait_tracer — Time Model    Backends: 26    Interval: 60s
+════════════════════════════════════════════════════════════════════════════════
+
+  Stat Name                               Time (ms)  % DB Time
+  �───────────────────────────────────────────────────────────────── �───────────────────────────────────────────────────────── ��────────────────────────────────────────────────────────
+  DB Time                                  234641.9     100.0%
+    CPU*                                    38897.5      16.6%
+    Extension                               61261.4      26.1%
+      Extension:Extension                   61261.4     26.1%
+    Lock                                    54553.7      23.2%
+      Lock:transactionid                    46170.7     19.7%
+      Lock:tuple                             8382.9      3.6%
+    LWLock                                  42304.2      18.0%
+      LWLock:WALWrite                       40245.8     17.2%
+    IO                                      37071.4      15.8%
+      IO:WalSync                            30397.8     13.0%
+      IO:AioIoCompletion                     4755.0      2.0%
+    IPC                                       543.5       0.2%
+    Timeout                                    10.3       0.0%
+      Timeout:CheckpointWriteDelay          61291.5       —
+
+  (Activity/Idle — excluded from DB Time)    1176840.4        —
+
+
+pg_wait_tracer: shutting down

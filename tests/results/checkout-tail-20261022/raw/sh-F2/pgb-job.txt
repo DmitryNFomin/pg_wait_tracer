@@ -1,0 +1,15 @@
+pgbench (20devel)
+transaction type: ../restock_chunked.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 150 s
+number of transactions actually processed: 730
+number of failed transactions: 0 (0.000%)
+latency average = 46.433 ms
+latency stddev = 14.015 ms
+rate limit schedule lag: avg 5.857 (max 79.570) ms
+initial connection time = 4.076 ms
+tps = 4.867901 (without initial connection time)

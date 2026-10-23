@@ -1,0 +1,72 @@
+=== c4-bl-o10-1: window 60.0 s, requests 243056 (4051/s), timeouts 87 (0.04%), latency p50 1.67 p99 5.48 max 72.9 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 93.3%, CPU:CPU 6.5%, IO:DataFileWrite 0.2%, IO:AioIoCompletion 0.0%
+  pgss: calls 39577, blocks read/call 29.3, read time/call 1.69 ms, mean 1.747 ms, max 9.9 ms
+  pgss: calls 203664, blocks read/call 29.3, read time/call 1.71 ms, mean 1.772 ms, max 9.9 ms
+  pg_stat_io: reads 7120210, avg 0.059 ms
+=== c4-bl-o10-2: window 60.0 s, requests 224494 (3741/s), timeouts 22 (0.01%), latency p50 1.80 p99 5.94 max 17.6 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 93.6%, CPU:CPU 6.4%, IO:AioIoCompletion 0.0%, LWLock:BufferMapping 0.0%
+  pgss: calls 36804, blocks read/call 29.2, read time/call 1.97 ms, mean 2.030 ms, max 9.4 ms
+  pgss: calls 187895, blocks read/call 29.2, read time/call 1.84 ms, mean 1.900 ms, max 10.0 ms
+  pg_stat_io: reads 6565154, avg 0.064 ms
+=== c4-bl-o10-3: window 60.0 s, requests 231788 (3863/s), timeouts 0 (0.00%), latency p50 1.67 p99 5.91 max 9.5 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 93.5%, CPU:CPU 6.4%, IO:AioIoCompletion 0.0%, LWLock:BufferMapping 0.0%
+  pgss: calls 37930, blocks read/call 29.2, read time/call 1.90 ms, mean 1.954 ms, max 7.9 ms
+  pgss: calls 194073, blocks read/call 29.2, read time/call 1.80 ms, mean 1.856 ms, max 8.2 ms
+  pg_stat_io: reads 6770402, avg 0.062 ms
+=== c4-bl-n10-1: window 60.0 s, requests 228211 (3803/s), timeouts 11 (0.00%), latency p50 1.70 p99 5.87 max 12.8 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 93.9%, CPU:CPU 6.0%, IO:AioIoCompletion 0.1%, LWLock:BufferMapping 0.0%
+  pgss: calls 40251, blocks read/call 29.2, read time/call 1.88 ms, mean 1.933 ms, max 9.8 ms
+  pgss: calls 205134, blocks read/call 29.3, read time/call 1.89 ms, mean 1.940 ms, max 9.8 ms
+  pg_stat_io: reads 7229927, avg 0.064 ms
+  patch stats (window delta, client backends): IO:DataFileRead 6676645 calls, 415895 ms, avg 62 us, IO:AioIoCompletion 1609 calls, 215 ms, avg 133 us, LWLock:BufferMapping 6204 calls, 67 ms, avg 11 us
+  patch DataFileRead histogram (bucket upper bound us: share): <2:23%, <4:37%, <16:1%, <128:11%, <256:25%, <512:2%
+=== c4-bl-n10-2: window 60.0 s, requests 239559 (3992/s), timeouts 2 (0.00%), latency p50 1.65 p99 5.54 max 10.8 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 94.0%, CPU:CPU 5.9%, IO:AioIoCompletion 0.1%, LWLock:BufferMapping 0.0%
+  pgss: calls 42200, blocks read/call 29.3, read time/call 1.82 ms, mean 1.872 ms, max 7.8 ms
+  pgss: calls 215729, blocks read/call 29.2, read time/call 1.80 ms, mean 1.852 ms, max 9.5 ms
+  pg_stat_io: reads 7579838, avg 0.062 ms
+  patch stats (window delta, client backends): IO:DataFileRead 7007441 calls, 418904 ms, avg 60 us, IO:AioIoCompletion 1901 calls, 243 ms, avg 128 us, LWLock:BufferMapping 5830 calls, 72 ms, avg 12 us
+  patch DataFileRead histogram (bucket upper bound us: share): <2:26%, <4:34%, <16:1%, <128:13%, <256:23%, <512:2%
+=== c4-bl-n10-3: window 60.0 s, requests 236443 (3940/s), timeouts 0 (0.00%), latency p50 1.76 p99 5.43 max 9.6 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 93.9%, CPU:CPU 6.0%, IO:AioIoCompletion 0.0%, LWLock:BufferMapping 0.0%
+  pgss: calls 41638, blocks read/call 29.3, read time/call 1.84 ms, mean 1.896 ms, max 9.5 ms
+  pgss: calls 212024, blocks read/call 29.2, read time/call 1.82 ms, mean 1.874 ms, max 9.5 ms
+  pg_stat_io: reads 7478377, avg 0.062 ms
+  patch stats (window delta, client backends): IO:DataFileRead 6915697 calls, 416408 ms, avg 60 us, IO:AioIoCompletion 1689 calls, 208 ms, avg 123 us, LWLock:BufferMapping 6671 calls, 57 ms, avg 9 us
+  patch DataFileRead histogram (bucket upper bound us: share): <2:18%, <4:42%, <16:1%, <128:12%, <256:24%, <512:2%
+=== c4-bl-t10-1: window 60.5 s, requests 228222 (3772/s), timeouts 57 (0.02%), latency p50 1.79 p99 5.86 max 20.6 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 93.7%, CPU:CPU 6.2%, IO:AioIoCompletion 0.0%, LWLock:BufferMapping 0.0%
+  pgss: calls 40372, blocks read/call 29.2, read time/call 1.88 ms, mean 1.936 ms, max 9.6 ms
+  pgss: calls 204720, blocks read/call 29.2, read time/call 1.89 ms, mean 1.944 ms, max 9.9 ms
+  pg_stat_io: reads 7254603, avg 0.065 ms
+  patch stats (window delta, client backends): IO:DataFileRead 6672787 calls, 416556 ms, avg 62 us, IO:AioIoCompletion 1572 calls, 204 ms, avg 130 us, LWLock:BufferMapping 5800 calls, 78 ms, avg 13 us
+  patch DataFileRead histogram (bucket upper bound us: share): <2:16%, <4:45%, <16:1%, <128:10%, <256:25%, <512:2%
+  ring: executions in window 226134 (records lost to ring wrap: 0)
+    all: 226134 executions, reads/execution 29.2 (median 32), avg read 62 us, read time share of execution 95%, exec p50 1.59 ms
+    completed: 226077 executions, reads/execution 29.2 (median 32), avg read 62 us, read time share of execution 95%, exec p50 1.59 ms
+    cancelled (TxnAbort): 57 executions, reads/execution 31.9 (median 32), avg read 378 us, read time share of execution 96%, exec p50 11.78 ms
+    slowest 500: 500 executions, reads/execution 31.8 (median 32), avg read 241 us, read time share of execution 98%, exec p50 7.01 ms
+=== c4-bl-t10-2: window 60.3 s, requests 231136 (3834/s), timeouts 137 (0.06%), latency p50 1.68 p99 6.09 max 31.3 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 94.0%, CPU:CPU 5.9%, IO:AioIoCompletion 0.1%, Timeout:SpinDelay 0.0%
+  pgss: calls 40863, blocks read/call 29.2, read time/call 1.86 ms, mean 1.907 ms, max 9.9 ms
+  pgss: calls 207849, blocks read/call 29.2, read time/call 1.88 ms, mean 1.927 ms, max 10.0 ms
+  pg_stat_io: reads 7291317, avg 0.064 ms
+  patch stats (window delta, client backends): IO:DataFileRead 6761659 calls, 420587 ms, avg 62 us, IO:AioIoCompletion 1896 calls, 250 ms, avg 132 us, LWLock:BufferMapping 5788 calls, 87 ms, avg 15 us
+  patch DataFileRead histogram (bucket upper bound us: share): <2:21%, <4:38%, <16:1%, <128:13%, <256:23%, <512:2%
+  ring: executions in window 229202 (records lost to ring wrap: 0)
+    all: 229202 executions, reads/execution 29.2 (median 32), avg read 62 us, read time share of execution 95%, exec p50 1.51 ms
+    completed: 229065 executions, reads/execution 29.2 (median 32), avg read 62 us, read time share of execution 95%, exec p50 1.51 ms
+    cancelled (TxnAbort): 137 executions, reads/execution 31.5 (median 32), avg read 441 us, read time share of execution 99%, exec p50 12.46 ms
+    slowest 500: 500 executions, reads/execution 31.8 (median 32), avg read 301 us, read time share of execution 98%, exec p50 8.33 ms
+=== c4-bl-t10-3: window 60.2 s, requests 228156 (3787/s), timeouts 77 (0.03%), latency p50 1.71 p99 6.09 max 27.1 ms
+  pg_wait_sampling (client backends, excl. ClientRead): IO:DataFileRead 94.1%, CPU:CPU 5.8%, IO:AioIoCompletion 0.1%, LWLock:BufferMapping 0.0%
+  pgss: calls 40275, blocks read/call 29.2, read time/call 1.97 ms, mean 2.020 ms, max 9.9 ms
+  pgss: calls 204712, blocks read/call 29.2, read time/call 1.88 ms, mean 1.937 ms, max 10.0 ms
+  pg_stat_io: reads 7201305, avg 0.065 ms
+  patch stats (window delta, client backends): IO:DataFileRead 6671546 calls, 419627 ms, avg 63 us, IO:AioIoCompletion 1997 calls, 273 ms, avg 137 us, LWLock:BufferMapping 5771 calls, 76 ms, avg 13 us
+  patch DataFileRead histogram (bucket upper bound us: share): <2:17%, <4:43%, <16:1%, <128:10%, <256:25%, <512:2%
+  ring: executions in window 226041 (records lost to ring wrap: 0)
+    all: 226041 executions, reads/execution 29.2 (median 32), avg read 63 us, read time share of execution 95%, exec p50 1.53 ms
+    completed: 225964 executions, reads/execution 29.2 (median 32), avg read 63 us, read time share of execution 95%, exec p50 1.53 ms
+    cancelled (TxnAbort): 77 executions, reads/execution 31.7 (median 32), avg read 404 us, read time share of execution 99%, exec p50 11.88 ms
+    slowest 500: 500 executions, reads/execution 31.8 (median 32), avg read 263 us, read time share of execution 98%, exec p50 7.57 ms

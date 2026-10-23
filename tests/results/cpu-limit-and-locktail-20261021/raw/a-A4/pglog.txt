@@ -1,0 +1,213 @@
+2026-10-21 21:22:32.662 UTC [2381791] postgres@postgres LOG:  process 2381791 still waiting for ShareLock on transaction 317775961 after 10.050 ms
+2026-10-21 21:22:32.662 UTC [2381791] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381791.
+2026-10-21 21:22:32.662 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (197,48) in relation "pgbench_accounts"
+2026-10-21 21:22:32.662 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:32.692 UTC [2381791] postgres@postgres LOG:  process 2381791 acquired ShareLock on transaction 317775961 after 40.849 ms
+2026-10-21 21:22:32.692 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (197,48) in relation "pgbench_accounts"
+2026-10-21 21:22:32.692 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:33.835 UTC [2381786] postgres@postgres LOG:  process 2381786 still waiting for ShareLock on transaction 317776658 after 10.071 ms
+2026-10-21 21:22:33.835 UTC [2381786] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381786.
+2026-10-21 21:22:33.835 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (19697,27) in relation "pgbench_accounts"
+2026-10-21 21:22:33.835 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:33.867 UTC [2381786] postgres@postgres LOG:  process 2381786 acquired ShareLock on transaction 317776658 after 41.941 ms
+2026-10-21 21:22:33.867 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (19697,27) in relation "pgbench_accounts"
+2026-10-21 21:22:33.867 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:41.548 UTC [2381791] postgres@postgres LOG:  process 2381791 still waiting for ShareLock on transaction 317781298 after 10.118 ms
+2026-10-21 21:22:41.548 UTC [2381791] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381791.
+2026-10-21 21:22:41.548 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (2059,72) in relation "pgbench_accounts"
+2026-10-21 21:22:41.548 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:41.553 UTC [2381791] postgres@postgres LOG:  process 2381791 acquired ShareLock on transaction 317781298 after 15.265 ms
+2026-10-21 21:22:41.553 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (2059,72) in relation "pgbench_accounts"
+2026-10-21 21:22:41.553 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:42.160 UTC [2381790] postgres@postgres LOG:  process 2381790 still waiting for ShareLock on transaction 317781679 after 10.191 ms
+2026-10-21 21:22:42.160 UTC [2381790] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381790.
+2026-10-21 21:22:42.160 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (7328,30) in relation "pgbench_accounts"
+2026-10-21 21:22:42.160 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:42.197 UTC [2381790] postgres@postgres LOG:  process 2381790 acquired ShareLock on transaction 317781679 after 46.955 ms
+2026-10-21 21:22:42.197 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (7328,30) in relation "pgbench_accounts"
+2026-10-21 21:22:42.197 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:44.968 UTC [2381787] postgres@postgres LOG:  process 2381787 still waiting for ShareLock on transaction 317783385 after 10.059 ms
+2026-10-21 21:22:44.968 UTC [2381787] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381787.
+2026-10-21 21:22:44.968 UTC [2381787] postgres@postgres CONTEXT:  while updating tuple (18375,75) in relation "pgbench_accounts"
+2026-10-21 21:22:44.968 UTC [2381787] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:44.983 UTC [2381787] postgres@postgres LOG:  process 2381787 acquired ShareLock on transaction 317783385 after 25.212 ms
+2026-10-21 21:22:44.983 UTC [2381787] postgres@postgres CONTEXT:  while updating tuple (18375,75) in relation "pgbench_accounts"
+2026-10-21 21:22:44.983 UTC [2381787] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:49.976 UTC [2381792] postgres@postgres LOG:  process 2381792 still waiting for ShareLock on transaction 317786375 after 10.063 ms
+2026-10-21 21:22:49.976 UTC [2381792] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381792.
+2026-10-21 21:22:49.976 UTC [2381792] postgres@postgres CONTEXT:  while updating tuple (15223,59) in relation "pgbench_accounts"
+2026-10-21 21:22:49.976 UTC [2381792] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:49.982 UTC [2381792] postgres@postgres LOG:  process 2381792 acquired ShareLock on transaction 317786375 after 16.405 ms
+2026-10-21 21:22:49.982 UTC [2381792] postgres@postgres CONTEXT:  while updating tuple (15223,59) in relation "pgbench_accounts"
+2026-10-21 21:22:49.982 UTC [2381792] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:53.239 UTC [2381791] postgres@postgres LOG:  process 2381791 still waiting for ShareLock on transaction 317788287 after 10.071 ms
+2026-10-21 21:22:53.239 UTC [2381791] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381791.
+2026-10-21 21:22:53.239 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (4950,48) in relation "pgbench_accounts"
+2026-10-21 21:22:53.239 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:53.280 UTC [2381791] postgres@postgres LOG:  process 2381791 acquired ShareLock on transaction 317788287 after 51.269 ms
+2026-10-21 21:22:53.280 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (4950,48) in relation "pgbench_accounts"
+2026-10-21 21:22:53.280 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:53.344 UTC [2381793] postgres@postgres LOG:  process 2381793 still waiting for ShareLock on transaction 317788331 after 10.063 ms
+2026-10-21 21:22:53.344 UTC [2381793] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381793.
+2026-10-21 21:22:53.344 UTC [2381793] postgres@postgres CONTEXT:  while updating tuple (10264,24) in relation "pgbench_accounts"
+2026-10-21 21:22:53.344 UTC [2381793] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:53.347 UTC [2381793] postgres@postgres LOG:  process 2381793 acquired ShareLock on transaction 317788331 after 13.436 ms
+2026-10-21 21:22:53.347 UTC [2381793] postgres@postgres CONTEXT:  while updating tuple (10264,24) in relation "pgbench_accounts"
+2026-10-21 21:22:53.347 UTC [2381793] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:55.609 UTC [2337112] LOG:  checkpoint complete: wrote 1294 buffers (7.9%), wrote 7 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=126.604 s, sync=0.080 s, total=126.751 s; sync files=7, longest=0.052 s, average=0.012 s; distance=540532 kB, estimate=540532 kB; lsn=42/6D32E7A0, redo lsn=42/4F033A48
+2026-10-21 21:22:56.117 UTC [2381789] postgres@postgres LOG:  process 2381789 still waiting for ShareLock on transaction 317789957 after 10.212 ms
+2026-10-21 21:22:56.117 UTC [2381789] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381789.
+2026-10-21 21:22:56.117 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (25397,5) in relation "pgbench_accounts"
+2026-10-21 21:22:56.117 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:22:56.142 UTC [2381789] postgres@postgres LOG:  process 2381789 acquired ShareLock on transaction 317789957 after 35.872 ms
+2026-10-21 21:22:56.142 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (25397,5) in relation "pgbench_accounts"
+2026-10-21 21:22:56.142 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:03.218 UTC [2381787] postgres@postgres LOG:  process 2381787 still waiting for ShareLock on transaction 317794253 after 10.047 ms
+2026-10-21 21:23:03.218 UTC [2381787] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381787.
+2026-10-21 21:23:03.218 UTC [2381787] postgres@postgres CONTEXT:  while updating tuple (9592,29) in relation "pgbench_accounts"
+2026-10-21 21:23:03.218 UTC [2381787] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:03.225 UTC [2381787] postgres@postgres LOG:  process 2381787 acquired ShareLock on transaction 317794253 after 16.765 ms
+2026-10-21 21:23:03.225 UTC [2381787] postgres@postgres CONTEXT:  while updating tuple (9592,29) in relation "pgbench_accounts"
+2026-10-21 21:23:03.225 UTC [2381787] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:03.360 UTC [2381786] postgres@postgres LOG:  process 2381786 still waiting for ShareLock on transaction 317794361 after 10.079 ms
+2026-10-21 21:23:03.360 UTC [2381786] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381786.
+2026-10-21 21:23:03.360 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (9786,62) in relation "pgbench_accounts"
+2026-10-21 21:23:03.360 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:03.390 UTC [2381792] postgres@postgres LOG:  process 2381792 still waiting for ShareLock on transaction 317794361 after 10.144 ms
+2026-10-21 21:23:03.390 UTC [2381792] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381786, 2381792.
+2026-10-21 21:23:03.390 UTC [2381792] postgres@postgres CONTEXT:  while updating tuple (9727,65) in relation "pgbench_accounts"
+2026-10-21 21:23:03.390 UTC [2381792] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:03.406 UTC [2381792] postgres@postgres LOG:  process 2381792 acquired ShareLock on transaction 317794361 after 26.007 ms
+2026-10-21 21:23:03.406 UTC [2381792] postgres@postgres CONTEXT:  while updating tuple (9727,65) in relation "pgbench_accounts"
+2026-10-21 21:23:03.406 UTC [2381792] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:03.406 UTC [2381786] postgres@postgres LOG:  process 2381786 acquired ShareLock on transaction 317794361 after 56.866 ms
+2026-10-21 21:23:03.406 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (9786,62) in relation "pgbench_accounts"
+2026-10-21 21:23:03.406 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:03.718 UTC [2337112] LOG:  checkpoint starting: wal
+2026-10-21 21:23:09.757 UTC [2381788] postgres@postgres LOG:  process 2381788 still waiting for ShareLock on transaction 317798171 after 10.115 ms
+2026-10-21 21:23:09.757 UTC [2381788] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381788.
+2026-10-21 21:23:09.757 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (5163,62) in relation "pgbench_accounts"
+2026-10-21 21:23:09.757 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:09.774 UTC [2381788] postgres@postgres LOG:  process 2381788 acquired ShareLock on transaction 317798171 after 27.339 ms
+2026-10-21 21:23:09.774 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (5163,62) in relation "pgbench_accounts"
+2026-10-21 21:23:09.774 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:13.449 UTC [2381788] postgres@postgres LOG:  process 2381788 still waiting for ShareLock on transaction 317800369 after 10.062 ms
+2026-10-21 21:23:13.449 UTC [2381788] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381788.
+2026-10-21 21:23:13.449 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (5859,24) in relation "pgbench_accounts"
+2026-10-21 21:23:13.449 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:13.475 UTC [2381788] postgres@postgres LOG:  process 2381788 acquired ShareLock on transaction 317800369 after 35.336 ms
+2026-10-21 21:23:13.475 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (5859,24) in relation "pgbench_accounts"
+2026-10-21 21:23:13.475 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:17.020 UTC [2381789] postgres@postgres LOG:  process 2381789 still waiting for ShareLock on transaction 317802365 after 10.057 ms
+2026-10-21 21:23:17.020 UTC [2381789] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381789.
+2026-10-21 21:23:17.020 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (2804,21) in relation "pgbench_accounts"
+2026-10-21 21:23:17.020 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:17.030 UTC [2381789] postgres@postgres LOG:  process 2381789 acquired ShareLock on transaction 317802365 after 19.426 ms
+2026-10-21 21:23:17.030 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (2804,21) in relation "pgbench_accounts"
+2026-10-21 21:23:17.030 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:20.661 UTC [2381793] postgres@postgres LOG:  process 2381793 still waiting for ShareLock on transaction 317804592 after 10.766 ms
+2026-10-21 21:23:20.661 UTC [2381793] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381793.
+2026-10-21 21:23:20.661 UTC [2381793] postgres@postgres CONTEXT:  while updating tuple (8994,33) in relation "pgbench_accounts"
+2026-10-21 21:23:20.661 UTC [2381793] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:20.692 UTC [2381793] postgres@postgres LOG:  process 2381793 acquired ShareLock on transaction 317804592 after 41.903 ms
+2026-10-21 21:23:20.692 UTC [2381793] postgres@postgres CONTEXT:  while updating tuple (8994,33) in relation "pgbench_accounts"
+2026-10-21 21:23:20.692 UTC [2381793] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:23.926 UTC [2381789] postgres@postgres LOG:  process 2381789 still waiting for ShareLock on transaction 317806552 after 10.130 ms
+2026-10-21 21:23:23.926 UTC [2381789] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381789.
+2026-10-21 21:23:23.926 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (305,7) in relation "pgbench_accounts"
+2026-10-21 21:23:23.926 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:23.959 UTC [2381789] postgres@postgres LOG:  process 2381789 acquired ShareLock on transaction 317806552 after 43.048 ms
+2026-10-21 21:23:23.959 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (305,7) in relation "pgbench_accounts"
+2026-10-21 21:23:23.959 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:30.625 UTC [2381790] postgres@postgres LOG:  process 2381790 still waiting for ShareLock on transaction 317810477 after 10.075 ms
+2026-10-21 21:23:30.625 UTC [2381790] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381790.
+2026-10-21 21:23:30.625 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (15809,58) in relation "pgbench_accounts"
+2026-10-21 21:23:30.625 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:30.637 UTC [2381790] postgres@postgres LOG:  process 2381790 acquired ShareLock on transaction 317810477 after 22.284 ms
+2026-10-21 21:23:30.637 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (15809,58) in relation "pgbench_accounts"
+2026-10-21 21:23:30.637 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:32.320 UTC [2381788] postgres@postgres LOG:  process 2381788 still waiting for ShareLock on transaction 317811560 after 10.070 ms
+2026-10-21 21:23:32.320 UTC [2381788] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381788.
+2026-10-21 21:23:32.320 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (4135,70) in relation "pgbench_accounts"
+2026-10-21 21:23:32.320 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:32.335 UTC [2381788] postgres@postgres LOG:  process 2381788 acquired ShareLock on transaction 317811560 after 25.099 ms
+2026-10-21 21:23:32.335 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (4135,70) in relation "pgbench_accounts"
+2026-10-21 21:23:32.335 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:32.819 UTC [2381786] postgres@postgres LOG:  process 2381786 still waiting for ShareLock on transaction 317811858 after 10.069 ms
+2026-10-21 21:23:32.819 UTC [2381786] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381786.
+2026-10-21 21:23:32.819 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (17124,90) in relation "pgbench_accounts"
+2026-10-21 21:23:32.819 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:32.839 UTC [2381786] postgres@postgres LOG:  process 2381786 acquired ShareLock on transaction 317811858 after 30.079 ms
+2026-10-21 21:23:32.839 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (17124,90) in relation "pgbench_accounts"
+2026-10-21 21:23:32.839 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:33.929 UTC [2381793] postgres@postgres LOG:  process 2381793 still waiting for ShareLock on transaction 317812567 after 10.064 ms
+2026-10-21 21:23:33.929 UTC [2381793] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381793.
+2026-10-21 21:23:33.929 UTC [2381793] postgres@postgres CONTEXT:  while updating tuple (13418,105) in relation "pgbench_accounts"
+2026-10-21 21:23:33.929 UTC [2381793] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:33.943 UTC [2381793] postgres@postgres LOG:  process 2381793 acquired ShareLock on transaction 317812567 after 23.940 ms
+2026-10-21 21:23:33.943 UTC [2381793] postgres@postgres CONTEXT:  while updating tuple (13418,105) in relation "pgbench_accounts"
+2026-10-21 21:23:33.943 UTC [2381793] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:34.788 UTC [2381786] postgres@postgres LOG:  process 2381786 still waiting for ShareLock on transaction 317813078 after 10.112 ms
+2026-10-21 21:23:34.788 UTC [2381786] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381786.
+2026-10-21 21:23:34.788 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (20608,117) in relation "pgbench_accounts"
+2026-10-21 21:23:34.788 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:34.809 UTC [2381786] postgres@postgres LOG:  process 2381786 acquired ShareLock on transaction 317813078 after 31.165 ms
+2026-10-21 21:23:34.809 UTC [2381786] postgres@postgres CONTEXT:  while updating tuple (20608,117) in relation "pgbench_accounts"
+2026-10-21 21:23:34.809 UTC [2381786] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:35.309 UTC [2381789] postgres@postgres LOG:  process 2381789 still waiting for ShareLock on transaction 317813399 after 10.061 ms
+2026-10-21 21:23:35.309 UTC [2381789] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381789, 2381790.
+2026-10-21 21:23:35.309 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (917,27) in relation "pgbench_accounts"
+2026-10-21 21:23:35.309 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:35.315 UTC [2381790] postgres@postgres LOG:  process 2381790 still waiting for ShareLock on transaction 317813399 after 10.080 ms
+2026-10-21 21:23:35.315 UTC [2381790] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381789, 2381790, 2381788.
+2026-10-21 21:23:35.315 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (3299,18) in relation "pgbench_accounts"
+2026-10-21 21:23:35.315 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:35.317 UTC [2381789] postgres@postgres LOG:  process 2381789 acquired ShareLock on transaction 317813399 after 17.780 ms
+2026-10-21 21:23:35.317 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (917,27) in relation "pgbench_accounts"
+2026-10-21 21:23:35.317 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:35.317 UTC [2381790] postgres@postgres LOG:  process 2381790 acquired ShareLock on transaction 317813399 after 12.287 ms
+2026-10-21 21:23:35.317 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (3299,18) in relation "pgbench_accounts"
+2026-10-21 21:23:35.317 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:45.979 UTC [2381791] postgres@postgres LOG:  process 2381791 still waiting for ShareLock on transaction 317819822 after 10.065 ms
+2026-10-21 21:23:45.979 UTC [2381791] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381791.
+2026-10-21 21:23:45.979 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (4507,22) in relation "pgbench_accounts"
+2026-10-21 21:23:45.979 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:45.990 UTC [2381791] postgres@postgres LOG:  process 2381791 acquired ShareLock on transaction 317819822 after 20.465 ms
+2026-10-21 21:23:45.990 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (4507,22) in relation "pgbench_accounts"
+2026-10-21 21:23:45.990 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:46.440 UTC [2381790] postgres@postgres LOG:  process 2381790 still waiting for ShareLock on transaction 317820133 after 10.060 ms
+2026-10-21 21:23:46.440 UTC [2381790] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381790.
+2026-10-21 21:23:46.440 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (4459,26) in relation "pgbench_accounts"
+2026-10-21 21:23:46.440 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:46.458 UTC [2381788] postgres@postgres LOG:  process 2381788 still waiting for ShareLock on transaction 317820133 after 10.058 ms
+2026-10-21 21:23:46.458 UTC [2381788] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381790, 2381788, 2381787.
+2026-10-21 21:23:46.458 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (20353,51) in relation "pgbench_accounts"
+2026-10-21 21:23:46.458 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:46.467 UTC [2381790] postgres@postgres LOG:  process 2381790 acquired ShareLock on transaction 317820133 after 36.538 ms
+2026-10-21 21:23:46.467 UTC [2381790] postgres@postgres CONTEXT:  while updating tuple (4459,26) in relation "pgbench_accounts"
+2026-10-21 21:23:46.467 UTC [2381790] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:46.467 UTC [2381788] postgres@postgres LOG:  process 2381788 acquired ShareLock on transaction 317820133 after 18.446 ms
+2026-10-21 21:23:46.467 UTC [2381788] postgres@postgres CONTEXT:  while updating tuple (20353,51) in relation "pgbench_accounts"
+2026-10-21 21:23:46.467 UTC [2381788] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:46.866 UTC [2381789] postgres@postgres LOG:  process 2381789 still waiting for ShareLock on transaction 317820390 after 10.077 ms
+2026-10-21 21:23:46.866 UTC [2381789] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381789.
+2026-10-21 21:23:46.866 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (6352,29) in relation "pgbench_accounts"
+2026-10-21 21:23:46.866 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:46.867 UTC [2381789] postgres@postgres LOG:  process 2381789 acquired ShareLock on transaction 317820390 after 10.393 ms
+2026-10-21 21:23:46.867 UTC [2381789] postgres@postgres CONTEXT:  while updating tuple (6352,29) in relation "pgbench_accounts"
+2026-10-21 21:23:46.867 UTC [2381789] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:47.581 UTC [2337112] LOG:  checkpoint complete: wrote 1486 buffers (9.1%), wrote 8 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=43.612 s, sync=0.191 s, total=43.863 s; sync files=8, longest=0.161 s, average=0.024 s; distance=540841 kB, estimate=540841 kB; lsn=42/8DF88178, redo lsn=42/7005DED0
+2026-10-21 21:23:50.223 UTC [2381791] postgres@postgres LOG:  process 2381791 still waiting for ShareLock on transaction 317822382 after 10.075 ms
+2026-10-21 21:23:50.223 UTC [2381791] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381791, 2381792.
+2026-10-21 21:23:50.223 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (17226,93) in relation "pgbench_accounts"
+2026-10-21 21:23:50.223 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:50.231 UTC [2381792] postgres@postgres LOG:  process 2381792 still waiting for ShareLock on transaction 317822382 after 10.085 ms
+2026-10-21 21:23:50.231 UTC [2381792] postgres@postgres DETAIL:  Process holding the lock: 2381785. Wait queue: 2381791, 2381792.
+2026-10-21 21:23:50.231 UTC [2381792] postgres@postgres CONTEXT:  while updating tuple (16285,11) in relation "pgbench_accounts"
+2026-10-21 21:23:50.231 UTC [2381792] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:50.238 UTC [2381791] postgres@postgres LOG:  process 2381791 acquired ShareLock on transaction 317822382 after 25.708 ms
+2026-10-21 21:23:50.238 UTC [2381791] postgres@postgres CONTEXT:  while updating tuple (17226,93) in relation "pgbench_accounts"
+2026-10-21 21:23:50.238 UTC [2381791] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;
+2026-10-21 21:23:50.238 UTC [2381792] postgres@postgres LOG:  process 2381792 acquired ShareLock on transaction 317822382 after 17.527 ms
+2026-10-21 21:23:50.238 UTC [2381792] postgres@postgres CONTEXT:  while updating tuple (16285,11) in relation "pgbench_accounts"
+2026-10-21 21:23:50.238 UTC [2381792] postgres@postgres STATEMENT:  UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = $1;

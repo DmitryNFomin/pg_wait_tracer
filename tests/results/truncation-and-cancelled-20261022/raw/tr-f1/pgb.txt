@@ -1,0 +1,15 @@
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: ../lookup.sql
+scaling factor: 1
+query mode: prepared
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 300 s
+number of transactions actually processed: 2398979
+number of failed transactions: 0 (0.000%)
+latency average = 0.479 ms
+latency stddev = 2.530 ms
+rate limit schedule lag: avg 0.236 (max 125.755) ms
+initial connection time = 20.889 ms
+tps = 7996.940428 (without initial connection time)

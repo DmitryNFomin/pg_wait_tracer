@@ -1,0 +1,12 @@
+,Client,ClientRead,181808
+"SELECT name, descr FROM catalog WHERE id = $1",IO,DataFileRead,3824
+,CPU,CPU,3702
+"SELECT name, descr FROM catalog WHERE id = $1",CPU,CPU,1017
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,CPU,CPU,970
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,Lock,transactionid,682
+,LWLock,ProcArray,67
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,Lock,tuple,6
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,Buffer,BufferExclusive,1
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,IO,SlruWrite,1
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,LWLock,LockManager,1
+,Timeout,SpinDelay,1

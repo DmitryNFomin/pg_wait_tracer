@@ -1,0 +1,12 @@
+# E1: ticklat 10000 us x 60 s, one run per load (PG18 pgbench on port 5418)
+idle ticks 6000 missed 0
+sel-c4 ticks 6000 missed 0 tps = 47733.932531 (without initial connection time)
+sel-c8 ticks 6000 missed 0 tps = 41677.434757 (without initial connection time)
+sel-c16 ticks 6000 missed 0 tps = 40747.110728 (without initial connection time)
+tpcb-c8 ticks 6000 missed 0 tps = 4659.872058 (without initial connection time)
+
+idle     n=6000 p50=0.122ms p90=0.144 p99=0.188 p99.9=1.575 max=2.602ms  >1ms=0.2% >5ms=0.00%
+sel-c4   n=6000 p50=0.079ms p90=0.134 p99=0.220 p99.9=2.056 max=2.699ms  >1ms=0.3% >5ms=0.00%
+sel-c8   n=6000 p50=0.082ms p90=0.154 p99=0.241 p99.9=2.082 max=3.373ms  >1ms=0.2% >5ms=0.00%
+sel-c16  n=6000 p50=0.082ms p90=0.142 p99=0.410 p99.9=2.581 max=4.562ms  >1ms=0.5% >5ms=0.00%
+tpcb-c8  n=6000 p50=0.081ms p90=0.119 p99=0.230 p99.9=1.499 max=2.779ms  >1ms=0.2% >5ms=0.00%

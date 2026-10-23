@@ -1,0 +1,1 @@
+2026-10-21 20:59:49.919 UTC [2337112] LOG:  checkpoint starting: time

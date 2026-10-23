@@ -1,0 +1,17 @@
+,Client,ClientRead,40860
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN,CPU,CPU,2986
+,IO,WalSync,1532
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN,IO,AioIoCompletion,1352
+,CPU,CPU,555
+,LWLock,WALWrite,478
+UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE ai,CPU,CPU,168
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN,IO,DataFileRead,63
+,IO,WalWrite,32
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN,IO,DataFileWrite,20
+UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE ai,IO,DataFileRead,16
+,LWLock,ProcArray,9
+,IO,WalInitSync,3
+UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE ai,LWLock,BufferMapping,2
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN,LWLock,BufferMapping,2
+,IO,WalInitWrite,1
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN,Timeout,SpinDelay,1

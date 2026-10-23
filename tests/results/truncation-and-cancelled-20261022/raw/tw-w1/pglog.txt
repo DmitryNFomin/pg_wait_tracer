@@ -1,0 +1,32 @@
+2026-10-22 09:09:14.416 UTC [23372]  LOG:  checkpoint starting: wal
+2026-10-22 09:09:16.422 UTC [23372]  LOG:  checkpoint complete: wal: wrote 45199 buffers (17.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=1.939 s, sync=0.004 s, total=2.007 s; sync files=11, longest=0.002 s, average=0.001 s; distance=544113 kB, estimate=544113 kB; lsn=3/1FFC44F0, redo lsn=3/01FFE120
+2026-10-22 09:09:16.561 UTC [23372]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 09:09:16.561 UTC [23372]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 09:09:16.561 UTC [23372]  LOG:  checkpoint starting: wal
+2026-10-22 09:09:18.483 UTC [23372]  LOG:  checkpoint complete: wal: wrote 44667 buffers (17.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.802 s, sync=0.002 s, total=1.923 s; sync files=2, longest=0.002 s, average=0.001 s; distance=540681 kB, estimate=543770 kB; lsn=3/420029D8, redo lsn=3/230005B8
+2026-10-22 09:09:24.309 UTC [23372]  LOG:  checkpoints are occurring too frequently (8 seconds apart)
+2026-10-22 09:09:24.309 UTC [23372]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 09:09:24.309 UTC [23372]  LOG:  checkpoint starting: wal
+2026-10-22 09:09:25.771 UTC [23372]  LOG:  checkpoint complete: wal: wrote 43570 buffers (16.6%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 31 recycled; write=1.269 s, sync=0.120 s, total=1.463 s; sync files=4, longest=0.114 s, average=0.030 s; distance=541174 kB, estimate=543510 kB; lsn=3/64003BA0, redo lsn=3/4407DDF8
+2026-10-22 09:09:25.771 UTC [23372]  LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-10-22 09:09:25.771 UTC [23372]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 09:09:25.771 UTC [23372]  LOG:  checkpoint starting: wal
+2026-10-22 09:09:26.845 UTC [23372]  LOG:  checkpoint complete: wal: wrote 21319 buffers (8.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=0.987 s, sync=0.002 s, total=1.074 s; sync files=1, longest=0.002 s, average=0.002 s; distance=569899 kB, estimate=569899 kB; lsn=3/8510D1F0, redo lsn=3/66D08A40
+2026-10-22 09:09:26.979 UTC [23372]  LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-10-22 09:09:26.979 UTC [23372]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 09:09:26.979 UTC [23372]  LOG:  checkpoint starting: wal
+2026-10-22 09:09:29.336 UTC [26250]  LOG:  automatic vacuum of table "tr.public.t": index scans: 1
+	pages: 133333 removed, 133334 remain, 133334 scanned (50.00% of total), 0 eagerly scanned
+	tuples: 10000000 removed, 10000000 remain, 0 are dead but not yet removable
+	removable cutoff: 705, which was 1 XIDs old when operation ended
+	new relfrozenxid: 705, which is 22 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	visibility map: 133334 pages set all-visible, 133334 pages set all-frozen (0 were all-visible)
+	index scan needed: 133334 pages from table (50.00% of total) had 10000000 dead item identifiers removed
+	index "t_pkey": pages: 54839 in total, 27415 newly deleted, 27415 currently deleted, 0 reusable
+	I/O timings: read: 143.371 ms, write: 362.075 ms
+	avg read rate: 233.635 MB/s, avg write rate: 397.270 MB/s
+	buffer usage: 655184 hits, 152240 reads, 258867 dirtied
+	WAL usage: 482151 records, 294162 full page images, 1357773306 bytes, 1289691384 full page image bytes, 95676 buffers full
+	memory usage: dead item storage 5.20 MB accumulated across 1 reset (limit 64.00 MB each)
+	system usage: CPU: user: 1.50 s, system: 1.63 s, elapsed: 5.09 s

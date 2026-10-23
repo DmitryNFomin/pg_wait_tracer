@@ -1,0 +1,5 @@
+"SELECT name, descr FROM catalog WHERE id = $1",240826,39541.9,0.164,9.54,299845
+UPDATE stock SET qty = qty - 1 WHERE item_id = $1,240826,14367.3,0.060,25.55,2
+UPDATE stock s SET reserved = (SELECT count(*) FRO,627,11411.3,18.200,29.43,1750
+"copy (select left(regexp_replace(s.query,'\s+',' '",1,24.4,24.358,24.36,88
+select pg_stat_statements_reset(),1,0.3,0.261,0.26,0

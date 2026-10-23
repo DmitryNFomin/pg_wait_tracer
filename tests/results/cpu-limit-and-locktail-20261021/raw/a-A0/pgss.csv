@@ -1,0 +1,2 @@
+UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE ai,36096,0.035,1.00,1244263590800186222
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN,36096,1.157,8.85,8209821914602085227

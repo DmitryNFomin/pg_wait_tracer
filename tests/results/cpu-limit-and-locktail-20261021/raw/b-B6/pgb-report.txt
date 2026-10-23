@@ -1,0 +1,15 @@
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: ../report.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 80 s
+number of transactions actually processed: 10
+number of failed transactions: 0 (0.000%)
+latency average = 633.169 ms
+latency stddev = 129.937 ms
+rate limit schedule lag: avg 23.519 (max 232.424) ms
+initial connection time = 1.932 ms
+tps = 0.143679 (without initial connection time)

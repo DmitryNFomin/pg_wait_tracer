@@ -1,0 +1,1314 @@
+Started pgwet.service - /opt/pgwet/bin/postgres -D /var/lib/postgresql/pgwet.
+2026-10-22 21:39:19.208 UTC [17675]  LOG:  starting PostgreSQL 20devel on x86_64-linux, compiled by gcc-13.3.0, 64-bit
+2026-10-22 21:39:19.209 UTC [17675]  LOG:  listening on IPv6 address "::1", port 5419
+2026-10-22 21:39:19.209 UTC [17675]  LOG:  listening on IPv4 address "127.0.0.1", port 5419
+2026-10-22 21:39:19.209 UTC [17675]  LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5419"
+2026-10-22 21:39:19.212 UTC [17681]  LOG:  database system was shut down at 2026-10-22 21:39:19 UTC
+2026-10-22 21:39:19.215 UTC [17675]  LOG:  database system is ready to accept connections
+2026-10-22 21:39:19.217 UTC [17684]  LOG:  pg_wait_sampling collector started
+2026-10-22 21:39:28.185 UTC [17679]  LOG:  checkpoints are occurring too frequently (9 seconds apart)
+2026-10-22 21:39:28.185 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:28.211 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:32.394 UTC [17679]  LOG:  checkpoint complete: wal: wrote 6 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.113 s, sync=0.041 s, total=4.210 s; sync files=606, longest=0.015 s, average=0.001 s; distance=537294 kB, estimate=537294 kB; lsn=0/40E1B3B0, redo lsn=0/22402380
+2026-10-22 21:39:32.640 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:39:32.640 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:32.640 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:36.250 UTC [17679]  LOG:  checkpoint complete: wal: wrote 30 buffers (0.2%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=3.511 s, sync=0.046 s, total=3.610 s; sync files=4, longest=0.019 s, average=0.012 s; distance=540666 kB, estimate=540666 kB; lsn=0/6225DBD0, redo lsn=0/43400EB8
+2026-10-22 21:39:36.438 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:39:36.438 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:36.438 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:40.048 UTC [17679]  LOG:  checkpoint complete: wal: wrote 16 buffers (0.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.509 s, sync=0.050 s, total=3.611 s; sync files=4, longest=0.028 s, average=0.013 s; distance=538940 kB, estimate=540494 kB; lsn=0/826291B8, redo lsn=0/64250158
+2026-10-22 21:39:40.335 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:39:40.335 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:40.335 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:43.904 UTC [17679]  LOG:  checkpoint complete: wal: wrote 10 buffers (0.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.509 s, sync=0.037 s, total=3.570 s; sync files=3, longest=0.032 s, average=0.013 s; distance=542406 kB, estimate=542406 kB; lsn=0/A36D0BE8, redo lsn=0/85401C90
+2026-10-22 21:39:44.208 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:39:44.208 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:44.208 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:47.874 UTC [17679]  LOG:  checkpoint complete: wal: wrote 5 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.610 s, sync=0.037 s, total=3.666 s; sync files=4, longest=0.032 s, average=0.010 s; distance=540666 kB, estimate=542232 kB; lsn=0/C48860F8, redo lsn=0/A6400888
+2026-10-22 21:39:48.151 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:39:48.151 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:48.151 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:51.742 UTC [17679]  LOG:  checkpoint complete: wal: wrote 5 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.510 s, sync=0.047 s, total=3.591 s; sync files=3, longest=0.037 s, average=0.016 s; distance=540673 kB, estimate=542076 kB; lsn=0/E5652050, redo lsn=0/C7400FA8
+2026-10-22 21:39:52.044 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:39:52.044 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:52.045 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:54.166 UTC [17679]  LOG:  checkpoint complete: wal: wrote 4821 buffers (29.4%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=2.051 s, sync=0.026 s, total=2.122 s; sync files=5, longest=0.021 s, average=0.006 s; distance=540680 kB, estimate=541937 kB; lsn=1/07105FE8, redo lsn=0/E8403340
+2026-10-22 21:39:54.231 UTC [17679]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 21:39:54.231 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:54.231 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:55.833 UTC [17679]  LOG:  checkpoint complete: wal: wrote 10706 buffers (65.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=1.562 s, sync=0.016 s, total=1.602 s; sync files=6, longest=0.015 s, average=0.003 s; distance=537544 kB, estimate=541498 kB; lsn=1/275AF060, redo lsn=1/090F5550
+2026-10-22 21:39:55.942 UTC [17679]  LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-10-22 21:39:55.942 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:55.942 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:57.595 UTC [17679]  LOG:  checkpoint complete: wal: wrote 2 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=1.604 s, sync=0.021 s, total=1.653 s; sync files=3, longest=0.021 s, average=0.007 s; distance=540434 kB, estimate=541391 kB; lsn=1/4953CD60, redo lsn=1/2A0B9F10
+2026-10-22 21:39:57.645 UTC [17679]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 21:39:57.645 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:57.645 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:39:59.299 UTC [17679]  LOG:  checkpoint complete: wal: wrote 3 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=1.605 s, sync=0.016 s, total=1.655 s; sync files=2, longest=0.016 s, average=0.008 s; distance=540959 kB, estimate=541348 kB; lsn=1/6A1585C0, redo lsn=1/4B101D38
+2026-10-22 21:39:59.355 UTC [17679]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 21:39:59.355 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:39:59.355 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:00.890 UTC [17679]  LOG:  checkpoint complete: wal: wrote 3 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=1.505 s, sync=0.010 s, total=1.536 s; sync files=3, longest=0.010 s, average=0.004 s; distance=540951 kB, estimate=541308 kB; lsn=1/8A115290, redo lsn=1/6C147B10
+2026-10-22 21:40:01.014 UTC [17679]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 21:40:01.014 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:40:01.014 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:04.169 UTC [17679]  LOG:  checkpoint complete: wal: wrote 1 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.109 s, sync=0.020 s, total=3.155 s; sync files=90, longest=0.006 s, average=0.001 s; distance=539658 kB, estimate=541143 kB; lsn=1/AB491898, redo lsn=1/8D04A6D0
+2026-10-22 21:40:04.436 UTC [17679]  LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-10-22 21:40:04.436 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:40:04.436 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:07.583 UTC [17679]  LOG:  checkpoint complete: wal: wrote 22 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.109 s, sync=0.013 s, total=3.147 s; sync files=4, longest=0.011 s, average=0.004 s; distance=543194 kB, estimate=543194 kB; lsn=1/CC58D6A8, redo lsn=1/AE2C1178
+2026-10-22 21:40:07.837 UTC [17679]  LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-10-22 21:40:07.837 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:40:07.837 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:10.990 UTC [17679]  LOG:  checkpoint complete: wal: wrote 37 buffers (0.2%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.110 s, sync=0.016 s, total=3.154 s; sync files=4, longest=0.007 s, average=0.004 s; distance=541958 kB, estimate=543071 kB; lsn=1/ED8F31E0, redo lsn=1/CF402C60
+2026-10-22 21:40:11.226 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:40:11.226 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:40:11.227 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:15.782 UTC [17679]  LOG:  checkpoint complete: wal: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.511 s, sync=0.020 s, total=4.556 s; sync files=32, longest=0.013 s, average=0.001 s; distance=540669 kB, estimate=542830 kB; lsn=2/0E417938, redo lsn=1/F0402330
+2026-10-22 21:40:15.887 UTC [17679]  LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-10-22 21:40:15.887 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:40:15.887 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:17.504 UTC [17679]  LOG:  checkpoint complete: wal: wrote 15412 buffers (94.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=1.565 s, sync=0.031 s, total=1.617 s; sync files=22, longest=0.029 s, average=0.002 s; distance=537373 kB, estimate=542285 kB; lsn=2/300A94C8, redo lsn=2/110C9808
+2026-10-22 21:40:17.565 UTC [17679]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 21:40:17.565 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:40:17.565 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:19.096 UTC [17679]  LOG:  checkpoint complete: wal: wrote 3 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=1.504 s, sync=0.009 s, total=1.532 s; sync files=3, longest=0.008 s, average=0.003 s; distance=540254 kB, estimate=542082 kB; lsn=2/506FCE90, redo lsn=2/32061370
+2026-10-22 21:40:19.195 UTC [17679]  LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-10-22 21:40:19.195 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:40:19.195 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:40:27.555 UTC [17679]  LOG:  checkpoint complete: wal: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=8.312 s, sync=0.028 s, total=8.360 s; sync files=33, longest=0.022 s, average=0.001 s; distance=540609 kB, estimate=541934 kB; lsn=2/64D0B088, redo lsn=2/53051A38
+2026-10-22 21:45:19.585 UTC [17679]  LOG:  checkpoint starting: time
+2026-10-22 21:45:23.013 UTC [17679]  LOG:  checkpoint complete: time: wrote 34 buffers (0.2%), wrote 51 SLRU buffers; 0 WAL file(s) added, 0 removed, 22 recycled; write=3.408 s, sync=0.005 s, total=3.429 s; sync files=74, longest=0.002 s, average=0.001 s; distance=370686 kB, estimate=524810 kB; lsn=2/69B4FF80, redo lsn=2/69A51438
+2026-10-22 21:50:19.085 UTC [17679]  LOG:  checkpoint starting: time
+2026-10-22 21:50:22.101 UTC [17679]  LOG:  checkpoint complete: time: wrote 30 buffers (0.2%), wrote 52 SLRU buffers; 0 WAL file(s) added, 1 removed, 4 recycled; write=3.007 s, sync=0.003 s, total=3.016 s; sync files=8, longest=0.001 s, average=0.001 s; distance=79131 kB, estimate=480242 kB; lsn=2/6E87D868, redo lsn=2/6E798078
+2026-10-22 21:55:19.191 UTC [17679]  LOG:  checkpoint starting: time
+2026-10-22 21:55:22.009 UTC [17679]  LOG:  checkpoint complete: time: wrote 28 buffers (0.2%), wrote 52 SLRU buffers; 0 WAL file(s) added, 5 removed, 0 recycled; write=2.807 s, sync=0.002 s, total=2.818 s; sync files=7, longest=0.001 s, average=0.001 s; distance=80397 kB, estimate=440257 kB; lsn=2/73708B78, redo lsn=2/7361B770
+2026-10-22 21:55:30.801 UTC [17679]  LOG:  checkpoints are occurring too frequently (11 seconds apart)
+2026-10-22 21:55:30.801 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:55:30.801 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:55:39.000 UTC [17679]  LOG:  checkpoint complete: wal: wrote 19 buffers (0.1%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=8.119 s, sync=0.055 s, total=8.199 s; sync files=16, longest=0.042 s, average=0.004 s; distance=538514 kB, estimate=538514 kB; lsn=2/B24B5340, redo lsn=2/94400190
+2026-10-22 21:55:40.101 UTC [17679]  LOG:  checkpoints are occurring too frequently (10 seconds apart)
+2026-10-22 21:55:40.101 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:55:40.101 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:55:49.484 UTC [17679]  LOG:  checkpoint complete: wal: wrote 2 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=9.319 s, sync=0.036 s, total=9.384 s; sync files=4, longest=0.022 s, average=0.009 s; distance=538327 kB, estimate=538495 kB; lsn=2/D32720F0, redo lsn=2/B51B6160
+2026-10-22 21:55:50.159 UTC [17679]  LOG:  checkpoints are occurring too frequently (10 seconds apart)
+2026-10-22 21:55:50.159 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:55:50.159 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:55:56.208 UTC [17679]  LOG:  checkpoint complete: wal: wrote 4 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=6.013 s, sync=0.016 s, total=6.050 s; sync files=7, longest=0.009 s, average=0.003 s; distance=538975 kB, estimate=538975 kB; lsn=2/F3E9B5C8, redo lsn=2/D600E048
+2026-10-22 21:55:56.979 UTC [17679]  LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-10-22 21:55:56.979 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:55:56.979 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:56:03.386 UTC [17679]  LOG:  checkpoint complete: wal: wrote 13 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=6.312 s, sync=0.072 s, total=6.407 s; sync files=6, longest=0.049 s, average=0.012 s; distance=540918 kB, estimate=540918 kB; lsn=3/1554E708, redo lsn=2/F704BAA0
+2026-10-22 21:56:04.088 UTC [17679]  LOG:  checkpoints are occurring too frequently (8 seconds apart)
+2026-10-22 21:56:04.088 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:56:04.088 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:56:10.665 UTC [17679]  LOG:  checkpoint complete: wal: wrote 3 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=6.517 s, sync=0.037 s, total=6.578 s; sync files=4, longest=0.034 s, average=0.010 s; distance=541347 kB, estimate=541347 kB; lsn=3/36060B68, redo lsn=3/180F4800
+2026-10-22 21:56:11.553 UTC [17679]  LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-10-22 21:56:11.553 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:56:11.553 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:56:20.042 UTC [17679]  LOG:  checkpoint complete: wal: wrote 5 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=8.416 s, sync=0.050 s, total=8.489 s; sync files=10, longest=0.030 s, average=0.005 s; distance=540138 kB, estimate=541226 kB; lsn=3/56CB01C8, redo lsn=3/3906F238
+2026-10-22 21:56:22.986 UTC [17679]  LOG:  checkpoints are occurring too frequently (11 seconds apart)
+2026-10-22 21:56:22.986 UTC [17679]  HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-22 21:56:22.986 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:56:37.186 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:37.186 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:47.469 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:47.469 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:47.470 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:47.470 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:47.472 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:47.472 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:47.473 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:47.473 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:55.004 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:55.004 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:55.008 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:55.008 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:55.023 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:55.023 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.524 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.524 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.529 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.529 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.532 UTC [20210] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.532 UTC [20210] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.535 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.535 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.759 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.759 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.765 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.765 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.767 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.767 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.767 UTC [20210] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.767 UTC [20210] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.770 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.770 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.776 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.776 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.783 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.783 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.796 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.796 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.796 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:56.796 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:56.854 UTC [17679]  LOG:  checkpoint complete: wal: wrote 8 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=33.759 s, sync=0.059 s, total=33.868 s; sync files=11, longest=0.052 s, average=0.006 s; distance=541269 kB, estimate=541269 kB; lsn=3/77FC8E38, redo lsn=3/5A1047B0
+2026-10-22 21:56:58.286 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.286 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.299 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.299 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.311 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.311 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.311 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.311 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.340 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.340 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.341 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.341 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.344 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.344 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.344 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.344 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.346 UTC [20210] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.346 UTC [20210] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.353 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.353 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.354 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:56:58.354 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:56:58.536 UTC [17679]  LOG:  checkpoint starting: wal
+2026-10-22 21:57:00.427 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:00.427 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:00.487 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:00.487 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:00.488 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:00.488 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:00.489 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:00.489 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:00.499 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:00.499 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:00.510 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:00.510 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:03.680 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:03.680 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:04.874 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:04.874 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:04.876 UTC [20210] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:04.876 UTC [20210] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:04.879 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:04.879 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:04.882 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:04.882 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:04.900 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:04.900 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:04.916 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:04.916 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:04.927 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:04.927 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.786 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.786 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.790 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.790 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.800 UTC [20210] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.800 UTC [20210] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.801 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.801 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.801 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.801 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.807 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.807 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.814 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.814 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.815 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.815 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.816 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.816 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.817 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.817 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.823 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.823 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.829 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.829 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:06.842 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:06.842 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:09.821 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:09.821 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.255 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.255 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.302 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.302 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.303 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.303 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.304 UTC [20210] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.304 UTC [20210] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.310 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.310 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.315 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.315 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.320 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.320 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.329 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.329 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.334 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.334 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.334 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.334 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.335 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.335 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.337 UTC [20210] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.337 UTC [20210] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.342 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.342 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.343 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.343 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.344 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.344 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.346 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:11.346 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:11.389 UTC [17679]  LOG:  checkpoint complete: wal: wrote 5 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=12.727 s, sync=0.081 s, total=12.854 s; sync files=4, longest=0.080 s, average=0.021 s; distance=539643 kB, estimate=541106 kB; lsn=3/98E04BA8, redo lsn=3/7B0036E8
+2026-10-22 21:57:27.041 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.041 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.042 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.042 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.043 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.043 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.044 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.044 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.047 UTC [20203] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.047 UTC [20203] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.052 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.052 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.058 UTC [20211] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.058 UTC [20211] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.059 UTC [20202] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.059 UTC [20202] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.060 UTC [20204] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.060 UTC [20204] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.062 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.062 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:27.062 UTC [20201] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:27.062 UTC [20201] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:36.209 UTC [20209] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:36.209 UTC [20209] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:57:51.832 UTC [20212] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:57:51.832 UTC [20212] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:14.954 UTC [20454] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:14.954 UTC [20454] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:14.964 UTC [20459] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:14.964 UTC [20459] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:14.964 UTC [20456] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:14.964 UTC [20456] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.556 UTC [20454] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.556 UTC [20454] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.563 UTC [20465] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.563 UTC [20465] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.563 UTC [20463] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.563 UTC [20463] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.569 UTC [20454] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.569 UTC [20454] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.573 UTC [20462] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.573 UTC [20462] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.575 UTC [20463] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.575 UTC [20463] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.579 UTC [20458] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.579 UTC [20458] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:41.581 UTC [20454] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:41.581 UTC [20454] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:48.148 UTC [20465] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:48.148 UTC [20465] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:48.256 UTC [20465] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:48.256 UTC [20465] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:58:49.702 UTC [20459] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:58:49.702 UTC [20459] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:24.988 UTC [20465] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:24.988 UTC [20465] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:24.990 UTC [20464] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:24.990 UTC [20464] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:24.994 UTC [20462] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:24.994 UTC [20462] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:24.999 UTC [20463] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:24.999 UTC [20463] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:25.001 UTC [20456] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:25.001 UTC [20456] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:25.005 UTC [20459] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:25.005 UTC [20459] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:25.008 UTC [20454] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:25.008 UTC [20454] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:25.012 UTC [20458] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:25.012 UTC [20458] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:52.612 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:52.612 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:52.613 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:52.613 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:52.618 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:52.618 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 21:59:52.619 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 21:59:52.619 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.546 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.546 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.551 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.551 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.571 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.571 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.570 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.570 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.578 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.578 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.582 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.582 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.586 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.586 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.586 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.586 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.630 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.630 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.632 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.632 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:07.640 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:07.640 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:10.550 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:10.550 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:10.883 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:10.883 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:10.887 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:10.887 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:10.889 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:10.889 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:10.890 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:10.890 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:10.892 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:10.892 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:10.908 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:10.908 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:11.529 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:11.529 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:11.532 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:11.532 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:11.545 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:11.545 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:11.563 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:11.563 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:11.568 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:11.568 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:11.573 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:11.573 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.301 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.301 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.307 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.307 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.324 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.324 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.349 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.349 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.351 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.351 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.389 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.389 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.389 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.389 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.392 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.392 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.403 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.403 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.404 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.404 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.407 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.407 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.408 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.408 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.408 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.408 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.409 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.409 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.410 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.410 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.422 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.422 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.424 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.424 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.430 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.430 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.434 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.434 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.436 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.436 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.437 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.437 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.437 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.437 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.439 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.439 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.440 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.440 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.440 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.440 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.448 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.448 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.450 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.450 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.453 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.453 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.468 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.468 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.470 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.470 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.477 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.477 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.480 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.480 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:00:41.483 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:00:41.483 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.122 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.122 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.124 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.124 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.124 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.124 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.162 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.162 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.163 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.163 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.163 UTC [20752] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.163 UTC [20752] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.164 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.164 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.165 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.165 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.166 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.166 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.173 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.173 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.178 UTC [20751] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.178 UTC [20751] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:03.182 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:03.182 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.700 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.700 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.732 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.732 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.748 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.748 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.748 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.748 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.755 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.755 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.762 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.762 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.763 UTC [20754] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.763 UTC [20754] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.764 UTC [20755] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.764 UTC [20755] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.770 UTC [20753] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.770 UTC [20753] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.774 UTC [20747] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.774 UTC [20747] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:17.775 UTC [20745] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:17.775 UTC [20745] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:27.602 UTC [20744] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:27.602 UTC [20744] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.591 UTC [21172] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.591 UTC [21172] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.592 UTC [21168] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.592 UTC [21168] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.594 UTC [21171] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.594 UTC [21171] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.596 UTC [21176] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.596 UTC [21176] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.602 UTC [21179] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.602 UTC [21179] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.602 UTC [21178] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.602 UTC [21178] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.602 UTC [21177] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.602 UTC [21177] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:34.603 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:01:34.603 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:01:58.881 UTC [17679]  LOG:  checkpoint starting: time
+2026-10-22 22:01:58.912 UTC [17679]  LOG:  checkpoint complete: time: wrote 0 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 30 recycled; write=0.002 s, sync=0.002 s, total=0.031 s; sync files=17, longest=0.001 s, average=0.001 s; distance=497964 kB, estimate=536792 kB; lsn=3/9964E760, redo lsn=3/9964E700
+2026-10-22 22:02:11.602 UTC [21177] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:11.602 UTC [21177] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:11.603 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:11.603 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.677 UTC [21179] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.677 UTC [21179] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.678 UTC [21172] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.678 UTC [21172] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.681 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.681 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.681 UTC [21178] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.681 UTC [21178] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.681 UTC [21171] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.681 UTC [21171] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.682 UTC [21176] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.682 UTC [21176] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.689 UTC [21177] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.689 UTC [21177] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:02:44.699 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:02:44.699 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.055 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.055 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.064 UTC [21177] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.064 UTC [21177] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.066 UTC [21168] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.066 UTC [21168] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.068 UTC [21178] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.068 UTC [21178] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.070 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.070 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.074 UTC [21171] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.074 UTC [21171] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.116 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.116 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.116 UTC [21168] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.116 UTC [21168] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.121 UTC [21172] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.121 UTC [21172] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.125 UTC [21177] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.125 UTC [21177] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.138 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.138 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.138 UTC [21168] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.138 UTC [21168] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.138 UTC [21176] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.138 UTC [21176] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.139 UTC [21172] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.139 UTC [21172] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.139 UTC [21171] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.139 UTC [21171] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.140 UTC [21177] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.140 UTC [21177] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.297 UTC [21171] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.297 UTC [21171] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.298 UTC [21173] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.298 UTC [21173] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.314 UTC [21172] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.314 UTC [21172] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.316 UTC [21171] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.316 UTC [21171] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:03.328 UTC [21177] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:03.328 UTC [21177] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:12.259 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:12.259 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:12.259 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:12.259 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:12.260 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:12.260 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:12.270 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:12.270 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.690 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.690 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.697 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.697 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.705 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.705 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.705 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.705 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.709 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.709 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.712 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.712 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.712 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.712 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.713 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.713 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.717 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.717 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.718 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.718 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:18.718 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:18.718 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:19.307 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:19.307 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.498 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.498 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.504 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.504 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.505 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.505 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.511 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.511 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.518 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.518 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.519 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.519 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.522 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.522 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:21.525 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:21.525 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.635 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.635 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.645 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.645 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.647 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.647 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.649 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.649 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.651 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.651 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.678 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.678 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.684 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.684 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.685 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.685 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.688 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.688 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.694 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.694 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:25.696 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:25.696 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:30.776 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:30.776 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:30.806 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:30.806 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:30.808 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:30.808 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:30.810 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:30.810 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:30.812 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:30.812 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.053 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.053 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.057 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.057 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.058 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.058 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.119 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.119 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.125 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.125 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.127 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.127 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.129 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.129 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.132 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.132 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.684 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.684 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.735 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.735 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.736 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.736 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.741 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.741 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.746 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.746 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.747 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.747 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.756 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.756 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.759 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.759 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.760 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.760 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.762 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.762 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.765 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.765 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.771 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.771 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.772 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.772 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.775 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.775 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.777 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.777 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.805 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.805 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.809 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.809 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.814 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.814 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.819 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.819 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.823 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.823 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.825 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.825 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.850 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.850 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.854 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.854 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.855 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.855 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.857 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.857 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.858 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.858 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.861 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.861 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.872 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.872 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.877 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.877 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.879 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.879 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.880 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.880 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.885 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.885 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.888 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.888 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.892 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.892 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.973 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.973 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:31.977 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:31.977 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:32.002 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:32.002 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:32.003 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:32.003 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:33.672 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:33.672 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:33.684 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:33.684 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:53.303 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:53.303 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:53.304 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:53.304 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:53.304 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:53.304 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.502 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.502 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.551 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.551 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.555 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.555 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.563 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.563 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.566 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.566 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.568 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.568 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.569 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.569 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.581 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.581 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.588 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.588 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.597 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.597 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.602 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.602 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.602 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.602 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.604 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.604 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.614 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.614 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.615 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.615 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.629 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.629 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.630 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.630 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.632 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.632 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:54.635 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:54.635 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.423 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.423 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.424 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.424 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.424 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.424 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.424 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.424 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.427 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.427 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.434 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.434 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.436 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.436 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.440 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.440 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.444 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.444 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.447 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.447 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.453 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.453 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.453 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.453 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.454 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.454 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.462 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.462 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.464 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.464 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.465 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.465 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.465 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.465 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.465 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.465 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.465 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.465 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.468 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.468 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.478 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.478 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.478 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.478 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.479 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.479 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.479 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.479 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.480 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.480 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.485 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.485 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.491 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.491 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.494 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.494 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.495 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.495 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.503 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.503 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.505 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.505 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.505 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.505 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.508 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.508 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.509 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.509 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.510 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.510 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.518 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.518 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.518 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.518 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.522 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.522 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.523 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.523 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.524 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.524 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.526 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.526 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.528 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.528 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.532 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.532 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.534 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.534 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.536 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.536 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.536 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.536 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.542 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.542 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.543 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.543 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.543 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.543 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.544 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.544 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:03:58.545 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:03:58.545 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:22.631 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:22.631 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:22.637 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:22.637 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:22.638 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:22.638 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:22.639 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:22.639 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:22.645 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:22.645 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:22.652 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:22.652 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:22.666 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:22.666 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:27.100 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:27.100 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:29.658 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:29.658 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:29.663 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:29.663 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.779 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.779 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.782 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.782 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.783 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.783 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.784 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.784 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.785 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.785 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.786 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.786 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.788 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.788 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.795 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.795 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.797 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.797 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.808 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.808 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.816 UTC [21441] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.816 UTC [21441] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.816 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.816 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.824 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.824 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.825 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.825 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.829 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.829 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.832 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.832 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.834 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.834 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.835 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.835 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.849 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.849 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.850 UTC [21450] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.850 UTC [21450] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.851 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.851 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.851 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.851 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.852 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.852 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:34.853 UTC [21446] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:34.853 UTC [21446] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:38.733 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:38.733 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:38.736 UTC [21440] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:38.736 UTC [21440] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:38.736 UTC [21447] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:38.736 UTC [21447] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:38.746 UTC [21449] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:38.746 UTC [21449] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:38.768 UTC [21442] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:38.768 UTC [21442] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:47.244 UTC [21451] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:47.244 UTC [21451] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:54.002 UTC [21913] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:54.002 UTC [21913] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:04:54.008 UTC [21916] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:04:54.008 UTC [21916] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.787 UTC [21923] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.787 UTC [21923] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.788 UTC [21919] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.788 UTC [21919] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.790 UTC [21920] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.790 UTC [21920] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.790 UTC [21922] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.790 UTC [21922] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.791 UTC [21924] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.791 UTC [21924] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.791 UTC [21921] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.791 UTC [21921] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.792 UTC [21913] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.792 UTC [21913] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:18.795 UTC [21916] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:18.795 UTC [21916] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.768 UTC [21921] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.768 UTC [21921] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.782 UTC [21916] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.782 UTC [21916] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.782 UTC [21920] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.782 UTC [21920] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.792 UTC [21923] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.792 UTC [21923] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.793 UTC [21916] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.793 UTC [21916] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.808 UTC [21923] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.808 UTC [21923] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.809 UTC [21924] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.809 UTC [21924] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.814 UTC [21920] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.814 UTC [21920] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:26.842 UTC [21921] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:26.842 UTC [21921] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:58.503 UTC [21924] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:58.503 UTC [21924] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:58.505 UTC [21922] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:58.505 UTC [21922] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:58.506 UTC [21916] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:58.506 UTC [21916] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:58.506 UTC [21923] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:58.506 UTC [21923] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:05:59.675 UTC [21919] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:05:59.675 UTC [21919] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:28.929 UTC [21919] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:28.929 UTC [21919] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:28.931 UTC [21924] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:28.931 UTC [21924] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:28.931 UTC [21916] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:28.931 UTC [21916] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:28.932 UTC [21923] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:28.932 UTC [21923] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:28.932 UTC [21921] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:28.932 UTC [21921] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:31.686 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:31.686 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:31.696 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:31.696 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:31.696 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:31.696 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:31.696 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:31.696 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:45.135 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:45.135 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:45.135 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:45.135 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:45.141 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:45.141 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:45.172 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:45.172 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:57.110 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:57.110 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:57.113 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:57.113 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:57.116 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:57.116 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:57.123 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:57.123 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:57.123 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:57.123 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:57.125 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:57.125 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:57.132 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:06:57.132 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:06:59.011 UTC [17679]  LOG:  checkpoint starting: time
+2026-10-22 22:06:59.019 UTC [17679]  LOG:  checkpoint complete: time: wrote 0 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.008 s; sync files=3, longest=0.001 s, average=0.001 s; distance=9 kB, estimate=483114 kB; lsn=3/99650F50, redo lsn=3/99650EF0
+2026-10-22 22:07:02.237 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.237 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:02.247 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.247 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:02.255 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.255 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:02.258 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.258 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:02.290 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.290 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:02.292 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.292 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:02.304 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.304 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:02.307 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:02.307 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:12.526 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:12.526 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.421 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.421 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.459 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.459 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.464 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.464 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.470 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.470 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.475 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.475 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.477 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.477 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.478 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.478 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.483 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.483 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.485 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.485 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.487 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.487 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.491 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.491 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.494 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.494 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.495 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.495 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.540 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.540 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.543 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.543 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.558 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.558 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.560 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.560 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.567 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.567 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.572 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.572 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.584 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.584 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.585 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.585 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:35.592 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:35.592 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.088 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.088 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.090 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.090 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.099 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.099 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.103 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.103 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.121 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.121 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.123 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.123 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.143 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.143 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.145 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.145 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.170 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.170 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.172 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.172 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.173 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.173 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.175 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.175 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.178 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.178 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.185 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.185 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.187 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.187 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.190 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.190 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.190 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.190 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.190 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.190 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.191 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.191 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.197 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.197 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.206 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.206 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.212 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.212 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.215 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.215 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.216 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.216 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.216 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.216 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.222 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.222 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.227 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.227 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.229 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.229 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.231 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.231 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.236 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.236 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.240 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.240 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.240 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.240 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.246 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.246 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.246 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.246 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:38.247 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:38.247 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:41.989 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:41.989 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:41.989 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:41.989 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:41.989 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:41.989 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:41.991 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:41.991 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:41.992 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:41.992 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:41.993 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:41.993 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:41.998 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:41.998 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.006 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.006 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.009 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.009 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.011 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.011 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.015 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.015 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.015 UTC [22119] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.015 UTC [22119] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.017 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.017 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.061 UTC [22128] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.061 UTC [22128] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:42.061 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:42.061 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:47.295 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:47.295 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:47.297 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:47.297 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:47.311 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:47.311 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:47.318 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:47.318 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:07:47.320 UTC [22125] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:07:47.320 UTC [22125] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:05.086 UTC [22123] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:05.086 UTC [22123] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:05.086 UTC [22117] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:05.086 UTC [22117] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:05.086 UTC [22129] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:05.086 UTC [22129] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:06.671 UTC [22120] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:06.671 UTC [22120] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:06.672 UTC [22126] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:06.672 UTC [22126] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:13.615 UTC [22598] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:13.615 UTC [22598] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:13.615 UTC [22600] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:13.615 UTC [22600] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:08:13.623 UTC [22603] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:08:13.623 UTC [22603] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:09:48.602 UTC [22598] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:09:48.602 UTC [22598] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:09:51.229 UTC [22793] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:09:51.229 UTC [22793] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:09:51.231 UTC [22797] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:09:51.231 UTC [22797] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:09:51.235 UTC [22795] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:09:51.235 UTC [22795] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:09:51.236 UTC [22800] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:09:51.236 UTC [22800] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.213 UTC [22803] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.213 UTC [22803] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.213 UTC [22804] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.213 UTC [22804] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.260 UTC [22793] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.260 UTC [22793] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.262 UTC [22795] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.262 UTC [22795] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.264 UTC [22804] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.264 UTC [22804] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.266 UTC [22797] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.266 UTC [22797] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.267 UTC [22801] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.267 UTC [22801] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:01.267 UTC [22800] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:01.267 UTC [22800] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.588 UTC [22800] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.588 UTC [22800] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.588 UTC [22795] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.588 UTC [22795] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.589 UTC [22802] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.589 UTC [22802] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.589 UTC [22801] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.589 UTC [22801] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.590 UTC [22804] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.590 UTC [22804] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.591 UTC [22793] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.591 UTC [22793] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.592 UTC [22797] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.592 UTC [22797] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:05.592 UTC [22803] app ERROR:  canceling statement due to statement timeout
+2026-10-22 22:11:05.592 UTC [22803] app STATEMENT:  SELECT filler FROM t WHERE id = $1
+2026-10-22 22:11:59.044 UTC [17679]  LOG:  checkpoint starting: time
+2026-10-22 22:11:59.252 UTC [17679]  LOG:  checkpoint complete: time: wrote 2 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.202 s, sync=0.003 s, total=0.209 s; sync files=3, longest=0.003 s, average=0.001 s; distance=10 kB, estimate=434803 kB; lsn=3/99653870, redo lsn=3/99653810
+2026-10-22 22:13:06.601 UTC [23388] psql ERROR:  column "checkpoints_timed" does not exist at character 8
+2026-10-22 22:13:06.601 UTC [23388] psql STATEMENT:  select checkpoints_timed, checkpoints_req from pg_stat_checkpointer; select relname, autovacuum_count, autoanalyze_count from pg_stat_user_tables
