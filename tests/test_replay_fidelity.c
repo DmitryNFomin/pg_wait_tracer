@@ -75,6 +75,157 @@ find_sys(const struct pgwt_accumulator *acc, uint32_t we)
     return NULL;
 }
 
+/* #495: absolute CPU values catch full-wall replay; conservation alone
+ * cannot, since off-CPU is calculated as wall minus CPU. Each isolated
+ * case gets a fresh accumulator and a record decoded from the real writer. */
+static void check_cpu_replay(const struct pgwt_trace_event *e,
+                              const struct pgwt_block_info *bi,
+                              uint64_t from, uint64_t to,
+                              uint64_t cpu, uint64_t offcpu, uint64_t db)
+{
+    struct pgwt_accumulator *acc = malloc(sizeof(*acc));
+    if (!acc) { perror("malloc"); exit(1); }
+    pgwt_accum_init(acc);
+    pgwt_replay_events(acc, e, 1, from, to, bi, NULL);
+    CHECK_EQ_U64(acc->tm.cpu_time_ns, cpu, "time model CPU (ns)");
+    CHECK_EQ_U64(acc->tm.offcpu_time_ns, offcpu, "time model off-CPU (ns)");
+    CHECK_EQ_U64(acc->tm.db_time_ns, db, "time model DB wall (ns)");
+    struct pgwt_pid_accum *pa = pgwt_find_pid_accum(acc, e->pid);
+    CHECK(pa != NULL, "record's PID accumulated");
+    if (pa) {
+        CHECK_EQ_U64(pa->cpu_time_ns, cpu, "per-PID CPU agrees (ns)");
+        CHECK_EQ_U64(pa->db_time_ns, db, "per-PID DB keeps wall (ns)");
+    }
+    if (e->old_event == IO_READ) {
+        CHECK_EQ_U64(acc->tm.io_time_ns, db, "IO keeps full wall (ns)");
+        if (pa)
+            CHECK_EQ_U64(pa->wait_time_ns, db, "per-PID wait keeps wall (ns)");
+    }
+    free(acc);
+}
+
+static void test_cpu_replay(bool measured)
+{
+    char dir[] = "/tmp/pgwt_replay_cpu_XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+    const uint64_t BASE = 10000000000000ULL;
+    const uint64_t MS = 1000000ULL;
+    const uint64_t PERIOD = 100 * MS;
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0) {
+        fprintf(stderr, "CPU writer init failed\n");
+        exit(1);
+    }
+    w.cpu_measured = measured;
+    struct pgwt_trace_event trans[] = {
+        ev(2000, BASE + 10 * MS, 10 * MS, 0, IO_READ, 0),
+        ev(2001, BASE + 30 * MS, 10 * MS, 0, IO_READ, 0),
+        ev(2002, BASE + 50 * MS, 10 * MS, 0, IO_READ, 0),
+        ev(2003, BASE + 70 * MS, 10 * MS, IO_READ, 0, 0),
+    };
+    trans[0].cpu_ns = 4 * MS;
+    trans[1].cpu_ns = 0;
+    trans[2].cpu_ns = 12 * MS;
+    trans[3].cpu_ns = 4 * MS;
+    int count = measured ? 4 : 1;
+    for (int i = 0; i < count; i++)
+        CHECK(pgwt_writer_push_event(&w, &trans[i]) == 0,
+              "CPU fixture interval written");
+    if (measured) {
+        struct pgwt_trace_event sample = ev(2004, BASE + 90 * MS, 0,
+                                            0, 0, 0);
+        CHECK(pgwt_writer_push_samples(&w, &sample, 1, PERIOD) == 0,
+              "CPU fixture sample written");
+    }
+    CHECK(pgwt_writer_close(&w) == 0, "CPU fixture writer closed");
+    pgwt_writer_destroy(&w);
+
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, path) != 0) {
+        fprintf(stderr, "CPU fixture reader open failed\n");
+        exit(1);
+    }
+    /* cpu_measured=false still writes v3, with UNKNOWN in its CPU column;
+     * v2 decoding supplies the same sentinel without a column. */
+    CHECK_EQ_U64(r.header.version, 3, "real writer emits v3 CPU column");
+    CHECK_EQ_U64(r.num_blocks, measured ? 2 : 1,
+                 "CPU fixture has expected interval/sample blocks");
+    struct pgwt_trace_event *buf = malloc(PGWT_BLOCK_EVENTS * sizeof(*buf));
+    struct pgwt_accumulator *mixed = malloc(sizeof(*mixed));
+    if (!buf || !mixed) { perror("malloc"); exit(1); }
+    pgwt_accum_init(mixed);
+    int intervals_seen = 0, samples_seen = 0;
+    for (int b = 0; b < r.num_blocks; b++) {
+        struct pgwt_block_info bi;
+        int n = pgwt_reader_decode_block_info(&r, b, buf,
+                                              PGWT_BLOCK_EVENTS, &bi);
+        CHECK(n > 0, "CPU fixture block decoded");
+        if (n <= 0) continue;
+        pgwt_replay_events(mixed, buf, n, 0, 0, &bi, NULL);
+        if (bi.block_type == PGWT_BLOCK_TRANSITIONS) {
+            intervals_seen += n;
+            CHECK_EQ_U64(n, count, "all CPU fixture intervals decoded");
+            if (n != count) continue;
+            if (!measured) {
+                printf("CASE #495: UNKNOWN keeps legacy whole-gap CPU\n");
+                CHECK_EQ_U64(buf[0].cpu_ns, PGWT_CPU_NS_UNKNOWN,
+                             "unmeasured writer stamps UNKNOWN, not zero");
+                check_cpu_replay(&buf[0], &bi, 0, 0, 10 * MS, 0, 10 * MS);
+                continue;
+            }
+            CHECK_EQ_U64(buf[0].cpu_ns, 4 * MS, "measured CPU column decoded");
+            printf("CASE #495: measured 4 ms CPU in 10 ms wall\n");
+            check_cpu_replay(&buf[0], &bi, 0, 0, 4 * MS, 6 * MS, 10 * MS);
+            printf("CASE #495: same interval, half-window overlap\n");
+            check_cpu_replay(&buf[0], &bi, BASE + 5 * MS, BASE + 10 * MS,
+                             2 * MS, 3 * MS, 5 * MS);
+            printf("CASE #495: measured zero is not UNKNOWN\n");
+            CHECK_EQ_U64(buf[1].cpu_ns, 0, "measured zero survives writer");
+            check_cpu_replay(&buf[1], &bi, 0, 0, 0, 10 * MS, 10 * MS);
+            printf("CASE #495: CPU skew clamps to wall\n");
+            CHECK_EQ_U64(buf[2].cpu_ns, 12 * MS, "skew survives writer");
+            check_cpu_replay(&buf[2], &bi, 0, 0, 10 * MS, 0, 10 * MS);
+            printf("CASE #495: measured wait spin keeps its IO label\n");
+            CHECK_EQ_U64(buf[3].cpu_ns, 4 * MS, "wait spin survives writer");
+            check_cpu_replay(&buf[3], &bi, 0, 0, 0, 0, 10 * MS);
+        } else if (bi.block_type == PGWT_BLOCK_SAMPLES) {
+            samples_seen += n;
+            CHECK_EQ_U64(n, 1, "one CPU sample decoded");
+            if (n != 1) continue;
+            printf("CASE #495: CPU sample keeps one period of estimated CPU\n");
+            /* The original no-phantom-CPU assertion covers Lock samples.
+             * A real new_event==0 sample DOES reach the CPU bucket. */
+            CHECK_EQ_U64(buf[0].new_event, 0, "sample observes CPU");
+            CHECK_EQ_U64(buf[0].cpu_ns, PGWT_CPU_NS_UNKNOWN,
+                         "sample has no measured CPU");
+            check_cpu_replay(&buf[0], &bi, 0, 0, PERIOD, 0, PERIOD);
+        }
+    }
+    CHECK_EQ_U64(intervals_seen, count, "interval checks were reached");
+    CHECK_EQ_U64(samples_seen, measured ? 1 : 0, "sample checks were reached");
+    if (measured) {
+        uint64_t pid_cpu = 0;
+        for (int i = 0; i < mixed->num_pids; i++)
+            pid_cpu += mixed->pids[i].cpu_time_ns;
+        CHECK_EQ_U64(mixed->tm.cpu_time_ns, 14 * MS + PERIOD,
+                     "mixed CPU = 4 + 0 + clamped 10 ms + one period");
+        CHECK_EQ_U64(mixed->tm.offcpu_time_ns, 16 * MS,
+                     "mixed off-CPU = 6 + 10 ms");
+        CHECK_EQ_U64(pid_cpu, 14 * MS + PERIOD,
+                     "mixed per-PID CPU sum is measured, not wall");
+        CHECK_EQ_U64(pid_cpu, mixed->tm.cpu_time_ns,
+                     "mixed per-PID CPU sum agrees with time model");
+    }
+    pgwt_reader_close(&r);
+    free(buf);
+    free(mixed);
+    char cmd[700];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
 int main(void)
 {
     char dir[] = "/tmp/pgwt_replay_fid_XXXXXX";
@@ -221,6 +372,9 @@ int main(void)
     char cmd[700];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0) { /* best effort */ }
+
+    test_cpu_replay(true);
+    test_cpu_replay(false);
 
     printf("%s\n", failures == 0 ? "ALL PASSED" : "FAILURES");
     return failures == 0 ? 0 : 1;

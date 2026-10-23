@@ -784,6 +784,22 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
             else                        st->straddlers_admitted++;
         }
 
+        uint64_t cpu_add = add_ns, offcpu_add = 0;
+        if (we == 0 && !sampled && evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+            /* #495: match map_reader.c's measured CPU split and compute.c's
+             * window scaling. Clamp skew before scaling; measured zero is
+             * real zero, while UNKNOWN keeps legacy whole-gap CPU. Samples
+             * keep their whole sample-period weight as CPU, with no off-CPU.
+             * System/PID event tables still carry wall for the CPU row,
+             * unlike map_reader.c's add_event_stats: that known divergence
+             * remains for a separate issue. */
+            uint64_t m = evt->cpu_ns < occ_ns ? evt->cpu_ns : occ_ns;
+            cpu_add = occ_ns
+                ? (uint64_t)(((unsigned __int128)m * add_ns) / occ_ns) : 0;
+            if (cpu_add > add_ns) cpu_add = add_ns;
+            offcpu_add = add_ns - cpu_add;
+        }
+
         /* Per-PID accumulation */
         struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
         if (pa) {
@@ -800,7 +816,7 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                 }
             }
             if (we == 0)
-                pa->cpu_time_ns += add_ns;
+                pa->cpu_time_ns += cpu_add;
             else if (!pgwt_is_idle_event(we))
                 pa->wait_time_ns += add_ns;
             if (!pgwt_is_idle_event(we))
@@ -821,8 +837,17 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
             }
         }
 
-        /* Time model */
-        pgwt_update_time_model(&acc->tm, we, add_ns);
+        /* #495: split inline as in map_reader.c; pgwt_update_time_model
+         * accepts only wall time and cannot express measured off-CPU.
+         * Wait-labelled spin stays observability only (compute.c): every
+         * other label keeps its full wall contribution. */
+        if (we == 0) {
+            acc->tm.cpu_time_ns += cpu_add;
+            acc->tm.offcpu_time_ns += offcpu_add;
+            acc->tm.db_time_ns += add_ns;
+        } else {
+            pgwt_update_time_model(&acc->tm, we, add_ns);
+        }
 
         /* Query events */
         if (evt->query_id != 0) {

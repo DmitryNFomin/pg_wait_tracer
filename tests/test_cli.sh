@@ -15,10 +15,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$PM_PID" ]]; then
-    PM_PID=$(find_postmaster)
-fi
-
 echo "=== test_cli ==="
 
 passed=0
@@ -36,6 +32,75 @@ check_exit() {
         failed=$((failed + 1))
     fi
 }
+
+# #495: replay dispatches before PostgreSQL discovery/BPF setup. Keep this
+# rendered-text regression independent of PM_PID and fail if tools are missing.
+check_replay_cpu() {
+    local generator="$SCRIPT_DIR/gen_test_traces"
+    local replay_dir output rc stat ms
+    if [[ ! -x "$generator" ]]; then
+        echo "  FAIL: replay CPU fixture requires executable $generator"
+        failed=$((failed + 1))
+        return
+    fi
+    if [[ ! -x "$TRACER" ]]; then
+        echo "  FAIL: replay CPU text test requires executable $TRACER"
+        failed=$((failed + 1))
+        return
+    fi
+    if ! replay_dir=$(mktemp -d); then
+        echo "  FAIL: replay CPU fixture could not create temporary directory"
+        failed=$((failed + 1))
+        return
+    fi
+    output=$("$generator" -o "$replay_dir" --inline '{
+        "cpu_measured": 1,
+        "backends": [{"pid": 1000, "type": "client", "user": "postgres", "db": "testdb"}],
+        "events": [
+            {"pid": 1000, "ts": 1010000000, "dur": 10000000,
+             "old": 0, "new": 167772181, "cpu": 4000000},
+            {"pid": 1000, "ts": 1020000000, "dur": 10000000,
+             "old": 167772181, "new": 0, "cpu": 4000000}
+        ]
+    }' 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "  FAIL: replay CPU fixture generator failed (rc=$rc): $output"
+        failed=$((failed + 1))
+        rm -rf -- "$replay_dir"
+        return
+    fi
+    output=$("$TRACER" --replay -T "$replay_dir" --view time_model 2>&1)
+    rc=$?
+    check_exit 0 "$rc" "--replay measured CPU exits 0"
+    if [[ $rc -eq 126 || $rc -eq 127 ]]; then
+        echo "  replay tracer could not execute (rc=$rc): $output"
+    fi
+    # Match complete first and second fields: neither an Off-CPU* row nor
+    # an explanatory CPU* footnote can satisfy the measured CPU assertion.
+    while read -r stat ms; do
+        if awk -v stat="$stat" -v ms="$ms" '
+            NF == 3 && $1 == stat && $2 == ms { found = 1 }
+            END { exit !found }
+        ' <<< "$output"; then
+            echo "  PASS: --replay $stat row shows $ms ms"
+            passed=$((passed + 1))
+        else
+            echo "  FAIL: --replay $stat row missing $ms ms (rc=$rc): $output"
+            failed=$((failed + 1))
+        fi
+    done <<'ROWS'
+CPU* 4.0
+Off-CPU* 6.0
+IO 10.0
+ROWS
+    rm -rf -- "$replay_dir"
+}
+check_replay_cpu
+
+if [[ -z "$PM_PID" ]]; then
+    PM_PID=$(find_postmaster)
+fi
 
 # --help exits 0
 "$TRACER" --help > /dev/null 2>&1
