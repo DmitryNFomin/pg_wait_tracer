@@ -6643,13 +6643,17 @@ static void emit_transitions_response(struct pgwt_request *req,
         return;
     }
 
-    /* Classification status for the encountered NODE ids. No Timeout nodes
-     * means vacuously complete (nothing to classify), not "the catalog is
-     * good". The node pass examines every loaded event; raw res link rows
-     * are the request-filtered, capped subset. The raw node pass also applies
-     * that filter, but its event set covers every link's source event, so
-     * checking the full node table suffices for the idle verdicts below.
-     * Link-only target events have no node idle verdict to approve here. */
+    /* Classification status for the encountered Timeout NODE ids. No Timeout
+     * nodes means vacuously complete (nothing to classify), not "the catalog is
+     * good". The raw node pass applies the request filter, and
+     * pgwt_block_agg_add_event() accumulates old_event nodes, covering every
+     * link's source event; raw res link rows are request-filtered and capped.
+     * Link-only targets cannot reach a rendered graph unclassified:
+     * transitionsDataError() in web/static/lib/builders/transitions.js checks
+     * BOTH endpoints of every link against the node-name set and rejects the
+     * WHOLE payload with 'missing node: ' + name if either is absent, before
+     * any graph is built. Thus checking node ids suffices for the idle
+     * verdicts below. */
     int idle_classification_complete = 1;
     for (int i = 0; i < n_nodes; i++) {
         uint32_t event_id = nodes_arr[i].event_id;

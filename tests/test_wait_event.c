@@ -455,6 +455,16 @@ static void test_idle_pre_init(void)
     CHECK(pgwt_idle_rule_timeout_mask() == 0,
           "pre-init mask is EMPTY (got 0x%03x) -- uninitialised must not be "
           "silently treated as PG18", pgwt_idle_rule_timeout_mask());
+    for (uint32_t id = 0; id < 32; id++)
+        CHECK(pgwt_timeout_id_is_classifiable(id) == 0,
+              "uninitialised state: Timeout id %u coverage must agree with "
+              "the empty mask", id);
+    CHECK(pgwt_timeout_id_is_classifiable(32) == 0,
+          "uninitialised state: Timeout id 32 coverage must agree with "
+          "the empty mask");
+    CHECK(pgwt_timeout_id_is_classifiable(99) == 0,
+          "uninitialised state: Timeout id 99 coverage must agree with "
+          "the empty mask");
     CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
           "pre-init: no Timeout id is classified, not even PG18's id 1");
     CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
@@ -1136,6 +1146,15 @@ static void test_timeout_classification_coverage(void)
     CHECK(pgwt_idle_rule_timeout_mask() == 0,
           "PG16 dropped observed names ids 0..31: mask is empty again");
     check_timeout_coverage("PG16 dropped observed names", 0);
+
+    /* INVALIDATION: changing to an unverified major must clear stale
+     * coverage, and changing back must restore it. */
+    pgwt_init_event_names(18);
+    check_timeout_coverage("invalidation: PG18 before version change", 0x3FFu);
+    pgwt_init_event_names(16);
+    check_timeout_coverage("invalidation: PG16 clears stale coverage", 0);
+    pgwt_init_event_names(18);
+    check_timeout_coverage("invalidation: PG18 restores coverage", 0x3FFu);
 
     pgwt_init_event_names(18);
     check_timeout_coverage("PG18 static fallback", 0x3FFu); /* 10 entries */
