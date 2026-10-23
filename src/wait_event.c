@@ -605,6 +605,20 @@ static void rebuild_idle_mask(void)
     pgwt_idle_rule_set_timeout_mask(mask);
 }
 
+/* MUST be kept in step with rebuild_idle_mask(): a divergence would make
+ * the provenance flag approve ids the mask refuses to classify. */
+int pgwt_timeout_id_is_classifiable(uint32_t id)
+{
+    if (id >= 32)
+        return 0;
+    if (PGWT_TIMEOUT_TABLE_VERIFIED(pg_version))
+        return pgwt_event_name(WEI(PG_WAIT_TIMEOUT, (int)id)) != NULL;
+    if (dyn_loaded && dyn_observed && dyn_max[PG_WAIT_TIMEOUT] >= 0)
+        return ((int)id <= dyn_max[PG_WAIT_TIMEOUT]) &&
+               dyn_names[PG_WAIT_TIMEOUT][id] != NULL;
+    return 0;
+}
+
 void pgwt_init_event_names(int pg_major)
 {
     select_version_tables(pg_major);

@@ -11,6 +11,7 @@
 
 static int tests_run = 0;
 static int tests_passed = 0;
+static int cov515_section_ran = 0;
 
 /* WEI is provided by pg_wait_tracer.h */
 
@@ -1088,9 +1089,101 @@ static void test_trace_init_fallback_order(void)
     pgwt_init_event_names(18);
 }
 
+/* ── 10. #515: catalog coverage is distinct from the pacing verdict ───── */
+static void check_timeout_coverage(const char *state, uint32_t covered)
+{
+    uint32_t mask = pgwt_idle_rule_timeout_mask();
+    for (uint32_t id = 0; id < 32; id++) {
+        int classifiable = pgwt_timeout_id_is_classifiable(id);
+        CHECK((classifiable != 0) == ((covered >> id) & 1u),
+              "%s Timeout id %u: catalog coverage expected %u, got %d",
+              state, id, (covered >> id) & 1u, classifiable);
+        /* Only this implication holds: a known PgSleep is classifiable
+         * without being pacing, so the converse would be wrong. */
+        CHECK(!((mask >> id) & 1u) || classifiable,
+              "%s Timeout id %u: every pacing mask bit must be classifiable",
+              state, id);
+    }
+    CHECK(pgwt_timeout_id_is_classifiable(32) == 0,
+          "%s Timeout id 32: outside mask, must refuse", state);
+    CHECK(pgwt_timeout_id_is_classifiable(99) == 0,
+          "%s Timeout id 99: outside mask, must refuse", state);
+}
+
+static void test_timeout_classification_coverage(void)
+{
+    cov515_section_ran = 1;
+    printf("--- #515: Timeout classification catalog coverage ---\n");
+
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "PG16 no observed names ids 0..31: clear dynamic state");
+    pgwt_init_event_names(16);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "PG16 no observed names ids 0..31: mask is empty");
+    check_timeout_coverage("PG16 no observed names", 0);
+
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|BaseBackupThrottle\nTimeout|CheckpointWriteDelay\n"
+              "Timeout|PgSleep\n") == 0,
+          "PG16 observed ids 0..2: load partial names");
+    check_timeout_coverage("PG16 observed ids 0..2", 0x7u);
+    CHECK(pgwt_timeout_id_is_classifiable(2) &&
+          !pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)),
+          "PG16 observed id 2: PgSleep is classifiable but not pacing");
+
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "PG16 dropped observed names ids 0..31: invalid buffer drops names");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "PG16 dropped observed names ids 0..31: mask is empty again");
+    check_timeout_coverage("PG16 dropped observed names", 0);
+
+    pgwt_init_event_names(18);
+    check_timeout_coverage("PG18 static fallback", 0x3FFu); /* 10 entries */
+    pgwt_init_event_names(13);
+    check_timeout_coverage("PG13 static fallback", 0x3Fu);  /* 6 entries */
+    pgwt_init_event_names(0);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "unknown major ids 0..31: mask is empty");
+    check_timeout_coverage("unknown major", 0);
+
+    char dir[] = "/tmp/pgwt_cov515_XXXXXX";
+    char *created = mkdtemp(dir);
+    CHECK(created != NULL, "PG16 partial sidecar ids 0..3: create temp dir");
+    if (created) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
+        FILE *fp = fopen(path, "w");
+        CHECK(fp != NULL, "PG16 partial sidecar ids 0..3: open sidecar");
+        if (fp) {
+            CHECK(fputs("{\"names_source\":\"observed\",\"pg_version\":16,"
+                        "\"Timeout\":[\"BaseBackupThrottle\",\"\",\"PgSleep\"]}\n",
+                        fp) >= 0,
+                  "PG16 partial sidecar ids 0..3: write hole at id 1");
+            CHECK(fclose(fp) == 0,
+                  "PG16 partial sidecar ids 0..3: close sidecar");
+        }
+        CHECK(pgwt_load_names_json(dir) == 0,
+              "PG16 partial sidecar ids 0..3: load observed names");
+        check_timeout_coverage("PG16 partial sidecar with id 1 hole", 0x5u);
+        CHECK(pgwt_timeout_id_is_classifiable(2) &&
+              !pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)),
+              "PG16 partial sidecar id 2: PgSleep classifiable, not pacing");
+        CHECK(remove(path) == 0,
+              "PG16 partial sidecar ids 0..3: remove sidecar");
+        CHECK(rmdir(dir) == 0,
+              "PG16 partial sidecar ids 0..3: remove temp dir");
+    }
+
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "PG18 restored ids 0..31: clear dynamic names");
+    pgwt_init_event_names(18);
+}
+
 int main(void)
 {
     printf("=== test_wait_event ===\n");
+    CHECK(!cov515_section_ran,
+          "#515 coverage section must start unmarked before any section runs");
     /* FIRST of all: the pre-init default mask is only observable before any
      * pgwt_init_event_names() call, and this test reads nothing else. */
     test_idle_pre_init();
@@ -1119,8 +1212,12 @@ int main(void)
     test_unverified_majors_are_not_classified();
     test_pg16_sidecar_round_trip();
     test_trace_init_fallback_order();
+    test_timeout_classification_coverage();
     test_dynamic_name_mapping();  /* must run last: sets dyn_loaded */
 
+    CHECK(cov515_section_ran,
+          "#515 coverage section must still be called from main() -- a rebase "
+          "that drops the call silently shrinks this gate instead of failing");
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
 }

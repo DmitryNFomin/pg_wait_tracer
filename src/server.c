@@ -6643,6 +6643,23 @@ static void emit_transitions_response(struct pgwt_request *req,
         return;
     }
 
+    /* Classification status for the encountered NODE ids. No Timeout nodes
+     * means vacuously complete (nothing to classify), not "the catalog is
+     * good". The node pass examines every loaded event; raw res link rows
+     * are the request-filtered, capped subset. The raw node pass also applies
+     * that filter, but its event set covers every link's source event, so
+     * checking the full node table suffices for the idle verdicts below.
+     * Link-only target events have no node idle verdict to approve here. */
+    int idle_classification_complete = 1;
+    for (int i = 0; i < n_nodes; i++) {
+        uint32_t event_id = nodes_arr[i].event_id;
+        if (WE_CLASS(event_id) == PG_WAIT_TIMEOUT &&
+            !pgwt_timeout_id_is_classifiable(WE_EVENT(event_id))) {
+            idle_classification_complete = 0;
+            break;
+        }
+    }
+
     uint64_t total       = use_res ? res->total_transitions
                                    : win->total_transitions;
     int      total_links = use_res ? res->total_rows : n_pairs;
@@ -6657,6 +6674,10 @@ static void emit_transitions_response(struct pgwt_request *req,
     cJSON_AddNumberToObject(root, "link_count", shown);
     cJSON_AddNumberToObject(root, "total_link_count", total_links);
     cJSON_AddBoolToObject(root, "truncated", shown < total_links);
+    /* Trust status is deterministic for a window + catalog, on both paths;
+     * unlike the HOW diagnostics below it is unconditional payload data. */
+    cJSON_AddBoolToObject(root, "idle_classification_complete",
+                          idle_classification_complete);
     /* PROVENANCE, and OPT-IN. How the answer was produced — 0/0 is the raw
      * path — so a reviewer or a test can tell the fast path actually ran
      * instead of inferring it from a latency number.

@@ -1298,7 +1298,12 @@ def _handle_request_inner(cmd, req_id, msg):
         # (1670) are unchanged — test_matrix_view's "1,670 of 1,800" / "5 of
         # 8" note text depends only on those, not on which nodes carry them.
         return {"id": req_id, "total": 1800, "link_count": 5,
-                "total_link_count": 8, "truncated": True, "nodes": [
+                "total_link_count": 8, "truncated": True,
+                # CPU/Client/IO/LWLock only: no Timeout ids are encountered
+                # in this window, so nothing to classify is vacuously complete.
+                # tests/test_protocol_drift.py compares this protocol surface;
+                # keep it in sync with emit_transitions_response() in src/server.c.
+                "idle_classification_complete": True, "nodes": [
             {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0, "idle": False},
             {"name": "Client:ClientRead", "total_ms": 9153, "class": "Client", "event_id": 0x06000000, "idle": True},
             {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015, "idle": False},

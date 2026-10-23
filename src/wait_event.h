@@ -63,6 +63,12 @@ const char *pgwt_class_name(uint32_t wait_event_info);
  * For event=0 (CPU), returns "CPU". */
 const char *pgwt_event_name(uint32_t wait_event_info);
 
+/* Can the RESOLVED catalog decide whether Timeout event id `id` is a pacing
+ * sleep? This answers "can the catalog decide", NOT "is it pacing": a 0
+ * means REFUSE, never "not pacing". Ids >= 32 are not representable in the
+ * pacing mask and are always refused. */
+int pgwt_timeout_id_is_classifiable(uint32_t id);
+
 /* Writes "class:event" (e.g. "IO:DataFileRead") to buf.
  * For event=0, writes "CPU*" (asterisk: not all CPU time is instrumented). */
 void pgwt_event_full_name(uint32_t wait_event_info, char *buf, size_t bufsz);
