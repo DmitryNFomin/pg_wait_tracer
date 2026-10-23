@@ -12,6 +12,9 @@
 
 #define LINE "════════════════════════════════════════════════════════════════════════════════"
 #define DASH "────────────────────────────────────────────────────────────────────────────────"
+/* The "does not apply" cell this file already uses for an inapplicable
+ * %DB (fmt_pct_db), reused for the Off-CPU* row's count/avg/max. */
+#define DASH_CELL "—"
 
 static double ns_to_ms(uint64_t ns) { return (double)ns / 1e6; }
 static double ns_to_us(uint64_t ns) { return (double)ns / 1e3; }
@@ -463,6 +466,36 @@ static int cmp_snap_event_total(const void *a, const void *b)
     return 0;
 }
 
+/* #498: the Off-CPU* row of the system_event view.
+ *
+ * Off-CPU* is not a wait event, so it is in none of acc->system_events: the
+ * on-CPU interval's wall splits into the MEASURED cpu ns (which lands on the
+ * CPU row) and the off-CPU remainder -- runqueue / throttle / unaccounted --
+ * which until now only time_model printed. Without it this view's %DB column
+ * is structurally short of 100% and the two views of one trace disagree.
+ *
+ * It carries no occurrence count, average or maximum: there is no "an
+ * Off-CPU" to count, only a residual duration. Those cells print the same em
+ * dash the view already uses for a %DB that does not apply, which also keeps
+ * every existing `name count total ...` output parser from matching the row.
+ *
+ * Printed only when non-zero -- in the legacy/sampled shape the residual is
+ * structurally 0 and a "0.0%" row would assert a measurement nobody made.
+ */
+static void print_offcpu_row_wide(uint64_t offcpu_ns, uint64_t db)
+{
+    printf("  %-26s %12s %14.1f %10s %12s %8.1f%%\n",
+           "Off-CPU*", DASH_CELL, ns_to_ms(offcpu_ns), DASH_CELL, DASH_CELL,
+           db ? 100.0 * offcpu_ns / db : 0);
+}
+
+static void print_offcpu_row_narrow(uint64_t offcpu_ns, uint64_t db)
+{
+    printf("  %-26s %12s %14.1f %10s %8.1f%%\n",
+           "Off-CPU*", DASH_CELL, ns_to_ms(offcpu_ns), DASH_CELL,
+           db ? 100.0 * offcpu_ns / db : 0);
+}
+
 /* Multi-window system_event: vertically stacked sections per window */
 static void print_system_event_multi(struct pgwt_daemon *d)
 {
@@ -509,11 +542,22 @@ static void print_system_event_multi(struct pgwt_daemon *d)
         printf("\n");
 
         int shown = 0;
+        /* #498: emitted in its own sort position among the event rows, but
+         * NOT counted against the 20-row cap -- the cap is on wait events and
+         * displacing one of them would change what every existing output
+         * parser reads. */
+        int offcpu_done = deltas[w].tm.offcpu_time_ns == 0;
         for (int i = 0; i < deltas[w].num_events && shown < 20; i++) {
             struct pgwt_snap_event *ev = &deltas[w].events[i];
             if (pgwt_row_is_empty(ev->count, ev->total_ns)) continue;   /* #424 */
             /* System events list (visibility): keep Client:ClientRead. */
             if (pgwt_is_hidden_event(ev->wait_event)) continue;
+
+            if (!offcpu_done &&
+                deltas[w].tm.offcpu_time_ns >= ev->total_ns) {
+                print_offcpu_row_narrow(deltas[w].tm.offcpu_time_ns, db);
+                offcpu_done = 1;
+            }
 
             char name[64];
             pgwt_event_full_name(ev->wait_event, name, sizeof(name));
@@ -532,6 +576,8 @@ static void print_system_event_multi(struct pgwt_daemon *d)
                    pctcell);
             shown++;
         }
+        if (!offcpu_done)
+            print_offcpu_row_narrow(deltas[w].tm.offcpu_time_ns, db);
         printf("\n");
     }
 }
@@ -571,10 +617,17 @@ void pgwt_print_system_event(struct pgwt_daemon *d)
            DASH + 54, DASH + 68, DASH + 66, DASH + 70, DASH + 68, DASH + 71);
 
     int shown = 0;
+    /* #498: see print_offcpu_row_wide -- own sort position, outside the cap. */
+    int offcpu_done = acc->tm.offcpu_time_ns == 0;
     for (int i = 0; i < n && shown < 20; i++) {
         if (pgwt_row_is_empty(sorted[i].count, sorted[i].total_ns)) continue;
         /* System events list (visibility): keep Client:ClientRead. */
         if (pgwt_is_hidden_event(sorted[i].wait_event)) continue;
+
+        if (!offcpu_done && acc->tm.offcpu_time_ns >= sorted[i].total_ns) {
+            print_offcpu_row_wide(acc->tm.offcpu_time_ns, db);
+            offcpu_done = 1;
+        }
 
         char name[64];
         pgwt_event_full_name(sorted[i].wait_event, name, sizeof(name));
@@ -594,6 +647,8 @@ void pgwt_print_system_event(struct pgwt_daemon *d)
                pctcell);
         shown++;
     }
+    if (!offcpu_done)
+        print_offcpu_row_wide(acc->tm.offcpu_time_ns, db);
     free(sorted);
     printf("\n");
 }

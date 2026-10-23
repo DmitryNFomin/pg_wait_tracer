@@ -2107,15 +2107,30 @@ wait simultaneously, returns PIDs) — **DONE**; **13.4** web burst annotations 
 
 #### Sprint 14: Advanced Analysis (Phases 4–5) + Phase G.2 — [DONE v0.1–v0.9 backend; UI + plan_id deferred] (2026-03-24)
 (`TRACING_ANALYSIS_PLAN.md` Phases 4–5 + ROADMAP G.2.) **14.1** lock chain detection
-(scan Lock waits, find likely blocker PID via CPU-interval overlap; heuristic, no
-pg_locks) — **DONE**; **14.2** web lock-chain viz — **⏸ [PARKED]** (data via
+(scan Lock waits, pair each with the PID whose **on-CPU** interval overlapped it
+longest — an *overlapping candidate*, blocker **unverified**: no lock identity is
+compared, no pg_locks) — **DONE**; **14.2** web lock-chain viz — **⏸ [PARKED]** (data via
 `lock_chains`); **14.3** cross-session interference scoring (overlapping same-event
 intervals across PIDs, 4096-slot (pid_a,pid_b) hash, normalized 0–1) — **DONE**; **14.4**
 plan-id capture (PG18+) — **⏸ [LEFT/OPEN]** (needs BPF changes + `st_plan_id` offset
 discovery = ROADMAP G.2); **14.5** plan-change detection UI — **⏸ [LEFT/OPEN]** (depends
 on 14.4); **14.6** HMM anomaly detection — **⏸ [PARKED, research]** (see note). Endpoints
-`lock_chains` (waiter/blocker/lock/wait_ms), `interference` (pid_a/pid_b/score/overlap_ms)
-— both confirmed present in `src/server.c`. **Commit:** `5af0d0b`.
+`lock_chains` (waiter/blocker/**blocker_basis**/lock/wait_ms, plus **blocker_note**
+once per response), `interference` (pid_a/pid_b/score/overlap_ms) — both confirmed
+present in `src/server.c`. **Commit:** `5af0d0b`.
+*Later (#497):* the mechanism above is unchanged, but the two lines describing it
+were not safe to leave as written. 14.1 originally read "find **likely blocker** PID",
+and the field list omitted the disclosure keys. "Likely" is a probability claim this
+pick cannot support: candidates are on-CPU intervals **only**, so a holder that is
+itself waiting (e.g. on WAL), idle-in-transaction, or a prepared transaction
+contributes no candidate interval and can never be returned, however certainly it
+holds the lock — invisible, not unlikely. `pgwt-server` now ships
+`blocker_basis` = `"cpu-overlap"` on **every row** (the row is what a client renders)
+and one prose `blocker_note` per response, empty result or not. Both lines are
+corrected in place rather than annotated-and-left, because the sentence they sit in
+("confirmed present in `src/server.c`") is a claim about the CURRENT endpoint, and a
+future client written against the old field list would omit the disclosure. Do not
+re-present `blocker` as the holder.
 *Note on 14.6:* a **different** anomaly engine shipped later — the rework **A5**
 AAS-vs-baseline + lock-fraction rules engine (`src/anomaly.c`), not HMM. HMM proper
 remains parked research.

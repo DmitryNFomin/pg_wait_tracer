@@ -59,6 +59,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_tick_drain \
             test_window_overlap \
             test_semantics_wire \
+            test_lock_chain_disclosure \
+            test_system_event_offcpu \
             test_backend_span \
             test_open_overlay \
             test_replay_window \
@@ -899,6 +901,21 @@ test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_
 # test_window_overlap, so the real handlers, loader and routing gate run.
 test_semantics_wire: test_semantics_wire.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_lock_chain_disclosure: #497 -- lock_chains' "blocker" is an on-CPU
+# overlap pick with no ownership evidence, and the response has to say so.
+# Same shape as test_semantics_wire: the contract is a property of the JSON,
+# so it is driven through the real handler in src/server.c.
+test_lock_chain_disclosure: test_lock_chain_disclosure.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_system_event_offcpu: #498 -- the system_event view's missing Off-CPU*
+# row. Drives the REAL printers in src/output.c (both the single-window and
+# the --window one) with stdout captured, so the assertions are about printed
+# text rather than about the accumulator the printers read. Same object set as
+# test_backend_lifecycle; no bpf_* call is reached, so no wrap is needed.
+test_system_event_offcpu: test_system_event_offcpu.c $(LIFECYCLE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 # test_backend_span: #455 -- the BACKEND ACTIVE SPAN. Drives the real
 # top_queries / span_detail / execution_detail handlers over a trace holding

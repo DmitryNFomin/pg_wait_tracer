@@ -4238,14 +4238,24 @@ void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
 /* ── Lock Chains ──────────────────────────────────────────── */
 
 /*
- * Lock chain detection: for each Lock wait event, find another PID that
- * was active (on CPU or in a different state) during the same time interval.
- * The "blocker" is the PID that was most likely on CPU while the waiter
- * was blocked on a Lock event.
+ * Lock chain detection: for each Lock wait event, find the PID whose on-CPU
+ * interval overlapped that wait the most.
  *
- * This is a heuristic: without pg_locks data, we can only infer blockers
- * from temporal overlap. A PID on CPU while another waits on Lock:transactionid
- * is likely holding the conflicting lock.
+ * #497 -- the result is an OVERLAPPING CANDIDATE; the blocker is UNVERIFIED.
+ * Two facts make that stronger than "a heuristic that is sometimes wrong":
+ *
+ *   1. No lock identity is compared. Nothing here checks that the candidate
+ *      holds, or ever held, the lock the waiter is queued on. Two sessions
+ *      contending on unrelated objects score exactly like a real pair.
+ *   2. The candidate set is on-CPU intervals ONLY (`ev->old_event == 0`
+ *      below). A holder that is itself waiting (e.g. on WAL), sitting
+ *      idle-in-transaction, or a prepared transaction with no backend at all
+ *      contributes no candidate interval, so it cannot be returned however
+ *      certainly it holds the lock.
+ *
+ * So callers must not present the pid as the holder. pgwt-server's
+ * lock_chains response carries blocker_basis ("cpu-overlap") on every row
+ * and blocker_note once per response for exactly this reason.
  */
 
 static int cmp_lock_chain_desc(const void *a, const void *b)
@@ -4266,7 +4276,9 @@ void pgwt_compute_lock_chains(const struct pgwt_trace_event *events, int count,
     struct active_entry *locks = malloc(lock_cap * sizeof(*locks));
     int nlocks = 0;
 
-    /* Collect CPU intervals (potential blockers) */
+    /* Collect CPU intervals. #497: this is the whole candidate set -- a
+     * holder that is off CPU (waiting, idle in transaction, prepared) is
+     * invisible to the pick below, not just unlikely. */
     int cpu_cap = 8192;
     struct active_entry *cpus = malloc(cpu_cap * sizeof(*cpus));
     int ncpus = 0;
@@ -4300,8 +4312,9 @@ void pgwt_compute_lock_chains(const struct pgwt_trace_event *events, int count,
         }
     }
 
-    /* For each Lock wait, find the CPU interval from a different PID
-     * that overlaps the most. That PID is the likely blocker. */
+    /* For each Lock wait, find the CPU interval from a different PID that
+     * overlaps the most. #497: that PID is an overlapping candidate, not a
+     * verified blocker -- no lock identity is compared. */
     int link_cap = max_links * 2;
     struct pgwt_lock_chain_link *links = calloc(link_cap, sizeof(*links));
     int nlinks = 0;
