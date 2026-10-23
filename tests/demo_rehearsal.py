@@ -106,6 +106,63 @@ DEMO_VIEWPORT_HEIGHT = 981
 DEMO_DEVICE_SCALE_FACTOR = 2
 
 
+def _run_ui_gates(url):
+    """#514: timeouts and browser startup failures must register all checks."""
+    checks = {}
+    try:
+        from playwright.sync_api import sync_playwright
+        from web_unit.execution_list_browser import (
+            run_waterfall_fold_gate, run_execution_list_gates,
+            run_execution_disclosure_gates, waterfall_url,
+        )
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                measurements = {
+                    'waterfall_fold': run_waterfall_fold_gate(browser, url),
+                    'execution_list_full_rows': run_execution_list_gates(browser, url),
+                    'execution_truncation_disclosure': run_execution_disclosure_gates(
+                        browser, url, include_fitting=False),
+                }
+                for name, measured in measurements.items():
+                    if name == 'execution_truncation_disclosure':
+                        # Both disclosure mutations run at each viewport; the
+                        # capped-list floor control runs at 1280x800 DPR1.
+                        per_view = {view: measured[view]['negative_control_failures']
+                                    for view in ('snapshot', 'demo')}
+                        required = set(drlib.UI_GATE_CONTROLS[name])
+                        if any(set(failures) != (required if view == 'snapshot' else
+                                                 required - {'list_floor_60'})
+                               for view, failures in per_view.items()):
+                            raise ValueError('disclosure control names mismatch')
+                        if any(not isinstance(text, str) or not text.strip()
+                               for failures in per_view.values() for text in failures.values()):
+                            raise ValueError('disclosure control has no observed failure text')
+                        failures = {control: '\n'.join(f'{view}: {records[control]}'
+                                                      for view, records in per_view.items()
+                                                      if control in records)
+                                    for control in required}
+                    else:
+                        failures = measured.get('negative_control_failures', {})
+                    controls = {control: {'ok': False, 'detail': detail}
+                                for control, detail in failures.items()}
+                    checks[name] = drlib.evaluate_ui_gate(
+                        name, measured, controls, drlib.UI_GATE_CONTROLS[name])
+                    checks[name]['url'] = waterfall_url(url)
+            finally:
+                browser.close()
+    except Exception as exc:
+        # #514: even TimeoutError is evidence of failure, never a skipped gate.
+        detail = f'{type(exc).__name__}: {exc}'
+        checks = {name: {'ok': False, 'detail': detail,
+                         'url': url + '#tab=waterfall&live=1&span=900',
+                         'negative_control_failures': {}}
+                  for name in drlib.UI_GATE_CONTROLS}
+    for name, check in checks.items():
+        print(f"demo_rehearsal: {name}: {'PASS' if check['ok'] else 'FAIL'} -- {check['detail']}")
+    return checks
+
+
 def _print_plan_banner(duration_s, ticks, passes):
     degraded = ticks < lib.MIN_TICKS or len(passes) < 3
     names = ", ".join(f"{n}@{o:.0f}s" for n, o in passes)
@@ -575,7 +632,11 @@ def main():
               "samples it collected so far")
 
     print("\n=== end-of-capture checks ===")
+    ui_checks = _run_ui_gates(args.url)
     extra_checks = {}
+    extra_checks["waterfall_fold"] = ui_checks["waterfall_fold"]
+    extra_checks["execution_list_full_rows"] = ui_checks["execution_list_full_rows"]
+    extra_checks["execution_truncation_disclosure"] = ui_checks["execution_truncation_disclosure"]
     with ServerHarness(args.trace_dir) as srv:
         info = srv.query("info")
         from_ns = int(info["from_ns"])

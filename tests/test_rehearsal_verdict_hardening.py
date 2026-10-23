@@ -5,14 +5,17 @@ No browser, SSH or capture: the pass walker receives recorded tab measurements,
 and collect_results receives a complete local fixture through a fake rsync.
 """
 import contextlib
+import ast
+import copy
 import io
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import demo_rehearsal as dr
 import demo_rehearsal_lib as demo
@@ -152,6 +155,234 @@ class VerdictRefusals(unittest.TestCase):
         self.assertFalse(self.walk([])[0]["ok"])
         tab = demo.summarize_sweep_offset_coverage("queries", "early", [{}], 500)
         self.assertFalse(tab.get("ok", True))
+
+
+def ui_measurements():
+    disclosure = {
+        'text': 'Showing 100 of 265,756', 'rendered_rows': 100, 'response_rows': 100,
+        'response_total': 265756, 'truncated': True, 'fixture_installed': True,
+        'visible': True, 'fully_visible': True, 'outside_tbody': True,
+        'viewport': [1710, 981, 2],
+        'scroll_affordance': {'has_more': True, 'scroll_height': 4000,
+                             'client_height': 100, 'shadow': 'inset 0 -1px black'},
+    }
+    fold = {'ok': True, 'viewport': [1710, 981, 2], 'fixture_rows': 100,
+            'disclosure': copy.deepcopy(disclosure), 'scroll_height': 981, 'scroll_y': 0,
+            'readout_bottom': 980, 'chart': {
+                'rendered_bars': 3, 'minimum_bar_height': 10, 'stable_after_resize': True,
+                'readout_clickable': True, 'scroll_height_after_click': 981,
+                'scroll_y_after_click': 0, 'readout_bottom_after_click': 981}}
+    lists = {'ok': True}
+    disclosures = {'ok': True}
+    for view, viewport, minimum in [('snapshot', [1280, 800, 1], 1), ('demo', [1710, 981, 2], 2)]:
+        lists[view] = {'viewport': viewport, 'header': {'full': True}, 'full_rows': minimum,
+                       'rows': [{'full': True}] * minimum, 'scroll_y': 0, 'list_scroll_top': 0,
+                       'required_list_height': 80, 'list_height': 100, 'stable_after_resize': True}
+        disclosures[view] = {**copy.deepcopy(disclosure), **copy.deepcopy(lists[view]),
+                             'full_rows': 1, 'rows': [{'full': True}]}
+    return {'waterfall_fold': fold, 'execution_list_full_rows': lists,
+            'execution_truncation_disclosure': disclosures}
+
+
+class RehearsalUIGates(unittest.TestCase):
+    names = ('waterfall_fold', 'execution_list_full_rows', 'execution_truncation_disclosure')
+
+    def controls(self, name):
+        return {control: {'ok': False, 'detail': 'observed assertion failure: ' + control}
+                for control in demo.UI_GATE_CONTROLS[name]}
+
+    def evaluate(self, name, measured, controls):
+        return demo.evaluate_ui_gate(name, measured, controls, demo.UI_GATE_CONTROLS[name])
+
+    def test_each_ui_check_is_mandatory_by_name(self):
+        for name in self.names:
+            with self.subTest(name=name):
+                checks = {key: {'ok': True} for key in demo.REQUIRED_EXTRA_CHECKS if key != name}
+                summary = demo.build_demo_summary(
+                    [{'pass': 'early', 'tabs': {'queries': clean_tab()}}], checks,
+                    required_checks=demo.REQUIRED_EXTRA_CHECKS)
+                self.assertFalse(summary['ok'])
+                self.assertIn('missing_required_check:' + name, summary['failed'])
+
+    def test_main_registers_live_ui_checks_and_requires_them_in_summary(self):
+        tree = ast.parse((ROOT / 'tests/demo_rehearsal.py').read_text())
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)]
+        ui_calls = [node for node in calls if ast.unparse(node.func) == '_run_ui_gates']
+        self.assertEqual(len(ui_calls), 1)
+        self.assertEqual(ast.unparse(ui_calls[0].args[0]), 'args.url')
+        assignments = [node for node in ast.walk(main) if isinstance(node, ast.Assign)
+                       and node.value is ui_calls[0]]
+        self.assertEqual([ast.unparse(node.targets[0]) for node in assignments], ['ui_checks'])
+        for name in self.names:
+            inserted = [node for node in ast.walk(main) if isinstance(node, ast.Assign)
+                        and ast.unparse(node.targets[0]) == f"extra_checks['{name}']"]
+            self.assertEqual(len(inserted), 1)
+            self.assertEqual(ast.unparse(inserted[0].value), f"ui_checks['{name}']")
+        summary = [node for node in calls if ast.unparse(node.func) == 'drlib.build_demo_summary']
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(ast.unparse(summary[0].args[1]), 'extra_checks')
+        required = next(kw.value for kw in summary[0].keywords if kw.arg == 'required_checks')
+        self.assertEqual(ast.unparse(required), 'drlib.REQUIRED_EXTRA_CHECKS')
+
+    def test_ui_evaluator_refuses_every_bypass(self):
+        for name in self.names:
+            measured = ui_measurements()[name]
+            good = self.controls(name)
+            self.assertTrue(self.evaluate(name, measured, good)['ok'])
+            control = next(iter(good))
+            missing = dict(good)
+            del missing[control]
+            missing_measurement = copy.deepcopy(measured)
+            del missing_measurement['chart' if name == 'waterfall_fold' else 'snapshot']
+            cases = [('none', None, good), ('empty', {}, good),
+                     ('missing_ok', {k: v for k, v in measured.items() if k != 'ok'}, good),
+                     ('missing_measurement', missing_measurement, good),
+                     ('missing_control', measured, missing),
+                     ('unexpected_control', measured, dict(good, unexpected={'ok': False, 'detail': 'failed'}))]
+            for label, record in [('passed', {'ok': True, 'detail': 'survived'}),
+                                  ('empty_text', {'ok': False, 'detail': ''}),
+                                  ('whitespace_text', {'ok': False, 'detail': '  '}),
+                                  ('non_string_text', {'ok': False, 'detail': True}),
+                                  ('missing_text', {'ok': False}),
+                                  ('unrecorded_outcome', {'detail': 'failed'})]:
+                cases.append((label, measured, dict(good, **{control: record})))
+            for label, readings, controls in cases:
+                with self.subTest(name=name, bypass=label):
+                    result = self.evaluate(name, readings, controls)
+                    self.assertFalse(result['ok'])
+                    self.assertTrue(result['detail'])
+
+    def test_ui_evaluator_refuses_broken_product_measurements(self):
+        cases = [
+            ('waterfall_fold', ('scroll_height',), 982),
+            ('waterfall_fold', ('scroll_y',), 1),
+            ('waterfall_fold', ('chart', 'scroll_height_after_click'), 982),
+            ('waterfall_fold', ('chart', 'scroll_y_after_click'), 1),
+            ('waterfall_fold', ('chart', 'readout_bottom_after_click'), 982),
+            ('waterfall_fold', ('chart', 'rendered_bars'), 0),
+            ('waterfall_fold', ('disclosure', 'fixture_installed'), False),
+            ('execution_list_full_rows', ('snapshot', 'full_rows'), 0),
+            ('execution_list_full_rows', ('demo', 'full_rows'), 1),
+            ('execution_list_full_rows', ('demo', 'header', 'full'), False),
+            ('execution_list_full_rows', ('demo', 'stable_after_resize'), False),
+            ('execution_truncation_disclosure', ('snapshot', 'visible'), False),
+            ('execution_truncation_disclosure', ('demo', 'fully_visible'), False),
+            ('execution_truncation_disclosure', ('demo', 'outside_tbody'), False),
+            ('execution_truncation_disclosure', ('demo', 'text'), 'Showing 265,756 of 265,756'),
+            ('execution_truncation_disclosure', ('demo', 'fixture_installed'), False),
+        ]
+        for view in ('snapshot', 'demo'):
+            for path, value in [(('header', 'full'), False), (('full_rows',), 0),
+                                (('rows',), []), (('list_height',), 79),
+                                (('required_list_height',), 0), (('scroll_y',), 1),
+                                (('list_scroll_top',), 1), (('stable_after_resize',), False)]:
+                cases.append(('execution_truncation_disclosure', (view, *path), value))
+        for name, path, value in cases:
+            with self.subTest(name=name, path=path):
+                measured = ui_measurements()[name]
+                target = measured
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                self.assertFalse(self.evaluate(name, measured, self.controls(name))['ok'])
+
+    def test_ui_evaluator_requires_recorded_capped_list_measurements(self):
+        name = 'execution_truncation_disclosure'
+        for view in ('snapshot', 'demo'):
+            for field in ('header', 'full_rows', 'rows', 'list_height', 'required_list_height',
+                          'scroll_y', 'list_scroll_top', 'stable_after_resize'):
+                with self.subTest(view=view, missing=field):
+                    measured = ui_measurements()[name]
+                    del measured[view][field]
+                    self.assertFalse(self.evaluate(name, measured, self.controls(name))['ok'])
+
+    def test_dense_fixture_refuses_empty_uncapped_or_untruncated_responses(self):
+        self.assertTrue(demo.capped_fixture_ok(100, 100, 265756, True))
+        for values in [(0, 0, 265756, True), (100, 0, 265756, True),
+                       (100, 100, 100, True), (100, 100, 99, True),
+                       (100, 100, None, True), (100, 100, 265756, False)]:
+            with self.subTest(values=values):
+                self.assertFalse(demo.capped_fixture_ok(*values))
+
+    def run_browser_stub(self, *, exception=None, launch_error=None, mutate=None):
+        from web_unit import execution_list_browser as gates
+        manager = MagicMock()
+        launcher = manager.__enter__.return_value.chromium.launch
+        if launch_error:
+            launcher.side_effect = launch_error
+        measured = ui_measurements()
+        for name in self.names:
+            failures = {key: value['detail'] for key, value in self.controls(name).items()}
+            if name == 'execution_truncation_disclosure':
+                for view in ('snapshot', 'demo'):
+                    measured[name][view]['negative_control_failures'] = {
+                        control: text for control, text in failures.items()
+                        if view == 'snapshot' or control != 'list_floor_60'}
+            else:
+                measured[name]['negative_control_failures'] = failures
+        if mutate:
+            mutate(measured)
+        module = MagicMock(sync_playwright=lambda: manager)
+        with patch.dict(sys.modules, {'playwright': MagicMock(), 'playwright.sync_api': module}), \
+                patch.object(gates, 'run_waterfall_fold_gate',
+                             side_effect=exception, return_value=measured['waterfall_fold']), \
+                patch.object(gates, 'run_execution_list_gates',
+                             return_value=measured['execution_list_full_rows']), \
+                patch.object(gates, 'run_execution_disclosure_gates',
+                             return_value=measured['execution_truncation_disclosure']) as disclosures, \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = dr._run_ui_gates('http://live-bridge:8384/')
+        if not exception and not launch_error:
+            disclosures.assert_called_once_with(launcher.return_value, 'http://live-bridge:8384/',
+                                                 include_fitting=False)
+        return result
+
+    def test_ui_registration_retains_measurements_controls_and_live_url(self):
+        checks = self.run_browser_stub()
+        self.assertEqual(set(checks), set(self.names))
+        for name, check in checks.items():
+            self.assertTrue(check['ok'], check['detail'])
+            self.assertEqual(set(check['negative_control_failures']), set(demo.UI_GATE_CONTROLS[name]))
+            self.assertEqual(check['url'], 'http://live-bridge:8384/#tab=waterfall&live=1&span=900')
+
+    def test_browser_exceptions_fail_all_three_checks(self):
+        for label, kwargs in [('timeout', {'exception': TimeoutError('bridge down')}),
+                              ('empty_capture', {'exception': AssertionError('no executions')}),
+                              ('missing_chromium', {'launch_error': RuntimeError('chromium absent')})]:
+            with self.subTest(label=label):
+                checks = self.run_browser_stub(**kwargs)
+                self.assertEqual(set(checks), set(self.names))
+                for check in checks.values():
+                    self.assertFalse(check['ok'])
+                    self.assertIn('http://live-bridge:8384/', check['url'])
+                    self.assertTrue(check['detail'])
+
+    def test_live_registration_refuses_controls_that_did_not_fire(self):
+        for name, view in [('waterfall_fold', None), ('execution_list_full_rows', None),
+                           ('execution_truncation_disclosure', 'snapshot'),
+                           ('execution_truncation_disclosure', 'demo')]:
+            for control in demo.UI_GATE_CONTROLS[name]:
+                if view == 'demo' and control == 'list_floor_60':
+                    continue
+                for bad_text in (None, '', True):
+                    with self.subTest(name=name, view=view, control=control, bad_text=bad_text):
+                        def mutate(measured):
+                            record = measured[name][view] if view else measured[name]
+                            failures = record['negative_control_failures']
+                            if bad_text is None:
+                                del failures[control]
+                            else:
+                                failures[control] = bad_text
+                        self.assertFalse(self.run_browser_stub(mutate=mutate)[name]['ok'])
+
+    def test_missing_playwright_registers_three_failures(self):
+        with patch.dict(sys.modules, {'playwright.sync_api': None}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            checks = dr._run_ui_gates('http://live-bridge:8384/')
+        self.assertEqual(set(checks), set(self.names))
+        self.assertTrue(all(not check['ok'] and 'ModuleNotFoundError' in check['detail']
+                            for check in checks.values()))
 
 
 class ArtifactSurvival(unittest.TestCase):

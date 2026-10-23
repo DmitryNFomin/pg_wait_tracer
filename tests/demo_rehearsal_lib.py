@@ -11,6 +11,116 @@ Nothing in this module touches a browser, a socket, a subprocess, or the
 filesystem -- plain data in, plain data out.
 """
 import math
+import re
+
+
+# #514: membership and control evidence are part of the counted verdict.
+UI_GATE_CONTROLS = {
+    "waterfall_fold": ("chart_floor_240",),
+    "execution_list_full_rows": ("list_floor_60",),
+    "execution_truncation_disclosure": (
+        "disclosure_title_only", "disclosure_total_as_shown", "list_floor_60"),
+}
+
+
+def capped_fixture_ok(rendered_rows, response_rows, total_count, truncated):
+    """#514: an empty or uncapped response cannot exercise #486."""
+    return (all(type(n) is int for n in (rendered_rows, response_rows, total_count))
+            and rendered_rows == response_rows and rendered_rows > 0
+            and total_count > rendered_rows and truncated is True)
+
+
+def evaluate_ui_gate(name, measurements, negative_controls, required_controls):
+    """Evaluate browser evidence without importing Playwright (#514).
+
+    Controls map names to {ok: False, detail: <observed assertion failure>}.
+    Missing measurements or controls are refusals, never agreement.
+    """
+    errors = []
+    observed = {}
+    expected = set(UI_GATE_CONTROLS.get(name, ()))
+    required = set(required_controls)
+    if name not in UI_GATE_CONTROLS or required != expected:
+        errors.append("unknown gate or incorrect required controls")
+    controls = negative_controls if isinstance(negative_controls, dict) else {}
+    if set(controls) != required:
+        errors.append(f"control names mismatch: missing={sorted(required - set(controls))}, "
+                      f"unexpected={sorted(set(controls) - required)}")
+    for control, record in controls.items():
+        if (not isinstance(record, dict) or record.get("ok") is not False
+                or not isinstance(record.get("detail"), str) or not record["detail"].strip()):
+            errors.append(f"control did not prove an assertion failure: {control}")
+        else:
+            observed[control] = record["detail"]
+    if set(observed) != required:
+        errors.append("observed failure names do not equal required controls")
+
+    def require(condition, detail):
+        if not condition:
+            errors.append(detail)
+
+    def disclosure(record):
+        require(capped_fixture_ok(record["rendered_rows"], record["response_rows"],
+                                  record["response_total"], record["truncated"]),
+                "capped fixture is absent or invalid")
+        require(record["rendered_rows"] == 100 and record["response_total"] == 265756
+                and record["fixture_installed"] is True, "dense fixture was not installed")
+        numbers = [int(n.replace(',', '')) for n in re.findall(r'[\d,]+', record["text"])]
+        require(numbers == [record["rendered_rows"], record["response_total"]],
+                "execution disclosure counts mismatch")
+        require(record["visible"] is True and record["fully_visible"] is True
+                and record["outside_tbody"] is True, "execution disclosure is hidden or clipped")
+        affordance = record["scroll_affordance"]
+        require(affordance["has_more"] is True
+                and affordance["scroll_height"] > affordance["client_height"]
+                and affordance["shadow"] != "none", "execution scroll affordance is absent")
+
+    try:
+        if not isinstance(measurements, dict) or not measurements:
+            raise ValueError("empty measurements")
+        require(measurements["ok"] is True, "browser assertions failed")
+        if name == "waterfall_fold":
+            require(measurements["viewport"] == [1710, 981, 2], "incorrect fold viewport")
+            require(measurements["fixture_rows"] == 100, "dense fixture rows absent")
+            disclosure(measurements["disclosure"])
+            chart = measurements["chart"]
+            require(chart["rendered_bars"] > 0 and chart["minimum_bar_height"] > 0
+                    and chart["stable_after_resize"] is True
+                    and chart["readout_clickable"] is True, "no stable clickable Waterfall bar")
+            for height, scroll, bottom in [
+                    (measurements["scroll_height"], measurements["scroll_y"], measurements["readout_bottom"]),
+                    (chart["scroll_height_after_click"], chart["scroll_y_after_click"],
+                     chart["readout_bottom_after_click"])]:
+                require(all(type(n) in (int, float) and math.isfinite(n)
+                            for n in (height, scroll, bottom))
+                        and 0 < height <= 981 and scroll == 0 and 0 < bottom <= 981,
+                        "Waterfall exceeds the fold before or after click")
+        elif name == "execution_list_full_rows":
+            for view, viewport, minimum in [("snapshot", [1280, 800, 1], 1),
+                                             ("demo", [1710, 981, 2], 2)]:
+                record = measurements[view]
+                require(record["viewport"] == viewport and record["header"]["full"] is True
+                        and record["full_rows"] >= minimum and bool(record["rows"])
+                        and record["scroll_y"] == 0 and record["list_scroll_top"] == 0
+                        and record["required_list_height"] > 0
+                        and record["list_height"] >= record["required_list_height"]
+                        and record["stable_after_resize"] is True,
+                        f"execution list clipped or unstable: {view}")
+        elif name == "execution_truncation_disclosure":
+            for view, viewport in [("snapshot", [1280, 800, 1]), ("demo", [1710, 981, 2])]:
+                record = measurements[view]
+                require(record["viewport"] == viewport, "incorrect disclosure viewport")
+                disclosure(record)
+                require(record["header"]["full"] is True and record["full_rows"] >= 1
+                        and bool(record["rows"]) and record["required_list_height"] > 0
+                        and record["list_height"] >= record["required_list_height"]
+                        and record["scroll_y"] == 0 and record["list_scroll_top"] == 0
+                        and record["stable_after_resize"] is True,
+                        f"capped execution list clipped or unstable: {view}")
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        errors.append(f"missing or invalid measurements: {exc}")
+    return {"ok": not errors, "detail": "; ".join(errors) if errors else "browser assertions and controls passed",
+            "measurements": measurements, "negative_control_failures": observed}
 
 # ── Waterfall query-latency threshold ────────────────────────────────────
 #
@@ -1193,6 +1303,9 @@ REQUIRED_EXTRA_CHECKS = (
     "capture_freshness",
     "daemon_integrity",
     "daemon_log_clean",
+    "waterfall_fold",
+    "execution_list_full_rows",
+    "execution_truncation_disclosure",
 )
 
 

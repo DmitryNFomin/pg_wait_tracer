@@ -65,7 +65,7 @@ from test_web_ui import start_mock_server, stop_mock_server, app_url  # noqa: E4
 from web_unit.span_browser import run_span_gates
 from web_unit.execution_list_browser import (
     run_execution_list_gates, run_execution_disclosure_gates,
-    install_dense_execution_fixture, assert_execution_disclosure, assert_scroll_affordance,
+    run_waterfall_fold_gate,
 )
 
 try:
@@ -78,115 +78,19 @@ except ImportError:
 PORT = int(os.environ.get("PGWT_WATERFALL_PORT", "18977"))
 
 
-def chart_metrics(page):
-    return page.evaluate("""() => {
-        const host = document.querySelector('#waterfall-chart');
-        const chart = echarts.getInstanceByDom(host);
-        const data = chart.getModel().getSeriesByIndex(0).getData();
-        const bars = [];
-        for (let i = 0; i < data.count(); i++) {
-            const graphic = data.getItemGraphicEl(i);
-            if (!graphic || graphic.ignore || graphic.invisible) continue;
-            const box = graphic.getBoundingRect();
-            if (box.width > 0 && box.height > 0) bars.push({i, box});
-        }
-        const widest = bars.sort((a, b) => b.box.width - a.box.width)[0];
-        const tuple = widest && chart.getOption().series[0].data[widest.i];
-        const canvas = host.querySelector('canvas').getBoundingClientRect();
-        const point = tuple && chart.convertToPixel({gridIndex: 0},
-            [(tuple[0] + tuple[1]) / 2, tuple[2]]);
-        return {
-            height: host.getBoundingClientRect().height,
-            minimum_height: parseFloat(getComputedStyle(host).minHeight),
-            canvas_height: canvas.height, rendered_bars: bars.length,
-            minimum_bar_height: bars.length ? Math.min(...bars.map(b => b.box.height)) : 0,
-            click: point ? {x: canvas.left + point[0], y: canvas.top + point[1],
-                name: tuple[3]} : null,
-        };
-    }""")
-
-
 def run(red_green=False):
     proc = start_mock_server(port=PORT)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
+                result = run_waterfall_fold_gate(browser, app_url(PORT), hash_filter='f.pid=1000')
                 ctx = browser.new_context(
-                    viewport={"width": 1710, "height": 981},
-                    device_scale_factor=2)
+                    viewport={"width": 1710, "height": 981}, device_scale_factor=2)
                 page = ctx.new_page()
-                url = app_url(PORT) + "#tab=waterfall&live=1&span=900&f.pid=1000"
-                page.goto(url)
-                page.wait_for_selector("#status.connected", timeout=10000)
-                page.wait_for_selector("#waterfall-chart canvas", timeout=10000)
-                page.wait_for_timeout(300)  # let fitExecutionList() settle
-
-                # A real capped response exercises model -> header -> table
-                # and spends the chart's recovered space on its disclosure.
-                response = install_dense_execution_fixture(page)
-                disclosure = assert_execution_disclosure(page, response)
-                disclosure['scroll_affordance'] = assert_scroll_affordance(page, True)
-
-                readout = page.query_selector("#waterfall-readout")
-                if readout is None:
-                    return {"ok": False, "reason": "no #waterfall-readout element"}
-                box = readout.bounding_box()
-                metrics = page.evaluate("""() => ({
-                    innerHeight: window.innerHeight,
-                    scrollY: window.scrollY,
-                    scrollHeight: document.documentElement.scrollHeight,
-                    listMaxHeight: (document.querySelector('.execution-list') || {}).style
-                        ? document.querySelector('.execution-list').style.maxHeight : null,
-                })""")
-                readout_bottom = box["y"] + box["height"]
-                above_fold = readout_bottom <= metrics["innerHeight"] + 0.5
-                not_scrollable = metrics["scrollHeight"] <= metrics["innerHeight"] + 0.5
-                scroll_y_zero = metrics["scrollY"] == 0
-                result = {
-                    "ok": bool(above_fold and not_scrollable and scroll_y_zero),
-                    "fixture_rows": len(response['rows']),
-                    "disclosure": disclosure,
-                    "readout_bottom": readout_bottom,
-                    "viewport_height": metrics["innerHeight"],
-                    "scroll_height": metrics["scrollHeight"],
-                    "scroll_y": metrics["scrollY"],
-                    "execution_list_max_height": metrics["listMaxHeight"],
-                    "above_fold": above_fold,
-                    "not_scrollable": not_scrollable,
-                    "scroll_y_zero": scroll_y_zero,
-                }
-                result["chart"] = chart_metrics(page)
-                for _ in range(3):
-                    page.evaluate("window.dispatchEvent(new Event('resize'))")
-                    page.wait_for_timeout(100)
-                resized = chart_metrics(page)
-                result["chart"]["stable_after_resize"] = all(
-                    resized[key] == result["chart"][key] for key in
-                    ["height", "canvas_height", "rendered_bars", "minimum_bar_height"])
-                click = resized["click"]
-                if click:
-                    page.mouse.click(click["x"], click["y"])
-                inspected = page.locator("#waterfall-readout .wf-inspect-name")
-                result["chart"]["readout_clickable"] = (
-                    bool(click) and inspected.count() == 1 and
-                    inspected.inner_text() == click["name"])
-                clicked_box = page.locator("#waterfall-readout").bounding_box()
-                result["chart"]["readout_bottom_after_click"] = (
-                    clicked_box["y"] + clicked_box["height"])
-                result["chart"]["scroll_height_after_click"] = page.evaluate(
-                    "document.documentElement.scrollHeight")
-                result["chart"]["scroll_y_after_click"] = page.evaluate("scrollY")
-                chart_ok = (
-                    resized["height"] >= resized["minimum_height"] and
-                    resized["rendered_bars"] > 0 and resized["minimum_bar_height"] > 0 and
-                    result["chart"]["stable_after_resize"] and
-                    result["chart"]["readout_clickable"] and
-                    result["chart"]["readout_bottom_after_click"] <= metrics["innerHeight"] and
-                    result["chart"]["scroll_height_after_click"] <= metrics["innerHeight"] and
-                    result["chart"]["scroll_y_after_click"] == 0)
-                result["chart"]["ok"] = chart_ok
-                result["ok"] = result["ok"] and chart_ok
+                page.goto(app_url(PORT) + '#tab=waterfall&live=1&span=900&f.pid=1000')
+                page.wait_for_selector('#status.connected', timeout=10000)
+                page.wait_for_selector('#waterfall-chart canvas', timeout=10000)
                 if red_green:
                     # Serve original web assets over the same real mock shell.
                     # No checkout/reset and no edits to another agent's files.
@@ -229,7 +133,8 @@ def run(red_green=False):
                         old.close()
                 result["span_gates"] = run_span_gates(page, app_url(PORT))
                 result["execution_list_gates"] = run_execution_list_gates(browser, app_url(PORT))
-                result["execution_disclosure_gates"] = run_execution_disclosure_gates(browser, app_url(PORT))
+                result["execution_disclosure_gates"] = run_execution_disclosure_gates(
+                    browser, app_url(PORT), hash_filter='f.pid=1000')
                 result["ok"] = (result["ok"] and result["execution_list_gates"]["ok"]
                                 and result["execution_disclosure_gates"]["ok"])
                 return result
