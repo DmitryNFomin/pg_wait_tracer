@@ -186,6 +186,24 @@ DEFAULT_PASS_NAME_OPTIONS = (("early", "middle", "late"),
                             ("early", "late"), ("early",))
 
 
+def rehearsal_plan(duration_s):
+    """Refuse an impossible baseline before starting live load (#543).
+
+    The documented 3-minute mechanics self-test deliberately reduces coverage;
+    every other invocation must fit all three passes at six ticks per tab.
+    This checks the scheduling estimate, not a promise about UI wall time:
+    workloads must remain alive until the caller tears them down.
+    """
+    if not math.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("DURATION_MIN must be finite and positive")
+    ticks, passes = plan_passes(duration_s)
+    if duration_s != 180 and (ticks < DEFAULT_TICK_OPTIONS[0] or len(passes) < 3):
+        raise ValueError(
+            f"{duration_s:g}s cannot fit the baseline (6 ticks/tab, 3 passes); "
+            "use the default DURATION_MIN=35 or DURATION_MIN=3 for a mechanics self-test")
+    return ticks, passes
+
+
 def plan_passes(duration_s, tab_count=11, tick_interval_s=5.0,
                 per_tab_overhead_s=5.0, tick_options=DEFAULT_TICK_OPTIONS,
                 pass_name_options=DEFAULT_PASS_NAME_OPTIONS):

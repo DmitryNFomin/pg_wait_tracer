@@ -185,6 +185,9 @@ run python3 tests/test_demo_rehearsal_lib.py
 step "python: rehearsal verdict refusal tests"
 run python3 tests/test_rehearsal_verdict_hardening.py
 
+step "python: rehearsal workload lifetime and launch refusals (#543)"
+run python3 tests/test_rehearsal_workload_lifetime.py
+
 step "python: live-smoke verdict unit tests"
 run python3 tests/test_ui_live_smoke_lib.py
 

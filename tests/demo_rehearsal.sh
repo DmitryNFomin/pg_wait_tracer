@@ -74,6 +74,28 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Default 35 min schedules the three passes; DURATION_MIN=3 is the explicit
+# mechanics self-test. Validate before PostgreSQL discovery, provisioning,
+# sysctl changes or load.
+# DURATION_MIN schedules the walk; teardown owns both workload lifetimes.
+DURATION_MIN="${DURATION_MIN:-35}"
+if ! PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$DURATION_MIN" <<'PY'
+import sys
+from demo_rehearsal_lib import rehearsal_plan
+try:
+    duration_s = float(sys.argv[1]) * 60
+    ticks, passes = rehearsal_plan(duration_s)
+except ValueError as exc:
+    sys.exit(f"REFUSING rehearsal plan: {exc}")
+print(f"demo_rehearsal: launch plan target={duration_s:g}s ticks_per_tab={ticks} "
+      f"passes={len(passes)}; workloads stay live until teardown")
+if duration_s == 180:
+    print("demo_rehearsal: 3-minute mechanics self-test; reduced coverage cannot pass the baseline")
+PY
+then
+    exit 1
+fi
+
 if [[ -z "$PM_PID" ]]; then
     if [[ -n "$PG_MAJOR" ]]; then
         PM_PID=$(find_postmaster --pg-version "$PG_MAJOR")
@@ -96,14 +118,6 @@ for bin in "$TRACER" "$SERVER" "$BRIDGE"; do
     fi
 done
 
-# Default 35 min: the issue's documented range is 30-45 -- demo length, not
-# smoke length (tests/ui_live_smoke.sh's own 30 min is already this long;
-# this harness additionally REPEATS the full 11-tab walk 3x across the
-# window instead of once, see tests/demo_rehearsal.py). Override only for
-# the issue's explicit DURATION_MIN=3 self-test -- never for a real
-# baseline run.
-DURATION_MIN="${DURATION_MIN:-35}"
-DURATION_S=$(python3 -c "print(int(float(\"$DURATION_MIN\") * 60))")
 PORT="${PGWT_DEMO_PORT:-8385}"
 
 # Retention (docs/DEMO_DELIVERY_QUEUE.md item 2): ON by default since
@@ -287,13 +301,17 @@ report_early_exit() {
 # ── 1. Controlled load ───────────────────────────────────────────────────────
 check_pgbench_provisioned "demo_rehearsal" "$PGBENCH_LOG"
 
-echo "demo_rehearsal: starting pgbench (4 clients, ${DURATION_S}s, throttled)"
+echo "demo_rehearsal: starting pgbench (4 clients, until teardown, throttled)"
 # --rate: same 25 tx/s reasoning as tests/ui_live_smoke.sh (an unthrottled
 # --mode full capture over the WHOLE window grows the executions dataset
 # enough to make the end-of-capture Waterfall-latency check meaningless --
 # it would be measuring "how slow does an unrealistically large dataset
 # get", not the realistic-load regression issue #101 describes).
-pgbench -U postgres -d postgres -c 4 -T "$DURATION_S" --rate=25 \
+# pgbench requires a finite duration or transaction count. INT_MAX per client
+# at 25 total tx/s cannot finish within a rehearsal (~10.9 years); cleanup()
+# stops this same process on success, failure, INT or TERM. No restart loop:
+# an unexpected exit must still trip the walk's unchanged liveness guard.
+pgbench -U postgres -d postgres -c 4 -t 2147483647 --rate=25 \
     >>"$PGBENCH_LOG" 2>&1 &
 PGBENCH_PID=$!
 sleep 1
@@ -305,7 +323,7 @@ if ! kill -0 "$PGBENCH_PID" 2>/dev/null; then
 fi
 
 echo "demo_rehearsal: starting looping lock/sleep workload"
-python3 "$SCRIPT_DIR/live_loop_workload.py" "$DURATION_S" >>"$WORKLOAD_LOG" 2>&1 &
+python3 "$SCRIPT_DIR/live_loop_workload.py" --until-stopped >>"$WORKLOAD_LOG" 2>&1 &
 WORKLOAD_PID=$!
 sleep 2
 if ! kill -0 "$WORKLOAD_PID" 2>/dev/null; then
@@ -318,7 +336,7 @@ fi
 # ── 2. Daemon (--mode full -- see tests/ui_live_smoke.sh's DEVIATION note
 # for why full, not tiered: plan/execute USDT probes, which Waterfall's
 # executions query needs, are gated on --mode full only). --daemon: long-
-# running, no fixed capture budget -- DURATION_S below decides how long.
+# running, no fixed capture budget -- the walk below decides how long.
 echo "demo_rehearsal: starting daemon (--mode full, trace dir $TRACE_DIR)"
 "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" \
     --mode full -v \

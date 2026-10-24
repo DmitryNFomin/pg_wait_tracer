@@ -390,9 +390,11 @@ def _lockmgr_tick(lockmgr_sessions):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: live_loop_workload.py DURATION_S", file=sys.stderr)
+        print("Usage: live_loop_workload.py DURATION_S | --until-stopped", file=sys.stderr)
         return 2
-    duration_s = float(sys.argv[1])
+    # Rehearsals own this process until teardown; smoke callers retain their
+    # existing fixed-duration mode. SIGTERM below still releases all sessions.
+    duration_s = None if sys.argv[1] == "--until-stopped" else float(sys.argv[1])
     stop = {"flag": False}
 
     def _stop(signum, frame):
@@ -446,10 +448,10 @@ def main():
          f"(SELECT 1 FROM {ROW_LOCK_TABLE} WHERE id = 1)")
     time.sleep(0.5)   # let the extra sessions connect before the loop starts
 
-    deadline = time.monotonic() + duration_s
+    deadline = None if duration_s is None else time.monotonic() + duration_s
     iteration = 0
     try:
-        while not stop["flag"] and time.monotonic() < deadline:
+        while not stop["flag"] and (deadline is None or time.monotonic() < deadline):
             # Workload.release() COMMITs the holder, permanently dropping the
             # lock it took in open_sessions() -- a second fire() without
             # re-acquiring it would have the waiter sail through with no
