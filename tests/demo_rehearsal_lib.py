@@ -415,19 +415,20 @@ def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
     conservation check (with its own nonzero-DB-Time floor), the raw/exact
     compute path requirement, the cpu_clamped_ms self-check (CPU-class
     gaps only -- see its own comment), and (when
-    requested) the criteria-doc #2 floors -- the workload's own signature
-    events present with real time, and a non-vacuous AAS reading. ALL
+    requested) the criteria-doc #2 workload signature -- both required
+    events present with real time. ALL
     requested checks must hold, checked in that order (raw floors before
     any ratio/equality, per CLAUDE.md/issue #157's bypass-suite
     requirement). Used both for the repeated in-capture samples (gating --
-    see conservation_sample_interval_s, which also requests the two extra
-    floors) and for the one-off whole-capture-window diagnostic (never
+    see conservation_sample_interval_s, which also requests the signature
+    and AAS diagnostic) and for the one-off whole-capture-window diagnostic (never
     gating -- see RECENT_WINDOW_S's comment; the caller leaves
     check_workload_signature/check_aas_floor False there since a 35-45 min
     whole-window AAS average is not "the 60s recent window" the criteria
-    doc's floor is stated against). Off-CPU* is retained as an explicitly
-    magnitude diagnostic, with ok=None. Its availability is required; no
-    physical magnitude bound is registered.
+    doc reports). The legacy check_aas_floor flag now requests reported-only
+    AAS, with ok=None and gating=False; it cannot change the window verdict.
+    Off-CPU* is retained as a magnitude diagnostic, with ok=None. Its
+    availability is required; no physical magnitude bound is registered.
 
     NOTE (owner correction, 2026-09-27): this used to also gate on
     `wait_gap_cpu_ms <= 0.1% of db_time_ms` -- dropped entirely, see
@@ -460,8 +461,9 @@ def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
         result["workload_signature"] = {"ok": sig_ok, "detail": sig_detail}
     if check_aas_floor:
         aas_ok, aas_detail = aas_floor_ok(aas)
-        result["ok"] = bool(result["ok"] and aas_ok)
-        result["aas_floor"] = {"ok": aas_ok, "detail": aas_detail}
+        result["aas_floor"] = {
+            "ok": aas_ok, "gating": False, "aas": aas, "detail": aas_detail,
+        }
     return result
 
 
@@ -571,24 +573,22 @@ def workload_signature_present_ok(rows, required=REQUIRED_WORKLOAD_EVENTS):
     return ok, detail
 
 
-# Settled (criteria doc §2, owner / box access / review round 4,
-# docs/DEMO_REHEARSAL_CRITERIA.md's "AAS >= 1.15 on the 60 s recent window"
-# bullet): half of the first clean rehearsal's own measured AAS on that
-# window -- `cross_tab_aas_agreement`'s `derived=2.3033 time_model=2.3033`
-# (run.id 1790869219) -- which is 1.1517, recorded in the doc as 1.15. Was
-# AAS_FLOOR_PROVISIONAL = 0.5 (non-vacuous-only: reject an AAS reading of ~0
-# the same way MIN_DB_TIME_MS rejects a ~0 db_time_ms) until that rehearsal
-# landed; per the doc, replacing the provisional value is this code change,
-# not a further docs commit. Like WATERFALL_QUERY_THRESHOLD_S above, this is
-# not read from an env var: a flaky box must not get a looser gate than the
-# one the doc states.
+# WITHDRAWN (owner-approved criteria amendment, 2026-10-24, §2): the floor's
+# only stated purpose was anti-vacuity. Was AAS_FLOOR_PROVISIONAL = 0.5
+# (non-vacuous-only: reject an AAS reading of ~0 the same way MIN_DB_TIME_MS
+# rejects a ~0 db_time_ms). MIN_DB_TIME_MS, capture_has_events_ok and
+# workload_signature_present_ok already close that hazard. Raising it to
+# 1.15 added no new hazard: it was half of derived=2.3033 (run.id 1790869219,
+# n=1, on a now-deleted throwaway VM). AAS also measures box response speed;
+# applied-load qualification is planned, not built. Retain the historical
+# constant/call interface for diagnostics, never as a verdict threshold.
 AAS_FLOOR = 1.15
 
 
 def aas_floor_ok(aas, floor=AAS_FLOOR):
-    ok = isinstance(aas, (int, float)) and not isinstance(aas, bool) and aas >= floor
-    detail = f"aas={aas!r} (floor {floor})"
-    return ok, detail
+    """Legacy interface: report AAS without a pass/fail verdict, like Off-CPU*."""
+    detail = f"aas={aas!r} (withdrawn floor {floor}); reported, not gated"
+    return None, detail
 
 
 # ── Cross-tab agreement and freshness (criteria doc §5) ──────────────────

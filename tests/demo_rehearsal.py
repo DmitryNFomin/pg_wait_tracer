@@ -264,8 +264,8 @@ def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
     demo_rehearsal_lib.evaluate_time_model_window (identity conservation +
     raw-path check [only when gate_on_raw_path] + the cpu_clamped_ms
     self-check + [when check_criteria_floors] the criteria-doc #2
-    workload-signature and AAS floors, plus reported-not-gated Off-CPU*
-    diagnostics). Returns that dict,
+    workload-signature floor, plus reported-not-gated Off-CPU* and AAS
+    diagnostics -- the AAS 1.15 floor was withdrawn as a gate 2026-10-24). Returns that dict,
     or an ok=False stand-in on a server-side error / a malformed response --
     a gate that cannot see the fields it needs must refuse, never assume
     they were fine."""
