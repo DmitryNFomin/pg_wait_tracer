@@ -429,32 +429,48 @@ checked first and independently:
   this live loop's required pair changed, to what it now produces instead —
   `adv_holder` holding `pg_advisory_lock(42)` while `reporter`'s own call
   blocks on it.);
-- **AAS ≥ 1.15 on the 60 s recent window** (owner, box access, review round
-  4 — settled; was ≥0.5, provisional). The first clean rehearsal landed:
-  `ok: true`, `failed: []`. Its measured AAS on the 60 s recent window —
-  the basis this bullet itself names — was `cross_tab_aas_agreement`'s
-  `derived=2.3033 time_model=2.3033` (the two already had to agree within
-  1% to pass that check, so either number is the same measurement twice;
-  used `derived`/`time_model` from the 60 s window, not the whole-capture
-  `AAS: 2.22` also reported from the same run, because this bullet's own
-  text scopes the floor to "the 60 s recent window", and the whole-capture
-  figure is a different window over a different quantity). Half of 2.3033
-  is **1.1517**, recorded here as **1.15**. **`run.id`: 1790869219.**
-  Provenance, stated plainly rather than implied: the clean rehearsal ran on
-  a throwaway VM (`root@46.225.4.87`); its capture finished early
-  (`rehearsal.done` written while `scripts/demo-rehearsal.sh`'s own
-  `DURATION_MIN`-derived sleep was still running), so this run id and both
-  AAS figures were read directly off
-  `/root/pgwt-demo-rehearsal-master/tests/results/demo_rehearsal/` on that
-  box, not from a synced local artifact — none existed yet when this was
-  recorded (the rsync only happens after the launcher's sleep ends). This is
-  why no worktree in this repo's local clone had a matching `summary.json`:
-  the nearest candidate found (`aas-agreement-and-retention` worktree,
-  `derived=2.3617 time_model=2.3624`, `ok: False`) is a different, older,
-  failing run, not this one. **Doc vs. code, now settled**:
-  `tests/demo_rehearsal_lib.py`'s enforced `AAS_FLOOR` constant is **1.15**
-  (the `AAS_FLOOR_PROVISIONAL = 0.5` name and value are gone) — the gate
-  enforces exactly the floor this doc states.
+- **AAS ≥ 1.15 on the 60 s recent window — WITHDRAWN as a gate**
+  (owner-approved criteria amendment, 2026-10-24). AAS is now **reported,
+  not gated**, following §3's Off-CPU* precedent: the retained `aas_floor`
+  diagnostic has `ok: null`, `gating: false`, the measured `aas`, and its
+  detail string. Neither a low nor a high reading gives a pass/fail verdict.
+
+  **Hazard analysis is the basis.** The floor's own code comment stated its
+  only purpose: the provisional 0.5 rejected an AAS reading of ~0 the same
+  way `MIN_DB_TIME_MS` rejects a ~0 `db_time_ms`. That anti-vacuity hazard is
+  already closed by three unchanged checks: `MIN_DB_TIME_MS = 1.0`, checked
+  before any ratio; `capture_has_events_ok`; and
+  `workload_signature_present_ok`, requiring **both** `Lock:relation` and
+  `Lock:advisory` with ms > 0. Raising 0.5 to 1.15 attached no new hazard.
+  The historical derivation was half of the first clean run's
+  `cross_tab_aas_agreement` reading, `derived=2.3033 time_model=2.3033`
+  (`run.id` 1790869219, n=1): 1.1517, recorded as 1.15. That run used a
+  throwaway VM (`root@46.225.4.87`) which no longer exists. Neither adviser
+  found a downstream check that becomes vacuous between AAS 1.01 and 1.12.
+  AAS = active time / window also partly measures box speed: the same code
+  on two cx33s read 1.23–1.43 on gate-1 and 1.01–1.12 on gate-2.
+
+  **The trigger for this review was a red run:** gate-2 measured AAS
+  **1.01–1.12 on master `0479723` while rendering all 33 tab-walks**. This
+  project's rule is that a bound is never the thing to change to make a red
+  go green. The defence for withdrawing this one is the hazard analysis
+  above: it holds whether gate-2 read **1.01 or 1.30**. The anti-vacuity
+  checks already close the stated hazard independently of that red result;
+  this amendment withdraws an unsupported gate rather than recalibrating
+  it to the failing box. Demo richness remains independently gated by
+  `tests/demo_workload_coverage.py`: `SCATTER_MIN_POINTS = 5`,
+  `SCATTER_MIN_SPREAD_RATIO = 3.0`, `WATERFALL_INTERESTING_MS = 500`, per-tab
+  `*_populated()` checks and `concurrency_populated(resp, num_cpus)`.
+
+  **Temporary qualification gap:** the replacement, applied-load
+  measurement gating what was offered rather than the box's response, is
+  **planned and not yet built**. Existing anti-vacuity and demo-richness
+  gates do not fill that applied-load qualification gap; the criteria are
+  incomplete in that respect until the replacement lands.
+
+  **Counter reset:** this criteria change resets the clean-attempt counter
+  under this document's own rule. At landing the counter was **0 of 4
+  counted (1 of 2 voids)**, so nothing was voided by this amendment.
 - all 11 tabs reached and rendered;
 - the daemon process alive for the whole window.
 
@@ -1078,7 +1094,7 @@ left to be discovered.
 | §1 run.id asserted against staleness | yes — not by this branch directly: `agent/rehearsal-bypass-suite` built its own `verdict_is_fresh` gate, then found at rebase time that master's `tests/demo_rehearsal_orchestrator_lib.validate_results_dir` (#176) already covers the identical concern, more thoroughly (also checks run.id's numeric format and summary.json's required keys) — removed the redundant duplicate rather than keep two |
 | §2 samples > 0, DB Time > 0 | yes (`capture_has_events_ok`, `time_model_conservation`'s `MIN_DB_TIME_MS` floor, checked before any ratio) |
 | §2 `Lock:relation` + `Lock:advisory` present (was `Timeout:PgSleep`; changed 2026-10-06, see §2 above) | yes (`workload_signature_present_ok`) |
-| §2 AAS ≥ 1.15 on the recent window | yes (`aas_floor_ok`) — the gate enforces the settled **1.15** (`tests/demo_rehearsal_lib.py`'s `AAS_FLOOR`; the old `AAS_FLOOR_PROVISIONAL = 0.5` is gone) |
+| §2 AAS on the recent window (1.15 floor withdrawn, 2026-10-24) | **reported, not gated** (`aas_floor_ok`, `aas_floor.ok: null`, `gating: false`, measured `aas` and detail retained). Anti-vacuity stays with `MIN_DB_TIME_MS`, `capture_has_events_ok` and `workload_signature_present_ok`; applied-load qualification is **planned, not built — a temporary gap** (see §2 amendment) |
 | §2 all 11 tabs reached, daemon alive throughout | yes (`build_demo_summary`'s `expected_tabs_per_pass` floor; `_assert_daemon_alive`, mirrors the existing workload-alive fail-safe) |
 | §3 conservation identity | yes, sampled every ~5 minutes through the capture (`conservation_sample_interval_s`), every sample must pass — not once at the end |
 | §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (`cpu_ns` approaching `duration_ns` on a `Timeout:PgSleep`/`Lock:*` event) still has no field on this wire — **measured offline instead, 2026-10-13**, via a direct raw-trace walk, not through `time_model`: see §3's RESOLVED per-class paragraph above for the figures and the restated threshold (`cpu_ns` >= 824,430 ns AND ratio >= 50%, both required). Not a wired automatic gate inside `demo_rehearsal.py` |

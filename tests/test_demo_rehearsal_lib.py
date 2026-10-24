@@ -507,33 +507,34 @@ def test_workload_signature_empty_rows_fails():
     check(not ok, f"empty rows (e.g. an idle/empty window) fails ({detail})")
 
 
-def test_aas_floor_ok_above_floor():
+def test_aas_floor_above_withdrawn_floor_is_reported_only():
     ok, detail = lib.aas_floor_ok(1.2)
-    check(ok, f"aas=1.2 clears the settled 1.15 floor ({detail})")
+    check(ok is None, f"aas=1.2 has no pass/fail verdict ({detail})")
+    check("aas=1.2" in detail and "reported, not gated" in detail,
+          f"above-floor AAS and its diagnostic status remain visible ({detail})")
 
 
-def test_aas_floor_below_floor_fails():
-    # BYPASS-SUITE CASE: an AAS reading near zero is void the same way a
-    # near-zero db_time_ms is.
+def test_aas_floor_below_withdrawn_floor_is_reported_only():
+    # Anti-vacuity belongs to the independent DB-Time/events/signature gates.
     ok, detail = lib.aas_floor_ok(0.1)
-    check(not ok, f"aas=0.1 is below the settled 1.15 floor ({detail})")
+    check(ok is None, f"aas=0.1 has no pass/fail verdict ({detail})")
+    check("aas=0.1" in detail and "reported, not gated" in detail,
+          f"near-zero AAS is retained as diagnostic data ({detail})")
 
 
-def test_aas_floor_none_fails():
+def test_aas_floor_none_is_reported_only():
     ok, detail = lib.aas_floor_ok(None)
-    check(not ok, f"a missing aas value fails, is not treated as fine ({detail})")
+    check(ok is None, f"missing AAS has no pass/fail verdict ({detail})")
+    check("aas=None" in detail and "reported, not gated" in detail,
+          f"missing AAS stays visibly absent, not a measured zero ({detail})")
 
 
-def test_aas_floor_rejects_value_the_old_provisional_floor_passed():
-    # BYPASS-SUITE CASE (issue 2.4): aas=0.8 cleared the old
-    # AAS_FLOOR_PROVISIONAL = 0.5 but must fail the settled
-    # AAS_FLOOR = 1.15 (docs/DEMO_REHEARSAL_CRITERIA.md section 2,
-    # run.id 1790869219) -- a gate still reading 0.5 would wrongly pass
-    # this. Confirms the enforced constant was actually bumped, not just
-    # its name or comment.
+def test_aas_floor_between_old_floors_is_reported_only():
+    # Pin withdrawal of both 0.5 and 1.15, rather than a relaxed threshold.
     ok, detail = lib.aas_floor_ok(0.8)
-    check(not ok, f"aas=0.8 clears 0.5 but must fail the settled 1.15 floor ({detail})")
-    check(lib.AAS_FLOOR == 1.15, f"AAS_FLOOR constant is the settled 1.15, not 0.5 ({lib.AAS_FLOOR})")
+    check(ok is None, f"aas=0.8 has no pass/fail verdict ({detail})")
+    check("aas=0.8" in detail and "reported, not gated" in detail,
+          f"between-floor AAS remains diagnostic ({detail})")
 
 
 # ── evaluate_time_model_window with the criteria-doc #2 extra floors ─────
@@ -546,13 +547,30 @@ def test_evaluate_window_workload_signature_and_aas_when_requested():
         {"name": "Lock:relation", "ms": 3000.0, "indent": 2},
         {"name": "Lock:advisory", "ms": 500.0, "indent": 2},
     ]
-    result = lib.evaluate_time_model_window(
-        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
-        offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True,
-        aas=1.5, check_workload_signature=True, check_aas_floor=True)
-    check(result["ok"], f"a clean sample with real workload signature and healthy AAS passes ({result})")
-    check(result["workload_signature"]["ok"], "workload_signature sub-check recorded ok")
-    check(result["aas_floor"]["ok"], "aas_floor sub-check recorded ok")
+    samples = []
+    for aas in (None, 0.0, 0.1, 0.8, 1.01, 1.12, 1.15, 1.30, 1.5):
+        result = lib.evaluate_time_model_window(
+            rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
+            offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True,
+            aas=aas, check_workload_signature=True, check_aas_floor=True)
+        check(result["ok"], f"independent gates pass regardless of AAS ({aas!r})")
+        check(result["workload_signature"]["ok"], "workload_signature sub-check recorded ok")
+        diagnostic = result["aas_floor"]
+        check(diagnostic["ok"] is None and diagnostic.get("gating") is False,
+              "AAS uses the Off-CPU reported-only verdict shape")
+        check("aas" in diagnostic and diagnostic["aas"] == aas,
+              f"the original AAS value is retained ({aas!r})")
+        check(f"aas={aas!r}" in diagnostic["detail"]
+              and "reported, not gated" in diagnostic["detail"],
+              "AAS detail retains the value and explains its diagnostic status")
+        samples.append(dict(result, offset_s=len(samples) * 300.0))
+    aggregate = lib.build_demo_conservation_check(samples, {"ok": True})
+    summary = lib.build_demo_summary(
+        [{"pass": "early", "tabs": {"overview": {"ok": True}}}],
+        {"time_model_conserves": aggregate})
+    check(summary["ok"], "reported-only AAS cannot fail the final rehearsal verdict")
+    check(summary["checks"]["time_model_conserves"]["samples"][4]["aas_floor"].get("aas") == 1.01,
+          "the final summary preserves gate-2-range AAS diagnostics")
 
 
 def test_evaluate_window_missing_workload_signature_fails_when_requested():
