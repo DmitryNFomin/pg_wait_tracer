@@ -233,6 +233,7 @@ test_sampled_overhead_gate.py
 test_data_query_text_context.py
 test_ui_live_smoke_lib.py
 test_ui_live_smoke_footage.py
+test_ui_live_smoke_failure.py
 # Integration finding (#455): the two halves of the backend active span were
 # briefed from the issue text, not from each other, so the UI read
 # `backend_activity_span` / `start_observed` / `executions_count` while the

@@ -75,6 +75,7 @@ Usage:
     python3 tests/ui_live_smoke.py --url http://localhost:8384/
 """
 import argparse
+import asyncio
 import json
 import os
 import socket
@@ -197,6 +198,44 @@ VIEW_MOUNT_JS = """() => {
     const fn = window.__pgwt && window.__pgwt.viewMount;
     if (typeof fn !== 'function') return {missing: true};
     return {missing: false, mount: fn()};
+}"""
+
+# Failure-only, read-only state, not a paint measurement. Each field says
+# whether it was actually read; an absent hook must not look like empty data.
+# Limit cards/requests to 20 and card text to 2000 characters.
+FAILURE_SNAPSHOT_TIMEOUT_S = 1.0
+FAILURE_SNAPSHOT_JS = """() => {
+    const record = read => {
+        try {
+            const value = read();
+            if (value === undefined) throw new Error('instrumentation unavailable');
+            return {status: 'recorded', value};
+        } catch (e) {
+            return {status: 'unavailable', error: String(e)};
+        }
+    };
+    const p = window.__pgwt;
+    return {
+        status: 'recorded',
+        active_tab: record(() => {
+            if (!p || !('activeTab' in p)) throw new Error('activeTab hook unavailable');
+            return p.activeTab;
+        }),
+        last_mount: record(() => {
+            if (!p || typeof p.viewMount !== 'function')
+                throw new Error('viewMount hook unavailable');
+            const m = p.viewMount();
+            return m == null ? m : {id: m.id, seq: m.seq, at: m.at};
+        }),
+        pane_errors: record(() => Array.from(document.querySelectorAll('.pane-error'))
+            .slice(0, 20).map(el => el.textContent.slice(0, 2000))),
+        pending_requests: record(() => {
+            if (!p || !p.transport || !p.transport.pending)
+                throw new Error('transport.pending unavailable');
+            return Object.entries(p.transport.pending).slice(0, 20)
+                .map(([id, r]) => ({id, cmd: r.cmd, channel: r.channel}));
+        }),
+    };
 }"""
 
 # AAS legend chip colours keyed by event/class name (active.js renderLegend:
@@ -524,6 +563,40 @@ class ConsoleErrorGuard:
 
 def _is_pgwt_error(e):
     return e.startswith("console: [pgwt]")
+
+
+def _failure_snapshot(page):
+    """Bound the entire browser read on Python's event loop, even if the
+    renderer or driver never replies. sync Page.evaluate has no timeout;
+    isolate its private async bridge here and report unavailable if that
+    bridge changes. No threads, polling, or calls on the successful path.
+    """
+    try:
+        evaluate = page._impl_obj.evaluate
+        sync = page._sync
+
+        async def read():
+            return await asyncio.wait_for(
+                evaluate(FAILURE_SNAPSHOT_JS), FAILURE_SNAPSHOT_TIMEOUT_S)
+
+        return sync(read())
+    except asyncio.TimeoutError:
+        return {"status": "unavailable",
+                "error": f"snapshot timed out after {FAILURE_SNAPSHOT_TIMEOUT_S}s"}
+    except Exception as e:
+        return {"status": "unavailable", "error": f"{type(e).__name__}: {e}"}
+
+
+def _failed_tab_diagnostics(page, guard, console_errors, pgwt_errors,
+                            pre_mount_diagnostics):
+    snapshot = _failure_snapshot(page)
+    # Reading pumps browser events too; drain after it so those errors also
+    # survive. Lists include anything already drained during earlier ticks.
+    for error in guard.drain():
+        (pgwt_errors if _is_pgwt_error(error) else console_errors).append(error)
+    return {"console_errors": console_errors,
+            "pre_mount_diagnostics": pre_mount_diagnostics or None,
+            "failure_snapshot": snapshot}
 
 
 # ── mock front-end ───────────────────────────────────────────────────────────
@@ -1194,7 +1267,7 @@ def _mark_footage_result(result, ticks_observed, ticks_requested, video_path):
     result["no_blink"]["measured"].update(
         ok=None, measured_count=0, detail=FOOTAGE_NOT_EVALUATED)
     result["blink_sweep"]["detail"] = FOOTAGE_NOT_EVALUATED
-    for diagnostic in result["pre_mount_diagnostic"]:
+    for diagnostic in result.get("pre_mount_diagnostic", []):
         diagnostic["note"] = FOOTAGE_NOT_EVALUATED
 
 
@@ -1332,6 +1405,9 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     # fails, this already holds the real measured value, and
     # build_failed_tab_result carries it through instead of discarding it.
     ttfp_ms = None
+    # None means the sweep diagnostic was never reached; do not report a
+    # fabricated empty measurement when navigation itself failed.
+    pre_mount_diagnostics = None
     try:
         page.goto(url)
         actual = page.evaluate(
@@ -1831,13 +1907,18 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         result = lib.build_failed_tab_result(tab_id, str(e),
                                              ticks_observed=len(tick_paths),
                                              pgwt_console_errors=pgwt_errors,
-                                             ttfp_ms=ttfp_ms)
+                                             ttfp_ms=ttfp_ms,
+                                             **_failed_tab_diagnostics(
+                                                 page, guard, console_errors,
+                                                 pgwt_errors, pre_mount_diagnostics))
     except Exception:
         traceback.print_exc()
         result = lib.build_failed_tab_result(
             tab_id, "unhandled exception (see stderr traceback)",
             ticks_observed=len(tick_paths), pgwt_console_errors=pgwt_errors,
-            ttfp_ms=ttfp_ms)
+            ttfp_ms=ttfp_ms,
+            **_failed_tab_diagnostics(page, guard, console_errors, pgwt_errors,
+                                      pre_mount_diagnostics))
     finally:
         video = page.video
         context.close()

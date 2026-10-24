@@ -191,6 +191,10 @@ run python3 tests/test_rehearsal_workload_lifetime.py
 step "python: live-smoke verdict unit tests"
 run python3 tests/test_ui_live_smoke_lib.py
 
+step "python: live-smoke failure diagnostic capture (#544)"
+run python3 tests/test_ui_live_smoke_failure.py
+run python3 tests/test_ui_live_smoke_failure.py --snapshot-js
+
 # #384: the --diag-data per-frame panel-data probe exists in
 # tests/ui_live_smoke.py and is reached from tests/ui_live_smoke.sh, but
 # tests/demo_rehearsal.py has its OWN run_tab call site -- so the instrument

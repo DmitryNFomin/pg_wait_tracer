@@ -1764,7 +1764,9 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
 
 
 def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
-                            pgwt_console_errors=(), ttfp_ms=None):
+                            pgwt_console_errors=(), ttfp_ms=None,
+                            console_errors=(), pre_mount_diagnostics=(),
+                            failure_snapshot=None):
     """A tab result for a tab that never got far enough to evaluate the four
     checks (e.g. the 60s no-data fail-safe fired, or navigation raised).
     Kept separate from build_tab_result so a genuine "checked and failed"
@@ -1772,8 +1774,13 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
     tab (and, unless known-failing-listed, the run), but the JSON says which
     happened.
 
-    ttfp_ms: None by default (navigation never reached a mount to measure
-    against); a caller MAY pass a measured value if navigation itself
+    console_errors/pre_mount_diagnostics preserve observations made before
+    failure. Passing pre_mount_diagnostics=None omits that field because
+    its measurement was never reached. failure_snapshot reports a bounded
+    browser read or an explicit reason it was unavailable.
+
+    ttfp_ms: None by default (navigation did not return a measurement);
+    a caller MAY pass a measured value if navigation itself
     succeeded but a LATER step failed (build_tab_result's own docstring
     covers the field's meaning)."""
     result = {
@@ -1782,7 +1789,7 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
         "ticks_observed": ticks_observed,
         "error": reason,
         "rendered": {"ok": False, "detail": reason},
-        "clean": {"ok": None, "console_errors": [],
+        "clean": {"ok": None, "console_errors": list(console_errors),
                   "pgwt_errors": list(pgwt_console_errors)[:10]},
         "no_blink": {"ok": None, "ratio": None, "threshold": BLINK_THRESHOLD,
                      "pair_offsets_ms": [], "not_measured": [],
@@ -1800,11 +1807,14 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
         "no_leak": {"ok": None, "before": None, "after": None,
                     "settle_s": {"before": None, "after": None}},
         "artifacts": artifacts or {},
-        "pre_mount_diagnostic": [],
         "ttfp_ms": ttfp_ms,
         "first_paint": {"ok": False, "bound_ms": FIRST_PAINT_BOUND_MS,
                         "detail": f"{tab_id}: ttfp_ms={ttfp_ms!r}ms; {reason}"},
     }
+    if pre_mount_diagnostics is not None:
+        result["pre_mount_diagnostic"] = list(pre_mount_diagnostics)
+    if failure_snapshot is not None:
+        result["failure_snapshot"] = failure_snapshot
     return _apply_known_failing(result)
 
 
