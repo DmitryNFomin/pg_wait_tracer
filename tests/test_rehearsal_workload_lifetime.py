@@ -60,7 +60,7 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
                         else float(loop_args[1]))
             now = [0.0]
             walked = []
-            ticks, schedule = dr.drlib.plan_passes(2100)
+            ticks, schedule = dr.drlib.rehearsal_plan(2100)
             self.assertEqual(ticks, dr.lib.MIN_TICKS)
             self.assertEqual(len(schedule), 3)
 
@@ -76,18 +76,23 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
                             "achieved_offsets_ms": [200, 600, 1100, 1600, 2100]}]}}
 
             output = io.StringIO()
-            with patch.object(dr.time, "monotonic", side_effect=lambda: now[0]), \
-                    patch.object(dr.time, "sleep", side_effect=lambda s: now.__setitem__(0, now[0] + s)), \
-                    patch.object(dr.live_smoke, "run_tab", side_effect=tab), \
-                    patch.object(dr.live_smoke, "_pid_is_live",
-                                 side_effect=lambda pid: now[0] < {101: pg_end, 102: loop_end}[pid]), \
-                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                try:
-                    results, _ = dr._run_passes(
+            def walk_until(pg_end):
+                now[0] = 0.0
+                walked.clear()
+                with patch.object(dr.time, "monotonic", side_effect=lambda: now[0]), \
+                        patch.object(dr.time, "sleep", side_effect=lambda s: now.__setitem__(0, now[0] + s)), \
+                        patch.object(dr.live_smoke, "run_tab", side_effect=tab), \
+                        patch.object(dr.live_smoke, "_pid_is_live",
+                                     side_effect=lambda pid: now[0] < {101: pg_end, 102: loop_end}[pid]), \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    return dr._run_passes(
                         None, "http://fixture/", tmp, ticks, schedule, 60,
                         101, 102, None, 0, viewport={}, device_scale_factor=1)
-                except SystemExit as exc:
-                    self.fail(f"delayed walk voided (exit={exc.code}):\n{output.getvalue()}")
+
+            try:
+                results, _ = walk_until(pg_end)
+            except SystemExit as exc:
+                self.fail(f"delayed walk voided (exit={exc.code}):\n{output.getvalue()}")
             self.assertGreater(now[0], 2100, "regression must actually cross the old deadline")
             self.assertEqual(len(walked), 3 * len(dr.lib.TABS))
             summary = dr.drlib.build_demo_summary(results, {"fixture": {"ok": True}})
@@ -95,6 +100,8 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
             self.assertEqual(summary["failed"], [f"late/{tab}" for tab in dr.lib.TABS[:3]])
             print(f"delayed walk: {now[0]:.0f}s > old 2100s; "
                   f"{len(walked)} tabs; RED verdict, no liveness void")
+            with self.subTest(pg_end=1000), self.assertRaises(SystemExit):
+                walk_until(1000)
 
     def test_dead_workload_still_refuses(self):
         for dead in (101, 102):
@@ -131,15 +138,23 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
                 self.assertEqual(workload.fire.call_count, expected)
                 workload.stop.assert_called_once_with(keep_table=False)
 
-    def test_impossible_plan_refuses_before_postgres_discovery(self):
-        for duration in ("0", "nan", "inf", "nonsense", "0.01", "10"):
+    def test_plan_preflight_before_postgres_discovery(self):
+        for duration in ("0", "nan", "inf", "nonsense", "0.01", "10", "35"):
             with self.subTest(duration=duration):
-                run = subprocess.run(["bash", "tests/demo_rehearsal.sh"], cwd=ROOT,
+                # An unavailable version bounds even a misplaced preflight to
+                # discovery; this test must never start load on a gate box.
+                run = subprocess.run(["bash", "tests/demo_rehearsal.sh", "--pg-version", "999"], cwd=ROOT,
                                      env=dict(os.environ, DURATION_MIN=duration),
                                      capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(run.returncode, 0)
-                self.assertIn("REFUSING rehearsal plan", run.stdout + run.stderr)
-                self.assertNotIn("postmaster", run.stdout + run.stderr)
+                output = run.stdout + run.stderr
+                if duration == "35":
+                    self.assertIn("launch plan target=2100s", output)
+                    self.assertNotIn("REFUSING", output)
+                    self.assertIn("cannot find postmaster PID", output)
+                else:
+                    self.assertIn("REFUSING rehearsal plan", output)
+                    self.assertNotIn("postmaster", output)
 
     def test_real_plans_and_explicit_mechanics_self_test_are_accepted(self):
         for duration in (30, 35, 45):
@@ -147,6 +162,13 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
             self.assertEqual(ticks, dr.lib.MIN_TICKS)
             self.assertEqual([name for name, _ in passes], ["early", "middle", "late"])
         self.assertEqual(dr.drlib.rehearsal_plan(180), dr.drlib.plan_passes(180))
+        for duration_s in (180 - 1e-7, 180 + 1e-7):
+            with self.subTest(duration_s=duration_s):
+                self.assertEqual(dr.drlib.rehearsal_plan(duration_s),
+                                 dr.drlib.plan_passes(duration_s))
+        for duration_s in (180 - 1e-5, 180 + 1e-5):
+            with self.subTest(duration_s=duration_s), self.assertRaises(ValueError):
+                dr.drlib.rehearsal_plan(duration_s)
 
     def test_direct_walker_refuses_before_changing_results(self):
         argv = ["demo_rehearsal.py", "--duration-min", "10", "--url", "http://fixture/",

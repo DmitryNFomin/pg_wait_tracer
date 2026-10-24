@@ -11,11 +11,12 @@ with a void.
 
 The shell now owns workload lifetime through its existing EXIT/INT/TERM
 cleanup. The lock loop has an explicit `--until-stopped` mode (fixed-duration
-smoke callers retain their mode). Pgbench has no unlimited-time switch, so it
-uses `-t 2147483647` per client instead of `-T`: four clients at 25 total tx/s
-would need approximately 10.9 years to finish naturally. Cleanup stops the
-original PID. There are no restarts, retries or modified UI thresholds. Both
-workloads remain live through end-of-capture queries too.
+smoke callers retain their mode). Pgbench uses `-T 86400`: one day exceeds
+the launcher's walk/wait/collect budget for the documented 30-45 minute runs
+and bounds orphaned load if the harness is killed. Cleanup sends SIGINT to the
+original PID so pgbench prints its statistics. There are no restarts, retries
+or modified UI thresholds. Both workloads remain live through end-of-capture
+queries too.
 
 An early preflight rejects nonfinite, nonpositive, malformed and too-short
 plans before PostgreSQL discovery, load or sysctl changes. A reduced baseline
@@ -23,8 +24,8 @@ cannot pass and is refused; the explicitly documented DURATION_MIN=3 mechanics
 self-test remains allowed and announces its expected reduced coverage. Direct
 Python invocations use the same plan validation before resetting result files.
 
-Rejected alternatives: fixed headroom merely moves the arbitrary cutoff;
-shrinking selector waits changes the measurements without diagnosing the hangs;
+Rejected alternatives: shrinking selector waits changes the measurements without
+diagnosing the hangs;
 a remaining-time walk cutoff needs a new incomplete-verdict/abort path and
 still sacrifices useful findings. Keeping load alive preserves the existing
 walker, timeouts, failed-tab aggregation and liveness guard. This does not
@@ -67,51 +68,47 @@ Separate tests cover either workload dying, the real lock loop continuing
 until SIGTERM and cleaning up, fixed-duration compatibility, and preflight
 refusal/acceptance. Registered in `scripts/check.sh` and `tests/unit_tests.list`.
 
-Full local gate command: `make check > /tmp/issue543-make-check.log 2>&1`.
-The final report provides its tree stamp; `.pgwt-check.stamp` must equal
-`scripts/tree-hash.sh` and `git rev-parse HEAD^{tree}` after commit.
+## Completed validation of cbc4b2d
 
-`make box-check` was deliberately not run per the owner's sandbox instruction.
-There is no box-check summary tail yet: owner must run it on gate-2 against
-the committed branch. In particular that gate must verify actual workload
-teardown and the live harness; simulation cannot establish those.
-
-## Sandbox commit blocker
-
-Normal `git add ... && git commit ...` was attempted in the supplied clone.
-It failed before staging, with exit 128:
+The implementation was committed as `cbc4b2d`. The owner's subsequent full
+`make check` passed with stamp `fc247be77eaf7ca7d02743b846f61cf8ccd98c04`
+(also present in `.pgwt-check.stamp`). Gate-2 box-check returned:
 
 ```text
-fatal: Unable to create '.../scratchpad/fix543/.git/index.lock': Operation not permitted
+Executed: 149 (passed 149, failed 0)
+Live UI smoke: overall=PASS
 ```
 
-No alternate Git directory/index or worktree was used. Changes remain
-uncommitted in this working tree; gate-2 cannot check out the implementation
-until the sandbox write restriction is resolved and the changes are committed.
-Process inspection with `ps` was also denied. The check reported that it could
-not activate `core.hooksPath` for this clone.
+These results apply to that committed implementation, before the second-round
+review fixes. Full check is left to the owner for the revised tree; no rehearsal
+was started. The owner will validate the real pgbench argv on gate-2 with a
+10-second smoke of `pgbench -U postgres -d postgres -c 4 -T 86400 --rate=25`.
 
-## Full check result in this sandbox
+## Second-round regression controls
 
-`make check` completed with exit 2 / `CHECK FAILED`; **no check stamp exists**.
-No retry or sandbox workaround was attempted. Its failures were:
+The delayed-walk test now uses `rehearsal_plan(2100)` and repeats the same walk
+with `pg_end=1000`, requiring `SystemExit`. Temporarily removing both workload
+liveness calls from `_run_passes` (leaving the guard implementation intact)
+produced:
 
-- `test_gitignore_build_products.sh`: tree-hash produced nothing (the guard
-  suppresses the underlying Git stderr; see the direct Git denial above).
-- Go vet/test: `open /Users/dmitryfomin/Library/Caches/go-build/...: operation not permitted`.
-- `test_served_asset_guard.sh`: process classification failed because `ps`
-  exited 126, including the forgotten-server scan/teardown assertions.
-- All five browser suites (`test_web_ui.py`, `test_web_ui_chaos.py`,
-  `test_chip_label_alignment.py`, `verify_waterfall_fold.py`,
-  `test_dfg_geometry.py`) failed to launch Chromium: `bootstrap_check_in
-  org.chromium.Chromium.MachPortRendezvousServer...: Permission denied (1100)`.
+```text
+(pg_end=1000) ... FAIL
+AssertionError: SystemExit not raised
+```
 
-The new six-test suite passed within that full invocation, as did the existing
-287-assertion rehearsal library suite. Standalone GREEN output is in
-`/tmp/issue543-green.log`; the complete full-check log is in
-`/tmp/issue543-make-check.log`.
+The shell preflight test now includes a valid `DURATION_MIN=35` control. Every
+case passes `--pg-version 999`, so discovery cannot start a real workload.
+Temporarily inserting `sys.exit(1)` on the heredoc's success path produced:
 
-Manual reviewer guards: `scripts/check-test-registration.sh` passed.
-`scripts/check-runner-registration.sh` reported exactly the baseline gaps
-documented in CLAUDE.md/#433 (CI-only capture/uprobe smoke tests and four
-existing orphans); the new test was not among its findings.
+```text
+(duration='35') ... FAIL
+AssertionError: 'launch plan target=2100s' not found in ''
+```
+
+Both mutations were restored. Full RED logs are
+`/tmp/issue543-round2-F3-red.log` and `/tmp/issue543-round2-F4-red.log`.
+The revised workload-lifetime suite passes all six tests, including tolerance
+controls inside and outside the mechanics self-test's `1e-6` second allowance.
+The existing rehearsal library suite passes all 287 assertions; shell syntax
+and `git diff --check` also pass. No full check or box-check was rerun for this
+round. Changes remain uncommitted for the owner; the sandbox protects `.git`.

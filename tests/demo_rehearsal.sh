@@ -89,7 +89,7 @@ except ValueError as exc:
     sys.exit(f"REFUSING rehearsal plan: {exc}")
 print(f"demo_rehearsal: launch plan target={duration_s:g}s ticks_per_tab={ticks} "
       f"passes={len(passes)}; workloads stay live until teardown")
-if duration_s == 180:
+if abs(duration_s - 180) < 1e-6:
     print("demo_rehearsal: 3-minute mechanics self-test; reduced coverage cannot pass the baseline")
 PY
 then
@@ -190,7 +190,8 @@ PGBENCH_PID=""
 DEMO_RC=1
 
 # stop_pid: bounded wait (signal, poll, KILL) -- live_daemon_lib.sh. The
-# bridge gets SIGINT specifically (web/main.go only handles os.Interrupt).
+# bridge gets SIGINT specifically (web/main.go only handles os.Interrupt),
+# as does pgbench so its cancel path prints end-of-run statistics.
 cleanup() {
     # issue #386: put the global sysctl back exactly as it was, BEFORE
     # anything else can exit early below.
@@ -203,7 +204,7 @@ cleanup() {
     fi
 
     stop_pid "$WORKLOAD_PID" 10
-    stop_pid "$PGBENCH_PID" 10
+    stop_pid "$PGBENCH_PID" 10 INT
     stop_pid "$BRIDGE_PID" 10 INT
     stop_pid "$TRACER_PID" 15
 
@@ -307,11 +308,11 @@ echo "demo_rehearsal: starting pgbench (4 clients, until teardown, throttled)"
 # enough to make the end-of-capture Waterfall-latency check meaningless --
 # it would be measuring "how slow does an unrealistically large dataset
 # get", not the realistic-load regression issue #101 describes).
-# pgbench requires a finite duration or transaction count. INT_MAX per client
-# at 25 total tx/s cannot finish within a rehearsal (~10.9 years); cleanup()
-# stops this same process on success, failure, INT or TERM. No restart loop:
-# an unexpected exit must still trip the walk's unchanged liveness guard.
-pgbench -U postgres -d postgres -c 4 -t 2147483647 --rate=25 \
+# One day exceeds the launcher's walk/wait/collect budget for the documented
+# 30-45 minute runs, while bounding orphaned load if the harness is killed.
+# cleanup() normally stops this same process on success, failure, INT or TERM.
+# No restart loop: an unexpected exit still trips the walk's liveness guard.
+pgbench -U postgres -d postgres -c 4 -T 86400 --rate=25 \
     >>"$PGBENCH_LOG" 2>&1 &
 PGBENCH_PID=$!
 sleep 1

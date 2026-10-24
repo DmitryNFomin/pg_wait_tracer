@@ -197,7 +197,8 @@ def rehearsal_plan(duration_s):
     if not math.isfinite(duration_s) or duration_s <= 0:
         raise ValueError("DURATION_MIN must be finite and positive")
     ticks, passes = plan_passes(duration_s)
-    if duration_s != 180 and (ticks < DEFAULT_TICK_OPTIONS[0] or len(passes) < 3):
+    is_self_test = abs(duration_s - 180) < 1e-6
+    if not is_self_test and (ticks < DEFAULT_TICK_OPTIONS[0] or len(passes) < 3):
         raise ValueError(
             f"{duration_s:g}s cannot fit the baseline (6 ticks/tab, 3 passes); "
             "use the default DURATION_MIN=35 or DURATION_MIN=3 for a mechanics self-test")
