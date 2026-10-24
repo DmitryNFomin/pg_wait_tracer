@@ -478,7 +478,11 @@ def main():
     args = build_arg_parser().parse_args()
 
     duration_s = args.duration_min * 60.0
-    ticks, passes = drlib.plan_passes(duration_s)
+    try:
+        ticks, passes = drlib.rehearsal_plan(duration_s)
+    except ValueError as exc:
+        print(f"REFUSING rehearsal plan: {exc}", file=sys.stderr)
+        return 1
     _print_plan_banner(duration_s, ticks, passes)
 
     out_dir = args.out_dir
