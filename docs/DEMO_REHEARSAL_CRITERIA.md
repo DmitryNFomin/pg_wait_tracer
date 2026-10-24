@@ -462,6 +462,17 @@ checked first and independently:
   `SCATTER_MIN_SPREAD_RATIO = 3.0`, `WATERFALL_INTERESTING_MS = 500`, per-tab
   `*_populated()` checks and `concurrency_populated(resp, num_cpus)`.
 
+  **AAS availability is still gated — only its magnitude was withdrawn.** A server
+  that stops reporting AAS altogether still fails the rehearsal loudly:
+  `cross_tab_aas_agreement` is in `REQUIRED_EXTRA_CHECKS`, runs on the identical
+  recent window, and `bucket_weighted_aas_ok` fails closed on a missing or
+  non-numeric `time_model` `aas`. Unlike §3's Off-CPU diagnostic, the `aas_floor`
+  entry carries no `available` leg of its own, so do not re-derive a fail-safe
+  gap from its absence — the availability check lives in the extra-checks set.
+  Demo richness is also still gated on **peak AAS ≥ `num_cpus`**
+  (`tests/demo_workload_coverage.py:192`), which is a stricter bar than the
+  withdrawn 1.15 window average.
+
   **Temporary qualification gap:** the replacement, applied-load
   measurement gating what was offered rather than the box's response, is
   **planned and not yet built**. Existing anti-vacuity and demo-richness
