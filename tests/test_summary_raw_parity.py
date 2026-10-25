@@ -32,7 +32,14 @@ A third copy retains its summaries but stamps every file header to
 PGWT_SUMMARY_VERSION - 1, following test_open_cpu_accounting.c's set_version.
 Its long-window route must be raw, with the ACCOUNTING-VERSION PREFLIGHT INFO
 marker (never the no-file marker), and EVERY compared field must equal the
-fresh summary answer. Existing expected divergences do not exempt this arm.
+SUMMARY-LESS RAW REFERENCE -- exactly, with no expected-divergence table and
+no holes. The version refusal puts this arm on the raw path, so the raw answer
+is the one it owes; comparing it against the fresh SUMMARY answer instead would
+re-ask arm one's question, inherit arm one's open #410/straddle divergences as
+NEW ones, and -- the part that matters -- PASS a future bug that made the
+refusal leak the summary path's numbers. The fresh-summary answer is still
+required to route to summaries, which is what proves this window was
+summary-eligible and therefore that the stamping is what forced the fallback.
 
 That premise is not assumed — it is asserted, by the PREMISE CONTROL below:
 at a 59 s window BOTH dirs take the raw path, and their answers must be
@@ -343,6 +350,155 @@ def set_version(trace_dir, current_version):
     return [os.path.basename(p) for p in paths]
 
 
+# ── The stale arm's own detectors, checked before they are trusted ─────────
+#
+# Every defect found in a gate in this repo has been a FALSE NEGATIVE: the
+# check was unreachable, skipped, or satisfied without looking at anything.
+# Showing that the arm CAN go red (--sabotage-stale-fallback) proves the
+# true-positive path, which has never been the broken one. So before any live
+# work, drive P.stale_verdict through each way its detection could be made
+# blind and require a REFUSAL from every one. If a detector approves here, the
+# gate fails without pretending to have measured a capture.
+#
+# These are pure-function cases over tests/summary_raw_parity_lib.py and would
+# ideally also live in tests/test_summary_raw_parity_lib.py (which `make check`
+# runs on this Mac, while THIS file runs only in run_all.sh's synthetic-data
+# tier). That file is outside this branch's file scope; running them here means
+# they execute on every box-check and CI Linux job rather than nowhere.
+
+_STALE_MARKER = ("INFO: %d of %d summary file(s) covering this window are not "
+                 "summary v%d -- recomputing from raw events")
+
+
+def _answer(db_time=200000.0, cpu=40044.0):
+    """A field dict shaped like a real one: non-vacuous by P's own rules
+    (DB Time, >=3 class rows, >=2 sessions, >=2 queries)."""
+    return {
+        "time_model/db_time_ms": db_time,
+        "time_model/cpu_ms": cpu,
+        "time_model/rowset": "CPU@1 | IO@1 | Lock@1",
+        "sessions/rowset": "1000 | 1001",
+        "queries/order": "100 | 101",
+    }
+
+
+def selftest_detectors():
+    """(ok, lines). Each case names the blinding it simulates."""
+    good_routes = {"raw": P.ROUTE_RAW, "summary": P.ROUTE_SUMMARY}
+    ver, nfiles = 8, 1
+    err = _STALE_MARKER % (nfiles, nfiles, ver)
+    raw = _answer()
+    stale_good = _answer()
+
+    def run(routes=good_routes, stale=None, summary=None, stderr=err,
+            version=ver, files=nfiles, raw_ref="default"):
+        return P.stale_verdict(
+            "selftest", routes,
+            stale_good if stale is None else stale,
+            _answer(db_time=312114.0, cpu=0.0) if summary is None else summary,
+            stderr, version, files,
+            raw_fields=(raw if raw_ref == "default" else raw_ref))
+
+    # (name, must-refuse call, what a PASS here would mean)
+    cases = [
+        ("no raw oracle supplied",
+         lambda: run(raw_ref=None),
+         "the arm would fall back to some other answer as its oracle"),
+        ("stale answer leaks the SUMMARY path's numbers",
+         lambda: run(stale=_answer(db_time=312114.0, cpu=0.0)),
+         "a broken version preflight that served the stale file would pass"),
+        ("preflight marker absent entirely",
+         lambda: run(stderr=""),
+         "a raw answer reached by any other route would count"),
+        ("the #403 no-file marker instead of the version one",
+         lambda: run(stderr="INFO: no summary file covers this window -- "
+                            "recomputing from raw events"),
+         "#403 (no summary written at all) would read as a version refusal"),
+        ("marker names a different file count than we stamped",
+         lambda: run(stderr=_STALE_MARKER % (0, 0, ver), files=0),
+         "a window covered by zero summary files would count as proof"),
+        ("marker names a different version",
+         lambda: run(stderr=_STALE_MARKER % (nfiles, nfiles, ver + 5)),
+         "a refusal for some other version would be accepted"),
+        ("fresh-summary side also took the raw path",
+         lambda: run(routes={"raw": P.ROUTE_RAW, "summary": P.ROUTE_RAW}),
+         "the window was never summary-eligible, so stamping proved nothing"),
+        ("a route could not be determined",
+         lambda: run(routes={"raw": P.ROUTE_RAW,
+                             "summary": P.ROUTE_UNKNOWN}),
+         "an undeterminable route would be treated as a good one"),
+        ("the raw oracle is empty",
+         lambda: run(raw_ref={}),
+         "an absent oracle would agree with anything"),
+        ("the version-refused answer is empty",
+         lambda: run(stale={}),
+         "an empty answer would be 'complete'"),
+        ("the version-refused answer dropped a field",
+         lambda: run(stale={k: v for k, v in _answer().items()
+                            if k != "time_model/cpu_ms"}),
+         "a missing column would read as agreement"),
+        ("premise control with both routes NOT raw",
+         lambda: P.stale_verdict(
+             "selftest", {"raw": P.ROUTE_RAW, "summary": P.ROUTE_SUMMARY},
+             _answer(), _answer(), "", ver, nfiles, is_control=True,
+             raw_fields=raw),
+         "the 59 s control would not actually be on the raw path"),
+        ("premise control comparing nothing",
+         lambda: P.stale_verdict(
+             "selftest", {"raw": P.ROUTE_RAW, "summary": P.ROUTE_RAW},
+             {}, {}, "", ver, nfiles, is_control=True, raw_fields=raw),
+         "two empty answers would agree perfectly"),
+    ]
+
+    lines = ["--- stale-arm detector self-test ---"]
+    ok = True
+    # POSITIVE CONTROL FIRST. Without it every case below could be satisfied
+    # by a stale_verdict that refuses unconditionally, which would refuse the
+    # real run too -- and 13 green REFUSALs would look like 13 working checks.
+    pos_ok, _, pos_findings = run()
+    if not pos_ok:
+        lines.append("  FAIL positive control: correct inputs must PASS; "
+                     "a detector that always refuses proves nothing")
+        ok = False
+    elif not pos_findings:
+        lines.append("  FAIL positive control: PASSed having compared "
+                     "0 fields")
+        ok = False
+    else:
+        lines.append("  positive control: PASS over %d fields"
+                     % len(pos_findings))
+    for name, call, consequence in cases:
+        # A CLEAN refusal is required: ok=False *and* a FAIL line naming the
+        # problem. An exception is not good enough even though main() would
+        # turn it into a failure -- "refuses by crashing" is how a guard gets
+        # deleted as redundant and the crash then turns out to depend on an
+        # unrelated detail. Counting a raise as a pass here is also what let
+        # four of these cases stay green while their own guard was reverted.
+        try:
+            case_ok, case_lines = call()[0], call()[1]
+        except Exception as exc:                     # noqa: BLE001
+            lines.append("  FAIL detector did not refuse cleanly: %s -- "
+                         "raised %r instead of returning a refusal"
+                         % (name, exc))
+            ok = False
+            continue
+        if case_ok:
+            lines.append("  FAIL detector is blind: %s -- %s"
+                         % (name, consequence))
+            ok = False
+        elif not any("FAIL" in l or any(st in l for st in P.FAIL_STATUSES)
+                     for l in case_lines):
+            # A refusal must name its reason, either as a FAIL line or as the
+            # divergence rows that caused it. A silent ok=False would leave a
+            # red run with nothing for a reader to act on.
+            lines.append("  FAIL detector refused without saying why: %s"
+                         % name)
+            ok = False
+    lines.append("  %d blinding cases, all refused cleanly: %s"
+                 % (len(cases), "yes" if ok else "NO"))
+    return ok, lines
+
+
 def main():
     record = "--record" in sys.argv
     sabotage = "--sabotage" in sys.argv
@@ -354,6 +510,16 @@ def main():
             print("FAIL dependency: %s" % p)
         print("=== test_summary_raw_parity: FAIL (the gate could not run; "
               "that is a failure, not a skip) ===")
+        return 1
+
+    # Before measuring a capture, prove the stale arm's detectors can still
+    # SEE. A blinded detector must not get the chance to approve a live run.
+    self_ok, self_lines = selftest_detectors()
+    if not self_ok:
+        for l in self_lines:
+            print(l)
+        print("=== test_summary_raw_parity: FAIL (the stale arm's own "
+              "detectors are blind; refusing to report on a capture) ===")
         return 1
 
     os.makedirs(RESULT_DIR, exist_ok=True)
@@ -385,7 +551,11 @@ def main():
               "windows": {}}
     expected = load_expected()
     recorded = {}
-    lines = []
+    # The detector self-test's verdict is part of the printed log and the
+    # artifact, so a reader can see it ran rather than trusting that it did.
+    lines = list(self_lines)
+    report["stale_detector_selftest_ok"] = self_ok
+    report["stale_detector_selftest"] = self_lines
     try:
         version = int(summary_format_version())
         if version <= 1:
@@ -463,9 +633,16 @@ def main():
             t_routes = {"raw": P.classify_route(
                 t_oracle, t_err, marker_expected=not is_control),
                 "summary": routes["summary"]}
+            # The stale arm's NUMERIC oracle is the summary-less raw dir, not
+            # the fresh-summary answer: the version refusal puts this arm on
+            # the raw path, so the raw answer is what it owes. s_fields is
+            # still passed, for the one thing only it can prove -- that this
+            # window routes to summaries when the headers are fresh, so the
+            # stamping is what forced the fallback. See P.stale_verdict.
             t_ok, t_lines, t_findings = P.stale_verdict(
                 name, t_routes, P.extract_all(t_ans), s_fields, t_err,
-                version, len(stamped), is_control=is_control)
+                version, len(stamped), is_control=is_control,
+                raw_fields=r_fields)
             ok = ok and t_ok
             lines.extend(t_lines)
             report["windows"][name]["stale"] = {

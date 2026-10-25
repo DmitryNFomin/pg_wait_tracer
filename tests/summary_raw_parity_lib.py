@@ -73,6 +73,16 @@ not a skip (tests/test_summary_raw_parity_lib.py drives each one):
   * a KNOWN divergence disappears             -> XPASS, reported, does NOT
     fail: that is what a fix for #408/#379/#319 looks like, and the entry is
     then deleted.
+  * the stale arm has no oracle               -> FAIL (`stale_verdict` refuses
+    without a raw reference rather than silently grading the version-refused
+    answer against the fresh SUMMARY one, which would inherit the main arm's
+    registered holes AND pass a refusal that leaked summary numbers)
+
+The stale arm's detectors are additionally re-proved on every run, before any
+capture is measured: test_summary_raw_parity.py's selftest_detectors() drives
+`stale_verdict` through thirteen ways its detection could be blinded, requires
+a CLEAN refusal from each, and requires correct inputs to still PASS -- so a
+detector that refuses unconditionally cannot masquerade as a working one.
 """
 
 import math
@@ -97,14 +107,24 @@ ABSENT = "<absent>"
 UNPARSEABLE = "<unparseable>"
 
 
+#: Default side labels. `labels` exists because this module compares THREE
+#: pairings, not one: raw-vs-summary (the main arm), raw-vs-raw (the premise
+#: control) and version-refused-vs-raw (the stale arm). Printing "summary=" for
+#: an answer that came from the RAW path would misname the very thing under
+#: test, and a misnamed number is how a reviewer approves the wrong comparison.
+LABELS_RAW_SUMMARY = ("raw", "summary")
+
+
 class Finding:
-    def __init__(self, field, raw, summary, status, issue=None, note=""):
+    def __init__(self, field, raw, summary, status, issue=None, note="",
+                 labels=LABELS_RAW_SUMMARY):
         self.field = field
         self.raw = raw
         self.summary = summary
         self.status = status
         self.issue = issue
         self.note = note
+        self.labels = tuple(labels)
 
     @property
     def delta(self):
@@ -120,13 +140,14 @@ class Finding:
         return d / self.raw
 
     def line(self):
+        la, lb = self.labels
         if self.delta is not None:
-            what = "raw=%.6f summary=%.6f delta=%+.6f" % (
-                self.raw, self.summary, self.delta)
+            what = "%s=%.6f %s=%.6f delta=%+.6f" % (
+                la, self.raw, lb, self.summary, self.delta)
             if self.rel is not None:
                 what += " (%+.4f%%)" % (self.rel * 100.0)
         else:
-            what = "raw=%r summary=%r" % (self.raw, self.summary)
+            what = "%s=%r %s=%r" % (la, self.raw, lb, self.summary)
         tag = self.status
         if self.issue is not None:
             tag += " #%s" % self.issue
@@ -136,9 +157,14 @@ class Finding:
         return out
 
     def as_dict(self):
+        # The "raw"/"summary" KEYS are the on-disk pin format
+        # (summary_raw_parity_expected.json) and never change; "sides" records
+        # which two answers those slots actually held for this finding, so the
+        # artifact cannot be read as a raw-vs-summary result when it is not.
         return {"field": self.field, "raw": self.raw, "summary": self.summary,
                 "status": self.status, "issue": self.issue,
-                "delta": self.delta, "rel": self.rel, "note": self.note}
+                "delta": self.delta, "rel": self.rel, "note": self.note,
+                "sides": list(self.labels)}
 
 
 def _num(v):
@@ -285,7 +311,8 @@ def extract_all(answers):
 
 # ── Comparison ──────────────────────────────────────────────────────────────
 
-def compare(raw_fields, summary_fields, expected):
+def compare(raw_fields, summary_fields, expected,
+            labels=LABELS_RAW_SUMMARY):
     """expected: {field: {"issue": <int|str>, "raw": v, "summary": v}}.
 
     A pinned pair per entry is what keeps "known issue" from licensing an
@@ -302,36 +329,38 @@ def compare(raw_fields, summary_fields, expected):
             only = "summary" if (rv is ABSENT or rv == ABSENT) else "raw"
             if exp and _same(rv, exp.get("raw")) and _same(sv, exp.get("summary")):
                 findings.append(Finding(field, rv, sv, KNOWN, issue=iss,
+                                        labels=labels,
                                         note="present on %s only" % only))
             else:
                 findings.append(Finding(field, rv, sv, MISSING, issue=iss,
+                                        labels=labels,
                                         note="present on %s only" % only))
             continue
         if (isinstance(rv, str) and rv.startswith(UNPARSEABLE)) or \
            (isinstance(sv, str) and sv.startswith(UNPARSEABLE)):
-            findings.append(Finding(field, rv, sv, BAD, issue=iss))
+            findings.append(Finding(field, rv, sv, BAD, issue=iss, labels=labels))
             continue
 
         if _same(rv, sv):
             if exp:
                 findings.append(Finding(
-                    field, rv, sv, XPASS, issue=iss,
+                    field, rv, sv, XPASS, issue=iss, labels=labels,
                     note="recorded as divergent, now AGREES -- if #%s is "
                          "fixed, delete this entry from "
                          "tests/summary_raw_parity_expected.json. Removing "
                          "the pin is the last step of landing that fix, not "
                          "an edit to be nervous about" % iss))
             else:
-                findings.append(Finding(field, rv, sv, AGREE))
+                findings.append(Finding(field, rv, sv, AGREE, labels=labels))
             continue
 
         if not exp:
-            findings.append(Finding(field, rv, sv, NEW))
+            findings.append(Finding(field, rv, sv, NEW, labels=labels))
         elif _same(rv, exp.get("raw")) and _same(sv, exp.get("summary")):
-            findings.append(Finding(field, rv, sv, KNOWN, issue=iss))
+            findings.append(Finding(field, rv, sv, KNOWN, issue=iss, labels=labels))
         else:
             findings.append(Finding(
-                field, rv, sv, CHANGED, issue=iss,
+                field, rv, sv, CHANGED, issue=iss, labels=labels,
                 note="recorded raw=%r summary=%r"
                      % (exp.get("raw"), exp.get("summary"))))
     order = {NEW: 0, CHANGED: 1, MISSING: 2, BAD: 3, XPASS: 4, KNOWN: 5,
@@ -451,10 +480,25 @@ def require_tools(paths):
 # ── Verdict ─────────────────────────────────────────────────────────────────
 
 def verdict(window, routes, raw_fields, summary_fields, expected,
-            tool_problems=(), fallbacks=None):
+            tool_problems=(), fallbacks=None, compare_pair=None,
+            labels=LABELS_RAW_SUMMARY, route_labels=LABELS_RAW_SUMMARY):
     """(ok, lines, findings) for one window — diagnostic first: every
     divergence prints with field name and magnitude whether or not it fails
-    the gate."""
+    the gate.
+
+    `raw_fields`/`summary_fields` are the pair whose ROUTES must differ
+    (raw then summary) and whose content must be non-vacuous.
+
+    `compare_pair` exists for the stale-version arm, the one case where the
+    pair that must have DIFFERENT ROUTES is not the pair whose NUMBERS must
+    MATCH. That arm has three answers, not two: the version-refused one, the
+    fresh-summary one (whose summary route proves the window was
+    summary-eligible, so that the stamping is what forced the fallback) and
+    the summary-less raw reference (the answer a raw recompute owes). Routes
+    are proved over the first two; numbers are compared against the third.
+    When set it is `(a_fields, b_fields)` and `labels` names them; both halves
+    are vacuity-checked too, so substituting an empty dict cannot buy a pass.
+    """
     lines = ["--- window %s ---" % window]
     findings = []
     ok = True
@@ -466,8 +510,12 @@ def verdict(window, routes, raw_fields, summary_fields, expected,
         return ok, lines, findings
 
     fallbacks = fallbacks or {}
-    lines.append("  routes: raw-side=%s summary-side=%s"
-                 % (routes.get("raw"), routes.get("summary")))
+    lines.append("  routes: %s-side=%s %s-side=%s"
+                 % (route_labels[0], routes.get("raw"),
+                    route_labels[1], routes.get("summary")))
+    if compare_pair is not None:
+        lines.append("  numbers compared: %s vs %s (NOT the route pair above)"
+                     % (labels[0], labels[1]))
     for side, reason in sorted(fallbacks.items()):
         if reason:
             lines.append("  %s-side raw fallback: %s" % (side, reason))
@@ -491,15 +539,35 @@ def verdict(window, routes, raw_fields, summary_fields, expected,
         lines.append("  FAIL route: sides are swapped or mislabelled")
         ok = False
 
-    for p in (vacuity_problems(raw_fields, "raw")
-              + vacuity_problems(summary_fields, "summary")):
-        lines.append("  FAIL vacuous: %s" % p)
-        ok = False
+    checked = [(raw_fields, route_labels[0]), (summary_fields, route_labels[1])]
+    if compare_pair is not None:
+        # The COMPARED pair is vacuity-checked in its own right. BELT AND
+        # BRACES, stated honestly: with stale_verdict's wiring compare_pair[0]
+        # IS raw_fields (already checked above), and a thin or empty
+        # compare_pair[1] is caught first as MISSING-FIELD by compare(). No
+        # input is known that reaches this and nothing else, so the detector
+        # self-test does not claim it as a demonstrated gate -- it is here so
+        # that a future caller passing an unrelated pair is still covered.
+        checked += [(compare_pair[0], labels[0]), (compare_pair[1], labels[1])]
+    for fields, side in checked:
+        for p in vacuity_problems(fields, side):
+            lines.append("  FAIL vacuous: %s" % p)
+            ok = False
 
     if not ok:
         return ok, lines, findings
 
-    findings = compare(raw_fields, summary_fields, expected)
+    a_fields, b_fields = compare_pair if compare_pair is not None \
+        else (raw_fields, summary_fields)
+    findings = compare(a_fields, b_fields, expected, labels=labels)
+    if not findings:
+        # Two field dicts that share no keys produce no findings at all, and
+        # "nothing disagreed" would read as a pass. A window that compared
+        # nothing has not been checked. BELT AND BRACES: unreachable while the
+        # vacuity rules above require four specific keys on both sides, so
+        # this is not claimed as a demonstrated gate either.
+        lines.append("  FAIL vacuous: 0 fields compared -- nothing was checked")
+        return False, lines, findings
     counts = {}
     for f in findings:
         counts[f.status] = counts.get(f.status, 0) + 1
@@ -513,11 +581,42 @@ def verdict(window, routes, raw_fields, summary_fields, expected,
     return ok, lines, findings
 
 
-def stale_verdict(window, routes, stale_fields, summary_fields, stderr_text,
-                  version, summary_files, is_control=False):
-    """The version-refused arm must return the COMPLETE fresh-arm answer.
+LABELS_STALE = ("version-refused", "raw-reference")
 
-    No expected-divergence table applies here, including during --record.
+
+def stale_verdict(window, routes, stale_fields, summary_fields, stderr_text,
+                  version, summary_files, is_control=False,
+                  raw_fields=None):
+    """The version-refused arm must return the COMPLETE RAW answer.
+
+    WHICH ANSWER IS THE ORACLE, AND WHY IT IS THE RAW ONE
+    ─────────────────────────────────────────────────────────────────────────
+    This arm's whole claim is that a summary file stamped with a superseded
+    accounting version is refused AND the window is then recomputed from raw
+    to a complete answer. The product's own fallback puts this arm ON THE RAW
+    PATH, so the answer it owes is the RAW answer -- byte-identical trace
+    files, so the summary-less reference dir is the exact oracle.
+
+    It is NOT the fresh-summary answer. Comparing against that re-asks "does
+    raw equal summary?", which is the FIRST arm's question and is already
+    answered and pinned per field in summary_raw_parity_expected.json; every
+    open divergence there (#410's four fields, the eight straddle queries/*
+    residuals) would be re-reported here as a NEW-DIVERGENCE, so the arm could
+    only be made green by registering the same holes twice.
+
+    And the raw oracle is STRICTLY STRONGER, not a relaxation. Suppose a
+    future bug made the version preflight accept the stale file, or made the
+    fallback reproduce the summary path's numbers. Against the fresh-summary
+    oracle those numbers MATCH and the arm passes -- a false negative on
+    exactly the regression it exists to catch. Against the raw oracle they
+    diverge and it fails. The fresh-summary answer keeps the one job it can
+    do: its SUMMARY ROUTE proves the window was summary-eligible, so the
+    header stamping is what forced the fallback rather than the window's
+    shape.
+
+    No expected-divergence table applies here, including during --record: this
+    arm has no known holes and must never acquire one silently.
+
     The short premise control requires raw/raw; every long window still
     requires raw/summary, using the same fail-closed route proof as verdict.
     """
@@ -532,18 +631,37 @@ def stale_verdict(window, routes, stale_fields, summary_fields, stderr_text,
                     + vacuity_problems(summary_fields, "summary"))
         lines.extend("  FAIL vacuous: " + p for p in problems)
         ok = ok and not problems
-        findings = compare(stale_fields, summary_fields, {})
+        findings = compare(stale_fields, summary_fields, {},
+                           labels=("stamped", "unstamped"))
         for f in findings:
             if f.status != AGREE:
                 lines.append(f.line())
                 ok = False
+        if not findings:
+            # Belt and braces, like verdict()'s: two empty answers are already
+            # refused by the vacuity rules just above, so no input is known
+            # that reaches this line alone.
+            lines.append("  FAIL stale premise control: 0 fields compared -- "
+                         "nothing was checked")
+            ok = False
         lines.append("  %d fields compared; stamping headers %s change the "
                      "raw answer" % (len(findings), "does NOT" if ok else "DOES"))
         return ok, lines, findings
 
+    if raw_fields is None:
+        # A gate that cannot see must refuse. Without the raw reference there
+        # is no oracle for this arm, and defaulting to the fresh-summary
+        # answer is the very comparison this function exists not to make.
+        return False, ["--- window %s stale-version ---" % window,
+                       "  FAIL stale-version: no raw reference answer was "
+                       "supplied, so there is nothing to compare the "
+                       "version-refused answer against"], []
+
     ok, lines, findings = verdict(
         window + " stale-version", routes, stale_fields, summary_fields, {},
-        fallbacks={"raw": fallback_reason(stderr_text)})
+        fallbacks={"raw": fallback_reason(stderr_text)},
+        compare_pair=(stale_fields, raw_fields), labels=LABELS_STALE,
+        route_labels=("version-refused", "fresh-summary"))
     # Require the WHOLE version-preflight diagnostic, with positive counts
     # matching the files we stamped. A generic raw fallback is insufficient:
     # "no summary file covers this window" is the different #403 failure.
