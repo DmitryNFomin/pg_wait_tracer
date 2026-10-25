@@ -91,14 +91,26 @@ static int checks   = 0;
     else printf("  ok: %s (%llu)\n", msg, _g);                       \
 } while (0)
 
-/* compute.c's only foreign symbol (summary streaming) — unused here. */
+/* compute.c's only foreign symbol (summary streaming).
+ *
+ * It REFUSES by default, which is what keeps every section below on the raw
+ * path. Section 12c points it at one synthetic per-second record so the
+ * SUMMARY twin of pgwt_compute_time_model can be driven in-process: the
+ * >= 120 s unfiltered routing is a different function with its own copy of
+ * the CPU-row rule, and a fix applied to only one of the two creates a
+ * discontinuity at 120 seconds — the same class of hole #559 hit. */
+static const struct pgwt_summary_accum *fake_summary_rec = NULL;
+
 int pgwt_visit_summaries(const char *trace_dir, uint64_t from_wall_ns,
                          uint64_t to_wall_ns, pgwt_summary_visitor visitor,
                          void *ctx)
 {
     (void)trace_dir; (void)from_wall_ns; (void)to_wall_ns;
-    (void)visitor; (void)ctx;
-    return -1;
+    if (!fake_summary_rec)
+        return -1;
+    if (visitor(fake_summary_rec, ctx) != 0)
+        return -1;
+    return 1;
 }
 
 /* ── Fixture vocabulary ───────────────────────────────────────────────── */
@@ -1631,6 +1643,183 @@ static void test_tag_table_scale(void)
           "11d: an empty window is a complete tagging result, not a failure");
 }
 
+/* ── 12. #575: time_model must not hide a non-zero off-CPU sibling ──
+ *
+ * Both CPU rows sat INSIDE the `classes[c].total_ns <= 0 -> continue` guard.
+ * An all-runqueue gap — a backend that was ready and never scheduled, which
+ * is exactly the condition this tool exists to show — measures cpu_ns == 0
+ * over a non-zero wall, so the CPU class total is 0, the guard skips the
+ * class, and BOTH CPU rows disappear. The time is still inside DB Time, so
+ * the Time Model shows a DB Time it does not account for and the reader
+ * concludes there was no CPU activity.
+ *
+ * TWO DEFECTS, not one, and 12b is the second:
+ *   (1) the row guard above, which is in the raw path AND in its summary
+ *       twin (pgwt_compute_time_model_from_summaries), so fixing one alone
+ *       would make the Time Model disagree with itself across the 120 s
+ *       summary-routing threshold. 12a and 12c pin both.
+ *   (2) has_measured_cpu was also raised by MEASURED SPIN INSIDE A WAIT
+ *       (the else branch's wait_gap_cpu_ns), which is a different question
+ *       from "is this response's CPU row a measurement". With an UNKNOWN CPU
+ *       gap next to such a wait, time_model labelled an UNMEASURED wall
+ *       "CPU (running)" and printed a 0.0 ms runqueue sibling beside it.
+ *       Different cause, different line, so: a second bug. The summary
+ *       twin's flag was already the narrow one (cpu_measured_records > 0),
+ *       which is also the evidence for which of the two predicates is
+ *       intended.
+ *
+ * Nothing here is timed or ordered: in-memory arrays and, for 12c, one
+ * synthetic summary record fed through the stub above.
+ */
+
+static double tm_row_ms(const struct pgwt_tm_result *tm, const char *name)
+{
+    return tm_class_ms(tm, name);      /* -1.0 == the row is ABSENT */
+}
+
+static int tm_row_count(const struct pgwt_tm_result *tm, const char *name)
+{
+    int n = 0;
+    for (int i = 0; i < tm->num_rows; i++)
+        if (tm->rows[i].indent == 1 && strcmp(tm->rows[i].name, name) == 0)
+            n++;
+    return n;
+}
+
+static void test_time_model_offcpu_sibling(void)
+{
+    printf("--- 12. #575: an all-runqueue gap must still report both CPU rows ---\n");
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* 12a. One 10 ms on-CPU gap, MEASURED as 0 ns on a core. */
+    {
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(900, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 0 /* measured 0 */);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+
+        CHECK_MS(tm.db_time_ms, 10.0, "12a: the gap is 10 ms of DB Time");
+        CHECK(tm.has_measured_cpu == 1,
+              "12a: the window HAS a measured CPU row (a measured zero is a "
+              "signal, not an absence)");
+        CHECK_MS(tm.offcpu_ms, 10.0,
+                 "12a: …and the scalar off-CPU total is the whole gap");
+        CHECK_MS(tm_row_ms(&tm, "CPU (running)"), 0.0,
+                 "12a: the 'CPU (running)' ROW is present and reads 0.0 ms — "
+                 "nothing ran, measured");
+        CHECK_MS(tm_row_ms(&tm, "CPU (waiting for a core)"), 10.0,
+                 "12a: and its sibling ROW reports the whole 10 ms "
+                 "(this is the defect: both rows used to vanish)");
+        CHECK(tm_row_count(&tm, "CPU*") == 0,
+              "12a: …and the un-split 'CPU*' label is NOT used, because this "
+              "window can separate running from waiting");
+        free(tm.rows);
+    }
+
+    /* 12b. An UNKNOWN gap plus a wait carrying measured spin. The gap's wall
+     * is NOT a measurement of on-CPU time and must not be labelled one. */
+    {
+        struct pgwt_trace_event evs[2];
+        evs[0] = mk(901, CPU_GAP, WFROM + S(1), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        evs[1] = mk(901, LOCK_RELATION, WFROM + S(2), 5000000ULL, 0,
+                    1000000ULL /* 1 ms of spin inside the wait */);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 2, &f, WFROM, WTO, 10000.0, &tm);
+
+        CHECK_MS(tm.db_time_ms, 15.0, "12b: DB Time is 10 + 5 ms");
+        CHECK(tm.has_measured_cpu == 0,
+              "12b: has_measured_cpu is 0 — spin measured INSIDE A WAIT is "
+              "not a measurement of THIS response's CPU row");
+        CHECK_MS(tm_row_ms(&tm, "CPU*"), 10.0,
+                 "12b: the gap is the un-split 'CPU*' row by gap-inference");
+        CHECK(tm_row_ms(&tm, "CPU (running)") < 0.0,
+              "12b: …NOT labelled 'CPU (running)', which claimed an "
+              "unmeasured wall was measured on-CPU time");
+        CHECK(tm_row_ms(&tm, "CPU (waiting for a core)") < 0.0,
+              "12b: …and there is NO 0.0 ms runqueue sibling: off-CPU time "
+              "here is unavailable, which is not the same as zero");
+        CHECK_MS(tm.wait_gap_cpu_ms, 1.0,
+                 "12b: the wait's spin is still reported as the observability "
+                 "sum it always was — narrowing the flag loses no number");
+        free(tm.rows);
+    }
+
+    /* 12c. The SUMMARY twin, same all-runqueue second, through the stub. The
+     * routing threshold is 120 s, so these two functions answer the same
+     * question on either side of it and must not disagree. */
+    {
+        struct pgwt_summary_accum rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.second_wall_ns = WFROM + S(1);
+        rec.total_events = 1;
+        rec.class_ns[PGWT_CLASS_CPU] = 10000000ULL;   /* 10 ms of DB Time */
+        rec.cpu_measured_ns = 0;                      /* measured: none on a core */
+        rec.cpu_unknown_ns = 0;
+        rec.cpu_measured_records = 1;                 /* …but it WAS measured */
+        fake_summary_rec = &rec;
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model_from_summaries("/nonexistent", WFROM, WTO,
+                                               &f, 10000.0, &tm);
+        fake_summary_rec = NULL;
+
+        CHECK_MS(tm.db_time_ms, 10.0, "12c: the summary twin sees 10 ms of DB Time");
+        CHECK(tm.has_measured_cpu == 1, "12c: …and a measured CPU row");
+        CHECK_MS(tm_row_ms(&tm, "CPU (running)"), 0.0,
+                 "12c: the summary twin ALSO emits 'CPU (running)' 0.0 ms");
+        CHECK_MS(tm_row_ms(&tm, "CPU (waiting for a core)"), 10.0,
+                 "12c: …and its 10 ms sibling — identical to 12a, so the "
+                 "Time Model does not change answer at the 120 s threshold");
+        free(tm.rows);
+    }
+
+    /* 12d controls. Each removes a way the fix could be "always print the
+     * CPU rows", which would be a different wrong answer. */
+    {
+        /* A MEASURED, non-zero gap: 10 ms wall, 4 ms on a core. Unchanged. */
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(902, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 4000000ULL);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+        CHECK_MS(tm_row_ms(&tm, "CPU (running)"), 4.0,
+                 "12d control: a measured non-zero gap still reports the "
+                 "MEASURED 4 ms on the running row");
+        CHECK_MS(tm_row_ms(&tm, "CPU (waiting for a core)"), 6.0,
+                 "12d control: …and 6 ms on the runqueue row");
+        free(tm.rows);
+    }
+    {
+        /* UNKNOWN only, no wait spin anywhere: one combined row, no sibling. */
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(903, CPU_GAP, WFROM + S(1), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+        CHECK_MS(tm_row_ms(&tm, "CPU*"), 10.0,
+                 "12d control: an UNKNOWN-only window keeps ONE combined "
+                 "'CPU*' row");
+        CHECK(tm_row_ms(&tm, "CPU (waiting for a core)") < 0.0,
+              "12d control: …with no runqueue sibling (unavailable is not 0)");
+        free(tm.rows);
+    }
+    {
+        /* NO CPU record at all: neither CPU row may be invented. */
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(904, IO_READ, WFROM + S(1), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+        CHECK(tm_row_ms(&tm, "CPU (running)") < 0.0 &&
+              tm_row_ms(&tm, "CPU*") < 0.0 &&
+              tm_row_ms(&tm, "CPU (waiting for a core)") < 0.0,
+              "12d control: a window with NO on-CPU gap reports NO CPU row "
+              "of any kind — the fix must not conjure a 0.0/0.0 pair");
+        free(tm.rows);
+    }
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -1652,6 +1841,7 @@ int main(void)
     test_transitions_table_full();
     test_transitions_alloc_refusal();
     test_tag_table_scale();
+    test_time_model_offcpu_sibling();
 
     /* A suite that ran no assertions is a suite that proved nothing. The
      * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
@@ -1660,8 +1850,8 @@ int main(void)
      * asserts the SAME number of times whichever way the child goes, so a
      * hang cannot satisfy the floor by running fewer checks. 10f adds 4
      * more (the two allocators' refusal paths and their two controls).
-     * Section 11 (#374) adds 9. */
-    if (checks < 154) {
+     * Section 11 (#374) adds 9, section 12 (#575) 21. */
+    if (checks < 176) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;
