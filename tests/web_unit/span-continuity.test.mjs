@@ -161,6 +161,42 @@ test('contradictory relation evidence inside executor bars refuses a pre-executi
     assert.doesNotMatch(html, /occurred before|not represented/);
 });
 
+// #523: three readers (two advisers plus the owner relaying their
+// conclusion) misread "Observed waits: Lock:transactionid, IO:WalWrite,
+// IO:WalSync" as describing the EXECUTOR BARS below -- sub-pixel bars that
+// do not exist -- because the scope qualifier lived only in the THIRD
+// context line ("Bars show executor phase only..."), and a GIF crop of
+// this pane kept the first two lines while losing the third. Simulates
+// that exact crop (drop the trailing scope sentence) and asserts the
+// qualifier is still present where the wait names are.
+test('#523: the backend-scope qualifier survives a GIF crop that drops the trailing scope sentence', () => {
+    const html = waterfallContextHtml(detail, execution, timeline);
+    const lines = [...html.matchAll(/<div data-context>([\s\S]*?)<\/div>/g)].map(m => m[1]);
+    assert.equal(lines.length, 3, 'fixture must produce the full 3-line context block');
+    assert.match(lines[2], /bars show executor phase only/i,
+        'fixture sanity: the trailing scope sentence this crop drops must exist');
+    // The crop the issue reports: keep only the PID/Query line and the
+    // "Containing backend activity" line.
+    const cropped = lines.slice(0, 2).join(' ');
+    assert.match(cropped, /Lock:relation/, 'crop fixture sanity: wait names must survive');
+    assert.match(cropped, /Observed waits \(containing backend, not these bars\)/,
+        'the scope qualifier must be carried INSIDE the same line as the wait names, ' +
+        'not only in the dropped third sentence');
+});
+
+test('#523 negative control: the pre-fix unscoped wording fails the same crop assertion', () => {
+    // Reconstructs the OLD wording this fix replaced, to prove the crop
+    // assertion above actually discriminates -- it must FAIL here exactly
+    // as the three real readers were misled.
+    const html = waterfallContextHtml(detail, execution, timeline)
+        .replace('Observed waits (containing backend, not these bars): ', 'Observed waits: ');
+    const lines = [...html.matchAll(/<div data-context>([\s\S]*?)<\/div>/g)].map(m => m[1]);
+    const cropped = lines.slice(0, 2).join(' ');
+    assert.match(cropped, /Lock:relation/);
+    assert.doesNotMatch(cropped, /Observed waits \(containing backend, not these bars\)/,
+        'negative control must reproduce the pre-#523 (unscoped) wording');
+});
+
 test('Query execution drill carries the selected span PID and releases wait filters, preserving query identity', () => {
     const intent = makeQueriesConfig('exact').columns.find(c => c.key === '_executions')
         .intent({ query_id: '42', backend_activity: { span } });

@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     MATRIX_COLORS, buildMatrixOption, matrixCellIntent, matrixTooltipFormatter,
-    matrixLegendBucketMax,
+    matrixLegendBucketMax, matrixChartFitHeight,
+    MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX, MATRIX_FOLD_RESERVE_PX,
 } from '../../web/static/lib/builders/matrix.js';
 import { eventColor } from '../../web/static/lib/format.js';
 
@@ -240,6 +241,60 @@ test('#438 cpuNote coexists with an unrelated notes entry (hidden-count disclosu
     assert.ok(!m.notes.some(n => n.includes('CPU*')));
 });
 
+// #438 (owner decision, issue #438: "Transition Matrix is a degenerate L on
+// the demo workload: only the CPU* row and column populate, because every
+// transition routes through CPU*"): state that fact above the grid rather
+// than leaving an L-shaped grid to read as broken. GATED BOTH WAYS -- the
+// extra sentence must appear exactly when the full link set is truly
+// CPU*-incident-only (the degenerate case), and must NOT appear merely
+// because CPU* is one of the shown axis labels (the "coexists" test above
+// already covers a CPU*-containing but non-degenerate link set).
+test('#438: a truly degenerate matrix (every link touches CPU*) states the L-shape fact', () => {
+    const p = {
+        total: 10,
+        nodes: [
+            { name: 'CPU*', class: 'CPU', event_id: 0 },
+            { name: 'IO:A', class: 'IO', event_id: 1 },
+            { name: 'Lock:B', class: 'Lock', event_id: 2 },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:A', value: 5, duration_ms: 1 },
+            { source: 'CPU*', target: 'Lock:B', value: 3, duration_ms: 1 },
+            { source: 'Lock:B', target: 'CPU*', value: 2, duration_ms: 1 },
+        ],
+    };
+    const m = buildMatrixOption(p);
+    assert.ok(m.cpuNote.includes('Every transition in this workload passes through CPU*'),
+        'degenerate-L fixture must state the fact: ' + JSON.stringify(m.cpuNote));
+    assert.ok(m.cpuNote.includes('the L shape is the data, not a rendering bug'),
+        m.cpuNote);
+    // Still carries the base explanation too (it is an addition, not a
+    // replacement) -- the "coexists" test above pins that substring too.
+    assert.ok(m.cpuNote.includes('literal intermediate state'));
+});
+
+test('#438: a non-degenerate matrix (a real wait->wait link exists) does NOT claim every transition passes through CPU*', () => {
+    const p = {
+        total: 10,
+        nodes: [
+            { name: 'CPU*', class: 'CPU', event_id: 0 },
+            { name: 'IO:A', class: 'IO', event_id: 1 },
+            { name: 'Lock:B', class: 'Lock', event_id: 2 },
+        ],
+        links: [
+            { source: 'CPU*', target: 'IO:A', value: 5, duration_ms: 1 },
+            // A genuine wait -> wait link that never touches CPU* -- the
+            // claim "every transition passes through CPU*" would be FALSE
+            // here, so the builder must not assert it.
+            { source: 'IO:A', target: 'Lock:B', value: 3, duration_ms: 1 },
+        ],
+    };
+    const m = buildMatrixOption(p);
+    assert.ok(m.cpuNote.includes('literal intermediate state'));
+    assert.ok(!m.cpuNote.includes('Every transition in this workload passes through CPU*'),
+        'non-degenerate fixture must not claim the L-shape fact: ' + JSON.stringify(m.cpuNote));
+});
+
 // #473 item 2 (video review): several IO event names render dark blue on
 // the #1a1a2e navy background and are effectively invisible (IO:DataFileWrite,
 // IO:WalWrite, IO:WalSync, IO:DataFilePrefetch, IO:AioIoCompletion,
@@ -329,4 +384,39 @@ test('axis names are positioned clear of tick labels, not at the clipped default
     // so it renders as its own strip, never over the first x tick label.
     assert.ok(m.option.yAxis.nameGap < m.option.grid.left,
         'yAxis name must stay inside the left grid margin, not spill onto the plot');
+});
+
+// #473 item 1 (live-walk evidence: tests/results/demo_walk/
+// mac-walk1-live-8112c71/frames/002700.jpg and 002820.jpg at the pinned
+// demo viewport 1710x981 -- #matrix-chart's own top measured 493.39px
+// there, so its OLD fixed 660px CSS height put its bottom at 1153.39,
+// 172px past the fold; the x-axis tick labels (grid.bottom:150, where they
+// live) never rendered on screen). matrixChartFitHeight is the same
+// "shrink only by the overflow plus a fold reserve" shape as #462's
+// waterfallChartFitHeight -- see that test file's header comment for the
+// identical reasoning, applied here to the Matrix tab.
+test('#473-1: a page with plenty of room is untouched (no needless shrink)', () => {
+    // overflow very negative (top sits high on a tall viewport) -> the
+    // natural 660px height must come back unchanged, so no gallery
+    // snapshot cell moves because of this fix.
+    assert.equal(matrixChartFitHeight(MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX, -400),
+        MATRIX_CHART_NATURAL_PX);
+});
+
+test('#473-1: the measured live-walk overflow (172px) shrinks the chart enough to clear the fold', () => {
+    // Real geometry from the frames above: top=493.39, natural=660 ->
+    // naturalBottom = 1153.39, viewport 981 -> overflow ~172.39.
+    const top = 493.390625, innerHeight = 981;
+    const overflow = (top + MATRIX_CHART_NATURAL_PX) - innerHeight;
+    const px = matrixChartFitHeight(MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX, overflow);
+    const finalBottom = top + px;
+    assert.ok(finalBottom <= innerHeight - MATRIX_FOLD_RESERVE_PX + 1,
+        `expected the fold reserve to survive: finalBottom=${finalBottom}, innerHeight=${innerHeight}`);
+    assert.ok(px < MATRIX_CHART_NATURAL_PX, 'the chart must actually have shrunk');
+    assert.ok(px >= MATRIX_CHART_MIN_PX, 'must never go below the CSS floor');
+});
+
+test('#473-1: an overflow larger than the available slack clamps at the CSS floor, never below it', () => {
+    assert.equal(matrixChartFitHeight(MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX, 100000),
+        MATRIX_CHART_MIN_PX);
 });
