@@ -666,7 +666,7 @@ _LIVE_ACTIVE_JS = "() => { const b = document.getElementById('live-btn'); " \
 
 # ── tab navigation ───────────────────────────────────────────────────────────
 
-def _navigate_to_tab(page, tab_id, timeout_s):
+def _navigate_to_tab(page, tab_id, timeout_s, resume_live=True):
     """Switches to tab_id, driving the same clicks a user would. Timeline has
     no standalone entry point with data (a bare tab click shows the "select a
     session" prompt) -- it is reached by drilling into a session row, exactly
@@ -709,7 +709,7 @@ def _navigate_to_tab(page, tab_id, timeout_s):
     mount = _wait_for_mount_at_or_after(page, tab_id, nav_start_ms, timeout_s, min_seq=None)
     ttfp_ms = mount["at"] - nav_start_ms
 
-    if not page.evaluate(_LIVE_ACTIVE_JS):
+    if resume_live and not page.evaluate(_LIVE_ACTIVE_JS):
         live_btn = page.query_selector("#live-btn")
         if live_btn is None:
             raise SmokeFailure("no #live-btn to resume live mode")
@@ -1278,8 +1278,14 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             inject_blink_ms=None, inject_tick=None,
             inject_blink_frac=DEFAULT_INJECT_BLINK_FRAC,
             inject_frame_index=lib.INJECT_FRAME_INDEX, diag_data=False,
-            footage_only=False):
-    """inject_blink_ms/inject_tick (issue #252 self-test, off by default --
+            footage_only=False, replay_probe=None):
+    """replay_probe: optional replay observer, attached before navigation and
+    verified after the existing navigation/render checks. Requires ticks=0;
+    fixed-window URL hydration keeps Live off. The replay result reports only
+    rendering, transport/DOM agreement and leak/console checks, never live
+    blink or tick measurements. Existing callers retain the live path.
+
+    inject_blink_ms/inject_tick (issue #252 self-test, off by default --
     None/None, the value every real gating caller -- tests/ui_live_smoke.sh,
     demo_rehearsal.py -- passes, so this is a strict addition with no effect
     on a normal run): when both are set, a synthetic overlay covering the
@@ -1372,6 +1378,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     # screenshots disturb the attached video recorder; replacing them with
     # full-viewport captures increases gated capture cost. Footage therefore
     # performs zero CDP captures, without changing the normal capture path.
+    if replay_probe is not None and (ticks != 0 or footage_only):
+        raise ValueError("replay requires ticks=0 and no footage mode")
     if footage_only and (diag_data or inject_blink_ms is not None):
         raise ValueError("footage mode cannot evaluate screenshot diagnostics or blink injection")
     req_width = viewport["width"] if viewport else 1280
@@ -1409,6 +1417,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     # fabricated empty measurement when navigation itself failed.
     pre_mount_diagnostics = None
     try:
+        if replay_probe is not None:
+            replay_probe.attach(page)
         page.goto(url)
         actual = page.evaluate(
             "() => ({w: window.innerWidth, h: window.innerHeight, "
@@ -1425,6 +1435,9 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             raise SmokeFailure(
                 f"WebSocket never reached #status.connected within {first_data_timeout}s")
 
+        if replay_probe is not None:
+            replay_probe.assert_owner(page)
+
         # No-data fail-safe (issue #93 acceptance item 6): real rows, not a
         # perpetual '.loading' placeholder, within the fixed budget.
         deadline = time.monotonic() + first_data_timeout
@@ -1434,7 +1447,17 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             page.wait_for_timeout(200)
 
         page.evaluate(TICK_HOOK_JS)
-        ttfp_ms = _navigate_to_tab(page, tab_id, first_data_timeout)
+        ttfp_ms = _navigate_to_tab(page, tab_id, first_data_timeout,
+                                   resume_live=replay_probe is None)
+        replay_result = None
+        if replay_probe is not None:
+            render = _poll_render_check(page, tab_id, first_data_timeout)
+            if not render[0]:
+                raise SmokeFailure(render[1])
+            replay_result = replay_probe.verify(page)
+            path = os.path.join(tab_dir, "replay.png")
+            page.screenshot(path=path, scale="css")
+            tick_paths.append(path)
 
         leak_before, leak_before_settle_s = _settled_leak_probe(page)
 
@@ -1898,11 +1921,18 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_not_measured=blink_not_measured,
             pre_mount_diagnostics=pre_mount_diagnostics,
             ttfp_ms=ttfp_ms)
+        if replay_probe is not None:
+            result = {"tab": tab_id, "ok": not console_errors and
+                      lib.leak_probe_ok(leak_before) and lib.leak_probe_ok(leak_after),
+                      "mode": "replay", "rendered": True,
+                      "console_errors": console_errors,
+                      "pgwt_console_errors": pgwt_errors,
+                      "comparison": replay_result}
         if diag_data:
             result["diag_data"] = diag_ticks
         if self_test_result is not None:
             result["self_test"] = self_test_result
-    except SmokeFailure as e:
+    except (SmokeFailure, AssertionError) as e:
         print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
         result = lib.build_failed_tab_result(tab_id, str(e),
                                              ticks_observed=len(tick_paths),

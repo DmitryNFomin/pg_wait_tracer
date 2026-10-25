@@ -942,3 +942,6 @@ test_system_event_offcpu
 #   non-root uid (root only) and checks a root:root control file in the
 #   same directory stays refused.
 test_trace_perms
+
+# Real replay-over-UI comparator: empty fixture, unit/value/count REDs.
+test_replay_ui.py
