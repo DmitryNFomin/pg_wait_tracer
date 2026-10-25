@@ -125,6 +125,111 @@ XVAL_PREREG_BIAS_PP=6.52     # #306 arm A median, shipped SCHED_OTHER 10 Hz
 XVAL_PREREG_SAMPLES=3130     # smallest observed "Samples in window" at that point
 XVAL_PREREG_K=5              # eligible events (exact share >= 2%), 5 of 5 captures
 
+# ---------------------------------------------------------------------------
+# The capture-thickness floor, re-specified 2026-10-25 (round 2).
+#
+# WHAT WAS WRONG THE FIRST TIME. This floor was originally set to
+# XVAL_PREREG_SAMPLES itself (3130), i.e. to the MINIMUM of a prior n=5. Two
+# errors in one number:
+#
+#   1. Wrong harness. 3130 was the thinnest capture from diag294's own
+#      pgbench driver (N 3130-3682). test_cross_validate_tiered.sh's
+#      workload runs THINNER: measured on the gate's own harness, n=11,
+#      N = 2918-3274, mean 3102, sd 117 (CV 3.8%). Transplanting a figure
+#      between two harnesses known to read differently is exactly the error
+#      #321 was built on, and it was repeated here.
+#   2. Wrong statistic. The minimum of five observations is not a lower
+#      bound on the sixth. The floor fired on 5 of 10 ordinary captures --
+#      a false-FAILURE mechanism, not a detection.
+#
+# TWO ROLES, NOW SEPARATED. XVAL_PREREG_SAMPLES plays one role only: the N at
+# which the tolerance's sampling error was computed. It does NOT also serve as
+# a validity gate, which is what conflating them produced. The floor below is
+# derived independently and the tolerance is untouched by it.
+#
+# THE CRITERION, fixed before confirming (two constraints, which together pin
+# a unique answer -- so this is a selection rule, not a number chosen to let
+# some observations through):
+#
+#   (a) The capture's binomial SE must not exceed the SE the bound budgets by
+#       more than a round tolerance. SE_budget = 100*sqrt(0.25/3130) =
+#       0.8937 pp.
+#   (b) The floor must sit at least 4 sd below the mean of the gate harness's
+#       own capture-thickness distribution. Its job is to catch a
+#       STRUCTURALLY BROKEN capture -- stalled daemon, mis-aligned window,
+#       dead workload -- not ordinary run-to-run variation in how many
+#       backends are in DB Time per tick. At 4 sd, ordinary variation trips
+#       it less than once in 10,000 runs.
+#
+#   tolerance | SE_max   | floor | sd below mean | verdict
+#      5%     | 0.9384   | 2839  |  2.25         | fails (b)
+#     10%     | 0.9831   | 2587  |  4.39         | PASSES both -> chosen
+#     20%     | 1.0725   | 2174  |  7.92         | passes, but see cost below
+#
+# Take the TIGHTEST round tolerance that clears (b): 10%, floor = 2587.
+#   N_floor = 0.25 * 100^2 / (1.10 * 0.8937)^2 = 2500 / 0.96648 = 2586.8 -> 2587
+#
+# THE COST, STATED RATHER THAN HIDDEN. Admitting a capture at exactly N=2587
+# admits one whose own derived bound would be 6.52 + 2.5688*0.9831 = 9.05 pp,
+# while the gate still holds it to 8.8 pp. The gate is therefore up to 0.25 pp
+# TIGHTER than the derivation permits at the floor -- conservative, which is
+# the safe direction, and the reason it is acceptable to leave the tolerance
+# alone. The 20% row would cost 0.47 pp of the same optimism, which is why the
+# tightest qualifying tolerance is taken rather than the most comfortable one.
+#
+# Applied at EVERY rate, not just 10 Hz. At 50/100/200 Hz the observed N is
+# 15,718 / 30,527 / 62,864, so the floor is cleared by an order of magnitude
+# and cannot cause a false failure there -- but it still catches a
+# structurally broken capture at those rates, which the previous
+# "any N >= 1" rule did not.
+XVAL_FLOOR_SE_INFLATION=1.10  # (a): round tolerance on the model input
+XVAL_HARNESS_N_MEAN=3102      # (b): gate harness, n=11, shipped operating point
+XVAL_HARNESS_N_SD=117         #      sd of the same 11 captures
+XVAL_FLOOR_MIN_SD_BELOW=4     # (b): required margin, in sd, below that mean
+
+# derive_xval_sample_floor [SE_INFLATION] [PREREG_SAMPLES]
+# Echoes the floor (integer samples) and returns 0; refuses (exit 2) on any
+# unusable input or unusable awk, same discipline as derive_xval_tolerance.
+# Rounds UP (ceil): rounding a floor down would admit captures the criterion
+# excludes.
+derive_xval_sample_floor() {
+    local infl="${1-$XVAL_FLOOR_SE_INFLATION}" base="${2-$XVAL_PREREG_SAMPLES}" out
+    _xval_is_number "$infl" || { echo "REFUSE: SE inflation tolerance is not a number: '$infl'" >&2; return 2; }
+    _xval_is_number "$base" || { echo "REFUSE: base sample count is not a number: '$base'" >&2; return 2; }
+    # An inflation tolerance below 1.0 would put the floor ABOVE the N the
+    # bound was derived at, which is the original bug in a new costume.
+    awk -v i="$infl" 'BEGIN { exit !(i >= 1.0) }' \
+      || { echo "REFUSE: SE inflation tolerance must be >= 1.0 (a floor above the derivation's own N is the mis-specification this replaces), got '$infl'" >&2; return 2; }
+    [[ "${base%%.*}" -ge 1 ]] || { echo "REFUSE: base sample count must be >= 1, got '$base'" >&2; return 2; }
+    # floor = 0.25*100^2 / (infl * 100*sqrt(0.25/base))^2  ==  base / infl^2
+    out=$(awk -v b="$base" -v i="$infl" \
+        'BEGIN { v = b / (i*i); printf "%d", (v == int(v) ? v : int(v) + 1) }' 2>/dev/null)
+    local rc=$?
+    [[ $rc -eq 0 ]] || { echo "REFUSE: awk failed (exit $rc) computing the sample floor" >&2; return 2; }
+    _xval_is_number "$out" || { echo "REFUSE: awk produced no usable floor (got '$out')" >&2; return 2; }
+    [[ "$out" -ge 1 ]] || { echo "REFUSE: computed floor is not positive ('$out')" >&2; return 2; }
+    echo "$out"
+}
+
+# xval_floor_sd_margin [FLOOR]
+# Echoes how many sd below the harness mean the floor sits, to 2 dp -- the
+# (b) constraint, as a number a reviewer can check rather than a claim in a
+# comment. Refuses if the harness sd is zero or unusable (a zero sd would
+# make every floor "infinitely safe", which is the shape of a check that
+# cannot fail).
+xval_floor_sd_margin() {
+    local floor="${1-$(derive_xval_sample_floor)}" out
+    _xval_is_number "$floor" || { echo "REFUSE: floor is not a number: '$floor'" >&2; return 2; }
+    _xval_is_number "$XVAL_HARNESS_N_MEAN" || { echo "REFUSE: harness N mean unusable" >&2; return 2; }
+    _xval_is_number "$XVAL_HARNESS_N_SD" || { echo "REFUSE: harness N sd unusable" >&2; return 2; }
+    [[ "${XVAL_HARNESS_N_SD%%.*}" -ge 1 ]] || { echo "REFUSE: harness N sd is zero; every floor would look infinitely safe" >&2; return 2; }
+    out=$(awk -v m="$XVAL_HARNESS_N_MEAN" -v s="$XVAL_HARNESS_N_SD" -v f="$floor" \
+        'BEGIN { printf "%.2f", (m - f) / s }' 2>/dev/null) || {
+        echo "REFUSE: awk failed computing the sd margin" >&2; return 2; }
+    _xval_is_number "$out" || { echo "REFUSE: sd margin is not a usable number ('$out')" >&2; return 2; }
+    echo "$out"
+}
+
 # xval_z_family_wise K
 # Two-sided normal quantile z with (2*Phi(z)-1)^K = 0.95, i.e. 95% coverage
 # of the MAXIMUM of K deltas. Tabulated because neither bash nor POSIX awk
@@ -283,20 +388,29 @@ extract_samples_in_window() {
 }
 
 # refuse_unless_samples_sufficient OBSERVED_SAMPLES [MIN]
-# The bound above is only valid at or above the sample count its SE was
-# computed from. A thinner capture has a larger SE, so reusing the bound
-# would silently certify a looser quantity than the one derived.
+# Refuses a capture too thin for the comparison to mean anything. MIN
+# defaults to the DERIVED floor (derive_xval_sample_floor, ~2587), NOT to
+# XVAL_PREREG_SAMPLES -- see the long note beside the floor's derivation for
+# why using the tolerance's own N here was wrong in two separate ways.
 # Returns 0 when OBSERVED >= MIN, 2 otherwise AND when OBSERVED cannot be
 # parsed -- an unknown sample count is never treated as sufficient.
 refuse_unless_samples_sufficient() {
-    local observed="${1-}" min="${2-$XVAL_PREREG_SAMPLES}"
+    local observed="${1-}" min="${2-}"
+    if [[ -z "$min" ]]; then
+        # A floor that cannot be derived must refuse, not fall back to a
+        # permissive default: an underivable floor is a blind floor.
+        min=$(derive_xval_sample_floor) || {
+            echo "REFUSE: the sample floor could not be derived, so capture thickness cannot be judged" >&2
+            return 2
+        }
+    fi
     _xval_is_number "$observed" || {
         echo "REFUSE: sample count is not a number ('$observed'); an unknown N is not evidence the derived bound applies" >&2
         return 2
     }
     _xval_is_number "$min" || { echo "REFUSE: minimum sample count is not a number ('$min')" >&2; return 2; }
     if [[ "${observed%%.*}" -lt "${min%%.*}" ]]; then
-        echo "REFUSE: capture has ${observed} DB-time samples, below the ${min} the derived tolerance's sampling error was computed at; the bound does not apply to a capture this thin" >&2
+        echo "REFUSE: capture has ${observed} DB-time samples, below the derived floor of ${min} (the N at which this capture's sampling error would exceed the bound's budget by more than $(awk -v i="$XVAL_FLOOR_SE_INFLATION" 'BEGIN{printf "%.0f", (i-1)*100}')%); a capture this thin is structurally broken, not merely noisy" >&2
         return 2
     fi
     echo "$observed"

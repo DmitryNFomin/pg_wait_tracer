@@ -202,19 +202,31 @@ for RATE in $RATES; do
     #  1. N absent or unparseable -- the gate is blind. A blind gate must
     #     refuse, never approve; this is the same disposition
     #     extract_max_delta already takes for a missing delta line.
-    #  2. at the derived rate (10 Hz) only, N below the 3130 the bound's
-    #     sampling error was computed at. That floor is not a guess: the
-    #     bound budgets 2.2958 pp of its 8.8 to noise at z(5)=2.5688, which
-    #     is exactly SE <= 0.8937 pp, which is exactly N >= 0.25*100^2 /
-    #     0.8937^2 = 3130. Below it the capture's SE exceeds what the bound
-    #     allocated, so a "pass" would certify a looser quantity than the
-    #     one derived. Other rates get only refusal (1), because the
-    #     derivation covers 10 Hz and the observed N is measurably
-    #     sub-linear in rate (33,778 at 100 Hz against 31,300 scaled), so a
-    #     scaled floor would be invention, not arithmetic.
+    #  2. N below the DERIVED floor (derive_xval_sample_floor, 2587), which
+    #     marks a structurally broken capture -- stalled daemon, mis-aligned
+    #     window, dead workload -- rather than ordinary variation. It sits
+    #     4.4 sd below the mean of this harness's own capture-thickness
+    #     distribution (mean 3102, sd 117, n=11), so ordinary variation
+    #     cannot trip it; see the derivation in tests/xval_tolerance.sh.
+    #
+    #     ROUND 1 GOT THIS WRONG and the correction is the point: the floor
+    #     was XVAL_PREREG_SAMPLES (3130), the minimum of a prior n=5 taken
+    #     on a DIFFERENT harness, and it fired on 5 of 10 ordinary captures
+    #     -- a false failure, not a detection. The tolerance's N and the
+    #     validity floor are two different quantities and are now two
+    #     different numbers.
+    #
+    #     Applied at EVERY rate: at 50/100/200 Hz the observed N is
+    #     15,718 / 30,527 / 62,864, so the floor cannot cause a false
+    #     failure there, but it still catches a broken capture -- which the
+    #     previous "any N >= 1" rule at those rates did not.
     SAMP=$(extract_samples_in_window "$OUT")
-    SAMP_MIN=1
-    [[ "$RATE" == 10 ]] && SAMP_MIN="$XVAL_PREREG_SAMPLES"
+    if ! SAMP_MIN=$(derive_xval_sample_floor); then
+        echo "  RATE ${RATE}Hz: REFUSED — the capture-thickness floor could not be derived;" \
+             "thickness cannot be judged, so this counts as a failure, not a skip"
+        rm -rf "$TRACE_DIR" "$LOG"
+        continue
+    fi
     if ! refuse_unless_samples_sufficient "$SAMP" "$SAMP_MIN" >/dev/null; then
         echo "  RATE ${RATE}Hz: REFUSED — capture too thin / sample count unreadable" \
              "(N=${SAMP}, need >=${SAMP_MIN}); counts as a failure, not a skip"

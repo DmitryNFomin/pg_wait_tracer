@@ -1626,8 +1626,13 @@ bound = BIAS + z(K) × SE  =  6.52 + 2.5688 × 0.8937  =  8.8 pp
 - **6.52 pp** is the systematic CPU under-read at the shipped operating point
   (10 Hz, 8 clients, ordinary scheduling). It is *known bias*, not noise — see
   the residual described immediately below, which is **still open**.
-- **0.8937 pp** is the binomial standard error at the worst-case share on the
-  thinnest capture observed at that operating point (3,130 DB-time samples).
+- **0.8937 pp** is the binomial standard error at the worst-case share on a
+  3,130-sample capture — the thinnest seen on the diagnostic driver this input
+  was taken from. The gate's own harness runs slightly thinner (2,918–3,274
+  DB-time samples, mean 3,102, n=11), where the same SE is 0.90–0.93 pp; that
+  moves the bound by under 0.1 pp, so it is reported rather than folded in.
+  The gate separately refuses any capture below a derived **2,587**-sample
+  floor as structurally broken rather than merely noisy.
 - **2.5688** gives 95% coverage of the *maximum* of the K=5 eligible events,
   not of one event: a 2σ per-event figure would cover about 23% of runs.
 

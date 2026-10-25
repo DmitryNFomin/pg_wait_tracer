@@ -311,6 +311,65 @@ for mode in 127 126; do
 done
 
 echo ""
+echo "--- the capture-thickness floor (round 2: re-specified a priori) ---"
+eq "$(derive_xval_sample_floor)" "2587" \
+   "the pre-registered criterion (10% SE inflation off N=3130) derives a floor of 2587"
+eq "$(derive_xval_sample_floor 1.10 3130)" "2587" \
+   "the floor is base/inflation^2, rounded up"
+
+# Constraint (b): the floor must sit >= 4 sd below the mean of the gate
+# harness's capture-thickness distribution. This is the constraint that
+# round 1 violated -- its floor sat ABOVE the observed minimum.
+awk -v m="$(xval_floor_sd_margin)" -v k="$XVAL_FLOOR_MIN_SD_BELOW" \
+    'BEGIN { exit !(m >= k) }' \
+  && report true "the floor is $(xval_floor_sd_margin) sd below the harness mean, clearing the required ${XVAL_FLOOR_MIN_SD_BELOW} sd" \
+  || report false "the floor is only $(xval_floor_sd_margin) sd below the harness mean — ordinary variation would trip it"
+
+# The selection rule has to actually bind, or "I chose 10%" is decoration.
+# 5% must FAIL constraint (b); 10% must pass. If both passed, the rule would
+# not pin a unique answer and the choice would be arbitrary.
+awk -v m="$(xval_floor_sd_margin "$(derive_xval_sample_floor 1.05)")" -v k="$XVAL_FLOOR_MIN_SD_BELOW" \
+    'BEGIN { exit !(m < k) }' \
+  && report true "the 5% tolerance is genuinely excluded by the 4-sd constraint ($(xval_floor_sd_margin "$(derive_xval_sample_floor 1.05)") sd) — the selection rule binds" \
+  || report false "the 5% tolerance also clears 4 sd, so the selection rule does not pin a unique answer"
+
+# The floor must be BELOW the tolerance's own N. A floor at or above it is
+# exactly the round-1 mis-specification, and it must be impossible to
+# reintroduce by editing the inflation constant alone.
+awk -v f="$(derive_xval_sample_floor)" -v n="$XVAL_PREREG_SAMPLES" 'BEGIN { exit !(f < n) }' \
+  && report true "the floor (2587) is below the tolerance's N (3130) — the two roles are separate numbers" \
+  || report false "the floor is at or above the tolerance's N — the round-1 conflation is back"
+refuses "an SE-inflation tolerance below 1.0 refuses (it would put the floor above the derivation's N)" \
+    derive_xval_sample_floor 0.9 3130
+
+# Every capture measured on the gate's own harness at the shipped operating
+# point must clear the floor. These are the 11 observations the floor was
+# specified AGAINST (not fitted to) -- round 1 refused 5 of them.
+bad=0
+for n in 3033 3274 2922 3109 3059 3165 3069 3133 3211 3233 2918; do
+    refuse_unless_samples_sufficient "$n" >/dev/null 2>&1 || { echo "    N=$n refused"; bad=1; }
+done
+[[ $bad -eq 0 ]] \
+  && report true "all 11 measured gate-harness captures (N 2918-3274) clear the floor" \
+  || report false "the floor still refuses an ordinary gate-harness capture"
+
+# ...and the floor must still REFUSE a genuinely broken capture, or it has
+# been relaxed into uselessness. 356 is the N of a real --esc-seconds 8 run.
+refuses "a 356-sample capture (real --esc-seconds 8 run) is still refused" \
+    refuse_unless_samples_sufficient 356
+refuses "a 2586-sample capture (one below the floor) is refused" \
+    refuse_unless_samples_sufficient 2586
+eq "$(refuse_unless_samples_sufficient 2587)" "2587" \
+   "a capture exactly at the floor is accepted"
+
+# The tolerance must NOT have moved while the floor was re-specified. The two
+# are independent problems and mixing them would hide both.
+eq "$(derive_xval_tolerance "$XVAL_PREREG_BIAS_PP" "$XVAL_PREREG_SAMPLES" "$XVAL_PREREG_K")" "8.8" \
+   "re-specifying the floor did NOT move the tolerance (still 8.8 pp)"
+eq "$(xval_script_tolerance "$TIERED")" "8.8" \
+   "the live script still ships 8.8 pp"
+
+echo ""
 echo "--- bypass suite: sample-count blindness ---"
 eq "$(extract_samples_in_window 'Samples in window: 3456')" "3456" \
    "sample count is parsed from cross_validate output"
@@ -331,6 +390,41 @@ eq "$(refuse_unless_samples_sufficient 79679 3130)" "79679" \
    "a 200 Hz-sized capture is accepted"
 refuses "an unparseable MINIMUM refuses too (a blind floor is not a floor)" \
     refuse_unless_samples_sufficient 5000 "?"
+refuses "a non-numeric SE inflation refuses"   derive_xval_sample_floor abc 3130
+refuses "an empty SE inflation refuses"        derive_xval_sample_floor "" 3130
+refuses "a zero base sample count refuses"     derive_xval_sample_floor 1.10 0
+refuses "a non-numeric base refuses"           derive_xval_sample_floor 1.10 lots
+refuses "a non-numeric floor refuses in the sd-margin check" xval_floor_sd_margin abc
+
+# A zero harness sd would make EVERY floor look infinitely safe -- a check
+# that cannot fail. It must refuse rather than report a huge margin.
+out=$(bash -c "
+    source '$SCRIPT_DIR/xval_tolerance.sh'
+    XVAL_HARNESS_N_SD=0
+    xval_floor_sd_margin 2587
+" 2>/dev/null); rc=$?
+if [[ $rc -ne 0 && -z "$out" ]]; then
+    report true "a zero harness sd refuses (every floor would otherwise look infinitely safe)"
+else
+    report false "a zero harness sd gave rc=$rc out='$out' — the 4-sd constraint would be unfalsifiable"
+fi
+
+# And awk going missing must take the floor down too, not yield an empty
+# "floor" that compares equal to an empty observed count.
+for mode in 127 126; do
+    STUBDIR="$TMP/fstub$mode"; mkdir -p "$STUBDIR"
+    if [[ "$mode" == 126 ]]; then printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/awk"; chmod 000 "$STUBDIR/awk"; fi
+    out=$(PATH="$STUBDIR" bash -c "
+        source '$SCRIPT_DIR/xval_tolerance.sh'
+        refuse_unless_samples_sufficient 3000
+    " 2>/dev/null); rc=$?
+    if [[ $rc -ne 0 && -z "$out" ]]; then
+        report true "awk unavailable (exit $mode): the thickness check refuses rather than passing an underivable floor"
+    else
+        report false "awk unavailable (exit $mode): rc=$rc out='$out'"
+    fi
+    chmod 755 "$STUBDIR/awk" 2>/dev/null || true
+done
 
 # ───────────── 4. the live script actually consults the guard ───────────────
 # The guard existing and the gate USING it are different claims. #309's
@@ -347,6 +441,12 @@ grep -q 'xval_tolerance_matches_script' "$TIERED" \
 grep -q 'refuse_unless_samples_sufficient' "$TIERED" \
   && report true "the live script calls refuse_unless_samples_sufficient" \
   || report false "the live script never checks capture thickness"
+grep -q 'derive_xval_sample_floor' "$TIERED" \
+  && report true "the live script derives its thickness floor instead of hard-coding one" \
+  || report false "the live script does not derive the floor — a literal would drift from its criterion"
+grep -q 'SAMP_MIN="\$XVAL_PREREG_SAMPLES"' "$TIERED" \
+  && report false "the live script still uses the tolerance's N as the thickness floor (the round-1 conflation)" \
+  || report true "the live script no longer uses the tolerance's N as the thickness floor"
 grep -q 'exit 1' <<<"$(grep -A6 'ERROR: this script.s TOLERANCE does not match' "$TIERED")" \
   && report true "a drifted constant makes the live script EXIT, not warn" \
   || report false "the live script warns but continues on a drifted constant"
