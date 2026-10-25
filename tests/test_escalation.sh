@@ -22,14 +22,21 @@ SERVER="$SCRIPT_DIR/../pgwt-server"
 source "$SCRIPT_DIR/testutil.sh"
 
 PM_PID=""
+SELF_TEST_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid) PM_PID="$2"; shift 2 ;;
-        *) echo "Usage: $0 [--pid POSTMASTER_PID]"; exit 1 ;;
+        # Runs ONLY exec_rows_selftest (below) and exits. No root, no
+        # PostgreSQL, no pgwt-server: it is how the #108 response classifier
+        # is shown going red without spending a 40-minute box run. The same
+        # function also runs unconditionally in the normal flow, so this
+        # flag adds a way to invoke it, never a way to skip it.
+        --self-test-only) SELF_TEST_ONLY=1; shift ;;
+        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--self-test-only]"; exit 1 ;;
     esac
 done
 
-if [[ -z "$PM_PID" ]]; then
+if [[ -z "$PM_PID" && $SELF_TEST_ONLY -eq 0 ]]; then
     PM_PID=$(find_postmaster)
     if [[ -z "$PM_PID" ]]; then
         echo "ERROR: cannot find postmaster PID"
@@ -38,7 +45,7 @@ if [[ -z "$PM_PID" ]]; then
 fi
 
 echo "=== test_escalation ==="
-echo "Postmaster PID: $PM_PID"
+[[ $SELF_TEST_ONLY -eq 0 ]] && echo "Postmaster PID: $PM_PID"
 
 TRACE_DIR=$(mktemp -d /tmp/pgwt_esc_XXXXXX)
 DAEMON_LOG=$(mktemp /tmp/pgwt_esc_daemon_XXXXXX.log)
@@ -59,6 +66,120 @@ check() {
         echo "  FAIL: $2"; failed=$((failed + 1))
     fi
 }
+
+# One pgwt-server data command. Prints, on stdout, exactly one of:
+#   <integer>  the number of rows/points returned
+#   UNAVAIL    the documented exact-tier refusal: a sampled-only window
+#              cannot answer an EXACT-required view, so pgwt-server emits
+#              {"unavailable":..., "code":"full_fidelity_required",
+#               "fidelity":"sampled"} with NO rows key at all
+#              (src/compute.h PGWT_UNAVAILABLE_CODE, src/server.c
+#               emit_unavailable). This is the product behaving correctly,
+#              and the control capture below accepts it -- but ONLY this
+#              exact shape. A generic error, a crash, empty output or a
+#              missing rows key on an EXACT-fidelity answer all stay ERR,
+#              so a broken server cannot pass as "no executions".
+#   ERR        anything else
+exec_rows() {
+    local dir="$1" cmd="$2" key="$3"
+    printf '{"id":1,"cmd":"%s","limit":500}\n' "$cmd" | \
+        "$SERVER" "$dir" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    r = json.loads(sys.stdin.readline())
+    if r.get('code') == 'full_fidelity_required':
+        # The refusal must be coherent: a sampled/none window AND no data
+        # key. A refusal that also carries rows is a contradiction, and
+        # picking either half of it would be inventing an answer.
+        ok = (r.get('fidelity') in ('sampled', 'none') and '$key' not in r)
+        print('UNAVAIL' if ok else 'ERR'); sys.exit(0)
+    if r.get('error'):
+        print('ERR'); sys.exit(0)
+    print(len(r['$key']))
+except Exception:
+    print('ERR')
+"
+}
+
+# ── Bypass suite for exec_rows (the #108 response classifier) ────────────
+#
+# WHY THIS EXISTS. The first version of exec_rows collapsed EVERY non-`rows`
+# response to ERR, and the box-check run on this branch failed on exactly
+# that: a sampled-only window makes pgwt-server emit its documented
+# exact-tier refusal (code=full_fidelity_required, no `rows` key), which the
+# classifier reported as "the server did not answer". The gate was red while
+# the product was right -- the mirror image of the usual defect, and just as
+# much a gate defect.
+#
+# Accepting that refusal must NOT become "accept anything that is not a row
+# count". These cases pin both directions against a FAKE $SERVER, with no
+# PostgreSQL, no root and no pgwt-server, so a regression here is caught in
+# a second rather than in a 40-minute box run.
+exec_rows_selftest() {
+    local saved_server="$SERVER"
+    local d t
+    d=$(mktemp -d /tmp/pgwt_esc_selftest_XXXXXX)
+    t="$d/fake-server"
+
+    # $1 = the single line the fake server prints; "" = print nothing. The
+    # payload goes in a file the stub cats, so no quoting of the JSON is
+    # needed anywhere.
+    _fake() {
+        if [[ -n "$1" ]]; then
+            printf '%s\n' "$1" > "$d/payload"
+        else
+            : > "$d/payload"
+        fi
+        {
+            echo '#!/bin/bash'
+            echo 'cat >/dev/null'
+            echo "cat '$d/payload'"
+        } > "$t"
+        chmod +x "$t"
+        SERVER="$t"
+    }
+    _case() {  # _case <want> <label> <server line>
+        local want="$1" label="$2" line="$3" got
+        _fake "$line"
+        got=$(exec_rows "$d" executions rows)
+        [[ "$got" == "$want" ]]
+        check $? "exec_rows self-test: $label (got '$got', want '$want')"
+    }
+
+    _case 2 "an exact answer returns its row count" \
+        '{"id":1,"fidelity":"exact","rows":[{"pid":1},{"pid":2}],"total_count":2}'
+    _case 0 "an empty exact answer returns 0" \
+        '{"id":1,"fidelity":"exact","rows":[],"total_count":0}'
+    _case UNAVAIL "the documented exact-tier refusal is UNAVAIL" \
+        '{"id":1,"unavailable":"requires full-fidelity data","code":"full_fidelity_required","fidelity":"sampled"}'
+    # ── the ERR direction: none of these may pass as "no executions" ──
+    _case ERR "a generic server error is ERR, not UNAVAIL" \
+        '{"id":1,"error":"something went wrong"}'
+    _case ERR "a response with no rows key and no refusal code is ERR" \
+        '{"id":1,"fidelity":"exact","total_count":0}'
+    _case ERR "a refusal code on an EXACT window is ERR (incoherent)" \
+        '{"id":1,"code":"full_fidelity_required","fidelity":"exact"}'
+    _case ERR "a different refusal code is ERR" \
+        '{"id":1,"code":"request_too_large","fidelity":"sampled"}'
+    _case ERR "a crashed server that prints nothing is ERR" ''
+    _case ERR "unparseable output is ERR" 'not json at all'
+    # A refusal that ALSO carries rows is incoherent: refuse rather than
+    # silently prefer one half of a contradictory answer.
+    _case ERR "refusal code together with rows is ERR" \
+        '{"id":1,"code":"full_fidelity_required","fidelity":"sampled","rows":[]}'
+
+    unset -f _fake _case
+    SERVER="$saved_server"
+    rm -rf "$d"
+}
+
+exec_rows_selftest
+if [[ $SELF_TEST_ONLY -eq 1 ]]; then
+    echo ""
+    echo "$passed/$((passed + failed)) self-test checks passed"
+    [[ $failed -eq 0 ]]
+    exit $?
+fi
 
 cleanup() {
     if [[ -n "$TRACER_PID" ]] && kill -0 "$TRACER_PID" 2>/dev/null; then
@@ -384,23 +505,6 @@ run_tiered_capture() {
     return 0
 }
 
-# Row count for one pgwt-server data command. Prints an integer, or ERR.
-exec_rows() {
-    local dir="$1" cmd="$2" key="$3"
-    printf '{"id":1,"cmd":"%s","limit":500}\n' "$cmd" | \
-        "$SERVER" "$dir" 2>/dev/null | python3 -c "
-import json,sys
-try:
-    line = sys.stdin.readline()
-    r = json.loads(line)
-    if r.get('error'):
-        print('ERR'); sys.exit(0)
-    print(len(r['$key']))
-except Exception:
-    print('ERR')
-"
-}
-
 if [[ -z "$PSQL_BIN" ]]; then
     check 1 "#108: psql is available (cannot drive a workload without it)"
 else
@@ -424,7 +528,13 @@ else
         A_SCAT=$(exec_rows "$A_DIR" exec_scatter points)
         [[ "$A_EXEC" != "ERR" && "$A_SCAT" != "ERR" ]]
         check $? "#108: server answered the control capture (execs=$A_EXEC scatter=$A_SCAT)"
-        [[ "$A_EXEC" == "0" && "$A_SCAT" == "0" ]]
+        # No executions, either as zero rows or as the explicit exact-tier
+        # refusal -- a sampled-only window is the one case where
+        # pgwt-server answers "requires full-fidelity data" instead of an
+        # empty list, and that refusal IS the #108 interim state. Any other
+        # outcome, including a nonzero count, fails.
+        [[ ( "$A_EXEC" == "0" || "$A_EXEC" == "UNAVAIL" ) && \
+           ( "$A_SCAT" == "0" || "$A_SCAT" == "UNAVAIL" ) ]]
         check $? "#108: always-on sampled tier yields NO executions (execs=$A_EXEC scatter=$A_SCAT)"
         rm -rf "$A_DIR"
     fi
