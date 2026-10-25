@@ -231,6 +231,12 @@ test_exec_sites_nopie
 test_replay_fidelity
 test_sampled_overhead_gate.py
 test_data_query_text_context.py
+# #553's other surface: `pgwt-server --dump`'s Top Events table printed the
+# measured CPU* row but not the off-CPU remainder, so its "% DB" column
+# summed to 60% on a measured capture while the SAME dump's Time Model
+# section printed that 40% as its own row. Needs ../pgwt-server and
+# gen_test_traces, exactly like test_data_query_text_context.py above.
+test_dump_report.py
 test_ui_live_smoke_lib.py
 test_ui_live_smoke_footage.py
 test_ui_live_smoke_failure.py

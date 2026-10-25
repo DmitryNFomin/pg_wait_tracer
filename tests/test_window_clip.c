@@ -1438,6 +1438,29 @@ static void test_cpu_row_measured_bypass(void)
     CHECK_MS(e.offcpu_ms, 0.0, "...and the remainder floors at 0, never "
                                "negative");
     CHECK(e.has_measured_cpu != 0, "...still a measurement");
+    /* The clamp is right, but clamping SILENTLY is not: 15 ms of claimed CPU
+     * disappears here. pgwt_compute_time_model counts that excess in
+     * cpu_clamped_ms and this response had no equivalent, so the same skew
+     * was a reported diagnostic on one response and invisible on the other. */
+    CHECK_MS(e.cpu_clamped_ms, 15.0,
+             "...and the 15 ms of overshoot is COUNTED, not silently absorbed");
+    struct pgwt_tm_result skew_tm;
+    pgwt_compute_time_model(&skew, 1, &f, WFROM, WTO, 10000.0, &skew_tm);
+    CHECK_MS(e.cpu_clamped_ms, skew_tm.cpu_clamped_ms,
+             "...the same number the time model reports under that name");
+    free(skew_tm.rows);
+    /* Clipped by the window: the measurement is split by the in-window
+     * fraction FIRST, so the overshoot is the fraction's overshoot (12.5 ms
+     * of CPU over a 5 ms clip), not the whole-record one. A clamp counter
+     * written against the unclipped record would read 15.0 here. */
+    struct pgwt_events_result e_clip;
+    pgwt_compute_top_events(&skew, 1, &f, skew.timestamp_ns - MS_NS(5),
+                            skew.timestamp_ns, 5.0, &e_clip);
+    CHECK_MS(ev_total_ms(&e_clip, CPU_GAP), 5.0,
+             "...half the gap in window clamps to the 5 ms clip");
+    CHECK_MS(e_clip.cpu_clamped_ms, 7.5,
+             "...and the overshoot is the clipped one (12.5 - 5), not 15.0");
+    free(e_clip.rows);
     free(e.rows);
 
     /* 11f. EMPTY input: nothing to look at. Every number must be a real zero
@@ -1498,7 +1521,19 @@ static void test_cpu_row_measured_bypass(void)
     /* 11j. An IDLE interval carrying a measurement (Client:ClientRead). The
      * time model skips such an interval WHOLE, including its cpu_ns
      * (tests/test_idle_accounting.c); this table lists it at wall but outside
-     * DB Time, so neither CPU* nor off-CPU may take anything from it. */
+     * DB Time, so neither CPU* nor off-CPU may take anything from it.
+     *
+     * WHAT KEEPS IT OUT is the CPU-CLASS selector, not an idle test. This
+     * case used to be labelled as covering a `!pgwt_is_idle_event()` conjunct
+     * in compute.c, and a reviewer killed that claim by mutation: deleting
+     * the conjunct left every assertion here green, because no idle event is
+     * in PGWT_CLASS_CPU, so the conjunct could not change the answer for ANY
+     * input. An assertion cannot fix an unfalsifiable claim -- so the dead
+     * conjunct is gone from compute.c and the PROPERTY that made it dead is
+     * asserted below instead, over the whole idle universe. That one CAN
+     * fail: it goes red the day an idle event is put in the CPU class (or
+     * event 0 is called idle), which is exactly when the deleted conjunct
+     * would have started to matter. */
     struct pgwt_trace_event idle =
         mk(1, CLIENT_READ, WFROM + S(1), MS_NS(8), 38, MS_NS(2));
     struct pgwt_events_result k;
@@ -1510,6 +1545,44 @@ static void test_cpu_row_measured_bypass(void)
           "...its cpu_ns does not make this a measured-CPU window");
     CHECK_MS(k.offcpu_ms, 0.0, "...and yields no off-CPU");
     free(k.rows);
+
+    /* The invariant, swept rather than argued. pgwt_is_idle_event only ever
+     * looks at the class byte and (for Timeout) the low event number, so
+     * 256 classes x 64 ids covers its whole decision space; the PG18 pacing
+     * mask is installed for the sweep so the Timeout pacing ids are in it
+     * too (the suite otherwise leaves the mask empty, which would have
+     * silently excluded six of the seven visible idle events). */
+    uint32_t saved_mask = pgwt_idle_rule_timeout_mask();
+    pgwt_idle_rule_set_timeout_mask(PGWT_IDLE_TIMEOUT_MASK_PG18);
+    int idle_seen = 0, idle_in_cpu = 0, pacing_seen = 0;
+    for (uint32_t cls = 0; cls < 256; cls++) {
+        for (uint32_t n = 0; n < 64; n++) {
+            uint32_t id = (cls << 24) | n;
+            if (!pgwt_is_idle_event(id))
+                continue;
+            idle_seen++;
+            if (cls == CLASS_TIMEOUT)
+                pacing_seen++;
+            if (pgwt_wait_class_index(id) == PGWT_CLASS_CPU)
+                idle_in_cpu++;
+        }
+    }
+    pgwt_idle_rule_set_timeout_mask(saved_mask);
+    /* Non-vacuity first: a sweep that matched nothing would report
+     * "none of them is in the CPU class" about the empty set. */
+    CHECK(idle_seen > 1,
+          "the idle sweep found more than one idle event to look at");
+    CHECK(pacing_seen == 6,
+          "...including all six PG18 Timeout pacing ids (mask 0x29B)");
+    CHECK(pgwt_is_idle_event(CLIENT_READ) != 0,
+          "...and Client:ClientRead, the one idle event with a visible row");
+    CHECK(idle_in_cpu == 0,
+          "NO idle event is in PGWT_CLASS_CPU -- which is why the CPU split "
+          "needs no idle test of its own");
+    CHECK(pgwt_is_idle_event(CPU_GAP) == 0,
+          "...and event 0, the ONLY id in that class, is not idle");
+    CHECK(pgwt_wait_class_index(CPU_GAP) == PGWT_CLASS_CPU,
+          "...so the class the split selects on is reachable at all");
 
     /* 11k. MIXED tiers in one window: one measured gap (10 ms wall / 4 ms
      * on-CPU) and one UNKNOWN gap (6 ms). CPU* is measured + unknown-wall =
@@ -1545,6 +1618,48 @@ static void test_cpu_row_measured_bypass(void)
           "measurement is not described by this response");
     CHECK_MS(m.offcpu_ms, 0.0, "...with no off-CPU carried over");
     free(m.rows);
+
+    /* 11m. ROUNDING, not truncation. The row accumulator is integer ns and
+     * the split is a double, so every straddling record leaves a fractional
+     * nanosecond; truncating it biases that remainder into off-CPU on EVERY
+     * record. compute.c:1845 rounds for exactly that reason, and a reviewer
+     * showed the claim was untested: changing `(uint64_t)(m + 0.5)` to
+     * `(uint64_t)m` left the whole suite green, because every earlier fixture
+     * splits to a whole nanosecond.
+     *
+     * The fixture is built so the two differ by HALF a nanosecond per record,
+     * and then AMPLIFIED by 2000 records -- not because 1 ns is acceptable,
+     * but because CHECK_MS's tolerance IS 1e-6 ms (one nanosecond), so a
+     * one-record difference sits exactly on its boundary and would pass. 2000
+     * records put the difference at 0.002 ms, two thousand times the
+     * tolerance, which is a gate rather than a coin flip.
+     *
+     * Per record: 2000 ns duration, 1000 ns of it in window (frac 0.5),
+     * cpu_ns 501 -> m = 250.5 ns. Rounded 251, truncated 250.
+     *   CPU*    = 2000 * 251 ns  = 0.502 ms   (truncation: 0.500 ms)
+     *   off-CPU = 2000 * 749 ns  = 1.498 ms   (truncation: 1.500 ms)
+     *   DB Time = 2000 * 1000 ns = 2.000 ms   (unchanged either way) */
+    static struct pgwt_trace_event frac[2000];
+    for (int i = 0; i < 2000; i++)
+        frac[i] = mk(1, CPU_GAP, WFROM + 1000, 2000, 44, 501);
+    struct pgwt_events_result r;
+    pgwt_compute_top_events(frac, 2000, &f, WFROM, WTO, 10000.0, &r);
+    CHECK_MS(r.db_time_ms, 2.0,
+             "2000 half-in-window gaps: DB Time is the clipped wall, 2.000 ms");
+    CHECK_MS(ev_total_ms(&r, CPU_GAP), 0.502,
+             "250.5 ns of measured CPU per record ROUNDS up to 251 ns "
+             "(truncation would read 0.500 ms)");
+    CHECK_MS(r.offcpu_ms, 1.498,
+             "...and the half-nanosecond is not biased into off-CPU "
+             "(truncation would read 1.500 ms)");
+    CHECK(r.has_measured_cpu != 0,
+          "...and this is a measurement, not the unsplit wall (which would "
+          "also read 2.000 ms on the CPU row)");
+    /* No "CPU* + off-CPU == DB Time" line here on purpose: off-CPU is
+     * computed AS clip_u - row_ns, so that identity cannot fail (section
+     * 10's header says the same about the four-term version). Each number
+     * above is asserted against its own hand-computed literal instead. */
+    free(r.rows);
 }
 
 int main(void)
@@ -1574,8 +1689,11 @@ int main(void)
      * silently stop running. Sections 10-11 (#553) add 66 more (5 of them
      * inside guards that are only skipped when the guarding assertion has
      * already failed), so the floor rises with them -- a dropped call in
-     * main() is exactly the false negative this floor exists to catch. */
-    if (checks < 192) {
+     * main() is exactly the false negative this floor exists to catch.
+     * 11e's clamp counter, 11j's idle-class sweep and 11m's rounding gate
+     * add 14 after that: the whole suite runs 211, and the floor moves with
+     * it rather than staying where a deleted section would still clear it. */
+    if (checks < 211) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

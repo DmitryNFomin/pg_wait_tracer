@@ -327,9 +327,17 @@ _CANNED["top_events"] = {
     # has_measured_cpu=True next to a 0 remainder and a 100%-summing table
     # would be a payload the real server cannot produce. No UI code reads
     # either field yet (nothing to exercise visually); the measured shape is
-    # pinned in C, in tests/test_window_clip.c section 15.
+    # pinned in C, in tests/test_window_clip.c sections 10-11 (there is no
+    # section 15 -- that reference was wrong), and the text-report surface in
+    # tests/test_dump_report.py.
+    #
+    # cpu_clamped_ms is the skew self-check the real server emits here too
+    # (measured CPU that exceeded its own clipped gap wall, clamped out of the
+    # row and counted). 0.0 for a fixture with no measurement at all: the
+    # field is always present, like time_model's.
     "has_measured_cpu": False,
     "offcpu_ms": 0.0,
+    "cpu_clamped_ms": 0.0,
     "rows": [
         {"name": "CPU*",             "event_id": 0,          "class": "CPU",
          "count": 250000, "total_ms": 4800, "avg_us": 19.2, "p50_us": 12,
@@ -1023,6 +1031,7 @@ def _handle_request_inner(cmd, req_id, msg):
                 "db_time_ms": _CANNED["top_events"]["db_time_ms"],
                 "has_measured_cpu": _CANNED["top_events"]["has_measured_cpu"],
                 "offcpu_ms": _CANNED["top_events"]["offcpu_ms"],
+                "cpu_clamped_ms": _CANNED["top_events"]["cpu_clamped_ms"],
                 "rows": rows}
 
     if cmd == "top_sessions":

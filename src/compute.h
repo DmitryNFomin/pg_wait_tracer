@@ -391,8 +391,19 @@ struct pgwt_events_result {
      * pgwt_compute_top_events_from_summaries leaves both at 0: the per-second
      * summary's events[] table carries wall for event 0 (summary_writer.c's
      * `se->total_ns += tns`), so on that routing CPU* is the unsplit total and
-     * says so. */
+     * says so. The two paths therefore describe the SAME total split two
+     * ways, which is the identity pinned in tests/test_agg_raw_crosscheck.c
+     * section 6f: raw CPU* + raw offcpu_ms == summary CPU*.
+     *
+     * cpu_clamped_ms is the same self-check pgwt_compute_time_model reports
+     * under that name: the measured CPU that exceeded its own clipped gap
+     * wall (sum_exec_runtime is only current at a tick or a context switch,
+     * so a sub-ms burst can be attributed past its interval). It is OUTSIDE
+     * the rows and outside db_time_ms — a diagnostic, not time. Without it a
+     * skewed measurement was silently absorbed on this response while
+     * time_model counted it. */
     double offcpu_ms;
+    double cpu_clamped_ms;
     int    has_measured_cpu;
 };
 

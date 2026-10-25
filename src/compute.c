@@ -1765,6 +1765,9 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
      * silently dropped. has_measured_cpu says which of the two things the
      * CPU* row IS: a measurement (1) or the unsplit gap wall (0). */
     uint64_t cpu_offcpu_ns = 0;
+    /* Double, like time_model's: the overshoot is the fractional difference
+     * of two doubles, and rounding it per record would hide a sub-ns skew. */
+    double cpu_clamped_ns = 0.0;
     int has_measured_cpu = 0;
 
     for (int i = 0; i < count; i++) {
@@ -1829,14 +1832,31 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
          * Idle rows are untouched, including an idle interval's own cpu_ns:
          * the time model skips such an interval whole (ClientRead precedent,
          * tests/test_idle_accounting.c), and its time is not in DB Time here
-         * either. */
+         * either. That falls out of the CLASS selector below and needs no
+         * `!pgwt_is_idle_event()` conjunct of its own: PGWT_CLASS_CPU is
+         * reachable only for event_id 0 (pgwt_wait_class_index special-cases
+         * it; every other id is classified by its class byte), and 0 is not
+         * an idle event under any rule — pgwt_is_idle_event covers the
+         * Activity class, Client:ClientRead and the Timeout pacing ids. The
+         * conjunct this replaces could not change the answer for ANY input,
+         * so no test could have failed when it was dropped. What makes it
+         * dead is a property of two OTHER functions, so that property is
+         * asserted directly, over the whole idle universe, in
+         * tests/test_window_clip.c section 11j — the one check that goes red
+         * if a future idle event is ever put in the CPU class. */
         uint64_t row_ns = clip_u;
-        if (!pgwt_is_idle_event(ev->old_event) &&
-            pgwt_wait_class_index(ev->old_event) == PGWT_CLASS_CPU &&
+        if (pgwt_wait_class_index(ev->old_event) == PGWT_CLASS_CPU &&
             ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
             double frac = event_window_frac(clip_u, ev->duration_ns);
             double m = (double)ev->cpu_ns * frac;
-            if (m > (double)clip_u) m = (double)clip_u;
+            /* Skew self-check, same name and meaning as time_model's: the
+             * excess is CLAMPED away (it is not time that happened in this
+             * gap) but it is COUNTED, so a measurement that overshoots its
+             * own wall is visible instead of silently absorbed. */
+            if (m > (double)clip_u) {
+                cpu_clamped_ns += m - (double)clip_u;
+                m = (double)clip_u;
+            }
             /* This accumulator is integer ns (the row totals are), so the
              * split is ROUNDED, not truncated -- truncation would bias every
              * straddling record's sub-ns remainder into off-CPU. m <= clip_u
@@ -1937,6 +1957,7 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
      * runqueue time inside CPU*. offcpu_ms is the missing share, reported
      * rather than dropped. */
     out->offcpu_ms        = (double)cpu_offcpu_ns / 1e6;
+    out->cpu_clamped_ms   = cpu_clamped_ns / 1e6;
     out->has_measured_cpu = has_measured_cpu;
 }
 
@@ -3112,7 +3133,11 @@ void pgwt_compute_top_events_from_summaries(
      * all. 0 is therefore the honest answer for "is the CPU* row below a
      * measurement": no. Bringing this routing onto the measurement needs the
      * writer's per-event table to carry it, which is a format change and a
-     * separate issue. */
+     * separate issue -- decided: summary v9, together with #563's per-record
+     * field, so every retained trace is recomputed once rather than twice.
+     * The contract that change must satisfy is pinned as an identity (raw
+     * CPU* + raw off-CPU == summary CPU*, each side saying which quantity it
+     * is) in tests/test_agg_raw_crosscheck.c section 6f. */
 }
 
 /* ── Top Sessions from summaries ──────────────────────────── */
