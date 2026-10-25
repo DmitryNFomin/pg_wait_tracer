@@ -434,6 +434,14 @@ void pgwt_live_qattr_between_commands(struct pgwt_accumulator *acc,
         pgwt_qattr_boundary(&pa->qattr, true, qattr_emit, acc);
 }
 
+void pgwt_live_qattr_pid_exit(struct pgwt_accumulator *acc, uint32_t pid)
+{
+    /* DELIBERATELY EMPTY in this commit: it is the RED half of #156 item 2.
+     * The next commit flushes the exiting pid's pending aggregates here. */
+    (void)acc;
+    (void)pid;
+}
+
 bool pgwt_live_qattr_sample(struct pgwt_accumulator *acc,
                             struct pgwt_pid_accum *pa, uint64_t query_id,
                             uint32_t we, uint64_t stat_ns, uint32_t cat_flag,
