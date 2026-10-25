@@ -147,7 +147,10 @@ static void test_best_effort_startup_keeps_available_probe(void)
     uint32_t pinned = pgwt_exact_probe_core_pin_best_effort(
         &core, PGWT_EXACT_PROBE_ALL_MASK, 1, &ops, &f);
 
-    CHECK(pinned == PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_ACTIVITY) &&
+    /* #108: full-mode startup now pins the phase markers too, so the
+     * surviving set is everything except the probe that failed. */
+    CHECK(pinned == (PGWT_EXACT_PROBE_ALL_MASK &
+                     ~PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_QUERY_ID)) &&
           core.attached_mask == pinned && core.pinned_mask == pinned,
           "startup drops a failed probe but keeps the available probe");
     CHECK(f.attach_calls[PGWT_EXACT_PROBE_QUERY_ID] == 1 &&

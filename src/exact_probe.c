@@ -106,11 +106,31 @@ int pgwt_exact_probe_core_acquire(struct pgwt_exact_probe_core *core,
         core->consumers++;
         return 0;
     }
+    /* REQUIRED members attach atomically: a partial attribution bundle
+     * would hand out an exact generation whose answers are half exact. */
+    uint32_t required = mask & ~PGWT_EXACT_PROBE_PHASE_MASK;
     uint32_t new_mask = 0;
-    if (attach_missing(core, mask, ops, ctx, &new_mask) != 0)
+    if (attach_missing(core, required, ops, ctx, &new_mask) != 0)
         return -1;
     core->generation = generation;
     core->consumers = 1;
+
+    /* #108: OPTIONAL members (the execute/plan USDT phase markers) attach
+     * one at a time, best effort, AFTER the window is already granted.
+     * A kernel without USDT semaphore refcounting -- EL8 -- has never been
+     * able to carry them, and denying the whole escalation there would
+     * remove exact wait capture to protect an optional overlay. They are
+     * not pinned, so pgwt_exact_probe_core_release() detaches them with
+     * the rest of the window: they never outlive it into the always-on
+     * sampled tier. */
+    uint32_t optional = mask & PGWT_EXACT_PROBE_PHASE_MASK;
+    for (int i = 0; i < PGWT_EXACT_PROBE_COUNT; i++) {
+        uint32_t bit = PGWT_EXACT_PROBE_BIT(i);
+        if (!(optional & bit) || (core->attached_mask & bit))
+            continue;
+        uint32_t got = 0;
+        (void)attach_missing(core, bit, ops, ctx, &got);
+    }
     return 0;
 }
 
@@ -204,6 +224,55 @@ static struct bpf_link **skeleton_link_slot(struct pgwt_daemon *d,
     }
 }
 
+/* #108: attach one USDT start/done PAIR. Both or neither -- half a pair
+ * produces executions that open and never close (or the reverse), which is
+ * worse than no execution telemetry at all because it is invisible. */
+static void *attach_usdt_pair(struct pgwt_daemon *d,
+                              struct pgwt_exact_probe_pair *pair,
+                              struct bpf_program *prog_start,
+                              struct bpf_program *prog_done,
+                              struct bpf_link **slot_start,
+                              struct bpf_link **slot_done,
+                              const char *note_start, const char *note_done)
+{
+    const char *bin = d->pg_binary_saved;
+    struct bpf_link *a = bpf_program__attach_usdt(prog_start, -1, bin,
+                                                  "postgresql", note_start,
+                                                  NULL);
+    if (libbpf_get_error(a))
+        a = NULL;
+    struct bpf_link *b = NULL;
+    if (a) {
+        b = bpf_program__attach_usdt(prog_done, -1, bin, "postgresql",
+                                     note_done, NULL);
+        if (libbpf_get_error(b))
+            b = NULL;
+    }
+    if (!a || !b) {
+        if (b) bpf_link__destroy(b);
+        if (a) bpf_link__destroy(a);
+        errno = ENOTSUP;
+        return NULL;
+    }
+    pair->start = a;
+    pair->done = b;
+    *slot_start = a;
+    *slot_done = b;
+    return pair;
+}
+
+static void detach_usdt_pair(struct pgwt_exact_probe_pair *pair,
+                             struct bpf_link **slot_start,
+                             struct bpf_link **slot_done)
+{
+    if (slot_start) *slot_start = NULL;
+    if (slot_done) *slot_done = NULL;
+    if (pair->done) bpf_link__destroy(pair->done);
+    if (pair->start) bpf_link__destroy(pair->start);
+    pair->start = NULL;
+    pair->done = NULL;
+}
+
 static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
 {
     struct pgwt_daemon *d = ctx;
@@ -270,6 +339,43 @@ static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
             d->skel->progs.on_report_activity, -1, bin,
             d->exact_probes.activity_offset, &opts);
         break;
+    case PGWT_EXACT_PROBE_EXEC:
+        if (d->lightweight_mode || d->skip_usdt) {
+            errno = ENOTSUP;
+            break;
+        }
+        /* #464: publish the canonical-site allowlist BEFORE attaching.
+         * On refusal, attach NOTHING: execution telemetry is absent and
+         * loud, never doubled and quiet. Published once per daemon --
+         * the map outlives a de-escalation and re-parsing the postgres
+         * ELF inside a bounded window is overhead the window does not
+         * need. */
+        if (!d->exact_probes.exec_sites_published) {
+            if (pgwt_publish_exec_sites(d, bin) != 0) {
+                errno = ENOTSUP;
+                break;
+            }
+            d->exact_probes.exec_sites_published = true;
+        }
+        return attach_usdt_pair(d, &d->exact_probes.exec_links,
+                                d->skel->progs.on_exec_start,
+                                d->skel->progs.on_exec_done,
+                                &d->skel->links.on_exec_start,
+                                &d->skel->links.on_exec_done,
+                                "query__execute__start",
+                                "query__execute__done");
+    case PGWT_EXACT_PROBE_PLAN:
+        if (d->lightweight_mode || d->skip_usdt) {
+            errno = ENOTSUP;
+            break;
+        }
+        return attach_usdt_pair(d, &d->exact_probes.plan_links,
+                                d->skel->progs.on_plan_start,
+                                d->skel->progs.on_plan_done,
+                                &d->skel->links.on_plan_start,
+                                &d->skel->links.on_plan_done,
+                                "query__plan__start",
+                                "query__plan__done");
     default:
         break;
     }
@@ -290,6 +396,18 @@ static void detach_link(void *ctx, enum pgwt_exact_probe_index index,
                         void *opaque)
 {
     struct pgwt_daemon *d = ctx;
+    if (index == PGWT_EXACT_PROBE_EXEC) {
+        detach_usdt_pair(&d->exact_probes.exec_links,
+                         &d->skel->links.on_exec_start,
+                         &d->skel->links.on_exec_done);
+        return;
+    }
+    if (index == PGWT_EXACT_PROBE_PLAN) {
+        detach_usdt_pair(&d->exact_probes.plan_links,
+                         &d->skel->links.on_plan_start,
+                         &d->skel->links.on_plan_done);
+        return;
+    }
     struct bpf_link **slot = skeleton_link_slot(d, index);
     if (slot)
         *slot = NULL;
@@ -344,7 +462,11 @@ int pgwt_exact_probe_startup(struct pgwt_daemon *d)
         uint32_t bit = PGWT_EXACT_PROBE_BIT(i);
         if (!(dropped & bit))
             continue;
-        if (i == PGWT_EXACT_PROBE_QUERY_ID) {
+        if (i == PGWT_EXACT_PROBE_EXEC || i == PGWT_EXACT_PROBE_PLAN) {
+            fprintf(stderr, "WARN: optional full-mode %s USDT phase markers "
+                    "unavailable\n",
+                    i == PGWT_EXACT_PROBE_EXEC ? "execution" : "plan");
+        } else if (i == PGWT_EXACT_PROBE_QUERY_ID) {
             const char *symbol = d->use_pg13_query_attr
                                ? "standard_ExecutorStart"
                                : "pgstat_report_query_id";
@@ -409,6 +531,25 @@ int pgwt_exact_probe_acquire(struct pgwt_daemon *d, uint64_t generation,
         set_config(d, 0, 0, true);
         return -1;
     }
+    /* #108: say which half of the bundle the window actually got. An
+     * escalation that grants exactness but silently has no phase markers
+     * is exactly the failure this issue was: the Waterfall and Scatter
+     * tabs came back empty with nothing anywhere saying why. */
+    uint32_t phase = d->exact_probes.core.attached_mask &
+                     PGWT_EXACT_PROBE_PHASE_MASK;
+    if (phase != PGWT_EXACT_PROBE_PHASE_MASK)
+        fprintf(stderr, "WARN: exact window %llu has no %s phase markers "
+                "(attached mask 0x%x) -- Waterfall/Scatter executions will "
+                "be absent for this window\n",
+                (unsigned long long)generation,
+                phase == 0 ? "execute or plan"
+                           : (phase & PGWT_EXACT_PROBE_BIT(
+                                  PGWT_EXACT_PROBE_EXEC) ? "plan"
+                                                         : "execute"),
+                phase);
+    else if (d->verbose)
+        fprintf(stderr, "INFO: exact window %llu attached execute/plan "
+                "phase markers\n", (unsigned long long)generation);
     d->cmd_gate_active = true;
     return 0;
 }

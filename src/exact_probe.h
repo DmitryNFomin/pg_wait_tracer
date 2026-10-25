@@ -35,7 +35,8 @@ enum pgwt_exact_probe_index {
 #define PGWT_EXACT_PROBE_PHASE_MASK \
     (PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_EXEC) | \
      PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_PLAN))
-#define PGWT_EXACT_PROBE_ALL_MASK PGWT_EXACT_PROBE_ATTR_MASK
+#define PGWT_EXACT_PROBE_ALL_MASK \
+    (PGWT_EXACT_PROBE_ATTR_MASK | PGWT_EXACT_PROBE_PHASE_MASK)
 
 typedef void *(*pgwt_exact_attach_fn)(void *ctx,
                                       enum pgwt_exact_probe_index index);
@@ -58,11 +59,28 @@ struct pgwt_exact_probe_core {
     unsigned consumers;
 };
 
+/* One bundle member, two bpf_links: a USDT phase marker is only meaningful
+ * as a start/done PAIR. Both attach or neither does, and they detach
+ * together, so an escalation window can never leave executions that open
+ * and never close (or close and never open). */
+struct pgwt_exact_probe_pair {
+    void *start;
+    void *done;
+};
+
 struct pgwt_exact_probe_bundle {
     struct pgwt_exact_probe_core core;
     uint64_t query_offset;
     uint64_t activity_offset;
     bool sampled_warmup_reconciled;
+    /* #108: the execute/plan link pairs, owned by the bundle member whose
+     * index they belong to. */
+    struct pgwt_exact_probe_pair exec_links;
+    struct pgwt_exact_probe_pair plan_links;
+    /* The #464 canonical-site allowlist is published once per daemon
+     * lifetime; re-publishing on every escalation would re-parse the
+     * postgres ELF inside the window. */
+    bool exec_sites_published;
 };
 
 uint32_t pgwt_exact_probe_startup_mask(
