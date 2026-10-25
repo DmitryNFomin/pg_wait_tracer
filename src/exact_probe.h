@@ -83,6 +83,40 @@ struct pgwt_exact_probe_bundle {
     bool exec_sites_published;
 };
 
+/* #108: the "both links or neither" rule for one USDT start/done pair.
+ *
+ * PURE (libbpf-free), so the invariant this branch introduces is a unit
+ * test rather than something only a live box could exercise -- and the live
+ * A/B in tests/test_escalation.sh provably CANNOT see it: a half-attached
+ * pair still yields executions > 0, so both sides of that A/B agree while
+ * on_exec_done sits live in the sampled tier.
+ *
+ * PGWT_EXACT_PAIR_START / _DONE are the `which` values handed to the
+ * callbacks. attach returns an opaque link or NULL on failure.
+ *
+ * pgwt_exact_probe_pair_attach: attaches START, then DONE. If either fails,
+ * anything already attached is detached and the pair is left ZEROED --
+ * returns -1 and never a half pair, because half a pair produces
+ * executions that open and never close (or the reverse), which is worse
+ * than absent telemetry because it is invisible.
+ *
+ * pgwt_exact_probe_pair_detach: detaches DONE then START (reverse of
+ * attach) and zeroes the pair. Idempotent: a second call is a no-op, so a
+ * release and a cleanup cannot double-destroy a link. */
+#define PGWT_EXACT_PAIR_START 0
+#define PGWT_EXACT_PAIR_DONE  1
+
+typedef void *(*pgwt_exact_pair_attach_fn)(void *ctx, int which);
+typedef void (*pgwt_exact_pair_detach_fn)(void *ctx, int which, void *link);
+
+int pgwt_exact_probe_pair_attach(struct pgwt_exact_probe_pair *pair,
+                                 pgwt_exact_pair_attach_fn attach,
+                                 pgwt_exact_pair_detach_fn detach,
+                                 void *ctx);
+void pgwt_exact_probe_pair_detach(struct pgwt_exact_probe_pair *pair,
+                                  pgwt_exact_pair_detach_fn detach,
+                                  void *ctx);
+
 /* #108: forget everything in the bundle that belongs to a DESTROYED BPF
  * skeleton, keeping what survives one.
  *

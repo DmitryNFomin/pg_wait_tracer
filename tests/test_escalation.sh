@@ -300,6 +300,8 @@ WL_PID=""
 CAP_DIR=""
 CAP_MODE=""
 CAP_TIER=""
+CAP_TIER_END=""
+CAP_WINDOWS=""
 
 esc108_cleanup() {
     [[ -n "$WL_STOP" ]] && rm -f "$WL_STOP"
@@ -311,17 +313,28 @@ esc108_cleanup() {
 WL_STOP=""
 
 # One tiered capture. $1 = tag, $2 = "escalate" | "noescalate".
-# Sets CAP_DIR (empty on failure), CAP_MODE, CAP_TIER. Runs in THIS shell
-# (not a subshell) so those assignments are visible to the caller.
+# Sets CAP_DIR (empty on failure), CAP_MODE, CAP_TIER, CAP_TIER_END,
+# CAP_WINDOWS. Runs in THIS shell (not a subshell) so those assignments are
+# visible to the caller.
+#
+# The --anomaly-* flags DISABLE auto-escalation. Tiered mode arms the anomaly
+# engine by default, so without them the control capture's "no executions"
+# rests on the rules' absolute floors staying above whatever this box is
+# doing -- true today, but a neighbouring session raising AAS would turn the
+# negative control red for a reason that has nothing to do with #108. This
+# removes a trigger; it does not weaken an assertion. CAP_WINDOWS below is
+# the independent proof that it worked.
 run_tiered_capture() {
     local tag="$1" do_escalate="$2" log
-    CAP_DIR=""; CAP_MODE="?"; CAP_TIER="?"
+    CAP_DIR=""; CAP_MODE="?"; CAP_TIER="?"; CAP_TIER_END="?"; CAP_WINDOWS="?"
     local dir
     dir=$(mktemp -d "/tmp/pgwt_esc108_${tag}_XXXXXX")
     log=$(mktemp "/tmp/pgwt_esc108_${tag}_log_XXXXXX")
     SOCK="$dir/pgwt.sock"
     "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$dir" \
         --mode tiered --sample-rate 50 --escalation-budget 120 -v \
+        --anomaly-aas-factor 1000000 --anomaly-cpu-cusum-disable \
+        --anomaly-lock-fraction 1 --anomaly-lock-min-aas 1000000 \
         >/dev/null 2>"$log" &
     TRACER_PID=$!
     local up=0
@@ -357,6 +370,12 @@ run_tiered_capture() {
     rm -f "$WL_STOP"; WL_STOP=""
     sleep 1
     kill -TERM "$WL_PID" 2>/dev/null; wait "$WL_PID" 2>/dev/null; WL_PID=""
+    # Read the tier and the window counter while the daemon is still up: the
+    # tier asserted at STARTUP cannot see a late auto-escalation, and
+    # escalation_windows_total is the quantity that decides, independently of
+    # any flag, whether this capture had an exact window at all.
+    CAP_TIER_END=$(ctl '{"cmd":"status"}' | jget "['tier']" 2>/dev/null || echo "?")
+    CAP_WINDOWS=$(ctl '{"cmd":"metrics"}' | jget "['escalation_windows_total']" 2>/dev/null || echo "?")
     kill -TERM "$TRACER_PID"
     wait "$TRACER_PID" 2>/dev/null
     TRACER_PID=""
@@ -394,8 +413,13 @@ else
         A_DIR="$CAP_DIR"; CAP_DIR=""
         [[ "$CAP_MODE" == "tiered" ]]
         check $? "#108: control capture ran in TIERED mode (got: $CAP_MODE)"
-        [[ "$CAP_TIER" == "sampled" ]]
-        check $? "#108: control capture never escalated (tier: $CAP_TIER)"
+        [[ "$CAP_TIER" == "sampled" && "$CAP_TIER_END" == "sampled" ]]
+        check $? "#108: control capture sampled at both ends (start: $CAP_TIER, end: $CAP_TIER_END)"
+        # The decisive one: zero exact windows over the whole capture. This
+        # is what makes "no executions" mean "the sampled tier produces
+        # none", rather than "nothing happened to escalate".
+        [[ "$CAP_WINDOWS" == "0" ]]
+        check $? "#108: control capture opened NO escalation window (windows: $CAP_WINDOWS)"
         A_EXEC=$(exec_rows "$A_DIR" executions rows)
         A_SCAT=$(exec_rows "$A_DIR" exec_scatter points)
         [[ "$A_EXEC" != "ERR" && "$A_SCAT" != "ERR" ]]
@@ -412,6 +436,10 @@ else
         B_DIR="$CAP_DIR"; CAP_DIR=""
         [[ "$CAP_MODE" == "tiered" ]]
         check $? "#108: escalated capture ran in TIERED mode (got: $CAP_MODE)"
+        # And the escalated capture provably DID open one, so the pair
+        # differs in exactly the thing under test.
+        [[ "$CAP_WINDOWS" =~ ^[0-9]+$ && "$CAP_WINDOWS" -ge 1 ]]
+        check $? "#108: escalated capture opened an escalation window (windows: $CAP_WINDOWS)"
         B_EXEC=$(exec_rows "$B_DIR" executions rows)
         B_SCAT=$(exec_rows "$B_DIR" exec_scatter points)
         [[ "$B_EXEC" != "ERR" && "$B_SCAT" != "ERR" ]]

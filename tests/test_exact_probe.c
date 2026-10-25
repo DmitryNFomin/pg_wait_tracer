@@ -354,6 +354,128 @@ static void test_acquire_refuses_without_ops(void)
  * is forgotten, and restart-safe work (the resolved FILE offsets) is kept.
  * A "forget everything" implementation fails the second half, which is why
  * it is here and not just the first. */
+/* ── #580 should-fix: the "both links or neither" PAIR invariant ─────────
+ *
+ * THE COVERAGE GAP. attach_usdt_pair/detach_usdt_pair sit behind
+ * #ifndef PGWT_SERVER, so the invariant this branch INTRODUCES had no unit
+ * coverage, and the live A/B in tests/test_escalation.sh provably cannot see
+ * it: a half-attached pair still yields executions > 0, so both captures
+ * agree while on_exec_done sits live in the sampled tier. The rule now lives
+ * in pgwt_exact_probe_pair_attach/_detach (pure) and the libbpf wrappers
+ * only supply the primitives.
+ *
+ * The scenario that must go red: a future edit detaching only pair->start,
+ * leaving on_exec_done attached past the window. */
+struct fake_pair_ops {
+    int attach_calls[2];
+    int detach_calls[2];
+    int detach_order[8];
+    int detach_count;
+    int fail_at;          /* -1 = never */
+};
+
+static void *fake_pair_attach(void *ctx, int which)
+{
+    struct fake_pair_ops *f = ctx;
+    if (which < 0 || which > 1)
+        return NULL;
+    f->attach_calls[which]++;
+    if (f->fail_at == which)
+        return NULL;
+    return (void *)(uintptr_t)(which + 0x10);
+}
+
+static void fake_pair_detach(void *ctx, int which, void *link)
+{
+    struct fake_pair_ops *f = ctx;
+    (void)link;
+    if (which < 0 || which > 1)
+        return;
+    f->detach_calls[which]++;
+    if (f->detach_count < 8)
+        f->detach_order[f->detach_count++] = which;
+}
+
+static void test_pair_both_or_neither(void)
+{
+    /* 1. Success: both links recorded, in order. */
+    struct pgwt_exact_probe_pair pair;
+    memset(&pair, 0, sizeof(pair));
+    struct fake_pair_ops f = {.fail_at = -1};
+    CHECK(pgwt_exact_probe_pair_attach(&pair, fake_pair_attach,
+                                       fake_pair_detach, &f) == 0,
+          "#580: a pair with both links available attaches");
+    CHECK(pair.start != NULL && pair.done != NULL,
+          "#580: both links of the pair are recorded");
+    CHECK(f.attach_calls[PGWT_EXACT_PAIR_START] == 1 &&
+          f.attach_calls[PGWT_EXACT_PAIR_DONE] == 1 &&
+          f.detach_count == 0,
+          "#580: a successful pair attach detaches nothing");
+
+    /* 2. Detach takes BOTH, DONE first, and zeroes the pair. The half-detach
+     * mutant (only pair->start) fails here. */
+    pgwt_exact_probe_pair_detach(&pair, fake_pair_detach, &f);
+    CHECK(f.detach_calls[PGWT_EXACT_PAIR_START] == 1 &&
+          f.detach_calls[PGWT_EXACT_PAIR_DONE] == 1,
+          "#580: detach releases BOTH links -- never half a pair");
+    CHECK(f.detach_count == 2 &&
+          f.detach_order[0] == PGWT_EXACT_PAIR_DONE &&
+          f.detach_order[1] == PGWT_EXACT_PAIR_START,
+          "#580: detach is the reverse of attach (done, then start)");
+    CHECK(pair.start == NULL && pair.done == NULL,
+          "#580: the pair is empty after detach");
+
+    /* 3. Idempotent: release and cleanup both run, and must not
+     * double-destroy a link. */
+    pgwt_exact_probe_pair_detach(&pair, fake_pair_detach, &f);
+    CHECK(f.detach_count == 2,
+          "#580: a repeated detach destroys nothing a second time");
+
+    /* 4. START fails: nothing attached, nothing to release, no half pair. */
+    memset(&pair, 0, sizeof(pair));
+    memset(&f, 0, sizeof(f));
+    f.fail_at = PGWT_EXACT_PAIR_START;
+    CHECK(pgwt_exact_probe_pair_attach(&pair, fake_pair_attach,
+                                       fake_pair_detach, &f) != 0,
+          "#580: a failed START denies the pair");
+    CHECK(pair.start == NULL && pair.done == NULL,
+          "#580: a failed START leaves no link behind");
+    CHECK(f.attach_calls[PGWT_EXACT_PAIR_DONE] == 0 &&
+          f.detach_count == 0,
+          "#580: a failed START never attaches DONE on its own");
+
+    /* 5. THE ONE THAT MATTERS. DONE fails AFTER START succeeded: the START
+     * link must be given back. Leaving it is precisely the half pair --
+     * query__execute__start live with no done, so executions open and never
+     * close, invisibly. */
+    memset(&pair, 0, sizeof(pair));
+    memset(&f, 0, sizeof(f));
+    f.fail_at = PGWT_EXACT_PAIR_DONE;
+    CHECK(pgwt_exact_probe_pair_attach(&pair, fake_pair_attach,
+                                       fake_pair_detach, &f) != 0,
+          "#580: a failed DONE denies the pair");
+    CHECK(f.attach_calls[PGWT_EXACT_PAIR_START] == 1 &&
+          f.attach_calls[PGWT_EXACT_PAIR_DONE] == 1,
+          "#580: both were attempted -- the case is not vacuous");
+    CHECK(f.detach_calls[PGWT_EXACT_PAIR_START] == 1,
+          "#580: a failed DONE RELEASES the START link it already took");
+    CHECK(pair.start == NULL && pair.done == NULL,
+          "#580: a denied pair is left empty, never half attached");
+
+    /* 6. Refuse when it cannot act at all, rather than reporting success. */
+    memset(&pair, 0, sizeof(pair));
+    CHECK(pgwt_exact_probe_pair_attach(&pair, NULL, fake_pair_detach,
+                                       &f) != 0 &&
+          pgwt_exact_probe_pair_attach(&pair, fake_pair_attach, NULL,
+                                       &f) != 0 &&
+          pgwt_exact_probe_pair_attach(NULL, fake_pair_attach,
+                                       fake_pair_detach, &f) != 0,
+          "#580: pair attach refuses without a usable ops pair");
+    pgwt_exact_probe_pair_detach(NULL, fake_pair_detach, &f);
+    pgwt_exact_probe_pair_detach(&pair, NULL, &f);
+    CHECK(1, "#580: pair detach tolerates NULL arguments");
+}
+
 static void test_bundle_forget_skeleton(void)
 {
     struct pgwt_exact_probe_bundle b;
@@ -498,6 +620,7 @@ int main(void)
     test_sampled_tier_never_pins_phase_probes();
     test_phase_probe_failure_degrades_but_never_denies();
     test_acquire_refuses_without_ops();
+    test_pair_both_or_neither();
     test_bundle_forget_skeleton();
     test_generation_merge();
     test_straddler_context_persistence();

@@ -38,6 +38,45 @@ static int attach_missing(struct pgwt_exact_probe_core *core, uint32_t mask,
     return 0;
 }
 
+int pgwt_exact_probe_pair_attach(struct pgwt_exact_probe_pair *pair,
+                                 pgwt_exact_pair_attach_fn attach,
+                                 pgwt_exact_pair_detach_fn detach,
+                                 void *ctx)
+{
+    if (!pair || !attach || !detach)
+        return -1;
+    pair->start = NULL;
+    pair->done = NULL;
+    void *a = attach(ctx, PGWT_EXACT_PAIR_START);
+    if (!a)
+        return -1;
+    void *b = attach(ctx, PGWT_EXACT_PAIR_DONE);
+    if (!b) {
+        detach(ctx, PGWT_EXACT_PAIR_START, a);
+        return -1;
+    }
+    pair->start = a;
+    pair->done = b;
+    return 0;
+}
+
+void pgwt_exact_probe_pair_detach(struct pgwt_exact_probe_pair *pair,
+                                  pgwt_exact_pair_detach_fn detach,
+                                  void *ctx)
+{
+    if (!pair || !detach)
+        return;
+    /* Reverse of attach order, and zero BEFORE handing the links out so a
+     * re-entrant detach cannot see them twice. */
+    void *a = pair->start, *b = pair->done;
+    pair->start = NULL;
+    pair->done = NULL;
+    if (b)
+        detach(ctx, PGWT_EXACT_PAIR_DONE, b);
+    if (a)
+        detach(ctx, PGWT_EXACT_PAIR_START, a);
+}
+
 void pgwt_exact_probe_bundle_forget_skeleton(
     struct pgwt_exact_probe_bundle *bundle)
 {
@@ -239,6 +278,43 @@ static struct bpf_link **skeleton_link_slot(struct pgwt_daemon *d,
 /* #108: attach one USDT start/done PAIR. Both or neither -- half a pair
  * produces executions that open and never close (or the reverse), which is
  * worse than no execution telemetry at all because it is invisible. */
+/* The libbpf half of one USDT pair. The "both or neither" RULE lives in
+ * pgwt_exact_probe_pair_attach/_detach (above, PURE and unit-tested); this
+ * only supplies the attach/detach primitives and the skeleton slots. */
+struct usdt_pair_ctx {
+    const char *bin;
+    struct bpf_program *prog[2];
+    struct bpf_link **slot[2];
+    const char *note[2];
+};
+
+static void *usdt_pair_attach_one(void *ctx, int which)
+{
+    struct usdt_pair_ctx *c = ctx;
+    if (which < 0 || which > 1)
+        return NULL;
+    struct bpf_link *l = bpf_program__attach_usdt(
+        c->prog[which], -1, c->bin, "postgresql", c->note[which], NULL);
+    if (libbpf_get_error(l))
+        l = NULL;
+    if (!l) {
+        errno = ENOTSUP;
+        return NULL;
+    }
+    if (c->slot[which])
+        *c->slot[which] = l;
+    return l;
+}
+
+static void usdt_pair_detach_one(void *ctx, int which, void *link)
+{
+    struct usdt_pair_ctx *c = ctx;
+    if (c && which >= 0 && which <= 1 && c->slot[which])
+        *c->slot[which] = NULL;
+    if (link)
+        bpf_link__destroy(link);
+}
+
 static void *attach_usdt_pair(struct pgwt_daemon *d,
                               struct pgwt_exact_probe_pair *pair,
                               struct bpf_program *prog_start,
@@ -247,42 +323,32 @@ static void *attach_usdt_pair(struct pgwt_daemon *d,
                               struct bpf_link **slot_done,
                               const char *note_start, const char *note_done)
 {
-    const char *bin = d->pg_binary_saved;
-    struct bpf_link *a = bpf_program__attach_usdt(prog_start, -1, bin,
-                                                  "postgresql", note_start,
-                                                  NULL);
-    if (libbpf_get_error(a))
-        a = NULL;
-    struct bpf_link *b = NULL;
-    if (a) {
-        b = bpf_program__attach_usdt(prog_done, -1, bin, "postgresql",
-                                     note_done, NULL);
-        if (libbpf_get_error(b))
-            b = NULL;
-    }
-    if (!a || !b) {
-        if (b) bpf_link__destroy(b);
-        if (a) bpf_link__destroy(a);
+    struct usdt_pair_ctx c = {
+        .bin = d->pg_binary_saved,
+        .prog = { prog_start, prog_done },
+        .slot = { slot_start, slot_done },
+        .note = { note_start, note_done },
+    };
+    if (pgwt_exact_probe_pair_attach(pair, usdt_pair_attach_one,
+                                     usdt_pair_detach_one, &c) != 0) {
         errno = ENOTSUP;
         return NULL;
     }
-    pair->start = a;
-    pair->done = b;
-    *slot_start = a;
-    *slot_done = b;
     return pair;
 }
 
-static void detach_usdt_pair(struct pgwt_exact_probe_pair *pair,
+static void detach_usdt_pair(struct pgwt_daemon *d,
+                             struct pgwt_exact_probe_pair *pair,
                              struct bpf_link **slot_start,
                              struct bpf_link **slot_done)
 {
-    if (slot_start) *slot_start = NULL;
-    if (slot_done) *slot_done = NULL;
-    if (pair->done) bpf_link__destroy(pair->done);
-    if (pair->start) bpf_link__destroy(pair->start);
-    pair->start = NULL;
-    pair->done = NULL;
+    struct usdt_pair_ctx c = {
+        .bin = d->pg_binary_saved,
+        .prog = { NULL, NULL },
+        .slot = { slot_start, slot_done },
+        .note = { NULL, NULL },
+    };
+    pgwt_exact_probe_pair_detach(pair, usdt_pair_detach_one, &c);
 }
 
 static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
@@ -409,13 +475,13 @@ static void detach_link(void *ctx, enum pgwt_exact_probe_index index,
 {
     struct pgwt_daemon *d = ctx;
     if (index == PGWT_EXACT_PROBE_EXEC) {
-        detach_usdt_pair(&d->exact_probes.exec_links,
+        detach_usdt_pair(d, &d->exact_probes.exec_links,
                          &d->skel->links.on_exec_start,
                          &d->skel->links.on_exec_done);
         return;
     }
     if (index == PGWT_EXACT_PROBE_PLAN) {
-        detach_usdt_pair(&d->exact_probes.plan_links,
+        detach_usdt_pair(d, &d->exact_probes.plan_links,
                          &d->skel->links.on_plan_start,
                          &d->skel->links.on_plan_done);
         return;
