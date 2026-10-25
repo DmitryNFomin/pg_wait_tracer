@@ -488,6 +488,24 @@ def check_corrupt_trace_refusal(t):
     finally:
         cleanup_traces(trace_dir)
 
+    # 2b. The OTHER corruption shape, and the other half of the fix: cut the
+    #     file so short that the reader cannot open it at all (no block index
+    #     by any of its three strategies) while current.trace.meta still
+    #     claims a committed block. 2 above exercises the decode counter in
+    #     the loader; this one exercises the coverage layer's own refusal.
+    #     Without it that detector is code no test reaches.
+    short_dir = generate_traces(SCENARIO)
+    try:
+        path = os.path.join(short_dir, "current.trace")
+        with open(path, "r+b") as f:
+            f.truncate(30)          # header (28 B) + 2 stray bytes
+        with open(path + ".meta") as f:
+            t.check(int(f.read().strip()) >= 1,
+                    "[corrupt trace] the meta still claims a committed block")
+        _corrupt_probe(t, short_dir, "corrupt trace/unopenable", True)
+    finally:
+        cleanup_traces(short_dir)
+
     # 3. A capture that has committed NOTHING yet is absence, not corruption:
     #    header only, and a meta that says zero blocks. The reader cannot open
     #    such a file either (no block index by any of its three strategies),
