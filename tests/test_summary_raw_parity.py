@@ -75,6 +75,7 @@ would have no server to query. The pure comparison core is separately gated in
 import glob
 import json
 import os
+import re
 import shutil
 import signal
 import struct
@@ -288,6 +289,30 @@ CPU_SCALARS = ("time_model/has_measured_cpu", "time_model/cpu_ms",
                "time_model/offcpu_ms", "time_model/cpu_group_ms",
                "time_model/rowset")
 
+# #562, Top Sessions' measured-CPU split: the RAW path now reports measured
+# on-CPU time with its runqueue remainder (agent/laneC-raw-compute), while the
+# SUMMARY path still reports the unsplit gap WALL in cpu_pct and no remainder
+# at all. laneC's own test_window_clip section 13d documents this as a
+# registered HOLE rather than a fix, because closing it needs the summary
+# writer to carry the measurement -- that is Lane S's format epoch, in flight,
+# and not fixable from the raw side.
+#
+# CLOSING CONDITION: when the epoch lands the summary-side measured split,
+# these fields start AGREEING, this gate reports them as
+# `xpass ... delete this entry`, and deleting them from
+# summary_raw_parity_expected.json is the last step of landing that fix.
+#
+# The match is deliberately SHAPE-EXACT, not "anything under sessions/".
+# A blanket sessions/ rule would let the next, unrelated Top Sessions
+# divergence inherit #562 just by sitting next to these -- the exact failure
+# issue_for() exists to prevent, and the one that put eight pins on closed
+# #379. Only the four field shapes #562 actually produces match:
+#   sessions/has_measured_cpu, sessions/offcpu_ms,
+#   sessions/row/<pid>/cpu_pct, sessions/row/<pid>/offcpu_ms
+SESSIONS_MEASURED_CPU_562 = re.compile(
+    r"^sessions/(has_measured_cpu|offcpu_ms"
+    r"|row/\d+/(cpu_pct|offcpu_ms))$")
+
 
 def issue_for(field, window):
     """Which open issue owns this divergence.
@@ -301,6 +326,11 @@ def issue_for(field, window):
         return 319                      # two definitions of one column
     if "CPU" in field or field in CPU_SCALARS:
         return 408                      # has_measured_cpu=false on summaries
+    if SESSIONS_MEASURED_CPU_562.match(field):
+        # BEFORE the straddle_130s branch on purpose: these eight fields also
+        # occur in that window, and falling through would label them #324 --
+        # inheriting an issue by sitting next to one.
+        return 562                      # Top Sessions raw measures, summary walls
     if window == "straddle_130s":
         # The quiet zones guarantee the ONLY record straddling this window's
         # edges is the deliberate 100 s Client:ClientRead, so every remaining

@@ -90,12 +90,46 @@ class Page:
         self.log('box')
         return {'x': 0, 'y': 0, 'width': 30, 'height': 20}
 
+    # Two JS shapes reach this fake, and they are told apart by STRUCTURE,
+    # never by "whatever the last whitespace-delimited token happens to be".
+    # The old code did the latter -- `int(js.rsplit(' ', 1)[1])` -- which
+    # worked only while every wait_for_function in the walker ended in a tick
+    # count. U2's "Load flow variants" settle wait ends in `variants')`, so
+    # the fake died with `ValueError: invalid literal for int() with base 10:
+    # "variants')"`: a crash in the MODEL of the browser, blamed on the walker.
+    #
+    # An unrecognised shape now REFUSES BY NAME instead of guessing. That is
+    # deliberate: this file freezes a protocol, so a call it cannot model is
+    # something a human has to teach it, and a fake that silently treats an
+    # unknown wait as a zero-tick no-op would let a real new browser
+    # interaction slip past the very comparison this file exists to make.
+    TICK_WAIT_PREFIX = ('window.__uiLiveTicks && '
+                        'window.__uiLiveTicks.length >= ')
+
     def wait_for_function(self, js, **kw):
-        self.target = int(js.rsplit(' ', 1)[1])
-        if self.origin is None:
-            self.origin = self.now
-        self.now = max(self.now, self.origin + self.target * 5000)
-        self.log('tick', self.target, kw)
+        if js.startswith(self.TICK_WAIT_PREFIX):
+            self.target = int(js[len(self.TICK_WAIT_PREFIX):].strip())
+            if self.origin is None:
+                self.origin = self.now
+            self.now = max(self.now, self.origin + self.target * 5000)
+            self.log('tick', self.target, kw)
+            return
+        if 'dfg-load-variants' in js:
+            # The walker clicks the button, then waits for it to go away and
+            # the panel to stop saying "Loading flow variants" (#327's hang
+            # regression guard). The fake resolves it immediately and does
+            # NOT advance its clock, so every later call keeps the timestamp
+            # it had before this step existed -- the delta against the frozen
+            # oracle stays a pure INSERTION rather than a reflow of the whole
+            # tail, which is what makes it reviewable.
+            self.log('await', 'dfg-load-variants settled', kw)
+            return
+        raise AssertionError(
+            'test_ui_live_smoke_footage: this fake Page cannot model '
+            'wait_for_function(%r). Teach it the new shape -- do not let it '
+            'guess, and do not delete this refusal: an unmodelled browser '
+            'call is exactly what the frozen-protocol comparison below is '
+            'for.' % (js,))
 
     def wait_for_timeout(self, ms):
         self.log('sleep', ms)
@@ -184,14 +218,101 @@ def calls(page, kind):
     return [c for c in page.calls if c[0] == kind]
 
 
+# The ONE deliberate protocol change since the 907e070 oracle was frozen.
+#
+# U2 (agent/decided-smalls) lifted the standing ban on clicking "Load flow
+# variants" during the walk -- #327's hang is fixed, #269 replaced the bubble
+# sort, and tests/ui_live_smoke.py now exercises the button so the walk's own
+# gate covers it instead of presenter choreography. On the transitions tab the
+# walker therefore performs three new browser calls.
+#
+# WHY THIS IS PINNED HERE RATHER THAN RE-FREEZING THE ORACLE. The fixture says
+# in its own header: "Never update this oracle to make a candidate pass: it
+# represents the pre-footage path." Re-freezing it against today's run_tab
+# would satisfy this test by destroying what it measures -- the comparison
+# would become new-code-vs-new-code, which the module docstring already warns
+# "would not detect a default-path regression shared by both". So the oracle
+# stays at 907e070 and the intended delta is written down instead.
+#
+# This is STRICTER than the equality it replaces, in both directions:
+#   * every other tab must still be byte-identical, and
+#   * the three calls must be PRESENT and in this order -- quietly dropping
+#     the variants click fails too, which a tolerant "ignore transitions"
+#     exception would not catch.
+# Anything else differing anywhere still fails as before.
+EXPECTED_WALK_ADDITIONS = {
+    'transitions': [
+        ('query', ('#dfg-load-variants',)),
+        ('click', ('#dfg-load-variants',)),
+        ('await', ('dfg-load-variants settled', {'timeout': 30000})),
+    ],
+}
+
+# The same change also adds one key to the transitions VERDICT: how long the
+# click took, which is the number #327's regression guard reads. It is a
+# time.monotonic() delta, so it is pinned by PRESENCE AND TYPE and never by
+# value -- asserting a literal here would be pinning the clock, which is how a
+# test becomes timing-flaky on a loaded runner.
+EXPECTED_RESULT_ADDITIONS = {'transitions': ('variants_click_ms',)}
+
+
+def strip_expected_result_keys(test, tab, result):
+    """result minus this tab's deliberate new keys, after checking each one."""
+    out = dict(result)
+    for key in EXPECTED_RESULT_ADDITIONS.get(tab, ()):
+        test.assertIn(key, out,
+                      f'{tab}: the deliberate verdict key {key!r} is missing. '
+                      f'If the walk dropped it, delete it from '
+                      f'EXPECTED_RESULT_ADDITIONS in the same commit.')
+        value = out.pop(key)
+        test.assertIsInstance(value, float,
+                              f'{tab}: {key} must be a float duration')
+        test.assertGreaterEqual(value, 0.0,
+                                f'{tab}: {key} must not be negative')
+    return out
+
+
+def strip_expected_additions(tab, after_calls):
+    """after_calls minus this tab's deliberate additions, or a reason why not.
+
+    Returns (stripped, None) on success and (None, reason) when the additions
+    are absent, out of order, or not contiguous -- never a silent pass-through,
+    because "the addition was not found" must fail rather than compare as if
+    nothing had changed.
+    """
+    want = EXPECTED_WALK_ADDITIONS.get(tab)
+    if not want:
+        return list(after_calls), None
+    n = len(want)
+    for i in range(len(after_calls) - n + 1):
+        window = after_calls[i:i + n]
+        if [(c[0], c[1]) for c in window] != want:
+            continue
+        # The additions must not have reflowed the clock: they are logged at
+        # the timestamp already current, so every later call keeps its own.
+        return list(after_calls[:i]) + list(after_calls[i + n:]), None
+    return None, (
+        f'{tab}: the deliberate "Load flow variants" calls are missing from '
+        f'the walk (expected the contiguous run {want!r}). If the walk '
+        f'genuinely dropped that step, delete this tab\'s entry from '
+        f'EXPECTED_WALK_ADDITIONS in the same commit -- do not relax this '
+        f'check.')
+
+
 def assert_normal(test, module, base):
     for tab in smoke.lib.TABS:
         before, expected = drive(base, tab)
         after, result = drive(module, tab)
         test.assertEqual(len(calls(after, 'screenshot')), 36 if tab == 'timeline' else 30,
                          f'{tab}: default screenshot count changed')
-        test.assertEqual(after.calls, before.calls, f'{tab}: default timing/protocol changed')
-        test.assertEqual(result, expected, f'{tab}: default result changed')
+        stripped, why = strip_expected_additions(tab, after.calls)
+        test.assertIsNotNone(stripped, why)
+        test.assertEqual(stripped, before.calls,
+                         f'{tab}: default timing/protocol changed beyond the '
+                         f'deliberate additions in EXPECTED_WALK_ADDITIONS')
+        test.assertEqual(strip_expected_result_keys(test, tab, result), expected,
+                         f'{tab}: default result changed beyond the '
+                         f'deliberate keys in EXPECTED_RESULT_ADDITIONS')
 
 
 def assert_zero(test, module):

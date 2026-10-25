@@ -10,6 +10,9 @@
  *   2. the per-pid table filling up — `tag_pid_get` returned NULL for the
  *      (TAG_HT_SIZE+1)-th distinct pid and the caller did `continue`, so
  *      every record of every surplus pid stayed exactly as it came off disk.
+ *      THIS SECOND PATH NO LONGER EXISTS: #374 made the per-pid table GROW,
+ *      so there is no distinct-pid count at which tagging refuses. See the
+ *      note where section 4 used to be.
  *
  * WHY THAT IS WORSE THAN AN OOM. This array IS the oracle: #357 established
  * that every aggregate path reconciles to it, never the reverse. The pass
@@ -45,12 +48,10 @@
  *
  * TIMING AND ORDERING. Nothing here reads a clock, allocates concurrently,
  * or depends on scheduling: in-memory arrays, synthetic timestamps. The one
- * order-dependent property is WHERE the failure lands — section 2/3 refuse
- * BEFORE any record is touched (asserted by memcmp against the input), while
- * section 4 refuses MID-ARRAY, with partial rewrites already applied
- * (asserted by memcmp showing a difference, and by a relabel count strictly
- * between zero and complete). That partial state is the whole reason the
- * caller must invalidate the count instead of using what it got.
+ * order-dependent property is WHERE the failure lands, and since #374 there
+ * is only one answer: sections 2/3 refuse BEFORE any record is touched,
+ * asserted by memcmp against the input. The mid-array refusal that section 4
+ * used to pin is gone with the bound that caused it.
  */
 #include "compute.h"
 #include "wait_event.h"
@@ -100,8 +101,6 @@ static struct {
     int backfills_seen;       /* records the success path re-attributed */
     int cat_flags_seen;       /* records stamped from the pid->category table */
     int refusals_alloc;       /* refusals from an injected allocation failure */
-    int refusals_exhaustion;  /* refusals from the REAL pid table filling up */
-    int partial_relabels;     /* relabels present in a REFUSED array */
     int unreached_injections; /* injection points set but not reachable */
 } led;
 
@@ -314,71 +313,32 @@ static void s3_pid_state_table_allocation_failure(void)
     refused_before_any_mutation("tag_ht", "tag_ht");
 }
 
-/* ── 4. PID-table EXHAUSTION — the real table, no test hook ───────────────
- * This is the path the issue is really about: no allocation failed, the
- * machine is healthy, the window simply holds more distinct pids than the
- * table has slots (connection CHURN, not concurrency, drives that count).
+/* ── 4. REMOVED — the per-pid table no longer has a bound to exhaust ──
  *
- * The table size is private to compute.c, so this searches for the bound
- * instead of hard-coding it: a future change that grows the table makes the
- * search find a bigger threshold, and one that removes the bound entirely
- * makes it REFUSE at the ceiling rather than quietly becoming a
- * success-path test. Both failure modes are loud. */
-#define PID_CEILING (1 << 17)
-
-static void s4_pid_table_exhaustion(void)
-{
-    printf("--- 4. the per-pid table fills up (no injection) ---\n");
-    int refuse_at = 0, last_ok = 0;
-    for (int npids = 256; npids <= PID_CEILING; npids *= 2) {
-        int n;
-        struct pgwt_trace_event *ev = alloc_fixture(npids, &n);
-        int rc = pgwt_tag_events(ev, n, NULL, 0);
-        free(ev);
-        if (rc) { last_ok = npids; continue; }
-        refuse_at = npids;
-        break;
-    }
-
-    if (!refuse_at) {
-        checks++; failures++;
-        printf("  FAIL: REFUSE — no distinct-pid count up to %d made the "
-               "tagging pass refuse, so this case cannot see the defect "
-               "it exists for. Either the per-pid table is now unbounded "
-               "(delete this section and say so) or the refusal was lost.\n",
-               PID_CEILING);
-        return;
-    }
-    printf("  (bound located: %d pids tag completely, %d refuse)\n",
-           last_ok, refuse_at);
-    CHECK(last_ok > 0,
-          "a pid count just under the bound still tags COMPLETELY, so the "
-          "refusal is a bound and not an unconditional 0");
-
-    /* At the refusing count: refuse, and prove the partial state is real. */
-    int n;
-    struct pgwt_trace_event *ev = alloc_fixture(refuse_at, &n);
-    struct pgwt_trace_event *before = calloc((size_t)n, sizeof(*before));
-    memcpy(before, ev, (size_t)n * sizeof(*ev));
-    int rc = pgwt_tag_events(ev, n, NULL, 0);
-    CHECK(rc == 0, "more distinct pids than the table holds returns 0");
-    if (rc == 0) led.refusals_exhaustion++;
-
-    int partial = count_relabels(ev, n);
-    led.partial_relabels += partial;
-    CHECK(memcmp(before, ev, (size_t)n * sizeof(*ev)) != 0,
-          "the refused array IS partly rewritten — which is why the caller "
-          "must discard it rather than use what it got");
-    CHECK(partial > 0 && partial < refuse_at,
-          "the partial rewrite covers SOME pids and not all: this is the "
-          "silently-wrong array the pre-fix code handed back");
-    CHECK_INT(count_flag(ev, n, PGWT_EVENT_FLAG_QUERY_BACKFILL), 0,
-              "the back-fill pass did not run at all, so the surviving "
-              "query ids are emission-time ids (the wrong statement)");
-
-    free(before);
-    free(ev);
-}
+ * There used to be a section here that searched upward for the distinct-pid
+ * count at which pgwt_tag_events refuses, then pinned the partial-rewrite
+ * state that refusal leaves behind.
+ *
+ * #374 removed the bound: the per-pid table GROWS, so no pid count refuses.
+ * That is the fix, not a regression — the old behaviour gave a legitimate
+ * instance above TAG_HT_SIZE distinct pids a total outage reported as a
+ * misleading "memory allocation failed", and growing the table is exactly
+ * what #374 was filed to do.
+ *
+ * The section is DELETED rather than weakened. A relaxed version ("refuses
+ * at some count, or does not") asserts nothing, and a ceiling-raised version
+ * only moves the vacuity somewhere slower. The possibility is gone, so the
+ * assertion is gone with it. Its two non-vacuity ledger counters
+ * (refusals_exhaustion, partial_relabels) are deleted for the same reason:
+ * they could only ever be incremented from here, so leaving them would have
+ * demanded evidence of a code path that no longer exists.
+ *
+ * What still covers this ground: the ALLOCATION refusals (sections 2 and 3)
+ * remain the live refusal paths and are still pinned, including that they
+ * refuse before touching a single record. #374's own growth test is
+ * section 11 of tests/test_window_clip.c (">4096 distinct pids still tag,
+ * and the records beyond the old bound carry their own flags").
+ */
 
 /* ── 5. Absent input is a COMPLETE result, not a refusal ──────────────────
  * The opposite failure mode of the one above: a refusal on every empty
@@ -525,11 +485,6 @@ static void ledger(void)
     CHECK(led.refusals_alloc >= 3,
           "both injected allocation failures, and the no-work fixture, "
           "actually produced refusals");
-    CHECK(led.refusals_exhaustion > 0,
-          "the REAL pid-table bound produced a refusal with no test hook");
-    CHECK(led.partial_relabels > 0,
-          "a refused array was observed partly rewritten (the reason the "
-          "caller must invalidate the count, not just flag it)");
     CHECK(led.unreached_injections > 0,
           "an armed-but-unreachable injection point was exercised");
 }
@@ -550,7 +505,6 @@ int main(void)
     s1b_category_flags_are_stamped();
     s2_forward_array_allocation_failure();
     s3_pid_state_table_allocation_failure();
-    s4_pid_table_exhaustion();
     s5_empty_is_success();
     s6a_unknown_injection_point_fails_nothing();
     s6b_empty_injection_value_fails_nothing();
