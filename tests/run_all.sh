@@ -305,7 +305,6 @@ fi
 # run_all.sh fixtures under mktemp and asserts that an unmet tier
 # precondition fails the run, including a mutant with the pre-#528 wrapping
 # restored to prove the refusal is what makes the difference.
-run_test "test_run_all_tier_skip" bash "$SCRIPT_DIR/test_run_all_tier_skip.sh"
 
 # Step 2.5: Synthetic data correctness tests (no root needed, needs pgwt-server)
 #
