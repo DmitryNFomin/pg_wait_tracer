@@ -72,42 +72,42 @@
    "summary": 0
   },
   "queries/db_time_ms": {
-   "issue": 379,
+   "issue": 324,
    "raw": 252114,
    "summary": 312114
   },
   "queries/order": {
-   "issue": 379,
+   "issue": 324,
    "raw": "100 | 102 | 104 | 103 | 101",
    "summary": "104 | 100 | 102 | 103 | 101"
   },
   "queries/row/100/pct": {
-   "issue": 379,
+   "issue": 324,
    "raw": 30.145093092807222,
    "summary": 24.350077215376434
   },
   "queries/row/101/pct": {
-   "issue": 379,
+   "issue": 324,
    "raw": 15.072546546403611,
    "summary": 12.175038607688217
   },
   "queries/row/102/pct": {
-   "issue": 379,
+   "issue": 324,
    "raw": 22.654037459244627,
    "summary": 18.29908302735539
   },
   "queries/row/103/pct": {
-   "issue": 379,
+   "issue": 324,
    "raw": 15.865838469898538,
    "summary": 12.815830113356016
   },
   "queries/row/104/pct": {
-   "issue": 379,
+   "issue": 324,
    "raw": 16.262484431646,
    "summary": 32.359971036223946
   },
   "queries/row/104/total_ms": {
-   "issue": 379,
+   "issue": 324,
    "raw": 41000,
    "summary": 101000
   },

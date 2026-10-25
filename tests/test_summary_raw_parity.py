@@ -87,6 +87,12 @@ from server_harness import (                                    # noqa: E402
     make_event_id, CLASS_CLIENT, CLASS_LOCK, SERVER_BIN, GEN_BIN,
 )
 import summary_raw_parity_lib as P                              # noqa: E402
+# The stale arm's detector self-test lives in the FALSE-NEGATIVE suite, which
+# `make check` runs in seconds; this file only runs in run_all.sh's
+# synthetic-data tier. One table drives both, so they cannot drift.
+from test_summary_raw_parity_lib import (                       # noqa: E402
+    run_stale_detector_selftest,
+)
 
 S = 1_000_000_000
 MS = 1_000_000
@@ -220,8 +226,13 @@ def ask(trace_dir, frm, to, stderr_path):
 #   #408 — the summary path reports has_measured_cpu=false, so it emits one
 #          `CPU*` row where raw emits `CPU (running)` + `CPU (waiting for a
 #          core)`, and cpu_ms/offcpu_ms read 0.
-#   #379 — the writer attributes a record's whole duration to the second it
-#          closes in; raw clips it to the window.
+#   #379 — FIXED and CLOSED (v8, dd93d523): the writer used to attribute a
+#          record's whole duration to the second it closed in while raw clips
+#          it to the window. No pin should point here any more.
+#   #324 — v8's deliberate residual of the above: only the DURATION is
+#          spread, so queries[] still carries a straddling record's full
+#          duration at its closing second. OPEN; this is what the eight
+#          straddle queries/* pins belong to.
 #   #319 — `top_wait` means "largest total" on raw and "longest single wait"
 #          on the summary path.
 #   #410 — the four divergences THIS gate found on its first run: max_aas
@@ -229,7 +240,7 @@ def ask(trace_dir, frm, to, stderr_path):
 #          unattributed_available (no unattributed accounting on the summary
 #          path) and io_worker_busy_pct (absent there).
 #
-# DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #379, #319 or #410
+# DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #324, #319 or #410
 # is fixed, its pinned fields start agreeing and this gate reports them as
 # `xpass ... delete this entry` and still passes. Removing those lines from
 # tests/summary_raw_parity_expected.json is the last step of that fix, not an
@@ -294,7 +305,21 @@ def issue_for(field, window):
         # The quiet zones guarantee the ONLY record straddling this window's
         # edges is the deliberate 100 s Client:ClientRead, so every remaining
         # divergence here is the whole-record-into-closing-second mechanism.
-        return 379
+        #
+        # #324, NOT #379 -- and the distinction is load-bearing. #379 (the
+        # writer charging a long record's whole duration to its closing
+        # second) IS FIXED and CLOSED: v8 spreads the duration across the
+        # seconds it covers, which is why this window's time_model/* rows now
+        # AGREE where 21 #379 pins used to sit. What remains is v8's
+        # DOCUMENTED carve-out: only the duration is spread, while queries[]
+        # stays once-at-close with the full duration because an open
+        # interval's query attribution is unresolved at credit time
+        # (src/summary_writer.c "queries[] (never credited open; see the v8
+        # note)"; dd93d523; the Queries tab raw-loads, #324 -- which is OPEN).
+        # Pointing these pins at closed #379 would arm a trap: this gate's own
+        # rule is "delete an entry the moment its issue is fixed", so the next
+        # reader would delete eight live pins and silently blind this window.
+        return 324
     return "UNEXPLAINED"
 
 
@@ -350,155 +375,6 @@ def set_version(trace_dir, current_version):
     return [os.path.basename(p) for p in paths]
 
 
-# ── The stale arm's own detectors, checked before they are trusted ─────────
-#
-# Every defect found in a gate in this repo has been a FALSE NEGATIVE: the
-# check was unreachable, skipped, or satisfied without looking at anything.
-# Showing that the arm CAN go red (--sabotage-stale-fallback) proves the
-# true-positive path, which has never been the broken one. So before any live
-# work, drive P.stale_verdict through each way its detection could be made
-# blind and require a REFUSAL from every one. If a detector approves here, the
-# gate fails without pretending to have measured a capture.
-#
-# These are pure-function cases over tests/summary_raw_parity_lib.py and would
-# ideally also live in tests/test_summary_raw_parity_lib.py (which `make check`
-# runs on this Mac, while THIS file runs only in run_all.sh's synthetic-data
-# tier). That file is outside this branch's file scope; running them here means
-# they execute on every box-check and CI Linux job rather than nowhere.
-
-_STALE_MARKER = ("INFO: %d of %d summary file(s) covering this window are not "
-                 "summary v%d -- recomputing from raw events")
-
-
-def _answer(db_time=200000.0, cpu=40044.0):
-    """A field dict shaped like a real one: non-vacuous by P's own rules
-    (DB Time, >=3 class rows, >=2 sessions, >=2 queries)."""
-    return {
-        "time_model/db_time_ms": db_time,
-        "time_model/cpu_ms": cpu,
-        "time_model/rowset": "CPU@1 | IO@1 | Lock@1",
-        "sessions/rowset": "1000 | 1001",
-        "queries/order": "100 | 101",
-    }
-
-
-def selftest_detectors():
-    """(ok, lines). Each case names the blinding it simulates."""
-    good_routes = {"raw": P.ROUTE_RAW, "summary": P.ROUTE_SUMMARY}
-    ver, nfiles = 8, 1
-    err = _STALE_MARKER % (nfiles, nfiles, ver)
-    raw = _answer()
-    stale_good = _answer()
-
-    def run(routes=good_routes, stale=None, summary=None, stderr=err,
-            version=ver, files=nfiles, raw_ref="default"):
-        return P.stale_verdict(
-            "selftest", routes,
-            stale_good if stale is None else stale,
-            _answer(db_time=312114.0, cpu=0.0) if summary is None else summary,
-            stderr, version, files,
-            raw_fields=(raw if raw_ref == "default" else raw_ref))
-
-    # (name, must-refuse call, what a PASS here would mean)
-    cases = [
-        ("no raw oracle supplied",
-         lambda: run(raw_ref=None),
-         "the arm would fall back to some other answer as its oracle"),
-        ("stale answer leaks the SUMMARY path's numbers",
-         lambda: run(stale=_answer(db_time=312114.0, cpu=0.0)),
-         "a broken version preflight that served the stale file would pass"),
-        ("preflight marker absent entirely",
-         lambda: run(stderr=""),
-         "a raw answer reached by any other route would count"),
-        ("the #403 no-file marker instead of the version one",
-         lambda: run(stderr="INFO: no summary file covers this window -- "
-                            "recomputing from raw events"),
-         "#403 (no summary written at all) would read as a version refusal"),
-        ("marker names a different file count than we stamped",
-         lambda: run(stderr=_STALE_MARKER % (0, 0, ver), files=0),
-         "a window covered by zero summary files would count as proof"),
-        ("marker names a different version",
-         lambda: run(stderr=_STALE_MARKER % (nfiles, nfiles, ver + 5)),
-         "a refusal for some other version would be accepted"),
-        ("fresh-summary side also took the raw path",
-         lambda: run(routes={"raw": P.ROUTE_RAW, "summary": P.ROUTE_RAW}),
-         "the window was never summary-eligible, so stamping proved nothing"),
-        ("a route could not be determined",
-         lambda: run(routes={"raw": P.ROUTE_RAW,
-                             "summary": P.ROUTE_UNKNOWN}),
-         "an undeterminable route would be treated as a good one"),
-        ("the raw oracle is empty",
-         lambda: run(raw_ref={}),
-         "an absent oracle would agree with anything"),
-        ("the version-refused answer is empty",
-         lambda: run(stale={}),
-         "an empty answer would be 'complete'"),
-        ("the version-refused answer dropped a field",
-         lambda: run(stale={k: v for k, v in _answer().items()
-                            if k != "time_model/cpu_ms"}),
-         "a missing column would read as agreement"),
-        ("premise control with both routes NOT raw",
-         lambda: P.stale_verdict(
-             "selftest", {"raw": P.ROUTE_RAW, "summary": P.ROUTE_SUMMARY},
-             _answer(), _answer(), "", ver, nfiles, is_control=True,
-             raw_fields=raw),
-         "the 59 s control would not actually be on the raw path"),
-        ("premise control comparing nothing",
-         lambda: P.stale_verdict(
-             "selftest", {"raw": P.ROUTE_RAW, "summary": P.ROUTE_RAW},
-             {}, {}, "", ver, nfiles, is_control=True, raw_fields=raw),
-         "two empty answers would agree perfectly"),
-    ]
-
-    lines = ["--- stale-arm detector self-test ---"]
-    ok = True
-    # POSITIVE CONTROL FIRST. Without it every case below could be satisfied
-    # by a stale_verdict that refuses unconditionally, which would refuse the
-    # real run too -- and 13 green REFUSALs would look like 13 working checks.
-    pos_ok, _, pos_findings = run()
-    if not pos_ok:
-        lines.append("  FAIL positive control: correct inputs must PASS; "
-                     "a detector that always refuses proves nothing")
-        ok = False
-    elif not pos_findings:
-        lines.append("  FAIL positive control: PASSed having compared "
-                     "0 fields")
-        ok = False
-    else:
-        lines.append("  positive control: PASS over %d fields"
-                     % len(pos_findings))
-    for name, call, consequence in cases:
-        # A CLEAN refusal is required: ok=False *and* a FAIL line naming the
-        # problem. An exception is not good enough even though main() would
-        # turn it into a failure -- "refuses by crashing" is how a guard gets
-        # deleted as redundant and the crash then turns out to depend on an
-        # unrelated detail. Counting a raise as a pass here is also what let
-        # four of these cases stay green while their own guard was reverted.
-        try:
-            case_ok, case_lines = call()[0], call()[1]
-        except Exception as exc:                     # noqa: BLE001
-            lines.append("  FAIL detector did not refuse cleanly: %s -- "
-                         "raised %r instead of returning a refusal"
-                         % (name, exc))
-            ok = False
-            continue
-        if case_ok:
-            lines.append("  FAIL detector is blind: %s -- %s"
-                         % (name, consequence))
-            ok = False
-        elif not any("FAIL" in l or any(st in l for st in P.FAIL_STATUSES)
-                     for l in case_lines):
-            # A refusal must name its reason, either as a FAIL line or as the
-            # divergence rows that caused it. A silent ok=False would leave a
-            # red run with nothing for a reader to act on.
-            lines.append("  FAIL detector refused without saying why: %s"
-                         % name)
-            ok = False
-    lines.append("  %d blinding cases, all refused cleanly: %s"
-                 % (len(cases), "yes" if ok else "NO"))
-    return ok, lines
-
-
 def main():
     record = "--record" in sys.argv
     sabotage = "--sabotage" in sys.argv
@@ -514,7 +390,7 @@ def main():
 
     # Before measuring a capture, prove the stale arm's detectors can still
     # SEE. A blinded detector must not get the chance to approve a live run.
-    self_ok, self_lines = selftest_detectors()
+    self_ok, self_lines = run_stale_detector_selftest()
     if not self_ok:
         for l in self_lines:
             print(l)
