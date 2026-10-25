@@ -3125,6 +3125,59 @@ def test_matrix_cpu_note_sits_above_the_canvas(page):
           f"#matrix-cpu-note sits ABOVE #matrix-chart in the real page ({geo})")
 
 
+def test_matrix_chart_clears_the_fold_at_the_demo_viewport(page):
+    """#473 (reopened item, 'clipped axis'): #matrix-chart's CSS height was a
+    flat 660px with no viewport awareness. At the pinned demo viewport
+    (1710x981 DPR2) the chart's own top measured ~493px, so its bottom used
+    to land at ~1153 -- 172px past the fold -- and the rotated x-axis tick
+    labels (which live in the chart's own bottom margin) never rendered on
+    screen (tests/results/demo_walk/mac-walk1-live-8112c71/frames/002700.jpg
+    and 002820.jpg: only y-axis labels visible, no x-axis labels anywhere in
+    the frame). matrixChartFitHeight (lib/builders/matrix.js) now shrinks the
+    chart's rendered height to clear the fold with a reserve; this pins the
+    REAL page, not just the pure function, since the pure function alone
+    cannot see whether views/matrix.js actually calls it."""
+    print("--- Test #473: Matrix chart clears the fold at the demo viewport ---")
+    browser = page.context.browser
+    ctx = browser.new_context(viewport={"width": 1710, "height": 981},
+                               device_scale_factor=2)
+    ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+    p = ctx.new_page()
+    guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector("#status.connected", timeout=10000)
+        p.click(".tab[data-tab='matrix']")
+        p.wait_for_selector("#matrix-chart canvas", timeout=10000)
+        p.wait_for_timeout(700)
+        geo = p.evaluate("""() => {
+            const host = document.getElementById('matrix-chart');
+            const r = host.getBoundingClientRect();
+            // The actual rendered x-axis tick label text nodes, read off the
+            // ECharts canvas's own internal geometry via its public API --
+            // not a DOM element (canvas text isn't inspectable any other
+            // way), but this is the same chart instance the page drew.
+            const inst = echarts.getInstanceByDom(host);
+            const labelCount = inst ? inst.getOption().xAxis[0].data.length : 0;
+            return { top: r.top, bottom: r.bottom, height: r.height,
+                     innerHeight: window.innerHeight, labelCount };
+        }""")
+        check(geo["labelCount"] > 0, f"fixture must actually have axis labels to clip ({geo})")
+        check(geo["bottom"] <= geo["innerHeight"],
+              f"#matrix-chart bottom ({geo['bottom']}) must not exceed the viewport "
+              f"({geo['innerHeight']}) -- the x-axis labels in its bottom margin would "
+              f"be off-screen otherwise ({geo})")
+        check(geo["height"] < 660,
+              f"the chart must actually have shrunk from its 660px CSS natural height "
+              f"at this viewport, confirming the fit logic ran (not just happened to fit) ({geo})")
+        assert_no_console_errors(p, guard, "matrix-chart-fold")
+    finally:
+        set_failure_capture(*prev_capture)
+        ctx.close()
+
+
 def test_scatter_notes_fully_above_fold(page):
     """Video review (two independent reviewers): Scatter's sampling
     disclosure ("Excludes waiting before execution starts ... Showing N of M
@@ -4443,6 +4496,7 @@ def main():
                 test_matrix_view,
                 test_matrix_scatter_notes_never_overlap_their_chart,
                 test_matrix_cpu_note_sits_above_the_canvas,
+                test_matrix_chart_clears_the_fold_at_the_demo_viewport,
                 test_scatter_notes_fully_above_fold,
                 test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
