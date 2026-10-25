@@ -751,6 +751,36 @@ def main():
                     "top_events for the identical recent window"),
         }
 
+        # Per-class attribution, re-derived from the OTHER endpoint (#517).
+        # time_model_conserves above compares db_time_ms against the sum of
+        # the SAME response's class rows, which the raw path makes an
+        # algebraic identity -- gap 0.0 for every trace the product can
+        # emit (proof + 12-trace measurement in
+        # demo_rehearsal_lib.TIME_MODEL_TOLERANCE_PCT's comment). This leg
+        # regroups top_events' own rows by their own `class` field and
+        # compares per class, so a class whose time time_model never
+        # attributes to its own row -- which the identity absorbs into
+        # Off-CPU* and still closes to 0.0 -- shows up here. No new query:
+        # both responses are the ones the DB-Time leg above already has,
+        # for the identical window.
+        if top_events_err is not None or time_model_err is not None:
+            class_attr_ok = False
+            class_attr_detail = (f"query error(s): {top_events_err!r} / "
+                                 f"{time_model_err!r}")
+        else:
+            class_attr_ok, class_attr_detail = drlib.class_rows_vs_top_events_ok(
+                time_model_recent.get("rows"), top_events_resp.get("rows"),
+                top_events_resp.get("db_time_ms"))
+        print(f"demo_rehearsal: cross_tab_class_attribution: "
+              f"{'PASS' if class_attr_ok else 'FAIL'} -- {class_attr_detail}")
+        extra_checks["cross_tab_class_attribution"] = {
+            "ok": class_attr_ok, "detail": class_attr_detail,
+            "note": ("per-class agreement between Overview's time_model "
+                    "class rows and Top Events' rows regrouped by class, "
+                    "for the identical recent window -- the independently "
+                    "derived half of conservation (#517)"),
+        }
+
         # Cross-tab AAS agreement, bucket-weighted (criteria doc §5, item
         # 2.2): the `aas` endpoint's own per-bucket breakdown, re-derived
         # into a single weighted average over the IDENTICAL recent window
