@@ -37,17 +37,36 @@
 #define LOCK_REL 0x03000000u   /* Lock:relation */
 
 static int failures = 0;
+/* #531 bypass suite: EXPECT_RED runs a probe that MUST register a failure,
+ * so the probe's own PASS/FAIL lines are noise. `quiet` silences them; it
+ * never silences a failure COUNT, which is what EXPECT_RED inspects. */
+static int quiet = 0;
 
 #define CHECK(cond, msg) do { \
-    if (cond) { printf("  PASS: %s\n", msg); } \
-    else      { printf("  FAIL: %s\n", msg); failures++; } \
+    if (cond) { if (!quiet) printf("  PASS: %s\n", msg); } \
+    else      { if (!quiet) printf("  FAIL: %s\n", msg); failures++; } \
 } while (0)
 
 #define CHECK_EQ_U64(got, want, msg) do { \
     uint64_t g_ = (got), w_ = (want); \
-    if (g_ == w_) { printf("  PASS: %s\n", msg); } \
-    else { printf("  FAIL: %s (got %llu, want %llu)\n", msg, \
+    if (g_ == w_) { if (!quiet) printf("  PASS: %s\n", msg); } \
+    else { if (!quiet) printf("  FAIL: %s (got %llu, want %llu)\n", msg, \
                   (unsigned long long)g_, (unsigned long long)w_); \
+           failures++; } \
+} while (0)
+
+/* The gate's own detection test. `stmt` is an assertion block that is
+ * SUPPOSED to go red; EXPECT_RED fails if it stays green, and absorbs the
+ * failures it provoked so they do not count against the suite. Every defect
+ * this repo keeps finding is a FALSE negative -- a gate that could not see
+ * -- so each way of blinding the CPU*-row check gets one of these. */
+#define EXPECT_RED(desc, stmt) do { \
+    int before_ = failures; \
+    quiet = 1; { stmt; } quiet = 0; \
+    int raised_ = failures - before_; \
+    failures = before_; \
+    if (raised_ > 0) printf("  PASS: %s (gate raised %d)\n", desc, raised_); \
+    else { printf("  FAIL: %s (gate stayed GREEN -- it cannot see)\n", desc); \
            failures++; } \
 } while (0)
 
@@ -75,13 +94,92 @@ find_sys(const struct pgwt_accumulator *acc, uint32_t we)
     return NULL;
 }
 
+static const struct pgwt_event_stats *
+find_pid_ev(struct pgwt_accumulator *acc, uint32_t pid, uint32_t we)
+{
+    struct pgwt_pid_accum *pa = pgwt_find_pid_accum(acc, pid);
+    if (!pa) return NULL;
+    for (int i = 0; i < pa->num_events; i++)
+        if (pa->events[i].wait_event == we && pa->events[i].count > 0)
+            return &pa->events[i];
+    return NULL;
+}
+
+static const struct pgwt_query_event_stats *
+find_query_ev(struct pgwt_accumulator *acc, uint64_t qid, uint32_t we)
+{
+    for (int i = 0; i < acc->num_query_events; i++)
+        if (acc->query_events[i].query_id == qid &&
+            acc->query_events[i].wait_event == we &&
+            acc->query_events[i].count > 0)
+            return &acc->query_events[i];
+    return NULL;
+}
+
+#define FIX_QID 700ULL
+#define ROW_ABSENT UINT64_MAX   /* "there must be no CPU* row at all" */
+#define OCC_UNSET  UINT64_MAX   /* "the occurrence columns stay untouched" */
+
+/* #531: every per-event table that renders a "CPU*" row -- system_event,
+ * session_event (per-PID), query_event -- must carry the MEASURED on-CPU ns,
+ * the same figure src/output.c prints as time_model's CPU*. One replay
+ * invocation printing that one label twice with two different numbers is the
+ * defect; src/output.c:print_offcpu_row_wide (#498) then stacks the off-CPU
+ * remainder on a row that already holds the whole wall, so system_event's
+ * %DB column sums past 100%.
+ *
+ * The assertions are ABSOLUTE (4 ms measured inside a 10 ms wall), not
+ * "the rows agree": agreement is satisfied by both rows being wall, which is
+ * precisely the state before #495 and before this change. `row_total` is the
+ * expected window-clipped total; `row_occ` the expected min/max, a SEPARATE
+ * axis the half-window case pins at 4 ms while the total is 2 ms -- a fix
+ * that only moves total_ns leaves max/min and the histogram on wall.
+ *
+ * A row that ought to exist and does not is a FAILURE, never a skipped
+ * `if (row)`: that vacuous shape is how this family of test goes blind. */
+static void check_cpu_rows(struct pgwt_accumulator *acc, uint32_t pid,
+                           uint64_t row_total, uint64_t row_occ)
+{
+    const struct pgwt_event_stats *se = find_sys(acc, 0);
+    const struct pgwt_event_stats *pe = find_pid_ev(acc, pid, 0);
+    const struct pgwt_query_event_stats *qe = find_query_ev(acc, FIX_QID, 0);
+
+    if (row_total == ROW_ABSENT) {
+        CHECK(se == NULL, "no system_event CPU* row for a wait-labelled record");
+        CHECK(pe == NULL, "no session_event CPU* row for a wait-labelled record");
+        CHECK(qe == NULL, "no query_event CPU* row for a wait-labelled record");
+        return;
+    }
+
+    CHECK(se != NULL, "system_event CPU* row present");
+    CHECK(pe != NULL, "session_event CPU* row present");
+    CHECK(qe != NULL, "query_event CPU* row present");
+    if (se) {
+        CHECK_EQ_U64(se->total_ns, row_total, "system_event CPU* total (ns)");
+        CHECK_EQ_U64(se->total_ns, acc->tm.cpu_time_ns,
+                     "system_event CPU* == time_model CPU* in one invocation");
+        if (row_occ == OCC_UNSET) {
+            CHECK_EQ_U64(se->max_ns, 0, "CPU* max unset for a sample");
+            CHECK_EQ_U64(se->min_ns, UINT64_MAX, "CPU* min unset for a sample");
+        } else {
+            CHECK_EQ_U64(se->max_ns, row_occ, "system_event CPU* max (ns)");
+            CHECK_EQ_U64(se->min_ns, row_occ, "system_event CPU* min (ns)");
+        }
+    }
+    if (pe)
+        CHECK_EQ_U64(pe->total_ns, row_total, "session_event CPU* total (ns)");
+    if (qe)
+        CHECK_EQ_U64(qe->total_ns, row_total, "query_event CPU* total (ns)");
+}
+
 /* #495: absolute CPU values catch full-wall replay; conservation alone
  * cannot, since off-CPU is calculated as wall minus CPU. Each isolated
  * case gets a fresh accumulator and a record decoded from the real writer. */
 static void check_cpu_replay(const struct pgwt_trace_event *e,
                               const struct pgwt_block_info *bi,
                               uint64_t from, uint64_t to,
-                              uint64_t cpu, uint64_t offcpu, uint64_t db)
+                              uint64_t cpu, uint64_t offcpu, uint64_t db,
+                              uint64_t row_total, uint64_t row_occ)
 {
     struct pgwt_accumulator *acc = malloc(sizeof(*acc));
     if (!acc) { perror("malloc"); exit(1); }
@@ -100,7 +198,106 @@ static void check_cpu_replay(const struct pgwt_trace_event *e,
         CHECK_EQ_U64(acc->tm.io_time_ns, db, "IO keeps full wall (ns)");
         if (pa)
             CHECK_EQ_U64(pa->wait_time_ns, db, "per-PID wait keeps wall (ns)");
+        const struct pgwt_event_stats *io = find_sys(acc, IO_READ);
+        CHECK(io != NULL, "system_event IO row present");
+        if (io)
+            CHECK_EQ_U64(io->total_ns, db,
+                         "system_event IO row keeps full wall (ns)");
     }
+    check_cpu_rows(acc, e->pid, row_total, row_occ);
+    free(acc);
+}
+
+/* Re-stamp every per-event CPU* row, leaving the time model alone. Used only
+ * by the bypass suite below, to build the exact shape of the #531 defect
+ * (per-event rows on wall, time model on measured) without reverting the
+ * product -- so the gate's detection is proved on this tree, not inferred. */
+static void stamp_cpu_rows(struct pgwt_accumulator *acc, uint32_t pid,
+                           uint64_t total, uint64_t occ, uint64_t count)
+{
+    for (int i = 0; i < acc->num_system_events; i++)
+        if (acc->system_events[i].wait_event == 0) {
+            acc->system_events[i].total_ns = total;
+            acc->system_events[i].min_ns = occ;
+            acc->system_events[i].max_ns = occ;
+            acc->system_events[i].count = count;
+        }
+    struct pgwt_pid_accum *pa = pgwt_find_pid_accum(acc, pid);
+    if (pa)
+        for (int i = 0; i < pa->num_events; i++)
+            if (pa->events[i].wait_event == 0) {
+                pa->events[i].total_ns = total;
+                pa->events[i].min_ns = occ;
+                pa->events[i].max_ns = occ;
+                pa->events[i].count = count;
+            }
+    for (int i = 0; i < acc->num_query_events; i++)
+        if (acc->query_events[i].wait_event == 0 &&
+            acc->query_events[i].query_id == FIX_QID) {
+            acc->query_events[i].total_ns = total;
+            acc->query_events[i].count = count;
+        }
+}
+
+/* #531 BYPASS SUITE -- every way the CPU*-row check could be made unable to
+ * see, each one asserted to go RED rather than quietly approve. True
+ * positives were never the broken path in this repo; false negatives were:
+ * a guard that passed because something else in the range changed, a probe
+ * that passed against a working dependency, an implication guard that was
+ * vacuous because its premise was false. So: the row absent instead of
+ * wrong, nothing replayed at all, the row carrying wall, only total_ns
+ * corrected, the row present but invisible to the finder, and an UNKNOWN
+ * measurement offered in place of a measured one. */
+static void test_cpu_row_bypass(const struct pgwt_trace_event *measured,
+                                const struct pgwt_trace_event *wait_labelled,
+                                const struct pgwt_block_info *bi)
+{
+    const uint64_t MS = 1000000ULL;
+    struct pgwt_accumulator *acc = malloc(sizeof(*acc));
+    if (!acc) { perror("malloc"); exit(1); }
+
+    printf("CASE #531 bypass: the CPU* row is ABSENT, not wrong\n");
+    pgwt_accum_init(acc);
+    pgwt_replay_events(acc, wait_labelled, 1, 0, 0, bi, NULL);
+    EXPECT_RED("an absent CPU* row refuses, never approves",
+               check_cpu_rows(acc, wait_labelled->pid, 4 * MS, 4 * MS));
+
+    printf("CASE #531 bypass: nothing was replayed at all\n");
+    pgwt_accum_init(acc);
+    EXPECT_RED("an empty accumulator refuses",
+               check_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS));
+
+    printf("CASE #531 bypass: per-event rows carry WALL (the defect itself)\n");
+    pgwt_accum_init(acc);
+    pgwt_replay_events(acc, measured, 1, 0, 0, bi, NULL);
+    stamp_cpu_rows(acc, measured->pid, 10 * MS, 10 * MS, 1);
+    EXPECT_RED("wall in the per-event CPU* rows goes red",
+               check_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS));
+
+    printf("CASE #531 bypass: total_ns corrected, occurrence left on wall\n");
+    pgwt_accum_init(acc);
+    pgwt_replay_events(acc, measured, 1, 0, 0, bi, NULL);
+    stamp_cpu_rows(acc, measured->pid, 4 * MS, 10 * MS, 1);
+    EXPECT_RED("min/max left on wall goes red",
+               check_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS));
+
+    printf("CASE #531 bypass: the row exists but is invisible (count == 0)\n");
+    pgwt_accum_init(acc);
+    pgwt_replay_events(acc, measured, 1, 0, 0, bi, NULL);
+    stamp_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS, 0);
+    EXPECT_RED("a CPU* row the finder cannot resolve refuses",
+               check_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS));
+
+    printf("CASE #531 bypass: UNKNOWN is not accepted in place of measured\n");
+    struct pgwt_trace_event unknown = *measured;
+    unknown.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    pgwt_accum_init(acc);
+    pgwt_replay_events(acc, &unknown, 1, 0, 0, bi, NULL);
+    EXPECT_RED("an UNKNOWN cpu column cannot satisfy the measured assertion",
+               check_cpu_rows(acc, unknown.pid, 4 * MS, 4 * MS));
+    /* ...and the legacy whole-gap row is still asserted, positively. */
+    check_cpu_rows(acc, unknown.pid, 10 * MS, 10 * MS);
+
     free(acc);
 }
 
@@ -117,11 +314,13 @@ static void test_cpu_replay(bool measured)
         exit(1);
     }
     w.cpu_measured = measured;
+    /* FIX_QID so the query_event table's CPU* row is exercised too: it is a
+     * third per-event view of the same record and renders the same label. */
     struct pgwt_trace_event trans[] = {
-        ev(2000, BASE + 10 * MS, 10 * MS, 0, IO_READ, 0),
-        ev(2001, BASE + 30 * MS, 10 * MS, 0, IO_READ, 0),
-        ev(2002, BASE + 50 * MS, 10 * MS, 0, IO_READ, 0),
-        ev(2003, BASE + 70 * MS, 10 * MS, IO_READ, 0, 0),
+        ev(2000, BASE + 10 * MS, 10 * MS, 0, IO_READ, FIX_QID),
+        ev(2001, BASE + 30 * MS, 10 * MS, 0, IO_READ, FIX_QID),
+        ev(2002, BASE + 50 * MS, 10 * MS, 0, IO_READ, FIX_QID),
+        ev(2003, BASE + 70 * MS, 10 * MS, IO_READ, 0, FIX_QID),
     };
     trans[0].cpu_ns = 4 * MS;
     trans[1].cpu_ns = 0;
@@ -133,7 +332,7 @@ static void test_cpu_replay(bool measured)
               "CPU fixture interval written");
     if (measured) {
         struct pgwt_trace_event sample = ev(2004, BASE + 90 * MS, 0,
-                                            0, 0, 0);
+                                            0, 0, FIX_QID);
         CHECK(pgwt_writer_push_samples(&w, &sample, 1, PERIOD) == 0,
               "CPU fixture sample written");
     }
@@ -172,24 +371,31 @@ static void test_cpu_replay(bool measured)
                 printf("CASE #495: UNKNOWN keeps legacy whole-gap CPU\n");
                 CHECK_EQ_U64(buf[0].cpu_ns, PGWT_CPU_NS_UNKNOWN,
                              "unmeasured writer stamps UNKNOWN, not zero");
-                check_cpu_replay(&buf[0], &bi, 0, 0, 10 * MS, 0, 10 * MS);
+                check_cpu_replay(&buf[0], &bi, 0, 0, 10 * MS, 0, 10 * MS,
+                                 10 * MS, 10 * MS);
                 continue;
             }
             CHECK_EQ_U64(buf[0].cpu_ns, 4 * MS, "measured CPU column decoded");
             printf("CASE #495: measured 4 ms CPU in 10 ms wall\n");
-            check_cpu_replay(&buf[0], &bi, 0, 0, 4 * MS, 6 * MS, 10 * MS);
+            check_cpu_replay(&buf[0], &bi, 0, 0, 4 * MS, 6 * MS, 10 * MS,
+                             4 * MS, 4 * MS);
             printf("CASE #495: same interval, half-window overlap\n");
+            /* total and occurrence are SEPARATE axes: 2 ms of clipped
+             * measured CPU, whose occurrence still measured 4 ms. */
             check_cpu_replay(&buf[0], &bi, BASE + 5 * MS, BASE + 10 * MS,
-                             2 * MS, 3 * MS, 5 * MS);
+                             2 * MS, 3 * MS, 5 * MS, 2 * MS, 4 * MS);
             printf("CASE #495: measured zero is not UNKNOWN\n");
             CHECK_EQ_U64(buf[1].cpu_ns, 0, "measured zero survives writer");
-            check_cpu_replay(&buf[1], &bi, 0, 0, 0, 10 * MS, 10 * MS);
+            check_cpu_replay(&buf[1], &bi, 0, 0, 0, 10 * MS, 10 * MS, 0, 0);
             printf("CASE #495: CPU skew clamps to wall\n");
             CHECK_EQ_U64(buf[2].cpu_ns, 12 * MS, "skew survives writer");
-            check_cpu_replay(&buf[2], &bi, 0, 0, 10 * MS, 0, 10 * MS);
+            check_cpu_replay(&buf[2], &bi, 0, 0, 10 * MS, 0, 10 * MS,
+                             10 * MS, 10 * MS);
             printf("CASE #495: measured wait spin keeps its IO label\n");
             CHECK_EQ_U64(buf[3].cpu_ns, 4 * MS, "wait spin survives writer");
-            check_cpu_replay(&buf[3], &bi, 0, 0, 0, 0, 10 * MS);
+            check_cpu_replay(&buf[3], &bi, 0, 0, 0, 0, 10 * MS,
+                             ROW_ABSENT, ROW_ABSENT);
+            test_cpu_row_bypass(&buf[0], &buf[3], &bi);
         } else if (bi.block_type == PGWT_BLOCK_SAMPLES) {
             samples_seen += n;
             CHECK_EQ_U64(n, 1, "one CPU sample decoded");
@@ -200,7 +406,8 @@ static void test_cpu_replay(bool measured)
             CHECK_EQ_U64(buf[0].new_event, 0, "sample observes CPU");
             CHECK_EQ_U64(buf[0].cpu_ns, PGWT_CPU_NS_UNKNOWN,
                          "sample has no measured CPU");
-            check_cpu_replay(&buf[0], &bi, 0, 0, PERIOD, 0, PERIOD);
+            check_cpu_replay(&buf[0], &bi, 0, 0, PERIOD, 0, PERIOD,
+                             PERIOD, OCC_UNSET);
         }
     }
     CHECK_EQ_U64(intervals_seen, count, "interval checks were reached");
@@ -217,6 +424,18 @@ static void test_cpu_replay(bool measured)
                      "mixed per-PID CPU sum is measured, not wall");
         CHECK_EQ_U64(pid_cpu, mixed->tm.cpu_time_ns,
                      "mixed per-PID CPU sum agrees with time model");
+        /* #531: the same absolute figure in the per-event table, over the
+         * whole fixture. 14 ms + one period, not the 30 ms + period of wall. */
+        const struct pgwt_event_stats *mix_cpu = find_sys(mixed, 0);
+        CHECK(mix_cpu != NULL, "mixed system_event CPU* row present");
+        if (mix_cpu)
+            CHECK_EQ_U64(mix_cpu->total_ns, 14 * MS + PERIOD,
+                         "mixed system_event CPU* total is measured, not wall");
+        const struct pgwt_event_stats *mix_io = find_sys(mixed, IO_READ);
+        CHECK(mix_io != NULL, "mixed system_event IO row present");
+        if (mix_io)
+            CHECK_EQ_U64(mix_io->total_ns, 10 * MS,
+                         "mixed system_event IO row still carries wall");
     }
     pgwt_reader_close(&r);
     free(buf);
