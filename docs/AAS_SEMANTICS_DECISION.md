@@ -627,7 +627,13 @@ Overview's total for the same reason — the Sessions tab can also be truncated
 client-side (`model.truncation`).
 
 **What was wrong was the disclosure, not the accounting.** The label half was
-fixed in #481 (Overview renders the Idle child as "Background idle (parked)").
+first patched in #481, as a display-only remap of the raw row name to
+"Background idle (parked)". That remap is **gone**: #439's follow-up fixed the
+name at the SOURCE instead (`src/compute.c` now emits "Other idle (parked
+background loops)" directly) and deleted the client-side rename, so Overview
+renders the server's string as-is like every other row. The row name quoted in
+the table above, and in the measured dump below, is the pre-rename one this
+addendum was written against.
 The Sessions half, added in #494, asserted a scope difference that does not
 exist — *"Overview uses a different, system-wide DB Time total that excludes
 the parked-idle time of background processes"* — naming as the differentiator
