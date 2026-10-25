@@ -5234,6 +5234,11 @@ static int detail_lane_add(struct pgwt_exec_lane *lane,
     dst->event_id = ev->old_event;
     dst->start_ns = cs;
     dst->duration_ns = clipped;
+    /* #529: the record's own duration, taken straight from the record and
+     * NOT derived from `clipped` -- a field computed from the clipped value
+     * would agree with it by construction on every fixture, which is exactly
+     * the shape of check that cannot fail. */
+    dst->raw_duration_ns = ev->duration_ns;
     dst->has_cpu = ev->cpu_ns != PGWT_CPU_NS_UNKNOWN;
     dst->cpu_ns = dst->has_cpu
                 ? detail_prorate(ev->cpu_ns, clipped, ev->duration_ns) : 0;

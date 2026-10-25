@@ -1196,11 +1196,20 @@ def _handle_request_inner(cmd, req_id, msg):
                     **_mock_exec_span(pid)}
         if pid == 1002:
             events = [
+                # #529: dur_ns is the clipped slice a client sums,
+                # raw_dur_ns the wait's own wall time a tooltip displays.
+                # The real server emits BOTH on every event
+                # (serialize_exec_lane); this one deliberately STRADDLES so
+                # the mock exercises the case where they differ -- a mock
+                # where raw_dur_ns always equalled dur_ns would let a client
+                # that reads the wrong field look correct.
                 {"we": 0x0100004e, "name": "IO:WalSync",
-                 "start_ns": start, "dur_ns": "20000000", "cpu_ns": None},
+                 "start_ns": start, "dur_ns": "20000000",
+                 "raw_dur_ns": "24000000", "cpu_ns": None},
                 {"we": 0, "name": "CPU*",
                  "start_ns": str(_EXEC_BASE_NS + 130_000_000),
-                 "dur_ns": "30000000", "cpu_ns": None},
+                 "dur_ns": "30000000", "raw_dur_ns": "30000000",
+                 "cpu_ns": None},
             ]
             return {"id": req_id, "query_id": qid,
                     "leader": {"pid": pid, "query_id": qid,
@@ -1210,13 +1219,15 @@ def _handle_request_inner(cmd, req_id, msg):
                     "total_count": 2, "kept_count": 2, "truncated": False,
                     **_mock_exec_span(pid)}
         event = {"we": 0x01000015, "name": "IO:DataFileRead",
-                 "start_ns": start, "dur_ns": "10000000", "cpu_ns": None}
+                 "start_ns": start, "dur_ns": "10000000",
+                 "raw_dur_ns": "10000000", "cpu_ns": None}
         return {"id": req_id, "query_id": qid,
                 "leader": {"pid": pid, "query_id": qid,
                            "events": [event,
                                 {"we": 0, "name": "CPU*",
                                  "start_ns": str(_EXEC_BASE_NS + 12_000_000),
-                                "dur_ns": "8000000", "cpu_ns": None}],
+                                "dur_ns": "8000000",
+                                "raw_dur_ns": "8000000", "cpu_ns": None}],
                            "total_count": 2, "truncated": False},
                 "workers": [
                     {"pid": 1006, "events": [dict(event)],
