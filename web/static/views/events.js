@@ -27,6 +27,7 @@ import {
 } from '../lib/table.js';
 import {
     eventsConfig, compareEventsConfig, buildOverflowNote, overflowNoteHtml,
+    addCpuWaitingRow,
 } from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
@@ -48,7 +49,7 @@ import {
 export function buildEventsModel(data, sort, orderTracker) {
     if (data && data.compare && data.baselineUnavailable) {
         const primary = data.a;
-        const rows = (primary && primary.rows) || [];
+        const rows = addCpuWaitingRow(primary);
         const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
         return {
             hasRows: rows.length > 0,
@@ -75,7 +76,7 @@ export function buildEventsModel(data, sort, orderTracker) {
             baselinePredates: delta.baselineUnavailable,
         };
     }
-    const rows = (data && data.rows) || [];
+    const rows = addCpuWaitingRow(data);
     const ordered = orderTracker ? applyDefaultOrder(orderTracker, rows, sort) : rows;
     return {
         hasRows: rows.length > 0,

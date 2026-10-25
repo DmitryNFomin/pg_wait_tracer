@@ -33,6 +33,7 @@ import { controlStatus, controlMetrics, ControlUnavailable } from './lib/control
 import {
     mountEscalateControl, mountMetricsPanel,
     buildComparePaneFidelity, compareFidelityHtml,
+    buildDegradedDetail, degradedDetailHtml,
 } from './lib/panels.js';
 import { createActiveView } from './views/active.js';
 import { createOverviewView } from './views/overview.js';
@@ -122,7 +123,12 @@ let uiInitialized = false;
 // to tick (the window freezes); a background probe re-tries `info` and, on
 // success, resyncs — server info refreshed and any live window re-anchored to
 // NOW (never to stale data).
-const degraded = { active: false, reason: null };
+// #351: `cause` is the upstream pgwt-server's own startup-refusal line
+// (TransportError.reason, set only when the bridge established one) --
+// distinct from `reason`, the short connection-lost message shown before
+// this field existed. Both can be present; `cause` is never invented from
+// `reason` or vice versa.
+const degraded = { active: false, reason: null, cause: null };
 let recoverId = 0;
 
 // Version handshake (T7 / TST-11). The Go client reports its build version +
@@ -483,7 +489,7 @@ function initOnce() {
 
 function onRequestError(e, pane) {
     if (e instanceof CancelledError) return;
-    if (e instanceof TransportError && e.transport) { setDegraded(e.message); return; }
+    if (e instanceof TransportError && e.transport) { setDegraded(e.message, e.reason); return; }
     // P1: a command-level error from a healthy server (transport:false
     // envelope — e.g. the DUR-9 window_too_large refusal) used to be silently
     // dropped here. Make it loud and paint it into the failing pane.
@@ -496,10 +502,16 @@ function onRequestError(e, pane) {
     }
 }
 
-function setDegraded(reason) {
-    if (degraded.active) { degraded.reason = reason; renderDegraded(); return; }
+function setDegraded(reason, cause) {
+    if (degraded.active) {
+        degraded.reason = reason;
+        degraded.cause = cause || null;
+        renderDegraded();
+        return;
+    }
     degraded.active = true;
     degraded.reason = reason;
+    degraded.cause = cause || null;
     renderDegraded();
     startRecoveryProbe();
 }
@@ -509,6 +521,7 @@ function clearDegraded() {
     if (!degraded.active) return;
     degraded.active = false;
     degraded.reason = null;
+    degraded.cause = null;
     renderDegraded();
 }
 
@@ -517,7 +530,10 @@ function renderDegraded() {
     if (overlay) {
         overlay.style.display = degraded.active ? 'flex' : 'none';
         const reasonEl = document.getElementById('degraded-reason');
-        if (reasonEl) reasonEl.textContent = degraded.reason || '';
+        // #351: PURE builder (lib/panels.js) decides the two-line shape;
+        // this is only the DOM write.
+        if (reasonEl) reasonEl.innerHTML =
+            degradedDetailHtml(buildDegradedDetail(degraded.reason, degraded.cause));
     }
     if (degraded.active) setStatus('Connection lost — retrying', 'degraded');
 }

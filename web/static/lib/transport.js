@@ -38,7 +38,12 @@ export class CancelledError extends Error {
  * command failed" (degrade just that feature). Command-level envelopes may
  * additionally carry `cmd` (the request's command) and the server's structured
  * fields `code` / `hint` / `maxEvents` (DUR-9 window_too_large) so the client
- * can present the refusal (P1). */
+ * can present the refusal (P1). A transport-level envelope may additionally
+ * carry `reason` (#351): the upstream pgwt-server's own startup-refusal line
+ * ("pgwt-server: no trace files found in <dir>"), forwarded by the bridge
+ * (web/refusal.go TransportErrorWithReason) ONLY when one was established —
+ * absent, never an empty string, so "no reason known" stays distinguishable
+ * from "here is the reason". */
 export class TransportError extends Error {
     constructor(msg, opts) {
         super(msg || 'request failed');
@@ -84,6 +89,11 @@ export class Transport {
             if (typeof data.code === 'string') err.code = data.code;
             if (typeof data.hint === 'string') err.hint = data.hint;
             if (typeof data.max_events === 'number') err.maxEvents = data.max_events;
+            // #351: the upstream startup-refusal reason, present only when
+            // the bridge established one (web/refusal.go).
+            if (typeof data.reason === 'string' && data.reason !== '') {
+                err.reason = data.reason;
+            }
             p.reject(err);
             return;
         }

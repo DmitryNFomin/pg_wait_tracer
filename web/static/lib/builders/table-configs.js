@@ -25,17 +25,18 @@ import { queryBackendSpanHtml, backendSpanEnvelope } from './backend-span.js';
 
 const _dot = (name) => dot(name, classColor);
 
-/* #439-label: "Other (background)" (src/compute.c:1283, the hidden-
- * Activity parking remainder under Idle) reads as if it contradicts
- * #453's "background non-idle work IS inside DB Time" (compute.c:745,
- * PGWT_CAT_BG) -- same English words, two different, unrelated
- * quantities. Relabeled for clarity; the server's row.name string and
- * every other consumer of it (filters, drill intents) are UNCHANGED --
- * this is a display-only remap at render time. */
-function overviewDisplayName(name) {
-    if (name === 'Other (background)') return 'Background idle (parked)';
-    return name;
-}
+/* #439-label (superseded): "Other (background)" used to read as if it
+ * contradicted #453's "background non-idle work IS inside DB Time"
+ * (compute.c:745, PGWT_CAT_BG) -- same English words, two different,
+ * unrelated quantities. The fix originally lived here as a display-only
+ * remap ('Other (background)' -> 'Background idle (parked)'). #439's
+ * actual root cause was the raw NAME itself (src/compute.c:1283, now
+ * "Other idle (parked background loops)"), not a display-layer problem --
+ * Sessions and Overview never disagreed (compute.c:1399-1401 already folds
+ * PGWT_CAT_BG into db_time_ns like everything else). With the server
+ * emitting a self-explanatory string directly, this remap is permanently
+ * unreachable (the server never sends the old name again) and has been
+ * removed; the row's name renders as-is like every other row. */
 
 function fmtSignedMs(ms) {
     if (!Number.isFinite(ms)) return '—';
@@ -242,9 +243,8 @@ function remainderAasCellHtml() {
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
-            const label = overviewDisplayName(r.name);
-            if (r.indent >= 1) return _dot(r.name) + esc(label);
-            return esc(label);
+            if (r.indent >= 1) return _dot(r.name) + esc(r.name);
+            return esc(r.name);
         }},
         { key: 'ms', label: 'Time', cls: 'num', format: (r) => fmtMs(r.ms) },
         { key: 'pct', label: '%DB Time', cls: 'num', format: (r) => {
@@ -470,6 +470,48 @@ export function createOverviewOrder() {
     }
 
     return { apply, reset };
+}
+
+/* #576: the Events table's %DB column summed short of 100% on a measured-CPU
+ * response -- the CPU* row carries measured on-CPU time only (#553), so the
+ * off-CPU runqueue remainder (offcpu_ms) is inside db_time_ms but on no row
+ * at all, and every row's %DB still reads "share of DB Time" against the
+ * full total. src/server.c's dump_summary (server.c ~:7736) closes the
+ * identical gap with a synthetic "CPU (waiting for a core)" row gated on
+ * ev.has_measured_cpu; this mirrors that for the browser table, same name,
+ * same gate.
+ *
+ * has_measured_cpu is false on sampled/v2 data AND on the v7/v8 summary
+ * routing (#408) -- the CPU* row there IS the unsplit on-CPU gap wall, so
+ * offcpu_ms is always 0 and this never fires until a response actually
+ * carries the measured split (the v9 epoch, #424, lands it on the default
+ * live view). A 0 (or missing/non-finite) offcpu_ms adds no row either --
+ * printing a 0.0 "CPU (waiting for a core)" row would claim a measured-zero
+ * remainder when has_measured_cpu alone does not guarantee one exists this
+ * window.
+ *
+ * Unknown fields on the synthetic row (count, avg_us, every percentile, aas)
+ * are null, not fabricated: this is a residual duration, not an observed
+ * wait with its own sessions/latencies/occupancy -- every formatter in
+ * eventsConfig already renders null as "—" (fmtCount/fmtUs/fmtAas/pctlCell),
+ * so no column needs special-casing for this one extra row. */
+export function addCpuWaitingRow(data) {
+    const rows = (data && data.rows) || [];
+    if (!data || !data.has_measured_cpu) return rows;
+    const offcpu = data.offcpu_ms;
+    const dbTime = data.db_time_ms;
+    if (!(offcpu > 0) || !(dbTime > 0)) return rows;
+    return rows.concat([{
+        name: 'CPU (waiting for a core)',
+        event_id: null,
+        count: null,
+        total_ms: offcpu,
+        avg_us: null,
+        p50_us: null, p95_us: null, p99_us: null, max_us: null,
+        p50_overflow: false, p95_overflow: false, p99_overflow: false,
+        pct: offcpu / dbTime * 100,
+        aas: null,
+    }]);
 }
 
 export const eventsConfig = {
@@ -704,10 +746,11 @@ export const queriesConfig = makeQueriesConfig('exact');
  * 1493681.800708 + 825.638179 + 2764.997287 = 2495784.951108).
  *
  * The row that READS like an exclusion is a different quantity with
- * confusingly similar words: Overview's Idle child "Other (background)"
- * (src/compute.c:1283 -- hidden Activity parking, 7757772.93 ms in that same
- * window) is parked-idle time, excluded from DB Time in BOTH tabs, and is
- * relabeled "Background idle (parked)" by overviewDisplayName above.
+ * confusingly similar words: Overview's Idle child "Other idle (parked
+ * background loops)" (src/compute.c:1283 -- hidden Activity parking,
+ * 7757772.93 ms in that same window) is parked-idle time, excluded from DB
+ * Time in BOTH tabs -- the self-explanatory raw name IS what renders, no
+ * client-side display remap (#439).
  *
  * So this note must NOT tell a reader the two tabs count different things.
  * It used to -- "Overview uses a different, system-wide DB Time total that
@@ -721,7 +764,10 @@ export const queriesConfig = makeQueriesConfig('exact');
 export const DB_TIME_MEMBERSHIP = {
     /* non-idle work of bgwriter / walwriter / checkpointer / autovacuum */
     backgroundActive: 'inside',
-    /* Overview's "Background idle (parked)" row (Activity-class parking) */
+    /* Overview's "Other idle (parked background loops)" row (Activity-class
+     * parking) -- same label buildSessionsScopeNote's own prose below now
+     * names directly (#439 follow-up, agent/decided-smalls: src/compute.c
+     * renamed the raw row from "Other (background)" at the SOURCE). */
     backgroundParked: 'outside',
 };
 
@@ -749,8 +795,8 @@ export function buildSessionsScopeNote(membership) {
         (membership.backgroundActive === 'inside'
             ? 'inside DB Time in both tabs'
             : 'outside DB Time in Overview');
-    const parked = 'their parked-idle time, the Background idle (parked) row ' +
-        'on Overview, is ' +
+    const parked = 'their parked-idle time, the Other idle (parked ' +
+        'background loops) row on Overview, is ' +
         (membership.backgroundParked === 'outside'
             ? 'outside it in both'
             : 'inside it in both');

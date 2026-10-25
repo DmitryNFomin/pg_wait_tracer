@@ -1145,24 +1145,35 @@ test('#439 Queries pct column is labeled "% attributed DB Time", not "%DB"', () 
     assert.ok(!headerLabels.includes('%DB'), headerLabels.join(', '));
 });
 
-// ── #439-label: "Other (background)" is NOT a contradiction of #453's
-// "excluded from DB Time" rule -- compute.c:745 classifies background
-// non-idle work as PGWT_CAT_BG (genuinely inside DB Time), while this row
-// is the UNRELATED hidden-Activity parking remainder under Idle
-// (PGWT_PCT_DB_IDLE, compute.c:1283). Same English words, two different
-// quantities -- the label is what is misleading, not the semantics. Fixed
-// by relabeling only; no src/ change, no wire field renamed.
+// ── #439-label (superseded by #439's root-cause fix): "Other (background)"
+// was NOT a contradiction of #453's "excluded from DB Time" rule --
+// compute.c:745 classifies background non-idle work as PGWT_CAT_BG
+// (genuinely inside DB Time), while this row is the UNRELATED hidden-
+// Activity parking remainder under Idle (PGWT_PCT_DB_IDLE, compute.c:1283).
+// Same English words, two different quantities -- the label was what was
+// misleading, not the semantics. The fix now lives at the SOURCE
+// (src/compute.c:1283 emits "Other idle (parked background loops)"
+// directly) instead of a client-side display remap, so this row renders
+// like every other row: pass-through, no special-casing.
 
-test('#439-label Overview renders "Other (background)" as "Background idle (parked)"', () => {
+test('#439-label Overview renders a row name unchanged (no display remap)', () => {
     const rows = [
         { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
         { indent: 0, name: 'Idle', ms: 3000, pct: null, aas: null },
-        { indent: 2, name: 'Other (background)', ms: 1476, pct: null, aas: 4.10 },
+        { indent: 2, name: 'Other idle (parked background loops)', ms: 1476, pct: null, aas: 4.10 },
     ];
     const model = buildTableModel(overviewConfig, rows, null);
     const html = model.rows[2].cells[0].html;
-    assert.ok(html.includes('Background idle (parked)'), html);
-    assert.ok(!html.includes('Other (background)'), html);
+    assert.ok(html.includes('Other idle (parked background loops)'), html);
+    // The OLD remap must not resurrect itself for the old raw name either --
+    // the old string from a stale server would render as-is, not vanish
+    // behind a hidden translation.
+    const legacyRows = rows.slice(0, 2).concat(
+        [{ indent: 2, name: 'Other (background)', ms: 1476, pct: null, aas: 4.10 }]);
+    const legacyModel = buildTableModel(overviewConfig, legacyRows, null);
+    const legacyHtml = legacyModel.rows[2].cells[0].html;
+    assert.ok(legacyHtml.includes('Other (background)'), legacyHtml);
+    assert.ok(!legacyHtml.includes('Background idle (parked)'), legacyHtml);
 });
 
 test('#439-label Sessions DB Time header discloses background processes are included', () => {
@@ -1256,8 +1267,8 @@ test('#439 the scope note is derived from DB_TIME_MEMBERSHIP, not hand-written',
 
     const flippedParked = buildSessionsScopeNote(
         { backgroundActive: 'inside', backgroundParked: 'inside' });
-    assert.ok(/parked\) row on Overview, is inside it in both/i.test(flippedParked),
-        flippedParked);
+    assert.ok(/parked background loops\) row on Overview, is inside it in both/i
+        .test(flippedParked), flippedParked);
     assert.ok(!/is outside it in both/i.test(flippedParked), flippedParked);
 });
 
