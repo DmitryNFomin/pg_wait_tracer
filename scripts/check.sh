@@ -283,6 +283,9 @@ run bash tests/test_classify_changed_files.sh
 step "cross-validate rate-sweep gate unit tests (issue #309)"
 run bash tests/test_cross_validate_rate_gate.sh
 
+step "cross-validate tolerance derivation + bypass suite (issues #294/#306/#321)"
+run bash tests/test_xval_tolerance_derivation.sh
+
 if [[ $FAST -eq 0 ]]; then
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock
