@@ -4219,6 +4219,15 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
     }
 
     cJSON_AddNumberToObject(root, "db_time_ms", res.db_time_ms);
+    /* #553 (additive): the CPU* row's measured-CPU contract. has_measured_cpu
+     * says WHICH quantity that row is -- measured on-CPU ns (true) or the
+     * unsplit gap wall by gap-inference (false, on sampled/v2 data and on the
+     * summary routing). offcpu_ms is the runqueue remainder of those gaps: it
+     * is inside db_time_ms but on no row here, so a client that sums the rows
+     * can account for the difference instead of reading it as missing time.
+     * Same two field names, same meaning, as the time_model response. */
+    cJSON_AddBoolToObject(root, "has_measured_cpu", res.has_measured_cpu);
+    cJSON_AddNumberToObject(root, "offcpu_ms", res.offcpu_ms);
     emit_json(root);
 
     free(res.rows);

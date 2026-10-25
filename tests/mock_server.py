@@ -313,6 +313,23 @@ _CANNED["time_model"] = {
 
 _CANNED["top_events"] = {
     "db_time_ms": 12500,
+    # #553 (additive, protocol shape — gated by tests/test_protocol_drift.py):
+    # the real server emits these on EVERY top_events response.
+    # has_measured_cpu says which quantity the CPU* row IS — measured on-CPU
+    # ns (v3 exact data) or the unsplit on-CPU gap wall (sampled/v2 data, and
+    # the summary routing). offcpu_ms is the runqueue remainder: inside
+    # db_time_ms but on no row.
+    #
+    # Canned as the UNSPLIT shape (False / 0), because that is the one
+    # consistent with these canned rows: they sum to exactly db_time_ms
+    # (4800 + 2100 + 1500 + 1200 + 1000 + 800 + 800 + 300 = 12500), which is
+    # only true when no off-CPU time has been split out. Claiming
+    # has_measured_cpu=True next to a 0 remainder and a 100%-summing table
+    # would be a payload the real server cannot produce. No UI code reads
+    # either field yet (nothing to exercise visually); the measured shape is
+    # pinned in C, in tests/test_window_clip.c section 15.
+    "has_measured_cpu": False,
+    "offcpu_ms": 0.0,
     "rows": [
         {"name": "CPU*",             "event_id": 0,          "class": "CPU",
          "count": 250000, "total_ms": 4800, "avg_us": 19.2, "p50_us": 12,
@@ -1004,6 +1021,8 @@ def _handle_request_inner(cmd, req_id, msg):
             rows = _baseline_rows(rows, "total_ms")
         return {"id": req_id,
                 "db_time_ms": _CANNED["top_events"]["db_time_ms"],
+                "has_measured_cpu": _CANNED["top_events"]["has_measured_cpu"],
+                "offcpu_ms": _CANNED["top_events"]["offcpu_ms"],
                 "rows": rows}
 
     if cmd == "top_sessions":

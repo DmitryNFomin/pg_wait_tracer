@@ -374,6 +374,26 @@ struct pgwt_events_result {
     struct pgwt_event_row *rows;   /* malloc'd, caller frees */
     int    num_rows;
     double db_time_ms;
+    /* #553: the CPU* row's measured-CPU contract, stated on the RESULT so a
+     * consumer can tell the two cases apart instead of guessing:
+     *
+     *   has_measured_cpu != 0 — the CPU* row is MEASURED on-CPU time (Σ of
+     *       each in-window CPU gap's cpu_ns, split by overlap and clamped to
+     *       its wall). offcpu_ms is the rest of those gaps' wall: runqueue /
+     *       throttle time, the same quantity pgwt_compute_time_model reports
+     *       as Off-CPU*. DB Time still holds BOTH, so the rows' %DB sums to
+     *       100% − offcpu_ms/db_time_ms, not to 100%.
+     *   has_measured_cpu == 0 — no in-window CPU gap carried a measurement
+     *       (sampled / v2 / no CPU capability, or no CPU gap at all). CPU* is
+     *       then the unsplit gap wall by gap-inference and offcpu_ms is 0 —
+     *       a refusal to split, never a claim that off-CPU time was zero.
+     *
+     * pgwt_compute_top_events_from_summaries leaves both at 0: the per-second
+     * summary's events[] table carries wall for event 0 (summary_writer.c's
+     * `se->total_ns += tns`), so on that routing CPU* is the unsplit total and
+     * says so. */
+    double offcpu_ms;
+    int    has_measured_cpu;
 };
 
 void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,

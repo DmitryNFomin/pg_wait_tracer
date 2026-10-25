@@ -1206,6 +1206,347 @@ static void test_query_avg_needs_exact_evidence(void)
     free(tq.rows);
 }
 
+/* ── 10. #553: the CPU* row is MEASURED on-CPU time, not the gap's wall ──
+ *
+ * THE DEFECT. pgwt_compute_top_events added the on-CPU interval's window-
+ * clipped WALL to the CPU* row. Every WAIT row is right to carry wall -- the
+ * wall IS the wait -- but the gap between two waits is "on a core" only for
+ * the part sum_exec_runtime actually advanced; the rest is runqueue time,
+ * which pgwt_compute_time_model reports as Off-CPU*. So one invocation
+ * answered the same question twice: this table's CPU* exceeded that
+ * invocation's time_model CPU* by exactly the off-CPU amount. This is the
+ * compute path behind pgwt-server's top_events response -- what the browser
+ * draws -- and #531 is the same defect on the CLI replay path
+ * (src/event_reader.c).
+ *
+ * WHY THE FIXTURE IS ABSOLUTE, not an agreement check. "top_events agrees
+ * with time_model" is satisfied by both carrying wall, which is exactly how
+ * #531 survived until someone wrote a 10 ms-wall / 4 ms-measured fixture. So
+ * the numbers below are hand-computed from the fixture and asserted as
+ * values; the cross-tab agreement is checked too, but only AFTER each side
+ * has been pinned to its own literal.
+ *
+ * Likewise the conservation identity DB == CPU* + Off-CPU* + Sigma waits is
+ * NOT the gate: off-CPU is the on-CPU gaps' wall minus their measurement, so
+ * that sum is true by construction and cannot fail. Each of the four terms is
+ * asserted against its own literal instead, and the identity is then stated.
+ */
+#define MS_NS(x)  ((uint64_t)(x) * 1000000ULL)
+
+static void test_cpu_row_is_measured(void)
+{
+    printf("--- 10. #553: CPU* carries measured cpu_ns, waits carry wall ---\n");
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* 10a. The #531 shape, wholly inside the window:
+     *        one on-CPU gap  10 ms wall, 4 ms measured on-CPU
+     *        one Lock:relation wait 5 ms
+     *      DB Time 15 ms = CPU* 4 + Off-CPU* 6 + Lock 5. */
+    struct pgwt_trace_event evs[] = {
+        mk(1, CPU_GAP,       WFROM + S(1), MS_NS(10), 21, MS_NS(4)),
+        mk(1, LOCK_RELATION, WFROM + S(2), MS_NS(5),  21, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_events_result te;
+    pgwt_compute_top_events(evs, 2, &f, WFROM, WTO, 10000.0, &te);
+
+    /* The row must EXIST. ev_total_ms() answers -1.0 for an absent row, which
+     * would satisfy any "CPU* is below the wall" style check without the
+     * product computing anything -- section 11a pins that -1.0. */
+    const struct pgwt_event_row *cpu = ev_row(&te, CPU_GAP);
+    CHECK(cpu != NULL, "the CPU* row is present");
+    CHECK_MS(ev_total_ms(&te, CPU_GAP), 4.0,
+             "CPU* reports the MEASURED 4 ms (wall would read 10.0)");
+    CHECK_MS(ev_total_ms(&te, LOCK_RELATION), 5.0,
+             "the Lock wait keeps its FULL 5 ms wall -- only the CPU row moved");
+    CHECK_MS(te.db_time_ms, 15.0,
+             "DB Time is still wall: 10 ms gap + 5 ms wait");
+    CHECK(te.has_measured_cpu != 0,
+          "the result declares the CPU* row a measurement");
+    CHECK_MS(te.offcpu_ms, 6.0,
+             "the 6 ms the CPU row no longer claims is REPORTED as off-CPU, "
+             "not dropped");
+
+    /* Conservation, stated. Each term above was pinned to its own literal
+     * first; this line only records that they close on DB Time. */
+    CHECK_MS(ev_total_ms(&te, CPU_GAP) + te.offcpu_ms +
+             ev_total_ms(&te, LOCK_RELATION), te.db_time_ms,
+             "DB Time == CPU* + Off-CPU* + Sigma waits (4 + 6 + 5 == 15)");
+
+    /* The %DB consequence, pinned rather than left for a reader to discover:
+     * this table has no Off-CPU* ROW, so its %DB column now sums to 100%
+     * minus the off-CPU share instead of to a flat 100% that counted runqueue
+     * time as CPU. */
+    if (cpu)
+        CHECK_NUM(cpu->pct_db, 4.0 / 15.0 * 100.0,
+                  "CPU* %DB is the measured share (26.67%), not 66.67%");
+    double pct_sum = 0.0;
+    for (int i = 0; i < te.num_rows; i++)
+        pct_sum += te.rows[i].pct_db;
+    CHECK_NUM(pct_sum, 60.0,
+              "the %DB column sums to 60% -- the missing 40% is offcpu_ms, "
+              "which this view has no row for");
+
+    /* The LATENCY columns are a property of the interval, not of this fix: a
+     * 10 ms on-CPU gap still lasted 10 ms. If a future change "fixed" the
+     * time column by rewriting duration_ns, these go red. */
+    if (cpu) {
+        CHECK_U64(cpu->count, 1, "the gap is still ONE observation");
+        CHECK(fabs(cpu->avg_us - 10000.0) < 1e-3,
+              "CPU* avg is the gap's 10 ms wall (latency is not clipped and "
+              "not replaced by the measurement)");
+        CHECK(fabs(cpu->max_us - 10000.0) < 1e-3,
+              "CPU* max is the gap's 10 ms wall");
+    }
+
+    /* RANKING follows the corrected number: with CPU* at 4 ms the 5 ms Lock
+     * is now the bigger row. Every assertion in this section looks rows up by
+     * EVENT ID (ev_row/ev_total_ms), never by index, so this reordering
+     * cannot change what any of them read -- it is asserted here as the
+     * user-visible consequence, not relied on anywhere. */
+    CHECK(te.num_rows == 2, "both rows are present");
+    if (te.num_rows == 2) {
+        CHECK(te.rows[0].event_id == LOCK_RELATION &&
+              te.rows[1].event_id == CPU_GAP,
+              "the 5 ms Lock now outranks the 4 ms CPU* (wall ranked CPU* "
+              "first with 10 ms)");
+    }
+
+    /* Cross-tab: time_model over the SAME events, same window. Checked only
+     * after both sides were pinned to literals above -- agreement alone is
+     * satisfiable by both carrying wall. */
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(evs, 2, &f, WFROM, WTO, 10000.0, &tm);
+    CHECK_MS(tm.cpu_ms, 4.0, "time_model CPU* is the same measured 4 ms");
+    CHECK_MS(tm.offcpu_ms, 6.0, "time_model Off-CPU* is the same 6 ms");
+    CHECK_MS(ev_total_ms(&te, CPU_GAP), tm.cpu_ms,
+             "and the two tabs agree within one invocation");
+    CHECK_MS(te.offcpu_ms, tm.offcpu_ms,
+             "...on the off-CPU remainder too");
+    free(tm.rows);
+    free(te.rows);
+
+    /* 10b. A STRADDLING gap, which separates the three candidate
+     * implementations. 20 ms wall ending 10 ms into the window (so 10 ms
+     * inside), 8 ms measured on-CPU over the whole 20 ms:
+     *     wall            -> 10.0 ms  (the defect)
+     *     cpu_ns taken whole ->  8.0 ms  (measurement not clipped)
+     *     measured * overlap ->  4.0 ms  (correct: 8 * 10/20)
+     * Off-CPU* is the rest of the in-window wall: 10 - 4 = 6. */
+    struct pgwt_trace_event strad =
+        mk(2, CPU_GAP, WFROM + MS_NS(10), MS_NS(20), 22, MS_NS(8));
+    struct pgwt_events_result ts;
+    pgwt_compute_top_events(&strad, 1, &f, WFROM, WTO, 10000.0, &ts);
+    CHECK_MS(ev_total_ms(&ts, CPU_GAP), 4.0,
+             "a straddling gap contributes measured * overlap (4 ms), not the "
+             "whole measurement (8) and not the clipped wall (10)");
+    CHECK_MS(ts.db_time_ms, 10.0, "its DB Time is the clipped wall, 10 ms");
+    CHECK_MS(ts.offcpu_ms, 6.0, "off-CPU is the in-window remainder, 6 ms");
+    CHECK(ts.has_measured_cpu != 0, "and it is still a measurement");
+    free(ts.rows);
+}
+
+/* ── 11. #553 bypass suite: the measured-CPU gate must refuse, not approve ──
+ *
+ * Section 10 proves the TRUE-POSITIVE path (it goes red on the parent tree).
+ * This section walks the FALSE NEGATIVES: every way the CPU* row could stop
+ * being checked, or could be "right" without anything being measured. A gate
+ * that cannot see must refuse, never approve -- so where no measurement
+ * exists, has_measured_cpu must read 0 and offcpu_ms 0, which is a refusal to
+ * split, NOT a claim that off-CPU time was zero.
+ */
+static void test_cpu_row_measured_bypass(void)
+{
+    printf("--- 11. #553 false-negative suite ---\n");
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* 11a. The thing being checked is ABSENT rather than wrong: no CPU gap in
+     * the window at all. The row must be missing (ev_total_ms answers -1.0,
+     * which is what keeps section 10's existence check non-vacuous), and the
+     * result must not report a measured split it never made. */
+    struct pgwt_trace_event wait_only =
+        mk(1, LOCK_RELATION, WFROM + S(1), MS_NS(5), 31, PGWT_CPU_NS_UNKNOWN);
+    struct pgwt_events_result a;
+    pgwt_compute_top_events(&wait_only, 1, &f, WFROM, WTO, 10000.0, &a);
+    CHECK(ev_row(&a, CPU_GAP) == NULL, "no CPU gap => no CPU* row");
+    CHECK_MS(ev_total_ms(&a, CPU_GAP), -1.0,
+             "...and the lookup answers -1.0 for it, so an absent row cannot "
+             "satisfy a 'CPU* <= wall' style check");
+    CHECK(a.has_measured_cpu == 0, "...has_measured_cpu refuses");
+    CHECK_MS(a.offcpu_ms, 0.0, "...and no off-CPU is invented");
+    CHECK_MS(ev_total_ms(&a, LOCK_RELATION), 5.0,
+             "...while the wait row is untouched");
+    free(a.rows);
+
+    /* 11b. The MEASUREMENT is absent (sampled / v2 / no CPU capability):
+     * cpu_ns == PGWT_CPU_NS_UNKNOWN. Gap-inference keeps the whole gap on
+     * CPU*, and the result says the row is NOT a measurement. */
+    struct pgwt_trace_event unk =
+        mk(1, CPU_GAP, WFROM + S(1), MS_NS(10), 32, PGWT_CPU_NS_UNKNOWN);
+    struct pgwt_events_result b;
+    pgwt_compute_top_events(&unk, 1, &f, WFROM, WTO, 10000.0, &b);
+    CHECK_MS(ev_total_ms(&b, CPU_GAP), 10.0,
+             "UNKNOWN cpu_ns: CPU* is the whole 10 ms gap (gap-inference)");
+    CHECK(b.has_measured_cpu == 0,
+          "...and is declared NOT a measurement, so nobody reads it as one");
+    CHECK_MS(b.offcpu_ms, 0.0,
+             "...no off-CPU is split out of an unmeasured gap");
+    free(b.rows);
+
+    /* 11c. Measured == wall. This is the input that makes the BROKEN code
+     * look right, so it cannot be the only fixture: 10 ms wall, 10 ms on-CPU
+     * reads 10.0 either way. What distinguishes them is the two flags. */
+    struct pgwt_trace_event full =
+        mk(1, CPU_GAP, WFROM + S(1), MS_NS(10), 33, MS_NS(10));
+    struct pgwt_events_result c;
+    pgwt_compute_top_events(&full, 1, &f, WFROM, WTO, 10000.0, &c);
+    CHECK_MS(ev_total_ms(&c, CPU_GAP), 10.0,
+             "a gap entirely on-CPU reports 10 ms -- same as wall, by "
+             "coincidence of the input");
+    CHECK(c.has_measured_cpu != 0,
+          "...but it IS measured (this is how the fixture tells 'no off-CPU' "
+          "from 'cannot measure')");
+    CHECK_MS(c.offcpu_ms, 0.0, "...and the remainder is a real zero");
+    free(c.rows);
+
+    /* 11d. A measured ZERO is a signal, not absence: the gap was all
+     * runqueue. Reading 0 as UNKNOWN would put the whole 10 ms back on CPU*. */
+    struct pgwt_trace_event zero =
+        mk(1, CPU_GAP, WFROM + S(1), MS_NS(10), 34, 0);
+    struct pgwt_events_result d;
+    pgwt_compute_top_events(&zero, 1, &f, WFROM, WTO, 10000.0, &d);
+    CHECK_MS(ev_total_ms(&d, CPU_GAP), 0.0,
+             "cpu_ns == 0: CPU* is 0 ms, the gap was never on a core");
+    CHECK(d.has_measured_cpu != 0, "...a measured zero still counts as "
+                                   "measured");
+    CHECK_MS(d.offcpu_ms, 10.0, "...and all 10 ms is off-CPU");
+    CHECK_MS(d.db_time_ms, 10.0, "...DB Time is unchanged at the 10 ms wall");
+    free(d.rows);
+
+    /* 11e. cpu_ns EXCEEDS its own wall (sum_exec_runtime is only current at a
+     * tick or a context switch, so a leaked sub-ms burst can). The row must
+     * clamp to the time that actually elapsed, never exceed it. */
+    struct pgwt_trace_event skew =
+        mk(1, CPU_GAP, WFROM + S(1), MS_NS(10), 35, MS_NS(25));
+    struct pgwt_events_result e;
+    pgwt_compute_top_events(&skew, 1, &f, WFROM, WTO, 10000.0, &e);
+    CHECK_MS(ev_total_ms(&e, CPU_GAP), 10.0,
+             "25 ms measured over a 10 ms gap clamps to 10 ms");
+    CHECK_MS(e.offcpu_ms, 0.0, "...and the remainder floors at 0, never "
+                               "negative");
+    CHECK(e.has_measured_cpu != 0, "...still a measurement");
+    free(e.rows);
+
+    /* 11f. EMPTY input: nothing to look at. Every number must be a real zero
+     * and no measurement may be claimed. */
+    struct pgwt_events_result g;
+    pgwt_compute_top_events(NULL, 0, &f, WFROM, WTO, 10000.0, &g);
+    CHECK(g.num_rows == 0, "empty input: no rows");
+    CHECK_MS(g.db_time_ms, 0.0, "empty input: DB Time 0");
+    CHECK(g.has_measured_cpu == 0, "empty input claims no measurement");
+    CHECK_MS(g.offcpu_ms, 0.0, "empty input invents no off-CPU");
+    free(g.rows);
+
+    /* 11g. ZERO-WIDTH window over a measured gap: zero overlap is ABSENCE,
+     * not a measured zero -- and the in-window fraction must not divide by a
+     * zero duration. */
+    struct pgwt_events_result h;
+    pgwt_compute_top_events(&full, 1, &f, WFROM, WFROM, 0.0, &h);
+    CHECK_MS(ev_total_ms(&h, CPU_GAP), 0.0, "zero-width window: CPU* 0 ms");
+    CHECK_MS(h.db_time_ms, 0.0, "zero-width window: DB Time 0");
+    CHECK(h.has_measured_cpu == 0,
+          "zero OVERLAP is absence: no measurement is claimed for a window "
+          "the gap does not intersect");
+    CHECK_MS(h.offcpu_ms, 0.0, "zero-width window: no off-CPU");
+    free(h.rows);
+
+    /* 11h. ZERO-DURATION record carrying a measurement: frac is 0, so nothing
+     * is attributed and nothing divides by zero. */
+    struct pgwt_trace_event zdur =
+        mk(1, CPU_GAP, WFROM + S(1), 0, 36, MS_NS(4));
+    struct pgwt_events_result i2;
+    pgwt_compute_top_events(&zdur, 1, &f, WFROM, WTO, 10000.0, &i2);
+    CHECK_MS(ev_total_ms(&i2, CPU_GAP), 0.0,
+             "a zero-duration record contributes 0 ms, not its cpu_ns");
+    CHECK(i2.has_measured_cpu == 0,
+          "...and claims no measurement (no wall to measure over)");
+    CHECK_MS(i2.offcpu_ms, 0.0, "...and no off-CPU");
+    free(i2.rows);
+
+    /* 11i. A WAIT that carries measured cpu_ns (a backend spinning on-CPU
+     * inside an LWLock, S3). Its wall stays on the WAIT row with its label --
+     * the fix must not move wait time onto CPU*, nor count the spin as
+     * off-CPU. This is the over-reach direction: a change that keyed on
+     * "cpu_ns is present" instead of "the record is a CPU gap" goes red
+     * here. */
+    struct pgwt_trace_event spin =
+        mk(1, LOCK_RELATION, WFROM + S(1), MS_NS(5), 37, MS_NS(3));
+    struct pgwt_events_result j;
+    pgwt_compute_top_events(&spin, 1, &f, WFROM, WTO, 10000.0, &j);
+    CHECK_MS(ev_total_ms(&j, LOCK_RELATION), 5.0,
+             "a wait with measured spin keeps its full 5 ms wall and label");
+    CHECK(ev_row(&j, CPU_GAP) == NULL,
+          "...no CPU* row is conjured from a wait's spin");
+    CHECK_MS(j.offcpu_ms, 0.0, "...and a wait's spin is not off-CPU time");
+    CHECK(j.has_measured_cpu == 0,
+          "...the CPU* row is what the flag is about; there is none here");
+    free(j.rows);
+
+    /* 11j. An IDLE interval carrying a measurement (Client:ClientRead). The
+     * time model skips such an interval WHOLE, including its cpu_ns
+     * (tests/test_idle_accounting.c); this table lists it at wall but outside
+     * DB Time, so neither CPU* nor off-CPU may take anything from it. */
+    struct pgwt_trace_event idle =
+        mk(1, CLIENT_READ, WFROM + S(1), MS_NS(8), 38, MS_NS(2));
+    struct pgwt_events_result k;
+    pgwt_compute_top_events(&idle, 1, &f, WFROM, WTO, 10000.0, &k);
+    CHECK_MS(ev_total_ms(&k, CLIENT_READ), 8.0,
+             "an idle interval keeps its 8 ms wall on its own row");
+    CHECK_MS(k.db_time_ms, 0.0, "...and stays out of DB Time");
+    CHECK(k.has_measured_cpu == 0,
+          "...its cpu_ns does not make this a measured-CPU window");
+    CHECK_MS(k.offcpu_ms, 0.0, "...and yields no off-CPU");
+    free(k.rows);
+
+    /* 11k. MIXED tiers in one window: one measured gap (10 ms wall / 4 ms
+     * on-CPU) and one UNKNOWN gap (6 ms). CPU* is measured + unknown-wall =
+     * 10 ms; off-CPU comes ONLY from the measured gap, so the unknown gap's
+     * wall is not counted twice. */
+    struct pgwt_trace_event mix[] = {
+        mk(1, CPU_GAP, WFROM + S(1), MS_NS(10), 39, MS_NS(4)),
+        mk(2, CPU_GAP, WFROM + S(2), MS_NS(6),  40, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_events_result l;
+    pgwt_compute_top_events(mix, 2, &f, WFROM, WTO, 10000.0, &l);
+    CHECK_MS(ev_total_ms(&l, CPU_GAP), 10.0,
+             "mixed tiers: CPU* is 4 ms measured + 6 ms inferred");
+    CHECK_MS(l.offcpu_ms, 6.0,
+             "...off-CPU is the measured gap's remainder only (6 ms), not the "
+             "unknown gap's wall as well");
+    CHECK_MS(l.db_time_ms, 16.0, "...DB Time is the two walls, 16 ms");
+    CHECK(l.has_measured_cpu != 0,
+          "...and the window reports that it CAN split (one gap was measured)");
+    free(l.rows);
+
+    /* 11l. A FILTER removes the measured record. The flag must come back
+     * down: the response describes the rows it returned, not the trace. */
+    struct pgwt_filter pf;
+    memset(&pf, 0, sizeof(pf));
+    pf.pid = 2;                      /* keeps only the UNKNOWN gap above */
+    struct pgwt_events_result m;
+    pgwt_compute_top_events(mix, 2, &pf, WFROM, WTO, 10000.0, &m);
+    CHECK_MS(ev_total_ms(&m, CPU_GAP), 6.0,
+             "filtered to pid 2: CPU* is that pid's 6 ms unknown gap");
+    CHECK(m.has_measured_cpu == 0,
+          "...and the measured flag goes back DOWN -- the filtered-out "
+          "measurement is not described by this response");
+    CHECK_MS(m.offcpu_ms, 0.0, "...with no off-CPU carried over");
+    free(m.rows);
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -1224,12 +1565,17 @@ int main(void)
     test_rank_reversing_boundary();
     test_tie_break_is_identity();
     test_query_avg_needs_exact_evidence();
+    test_cpu_row_is_measured();
+    test_cpu_row_measured_bypass();
 
     /* A suite that ran no assertions is a suite that proved nothing. The
      * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
      * assertions, and a floor left at 80 would have let any one of the three
-     * silently stop running. */
-    if (checks < 130) {
+     * silently stop running. Sections 10-11 (#553) add 66 more (5 of them
+     * inside guards that are only skipped when the guarding assertion has
+     * already failed), so the floor rises with them -- a dropped call in
+     * main() is exactly the false negative this floor exists to catch. */
+    if (checks < 192) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;
