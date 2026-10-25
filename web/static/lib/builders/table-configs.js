@@ -551,8 +551,13 @@ export const sessionsConfig = {
         { key: 'type', label: 'Backend', format: (r) => esc(r.type || 'unknown') },
         { key: 'user', label: 'User', format: (r) => esc(r.user || '') },
         { key: 'db', label: 'Database', format: (r) => esc(r.db || '') },
+        /* #439: see DB_TIME_MEMBERSHIP / buildSessionsScopeNote below for the
+         * measurement behind this wording. The pre-fix title claimed "This is
+         * a different scope from DB Time in Overview", which is false: the
+         * per-process rows and Overview's total come from the same predicates
+         * over the same events and summed bit-identical on a real capture. */
         { key: 'db_time_ms', label: 'DB Time', cls: 'num',
-          title: 'non-idle time of this process; background processes included. This is a different scope from DB Time in Overview.',
+          title: 'non-idle time of this process; background processes included, and Overview counts the same time -- these rows are its per-process parts.',
           format: (r) => fmtMs(r.db_time_ms) },
         // #187: was a hardcoded literal that silently went stale when the
         // owner recoloured 'cpu' (dark green for "running"); classColor('cpu')
@@ -675,11 +680,88 @@ export function makeQueriesConfig(fidelity) {
  * (data)) instead, so the live tab's headers track the real response. */
 export const queriesConfig = makeQueriesConfig('exact');
 
+/* ── #439: what Sessions' "DB Time" means, and how it relates to Overview's
+ *
+ * MEASURED, not assumed (local pgwt-server over
+ * tests/results/demo_rehearsal/trace -- PG18, 1851 s, 4.3M events):
+ *
+ *   time_model            db_time_ms = 2495784.951108
+ *   sum of top_sessions   db_time_ms = 2495784.951108   (diff 0.000000000)
+ *
+ * They are bit-identical because the two computations apply the SAME three
+ * predicates over the same events: src/compute.c's pgwt_compute_top_sessions
+ * (same pgwt_filter_matches, same pgwt_is_idle_event skip, same
+ * PGWT_EVENT_FLAG_IO_WORKER skip, same event_window_ns clipping) as
+ * pgwt_compute_time_model. Sessions is therefore a DECOMPOSITION of
+ * Overview's DB Time, not a second, wider total.
+ *
+ * Background-process work is INSIDE that total, by decision and in the
+ * numbers: docs/AAS_SEMANTICS_DECISION.md lists "background (checkpointer /
+ * bgwriter / walwriter / ...)" and "maintenance (autovacuum)" as CATEGORIES
+ * OF AAS, and pgwt_event_category (src/compute.c) files them into
+ * cat_ms[PGWT_CAT_BG] / [PGWT_CAT_MAINT], whose five categories sum to
+ * db_time_ms exactly (same window: 3.238513 + 998509.276421 +
+ * 1493681.800708 + 825.638179 + 2764.997287 = 2495784.951108).
+ *
+ * The row that READS like an exclusion is a different quantity with
+ * confusingly similar words: Overview's Idle child "Other (background)"
+ * (src/compute.c:1283 -- hidden Activity parking, 7757772.93 ms in that same
+ * window) is parked-idle time, excluded from DB Time in BOTH tabs, and is
+ * relabeled "Background idle (parked)" by overviewDisplayName above.
+ *
+ * So this note must NOT tell a reader the two tabs count different things.
+ * It used to -- "Overview uses a different, system-wide DB Time total that
+ * excludes the parked-idle time of background processes" -- which named as
+ * the differentiator something Sessions excludes identically, and declared
+ * two numbers irreconcilable that reconcile to the nanosecond. The sentence
+ * is now DERIVED from the membership table below rather than hand-written,
+ * so a future change to what is inside DB Time cannot leave the disclosure
+ * behind without editing the same object a reader of src/compute.c would
+ * come here to change. */
+export const DB_TIME_MEMBERSHIP = {
+    /* non-idle work of bgwriter / walwriter / checkpointer / autovacuum */
+    backgroundActive: 'inside',
+    /* Overview's "Background idle (parked)" row (Activity-class parking) */
+    backgroundParked: 'outside',
+};
+
+const BACKGROUND_PROCESS_NAMES =
+    'bgwriter, walwriter, checkpointer and autovacuum';
+
+/* PURE. Throws rather than returning a vacuous note: a disclosure that
+ * cannot say where the time belongs must refuse, not render an empty
+ * caption that every "does not claim X" assertion would pass. */
+export function buildSessionsScopeNote(membership) {
+    if (!membership || typeof membership !== 'object')
+        throw new Error('buildSessionsScopeNote: no DB Time membership given');
+    for (const key of ['backgroundActive', 'backgroundParked']) {
+        const v = membership[key];
+        if (v !== 'inside' && v !== 'outside')
+            throw new Error('buildSessionsScopeNote: membership.' + key +
+                ' must be "inside" or "outside", got ' + JSON.stringify(v));
+    }
+    /* No apostrophes or quote characters anywhere in the returned sentence:
+     * the caption is esc()aped before it reaches the DOM, and the wiring
+     * tests (and any future one) check that the RAW text is a substring of
+     * the rendered HTML. An apostrophe here makes that check fail for a
+     * reason that has nothing to do with what the note says. */
+    const active = 'The non-idle work of ' + BACKGROUND_PROCESS_NAMES + ' is ' +
+        (membership.backgroundActive === 'inside'
+            ? 'inside DB Time in both tabs'
+            : 'outside DB Time in Overview');
+    const parked = 'their parked-idle time, the Background idle (parked) row ' +
+        'on Overview, is ' +
+        (membership.backgroundParked === 'outside'
+            ? 'outside it in both'
+            : 'inside it in both');
+    return 'DB Time here is the non-idle time of this one process, and the ' +
+        'DB Time total on Overview counts that same time over every process ' +
+        'at once -- one total, decomposed, not two. ' +
+        active + '; ' + parked + '.';
+}
+
 export const SESSIONS_SCOPE_NOTE_TEXT =
-    'DB Time in Sessions is the non-idle time of this process, including ' +
-    'bgwriter, walwriter, checkpointer, and autovacuum. Overview uses a ' +
-    'different, system-wide DB Time total that excludes the parked-idle ' +
-    'time of background processes.';
+    buildSessionsScopeNote(DB_TIME_MEMBERSHIP);
 
 export function sessionsScopeNoteHtml() {
     return '<div class="panel-caption">' + esc(SESSIONS_SCOPE_NOTE_TEXT) + '</div>';
