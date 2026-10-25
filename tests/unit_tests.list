@@ -246,9 +246,9 @@ test_ui_live_smoke_failure.py
 # go blind a second time. It REFUSES (never approves) on a missing, empty,
 # unparseable or vacuous fixture and on a mock that cannot answer.
 test_mock_backend_activity_fixture.py
-# #202 review: the pure parsers behind test_multi_window's conservation
-# check. The old whole-output, last-writer-wins parse merged two ticks and
-# MANUFACTURED positive excess inside that check (+13.3% on the fixture).
+# Offline multi-window CLI gate: production ring/output driven by scripted
+# cumulative snapshots; literal expectations for each horizon, plus three
+# mutation refusals. Also guards #202's cross-tick parser contamination.
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_rehearsal_verdict_hardening.py
