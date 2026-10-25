@@ -1165,7 +1165,7 @@ static void idle_accum_add(struct idle_accum *ia, int *n, uint32_t eid,
     /* Capacity is in DISTINCT EVENTS (MAX_IDLE_EV), not rows: the row budget
      * is one larger because of the remainder row, and using it here let the
      * accumulator outgrow what the caller reserved. Anything dropped lands in
-     * "Other (background)", so the children still sum to the parent. */
+     * "Other idle (parked background loops)", so the children still sum to the parent. */
     if (*n >= MAX_IDLE_EV)
         return;
     ia[*n].event_id = eid;
@@ -1280,7 +1280,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
      * values are sums of integer nanosecond durations, so there is no dust to
      * ignore. */
     if (other > 0) {
-        snprintf(rows[nr].name, sizeof(rows[nr].name), "Other (background)");
+        snprintf(rows[nr].name, sizeof(rows[nr].name), "Other idle (parked background loops)");
         rows[nr].time_ms     = other / 1e6;
         rows[nr].pct_db_time = PGWT_PCT_DB_IDLE;
         rows[nr].aas         = IDLE_AAS(rows[nr].time_ms);
@@ -2612,7 +2612,7 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
              * busier non-idle events reported Idle = 0 beside a correct DB
              * Time and the two stopped accounting for the window. The named
              * children below are still drawn from the bounded list; whatever
-             * they do not cover becomes the "Other (background)" row. */
+             * they do not cover becomes the "Other idle (parked background loops)" row. */
             ctx->idle_time_ns += (double)sq->idle_ns;
             for (int j = 0; j < sq->num_top_events; j++) {
                 uint32_t eid = sq->top_events[j].event_id;

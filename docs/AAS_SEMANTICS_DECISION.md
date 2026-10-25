@@ -347,7 +347,7 @@ Idle                                1,207,000 ms   indent 0
 The children always account for the parent. What the named rows cannot
 cover — hidden `Activity` parking, plus anything the summary path's bounded
 per-event tables dropped — is emitted as a single labelled
-`Other (background)` row rather than left as an unexplained gap. An
+`Other idle (parked background loops)` row rather than left as an unexplained gap. An
 unexplained gap in a visible total is the thing this change exists to remove;
 leaving one at the next level down would have reintroduced it.
 
@@ -383,7 +383,7 @@ Idle would stop accounting for the window under a query filter.
 Both totals therefore come from **exact scalars accumulated at the writer**
 (`pgwt_summary_accum::idle_ns`, `pgwt_summary_query::idle_ns`). The bounded
 lists only drive the NAMED breakdown, and whatever they miss lands in
-`Other (background)`. `events[]` additionally reports when it could not take an
+`Other idle (parked background loops)`. `events[]` additionally reports when it could not take an
 entry (`events_overflow`), because a full table still truncates the per-event
 breakdown and any class/event-FILTERED total while unfiltered DB Time stays
 right — a mismatch that previously had no signal at all.

@@ -1800,7 +1800,7 @@ foundational command set and shapes (preserved):
 - `top_queries` → rows `{query_id,count,total_ms,pct,top_wait}`
 - `time_model` → `{db_time_ms,idle_time_ms,aas,classes:[{name,ms,pct,aas}],wall_ms,`
   `idle_children_excess_ms,rows:[…]}` — `rows` carries the indent-0 `Idle` row and its
-  indent-2 named children (`Timeout:VacuumDelay`, `Activity`-backed `Other (background)`, …);
+  indent-2 named children (`Timeout:VacuumDelay`, `Activity`-backed `Other idle (parked background loops)`, …);
   `idle_children_excess_ms` is the self-check that those children sum to the parent and
   must be 0. Idle is EXCLUDED from `db_time_ms` and from the top-level `aas`.
   On the Idle row and its children `pct` is 0 (a share of a total they are not

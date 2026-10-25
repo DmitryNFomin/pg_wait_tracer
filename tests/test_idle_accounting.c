@@ -522,7 +522,7 @@ static void test_idle_row_named_children(void)
           "Activity time", kids, FIX_IDLE_MS - kids);
     /* That remainder is LABELLED, not left as an unexplained gap in a visible
      * total -- the children must always account for the parent. */
-    const struct pgwt_tm_row *other = row_at(&tm, "Other (background)", 2);
+    const struct pgwt_tm_row *other = row_at(&tm, "Other idle (parked background loops)", 2);
     CHECK(other != NULL && NEAR(other->time_ms, 900.0),
           "the hidden Activity share appears as a labelled Other-background "
           "row of 900 ms (got %.1f)",
@@ -961,7 +961,7 @@ static void test_idle_breakdown_at_its_bound(void)
 
     /* THE GATE. The rule admits PGWT_MAX_VISIBLE_IDLE_EVENTS distinct visible
      * idle events, so the breakdown can never name more than that -- plus the
-     * single "Other (background)" remainder. With the accumulator sized at the
+     * single "Other idle (parked background loops)" remainder. With the accumulator sized at the
      * ROW budget instead it named eight, one more than the Idle sub-budget
      * reserves. src/compute.c also asserts nr <= max_rows at runtime, which is
      * what gates a genuinely too-small allocation; this gates the sub-budget. */
@@ -993,11 +993,11 @@ static void test_idle_breakdown_at_its_bound(void)
           parent ? parent->time_ms : -1.0);
     CHECK(parent != NULL && NEAR(kids_ms, parent->time_ms),
           "children sum EXACTLY to the parent (%.9f vs %.9f) -- the two "
-          "events the accumulator refused are in Other (background), not "
+          "events the accumulator refused are in Other idle (parked background loops), not "
           "dropped", kids_ms, parent ? parent->time_ms : -1.0);
     CHECK(tm.idle_children_excess_ms == 0.0,
           "no excess reported (got %.9f)", tm.idle_children_excess_ms);
-    CHECK(row_at(&tm, "Other (background)", 2) != NULL,
+    CHECK(row_at(&tm, "Other idle (parked background loops)", 2) != NULL,
           "the remainder row is present and named");
 
     free(tm.rows);
@@ -1196,7 +1196,7 @@ static void test_idle_aas_is_a_rate(void)
         { "Timeout:CheckpointWriteDelay",   2,  800.0 },
         { "Client:ClientRead",              2,  600.0 },
         { "Timeout:VacuumDelay",            2,  150.0 },
-        { "Other (background)",             2,  900.0 },
+        { "Other idle (parked background loops)",             2,  900.0 },
     };
     const int N_IDLE_ROWS = (int)(sizeof(idle_rows) / sizeof(idle_rows[0]));
 
@@ -1268,7 +1268,7 @@ static void test_idle_aas_is_a_rate(void)
           "all %d idle rows were found (got %d) -- a missing row would make "
           "the conservation sums below quietly short", N_IDLE_ROWS, found);
 
-    /* CONSERVATION of the rate, including the Other (background) remainder.
+    /* CONSERVATION of the rate, including the Other idle (parked background loops) remainder.
      * Compared against TWO independent right-hand sides: the parent ROW, and
      * a constant computed from the fixture without touching any row. The
      * child COUNT is pinned too, because a breakdown of zero children sums to
@@ -1355,7 +1355,7 @@ static void test_idle_aas_is_a_rate(void)
     CHECK(tmb.idle_time_ms == 0.0 && row_at(&tmb, "Idle", 0) == NULL,
           "no idle time (%.1f ms) => NO Idle row at all, rather than one "
           "reading AAS 0.00", tmb.idle_time_ms);
-    CHECK(row_at(&tmb, "Other (background)", 2) == NULL,
+    CHECK(row_at(&tmb, "Other idle (parked background loops)", 2) == NULL,
           "...and no orphaned remainder row either");
     free(tmb.rows);
 
@@ -1371,7 +1371,7 @@ static void test_idle_aas_is_a_rate(void)
     struct pgwt_tm_result tmh;
     pgwt_compute_time_model(hid, hn, &f, 0, 0, FIX_WALL_MS, &tmh);
     const struct pgwt_tm_row *hp = row_at(&tmh, "Idle", 0);
-    const struct pgwt_tm_row *ho = row_at(&tmh, "Other (background)", 2);
+    const struct pgwt_tm_row *ho = row_at(&tmh, "Other idle (parked background loops)", 2);
     CHECK(hp != NULL && NEAR(hp->time_ms, 450.0),
           "hidden-only idle: parent = 450 ms (got %.3f)",
           hp ? hp->time_ms : -1.0);
