@@ -631,6 +631,38 @@ static void test_bypass(const char *dir_main, const char *dir_nostraddle,
     else
         CHECK(0, "6e. harness failure");
 
+    /* 6h. the NEEDY-PID TABLE could not be built, so WHICH pids have a
+     * rule-2 hole is unknown. Unknown is never "none". (The table grows on
+     * its first insert, so this point is reached on every window -- a
+     * refusal path that could not be reached would be indistinguishable
+     * from one that approves.) */
+    if (run_bypass(dir_main, "PGWT_TEST_LOAD_ALLOC_FAIL", "left_needy_grow",
+                   &b) == 0)
+        CHECK(b.lock_sum == 1 && b.left_truncated == 1 &&
+              b.seeds_resolved == 0,
+              "6h. the needy-pid table refused: sum %llu, seeds=%d, "
+              "truncated=%d -- not a silent 'no pid needs a seed'",
+              (unsigned long long)b.lock_sum, b.seeds_resolved,
+              b.left_truncated);
+    else
+        CHECK(0, "6h. harness failure");
+
+    /* 6i. the seeds were RESOLVED and then the array holding them could not
+     * be allocated. The one case where the scan saw everything and still
+     * cannot deliver: it must drop the seeds it found rather than pass a
+     * short array, and still flag the edge. */
+    if (run_bypass(dir_main, "PGWT_TEST_LOAD_ALLOC_FAIL", "left_seed_array",
+                   &b) == 0)
+        CHECK(b.lock_sum == 1 && b.left_truncated == 1 &&
+              b.seeds_resolved == 0,
+              "6i. the resolved seeds could not be handed over: sum %llu, "
+              "seeds=%d, truncated=%d. A partial seed table would attribute "
+              "some of a window's left-edge records and not others",
+              (unsigned long long)b.lock_sum, b.seeds_resolved,
+              b.left_truncated);
+    else
+        CHECK(0, "6i. harness failure");
+
     /* 6f. ABSENCE, not wrongness: a window with no left straddler at all.
      * Proves 6a's counters are produced by a record and not by the code
      * path -- the fixture that would have made this whole file vacuous. */
