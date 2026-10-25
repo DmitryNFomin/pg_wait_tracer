@@ -390,9 +390,22 @@ int pgwt_filter_matches(const struct pgwt_filter *f,
 
 /* ── T2: category tagging pass (docs/AAS_SEMANTICS_DECISION.md) ──────── */
 
-/* Per-pid sweep state for pgwt_tag_events. Open-addressing hash on pid. */
-#define TAG_HT_SIZE 4096
-#define TAG_HT_MASK (TAG_HT_SIZE - 1)
+/* Per-pid sweep state for pgwt_tag_events.
+ *
+ * #374: this was `#define TAG_HT_SIZE 4096` + a fixed open-addressed array
+ * on pid — the LAST fixed-size pid table in this file (#327 grew the other
+ * five). Its probe DID have a fullness test, so it never hung; it refused
+ * instead, which is the right fail-safe (#363) attached to the wrong bound.
+ * Distinct pids in a loaded window are driven by connection CHURN, not by
+ * concurrency, and `pgwt-server --dump` loads the whole trace — so a
+ * perfectly healthy long capture answered EVERY request with
+ * `allocation_failed` / "memory allocation failed" / "retry the request",
+ * three statements of which none was true.
+ *
+ * Now a pgwt_pid_index (unbounded, `used`-byte occupancy) over an
+ * insertion-ordered accum_grow array, exactly as #327 did elsewhere. The
+ * refusal survives untouched for the case that really is one: a failed
+ * allocation. */
 struct tag_pid_state {
     uint32_t pid;          /* 0 = empty slot */
     uint32_t cat_flag;     /* category flag from the pid table */
@@ -425,22 +438,42 @@ static uint32_t pid_cat_lookup(const struct pgwt_pid_cat *cats, int n,
     return 0;   /* unknown pid: foreground (conservative) */
 }
 
-static struct tag_pid_state *tag_pid_get(struct tag_pid_state *ht, uint32_t pid)
+/* The growable per-pid table. `st` is insertion-ordered; `ix` maps pid to
+ * its index. Nothing holds a `struct tag_pid_state *` across two calls of
+ * tag_pid_get — the array may move — and both passes in pgwt_tag_events_window
+ * use theirs within one loop iteration. */
+struct tag_pid_table {
+    struct pgwt_pid_index ix;
+    struct tag_pid_state *st;
+    int n, cap;
+};
+
+/* #374: pid 0 is a KEY LIKE ANY OTHER here, which it was not before: the old
+ * table used `pid == 0` as its empty-slot marker, so a pid-0 record (the
+ * input is a trace file, not a guarantee) shared one slot with "free" and
+ * every later pid probing to it inherited that state. Same #347 shape
+ * pgwt_compute_top_sessions had. pgwt_pid_index carries a `used` byte. */
+static struct tag_pid_state *tag_pid_get(struct tag_pid_table *t, uint32_t pid)
 {
-    int h = hash32(pid, TAG_HT_MASK);
-    for (int probe = 0; probe < TAG_HT_SIZE; probe++) {
-        if (ht[h].pid == pid)
-            return &ht[h];
-        if (ht[h].pid == 0) {
-            ht[h].pid = pid;
-            return &ht[h];
-        }
-        h = (h + 1) & TAG_HT_MASK;
-    }
-    /* #363: table full — this pid CANNOT be tracked. The caller refuses the
-     * whole array; it used to leave the surplus pids' records foreground and
-     * return normally, which is a wrong answer and not a smaller one. */
-    return NULL;
+    int h = pgwt_pid_index_find(&t->ix, pid);
+    if (h >= 0)
+        return &t->st[h];
+    if (accum_grow((void **)&t->st, &t->cap, t->n + 1, sizeof(*t->st),
+                   "tag_pid_entries") != 0)
+        return NULL;            /* a REAL allocation failure: caller refuses */
+    h = t->n;
+    if (pgwt_pid_index_put(&t->ix, pid, h) != 0)
+        return NULL;
+    t->n++;
+    t->st[h].pid = pid;
+    return &t->st[h];
+}
+
+static void tag_pid_table_free(struct tag_pid_table *t)
+{
+    pgwt_pid_index_free(&t->ix);
+    free(t->st);
+    memset(t, 0, sizeof(*t));
 }
 
 /* Test-only allocation injection. Same env-var shape as src/server.c's
@@ -469,9 +502,16 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
      * an allocation error. */
     if (count <= 0)
         return 1;
-    struct tag_pid_state *ht = tag_alloc_fail("tag_ht")
-                             ? NULL : calloc(TAG_HT_SIZE, sizeof(*ht));
-    if (!ht)
+    /* #374: the table has no initial allocation to fail any more, but the
+     * "tag_ht" injection point stays — tests/test_data_tag_refusal.py and
+     * test_window_clip 11c both drive the refusal through it, and an
+     * injection point silently removed is a refusal path silently made
+     * unreachable. It still means exactly what it meant: refused before
+     * touching a single record. */
+    struct tag_pid_table tbl;
+    memset(&tbl, 0, sizeof(tbl));
+    pgwt_pid_index_init(&tbl.ix);
+    if (tag_alloc_fail("tag_ht"))
         return 0;   /* refused before touching a single record */
     /* #128: per-record cmd_qid at the record's time (rule 2 fallback for
      * the backward pass). #363: the back-fill is part of the tagged result,
@@ -485,9 +525,9 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count; i++) {
         struct pgwt_trace_event *ev = &events[i];
-        struct tag_pid_state *st = tag_pid_get(ht, ev->pid);
+        struct tag_pid_state *st = tag_pid_get(&tbl, ev->pid);
         if (!st)
-            goto refused;   /* #363: PID-table exhausted mid-array */
+            goto refused;   /* #374: a real allocation failure, mid-array */
 
         /* Markers drive the per-pid windows and are otherwise left alone. */
         if (PGWT_IS_MARKER(ev->old_event)) {
@@ -668,7 +708,7 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
     if (fwd) {
         for (int i = count - 1; i >= 0; i--) {
             struct pgwt_trace_event *ev = &events[i];
-            struct tag_pid_state *st = tag_pid_get(ht, ev->pid);
+            struct tag_pid_state *st = tag_pid_get(&tbl, ev->pid);
             if (!st)
                 goto refused;   /* unreachable: the forward pass above
                                  * inserted every pid in the array or
@@ -720,7 +760,7 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
         }
     }
     free(fwd);
-    free(ht);
+    tag_pid_table_free(&tbl);
     return 1;
 
 refused:
@@ -730,7 +770,7 @@ refused:
      * there: a partly tagged array is indistinguishable from a complete
      * one by inspection. */
     free(fwd);
-    free(ht);
+    tag_pid_table_free(&tbl);
     return 0;
 }
 
