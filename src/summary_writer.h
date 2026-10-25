@@ -690,6 +690,85 @@ struct pgwt_summary_accum {
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];
     int num_sessions;
+    /* #555: sessions[] could not take an entry because all
+     * SUMMARY_MAX_SESSIONS slots were occupied, so that pid's time was
+     * DROPPED from sessions[].db_time_ns while class_ns and idle_ns kept it.
+     * The visible symptom is Sigma Top Sessions < Overview's DB Time, which a
+     * reader cannot tell apart from a broken accounting -- measured on the
+     * RAW path the two agree to the last bit (2,495,784.951108 ms either way
+     * over an 1851 s / 4.3M-event trace), so on the summary path any such gap
+     * IS this bound and nothing said so. This is that signal, the exact
+     * counterpart of events_overflow above.
+     *
+     * COUNTS DENIALS THAT COST sessions[] SOMETHING, not nanoseconds: one
+     * per push whose pid could not claim a slot AND whose event was not
+     * idle. The idle clause is the counter's MEANING -- every write into a
+     * session slot is already closed to idle events, so a slot denied to an
+     * idle-only pid loses nothing, and counting it fired the WARN and the
+     * metric (both of which assert a DB-time shortfall) on precisely the
+     * workload that trips the bound: a >1024-connection instance is mostly
+     * backends in Client:ClientRead. src/summary_writer.c's accum_event has
+     * the full argument; section 14g of tests/test_idle_summary.c pins it
+     * both ways.
+     *
+     * Deliberately NOT the same rule as events_overflow, which counts every
+     * denial: events[] DOES carry idle events (it is where every read path
+     * gets the Idle breakdown from), so an idle denial there loses real data.
+     * Both counters count what was lost. Also not guarded on `tns > 0`: a
+     * non-idle denial still loses this record's top_wait candidacy, so the
+     * counter answers "was session data dropped" and the lost NANOSECONDS
+     * are the separate, exact class_ns - Sigma sessions[].db_time_ns.
+     *
+     * NOT YET SERIALIZED -- a SEQUENCED GAP, not a permanent limitation.
+     * events_overflow is in the on-disk record trailer; putting this field
+     * there is a FORMAT change, i.e. a PGWT_SUMMARY_VERSION bump and a raw
+     * recompute of every retained capture (see the version notes above).
+     * The owner APPROVED that bump on 2026-10-25; it is deliberately NOT in
+     * this change, because it is being landed as ONE consolidated 8 -> 9 bump
+     * together with the measured-CPU split for queries[].top_events, so that
+     * two format changes cost one recompute instead of two. Do not read the
+     * paragraph below as "captures will never carry this".
+     *
+     * UNTIL THAT LANDS: A CAPTURE ON DISK CARRIES NO RECORD OF ITS DROPPED
+     * PIDS AT ALL. Not "cannot attribute them to individual seconds" -- none,
+     * anywhere. sessions_overflow_total lives on the writer struct, is never
+     * logged at exit, and pgwt-server instantiates no writer, so the only
+     * path by which the count leaves the daemon is control.c's `metrics`
+     * reply, polled while the daemon is still running. After the fact, the
+     * WARN lines in the daemon's stderr are the only evidence. That is why
+     * both drop sites emit one.
+     *
+     * THE SEAM, so the 8 -> 9 bump is a small diff. This field is already
+     * shaped exactly like events_overflow: same name pattern, zeroed by
+     * accum_reset with the rest of the accumulator, rolled up at the one
+     * place in flush_accum that sits after every early return. What that
+     * change has to add is only:
+     *   - PGWT_SUMMARY_VERSION 8 -> 9 and its version note;
+     *   - 4 bytes in pgwt_summary_serialize's trailer, after
+     *     acc->events_overflow;
+     *   - the matching read in pgwt_summary_deserialize under
+     *     `if (version >= 9)`, REFUSING a short record (the v7 note above
+     *     says why a zero there is not neutral);
+     *   - the `+ 12 + 40` trailer term in PGWT_SUMMARY_SERIALIZE_MAX, and the
+     *     layout comment above it.
+     *
+     * ONE TRAP IN THAT CHANGE, stated here because it is silent and it is the
+     * same class of bug as #555 itself: pgwt_summary_deserialize already
+     * WRITES this field, counting the entries it had to drop, and it does so
+     * in the session loop -- which runs BEFORE the trailer is read. A plain
+     * `memcpy(&acc->sessions_overflow, p, 4)` in the trailer would therefore
+     * OVERWRITE the reader's own count with the writer's, losing exactly the
+     * drops that the reader is the only witness to. Read the trailer value
+     * into a local and ADD it, or move the reader's increment to a separate
+     * field. tests/test_idle_summary.c section 14e pins the reader's count
+     * and will go red if it is clobbered.
+     *
+     * The field is also set by pgwt_summary_deserialize when a record claims
+     * more sessions than the table can hold -- and that site has its own
+     * one-per-process WARN, because on the READ side nothing consumes this
+     * field either: the counter alone would have left a forged block decoding
+     * rc=0 and being served labelled exact with entries missing. */
+    uint32_t sessions_overflow;
 
     /* Per-query hash table (open addressing) */
     struct pgwt_summary_query queries[SUMMARY_MAX_QUERIES];
@@ -876,6 +955,23 @@ struct pgwt_summary_writer {
     /* Σ of every record's events_overflow, so the control socket can report
      * one number instead of a reader having to sum the blocks. */
     uint64_t      events_overflow_total;
+    /* #555: Σ of every WRITTEN record's sessions_overflow. Read it exactly
+     * the way events_overflow_total is read: WRITTEN seconds only, so a
+     * second lost to a failed rotation or close never reaches it and
+     * flush_failures_total is the signal for the seconds it cannot speak
+     * for. Unlike events_overflow_total this is the ONLY place the count
+     * survives the flush -- the per-record field is not on disk (see
+     * pgwt_summary_accum::sessions_overflow).
+     *
+     * SCOPE, because it is easy to over-read: this is LIVE-DAEMON state. It
+     * is never written to the trace directory and never logged at exit, so it
+     * is reachable only by a `metrics` query to the control socket of a
+     * daemon that is still running. A capture analysed later carries nothing
+     * from it -- until the approved PGWT_SUMMARY_VERSION 8 -> 9 bump puts the
+     * per-record field on disk (see pgwt_summary_accum::sessions_overflow for
+     * the seam and the one trap in it). This total stays useful after that:
+     * it is what spares a reader summing every block. */
+    uint64_t      sessions_overflow_total;
     uint64_t      total_records_written;
     uint64_t      total_bytes_written;
     /* v6 (#315/#376): records dropped because their pid is an io_worker, and

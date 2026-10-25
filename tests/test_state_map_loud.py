@@ -183,6 +183,13 @@ def main():
                     # "the counters are surfaced" a doc sentence cannot prove.
                     "summary_flush_failures_total",
                     "summary_events_overflow_total",
+                    # #555: the per-session counterpart. It is on this list
+                    # for the reason above and not as symmetry: the per-record
+                    # sessions_overflow is NOT serialized (that would be a
+                    # PGWT_SUMMARY_VERSION bump), so this metrics key is the
+                    # ONLY place the count leaves the daemon. A gate on
+                    # nothing else would make it unreachable by construction.
+                    "summary_sessions_overflow_total",
                     "sampler_healthy"):
             check(metrics is not None and key in metrics,
                   f"metrics carries '{key}'")
