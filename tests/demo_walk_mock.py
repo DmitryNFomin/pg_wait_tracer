@@ -6,6 +6,7 @@ matches the execution fixture so the literal Sessions drill remains populated.
 All served UI assets come from mock_server.py. This is mock evidence only.
 """
 import copy
+import os
 import time
 
 import mock_server
@@ -14,6 +15,39 @@ original = mock_server.handle_request
 tick = 0
 phase = 0
 _last_tick_at = None
+
+# issue #571: mock_server's canned `info` returns a CONSTANT to_ns
+# (mock_server._TO_NS), i.e. a trace whose latest timestamp never moves --
+# which is precisely the signature of a DEAD daemon. The recorder's
+# capture-advance gate reads that field, so for a healthy mock walk to pass
+# the fixture has to behave like a daemon that is still writing: advance
+# to_ns with real wall-clock elapsed since this process started.
+#
+# now_ns is deliberately left PINNED at _TO_NS, and that is a fixture
+# decision worth stating. In the real product now_ns advances too (it is the
+# bridge's own CLOCK_REALTIME), but advancing it here would slide the live
+# 15-minute window forward by the walk's whole duration and start pushing
+# mock_server's canned, _TO_NS-anchored session_timeline waits out of it --
+# changing what OTHER gates in the same walk see, for no benefit to this
+# one. Pinning now_ns keeps every existing fixture exactly where it was.
+# Gating on now_ns would in any case be useless: a dead daemon does not
+# stop the bridge's clock.
+#
+# PGWT_MOCK_STALL_AFTER_S freezes the advance after that many seconds while
+# the mock keeps serving everything else unchanged -- the dead-daemon-but-
+# live-bridge simulation the capture-advance gate exists to catch, and the
+# red half of its red/green pair.
+_STARTED_AT = time.monotonic()
+_STALL_AFTER_S = float(os.environ.get("PGWT_MOCK_STALL_AFTER_S") or 0)
+
+
+def trace_tip_ns():
+    """The simulated trace's latest timestamp: _TO_NS plus wall-clock, frozen
+    at PGWT_MOCK_STALL_AFTER_S seconds when that is set."""
+    elapsed = time.monotonic() - _STARTED_AT
+    if _STALL_AFTER_S > 0:
+        elapsed = min(elapsed, _STALL_AFTER_S)
+    return mock_server._TO_NS + int(elapsed * 1_000_000_000)
 
 # issue #411/#409: the real product only advances what the Overview shows
 # once per live tick (app.js startAutoRefresh's setTimeout(.., 5000) --
@@ -35,6 +69,8 @@ TICK_INTERVAL_S = 5.0
 def handle_request(msg):
     global tick, phase, _last_tick_at
     response = copy.deepcopy(original(msg))
+    if msg.get("cmd") == "info" and "to_ns" in response:
+        response["to_ns"] = trace_tip_ns()
     if msg.get("cmd") == "aas" and response.get("buckets"):
         now = time.monotonic()
         if _last_tick_at is None or now - _last_tick_at >= TICK_INTERVAL_S:

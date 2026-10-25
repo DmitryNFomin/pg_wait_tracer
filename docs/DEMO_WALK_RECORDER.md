@@ -231,6 +231,76 @@ Overview's `%DB Time` column is preserved in full: the small blue rectangle
 beside IO's `5.0s` was the cropped tail of its real `.pct-fill` percentage bar
 (39.2% of DB time), not a selection, hover or rendering defect.
 
+## The capture must still be advancing (exit code 10, issue #571)
+
+Every other gate here inspects the BROWSER. None of them noticed whether the
+daemon writing the trace was still alive. If it dies mid-capture the bridge
+keeps serving what is already on disk: every panel stays populated, no
+console error appears, chart motion from earlier in the dwell is already
+recorded — and the walk passes, publishing a recording of a window that
+*looks* live but stopped advancing at the moment of death. This is the #544
+class one layer down: #544's orphan bridge passed `kill -0`, returned HTTP
+200 and matched the served-asset guard while serving a 12-hour-old trace,
+and PR #558 answered it with pid *ownership* of the bridge. Owning the
+bridge does not prove the capture is advancing.
+
+What is measured: the trace's **own latest timestamp** (`info.to_ns`, i.e.
+`src/server.c`'s `srv->latest_wall_ns` — the newest event wall time across
+the scanned blocks), sampled three times through the page's already-connected
+transport: at walk start (before the first frame), at the drill hand-off, and
+at walk end. Two sub-checks, both required:
+
+1. **whole walk** — the tip must have advanced by at least
+   `CAPTURE_ADVANCE_FRACTION` (0.5) of the walk's own wall-clock duration.
+   Catches a capture that was already dead or wedged at walk start, and any
+   death in the first half.
+2. **final segment** — between the drill hand-off and walk end the tip must
+   have moved *at all*. Check 1 alone cannot see a daemon that dies late: a
+   death at 60% of the walk still leaves 60% of advance, which clears a 50%
+   bar. A dead daemon's tip does not move one nanosecond afterwards.
+
+Plus two fail-safe refusals that are not about the product: a tip that went
+**backwards** (the backend is serving a different trace — #544's shape), and
+a sample that could not be READ at all (no transport handle, the `info`
+request throwing, an empty reply, a non-numeric/NaN/null `to_ns`). A gate
+that cannot see must refuse, never approve, so none of those return a
+placeholder for the comparison to interpret.
+
+Why this quantity rather than a liveness probe. A pid check proves only that
+a process exists, and a process can be alive and wedged — indistinguishable
+from healthy, which is the failure shape this gate exists for. It also cannot
+run in the normal topology: the recorder drives Chrome on a Mac against a
+bridge forwarded from the Linux box, so neither the daemon's pid nor its
+control socket is reachable. The UI's own control-plane poll treats
+"daemon not running" as an ordinary static-replay state rather than an error
+(`app.js` `pollDaemon`), so a daemon-absent reply is not even distinguishable
+there from a legitimate archived replay. And `info.now_ns` is the **wrong
+field**: it is the bridge's own `CLOCK_REALTIME`, advancing at exactly the
+same rate whether the daemon is alive, wedged or dead — a gate reading it
+could never fail.
+
+Known limit, stated rather than hidden: `to_ns` advances only when new events
+land, so a capture whose workload goes genuinely quiet stalls it too. That is
+why the whole-walk bar is a fraction of the duration rather than ~1.0, and
+why the second bar is "moved at all" rather than a rate. A capture quiet
+enough to trouble this gate already refuses at `check_overview_wait_mix()`
+and at the AAS motion gates.
+
+Under `--archived` the check is **skipped**, never faked: that capture ended
+before the walk began, so its tip cannot advance by construction. As with the
+wait-mix skip, the skip is recorded verbatim in
+`walk["capture_advance"]["verdict"]` and in `analysis.md` under
+`"Capture liveness:"`, with a string distinct from the live-path verdict, so
+a skipped check can never read like a passed one. A live walk also records
+the measured numbers (advance, elapsed, floor, and the final segment's own
+pair) in `walk.json`.
+
+`tests/demo_walk_mock.py` advances its simulated tip with real wall-clock, so
+a healthy `--mock` walk passes; `PGWT_MOCK_STALL_AFTER_S=<seconds>` freezes
+that advance while the mock keeps serving everything else, which is how the
+refusal is demonstrated end to end. `now_ns` stays pinned in the mock on
+purpose — see the comment in that file.
+
 Edit the two `gifs` definitions in `walk.json`, then re-cut without a browser:
 
 ```sh
@@ -246,6 +316,7 @@ New codes: **7 GIF frame count gate** (sampled or decoded); **8 GIF motion
 gate** (first/last, or the single biggest consecutive-pair jump; sampled
 crop, palette or decoded — see the motion gate description above); **9 capture
 younger than the rendered window** (`--allow-young` overrides).
+**10 the capture stopped advancing** (see below; no override flag exists).
 Existing codes retain their meanings. An empty-motion GIF is an observed
 artifact refusal, with the failed check named in the diagnostic.
 The distinction between 2 and 3 is observed-negative versus unobserved, rather
