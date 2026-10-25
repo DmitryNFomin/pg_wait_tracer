@@ -2504,8 +2504,15 @@ static void test_unplaceable_archive_is_refused(void)
  *     the counter must account for the whole of it;
  *   - every probe reports whether the fixture RAN (a second opened, class_ns
  *     positive, a record written), because `0 == 0` on a fixture that never
- *     produced a second is how a gate approves while blind -- 14e pins the
- *     empty shape so it cannot be mistaken for a tested zero.
+ *     produced a second is how a gate approves while blind -- 14f pins the
+ *     empty shape so it cannot be mistaken for a tested zero;
+ *   - 14g pins the counter's MEANING in both directions: idle-only denials
+ *     are 0 while the table is demonstrably full and the idle time
+ *     demonstrably arrived, and a MIXED second counts its non-idle denials
+ *     and only those -- an assertion a guard that simply stopped counting
+ *     cannot pass;
+ *   - 14e asserts the reader's WARN, not only its counter, because that
+ *     field reaches nobody on the read side.
  *
  * TIMING. One second, every timestamp a literal offset from the writer's
  * origin, every duration a literal; no assertion depends on wall time.
@@ -2519,15 +2526,17 @@ struct sess_probe {
     uint32_t overflow;      /* acc->sessions_overflow BEFORE the flush      */
     uint64_t sessions_ns;   /* Sigma sessions[].db_time_ns                  */
     uint64_t class_ns;      /* Sigma class_ns -- never reads sessions[]     */
+    uint64_t idle_ns;       /* acc->idle_ns -- the idle fixtures' witness   */
     uint64_t total_after;   /* w->sessions_overflow_total AFTER the flush   */
     uint32_t accum_after;   /* acc->sessions_overflow AFTER the flush       */
     uint64_t records;       /* w->total_records_written                     */
 };
 
-/* `npids` distinct pids, `pushes` non-idle 1 ms intervals each, all in ONE
- * second, through the REAL writer. */
+/* `npids` distinct pids, `pushes` 1 ms intervals of `ev` each, all in ONE
+ * second, through the REAL writer. `ev` is a parameter because the counter's
+ * meaning turns on whether the event is idle: see 14g. */
 static void sess_probe_run(const char *name, int npids, int pushes,
-                           struct sess_probe *out)
+                           uint32_t ev, struct sess_probe *out)
 {
     memset(out, 0, sizeof(*out));
     const char *dir = fresh_dir(name);
@@ -2541,7 +2550,7 @@ static void sess_probe_run(const char *name, int npids, int pushes,
     e.new_event = EV_IO;
     e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
     e.timestamp_ns = sec + 100 * MS;
-    e.old_event = EV_LOCK;            /* non-idle, so it enters class_ns */
+    e.old_event = ev;
     e.duration_ns = SESS_ONE_NS;
     e.query_id = 0;
     for (int k = 0; k < npids; k++) {
@@ -2557,6 +2566,7 @@ static void sess_probe_run(const char *name, int npids, int pushes,
         out->sessions_ns += w->accum.sessions[i].db_time_ns;
     for (int i = 0; i < PGWT_NUM_CLASSES; i++)
         out->class_ns += w->accum.class_ns[i];
+    out->idle_ns = w->accum.idle_ns;
 
     pgwt_summary_flush(w);
     out->total_after = w->sessions_overflow_total;
@@ -2578,7 +2588,7 @@ static void test_sessions_overflow_is_reported(void)
      * (exactly 1024, which open addressing must place in full). This is the
      * SAME `sessions_overflow == 0` assertion that must go red in 14b. */
     struct sess_probe p4;
-    sess_probe_run("sess_normal", 4, 1, &p4);
+    sess_probe_run("sess_normal", 4, 1, EV_LOCK, &p4);
     CHECK(p4.opened == 1 && p4.placed == 4 && p4.records == 1 &&
           p4.class_ns == 4 * SESS_ONE_NS,
           "the 4-pid fixture RAN (open=%d placed=%d records=%llu "
@@ -2596,7 +2606,8 @@ static void test_sessions_overflow_is_reported(void)
           p4.overflow, (unsigned long long)p4.total_after);
 
     struct sess_probe pfull;
-    sess_probe_run("sess_at_bound", SUMMARY_MAX_SESSIONS, 1, &pfull);
+    sess_probe_run("sess_at_bound", SUMMARY_MAX_SESSIONS, 1, EV_LOCK,
+                   &pfull);
     CHECK(pfull.placed == SUMMARY_MAX_SESSIONS &&
           pfull.class_ns == (uint64_t)SUMMARY_MAX_SESSIONS * SESS_ONE_NS,
           "EXACTLY at the bound all %d pids are placed (%d, class_ns=%llu)",
@@ -2613,7 +2624,8 @@ static void test_sessions_overflow_is_reported(void)
 
     /* 14b. THE OVERFLOW. 1024 + 50 distinct pids in one second. */
     struct sess_probe pover;
-    sess_probe_run("sess_overflow", SUMMARY_MAX_SESSIONS + EXTRA, 1, &pover);
+    sess_probe_run("sess_overflow", SUMMARY_MAX_SESSIONS + EXTRA, 1,
+                   EV_LOCK, &pover);
     CHECK(pover.placed == SUMMARY_MAX_SESSIONS &&
           pover.class_ns ==
               (uint64_t)(SUMMARY_MAX_SESSIONS + EXTRA) * SESS_ONE_NS,
@@ -2652,7 +2664,7 @@ static void test_sessions_overflow_is_reported(void)
      * what the field means, and is a second way `> 0` is not enough. */
     struct sess_probe ptwice;
     sess_probe_run("sess_overflow_x2", SUMMARY_MAX_SESSIONS + EXTRA, 2,
-                   &ptwice);
+                   EV_LOCK, &ptwice);
     CHECK(ptwice.overflow == (uint32_t)(2 * EXTRA),
           "two pushes per pid -> %d denied LOOKUPS (got %u), not %d denied "
           "pids: the counter's unit is the same one events_overflow uses",
@@ -2661,6 +2673,133 @@ static void test_sessions_overflow_is_reported(void)
               (uint64_t)ptwice.overflow * SESS_ONE_NS,
           "...and the shortfall doubles with it (%llu ns)",
           (unsigned long long)(ptwice.class_ns - ptwice.sessions_ns));
+
+    /* 14g. THE COUNTER'S MEANING: a denial that COST sessions[] something.
+     *
+     * Found in review. The accum_event increment used to be unconditional,
+     * but every write into a session slot already excludes idle events
+     * (db_time_ns and top_wait_* by pgwt_is_idle_event, cpu_ns by
+     * `old_ev == 0`, the raw on-CPU id, which is never idle). So a slot
+     * denied to an idle-only pid loses NOTHING -- and the WARN and the
+     * control-socket metric both assert "Top Sessions sums to LESS than DB
+     * Time", which was then a false alarm on exactly the workload that trips
+     * the bound: an instance with >1024 connections is mostly backends
+     * sitting in Client:ClientRead.
+     *
+     * Reproduced before it was fixed: 1024 + 50 ClientRead-only pids gave
+     * sessions_overflow = 50 with class_ns = 0 and Sigma sessions[] = 0, a
+     * 0 ns gap against an invariant demanding 50 x 1 ms.
+     *
+     * 14g pins the choice in BOTH directions, because a guard that simply
+     * stopped counting would also pass an "idle denials are 0" assertion by
+     * never counting anything. So: idle-only must be 0 WHILE THE TABLE IS
+     * DEMONSTRABLY FULL and the idle time demonstrably arrived, and a mixed
+     * second must count the non-idle denials and only those. */
+    struct sess_probe pidle;
+    sess_probe_run("sess_idle_overflow", SUMMARY_MAX_SESSIONS + EXTRA, 1,
+                   EV_CLIENTREAD, &pidle);
+    CHECK(pidle.placed == SUMMARY_MAX_SESSIONS &&
+          pidle.idle_ns ==
+              (uint64_t)(SUMMARY_MAX_SESSIONS + EXTRA) * SESS_ONE_NS,
+          "the idle fixture really DID overflow the table and really DID "
+          "arrive: %d of %d pids placed, idle_ns=%llu (expected %llu). "
+          "Without these two the zero below is a gate that stopped counting",
+          pidle.placed, SUMMARY_MAX_SESSIONS + EXTRA,
+          (unsigned long long)pidle.idle_ns,
+          (unsigned long long)((uint64_t)(SUMMARY_MAX_SESSIONS + EXTRA) *
+                               SESS_ONE_NS));
+    CHECK(pidle.class_ns == 0 && pidle.sessions_ns == 0,
+          "...and NOTHING was lost from sessions[]: class_ns=%llu and Sigma "
+          "sessions[]=%llu are both 0, because idle time enters neither",
+          (unsigned long long)pidle.class_ns,
+          (unsigned long long)pidle.sessions_ns);
+    CHECK(pidle.overflow == 0 && pidle.total_after == 0,
+          "...so sessions_overflow is 0 (record %u, total %llu). It was %d "
+          "before this guard, and the WARN and the metric it fires both "
+          "assert a DB-time shortfall that does not exist -- a false alarm on "
+          "the one workload that reaches the bound",
+          pidle.overflow, (unsigned long long)pidle.total_after, EXTRA);
+
+    /* 14g-ii. THE MIXED SECOND, which is what a real >1024-connection
+     * instance looks like: the table filled by working backends, then both
+     * idle and non-idle pids denied in the same second. The count must be the
+     * non-idle denials and ONLY those -- this is the assertion a guard that
+     * stopped counting altogether cannot pass. */
+    {
+        const int IDLE_DENIED = 50, LOAD_DENIED = 30;
+        const char *dir = fresh_dir("sess_mixed");
+        struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+        CHECK(w != NULL && pgwt_summary_writer_init(w, dir, 24, NULL) == 0,
+              "mixed-fixture writer opens");
+        if (w) {
+            uint64_t sec = mono_origin();
+            struct pgwt_trace_event e;
+            memset(&e, 0, sizeof(e));
+            e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+            e.timestamp_ns = sec + 100 * MS;
+            e.duration_ns = SESS_ONE_NS;
+            e.query_id = 0;
+            /* fill the table with non-idle backends */
+            e.old_event = EV_LOCK;
+            for (int k = 0; k < SUMMARY_MAX_SESSIONS; k++) {
+                e.pid = (uint32_t)(9000 + k);
+                pgwt_summary_push_event(w, &e, 0, e.old_event);
+            }
+            CHECK(w->accum.num_sessions == SUMMARY_MAX_SESSIONS &&
+                  w->accum.sessions_overflow == 0,
+                  "the table is full with nothing denied yet (%d placed, "
+                  "overflow %u)", w->accum.num_sessions,
+                  w->accum.sessions_overflow);
+            /* now deny: idle pids first, then non-idle ones */
+            e.old_event = EV_CLIENTREAD;
+            for (int k = 0; k < IDLE_DENIED; k++) {
+                e.pid = (uint32_t)(20000 + k);
+                pgwt_summary_push_event(w, &e, 0, e.old_event);
+            }
+            CHECK(w->accum.sessions_overflow == 0,
+                  "%d IDLE pids denied a slot add nothing to the counter "
+                  "(%u), because a slot would have given them nothing",
+                  IDLE_DENIED, w->accum.sessions_overflow);
+            e.old_event = EV_LOCK;
+            for (int k = 0; k < LOAD_DENIED; k++) {
+                e.pid = (uint32_t)(30000 + k);
+                pgwt_summary_push_event(w, &e, 0, e.old_event);
+            }
+            CHECK(w->accum.sessions_overflow == (uint32_t)LOAD_DENIED,
+                  "...and the %d NON-IDLE pids denied in the SAME second are "
+                  "counted, exactly (%u). A guard that merely stopped "
+                  "counting fails here; the idle zero above alone would not "
+                  "have caught it",
+                  LOAD_DENIED, w->accum.sessions_overflow);
+
+            uint64_t sess_ns = 0, cls_ns = 0;
+            for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
+                sess_ns += w->accum.sessions[i].db_time_ns;
+            for (int i = 0; i < PGWT_NUM_CLASSES; i++)
+                cls_ns += w->accum.class_ns[i];
+            CHECK(cls_ns - sess_ns ==
+                      (uint64_t)w->accum.sessions_overflow * SESS_ONE_NS,
+                  "...and the counter still accounts for the WHOLE DB-time "
+                  "shortfall in a second that also dropped idle pids: "
+                  "class_ns - Sigma sessions[] = %llu ns = %u x 1 ms, with "
+                  "the %d idle drops contributing to neither side",
+                  (unsigned long long)(cls_ns - sess_ns),
+                  w->accum.sessions_overflow, IDLE_DENIED);
+            CHECK(w->accum.idle_ns == (uint64_t)IDLE_DENIED * SESS_ONE_NS,
+                  "...while the exact idle scalar still carries every denied "
+                  "idle pid's %d ms (%llu ns): their time is not lost, it was "
+                  "never sessions[] data",
+                  IDLE_DENIED, (unsigned long long)w->accum.idle_ns);
+
+            pgwt_summary_flush(w);
+            CHECK(w->sessions_overflow_total == (uint64_t)LOAD_DENIED,
+                  "...and only those %d reach the writer total (%llu)",
+                  LOAD_DENIED, (unsigned long long)w->sessions_overflow_total);
+            pgwt_summary_close(w);
+            pgwt_summary_destroy(w);
+            free(w);
+        }
+    }
 
     /* 14d. THE ROLL-UP IS NOT DOUBLE-COUNTED across a failed flush and its
      * retry -- the identical hazard section 11 pins for events_overflow. A
@@ -2723,6 +2862,16 @@ static void test_sessions_overflow_is_reported(void)
      * decode SUCCEEDS and the window is then served and labelled exact. A
      * payload with 1024 + 8 session entries must decode, drop 8, and SAY so.
      *
+     * AND THE COUNTER ALONE IS NOT "SAYING SO", which the first cut of this
+     * change claimed. Found in review: acc->sessions_overflow is not
+     * serialized, no production code reads it, and pgwt-server instantiates
+     * no summary_writer -- so the roll-up's only consumer (control.c's
+     * metrics reply) does not exist in the process that decodes blocks. The
+     * drop site therefore emits a one-per-process WARN, and this section
+     * asserts the WARN, not just the field. The one-shot is asserted too: a
+     * reader walking a corrupt FILE must not emit one line per second of the
+     * window.
+     *
      * The payload is built by hand rather than serialized, for the same
      * reason section 9 builds its old-layout bytes by hand: the writer
      * cannot produce this record. Layout for PGWT_SUMMARY_VERSION:
@@ -2757,8 +2906,55 @@ static void test_sessions_overflow_is_reported(void)
             back->num_events   = 0;
             back->num_sessions = NSESS;   /* what the corrupt header claims */
             back->num_queries  = 0;
-            int rc = pgwt_summary_deserialize(buf, sz, back,
+
+            /* Capture the reader's stderr across TWO forged decodes and
+             * COUNT the WARN, rather than splitting the capture at an offset.
+             *
+             * The first cut of this case did split it, with ftell() after the
+             * first decode, and that assertion was VACUOUS: the mutant that
+             * makes the WARN fire per dropped entry emits 16 lines, the
+             * capture overran the 2 KB buffer, `split > bytes_read` skipped
+             * the comparison, and the one-shot check passed on the mutant it
+             * existed to catch. Counting occurrences over the whole window has
+             * no offset to get wrong, and the buffer is checked for
+             * truncation below so a flood REFUSES instead of approving. */
+            char errlog[700], cap_txt[8192] = "";
+            size_t cap_len = 0;
+            const char *WARN_MARK = "more sessions than the table holds";
+            snprintf(errlog, sizeof(errlog), "%s/sess_reader_warn.txt",
+                     g_base);
+            int rc = -1, rc2 = -1, truncated = 1;
+            fflush(stderr);
+            int saved_err = dup(STDERR_FILENO);
+            FILE *cap = fopen(errlog, "w+");
+            CHECK(saved_err >= 0 && cap != NULL,
+                  "captured the reader's stderr (fd=%d)", saved_err);
+            if (saved_err >= 0 && cap) {
+                dup2(fileno(cap), STDERR_FILENO);
+                rc = pgwt_summary_deserialize(buf, sz, back,
                                               PGWT_SUMMARY_VERSION);
+                /* A SECOND forged decode inside the SAME window. */
+                struct pgwt_summary_accum *again = calloc(1, sizeof(*again));
+                if (again) {
+                    again->num_sessions = NSESS;
+                    rc2 = pgwt_summary_deserialize(buf, sz, again,
+                                                   PGWT_SUMMARY_VERSION);
+                    free(again);
+                }
+                fflush(stderr);
+                dup2(saved_err, STDERR_FILENO);
+                close(saved_err);
+                rewind(cap);
+                cap_len = fread(cap_txt, 1, sizeof(cap_txt) - 1, cap);
+                cap_txt[cap_len] = 0;
+                truncated = (cap_len >= sizeof(cap_txt) - 1);
+                fclose(cap);
+            }
+            int warn_lines = 0;
+            for (const char *q = cap_txt;
+                 (q = strstr(q, WARN_MARK)) != NULL; q += 1)
+                warn_lines++;
+
             uint64_t got = 0;
             for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
                 got += back->sessions[i].db_time_ns;
@@ -2773,9 +2969,28 @@ static void test_sessions_overflow_is_reported(void)
                   back->num_sessions, NSESS, (unsigned long long)got,
                   (unsigned long long)cls);
             CHECK(back->sessions_overflow == (uint32_t)OVER,
-                  "...and the READER counted EXACTLY the %d entries it "
-                  "dropped (%u): the silent decode is no longer silent",
+                  "...the READER counted EXACTLY the %d entries it dropped "
+                  "(%u) -- in a field that reaches nobody on this side, which "
+                  "is why the WARN below is the part that makes the decode "
+                  "non-silent",
                   OVER, back->sessions_overflow);
+            CHECK(!truncated,
+                  "the stderr capture is COMPLETE (%zu of %zu bytes) -- a "
+                  "full buffer must refuse, because that is how the earlier "
+                  "version of the one-shot check below passed on a WARN that "
+                  "fired 16 times", cap_len, sizeof(cap_txt) - 1);
+            CHECK(rc2 == 0,
+                  "...the second forged decode also succeeded (rc=%d), so "
+                  "both decodes really did reach the drop branch", rc2);
+            CHECK(warn_lines == 1,
+                  "...and the drop is REPORTED on stderr EXACTLY ONCE across "
+                  "both decodes and all %d dropped entries (%d lines). "
+                  "0 means the read side is still silent -- the counter it "
+                  "sets reaches nobody on this side; >1 means a corrupt FILE "
+                  "would emit a line per entry per second and bury the "
+                  "operator. Capture: %.160s",
+                  2 * OVER, warn_lines,
+                  cap_txt[0] ? cap_txt : "<nothing at all>");
             CHECK(back->class_ns[PGWT_CLASS_LOCK] - got ==
                       (uint64_t)back->sessions_overflow * SESS_ONE_NS,
                   "...matching the shortfall against the class_ns the SAME "
@@ -2797,7 +3012,7 @@ static void test_sessions_overflow_is_reported(void)
      * and a written record, which this case shows is a distinguishable
      * state. */
     struct sess_probe p0;
-    sess_probe_run("sess_empty", 0, 1, &p0);
+    sess_probe_run("sess_empty", 0, 1, EV_LOCK, &p0);
     CHECK(p0.opened == 0 && p0.class_ns == 0 && p0.records == 0 &&
           p0.sessions_ns == 0,
           "an empty fixture is RECOGNISABLY empty (open=%d class_ns=%llu "

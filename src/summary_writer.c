@@ -501,11 +501,45 @@ static int accum_event(struct pgwt_summary_accum *acc,
 
     /* Per-session stats */
     struct pgwt_summary_session *ss = find_or_insert_session(acc, evt->pid);
-    if (!ss) {
+    if (!ss && !ev_idle) {
         /* #555: the mirror of events_overflow above. A full sessions[] used
          * to drop this pid's time with no signal at all, while class_ns and
          * idle_ns kept it -- so Top Sessions summed to LESS than Overview's
-         * DB Time and a reader could not tell the bound from a bug. */
+         * DB Time and a reader could not tell the bound from a bug.
+         *
+         * `&& !ev_idle` IS THE MEANING OF THIS COUNTER, not a micro
+         * optimisation: it counts denials that COST sessions[] something, and
+         * an idle event costs it nothing. Look at the block below -- every
+         * one of its three writes is already closed to idle events:
+         * db_time_ns by `!pgwt_is_idle_event(old_ev)`, top_wait_* by the
+         * same, and cpu_ns by `old_ev == 0`, which is the RAW on-CPU id and
+         * is never idle (the idle on-CPU relabel is PGWT_WEI_NONCMD_CPU, an
+         * Activity id). So a slot granted to an idle-only pid would receive
+         * nothing, and a slot DENIED to one loses nothing.
+         *
+         * Counting it anyway was a FALSE ALARM on exactly the workload that
+         * trips the bound. An instance with >1024 connections is dominated by
+         * backends sitting in Client:ClientRead; with the unconditional
+         * count, 1074 idle-only pids gave sessions_overflow=50 while
+         * class_ns and Sigma sessions[] were both 0 -- the WARN below and the
+         * control-socket metric both assert a DB-time shortfall, and there
+         * was none. Section 14g of tests/test_idle_summary.c pins the choice
+         * in both directions.
+         *
+         * This also makes the three sites agree: accum_open_credit's
+         * equivalent already sits inside `if (!ev_idle)`, and a session entry
+         * dropped by pgwt_summary_deserialize is non-idle by construction
+         * (sessions[].db_time_ns has excluded idle since v3). It is NOT the
+         * same rule as events_overflow, deliberately: events[] DOES carry
+         * idle events -- it is where every read path gets the Idle breakdown
+         * from -- so an idle denial there really does lose data. Both
+         * counters count what was lost; the tables differ in what they hold.
+         *
+         * NOT guarded on `tns > 0`: a non-idle denial whose time was already
+         * credited to earlier seconds still loses this record's top_wait
+         * candidacy. The counter answers "was session data dropped"; the lost
+         * NANOSECONDS are the separate, exact quantity
+         * class_ns - Sigma sessions[].db_time_ns. */
         acc->sessions_overflow++;
         static int warned_sessions_overflow;
         if (!warned_sessions_overflow) {
@@ -811,8 +845,34 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
              * from a corrupt or forged block (pgwt_summary_serialize emits at
              * most SUMMARY_MAX_SESSIONS entries), which is exactly the case
              * where silence is worst: the decode SUCCEEDS and the window is
-             * then labelled exact. */
+             * then labelled exact.
+             *
+             * THE COUNTER ALONE IS NOT ENOUGH HERE, and saying otherwise was
+             * an overstatement in the first cut of this change. acc->
+             * sessions_overflow is not serialized and NOTHING on the read
+             * side consumes it: pgwt-server instantiates no summary_writer,
+             * so the only consumer of the roll-up (control.c's metrics reply)
+             * does not exist in the process that runs this function. Without
+             * the line below, a forged block claiming 2000 sessions decodes
+             * rc=0, is served labelled exact, 976 entries short, and nothing
+             * anywhere says so.
+             *
+             * One per process, not one per block: a reader walking a corrupt
+             * FILE would otherwise emit this per second of the window, which
+             * buries the operator rather than informing them -- the same
+             * reason accum_event's two warnings are one-shot. */
             acc->sessions_overflow++;
+            static int warned_reader_sessions_overflow;
+            if (!warned_reader_sessions_overflow) {
+                warned_reader_sessions_overflow = 1;
+                fprintf(stderr, "WARN: summary record claims more sessions "
+                        "than the table holds (%d slots) -- entries are being "
+                        "DROPPED while the block still decodes, so Top "
+                        "Sessions for the affected seconds is short and the "
+                        "window would otherwise look complete. The file is "
+                        "corrupt or was written by a build with a larger "
+                        "bound\n", SUMMARY_MAX_SESSIONS);
+            }
             p += 28;
             continue;
         }
