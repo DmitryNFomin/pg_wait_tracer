@@ -1758,6 +1758,17 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
     struct top_event_accum *ht = calloc(EVENT_HT_SIZE, sizeof(*ht));
     int num_entries = 0;
     uint64_t db_time_ns = 0;
+    /* #553: the measured-CPU split of the CPU* row. offcpu_ns is the wall of
+     * the on-CPU gaps that was NOT on a CPU (runqueue/throttle) -- the same
+     * quantity pgwt_compute_time_model reports as Off-CPU*, accumulated here
+     * so the time this row no longer claims is still reported instead of
+     * silently dropped. has_measured_cpu says which of the two things the
+     * CPU* row IS: a measurement (1) or the unsplit gap wall (0). */
+    uint64_t cpu_offcpu_ns = 0;
+    /* Double, like time_model's: the overshoot is the fractional difference
+     * of two doubles, and rounding it per record would hide a sub-ns skew. */
+    double cpu_clamped_ns = 0.0;
+    int has_measured_cpu = 0;
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
@@ -1798,7 +1809,67 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
             ht[h].event_id = ev->old_event;
             num_entries++;
         }
-        ht[h].total_ns += clip_u;
+        /* #553: the CPU* row carries the MEASURED on-CPU nanoseconds, not the
+         * on-CPU interval's wall. Every WAIT row keeps wall -- its wall IS the
+         * wait. The CPU row is the one place where the two differ, because the
+         * gap between two waits is "on a core" only for the part
+         * sum_exec_runtime actually advanced; the rest is runqueue time, which
+         * pgwt_compute_time_model reports as Off-CPU*. Carrying wall here made
+         * this table's CPU* exceed the same invocation's time_model CPU* by
+         * exactly that off-CPU amount (#531 is the same defect on the CLI
+         * replay path, src/event_reader.c).
+         *
+         * Arithmetic is the time model's, record for record: the measurement
+         * is split by the in-window FRACTION (not taken whole -- a straddling
+         * gap contributes only the CPU that happened inside the window) and
+         * clamped to the clipped wall, since sum_exec_runtime is only current
+         * at a tick or a context switch and a leaked sub-ms burst can exceed
+         * its own interval. UNKNOWN (sampled / v2 / no CPU capability) keeps
+         * gap-inference: the whole gap is CPU*, and there is no off-CPU
+         * residual to report for it -- which is what has_measured_cpu == 0
+         * tells the caller.
+         *
+         * Idle rows are untouched, including an idle interval's own cpu_ns:
+         * the time model skips such an interval whole (ClientRead precedent,
+         * tests/test_idle_accounting.c), and its time is not in DB Time here
+         * either. That falls out of the CLASS selector below and needs no
+         * `!pgwt_is_idle_event()` conjunct of its own: PGWT_CLASS_CPU is
+         * reachable only for event_id 0 (pgwt_wait_class_index special-cases
+         * it; every other id is classified by its class byte), and 0 is not
+         * an idle event under any rule — pgwt_is_idle_event covers the
+         * Activity class, Client:ClientRead and the Timeout pacing ids. The
+         * conjunct this replaces could not change the answer for ANY input,
+         * so no test could have failed when it was dropped. What makes it
+         * dead is a property of two OTHER functions, so that property is
+         * asserted directly, over the whole idle universe, in
+         * tests/test_window_clip.c section 11j — the one check that goes red
+         * if a future idle event is ever put in the CPU class. */
+        uint64_t row_ns = clip_u;
+        if (pgwt_wait_class_index(ev->old_event) == PGWT_CLASS_CPU &&
+            ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+            double frac = event_window_frac(clip_u, ev->duration_ns);
+            double m = (double)ev->cpu_ns * frac;
+            /* Skew self-check, same name and meaning as time_model's: the
+             * excess is CLAMPED away (it is not time that happened in this
+             * gap) but it is COUNTED, so a measurement that overshoots its
+             * own wall is visible instead of silently absorbed. */
+            if (m > (double)clip_u) {
+                cpu_clamped_ns += m - (double)clip_u;
+                m = (double)clip_u;
+            }
+            /* This accumulator is integer ns (the row totals are), so the
+             * split is ROUNDED, not truncated -- truncation would bias every
+             * straddling record's sub-ns remainder into off-CPU. m <= clip_u
+             * holds above, so the rounded value cannot exceed clip_u either,
+             * and `clip_u - row_ns` below stays non-negative. */
+            row_ns = (uint64_t)(m + 0.5);
+            cpu_offcpu_ns += clip_u - row_ns;
+            /* A measured ZERO is a signal (the gap was all runqueue); zero
+             * overlap is absence and must not claim a measurement. */
+            if (frac > 0.0)
+                has_measured_cpu = 1;
+        }
+        ht[h].total_ns += row_ns;
 
         /* #424: everything from here down is INSTANT-selected -- one
          * completed observation. A record admitted by overlap that closes
@@ -1881,6 +1952,13 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
     out->rows        = rows;
     out->num_rows    = nr;
     out->db_time_ms  = db_time_ms;
+    /* #553: DB Time is unchanged (wall, idle excluded), so the %DB column now
+     * sums to 100% MINUS off-CPU rather than to a flat 100% that included
+     * runqueue time inside CPU*. offcpu_ms is the missing share, reported
+     * rather than dropped. */
+    out->offcpu_ms        = (double)cpu_offcpu_ns / 1e6;
+    out->cpu_clamped_ms   = cpu_clamped_ns / 1e6;
+    out->has_measured_cpu = has_measured_cpu;
 }
 
 /* ── Top Sessions ─────────────────────────────────────────── */
@@ -3046,6 +3124,20 @@ void pgwt_compute_top_events_from_summaries(
     out->rows       = rows;
     out->num_rows   = nr;
     out->db_time_ms = db_time_ms;
+    /* #553: has_measured_cpu / offcpu_ms stay 0 (memset above) ON PURPOSE.
+     * The per-second summary's events[] table carries WALL for event 0
+     * (summary_writer.c: `se->total_ns += tns`), so this routing cannot
+     * report a measured CPU* row -- the record-level cpu_measured_ns scalars
+     * that pgwt_compute_time_model_from_summaries uses are window totals, not
+     * per-event ones, and there is no per-QUERY measurement in the file at
+     * all. 0 is therefore the honest answer for "is the CPU* row below a
+     * measurement": no. Bringing this routing onto the measurement needs the
+     * writer's per-event table to carry it, which is a format change and a
+     * separate issue -- decided: summary v9, together with #563's per-record
+     * field, so every retained trace is recomputed once rather than twice.
+     * The contract that change must satisfy is pinned as an identity (raw
+     * CPU* + raw off-CPU == summary CPU*, each side saying which quantity it
+     * is) in tests/test_agg_raw_crosscheck.c section 6f. */
 }
 
 /* ── Top Sessions from summaries ──────────────────────────── */
