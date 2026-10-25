@@ -23,8 +23,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestRefusalReasonPicksTheServersOwnRefusal(t *testing.T) {
@@ -247,5 +253,100 @@ func TestBridgeAttachesTheRefusalReasonToTransportErrors(t *testing.T) {
 	}
 	if !strings.Contains(env, `"transport":true`) {
 		t.Errorf("the transport flag was lost: %s", env)
+	}
+}
+
+// THE WIRING, not the accessors. Every case above writes into the tap
+// directly, so a build that never connected cmd.Stderr to the tap would
+// pass all of them -- the exact false negative #351 is about. This case
+// spawns a REAL process that refuses on stderr and exits, the way
+// pgwt-server does when the trace directory holds nothing, and reads the
+// reason back out of a browser WebSocket response.
+//
+// No pgwt-server binary needed (so it runs on a developer machine, where the
+// package's other integration tests skip): /bin/sh reproduces the only two
+// properties that matter -- a reason on stderr, then exit.
+func TestBridgeSurfacesARealUpstreamRefusalToTheBrowser(t *testing.T) {
+	const want = "pgwt-server: no trace files found in /tmp/laneD-fake"
+	b := NewBridge(func() *exec.Cmd {
+		return exec.Command("/bin/sh", "-c",
+			"echo '"+want+"' >&2; exit 1")
+	}, "")
+	if err := b.Start(); err != nil {
+		t.Fatalf("bridge start: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(b.HandleWebSocket))
+	t.Cleanup(func() { srv.Close(); b.Close() })
+
+	// Wait for the first incarnation's stderr to be tapped. Bounded, and a
+	// timeout FAILS: "I could not look" is how this defect survived.
+	deadline := time.Now().Add(10 * time.Second)
+	for b.refusalReason() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("the upstream's stderr refusal never reached the bridge's " +
+				"tap: cmd.Stderr is not wired to it")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := b.refusalReason(); got != want {
+		t.Fatalf("refusalReason() = %q, want %q", got, want)
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"id":1,"cmd":"info"}`)); err != nil {
+		t.Fatalf("ws write: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("ws read: %v", err)
+	}
+	var env struct {
+		Error     string `json:"error"`
+		Transport bool   `json:"transport"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("bad envelope %q: %v", raw, err)
+	}
+	if !env.Transport || env.Error == "" {
+		t.Errorf("expected a transport error envelope, got %s", raw)
+	}
+	if env.Reason != want {
+		t.Errorf("the browser got no reason for the refusal: %s", raw)
+	}
+}
+
+// The OTHER half of the wiring, and the one no direct Reset() test can
+// reach: spawn() must clear the tap, so a reason never survives into a
+// healthy incarnation and explains a failure that is already over. Asserted
+// through the real spawn path with a poisoned tap and an upstream that says
+// nothing.
+func TestBridgeSpawnClearsAPreviousIncarnationsReason(t *testing.T) {
+	b := NewBridge(func() *exec.Cmd {
+		// Stays alive reading stdin, writes nothing anywhere.
+		return exec.Command("/bin/sh", "-c", "cat >/dev/null")
+	}, "")
+	if _, err := io.WriteString(b.stderrTap(),
+		"pgwt-server: no trace files found in /tmp/stale\n"); err != nil {
+		t.Fatal(err)
+	}
+	if b.refusalReason() == "" {
+		t.Fatal("precondition: the stale reason must be present before Start()")
+	}
+	if err := b.Start(); err != nil {
+		t.Fatalf("bridge start: %v", err)
+	}
+	t.Cleanup(b.Close)
+	// spawn() runs synchronously inside Start(), so this is deterministic.
+	if got := b.refusalReason(); got != "" {
+		t.Errorf("spawn() did not clear the tap: a healthy upstream still "+
+			"reports %q", got)
 	}
 }
