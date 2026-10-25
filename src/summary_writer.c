@@ -501,6 +501,23 @@ static int accum_event(struct pgwt_summary_accum *acc,
 
     /* Per-session stats */
     struct pgwt_summary_session *ss = find_or_insert_session(acc, evt->pid);
+    if (!ss) {
+        /* #555: the mirror of events_overflow above. A full sessions[] used
+         * to drop this pid's time with no signal at all, while class_ns and
+         * idle_ns kept it -- so Top Sessions summed to LESS than Overview's
+         * DB Time and a reader could not tell the bound from a bug. */
+        acc->sessions_overflow++;
+        static int warned_sessions_overflow;
+        if (!warned_sessions_overflow) {
+            warned_sessions_overflow = 1;
+            fprintf(stderr, "WARN: summary per-session table full (%d slots) "
+                    "-- Top Sessions for affected seconds is incomplete and "
+                    "sums to LESS than DB Time; the time model and Idle "
+                    "totals stay exact (summary_sessions_overflow_total in "
+                    "the control socket's metrics)\n",
+                    SUMMARY_MAX_SESSIONS);
+        }
+    }
     if (ss) {
         if (!pgwt_is_idle_event(old_ev))
             ss->db_time_ns += tns;
@@ -787,7 +804,18 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
         memcpy(&pid, p, 4);  p += 4;
 
         struct pgwt_summary_session *s = find_or_insert_session(acc, pid);
-        if (!s) { p += 28; continue; }
+        if (!s) {
+            /* #555: a record whose header claims more distinct pids than the
+             * table holds loses this entry's whole db_time_ns, while the
+             * class_ns this function already decoded keeps it. Reachable only
+             * from a corrupt or forged block (pgwt_summary_serialize emits at
+             * most SUMMARY_MAX_SESSIONS entries), which is exactly the case
+             * where silence is worst: the decode SUCCEEDS and the window is
+             * then labelled exact. */
+            acc->sessions_overflow++;
+            p += 28;
+            continue;
+        }
 
         memcpy(&s->db_time_ns, p, 8);    p += 8;
         memcpy(&s->cpu_ns, p, 8);        p += 8;
@@ -1308,6 +1336,13 @@ static int flush_accum(struct pgwt_summary_writer *w)
      * is not a complete total, and flush_failures_total is the signal for the
      * seconds it cannot speak for. The two must be read together. */
     w->events_overflow_total += acc->events_overflow;
+    /* #555: the same roll-up for the per-session table, in the same place and
+     * for the same two reasons -- after every early return so a failed
+     * attempt and its retry count the second once, and before accum_close()
+     * clears the accumulator. For sessions this roll-up is not a convenience:
+     * the per-record field is NOT serialized, so this is the only place the
+     * count survives at all. */
+    w->sessions_overflow_total += acc->sessions_overflow;
     /* This second is now on disk and immutable (#277). */
     w->last_flushed_second_mono_ns = flushed_second_mono_ns;
     w->have_flushed_second = true;
@@ -1407,6 +1442,14 @@ static void accum_open_credit(struct pgwt_summary_accum *acc, uint32_t pid,
             ss->db_time_ns += ns;
             if (we == 0)
                 ss->cpu_ns += ns;
+        } else {
+            /* #555: the open-interval credit drops this pid's share of the
+             * second exactly as accum_event drops a closing record's, and it
+             * is the SAME shortfall against class_ns above -- so it is
+             * counted in the same place. No WARN here: accum_event already
+             * emits the one-per-process line and this path cannot be reached
+             * without the table being full there too. */
+            acc->sessions_overflow++;
         }
     }
 }

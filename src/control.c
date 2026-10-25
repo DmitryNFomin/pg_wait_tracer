@@ -409,6 +409,16 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * summary_flush_failures_total rather than as a complete total. */
     cjson_add_uint64(root, "summary_events_overflow_total",
                      d->summary_writer ? d->summary_writer->events_overflow_total : 0);
+    /* #555: pids that could not claim a per-second sessions[] slot (1024 per
+     * second). Nonzero means Top Sessions for those seconds is incomplete and
+     * sums to LESS than DB Time, while the time model and Idle stay exact --
+     * the one discrepancy a reader would otherwise have to attribute to
+     * broken accounting (on the raw path the two totals agree to the last
+     * bit, so a gap on the summary path IS this bound). Same reading rule as
+     * summary_events_overflow_total: WRITTEN seconds only, so pair it with
+     * summary_flush_failures_total rather than treating it as complete. */
+    cjson_add_uint64(root, "summary_sessions_overflow_total",
+                     d->summary_writer ? d->summary_writer->sessions_overflow_total : 0);
     /* #277: events that arrived after their second had already been written
      * and were therefore counted in the NEXT second instead. Counts are
      * conserved either way; a persistently nonzero rate means ticks are

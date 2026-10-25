@@ -690,6 +690,32 @@ struct pgwt_summary_accum {
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];
     int num_sessions;
+    /* #555: sessions[] could not take an entry because all
+     * SUMMARY_MAX_SESSIONS slots were occupied, so that pid's time was
+     * DROPPED from sessions[].db_time_ns while class_ns and idle_ns kept it.
+     * The visible symptom is Sigma Top Sessions < Overview's DB Time, which a
+     * reader cannot tell apart from a broken accounting -- measured on the
+     * RAW path the two agree to the last bit (2,495,784.951108 ms either way
+     * over an 1851 s / 4.3M-event trace), so on the summary path any such gap
+     * IS this bound and nothing said so. This is that signal, the exact
+     * counterpart of events_overflow above.
+     *
+     * COUNTS DENIED LOOKUPS, not nanoseconds: one per push whose pid could
+     * not claim a slot, the same unit events_overflow uses. A denial for a
+     * zero-duration interval is still counted (events_overflow does the
+     * same) -- the counter answers "was the table full", and the lost
+     * nanoseconds are recoverable as class_ns - Sigma sessions[].db_time_ns.
+     *
+     * NOT SERIALIZED, deliberately. events_overflow is in the on-disk record
+     * trailer; adding a field there is a FORMAT change, which in this file
+     * means a PGWT_SUMMARY_VERSION bump and therefore a raw recompute for
+     * every capture already on disk (see the version notes above). That is an
+     * owner-scope call, not a side effect of adding a counter. So the roll-up
+     * (sessions_overflow_total) and the one-time WARN carry the signal, and a
+     * reader cannot yet attribute it to INDIVIDUAL seconds. The field is also
+     * set by pgwt_summary_deserialize when a record claims more sessions than
+     * the table can hold, so the read side refuses to drop silently too. */
+    uint32_t sessions_overflow;
 
     /* Per-query hash table (open addressing) */
     struct pgwt_summary_query queries[SUMMARY_MAX_QUERIES];
@@ -876,6 +902,14 @@ struct pgwt_summary_writer {
     /* Σ of every record's events_overflow, so the control socket can report
      * one number instead of a reader having to sum the blocks. */
     uint64_t      events_overflow_total;
+    /* #555: Σ of every WRITTEN record's sessions_overflow. Read it exactly
+     * the way events_overflow_total is read: WRITTEN seconds only, so a
+     * second lost to a failed rotation or close never reaches it and
+     * flush_failures_total is the signal for the seconds it cannot speak
+     * for. Unlike events_overflow_total this is the ONLY place the count
+     * survives the flush -- the per-record field is not on disk (see
+     * pgwt_summary_accum::sessions_overflow). */
+    uint64_t      sessions_overflow_total;
     uint64_t      total_records_written;
     uint64_t      total_bytes_written;
     /* v6 (#315/#376): records dropped because their pid is an io_worker, and
