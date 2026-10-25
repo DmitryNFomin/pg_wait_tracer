@@ -231,6 +231,13 @@ test_exec_sites_nopie
 test_replay_fidelity
 test_sampled_overhead_gate.py
 test_data_query_text_context.py
+# #553's other surface: `pgwt-server --dump`'s Top Events table printed the
+# measured CPU* row but not the off-CPU remainder, so its "% DB" column
+# summed to 60% on a measured capture while the SAME dump's Time Model
+# section printed that 40% as its own row. Needs ../pgwt-server and
+# gen_test_traces, exactly like test_data_query_text_context.py above.
+test_dump_report.py
+test_build_version.py
 test_ui_live_smoke_lib.py
 test_ui_live_smoke_footage.py
 test_ui_live_smoke_failure.py
@@ -252,6 +259,7 @@ test_mock_backend_activity_fixture.py
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_rehearsal_verdict_hardening.py
+test_harness_ownership.py
 test_run_all_tier_skip.sh
 test_rehearsal_workload_lifetime.py
 # #384: the per-frame panel-data probe (--diag-data) is reached FROM the
@@ -946,3 +954,7 @@ test_trace_perms
 
 # Real replay-over-UI comparator: empty fixture, unit/value/count REDs.
 test_replay_ui.py
+
+# #567: box-check.sh's up-rsync must never send tests/*.o (or *.a/*.so) to
+# the Linux box, and a stale object already there must not survive either.
+test_box_check_object_excludes.sh

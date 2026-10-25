@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """test_summary_raw_parity.py — THE SUMMARY-vs-RAW PARITY GATE.
 
-The same capture, the same unfiltered window, answered BOTH ways, asserted to
-agree. See tests/summary_raw_parity_lib.py's header for what is compared and
-for every refuse-rather-than-approve rule; this file is the live half.
+The same capture, the same unfiltered window, answered through fresh-summary,
+missing-summary raw, and stale-version raw arms. See the library for what is
+compared and for every refuse-rather-than-approve rule; this is the live half.
 
 HOW THE RAW REFERENCE IS OBTAINED, AND WHY THIS WAY
 ─────────────────────────────────────────────────────────────────────────────
@@ -28,6 +28,19 @@ files are deleted. src/server.c then refuses the summary path for that window
 #402/#403 fix) and answers from raw events. The two dirs hold byte-identical
 trace files, so the raw side's inputs are exactly the summary side's inputs.
 
+A third copy retains its summaries but stamps every file header to
+PGWT_SUMMARY_VERSION - 1, following test_open_cpu_accounting.c's set_version.
+Its long-window route must be raw, with the ACCOUNTING-VERSION PREFLIGHT INFO
+marker (never the no-file marker), and EVERY compared field must equal the
+SUMMARY-LESS RAW REFERENCE -- exactly, with no expected-divergence table and
+no holes. The version refusal puts this arm on the raw path, so the raw answer
+is the one it owes; comparing it against the fresh SUMMARY answer instead would
+re-ask arm one's question, inherit arm one's open #410/straddle divergences as
+NEW ones, and -- the part that matters -- PASS a future bug that made the
+refusal leak the summary path's numbers. The fresh-summary answer is still
+required to route to summaries, which is what proves this window was
+summary-eligible and therefore that the stamping is what forced the fallback.
+
 That premise is not assumed — it is asserted, by the PREMISE CONTROL below:
 at a 59 s window BOTH dirs take the raw path, and their answers must be
 IDENTICAL on every compared field. If deleting the summary files changed the
@@ -45,6 +58,10 @@ the server's own raw-fallback stderr markers. Same route on both sides, or an
 undeterminable route, FAILS the gate before any number is compared. Run with
 --sabotage to see that happen: both sides are pointed at the summary-less dir,
 every number then agrees perfectly, and the gate still goes red.
+--sabotage-stale-fallback injects an incomplete numeric answer after the REAL
+stale fallback and oracle have run: it zeroes only that answer's measured CPU
+scalar. Routes, preflight markers, rows and DB Time stay intact, so the new
+arm must reject it on numeric completeness rather than refusal or vacuity.
 
 WHERE THIS RUNS
 ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +76,8 @@ import glob
 import json
 import os
 import shutil
+import signal
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -68,6 +87,12 @@ from server_harness import (                                    # noqa: E402
     make_event_id, CLASS_CLIENT, CLASS_LOCK, SERVER_BIN, GEN_BIN,
 )
 import summary_raw_parity_lib as P                              # noqa: E402
+# The stale arm's detector self-test lives in the FALSE-NEGATIVE suite, which
+# `make check` runs in seconds; this file only runs in run_all.sh's
+# synthetic-data tier. One table drives both, so they cannot drift.
+from test_summary_raw_parity_lib import (                       # noqa: E402
+    run_stale_detector_selftest,
+)
 
 S = 1_000_000_000
 MS = 1_000_000
@@ -201,8 +226,13 @@ def ask(trace_dir, frm, to, stderr_path):
 #   #408 — the summary path reports has_measured_cpu=false, so it emits one
 #          `CPU*` row where raw emits `CPU (running)` + `CPU (waiting for a
 #          core)`, and cpu_ms/offcpu_ms read 0.
-#   #379 — the writer attributes a record's whole duration to the second it
-#          closes in; raw clips it to the window.
+#   #379 — FIXED and CLOSED (v8, dd93d523): the writer used to attribute a
+#          record's whole duration to the second it closed in while raw clips
+#          it to the window. No pin should point here any more.
+#   #324 — v8's deliberate residual of the above: only the DURATION is
+#          spread, so queries[] still carries a straddling record's full
+#          duration at its closing second. OPEN; this is what the eight
+#          straddle queries/* pins belong to.
 #   #319 — `top_wait` means "largest total" on raw and "longest single wait"
 #          on the summary path.
 #   #410 — the four divergences THIS gate found on its first run: max_aas
@@ -210,7 +240,7 @@ def ask(trace_dir, frm, to, stderr_path):
 #          unattributed_available (no unattributed accounting on the summary
 #          path) and io_worker_busy_pct (absent there).
 #
-# DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #379, #319 or #410
+# DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #324, #319 or #410
 # is fixed, its pinned fields start agreeing and this gate reports them as
 # `xpass ... delete this entry` and still passes. Removing those lines from
 # tests/summary_raw_parity_expected.json is the last step of that fix, not an
@@ -275,7 +305,21 @@ def issue_for(field, window):
         # The quiet zones guarantee the ONLY record straddling this window's
         # edges is the deliberate 100 s Client:ClientRead, so every remaining
         # divergence here is the whole-record-into-closing-second mechanism.
-        return 379
+        #
+        # #324, NOT #379 -- and the distinction is load-bearing. #379 (the
+        # writer charging a long record's whole duration to its closing
+        # second) IS FIXED and CLOSED: v8 spreads the duration across the
+        # seconds it covers, which is why this window's time_model/* rows now
+        # AGREE where 21 #379 pins used to sit. What remains is v8's
+        # DOCUMENTED carve-out: only the duration is spread, while queries[]
+        # stays once-at-close with the full duration because an open
+        # interval's query attribution is unresolved at credit time
+        # (src/summary_writer.c "queries[] (never credited open; see the v8
+        # note)"; dd93d523; the Queries tab raw-loads, #324 -- which is OPEN).
+        # Pointing these pins at closed #379 would arm a trap: this gate's own
+        # rule is "delete an entry the moment its issue is fixed", so the next
+        # reader would delete eight live pins and silently blind this window.
+        return 324
     return "UNEXPLAINED"
 
 
@@ -306,9 +350,35 @@ def summary_format_version():
     return "unknown"
 
 
+def set_version(trace_dir, current_version):
+    """Port the C set_version helper: validate and rewrite only file headers.
+
+    pgwt_trace_file_header is packed (event_writer.h), with uint32 magic,
+    uint16 version/flags, uint32 pg_version and two uint64 clock fields.
+    Summary blocks and all raw files remain byte-identical to the fresh copy.
+    """
+    header = struct.Struct("=IHHIQQ")
+    paths = sorted(glob.glob(os.path.join(trace_dir, "*.summary")))
+    if not paths:
+        raise RuntimeError("no summary headers to stamp stale")
+    if glob.glob(os.path.join(trace_dir, "*.summary.lz4")):
+        raise RuntimeError("fixture has archived summaries; refuse to leave "
+                           "an unstamped header")
+    for path in paths:
+        with open(path, "r+b") as f:
+            values = list(header.unpack(f.read(header.size)))
+            if values[0] != 0x53574750 or values[1] != current_version:
+                raise RuntimeError("not a current summary header: %s" % path)
+            values[1] = current_version - 1
+            f.seek(0)
+            f.write(header.pack(*values))
+    return [os.path.basename(p) for p in paths]
+
+
 def main():
     record = "--record" in sys.argv
     sabotage = "--sabotage" in sys.argv
+    sabotage_stale = "--sabotage-stale-fallback" in sys.argv
 
     tool_problems = P.require_tools([SERVER_BIN, GEN_BIN])
     if tool_problems:
@@ -318,9 +388,20 @@ def main():
               "that is a failure, not a skip) ===")
         return 1
 
+    # Before measuring a capture, prove the stale arm's detectors can still
+    # SEE. A blinded detector must not get the chance to approve a live run.
+    self_ok, self_lines = run_stale_detector_selftest()
+    if not self_ok:
+        for l in self_lines:
+            print(l)
+        print("=== test_summary_raw_parity: FAIL (the stale arm's own "
+              "detectors are blind; refusing to report on a capture) ===")
+        return 1
+
     os.makedirs(RESULT_DIR, exist_ok=True)
     sum_dir = generate_traces(build_capture())
     raw_dir = sum_dir + "_rawref"
+    stale_dir = sum_dir + "_stalever"
     shutil.copytree(sum_dir, raw_dir)
     removed = sorted(glob.glob(os.path.join(raw_dir, "*.summary*")))
     for f in removed:
@@ -338,6 +419,7 @@ def main():
 
     ok = True
     report = {"commit_fixture": "synthetic", "sabotage": sabotage,
+              "sabotage_stale_fallback": sabotage_stale,
               "summary_format_version": summary_format_version(),
               "summary_files_present": sorted(
                   os.path.basename(p) for p in glob.glob(
@@ -345,8 +427,19 @@ def main():
               "windows": {}}
     expected = load_expected()
     recorded = {}
-    lines = []
+    # The detector self-test's verdict is part of the printed log and the
+    # artifact, so a reader can see it ran rather than trusting that it did.
+    lines = list(self_lines)
+    report["stale_detector_selftest_ok"] = self_ok
+    report["stale_detector_selftest"] = self_lines
     try:
+        version = int(summary_format_version())
+        if version <= 1:
+            raise RuntimeError("summary version must have a predecessor")
+        shutil.copytree(sum_dir, stale_dir)
+        stamped = set_version(stale_dir, version)
+        report["stale_summary_version"] = version - 1
+        report["stale_summary_files"] = stamped
         for name, (frm, to) in list(WINDOWS.items()) + [CONTROL_WINDOW]:
             is_control = (name == CONTROL_WINDOW[0])
             r_ans, r_oracle, r_err = ask(
@@ -354,6 +447,14 @@ def main():
             s_ans, s_oracle, s_err = ask(
                 sum_dir_used, frm, to,
                 os.path.join(RESULT_DIR, "err_%s_sum" % name))
+            t_ans, t_oracle, t_err = ask(
+                stale_dir, frm, to,
+                os.path.join(RESULT_DIR, "err_%s_stale" % name))
+            if sabotage_stale and not is_control:
+                if t_ans["time_model"].get("cpu_ms", 0) <= 0:
+                    raise RuntimeError("stale sabotage needs nonzero measured CPU")
+                t_ans["time_model"]["cpu_ms"] = 0
+                lines.append("SABOTAGE stale fallback answer: cpu_ms=0")
             # Below the 120 s threshold the raw path is taken on length alone
             # and no fallback line is printed, so the control window's routes
             # are classified by the oracle alone (see classify_route).
@@ -405,6 +506,28 @@ def main():
                              if f.status != P.AGREE],
                 "fields_compared": len(findings),
             }
+            t_routes = {"raw": P.classify_route(
+                t_oracle, t_err, marker_expected=not is_control),
+                "summary": routes["summary"]}
+            # The stale arm's NUMERIC oracle is the summary-less raw dir, not
+            # the fresh-summary answer: the version refusal puts this arm on
+            # the raw path, so the raw answer is what it owes. s_fields is
+            # still passed, for the one thing only it can prove -- that this
+            # window routes to summaries when the headers are fresh, so the
+            # stamping is what forced the fallback. See P.stale_verdict.
+            t_ok, t_lines, t_findings = P.stale_verdict(
+                name, t_routes, P.extract_all(t_ans), s_fields, t_err,
+                version, len(stamped), is_control=is_control,
+                raw_fields=r_fields)
+            ok = ok and t_ok
+            lines.extend(t_lines)
+            report["windows"][name]["stale"] = {
+                "ok": t_ok, "routes": t_routes,
+                "fallback": P.fallback_reason(t_err),
+                "findings": [f.as_dict() for f in t_findings
+                             if f.status != P.AGREE],
+                "fields_compared": len(t_findings),
+            }
             if not is_control:
                 tbl = P.record_table(findings)
                 for field, entry in tbl.items():
@@ -413,6 +536,7 @@ def main():
     finally:
         cleanup_traces(sum_dir)
         cleanup_traces(raw_dir)
+        cleanup_traces(stale_dir)
 
     print("=== test_summary_raw_parity ===")
     for l in lines:
@@ -423,6 +547,11 @@ def main():
     print("artifact: %s" % os.path.join(RESULT_DIR, "summary.json"))
 
     if record:
+        # Recording may update the historical raw/summary pins, never excuse
+        # a broken third arm (or a failed route/premise control).
+        if not ok:
+            print("REFUSING to record: parity or stale-version proof failed")
+            return 1
         orphans = unexplained(recorded)
         if orphans:
             for w, field in orphans:
@@ -441,4 +570,17 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Includes generation and ServerHarness.start()'s initial blocking read,
+    # which a per-query timeout would miss. Missing tools already FAIL above.
+    def deadline(signum, frame):
+        raise TimeoutError("parity gate exceeded 120 seconds")
+
+    signal.signal(signal.SIGALRM, deadline)
+    signal.alarm(120)
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print("FAIL summary/raw parity: %s" % exc)
+        sys.exit(1)
+    finally:
+        signal.alarm(0)

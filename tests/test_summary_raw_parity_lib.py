@@ -28,6 +28,19 @@ and each asserts a FAILURE, never a skip:
   §12 the comparator detects each defect class on its own merits: a wrong
       number, a wrong row SET, a wrong row ORDER, a wrong top_wait name, and
       a null top_wait that is honest on both sides (which must PASS)
+  §13 issue attribution by rule, and --record's refusal to launder an
+      UNEXPLAINED divergence into "known"
+  §14 the STALE-VERSION arm (a summary file stamped with a superseded
+      accounting version must be refused AND recomputed from raw to a
+      COMPLETE answer): thirteen ways that arm could be blinded -- no oracle,
+      an oracle that leaked the summary path's numbers, four wrong/absent
+      preflight markers, a fresh side that also went raw, an undeterminable
+      route, empty answers, a dropped field, and two premise-control
+      blindings. Each must refuse CLEANLY (ok=False AND a stated reason), and
+      correct inputs must still PASS
+  §15 every pin in the TRACKED table carries the issue issue_for() assigns,
+      and none points at a closed issue -- the label is display-only to
+      compare(), so nothing else would notice it drifting
 
 Pure Python: no server, no trace files, milliseconds. Runs in `make check`
 (scripts/check.sh) and in the box/CI tier (tests/unit_tests.list), because a
@@ -43,6 +56,162 @@ import summary_raw_parity_lib as P                              # noqa: E402
 
 FAILURES = []
 CHECKS = [0]
+
+# ── §14 fixtures: the stale arm's detector cases ────────────────────────────
+#
+# These live HERE, not in tests/test_summary_raw_parity.py, because `make check`
+# runs this file in seconds while that one only runs in run_all.sh's
+# synthetic-data tier (box-check / CI Linux). A bypass case that takes a
+# 40-minute box run to show up is a bypass case nobody sees, and box slots are
+# the scarcest resource in this project. test_summary_raw_parity.py imports
+# run_stale_detector_selftest() from here for its live pre-flight, so there is
+# ONE table driving both -- not a copy that can drift.
+
+_STALE_MARKER = ("INFO: %d of %d summary file(s) covering this window are not "
+                 "summary v%d -- recomputing from raw events")
+_STALE_VER = 8
+_STALE_FILES = 1
+
+
+def stale_answer(db_time=200000.0, cpu=40044.0):
+    """A field dict shaped like a real one: non-vacuous by P's own rules
+    (DB Time, >=3 class rows, >=2 sessions, >=2 queries)."""
+    return {
+        "time_model/db_time_ms": db_time,
+        "time_model/cpu_ms": cpu,
+        "time_model/rowset": "CPU@1 | IO@1 | Lock@1",
+        "sessions/rowset": "1000 | 1001",
+        "queries/order": "100 | 101",
+    }
+
+
+def _stale_call(routes=None, stale=None, summary=None, stderr=None,
+                version=_STALE_VER, files=_STALE_FILES, raw_ref="default"):
+    err = _STALE_MARKER % (_STALE_FILES, _STALE_FILES, _STALE_VER)
+    return P.stale_verdict(
+        "selftest",
+        {"raw": P.ROUTE_RAW, "summary": P.ROUTE_SUMMARY} if routes is None
+        else routes,
+        stale_answer() if stale is None else stale,
+        stale_answer(db_time=312114.0, cpu=0.0) if summary is None else summary,
+        err if stderr is None else stderr, version, files,
+        raw_fields=(stale_answer() if raw_ref == "default" else raw_ref))
+
+
+def stale_detector_cases():
+    """(name, call, what a PASS would mean) per way the arm could be blinded.
+
+    One table, so the live pre-flight and §14 cannot disagree about what is
+    covered.
+    """
+    v, n = _STALE_VER, _STALE_FILES
+    return [
+        ("no raw oracle supplied",
+         lambda: _stale_call(raw_ref=None),
+         "the arm would fall back to some other answer as its oracle"),
+        ("stale answer leaks the SUMMARY path's numbers",
+         lambda: _stale_call(stale=stale_answer(db_time=312114.0, cpu=0.0)),
+         "a broken version preflight that served the stale file would pass"),
+        ("preflight marker absent entirely",
+         lambda: _stale_call(stderr=""),
+         "a raw answer reached by any other route would count"),
+        ("the #403 no-file marker instead of the version one",
+         lambda: _stale_call(stderr="INFO: no summary file covers this window "
+                                    "-- recomputing from raw events"),
+         "#403 (no summary written at all) would read as a version refusal"),
+        ("marker names a different file count than we stamped",
+         lambda: _stale_call(stderr=_STALE_MARKER % (0, 0, v), files=0),
+         "a window covered by zero summary files would count as proof"),
+        ("marker names a different version",
+         lambda: _stale_call(stderr=_STALE_MARKER % (n, n, v + 5)),
+         "a refusal for some other version would be accepted"),
+        ("fresh-summary side also took the raw path",
+         lambda: _stale_call(routes={"raw": P.ROUTE_RAW,
+                                     "summary": P.ROUTE_RAW}),
+         "the window was never summary-eligible, so stamping proved nothing"),
+        ("a route could not be determined",
+         lambda: _stale_call(routes={"raw": P.ROUTE_RAW,
+                                     "summary": P.ROUTE_UNKNOWN}),
+         "an undeterminable route would be treated as a good one"),
+        ("the raw oracle is empty",
+         lambda: _stale_call(raw_ref={}),
+         "an absent oracle would agree with anything"),
+        ("the version-refused answer is empty",
+         lambda: _stale_call(stale={}),
+         "an empty answer would be 'complete'"),
+        ("the version-refused answer dropped a field",
+         lambda: _stale_call(stale={k: val for k, val in stale_answer().items()
+                                    if k != "time_model/cpu_ms"}),
+         "a missing column would read as agreement"),
+        ("premise control with both routes NOT raw",
+         lambda: P.stale_verdict(
+             "selftest", {"raw": P.ROUTE_RAW, "summary": P.ROUTE_SUMMARY},
+             stale_answer(), stale_answer(), "", v, n, is_control=True,
+             raw_fields=stale_answer()),
+         "the 59 s control would not actually be on the raw path"),
+        ("premise control comparing nothing",
+         lambda: P.stale_verdict(
+             "selftest", {"raw": P.ROUTE_RAW, "summary": P.ROUTE_RAW},
+             {}, {}, "", v, n, is_control=True, raw_fields=stale_answer()),
+         "two empty answers would agree perfectly"),
+    ]
+
+
+def stale_positive_control():
+    """Correct inputs must PASS, over a non-zero number of fields.
+
+    Without this, every case above could be satisfied by a stale_verdict that
+    refuses unconditionally -- which would refuse the real run too, and
+    thirteen green REFUSALs would look like thirteen working checks.
+    """
+    ok, _lines, findings = _stale_call()
+    return ok, len(findings)
+
+
+def stale_case_refuses_cleanly(call):
+    """(ok_to_count, why). A CLEAN refusal is required: ok=False AND a stated
+    reason. An exception is NOT good enough even though the live main() turns
+    one into a failure -- 'refuses by crashing' is how a guard gets deleted as
+    redundant and the crash then turns out to rest on an unrelated detail.
+    Counting a raise as a refusal is exactly what let four of these cases stay
+    green while their own guard was reverted (see the branch's bypass log)."""
+    try:
+        ok, lines, _ = call()
+    except Exception as exc:                                  # noqa: BLE001
+        return False, "raised %r instead of returning a refusal" % (exc,)
+    if ok:
+        return False, "APPROVED -- the detector is blind"
+    if not any("FAIL" in l or any(st in l for st in P.FAIL_STATUSES)
+               for l in lines):
+        return False, "refused without saying why"
+    return True, ""
+
+
+def run_stale_detector_selftest():
+    """(ok, lines) -- the live pre-flight used by test_summary_raw_parity.py
+    before it measures a capture. Same table as §14."""
+    lines = ["--- stale-arm detector self-test ---"]
+    ok = True
+    pos_ok, nfields = stale_positive_control()
+    if not pos_ok or not nfields:
+        lines.append("  FAIL positive control: correct inputs must PASS over "
+                     "a non-zero field count (ok=%s, fields=%d); a detector "
+                     "that always refuses proves nothing" % (pos_ok, nfields))
+        ok = False
+    else:
+        lines.append("  positive control: PASS over %d fields" % nfields)
+    cases = stale_detector_cases()
+    for name, call, consequence in cases:
+        clean, why = stale_case_refuses_cleanly(call)
+        if not clean:
+            lines.append("  FAIL detector %s: %s -- %s" % (why, name,
+                                                           consequence))
+            ok = False
+    lines.append("  %d blinding cases, all refused cleanly: %s"
+                 % (len(cases), "yes" if ok else "NO"))
+    return ok, lines
+
+
 
 
 def check(cond, what):
@@ -297,8 +466,9 @@ def main():
           "§13 a CPU row field is attributed to #408")
     check(G.issue_for("sessions/row/1001/top_wait", "interior_160s") == 319,
           "§13 a top_wait field is attributed to #319")
-    check(G.issue_for("time_model/row/Client/ms", "straddle_130s") == 379,
-          "§13 a straddle-window class row is attributed to #379")
+    check(G.issue_for("time_model/row/Client/ms", "straddle_130s") == 324,
+          "§13 a straddle-window divergence is attributed to OPEN #324, "
+          "not CLOSED #379 (v8's queries[] carve-out, not a regression)")
     check(G.issue_for("aas/max_aas", "interior_160s") == 410,
           "§13 a divergence this gate found is attributed to #410")
     check(G.issue_for("time_model/row/Client/ms", "interior_160s")
@@ -311,6 +481,50 @@ def main():
           "§13 ... and does not block an attributed one")
     check(G.load_expected.__doc__ and "EMPTY" in G.load_expected.__doc__,
           "§13 a missing expected table is documented as fail-loud")
+
+    # §14 the STALE-VERSION arm's detectors. One check per way its detection
+    #     could be made unreachable, so `make check` names the specific
+    #     blinding that regressed instead of just "the self-test failed".
+    pos_ok, pos_fields = stale_positive_control()
+    check(pos_ok and pos_fields > 0,
+          "§14 positive control: correct inputs PASS over %d fields (a "
+          "detector that always refuses proves nothing)" % pos_fields)
+    for name, call, consequence in stale_detector_cases():
+        clean, why = stale_case_refuses_cleanly(call)
+        check(clean, "§14 refuses cleanly: %s%s"
+              % (name, "" if clean else " -- %s (%s)" % (why, consequence)))
+    # And the live pre-flight agrees with the per-case verdicts above, so the
+    # thing test_summary_raw_parity.py actually calls is the thing tested.
+    pre_ok, _pre_lines = run_stale_detector_selftest()
+    check(pre_ok, "§14 the live pre-flight run_stale_detector_selftest() "
+                  "passes on a healthy tree")
+
+    # §15 the TRACKED table's issue labels must match issue_for()'s rule.
+    #     compare() uses an entry's "issue" for DISPLAY only, so a stale label
+    #     is invisible to the gate -- and a label pointing at a CLOSED issue
+    #     arms a trap, because this gate's own rule is "delete an entry the
+    #     moment its issue is fixed". Eight straddle pins pointed at closed
+    #     #379 (v8's documented queries[] carve-out, not a #379 regression);
+    #     the next reader would have deleted them and blinded the window.
+    #     This check is what stops that label drifting back.
+    table = G.load_expected()
+    check(bool(table), "§15 the tracked expected-divergence table is present "
+                       "and non-empty (an empty one would make §15 vacuous)")
+    mismatched, labelled = [], 0
+    for w, tbl in sorted(table.items()):
+        for f, e in sorted(tbl.items()):
+            labelled += 1
+            want = G.issue_for(f, w)
+            if e.get("issue") != want:
+                mismatched.append("%s/%s labelled #%s, rule says #%s"
+                                  % (w, f, e.get("issue"), want))
+    check(labelled > 0 and not mismatched,
+          "§15 all %d pinned entries carry the issue issue_for() assigns%s"
+          % (labelled, "" if not mismatched else " -- " + "; ".join(mismatched)))
+    check(all(e.get("issue") != 379 for tbl in table.values()
+              for e in tbl.values()),
+          "§15 no pin points at CLOSED #379 (its fix landed in v8; a pin there "
+          "invites deletion of a live pin)")
 
     print("--- %d checks, %d failed ---" % (CHECKS[0], len(FAILURES)))
     for f in FAILURES:

@@ -19,6 +19,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
+from compare_presets import assert_compare_presets_reachable
 from demo_walk_record_lib import (Refusal, chart_change, compose, coverage, frame_indices,
                                   MOTION_LEVEL, sample_indices, save_walk, write_analysis, write_gif,
                                   young_capture_refusal)
@@ -925,11 +926,16 @@ def record(args, staging):
             for tab in smoke.lib.TABS:
                 print(f"Recording {tab}: {dwells[tab]:g}s",flush=True)
                 navigate(page,tab,smoke,capture,args.timeout,args.archived)
+                try:
+                    compare_presets = assert_compare_presets_reachable(page)
+                except AssertionError as exc:
+                    raise Refusal(2, str(exc)) from exc
                 if tab == "overview":
                     headline_crop = [[rect(page,"#aas-chart-container")],
                                      table_crop(page,["name","ms","pct","aas"])]
                 result = dwell(page,tab,dwells[tab],smoke,capture,
                                aas_inspection_path(page) if tab == 'overview' else None)
+                result['compare_presets'] = compare_presets
                 walk["tabs"].append(result)
             print("Recording continuous Queries → execution → wait interaction",flush=True)
             interaction, query_crop, execution_crop = drill(page,smoke,capture,args.timeout,args.archived)

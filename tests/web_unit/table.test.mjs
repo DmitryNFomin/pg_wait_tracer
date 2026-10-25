@@ -21,6 +21,7 @@ import {
     queriesConfig, makeQueriesConfig,
     buildUnattributedNote, unattributedNoteHtml, createOverviewOrder, sessionsConfig,
     childRemainderRow, sessionsScopeNoteHtml, SESSIONS_SCOPE_NOTE_TEXT,
+    DB_TIME_MEMBERSHIP, buildSessionsScopeNote,
 } from '../../web/static/lib/builders/table-configs.js';
 import { buildSummary } from '../../web/static/views/overview.js';
 import { WAIT_CLASSES, classColor, eventColor, fmtMs, fmtUs } from '../../web/static/lib/format.js';
@@ -1179,34 +1180,98 @@ test('#439-label Sessions DB Time header discloses background processes are incl
 });
 
 // ── #439 (Sessions half): Sessions' "DB Time" is per-PROCESS non-idle time,
-// a genuinely different SCOPE from Overview's system-wide DB Time, which
-// excludes background processes' parked-idle time entirely ("Background
-// idle (parked)" -- #439-label above). A viewer moving from Sessions (where
-// bgwriter/walwriter/checkpointer/autovacuum carry a real DB Time) to
-// Overview (where the same processes' time sits OUTSIDE DB Time) must not
-// read the two numbers as contradicting each other -- the scope title says
-// what THIS column measures, and the cross-tab note says it on its own,
-// not only inside a column tooltip nobody has to hover. ──────────────────
+// and it is the SAME DB Time Overview totals -- one quantity decomposed, not
+// two scopes. MEASURED (local pgwt-server over
+// tests/results/demo_rehearsal/trace, PG18, 1851 s):
+//
+//     time_model           db_time_ms = 2495784.951108
+//     sum of top_sessions  db_time_ms = 2495784.951108   (diff 0.000000000)
+//
+// with background + maintenance carrying 2764.997287 + 825.638179 ms INSIDE
+// that total (cat_ms[PGWT_CAT_BG]/[PGWT_CAT_MAINT], src/compute.c:745; the
+// five categories sum to db_time_ms exactly). The row that merely READS like
+// an exclusion is Overview's Idle child "Other (background)" -- hidden
+// Activity parking, outside DB Time in BOTH tabs, relabeled "Background idle
+// (parked)" (#439-label above).
+//
+// So the disclosure must not assert a scope difference. The pre-fix text did
+// ("Overview uses a different, system-wide DB Time total that excludes the
+// parked-idle time of background processes"), naming as the differentiator
+// something Sessions excludes identically, and telling a reader that two
+// numbers which reconcile to the nanosecond cannot be reconciled. ─────────
 
-test('#439 Sessions DB Time header title also names its scope against Overview', () => {
+test('#439 Sessions DB Time header title says Overview counts the SAME time', () => {
     const headerCol = sessionsConfig.columns.find(c => c.key === 'db_time_ms');
-    // The #439-label test above already pins these two substrings; this
-    // fix must ADD the cross-tab disclosure without breaking that gate.
+    // The #439-label test above already pins these two substrings; the
+    // cross-tab disclosure must be ADDED without breaking that gate.
     assert.ok(headerCol.title.includes('non-idle time of this process'), headerCol.title);
     assert.ok(headerCol.title.includes('background processes included'), headerCol.title);
-    assert.ok(/overview/i.test(headerCol.title), headerCol.title);
-    assert.ok(/different scope|different total|not the same/i.test(headerCol.title),
+    assert.ok(/overview counts the same time/i.test(headerCol.title), headerCol.title);
+    // The false claim, in any of the three shapes it has had.
+    assert.ok(!/different scope|different, system-wide|wider total/i.test(headerCol.title),
         headerCol.title);
 });
 
-test('sessionsScopeNoteHtml: discloses the cross-tab scope gap against Overview', () => {
+test('#439 the Sessions scope note never claims Overview excludes background DB Time', () => {
     const html = sessionsScopeNoteHtml();
+    // Non-emptiness FIRST: every "must not say X" assertion below is
+    // satisfied by an empty note, so without this the whole test is a
+    // false-negative machine (bypass case: sessionsScopeNoteHtml() -> '').
+    assert.ok(SESSIONS_SCOPE_NOTE_TEXT.length > 80,
+        'scope note is empty/stub: ' + JSON.stringify(SESSIONS_SCOPE_NOTE_TEXT));
     assert.ok(html.includes(SESSIONS_SCOPE_NOTE_TEXT), html);
     assert.ok(/overview/i.test(SESSIONS_SCOPE_NOTE_TEXT), SESSIONS_SCOPE_NOTE_TEXT);
     // Names the actual background processes, not just "background work" --
-    // a viewer comparing tabs needs to know WHICH rows disagree.
+    // a viewer comparing tabs needs to know WHICH rows are meant.
     for (const proc of ['bgwriter', 'walwriter', 'checkpointer', 'autovacuum']) {
         assert.ok(SESSIONS_SCOPE_NOTE_TEXT.includes(proc), proc);
+    }
+    // The positive claim: background work is inside DB Time in BOTH tabs.
+    assert.ok(/inside db time in both tabs/i.test(SESSIONS_SCOPE_NOTE_TEXT),
+        SESSIONS_SCOPE_NOTE_TEXT);
+    // And the retracted one: Overview does NOT use a different total, and
+    // what it excludes is the PARKED-idle time, which Sessions excludes too.
+    assert.ok(!/different, system-wide|different scope|different db time total/i
+        .test(SESSIONS_SCOPE_NOTE_TEXT), SESSIONS_SCOPE_NOTE_TEXT);
+    assert.ok(!/excludes the parked-idle time of background processes/i
+        .test(SESSIONS_SCOPE_NOTE_TEXT), SESSIONS_SCOPE_NOTE_TEXT);
+});
+
+// A hand-written sentence passes every substring assertion above while
+// src/compute.c moves background time out of DB Time underneath it -- that
+// is exactly how the pre-fix text survived two releases. The sentence is
+// therefore DERIVED from DB_TIME_MEMBERSHIP, and this test is what makes the
+// derivation load-bearing: flip a membership and the claim must flip with
+// it. (It cannot see src/; what it can guarantee is that ONE object in this
+// repo states the membership and the user-visible text follows it.)
+test('#439 the scope note is derived from DB_TIME_MEMBERSHIP, not hand-written', () => {
+    assert.equal(DB_TIME_MEMBERSHIP.backgroundActive, 'inside');
+    assert.equal(DB_TIME_MEMBERSHIP.backgroundParked, 'outside');
+    assert.equal(buildSessionsScopeNote(DB_TIME_MEMBERSHIP), SESSIONS_SCOPE_NOTE_TEXT);
+
+    const flippedActive = buildSessionsScopeNote(
+        { backgroundActive: 'outside', backgroundParked: 'outside' });
+    assert.ok(/outside db time in overview/i.test(flippedActive), flippedActive);
+    assert.ok(!/inside db time in both tabs/i.test(flippedActive), flippedActive);
+
+    const flippedParked = buildSessionsScopeNote(
+        { backgroundActive: 'inside', backgroundParked: 'inside' });
+    assert.ok(/parked\) row on Overview, is inside it in both/i.test(flippedParked),
+        flippedParked);
+    assert.ok(!/is outside it in both/i.test(flippedParked), flippedParked);
+});
+
+// BYPASS SUITE for the new builder: every way its detection can be made
+// unreachable must REFUSE, never approve with an empty or partial note.
+test('#439 buildSessionsScopeNote refuses a membership it cannot read', () => {
+    for (const bad of [undefined, null, 'inside', 42,
+                       {}, { backgroundActive: 'inside' },
+                       { backgroundParked: 'outside' },
+                       { backgroundActive: 'inside', backgroundParked: '' },
+                       { backgroundActive: 'INSIDE', backgroundParked: 'outside' },
+                       { backgroundActive: 'inside', backgroundParked: 'maybe' }]) {
+        assert.throws(() => buildSessionsScopeNote(bad), /membership/i,
+            'must refuse, not render a note, for ' + JSON.stringify(bad));
     }
 });
 

@@ -38,6 +38,7 @@ check_exit() {
 check_replay_cpu() {
     local generator="$SCRIPT_DIR/gen_test_traces"
     local replay_dir output rc stat ms
+    local sys_output row total avgus maxus pct
     if [[ ! -x "$generator" ]]; then
         echo "  FAIL: replay CPU fixture requires executable $generator"
         failed=$((failed + 1))
@@ -94,6 +95,78 @@ CPU* 4.0
 Off-CPU* 6.0
 IO 10.0
 ROWS
+
+    # #531: the per-event table must print the SAME measured CPU* figure the
+    # time model does -- it is the same label, from the same command, over the
+    # same records. Before this, the two views of this one fixture read
+    # "CPU* 4.0 20.0%" (time_model) and "CPU* 1 10.0 10000.0 10000.0 50.0%"
+    # (system_event): one number measured, one wall.
+    #
+    # Matched ABSOLUTELY, field by field -- the measured 4.0 ms against the
+    # 10.0 ms wall, and 4000.0 us in the Avg/Max occurrence columns, which a
+    # fix that moved only the total would leave at 10000.0. "The two views
+    # agree" is deliberately NOT the assertion: it is satisfied by both being
+    # wall, which is exactly the state before #495.
+    sys_output=$("$TRACER" --replay -T "$replay_dir" --view system_event 2>&1)
+    rc=$?
+    check_exit 0 "$rc" "--replay system_event exits 0"
+    if [[ $rc -eq 126 || $rc -eq 127 ]]; then
+        echo "  replay tracer could not execute (rc=$rc): $sys_output"
+    fi
+    while read -r row total avgus maxus pct; do
+        # LC_ALL=C: the view's rule lines are em dashes, and a multibyte
+        # locale makes some awks abort on them ("towc: multibyte conversion
+        # failure") -- which would fail this assertion for a reason that has
+        # nothing to do with the number being checked. Every field compared
+        # here is ASCII, so byte semantics are exact.
+        if LC_ALL=C awk -v row="$row" -v total="$total" -v avgus="$avgus" \
+               -v maxus="$maxus" -v pct="$pct" '
+            NF == 6 && $1 == row && $3 == total && $4 == avgus &&
+            $5 == maxus && $6 == pct { found = 1 }
+            END { exit !found }
+        ' <<< "$sys_output"; then
+            echo "  PASS: --replay system_event $row = $total ms, $maxus us max, $pct"
+            passed=$((passed + 1))
+        else
+            echo "  FAIL: --replay system_event $row != $total ms / $avgus / $maxus us / $pct (rc=$rc): $sys_output"
+            failed=$((failed + 1))
+        fi
+    done <<'SYSROWS'
+CPU* 4.0 4000.0 4000.0 20.0%
+IO:DataFileRead 10.0 10000.0 10000.0 50.0%
+SYSROWS
+
+    # #498's Off-CPU* row carries no occurrence columns (em dashes), so it
+    # needs its own matcher rather than a wider one that a dash could satisfy.
+    if LC_ALL=C awk '
+        NF == 6 && $1 == "Off-CPU*" && $3 == "6.0" && $6 == "30.0%" { found = 1 }
+        END { exit !found }
+    ' <<< "$sys_output"; then
+        echo "  PASS: --replay system_event Off-CPU* = 6.0 ms, 30.0%"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL: --replay system_event Off-CPU* != 6.0 ms / 30.0% (rc=$rc): $sys_output"
+        failed=$((failed + 1))
+    fi
+
+    # The structural consequence, and the user-visible one: this view's %DB
+    # column has to sum to 100. Off-CPU* is the on-CPU wall MINUS the measured
+    # CPU, so a CPU* row still holding the whole wall double-counts the
+    # off-CPU part and the column reads 130%. `rows >= 3` is load-bearing: a
+    # view that printed nothing (or "(no data yet)") would otherwise sum to 0
+    # and satisfy no-overshoot vacuously, which is a gate that cannot see.
+    if LC_ALL=C awk '
+        NF == 6 && $6 ~ /^[0-9]+\.[0-9]+%$/ { gsub(/%/, "", $6); sum += $6; rows++ }
+        END { printf "  %d numeric %%DB rows summing to %.1f%%\n", rows, sum;
+              exit !(rows >= 3 && sum > 99.9 && sum < 100.1) }
+    ' <<< "$sys_output"; then
+        echo "  PASS: --replay system_event %DB column sums to 100.0 over 3 rows"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL: --replay system_event %DB column does not sum to 100.0 over >=3 rows (rc=$rc): $sys_output"
+        failed=$((failed + 1))
+    fi
+
     rm -rf -- "$replay_dir"
 }
 check_replay_cpu

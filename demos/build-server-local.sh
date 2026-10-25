@@ -13,7 +13,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
-BUILD_VERSION="${PGWT_BUILD_VERSION:-$(git rev-parse HEAD)}"
+# Ask the Makefile for the stamp so both build entry points agree (#572).
+BUILD_VERSION="$(make -s --no-print-directory print-build-version)"
 
 case "$(uname -s)" in
     Darwin)

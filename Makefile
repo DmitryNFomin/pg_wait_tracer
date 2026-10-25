@@ -24,6 +24,15 @@ ARCH       := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 # ---------------------------------------------------------------------------
 PGWT_BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 
+# Build wrappers must use this value -- including an override and the fallback
+# -- rather than deriving a second version independently. demos/build-server-local.sh
+# used to default to `git rev-parse HEAD`, which disagrees with `git describe`
+# for the same commit and made the walk recorder refuse with a false "version
+# skew" (#572).
+.PHONY: print-build-version
+print-build-version:
+	@printf '%s\n' '$(PGWT_BUILD_VERSION)'
+
 # ---------------------------------------------------------------------------
 # libbpf selection (Rocky 8 / RHEL 8 support)
 #

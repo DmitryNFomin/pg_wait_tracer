@@ -191,8 +191,38 @@ function mountSessions(data) {
 test('#439 Sessions mount() actually inserts the cross-tab scope note into the DOM', () => {
     const html = mountSessions({ rows: [sess({ pid: 4870, type: 'checkpointer',
         user: '', db: '', db_time_ms: 1200 })] });
+    // BYPASS: `includes(SESSIONS_SCOPE_NOTE_TEXT)` and
+    // `includes(sessionsScopeNoteHtml())` are BOTH satisfied by an empty
+    // note ('' is a substring of everything), so this wiring test approved
+    // a tab that disclosed nothing. Pin the content first.
+    assert.ok(SESSIONS_SCOPE_NOTE_TEXT.length > 80,
+        'empty/stub note: ' + JSON.stringify(SESSIONS_SCOPE_NOTE_TEXT));
+    assert.ok(/overview/i.test(SESSIONS_SCOPE_NOTE_TEXT), SESSIONS_SCOPE_NOTE_TEXT);
     assert.ok(html.includes(SESSIONS_SCOPE_NOTE_TEXT), html);
     assert.equal(html.includes(sessionsScopeNoteHtml()), true, html);
+    assert.ok(/panel-caption/.test(html), html);
+});
+
+// #439 ABSOLUTE fixture, not a "both tabs agree" check: a background
+// process with exactly 50 ms of non-idle time must render 50 ms in the
+// DB Time column -- the number stays, with its own value, in exactly one
+// place. The tempting wrong fix for #439 was to stop showing background
+// processes' DB Time (or dash it out) on the theory that Overview excludes
+// it; it does not (table.test.mjs's #439 block carries the measurement),
+// so a dashed, zeroed or missing cell here is the regression.
+test('#439 a background process\'s 50 ms of DB Time renders as exactly "50.0ms"', () => {
+    const m = buildSessionsModel({ rows: [
+        sess({ pid: 22530, type: 'checkpointer', user: '', db: '',
+               db_time_ms: 50, cpu_pct: 0, wait_pct: 100,
+               top_wait: 'IO:DataFileWrite' }),
+    ] }, null);
+    const dbTimeIdx = m.table.headers.findIndex(h => h.key === 'db_time_ms');
+    assert.ok(dbTimeIdx >= 0, JSON.stringify(m.table.headers));
+    assert.equal(m.table.headers[dbTimeIdx].label, 'DB Time');
+    // Literal, not fmtMs(50): asserting against the same formatter the cell
+    // uses would pass whatever that formatter did, including returning '—'.
+    assert.equal(m.table.rows[0].cells[dbTimeIdx].html, '50.0ms');
+    assert.equal(m.table.rows[0].row.type, 'checkpointer');
 });
 
 test('#439 Sessions mount() with no rows still shows the empty state (note is not required there)', () => {

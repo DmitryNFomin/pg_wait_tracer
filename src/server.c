@@ -4219,6 +4219,21 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
     }
 
     cJSON_AddNumberToObject(root, "db_time_ms", res.db_time_ms);
+    /* #553 (additive): the CPU* row's measured-CPU contract. has_measured_cpu
+     * says WHICH quantity that row is -- measured on-CPU ns (true) or the
+     * unsplit gap wall by gap-inference (false, on sampled/v2 data and on the
+     * summary routing). offcpu_ms is the runqueue remainder of those gaps: it
+     * is inside db_time_ms but on no row here, so a client that sums the rows
+     * can account for the difference instead of reading it as missing time.
+     * cpu_clamped_ms is the skew self-check: measured CPU that exceeded its
+     * own clipped gap wall. It is clamped out of the row (it is not time that
+     * happened) and reported here, exactly as the time_model response does --
+     * without it a skewed measurement was absorbed silently on this response
+     * alone. Outside db_time_ms and outside every row.
+     * Same field names, same meaning, as the time_model response. */
+    cJSON_AddBoolToObject(root, "has_measured_cpu", res.has_measured_cpu);
+    cJSON_AddNumberToObject(root, "offcpu_ms", res.offcpu_ms);
+    cJSON_AddNumberToObject(root, "cpu_clamped_ms", res.cpu_clamped_ms);
     emit_json(root);
 
     free(res.rows);
@@ -7683,6 +7698,52 @@ static void dump_summary(struct pgwt_server *srv)
             snprintf(avgbuf, sizeof(avgbuf), "%10s", "—");
         printf("  %-28s %10llu %12.1f %s %s\n",
                r->name, (unsigned long long)r->count, r->total_ms, avgbuf, pctbuf);
+    }
+    /* #553: the CPU* row above carries MEASURED on-CPU time, so the rows sum
+     * to DB Time MINUS the off-CPU remainder -- runqueue time that is inside
+     * DB Time but on no event row. Printing nothing made the % DB column stop
+     * adding up with no way for the reader to see why.
+     *
+     * The NAME is borrowed from the Time Model table above, where
+     * pgwt_compute_time_model emits the same quantity as a row of its own
+     * ("CPU (waiting for a core)", src/compute.c under PGWT_CLASS_CPU) and
+     * dump_summary prints it like any other row -- so a reader meets one
+     * label for one thing in both sections.
+     *
+     * The GATE is NOT time_model's, and the two sections can therefore
+     * disagree about whether the row appears at all. This one is
+     * ev.has_measured_cpu: at least one in-window CPU GAP carried a
+     * measurement. time_model's flag is deliberately WIDER -- it is also
+     * raised by measured spin inside a WAIT (compute.c's wait branch), and
+     * its row additionally sits behind a `classes[CPU].total_ns <= 0 ->
+     * continue` guard. Two corners where that differs, both pre-existing
+     * time_model behaviour filed as #575, neither a defect in this table:
+     *   - an all-runqueue gap (cpu_ns measured as 0): this table prints the
+     *     remainder as 100% of DB Time; time_model prints NO CPU rows at all,
+     *     because its CPU class total is 0. Pinned in
+     *     tests/test_dump_report.py section 2d.
+     *   - an UNKNOWN gap next to a wait carrying measured spin: time_model
+     *     prints "CPU (running)" over an unmeasured wall plus a 0.0
+     *     remainder; this table's flag is 0, so it prints neither.
+     * In both, printing is gated on THIS response's own measurement, which is
+     * the narrower and the honest answer for a per-event table.
+     *
+     * With has_measured_cpu == 0 the CPU* row IS the unsplit gap wall and
+     * there is no remainder -- a 0.0 row there would claim off-CPU time was
+     * measured as zero when it was not measured at all. Waits and latency are
+     * not applicable to a residual (it is not an observed wait), so those two
+     * columns print the same "—" sentinel the rows above use.
+     *
+     * The column still does not reach 100% when the capture has more than 15
+     * distinct events: this table is truncated at 15 rows, which is visible
+     * as a short list. The off-CPU remainder was not visible at all. */
+    if (ev.has_measured_cpu) {
+        /* printf pads by BYTES and "—" is three of them for one column, so
+         * the two sentinel columns are written two wider than the %10
+         * numeric columns they line up under. */
+        printf("  %-28s %12s %12.1f %12s %7.1f%%\n",
+               "CPU (waiting for a core)", "—", ev.offcpu_ms, "—",
+               ev.db_time_ms > 0 ? ev.offcpu_ms / ev.db_time_ms * 100.0 : 0.0);
     }
     free(ev.rows);
 

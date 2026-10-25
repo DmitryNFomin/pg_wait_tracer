@@ -63,6 +63,66 @@ except Exception:
 PYEOF
 }
 
+# Preflight is NOT a port reservation. bridge_ready checks ownership again
+# around the HTTP request, closing the check/start race even if our new PID
+# is still alive before bind while an older bridge answers HTTP 200 (#544).
+bridge_port_state() {
+    python3 "$(dirname "${BASH_SOURCE[0]}")/bridge_owner.py" "$@"
+}
+
+bridge_ready() {
+    local url="$1" port="$2" pid="$3" rc
+    bridge_port_state "$port" "$pid"; rc=$?
+    [[ "$rc" == 0 ]] || return "$rc"
+    url_ready "$url" || return 1
+    bridge_port_state "$port" "$pid"
+}
+
+wait_bridge_ready() {
+    local url="$1" port="$2" pid="$3" log="$4" rc
+    for _ in $(seq 1 60); do
+        bridge_ready "$url" "$port" "$pid"; rc=$?
+        [[ "$rc" == 0 ]] && return 0
+        if [[ "$rc" != 1 ]] || ! kill -0 "$pid" 2>/dev/null; then
+            echo "REFUSE bridge startup: port=$port expected PID=$pid (ownership unavailable, foreign listener, or bridge exited)" >&2
+            tail -n 40 "$log" >&2
+            return 1
+        fi
+        sleep 0.5
+    done
+    echo "REFUSE bridge startup: PID=$pid never owned a ready listener on port=$port" >&2
+    tail -n 40 "$log" >&2
+    return 1
+}
+
+# exec preserves $! as the bridge PID and gives its local descendants a
+# dedicated process group. Unlike pkill -f, teardown cannot match another
+# worktree. Even a bridge that exits on bind failure can leave children;
+# stop the group whether or not its leader is still alive.
+run_bridge() {
+    exec python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' "$@"
+}
+
+stop_bridge() {
+    local pid="$1" n
+    [[ -n "$pid" ]] || return 0
+    kill -s INT -- "-$pid" 2>/dev/null || true
+    # Also handles termination between fork and setsid, before the group
+    # exists. Never signal the harness's own group.
+    stop_pid "$pid" 2 INT
+    for n in $(seq 1 10); do
+        kill -0 -- "-$pid" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    kill -s KILL -- "-$pid" 2>/dev/null || true
+    for n in $(seq 1 10); do
+        kill -0 -- "-$pid" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    echo "ERROR: bridge process group $pid survived teardown" >&2
+    return 1
+}
+
 # assert_served_ui_matches_tree BASE_URL [STATIC_DIR] [LABEL]
 # Refuses when the Go bridge is not serving the web/static of the tree under
 # test. web/main.go compiles web/static into the binary (`//go:embed static`),
