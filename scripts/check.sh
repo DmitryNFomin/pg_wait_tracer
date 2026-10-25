@@ -158,6 +158,9 @@ run bash -c 'cd web && go vet ./... && go test ./...'
 step "python: compile every test module"
 run python3 -m py_compile tests/*.py
 
+step "python: multi-window scripted snapshots + refusal tests"
+run python3 tests/test_multi_window_lib.py
+
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 

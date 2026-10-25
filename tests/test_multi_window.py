@@ -973,22 +973,37 @@ def parse_histogram_row(line):
     Bucket labels are known strings like '<1', '1-  2', '>=16K'.
     We detect a histogram row by finding count/pct pairs in the line.
     """
-    line = line.strip()
-    # Must start with a bucket-like char (digit, <, >)
-    if not line or line[0] not in '<>=0123456789':
+    m = re.fullmatch(r'\s*(<1|>=16K|\d+K?\s*-\s*\d+K?)\s+(.*?)\s*', line)
+    if not m or not re.fullmatch(r'(?:\s*(?:\d+\s+[\d.]+%|-\s+-))+', m[2]):
         return None
-    # Extract all numeric (count pct%) pairs from the whole line
+    # Preserve unavailable slots: compacting the numeric cells changes which
+    # horizon a percentage belongs to when an earlier column is unavailable.
     values = []
-    for wm in re.finditer(r'(\d+)\s+([\d.]+)%', line):
-        values.append({
-            'count': int(wm.group(1)),
-            'pct': float(wm.group(2)),
-        })
-    # Also check for '-' entries (not-yet-valid windows)
-    has_dash = bool(re.search(r'\s+-\s+-', line))
-    if not values and not has_dash:
-        return None
-    return {'values': values, 'has_dash': has_dash}
+    for cell in re.finditer(r'(\d+)\s+([\d.]+)%|(-)\s+-', m[2]):
+        values.append(None if cell[3] else
+                      {'count': int(cell[1]), 'pct': float(cell[2])})
+    return {'label': re.sub(r'\s+', '', m[1]), 'values': values,
+            'has_dash': None in values}
+
+
+def check_histogram_population(output, expected_ticks=5):
+    """Require the requested run to reach population; zero sums fail too."""
+    ticks = split_ticks(output)
+    check(len(ticks) == expected_ticks,
+          f"histogram got {len(ticks)} ticks (expected {expected_ticks})")
+    rows = [row for line in (ticks[-1] if ticks else '').splitlines()
+            if (row := parse_histogram_row(line))]
+    populated = (len(rows) == 16 and
+                 all(len(row['values']) == 2 and not row['has_dash']
+                     for row in rows))
+    check(populated, "histogram last tick has all buckets in both windows")
+    for wi in range(2):
+        cells = [row['values'][wi] for row in rows
+                 if len(row['values']) > wi and row['values'][wi] is not None]
+        pct_sum = sum(cell['pct'] for cell in cells)
+        check(len(cells) == 16 and 80 < pct_sum < 120,
+              f"histogram window {wi + 1} percentages sum to {pct_sum:.1f}% "
+              f"(expected ~100% across 16 buckets)")
 
 
 def test_histogram_multi(pm_pid):
@@ -1031,45 +1046,7 @@ def test_histogram_multi(pm_pid):
     check(bar_count == 0,
           f"histogram multi-window has no ASCII bar (found {bar_count})")
 
-    # Progressive population: find a tick where first window has data,
-    # second shows '-'
-    ticks = split_ticks(output)
-    check(len(ticks) >= 3,
-          f"histogram got {len(ticks)} ticks (expected >= 3)")
-
-    # Last tick should have data in both windows
-    if len(ticks) >= 4:
-        last_tick = ticks[-1]
-        # Look for at least one row with two count/pct pairs
-        has_both = False
-        for line in last_tick.split('\n'):
-            row = parse_histogram_row(line)
-            if row and len(row['values']) >= 2:
-                has_both = True
-                break
-        check(has_both,
-              "histogram last tick has data in both windows")
-
-    # Percentages in each window should sum to ~100%
-    if len(ticks) >= 4:
-        last_tick = ticks[-1]
-        # Collect all pct values for the first window
-        pct_sums = [0.0, 0.0]
-        for line in last_tick.split('\n'):
-            row = parse_histogram_row(line)
-            if row:
-                for wi, v in enumerate(row['values']):
-                    if wi < 2:
-                        pct_sums[wi] += v['pct']
-
-        if pct_sums[0] > 0:
-            check(80 < pct_sums[0] < 120,
-                  f"histogram window 1 percentages sum to {pct_sums[0]:.1f}% "
-                  f"(expected ~100%)")
-        if pct_sums[1] > 0:
-            check(80 < pct_sums[1] < 120,
-                  f"histogram window 2 percentages sum to {pct_sums[1]:.1f}% "
-                  f"(expected ~100%)")
+    check_histogram_population(output)
 
 
 # ── Main ─────────────────────────────────────────────────────
