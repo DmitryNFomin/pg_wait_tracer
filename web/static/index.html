@@ -41,11 +41,7 @@
               title="Exit compare">✕</button>
       <div id="compare-picker" class="compare-picker" style="display:none">
         <div class="tp-label">Baseline offset</div>
-        <div class="compare-presets">
-          <button data-b-offset="-3600000000000">1 hour ago</button>
-          <button data-b-offset="-86400000000000">24 hours ago</button>
-          <button data-b-offset="-604800000000000">7 days ago</button>
-        </div>
+        <div class="compare-presets" aria-live="polite"></div>
         <div class="tp-label">Custom offset</div>
         <div class="compare-custom">
           <input id="compare-custom-value" type="number" min="1" step="1" value="1"

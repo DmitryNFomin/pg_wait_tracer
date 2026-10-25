@@ -23,6 +23,7 @@ import { Camera } from './lib/camera.js';
 import { StripCache } from './lib/stripcache.js';
 import { ViewManager } from './lib/view-manager.js';
 import { runConcurrentRefresh } from './lib/refresh-orchestration.js';
+import { comparePresetOffsets } from './lib/compare-presets.js';
 import { mountTable } from './lib/table.js';
 import {
     classColor, fmtTime, fmtDuration, esc, fmtCount,
@@ -1139,6 +1140,7 @@ function updateTimeRange() {
     const dur = fmtDuration(timeRange.span());
     // All pgwt times are UTC — say so (UI-11).
     el.textContent = from + ' – ' + to + ' UTC (' + dur + ')';
+    renderComparePresets();
     renderCompareHeader();
 }
 
@@ -1274,6 +1276,18 @@ function baselinePredatesCurrent() {
     return compare.enabled && timeRange.from + compare.offsetNs < server.fromNs;
 }
 
+function renderComparePresets() {
+    const presets = document.querySelector('#compare-picker .compare-presets');
+    if (!presets) return;
+    const offsets = comparePresetOffsets(timeRange.from, timeRange.to,
+                                         server.fromNs, server.toNs);
+    presets.innerHTML = offsets.length
+        ? offsets.map(offset => '<button data-b-offset="' + offset + '">' +
+            esc(compareOffsetLabel(offset)) + ' ago</button>').join('')
+        : '<span class="compare-note">No earlier baseline fits this range. ' +
+          'Select a later or shorter range.</span>';
+}
+
 function renderCompareControl() {
     const btn = document.getElementById('compare-btn');
     const exitBtn = document.getElementById('compare-exit');
@@ -1283,6 +1297,7 @@ function renderCompareControl() {
         ? 'vs ' + compareOffsetLabel(compare.offsetNs) + ' ago ▾'
         : 'Compare ▾';
     exitBtn.style.display = compare.enabled ? '' : 'none';
+    renderComparePresets();
     renderCompareHeader();
 }
 
@@ -1353,17 +1368,23 @@ function initCompareControl() {
     if (!btn || !menu || !exitBtn) return;
     btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        renderComparePresets();
         menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
     });
     menu.addEventListener('click', e => e.stopPropagation());
     document.addEventListener('click', e => {
         if (!menu.contains(e.target) && e.target !== btn) menu.style.display = 'none';
     });
-    menu.querySelectorAll('[data-b-offset]').forEach(preset => {
-        preset.addEventListener('click', () => {
-            menu.style.display = 'none';
-            setCompareOffset(Number(preset.dataset.bOffset));
-        });
+    menu.addEventListener('click', e => {
+        const preset = e.target.closest('[data-b-offset]');
+        if (!preset || !menu.contains(preset)) return;
+        // Recheck at activation in case a live tick/retention update has
+        // changed the bounds while the user was choosing a baseline.
+        const offset = Number(preset.dataset.bOffset);
+        if (!comparePresetOffsets(timeRange.from, timeRange.to,
+                                  server.fromNs, server.toNs).includes(offset)) return;
+        menu.style.display = 'none';
+        setCompareOffset(offset);
     });
     document.getElementById('compare-custom-apply').addEventListener('click', () => {
         const amount = Number(document.getElementById('compare-custom-value').value);

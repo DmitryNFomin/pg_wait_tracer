@@ -21,6 +21,7 @@ Usage: python3 tests/test_web_ui.py
   (No root, no PG, no SSH needed — uses mock_server.py)
 """
 import collections
+import json
 import os
 import re
 import socket
@@ -28,6 +29,11 @@ import sys
 import subprocess
 import time
 import signal
+
+# Shared DOM assertion only; importing the recorder pulls in image dependencies.
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '../scripts')))
+from compare_presets import assert_compare_presets_reachable
 
 # Playwright import
 try:
@@ -3952,6 +3958,87 @@ def test_b5_metrics_panel(page):
 
 # ── Track U Phase U4: compare mode ──────────────────────────────────────────
 
+def test_compare_preset_reachability(page):
+    """#549: the walk's DOM assertion must reject unreachable preset choices."""
+    print('--- Test U4.9: Preset reachability against short served traces ---')
+    for span in (35 * 60 * 10**9, 20 * 10**9, 500_000_000):
+        # Change the served info response, never the client's state. Other
+        # commands still use the normal fixture, as in the existing tests.
+        p = page.context.new_page()
+        preset_guard = ConsoleErrorGuard(p)
+        previous_capture = (_capture['page'], _capture['guard'])
+        set_failure_capture(p, preset_guard)
+        def route(ws):
+            upstream = ws.connect_to_server()
+            def receive(message):
+                data = json.loads(message)
+                if 'from_ns' in data and 'now_ns' in data:
+                    data['from_ns'] = data['to_ns'] - span
+                    data['now_ns'] = data['to_ns']
+                ws.send(json.dumps(data))
+            upstream.on_message(receive)
+        p.route_web_socket('**/ws', route)
+        try:
+            p.goto(COMPARE_URL)
+            p.wait_for_selector('#status.connected')
+            p.wait_for_function("location.hash.includes('live=1')")
+            bounds = p.evaluate('[window.__pgwt.server.fromNs, window.__pgwt.server.toNs]')
+            check(bounds[1] - bounds[0] == span, f'served trace span is {span} ns')
+            a, b = bounds[1] - span // 4, bounds[1]
+            p.evaluate("([a,b]) => location.hash = `tab=overview&from=${a}&to=${b}`", [a, b])
+            p.wait_for_function('a => window.__pgwt.timeRange.from === a', arg=a)
+            try:
+                evidence = assert_compare_presets_reachable(p)
+                check(bool(evidence['offsets']), f'reachable presets for {span} ns: {evidence["offsets"]}')
+            except AssertionError as exc:
+                check(False, str(exc))
+                continue
+            # Prove the walk assertion rejects a real, enabled dead end.
+            p.click('#compare-btn')
+            p.evaluate("""() => {
+                const button = document.createElement('button');
+                button.dataset.bOffset = '-3600000000000';
+                button.textContent = '1 hour ago';
+                document.querySelector('.compare-presets').append(button);
+            }""")
+            # Keep this menu open: the assertion must inspect existing DOM,
+            # rather than refresh away a defective choice before checking it.
+            try:
+                assert_compare_presets_reachable(p)
+                check(False, 'walk accepted an injected unreachable preset')
+            except AssertionError as exc:
+                check('unreachable' in str(exc), 'walk rejects an enabled unreachable preset')
+            # Click a real preset and verify the existing predates detector,
+            # then re-open across a range change (All has no earlier history).
+            p.click('#compare-btn')
+            p.locator('#compare-picker [data-b-offset]:enabled').first.click()
+            p.wait_for_function('window.__pgwt.compareSnapshot().enabled')
+            check(not p.evaluate('window.__pgwt.compareSnapshot().baselinePredates'),
+                  'offered preset does not predate the trace')
+            p.click('#compare-exit')
+            p.click('#compare-btn')
+            p.evaluate("([a,b]) => location.hash = `tab=overview&from=${a}&to=${b}`", bounds)
+            p.wait_for_function('a => window.__pgwt.timeRange.from === a', arg=bounds[0])
+            check(p.locator('#compare-picker [data-b-offset]:enabled').count() == 0,
+                  'open picker updates when All leaves no earlier history')
+            check(bool(p.inner_text('.compare-presets').strip()), 'no-history explanation is visible')
+            p.click('#compare-btn')
+            check(not assert_compare_presets_reachable(p)['offsets'],
+                  'walk accepts explained absence of presets for the full trace')
+            # Custom offsets remain available, including honest predates notes.
+            p.click('#compare-btn')
+            p.fill('#compare-custom-value', '1')
+            p.select_option('#compare-custom-unit', '60')
+            p.click('#compare-custom-apply')
+            p.wait_for_function('window.__pgwt.compareSnapshot().enabled')
+            check(p.evaluate('window.__pgwt.compareSnapshot().offsetNs') == -60_000_000_000,
+                  'custom minute offset remains usable')
+        finally:
+            assert_no_console_errors(p, preset_guard, f'compare-presets-{span}')
+            set_failure_capture(*previous_capture)
+            p.close()
+
+
 def _enable_compare_5m(page, url=COMPARE_URL):
     page.goto(url)
     page.wait_for_selector("#status.connected", timeout=10000)
@@ -4002,11 +4089,30 @@ def test_compare_live_offset_follow(page):
 def test_compare_fidelity_mismatch(page):
     """D4: exact A vs sampled B renders deltas with a persistent warning."""
     print("--- Test U4.3: Compare fidelity mismatch ---")
-    _enable_compare_5m(page)
+    page.goto(COMPARE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    # The mock advances NOW on every info request, including other tests',
+    # but classifies B against a fixed trace-end cutoff. Anchor this evidence
+    # test to the served trace, so earlier tests cannot age B into exact AAS.
+    # U4.2 separately covers live follow; use the real URL + custom control.
+    end_ns = page.evaluate("window.__pgwt.server.toNs")
+    _enable_compare_5m(page, COMPARE_URL +
+                      f"#tab=overview&from={end_ns - 900_000_000_000}&to={end_ns}")
     text = page.text_content("#compare-header")
-    check("A Exact" in text and "B Sampled" in text,
+    expected_header = ("A vs 5 min agoA ExactB Sampled (estimated)"
+                       "⚠ Δ compares exact against sampled estimates")
+    check(text == expected_header,
           f"compare header keeps both fidelity badges ('{text}')")
-    check("Δ compares exact against sampled estimates" in text,
+
+    # Persistence is observable: restoring the same comparison must keep
+    # the explicit warning visible, with its complete text unchanged.
+    page.reload()
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_selector("#compare-header", state="visible")
+    page.wait_for_timeout(1000)
+    warning = page.locator("#compare-header .compare-warning")
+    check(warning.count() == 1 and warning.is_visible() and
+          warning.text_content() == "⚠ Δ compares exact against sampled estimates",
           "fidelity mismatch warning is persistent and explicit")
     check(page.locator("#aas-chart-container canvas").count() > 0,
           "fidelity mismatch flags but does not block rendering")
@@ -4391,6 +4497,7 @@ def main():
                 compare_guard = ConsoleErrorGuard(compare_page)
                 set_failure_capture(compare_page, compare_guard)
                 compare_tests = [
+                    test_compare_preset_reachability,
                     test_compare_delta_ranking,
                     test_compare_live_offset_follow,
                     test_compare_fidelity_mismatch,
