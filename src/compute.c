@@ -390,9 +390,22 @@ int pgwt_filter_matches(const struct pgwt_filter *f,
 
 /* ── T2: category tagging pass (docs/AAS_SEMANTICS_DECISION.md) ──────── */
 
-/* Per-pid sweep state for pgwt_tag_events. Open-addressing hash on pid. */
-#define TAG_HT_SIZE 4096
-#define TAG_HT_MASK (TAG_HT_SIZE - 1)
+/* Per-pid sweep state for pgwt_tag_events.
+ *
+ * #374: this was `#define TAG_HT_SIZE 4096` + a fixed open-addressed array
+ * on pid — the LAST fixed-size pid table in this file (#327 grew the other
+ * five). Its probe DID have a fullness test, so it never hung; it refused
+ * instead, which is the right fail-safe (#363) attached to the wrong bound.
+ * Distinct pids in a loaded window are driven by connection CHURN, not by
+ * concurrency, and `pgwt-server --dump` loads the whole trace — so a
+ * perfectly healthy long capture answered EVERY request with
+ * `allocation_failed` / "memory allocation failed" / "retry the request",
+ * three statements of which none was true.
+ *
+ * Now a pgwt_pid_index (unbounded, `used`-byte occupancy) over an
+ * insertion-ordered accum_grow array, exactly as #327 did elsewhere. The
+ * refusal survives untouched for the case that really is one: a failed
+ * allocation. */
 struct tag_pid_state {
     uint32_t pid;          /* 0 = empty slot */
     uint32_t cat_flag;     /* category flag from the pid table */
@@ -425,22 +438,42 @@ static uint32_t pid_cat_lookup(const struct pgwt_pid_cat *cats, int n,
     return 0;   /* unknown pid: foreground (conservative) */
 }
 
-static struct tag_pid_state *tag_pid_get(struct tag_pid_state *ht, uint32_t pid)
+/* The growable per-pid table. `st` is insertion-ordered; `ix` maps pid to
+ * its index. Nothing holds a `struct tag_pid_state *` across two calls of
+ * tag_pid_get — the array may move — and both passes in pgwt_tag_events_window
+ * use theirs within one loop iteration. */
+struct tag_pid_table {
+    struct pgwt_pid_index ix;
+    struct tag_pid_state *st;
+    int n, cap;
+};
+
+/* #374: pid 0 is a KEY LIKE ANY OTHER here, which it was not before: the old
+ * table used `pid == 0` as its empty-slot marker, so a pid-0 record (the
+ * input is a trace file, not a guarantee) shared one slot with "free" and
+ * every later pid probing to it inherited that state. Same #347 shape
+ * pgwt_compute_top_sessions had. pgwt_pid_index carries a `used` byte. */
+static struct tag_pid_state *tag_pid_get(struct tag_pid_table *t, uint32_t pid)
 {
-    int h = hash32(pid, TAG_HT_MASK);
-    for (int probe = 0; probe < TAG_HT_SIZE; probe++) {
-        if (ht[h].pid == pid)
-            return &ht[h];
-        if (ht[h].pid == 0) {
-            ht[h].pid = pid;
-            return &ht[h];
-        }
-        h = (h + 1) & TAG_HT_MASK;
-    }
-    /* #363: table full — this pid CANNOT be tracked. The caller refuses the
-     * whole array; it used to leave the surplus pids' records foreground and
-     * return normally, which is a wrong answer and not a smaller one. */
-    return NULL;
+    int h = pgwt_pid_index_find(&t->ix, pid);
+    if (h >= 0)
+        return &t->st[h];
+    if (accum_grow((void **)&t->st, &t->cap, t->n + 1, sizeof(*t->st),
+                   "tag_pid_entries") != 0)
+        return NULL;            /* a REAL allocation failure: caller refuses */
+    h = t->n;
+    if (pgwt_pid_index_put(&t->ix, pid, h) != 0)
+        return NULL;
+    t->n++;
+    t->st[h].pid = pid;
+    return &t->st[h];
+}
+
+static void tag_pid_table_free(struct tag_pid_table *t)
+{
+    pgwt_pid_index_free(&t->ix);
+    free(t->st);
+    memset(t, 0, sizeof(*t));
 }
 
 /* Test-only allocation injection. Same env-var shape as src/server.c's
@@ -469,9 +502,16 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
      * an allocation error. */
     if (count <= 0)
         return 1;
-    struct tag_pid_state *ht = tag_alloc_fail("tag_ht")
-                             ? NULL : calloc(TAG_HT_SIZE, sizeof(*ht));
-    if (!ht)
+    /* #374: the table has no initial allocation to fail any more, but the
+     * "tag_ht" injection point stays — tests/test_data_tag_refusal.py and
+     * test_window_clip 11c both drive the refusal through it, and an
+     * injection point silently removed is a refusal path silently made
+     * unreachable. It still means exactly what it meant: refused before
+     * touching a single record. */
+    struct tag_pid_table tbl;
+    memset(&tbl, 0, sizeof(tbl));
+    pgwt_pid_index_init(&tbl.ix);
+    if (tag_alloc_fail("tag_ht"))
         return 0;   /* refused before touching a single record */
     /* #128: per-record cmd_qid at the record's time (rule 2 fallback for
      * the backward pass). #363: the back-fill is part of the tagged result,
@@ -485,9 +525,9 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count; i++) {
         struct pgwt_trace_event *ev = &events[i];
-        struct tag_pid_state *st = tag_pid_get(ht, ev->pid);
+        struct tag_pid_state *st = tag_pid_get(&tbl, ev->pid);
         if (!st)
-            goto refused;   /* #363: PID-table exhausted mid-array */
+            goto refused;   /* #374: a real allocation failure, mid-array */
 
         /* Markers drive the per-pid windows and are otherwise left alone. */
         if (PGWT_IS_MARKER(ev->old_event)) {
@@ -668,7 +708,7 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
     if (fwd) {
         for (int i = count - 1; i >= 0; i--) {
             struct pgwt_trace_event *ev = &events[i];
-            struct tag_pid_state *st = tag_pid_get(ht, ev->pid);
+            struct tag_pid_state *st = tag_pid_get(&tbl, ev->pid);
             if (!st)
                 goto refused;   /* unreachable: the forward pass above
                                  * inserted every pid in the array or
@@ -720,7 +760,7 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
         }
     }
     free(fwd);
-    free(ht);
+    tag_pid_table_free(&tbl);
     return 1;
 
 refused:
@@ -730,7 +770,7 @@ refused:
      * there: a partly tagged array is indistinguishable from a complete
      * one by inspection. */
     free(fwd);
-    free(ht);
+    tag_pid_table_free(&tbl);
     return 0;
 }
 
@@ -1446,8 +1486,20 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
                 ev_ht[slot].total_ns += dur_ns;
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
                 wait_gap_cpu_ns += (double)ev->cpu_ns * frac; /* observability only */
-                if (frac > 0.0)
-                    has_measured_cpu = 1;
+                /* #575 (second defect, distinct from the row guard below):
+                 * this used to also set has_measured_cpu, which is a
+                 * DIFFERENT question — "is THIS RESPONSE's CPU row a
+                 * measurement". Measured spin inside a wait says nothing
+                 * about the on-CPU GAPS, so with an UNKNOWN gap beside such
+                 * a wait the flag went up and the gap's unmeasured wall was
+                 * labelled "CPU (running)" with a 0.0 ms runqueue sibling
+                 * beside it: an inference presented as a measurement.
+                 *
+                 * The number is not lost — it is wait_gap_cpu_ns, which is
+                 * what it always was and what the response still reports.
+                 * The summary twin's flag was already this narrow
+                 * (cpu_measured_records counts CPU observations only), so
+                 * this also makes the two routings agree. */
             }
         }
     }
@@ -1522,7 +1574,23 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     qsort(ev_accum, num_ev_accum, sizeof(ev_accum[0]), cmp_event_desc);
 
     for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
-        if (classes[c].total_ns <= 0)
+        /* #575: a class whose MEASURED total is zero can still have a
+         * non-zero runqueue remainder, and the CPU class is the only one
+         * where those are two different quantities. An all-runqueue gap
+         * (cpu_ns measured as 0 over a non-zero wall) sets
+         * classes[CPU].total_ns = 0, so this guard used to skip the class
+         * and BOTH CPU rows disappeared — while the 10 ms stayed inside DB
+         * Time, leaving a reader to conclude there had been no CPU activity
+         * when in fact there was 10 ms of waiting for a core.
+         *
+         * Only the CPU class is exempted, and only when the window actually
+         * measured its CPU and the remainder is non-zero: a class with
+         * nothing in it still emits nothing, and a window with no on-CPU gap
+         * at all gets no 0.0/0.0 pair conjured for it (has_measured_cpu is
+         * 0 there). tests/test_window_clip.c section 12d pins all three. */
+        int is_cpu_class = strcasecmp(classes[c].name, "cpu") == 0;
+        if (classes[c].total_ns <= 0 &&
+            !(is_cpu_class && has_measured_cpu && offcpu_ns > 0))
             continue;
 
         double cls_ms = classes[c].total_ns / 1e6;
@@ -1966,7 +2034,14 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
 struct session_accum {
     uint32_t pid;
     uint64_t total_ns;
+    /* #562: MEASURED on-CPU ns where the gap carried a measurement, the
+     * clipped gap WALL where it did not (gap-inference). */
     uint64_t cpu_ns;
+    /* #562: the runqueue remainder of this session's MEASURED gaps, and the
+     * sum of its wait intervals -- the two quantities the percentages used
+     * to be derived from each other instead of from. */
+    uint64_t offcpu_ns;
+    uint64_t wait_ns;
     /* Per-wait hash table — O(1) lookup */
     struct wait_ht_entry waits[WAIT_HT_SIZE];
 };
@@ -2009,6 +2084,12 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
     pgwt_pid_index_init(&ix);
     struct session_accum *ht = NULL;
     int num_entries = 0, cap_entries = 0, alloc_failed = 0;
+    /* #562, response-level, same three as pgwt_events_result's. Double for
+     * the clamp, like the time model's: the overshoot is the fractional
+     * difference of two doubles and rounding it per record would hide a
+     * sub-ns skew. */
+    double cpu_clamped_ns = 0.0;
+    int    has_measured_cpu = 0;
 
     for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
@@ -2039,12 +2120,59 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
         ht[h].total_ns += clip_u;
 
         if (ev->old_event == 0) {
-            ht[h].cpu_ns += clip_u;
+            /* #562: the CPU column carries the MEASURED on-CPU nanoseconds,
+             * not the on-CPU gap's wall -- the same correction #553/PR #559
+             * made to pgwt_compute_top_events and #531/PR #554 to the CLI
+             * replay path, with the same arithmetic record for record: the
+             * measurement is split by the in-window FRACTION (a straddling
+             * gap contributes only the CPU that happened inside the window)
+             * and clamped to the clipped wall, because sum_exec_runtime is
+             * only current at a tick or a context switch and a leaked sub-ms
+             * burst can exceed its own interval. The excess is clamped away
+             * -- it is not time that happened in this gap -- but COUNTED, so
+             * a skewed measurement is visible rather than absorbed.
+             *
+             * UNKNOWN (sampled / v2 / no CPU capability) keeps
+             * gap-inference: the whole clipped gap is the CPU column and
+             * there is no off-CPU residual to report for it, which is what
+             * has_measured_cpu == 0 tells the caller.
+             *
+             * `ev->old_event == 0` is the gap test the surrounding code
+             * already used; pgwt_wait_class_index(0) is PGWT_CLASS_CPU and
+             * nothing else maps there, so the two are the same selector. */
+            uint64_t row_ns = clip_u;
+            if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+                double frac = event_window_frac(clip_u, ev->duration_ns);
+                double m = (double)ev->cpu_ns * frac;
+                if (m > (double)clip_u) {
+                    cpu_clamped_ns += m - (double)clip_u;
+                    m = (double)clip_u;
+                }
+                /* Rounded, not truncated: truncation would bias every
+                 * straddling record's sub-ns remainder into off-CPU. m <=
+                 * clip_u holds above, so the rounded value cannot exceed
+                 * clip_u either and the subtraction below stays >= 0. */
+                row_ns = (uint64_t)(m + 0.5);
+                ht[h].offcpu_ns += clip_u - row_ns;
+                /* A measured ZERO is a signal (the gap was all runqueue);
+                 * zero overlap is absence and must not claim a
+                 * measurement. */
+                if (frac > 0.0)
+                    has_measured_cpu = 1;
+            }
+            ht[h].cpu_ns += row_ns;
         } else {
             /* O(1) hash lookup for per-wait totals */
             int wslot = wait_ht_find_or_insert(ht[h].waits, ev->old_event);
             if (wslot >= 0)
                 ht[h].waits[wslot].total_ns += clip_u;
+            /* #562: accumulated INDEPENDENTLY of the per-wait table, which
+             * is bounded (WAIT_HT_SIZE) and whose find_or_insert can return
+             * -1. wait_pct must be the session's real wait share even when
+             * the table that names the TOP wait is full -- deriving it from
+             * that table would silently under-report the percentage on
+             * exactly the busiest sessions. */
+            ht[h].wait_ns += clip_u;
         }
     }
 
@@ -2077,7 +2205,14 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
 
         double db = (double)ht[i].total_ns;
         r->cpu_pct  = db > 0 ? (double)ht[i].cpu_ns / db * 100.0 : 0;
-        r->wait_pct = 100.0 - r->cpu_pct;
+        /* #562: Σwaits / db, the live semantics -- NOT 100 - cpu_pct. While
+         * cpu_pct carried the gap wall the two were the same number (db is
+         * exactly gaps + waits), which is why no sums-to-100% check could
+         * ever see the CPU column being wrong. Now that cpu_pct is the
+         * measurement, 100 - cpu_pct would report the wait share as the
+         * waits PLUS the runqueue time. */
+        r->wait_pct = db > 0 ? (double)ht[i].wait_ns / db * 100.0 : 0;
+        r->offcpu_ms = (double)ht[i].offcpu_ns / 1e6;
 
         /* Find top wait from per-PID hash table */
         uint32_t top_id = 0;
@@ -2105,6 +2240,15 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
 
     out->rows     = rows;
     out->num_rows = nr;
+    /* #562: the response-level trio. offcpu_ms is the Σ over rows so a
+     * client that does not walk them can still account for the time the CPU
+     * column no longer claims. */
+    double off_total_ms = 0.0;
+    for (int i = 0; i < nr; i++)
+        off_total_ms += rows[i].offcpu_ms;
+    out->offcpu_ms        = off_total_ms;
+    out->cpu_clamped_ms   = cpu_clamped_ns / 1e6;
+    out->has_measured_cpu = has_measured_cpu;
 }
 
 /* ── Top Queries ──────────────────────────────────────────── */
@@ -2878,7 +3022,16 @@ void pgwt_compute_time_model_from_summaries(
     qsort(ctx.ev_accum, ctx.num_ev_accum, sizeof(ctx.ev_accum[0]), cmp_event_desc);
 
     for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
-        if (ctx.classes[c].total_ns <= 0) continue;
+        /* #575, the same exemption as the raw path's, for the same reason
+         * and on the same terms. It has to be here too: should_use_summaries
+         * routes an unfiltered window >= 120 s to this function, so a fix in
+         * only one of the two would make the Time Model change its answer at
+         * the threshold — pinned as an identity between the two in
+         * tests/test_window_clip.c 12a vs 12c. */
+        int is_cpu_class = strcasecmp(ctx.classes[c].name, "cpu") == 0;
+        if (ctx.classes[c].total_ns <= 0 &&
+            !(is_cpu_class && ctx.has_measured_cpu && offcpu_ns > 0))
+            continue;
 
         double cls_ms = ctx.classes[c].total_ns / 1e6;
         double pct = db_time_ms > 0 ? cls_ms / db_time_ms * 100.0 : 0;
@@ -3276,8 +3429,33 @@ void pgwt_compute_top_sessions_from_summaries(
         row->pid        = ctx.ht[i].pid;
         row->db_time_ms = (double)ctx.ht[i].db_time_ns / 1e6;
         double db = (double)ctx.ht[i].db_time_ns;
+        /* #562: WALL, and the response says so. struct pgwt_summary_session
+         * stores `cpu_ns += tns` (src/summary_writer.c) -- the on-CPU gap's
+         * wall -- and the format has no measured column, so this routing
+         * reports the unsplit total and leaves has_measured_cpu / offcpu_ms
+         * at 0 (the memset above). A REAL divergence from the raw path at
+         * should_use_summaries' 120 s threshold, not a comparability
+         * artefact; pinned as an identity in tests/test_window_clip.c 13d
+         * so the day the writer carries the measurement this is what
+         * notices.
+         *
+         * wait_pct, by contrast, is the SAME quantity on both paths and is
+         * now computed the same WAY, which it was not: it read
+         * `100 - cpu_pct`, algebraically Σwaits/db here (db is exactly gaps
+         * + waits, and this path's cpu IS the gap wall) but not the same
+         * floating-point expression -- 100.0 - 7/12*100 differs from
+         * 5/12*100 in the last bit, and tests/test_agg_raw_crosscheck.c
+         * compares the two paths with exact equality. The record carries no
+         * per-wait list to sum, but db_time_ns - cpu_ns IS that sum
+         * (summary_writer.c adds tns to db_time_ns for every non-idle record
+         * and to cpu_ns for the gaps), so the subtraction is done in integer
+         * ns and divided exactly as the raw path divides. Clamped at 0
+         * because the input is a file, not a guarantee. */
         row->cpu_pct  = db > 0 ? (double)ctx.ht[i].cpu_ns / db * 100.0 : 0;
-        row->wait_pct = 100.0 - row->cpu_pct;
+        uint64_t wait_total_ns = ctx.ht[i].db_time_ns > ctx.ht[i].cpu_ns
+                               ? ctx.ht[i].db_time_ns - ctx.ht[i].cpu_ns : 0;
+        row->wait_pct = db > 0 ? (double)wait_total_ns / db * 100.0 : 0;
+        row->offcpu_ms = 0.0;
         row->top_wait_id = ctx.ht[i].top_wait_id;
         if (ctx.ht[i].top_wait_id == 0)
             snprintf(row->top_wait, sizeof(row->top_wait), "CPU*");
@@ -3293,6 +3471,10 @@ void pgwt_compute_top_sessions_from_summaries(
 
     out->rows     = rows;
     out->num_rows = nr;
+    /* #562: has_measured_cpu / offcpu_ms / cpu_clamped_ms stay 0 (the memset
+     * above) ON PURPOSE -- see the per-row note on cpu_pct. Bringing this
+     * routing onto the measurement needs a per-session measured column in
+     * the summary format, which is a format change and a separate issue. */
 }
 
 /* ── Top Queries from summaries ───────────────────────────── */
@@ -3619,8 +3801,10 @@ struct trans_accum {
     uint64_t total_ns;
 };
 
-#define TRANS_HT_SIZE 4096
-#define TRANS_HT_MASK (TRANS_HT_SIZE - 1)
+/* #461: `#define TRANS_HT_SIZE 4096` / `TRANS_HT_MASK` used to live here.
+ * The transition-pair table grows now, so there is no size constant left for
+ * a probe loop to run out of -- removed rather than left behind, because a
+ * leftover bound is the next thing somebody writes a probe loop against. */
 
 /* TOTAL order: count DESC, then from_event ASC, then to_event ASC.
  *
@@ -3684,60 +3868,105 @@ void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,
 {
     memset(out, 0, sizeof(*out));
 
-    /* Hash table for (from, to) pairs */
-    struct trans_accum *ht = calloc(TRANS_HT_SIZE, sizeof(*ht));
-    int num_entries = 0;
+    /* #461: this was a FIXED `calloc(TRANS_HT_SIZE, ...)` (4096 slots)
+     * probed with
+     *
+     *     while (ht[h].count > 0 &&
+     *            (ht[h].from_event != from || ht[h].to_event != to))
+     *         h = (h + 1) & TRANS_HT_MASK;
+     *
+     * -- no fullness test. Once 4096 distinct (from, to) pairs occupied the
+     * table the 4097th found no free slot and the loop never exited;
+     * pgwt-server is single-threaded, so the request never answered and
+     * every tab stopped at once. Same shape as #327, which removed five
+     * other instances of it.
+     *
+     * The repair is NOT a bigger table, which only moves the number at which
+     * the same loop hangs. The pair is keyed through a pgwt_qid_index
+     * (src/qid_index.h: unbounded, doubles on load, `used`-byte occupancy)
+     * over an insertion-ordered accumulator array, so TERMINATION NO LONGER
+     * DEPENDS ON THE TABLE HAVING A FREE SLOT -- the index grows before it
+     * can fill, and its own probe walks `used` bytes in a table it keeps
+     * below 70% load. There is no bound left here to exceed.
+     *
+     * The key packs the pair, `from` in the high half and `to` in the low
+     * half, which is injective over the two uint32 ids -- so two different
+     * pairs can collide in the hash (handled, like any hash) but can never
+     * be merged into one row.
+     *
+     * The only remaining exit is a REAL allocation failure, and it refuses
+     * the whole result (`failed`) instead of returning a graph that is
+     * quietly missing edges. Dropping pairs on overflow is the failure class
+     * this release has spent its time eliminating: a short answer that looks
+     * complete is worse than a refusal, because nobody notices it. */
+    struct pgwt_qid_index ix;
+    pgwt_qid_index_init(&ix);
+    struct trans_accum *ht = NULL;
+    int num_entries = 0, cap_entries = 0, alloc_failed = 0;
     uint64_t total = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
         if (!pgwt_transition_record_counts(f, ev))
             continue;
 
         uint32_t from = ev->old_event;
         uint32_t to   = ev->new_event;
+        uint64_t key  = ((uint64_t)from << 32) | (uint64_t)to;
 
-        /* Hash: combine from and to */
-        uint32_t h = ((from * 0x45d9f3b) ^ (to * 0x9e3779b9)) & TRANS_HT_MASK;
-        while (ht[h].count > 0 &&
-               (ht[h].from_event != from || ht[h].to_event != to))
-            h = (h + 1) & TRANS_HT_MASK;
-
-        if (ht[h].count == 0) {
+        int h = pgwt_qid_index_find(&ix, key);
+        if (h < 0) {
+            if (accum_grow((void **)&ht, &cap_entries, num_entries + 1,
+                           sizeof(*ht), "transition_entries") != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            h = num_entries;
+            if (pgwt_qid_index_put(&ix, key, h) != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            num_entries++;
             ht[h].from_event = from;
             ht[h].to_event = to;
-            num_entries++;
         }
         ht[h].count++;
         ht[h].total_ns += ev->duration_ns;
         total++;
     }
+    pgwt_qid_index_free(&ix);
 
-    /* Collect into flat array for sorting */
-    struct trans_accum *arr = calloc(num_entries, sizeof(*arr));
-    int n = 0;
-    for (int i = 0; i < TRANS_HT_SIZE && n < num_entries; i++) {
-        if (ht[i].count > 0)
-            arr[n++] = ht[i];
+    if (alloc_failed) {
+        free(ht);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
     }
-    free(ht);
 
-    qsort(arr, n, sizeof(arr[0]), cmp_trans_desc);
+    int n = num_entries;
+    qsort(ht, (size_t)n, sizeof(ht[0]), cmp_trans_desc);
 
     /* Build result rows */
     int nr = n < max_rows ? n : max_rows;
-    struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+    struct pgwt_transition_row *rows = nr ? calloc((size_t)nr, sizeof(*rows))
+                                          : NULL;
+    if (nr && !rows) {
+        free(ht);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
     for (int i = 0; i < nr; i++) {
-        rows[i].from_event = arr[i].from_event;
-        rows[i].to_event   = arr[i].to_event;
-        rows[i].count      = arr[i].count;
-        rows[i].total_ns   = arr[i].total_ns;
-        pgwt_event_full_name(arr[i].from_event, rows[i].from_name,
+        rows[i].from_event = ht[i].from_event;
+        rows[i].to_event   = ht[i].to_event;
+        rows[i].count      = ht[i].count;
+        rows[i].total_ns   = ht[i].total_ns;
+        pgwt_event_full_name(ht[i].from_event, rows[i].from_name,
                              sizeof(rows[i].from_name));
-        pgwt_event_full_name(arr[i].to_event, rows[i].to_name,
+        pgwt_event_full_name(ht[i].to_event, rows[i].to_name,
                              sizeof(rows[i].to_name));
     }
-    free(arr);
+    free(ht);
 
     out->rows = rows;
     out->num_rows = nr;
