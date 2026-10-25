@@ -301,6 +301,11 @@ static int write_cpu_skew_trace(const char *dir)
     struct pgwt_event_writer w;
     if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0)
         return -1;
+    /* Without this the writer's push funnel stamps every record
+     * PGWT_CPU_NS_UNKNOWN (a legacy-capability capture), and the clamp this
+     * case is about is unreachable -- the exact "the gate could not see"
+     * shape, asserted on below by the cpu_measured precondition. */
+    w.cpu_measured = true;
     struct pgwt_trace_event e[5];
     e[0] = ev(1100, 100, 0);          e[0].cpu_ns = 160 * MS;
     e[1] = ev(1300, 100, 0);          e[1].cpu_ns =  40 * MS;
@@ -321,6 +326,11 @@ static int write_cpu_clean_trace(const char *dir)
     struct pgwt_event_writer w;
     if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0)
         return -1;
+    /* Without this the writer's push funnel stamps every record
+     * PGWT_CPU_NS_UNKNOWN (a legacy-capability capture), and the clamp this
+     * case is about is unreachable -- the exact "the gate could not see"
+     * shape, asserted on below by the cpu_measured precondition. */
+    w.cpu_measured = true;
     struct pgwt_trace_event e[5];
     e[0] = ev(1100, 100, 0);          e[0].cpu_ns =  90 * MS;
     e[1] = ev(1300, 100, 0);          e[1].cpu_ns =  40 * MS;
@@ -341,6 +351,11 @@ static int write_cpu_sampled_trace(const char *dir)
     struct pgwt_event_writer w;
     if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0)
         return -1;
+    /* Without this the writer's push funnel stamps every record
+     * PGWT_CPU_NS_UNKNOWN (a legacy-capability capture), and the clamp this
+     * case is about is unreachable -- the exact "the gate could not see"
+     * shape, asserted on below by the cpu_measured precondition. */
+    w.cpu_measured = true;
     struct pgwt_trace_event smp[4];
     for (int i = 0; i < 4; i++) {
         smp[i] = ev(1100 + (uint64_t)i * 100, 0, 0);
@@ -1086,6 +1101,19 @@ int main(void)
         if (!a4) { fprintf(stderr, "FATAL: cannot open %s\n", p4); return 1; }
         CHECK_EQ(dec534, 5, "534: the skew fixture decoded all 5 records");
         CHECK_EQ(s534.transitions, 5, "534: all 5 are exact transitions");
+        /* THE FALSE NEGATIVE THIS CASE ALREADY WALKED INTO ONCE. The
+         * writer's push funnel stamps every record PGWT_CPU_NS_UNKNOWN
+         * unless cpu_measured is set, and the whole clamp branch is then
+         * unreachable -- the assertion below read 0 and would have read 0
+         * for any product. Proven here by a quantity the clamp does NOT
+         * write: measured off-CPU. Under UNKNOWN, cpu_add == add_ns and
+         * offcpu_time_ns is exactly 0; with a real measurement it is
+         * 60 ms (the 40 ms-of-100 ms record's remainder; the clamped
+         * record's own remainder is 0 by construction). So this gate
+         * refuses to agree with a fixture whose cpu_ns never survived. */
+        CHECK_EQ(a4->tm.offcpu_time_ns, 60 * MS,
+                 "534: the fixture's measured cpu_ns round-tripped "
+                 "(off-CPU remainder, ns)");
 
         /* ABSOLUTE, in nanoseconds, the same unit as the live path's
          * cpu_clamped_ns_total: one record exceeded its wall by 60 ms and
@@ -1102,6 +1130,9 @@ int main(void)
             replay(p5, 0, 0, NULL, &s534c, -1, &dec534c, NULL);
         if (!a5) { fprintf(stderr, "FATAL: cannot open %s\n", p5); return 1; }
         CHECK_EQ(dec534c, 5, "534: the clean fixture decoded all 5 records");
+        CHECK_EQ(a5->tm.offcpu_time_ns, 70 * MS,
+                 "534: the clean fixture's cpu_ns round-tripped too, so its "
+                 "zero below is a measurement and not an absence (ns)");
         CHECK_EQ(s534c.cpu_clamped_ns, 0,
                  "534: a clean capture reports exactly no clamped skew");
 

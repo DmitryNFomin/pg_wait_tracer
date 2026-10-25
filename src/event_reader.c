@@ -794,6 +794,17 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
              * unlike map_reader.c's add_event_stats: that known divergence
              * remains for a separate issue. */
             uint64_t m = evt->cpu_ns < occ_ns ? evt->cpu_ns : occ_ns;
+            /* #534: the clamp removes a measurable amount -- report it
+             * instead of discarding it. Non-zero means measured CPU
+             * exceeded the wall interval it belongs to (clock skew, a
+             * schedstat read straddling a boundary, an accounting error),
+             * exactly what the live path's cpu_clamped_ns_total says, in
+             * the same unit. Silence here is indistinguishable from zero,
+             * so a trace with real skew replayed as though it were clean.
+             * Deliberately NOT scaled by the window clip: it describes the
+             * record's measurement, not time being apportioned. */
+            if (st && evt->cpu_ns > occ_ns)
+                st->cpu_clamped_ns += evt->cpu_ns - occ_ns;
             cpu_add = occ_ns
                 ? (uint64_t)(((unsigned __int128)m * add_ns) / occ_ns) : 0;
             if (cpu_add > add_ns) cpu_add = add_ns;
