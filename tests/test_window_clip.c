@@ -1491,6 +1491,146 @@ static void test_transitions_alloc_refusal(void)
                              "same fixture computes cleanly again afterwards");
 }
 
+/* ── 11. #374: the per-pid TAGGING table must not have a fixed bound ──
+ *
+ * pgwt_tag_events' `tag_pid_state ht[TAG_HT_SIZE]` was the LAST fixed-size
+ * pid table (#327 grew the other five). Past 4096 distinct pids in one
+ * loaded window, tag_pid_get() ran out of slots and the pass refused the
+ * whole array — correct as a fail-safe (#363), but the array IS the oracle
+ * every raw estimator reads, so the refusal becomes a TOTAL OUTAGE: every
+ * request on that window answers `code: "allocation_failed"`, "memory
+ * allocation failed", hint "retry the request". Nothing was allocated and
+ * retrying never helps. Distinct pids per window are driven by connection
+ * CHURN, not concurrency, so 4097 is ordinary on a long capture — and
+ * `pgwt-server --dump` loads the WHOLE trace, where it is close to certain.
+ *
+ * Nothing here is timed, ordered against anything, or shared: one in-memory
+ * array, one call.
+ */
+
+#define TAG_OVER_PIDS  5000     /* > the old 4096-slot table */
+#define TAG_UNDER_PIDS 4000     /* < it: the same shape, admitted either way */
+
+/* One IO wait per pid, pids 10000.. ascending. Each pid is declared either
+ * BACKGROUND or MAINT by index parity — two DIFFERENT non-zero flags, so the
+ * probe below is a positive assertion on both records it reads.
+ *
+ * That shape is deliberate. An earlier draft marked odd pids with flag 0 and
+ * happened to probe an odd pid, so "the record carries its pid's flag" read
+ * `(flags & BACKGROUND) == 0` — true for an untagged record too, and true on
+ * the broken tree. Expecting ZERO proves nothing about whether the pass ran;
+ * the possibility is removed here rather than asserted around. */
+static int tag_scale_case(int n_pids, uint32_t *last_flags, uint32_t *prev_flags)
+{
+    struct pgwt_trace_event *evs = calloc((size_t)n_pids, sizeof(*evs));
+    struct pgwt_pid_cat *cats = calloc((size_t)n_pids, sizeof(*cats));
+    if (!evs || !cats) { free(evs); free(cats); return -1; }
+
+    for (int i = 0; i < n_pids; i++) {
+        uint32_t pid = 10000u + (uint32_t)i;
+        evs[i].pid          = pid;
+        evs[i].old_event    = IO_READ;
+        evs[i].new_event    = CPU_GAP;
+        evs[i].timestamp_ns = WFROM + S(1) + (uint64_t)i;
+        evs[i].duration_ns  = 1000;
+        evs[i].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+        /* pid_cat_lookup binary-searches, so cats must be pid-ascending. */
+        cats[i].pid  = pid;
+        cats[i].flag = (i % 2 == 0) ? PGWT_EVENT_FLAG_BACKGROUND
+                                    : PGWT_EVENT_FLAG_MAINT;
+    }
+
+    int ok = pgwt_tag_events(evs, n_pids, cats, n_pids);
+    /* The last two records: past the old bound, and the ones a pass that
+     * stopped early would never reach. Their expected flags DIFFER, so a
+     * blanket stamp fails one of them. */
+    *prev_flags = evs[n_pids - 2].flags;
+    *last_flags = evs[n_pids - 1].flags;
+    free(evs);
+    free(cats);
+    return ok;
+}
+
+/* n_pids is even in both cases below, so index n-2 is a BACKGROUND pid and
+ * index n-1 a MAINT one. Both expectations are non-zero. */
+static int tag_probe_ok(uint32_t last_flags, uint32_t prev_flags)
+{
+    return (prev_flags & PGWT_EVENT_FLAG_BACKGROUND) != 0 &&
+           (prev_flags & PGWT_EVENT_FLAG_MAINT) == 0 &&
+           (last_flags & PGWT_EVENT_FLAG_MAINT) != 0 &&
+           (last_flags & PGWT_EVENT_FLAG_BACKGROUND) == 0;
+}
+
+static void test_tag_table_scale(void)
+{
+    printf("--- 11. #374: the tagging pid table is not fixed at 4096 ---\n");
+
+    uint32_t last = 0, prev = 0;
+
+    /* 11a control, below the old bound: passes on the broken tree too. It is
+     * what says 11b's failure is about the BOUND and not about a fixture
+     * pgwt_tag_events would reject for some other reason. */
+    int ok = tag_scale_case(TAG_UNDER_PIDS, &last, &prev);
+    CHECK(ok == 1, "11a control: 4000 distinct pids tag successfully");
+    CHECK(tag_probe_ok(last, prev),
+          "11a control: …and the last two records carry their OWN pids' "
+          "distinct category flags (the pass is neither a no-op that returns "
+          "1 nor a blanket stamp)");
+
+    /* 11b. THE DEFECT: one more distinct pid than the fixed table held is a
+     * total refusal of every raw request on the window. */
+    last = prev = 0;
+    ok = tag_scale_case(TAG_OVER_PIDS, &last, &prev);
+    CHECK(ok == 1,
+          "11b: 5000 distinct pids (past the old 4096-slot table) still tag "
+          "successfully — connection churn is not an allocation failure");
+    CHECK(tag_probe_ok(last, prev),
+          "11b: …and the records BEYOND the old bound carry their own flags, "
+          "so the pass grew the table rather than quietly skipping the "
+          "surplus pids");
+
+    /* 11c. The refusal that must SURVIVE: a real allocation failure still
+     * refuses the whole array (#363). Three injection points — the historic
+     * one and both allocators the growable table uses — because a refusal
+     * wired to only one of them approves the others. */
+    struct pgwt_trace_event one[1];
+    struct pgwt_pid_cat cat1[1];
+    const char *pts[3] = { "tag_ht", "tag_pid_entries", "pid_index_grow" };
+    const char *envs[3] = { "PGWT_TEST_LOAD_ALLOC_FAIL",
+                            "PGWT_TEST_ALLOC_FAIL", "PGWT_TEST_ALLOC_FAIL" };
+    for (int k = 0; k < 3; k++) {
+        memset(one, 0, sizeof(one));
+        one[0].pid = 777; one[0].old_event = IO_READ;
+        one[0].timestamp_ns = WFROM + S(1); one[0].duration_ns = 1000;
+        one[0].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        cat1[0].pid = 777; cat1[0].flag = PGWT_EVENT_FLAG_BACKGROUND;
+        setenv(envs[k], pts[k], 1);
+        int r = pgwt_tag_events(one, 1, cat1, 1);
+        unsetenv(envs[k]);
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "11c: a REAL allocation failure at \"%s\" still refuses the "
+                 "whole array", pts[k]);
+        CHECK(r == 0, msg);
+    }
+
+    /* …and the refusal does not latch: the same call succeeds once the
+     * injection is gone. Without this, 11c would also pass if the function
+     * had simply started refusing everything. */
+    memset(one, 0, sizeof(one));
+    one[0].pid = 777; one[0].old_event = IO_READ;
+    one[0].timestamp_ns = WFROM + S(1); one[0].duration_ns = 1000;
+    one[0].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    cat1[0].pid = 777; cat1[0].flag = PGWT_EVENT_FLAG_BACKGROUND;
+    int r = pgwt_tag_events(one, 1, cat1, 1);
+    CHECK(r == 1 && (one[0].flags & PGWT_EVENT_FLAG_BACKGROUND) != 0,
+          "11c control: with no injection the same call succeeds and tags");
+
+    /* An empty array is a complete success, not a refusal (compute.h). */
+    CHECK(pgwt_tag_events(NULL, 0, NULL, 0) == 1,
+          "11d: an empty window is a complete tagging result, not a failure");
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -1511,6 +1651,7 @@ int main(void)
     test_query_avg_needs_exact_evidence();
     test_transitions_table_full();
     test_transitions_alloc_refusal();
+    test_tag_table_scale();
 
     /* A suite that ran no assertions is a suite that proved nothing. The
      * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
@@ -1518,8 +1659,9 @@ int main(void)
      * silently stop running. Section 10 (#461) adds 11 -- and its 10e branch
      * asserts the SAME number of times whichever way the child goes, so a
      * hang cannot satisfy the floor by running fewer checks. 10f adds 4
-     * more (the two allocators' refusal paths and their two controls). */
-    if (checks < 145) {
+     * more (the two allocators' refusal paths and their two controls).
+     * Section 11 (#374) adds 9. */
+    if (checks < 154) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;
