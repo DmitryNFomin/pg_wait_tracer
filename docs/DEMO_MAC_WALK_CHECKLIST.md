@@ -1,4 +1,16 @@
-# Mac-side demo walk — manual sign-off
+# Mac-side demo walk — manual sign-off (ARCHIVED 2026-10-25)
+
+**ARCHIVED.** The demo is cancelled, and `docs/DEMO_REHEARSAL_CRITERIA.md`'s
+"What changed and why" (2026-10-25 amendment) retires the two-owner-signed-
+walk apparatus this checklist is a sign-off form for. It is kept, unmodified
+below, as historical record and as a source of the per-tab checklist items
+(console errors, blank panels, data present, paints without a visible
+spinner) that "The recorded walk" in the criteria doc still uses when
+analysing the one recorded release-candidate walk — but nobody fills in or
+signs this form anymore, and no process requires it. Do not reference it as
+an active gate.
+
+---
 
 Owner decision, 2026-09-29: walk this by hand in real Chrome on the Mac's
 built-in display. Fill in this copy and sign it. The VM capture verdict does

@@ -1,13 +1,33 @@
-# What counts as a clean demo rehearsal
+# What counts as a clean release gate
 
-**Pre-registered.** This file is committed BEFORE the first rehearsal attempt of
-the sequence it governs. Deciding after a run which of its failures "really
-counted" is the single failure mode this document exists to prevent, and it is
-the same failure mode a process retro found in the lead's own analysis on
-2026-09-27: a conclusion chosen after seeing the data.
+**AMENDED 2026-10-25 — the demo is cancelled.** The owner: *"There is no demo
+planned anymore, moment for it has gone"* (PGConf Valencia). This document
+used to govern a sequence of pre-registered, counted *demo rehearsals* ending
+in a tag cut right before a presentation. That event no longer exists, so the
+apparatus built around it — counted attempts, a void cap, two separately
+counted verdicts (Mac-side vs. capture-side), owner-signed Mac walks, Mac
+pre-flight hygiene, and a dedicated `pgwt-stage` box — is **retired**. See
+"What changed and why" near the end of this document for the full list and
+the reasoning; nothing there is a silent reinterpretation, it is a dated
+amendment, per this document's own pre-existing rule below.
 
-If a criterion below turns out to be wrong, it is changed by a commit that says
-so and the attempt counter resets. It is never reinterpreted in a report.
+**What is NOT retired, and is the actual point of this document now:** the
+quality bar is unchanged — *"all features work as designed, no UX issues, all
+data is correct"* — and the technical checks below (§1-§8) are the only
+30-45 minute full-stack live gate this project has. They become an **ordinary
+release gate**: run once before a tag, the same as a `box-check`, not a
+rehearsal for an audience. "Release" below means "the tree about to be tagged
+or merged", not a presentation.
+
+**Pre-registered, still.** A criterion's bound (a floor, a tolerance, a
+threshold) is set BEFORE it is used to judge a run, not adjusted after seeing
+one fail. Deciding after a run which of its failures "really counted" is the
+failure mode this document exists to prevent (the same one a process retro
+found in the lead's own analysis on 2026-09-27: a conclusion chosen after
+seeing the data). If a criterion is wrong, it is changed by a commit that says
+so, explicitly amending the rule rather than reinterpreting it — never
+silently in a report. (The now-retired "attempt counter" that used to reset on
+such a change no longer exists; see "What changed and why".)
 
 ## The workload the criteria are written against
 
@@ -118,146 +138,81 @@ A rehearsal run on a different workload, client count, PG version, box class,
 below — sha pre-tag, tag once one is cut, per the 2026-10-13 amendment) is a
 different experiment and does not count toward the sequence.
 
-## The demo configuration (owner, 2026-09-28)
+## The release configuration
 
-Pre-registered here so the rehearsal is run against the thing being demoed,
-rather than the thing that was convenient to test:
+Originally pinned to the specific demo's hardware and client (owner,
+2026-09-28); restated 2026-10-25 for the ordinary release gate since there is
+no longer a specific event to match:
 
 - **PostgreSQL 18** (latest).
-- **The same hardware class as today's gate box** — Hetzner `cx33`.
+- **The same hardware class as the gate box** — Hetzner `cx33` (`pgwt-gate` /
+  `pgwt-gate-2`, or an ephemeral VM of the same class — CLAUDE.md). This is
+  the box `make box-check` already uses; nothing new to provision.
+- **The client for the one recorded walk (see "The recorded walk" below) is
+  real Chrome on a laptop** — "a laptop", not "the demo Chrome": the
+  1710x981 CSS @ DPR 2 viewport pin below exists because the #415/#462/#473
+  fold checks are written against it, not because of anything about a
+  presentation. Nothing eBPF runs on macOS, so the capture itself is always
+  remote (daemon + PostgreSQL on the Linux box, browser + Go bridge on
+  the laptop, ssh in between) — that topology is unchanged by the demo's
+  cancellation, because it was never about the demo, it is how this product's
+  client/server split works.
 
-Two consequences follow, and both are deliberate:
+## Dropped: presenter-machine hygiene and the two-verdict split
 
-1. Rehearsals run on a `cx33`, which is what the throwaway VMs already are, so
-   the machine under test matches the machine that will be demoed. A rehearsal
-   on any other class does not count toward the sequence.
-2. **The client is the owner's Mac** (owner, 2026-09-28: "Demo will be using
-   my Mac where you are running now"). So the demo topology is: browser and
-   Go bridge on the Mac, ssh to the VM, daemon and PostgreSQL on the VM.
-   Nothing eBPF runs on macOS, so the capture is necessarily remote — but the
-   client half is the Mac, and that is the half a rehearsal on the VM does not
-   exercise at all.
+**DROPPED 2026-10-25.** Everything that used to live here — an owner
+pre-flight checklist for the presenting Mac (auto-lock, zoom, a second
+display, Time Machine, quitting apps), the proposed "harness must assert
+this" list for that checklist, and the "two verdicts, never merged"
+capture-side/Mac-side split with its own void cap and attribution rules for
+Mac `memory_pressure` — was stage insurance for a specific presenter's
+specific machine at a specific event. None of it is genuine product
+verification: it is care for the machine a human is about to demo from, and
+there is no such machine or moment anymore.
 
-## Owner pre-flight checklist (run ONCE per rehearsal window)
+**One piece of it is genuine and is kept, moved to "The recorded walk"
+below:** a video recording cannot establish numerical correctness — it shows
+layout, emptiness and motion, not whether the displayed numbers are right.
+That point does not depend on any of the dropped apparatus, so it survives
+the cut on its own merits.
 
-Every one of these was discovered the hard way on 2026-09-28, one at a time,
-each costing the owner a separate interruption. They are collected here so a
-rehearsal window costs him **one interaction instead of a dozen**. **Retracted
-for the Mac side (owner, 2026-09-29):** the claim that a harness asserts each
-item and fails fast was written before there was a Mac-side harness. The
-Mac-side pre-flight is checked and recorded by the walker in
-`docs/DEMO_MAC_WALK_CHECKLIST.md`.
+## The recorded walk
 
-Before saying "go":
+**KEPT, restated as an ordinary release step.** One recorded real-Chrome walk
+of all eleven tabs is made per release candidate (`scripts/demo-walk-record.py`
+or an equivalent manual recording), and that recording is analysed by both
+standing advisers (codex and Fable) plus the lead before the tag — not by the
+owner; see "What changed and why" for why the owner's own walks are dropped.
+This replaces the old pair of owner-signed Mac walks with a single recording
+and an asynchronous three-way review, which is enough to catch a visible
+defect (blank panel, console error, frozen chart, a UI regression the
+automated gates below do not look for) without needing a human to sit through
+it live.
 
-1. **Auto-lock off.** System Settings → Lock Screen → "Require password after
-   screen saver begins or display is turned off" → **Never**, and display sleep
-   set long. macOS refuses WebDriver fullscreen on a locked session, and the
-   screen re-locks *during* the several minutes of VM provisioning — so
-   unlocking once is not enough. Restore afterwards.
-2. **Page zoom at 100% on the pgwt tab** (`Cmd+0`). Safari persists zoom
-   per-hostname: a 115% setting on `localhost` silently shrank the viewport by
-   15% and produced a layout nobody intended. The harness navigates via
-   `127.0.0.1`, which carries no such setting, but the owner's own tab is
-   still whatever he last left it at.
-3. **Display awake and the session unlocked** at the moment of starting.
-4. **No multipass or other local VMs running** (`multipass list`, then
-   `multipass stop <name>`). Two Ubuntu VMs were consuming CPU during the first
-   attempts.
-5. **Time Machine not mid-backup**, and no Photos media analysis running. Both
-   appeared in the top CPU consumers during a measurement.
-6. **Second display detached** if the demo is on the built-in panel.
-   WindowServer drew 40.7% CPU compositing a 6K external alongside the Retina
-   panel, versus 19.7% with it detached.
-7. **Quit heavy apps** that will not be part of the demo.
+**A recording cannot establish numerical correctness — say this explicitly so
+a clean recording is never treated as proof the numbers are right.** Video
+shows layout, emptiness and motion: whether a panel renders, whether it is
+visibly blank, whether a chart advances. It cannot show whether the AAS value
+on screen is the AAS the capture actually produced. That is what §1-§8 below
+(the automated capture-side checks) and a direct comparison of displayed
+values against the underlying API responses are for — the recording and the
+numeric checks are two different kinds of evidence, and neither substitutes
+for the other.
 
-**Retracted for the Mac-side walk:** the earlier text assigned holding the
-display awake (`caffeinate` with a trap) and process and VM cleanup to a
-Mac-side harness that does not exist. **The owner should never be asked to
-kill an orphaned shell.** That happened twice on 2026-09-28 and was a
-missing trap, not a thing for him to do.
+### The client, pinned — restated 2026-10-25: "a laptop", not "the demo Chrome"
 
-### What the harness must do with this list
+This pin originally described a specific presenter's machine for a specific
+event (owner, 2026-09-28: "Screen, chrome"). The event is cancelled, but the
+number is not stage trivia: the #415/#462/#473 fold checks are written
+against this exact viewport, so changing it would change what those checks
+actually exercise. It is kept, unchanged, as **the pinned viewport for the one
+recorded walk** (see "The recorded walk" below) — a laptop running real
+Chrome, not a special "demo" configuration.
 
-**Retracted for the Mac side (owner, 2026-09-29):** these were proposed harness
-requirements, not implemented Mac-side checks. The manual checklist now owns
-the Mac-side observations. Do not report this list as automated evidence.
-
-- Assert every item it can observe — lock state via `CGSSessionScreenIsLocked`,
-  display sleep, achieved viewport, effective zoom, load and memory pressure.
-- On an unmet precondition: **stop, name it, do not retry.** An opaque failure
-  costs an owner interaction; a named one costs a setting change.
-- Record every observed value in the verdict, so a reader can tell later which
-  conditions produced a number.
-
-## Two verdicts, never merged into one
-
-A rehearsal produces **two** results and they are reported separately:
-
-- **Capture-side**, walked on the VM: everything that does not depend on the
-  client — §1 verdict, §2 floors, §3 conservation, §6 daemon integrity, §7
-  execution, §8 known-failing, and the data half of §4 and §5 (console errors,
-  blank panels, cross-tab agreement).
-- **Mac-side**, walked by hand in real Chrome on the Mac's built-in display,
-  against `docs/DEMO_MAC_WALK_CHECKLIST.md` and the same VM in the demo
-  topology: §4's time to first paint and viewport, and §5's freshness — *as
-  the audience will see them*. The result is a human sign-off on the filled-in
-  checklist. These are different quantities from their VM-side namesakes.
-  Headless Chromium on a cx33 over localhost is not real Chrome at DPR 2 on
-  Apple silicon over an ssh hop, and a bound measured on one does not transfer
-  to the other. The VM's number is kept only as a regression detector.
-
-**Retracted (owner, 2026-09-29):** the Mac-side criteria were written as if an
-automated harness existed. It does not. `scripts/demo-rehearsal.sh` runs the
-walk over ssh on the VM via `scripts/demo-rehearsal-remote-run.sh`;
-`tests/demo_rehearsal.py` launches Playwright's bundled headless Chromium
-(`p.chromium.launch()`, with no `channel="chrome"` in the tree). It pins the
-1710 x 981 viewport at DPR 2 (#223), but a pinned viewport in headless
-Chromium on the VM is not a Mac-side walk. `memory_pressure` and bridge-drop
-recovery were specified here but implemented in no test or script. Thus
-"Mac-side m of M" was a counter that could not advance. Building that harness
-was judged days of work competing with the dry run and counted attempts. A
-manual walk observes the real presentation environment more honestly than a
-headless approximation of it.
-
-Reported as "capture-side clean k of N, Mac-side clean m of M". The Mac-side
-count means **signed-off manual walks**, not automated verdicts. **Never as
-"two clean rehearsals"** — that would claim the Mac half on the strength of
-the VM half.
-
-### Attribution for the Mac side, pre-registered
-
-The Mac is also this project's build machine, and local memory pressure has
-already killed two rehearsal attempts (#176). So, decided in advance rather
-than after seeing a result:
-
-- a Mac tick recorded with memory pressure other than normal is **void**
-  (infrastructure), not a failure;
-- a tick over bound with **normal** pressure, while the VM-side walk is clean
-  for the same tick, is a **client-side product finding**;
-- both sides red is a product failure.
-
-**Void cap: 2** (owner, 2026-09-30). There was previously no limit on how many
-attempts could be voided this way, which would let "two consecutive clean
-attempts" decay into "two clean attempts eventually" by re-rolling past an
-unlimited number of voided ones. After **two** voided attempts — whether from
-abnormal Mac-side `memory_pressure` or any other infrastructure reason under
-"The sequence, and what stops it from being rolled" below — stop and treat it
-as a real problem with the machine or the setup, not bad luck; do not keep
-re-rolling. The cap applies to attempts, not to individual within-walk ticks.
-
-The walker records `memory_pressure` and load by hand at the start and end of
-the walk and on any tick that looks slow, in the checklist. This is coarser
-than the per-tick verdict record originally specified; the trade was made
-deliberately for a manual walk. Record the observation, not "the Mac was
-busy". For the duration of a Mac-side walk, no implementing agents and no
-local VM work run on it — that cost is real and is accepted deliberately.
-
-### The client, pinned (owner, 2026-09-28: "Screen, chrome")
-
-- **Display: the Mac's built-in screen**, not the projector — `Color LCD`,
-  Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display: Yes`.
-- **Presented FULL SCREEN** (owner, 2026-09-28). Historically pinned to
+- **Display: the laptop's built-in screen**, not an external monitor —
+  `Color LCD`, Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display:
+  Yes`.
+- **Full screen.** Historically pinned to
   Safari's measured **1710 x 1069 CSS at devicePixelRatio 2**; `screen`
   reports 1710 x 1107 logical, full screen leaves 38 px of chrome, and the
   content layer is 3420 x 2138 physical.
@@ -295,8 +250,8 @@ local VM work run on it — that cost is real and is accepted deliberately.
   Safari's did.
 
   **Pin: 1710 x 981 CSS at devicePixelRatio 2** — Chrome full screen, the
-  built-in panel, 100% zoom, in a dedicated demo profile. Environment to
-  record alongside every counted attempt: **macOS 15.6.1 (24G90), Chrome
+  built-in panel, 100% zoom, in a clean profile. Environment to record
+  alongside the recorded walk (see below): **macOS 15.6.1 (24G90), Chrome
   153.0.8010.53**, built-in `Color LCD` 2880 x 1864 Retina as the only
   attached display, `screen` 1710 x 1107.
 
@@ -311,23 +266,18 @@ local VM work run on it — that cost is real and is accepted deliberately.
   there is exactly one record of the number, never two to drift apart the
   way 1440x932 and 1710x1069 once did).
 
-  Pin the Chrome and macOS versions in the verdict, same reasoning as
-  before the browser changed: an update between a clean rehearsal and the
-  demo invalidates the client half, because rendering, paint timing and
-  WebSocket behaviour are exactly what that half measures.
+  Pin the Chrome and macOS versions in the recorded walk's record: a version
+  update between the recording and the tag could change rendering, paint
+  timing and WebSocket behaviour, which is exactly what the recording is
+  supposed to show honestly.
 
-  **Re-confirmed on Chrome 154.0.8037.58** (2026-09-30, **uncounted diagnostic
-  reading — not a signed walk, no committed artifact**, same status as the
-  2.0 s bridge-drop observation below): two agreeing reads, full screen, 100%
-  zoom, `windowState: fullscreen`, built-in `Color LCD` as the only attached
-  display. Unchanged: still **1710 x 981 CSS at DPR 2**. This does not stand
-  in for a signed Mac-side walk's own viewport check (checklist §1 above,
-  "Both readings must agree") — it re-confirms the pin is still plausible on
-  the newer Chrome version, nothing more. Record whichever Chrome version is
-  actually installed at the time of each counted attempt (153.0.8010.53 or
-  154.0.8037.58 as applicable) — the pin held across this one version bump,
-  but the next bump needs its own re-check, not an assumption that it is
-  still unchanged.
+  **Re-confirmed on Chrome 154.0.8037.58** (2026-09-30, diagnostic reading,
+  no committed artifact): two agreeing reads, full screen, 100% zoom,
+  `windowState: fullscreen`, built-in `Color LCD` as the only attached
+  display. Unchanged: still **1710 x 981 CSS at DPR 2**. Record whichever
+  Chrome version is actually installed at the time of the recorded walk — the
+  pin held across this one version bump, but the next bump needs its own
+  re-check, not an assumption that it is still unchanged.
 
   **Still unmeasured, stated as such rather than assumed equal**: the
   screen-shared (Zoom/Meet/Teams) variant. Screen sharing changes
@@ -335,68 +285,50 @@ local VM work run on it — that cost is real and is accepted deliberately.
   needs the owner driving the real conferencing tool to measure — open
   item, not a criterion yet.
 
-**Display confirmed** (owner, 2026-09-28): the built-in panel, not the
-`LG ULTRAFINE` 6016 x 3384 also attached to this Mac — the identity is
-recorded in the verdict alongside the Chrome and macOS versions, and the
-pinned viewport is the measured **1710 x 981 CSS at DPR 2** above (the
-1440 x 932 and the superseded Safari 1710 x 1069 figures are not second
-final values) — a rehearsal walked on a different display, or a different
-browser, is a different experiment, exactly as a different PG version
-would be.
+**Display confirmed**: the built-in panel, not an external monitor — the
+identity is recorded alongside the Chrome and macOS versions, and the pinned
+viewport is the measured **1710 x 981 CSS at DPR 2** above (the 1440 x 932 and
+the superseded Safari 1710 x 1069 figures are not second final values) — a
+walk at a different display, or a different browser, is a different
+experiment, exactly as a different PG version would be.
 
-### Recovery after the bridge drops
+### Known behavior: recovery after the bridge drops
 
-Added because the owner observed it before any harness did: a Safari tab open
-against a bridge that went away showed an error chip and eleven blank panels.
+Observed once, kept as a documented behavior rather than a required gate step
+(the owner-signed step-3 bridge-drop drill this used to describe is part of
+the retired Mac-walk apparatus above). The code path is sound on inspection —
+`connect()` re-fetches the session token on every attempt, so the bridge's
+per-process token rotating on restart does not strand an open tab — and a
+2026-09-30 diagnostic observation on the real topology (Go bridge killed,
+tearing down ssh and `pgwt-server` with it) matched that: the degraded overlay
+appeared in 0.4 s with reason `disconnected`, previously loaded rows were
+retained rather than blanked, and the UI recovered in **2.0 s** without a
+reload, with a second `/session` request returning 200. This is informational
+background, not a pass/fail criterion; nothing below requires reproducing it
+per release.
 
-The code path is sound on inspection — `connect()` re-fetches the session
-token on every attempt, so the bridge's per-process token rotating on restart
-does **not** strand an open tab — but nobody has ever observed a recovery.
-Inspection is not observation, and the difference between "recovers within the
-16 s backoff cap" and "stays blank until someone reloads" is the difference
-between a hiccup and a dead demo.
+### `pgwt-stage` is retired — it was never provisioned
 
-So step 3 of the manual Mac-side walk drops the bridge mid-walk, brings it
-back, and records whether the UI reconnects, how long it takes, and whether
-any state is lost in the signed checklist.
+This document used to require a dedicated, pre-provisioned `pgwt-stage` box
+for the demo itself (owner, 2026-09-28: "we will provision dedicated node
+couple days in advance"), distinct from the gate boxes and the rehearsal's own
+throwaway VMs. **It was never built.** The owner's later decision (2026-10-13,
+delivery-queue item 4.1) already had the gate box (`pgwt-gate`) stand in for
+it for the counted rehearsals, with a real dedicated box deferred to "before
+the real demo". That event is cancelled, so the deferred box is simply never
+needed — there is no live event left for it to serve.
 
-**Diagnostic observation, 2026-09-30 (uncounted — not a signed walk):** on the
-real topology (Go bridge killed, which tears down ssh and `pgwt-server` with
-it), the degraded overlay appeared in 0.4 s with reason `disconnected`,
-previously loaded rows were retained rather than blanked, and the UI
-recovered in **2.0 s** without a reload, with a second `/session` request
-returning 200 — i.e. the per-process token was correctly re-fetched, the
-exact risk this section names. This is a real recovery number where there was
-previously only inspection, but it has no committed artifact, it is a
-diagnostic run, **not** step 3 of a signed Mac-side walk, and **it does NOT
-close or satisfy step 3** — every counted attempt still needs its own signed
-step-3 observation in the checklist, and this paragraph must not be read as
-having already provided one. It replaces only the earlier placeholder
-characterization of the 16 s backoff cap as "not
-evidence" — it does not set a pass/fail bound, and step 3 above still needs
-its own signed observation per counted attempt.
+Whatever still needs an uncontended Linux box (e.g. a paired overhead A/B,
+which must not share CPU with other work) uses **gate-2**, which CLAUDE.md
+already names as the reproduction box: reserve it exclusively for the
+duration of the paired measurement, and pin CPU model, kernel, PG version,
+configuration and dataset so the two sides of the pair are comparable. A
+pinned ephemeral VM also works for a paired measurement, since neighbour
+noise pairs out within the one VM — but it loses cross-day comparability
+(#451), so prefer gate-2 when it is free (CLAUDE.md's "persistent boxes
+first" rule).
 
-### The demo machine (owner, 2026-09-28: "we will provision dedicated node couple days in advance")
-
-A dedicated PG 18 `cx33`, created days ahead, **not** an ephemeral VM. Two
-requirements follow from how the janitor works, and both are mechanical:
-
-1. It must **not** carry the `pgwt=ephemeral` label. `tests/hetzner-sweep.sh`
-   deletes labelled machines older than its cutoff, and the demo node will be
-   days old by definition — precisely the shape the sweep exists to remove.
-2. Its name must be in `PROTECTED_NAMES` in `tests/hetzner-sweep.sh`, as a
-   second independent guard. The script's own comment says not to rely on the
-   missing label alone, because an unlabelled persistent box looks identical
-   to an operator's one-off VM.
-
-**Name: `pgwt-stage`, deliberately not `pgwt-demo`.** The rehearsal's own
-throwaway VMs are already created as `pgwt-demo-<epoch>-<rand>`, so a
-dedicated node called `pgwt-demo` would sit one careless prefix match away
-from the machines the sweep is built to delete. `PROTECTED_NAMES` matches
-exact names today, but the demo node is the one machine where a future
-loosening of that match must not be able to reach.
-
-## A rehearsal is CLEAN only if ALL of these hold
+## A release is CLEAN only if ALL of these hold
 
 Any single failure makes the attempt not clean, however good the rest look.
 
@@ -1125,209 +1057,92 @@ that captured nothing used to score clean) is now FIXED on
 -- each ships with a case proving it can go red
 (`tests/test_demo_rehearsal_lib.py`).
 
-## The sequence, and what stops it from being rolled
+## The ordinary release rule
 
-- **Pre-attempt dry run:** declare it **uncounted before it starts** and
-  record that declaration with its result. Any non-infrastructure failure
-  (product or harness) blocks counted attempts until fixed. An uncounted dry
-  run is not a re-roll past a known failure; infrastructure failures retain
-  their recorded attribution under the rules above.
-- **One capture, one signed Mac walk:** each capture attempt is paired with
-  its own signed Mac walk against the same candidate sha and tree, with the
-  attempt identity on both records. Report the pair as **"capture-side N of
-  M, Mac-side N of M"**, alongside each side's separate clean verdict and
-  consecutive-clean count. One later video cannot advance both Mac counts.
-- **Clean is reported as "k consecutive clean of N attempted", never as "two
-  clean rehearsals".** N is always stated.
-- Every attempt is logged and reported, including the failures, each classified
-  by the criterion number it failed and as product / harness / infrastructure.
-- An attempt that fails criterion 2's floors for an infrastructure reason (the
-  box died, the workload never started) is recorded but does not count toward N.
-- **Void cap: 2** (owner, 2026-09-30, see "Attribution for the Mac side" above).
-  At most two attempts total may be voided for an infrastructure reason — Mac
-  `memory_pressure` or otherwise — before the sequence stops: a third void is
-  not re-rolled past, it is reported as a real problem with the machine or the
-  setup. Without this cap, an unlimited number of voided attempts would let
-  "two consecutive clean attempts" decay into "two clean attempts eventually".
-- **At most 4 counted attempts.** If two consecutive clean runs have not
-  happened by then, the result is "not clean" and that is what the owner is
-  told. Re-rolling until two land in a row is the same after-the-fact selection
-  this document exists to prevent.
-- **AMENDMENT (owner, 2026-10-13): rehearsals and the GIF come BEFORE the tag,
-  superseding the tag-first ordering this bullet originally stated.** The
-  owner ruled this twice, explicitly — "tag after rehersals/walks and gif",
-  and earlier chose the same ordering when offered both. Per this file's own
-  rule (above: "changed by a commit that says so and the attempt counter
-  resets"), this is a correction, not a reinterpretation, and the
-  clean-attempt counter resets with it.
+**REPLACED 2026-10-25.** Everything that used to live in this section —
+pre-attempt dry runs, two-of-N counted attempts, a 4-attempt cap, a separate
+2-void cap and its infrastructure/product/harness attribution bookkeeping,
+"capture-side N of M / Mac-side N of M" reporting, the merge-window freeze
+between attempt 1 and the tag, the multi-step reordering of owner actions
+around video/GIF analysis, and the pre-registered attempt-record format — is
+retired. It was built to answer one question a live demo audience makes
+urgent: "is this specific, immutable tree, walked twice, clean enough to show
+a room full of people right now?" With no audience and no fixed date, that
+question does not need that machinery; an ordinary release gate asks only
+"is this tree good enough to tag", once.
 
-  **Why the original rule existed, and what carries over.** The tag-first
-  rule existed so two counted attempts could not be attributed to a moving
-  target — master keeps changing, so "two clean attempts" is meaningless
-  without an immutable reference both attempts (and the GIF) can be pinned to
-  and shown to share. **That requirement does not go away.** Only the timing
-  of *naming* the immutable reference moves: from a tag cut before the first
-  attempt to a commit sha recorded as each attempt runs, before any tag
-  exists.
+**The arithmetic that justified dropping the counted-attempt apparatus,
+rather than just not needing it:** it was never a good instrument for finding
+intermittent defects. Two independent whole-run attempts catch a bug that
+fails only 1 time in 4 with probability `1 - 0.75^2 = 0.4375` — about 44%, a
+coin flip, for 30-45 minutes of box time each. A targeted, repeated run of
+just the one suspect check (what issue #537's diagnosis is doing right now)
+finds the same 1-in-4 intermittent far more cheaply by running many more
+times at a fraction of the cost per run. Counted whole-run attempts were
+solving the wrong problem even while the demo still existed.
 
-  **The new sequence:**
-  1. Demo-blocking fixes land on master.
-  2. Two clean rehearsals, each paired with its own signed Mac walk, run
-     against the **same candidate master commit**
-     — pinned by its **sha**, not a tag (none exists yet) — from a worktree
-     checked out at that sha, never from a moving master HEAD. **[AMENDMENT
-     2026-10-22: the rehearsals stay capture-side-first, unchanged; the Mac
-     walk's place in the overall sequence moves — see below.]**
-  3. The two paired Mac-side video walks and their analyses are signed off
-     against that same sha; a single later walk cannot cover both attempts.
-     **[AMENDMENT 2026-10-22: this step's TIMING moves to after GIF cutting
-     and three-way video/GIF analysis — see below. Its content does not
-     change: still two distinct signed Mac walks, both against this same
-     sha, and "a single later walk cannot cover both attempts" still
-     binds.]**
-  4. **Owner's sign-off.**
-  5. GIF cut, from that same sha's rehearsal/walk material.
-  6. **Owner tags** the rehearsed commit — naming, after the fact, the sha
-     that already passed steps 2-5, not before it.
+**The rule, replacing all of it:** the tree that gets tagged is the tree
+that has, on the same sha:
 
-  **Provenance, restated against a sha instead of a tag:**
-  - A counted attempt **names the commit sha it ran against**, alongside the
-    box class, PG version, pgbench parameters, and the display identity and
-    Chrome/macOS versions already recorded in the verdict. The `--tag` CLI
-    flag and `summary["tag"]` field (`tests/demo_rehearsal_lib.resolve_tag`,
-    landed on `agent/round3-demo-fixes`) already exist for this: when a tag
-    exists it is recorded there, but under this ordering no tag will exist
-    yet, so `resolve_tag` correctly returns `None` for `summary["tag"]` — per
-    its own docstring, it is never invented or substituted with a sha in
-    that field. **A null `tag` with the sha recorded elsewhere in the
-    attempt's record (e.g. the run's own `git rev-parse HEAD`, logged
-    alongside the verdict) is the correct, honest state pre-tag — it is not
-    a gap to be papered over.**
-  - Two clean attempts count as consecutive **only if they ran on the same
-    sha** — the identical requirement as "only if they ran on the same tag"
-    before, with sha standing in until a tag exists.
-  - **Any further merge to master after attempt 1 invalidates both attempts
-    and resets the clean-attempt counter to zero**, exactly as landing a fix
-    and re-tagging did under the old ordering: a new sha is a new candidate.
-    Master may keep moving only until attempt 1 starts; after that no merge
-    lands until the tag. The tree tagged must be the tree rehearsed twice,
-    with matching candidate sha and working-tree hash on both records.
-  - Once the owner tags the rehearsed sha (step 6 above), that tag is a
-    second, permanent name for the commit that already passed — tagging does
-    not itself trigger a new rehearsal requirement.
+1. passed `make box-check` (the existing Linux build, C units,
+   synthetic-data and real-PG tiers CLAUDE.md already requires for every PR);
+2. one clean rehearsal — a single run of `tests/demo_rehearsal.py`'s
+   capture-side checks (§1-§8 above), with no re-rolling past a failure: a
+   criterion fails, it gets fixed, and the rule applies to the fixed tree
+   from a fresh run, not a cherry-picked one from history;
+3. one analysed recording — the walk from "The recorded walk" above, reviewed
+   by the lead and both standing advisers.
 
-  **Caps are unchanged**: at most 4 counted attempts, at most 2 voided (both
-  stated below, unmodified by this amendment).
+**A merge to master after that re-runs all three once**, on the new sha,
+before the tag moves. This is the same "a new sha is a new candidate"
+principle the old sequence already had (§3's conservation section and the
+old attempt-record rules both said so) — only the bookkeeping around it is
+gone. There is no cap on how many times this can happen; each merge is
+expected to be rare in the narrow window between "ready to tag" and the tag
+itself, same as it would be for any other release process.
 
-  **AMENDMENT (owner, 2026-10-22): the owner's own actions — the two signed
-  Mac walks, sign-off, and tagging — move to AFTER the lead and both
-  advisers have fully analysed the recorded video AND the cut GIFs,
-  superseding steps 2-6 of the sequence above for ORDERING only.** The
-  owner's ruling, verbatim: *"Any of my Actions should only after full video
-  analisys by you fable and astra, and sant for gif. So if point 5 means
-  it's me zitting and testing than it should go after 6"*.
+**What this does NOT weaken:** no gate inside §1-§8 is removed, no bound is
+widened, no KNOWN_FAILING entry is added. The only things dropped are the
+accounting *around* a gate result (how many times you were allowed to try,
+whether a failure was "voided", which of two humans' machines it ran on) —
+none of which is itself a check on the product.
 
-  **What carries over unchanged.** Steps 2 and 3 above are annotated in
-  place, not deleted, because the pairing requirement they state does not
-  weaken here. It is still **two distinct signed Mac walks**, both against
-  the **same candidate sha**, and the existing prohibition stands exactly as
-  written: "a single later walk cannot cover both attempts." Say this
-  outright, because leaving steps 2-3's old wording — "each paired with its
-  own signed Mac walk" — unannotated would let a future reader re-derive
-  interleaving (walk immediately after rehearsal 1, walk immediately after
-  rehearsal 2) and use that to justify pausing a rehearsal mid-flight to
-  demand a walk. Nothing of the kind is intended: both walks still happen,
-  still paired one-to-one with the two capture attempts by attempt
-  identity, exactly as before — only their position in the overall sequence
-  moves, from immediately after each capture to after both captures, both
-  GIFs, and the three-way analysis.
+## What changed and why (amendment, 2026-10-25)
 
-  **The new sequence, superseding steps 1-6 above for ordering (the old
-  steps' own numbering and content stand as written above; this is an
-  independent 1-8 list for the reordered flow, not a renumbering of them):**
-  1. Demo-blocking fixes land on master.
-  2. Two clean rehearsals, **capture-side only**, both against the **same
-     candidate master commit** — pinned by its **sha**, not a tag — from a
-     worktree checked out at that sha, never from a moving master HEAD.
-  3. Record the video, box-side (`--footage-only`;
-     `scripts/demo-walk-record.py`'s own `walk.webm`) — no owner action here.
-  4. Cut both GIFs from that same recorded material.
-  5. **Full analysis of the video and the GIFs by all three reviewers** —
-     the lead plus both advisers (codex and Fable) — against that same sha.
-  6. **The owner's two signed Mac walks**, both against that same sha, one
-     per rehearsal attempt by identity — the same pairing steps 2-3 above
-     required, only later in the sequence.
-  7. **Owner's sign-off.**
-  8. **Owner tags** the rehearsed commit.
+Explicit amendment, not a reinterpretation, per this document's own
+pre-existing rule: the owner cancelled the demo (PGConf Valencia — "the
+moment for it has gone"), and both standing advisers independently concluded
+the rehearsal apparatus built around that specific event should mostly drop
+away, leaving the tag as an ordinary release gate.
 
-  **Why this order is better, not merely different.** Under the old
-  ordering a defect first visible only in the video/GIF analysis could
-  surface AFTER the owner had already spent both signed Mac walks on that
-  sha, so fixing it cost a re-record plus a fresh pair of owner walks. Under
-  the new ordering the same defect is caught by step 5's analysis before
-  the owner has spent any of their own time on that sha, so the same fix
-  costs only a re-record. This also answers an adviser's objection raised
-  while this change was made: discovering a false answer after two green
-  runs wastes the capture AND the owner's two walks under the old order;
-  under the new order it wastes only the capture.
+| Dropped | Why |
+|---|---|
+| Two-of-N counted attempts, the 4-attempt cap, re-roll prohibition | Built to answer "is this one immutable tree clean enough to show an audience right now"; see "The ordinary release rule" for the 44% arithmetic showing it was never a good intermittency instrument anyway |
+| Void cap and infrastructure/product/harness attribution bookkeeping | Administration around counted attempts; no counted attempts, no administration |
+| Dry-run declarations, attempt records | Pre-registration scaffolding for a sequence that no longer exists |
+| The merge-window freeze between attempt 1 and the tag | Existed so two counted attempts stayed attributable to one sha; "The ordinary release rule" gets the same guarantee (same sha for box-check + rehearsal + recording) without freezing merges |
+| "Two verdicts, never merged" (capture-side vs. Mac-side), the owner's two signed Mac walks, the owner-actions-after-video-analysis reordering | Stage insurance for a human presenting live; replaced by one recorded walk analysed by the lead and both advisers (see "The recorded walk") |
+| Mac pre-flight hygiene (auto-lock, zoom, second display, Time Machine, quitting apps) | Presenter-machine care for a presentation that is not happening |
+| `pgwt-stage` | Never provisioned; its only purpose was the live demo event itself — see "`pgwt-stage` is retired" above |
 
-  **Dependency check, verified, that makes this reorder safe.** The GIFs
-  are cut from `scripts/demo-walk-record.py`'s own recorded `walk.webm` —
-  the automated box-side capture (`write_gif` runs against `capture.frames`
-  read from that file) — never from the owner's Mac walk video. So step 4's
-  "that same recorded material" is the recorder's own walk, not anything
-  the owner produces in step 6; moving the owner's walks later creates no
-  circular dependency between step 6 and the GIFs analysed in step 5.
-
-  **Caps are still untouched by this amendment**: at most 4 counted
-  attempts, at most 2 voided, and two clean attempts still count as
-  consecutive only if they ran on the same sha — all restated above,
-  unmodified again.
-
-### Attempt record, pre-registered before attempt 1
-
-Every attempt record includes:
-
-- The **candidate sha** (`git rev-parse HEAD`) and **working-tree hash**
-  (`scripts/tree-hash.sh`), and whether `git status --porcelain` was empty.
-  Record the checkout path so a dirty or wrong worktree is visible. The
-  launcher preserves these launch-time values across `--collect` and writes
-  them into its log and collected `summary.json` as `launcher_provenance`;
-  the collector's current checkout must never substitute for the launched
-  tree. After rsync, the launcher hashes the received source tree on the box
-  and records `remote_tree_hash` and `tree_hash_verification` beside the local
-  `tree_hash`. A mismatch or unavailable remote hash refuses the launch;
-  absence is never recorded as a verified match. `tag` remains null before
-  a tag exists.
-- This explicit statement: **"Under c778d90, Off-CPU\* is reported, not
-  gated; the counter started at zero. Earlier verdicts used different
-  criteria and cannot be pooled with this sequence."**
-- **All seven sample Off-CPU\* percentages**, each with its sample identity
-  and beside the registered **gate-1 band 5.08–13.52%** (§3). This is a
-  reporting band, not a correctness gate: an out-of-band magnitude is green
-  by code and must still be reported. Unavailable data is absence, not a
-  measured zero or an in-band value; the independent availability and
-  accounting checks still apply.
-- **Which box it ran on**, including the exact SSH target and box identity
-  (gate-1 / gate-2, or the ephemeral server name and id). Gate-1 and gate-2
-  are not comparable (#366); do not present one box's percentages as evidence
-  against the other's calibration. Include the launcher's **box uptime at
-  start and end** and its **box-lock queue line** in the log and result JSON,
-  with missing observations explicitly unavailable. These uptime readings
-  bracket launch and collection, including queue time; they are not claimed
-  as the remote capture's exact start and finish times.
-- The predeclared counted/uncounted status, attempt identity, paired signed
-  Mac checklist/video and sign-off, separate verdicts, and all failures with
-  their product / harness / infrastructure classification.
-
-The statement, seven-sample comparison and signed Mac pairing are required
-in the attempt record; launcher provenance alone does not supply them or
-advance either counter.
+**Kept, unchanged in substance:** `tests/demo_rehearsal.py`'s capture-side
+checks (§1-§8); the 1710x981 viewport pin (restated, not retracted — the
+#415/#462/#473 fold checks need it); the overhead-envelope and per-class
+wait-CPU measurements already recorded in §3/§6 (these were already DONE on
+master before this amendment and are not reopened by it — see the note on
+`docs/DEMO_DELIVERY_QUEUE.md` for a correction to a stale claim about their
+status); and the fact that a recording proves layout/motion, never numeric
+correctness.
 
 ## Provenance
 
 Criteria drafted by the lead, challenged and corrected by the standing adviser
 (`.claude/agents/adviser.md`) on 2026-09-27 — which supplied criterion 3's
 residual-absorption finding, the over-attribution detectors, the sampling
-requirement, the cross-tab and freshness checks, and the attempt accounting.
-The owner's rulings are quoted inline where they bind.
+requirement, the cross-tab and freshness checks, and the attempt accounting
+(the last of these retired 2026-10-25, see "What changed and why" above).
+The owner's rulings are quoted inline where they bind. The 2026-10-25
+amendment was drafted against the demo's cancellation; both advisers agreed
+on dropping the rehearsal apparatus, and the lead corrected their shared
+premise that the demo-workload overhead A/B was still outstanding — it was
+already measured 2026-10-13 (§6) — before writing that table.

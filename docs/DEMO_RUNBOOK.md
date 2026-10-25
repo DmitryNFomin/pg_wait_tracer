@@ -1,10 +1,17 @@
 # Demo runbook
 
-How the demo is actually started, verified, walked, recovered, and shut
-down. This is the only document that says that — `docs/DEMO_REHEARSAL_CRITERIA.md`
-defines what a *clean rehearsal* is, and `docs/DEMO_MAC_WALK_CHECKLIST.md` is
-the sign-off form for a walk — neither one is a "how to start it" sequence,
-and until now that only existed in an orchestrating agent's own session.
+**Retitled in substance, not in name, 2026-10-25**: the live demo this
+runbook was written for is cancelled (`docs/DEMO_REHEARSAL_CRITERIA.md`,
+"What changed and why"). The architecture and the start-up/verify/recover
+sequence below are unchanged and still the operational how-to for driving a
+live capture — for the recorded release walk, for `box-check`'s live tier, or
+for reproducing a bug by hand. What is stripped is presenter choreography
+(audience framing, a dedicated "demo" Chrome profile, stage-specific phrasing)
+that only ever made sense in front of a room.
+
+How a live capture is actually started, verified, walked, and recovered.
+`docs/DEMO_REHEARSAL_CRITERIA.md` defines what a *clean release gate* is;
+neither document is a "how to start it" sequence for the other.
 
 Every command below is traced to a file, cited beside it. Anything that
 isn't in the repo is marked **UNKNOWN — needs owner input** rather than
@@ -13,25 +20,25 @@ guessed at.
 ## 1. Topology
 
 ```
-[Demo box: pgwt-stage]                    [Presenter's Mac]
+[Capture box: a gate box or an       [Client machine: browser + bridge]
+ ephemeral VM, CLAUDE.md]
 PostgreSQL 18 (already running)
 pg_wait_tracer --daemon  ───(unix socket:  <trace-dir>/pgwt.sock)
   writes trace files to <trace-dir>
 pgwt-server (spawned by the bridge          web/pgwt (Go bridge)
-  over ssh, one process per bridge            ├─ spawns: ssh <user>@pgwt-stage
+  over ssh, one process per bridge            ├─ spawns: ssh <user>@<capture-box>
   session, reads the trace files,             │     pgwt-server <trace-dir>
   computes aggregates, JSON lines               ├─ localhost:8384 HTTP + WebSocket
-  on stdin/stdout)                              └─ real Chrome, dedicated demo
-                                                    profile, full screen
+  on stdin/stdout)                              └─ real Chrome, full screen
 ```
 
-- The daemon and PostgreSQL run **on the demo box** (`pgwt-stage`, a
-  dedicated PG 18 `cx33`, not an ephemeral VM —
-  `docs/DEMO_REHEARSAL_CRITERIA.md` "The demo machine"). Nothing eBPF runs
-  on macOS (`CLAUDE.md`), so the capture is necessarily remote.
-- The **Go bridge and the browser run on the Mac** (owner, 2026-09-28: "Demo
-  will be using my Mac where you are running now" —
-  `docs/DEMO_REHEARSAL_CRITERIA.md` "The demo configuration"). The bridge
+- The daemon and PostgreSQL run **on the capture box** — a gate box
+  (`pgwt-gate`/`pgwt-gate-2`) or an ephemeral VM of the same class
+  (CLAUDE.md). Nothing eBPF runs on macOS (`CLAUDE.md`), so the capture is
+  necessarily remote. There is no longer a separate dedicated box for this —
+  `docs/DEMO_REHEARSAL_CRITERIA.md`'s "`pgwt-stage` is retired" explains why.
+- The **Go bridge and the browser run on the client machine** (a laptop —
+  `docs/DEMO_REHEARSAL_CRITERIA.md` "The release configuration"). The bridge
   itself opens `ssh <target>` and runs `pgwt-server <trace-dir>` on the far
   end as a child process, talking JSON lines over that ssh session's
   stdin/stdout (README.md "Architecture" diagram, `## Web Investigation
@@ -44,33 +51,25 @@ pgwt-server (spawned by the bridge          web/pgwt (Go bridge)
 
 ## 2. Start-up sequence
 
-Run steps 1–3 **on `pgwt-stage`** (ssh in first). Run steps 4–6 **on the
-Mac**.
+Run steps 1–3 **on the capture box** (ssh in first). Run steps 4–6 **on the
+client machine**.
 
 ### 2.1 PostgreSQL
 
-`pgwt-stage` is a dedicated, pre-provisioned box (owner, 2026-09-28: "we
-will provision dedicated node couple days in advance" —
-`docs/DEMO_REHEARSAL_CRITERIA.md`), so PostgreSQL should already be running.
-Confirm, and (re)start via the cluster tooling the provisioning script
-itself uses if it is not (`tests/provision-runner.sh`, which calls
-`pg_ctlcluster "$V" main start` / `restart` for Ubuntu-managed clusters):
+A gate box is already provisioned (`tests/provision-runner.sh`, Ubuntu,
+`pg_ctlcluster`); an ephemeral VM gets the same provisioning fresh
+(CLAUDE.md). Confirm PostgreSQL is running, and (re)start it via the same
+tooling if it is not:
 
 ```bash
 pg_lsclusters                    # confirm PG 18 is "online"
 sudo pg_ctlcluster 18 main start # only if it is down
 ```
 
-**UNKNOWN — needs owner input**: `pgwt-stage`'s exact OS/PG install layout
-(Ubuntu `pg_ctlcluster` vs. a `systemctl postgresql` unit) is not pinned
-anywhere in the repo — `tests/provision-runner.sh` only provisions Ubuntu
-boxes. Confirm the actual service-management command on `pgwt-stage` once
-it exists.
-
 ### 2.2 The daemon (`pg_wait_tracer --daemon`)
 
 Default capture tier is **`tiered`** (low-overhead always-on sampler,
-escalates to exact on demand — README.md "Capture Tiers"). The demo instead
+escalates to exact on demand — README.md "Capture Tiers"). This walk instead
 needs **`--mode full`**, the expensive always-on-exact tier (6–30% overhead,
 README.md): Waterfall's executions view needs the plan/execute USDT probes,
 which are gated on `--mode full` only (`tests/demo_rehearsal.sh`, the
@@ -98,7 +97,7 @@ sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 >
 > The answer is still correct, but the 900 s Overview window is exactly the
 > request that fast path exists for: taking the raw path for it costs the
-> paint latency this project spent a week reducing, live, on stage. If
+> paint latency this project spent a week reducing, live, during a walk. If
 > `/var/lib/pgwt/traces` holds anything written before today's v8 upgrade
 > (or any earlier version), move it aside (`mv traces traces.pre-v8`)
 > before starting the daemon. A fresh `mktemp -d` directory, as
@@ -120,7 +119,8 @@ matches `tests/demo_rehearsal.sh`'s own daemon invocation (`"$TRACER"
 --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" --mode full -v`), minus the
 harness's `-i 1`/`--pid` (those are for its own scripted polling, not
 needed interactively) and its `mktemp` trace directory (use a fixed,
-memorable path for a demo instead — see the open question below).
+memorable path for a manually-driven walk instead — see the open question
+below).
 
 Confirm it came up before moving on (the control socket only appears once
 the daemon is ready): `tests/demo_rehearsal.sh` polls for
@@ -133,27 +133,27 @@ ls -la /var/lib/pgwt/traces/pgwt.sock   # must exist, socket, mode 0600
 **UNKNOWN — needs owner input**: whether the daemon should run inside
 `tmux`/`screen`, or via the `nohup ... setsid -w` pattern
 `scripts/demo-rehearsal-remote-run.sh` uses to survive its own ssh session
-ending, so an accidental ssh drop during the live demo doesn't kill the
-capture mid-walk. No repo script does this for an *interactively started*
-daemon — the automated harnesses only detach their own wrapping script, not
-a daemon a human starts by hand.
+ending, so an accidental ssh drop doesn't kill the capture mid-walk. No repo
+script does this for an *interactively started* daemon — the automated
+harnesses only detach their own wrapping script, not a daemon a human starts
+by hand.
 
 **UNKNOWN — needs owner input**: whether `/var/lib/pgwt/traces` should be
-emptied before each demo session (old trace files accumulate;
+emptied before each session (old trace files accumulate;
 `--trace-retention <H>` defaults to 24 h — README.md "Trace Recording") or
 left to retention.
 
 ### 2.3 The workload
 
-The demo's realism comes from `tests/live_loop_workload.py` (five
+The walk's realism comes from `tests/live_loop_workload.py` (five
 persistent sessions producing `Lock:relation`, `Lock:advisory`,
 `Lock:transactionid`, and query-id/duration variety across Queries,
 Histogram, Waterfall and Scatter — `docs/DEMO_REHEARSAL_CRITERIA.md` "The
 workload the criteria are written against") plus throttled pgbench, exactly
 as `tests/demo_rehearsal.sh` starts them. **Not `Timeout:PgSleep`**: the
-workload dropped server-side `pg_sleep` on 2026-10-06 (a DBA watching the
-demo would read a literal `pg_sleep(1.3)` in Top Queries as a faked
-workload) and replaced it with a four-shape `pg_advisory_lock` hold
+workload dropped server-side `pg_sleep` on 2026-10-06 (a literal
+`pg_sleep(1.3)` visible in Top Queries reads as a faked workload to anyone
+watching) and replaced it with a four-shape `pg_advisory_lock` hold
 (0.1/0.3/1.0/3.0s), which is where `Lock:advisory` comes from —
 `docs/DEMO_REHEARSAL_CRITERIA.md` records the same change at its §2
 workload-signature check.
@@ -164,7 +164,7 @@ python3 tests/live_loop_workload.py <duration_s> &
 ```
 
 Both take a fixed duration in seconds (`tests/demo_rehearsal.sh`); pick a
-duration that comfortably outlasts the demo, or restart them if either one
+duration that comfortably outlasts the walk, or restart them if either one
 finishes early (see §5 "the workload dies"). `pgbench` needs its tables
 already provisioned (`-i` is never re-run against a shared box's data —
 `tests/live_daemon_lib.sh`'s `check_pgbench_provisioned`); confirm with
@@ -172,28 +172,27 @@ already provisioned (`-i` is never re-run against a shared box's data —
 first if unsure.
 
 **Run only this rehearsed command — do not improvise a higher-concurrency
-pileup on stage.** `pgbench -c 4 --rate=25` plus `live_loop_workload.py`'s
-persistent sessions is about 20 backends total. The interference table
+pileup.** `pgbench -c 4 --rate=25` plus `live_loop_workload.py`'s persistent
+sessions is about 20 backends total. The interference table
 (`src/compute.c`, `PAIR_HT_SIZE` 4096 slots, keyed on an unordered PID pair)
 needs around 92 pairwise-overlapping backends to saturate its hash table
 (92×91/2 = 4186 > 4096), so this workload sits roughly 20x under that
 threshold. Something like `pgbench -c 100` is the one improvisation that
-would push past it and turn #327 (see §5) into a live demo freeze — the
-owner has confirmed the plan is the rehearsed script only.
+would push past it and turn #327 (see §5) into a server freeze mid-walk.
 
 ### 2.4 `pgwt-server`
 
 Not started by hand — the bridge spawns it over ssh for you (§1, README.md
-"Architecture"). Just confirm the binary is on `pgwt-stage`'s `PATH` (or
+"Architecture"). Just confirm the binary is on the capture box's `PATH` (or
 know its path for `--server-path` below): `which pgwt-server` or
 `ls /usr/local/bin/pgwt-server` (INSTALL.md "Web Investigation Client"
 shows `scp pgwt-server root@db-server:/usr/local/bin/`).
 
-### 2.5 The Go bridge — **run this on the Mac**
+### 2.5 The Go bridge — **run this on the client machine**
 
 ```bash
 ./pgwt --trace-dir /var/lib/pgwt/traces --server-path pgwt-server \
-       root@pgwt-stage
+       root@<capture-box>
 ```
 
 (README.md "Web Investigation Client (pgwt)"; flags table: `--trace-dir`
@@ -203,20 +202,21 @@ already on the remote `PATH`.
 
 The bridge calls macOS's `open <url>` on startup (`web/main.go`,
 `openBrowser`), which launches your **default** browser/profile — not
-necessarily the dedicated demo Chrome profile from §2.6. Either close that
-auto-opened tab, or set the demo profile as default beforehand; either way,
-do the actual walk from the profile in §2.6.
+necessarily the clean profile from §2.6. Either close that auto-opened tab,
+or set the walk profile as default beforehand; either way, do the actual walk
+from the profile in §2.6.
 
 ### 2.6 Chrome — 1710×981 CSS @ DPR 2, built-in display
 
-Per the pinned client configuration
-(`docs/DEMO_REHEARSAL_CRITERIA.md` "The client, pinned", raw measurement in
-`docs/chrome-demo-viewport-2026-09-28.md`):
+Needed for the one recorded release walk (`docs/DEMO_REHEARSAL_CRITERIA.md`
+"The recorded walk" / "The client, pinned", raw measurement in
+`docs/chrome-demo-viewport-2026-09-28.md`) and useful whenever paint-timing
+behavior needs reproducing at the pinned viewport:
 
-1. Detach any second display; use the Mac's built-in `Color LCD` as **Main
+1. Detach any second display; use the built-in `Color LCD` as **Main
    Display**.
-2. Launch the dedicated demo profile (`docs/chrome-demo-viewport-2026-09-28.md`
-   "Environment"): same Chrome binary, `--user-data-dir=$HOME/.pgwt-demo-chrome-profile
+2. Launch a clean profile (`docs/chrome-demo-viewport-2026-09-28.md`
+   "Environment"): same Chrome binary, `--user-data-dir=$HOME/.pgwt-walk-chrome-profile
    --no-first-run --no-default-browser-check --disable-session-crashed-bubble`.
 3. Navigate to `http://localhost:8384/`, page zoom 100% (`Cmd+0`).
 4. Enter full screen (green button or `Cmd+Ctrl+F`) and let the animation
@@ -227,7 +227,7 @@ Per the pinned client configuration
    measurement is two identical readings taken after the full-screen
    animation settles").
 
-## 3. Verification before the audience arrives
+## 3. Verification before the walk
 
 Each check below tells you the component is *producing data*, not just
 running — running-but-mute is the failure mode this section exists to
@@ -244,7 +244,7 @@ catch.
    between two calls a few seconds apart is "actually tracing", not just
    "process alive". `ringbuf_drops_total`, `state_map_full_total`, and
    `seen_query_ids_full_total` should all read 0 — these are the
-   lost-trace-event counters the demo's correctness rests on
+   lost-trace-event counters the capture's correctness rests on
    (`docs/DEMO_REHEARSAL_CRITERIA.md` §6 "Daemon integrity").
 2. **Quick data sanity, no browser needed**:
    ```bash
@@ -296,7 +296,7 @@ Visit the 11 tabs **in the order the UI lists them**
    single-threaded, so a saturated probe spins forever and freezes every tab
    at once (see §5's hung-server recovery). It is not loaded with the tab
    itself — only this explicit button triggers it — so leaving it unclicked
-   keeps it off the demo path entirely. Tracking: #327.
+   keeps it off the walk's path entirely. Tracking: #327.
 8. Concurrency
 9. Waterfall
 10. Scatter
@@ -310,17 +310,16 @@ drill, click the `#live-btn` in the header — it will show as not-`active`
 until you do.
 
 For each tab, the same four things `docs/DEMO_MAC_WALK_CHECKLIST.md` §2
-grades: no console errors, no blank panel, data actually present, and it
+lists: no console errors, no blank panel, data actually present, and it
 paints without a visible spinner hanging.
 
 **Range and compare mode, for the duration of the walk:**
 
-- **Keep the range at 15 minutes** (the owner's stated plan is a moving
-  15-minute window). `top_queries` (behind the Queries tab) has latency
-  that tracks the requested window — measured 391 ms at 15 minutes on a
-  2583 s capture, rising toward 1237 ms at full-capture range. Widening to
-  full capture moves that cost toward seconds; there is no reason to during
-  the demo, and every reason not to.
+- **Keep the range at 15 minutes** (a moving 15-minute window).
+  `top_queries` (behind the Queries tab) has latency that tracks the
+  requested window — measured 391 ms at 15 minutes on a 2583 s capture,
+  rising toward 1237 ms at full-capture range. Widening to full capture
+  moves that cost toward seconds, with no benefit during a walk.
 - **Never narrow to ~1 minute on Queries.** Measured (all windows anchored
   well inside the capture, no edge effects): a 110 s window and a 130 s
   window both returned 0 rows from `top_queries`, while 300 s and 900 s
@@ -328,15 +327,15 @@ paints without a visible spinner hanging.
   legitimately render an empty Queries panel with no error chip. This is a
   recorded observation, not an explained one: the data crosses the 120 s
   raw/summaries code-path boundary (130 s) while still showing 0 rows, so
-  that boundary is not the cause either. An empty Queries panel on stage is
-  a visible failure that no gate catches — stay at 15 minutes.
+  that boundary is not the cause either. An empty Queries panel is a visible
+  failure that no gate catches — stay at 15 minutes.
 - **Keep compare mode off.** It was not part of this measurement and has no
   equivalent paint-timing or window-dependence data recorded anywhere in
   this repo.
 - **A moving window re-fetches and recomputes its overlapping data on every
   live tick** — there is no sliding result cache. This is a property of
-  the live-window design, not a bug to watch for; it's recorded here so a
-  presenter narrating performance doesn't claim otherwise.
+  the live-window design, not a bug to watch for; it's recorded here so
+  nobody narrating this walk's performance claims otherwise.
 - **The live window's right edge always ends in uncommitted data.** The
   daemon's event writer flushes a block only when it fills to 4096 events
   (`PGWT_BLOCK_EVENTS`, `pgwt_writer_push_event`, `src/event_writer.c:654`)
@@ -352,12 +351,12 @@ paints without a visible spinner hanging.
   (`src/server.c:942`), which decodes the **entire** newly-rotated file's
   blocks into cache in one pass on first access (every subsequent request
   hits the cache and is fast again) — a one-time stall of unmeasured size.
-  If the demo slot crosses :00, expect one tick to pause longer than usual
-  right after the hour changes; it is this mechanism, not a frozen demo.
+  If a capture session crosses :00, expect one tick to pause longer than
+  usual right after the hour changes; it is this mechanism, not a frozen UI.
 
 ## 5. Recovery
 
-### The bridge drops mid-demo
+### The bridge drops mid-walk
 
 Observed behavior, not just code inspection (`docs/DEMO_REHEARSAL_CRITERIA.md`
 "Recovery after the bridge drops"): a tab left open against a bridge that
@@ -383,9 +382,9 @@ criteria doc is explicit that "inspection is not observation" here.
   transitions, fingerprints, lock chains, interference, concurrency,
   executions/waterfall, scatter, transition matrix) report that message
   over windows with no escalation, rather than silently returning nothing
-  (README.md, "Capture Tiers"). This should not happen during the demo
-  since §2.2 starts the daemon in `--mode full`, always-exact — if you see
-  it, the daemon is not actually running full mode; check `status` (§3.1).
+  (README.md, "Capture Tiers"). This should not happen here since §2.2
+  starts the daemon in `--mode full`, always-exact — if you see it, the
+  daemon is not actually running full mode; check `status` (§3.1).
 - If it's genuinely blank with no message: check the daemon and bridge are
   both still alive (§3.1, §3.3) and reload the tab.
 
@@ -400,28 +399,26 @@ failure mode from both of the others below:
 
 - **Recognise it**: every tab stops updating at the same moment (not just
   one), the bridge shows no error chip or dropped connection (contrast
-  "The bridge drops mid-demo" above), and `top`/`htop` on `pgwt-stage` shows
-  `pgwt-server` pinned near 100% of one core with no change over time. A
-  slow query instead stalls one tab while others keep refreshing; a crash
+  "The bridge drops mid-walk" above), and `top`/`htop` on the capture box
+  shows `pgwt-server` pinned near 100% of one core with no change over time.
+  A slow query instead stalls one tab while others keep refreshing; a crash
   instead produces the bridge's error chip.
-- **Recover it**: Ctrl-C the bridge on the Mac (§6) — this tears down the
-  ssh session and should end the remote `pgwt-server` child with it. Check
-  `pgrep pgwt-server` on `pgwt-stage`; if it's still running, `kill -9` it
-  directly (a tight probe loop may not act on a milder signal promptly).
-  Then restart the bridge (§2.5). The daemon and PostgreSQL are untouched,
-  so no capture data is lost.
+- **Recover it**: Ctrl-C the bridge on the client machine (§6) — this tears
+  down the ssh session and should end the remote `pgwt-server` child with it.
+  Check `pgrep pgwt-server` on the capture box; if it's still running,
+  `kill -9` it directly (a tight probe loop may not act on a milder signal
+  promptly). Then restart the bridge (§2.5). The daemon and PostgreSQL are
+  untouched, so no capture data is lost.
 - **Timing**: there's no measured duration for this exact restart — budget
   it like §2.5's startup (an ssh connect and a few seconds for tabs to
-  repaint), not a reprovision. Tell the audience you're reconnecting the
-  client rather than stopping; only stop the demo if tabs are still frozen
-  once the new bridge is up.
+  repaint), not a reprovision.
 
 ### The workload dies
 
 `pgbench` or `tests/live_loop_workload.py` (§2.3) exit after their fixed
-duration, or can die early. If the demo view goes quiet (AAS drops toward
-idle, no new sessions in Sessions), restart whichever process ended, using
-the same commands from §2.3 with a fresh duration.
+duration, or can die early. If the view goes quiet (AAS drops toward idle,
+no new sessions in Sessions), restart whichever process ended, using the
+same commands from §2.3 with a fresh duration.
 
 ### An orphaned Waterfall row pins to the top
 
@@ -449,37 +446,37 @@ own `cleanup()` (workload → pgbench → bridge → daemon, each a bounded
 signal-then-poll-then-KILL wait — `stop_pid` in `tests/live_daemon_lib.sh`):
 
 ```bash
-# On pgwt-stage:
+# On the capture box:
 kill <live_loop_workload.py PID>     # or let its fixed duration expire
 kill <pgbench PID>                   # or let it expire
 kill -INT <pg_wait_tracer --daemon PID>   # daemon: SIGINT, not TERM
 ```
 
 ```bash
-# On the Mac:
+# On the client machine:
 # Ctrl-C the ./pgwt process (or kill it) — this closes the ssh session and
 # ends the remote pgwt-server child with it (README.md architecture: the
 # bridge OWNS the ssh session pgwt-server runs inside).
 ```
 
-Leave PostgreSQL running — `pgwt-stage` is a persistent, dedicated box
-(§2.1), not a throwaway VM; nothing in this repo stops PostgreSQL as part
-of a demo teardown.
+Leave PostgreSQL running if the capture box is a persistent gate box (§2.1);
+tear it down with the rest if it's an ephemeral VM, per that VM's own
+lifecycle (CLAUDE.md).
 
 **UNKNOWN — needs owner input**: whether to delete `/var/lib/pgwt/traces`
 after each session or let `--trace-retention`/`--retention-gb` (README.md)
-age it out — no script in the repo makes this decision for a *demo* box.
-(Corrected 2026-10-13, issue #386: the rehearsal harness's `cleanup()` no
-longer always deletes its own `mktemp` trace directory — `RETAIN_TRACE`
-now defaults to **1**, so it *moves* it to
+age it out — no script in the repo makes this decision for a capture box
+outside the automated harness. (Corrected 2026-10-13, issue #386: the
+rehearsal harness's `cleanup()` no longer always deletes its own `mktemp`
+trace directory — `RETAIN_TRACE` now defaults to **1**, so it *moves* it to
 `tests/results/demo_rehearsal/trace/` and the existing rsync brings it
 back. That is a deliberate change: two rehearsals in a row deleted the
 artifacts needed to diagnose their own failures. `RETAIN_TRACE=0` restores
 the old delete-on-exit behaviour for a cheap mechanics run. Either way it
-says nothing about what a *demo* box should do with
+says nothing about what a manually-driven capture box should do with
 `/var/lib/pgwt/traces`.)
 
-## 7. Known rough edges a presenter should not be surprised by
+## 7. Known rough edges, re-checked periodically
 
 Re-checked against `gh issue list` and master's code on 2026-10-13, filtered
 to ones with a symptom visible during the walk above, not test-only
@@ -488,13 +485,13 @@ view, is CLOSED and fixed — merged as #262/`8c1eb93`; see §5's orphan-row
 recovery for what that fix changed and the residual it introduces.)
 
 - **#172** — Transitions tab reproducibly exceeds the UI test suite's blink
-  threshold by a small margin (ratio ~0.0018–0.0024 vs. a 0.001 gate). On
-  stage this reads as a faint, brief flicker on that one tab, not a broken
+  threshold by a small margin (ratio ~0.0018–0.0024 vs. a 0.001 gate). During
+  a walk this reads as a faint, brief flicker on that one tab, not a broken
   panel.
 - **#160** — Queries tab shows a real repaint blink (~2.18% of pixels)
   specifically on the **first pass** of a long capture, when the query set
-  is still small and changing shape — i.e., right when a demo viewer first
-  looks at it. It settled clean on later passes of the same capture in the
+  is still small and changing shape — i.e., right when a viewer first looks
+  at it. It settled clean on later passes of the same capture in the
   rehearsal that found it.
 - **#168** — The Timeline chart can show a degenerate, sub-pixel wait bar
   pinned at the left axis edge for a session whose window got clamped; a
@@ -523,15 +520,15 @@ recovery for what that fix changed and the residual it introduces.)
   painted; `ttfp_ms` (`tests/ui_live_smoke.py`) uses the same hook. The
   numbers above come from that same instrument, so they likely understate
   true visual paint time by some amount; #197 is now specifically about
-  measuring real paint, in Safari, on the demo machine, and is not closed
-  on it yet.
+  measuring real paint, in Safari, on the recorded-walk client, and is not
+  closed on it yet.
   - **Separately, `top_queries` (the server-side endpoint behind the
     Queries tab) has latency that tracks the requested window, not a fixed
-    constant** — 14 ms at 60 s, 70 ms at 5 min, 391 ms at the demo's
-    planned 15-minute window, 1237 ms at full-capture range (measured on a
+    constant** — 14 ms at 60 s, 70 ms at 5 min, 391 ms at the planned
+    15-minute window, 1237 ms at full-capture range (measured on a
     2583 s / 4.2M-event capture). This is a server-side range-dependence
-    finding, independent of the paint-timing fix above; see §4 below for
-    presenter guidance and `docs/DEMO_REHEARSAL_CRITERIA.md` §4 for the
+    finding, independent of the paint-timing fix above; see §4 above for
+    walk guidance and `docs/DEMO_REHEARSAL_CRITERIA.md` §4 for the
     full caveats (it is not shown to be flat across capture length, and the
     60 s window's empty result is not attributed to a cause).
 - **#215** — The first several live ticks after startup can look like the
@@ -558,10 +555,9 @@ recovery for what that fix changed and the residual it introduces.)
 
 ## Open questions for the owner (collected)
 
-1. `pgwt-stage`'s exact OS/service-manager for PostgreSQL (§2.1).
-2. Whether the daemon should run detached (`tmux`/`nohup+setsid`) so an ssh
-   drop during the live demo can't kill the capture (§2.2).
-3. Whether `/var/lib/pgwt/traces` should be cleared before each session
+1. Whether the daemon should run detached (`tmux`/`nohup+setsid`) so an ssh
+   drop during a long capture can't kill it (§2.2).
+2. Whether `/var/lib/pgwt/traces` should be cleared before each session
    (§2.2, §6).
-4. Whether to delete trace files after each demo session or let retention
+3. Whether to delete trace files after each session or let retention
    age them out (§6).

@@ -1,4 +1,17 @@
-# Demo delivery queue — the ordered path to 2026-10-12
+# Demo delivery queue — the ordered path to 2026-10-12 (ARCHIVED 2026-10-25)
+
+**ARCHIVED.** The demo this queue was built to deliver is cancelled (owner,
+2026-10-25 — see `docs/DEMO_REHEARSAL_CRITERIA.md`'s "What changed and why").
+Kept, unmodified below, as real history: every row here already resolved
+before the cancellation (section 1 all DONE, section 2's criteria rows all
+DONE/WITHDRAWN/RESOLVED as recorded), and the genuine release-relevant
+outcomes — the TTFP bound, AAS cross-tab agreement, the overhead-envelope
+A/B, the per-class wait-CPU scan, Off-CPU reporting — are carried forward
+into `docs/DEMO_REHEARSAL_CRITERIA.md` §3/§4/§6, which is the live document
+now. **Do not read this file as open or actionable**; nothing here is
+dispatchable. In particular, row 2.3 below already records the demo-workload
+overhead A/B as **measured** (2026-10-13, gate-1, PG18, 30.31% ± 0.58pp) —
+it was done before this archival, not left outstanding by it.
 
 The standing, ordered list of everything between here and a demo-ready tag.
 **Its purpose is that work never stops for want of a decision**: any lead —
