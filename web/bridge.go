@@ -119,11 +119,25 @@ func (b *Bridge) stderrTap() *stderrTap { return &b.tap }
 func (b *Bridge) refusalReason() string { return b.tap.Reason() }
 
 // transportError is transportError() plus this bridge's refusal reason, so
-// every connection-level failure the browser sees can name its cause
-// instead of collapsing into "server disconnected" (#351). The envelope is
+// a connection-level failure the browser sees can name its cause instead of
+// collapsing into "server disconnected" (#351). The envelope is
 // byte-identical to transportError() when there is no reason, so the
 // existing client path is untouched.
+//
+// A reason is attached ONLY while the upstream is DOWN. The `timeout`
+// envelope (requestTimeout elapsed) is the one that fires against a
+// perfectly healthy, still-running server, and a reason there could only
+// ever mislabel it: the server is not gone, so nothing on its stderr
+// explains why one request was slow. "server unavailable (reconnecting)"
+// and "server disconnected" are both raised with the process already dead,
+// which is when its last words ARE the explanation.
 func (b *Bridge) transportError(id int64, msg string) []byte {
+	b.mu.Lock()
+	up := b.up
+	b.mu.Unlock()
+	if up {
+		return transportError(id, msg)
+	}
 	return TransportErrorWithReason(id, msg, b.refusalReason())
 }
 

@@ -25,7 +25,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -348,5 +351,125 @@ func TestBridgeSpawnClearsAPreviousIncarnationsReason(t *testing.T) {
 	if got := b.refusalReason(); got != "" {
 		t.Errorf("spawn() did not clear the tap: a healthy upstream still "+
 			"reports %q", got)
+	}
+}
+
+// ── #580 BLOCKER regression: a benign "pgwt-server:" line is NOT a reason ──
+//
+// The first version of this file treated the bare "pgwt-server:" prefix as a
+// refusal marker. src/server.c uses it for SEVEN informational lines, and
+// src/server.c:3713 ("%d trace files, %d CPUs, ~%lld events") prints on
+// every successful start -- so every healthy server retained a "reason" for
+// its whole life, and an ordinary request timeout shipped
+// `"reason":"pgwt-server: loaded 431 query texts"`. Confidently wrong, which
+// this file's own contract forbids. These are the exact inputs from the
+// review.
+func TestBenignServerPrefixLinesAreNotReasons(t *testing.T) {
+	benign := []string{
+		"pgwt-server: 12 trace files, 8 CPUs, ~3412004 events",
+		"pgwt-server: loaded 431 query texts",
+		"pgwt-server: loaded 17 backend metadata entries",
+		"pgwt-server: curcache enabled=1 lo=0 blocks=64 bytes=1024",
+		"pgwt-server: loaded event names from /tmp/x/wait_event_names.json",
+		"pgwt-server: no usable wait_event_names.json in /tmp/x",
+	}
+	for _, line := range benign {
+		if got := RefusalReason([]string{line}); got != "" {
+			t.Errorf("benign line classified as a refusal reason: %q -> %q",
+				line, got)
+		}
+	}
+	// The whole healthy-start sequence, in order, still yields nothing.
+	if got := RefusalReason(benign); got != "" {
+		t.Errorf("a healthy start sequence produced a reason: %q", got)
+	}
+	// And the real refusal still does, even with benign lines before it.
+	withRefusal := append(append([]string{}, benign[4:]...),
+		"pgwt-server: no trace files found in /tmp/empty")
+	want := "pgwt-server: no trace files found in /tmp/empty"
+	if got := RefusalReason(withRefusal); got != want {
+		t.Errorf("the real refusal was lost: %q, want %q", got, want)
+	}
+}
+
+// DRIFT GATE for the unmarkedRefusals table. Reads src/server.c, extracts
+// every "pgwt-server: ..." stderr line, and asserts that EXACTLY ONE of them
+// classifies as a refusal reason -- the no-trace-files refusal #351 is about.
+//
+// This is what keeps a text table from rotting: a new "pgwt-server:" line, a
+// reworded refusal, or a marker finally added at the source all turn this
+// red and name what to do. It REFUSES rather than approves when it cannot
+// look: a missing src/server.c, or an extraction that finds implausibly few
+// lines, fails.
+func TestRefusalClassificationCoversEveryServerLine(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "src", "server.c"))
+	if err != nil {
+		t.Fatalf("cannot read src/server.c, so this gate cannot see what it "+
+			"checks: %v", err)
+	}
+	re := regexp.MustCompile(`"pgwt-server: ([^"]*)"`)
+	ms := re.FindAllStringSubmatch(string(src), -1)
+	if len(ms) < 7 {
+		t.Fatalf("extracted only %d \"pgwt-server:\" line(s) from "+
+			"src/server.c -- below the plausibility floor, so this gate is "+
+			"not looking at what it thinks it is", len(ms))
+	}
+	subst := strings.NewReplacer(
+		"%d", "7", "%s", "/tmp/x", "%lld", "123456", "%u", "7", "\\n", "")
+	var classified []string
+	for _, m := range ms {
+		line := "pgwt-server: " + subst.Replace(m[1])
+		if RefusalReason([]string{line}) != "" {
+			classified = append(classified, line)
+		}
+	}
+	if len(classified) != 1 ||
+		!strings.Contains(classified[0], "no trace files found") {
+		t.Errorf("src/server.c's \"pgwt-server:\" lines classified as "+
+			"refusals = %q; want exactly one, the no-trace-files refusal.\n"+
+			"If a line was added or reworded, update unmarkedRefusals (or, "+
+			"better, give the line a FATAL:/REFUSED marker at the source).",
+			classified)
+	}
+}
+
+// A `timeout` against a LIVE server must carry no reason. This is the second
+// half of the #580 fix: even a correctly classified FATAL line on the tap
+// says nothing about why one request to a still-running server was slow.
+func TestLiveServerTimeoutCarriesNoReason(t *testing.T) {
+	b := NewBridge(func() *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "cat >/dev/null")
+	}, "")
+	if err := b.Start(); err != nil {
+		t.Fatalf("bridge start: %v", err)
+	}
+	t.Cleanup(b.Close)
+	// Poison AFTER Start(), so spawn()'s Reset() cannot be what clears it:
+	// the `up` gate has to be what suppresses the reason.
+	if _, err := io.WriteString(b.stderrTap(),
+		"FATAL: something that happened earlier\n"); err != nil {
+		t.Fatal(err)
+	}
+	if b.refusalReason() == "" {
+		t.Fatal("precondition: the tap must hold a classified reason, or " +
+			"this case proves nothing about the up gate")
+	}
+	for _, msg := range []string{"timeout", "server disconnected"} {
+		env := string(b.transportError(9, msg))
+		if strings.Contains(env, `"reason"`) {
+			t.Errorf("a live upstream's %q envelope carries a reason: %s",
+				msg, env)
+		}
+		if !strings.Contains(env, `"transport":true`) {
+			t.Errorf("%q envelope lost its transport flag: %s", msg, env)
+		}
+	}
+	// And once the upstream is gone, the same reason IS attached.
+	b.mu.Lock()
+	b.up = false
+	b.mu.Unlock()
+	env := string(b.transportError(9, "server disconnected"))
+	if !strings.Contains(env, `"reason":"FATAL: something that happened earlier"`) {
+		t.Errorf("a dead upstream's envelope carries no reason: %s", env)
 	}
 }

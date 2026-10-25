@@ -18,6 +18,7 @@ package main
 // rather than something only a live refusal can exercise.
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,21 +29,46 @@ import (
 // bound is what keeps a chatty --verbose server from growing this forever.
 const refusalKeep = 32
 
+// unmarkedRefusals are the stderr lines that ARE refusals but carry no
+// FATAL:/REFUSED marker of their own, matched on their distinctive text.
+//
+// Why a text table and not a marker in the server: the only entry,
+// src/server.c:3669's "pgwt-server: no trace files found in %s" (the line
+// #351 was filed about), is pinned VERBATIM by
+// tests/data_current_trace_cache_mutations.py:30, which patches that exact
+// string to build a #283 mutant. Adding "FATAL: " to it would break that
+// gate, in a file this branch does not own. So the durable fix -- a marker
+// at the source -- is left to whoever owns src/server.c, and this table is
+// the interim. TestRefusalClassificationCoversEveryServerLine below reads
+// src/server.c and FAILS if any "pgwt-server:" line drifts, is added, or
+// disappears, so the table cannot rot quietly.
+var unmarkedRefusals = []string{
+	"no trace files found",
+}
+
 // RefusalReason picks the reason to show a browser out of the stderr lines
 // one upstream incarnation produced, or returns "" when there is none.
 //
-// The rule, deliberately narrow: only a line the server itself marks as
-// fatal counts.
+// The rule, deliberately narrow: only a line that is unambiguously a
+// FAILURE counts.
 //
-//   - "pgwt-server: ..."  the binary's own startup refusal prefix
-//   - "FATAL: ..."        an explicit fatal
+//   - a line containing "FATAL:"
 //   - a line containing "REFUSED"
+//   - a "pgwt-server:" line matching unmarkedRefusals above
 //
-// INFO/WARN/DEBUG/NOTE lines are NOT reasons. A warning is not why the
-// server is gone, and presenting one as the cause would be worse than the
-// generic message it replaced: it would be confidently wrong. The LAST
-// qualifying line wins -- a refusal that narrates ("ERROR: ... REFUSED:
-// cannot publish site") ends with the most specific statement.
+// A bare "pgwt-server:" prefix is NOT a marker, and treating it as one was a
+// real defect in the first version of this file: src/server.c uses that
+// prefix for SEVEN informational lines, one of which
+// ("pgwt-server: %d trace files, %d CPUs, ~%lld events", src/server.c:3713)
+// prints on every successful start. Every healthy server therefore retained
+// a "reason" for its whole life, and an ordinary request timeout shipped
+// `"reason":"pgwt-server: loaded 431 query texts"` -- confidently wrong,
+// which this file's own contract forbids.
+//
+// INFO/WARN/DEBUG/NOTE lines are never reasons either. A warning is not why
+// the server is gone. The LAST qualifying line wins -- a refusal that
+// narrates ("ERROR: ... REFUSED: cannot publish site") ends with the most
+// specific statement.
 //
 // Returns "" for empty input, for whitespace-only input, and for input with
 // no qualifying line: "I could not establish a reason" must stay
@@ -55,17 +81,25 @@ func RefusalReason(lines []string) string {
 			continue
 		}
 		upper := strings.ToUpper(line)
-		switch {
-		case strings.HasPrefix(upper, "INFO:"),
-			strings.HasPrefix(upper, "WARN:"),
-			strings.HasPrefix(upper, "WARNING:"),
-			strings.HasPrefix(upper, "DEBUG:"),
-			strings.HasPrefix(upper, "NOTE:"):
+		if strings.HasPrefix(upper, "INFO:") ||
+			strings.HasPrefix(upper, "WARN:") ||
+			strings.HasPrefix(upper, "WARNING:") ||
+			strings.HasPrefix(upper, "DEBUG:") ||
+			strings.HasPrefix(upper, "NOTE:") {
 			continue
-		case strings.HasPrefix(line, "pgwt-server:"),
-			strings.HasPrefix(upper, "FATAL:"),
-			strings.Contains(upper, "REFUSED"):
+		}
+		if strings.Contains(upper, "FATAL:") ||
+			strings.Contains(upper, "REFUSED") {
 			reason = line
+			continue
+		}
+		if strings.HasPrefix(line, "pgwt-server:") {
+			for _, pat := range unmarkedRefusals {
+				if strings.Contains(line, pat) {
+					reason = line
+					break
+				}
+			}
 		}
 	}
 	return reason
@@ -104,17 +138,28 @@ type stderrTap struct {
 
 // Write implements io.Writer. Never returns an error: a tap that cannot
 // remember a line must not break stderr forwarding.
+// maxPartial bounds the UNTERMINATED tail. `lines` is capped by refusalKeep,
+// but a producer that never emits a newline would otherwise grow `partial`
+// without limit. A refusal reason is one line; anything past this cannot be
+// one, so the oldest bytes are dropped rather than retained.
+const maxPartial = 8192
+
 func (t *stderrTap) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.partial = append(t.partial, p...)
 	for {
-		i := strings.IndexByte(string(t.partial), '\n')
+		// bytes.IndexByte on the SLICE: string(t.partial) copied the whole
+		// buffer on every iteration of this loop.
+		i := bytes.IndexByte(t.partial, '\n')
 		if i < 0 {
 			break
 		}
 		t.push(string(t.partial[:i]))
 		t.partial = t.partial[i+1:]
+	}
+	if len(t.partial) > maxPartial {
+		t.partial = append([]byte(nil), t.partial[len(t.partial)-maxPartial:]...)
 	}
 	return len(p), nil
 }
