@@ -101,7 +101,13 @@ if [[ "$TOLERANCE_OVERRIDDEN" -eq 1 ]]; then
     echo "NOTE: tolerance OVERRIDDEN on the command line to +/-${TOLERANCE}pp;" \
          "this run is NOT evidence about the derived bound" \
          "($(derive_xval_tolerance "$XVAL_PREREG_BIAS_PP" "$XVAL_PREREG_SAMPLES" "$XVAL_PREREG_K" 2>/dev/null || echo '?') pp)."
-elif ! DERIVED_TOL=$(xval_tolerance_matches_script "${BASH_SOURCE[0]}"); then
+# $SCRIPT_DIR + basename, not a bare ${BASH_SOURCE[0]}: run_all.sh happens to
+# invoke this with an absolute path, so BASH_SOURCE works there, but a caller
+# that passed a relative path AND changed directory would make the guard
+# unable to read its own file -- and an unreadable file is a REFUSAL, i.e. a
+# spurious gate failure for an invocation style that is otherwise fine.
+# SCRIPT_DIR is already absolutised at the top of this file.
+elif ! DERIVED_TOL=$(xval_tolerance_matches_script "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"); then
     echo "ERROR: this script's TOLERANCE does not match the pre-registered"
     echo "       derivation in tests/xval_tolerance.sh (see the message above)."
     echo "       Refusing to run: a gate whose threshold it cannot justify"

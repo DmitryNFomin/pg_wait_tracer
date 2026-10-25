@@ -347,9 +347,25 @@ grep -q 'xval_tolerance_matches_script' "$TIERED" \
 grep -q 'refuse_unless_samples_sufficient' "$TIERED" \
   && report true "the live script calls refuse_unless_samples_sufficient" \
   || report false "the live script never checks capture thickness"
-grep -q 'exit 1' <<<"$(grep -A4 'ERROR: this script.s TOLERANCE does not match' "$TIERED")" \
+grep -q 'exit 1' <<<"$(grep -A6 'ERROR: this script.s TOLERANCE does not match' "$TIERED")" \
   && report true "a drifted constant makes the live script EXIT, not warn" \
   || report false "the live script warns but continues on a drifted constant"
+
+# The guard resolves its own path absolutely. A bare ${BASH_SOURCE[0]} works
+# only because run_all.sh passes an absolute path; a caller using a relative
+# path from another directory would leave the guard unable to READ the file
+# it is checking, which refuses -- a spurious gate failure, not a silent
+# pass, but a failure nobody could diagnose.
+grep -q 'xval_tolerance_matches_script "\$SCRIPT_DIR/' "$TIERED" \
+  && report true "the guard resolves the script path via \$SCRIPT_DIR, not a bare \$BASH_SOURCE" \
+  || report false "the guard uses an unanchored path — a relative invocation from another cwd would refuse spuriously"
+
+# Prove it, rather than only grepping for the idiom: the guard must return
+# the same answer from an unrelated working directory.
+( cd / && source "$SCRIPT_DIR/xval_tolerance.sh" \
+    && [[ "$(xval_tolerance_matches_script "$TIERED")" == "8.8" ]] ) \
+  && report true "the guard returns 8.8 when invoked from / (cwd-independent)" \
+  || report false "the guard is cwd-dependent"
 
 echo ""
 echo "===== summary ====="
