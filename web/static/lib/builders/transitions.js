@@ -713,9 +713,12 @@ export function buildVariantsHtml(vdata, esc) {
     return html;
 }
 
-/* PURE: the variants panel's own state. `variants` measures ~5.5s against a
- * realistic 900s window on a single-threaded server (issue follow-up to
- * #291) — expensive enough that it must never fire on its own. It is now
+/* PURE: the variants panel's own state. `variants` runs on a single-threaded
+ * server with no mid-flight cancellation (issue follow-up to #291), which is
+ * why it must never fire on its own regardless of its cost -- it used to
+ * measure ~5.5s against a realistic 900s window before #327/#269 bounded the
+ * pattern hash table and replaced its O(n^2) sort with qsort; now measured
+ * 0.09-0.27s against a 1851s trace (docs/DEMO_RUNBOOK.md §4 item 7). It is
  * ON DEMAND: the panel declares which of four states it is in, and only a
  * user click (wired in the view) ever moves it out of 'idle':
  *   'idle'    — not requested. The discoverable affordance: a button, so the

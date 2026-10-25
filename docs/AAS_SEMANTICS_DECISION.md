@@ -347,7 +347,7 @@ Idle                                1,207,000 ms   indent 0
 The children always account for the parent. What the named rows cannot
 cover — hidden `Activity` parking, plus anything the summary path's bounded
 per-event tables dropped — is emitted as a single labelled
-`Other (background)` row rather than left as an unexplained gap. An
+`Other idle (parked background loops)` row rather than left as an unexplained gap. An
 unexplained gap in a visible total is the thing this change exists to remove;
 leaving one at the next level down would have reintroduced it.
 
@@ -383,7 +383,7 @@ Idle would stop accounting for the window under a query filter.
 Both totals therefore come from **exact scalars accumulated at the writer**
 (`pgwt_summary_accum::idle_ns`, `pgwt_summary_query::idle_ns`). The bounded
 lists only drive the NAMED breakdown, and whatever they miss lands in
-`Other (background)`. `events[]` additionally reports when it could not take an
+`Other idle (parked background loops)`. `events[]` additionally reports when it could not take an
 entry (`events_overflow`), because a full table still truncates the per-event
 breakdown and any class/event-FILTERED total while unfiltered DB Time stays
 right — a mismatch that previously had no signal at all.
@@ -643,3 +643,44 @@ collector counted as client DB Time in the sampler-vs-tracer comparison
 views). That is a `backend_type` classification gap outside `pgwt-server`'s
 own paths; `pgwt-server` classifies it correctly via
 `bm_type_to_cat_flag` (`src/server.c:1035`).
+
+---
+
+## Addendum (#382): the Latency heatmap keeps the io_worker exclusion
+
+**Decision: the io_worker AAS/DB-Time exclusion (v6, above) is NOT extended
+into a separate "should the Latency heatmap also exclude io_worker latency"
+question — it already does, and that is staying.** `pgwt_compute_heatmap`
+drops `PGWT_EVENT_FLAG_IO_WORKER` records (`src/compute.c:2316-2322`) for a
+reason independent of the AAS decision: summary v6 drops io_worker records
+at the writer entirely (no bytes to read back), so the raw path has to match
+or `handle_heatmap`'s two routes (raw vs. summary) would disagree cell for
+cell past the window length where the reader switches (hole N7,
+`tests/test_agg_raw_crosscheck.c`). Re-including io_worker latency in the
+heatmap would need a summary format bump (v6 would have to start keeping
+what it now discards) plus new `src/` plumbing, for **zero viewer-visible
+change**: the requesting backend's own `AioIoCompletion` wait already carries
+the latency that query actually experienced (`src/compute.c:1768`,
+`src/anomaly.c:53`), so every real query-facing latency is already in the
+grid.
+
+**AAS exclusion does not logically require latency exclusion** — they are
+different questions. AAS/DB Time answers "how many sessions are doing
+chargeable work"; a latency heatmap answers "how long did waits of this kind
+take". An io_worker's own wait durations are a legitimate answer to the
+second question even though double-counting its busy time into DB Time is
+wrong for the first. The two decisions happen to agree here (both exclude)
+but for unrelated reasons, and only because of the v6 writer-format
+constraint above — not because the heatmap's exclusion was independently
+re-derived and found correct.
+
+**Capability gap, recorded rather than hidden:** an I/O-heavy capture using
+`io_method=worker` loses the physical io_worker's OWN read/write latency
+distribution from the heatmap — e.g. a worker queueing behind a slow device
+while every requesting backend's `AioIoCompletion` wait looks uniform. The
+backend-side wait still shows total latency including queueing, but cannot
+distinguish "this backend queued" from "the device is slow", which the
+io_worker's own per-operation latency could. Tracked as a separate feature
+request (io_worker latency as its own heatmap series or overlay) rather than
+folded into #382, since it needs the summary format bump above and is useful
+independently of whether #382's exclusion ever changes.

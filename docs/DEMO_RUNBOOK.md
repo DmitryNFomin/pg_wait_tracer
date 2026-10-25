@@ -287,16 +287,18 @@ Visit the 11 tabs **in the order the UI lists them**
    same walk order and the same warning are already in
    `docs/DEMO_MAC_WALK_CHECKLIST.md` §2). From Sessions, click any session
    row; that row's Timeline is what renders.
-7. Transitions — **do not click "Load flow variants"** during the walk. The
-   button (`web/static/lib/builders/transitions.js:302`) is the only way to
-   trigger `pgwt_compute_variants`'s pattern hash table (`src/compute.c`,
-   `VARIANT_HT_SIZE` 4096 slots, keyed by `hash_pattern` over the step
-   sequence); its insert loop probes with no fullness check, and nobody has
-   bounded the distinct-pattern count for a long capture. The server is
-   single-threaded, so a saturated probe spins forever and freezes every tab
-   at once (see §5's hung-server recovery). It is not loaded with the tab
-   itself — only this explicit button triggers it — so leaving it unclicked
-   keeps it off the demo path entirely. Tracking: #327.
+7. Transitions — click **"Load flow variants"**
+   (`web/static/lib/builders/transitions.js`). The hang this used to risk is
+   fixed: #327 made every probe loop in `src/compute.c`, including the
+   variant pattern table, grow instead of spinning forever on a full fixed
+   table, and #269 replaced the per-variant bubble sort with `qsort`. Both
+   issues are closed. Measured against the retained 1851 s demo-length trace
+   (`tests/results/demo_rehearsal/trace`, 323,930 executions, 20 variants
+   returned), a real click through the full local stack (pgwt-server + the
+   Go bridge) took 0.17–0.27 s across 3 runs — the server-only compute itself
+   measured 0.12–0.17 s across 5 runs. This is exercised automatically by
+   `tests/ui_live_smoke.py` now, so it is covered by the walk's own gate, not
+   just presenter choreography.
 8. Concurrency
 9. Waterfall
 10. Scatter
@@ -391,12 +393,15 @@ criteria doc is explicit that "inspection is not observation" here.
 
 ### A hung `pgwt-server` (spin, not a crash)
 
-Clicking Transitions' "Load flow variants" button (§4 item 7) or running a
-far larger workload than §2.3's rehearsed command (see that section's
-pileup warning) can saturate one of `pgwt-server`'s fixed-size hash tables.
-Because the server is single-threaded, the saturated probe loop spins
-forever on one core rather than crashing (#327) — this is a different
-failure mode from both of the others below:
+**#327 fixed the known trigger** (every probe loop in `src/compute.c`,
+including Transitions' "Load flow variants" button, now grows its hash
+table instead of spinning on a full fixed one — see §4 item 7) — this
+subsection is kept as defensive recovery guidance in case some other
+unbounded loop surfaces on a workload far larger than §2.3's rehearsed
+command (see that section's pileup warning), not because a known trigger
+remains on the demo path. Because the server is single-threaded, a
+saturated probe loop would spin forever on one core rather than crashing —
+this would be a different failure mode from both of the others below:
 
 - **Recognise it**: every tab stops updating at the same moment (not just
   one), the bridge shows no error chip or dropped connection (contrast

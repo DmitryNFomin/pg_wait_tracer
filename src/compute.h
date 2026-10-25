@@ -307,9 +307,10 @@ struct pgwt_tm_result {
     double cpu_clamped_ms;
     double wait_gap_cpu_ms;
     /* The Idle row's named children must account for its total exactly. A
-     * POSITIVE remainder is expected and labelled ("Other (background)": the
-     * hidden Activity share, plus anything the summary path's bounded
-     * per-event tables could not hold). A NEGATIVE one -- children exceeding
+     * POSITIVE remainder is expected and labelled ("Other idle (parked
+     * background loops)": the hidden Activity share, plus anything the
+     * summary path's bounded per-event tables could not hold). A NEGATIVE
+     * one -- children exceeding
      * the parent -- cannot happen by construction on any of the three paths,
      * so if it ever does it means the writer and the reader have diverged
      * about what counts as idle. Surfaced here rather than clamped away,

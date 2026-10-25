@@ -64,8 +64,10 @@ A PR is ready when ALL of these are true and the evidence is in the PR body:
    `tests/unit_tests.list`, or any live-tier test; if unsure, run `box-check`.
    `.github/workflows/ci.yml` already narrows its tier by changed files; CI
    still runs in full on every PR, and merge gates are unchanged.
-3. If `web/` changed: `make ui-gallery` ran; the `summary.json` counts and every
-   `changed`/`added`/`removed` cell are listed with a one-line justification each.
+3. If `web/static/` or `tests/web_snapshots/` changed (narrowed 2026-10-25,
+   same reasoning as the one-branch rule above): `make ui-gallery` ran; the
+   `summary.json` counts and every `changed`/`added`/`removed` cell are
+   listed with a one-line justification each.
 4. A fresh **reviewer** agent (`.claude/agents/reviewer.md`; `ui-reviewer.md`
    for UI) approved, or its open questions are listed under "Design questions
    for the owner". Those questions are the ONLY thing the owner should have to
@@ -160,17 +162,21 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   agent count we actually run. So there is no Mac-derived cap on agents in gate
   phase (gate phase = waiting on or running `make check`); the lock makes them
   queue, and the queue drains faster than a box run. The cap that binds is the
-  three-actively-implementing one above, plus the one-`web/`-branch rule. Do
-  not re-derive a "two in gate phase" limit from this paragraph: it came from
-  the wrong number. Before spawning, list the files the task will
+  three-actively-implementing one above, plus the one-`web/static/`-branch
+  rule. Do not re-derive a "two in gate phase" limit from this paragraph: it
+  came from the wrong number. Before spawning, list the files the task will
   touch and compare them against every in-flight branch — an overlap is
   refused up front, not discovered at merge (2026-09-25: two branches both
   edited `tests/test_durability.c`, git merged them silently and the build
-  broke). **At most ONE branch touching `web/` at a time**: UI branches
-  collide on snapshot baselines and `tests/web_snapshots/VERSION` by
-  construction, and each collision costs a manual merge plus a regeneration. Anything over ~a
-  day of work goes to a `Plan` agent first; its steps run sequentially unless
-  the plan shows them independent.
+  broke). **At most ONE branch touching `web/static/` or
+  `tests/web_snapshots/` at a time** (narrowed 2026-10-25: Playwright
+  snapshots run against `tests/mock_server.py`, never the Go bridge, so a
+  Go-only change under `web/` cannot move a baseline and does not need this
+  rule): UI branches collide on snapshot baselines and
+  `tests/web_snapshots/VERSION` by construction, and each collision costs a
+  manual merge plus a regeneration. Anything over ~a day of work goes to a
+  `Plan` agent first; its steps run sequentially unless the plan shows them
+  independent.
 - **Spawning**: always `isolation: "worktree"`. The prompt is a contract:
   issue text, acceptance criteria, required `make` targets, "stop and report,
   do not open the PR", and "report by T+N minutes even if incomplete". On

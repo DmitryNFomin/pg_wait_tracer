@@ -652,7 +652,7 @@ def _real_tm_rows():
         {"name": "Idle", "ms": 6000.0, "indent": 0},
         {"name": "Client:ClientRead", "ms": 2000.0, "indent": 2},
         {"name": "Timeout:CheckpointWriteDelay", "ms": 2000.0, "indent": 2},
-        {"name": "Other (background)", "ms": 2000.0, "indent": 2},
+        {"name": "Other idle (parked background loops)", "ms": 2000.0, "indent": 2},
     ]
 
 

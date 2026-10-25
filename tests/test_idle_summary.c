@@ -785,7 +785,7 @@ static void test_summary_idle_rows(void)
         { "Client:ClientRead",            2,  25.0 * SLICES },
         { "Timeout:VacuumDelay",          2,  15.0 * SLICES },
         /* The hidden Activity share, 50 ms/s, as the labelled remainder. */
-        { "Other (background)",           2,  50.0 * SLICES },
+        { "Other idle (parked background loops)",           2,  50.0 * SLICES },
     };
     const int N_AAS_ROWS = (int)(sizeof(aas_rows) / sizeof(aas_rows[0]));
 
@@ -1157,7 +1157,7 @@ static int topev_visitor(const struct pgwt_summary_accum *rec, void *vctx)
  *
  * Both totals now come from exact scalars accumulated at the writer; the
  * bounded lists only drive the NAMED breakdown, and whatever they miss shows
- * up as the labelled "Other (background)" row rather than vanishing.
+ * up as the labelled "Other idle (parked background loops)" row rather than vanishing.
  */
 static void test_bounded_tables(void)
 {
@@ -1231,7 +1231,7 @@ static void test_bounded_tables(void)
           "pushed out of the 8-entry top_events list (got %.1f -- 0.0 is the "
           "bug this pins)", 40.0 * SLICES, tm.idle_time_ms);
     /* The breakdown cannot name it, so it must be LABELLED, not dropped. */
-    const struct pgwt_tm_row *other = row_at(&tm, "Other (background)", 2);
+    const struct pgwt_tm_row *other = row_at(&tm, "Other idle (parked background loops)", 2);
     CHECK(other != NULL && NEAR_MS(other->time_ms, 40.0 * SLICES),
           "...and it appears as the labelled remainder row (got %.1f)",
           other ? other->time_ms : -1);
@@ -1446,7 +1446,7 @@ static void test_idle_children_sum_exactly(void)
         pgwt_compute_time_model(tiny, 2, &f, 0, 0, 1000.0, &rt);
         CHECK(rt.idle_time_ms > 0, "fixture has idle time (%.6f ms)",
               rt.idle_time_ms);
-        const struct pgwt_tm_row *oth = row_at(&rt, "Other (background)", 2);
+        const struct pgwt_tm_row *oth = row_at(&rt, "Other idle (parked background loops)", 2);
         CHECK(oth != NULL,
               "a 500 ns hidden-Activity remainder STILL gets its row (the old "
               "> 1 us threshold dropped it)");
