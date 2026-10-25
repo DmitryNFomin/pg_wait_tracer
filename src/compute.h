@@ -386,8 +386,29 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
 struct pgwt_session_row {
     uint32_t pid;
     double   db_time_ms;
+    /* #562: the MEASURED on-CPU share of this session's DB Time, not the
+     * on-CPU gaps' wall. The gap between two waits is "on a core" only for
+     * the part sum_exec_runtime actually advanced; the rest is runqueue
+     * time, reported as offcpu_ms below. Where no in-window gap of this
+     * response carried a measurement (sampled / v2 / no CPU capability, and
+     * the summary routing) this is the unsplit gap WALL by gap-inference,
+     * and pgwt_sessions_result.has_measured_cpu says which of the two it
+     * is. */
     double   cpu_pct;
+    /* #562: Σ(this session's wait intervals) / DB Time -- the live
+     * semantics. It used to be `100 - cpu_pct`, which is ALGEBRAICALLY the
+     * same number only while cpu_pct carried the gap wall (DB Time is
+     * exactly gaps + waits). Once cpu_pct became the measurement it stopped
+     * being the wait share, so this had to move with it. */
     double   wait_pct;
+    /* #562: the runqueue / throttle remainder of this session's MEASURED
+     * gaps -- their in-window wall minus the measurement, the same quantity
+     * pgwt_compute_time_model reports as "CPU (waiting for a core)". It is
+     * INSIDE db_time_ms but on neither percentage above, so cpu + wait +
+     * offcpu accounts for the row; without it the time the CPU column no
+     * longer claims would simply be missing. 0 where has_measured_cpu is 0
+     * -- a refusal to split, never a claim that off-CPU time was zero. */
+    double   offcpu_ms;
     char     top_wait[64];
     uint32_t top_wait_id;
 };
@@ -401,6 +422,37 @@ struct pgwt_sessions_result {
      * this field exists to prevent. Set by both the raw and the summary
      * path. */
     int failed;
+    /* #562: the same contract pgwt_events_result carries for Top Events
+     * (#553/PR #559), field for field rather than a parallel one.
+     *
+     *   has_measured_cpu != 0 — at least one in-window on-CPU GAP in this
+     *       response carried a measurement, so every row's cpu_pct is
+     *       measured on-CPU time (part inference on mixed data, where some
+     *       gaps are UNKNOWN) and offcpu_ms is the measured gaps' runqueue
+     *       remainder. NOT the same predicate as pgwt_tm_result's, whose
+     *       scope is the whole window rather than one response; it IS the
+     *       narrow one #575 settled on.
+     *   has_measured_cpu == 0 — no in-window gap carried a measurement, so
+     *       cpu_pct is the unsplit gap wall and every offcpu_ms is 0.
+     *
+     * pgwt_compute_top_sessions_from_summaries leaves it 0 ON PURPOSE: the
+     * per-second record's struct pgwt_summary_session stores `cpu_ns += tns`
+     * — WALL (src/summary_writer.c) — and the format has no measured column,
+     * so that routing cannot report a measurement and says so. That is a
+     * REAL divergence at the 120 s routing threshold, not a comparability
+     * artefact, pinned as an identity (raw cpu + raw offcpu == summary cpu)
+     * in tests/test_window_clip.c section 13d.
+     *
+     * cpu_clamped_ms is the skew self-check, same name and meaning as
+     * pgwt_tm_result's: measured CPU that exceeded its own clipped gap wall
+     * (sum_exec_runtime is only current at a tick or a context switch, so a
+     * sub-ms burst can be attributed past its interval). Clamped OUT of the
+     * row — it is not time that happened — and counted here, so a skewed
+     * measurement is visible instead of silently absorbed. Outside every
+     * row and outside db_time_ms. */
+    double offcpu_ms;          /* Σ of the rows' offcpu_ms, for the response */
+    double cpu_clamped_ms;
+    int    has_measured_cpu;
 };
 
 void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
