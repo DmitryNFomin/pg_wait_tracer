@@ -567,3 +567,79 @@ that `Timeout:CheckpointWriteDelay` is 0.897 AAS of that window. The
 `AAS_FLOOR_PROVISIONAL = 0.5` gate in `tests/demo_rehearsal_lib.py` is
 deliberately NOT re-pinned here (the documented 1.15 is a separate follow-up,
 `docs/DEMO_REHEARSAL_CRITERIA.md`).
+
+---
+
+## Addendum, 2026-10-25 (#439): background DB Time in Sessions vs Overview — no decision needed, the model already answered
+
+Status: **no semantic change.** This records what the existing model says, the
+measurement that confirms it, and the one thing that was actually wrong.
+
+#439 reported that Sessions shows `bgwriter`/`walwriter`/`checkpointer`/
+`autovacuum` rows carrying DB Time while Overview puts "Other (background)"
+outside DB Time, and asked which tab is right. **Neither is wrong.** The two
+rows are two different quantities that share three English words:
+
+| | what it is | inside DB Time? |
+|---|---|---|
+| Sessions' `DB Time` for a bgwriter pid | that process's non-idle time | **yes** |
+| Overview's `background` category (`cat_ms[PGWT_CAT_BG]`) | the same time, system-wide | **yes** |
+| Overview's Idle child `Other (background)` | hidden `Activity`-class **parking** (`src/compute.c:1283`) | **no**, in either tab |
+
+The decomposed model at the top of this file already settled the first two:
+"background — checkpointer / bgwriter / walwriter / … activity" and
+"maintenance — autovacuum worker activity" are **categories of AAS**, i.e. of
+DB Time. `pgwt_event_category` (`src/compute.c:737`) implements exactly that,
+and the only thing it moves *outside* DB Time is `PGWT_CAT_IO_WORKER`.
+
+**Measured** (local `pgwt-server`, `tests/results/demo_rehearsal/trace`, PG18,
+1851 s, 4.3M events, raw recompute):
+
+```
+time_model           db_time_ms = 2495784.951108
+sum of top_sessions  db_time_ms = 2495784.951108     diff 0.000000000
+categories: planning 3.238513 + execution 998509.276421
+          + command 1493681.800708 + maintenance 825.638179
+          + background 2764.997287                 = 2495784.951108
+Idle child "Other (background)"                    = 7757772.931164  (not DB Time)
+```
+
+The two totals are bit-identical because `pgwt_compute_top_sessions`
+(`src/compute.c:1911`) and `pgwt_compute_time_model` (`src/compute.c:1328`)
+apply the **same three predicates** to the same events — `pgwt_filter_matches`,
+the `pgwt_is_idle_event` skip, the `PGWT_EVENT_FLAG_IO_WORKER` skip — and clip
+with the same `event_window_ns`. Sessions is a *decomposition* of Overview's DB
+Time, not a second total. Conservation is therefore untouched by this issue:
+nothing moved.
+
+**Scope of the exactness claim: the RAW path.** The measurement above is a raw
+recompute (the retained capture's summary files predate v8, so the server
+refused them). On the SUMMARY path the per-second `sessions[]` table is bounded
+at `SUMMARY_MAX_SESSIONS` (1024) and `find_or_insert_session`
+(`src/summary_writer.c:143`) returns NULL when it is full; both the writer
+(`:503`) and the reader (`:789`) then skip that pid's time while `class_ns` —
+and therefore DB Time — still carries it. So a window with more than 1024
+distinct pids in one second can report Σ sessions < DB Time there, with **no
+overflow counter** (unlike `events_overflow`). Not changed here, and not what
+#439 was about; recorded so nobody reads "bit-identical" as a cross-path
+guarantee. The disclosure text deliberately does not claim the rows sum to
+Overview's total for the same reason — the Sessions tab can also be truncated
+client-side (`model.truncation`).
+
+**What was wrong was the disclosure, not the accounting.** The label half was
+fixed in #481 (Overview renders the Idle child as "Background idle (parked)").
+The Sessions half, added in #494, asserted a scope difference that does not
+exist — *"Overview uses a different, system-wide DB Time total that excludes
+the parked-idle time of background processes"* — naming as the differentiator
+something Sessions excludes identically, and telling a reader that two numbers
+agreeing to the nanosecond cannot be reconciled. The note and the column
+tooltip now say what is true, and the sentence is **derived** from
+`DB_TIME_MEMBERSHIP` in `web/static/lib/builders/table-configs.js` so a future
+change to what is inside DB Time cannot leave the user-visible text behind.
+
+**Still open, and not addressed here:** the CLI/sampler half recorded in
+#439's second comment (`Extension:Extension` from the `pg_wait_sampling`
+collector counted as client DB Time in the sampler-vs-tracer comparison
+views). That is a `backend_type` classification gap outside `pgwt-server`'s
+own paths; `pgwt-server` classifies it correctly via
+`bm_type_to_cat_flag` (`src/server.c:1035`).
