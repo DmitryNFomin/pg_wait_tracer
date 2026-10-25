@@ -194,9 +194,26 @@ export function buildMatrixOption(data, opts) {
     // leaving a CPU-saturated-looking row/column unexplained. Conditioned on
     // `labels` (what is ON the axes right now), not on the raw node catalog,
     // so the note never appears for a window where CPU* did not make top-N.
+    //
+    // #438 (owner decision): when CPU* is incident to EVERY link in the
+    // full response -- not just the shown top-N labels, which could make
+    // this true by truncation alone -- the matrix is the "degenerate L"
+    // the issue names: only the CPU* row/column carry values because this
+    // workload never has a direct wait -> wait transition, only
+    // wait -> CPU -> wait. State that fact explicitly rather than leaving
+    // an empty-looking grid to read as broken; keep the literal
+    // transitions unchanged (no wait -> wait edges are synthesized).
+    const allLinksTouchCpu = links.length > 0 &&
+        links.every(l => l.source === 'CPU*' || l.target === 'CPU*');
     const cpuNote = labels.includes('CPU*')
         ? 'CPU* is a literal intermediate state between waits, not ' +
-            'necessarily measured running CPU' : null;
+            'necessarily measured running CPU' +
+            (allLinksTouchCpu
+                ? '. Every transition in this workload passes through CPU* ' +
+                    '(wait -> CPU -> wait, never wait -> wait) -- the L shape is ' +
+                    'the data, not a rendering bug.'
+                : '')
+        : null;
     const option = {
         backgroundColor: 'transparent', animation: false,
         tooltip: {
@@ -250,4 +267,32 @@ export function buildMatrixOption(data, opts) {
         hiddenCount, visibleCount: labels.length, notes, cpuNote, cells, rawMax, bucketMax,
         shownVolume, hiddenVolume, totalVolume,
         serverTruncated: !!(data && data.truncated) };
+}
+
+/* #473 item 1 (live-walk evidence, frames 2591-2824 of
+ * tests/results/demo_walk/mac-walk1-live-8112c71 at the demo viewport
+ * 1710x981): #matrix-chart has a flat CSS height of 660px (style.css)
+ * regardless of how much vertical room is actually left under the title,
+ * cpu-note and tab bar. At that viewport the chrome above the chart leaves
+ * roughly 430px, so the chart's own bottom -- where the rotated x-axis tick
+ * labels (grid.bottom: 150) and the visualMap legend live -- renders past
+ * y=981 and is never on screen (the full-page snapshot gallery never shows
+ * this: test_web_ui_snapshots.py captures `full_page=True`, which is
+ * exactly why this escaped the gallery for four PR gates, same mechanism
+ * as #252).
+ *
+ * Same engineering shape as waterfallChartFitHeight (#462): shrink the
+ * chart from its CSS natural height only by however much it would
+ * otherwise overflow the viewport, plus a fold reserve, never below a
+ * floor that still leaves a usable (if cramped) grid. A page with room to
+ * spare (overflow <= 0) returns the natural height unchanged -- no
+ * snapshot-gallery cell moves, since the gallery's full-page capture never
+ * has a viewport to overflow. */
+export const MATRIX_CHART_NATURAL_PX = 660;
+export const MATRIX_CHART_MIN_PX = 360;
+export const MATRIX_FOLD_RESERVE_PX = 16;
+
+export function matrixChartFitHeight(naturalHeight, minimumHeight, overflow) {
+    return Math.max(minimumHeight,
+        naturalHeight - Math.max(0, Math.ceil(overflow) + MATRIX_FOLD_RESERVE_PX));
 }

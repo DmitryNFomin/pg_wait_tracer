@@ -1,6 +1,9 @@
 /* pgwt — transition matrix view. */
 
-import { buildMatrixOption, matrixCellIntent } from '../lib/builders/matrix.js';
+import {
+    buildMatrixOption, matrixCellIntent,
+    matrixChartFitHeight, MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX,
+} from '../lib/builders/matrix.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
 
@@ -27,6 +30,26 @@ export function createMatrixView() {
             ' <div id="matrix-chart"></div>' +
             ' <div id="matrix-notes" class="chart-notes"></div>' +
             '</div>';
+    }
+
+    /* #473 item 1: the chart's CSS height (660px) is a FLOOR-less fixed
+     * value -- see matrixChartFitHeight's doc comment in lib/builders/
+     * matrix.js. Same shape as waterfall.js's fitExecutionList: measure how
+     * much the chart's natural height would overflow window.innerHeight at
+     * its current DOM position and shrink by exactly that much (plus a
+     * fold reserve), never below the CSS-floor minimum. Always budgeted
+     * from the NATURAL height (not the previously-set one), so repeated
+     * resizes cannot ratchet the chart down further than the current
+     * viewport actually requires. */
+    function fitChartHeight() {
+        const host = document.getElementById('matrix-chart');
+        if (!host || !chart) return;
+        const top = host.getBoundingClientRect().top;
+        const overflow = (top + MATRIX_CHART_NATURAL_PX) - window.innerHeight;
+        const px = matrixChartFitHeight(
+            MATRIX_CHART_NATURAL_PX, MATRIX_CHART_MIN_PX, overflow);
+        host.style.height = px + 'px';
+        chart.resize();
     }
 
     return {
@@ -79,9 +102,10 @@ export function createMatrixView() {
                 });
             }
             chart.setOption(model.option, true);
+            fitChartHeight();
         },
         enter(ctx) { ctxRef = ctx; },
         leave() { disposeChart(); prevLabels = null; labelsRef = null; },
-        resize() { if (chart) chart.resize(); },
+        resize() { fitChartHeight(); },
     };
 }
