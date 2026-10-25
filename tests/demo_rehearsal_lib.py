@@ -55,8 +55,20 @@ WATERFALL_QUERY_THRESHOLD_S = 10.0
 # dropped wait class is INVISIBLE to this check alone (see
 # the per-class wait-CPU scan in criteria section 3 / queue item 2.5 for
 # the separate attribution evidence; Off-CPU magnitude cannot gate it).
-# This identity only catches OVER-attribution large enough to drive the residual
-# negative past the clamp, or a genuinely corrupted rows array.
+#
+# CORRECTED AGAIN (issue #517, 2026-10-25). This block used to end "This
+# identity only catches OVER-attribution large enough to drive the residual
+# negative past the clamp, or a genuinely corrupted rows array." The first
+# half is wrong: that residual can never go negative, because every CPU-class
+# contribution is clamped to its own interval first (src/compute.c
+# `if (m > dur_ns) { cpu_clamped_ns += m - dur_ns; m = dur_ns; }`), so
+# cpu_measured_ns <= Sigma CPU-class dur = db_time_ns - Sigma waits by
+# construction. Over the real pgwt-server, 12 synthetic traces on the raw
+# path -- 555-1340 ms of cpu_clamped_ms among them -- all reported
+# gap_ms = 0.000000000. So on a RESPONSE the product can actually emit, this
+# identity's gap is identically zero; the only thing it can still reject is a
+# rows array corrupted in transit, plus the MIN_DB_TIME_MS floor below.
+# The independently-derived replacement is class_rows_vs_top_events_ok.
 TIME_MODEL_TOLERANCE_PCT = 1.0
 
 # ── Time-model conservation: nonzero-DB-Time floor ───────────────────────
@@ -266,7 +278,14 @@ def time_model_conservation(rows, db_time_ms,
     0 ~= 0 reading cannot satisfy this function by construction.
 
     Returns (ok, detail) -- detail always states the actual numbers, never
-    just true/false, since a failure here IS the finding."""
+    just true/false, since a failure here IS the finding.
+
+    #517: on the raw path this equality is an algebraic identity whose gap is
+    identically 0.0 for every trace the product can produce (see
+    TIME_MODEL_TOLERANCE_PCT's comment for the proof and the 12-trace
+    measurement). It is kept for its MIN_DB_TIME_MS floor and as a corruption
+    tripwire; the per-class attribution evidence comes from
+    class_rows_vs_top_events_ok, which sums an independent endpoint."""
     if db_time_ms < MIN_DB_TIME_MS:
         return False, (
             f"db_time_ms={db_time_ms:.4f} is below the {MIN_DB_TIME_MS}ms "
@@ -613,6 +632,218 @@ def cross_tab_db_time_agreement_ok(db_time_a, db_time_b,
     return ok, detail
 
 
+# ── Per-class attribution, re-derived from an INDEPENDENT endpoint ───────
+#
+# Issue #517, settled by measurement 2026-10-25. time_model_conservation
+# above compares db_time_ms against the sum of the SAME response's indent-1
+# rows, and on the raw/exact path that comparison is an ALGEBRAIC IDENTITY
+# whose gap is exactly zero for every possible trace -- it is not merely
+# "zero on the runs we have looked at".
+#
+# The proof, from src/compute.c's raw path (pgwt_compute_time_model):
+#   db_time_ns      = Sigma dur over non-idle, non-io_worker events (line ~1404)
+#   classes[c!=CPU] = Sigma dur over that class's events  (line ~1444)
+#   classes[CPU]    = cpu_measured_ns                     (line ~1453)
+#   offcpu_ns       = max(0, db_time_ns - cpu_measured_ns - Sigma waits) (~1470)
+# so Sigma(indent-1 rows) = cpu_measured + Sigma waits + offcpu = db_time_ns
+# whenever the residual is non-negative. And the residual CANNOT be
+# negative: every CPU-class contribution is clamped to its own interval
+# (`if (m > dur_ns) { cpu_clamped_ns += m - dur_ns; m = dur_ns; }`), so
+# cpu_measured_ns <= Sigma CPU-class dur = db_time_ns - Sigma waits. The
+# clamp branch at ~1470 is therefore unreachable from the raw path, and the
+# printed gap is identically 0.0 ms.
+#
+# MEASURED (not inferred): 12 synthetic traces through the real pgwt-server
+# on the raw path -- including traces where cpu_ns deliberately exceeds its
+# interval, which drove cpu_clamped_ms to 555-1340 ms -- gave gap_ms =
+# 0.000000000 on all 12. See this task's report for the probe.
+#
+# What that leaves time_model_conservation worth: its MIN_DB_TIME_MS floor
+# (a void window must refuse, not approve) and its raw-path requirement.
+# As a conservation DETECTOR it is spent: a wait class whose time is never
+# attributed to its own class row flows into the Off-CPU* residual and the
+# identity still closes to 0.0 (the file already says this; the new part is
+# that there is no OTHER input that makes it close to anything else).
+#
+# So this check re-derives the per-class split from a DIFFERENT endpoint
+# with a DIFFERENT accumulator: top_events (pgwt_compute_top_events) builds
+# its own per-event hash table over the same window and labels each row with
+# pgwt_class_name(event_id), while time_model attributes via
+# pgwt_wait_class_index(old_event). Regrouping top_events' rows by `class`
+# and comparing against time_model's indent-1 rows therefore compares two
+# independent sums, and a class that time_model fails to attribute shows up
+# as a per-class disagreement even though both responses' db_time_ms agree.
+#
+# MEASURED on the same 12 traces: every wait class agreed to the last
+# printed digit, and time_model's CPU pair (CPU (running) + CPU (waiting
+# for a core)) equalled top_events' CPU row exactly -- so a 1% per-class
+# bound is a correctness bound here, not a noise budget.
+#
+# LIMIT, stated rather than hidden: both endpoints read the same trace
+# through the same pgwt_filter_matches / pgwt_is_idle_event chokepoints, so a
+# loss upstream of the server shrinks both sides together and is invisible
+# here -- as it is to any two-endpoint comparison. capture_has_events,
+# workload_signature_present_ok and the MIN_DB_TIME_MS floors are what cover
+# that direction.
+
+# time_model's indent-1 class-row names are src/compute.h's
+# pgwt_class_display values, except the CPU group, which compute.c renders
+# as two rows ("CPU (running)" + "CPU (waiting for a core)") where the
+# measured split exists and as a single "CPU*" row where it does not. All
+# three fold onto top_events' own "CPU" class label.
+TIME_MODEL_CPU_ROW_NAMES = ("CPU (running)", "CPU (waiting for a core)", "CPU*")
+
+# src/compute.h pgwt_class_display[] == src/wait_event.c pgwt_class_name()'s
+# return set, verified identical 2026-10-25. An indent-1 row name or a
+# top_events `class` value outside this set means one of the two sides grew a
+# label this check does not understand: it REFUSES rather than silently
+# dropping that class's time out of the comparison (which is how a gate
+# stops seeing the thing it was written to see).
+WAIT_CLASS_LABELS = ("CPU", "IO", "Lock", "LWLock", "IPC", "Client",
+                     "Timeout", "BufferPin", "Activity", "Extension",
+                     "Unknown")
+
+
+def _finite_number(v):
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
+
+
+def class_rows_vs_top_events_ok(tm_rows, top_events_rows,
+                                top_events_db_time_ms,
+                                tolerance_pct=TIME_MODEL_TOLERANCE_PCT):
+    """Compare time_model's per-class split against the SAME window's
+    top_events rows regrouped by their own `class` field -- two independent
+    accumulations, unlike time_model_conservation's identity (see the block
+    comment above).
+
+    tm_rows: time_model's `rows` array. top_events_rows: top_events' `rows`
+    array (each row carries "class", "total_ms" and "pct"; src/server.c
+    emits `pct` as null exactly for the idle-but-visible events its own
+    db_time_ms excludes -- src/compute.c sets PGWT_PCT_DB_IDLE under the
+    same pgwt_is_idle_event() predicate -- so a null `pct` is the server's
+    own "not in DB Time" marker, not a guess).
+    top_events_db_time_ms: that response's own top-level db_time_ms, used as
+    a TRUST PRECONDITION (see below), never as the comparison.
+
+    Fails closed -- returns (False, why) -- on anything it cannot evaluate:
+    either side empty, a missing/unparseable class label or total_ms, a
+    `pct` key absent (idle cannot be told from non-idle), either side below
+    MIN_DB_TIME_MS, or top_events' non-idle rows not summing to its own
+    db_time_ms (which is what a truncated row list looks like; a truncated
+    list would make every class look smaller and the comparison meaningless).
+    """
+    if not tm_rows:
+        return False, "no time_model rows -- void, not a passing comparison"
+    if not top_events_rows:
+        return False, "no top_events rows -- void, not a passing comparison"
+
+    tm_by_class = {}
+    tm_indent1 = 0
+    for r in tm_rows:
+        if not isinstance(r, dict) or r.get("indent") != 1:
+            continue
+        tm_indent1 += 1
+        name = r.get("name")
+        ms = r.get("ms")
+        if not _finite_number(ms):
+            return False, (f"time_model row {name!r} has unparseable ms "
+                           f"({ms!r}) -- refusing, not skipping it")
+        label = "CPU" if name in TIME_MODEL_CPU_ROW_NAMES else name
+        if label not in WAIT_CLASS_LABELS:
+            return False, (f"time_model indent-1 row name {name!r} is not a "
+                           "known class label -- refusing (an unknown label "
+                           "would otherwise drop that class's time out of "
+                           "this comparison)")
+        tm_by_class[label] = tm_by_class.get(label, 0.0) + ms
+    if tm_indent1 == 0:
+        return False, ("time_model returned no indent-1 class rows -- void, "
+                       "not a passing comparison")
+
+    te_by_class = {}
+    te_non_idle_sum = 0.0
+    te_non_idle_rows = 0
+    for r in top_events_rows:
+        if not isinstance(r, dict):
+            return False, f"top_events row is not an object ({r!r})"
+        if "pct" not in r:
+            return False, ("a top_events row has no `pct` key -- idle-but-"
+                           "visible rows cannot be told from DB-Time rows, "
+                           "refusing")
+        label = r.get("class")
+        ms = r.get("total_ms")
+        if not isinstance(label, str) or not label:
+            return False, (f"top_events row {r.get('name')!r} has no usable "
+                           f"`class` ({label!r}) -- refusing")
+        if not _finite_number(ms):
+            return False, (f"top_events row {r.get('name')!r} has unparseable "
+                           f"total_ms ({ms!r}) -- refusing")
+        if r["pct"] is None:
+            continue            # idle-but-visible: outside DB Time by design
+        if label not in WAIT_CLASS_LABELS:
+            return False, (f"top_events row {r.get('name')!r} reports class "
+                           f"{label!r}, which is not a known class label -- "
+                           "refusing")
+        te_by_class[label] = te_by_class.get(label, 0.0) + ms
+        te_non_idle_sum += ms
+        te_non_idle_rows += 1
+    if te_non_idle_rows == 0:
+        return False, ("top_events returned no DB-Time rows (every row was "
+                       "idle-but-visible) -- void, not a passing comparison")
+
+    # Trust precondition, not the detection: top_events' own db_time_ms is
+    # accumulated over the same records its rows are, so its non-idle rows
+    # must add up to it. They do not if the row list was truncated, which
+    # would shrink every class on one side and make the per-class comparison
+    # below silently meaningless.
+    if not _finite_number(top_events_db_time_ms):
+        return False, (f"top_events db_time_ms is unparseable "
+                       f"({top_events_db_time_ms!r}) -- cannot verify its row "
+                       "list is complete, refusing")
+    if top_events_db_time_ms < MIN_DB_TIME_MS:
+        return False, (f"top_events db_time_ms={top_events_db_time_ms:.4f} is "
+                       f"below the {MIN_DB_TIME_MS}ms nonzero-DB-Time floor -- "
+                       "void reading, not a passing comparison")
+    rowsum_gap_pct = (abs(te_non_idle_sum - top_events_db_time_ms)
+                      / top_events_db_time_ms * 100.0)
+    if rowsum_gap_pct > tolerance_pct:
+        return False, (f"top_events' DB-Time rows sum to "
+                       f"{te_non_idle_sum:.1f}ms but it reports "
+                       f"db_time_ms={top_events_db_time_ms:.1f}ms "
+                       f"({rowsum_gap_pct:.2f}%) -- its row list is "
+                       "incomplete, so the per-class comparison cannot be "
+                       "trusted; refusing")
+
+    tm_total = sum(tm_by_class.values())
+    if tm_total < MIN_DB_TIME_MS:
+        return False, (f"time_model class rows sum to {tm_total:.4f}ms, below "
+                       f"the {MIN_DB_TIME_MS}ms nonzero-DB-Time floor -- void "
+                       "reading, not a passing comparison")
+
+    # The UNION, so a class present on one side and absent on the other is a
+    # FAILURE rather than something the loop never visits. "Absent" is the
+    # shape the bug this check exists for actually takes.
+    failures = []
+    parts = []
+    worst_pct = 0.0
+    for label in sorted(set(tm_by_class) | set(te_by_class)):
+        a = tm_by_class.get(label, 0.0)
+        b = te_by_class.get(label, 0.0)
+        denom = max(abs(a), abs(b))
+        gap_pct = 0.0 if denom == 0 else abs(a - b) / denom * 100.0
+        worst_pct = max(worst_pct, gap_pct)
+        parts.append(f"{label} tm={a:.1f}/te={b:.1f} ({gap_pct:.2f}%)")
+        if gap_pct > tolerance_pct:
+            failures.append(f"{label}: time_model={a:.1f}ms vs "
+                            f"top_events={b:.1f}ms ({gap_pct:.2f}%)")
+    ok = not failures
+    detail = (f"{len(parts)} classes, worst gap {worst_pct:.2f}% "
+              f"(tolerance {tolerance_pct}%): " + "; ".join(parts))
+    if failures:
+        detail += " -- DISAGREES: " + "; ".join(failures)
+    return ok, detail
+
+
 # ── Cross-tab AAS agreement, bucket-weighted (criteria doc §5, item 2.2) ──
 #
 # A previous walk reported 0.0000% from an UNWEIGHTED MEAN of the `aas`
@@ -628,10 +859,35 @@ def cross_tab_db_time_agreement_ok(db_time_a, db_time_b,
 # bucket: `bucket_ns` is a CEILING of range_ns/num_buckets
 # (src/compute.c: `(range_ns + num_buckets - 1) / num_buckets`), so
 # `actual_buckets * bucket_ns` can exceed the true window (`to_ns - from_ns`)
-# by up to one bucket's width -- the server still divides that last
-# bucket's partial accumulation by the FULL bucket_ns. Wall-clock windows
-# essentially never divide bucket_ns evenly, so this truncation is the
-# common case, not an edge case.
+# -- the server still divides that last bucket's partial accumulation by
+# the FULL bucket_ns.
+#
+# CORRECTED (issue #517, 2026-10-25). These lines used to read "by up to
+# one bucket's width ... Wall-clock windows essentially never divide
+# bucket_ns evenly, so this truncation is the common case, not an edge
+# case." The magnitude claim is wrong, and the issue's proposed remedy
+# ("request a bucket count that does not divide the window evenly")
+# follows from it and cannot work. With bucket_ns = ceil(range_ns/N) the
+# overshoot is `N*bucket_ns - range_ns`, which is at most N-1
+# NANOSECONDS -- not a bucket width -- so the ratio between a
+# bucket-weighted and an unweighted derivation is bounded by
+# 1 + (N-1)/range_ns. MEASURED on the real pgwt-server over 16
+# (window, bucket-count) geometries, including 7/59/60/61/600 buckets and
+# windows of 12.3/30/45.1/59.5/60/60.5/90.1 s: the worst
+# |weighted/unweighted - 1| was 9.11e-7 %, nine orders of magnitude below
+# TIME_MODEL_TOLERANCE_PCT. The 60-buckets-over-60s "degenerate"
+# configuration is therefore not special; NO raw-path geometry makes the
+# weighted-vs-unweighted distinction reach this check's tolerance.
+#
+# So do not change AAS_CROSS_TAB_NUM_BUCKETS hoping to exercise that
+# distinction. What this check really gates -- and what IS able to go red,
+# see test_bucket_weighted_aas_ok_catches_an_endpoint_level_divergence --
+# is the CROSS-ENDPOINT comparison: the `aas` endpoint
+# (pgwt_compute_aas: per-bucket clipping, normalised by bucket_ns) against
+# time_model's own top-level `aas` (db_time_ms/wall_ms), two separate
+# implementations of the same quantity over the identical window. The
+# weighted form stays because it is the ARITHMETICALLY CORRECT
+# re-derivation, not because the alternative is detectable here.
 #
 # The correct re-derivation: recover each bucket's raw ns (aas_i *
 # bucket_ns), sum them, and divide by the TRUE window length (to_ns -
@@ -1208,6 +1464,7 @@ REQUIRED_EXTRA_CHECKS = (
     "waterfall_query_latency",
     "execution_cardinality",
     "cross_tab_db_time_agreement",
+    "cross_tab_class_attribution",
     "cross_tab_aas_agreement",
     "capture_freshness",
     "daemon_integrity",

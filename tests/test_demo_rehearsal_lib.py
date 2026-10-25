@@ -627,6 +627,346 @@ def test_cross_tab_agreement_missing_side_fails():
     check(not ok, f"a missing side fails rather than being skipped ({detail})")
 
 
+# -- class_rows_vs_top_events_ok (issue #517) ----------------------------
+#
+# Both fixtures below are the REAL responses the real pgwt-server returned
+# for one synthetic trace on the raw/exact path (measured on this Mac
+# 2026-10-25 -- a 60s window over a trace carrying CPU, Lock, LWLock, IO,
+# Client:ClientRead, a Timeout pacing event and an Activity event, with
+# cpu_measured=1). Numbers are verbatim, including the 659.9999/1320.0001
+# split, so the tests below exercise the shapes the product actually emits:
+# idle-but-visible rows carrying `pct: null`, the two-row CPU group, and
+# indent-2 sub-event rows under each class.
+
+def _real_tm_rows():
+    return [
+        {"name": "DB Time", "ms": 7980.0, "indent": 0},
+        {"name": "IO", "ms": 2000.0, "indent": 1},
+        {"name": "IO:AioIoUringExecution", "ms": 2000.0, "indent": 2},
+        {"name": "Lock", "ms": 2000.0, "indent": 1},
+        {"name": "Lock:extend", "ms": 2000.0, "indent": 2},
+        {"name": "LWLock", "ms": 2000.0, "indent": 1},
+        {"name": "LWLock:ShmemIndex", "ms": 2000.0, "indent": 2},
+        {"name": "CPU (running)", "ms": 659.9999, "indent": 1},
+        {"name": "CPU (waiting for a core)", "ms": 1320.0001, "indent": 1},
+        {"name": "Idle", "ms": 6000.0, "indent": 0},
+        {"name": "Client:ClientRead", "ms": 2000.0, "indent": 2},
+        {"name": "Timeout:CheckpointWriteDelay", "ms": 2000.0, "indent": 2},
+        {"name": "Other (background)", "ms": 2000.0, "indent": 2},
+    ]
+
+
+def _real_te_rows():
+    return [
+        {"class": "LWLock", "name": "LWLock:ShmemIndex",
+         "total_ms": 2000.0, "pct": 25.062656641604008},
+        {"class": "Lock", "name": "Lock:extend",
+         "total_ms": 2000.0, "pct": 25.062656641604008},
+        {"class": "Client", "name": "Client:ClientRead",
+         "total_ms": 2000.0, "pct": None},
+        {"class": "Timeout", "name": "Timeout:CheckpointWriteDelay",
+         "total_ms": 2000.0, "pct": None},
+        {"class": "IO", "name": "IO:AioIoUringExecution",
+         "total_ms": 2000.0, "pct": 25.062656641604008},
+        {"class": "CPU", "name": "CPU*", "total_ms": 1980.0,
+         "pct": 24.81203007518797},
+    ]
+
+
+REAL_TE_DB_TIME_MS = 7980.0
+
+
+def test_class_attribution_real_raw_path_response_agrees():
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        _real_tm_rows(), _real_te_rows(), REAL_TE_DB_TIME_MS)
+    check(ok, f"the real raw-path responses agree per class ({detail})")
+    check("worst gap 0.00%" in detail,
+          f"and agree exactly, not merely inside tolerance (got: {detail})")
+    # The CPU group is two rows in time_model and one in top_events; the
+    # fold has to be exact or this check would be red on every healthy run.
+    check("CPU tm=1980.0/te=1980.0" in detail,
+          f"CPU (running)+CPU (waiting for a core) folds onto top_events' "
+          f"single CPU row (got: {detail})")
+    # Idle-but-visible rows must not enter either side.
+    check("Client" not in detail and "Timeout" not in detail,
+          f"idle-but-visible rows (pct: null) are excluded from both sides "
+          f"(got: {detail})")
+
+
+def test_class_attribution_catches_the_dropped_class_the_identity_absorbs():
+    # THE POINT OF THIS CHECK, and issue #517's demonstrated red.
+    #
+    # Mutation: Lock's 2000 ms is never attributed to its own class row.
+    # This is not an arbitrary edit -- it is exactly what src/compute.c does
+    # with unattributed wait time: db_time_ns is unchanged (it is summed
+    # before any class attribution), the Lock class row drops out (a class
+    # with total_ns <= 0 is not emitted at all), and Off-CPU* -- defined as
+    # `db_time - CPU* - Sigma waits` -- grows by the same 2000 ms.
+    rows = [r for r in _real_tm_rows() if r["name"] != "Lock"]
+    for r in rows:
+        if r["name"] == "CPU (waiting for a core)":
+            r["ms"] += 2000.0
+
+    # Leg 1: the identity still closes to EXACTLY zero. This is the
+    # false negative #517 was filed about, asserted rather than described.
+    cons_ok, cons_detail = lib.time_model_conservation(rows, 7980.0)
+    check(cons_ok,
+          f"time_model_conservation still PASSES the dropped class "
+          f"({cons_detail})")
+    check("gap=0.0ms" in cons_detail,
+          f"and with a gap of exactly 0.0 ms, not a shrunken one "
+          f"(got: {cons_detail})")
+
+    # Leg 2: the independently derived comparison goes red, and names the
+    # class, because top_events still carries Lock:extend's 2000 ms.
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        rows, _real_te_rows(), REAL_TE_DB_TIME_MS)
+    check(not ok, f"class_rows_vs_top_events_ok FAILS the same input "
+                  f"({detail})")
+    check("Lock: time_model=0.0ms vs top_events=2000.0ms" in detail,
+          f"and names the dropped class and both numbers (got: {detail})")
+    check("CPU: time_model=3980.0ms vs top_events=1980.0ms" in detail,
+          f"and names the row the time landed in instead (got: {detail})")
+
+
+def test_class_attribution_class_missing_from_top_events_fails():
+    # The mirror direction, and the bypass-suite case CLAUDE.md names
+    # explicitly: the thing being checked is ABSENT rather than wrong. The
+    # comparison walks the UNION of both sides' classes, so a class only
+    # time_model reports is a failure, not a key the loop never visits.
+    rows = _real_tm_rows() + [{"name": "IPC", "ms": 500.0, "indent": 1}]
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        rows, _real_te_rows(), REAL_TE_DB_TIME_MS)
+    check(not ok, f"a class present only in time_model fails ({detail})")
+    check("IPC: time_model=500.0ms vs top_events=0.0ms" in detail,
+          f"and is named with its own numbers (got: {detail})")
+
+
+def test_class_attribution_within_tolerance_ok():
+    rows = _real_tm_rows()
+    for r in rows:
+        if r["name"] == "Lock" and r["indent"] == 1:
+            r["ms"] = 1990.0          # 0.5% under, inside the 1% bound
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        rows, _real_te_rows(), REAL_TE_DB_TIME_MS)
+    check(ok, f"a 0.5% per-class gap is inside the 1% tolerance ({detail})")
+
+
+def test_class_attribution_just_outside_tolerance_fails():
+    rows = _real_tm_rows()
+    for r in rows:
+        if r["name"] == "Lock" and r["indent"] == 1:
+            r["ms"] = 1960.0          # 2% under
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        rows, _real_te_rows(), REAL_TE_DB_TIME_MS)
+    check(not ok, f"a 2% per-class gap fails the 1% tolerance ({detail})")
+
+
+def test_class_attribution_legacy_single_cpu_row_folds():
+    # Sampled/v2/legacy windows emit one "CPU*" row instead of the measured
+    # pair. It must fold onto the same label, or this check would be red on
+    # every legacy window instead of comparing it.
+    rows = [r for r in _real_tm_rows()
+            if r["name"] not in ("CPU (running)", "CPU (waiting for a core)")]
+    rows.append({"name": "CPU*", "ms": 1980.0, "indent": 1})
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        rows, _real_te_rows(), REAL_TE_DB_TIME_MS)
+    check(ok, f"a legacy single CPU* row folds onto the CPU label ({detail})")
+
+
+# -- class_rows_vs_top_events_ok: BYPASS SUITE ---------------------------
+#
+# One case per way this gate's detection can be made unreachable. Every one
+# must REFUSE (ok False), never approve: a gate that cannot see the thing it
+# compares has no business returning True.
+
+def test_class_attribution_empty_time_model_rows_refuses():
+    ok, detail = lib.class_rows_vs_top_events_ok([], _real_te_rows(),
+                                                 REAL_TE_DB_TIME_MS)
+    check(not ok, f"empty time_model rows refuse ({detail})")
+    # Pinned to the SPECIFIC message, not just "void": every later guard
+    # (no indent-1 rows, the MIN_DB_TIME_MS floor) also refuses empty input
+    # and also says "void", so a looser assertion here would still pass
+    # with this guard deleted and would stop pinning anything.
+    check("no time_model rows" in detail,
+          f"and names the empty side, not a downstream symptom (got: {detail})")
+
+
+def test_class_attribution_empty_top_events_rows_refuses():
+    ok, detail = lib.class_rows_vs_top_events_ok(_real_tm_rows(), [],
+                                                 REAL_TE_DB_TIME_MS)
+    check(not ok, f"empty top_events rows refuse ({detail})")
+    check("no top_events rows" in detail,
+          f"and names the empty side (got: {detail})")
+
+
+def test_class_attribution_none_either_side_refuses():
+    # A missing `rows` key reads as None at the call site.
+    ok, _ = lib.class_rows_vs_top_events_ok(None, _real_te_rows(),
+                                            REAL_TE_DB_TIME_MS)
+    check(not ok, "a missing time_model rows key refuses")
+    ok, _ = lib.class_rows_vs_top_events_ok(_real_tm_rows(), None,
+                                            REAL_TE_DB_TIME_MS)
+    check(not ok, "a missing top_events rows key refuses")
+
+
+def test_class_attribution_no_indent1_rows_refuses():
+    # Rows present, but the CLASS rows absent -- the comparison would
+    # otherwise walk only top_events' classes against zeros, or (worse, if
+    # it walked the intersection) nothing at all.
+    rows = [r for r in _real_tm_rows() if r["indent"] != 1]
+    ok, detail = lib.class_rows_vs_top_events_ok(rows, _real_te_rows(),
+                                                 REAL_TE_DB_TIME_MS)
+    check(not ok, f"a response with no indent-1 class rows refuses ({detail})")
+    check("no indent-1" in detail, f"and names why (got: {detail})")
+
+
+def test_class_attribution_all_top_events_rows_idle_refuses():
+    rows = [dict(r, pct=None) for r in _real_te_rows()]
+    ok, detail = lib.class_rows_vs_top_events_ok(_real_tm_rows(), rows,
+                                                 REAL_TE_DB_TIME_MS)
+    check(not ok, f"top_events with only idle-but-visible rows refuses "
+                  f"({detail})")
+
+
+def test_class_attribution_missing_pct_key_refuses():
+    # Without `pct` there is no way to tell an idle-but-visible row from a
+    # DB-Time one, so every idle row's time would be added to a class and
+    # the comparison would be red (or, if the default went the other way,
+    # silently drop real classes).
+    rows = [{k: v for k, v in r.items() if k != "pct"} for r in _real_te_rows()]
+    ok, detail = lib.class_rows_vs_top_events_ok(_real_tm_rows(), rows,
+                                                 REAL_TE_DB_TIME_MS)
+    check(not ok, f"a top_events row with no `pct` key refuses ({detail})")
+    check("pct" in detail, f"and names the missing field (got: {detail})")
+
+
+def test_class_attribution_unparseable_time_model_ms_refuses():
+    for bad in (None, "2000.0", float("nan"), float("inf"), True):
+        rows = _real_tm_rows()
+        for r in rows:
+            if r["name"] == "Lock" and r["indent"] == 1:
+                r["ms"] = bad
+        ok, detail = lib.class_rows_vs_top_events_ok(
+            rows, _real_te_rows(), REAL_TE_DB_TIME_MS)
+        check(not ok, f"an unparseable time_model ms ({bad!r}) refuses "
+                      f"({detail})")
+
+
+def test_class_attribution_unparseable_top_events_total_ms_refuses():
+    for bad in (None, "2000.0", float("nan"), True):
+        rows = [dict(r) for r in _real_te_rows()]
+        rows[0]["total_ms"] = bad
+        ok, detail = lib.class_rows_vs_top_events_ok(
+            _real_tm_rows(), rows, REAL_TE_DB_TIME_MS)
+        check(not ok, f"an unparseable top_events total_ms ({bad!r}) refuses "
+                      f"({detail})")
+
+
+def test_class_attribution_unknown_class_label_refuses():
+    # A class label neither side's table knows -- e.g. a twelfth wait class
+    # added to src/compute.h, or a renamed display name. Dropping it would
+    # remove that class's time from the comparison without any signal.
+    rows = _real_tm_rows()
+    for r in rows:
+        if r["name"] == "Lock" and r["indent"] == 1:
+            r["name"] = "Quantum"
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        rows, _real_te_rows(), REAL_TE_DB_TIME_MS)
+    check(not ok, f"an unknown time_model class-row name refuses ({detail})")
+    check("Quantum" in detail, f"and names it (got: {detail})")
+
+    te = [dict(r) for r in _real_te_rows()]
+    te[0]["class"] = "Quantum"
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        _real_tm_rows(), te, REAL_TE_DB_TIME_MS)
+    check(not ok, f"an unknown top_events class label refuses ({detail})")
+
+
+def test_class_attribution_unknown_label_on_BOTH_sides_refuses():
+    # The case a "skip what you do not recognise" implementation gets
+    # wrong: when BOTH endpoints rename the same class, skipping it drops
+    # that class's time out of the comparison on both sides at once, so no
+    # per-class gap ever appears and the gate approves without having
+    # looked at it. Refusing is the only safe answer.
+    tm = _real_tm_rows()
+    for r in tm:
+        if r["name"] == "Lock" and r["indent"] == 1:
+            r["name"] = "Quantum"
+    te = [dict(r) for r in _real_te_rows()]
+    for r in te:
+        if r["class"] == "Lock":
+            r["class"] = "Quantum"
+    ok, detail = lib.class_rows_vs_top_events_ok(tm, te, REAL_TE_DB_TIME_MS)
+    check(not ok, f"an unknown label on both sides refuses rather than "
+                  f"quietly dropping the class ({detail})")
+    check("Quantum" in detail, f"and names it (got: {detail})")
+
+
+def test_class_attribution_missing_class_field_refuses():
+    for bad in (None, "", 7):
+        te = [dict(r) for r in _real_te_rows()]
+        te[0]["class"] = bad
+        ok, detail = lib.class_rows_vs_top_events_ok(
+            _real_tm_rows(), te, REAL_TE_DB_TIME_MS)
+        check(not ok, f"a top_events row with class={bad!r} refuses "
+                      f"({detail})")
+
+
+def test_class_attribution_truncated_top_events_row_list_refuses():
+    # A truncated row list shrinks one or more classes on the top_events
+    # side. It is detectable because top_events' own db_time_ms is
+    # accumulated over the same records, so the DB-Time rows must add up to
+    # it. Without this precondition the check would read the truncation as
+    # a per-class disagreement (noisy) or, if the missing class were absent
+    # from BOTH sides, as agreement.
+    te = [r for r in _real_te_rows() if r["class"] != "IO"]
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        _real_tm_rows(), te, REAL_TE_DB_TIME_MS)
+    check(not ok, f"a truncated top_events row list refuses ({detail})")
+    check("incomplete" in detail,
+          f"and says the row list is incomplete rather than blaming a class "
+          f"({detail})")
+
+
+def test_class_attribution_unparseable_top_events_db_time_refuses():
+    for bad in (None, "7980", float("nan"), True):
+        ok, detail = lib.class_rows_vs_top_events_ok(
+            _real_tm_rows(), _real_te_rows(), bad)
+        check(not ok, f"top_events db_time_ms={bad!r} refuses ({detail})")
+
+
+def test_class_attribution_below_nonzero_floor_refuses():
+    # Both sides agreeing at ~zero is the 0 ~= 0 reading MIN_DB_TIME_MS
+    # exists to reject: in this harness (continuous load for the whole
+    # capture) it means nothing was captured, not that nothing happened.
+    tm = [{"name": "DB Time", "ms": 0.0002, "indent": 0},
+          {"name": "Lock", "ms": 0.0001, "indent": 1},
+          {"name": "CPU (running)", "ms": 0.0001, "indent": 1}]
+    te = [{"class": "Lock", "name": "Lock:extend", "total_ms": 0.0001, "pct": 50.0},
+          {"class": "CPU", "name": "CPU*", "total_ms": 0.0001, "pct": 50.0}]
+    ok, detail = lib.class_rows_vs_top_events_ok(tm, te, 0.0002)
+    check(not ok, f"a near-zero window refuses rather than agreeing at zero "
+                  f"({detail})")
+    check("floor" in detail, f"and names the floor (got: {detail})")
+
+
+def test_class_attribution_non_dict_top_events_row_refuses():
+    te = _real_te_rows() + ["not-a-row"]
+    ok, detail = lib.class_rows_vs_top_events_ok(
+        _real_tm_rows(), te, REAL_TE_DB_TIME_MS)
+    check(not ok, f"a non-object top_events row refuses ({detail})")
+
+
+def test_class_attribution_is_a_mandatory_rehearsal_check():
+    # Without this, the leg could be computed, printed, and never gate --
+    # which is #464's failure mode (absent, not wrong).
+    check("cross_tab_class_attribution" in lib.REQUIRED_EXTRA_CHECKS,
+          "cross_tab_class_attribution is in REQUIRED_EXTRA_CHECKS "
+          "(test_required_check_names_all_exist_in_demo_rehearsal then "
+          "forces demo_rehearsal.py to actually insert it)")
+
+
 # ── bucket_weighted_aas_ok (criteria doc §5, item 2.2) ───────────────────
 
 def test_bucket_weighted_aas_ok_evenly_divisible_window_ok():
@@ -668,6 +1008,28 @@ def test_bucket_weighted_aas_ok_catches_what_unweighted_mean_would_miss():
         buckets, bucket_ns, from_ns, to_ns, time_model_aas)
     check(not ok, f"the bucket-weighted derivation correctly FAILS the same "
                   f"input an unweighted mean would have passed ({detail})")
+
+
+def test_bucket_weighted_aas_ok_catches_an_endpoint_level_divergence():
+    # #517 asked whether this leg can go red at all, given that its live
+    # configuration (60 buckets over 60 s) makes a weighted and an
+    # unweighted derivation coincide. It can -- but via the comparison it
+    # actually gates: the `aas` endpoint's own accumulation against
+    # time_model's `aas` for the same window. 60 x 1s buckets totalling
+    # 2.0 AAS each derive 2.0; a time_model reporting 2.1 is a 4.8%
+    # cross-endpoint disagreement and fails.
+    buckets = [{"t": i * 1_000_000_000, "cpu": 1.2, "io": 0.8}
+               for i in range(60)]
+    ok, detail = lib.bucket_weighted_aas_ok(
+        buckets, 1_000_000_000, 0, 60_000_000_000, 2.0)
+    check(ok, f"the two endpoints agreeing passes ({detail})")
+    ok, detail = lib.bucket_weighted_aas_ok(
+        buckets, 1_000_000_000, 0, 60_000_000_000, 2.1)
+    check(not ok, f"a 4.8% cross-endpoint disagreement FAILS in the very "
+                  f"60-buckets-over-60s geometry #517 called degenerate "
+                  f"({detail})")
+    check("derived=2.0000 time_model=2.1000" in detail,
+          f"and states both endpoints' numbers (got: {detail})")
 
 
 def test_bucket_weighted_aas_ok_ignores_cat_and_t_fields():
