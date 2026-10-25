@@ -1267,8 +1267,8 @@ test('#439 the scope note is derived from DB_TIME_MEMBERSHIP, not hand-written',
 
     const flippedParked = buildSessionsScopeNote(
         { backgroundActive: 'inside', backgroundParked: 'inside' });
-    assert.ok(/parked\) row on Overview, is inside it in both/i.test(flippedParked),
-        flippedParked);
+    assert.ok(/parked background loops\) row on Overview, is inside it in both/i
+        .test(flippedParked), flippedParked);
     assert.ok(!/is outside it in both/i.test(flippedParked), flippedParked);
 });
 

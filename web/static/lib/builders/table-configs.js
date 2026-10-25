@@ -765,10 +765,9 @@ export const DB_TIME_MEMBERSHIP = {
     /* non-idle work of bgwriter / walwriter / checkpointer / autovacuum */
     backgroundActive: 'inside',
     /* Overview's "Other idle (parked background loops)" row (Activity-class
-     * parking). NOTE: buildSessionsScopeNote's own prose below still says
-     * the OLD label ("the Background idle (parked) row on Overview") --
-     * that sentence is user-facing copy, not a derived value, so it is not
-     * changed here; flagged as a finding instead (see PR report). */
+     * parking) -- same label buildSessionsScopeNote's own prose below now
+     * names directly (#439 follow-up, agent/decided-smalls: src/compute.c
+     * renamed the raw row from "Other (background)" at the SOURCE). */
     backgroundParked: 'outside',
 };
 
@@ -796,8 +795,8 @@ export function buildSessionsScopeNote(membership) {
         (membership.backgroundActive === 'inside'
             ? 'inside DB Time in both tabs'
             : 'outside DB Time in Overview');
-    const parked = 'their parked-idle time, the Background idle (parked) row ' +
-        'on Overview, is ' +
+    const parked = 'their parked-idle time, the Other idle (parked ' +
+        'background loops) row on Overview, is ' +
         (membership.backgroundParked === 'outside'
             ? 'outside it in both'
             : 'inside it in both');
