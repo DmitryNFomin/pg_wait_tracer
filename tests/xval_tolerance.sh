@@ -94,6 +94,39 @@
 # between a wrong decomposition and a right one is a coincidence, not
 # corroboration, and is recorded here so nobody cites the sketch.
 #
+# A two-regime story you will be tempted to re-derive, and should not
+# =====================================================================
+# The confirmation runs recorded two groups: one with 10 s between runs whose
+# loadavg1 read 5.10-6.37, and one that waited for loadavg1 < 0.60 and read
+# 0.46-0.55. Round 1 of this work called those "loaded" and "quiet", treated
+# them as two regimes, and concluded the bound held in one and failed in the
+# other. THAT CONCLUSION WAS WRONG and is retracted here.
+#
+# Both figures are PRE-RUN readings. The test drives the box itself:
+# pgbench -c 8 on 4 vCPU puts loadavg1 at ~6 during the capture whatever it
+# was beforehand (measured: 0.35 -> 4.51 across one run, 4.42 -> 6.02 across
+# another), and inside tests/run_all.sh this test runs at loadavg1 median
+# 6.60 (n=135 samples over its 271 s window, min 2.51, max 7.69). So the
+# "quiet" group capture at ~6 too, and all three groups -- both standalone
+# sets and the real run_all invocation -- are the SAME regime. What differed
+# between the two standalone sets was only pre-run residue from the previous
+# run.
+#
+# Consequence: there is no measured load-dependence here, and the single
+# out-of-bound draw is not evidence of one. Do not add a load-robust variance
+# term or a quiet precondition on the strength of those pre-run numbers --
+# that would be designing against a cause the measurement refutes.
+#
+# The honest limit on the exceedance rate
+# =======================================
+# Across all 17 10 Hz captures taken on this harness, 1 exceeded the bound:
+# 5.9% against the 5% family-wise design target, with the floor contributing
+# 0 of 17 refusals. That agreement is reassuring but WEAK: 1/17 is a wide
+# estimate of a 5% tail, and the single run_all cell inside it is n=1, which
+# is exactly the kind of figure #321 was built on. Treat the rate as
+# provisional and re-check it as runs accumulate, rather than as settled.
+# This is a note for whoever next looks, not a reason to keep measuring.
+#
 # What this bound does NOT cover -- read before trusting it
 # ========================================================
 #  - It is derived for the SHIPPED 10 Hz rate only. The script applies it to
