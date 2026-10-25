@@ -82,6 +82,21 @@ run bash tests/test_gitignore_build_products.sh
 step "bash: the docs name the PGWT_SUMMARY_VERSION the code defines"
 run bash tests/test_docs_summary_version.sh
 
+# The same number, held against the WIRING rather than the prose. The
+# open-CPU accounting rule is implemented in the writer and reached by no
+# producer; it holds a version number while dormant, and the next bump will
+# want a number for a different set of rules.
+# pgwt_summaries_window_current compares only the number, so a collision
+# there ships one number naming two accounting rules with no reader able to
+# tell the files apart -- the exact failure src/summary_writer.h spends 200
+# lines arguing against, enforced until now by nothing but that comment.
+# This step checks the dormant rule's number against whether a producer
+# calls it, and REFUSES (so the step fails) when it cannot read the
+# constant, cannot find exactly one acceptance test, finds no producer
+# sources to scan, or has no runner to read registration from.
+step "bash: the dormant summary rule's number vs the shipped constant"
+run bash tests/test_summary_epoch_numbering.sh
+
 step "snapshot-history guard self-test"
 run tests/test_check_snapshot_history.sh
 
