@@ -272,6 +272,88 @@ static int write_clean_trace(const char *dir)
     return 0;
 }
 
+/* ── #534 fixtures: measured CPU that EXCEEDS its interval's wall ────────
+ *
+ * cpu_clamped_ns is a MEASUREMENT-QUALITY signal: non-zero means measured
+ * CPU exceeded the wall interval it belongs to (clock skew, a schedstat
+ * read straddling a boundary, an accounting error). The live path reports
+ * it (src/daemon.h cpu_clamped_ns_total, src/event_stream.c), the summary
+ * and compute paths report it -- replay clamped the same quantity and threw
+ * the remainder away, so a skewed trace replayed as though it were clean.
+ *
+ * Absolute expectations only: a conservation identity would be vacuous
+ * here, since the clamped amount IS the difference that was removed.
+ *
+ * SKEW trace, all in one window:
+ *   CPU  close 1100 ms dur 100 ms cpu_ns 160 ms  -> clamped  60 ms
+ *   CPU  close 1300 ms dur 100 ms cpu_ns  40 ms  -> clamped   0 (under)
+ *   CPU  close 1500 ms dur 100 ms cpu_ns 100 ms  -> clamped   0 (equal)
+ *   CPU  close 1700 ms dur 100 ms cpu_ns UNKNOWN -> clamped   0 (absent,
+ *                                                   never read as skew)
+ *   WAIT close 1900 ms dur 100 ms cpu_ns 900 ms  -> clamped   0 (that is
+ *                                                   the wait-gap self-check
+ *                                                   quantity, not this one)
+ * so the whole-trace expectation is exactly 60 ms, from one record. */
+#define CPU_SKEW_MS   60ULL
+
+static int write_cpu_skew_trace(const char *dir)
+{
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0)
+        return -1;
+    struct pgwt_trace_event e[5];
+    e[0] = ev(1100, 100, 0);          e[0].cpu_ns = 160 * MS;
+    e[1] = ev(1300, 100, 0);          e[1].cpu_ns =  40 * MS;
+    e[2] = ev(1500, 100, 0);          e[2].cpu_ns = 100 * MS;
+    e[3] = ev(1700, 100, 0);          e[3].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    e[4] = ev(1900, 100, EV_IN);      e[4].cpu_ns = 900 * MS;
+    for (size_t i = 0; i < sizeof(e) / sizeof(e[0]); i++)
+        if (pgwt_writer_push_event(&w, &e[i]) != 0) return -1;
+    if (pgwt_writer_close(&w) != 0) return -1;
+    pgwt_writer_destroy(&w);
+    return 0;
+}
+
+/* The "absent, not wrong" control: the SAME five records with no skew at
+ * all. A gate that reports a number here is reporting noise. */
+static int write_cpu_clean_trace(const char *dir)
+{
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0)
+        return -1;
+    struct pgwt_trace_event e[5];
+    e[0] = ev(1100, 100, 0);          e[0].cpu_ns =  90 * MS;
+    e[1] = ev(1300, 100, 0);          e[1].cpu_ns =  40 * MS;
+    e[2] = ev(1500, 100, 0);          e[2].cpu_ns = 100 * MS;
+    e[3] = ev(1700, 100, 0);          e[3].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    e[4] = ev(1900, 100, EV_IN);      e[4].cpu_ns =   0;
+    for (size_t i = 0; i < sizeof(e) / sizeof(e[0]); i++)
+        if (pgwt_writer_push_event(&w, &e[i]) != 0) return -1;
+    if (pgwt_writer_close(&w) != 0) return -1;
+    pgwt_writer_destroy(&w);
+    return 0;
+}
+
+/* A sampled record is a point observation with no wall of its own, so it
+ * can never contribute clamped skew however large its cpu_ns reads. */
+static int write_cpu_sampled_trace(const char *dir)
+{
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0)
+        return -1;
+    struct pgwt_trace_event smp[4];
+    for (int i = 0; i < 4; i++) {
+        smp[i] = ev(1100 + (uint64_t)i * 100, 0, 0);
+        smp[i].old_event = 0;
+        smp[i].new_event = 0;
+        smp[i].cpu_ns = 5000 * MS;
+    }
+    if (pgwt_writer_push_samples(&w, smp, 4, PERIOD) != 0) return -1;
+    if (pgwt_writer_close(&w) != 0) return -1;
+    pgwt_writer_destroy(&w);
+    return 0;
+}
+
 /* Replay `path` over [from, to] into a fresh accumulator.
  * budget: NULL = unlimited; otherwise in/out, the caller sees what is left.
  * corrupt_block: >= 0 points that block's index entry at a file offset past
@@ -967,6 +1049,95 @@ int main(void)
         CHECK(pgwt_trace_file_quick_skip(own, 2, 0, 2500) == false,
               "the entry's OWN placement_unknown=true -> never skip it, "
               "even though its successor (2000) is before --from (2500)");
+    }
+
+    /* ══ CASE 534: replay must REPORT the clamped CPU skew, not discard it ══
+     *
+     * src/event_reader.c clamps measured CPU that exceeds its interval's
+     * wall and used to throw the remainder away, while four other headers
+     * in this product surface the same quantity. Silence there is
+     * indistinguishable from zero, which is worse than a large value: a
+     * trace with real skew replays as though it were clean. */
+    {
+        printf("\nCASE 534: replay reports cpu_clamped_ns\n");
+        char d4[] = "/tmp/pgwt_replay_skew_XXXXXX";
+        char d5[] = "/tmp/pgwt_replay_noskew_XXXXXX";
+        char d6[] = "/tmp/pgwt_replay_smpcpu_XXXXXX";
+        if (!mkdtemp(d4) || !mkdtemp(d5) || !mkdtemp(d6)) {
+            perror("mkdtemp"); return 1;
+        }
+        if (write_cpu_skew_trace(d4) != 0 || write_cpu_clean_trace(d5) != 0 ||
+            write_cpu_sampled_trace(d6) != 0) {
+            fprintf(stderr, "FATAL: could not write the #534 fixtures\n");
+            return 1;
+        }
+        char p4[600], p5[600], p6[600];
+        snprintf(p4, sizeof(p4), "%s/current.trace", d4);
+        snprintf(p5, sizeof(p5), "%s/current.trace", d5);
+        snprintf(p6, sizeof(p6), "%s/current.trace", d6);
+
+        /* PRECONDITION: the fixture is actually read. Without this the
+         * assertions below pass on an empty replay -- 0 skew reported for
+         * 0 records is not evidence of anything. */
+        struct pgwt_replay_stats s534 = {0};
+        uint64_t dec534 = 0;
+        struct pgwt_accumulator *a4 =
+            replay(p4, 0, 0, NULL, &s534, -1, &dec534, NULL);
+        if (!a4) { fprintf(stderr, "FATAL: cannot open %s\n", p4); return 1; }
+        CHECK_EQ(dec534, 5, "534: the skew fixture decoded all 5 records");
+        CHECK_EQ(s534.transitions, 5, "534: all 5 are exact transitions");
+
+        /* ABSOLUTE, in nanoseconds, the same unit as the live path's
+         * cpu_clamped_ns_total: one record exceeded its wall by 60 ms and
+         * no other record contributes. */
+        CHECK_EQ(s534.cpu_clamped_ns, CPU_SKEW_MS * MS,
+                 "534: the clamped remainder is reported (ns)");
+
+        /* ABSENT, not wrong: the same five records without skew must
+         * report exactly zero. A gate that cannot tell these two traces
+         * apart is reporting noise. */
+        struct pgwt_replay_stats s534c = {0};
+        uint64_t dec534c = 0;
+        struct pgwt_accumulator *a5 =
+            replay(p5, 0, 0, NULL, &s534c, -1, &dec534c, NULL);
+        if (!a5) { fprintf(stderr, "FATAL: cannot open %s\n", p5); return 1; }
+        CHECK_EQ(dec534c, 5, "534: the clean fixture decoded all 5 records");
+        CHECK_EQ(s534c.cpu_clamped_ns, 0,
+                 "534: a clean capture reports exactly no clamped skew");
+
+        /* A SAMPLES record has no wall of its own: 5 s of cpu_ns on a
+         * point observation is not skew. */
+        struct pgwt_replay_stats s534s = {0};
+        uint64_t dec534s = 0;
+        struct pgwt_accumulator *a6 =
+            replay(p6, 0, 0, NULL, &s534s, -1, &dec534s, NULL);
+        if (!a6) { fprintf(stderr, "FATAL: cannot open %s\n", p6); return 1; }
+        CHECK_EQ(dec534s, 4, "534: the sampled fixture decoded all 4 samples");
+        CHECK_EQ(s534s.samples, 4, "534: they are counted as samples");
+        CHECK_EQ(s534s.cpu_clamped_ns, 0,
+                 "534: a sampled record never contributes clamped skew");
+
+        /* A window that admits NO record reports no skew -- the quantity
+         * describes the records the window actually replayed. */
+        struct pgwt_replay_stats s534e = {0};
+        struct pgwt_accumulator *a7 =
+            replay(p4, BASE + 5000 * MS, BASE + 6000 * MS, NULL, &s534e, -1,
+                   NULL, NULL);
+        if (!a7) { fprintf(stderr, "FATAL: cannot reopen %s\n", p4); return 1; }
+        CHECK_EQ(s534e.transitions, 0, "534: the empty window admits nothing");
+        CHECK_EQ(s534e.cpu_clamped_ns, 0,
+                 "534: an empty window reports no clamped skew");
+
+        /* A caller that passes no stats struct must not crash: replay() is
+         * also used without one. */
+        struct pgwt_accumulator *a8 =
+            replay(p4, 0, 0, NULL, NULL, -1, NULL, NULL);
+        CHECK(a8 != NULL, "534: replay with st == NULL still completes");
+
+        free(a4); free(a5); free(a6); free(a7); free(a8);
+        char rm534[1800];
+        snprintf(rm534, sizeof(rm534), "rm -rf %s %s %s", d4, d5, d6);
+        if (system(rm534) != 0) { /* best effort */ }
     }
 
     free(all);
