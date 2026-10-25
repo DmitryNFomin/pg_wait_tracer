@@ -18,6 +18,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/testutil.sh"
+# issue #528: required-tier accounting (skip_required_tier / tier_size_check
+# / tier_list_count / tier_report / tier_ok). A tier that was supposed to run
+# and did not must FAIL this run, not be absorbed into the skip count.
+source "$SCRIPT_DIR/run_all_tiers.sh"
 
 # issue #93: this run's marker (its own start timestamp), exported so
 # tests/ui_live_smoke.py can stamp tests/results/ui_live/run.id with it.
@@ -268,18 +272,53 @@ make -C "$SCRIPT_DIR"
 # so they need an explicit `python3` prefix rather than direct exec — same
 # two rules tests/Makefile's `check` target already applies.
 # (read via fd 3 so the tests' stdin stays the terminal, not the list file)
-pushd "$SCRIPT_DIR" >/dev/null
-while read -r t <&3; do
-    case "$t" in ''|\#*) continue ;; esac
-    case "$t" in
-        *.py) run_test "$t" python3 "$t" ;;
-        *)    run_test "$t" ./"$t" ;;
-    esac
-done 3< "unit_tests.list"
-popd >/dev/null
+#
+# issue #528: the `3< "unit_tests.list"` redirect used to be the whole
+# precondition. A missing or unreadable list makes bash print one line to
+# stderr and run the loop body zero times -- the entire C tier gone, `failed`
+# still 0, exit 0. tier_list_count() refuses rather than returning 0 for an
+# absent file (0 expected == 0 ran is how that would have approved itself),
+# and tier_size_check() below pins the loop's output against the list's own
+# entry count, so a truncated read fails too.
+unit_list="$SCRIPT_DIR/unit_tests.list"
+unit_declared=$(tier_list_count "$unit_list") || unit_declared=""
+if [[ -z "$unit_declared" ]]; then
+    skip_required_tier "C unit tier (tests/unit_tests.list)" "unknown" \
+        "unit_tests.list is missing, unreadable, or contains no entries"
+else
+    unit_before=$((passed + failed + known_failing))
+    pushd "$SCRIPT_DIR" >/dev/null
+    while read -r t <&3; do
+        case "$t" in ''|\#*) continue ;; esac
+        case "$t" in
+            *.py) run_test "$t" python3 "$t" ;;
+            *)    run_test "$t" ./"$t" ;;
+        esac
+    done 3< "unit_tests.list"
+    popd >/dev/null
+    tier_size_check "C unit tier (tests/unit_tests.list)" "$unit_declared" \
+        "$unit_before" "$((passed + failed + known_failing))"
+fi
+
+# Step 2.4: the runner's own guard against a silently absent tier (issue
+# #528). Deterministic, needs neither root nor PG; it builds throwaway
+# run_all.sh fixtures under mktemp and asserts that an unmet tier
+# precondition fails the run, including a mutant with the pre-#528 wrapping
+# restored to prove the refusal is what makes the difference.
 
 # Step 2.5: Synthetic data correctness tests (no root needed, needs pgwt-server)
+#
+# issue #528: how many tests this tier contains. A literal on purpose -- the
+# membership below is 26 separate `run_test ... python3 "$SCRIPT_DIR/x.py"`
+# lines because scripts/check-runner-registration.py's orphan scan reads
+# exactly that form to decide a test file has a runner; collapsing them into a
+# loop over an array would make all 26 look like tests nobody runs. The
+# literal is pinned against what actually ran by the tier_size_check() in the
+# `fi` branch, so it cannot drift below the real membership and quietly shrink
+# the number a skip reports.
+SYNTHETIC_TIER_SIZE=26
 if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]; then
+    synthetic_before=$((passed + failed + known_failing))
     run_test "test_data_time_model" python3 "$SCRIPT_DIR/test_data_time_model.py"
     run_test "test_data_offcpu_identity" python3 "$SCRIPT_DIR/test_data_offcpu_identity.py"
     run_test "test_data_aas" python3 "$SCRIPT_DIR/test_data_aas.py"
@@ -338,8 +377,14 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_current_trace_cache" \
         python3 "$SCRIPT_DIR/test_data_current_trace_cache.py"
     run_test "test_protocol_drift" python3 "$SCRIPT_DIR/test_protocol_drift.py"
+    tier_size_check "test_data_* (synthetic-data tier)" "$SYNTHETIC_TIER_SIZE" \
+        "$synthetic_before" "$((passed + failed + known_failing))"
 else
-    skip_test "test_data_*" "pgwt-server or gen_test_traces not built"
+    # NOT skip_test: this is the issue #528 case. pgwt-server or
+    # gen_test_traces absent means the build broke in a way that REMOVED 26
+    # tests, which is precisely when a green verdict is worth least.
+    skip_required_tier "test_data_* (synthetic-data tier)" "$SYNTHETIC_TIER_SIZE" \
+        "pgwt-server or tests/gen_test_traces missing or not executable — the build did not produce them (make && make -C tests)"
 fi
 
 # Live test inventory (root + running PG). One list, used both to run and to
@@ -497,6 +542,17 @@ fi
 # same layer CI's build-and-unit job runs: pure builders and the state/
 # transport/selection modules fail here in milliseconds, no Playwright needed.
 # Locally a missing node is a skip; in CI ($CI set) it is a FAILURE.
+#
+# issue #528: deliberately NOT promoted to skip_required_tier(). node is not
+# installed on the gate boxes by design -- tests/provision-runner.sh says so
+# explicitly ("It deliberately does NOT install node: nothing in the LIVE tier
+# needs it ... the Node builder-unit tests are Deterministic-tier, Mac-only"),
+# and this layer is gated for real by `make check` and ci.yml's
+# build-and-unit job. So the skip here is an expected opt-out expressed as a
+# capability probe, not an accidental absence. It remains the one tier whose
+# skip a box run cannot distinguish from a broken environment; closing that
+# needs an explicit opt-out flag set by scripts/box-check.sh and a box run to
+# prove it, which is out of scope for #528.
 if command -v node >/dev/null 2>&1; then
     run_test "web_unit (node --test)" node --test "$SCRIPT_DIR"/web_unit/*.test.mjs
 elif [[ -n "${CI:-}" ]]; then
@@ -533,9 +589,13 @@ elif python3 -c "import playwright, websockets" 2>/dev/null; then
     # isolated fixture gallery that missed it originally.
     run_test "verify_waterfall_fold" python3 "$SCRIPT_DIR/verify_waterfall_fold.py"
 else
-    skip_test "test_web_ui" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
-    skip_test "test_web_ui_chaos" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
-    skip_test "verify_waterfall_fold" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
+    # issue #528: the opt-OUT above is a judgement and stays a skip. THIS is
+    # the opposite: the operator asked for the tier (PGWT_RUN_WEB_UI=1) and
+    # got nothing -- the same shape as DIAG_DATA=1 being read on the box while
+    # the launcher never forwarded it, which cost a 50-minute run that
+    # produced no diagnostic data. A requested tier that cannot run fails.
+    skip_required_tier "test_web_ui + test_web_ui_chaos + verify_waterfall_fold (Playwright/mock_server tier)" 3 \
+        "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
 fi
 
 # Visual-regression snapshots (Phase B4). Needs playwright + Pillow + numpy AND
@@ -551,7 +611,10 @@ elif python3 -c "import playwright, websockets, PIL, numpy" 2>/dev/null \
    && ls "$SCRIPT_DIR"/web_snapshots/*.png >/dev/null 2>&1; then
     run_test "test_web_ui_snapshots" python3 "$SCRIPT_DIR/test_web_ui_snapshots.py"
 else
-    skip_test "test_web_ui_snapshots" "snapshot deps or baselines not present (CI snapshots job is authoritative)"
+    # issue #528, same rule as the Playwright tier above: PGWT_RUN_SNAPSHOTS=1
+    # was set, so this tier was asked for and did not run.
+    skip_required_tier "test_web_ui_snapshots" 1 \
+        "opted in via PGWT_RUN_SNAPSHOTS=1 but snapshot deps (playwright/websockets/PIL/numpy) or tests/web_snapshots/*.png baselines are not present"
 fi
 
 # issue #93: re-emit the live-UI-smoke's own one-line verdict here too, not
@@ -606,6 +669,7 @@ echo "════════════════════════�
 total=$((passed + failed + skipped + excluded + known_failing))
 executed=$((passed + failed + known_failing))
 echo "  Executed: $executed (passed $passed, failed $failed, known-failing $known_failing ($xpass xpass)), skipped $skipped, excluded $excluded, total $total"
+tier_report
 if [[ $REQUIRE_LIVE -eq 1 ]]; then
     echo "  Mode:     --require-live (live-section skips counted as failures)"
 fi
@@ -615,6 +679,19 @@ echo ""
 # environment or the runner itself if nothing executed (TST-4).
 if [[ $executed -eq 0 ]]; then
     echo "ERROR: no test was executed — refusing to report success"
+    exit 1
+fi
+
+# issue #528: an all-skip run was the only absence this script used to refuse.
+# A TIER-sized absence left both the count and the failure total looking
+# healthy, so 26 missing synthetic-data tests reported PASS. A required tier
+# that did not run (or ran a different number of tests than it declares) is a
+# failure in its own right, independent of $failed.
+if ! tier_ok; then
+    echo "ERROR: $TIER_ERRORS required tier(s) did not run as declared — refusing to report success"
+    for tier_line in ${TIER_ERROR_LINES[@]+"${TIER_ERROR_LINES[@]}"}; do
+        echo "  - $tier_line"
+    done
     exit 1
 fi
 
