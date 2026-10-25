@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
     buildConcurrencyOption, buildConcurrencyTables,
     burstSelectionNote, burstPidSampleMarker,
+    burstNoiseNote, BURST_NOTABLE_FRACTION, BURST_NOTABLE_MIN_BUCKETS,
 } from '../../web/static/lib/builders/concurrency.js';
 
 function fivePeaks() {
@@ -444,4 +445,96 @@ test('#442-review: buildConcurrencyTables (combined) is still exactly the two pa
     const model = buildConcurrencyOption(denseBurstData());
     assert.equal(buildConcurrencyTables(model),
         buildPeaksPanelHtml(model) + buildBurstsPanelHtml(model));
+});
+
+/* ── #442: burst markers must stop firing on (near-)every bucket ──────────
+ *
+ * The owner's diagnosis (issue #442 comment) requires the fix to be gated
+ * BOTH ways: a quiet/uniform fixture where the OLD absolute threshold marks
+ * every bucket must now show NO chart markers (the bar this whole fix
+ * exists to clear), and a genuinely isolated burst must NOT be collaterally
+ * suppressed just because the relative rule exists. Neither assertion was
+ * even expressible before burstNoiseNote/burstsMarkersSuppressed existed —
+ * see the PR description for the full revert-and-rerun RED transcript.
+ */
+function manyBucketsData(n, burstBucketIndices) {
+    const bucketNs = 1_000;
+    const marked = new Set(burstBucketIndices);
+    const peaks = [];
+    const bursts = [];
+    for (let i = 0; i < n; i++) {
+        const t = (i + 1) * bucketNs;
+        peaks.push({ t, t_ms: t, max: 5, event: 'LWLock:BufferMapping' });
+        if (marked.has(i)) {
+            const ts = t + 500;
+            bursts.push({ timestamp_ns: ts, timestamp_ms: ts, event: 'IO:DataFileRead',
+                sessions: 4, pids: [1, 2, 3, 4] });
+        }
+    }
+    return { bucket_ns: bucketNs, peaks, bursts };
+}
+
+test('#442: a uniform fixture (every captured bucket bursts) draws NO chart markers', () => {
+    const d = manyBucketsData(20, Array.from({ length: 20 }, (_, i) => i));
+    const model = buildConcurrencyOption(d);
+    assert.equal(model.option.series[0].markPoint, undefined,
+        'the old behavior (a marker on every bucket) must be gone');
+    assert.equal(model.burstsMarkersSuppressed, true);
+    // The table is NOT silently emptied -- #276's "must all stay reachable"
+    // still governs every burst the server actually detected.
+    assert.equal(model.bursts.length, 20);
+    assert.ok(model.burstNote.includes('fired in 20 of 20 captured buckets'),
+        model.burstNote);
+    const html = buildConcurrencyTables(model);
+    assert.ok(html.includes('fired in 20 of 20 captured buckets'));
+});
+
+test('#442: an isolated burst (minority of buckets) still draws its marker', () => {
+    const d = manyBucketsData(20, [10]);
+    const model = buildConcurrencyOption(d);
+    const mp = model.option.series[0].markPoint.data;
+    assert.equal(mp.length, 1, 'the one real burst must not be suppressed');
+    assert.equal(model.burstsMarkersSuppressed, false);
+    assert.equal(model.bursts.length, 1);
+    assert.ok(!model.burstNote.includes('Chart burst markers hidden'), model.burstNote);
+});
+
+test('#442: just over the minority line (11 of 20) suppresses; just under (10 of 20) does not', () => {
+    // BURST_NOTABLE_FRACTION is 0.5 -- the boundary is "more than half", so
+    // an exact half (10/20) must NOT suppress and 11/20 must.
+    assert.equal(BURST_NOTABLE_FRACTION, 0.5);
+    const half = buildConcurrencyOption(manyBucketsData(20, Array.from({ length: 10 }, (_, i) => i)));
+    assert.equal(half.burstsMarkersSuppressed, false);
+    assert.equal(half.option.series[0].markPoint.data.length, 10);
+    const overHalf = buildConcurrencyOption(manyBucketsData(20, Array.from({ length: 11 }, (_, i) => i)));
+    assert.equal(overHalf.burstsMarkersSuppressed, true);
+    assert.equal(overHalf.option.series[0].markPoint, undefined);
+});
+
+test('#442: tiny windows (below BURST_NOTABLE_MIN_BUCKETS) never suppress, even at 100%', () => {
+    assert.equal(BURST_NOTABLE_MIN_BUCKETS, 10);
+    const d = manyBucketsData(3, [0, 1, 2]);   // 100% of buckets burst, but only 3 of them
+    const model = buildConcurrencyOption(d);
+    assert.equal(model.burstsMarkersSuppressed, false);
+    assert.equal(model.option.series[0].markPoint.data.length, 3);
+});
+
+test('#442: burstNoiseNote is pure and false-negative-safe (absent inputs -> no note)', () => {
+    assert.equal(burstNoiseNote(0, 0), '');
+    assert.equal(burstNoiseNote(20, 0), '');            // no bursts at all
+    assert.equal(burstNoiseNote(5, 5), '');              // below the bucket-count floor
+    assert.equal(burstNoiseNote(20, 10), '');            // exactly half: not a majority
+    assert.ok(burstNoiseNote(20, 11).includes('fired in 11 of 20 captured buckets'));
+});
+
+test('#442: captureFromNs shrinks the denominator to CAPTURED buckets only', () => {
+    // 30 buckets total, the first 15 pre-capture (captureFromNs excludes
+    // them) -- 15 captured buckets remain (over BURST_NOTABLE_MIN_BUCKETS),
+    // 12 of which burst: 12/15 = 80%, over the line even though it is
+    // 12/30 = 40% of the RAW window (which would NOT suppress).
+    const d = manyBucketsData(30, Array.from({ length: 12 }, (_, i) => 15 + i));
+    const model = buildConcurrencyOption(d, { captureFromNs: 16_000 });
+    assert.equal(model.notCapturedCount, 15);
+    assert.equal(model.burstsMarkersSuppressed, true);
+    assert.ok(model.burstNote.includes('fired in 12 of 15 captured buckets'), model.burstNote);
 });
