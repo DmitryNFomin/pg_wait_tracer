@@ -567,3 +567,42 @@ that `Timeout:CheckpointWriteDelay` is 0.897 AAS of that window. The
 `AAS_FLOOR_PROVISIONAL = 0.5` gate in `tests/demo_rehearsal_lib.py` is
 deliberately NOT re-pinned here (the documented 1.15 is a separate follow-up,
 `docs/DEMO_REHEARSAL_CRITERIA.md`).
+
+## Addendum (#382): the Latency heatmap keeps the io_worker exclusion
+
+**Decision: the io_worker AAS/DB-Time exclusion (v6, above) is NOT extended
+into a separate "should the Latency heatmap also exclude io_worker latency"
+question — it already does, and that is staying.** `pgwt_compute_heatmap`
+drops `PGWT_EVENT_FLAG_IO_WORKER` records (`src/compute.c:2316-2322`) for a
+reason independent of the AAS decision: summary v6 drops io_worker records
+at the writer entirely (no bytes to read back), so the raw path has to match
+or `handle_heatmap`'s two routes (raw vs. summary) would disagree cell for
+cell past the window length where the reader switches (hole N7,
+`tests/test_agg_raw_crosscheck.c`). Re-including io_worker latency in the
+heatmap would need a summary format bump (v6 would have to start keeping
+what it now discards) plus new `src/` plumbing, for **zero viewer-visible
+change**: the requesting backend's own `AioIoCompletion` wait already carries
+the latency that query actually experienced (`src/compute.c:1768`,
+`src/anomaly.c:53`), so every real query-facing latency is already in the
+grid.
+
+**AAS exclusion does not logically require latency exclusion** — they are
+different questions. AAS/DB Time answers "how many sessions are doing
+chargeable work"; a latency heatmap answers "how long did waits of this kind
+take". An io_worker's own wait durations are a legitimate answer to the
+second question even though double-counting its busy time into DB Time is
+wrong for the first. The two decisions happen to agree here (both exclude)
+but for unrelated reasons, and only because of the v6 writer-format
+constraint above — not because the heatmap's exclusion was independently
+re-derived and found correct.
+
+**Capability gap, recorded rather than hidden:** an I/O-heavy capture using
+`io_method=worker` loses the physical io_worker's OWN read/write latency
+distribution from the heatmap — e.g. a worker queueing behind a slow device
+while every requesting backend's `AioIoCompletion` wait looks uniform. The
+backend-side wait still shows total latency including queueing, but cannot
+distinguish "this backend queued" from "the device is slow", which the
+io_worker's own per-operation latency could. Tracked as a separate feature
+request (io_worker latency as its own heatmap series or overlay) rather than
+folded into #382, since it needs the summary format bump above and is useful
+independently of whether #382's exclusion ever changes.
