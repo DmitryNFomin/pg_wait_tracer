@@ -424,10 +424,15 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      *
      * Same reading rule as summary_events_overflow_total: WRITTEN seconds
      * only, so pair it with summary_flush_failures_total rather than treating
-     * it as complete. And this reply is the ONLY way the count leaves the
-     * daemon: it is not serialized into the trace and not logged at exit, so
-     * a capture analysed later carries no record of its dropped pids -- only
-     * the daemon's own WARN lines do. */
+     * it as complete.
+     *
+     * AND, for now, this reply is the ONLY way the count leaves the daemon:
+     * unlike events_overflow the per-record field is not yet serialized, so a
+     * capture analysed later carries no record of its dropped pids and only
+     * the daemon's own WARN lines do. That gap is sequenced, not declined --
+     * the PGWT_SUMMARY_VERSION 8 -> 9 bump that puts the field on disk is
+     * approved and is being landed with the other pending format change so
+     * the two cost one recompute of retained traces instead of two. */
     cjson_add_uint64(root, "summary_sessions_overflow_total",
                      d->summary_writer ? d->summary_writer->sessions_overflow_total : 0);
     /* #277: events that arrived after their second had already been written

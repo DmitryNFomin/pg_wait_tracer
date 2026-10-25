@@ -2864,9 +2864,13 @@ static void test_sessions_overflow_is_reported(void)
      *
      * AND THE COUNTER ALONE IS NOT "SAYING SO", which the first cut of this
      * change claimed. Found in review: acc->sessions_overflow is not
-     * serialized, no production code reads it, and pgwt-server instantiates
-     * no summary_writer -- so the roll-up's only consumer (control.c's
-     * metrics reply) does not exist in the process that decodes blocks. The
+     * serialized YET (the approved PGWT_SUMMARY_VERSION 8 -> 9 bump puts it
+     * on disk; it is not in this change), no production code reads it, and
+     * pgwt-server instantiates no summary_writer -- so the roll-up's only
+     * consumer (control.c's metrics reply) does not exist in the process
+     * that decodes blocks. Note the assertions below stay correct AFTER that
+     * bump: they pin the READER's own count, which the trailer read must add
+     * to rather than overwrite (summary_writer.h names that trap). The
      * drop site therefore emits a one-per-process WARN, and this section
      * asserts the WARN, not just the field. The one-shot is asserted too: a
      * reader walking a corrupt FILE must not emit one line per second of the
