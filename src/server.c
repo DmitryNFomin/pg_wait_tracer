@@ -422,6 +422,30 @@ struct pgwt_load_info {
      * cut. Reported with the flag so "incomplete" comes with the bound that
      * made it incomplete instead of leaving the caller to guess. */
     uint64_t right_edge_scan_ns;
+    /* #586 LEFT-edge seed diagnostics, the mirror of the two above.
+     *
+     * A record straddling the LEFT edge arrives whole (its close is inside
+     * the window), but the EXEC_START/PLAN_START carrying its command's
+     * query id can sit before `from` and is therefore not loaded, so
+     * #128's rule 2 has no evidence and the record reaches no per-query
+     * drill-down at all. The loader looks BACK a bounded distance for that
+     * marker and seeds the tag pass with it; it admits no record and
+     * widens no window.
+     *
+     *   left_seeds_resolved — pids handed a nonzero id by the lookback.
+     *   left_edge_truncated — the lookback stopped at its horizon (or
+     *                         refused) with trace data still before it, so
+     *                         a seed FURTHER back may be missing. Same
+     *                         meaning as right_edge_truncated: "may be
+     *                         incomplete", never "is". 0 when the scan
+     *                         reached the start of the capture, because
+     *                         then nothing was missed.
+     *   left_edge_scan_ns   — the horizon that was in force, reported with
+     *                         the flag so "incomplete" arrives with the
+     *                         bound that made it incomplete. */
+    int      left_seeds_resolved;
+    int      left_edge_truncated;
+    uint64_t left_edge_scan_ns;
 };
 
 struct pgwt_server {
