@@ -27,7 +27,7 @@
 # touches it there), so it is taken unconditionally rather than needing a
 # second code path.
 #
-# Usage: scripts/demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]
+# Usage: scripts/demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG] [DIAG_DATA]
 # Run from the repo root on the target (the launcher cd's there first).
 # Writes, relative to cwd:
 #   rehearsal.out    combined stdout/stderr of the whole run
@@ -40,9 +40,9 @@
 #        itself failed (see tests/results/demo_rehearsal/summary.json)
 #   2    the build (make / make -C tests / make pgwt-client) failed
 set -u
-DURATION_MIN="${1:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
-RUN_MARKER="${2:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
-PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
+DURATION_MIN="${1:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG] [DIAG_DATA]}"
+RUN_MARKER="${2:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG] [DIAG_DATA]}"
+PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG] [DIAG_DATA]}"
 # Optional 4th arg (docs/DEMO_DELIVERY_QUEUE.md item 2) -- absent (older
 # caller) means "1", same as tests/demo_rehearsal.sh's own default since
 # issue #386: retain by default so a failing run can be diagnosed.
@@ -56,6 +56,7 @@ RETAIN_TRACE="${4:-1}"
 # transfers a .git-free snapshot, so summary.json's tag field stays null rather
 # than acquiring one.
 TAG="${5:-}"
+DIAG_DATA="${6:-0}"
 
 [ -w /tmp/pgwt-box-check.lock ] || { touch /tmp/pgwt-box-check.lock 2>/dev/null && chmod 0666 /tmp/pgwt-box-check.lock 2>/dev/null; }
 exec 200>/tmp/pgwt-box-check.lock
@@ -121,7 +122,7 @@ else
     # shellcheck disable=SC1091
     source tests/live_daemon_lib.sh
     mapfile -t tag_cli_args_out < <(tag_cli_args "$TAG")
-    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" RETAIN_TRACE="$RETAIN_TRACE" tests/demo_rehearsal.sh --pg-version "$PG_VERSION" "${tag_cli_args_out[@]}" 200>&-
+    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" RETAIN_TRACE="$RETAIN_TRACE" DIAG_DATA="$DIAG_DATA" tests/demo_rehearsal.sh --pg-version "$PG_VERSION" "${tag_cli_args_out[@]}" 200>&-
     rc=$?
 fi
 

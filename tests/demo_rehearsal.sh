@@ -37,8 +37,8 @@
 # run with `200>&-` so none of THIS script's own children ever inherit
 # that fd -- see the remote-run.sh comment for why an inherited fd on a
 # SHARED persistent box is now a real hazard, not just a hypothetical one:
-# cleanup() below already detects a leaked child and exits 1 but does NOT
-# kill it, exactly like tests/ui_live_smoke.sh's own cleanup() documents.
+# cleanup() below stops the bridge process group and reports any other
+# leaked children, exactly like tests/ui_live_smoke.sh.
 #
 # Usage: tests/demo_rehearsal.sh [--pid POSTMASTER_PID] [--pg-version N] [--tag TAG]
 # Env: DURATION_MIN (default 35), PGWT_DEMO_PORT (default 8385)
@@ -96,6 +96,10 @@ then
     exit 1
 fi
 
+PORT="${PGWT_DEMO_PORT:-8385}"
+# Refuse before PG discovery, sysctl changes, workloads, or capture.
+bridge_port_state "$PORT" || exit 1
+
 if [[ -z "$PM_PID" ]]; then
     if [[ -n "$PG_MAJOR" ]]; then
         PM_PID=$(find_postmaster --pg-version "$PG_MAJOR")
@@ -117,8 +121,6 @@ for bin in "$TRACER" "$SERVER" "$BRIDGE"; do
         exit 1
     fi
 done
-
-PORT="${PGWT_DEMO_PORT:-8385}"
 
 # Retention (docs/DEMO_DELIVERY_QUEUE.md item 2): ON by default since
 # issue #386. It used to default to 0 "because a 40-minute --mode full
@@ -185,6 +187,7 @@ SOCK="$TRACE_DIR/pgwt.sock"
 
 TRACER_PID=""
 BRIDGE_PID=""
+WALK_PID=""
 WORKLOAD_PID=""
 PGBENCH_PID=""
 DEMO_RC=1
@@ -193,6 +196,8 @@ DEMO_RC=1
 # bridge gets SIGINT specifically (web/main.go only handles os.Interrupt),
 # as does pgbench so its cancel path prints end-of-run statistics.
 cleanup() {
+    local cleanup_failed=0
+    trap '' INT TERM
     # issue #386: put the global sysctl back exactly as it was, BEFORE
     # anything else can exit early below.
     if [[ -n "$SCHEDSTATS_ORIG" && "$SCHEDSTATS_ORIG" != "1" ]]; then
@@ -203,9 +208,10 @@ cleanup() {
         fi
     fi
 
+    stop_pid "$WALK_PID" 10
     stop_pid "$WORKLOAD_PID" 10
     stop_pid "$PGBENCH_PID" 10 INT
-    stop_pid "$BRIDGE_PID" 10 INT
+    stop_bridge "$BRIDGE_PID" || cleanup_failed=1
     stop_pid "$TRACER_PID" 15
 
     echo "demo_rehearsal: daemon log tail:"
@@ -222,13 +228,13 @@ cleanup() {
     # on a PERSISTENT box (PGWT_BOX) nothing ever deletes it, so a leftover
     # process is no longer just an untidy-teardown signal, it is a
     # potentially permanent resident. Reported loudly (exit 1) either way;
-    # this guard does not kill it, which is exactly why remote-run.sh's
-    # `200>&-` matters -- the flock fd must not be among what survives.
+    # the bridge group has already been stopped by PID. This final guard
+    # reports other leaked children; the flock fd must not survive either.
     sleep 1
     local leftover=""
     leftover="$(pgrep -f "$TRACE_DIR" 2>/dev/null || true)"
     local pid
-    for pid in "$PGBENCH_PID" "$WORKLOAD_PID" "$BRIDGE_PID" "$TRACER_PID"; do
+    for pid in "$WALK_PID" "$PGBENCH_PID" "$WORKLOAD_PID" "$BRIDGE_PID" "$TRACER_PID"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             leftover="$leftover"$'\n'"$pid"
         fi
@@ -251,15 +257,25 @@ cleanup() {
     else
         rm -rf "$TRACE_DIR"
     fi
-    rm -f "$DAEMON_LOG" "$BRIDGE_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG"
+    local bridge_result="$PROJECT_DIR/tests/results/demo_rehearsal/bridge.log"
+    mkdir -p "$(dirname "$bridge_result")"
+    if cp "$BRIDGE_LOG" "$bridge_result"; then
+        rm -f "$BRIDGE_LOG"
+        echo "demo_rehearsal: retained bridge log at $bridge_result"
+    else
+        echo "ERROR: could not retain bridge log; original kept at $BRIDGE_LOG" >&2
+        cleanup_failed=1
+    fi
+    rm -f "$DAEMON_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG"
 
     if [[ -n "$leftover" ]]; then
         echo "ERROR: processes from this run survived teardown:"
         echo "$leftover" | while read -r p; do
             [[ -n "$p" ]] && ps -o pid,ppid,cmd -p "$p" 2>/dev/null
         done
-        exit 1
+        cleanup_failed=1
     fi
+    [[ "$cleanup_failed" == 0 ]] || exit 1
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -363,26 +379,12 @@ echo "demo_rehearsal: control socket ready"
 
 # ── 3. Go bridge ─────────────────────────────────────────────────────────────
 echo "demo_rehearsal: starting Go bridge on :$PORT against root@localhost"
-"$BRIDGE" --port "$PORT" --trace-dir "$TRACE_DIR" --server-path "$SERVER" \
+run_bridge "$BRIDGE" --port "$PORT" --trace-dir "$TRACE_DIR" --server-path "$SERVER" \
     root@localhost >"$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID=$!
 
 BASE_URL="http://localhost:$PORT/"
-for _ in $(seq 1 60); do
-    if url_ready "${BASE_URL}session"; then
-        break
-    fi
-    if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
-        echo "ERROR: bridge exited during startup:"
-        report_early_exit "bridge" "$BRIDGE_PID"
-        tail -n 40 "$BRIDGE_LOG"
-        exit 1
-    fi
-    sleep 0.5
-done
-if ! url_ready "${BASE_URL}session"; then
-    echo "ERROR: bridge never answered ${BASE_URL}session"
-    tail -n 40 "$BRIDGE_LOG"
+if ! wait_bridge_ready "${BASE_URL}session" "$PORT" "$BRIDGE_PID" "$BRIDGE_LOG"; then
     exit 1
 fi
 echo "demo_rehearsal: bridge ready at $BASE_URL"
@@ -415,7 +417,10 @@ python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --duration-min "$DURATION_MIN" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
     --daemon-pid "$TRACER_PID" --postmaster-pid "$PM_PID" \
-    "${DIAG_CLI_ARGS[@]+${DIAG_CLI_ARGS[@]}}" "${TAG_CLI_ARGS[@]}"
+    "${DIAG_CLI_ARGS[@]+${DIAG_CLI_ARGS[@]}}" "${TAG_CLI_ARGS[@]}" &
+WALK_PID=$!
+# Bash defers traps during a foreground command; wait is interruptible.
+wait "$WALK_PID"
 DEMO_RC=$?
 
 exit "$DEMO_RC"

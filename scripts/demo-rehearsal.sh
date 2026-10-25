@@ -133,6 +133,8 @@
 #                  artifacts needed to diagnose their own failures, which
 #                  costs far more than the disk. Set RETAIN_TRACE=0 to opt
 #                  out for a cheap mechanics run.
+#   DIAG_DATA      1 adds --diag-data to the Python walker on the target;
+#                  default 0. Forwarded through remote-run and sudo.
 #   TAG            the git tag this attempt ran against (docs/
 #                  DEMO_REHEARSAL_CRITERIA.md "a counted attempt names the
 #                  tag it ran against"). Env var, not a flag, matching
@@ -177,6 +179,9 @@ RETAIN_TRACE="${RETAIN_TRACE:-1}"
 # DURATION_MIN/PG/RETAIN_TRACE above. See the Env comment block for why
 # "unset" must stay honest rather than falling back to a commit sha.
 TAG="${TAG:-}"
+# Sixth remote-run positional; sudo must also forward this to the driver.
+DIAG_DATA="${DIAG_DATA:-0}"
+[[ "$DIAG_DATA" == 0 || "$DIAG_DATA" == 1 ]] || { echo "DIAG_DATA must be 0 or 1" >&2; exit 1; }
 STATE_FILE="${DEMO_REHEARSAL_STATE_FILE:-tests/results/.demo-rehearsal-state.sh}"
 
 # PERSISTENT=1 when PGWT_BOX names a persistent box (pgwt-gate/pgwt-gate-2)
@@ -903,7 +908,7 @@ EOF
     # backgrounded.
     launch_out=$(ssh -o BatchMode=yes $ssh_strict "$target" \
         "cd '$remote_dir' && rm -f rehearsal.done rehearsal.rc rehearsal.pid rehearsal.out rehearsal.started; \
-         nohup setsid -w bash scripts/demo-rehearsal-remote-run.sh '$DURATION_MIN' '$demo_rehearsal_start_epoch' '$PG' '$RETAIN_TRACE' '$TAG' </dev/null >/dev/null 2>&1 & \
+         nohup setsid -w bash scripts/demo-rehearsal-remote-run.sh '$DURATION_MIN' '$demo_rehearsal_start_epoch' '$PG' '$RETAIN_TRACE' '$TAG' '$DIAG_DATA' </dev/null >/dev/null 2>&1 & \
          echo \$! > rehearsal.pid; disown; \
          sleep 1; \
          if [[ -s rehearsal.pid ]] && kill -0 \$(cat rehearsal.pid) 2>/dev/null; then echo LAUNCHED=1; else echo LAUNCHED=0; fi" \

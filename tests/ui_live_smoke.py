@@ -357,7 +357,19 @@ _TABLE_CHECK = """() => {
 }"""
 
 PANEL_CHECKS = {
-    "overview": _TABLE_CHECK,
+    # A zero-data time_model still renders its DB Time row. Require a
+    # positive, displayed duration; '<1µs' also represents zero, so it cannot
+    # establish nonzero data. Read the mounted row, not a fresh response.
+    "overview": """() => {
+        const rows = document.querySelectorAll('#table-container table tbody tr');
+        const db = Array.from(rows).find(row =>
+            row.cells[0] && row.cells[0].textContent.trim() === 'DB Time');
+        const value = db && db.cells[1] ? db.cells[1].textContent.trim() : '';
+        const match = value.match(/^([0-9]+(?:\\.[0-9]+)?)\\s*(?:µs|ms|s)$/);
+        const ok = !!match && Number(match[1]) > 0;
+        return {ok, detail: 'DB Time ' + (value || 'missing') +
+            (ok ? ' > 0' : ' does not establish DB Time > 0')};
+    }""",
     "events": _TABLE_CHECK,
     "sessions": _TABLE_CHECK,
     "queries": _TABLE_CHECK,
