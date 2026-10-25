@@ -553,6 +553,24 @@ def _discover_tests():
     return found
 
 
+def test_replay_navigation_keeps_live_paused():
+    for tab in ('overview', 'timeline', 'waterfall'):
+        page = _FakePage({'id': tab, 'seq': 1, 'at': 5137},
+                         clock_values=[5000], live_active=False)
+        elapsed = smoke._navigate_to_tab(page, tab, timeout_s=5, resume_live=False)
+        check(elapsed == 137, f"replay {tab} reuses the mount/paint check")
+        check(("query_selector", "#live-btn") not in page.calls,
+              f"replay {tab} does not resume live")
+
+
+def test_replay_comparator_reds():
+    # The replay comparator also runs in the full local make-check tier.
+    import unittest
+    from test_replay_ui import suite
+    result = unittest.TextTestRunner(verbosity=1).run(suite())
+    check(result.wasSuccessful(), "replay comparison GREEN and mutation/empty REDs")
+
+
 TESTS = _discover_tests()
 
 
