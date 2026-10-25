@@ -491,6 +491,17 @@ _PANEL_ELEMENT_SELECTOR = {
 
 TICK_TIMEOUT_S = 30  # generous multiple of the 5s tick cadence
 
+# U2 / docs/DEMO_RUNBOOK.md §4 item 7: Transitions' "Load flow variants"
+# button used to be banned from the demo walk because its pattern hash
+# table (src/compute.c) could saturate and spin the single-threaded server
+# forever (#327) -- fixed (every probe loop now grows) along with the O(n^2)
+# variant sort (#269). Measured against the retained 1851s demo-length trace
+# (tests/results/demo_rehearsal/trace), a real click took 0.17-0.27s across
+# 3 runs. 30s (6x TICK_TIMEOUT_S's own margin over the 5s tick cadence) is
+# generous enough that only an actual hang -- the thing this exists to
+# catch, not ordinary variance -- trips it.
+VARIANTS_CLICK_TIMEOUT_S = 30
+
 # issue #193 (round 1): the gating check used to be a single pair of frames
 # anchored on a fixed delay after the tick's own AAS-request timestamp
 # (BLINK_PAIR_ANCHOR_MS, 500ms -- see git history for the issue #119
@@ -1895,6 +1906,35 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 else:
                     console_errors.append(e)
 
+        # U2 (docs/DEMO_RUNBOOK.md §4 item 7): exercise "Load flow variants"
+        # as part of the walk, now that #327/#269 fixed the hang it used to
+        # risk -- a feature that works must actually be qualified by the
+        # release walk, not left unclicked forever because it once was
+        # dangerous. After the tick sweep (never during it: this is a real
+        # server round trip, and the sweep's own timing is tuned to the
+        # millisecond -- see the tick-baseline comment above), not under
+        # footage_only (no screenshot diagnostics there) or replay_probe
+        # (fixed-window hydration, no live button to click back to).
+        variants_click_ms = None
+        if tab_id == "transitions" and not footage_only and replay_probe is None:
+            btn = page.query_selector("#dfg-load-variants")
+            if btn is None:
+                raise SmokeFailure(
+                    "Transitions panel has no #dfg-load-variants button to click")
+            click_start = time.monotonic()
+            btn.click()
+            try:
+                page.wait_for_function(
+                    "() => !document.getElementById('dfg-load-variants') && "
+                    "!(document.getElementById('dfg-variants').textContent || "
+                    "'').includes('Loading flow variants')",
+                    timeout=VARIANTS_CLICK_TIMEOUT_S * 1000)
+            except PWTimeoutError:
+                raise SmokeFailure(
+                    "Load flow variants did not resolve within "
+                    f"{VARIANTS_CLICK_TIMEOUT_S}s (hang regression -- see #327)")
+            variants_click_ms = (time.monotonic() - click_start) * 1000.0
+
         leak_after, leak_after_settle_s = _settled_leak_probe(page)
         color_violations = (lib.color_stability_violations(legend_ticks)
                             if legend_ticks else [])
@@ -1921,6 +1961,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_not_measured=blink_not_measured,
             pre_mount_diagnostics=pre_mount_diagnostics,
             ttfp_ms=ttfp_ms)
+        if variants_click_ms is not None:
+            result["variants_click_ms"] = variants_click_ms
         if replay_probe is not None:
             result = {"tab": tab_id, "ok": not console_errors and
                       lib.leak_probe_ok(leak_before) and lib.leak_probe_ok(leak_after),

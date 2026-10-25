@@ -73,12 +73,15 @@ export function createTransitionsView() {
     let resizePending = false;
     // Variants-on-demand (follow-up to #291): bumped on every mount() AND on
     // every user-triggered load, so a response can only ever paint if it is
-    // still the latest thing anyone asked for. `variants` measures ~5.5s
-    // against a realistic 900s window on a single-threaded server, and the
-    // in-flight server command cannot be cancelled once queued — so a stale
-    // click's eventual answer (superseded by a refresh, or by a second
-    // click) must still be rejected here even though transport.request()
-    // already cancels the prior pending request on the same channel.
+    // still the latest thing anyone asked for. `variants` used to measure
+    // ~5.5s against a realistic 900s window on a single-threaded server
+    // before #327/#269 bounded the pattern hash table and replaced its
+    // O(n^2) sort with qsort — now measured 0.09-0.27s against a 1851s
+    // trace (docs/DEMO_RUNBOOK.md §4 item 7). The in-flight server command
+    // still cannot be cancelled once queued, so a stale click's eventual
+    // answer (superseded by a refresh, or by a second click) must still be
+    // rejected here even though transport.request() already cancels the
+    // prior pending request on the same channel.
     let variantsGen = 0;
 
     function clearRenderData() {
@@ -370,14 +373,18 @@ export function createTransitionsView() {
     }
 
     /* On-demand variants (follow-up to #291): fired ONLY from the button's
-     * click handler — never on tab entry, never on a refresh tick. `variants`
-     * measures ~5.5s against a realistic 900s window and the server is
-     * single-threaded, so this is deliberately the one path in this view
-     * that can queue that much uncancellable work: it now happens because
-     * the user asked, not because a refresh timer did. If the user navigates
-     * away before it lands, that one request is still orphaned exactly like
-     * the old auto-fired one was — accepted, because it is now a single,
-     * user-initiated, bounded cost instead of one per refresh tick. */
+     * click handler — never on tab entry, never on a refresh tick. The
+     * server is single-threaded and the command cannot be cancelled once
+     * queued, so this is deliberately the one path in this view that can
+     * queue uncancellable work: it now happens because the user asked, not
+     * because a refresh timer did. `variants` used to measure ~5.5s against
+     * a realistic 900s window before #327/#269's fixes; now measured
+     * 0.09-0.27s against a 1851s trace (docs/DEMO_RUNBOOK.md §4 item 7), so
+     * the orphan risk below is smaller than it was, not gone. If the user
+     * navigates away before it lands, that one request is still orphaned
+     * exactly like the old auto-fired one was — accepted, because it is now
+     * a single, user-initiated, bounded cost instead of one per refresh
+     * tick. */
     function loadVariants(ctx) {
         const gen = ++variantsGen;
         paintVariants(gen, ctx, 'pending', null);
