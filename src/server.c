@@ -7704,14 +7704,31 @@ static void dump_summary(struct pgwt_server *srv)
      * DB Time but on no event row. Printing nothing made the % DB column stop
      * adding up with no way for the reader to see why.
      *
-     * The precedent is the Time Model table above: pgwt_compute_time_model
-     * emits that remainder as its own row named "CPU (waiting for a core)"
-     * (src/compute.c, under PGWT_CLASS_CPU), which dump_summary prints like
-     * any other row. This table now prints the same quantity under the same
-     * name, so the two sections of one dump agree word for word.
+     * The NAME is borrowed from the Time Model table above, where
+     * pgwt_compute_time_model emits the same quantity as a row of its own
+     * ("CPU (waiting for a core)", src/compute.c under PGWT_CLASS_CPU) and
+     * dump_summary prints it like any other row -- so a reader meets one
+     * label for one thing in both sections.
      *
-     * Only when a measurement exists, exactly as time_model gates its row:
-     * with has_measured_cpu == 0 the CPU* row IS the unsplit gap wall and
+     * The GATE is NOT time_model's, and the two sections can therefore
+     * disagree about whether the row appears at all. This one is
+     * ev.has_measured_cpu: at least one in-window CPU GAP carried a
+     * measurement. time_model's flag is deliberately WIDER -- it is also
+     * raised by measured spin inside a WAIT (compute.c's wait branch), and
+     * its row additionally sits behind a `classes[CPU].total_ns <= 0 ->
+     * continue` guard. Two corners where that differs, both pre-existing
+     * time_model behaviour filed as #575, neither a defect in this table:
+     *   - an all-runqueue gap (cpu_ns measured as 0): this table prints the
+     *     remainder as 100% of DB Time; time_model prints NO CPU rows at all,
+     *     because its CPU class total is 0. Pinned in
+     *     tests/test_dump_report.py section 2d.
+     *   - an UNKNOWN gap next to a wait carrying measured spin: time_model
+     *     prints "CPU (running)" over an unmeasured wall plus a 0.0
+     *     remainder; this table's flag is 0, so it prints neither.
+     * In both, printing is gated on THIS response's own measurement, which is
+     * the narrower and the honest answer for a per-event table.
+     *
+     * With has_measured_cpu == 0 the CPU* row IS the unsplit gap wall and
      * there is no remainder -- a 0.0 row there would claim off-CPU time was
      * measured as zero when it was not measured at all. Waits and latency are
      * not applicable to a residual (it is not an observed wait), so those two

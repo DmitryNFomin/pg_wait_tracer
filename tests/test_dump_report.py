@@ -17,7 +17,12 @@ WHAT THIS PINS
   2. the printed "% DB" column sums to 100% (section 1) -- the arithmetic the
      reader actually does;
   3. both sections of one dump use the SAME name and the SAME number for it
-     (section 1), so the cross-section contradiction cannot come back;
+     ON THIS FIXTURE (section 1), so the cross-section contradiction cannot
+     come back. NOT a general claim: the two gates differ, and section 2d
+     pins the all-runqueue corner where time_model prints no CPU row at all
+     while this table accounts for every millisecond -- time_model's
+     shortfall, filed as #575, with the numbers recorded so fixing it turns
+     2d red rather than letting the overlap be discovered by accident;
   4. CPU* is the measured 40.0 ms, not the 100.0 ms wall -- without this the
      sum above is satisfied by reverting #553 entirely (section 1).
 
@@ -26,9 +31,12 @@ refuse, never approve. Every way this check could be satisfied without
 checking anything is walked: a capture with NO measurement (where the row must
 be ABSENT and the sum must still be 100% -- the thing being checked absent
 rather than wrong), a dump whose table has no rows at all, a table of nothing
-but "—" sentinels, a server that exits non-zero, and a missing binary. Each
-asserts that the PARSER REFUSES, because a parser that returns an empty row
-list turns every assertion in section 1 into a vacuous truth.
+but "—" sentinels, an all-runqueue gap whose measurement IS zero (2d: the
+thing being checked is zero rather than missing), a server that exits
+non-zero, and a missing binary. Each asserts the specific value or the
+specific REFUSAL that distinguishes those from a working report, because a
+parser that returns an empty row list turns every assertion in section 1
+into a vacuous truth.
 
 Runs anywhere pgwt-server and tests/gen_test_traces build: no root, no PG, no
 BPF, no clock dependence (every timestamp is a literal offset from BASE).
@@ -222,9 +230,11 @@ def test_measured_dump_accounts_for_offcpu(t):
             f"...over all three rows, none of them a sentinel (got "
             f"{len(printed)})")
 
-    # One dump, two sections, one answer. This is the contradiction that
-    # existed before: the Time Model printed the remainder and Top Events
-    # did not.
+    # One dump, two sections, one answer -- ON THIS FIXTURE, where time_model
+    # emits its own remainder row. The two sections do NOT agree in general:
+    # their gates differ, and section 2d pins the corner (an all-runqueue gap)
+    # where time_model prints no CPU rows at all while this table accounts for
+    # every millisecond. That difference is time_model's, filed as #575.
     tm_total, tm_pct = find(tm, OFFCPU_ROW)
     t.check_eq(tm_total, off_total,
                f"the Time Model section prints the same '{OFFCPU_ROW}' "
@@ -302,6 +312,79 @@ def test_parser_refuses_what_it_cannot_read(t):
         t.check(False, f"a real row must still parse, got refusal: {e}")
 
 
+def test_all_runqueue_gap(t):
+    """2d. The gap was measured at ZERO on-CPU: all of it was runqueue.
+
+    A measured zero is a SIGNAL, not absence, and it is the corner where this
+    table and the Time Model table disagree about whether the row exists:
+      - here: CPU* 0.0 ms, '<OFFCPU_ROW>' = the whole gap wall, column 100%;
+      - time_model: NO CPU rows at all, because its rows sit behind
+        `classes[PGWT_CLASS_CPU].total_ns <= 0 -> continue` and the measured
+        total is 0 -- so 100 ms of real DB Time appears on no row of that
+        section and its column stops at 33.3%.
+    That shortfall is pre-existing time_model behaviour, filed as #575, NOT a
+    defect in the table under test. It is pinned here with numbers so that
+    fixing #575 turns this case red and whoever fixes it updates this comment
+    instead of discovering the overlap by accident.
+    """
+    print("\n### 2d. an all-runqueue gap (#575 divergence, pinned) ###")
+    sc = scenario(measured=True)
+    for e in sc["events"]:
+        if e["old"] == CPU:
+            e["cpu"] = 0                      # measured: zero on-CPU
+    d = generate_traces(sc)
+    try:
+        text = dump(d)
+    finally:
+        cleanup_traces(d)
+    ev = parse_rows(section(text, "Top Events", "Top Sessions"), "Top Events")
+    tm = parse_rows(section(text, "Time Model", "Top Events"), "Time Model",
+                    TM_RE)
+
+    # PREMISE: a measured ZERO, not a missing row and not an absent
+    # measurement -- the row must exist and read 0.0.
+    cpu_total, cpu_pct = find(ev, "CPU*")
+    t.check_eq(cpu_total, 0.0,
+               "premise: CPU* is present and reads 0.0 ms -- the gap was "
+               "measured as all runqueue, not left unmeasured")
+    all_off = CPU_MS + OFFCPU_MS              # the whole gap wall, 100.0 ms
+    off_total, off_pct = find(ev, OFFCPU_ROW)
+    t.check_eq(off_total, all_off,
+               f"the whole {all_off} ms gap wall is reported as "
+               f"'{OFFCPU_ROW}'")
+    t.check_eq(off_pct, round(all_off / DB_TIME_MS * 100.0, 1),
+               "...with its share of DB Time")
+    printed = [pct for _, _, pct in ev if pct is not None]
+    t.check(abs(sum(printed) - 100.0) <= 0.15,
+            f"Top Events still accounts for 100% ({sum(printed):.1f}%)")
+
+    # The #575 divergence, in both directions, with its numbers.
+    t.check(find(tm, OFFCPU_ROW)[0] is None and
+            find(tm, "CPU (running)")[0] is None,
+            "#575: the Time Model section prints NEITHER CPU row here (its "
+            "CPU class total is 0), so the two sections differ by design of "
+            "the gate, not by this table being wrong")
+    # The Time Model table is hierarchical (DB Time / class / sub-event), so
+    # only the CLASS level -- exactly four leading spaces -- is a column that
+    # should add up to 100% of DB Time. Here it holds IO alone.
+    tm_classes = [(m.group("name"), float(m.group("pct")))
+                  for m in (re.match(
+                      r"^    (?P<name>\S.*?)\s{2,}[\d.]+ ms\s+"
+                      r"(?P<pct>[\d.]+)%?\s*$", line)
+                      for line in section(text, "Time Model",
+                                          "Top Events").splitlines())
+                  if m]
+    t.check([n for n, _ in tm_classes] == ["IO"],
+            f"premise: IO is the only class row time_model printed "
+            f"({[n for n, _ in tm_classes]})")
+    t.check(abs(sum(p for _, p in tm_classes)
+                - round(IO_MS / DB_TIME_MS * 100.0, 1)) <= 0.15,
+            f"#575: ...so that section's class column stops at "
+            f"{sum(p for _, p in tm_classes):.1f}% of DB Time -- when #575 is "
+            f"fixed this goes red and this case should expect 100% on both "
+            f"sections")
+
+
 def test_dump_failure_is_not_a_skip(t):
     print("\n### 2c. a server that cannot answer FAILS the gate ###")
     try:
@@ -347,10 +430,11 @@ def main():
     test_measured_dump_accounts_for_offcpu(t)
     test_unmeasured_capture_prints_no_row(t)
     test_parser_refuses_what_it_cannot_read(t)
+    test_all_runqueue_gap(t)
     test_dump_failure_is_not_a_skip(t)
     ran = t.passed + t.failed
-    # 9 + 4 + 5 + 3 = 21 assertions; raise this WITH the suite.
-    if ran < 21:
+    # 9 + 4 + 5 + 7 + 3 = 28 assertions; raise this WITH the suite.
+    if ran < 28:
         print(f"FAIL: only {ran} assertions ran — a section did not execute")
         t.failed += 1
     sys.exit(0 if t.summary() else 1)

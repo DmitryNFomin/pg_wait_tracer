@@ -377,12 +377,23 @@ struct pgwt_events_result {
     /* #553: the CPU* row's measured-CPU contract, stated on the RESULT so a
      * consumer can tell the two cases apart instead of guessing:
      *
-     *   has_measured_cpu != 0 — the CPU* row is MEASURED on-CPU time (Σ of
-     *       each in-window CPU gap's cpu_ns, split by overlap and clamped to
-     *       its wall). offcpu_ms is the rest of those gaps' wall: runqueue /
-     *       throttle time, the same quantity pgwt_compute_time_model reports
-     *       as Off-CPU*. DB Time still holds BOTH, so the rows' %DB sums to
+     *   has_measured_cpu != 0 — AT LEAST ONE in-window CPU gap carried a
+     *       measurement. The CPU* row is then Σ over gaps of (measured
+     *       cpu_ns, split by overlap and clamped to its wall) for the
+     *       measured ones and (gap wall) for any UNKNOWN ones, so on MIXED
+     *       data the row is part measurement and part inference — not
+     *       "measured on-CPU time" flat (tests/test_window_clip.c 11k pins
+     *       4 ms measured + 6 ms inferred with this flag set). offcpu_ms is
+     *       the rest of the MEASURED gaps' wall only: runqueue / throttle
+     *       time, the same quantity pgwt_compute_time_model reports as
+     *       Off-CPU*. DB Time still holds BOTH, so the rows' %DB sums to
      *       100% − offcpu_ms/db_time_ms, not to 100%.
+     *
+     *       NOT the same predicate as pgwt_tm_result.has_measured_cpu, which
+     *       is also raised by measured spin inside a WAIT and whose Off-CPU*
+     *       row is additionally gated on a non-zero CPU class total. The two
+     *       therefore disagree in two corners (#575); this one is the
+     *       narrower, and src/server.c's dump_summary names both.
      *   has_measured_cpu == 0 — no in-window CPU gap carried a measurement
      *       (sampled / v2 / no CPU capability, or no CPU gap at all). CPU* is
      *       then the unsplit gap wall by gap-inference and offcpu_ms is 0 —
@@ -401,7 +412,14 @@ struct pgwt_events_result {
      * so a sub-ms burst can be attributed past its interval). It is OUTSIDE
      * the rows and outside db_time_ms — a diagnostic, not time. Without it a
      * skewed measurement was silently absorbed on this response while
-     * time_model counted it. */
+     * time_model counted it.
+     *
+     * Same name, same per-record arithmetic; not guaranteed to be the same
+     * NUMBER on every window. time_model folds a SECOND term into its
+     * counter (a negative DB − CPU* − Σwaits residual, compute.c's
+     * `if (resid < 0)`), which this per-event table has no analogue for. The
+     * two agree where that residual is non-negative, which is what
+     * tests/test_window_clip.c 11e asserts on a single-gap window. */
     double offcpu_ms;
     double cpu_clamped_ms;
     int    has_measured_cpu;
