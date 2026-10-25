@@ -526,6 +526,109 @@ def main():
           "§15 no pin points at CLOSED #379 (its fix landed in v8; a pin there "
           "invites deletion of a live pin)")
 
+    # ── §16 bucket_diff: the instrument that says WHICH bucket ─────────
+    # #410 pins aas/max_aas as a known divergence and does NOT pin
+    # aas/integral_ms, i.e. the two paths agree on AREA and differ on PEAK
+    # over the SAME layout (buckets=10 over 160 s = 16 s both sides). That is
+    # lumpier per-bucket VALUES, not a different peak rule -- and max_aas, one
+    # number per window, cannot say WHERE. bucket_diff() does.
+    #
+    # Every case below asserts that it REFUSES rather than reporting "no
+    # difference", because a per-bucket comparison that cannot see its inputs
+    # would silently approve the very question it was added to answer. The
+    # last case is the one that matters most: two EMPTY bucket arrays agree
+    # with each other perfectly.
+    def bkt(*totals, **kw):
+        w = kw.pop("width", 16000000000)
+        return {"bucket_ns": w,
+                "buckets": [{"t": 1000 + i, "IO": v} for i, v in
+                            enumerate(totals)]}
+
+    d = P.bucket_diff(bkt(1.0, 2.0, 3.0), bkt(1.0, 2.0, 3.0))
+    check(d["status"] == P.BUCKET_OK and d["first_divergent"] is None
+          and d["n"] == 3,
+          "§16a identical non-zero buckets AGREE and are not refused")
+
+    d = P.bucket_diff(bkt(1.0, 2.0, 3.0), bkt(1.0, 5.0, 0.0))
+    check(d["status"] == P.BUCKET_OK and d["first_divergent"] == 1
+          and len(d["divergent"]) == 2,
+          "§16b the lumpy case names the FIRST divergent bucket (got %s)"
+          % (d.get("first_divergent"),))
+
+    # The #410 shape itself: equal area, higher peak. Must be detected, and
+    # the area line must show the two integrals matching -- otherwise the
+    # instrument would blame a magnitude difference for a placement one.
+    d = P.bucket_diff(bkt(2.0, 2.0, 2.0), bkt(0.0, 4.0, 2.0))
+    check(d["status"] == P.BUCKET_OK
+          and abs(d["raw_integral_ms"] - d["sum_integral_ms"]) < 1e-9
+          and d["first_divergent"] == 0,
+          "§16c equal AREA with a moved peak is reported as placement "
+          "(areas %.6f vs %.6f)"
+          % (d.get("raw_integral_ms", -1), d.get("sum_integral_ms", -1)))
+
+    # EACH LEG PINS ITS OWN REASON, not merely "refused". The first cut of
+    # this suite asserted only the status, and three of its fixtures carried a
+    # raw side with bucket_ns=1 against a 16 s summary side -- so they refused
+    # on the WIDTH MISMATCH, never reaching the check they were named after.
+    # Two mutants (the empty-bucket refusal deleted, the no-class-keys guard
+    # deleted) survived the suite because of it. Pinning the reason is what
+    # makes each leg reach its own check: W is the shared width every fixture
+    # below uses unless it is deliberately testing the width.
+    W = 16000000000
+    for label, raw, sm, want in (
+        ("absent buckets", {"bucket_ns": W}, bkt(1.0),
+         "absent or not a list"),
+        ("buckets not a list", {"bucket_ns": W, "buckets": {}}, bkt(1.0),
+         "absent or not a list"),
+        ("EMPTY buckets on the summary side",
+         bkt(1.0), {"bucket_ns": W, "buckets": []}, "EMPTY"),
+        ("EMPTY buckets on the raw side",
+         {"bucket_ns": W, "buckets": []}, bkt(1.0), "EMPTY"),
+        ("EMPTY on the summary side while raw carries LOAD "
+         "(must not be mistaken for agreement)",
+         bkt(5.0, 5.0), {"bucket_ns": W, "buckets": []}, "EMPTY"),
+        ("absent bucket_ns", {"buckets": [{"t": 1, "IO": 1.0}]}, bkt(1.0),
+         "bucket_ns"),
+        ("zero bucket_ns", bkt(1.0, width=0), bkt(1.0), "bucket_ns"),
+        ("non-numeric bucket_ns", bkt(1.0, width="wide"), bkt(1.0),
+         "bucket_ns"),
+        ("DIFFERENT widths (not the same layout)",
+         bkt(1.0, width=W), bkt(1.0, width=W // 2), "DIFFERENT bucket widths"),
+        ("a bucket that is not a dict",
+         {"bucket_ns": W, "buckets": [[1, 2]]}, bkt(1.0), "unparseable"),
+        ("a bucket with no numeric class keys",
+         {"bucket_ns": W, "buckets": [{"t": 1}]}, bkt(1.0), "unparseable"),
+        ("a bucket whose class value is a list",
+         {"bucket_ns": W, "buckets": [{"t": 1, "IO": [1]}]}, bkt(1.0),
+         "unparseable"),
+        ("an `aas` answer that is not an object", None, bkt(1.0),
+         "not an object"),
+        ("both sides zero everywhere (vacuous agreement)",
+         bkt(0.0, 0.0), bkt(0.0, 0.0), "vacuous"),
+    ):
+        d = P.bucket_diff(raw, sm)
+        got = d.get("reason") or ""
+        check(d["status"] == P.BUCKET_REFUSED and want in got,
+              "§16d %s REFUSES for its OWN reason (wanted %r, got %r)"
+              % (label, want, got[:70]))
+
+    # A length mismatch is a FINDING, not a refusal: both sides were asked
+    # for the same layout, so reporting the mismatch IS the answer.
+    d = P.bucket_diff(bkt(1.0, 2.0, 3.0), bkt(1.0, 2.0))
+    check(d["status"] == P.BUCKET_OK and d.get("length_mismatch") == [3, 2]
+          and d["n"] == 2,
+          "§16e a LENGTH mismatch is reported as a finding, not refused")
+
+    # The renderer must not invent a clean line out of a refusal.
+    lines = P.bucket_diff_lines("w", P.bucket_diff(bkt(0.0), bkt(0.0)))
+    check(len(lines) == 1 and "REFUSED" in lines[0],
+          "§16f the log rendering of a refusal says REFUSED")
+    lines = P.bucket_diff_lines("w", P.bucket_diff(bkt(2.0, 2.0),
+                                                   bkt(0.0, 4.0)))
+    check(any("bucket 0" in l for l in lines)
+          and any("delta" in l for l in lines),
+          "§16g the log rendering of a finding names the bucket and the delta")
+
     print("--- %d checks, %d failed ---" % (CHECKS[0], len(FAILURES)))
     for f in FAILURES:
         print("  failed: %s" % f)

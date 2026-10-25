@@ -686,3 +686,146 @@ def record_table(findings):
             out[f.field] = {"issue": f.issue if f.issue is not None else "UNFILED",
                             "raw": f.raw, "summary": f.summary}
     return out
+
+
+# ── #410: WHICH BUCKET, not just "the peaks differ" ────────────────────────
+#
+# The gate pins `aas/max_aas` as a known divergence (raw 3.001 vs summary
+# 4.3135 on interior_160s) and does NOT pin `aas/integral_ms`, which means
+# the two paths agree on the AREA and disagree on the PEAK over the SAME
+# bucket layout -- both sides are asked for buckets=10 over 160 s, so both
+# lay out 16 s buckets. Equal area with a higher peak is not a different
+# peak RULE; it is lumpier per-bucket VALUES, i.e. some record's time
+# landing in the wrong bucket. `max_aas` is computed by the reader and never
+# stored, so nothing here needs a format bump unless the lumpiness turns out
+# to be a writer artifact.
+#
+# `aas/max_aas` alone cannot tell those apart: it is one number per window
+# and says nothing about WHERE. This returns the per-bucket comparison, so
+# the first divergent bucket names the second, and the second names the
+# record.
+#
+# IT REFUSES RATHER THAN REPORTING "NO DIFFERENCE" whenever it cannot see,
+# because that is the only outcome that could silently approve the question
+# it exists to answer:
+#   - either side has no `buckets` / no `bucket_ns`            -> REFUSE
+#   - either side's bucket list is EMPTY                       -> REFUSE
+#   - the two widths differ (not the same layout after all)    -> REFUSE
+#   - a bucket is not a dict, or carries no numeric class keys -> REFUSE
+#   - every bucket agrees AND both integrals are zero          -> REFUSE
+#     (two empty arrays agreeing is the vacuous pass: it proves the request
+#      returned nothing, not that the paths agree)
+# A differing LENGTH is a structural finding, not a refusal: the layouts
+# were supposed to match, so saying so is the answer.
+
+BUCKET_REFUSED = "REFUSED"
+BUCKET_OK = "ok"
+
+
+def _bucket_total(b):
+    """Σ of a bucket's class/category values, or None if unparseable. `t` is
+    the timestamp and `cat` the category sub-object -- neither is load."""
+    if not isinstance(b, dict):
+        return None
+    total = 0.0
+    seen = 0
+    for k, v in b.items():
+        if k in ("t", "cat"):
+            continue
+        if not _num(v):
+            return None
+        total += v
+        seen += 1
+    if seen == 0:
+        return None
+    return total
+
+
+def bucket_diff(raw_aas, sum_aas, tol=1e-9):
+    """Per-bucket raw-vs-summary comparison for one window's `aas` answer.
+
+    Returns a dict with `status` (BUCKET_OK or BUCKET_REFUSED), `reason` when
+    refused, and -- when ok -- `bucket_ns`, `n`, `raw_integral_ms`,
+    `sum_integral_ms`, `rows` (every bucket as
+    [index, t, raw_total, sum_total, delta]) and `divergent` (the subset whose
+    totals differ by more than `tol`). `first_divergent` is the index of the
+    earliest differing bucket, or None.
+    """
+    def refuse(reason):
+        return {"status": BUCKET_REFUSED, "reason": reason}
+
+    if not isinstance(raw_aas, dict) or not isinstance(sum_aas, dict):
+        return refuse("an `aas` answer is not an object on at least one side "
+                      "-- nothing to lay out, so 'no difference' would be an "
+                      "artefact of the input, not a finding")
+    rb = raw_aas.get("buckets")
+    sb = sum_aas.get("buckets")
+    rw = raw_aas.get("bucket_ns")
+    sw = sum_aas.get("bucket_ns")
+    if not isinstance(rb, list) or not isinstance(sb, list):
+        return refuse("`buckets` is absent or not a list on at least one side")
+    if not rb or not sb:
+        return refuse("`buckets` is EMPTY on at least one side (raw=%d, "
+                      "summary=%d) -- an empty comparison agrees with "
+                      "everything" % (len(rb), len(sb)))
+    if not _num(rw) or not _num(sw) or rw <= 0 or sw <= 0:
+        return refuse("`bucket_ns` is absent, non-numeric or non-positive "
+                      "(raw=%r, summary=%r) -- without a width there is no "
+                      "area to check the peak against" % (rw, sw))
+    if rw != sw:
+        return refuse("the two sides used DIFFERENT bucket widths (raw=%r, "
+                      "summary=%r). A per-bucket comparison across different "
+                      "layouts would attribute a layout difference to a "
+                      "record" % (rw, sw))
+
+    n = min(len(rb), len(sb))
+    rows = []
+    for i in range(n):
+        rt = _bucket_total(rb[i])
+        st = _bucket_total(sb[i])
+        if rt is None or st is None:
+            return refuse("bucket %d is unparseable on at least one side "
+                          "(raw=%r, summary=%r)" % (i, rb[i], sb[i]))
+        t = rb[i].get("t") if isinstance(rb[i], dict) else None
+        rows.append([i, t, rt, st, st - rt])
+
+    raw_integral = sum(r[2] for r in rows) * rw / 1e6
+    sum_integral = sum(r[3] for r in rows) * rw / 1e6
+    divergent = [r for r in rows if abs(r[4]) > tol]
+
+    if not divergent and raw_integral == 0.0 and sum_integral == 0.0:
+        return refuse("every bucket agrees but BOTH integrals are zero -- the "
+                      "window returned no load on either side, so agreement "
+                      "here is vacuous")
+
+    out = {
+        "status": BUCKET_OK,
+        "bucket_ns": rw,
+        "n": n,
+        "raw_integral_ms": raw_integral,
+        "sum_integral_ms": sum_integral,
+        "rows": rows,
+        "divergent": divergent,
+        "first_divergent": divergent[0][0] if divergent else None,
+    }
+    if len(rb) != len(sb):
+        out["length_mismatch"] = [len(rb), len(sb)]
+    return out
+
+
+def bucket_diff_lines(name, d):
+    """One-line-per-finding rendering for the gate's log."""
+    if d.get("status") != BUCKET_OK:
+        return ["  BUCKETS %s: REFUSED -- %s" % (name, d.get("reason"))]
+    lines = ["  BUCKETS %s: n=%d width=%sns area raw=%.3f ms summary=%.3f ms "
+             "(delta %.3f ms); %d of %d buckets differ%s"
+             % (name, d["n"], d["bucket_ns"], d["raw_integral_ms"],
+                d["sum_integral_ms"],
+                d["sum_integral_ms"] - d["raw_integral_ms"],
+                len(d["divergent"]), d["n"],
+                "; LENGTH MISMATCH %s" % (d["length_mismatch"],)
+                if "length_mismatch" in d else "")]
+    for i, t, rt, st, delta in d["divergent"]:
+        lines.append("    bucket %d t=%s raw=%.6f summary=%.6f delta=%+.6f"
+                     % (i, t, rt, st, delta))
+    return lines

@@ -233,6 +233,34 @@ def ask(trace_dir, frm, to, stderr_path):
 #          spread, so queries[] still carries a straddling record's full
 #          duration at its closing second. OPEN; this is what the eight
 #          straddle queries/* pins belong to.
+#
+#          #526 IS THIS MECHANISM, established by reading the writer rather
+#          than by inference (2026-10-25). src/summary_writer.c accumulates
+#          the two quantities in ONE function, 197 lines apart and with
+#          different arguments:
+#            :374  acc->class_ns[cls] += tns;                   <- this
+#                                                                  second's
+#                                                                  SLICE
+#            :571  accum_query_add(acc, query_id, old_ev, 1, dur, dur);
+#                                                               <- the FULL
+#                                                                  duration
+#          and src/compute.c's tm_summary_visitor reads whichever matches the
+#          request: :2679 `sq->class_ns[c]` when a query filter is set, :2729
+#          `rec->class_ns[c]` when it is not. So a FILTERED summary read
+#          over-reports a window-straddling record by exactly the part of it
+#          that lies outside the window, and an UNFILTERED one does not.
+#          #526's pair is filtered 719200.346 vs unfiltered 716200.203 ms,
+#          i.e. a filtered EXCESS of 3000.143 ms -- the signature of a ~3 s
+#          straddler at a window edge. The straddle_130s pins below are the
+#          same mechanism an order of magnitude larger and already measured:
+#          queries/db_time_ms raw 252114 vs summary 312114, a +60,000 ms
+#          excess on a window whose edge a 60 s record crosses.
+#          CONSEQUENCE FOR SCOPE: #526 is NOT reader-side and cannot be
+#          fixed by changing src/compute.c. Spreading queries[] per second
+#          is an on-disk accounting-rule change, so it belongs in the
+#          PGWT_SUMMARY_VERSION bump as its own numbered rule. The #425
+#          residual (7,393.0 ms, summary column only) has the same shape and
+#          wants the same test applied before it is classified.
 #   #319 — `top_wait` means "largest total" on raw and "longest single wait"
 #          on the summary path.
 #   #410 — the four divergences THIS gate found on its first run: max_aas
@@ -430,6 +458,10 @@ def main():
     # The detector self-test's verdict is part of the printed log and the
     # artifact, so a reader can see it ran rather than trusting that it did.
     lines = list(self_lines)
+    # #410 per-bucket diagnostic, collected per window and emitted as one
+    # block at the end so it reads as a measurement rather than being spread
+    # through the verdicts.
+    bucket_lines, bucket_reports = [], {}
     report["stale_detector_selftest_ok"] = self_ok
     report["stale_detector_selftest"] = self_lines
     try:
@@ -466,6 +498,27 @@ def main():
                          "summary": P.fallback_reason(s_err)}
             r_fields = P.extract_all(r_ans)
             s_fields = P.extract_all(s_ans)
+
+            # #410, the measurement that settles it. `aas/max_aas` is pinned
+            # as a divergence while `aas/integral_ms` is NOT, i.e. the two
+            # paths agree on AREA and differ on PEAK over the SAME layout
+            # (both are asked for buckets=10 over the same window). That is
+            # lumpier per-bucket VALUES -- some record's time in the wrong
+            # bucket -- not a different peak RULE, and max_aas cannot say
+            # WHERE. This prints the per-bucket comparison so the first
+            # divergent bucket names the second and the second names the
+            # record.
+            #
+            # DIAGNOSTIC, NOT AN ASSERTION: it deliberately does not touch
+            # `ok`. The divergence it describes is already pinned by
+            # aas/max_aas, so gating on it twice would turn one finding into
+            # two failures. It REFUSES loudly in the log rather than printing
+            # a clean line it cannot support (P.bucket_diff's own
+            # false-negative suite is section 16 of
+            # tests/test_summary_raw_parity_lib.py).
+            bd = P.bucket_diff(r_ans.get("aas"), s_ans.get("aas"))
+            bucket_reports[name] = bd
+            bucket_lines.extend(P.bucket_diff_lines(name, bd))
 
             if is_control:
                 # Both sides raw: every field must agree exactly, and the
@@ -541,6 +594,10 @@ def main():
     print("=== test_summary_raw_parity ===")
     for l in lines:
         print(l)
+    if bucket_lines:
+        lines.append("--- #410 per-bucket AAS comparison (diagnostic) ---")
+        lines.extend(bucket_lines)
+    report["aas_buckets"] = bucket_reports
     report["ok"] = ok
     with open(os.path.join(RESULT_DIR, "summary.json"), "w") as f:
         json.dump(report, f, indent=1, sort_keys=True)
