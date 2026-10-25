@@ -953,3 +953,7 @@ test_trace_perms
 
 # Real replay-over-UI comparator: empty fixture, unit/value/count REDs.
 test_replay_ui.py
+
+# #567: box-check.sh's up-rsync must never send tests/*.o (or *.a/*.so) to
+# the Linux box, and a stale object already there must not survive either.
+test_box_check_object_excludes.sh
