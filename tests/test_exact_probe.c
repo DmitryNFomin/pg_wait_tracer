@@ -344,6 +344,47 @@ static void test_acquire_refuses_without_ops(void)
           "#108: acquire refuses when it cannot attach at all");
 }
 
+/* #108 follow-up: a daemon-mode RE-ATTACH (PostgreSQL restarted) gets a
+ * fresh, EMPTY exec_site_allow map. If exec_sites_published survived the
+ * teardown the publish would be skipped, every address would be refused by
+ * exec_site_admitted(), and the capture would report ZERO executions with
+ * healthy-looking links -- a silent zero.
+ *
+ * What is asserted is the CONTRACT, both directions: skeleton-derived state
+ * is forgotten, and restart-safe work (the resolved FILE offsets) is kept.
+ * A "forget everything" implementation fails the second half, which is why
+ * it is here and not just the first. */
+static void test_bundle_forget_skeleton(void)
+{
+    struct pgwt_exact_probe_bundle b;
+    memset(&b, 0, sizeof(b));
+    b.query_offset = 0x1234;
+    b.activity_offset = 0x5678;
+    b.sampled_warmup_reconciled = true;
+    b.exec_links.start = (void *)1;
+    b.exec_links.done = (void *)2;
+    b.plan_links.start = (void *)3;
+    b.plan_links.done = (void *)4;
+    b.exec_sites_published = true;
+
+    pgwt_exact_probe_bundle_forget_skeleton(&b);
+
+    CHECK(!b.exec_sites_published,
+          "#108: a re-attach re-publishes the #464 canonical-site allowlist");
+    CHECK(b.exec_links.start == NULL && b.exec_links.done == NULL &&
+          b.plan_links.start == NULL && b.plan_links.done == NULL,
+          "#108: the destroyed skeleton's phase links are forgotten");
+    CHECK(b.query_offset == 0x1234 && b.activity_offset == 0x5678,
+          "#108: resolved FILE offsets survive a restart, they do not move");
+    CHECK(b.sampled_warmup_reconciled,
+          "#108: unrelated bundle state is left alone");
+
+    /* A NULL bundle must not crash: cleanup runs on partially initialised
+     * daemons. */
+    pgwt_exact_probe_bundle_forget_skeleton(NULL);
+    CHECK(1, "#108: forget_skeleton tolerates a NULL bundle");
+}
+
 static void test_generation_merge(void)
 {
     struct pgwt_exact_config cfg = {
@@ -457,6 +498,7 @@ int main(void)
     test_sampled_tier_never_pins_phase_probes();
     test_phase_probe_failure_degrades_but_never_denies();
     test_acquire_refuses_without_ops();
+    test_bundle_forget_skeleton();
     test_generation_merge();
     test_straddler_context_persistence();
     printf("%d/%d checks passed\n", passed, total);

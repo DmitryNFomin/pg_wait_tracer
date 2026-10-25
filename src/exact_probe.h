@@ -83,6 +83,25 @@ struct pgwt_exact_probe_bundle {
     bool exec_sites_published;
 };
 
+/* #108: forget everything in the bundle that belongs to a DESTROYED BPF
+ * skeleton, keeping what survives one.
+ *
+ * Cleared: the execute/plan link pairs, and exec_sites_published -- the
+ * #464 canonical-site allowlist is RUNTIME addresses in a map owned by that
+ * skeleton. A daemon-mode re-attach (PostgreSQL restarted) loads a fresh,
+ * EMPTY exec_site_allow and may see a different load base, so the publish
+ * has to happen again. Keeping the flag would leave the BPF handlers'
+ * exec_site_admitted() refusing every address while the links looked
+ * healthy: zero executions, silently -- the exact silent-zero shape the
+ * allowlist refusal exists to prevent.
+ *
+ * Kept: query_offset / activity_offset, which are FILE offsets into the
+ * postgres binary and do not move when a process restarts. (They do move
+ * if the restart is onto a DIFFERENT binary; that is pre-existing and not
+ * addressed here.) */
+void pgwt_exact_probe_bundle_forget_skeleton(
+    struct pgwt_exact_probe_bundle *bundle);
+
 uint32_t pgwt_exact_probe_startup_mask(
     enum pgwt_mode mode, int pg_major,
     const struct PgBackendStatusLayout *layout,

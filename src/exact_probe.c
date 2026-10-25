@@ -38,6 +38,18 @@ static int attach_missing(struct pgwt_exact_probe_core *core, uint32_t mask,
     return 0;
 }
 
+void pgwt_exact_probe_bundle_forget_skeleton(
+    struct pgwt_exact_probe_bundle *bundle)
+{
+    if (!bundle)
+        return;
+    bundle->exec_links.start = NULL;
+    bundle->exec_links.done = NULL;
+    bundle->plan_links.start = NULL;
+    bundle->plan_links.done = NULL;
+    bundle->exec_sites_published = false;
+}
+
 uint32_t pgwt_exact_probe_startup_mask(
     enum pgwt_mode mode, int pg_major,
     const struct PgBackendStatusLayout *layout,
@@ -581,6 +593,9 @@ void pgwt_exact_probe_release(struct pgwt_daemon *d)
 void pgwt_exact_probe_cleanup(struct pgwt_daemon *d)
 {
     pgwt_exact_probe_core_cleanup(&d->exact_probes.core, &live_ops, d);
+    /* The skeleton is destroyed right after this (src/daemon.c), and a
+     * daemon-mode re-attach reuses this same struct pgwt_daemon. */
+    pgwt_exact_probe_bundle_forget_skeleton(&d->exact_probes);
 }
 
 static int get_config(struct pgwt_daemon *d, struct pgwt_exact_config *cfg)
