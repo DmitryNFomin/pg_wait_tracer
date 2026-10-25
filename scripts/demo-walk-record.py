@@ -218,6 +218,46 @@ def reassert_archived_window(page):
     page.wait_for_timeout(200)
 
 
+def assert_compare_presets_reachable(page):
+    """Inspect the actual picker against this connection's trace and range.
+
+    Run on every tab of both real and mock walks. Counts alone cannot prove
+    that any offered baseline can be used (#549).
+    """
+    if not page.locator('#compare-picker').is_visible():
+        page.locator('#compare-btn').click()
+    try:
+        evidence = page.evaluate("""() => {
+            const {server, timeRange} = window.__pgwt;
+            const visible = el => el.getClientRects().length > 0 &&
+                getComputedStyle(el).visibility !== 'hidden';
+            return {
+                trace: [server.fromNs, server.toNs],
+                range: [timeRange.from, timeRange.to],
+                offsets: [...document.querySelectorAll('#compare-picker [data-b-offset]')]
+                    .filter(el => visible(el) && !el.disabled)
+                    .map(el => Number(el.dataset.bOffset)),
+                explanation: document.querySelector('.compare-presets').innerText.trim(),
+            };
+        }""")
+    finally:
+        page.locator('#compare-btn').click()
+    start, end = evidence['trace']
+    a, b = evidence['range']
+    offsets = evidence['offsets']
+    invalid = [off for off in offsets if not (
+        math.isfinite(off) and off < 0 and off == int(off)
+        and abs(off) <= 2**53 - 1 and start <= a + off < b + off <= end)]
+    if invalid:
+        raise Refusal(2, f"compare presets unreachable: {invalid}; {evidence}")
+    if not offsets:
+        if a > start and 0 < b - a <= end - start:
+            raise Refusal(2, f"compare offers no reachable preset despite available history: {evidence}")
+        if not evidence['explanation']:
+            raise Refusal(2, f"compare needs an explanation when no earlier baseline fits: {evidence}")
+    return evidence
+
+
 def navigate(page, tab, smoke, capture, timeout, archived=False):
     capture.current = tab
     try:
@@ -925,11 +965,13 @@ def record(args, staging):
             for tab in smoke.lib.TABS:
                 print(f"Recording {tab}: {dwells[tab]:g}s",flush=True)
                 navigate(page,tab,smoke,capture,args.timeout,args.archived)
+                compare_presets = assert_compare_presets_reachable(page)
                 if tab == "overview":
                     headline_crop = [[rect(page,"#aas-chart-container")],
                                      table_crop(page,["name","ms","pct","aas"])]
                 result = dwell(page,tab,dwells[tab],smoke,capture,
                                aas_inspection_path(page) if tab == 'overview' else None)
+                result['compare_presets'] = compare_presets
                 walk["tabs"].append(result)
             print("Recording continuous Queries → execution → wait interaction",flush=True)
             interaction, query_crop, execution_crop = drill(page,smoke,capture,args.timeout,args.archived)
