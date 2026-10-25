@@ -74,6 +74,10 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
 .degraded-title  { color: #ff8a80; font-size: 15px; font-weight: 600; margin-bottom: 6px; }
 .degraded-hint   { color: #ccc; font-size: 12px; }
 .degraded-detail { color: #888; font-size: 11px; margin-top: 6px; font-family: monospace; }
+/* #351: the upstream pgwt-server's own refusal reason, when the bridge
+ * established one -- a second, slightly brighter line so it reads as the
+ * answer to "why", not a repeat of the connection-lost message above it. */
+.degraded-cause  { color: #ffab91; display: inline-block; margin-top: 4px; }
 
 /* Time range button + picker */
 .time-range-btn {
