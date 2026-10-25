@@ -137,6 +137,18 @@ class CannotSeeMustRefuse(unittest.TestCase):
         with self.assertRaises(DiagRefusal):
             sweep_verdict([], 0)
 
+    def test_extra_attempts_cannot_pay_for_void_ones(self):
+        # Same gap as the fixture path's: 12 attempts per path, 2 of them
+        # blind, still leaves 10 completed and would satisfy a count-only
+        # guard. The void short-circuit is what refuses it.
+        attempts = sweep(n=12)
+        for a in attempts:
+            if a["index"] in (0, 1):
+                a["connected"] = False
+        v, reason, _ = sweep_verdict(attempts, 10)
+        self.assertEqual(v, "VOID")
+        self.assertIn("void", reason)
+
     def test_the_thing_checked_absent_vs_wrong_are_both_failures(self):
         # absent: no canvas element at all
         self.assertEqual(classify_attempt(attempt(canvas=None)), "fail")
@@ -162,6 +174,98 @@ class Ordering(unittest.TestCase):
         # the guard cannot be satisfied by the happy-path field.
         a = attempt(canvas=(1600, 300), connected=False)
         self.assertEqual(classify_attempt(a), "void")
+
+
+
+
+# ── part 2: the fixture path (tests/diag_537_fixture_path.py) ────────────────
+
+from diag_537_fixture_path import (          # noqa: E402
+    classify_fixture_attempt, fixture_counts, fixture_verdict,
+)
+
+CV = {"client_width": 1650, "client_height": 217}
+
+
+def fx(index=0, *, before=CV, after=CV, installed=True, connected=True,
+       alive=True, harness_error=None):
+    return {"index": index, "connected": connected, "bridge_alive_after": alive,
+            "harness_error": harness_error, "fixture_installed": installed,
+            "canvas_before": before, "canvas_after": after}
+
+
+class FixturePathTruePositive(unittest.TestCase):
+    def test_a_canvas_that_disappears_is_detected(self):
+        self.assertEqual(classify_fixture_attempt(fx(after=None)), "canvas_lost")
+        v, _, counts = fixture_verdict([fx(i, after=None) for i in range(10)], 10)
+        self.assertEqual(v, "FIXTURE_REMOVES_CANVAS")
+        self.assertEqual(counts["canvas_lost"], 10)
+
+    def test_a_surviving_canvas_reads_harmless(self):
+        v, _, _ = fixture_verdict([fx(i) for i in range(10)], 10)
+        self.assertEqual(v, "FIXTURE_HARMLESS")
+
+    def test_even_one_loss_is_reported(self):
+        attempts = [fx(i) for i in range(10)]
+        attempts[4]["canvas_after"] = None
+        v, reason, _ = fixture_verdict(attempts, 10)
+        self.assertEqual(v, "FIXTURE_REMOVES_CANVAS")
+        self.assertIn("1/10", reason)
+
+
+class FixturePathCannotSeeMustRefuse(unittest.TestCase):
+    def test_no_canvas_before_the_fixture_proves_nothing(self):
+        # The headline false POSITIVE for this script: an attempt that never
+        # had a canvas would otherwise be scored as the fixture removing one.
+        self.assertEqual(classify_fixture_attempt(fx(before=None, after=None)),
+                         "void")
+        v, _, _ = fixture_verdict(
+            [fx(i, before=None, after=None) for i in range(10)], 10)
+        self.assertEqual(v, "VOID")
+
+    def test_a_fixture_that_never_installed_is_void_not_harmless(self):
+        # transport.request unwrapped, the sort toggle missing, the response
+        # empty: the fixture did not run, so "canvas survived" is vacuous.
+        self.assertEqual(classify_fixture_attempt(fx(installed=False)), "void")
+        v, _, _ = fixture_verdict([fx(i, installed=False) for i in range(10)], 10)
+        self.assertEqual(v, "VOID")
+
+    def test_empty_and_partial_sweeps_are_void(self):
+        self.assertEqual(fixture_verdict([], 10)[0], "VOID")
+        self.assertEqual(fixture_verdict([fx(i) for i in range(6)], 10)[0], "VOID")
+
+    def test_a_dead_bridge_or_harness_error_is_void(self):
+        self.assertEqual(classify_fixture_attempt(fx(alive=False, after=None)),
+                         "void")
+        self.assertEqual(classify_fixture_attempt(
+            fx(harness_error="boom", after=None)), "void")
+        self.assertEqual(classify_fixture_attempt(fx(connected=False)), "void")
+
+    def test_a_zero_area_canvas_counts_as_absent_on_both_sides(self):
+        self.assertEqual(classify_fixture_attempt(
+            fx(after={"client_width": 0, "client_height": 217})), "canvas_lost")
+        self.assertEqual(classify_fixture_attempt(
+            fx(before={"client_width": 0, "client_height": 217})), "void")
+
+    def test_extra_attempts_cannot_pay_for_void_ones(self):
+        # The gap the mutation suite found (F3 was initially not
+        # load-bearing): with MORE attempts than requested, the partial-sweep
+        # guard is satisfied by the completed ones and a sweep containing
+        # blind attempts would be graded anyway. Retried/extra attempts must
+        # not launder a void.
+        attempts = [fx(i) for i in range(12)]
+        attempts[0]["connected"] = False
+        attempts[1]["canvas_before"] = None
+        v, reason, _ = fixture_verdict(attempts, 10)
+        self.assertEqual(v, "VOID")
+        self.assertIn("void", reason)
+
+    def test_an_unparseable_record_refuses(self):
+        for bad in (None, 7, "rec"):
+            with self.assertRaises(DiagRefusal):
+                fixture_counts([bad])
+        with self.assertRaises(DiagRefusal):
+            fixture_verdict([fx(0)], 0)
 
 
 if __name__ == "__main__":
