@@ -404,6 +404,44 @@ def check_transitions_idle_flag(t, srv):
                 f"(got {node.get('idle')!r})")
 
 
+def check_top_sessions_cpu_fields(t, srv):
+    """#562: the measured-CPU contract on Top Sessions, asserted POSITIVELY.
+
+    The schema comparison above is symmetric: if BOTH the real server and the
+    mock omitted these fields it would pass, which is the false negative that
+    matters here -- the fields went in to say which quantity the cpu_pct
+    column is, and a response without them is the ambiguity #562 is about.
+    So the real server's own response is checked for presence and type, and
+    every row for its remainder, independently of the mock.
+    """
+    real = srv.query("top_sessions")
+    t.check("error" not in real,
+            "[sessions cpu] real server answered without error"
+            + (f" (got: {real.get('error')})" if "error" in real else ""))
+    if "error" in real:
+        return
+    t.check(isinstance(real.get("has_measured_cpu"), bool),
+            "[sessions cpu] has_measured_cpu is a boolean "
+            f"(got {real.get('has_measured_cpu')!r})")
+    for field in ("offcpu_ms", "cpu_clamped_ms"):
+        v = real.get(field)
+        t.check(isinstance(v, (int, float)) and not isinstance(v, bool),
+                f"[sessions cpu] {field} is a number (got {v!r})")
+    rows = real.get("rows", [])
+    t.check(len(rows) > 0, "[sessions cpu] the fixture produces session rows")
+    for row in rows:
+        v = row.get("offcpu_ms")
+        t.check(isinstance(v, (int, float)) and not isinstance(v, bool),
+                f"[sessions cpu] pid {row.get('pid')} carries a numeric "
+                f"offcpu_ms (got {v!r})")
+    # The response-level total is the sum over the rows, which is what lets a
+    # client account for the time without walking them.
+    total = sum(r.get("offcpu_ms", 0.0) for r in rows)
+    t.check(abs(total - real.get("offcpu_ms", -1.0)) < 1e-6,
+            "[sessions cpu] response offcpu_ms == the sum over rows "
+            f"(got {real.get('offcpu_ms')!r}, rows sum to {total!r})")
+
+
 # ── #333: a corrupt trace must not answer as an empty one ───────────────────
 #
 # Lives here because this is the suite that owns "what the real server's
@@ -575,6 +613,7 @@ def main():
                     print(f"    DRIFT: {d}")
             check_transitions_idle_flag(t, srv)
             check_protocol_revision(t, srv)
+            check_top_sessions_cpu_fields(t, srv)
     finally:
         cleanup_traces(trace_dir)
 

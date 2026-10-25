@@ -2018,6 +2018,16 @@ static void test_sessions_measured_cpu(void)
                       "(66.667%), which is the divergence #562 registers");
             CHECK_MS(sr->offcpu_ms, 0.0,
                      "13d: and no remainder, because it never split one off");
+            /* wait_pct is the SAME quantity on both paths, and must be the
+             * same floating-point EXPRESSION too: it used to read
+             * `100 - cpu_pct` here, which is algebraically Σwaits/db on this
+             * path but differs from it in the last bit, and
+             * tests/test_agg_raw_crosscheck.c compares the two paths with
+             * exact equality (`!(a == b)`). 5 ms of 15. */
+            CHECK_NUM(sr->wait_pct, 5.0 / 15.0 * 100.0,
+                      "13d: the summary wait_pct is Σwaits/db, computed as "
+                      "the integer (db − cpu) over db, exactly as raw "
+                      "divides");
             /* The identity: the two paths describe the SAME total two ways.
              * Rebuilt from the raw path rather than from 13a's locals, so
              * this compares two computations and not one. */
@@ -2077,14 +2087,14 @@ int main(void)
      * asserts the SAME number of times whichever way the child goes, so a
      * hang cannot satisfy the floor by running fewer checks. 10f adds 4
      * more (the two allocators' refusal paths and their two controls).
-     * Section 11 (#374) adds 9, section 12 (#575) 21, section 13 (#562) 31.
+     * Section 11 (#374) adds 9, section 12 (#575) 21, section 13 (#562) 32.
      * Section 13's per-row assertions sit behind `if (r)`, so a vanished row
      * would run FEWER checks rather than failing each one -- which is
      * exactly what this floor is for: the row-present CHECK fails, and the
      * count falls below 207 as well. 10e is the one place where a branch
      * asserts the same number of times either way, because there the
      * alternative is a hang. */
-    if (checks < 207) {
+    if (checks < 208) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

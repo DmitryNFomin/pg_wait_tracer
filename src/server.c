@@ -4554,6 +4554,19 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
                                 top_wait_unavailable_reason);
     }
 
+    /* #562 (additive): which quantity the cpu_pct column IS. true -- measured
+     * on-CPU time, with each row's runqueue remainder in its offcpu_ms;
+     * false -- the unsplit on-CPU gap wall by gap-inference (sampled/v2 data
+     * and the SUMMARY routing, whose per-second record stores wall and has no
+     * measured column), with every offcpu_ms 0. Same field names and the same
+     * meaning as the time_model and top_events responses.
+     * cpu_clamped_ms is the skew self-check: measured CPU that exceeded its
+     * own clipped gap wall, clamped out of the column and counted here. It is
+     * outside every row and outside db_time_ms. */
+    cJSON_AddBoolToObject(root, "has_measured_cpu", res.has_measured_cpu);
+    cJSON_AddNumberToObject(root, "offcpu_ms", res.offcpu_ms);
+    cJSON_AddNumberToObject(root, "cpu_clamped_ms", res.cpu_clamped_ms);
+
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
         cJSON *r = cJSON_CreateObject();
@@ -4561,6 +4574,13 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
         cJSON_AddNumberToObject(r, "db_time_ms", res.rows[i].db_time_ms);
         cJSON_AddNumberToObject(r, "cpu_pct", res.rows[i].cpu_pct);
         cJSON_AddNumberToObject(r, "wait_pct", res.rows[i].wait_pct);
+        /* #562 (additive): the runqueue remainder of this session's MEASURED
+         * on-CPU gaps -- inside db_time_ms but on neither percentage, so a
+         * client can account for the row (cpu + wait + offcpu) instead of
+         * reading the difference as missing time. 0 where the response's
+         * has_measured_cpu is false: a refusal to split, not a measured
+         * zero. */
+        cJSON_AddNumberToObject(r, "offcpu_ms", res.rows[i].offcpu_ms);
         if (top_wait_unavailable) {
             cJSON_AddNullToObject(r, "top_wait");
             cJSON_AddNumberToObject(r, "top_wait_id", 0);
