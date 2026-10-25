@@ -861,6 +861,19 @@ struct pgwt_exec_event {
                                * not the event's whole wall time; cpu_ns is
                                * prorated onto the same slice. Both are set in
                                * detail_lane_add() in compute.c */
+    uint64_t raw_duration_ns; /* #529: the record's OWN wall time, unclipped.
+                               * duration_ns is what a client SUMS (it cannot
+                               * exceed the execution's duration); this is
+                               * what a client DISPLAYS for one bar. Before
+                               * this existed the Waterfall tooltip answered
+                               * "how long was this wait?" with the clipped
+                               * slice -- a 4 ms wait that opened 2 ms before
+                               * EXEC_START read 2 ms -- and the true figure
+                               * was on no field and no wire key, so no
+                               * client could have told. Serialised as
+                               * `raw_dur_ns` (src/server.c
+                               * serialize_exec_lane); equal to duration_ns
+                               * for every event the boundary does not cut. */
     uint64_t cpu_ns;
     int      has_cpu;
 };
@@ -888,8 +901,11 @@ struct pgwt_execution_detail_result {
 
 /* Build one marker-identified execution waterfall. Only exact transition
  * records are eligible; sampled observations never acquire fabricated
- * interval durations. Events are selected by interval overlap and keep their
- * raw starts/durations. */
+ * interval durations. Events are selected by interval overlap; since #496
+ * their start_ns/duration_ns are CLIPPED to the execution window, and since
+ * #529 raw_duration_ns carries the record's own wall time beside it. (The
+ * previous sentence here still read "keep their raw starts/durations", which
+ * #496 had already made false.) */
 void pgwt_compute_execution_detail(
     const struct pgwt_trace_event *events, int count,
     uint32_t leader_pid, uint64_t start_ns, uint64_t end_ns,

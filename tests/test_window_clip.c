@@ -2524,6 +2524,285 @@ static void test_sessions_measured_cpu(void)
     }
 }
 
+/* ── 14. #529: the execution-detail tooltip's wall time ───────────────────
+ *
+ * THE DEFECT. #496 made `pgwt_exec_event.duration_ns` the slice INSIDE the
+ * execution window, which is right for the column that gets SUMMED (before
+ * #496 the per-event durations added up past the execution's own duration).
+ * But the clipped value became the ONLY one there is, and the Waterfall
+ * tooltip reads it as the event's wall time: a 4 ms wait that opened 2 ms
+ * before EXEC_START displays as 2 ms. The record's own duration was on no
+ * wire field at all, so no client could say what the wait actually was.
+ *
+ * So the struct carries BOTH: `duration_ns` (clipped, summable) and
+ * `raw_duration_ns` (the record's own wall time). src/server.c serialises
+ * them as `dur_ns` and `raw_dur_ns`.
+ *
+ * WHY THE ASSERTIONS ARE ABSOLUTE LITERALS AND NOT AN AGREEMENT. Lane C's
+ * #562 trap in miniature: "the two fields differ on a straddler" is
+ * satisfied by any pair of different numbers, and "they agree on an interior
+ * event" is satisfied by emitting one value twice. Each arm below names the
+ * nanosecond count it requires, and the two arms disagree about which field
+ * moves, so no single wrong implementation satisfies both:
+ *
+ *   straddler  dur_ns = 2 ms   raw_dur_ns = 4 ms   (#529's measured pair)
+ *   interior   dur_ns = 5 ms   raw_dur_ns = 5 ms
+ *
+ * - emit the raw value into dur_ns (i.e. revert #496): straddler dur_ns
+ *   reads 4 ms, fails.
+ * - emit the clipped value into raw_dur_ns (the no-op field): straddler
+ *   raw_dur_ns reads 2 ms, fails.
+ * - leave raw_duration_ns unset: reads 0, fails.
+ * - raw_dur_ns = 2 * dur_ns (which the straddler alone cannot tell apart):
+ *   the interior event reads 10 ms, fails.
+ *
+ * Nothing here touches a clock, a socket or a subprocess: two in-memory
+ * arrays and absolute ns literals. There is no ordering to get wrong either
+ * — events are located by event id, never by index.
+ */
+
+#define EXEC_PID        100u
+#define EXEC_QID        4242ULL
+#define EXEC_START_NS   (T0 + S(1))
+#define EXEC_END_NS     (T0 + S(3))
+#define MS(x)           ((uint64_t)(x) * 1000000ULL)
+
+/* Locate one lane entry by event id. Returns NULL when the lane does not
+ * carry it — and section 14b REQUIRES that NULL for an id the fixture never
+ * produced, so "the helper found nothing" can never read as a pass. */
+static const struct pgwt_exec_event *
+lane_event(const struct pgwt_exec_lane *lane, uint32_t event_id)
+{
+    for (int i = 0; i < lane->num_events; i++)
+        if (lane->events[i].event_id == event_id)
+            return &lane->events[i];
+    return NULL;
+}
+
+/* The fixture. `straddle` chooses whether the Lock:relation record crosses
+ * EXEC_START (the #529 case) or sits wholly inside the execution (14b's
+ * control, where clipping must be a no-op). Everything else is identical, so
+ * the control differs from the case in exactly one property. */
+static int build_exec_fixture(struct pgwt_trace_event *ev, int straddle)
+{
+    int n = 0;
+    /* EXEC_START must be the first record of the pid the scan sees: the lane
+     * only accepts events while inside_exec. */
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_START, EXEC_START_NS, 0,
+                 EXEC_QID, 0);
+    /* The straddler: 4 ms long, closing 2 ms after EXEC_START, so 2 ms of it
+     * is inside the execution. Non-straddling control: the same 4 ms record
+     * closing 6 ms after EXEC_START, wholly inside. */
+    ev[n++] = mk(EXEC_PID, LOCK_RELATION,
+                 straddle ? EXEC_START_NS + MS(2) : EXEC_START_NS + MS(6),
+                 MS(4), EXEC_QID, PGWT_CPU_NS_UNKNOWN);
+    /* The interior event, 5 ms, never clipped on either fixture. */
+    ev[n++] = mk(EXEC_PID, IO_READ, EXEC_START_NS + S(1), MS(5),
+                 EXEC_QID, PGWT_CPU_NS_UNKNOWN);
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_END, EXEC_END_NS, 0, EXEC_QID, 0);
+    return n;
+}
+
+static void test_exec_detail_raw_duration(void)
+{
+    printf("\n14. #529: a clipped slice is not the event's wall time\n");
+
+    struct pgwt_trace_event ev[8];
+    int n = build_exec_fixture(ev, 1);
+
+    struct pgwt_execution_detail_result res;
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+
+    CHECK(!res.failed, "14a: the detail pass completed");
+    CHECK(res.found_execution == 1,
+          "14a: the requested EXEC_START matched — the lane is populated by "
+          "the scan and not by an empty-result shortcut");
+    CHECK_U64(res.leader.num_events, 2,
+              "14a: both records entered the leader lane");
+
+    const struct pgwt_exec_event *str = lane_event(&res.leader, LOCK_RELATION);
+    const struct pgwt_exec_event *in  = lane_event(&res.leader, IO_READ);
+    CHECK(str != NULL, "14a: the straddling Lock:relation record is present");
+    CHECK(in != NULL, "14a: the interior IO:DataFileRead record is present");
+
+    if (str) {
+        /* The #496 contract, unchanged: what clients SUM is the slice. */
+        CHECK_U64(str->duration_ns, MS(2),
+                  "14a: duration_ns is the 2 ms slice inside the execution "
+                  "(#496) — a client summing the lane still cannot exceed "
+                  "the execution's own duration");
+        /* The #529 contract: what a tooltip DISPLAYS is the wait. */
+        CHECK_U64(str->raw_duration_ns, MS(4),
+                  "14a: raw_duration_ns is the record's own 4 ms wall time "
+                  "— the number #529 measured displaying as 2 ms");
+        CHECK(str->raw_duration_ns > str->duration_ns,
+              "14a: and on a straddler the two are not the same number");
+        CHECK_U64(str->start_ns, EXEC_START_NS,
+                  "14a: start_ns stays clamped to the execution start, so the "
+                  "slice is (start_ns, start_ns+duration_ns) and still lies "
+                  "inside the execution");
+    }
+    if (in) {
+        CHECK_U64(in->duration_ns, MS(5),
+                  "14a: the interior record's slice is its whole 5 ms");
+        CHECK_U64(in->raw_duration_ns, MS(5),
+                  "14a: and its raw wall time is the same 5 ms — which is "
+                  "what kills raw_dur_ns = 2 * dur_ns, a rule the straddler "
+                  "alone cannot distinguish");
+    }
+    pgwt_free_execution_detail(&res);
+}
+
+/* 14b. FALSE NEGATIVES. Every way section 14a could be satisfied without
+ * checking anything. A gate that cannot see must refuse, never approve. */
+static void test_exec_detail_raw_duration_bypass(void)
+{
+    printf("\n14b. #529 bypass: the ways this gate could stop seeing\n");
+
+    struct pgwt_trace_event ev[8];
+    int n = build_exec_fixture(ev, 1);
+    struct pgwt_execution_detail_result res;
+
+    /* (1) THE THING IS ABSENT RATHER THAN WRONG. An id the fixture never
+     * produced must come back NULL, so 14a's `if (str)` guards sit behind a
+     * CHECK that the record exists — not behind a silent skip. */
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    CHECK(lane_event(&res.leader, CLIENT_READ) == NULL,
+          "14b1: an event id the fixture never emitted is NOT found — the "
+          "lookup cannot manufacture a row to assert on");
+    CHECK(lane_event(&res.leader, LOCK_RELATION) != NULL,
+          "14b1 control: the same lookup DOES find the id the fixture emits, "
+          "so 14b1 is not passing because the helper always returns NULL");
+    pgwt_free_execution_detail(&res);
+
+    /* (2) EMPTY INPUT. No events at all: the lane is empty and the execution
+     * was not found. 14a's found_execution and num_events assertions are the
+     * ones that separate this from a real answer. */
+    pgwt_compute_execution_detail(NULL, 0, EXEC_PID, EXEC_START_NS,
+                                  EXEC_END_NS, NULL, NULL, 0, 16, &res);
+    CHECK_U64(res.leader.num_events, 0, "14b2: empty input -> empty lane");
+    CHECK(res.found_execution == 0,
+          "14b2: and found_execution is 0, which is what 14a asserts against "
+          "— an empty answer cannot pose as a populated one");
+    pgwt_free_execution_detail(&res);
+
+    /* (3) THE LANE CAP MAKES THE PASS UNREACHABLE. max_events_per_lane 0
+     * returns before the scan runs at all. This is the readiness-gate
+     * failure mode: it must look like nothing happened, not like a pass. */
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 0, &res);
+    CHECK_U64(res.leader.num_events, 0,
+              "14b3: max_events_per_lane 0 -> no lane entries");
+    CHECK(res.found_execution == 0,
+          "14b3: and the scan never ran, so found_execution stays 0");
+    pgwt_free_execution_detail(&res);
+
+    /* (4) NO MATCHING EXECUTION. start_ns that no EXEC_START carries: the
+     * records are all outside an open execution, so nothing is admitted.
+     * A fixture that quietly stopped matching would otherwise assert over an
+     * empty lane and pass. */
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS + 1,
+                                  EXEC_END_NS, NULL, NULL, 0, 16, &res);
+    CHECK(res.found_execution == 0,
+          "14b4: an unresolvable execution start is not found");
+    CHECK_U64(res.leader.num_events, 0,
+              "14b4: and admits nothing, rather than admitting unclipped "
+              "records under a window it could not resolve");
+    pgwt_free_execution_detail(&res);
+
+    /* (5) THE FIXTURE DOES NOT ACTUALLY STRADDLE. The same record 4 ms long,
+     * moved wholly inside the execution. Now clipping is a no-op and the two
+     * fields MUST agree — which is what proves 14a's inequality comes from
+     * the straddle and not from the field being unconditionally different. */
+    n = build_exec_fixture(ev, 0);
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    {
+        const struct pgwt_exec_event *e = lane_event(&res.leader,
+                                                     LOCK_RELATION);
+        CHECK(e != NULL, "14b5: the non-straddling record is present");
+        if (e) {
+            CHECK_U64(e->duration_ns, MS(4),
+                      "14b5: a record wholly inside the execution is not "
+                      "clipped");
+            CHECK_U64(e->raw_duration_ns, MS(4),
+                      "14b5: and its raw wall time is the same 4 ms — the two "
+                      "fields differ ONLY where the boundary cuts");
+        }
+    }
+    pgwt_free_execution_detail(&res);
+
+    /* (6) A RIGHT-OPEN RECORD. #424 flags a wait still running at the window
+     * edge; the detail scan drops it, so it contributes NO lane entry. The
+     * hazard this guards is the opposite of 14a's: a dropped record must not
+     * reappear carrying a raw duration the execution never contained. */
+    n = build_exec_fixture(ev, 1);
+    ev[1].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    CHECK(lane_event(&res.leader, LOCK_RELATION) == NULL,
+          "14b6: a RIGHT_OPEN straddler is excluded from the lane entirely "
+          "— neither field is emitted for it");
+    CHECK_U64(res.leader.num_events, 1,
+              "14b6: and the interior record still arrives, so 14b6 is not "
+              "passing because the whole lane went empty");
+    pgwt_free_execution_detail(&res);
+
+    /* (7) A CORRUPT RECORD whose duration exceeds its own timestamp. The
+     * hazard would be a wrapped subtraction producing a vast raw figure.
+     * It is UNREACHABLE, and this block asserts the DEADNESS rather than
+     * asserting against it. The first draft did assert the admitted
+     * record's two fields and went red: the record never arrives at all.
+     *
+     * pgwt_filter_matches refuses `duration_ns > timestamp_ns`
+     * (src/compute.c:375) before pgwt_compute_execution_detail's selection
+     * reaches detail_lane_add, so no caller can hand that function a record
+     * whose raw_start underflows. Both arms are needed: on its own, "the
+     * lane does not carry it" is also satisfied by a fixture that stopped
+     * producing records for an unrelated reason. */
+    n = 0;
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_START, EXEC_START_NS, 0,
+                 EXEC_QID, 0);
+    ev[n++] = mk(EXEC_PID, LOCK_RELATION, EXEC_START_NS + MS(2),
+                 EXEC_START_NS + MS(2) + 1, EXEC_QID, PGWT_CPU_NS_UNKNOWN);
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_END, EXEC_END_NS, 0, EXEC_QID, 0);
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    CHECK(res.found_execution == 1,
+          "14b7: the execution itself still resolves, so the emptiness below "
+          "is the record being refused and not the scan failing to run");
+    CHECK(lane_event(&res.leader, LOCK_RELATION) == NULL,
+          "14b7: a record whose duration exceeds its own timestamp never "
+          "reaches detail_lane_add -- raw_start cannot underflow because the "
+          "input cannot exist, not because a clamp catches it");
+    pgwt_free_execution_detail(&res);
+
+    /* 14b7 CONTROL: the same record at the same timestamp with a duration
+     * that can be true. It IS admitted and carries both fields, which is
+     * what makes the refusal above attributable to the impossible
+     * duration. */
+    ev[1].duration_ns = MS(4);
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    {
+        const struct pgwt_exec_event *e = lane_event(&res.leader,
+                                                     LOCK_RELATION);
+        CHECK(e != NULL,
+              "14b7 control: a possible duration at the same timestamp IS "
+              "admitted");
+        if (e) {
+            CHECK_U64(e->raw_duration_ns, MS(4),
+                      "14b7 control: and carries its own 4 ms wall time");
+            CHECK_U64(e->duration_ns, MS(2),
+                      "14b7 control: clipped to the 2 ms inside the "
+                      "execution");
+        }
+    }
+    pgwt_free_execution_detail(&res);
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -2549,6 +2828,8 @@ int main(void)
     test_tag_table_scale();
     test_time_model_offcpu_sibling();
     test_sessions_measured_cpu();
+    test_exec_detail_raw_duration();
+    test_exec_detail_raw_duration_bypass();
 
     /* A suite that ran no assertions is a suite that proved nothing. The
      * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
@@ -2572,8 +2853,15 @@ int main(void)
      * + 77 from the #461 arm), and 288 is what is pinned here. A dropped
      * call in main() is the false negative this floor exists to catch, so
      * it moves with the union rather than staying where a deleted section
-     * would still clear it. */
-    if (checks < 288) {
+     * would still clear it.
+     *
+     * #529's section 14 adds 11 and its 14b bypass suite 18 (floor 237 on
+     * agent/laneC2-raw-compute). 14a's field assertions sit behind
+     * `if (str)` / `if (in)` for the same reason section 13's do -- the
+     * record-present CHECK is what fails, and the shortfall in this count
+     * is what catches a section that stopped running its body at all.
+     * Measured on the merged tree: 317. */
+    if (checks < 317) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

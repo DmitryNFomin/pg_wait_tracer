@@ -5852,6 +5852,14 @@ static cJSON *serialize_exec_lane(const struct pgwt_exec_lane *lane,
         cJSON_AddStringToObject(item, "name", ev->name);
         cjson_add_uint64_string(item, "start_ns", ev->start_ns);
         cjson_add_uint64_string(item, "dur_ns", ev->duration_ns);
+        /* #529: the pair, always both. `dur_ns` is the #496 slice a client
+         * sums; `raw_dur_ns` is the wait's own wall time, which is what a
+         * per-bar tooltip is asking for. Emitted unconditionally rather than
+         * "only when they differ": an optional key makes the clipped case
+         * indistinguishable from an old server to every client, and the
+         * cheapest way for a consumer to silently fall back to the wrong
+         * number is for the right one to sometimes be absent. */
+        cjson_add_uint64_string(item, "raw_dur_ns", ev->raw_duration_ns);
         if (ev->has_cpu)
             cjson_add_uint64_string(item, "cpu_ns", ev->cpu_ns);
         else
