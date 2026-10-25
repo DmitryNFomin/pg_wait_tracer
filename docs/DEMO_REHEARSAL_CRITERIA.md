@@ -15,6 +15,32 @@ so and the attempt counter resets. It is never reinterpreted in a report.
 `tests/live_loop_workload.py`. Full mode. `RECENT_WINDOW_S` = 60 s,
 `TIME_MODEL_TOLERANCE_PCT` = 1.0.
 
+**Explicit feature exclusion: tiered escalation.** This demo configuration
+cannot exercise sampled-to-exact escalation, bounded grants, expiry back to
+sampled, manual deescalation, or escalation-budget denial/accounting.
+`tests/demo_rehearsal.sh:3` runs `--mode full`; `src/control.c:66-67` makes an
+EXACT provider permanently report tier `"escalated"` (full fidelity).
+A clean full-mode rehearsal therefore provides no verification of those
+tiered features. This exclusion is explicit for the owner's review against
+the bar "all features work as designed"; it is not a claim that they passed.
+Existing coverage is `tests/test_escalation.sh`: a real tiered daemon,
+4 s grant, expiry, deescalation, budget denial with a reason, at least two
+windows and one denial counted, START/END trace markers, and proxy id
+round-trip; plus the 32 budget-core checks in `tests/test_escalation_budget.c`.
+`test_b5_escalate_flow` in `tests/test_web_ui.py` covers the mock flow.
+
+The presenter's **"Escalate 60s" button is still subject to an honesty check**,
+including when an empty-state panel offers it before daemon status is known.
+No button defect was found: `web/static/lib/panels.js:158-180` hides it when
+`escalation_supported` is false. If clicked while visible, the full-mode
+daemon refuses with `"escalation requires --mode tiered"`
+(`src/escalation.c:473-476`, `src/control.c:701-708`); the handler displays that
+refusal and restores the button (`web/static/lib/panels.js:188-214`), without
+claiming an escalation. `node --test tests/web_unit/escalation-button.test.mjs`
+pins hiding and the visible-button request/refusal/settlement path through
+the real handler, control client and transport, using DOM and daemon-peer
+doubles. It is not a live daemon or browser rehearsal.
+
 `tests/live_loop_workload.py` (issue #214; `adv_holder`/`io_reader` added
 2026-10-06; `io_writer`/eight `lockmgr_N` sessions added 2026-10-07, owner
 scope addition "add more load") loops seventeen persistent sessions for
