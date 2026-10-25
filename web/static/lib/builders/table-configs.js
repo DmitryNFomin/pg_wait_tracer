@@ -25,17 +25,18 @@ import { queryBackendSpanHtml, backendSpanEnvelope } from './backend-span.js';
 
 const _dot = (name) => dot(name, classColor);
 
-/* #439-label: "Other (background)" (src/compute.c:1283, the hidden-
- * Activity parking remainder under Idle) reads as if it contradicts
- * #453's "background non-idle work IS inside DB Time" (compute.c:745,
- * PGWT_CAT_BG) -- same English words, two different, unrelated
- * quantities. Relabeled for clarity; the server's row.name string and
- * every other consumer of it (filters, drill intents) are UNCHANGED --
- * this is a display-only remap at render time. */
-function overviewDisplayName(name) {
-    if (name === 'Other (background)') return 'Background idle (parked)';
-    return name;
-}
+/* #439-label (superseded): "Other (background)" used to read as if it
+ * contradicted #453's "background non-idle work IS inside DB Time"
+ * (compute.c:745, PGWT_CAT_BG) -- same English words, two different,
+ * unrelated quantities. The fix originally lived here as a display-only
+ * remap ('Other (background)' -> 'Background idle (parked)'). #439's
+ * actual root cause was the raw NAME itself (src/compute.c:1283, now
+ * "Other idle (parked background loops)"), not a display-layer problem --
+ * Sessions and Overview never disagreed (compute.c:1399-1401 already folds
+ * PGWT_CAT_BG into db_time_ns like everything else). With the server
+ * emitting a self-explanatory string directly, this remap is permanently
+ * unreachable (the server never sends the old name again) and has been
+ * removed; the row's name renders as-is like every other row. */
 
 function fmtSignedMs(ms) {
     if (!Number.isFinite(ms)) return '—';
@@ -242,9 +243,8 @@ function remainderAasCellHtml() {
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
-            const label = overviewDisplayName(r.name);
-            if (r.indent >= 1) return _dot(r.name) + esc(label);
-            return esc(label);
+            if (r.indent >= 1) return _dot(r.name) + esc(r.name);
+            return esc(r.name);
         }},
         { key: 'ms', label: 'Time', cls: 'num', format: (r) => fmtMs(r.ms) },
         { key: 'pct', label: '%DB Time', cls: 'num', format: (r) => {
@@ -704,10 +704,11 @@ export const queriesConfig = makeQueriesConfig('exact');
  * 1493681.800708 + 825.638179 + 2764.997287 = 2495784.951108).
  *
  * The row that READS like an exclusion is a different quantity with
- * confusingly similar words: Overview's Idle child "Other (background)"
- * (src/compute.c:1283 -- hidden Activity parking, 7757772.93 ms in that same
- * window) is parked-idle time, excluded from DB Time in BOTH tabs, and is
- * relabeled "Background idle (parked)" by overviewDisplayName above.
+ * confusingly similar words: Overview's Idle child "Other idle (parked
+ * background loops)" (src/compute.c:1283 -- hidden Activity parking,
+ * 7757772.93 ms in that same window) is parked-idle time, excluded from DB
+ * Time in BOTH tabs -- the self-explanatory raw name IS what renders, no
+ * client-side display remap (#439).
  *
  * So this note must NOT tell a reader the two tabs count different things.
  * It used to -- "Overview uses a different, system-wide DB Time total that
@@ -721,7 +722,11 @@ export const queriesConfig = makeQueriesConfig('exact');
 export const DB_TIME_MEMBERSHIP = {
     /* non-idle work of bgwriter / walwriter / checkpointer / autovacuum */
     backgroundActive: 'inside',
-    /* Overview's "Background idle (parked)" row (Activity-class parking) */
+    /* Overview's "Other idle (parked background loops)" row (Activity-class
+     * parking). NOTE: buildSessionsScopeNote's own prose below still says
+     * the OLD label ("the Background idle (parked) row on Overview") --
+     * that sentence is user-facing copy, not a derived value, so it is not
+     * changed here; flagged as a finding instead (see PR report). */
     backgroundParked: 'outside',
 };
 

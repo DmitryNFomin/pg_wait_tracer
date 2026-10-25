@@ -10,7 +10,7 @@
 
 export const states = {
     'overview': {
-        description: 'The time-model table: indents, class dots, pct bars. #187: DB Time now includes the "CPU (waiting for a core)" row (mirrors tests/mock_server.py). #435: Idle renders "—" (excluded from DB Time) in %DB Time, never a measured 0%. #453: Idle\'s AAS cell (parent AND its own "Other (background)" child) renders the SAME visible em-dash, with the idle-occupancy rate printed labeled beside it -- never the bare rate under an "AAS" header, which a still frame cannot tell from real active-session load.',
+        description: 'The time-model table: indents, class dots, pct bars. #187: DB Time now includes the "CPU (waiting for a core)" row (mirrors tests/mock_server.py). #435: Idle renders "—" (excluded from DB Time) in %DB Time, never a measured 0%. #453: Idle\'s AAS cell (parent AND its own "Other idle (parked background loops)" child) renders the SAME visible em-dash, with the idle-occupancy rate printed labeled beside it -- never the bare rate under an "AAS" header, which a still frame cannot tell from real active-session load. #439: the row name is the server\'s raw string, rendered as-is -- no client-side display remap.',
         tags: ['HIERARCHY'],
         config: 'overview',
         sort: null,   // overview keeps server order
@@ -26,7 +26,7 @@ export const states = {
             // #453 repro shape: Idle's occupancy (24.62) is nineteen times
             // DB Time's real AAS (1.28) above -- the exact #453 scenario.
             { indent: 0, name: 'Idle',     ms: 888000, pct: null,  aas: 24.62 },
-            { indent: 2, name: 'Other (background)', ms: 147600, pct: null, aas: 4.10 },
+            { indent: 2, name: 'Other idle (parked background loops)', ms: 147600, pct: null, aas: 4.10 },
         ],
     },
     'events-null-latency': {
