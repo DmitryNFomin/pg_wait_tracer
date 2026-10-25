@@ -49,6 +49,29 @@ class RecorderTests(unittest.TestCase):
                 capture.guard()
             self.assertEqual(failed.exception.code,5)
 
+    def test_any_recorded_error_still_refuses(self):
+        # No error kind is exempt (#401's favicon 404 is handled by serving
+        # the asset -- web/main.go -- never by teaching this gate to look
+        # away from a message). This is deliberately the plainest possible
+        # case: one pageerror, nothing favicon-shaped about it. It fails
+        # for TWO distinct reasons if the gate is weakened, both load-bearing
+        # on this test's name, not just the one most recently seen:
+        #   - guard() stops raising entirely (the gate is gone)
+        #   - guard() starts excluding a specific error kind (the gate grew
+        #     a hole, e.g. an overbroad future fix for one noisy message)
+        # This test is about a RECORDED error refusing; it says nothing
+        # about an error that is never recorded at all -- #571 (a dead
+        # daemon reading as stale-but-populated data) is exactly that case
+        # and this test does not, and cannot, cover it.
+        class Events:
+            def on(self,*args): pass
+        with tempfile.TemporaryDirectory() as temp:
+            capture=driver.Capture(Events(),Events(),Path(temp),12)
+            capture.error("pageerror","TypeError: x is not a function")
+            with self.assertRaises(lib.Refusal) as failed:
+                capture.guard()
+            self.assertEqual(failed.exception.code,4)
+
     def test_frame_count_cannot_hide_a_hole(self):
         with self.assertRaises(lib.Refusal) as failed:
             lib.coverage(frames([0.1,0.2,0.3,0.4,2.1,2.2,2.3,2.4,2.5,2.6,2.7,2.8]),0,3,4)
