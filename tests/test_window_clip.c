@@ -44,6 +44,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 static int failures = 0;
 static int checks   = 0;
@@ -1206,6 +1211,227 @@ static void test_query_avg_needs_exact_evidence(void)
     free(tq.rows);
 }
 
+
+/* ── 10. #461: pgwt_compute_transitions must TERMINATE on a full table ──
+ *
+ * `while (ht[h].count > 0 && (from/to mismatch)) h = (h+1) & TRANS_HT_MASK;`
+ * had no fullness test. Once 4096 distinct (from, to) pairs occupy the
+ * 4096-slot table, the 4097th distinct pair finds no free slot and the loop
+ * runs forever: pgwt-server is single-threaded, so the request never
+ * answers and every tab stops at once. Same shape as #327.
+ *
+ * A HANG IS NOT A FAILING TEST, so this section runs the reducer in a
+ * forked child behind a watchdog: no answer within the deadline is a FAIL
+ * with a named reason, never a stalled suite. The watchdog is itself the
+ * thing most likely to make this gate unreachable — one that never fires,
+ * or that reports "ok" for a child that produced nothing, would approve the
+ * hang it exists to catch — so 10b/10c/10d exercise its three outcomes
+ * directly before 10e uses it.
+ *
+ * Timing: the only clock here is the watchdog deadline. The real fixture is
+ * 4097 in-memory records and returns in milliseconds against a 20 s
+ * deadline (measured 0.004 s wall for the whole suite); the hang it detects
+ * is INFINITE, not slow, so no runner load can turn a pass into a failure
+ * or the reverse. The spin control uses a 1.5 s deadline for the same
+ * reason — it can never finish.
+ */
+
+/* Distinct pairs in the fixture: one more than TRANS_HT_SIZE (4096), which
+ * is the first count the old probe loop could not place. */
+#define TRANS_FULL_PAIRS 4097
+/* Below the table size: the SAME fixture shape, provably admitted by
+ * pgwt_transition_record_counts, which is what keeps 10e from passing
+ * vacuously on a fixture the filter throws away. */
+#define TRANS_SAFE_PAIRS 4000
+
+struct trans_probe {
+    int32_t  num_rows;
+    int32_t  total_rows;
+    uint64_t total_transitions;
+};
+
+enum { CHILD_OK = 0, CHILD_TIMEOUT = 1, CHILD_NO_RESULT = 2, CHILD_HARNESS = 3 };
+
+static const char *child_rc_name(int rc)
+{
+    switch (rc) {
+    case CHILD_OK:        return "returned a result";
+    case CHILD_TIMEOUT:   return "DID NOT RETURN (watchdog fired)";
+    case CHILD_NO_RESULT: return "exited without a result";
+    default:              return "harness error (fork/pipe failed)";
+    }
+}
+
+/* Run `body` in a child with a deadline. CHILD_OK only when the child wrote
+ * the whole result: a child that dies, or writes a short record, is
+ * CHILD_NO_RESULT, never a silent zero-filled "pass". */
+static int run_child(void (*body)(int wfd), int timeout_ms,
+                     void *out, size_t len)
+{
+    int fds[2];
+    memset(out, 0xA5, len);     /* poison: an unwritten result cannot read 0 */
+    if (pipe(fds) != 0)
+        return CHILD_HARNESS;
+    fflush(NULL);               /* no duplicated stdio buffer in the child */
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return CHILD_HARNESS; }
+    if (pid == 0) {
+        close(fds[0]);
+        body(fds[1]);
+        _exit(0);
+    }
+    close(fds[1]);
+
+    struct pollfd pf;
+    pf.fd = fds[0];
+    pf.events = POLLIN;
+    pf.revents = 0;
+    int pr;
+    do { pr = poll(&pf, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
+
+    int rc;
+    if (pr == 0) {
+        kill(pid, SIGKILL);
+        rc = CHILD_TIMEOUT;
+    } else if (pr < 0) {
+        kill(pid, SIGKILL);
+        rc = CHILD_HARNESS;
+    } else {
+        size_t got = 0;
+        while (got < len) {
+            ssize_t k = read(fds[0], (char *)out + got, len - got);
+            if (k <= 0) break;
+            got += (size_t)k;
+        }
+        rc = (got == len) ? CHILD_OK : CHILD_NO_RESULT;
+    }
+    close(fds[0]);
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    return rc;
+}
+
+/* The fixture: `pairs` records, each a DISTINCT (from, to). Both ids are
+ * ordinary wait events (IO / Lock), so every record passes
+ * pgwt_transition_record_counts — asserted, not assumed, by 10e's
+ * below-the-bound twin. */
+static void trans_pairs_child(int wfd, int pairs)
+{
+    struct pgwt_trace_event *evs = calloc((size_t)pairs, sizeof(*evs));
+    if (!evs)
+        _exit(2);               /* CHILD_NO_RESULT, never a zeroed pass */
+    for (int i = 0; i < pairs; i++) {
+        evs[i].pid          = 4242;
+        evs[i].old_event    = EV(CLASS_IO,   (uint32_t)(i >> 7));
+        evs[i].new_event    = EV(CLASS_LOCK, (uint32_t)(i & 127));
+        evs[i].timestamp_ns = WFROM + (uint64_t)i;
+        evs[i].duration_ns  = 1000;
+        evs[i].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+    }
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_transitions_result tr;
+    pgwt_compute_transitions(evs, pairs, &f, 50, &tr);
+
+    struct trans_probe r;
+    r.num_rows          = tr.num_rows;
+    r.total_rows        = tr.total_rows;
+    r.total_transitions = tr.total_transitions;
+    free(tr.rows);
+    free(evs);
+    if (write(wfd, &r, sizeof(r)) != (ssize_t)sizeof(r))
+        _exit(3);
+}
+
+static void child_full_table(int wfd) { trans_pairs_child(wfd, TRANS_FULL_PAIRS); }
+static void child_safe_table(int wfd) { trans_pairs_child(wfd, TRANS_SAFE_PAIRS); }
+
+/* Watchdog controls. `volatile` so the spin cannot be optimised away. */
+static volatile unsigned long spin_sink;
+static void child_spin_forever(int wfd) { (void)wfd; for (;;) spin_sink++; }
+static void child_prompt_result(int wfd)
+{
+    struct trans_probe r = { 11, 22, 33 };
+    if (write(wfd, &r, sizeof(r)) != (ssize_t)sizeof(r)) _exit(3);
+}
+static void child_exit_silently(int wfd) { (void)wfd; _exit(9); }
+static void child_short_write(int wfd)
+{
+    char half[sizeof(struct trans_probe) / 2] = {0};
+    if (write(wfd, half, sizeof(half)) != (ssize_t)sizeof(half)) _exit(3);
+}
+
+static void test_transitions_table_full(void)
+{
+    printf("--- 10. #461: transitions probe loop terminates on a full table ---\n");
+
+    struct trans_probe r;
+
+    /* 10b. The watchdog FIRES on a child that never finishes. Without this,
+     * a watchdog wired to a deadline it can never reach would report every
+     * hang as a pass — the exact false negative this gate exists to avoid. */
+    int rc = run_child(child_spin_forever, 1500, &r, sizeof(r));
+    CHECK(rc == CHILD_TIMEOUT,
+          "10b control: the watchdog FIRES on a child that never returns");
+
+    /* 10c. …and does NOT fire on one that answers promptly. */
+    rc = run_child(child_prompt_result, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_OK && r.num_rows == 11 && r.total_rows == 22 &&
+          r.total_transitions == 33,
+          "10c control: a prompt child is CHILD_OK and its result arrives "
+          "intact");
+
+    /* 10d. A child that produces NOTHING is not a pass. Two shapes: a silent
+     * exit, and a truncated record. Both must be CHILD_NO_RESULT — a gate
+     * that reads an unwritten buffer as zeros approves absence. */
+    rc = run_child(child_exit_silently, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_NO_RESULT,
+          "10d control: a child that exits without writing is NO_RESULT, not OK");
+    rc = run_child(child_short_write, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_NO_RESULT,
+          "10d control: a child that writes a PARTIAL result is NO_RESULT");
+
+    /* 10e-pre. The fixture shape is admitted by the transition filter. This
+     * runs BELOW the table bound, so it passes on the broken tree too — it
+     * is the control that says 10e's failure is about FULLNESS and not
+     * about a fixture the reducer throws away. */
+    rc = run_child(child_safe_table, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_OK,
+          "10e-pre: 4000 distinct pairs (below the 4096 bound) return");
+    if (rc == CHILD_OK) {
+        CHECK_U64(r.total_rows, TRANS_SAFE_PAIRS,
+                  "…and every one of them is a row (the filter admits this "
+                  "fixture)");
+        CHECK_U64(r.total_transitions, TRANS_SAFE_PAIRS,
+                  "…and every record is counted");
+    }
+
+    /* 10e. THE DEFECT. 4097 distinct pairs — one past the 4096-slot table. */
+    rc = run_child(child_full_table, 20000, &r, sizeof(r));
+    if (rc != CHILD_OK)
+        printf("  (child outcome: %s)\n", child_rc_name(rc));
+    CHECK(rc == CHILD_OK,
+          "10e: 4097 distinct (from,to) pairs — one more than the 4096-slot "
+          "table — and pgwt_compute_transitions RETURNS");
+    if (rc == CHILD_OK) {
+        CHECK_U64(r.total_rows, TRANS_FULL_PAIRS,
+                  "…with every distinct pair present (no silently dropped "
+                  "edge: a graph quietly missing links is the other way this "
+                  "could be 'fixed')");
+        CHECK_U64(r.total_transitions, TRANS_FULL_PAIRS,
+                  "…and every record counted");
+        CHECK_U64(r.num_rows, 50,
+                  "…and max_rows still caps the returned rows at 50");
+    } else {
+        /* Keep the assertion count stable whichever way 10e goes, so the
+         * floor below cannot be satisfied by a shorter run. */
+        CHECK(0, "…total_rows unavailable: the reducer did not return");
+        CHECK(0, "…total_transitions unavailable: the reducer did not return");
+        CHECK(0, "…num_rows unavailable: the reducer did not return");
+    }
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -1224,12 +1450,15 @@ int main(void)
     test_rank_reversing_boundary();
     test_tie_break_is_identity();
     test_query_avg_needs_exact_evidence();
+    test_transitions_table_full();
 
     /* A suite that ran no assertions is a suite that proved nothing. The
      * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
      * assertions, and a floor left at 80 would have let any one of the three
-     * silently stop running. */
-    if (checks < 130) {
+     * silently stop running. Section 10 (#461) adds 11 -- and its 10e branch
+     * asserts the SAME number of times whichever way the child goes, so a
+     * hang cannot satisfy the floor by running fewer checks. */
+    if (checks < 141) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;
