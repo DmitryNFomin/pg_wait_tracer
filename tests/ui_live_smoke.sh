@@ -131,6 +131,10 @@ if [[ -z "$DIAG_TABS" && -n "$DIAG_TICKS" ]]; then
     exit 1
 fi
 
+PORT="${PGWT_UI_LIVE_PORT:-8384}"
+# Refuse before PG discovery, sysctl changes, workloads, or capture.
+bridge_port_state "$PORT" || exit 1
+
 if [[ -z "$PM_PID" ]]; then
     if [[ -n "$PG_MAJOR" ]]; then
         PM_PID=$(find_postmaster --pg-version "$PG_MAJOR")
@@ -225,7 +229,6 @@ echo "ui_live_smoke: ssh host-key trust OK"
 # all and legitimately render empty. Override for local iteration only --
 # never lower this in a gating run.
 DURATION_S="${PGWT_UI_LIVE_DURATION_S:-1800}"
-PORT="${PGWT_UI_LIVE_PORT:-8384}"
 
 TRACE_DIR=$(mktemp -d /tmp/pgwt_ui_live_XXXXXX)
 DAEMON_LOG=$(mktemp /tmp/pgwt_ui_live_daemon_XXXXXX.log)
@@ -236,6 +239,7 @@ SOCK="$TRACE_DIR/pgwt.sock"
 
 TRACER_PID=""
 BRIDGE_PID=""
+WALK_PID=""
 WORKLOAD_PID=""
 PGBENCH_PID=""
 SMOKE_RC=1
@@ -243,14 +247,17 @@ SMOKE_RC=1
 # stop_pid: bounded wait (signal, poll, KILL) -- live_daemon_lib.sh. The
 # bridge gets SIGINT specifically (see cleanup()).
 cleanup() {
+    local cleanup_failed=0
+    trap '' INT TERM
     # Reverse start order. The bridge gets SIGINT specifically: web/main.go
     # only handles os.Interrupt (SIGINT), not SIGTERM -- a plain TERM would
     # kill the bridge process without it ever calling bridge.Close(), which
     # is what tears down its ssh/pgwt-server child. An orphaned pgwt-server
     # inherits the flock fd and blocks every later box-check (review item 4).
+    stop_pid "$WALK_PID" 10
     stop_pid "$WORKLOAD_PID" 10
     stop_pid "$PGBENCH_PID" 10
-    stop_pid "$BRIDGE_PID" 10 INT
+    stop_bridge "$BRIDGE_PID" || cleanup_failed=1
     stop_pid "$TRACER_PID" 15
 
     echo "ui_live_smoke: daemon log tail:"
@@ -270,7 +277,7 @@ cleanup() {
     local leftover=""
     leftover="$(pgrep -f "$TRACE_DIR" 2>/dev/null || true)"
     local pid
-    for pid in "$PGBENCH_PID" "$WORKLOAD_PID" "$BRIDGE_PID" "$TRACER_PID"; do
+    for pid in "$WALK_PID" "$PGBENCH_PID" "$WORKLOAD_PID" "$BRIDGE_PID" "$TRACER_PID"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             leftover="$leftover"$'\n'"$pid"
         fi
@@ -278,15 +285,25 @@ cleanup() {
     leftover="$(echo "$leftover" | sed '/^$/d')"
 
     rm -rf "$TRACE_DIR"
-    rm -f "$DAEMON_LOG" "$BRIDGE_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG"
+    local bridge_result="$PROJECT_DIR/tests/results/ui_live/bridge.log"
+    mkdir -p "$(dirname "$bridge_result")"
+    if cp "$BRIDGE_LOG" "$bridge_result"; then
+        rm -f "$BRIDGE_LOG"
+        echo "ui_live_smoke: retained bridge log at $bridge_result"
+    else
+        echo "ERROR: could not retain bridge log; original kept at $BRIDGE_LOG" >&2
+        cleanup_failed=1
+    fi
+    rm -f "$DAEMON_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG"
 
     if [[ -n "$leftover" ]]; then
         echo "ERROR: processes from this run survived teardown (would block every later box-check via the flock fd):"
         echo "$leftover" | while read -r p; do
             [[ -n "$p" ]] && ps -o pid,ppid,cmd -p "$p" 2>/dev/null
         done
-        exit 1
+        cleanup_failed=1
     fi
+    [[ "$cleanup_failed" == 0 ]] || exit 1
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -363,25 +380,12 @@ echo "ui_live_smoke: control socket ready"
 
 # ── 3. Go bridge ─────────────────────────────────────────────────────────────
 echo "ui_live_smoke: starting Go bridge on :$PORT against root@localhost"
-"$BRIDGE" --port "$PORT" --trace-dir "$TRACE_DIR" --server-path "$SERVER" \
+run_bridge "$BRIDGE" --port "$PORT" --trace-dir "$TRACE_DIR" --server-path "$SERVER" \
     root@localhost >"$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID=$!
 
 BASE_URL="http://localhost:$PORT/"
-for _ in $(seq 1 60); do
-    if url_ready "${BASE_URL}session"; then
-        break
-    fi
-    if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
-        echo "ERROR: bridge exited during startup:"
-        tail -n 40 "$BRIDGE_LOG"
-        exit 1
-    fi
-    sleep 0.5
-done
-if ! url_ready "${BASE_URL}session"; then
-    echo "ERROR: bridge never answered ${BASE_URL}session"
-    tail -n 40 "$BRIDGE_LOG"
+if ! wait_bridge_ready "${BASE_URL}session" "$PORT" "$BRIDGE_PID" "$BRIDGE_LOG"; then
     exit 1
 fi
 echo "ui_live_smoke: bridge ready at $BASE_URL"
@@ -409,14 +413,19 @@ if [[ -n "$DIAG_TABS" ]]; then
                --workload-pid "$WORKLOAD_PID" --diag-data --tabs "$DIAG_TABS"
                --out-dir "$SCRIPT_DIR/results/ui_live_diag")
     [[ -n "$DIAG_TICKS" ]] && diag_args+=(--ticks "$DIAG_TICKS")
-    python3 "$SCRIPT_DIR/ui_live_smoke.py" "${diag_args[@]}"
+    python3 "$SCRIPT_DIR/ui_live_smoke.py" "${diag_args[@]}" &
+    WALK_PID=$!
+    wait "$WALK_PID"
     DIAG_RC=$?
     echo "ui_live_smoke: diagnostic walk rc=$DIAG_RC (artifacts: $SCRIPT_DIR/results/ui_live_diag)"
     exit "$DIAG_RC"
 fi
 
 python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
-    --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"
+    --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" &
+WALK_PID=$!
+# Bash defers traps during a foreground command; wait is interruptible.
+wait "$WALK_PID"
 SMOKE_RC=$?
 
 # ── 5. Self-test (issue #224 bypass suite; issue #252 review round 1
@@ -439,7 +448,9 @@ echo "ui_live_smoke: self-test -- injecting a synthetic blink and confirming the
 python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
     --out-dir "$SCRIPT_DIR/results/ui_live_self_test" \
-    --inject-blink-ms 400
+    --inject-blink-ms 400 &
+WALK_PID=$!
+wait "$WALK_PID"
 SELF_TEST_RC=$?
 if [[ "$SELF_TEST_RC" -ne 0 ]]; then
     echo "ui_live_smoke: SELF-TEST FAILED (rc=$SELF_TEST_RC) -- the gate could not prove it still catches an injected blink; see results/ui_live_self_test/summary.json"

@@ -201,6 +201,9 @@ run python3 tests/test_ui_live_smoke_failure.py --snapshot-js
 # could be complete and still produce nothing during a rehearsal. Asserts the
 # whole thread (CLI flag -> _run_passes -> every run_tab call) with run_tab
 # replaced by a recorder: no browser, no network, milliseconds.
+step "python: harness ownership, box argv, teardown and Overview REDs (#544/#546)"
+run python3 tests/test_harness_ownership.py
+
 step "python: rehearsal --diag-data wiring (#384)"
 run python3 tests/test_demo_rehearsal_diag.py
 
