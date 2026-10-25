@@ -21,7 +21,6 @@ Usage: python3 tests/test_web_ui.py
   (No root, no PG, no SSH needed — uses mock_server.py)
 """
 import collections
-import importlib.util
 import json
 import os
 import re
@@ -30,6 +29,11 @@ import sys
 import subprocess
 import time
 import signal
+
+# Shared DOM assertion only; importing the recorder pulls in image dependencies.
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '../scripts')))
+from compare_presets import assert_compare_presets_reachable
 
 # Playwright import
 try:
@@ -3957,16 +3961,6 @@ def test_b5_metrics_panel(page):
 def test_compare_preset_reachability(page):
     """#549: the walk's DOM assertion must reject unreachable preset choices."""
     print('--- Test U4.9: Preset reachability against short served traces ---')
-    scripts_dir = os.path.abspath(
-        os.path.join(os.path.dirname(MOCK_SCRIPT), '../scripts'))
-    # demo-walk-record.py imports its own sibling lib by bare name, so the
-    # scripts dir has to be importable before exec_module runs it.
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    spec = importlib.util.spec_from_file_location(
-        'compare_walk', os.path.join(scripts_dir, 'demo-walk-record.py'))
-    walk = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(walk)
     for span in (35 * 60 * 10**9, 20 * 10**9, 500_000_000):
         # Change the served info response, never the client's state. Other
         # commands still use the normal fixture, as in the existing tests.
@@ -3994,9 +3988,9 @@ def test_compare_preset_reachability(page):
             p.evaluate("([a,b]) => location.hash = `tab=overview&from=${a}&to=${b}`", [a, b])
             p.wait_for_function('a => window.__pgwt.timeRange.from === a', arg=a)
             try:
-                evidence = walk.assert_compare_presets_reachable(p)
+                evidence = assert_compare_presets_reachable(p)
                 check(bool(evidence['offsets']), f'reachable presets for {span} ns: {evidence["offsets"]}')
-            except walk.Refusal as exc:
+            except AssertionError as exc:
                 check(False, str(exc))
                 continue
             # Prove the walk assertion rejects a real, enabled dead end.
@@ -4010,9 +4004,9 @@ def test_compare_preset_reachability(page):
             # Keep this menu open: the assertion must inspect existing DOM,
             # rather than refresh away a defective choice before checking it.
             try:
-                walk.assert_compare_presets_reachable(p)
+                assert_compare_presets_reachable(p)
                 check(False, 'walk accepted an injected unreachable preset')
-            except walk.Refusal as exc:
+            except AssertionError as exc:
                 check('unreachable' in str(exc), 'walk rejects an enabled unreachable preset')
             # Click a real preset and verify the existing predates detector,
             # then re-open across a range change (All has no earlier history).
@@ -4029,7 +4023,7 @@ def test_compare_preset_reachability(page):
                   'open picker updates when All leaves no earlier history')
             check(bool(p.inner_text('.compare-presets').strip()), 'no-history explanation is visible')
             p.click('#compare-btn')
-            check(not walk.assert_compare_presets_reachable(p)['offsets'],
+            check(not assert_compare_presets_reachable(p)['offsets'],
                   'walk accepts explained absence of presets for the full trace')
             # Custom offsets remain available, including honest predates notes.
             p.click('#compare-btn')

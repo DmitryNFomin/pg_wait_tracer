@@ -19,6 +19,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
+from compare_presets import assert_compare_presets_reachable
 from demo_walk_record_lib import (Refusal, chart_change, compose, coverage, frame_indices,
                                   MOTION_LEVEL, sample_indices, save_walk, write_analysis, write_gif,
                                   young_capture_refusal)
@@ -216,46 +217,6 @@ def reassert_archived_window(page):
     page.locator("#time-range").click()
     page.locator('#time-picker button[data-range="0"]').click()
     page.wait_for_timeout(200)
-
-
-def assert_compare_presets_reachable(page):
-    """Inspect the actual picker against this connection's trace and range.
-
-    Run on every tab of both real and mock walks. Counts alone cannot prove
-    that any offered baseline can be used (#549).
-    """
-    if not page.locator('#compare-picker').is_visible():
-        page.locator('#compare-btn').click()
-    try:
-        evidence = page.evaluate("""() => {
-            const {server, timeRange} = window.__pgwt;
-            const visible = el => el.getClientRects().length > 0 &&
-                getComputedStyle(el).visibility !== 'hidden';
-            return {
-                trace: [server.fromNs, server.toNs],
-                range: [timeRange.from, timeRange.to],
-                offsets: [...document.querySelectorAll('#compare-picker [data-b-offset]')]
-                    .filter(el => visible(el) && !el.disabled)
-                    .map(el => Number(el.dataset.bOffset)),
-                explanation: document.querySelector('.compare-presets').innerText.trim(),
-            };
-        }""")
-    finally:
-        page.locator('#compare-btn').click()
-    start, end = evidence['trace']
-    a, b = evidence['range']
-    offsets = evidence['offsets']
-    invalid = [off for off in offsets if not (
-        math.isfinite(off) and off < 0 and off == int(off)
-        and abs(off) <= 2**53 - 1 and start <= a + off < b + off <= end)]
-    if invalid:
-        raise Refusal(2, f"compare presets unreachable: {invalid}; {evidence}")
-    if not offsets:
-        if a > start and 0 < b - a <= end - start:
-            raise Refusal(2, f"compare offers no reachable preset despite available history: {evidence}")
-        if not evidence['explanation']:
-            raise Refusal(2, f"compare needs an explanation when no earlier baseline fits: {evidence}")
-    return evidence
 
 
 def navigate(page, tab, smoke, capture, timeout, archived=False):
@@ -965,7 +926,10 @@ def record(args, staging):
             for tab in smoke.lib.TABS:
                 print(f"Recording {tab}: {dwells[tab]:g}s",flush=True)
                 navigate(page,tab,smoke,capture,args.timeout,args.archived)
-                compare_presets = assert_compare_presets_reachable(page)
+                try:
+                    compare_presets = assert_compare_presets_reachable(page)
+                except AssertionError as exc:
+                    raise Refusal(2, str(exc)) from exc
                 if tab == "overview":
                     headline_crop = [[rect(page,"#aas-chart-container")],
                                      table_crop(page,["name","ms","pct","aas"])]
