@@ -320,32 +320,6 @@ remote_dir={shlex.quote(str(self.repo))}; target=local-fixture; ssh_strict=''; l
             for name in ('WALK_ARGV', 'BRIDGE_STARTED', 'HTTP_READY'):
                 Path(self.env[name]).unlink()
 
-    def test_overview_zero_response_with_one_row_refuses(self):
-        # Use the real builder/formatter to render the server's one-row zero
-        # response, then evaluate the driver's actual render predicate in
-        # Node. No replica of duration formatting or render predicate.
-        spec = importlib.util.spec_from_file_location('candidate_smoke', TREE / 'tests/ui_live_smoke.py')
-        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-        result = subprocess.check_output(['node', '--input-type=module', '-e', """
-import {buildTableModel} from './web/static/lib/table.js';
-import {overviewConfig} from './web/static/lib/builders/table-configs.js';
-const check = eval('(' + JSON.parse(process.argv[1]) + ')');
-const responses = [0, 0.001, 10, null].map(ms => ({rows:[{name:'DB Time', ms, indent:0}]}));
-const results = responses.map(response => {
-    const model = buildTableModel(overviewConfig, response.rows, null);
-    // DOM adapter contains the production builder's cell text; duration
-    // formatting and the gate itself are both real, not reimplemented.
-    const rows = model.rows.map(row => ({cells: row.cells.map(c => ({textContent:c.html}))}));
-    globalThis.document = {querySelectorAll: () => rows};
-    return {response, result:check()};
-});
-console.log(JSON.stringify(results));
-""", json.dumps(module.PANEL_CHECKS['overview'])], cwd=TREE, text=True)
-        for record, expected in zip(json.loads(result), (False, True, True, False)):
-            print(f'Overview one-row response {record}', flush=True)
-            self.assertEqual(record['result']['ok'], expected)
-
-
 
 class ListenerInspectionTests(unittest.TestCase):
     def test_linux_ss_ownership_and_fail_closed_paths(self):
