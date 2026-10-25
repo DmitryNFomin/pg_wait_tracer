@@ -513,6 +513,51 @@ def verdict(window, routes, raw_fields, summary_fields, expected,
     return ok, lines, findings
 
 
+def stale_verdict(window, routes, stale_fields, summary_fields, stderr_text,
+                  version, summary_files, is_control=False):
+    """The version-refused arm must return the COMPLETE fresh-arm answer.
+
+    No expected-divergence table applies here, including during --record.
+    The short premise control requires raw/raw; every long window still
+    requires raw/summary, using the same fail-closed route proof as verdict.
+    """
+    if is_control:
+        lines = ["--- window %s stale-version premise control ---" % window,
+                 "  routes: stale-side=%s summary-side=%s"
+                 % (routes.get("raw"), routes.get("summary"))]
+        ok = routes == {"raw": ROUTE_RAW, "summary": ROUTE_RAW}
+        if not ok:
+            lines.append("  FAIL stale premise control: both routes must be raw")
+        problems = (vacuity_problems(stale_fields, "stale")
+                    + vacuity_problems(summary_fields, "summary"))
+        lines.extend("  FAIL vacuous: " + p for p in problems)
+        ok = ok and not problems
+        findings = compare(stale_fields, summary_fields, {})
+        for f in findings:
+            if f.status != AGREE:
+                lines.append(f.line())
+                ok = False
+        lines.append("  %d fields compared; stamping headers %s change the "
+                     "raw answer" % (len(findings), "does NOT" if ok else "DOES"))
+        return ok, lines, findings
+
+    ok, lines, findings = verdict(
+        window + " stale-version", routes, stale_fields, summary_fields, {},
+        fallbacks={"raw": fallback_reason(stderr_text)})
+    # Require the WHOLE version-preflight diagnostic, with positive counts
+    # matching the files we stamped. A generic raw fallback is insufficient:
+    # "no summary file covers this window" is the different #403 failure.
+    marker = ("INFO: %d of %d summary file(s) covering this window are not "
+              "summary v%d -- recomputing from raw events"
+              % (summary_files, summary_files, version))
+    if (summary_files <= 0 or marker not in (stderr_text or "").splitlines()
+            or FALLBACK_MARKERS[0] in (stderr_text or "")):
+        lines.append("  FAIL stale-version marker: expected %r; got %r"
+                     % (marker, fallback_reason(stderr_text)))
+        ok = False
+    return ok, lines, findings
+
+
 def record_table(findings):
     """The expected-divergence table for the divergences just measured, ready
     to paste into the gate. Used by `--record` after a deliberate fix or

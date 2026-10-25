@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """test_summary_raw_parity.py — THE SUMMARY-vs-RAW PARITY GATE.
 
-The same capture, the same unfiltered window, answered BOTH ways, asserted to
-agree. See tests/summary_raw_parity_lib.py's header for what is compared and
-for every refuse-rather-than-approve rule; this file is the live half.
+The same capture, the same unfiltered window, answered through fresh-summary,
+missing-summary raw, and stale-version raw arms. See the library for what is
+compared and for every refuse-rather-than-approve rule; this is the live half.
 
 HOW THE RAW REFERENCE IS OBTAINED, AND WHY THIS WAY
 ─────────────────────────────────────────────────────────────────────────────
@@ -28,6 +28,12 @@ files are deleted. src/server.c then refuses the summary path for that window
 #402/#403 fix) and answers from raw events. The two dirs hold byte-identical
 trace files, so the raw side's inputs are exactly the summary side's inputs.
 
+A third copy retains its summaries but stamps every file header to
+PGWT_SUMMARY_VERSION - 1, following test_open_cpu_accounting.c's set_version.
+Its long-window route must be raw, with the ACCOUNTING-VERSION PREFLIGHT INFO
+marker (never the no-file marker), and EVERY compared field must equal the
+fresh summary answer. Existing expected divergences do not exempt this arm.
+
 That premise is not assumed — it is asserted, by the PREMISE CONTROL below:
 at a 59 s window BOTH dirs take the raw path, and their answers must be
 IDENTICAL on every compared field. If deleting the summary files changed the
@@ -45,6 +51,10 @@ the server's own raw-fallback stderr markers. Same route on both sides, or an
 undeterminable route, FAILS the gate before any number is compared. Run with
 --sabotage to see that happen: both sides are pointed at the summary-less dir,
 every number then agrees perfectly, and the gate still goes red.
+--sabotage-stale-fallback injects an incomplete numeric answer after the REAL
+stale fallback and oracle have run: it zeroes only that answer's measured CPU
+scalar. Routes, preflight markers, rows and DB Time stay intact, so the new
+arm must reject it on numeric completeness rather than refusal or vacuity.
 
 WHERE THIS RUNS
 ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +69,8 @@ import glob
 import json
 import os
 import shutil
+import signal
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -306,9 +318,35 @@ def summary_format_version():
     return "unknown"
 
 
+def set_version(trace_dir, current_version):
+    """Port the C set_version helper: validate and rewrite only file headers.
+
+    pgwt_trace_file_header is packed (event_writer.h), with uint32 magic,
+    uint16 version/flags, uint32 pg_version and two uint64 clock fields.
+    Summary blocks and all raw files remain byte-identical to the fresh copy.
+    """
+    header = struct.Struct("=IHHIQQ")
+    paths = sorted(glob.glob(os.path.join(trace_dir, "*.summary")))
+    if not paths:
+        raise RuntimeError("no summary headers to stamp stale")
+    if glob.glob(os.path.join(trace_dir, "*.summary.lz4")):
+        raise RuntimeError("fixture has archived summaries; refuse to leave "
+                           "an unstamped header")
+    for path in paths:
+        with open(path, "r+b") as f:
+            values = list(header.unpack(f.read(header.size)))
+            if values[0] != 0x53574750 or values[1] != current_version:
+                raise RuntimeError("not a current summary header: %s" % path)
+            values[1] = current_version - 1
+            f.seek(0)
+            f.write(header.pack(*values))
+    return [os.path.basename(p) for p in paths]
+
+
 def main():
     record = "--record" in sys.argv
     sabotage = "--sabotage" in sys.argv
+    sabotage_stale = "--sabotage-stale-fallback" in sys.argv
 
     tool_problems = P.require_tools([SERVER_BIN, GEN_BIN])
     if tool_problems:
@@ -321,6 +359,7 @@ def main():
     os.makedirs(RESULT_DIR, exist_ok=True)
     sum_dir = generate_traces(build_capture())
     raw_dir = sum_dir + "_rawref"
+    stale_dir = sum_dir + "_stalever"
     shutil.copytree(sum_dir, raw_dir)
     removed = sorted(glob.glob(os.path.join(raw_dir, "*.summary*")))
     for f in removed:
@@ -338,6 +377,7 @@ def main():
 
     ok = True
     report = {"commit_fixture": "synthetic", "sabotage": sabotage,
+              "sabotage_stale_fallback": sabotage_stale,
               "summary_format_version": summary_format_version(),
               "summary_files_present": sorted(
                   os.path.basename(p) for p in glob.glob(
@@ -347,6 +387,13 @@ def main():
     recorded = {}
     lines = []
     try:
+        version = int(summary_format_version())
+        if version <= 1:
+            raise RuntimeError("summary version must have a predecessor")
+        shutil.copytree(sum_dir, stale_dir)
+        stamped = set_version(stale_dir, version)
+        report["stale_summary_version"] = version - 1
+        report["stale_summary_files"] = stamped
         for name, (frm, to) in list(WINDOWS.items()) + [CONTROL_WINDOW]:
             is_control = (name == CONTROL_WINDOW[0])
             r_ans, r_oracle, r_err = ask(
@@ -354,6 +401,14 @@ def main():
             s_ans, s_oracle, s_err = ask(
                 sum_dir_used, frm, to,
                 os.path.join(RESULT_DIR, "err_%s_sum" % name))
+            t_ans, t_oracle, t_err = ask(
+                stale_dir, frm, to,
+                os.path.join(RESULT_DIR, "err_%s_stale" % name))
+            if sabotage_stale and not is_control:
+                if t_ans["time_model"].get("cpu_ms", 0) <= 0:
+                    raise RuntimeError("stale sabotage needs nonzero measured CPU")
+                t_ans["time_model"]["cpu_ms"] = 0
+                lines.append("SABOTAGE stale fallback answer: cpu_ms=0")
             # Below the 120 s threshold the raw path is taken on length alone
             # and no fallback line is printed, so the control window's routes
             # are classified by the oracle alone (see classify_route).
@@ -405,6 +460,21 @@ def main():
                              if f.status != P.AGREE],
                 "fields_compared": len(findings),
             }
+            t_routes = {"raw": P.classify_route(
+                t_oracle, t_err, marker_expected=not is_control),
+                "summary": routes["summary"]}
+            t_ok, t_lines, t_findings = P.stale_verdict(
+                name, t_routes, P.extract_all(t_ans), s_fields, t_err,
+                version, len(stamped), is_control=is_control)
+            ok = ok and t_ok
+            lines.extend(t_lines)
+            report["windows"][name]["stale"] = {
+                "ok": t_ok, "routes": t_routes,
+                "fallback": P.fallback_reason(t_err),
+                "findings": [f.as_dict() for f in t_findings
+                             if f.status != P.AGREE],
+                "fields_compared": len(t_findings),
+            }
             if not is_control:
                 tbl = P.record_table(findings)
                 for field, entry in tbl.items():
@@ -413,6 +483,7 @@ def main():
     finally:
         cleanup_traces(sum_dir)
         cleanup_traces(raw_dir)
+        cleanup_traces(stale_dir)
 
     print("=== test_summary_raw_parity ===")
     for l in lines:
@@ -423,6 +494,11 @@ def main():
     print("artifact: %s" % os.path.join(RESULT_DIR, "summary.json"))
 
     if record:
+        # Recording may update the historical raw/summary pins, never excuse
+        # a broken third arm (or a failed route/premise control).
+        if not ok:
+            print("REFUSING to record: parity or stale-version proof failed")
+            return 1
         orphans = unexplained(recorded)
         if orphans:
             for w, field in orphans:
@@ -441,4 +517,17 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Includes generation and ServerHarness.start()'s initial blocking read,
+    # which a per-query timeout would miss. Missing tools already FAIL above.
+    def deadline(signum, frame):
+        raise TimeoutError("parity gate exceeded 120 seconds")
+
+    signal.signal(signal.SIGALRM, deadline)
+    signal.alarm(120)
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print("FAIL summary/raw parity: %s" % exc)
+        sys.exit(1)
+    finally:
+        signal.alarm(0)
