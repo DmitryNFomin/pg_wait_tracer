@@ -472,6 +472,48 @@ export function createOverviewOrder() {
     return { apply, reset };
 }
 
+/* #576: the Events table's %DB column summed short of 100% on a measured-CPU
+ * response -- the CPU* row carries measured on-CPU time only (#553), so the
+ * off-CPU runqueue remainder (offcpu_ms) is inside db_time_ms but on no row
+ * at all, and every row's %DB still reads "share of DB Time" against the
+ * full total. src/server.c's dump_summary (server.c ~:7736) closes the
+ * identical gap with a synthetic "CPU (waiting for a core)" row gated on
+ * ev.has_measured_cpu; this mirrors that for the browser table, same name,
+ * same gate.
+ *
+ * has_measured_cpu is false on sampled/v2 data AND on the v7/v8 summary
+ * routing (#408) -- the CPU* row there IS the unsplit on-CPU gap wall, so
+ * offcpu_ms is always 0 and this never fires until a response actually
+ * carries the measured split (the v9 epoch, #424, lands it on the default
+ * live view). A 0 (or missing/non-finite) offcpu_ms adds no row either --
+ * printing a 0.0 "CPU (waiting for a core)" row would claim a measured-zero
+ * remainder when has_measured_cpu alone does not guarantee one exists this
+ * window.
+ *
+ * Unknown fields on the synthetic row (count, avg_us, every percentile, aas)
+ * are null, not fabricated: this is a residual duration, not an observed
+ * wait with its own sessions/latencies/occupancy -- every formatter in
+ * eventsConfig already renders null as "—" (fmtCount/fmtUs/fmtAas/pctlCell),
+ * so no column needs special-casing for this one extra row. */
+export function addCpuWaitingRow(data) {
+    const rows = (data && data.rows) || [];
+    if (!data || !data.has_measured_cpu) return rows;
+    const offcpu = data.offcpu_ms;
+    const dbTime = data.db_time_ms;
+    if (!(offcpu > 0) || !(dbTime > 0)) return rows;
+    return rows.concat([{
+        name: 'CPU (waiting for a core)',
+        event_id: null,
+        count: null,
+        total_ms: offcpu,
+        avg_us: null,
+        p50_us: null, p95_us: null, p99_us: null, max_us: null,
+        p50_overflow: false, p95_overflow: false, p99_overflow: false,
+        pct: offcpu / dbTime * 100,
+        aas: null,
+    }]);
+}
+
 export const eventsConfig = {
     columns: [
         { key: 'name', label: 'Wait Event', format: (r) => _dot(r.name) + esc(r.name) },

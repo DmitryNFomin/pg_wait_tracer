@@ -255,6 +255,63 @@ test('server-flagged truncation reaches the events model', () => {
         { omitted: 38, text: '… 38 more below threshold' });
 });
 
+// ── #576: the %DB column must sum to 100% on a measured-CPU response, the
+// same way src/server.c's dump_summary closes the gap with a synthetic
+// "CPU (waiting for a core)" row. ───────────────────────────────────────────
+
+test('#576 has_measured_cpu + offcpu_ms adds a synthetic "CPU (waiting for a core)" row', () => {
+    const data = {
+        has_measured_cpu: true, offcpu_ms: 260, db_time_ms: 1000,
+        rows: [ev({ name: 'CPU*', total_ms: 480, pct: 48 }),
+               ev({ name: 'IO:DataFileRead', total_ms: 260, pct: 26 })],
+    };
+    const m = buildEventsModel(data, null);
+    assert.equal(m.table.rows.length, 3);
+    const last = m.table.rows[2];
+    const nameHtml = last.cells[0].html;
+    assert.ok(nameHtml.includes('CPU (waiting for a core)'), nameHtml);
+    const pctHtml = last.cells.find((c, i) => m.table.headers[i].key === 'pct').html;
+    assert.ok(pctHtml.includes('26.0%'), pctHtml);   // 260/1000*100
+    // #576 is what this closes: the three rows' %DB now sum to 100, not 74.
+    const sumPct = 48 + 26 + 26;
+    assert.equal(sumPct, 100);
+});
+
+test('#576 has_measured_cpu=false (sampled/v2, and the v7/v8 summary routing '
+    + 'until the v9 epoch lands) adds NOTHING -- inert by design, not a bug',
+    () => {
+    const data = {
+        has_measured_cpu: false, offcpu_ms: 0, db_time_ms: 1000,
+        rows: [ev({ name: 'CPU*', total_ms: 480, pct: 48 })],
+    };
+    const m = buildEventsModel(data, null);
+    assert.equal(m.table.rows.length, 1);
+});
+
+test('#576 has_measured_cpu=true but offcpu_ms is 0 -- no fabricated zero row', () => {
+    const data = {
+        has_measured_cpu: true, offcpu_ms: 0, db_time_ms: 1000,
+        rows: [ev({ name: 'CPU*', total_ms: 1000, pct: 100 })],
+    };
+    const m = buildEventsModel(data, null);
+    assert.equal(m.table.rows.length, 1);
+});
+
+test('#576 the synthetic row\'s unknown columns (Count/Avg/P50/P95/P99/Max/AAS) '
+    + 'render "—", never a fabricated value', () => {
+    const data = {
+        has_measured_cpu: true, offcpu_ms: 260, db_time_ms: 1000,
+        rows: [ev({ name: 'CPU*', total_ms: 740, pct: 74 })],
+    };
+    const m = buildEventsModel(data, null);
+    const row = m.table.rows[1];
+    const byKey = {};
+    m.table.headers.forEach((h, i) => { byKey[h.key] = row.cells[i].html; });
+    for (const key of ['count', 'avg_us', 'p50_us', 'p95_us', 'p99_us', 'max_us', 'aas']) {
+        assert.ok(byKey[key].includes('—'), key + ': ' + byKey[key]);
+    }
+});
+
 test('#103 overflow percentiles reach the assembled model as ">=" bounds', () => {
     // The shape the live capture produced: a Lock row whose every percentile
     // saturated the histogram's open-ended top bucket while Avg/Max are
