@@ -785,19 +785,32 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
         }
 
         uint64_t cpu_add = add_ns, offcpu_add = 0;
+        /* Per-event-table row value (#531). `row_add` is what the TIME
+         * column of every per-event table gets (window-clipped), `row_occ`
+         * what the per-OCCURRENCE columns get (min/max/histogram, the whole
+         * occurrence). Both are wall for every wait and idle label; for the
+         * CPU* row they are the MEASURED on-CPU ns, exactly as
+         * map_reader.c's add_event_stats does on the live path. Before this,
+         * one replay invocation printed the same "CPU*" label twice with two
+         * different numbers -- wall in system_event/session_event/
+         * query_event, measured in time_model -- and src/output.c's
+         * print_offcpu_row_wide (#498) then added the off-CPU remainder on
+         * top of a row that already held the whole wall, so the view's %DB
+         * column summed past 100%. */
+        uint64_t row_add = add_ns, row_occ = occ_ns;
         if (we == 0 && !sampled && evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
             /* #495: match map_reader.c's measured CPU split and compute.c's
              * window scaling. Clamp skew before scaling; measured zero is
              * real zero, while UNKNOWN keeps legacy whole-gap CPU. Samples
-             * keep their whole sample-period weight as CPU, with no off-CPU.
-             * System/PID event tables still carry wall for the CPU row,
-             * unlike map_reader.c's add_event_stats: that known divergence
-             * remains for a separate issue. */
+             * keep their whole sample-period weight as CPU, with no
+             * off-CPU. */
             uint64_t m = evt->cpu_ns < occ_ns ? evt->cpu_ns : occ_ns;
             cpu_add = occ_ns
                 ? (uint64_t)(((unsigned __int128)m * add_ns) / occ_ns) : 0;
             if (cpu_add > add_ns) cpu_add = add_ns;
             offcpu_add = add_ns - cpu_add;
+            row_add = cpu_add;
+            row_occ = m;
         }
 
         /* Per-PID accumulation */
@@ -806,11 +819,11 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
             struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, we);
             if (es) {
                 if (closed_in_window) es->count++;
-                es->total_ns += add_ns;
+                es->total_ns += row_add;
                 if (exact && closed_in_window) {
-                    if (occ_ns < es->min_ns) es->min_ns = occ_ns;
-                    if (occ_ns > es->max_ns) es->max_ns = occ_ns;
-                    uint32_t bucket = pgwt_duration_to_bucket(occ_ns);
+                    if (row_occ < es->min_ns) es->min_ns = row_occ;
+                    if (row_occ > es->max_ns) es->max_ns = row_occ;
+                    uint32_t bucket = pgwt_duration_to_bucket(row_occ);
                     if (bucket < HISTOGRAM_BUCKETS)
                         es->histogram[bucket]++;
                 }
@@ -827,11 +840,11 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
         struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, we);
         if (se) {
             if (closed_in_window) se->count++;
-            se->total_ns += add_ns;
+            se->total_ns += row_add;
             if (exact && closed_in_window) {
-                if (occ_ns < se->min_ns) se->min_ns = occ_ns;
-                if (occ_ns > se->max_ns) se->max_ns = occ_ns;
-                uint32_t bucket = pgwt_duration_to_bucket(occ_ns);
+                if (row_occ < se->min_ns) se->min_ns = row_occ;
+                if (row_occ > se->max_ns) se->max_ns = row_occ;
+                uint32_t bucket = pgwt_duration_to_bucket(row_occ);
                 if (bucket < HISTOGRAM_BUCKETS)
                     se->histogram[bucket]++;
             }
@@ -855,10 +868,10 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                 pgwt_get_or_create_query_event(acc, evt->query_id, we);
             if (qe) {
                 if (closed_in_window) qe->count++;
-                qe->total_ns += add_ns;
+                qe->total_ns += row_add;
                 if (exact && closed_in_window) {
-                    if (occ_ns < qe->min_ns) qe->min_ns = occ_ns;
-                    if (occ_ns > qe->max_ns) qe->max_ns = occ_ns;
+                    if (row_occ < qe->min_ns) qe->min_ns = row_occ;
+                    if (row_occ > qe->max_ns) qe->max_ns = row_occ;
                 }
             }
         }
