@@ -1486,8 +1486,20 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
                 ev_ht[slot].total_ns += dur_ns;
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
                 wait_gap_cpu_ns += (double)ev->cpu_ns * frac; /* observability only */
-                if (frac > 0.0)
-                    has_measured_cpu = 1;
+                /* #575 (second defect, distinct from the row guard below):
+                 * this used to also set has_measured_cpu, which is a
+                 * DIFFERENT question — "is THIS RESPONSE's CPU row a
+                 * measurement". Measured spin inside a wait says nothing
+                 * about the on-CPU GAPS, so with an UNKNOWN gap beside such
+                 * a wait the flag went up and the gap's unmeasured wall was
+                 * labelled "CPU (running)" with a 0.0 ms runqueue sibling
+                 * beside it: an inference presented as a measurement.
+                 *
+                 * The number is not lost — it is wait_gap_cpu_ns, which is
+                 * what it always was and what the response still reports.
+                 * The summary twin's flag was already this narrow
+                 * (cpu_measured_records counts CPU observations only), so
+                 * this also makes the two routings agree. */
             }
         }
     }
@@ -1562,7 +1574,23 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     qsort(ev_accum, num_ev_accum, sizeof(ev_accum[0]), cmp_event_desc);
 
     for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
-        if (classes[c].total_ns <= 0)
+        /* #575: a class whose MEASURED total is zero can still have a
+         * non-zero runqueue remainder, and the CPU class is the only one
+         * where those are two different quantities. An all-runqueue gap
+         * (cpu_ns measured as 0 over a non-zero wall) sets
+         * classes[CPU].total_ns = 0, so this guard used to skip the class
+         * and BOTH CPU rows disappeared — while the 10 ms stayed inside DB
+         * Time, leaving a reader to conclude there had been no CPU activity
+         * when in fact there was 10 ms of waiting for a core.
+         *
+         * Only the CPU class is exempted, and only when the window actually
+         * measured its CPU and the remainder is non-zero: a class with
+         * nothing in it still emits nothing, and a window with no on-CPU gap
+         * at all gets no 0.0/0.0 pair conjured for it (has_measured_cpu is
+         * 0 there). tests/test_window_clip.c section 12d pins all three. */
+        int is_cpu_class = strcasecmp(classes[c].name, "cpu") == 0;
+        if (classes[c].total_ns <= 0 &&
+            !(is_cpu_class && has_measured_cpu && offcpu_ns > 0))
             continue;
 
         double cls_ms = classes[c].total_ns / 1e6;
@@ -2840,7 +2868,16 @@ void pgwt_compute_time_model_from_summaries(
     qsort(ctx.ev_accum, ctx.num_ev_accum, sizeof(ctx.ev_accum[0]), cmp_event_desc);
 
     for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
-        if (ctx.classes[c].total_ns <= 0) continue;
+        /* #575, the same exemption as the raw path's, for the same reason
+         * and on the same terms. It has to be here too: should_use_summaries
+         * routes an unfiltered window >= 120 s to this function, so a fix in
+         * only one of the two would make the Time Model change its answer at
+         * the threshold — pinned as an identity between the two in
+         * tests/test_window_clip.c 12a vs 12c. */
+        int is_cpu_class = strcasecmp(ctx.classes[c].name, "cpu") == 0;
+        if (ctx.classes[c].total_ns <= 0 &&
+            !(is_cpu_class && ctx.has_measured_cpu && offcpu_ns > 0))
+            continue;
 
         double cls_ms = ctx.classes[c].total_ns / 1e6;
         double pct = db_time_ms > 0 ? cls_ms / db_time_ms * 100.0 : 0;

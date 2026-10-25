@@ -113,7 +113,28 @@ static void test_nonempty_windows(void)
         struct pgwt_tm_result tm;
         pgwt_compute_time_model(events, count, &all, from, to, 10.0, &tm);
         CHECK(tm.db_time_ms > 0.0);
-        CHECK(tm.has_measured_cpu == (shape != 4));
+        /* #575: THIS TRIPWIRE FIRED AS DESIGNED, and it is updated with the
+         * fix rather than around it.
+         *
+         * It used to read `shape != 4` — i.e. "only the all-UNKNOWN window
+         * lacks a measurement" — which recorded the OLD, wider predicate:
+         * has_measured_cpu was also raised by measured spin inside a WAIT.
+         * That is a different question from "is this response's CPU row a
+         * measurement", and the difference was visible: with an UNKNOWN CPU
+         * gap beside a measured wait (shape 5), time_model labelled the
+         * gap's unmeasured wall "CPU (running)" and printed a 0.0 ms
+         * runqueue sibling next to it.
+         *
+         * The predicate now is: an in-window CPU GAP carried a measurement.
+         *   shape 3 — events[0] is turned into a LOCK, so the window has NO
+         *             on-CPU gap at all; only wait spin. -> 0
+         *   shape 4 — both records UNKNOWN.                -> 0
+         *   shape 5 — the ONLY gap is UNKNOWN; the measurement that remains
+         *             is the LOCK's spin.                  -> 0
+         * every other shape has a measured gap (including shape 2's measured
+         * ZERO, which is a signal, and shape 8's one-nanosecond overlap). */
+        CHECK(tm.has_measured_cpu ==
+              (shape != 3 && shape != 4 && shape != 5));
         if (shape == 0 || shape == 7) {
             CHECK(tm.db_time_ms == 10.0);
             CHECK(tm.cpu_ms == 3.0);
