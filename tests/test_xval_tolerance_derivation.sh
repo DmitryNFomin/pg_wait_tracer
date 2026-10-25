@@ -64,6 +64,38 @@ eq() {  # eq GOT WANT MSG
         report false "$3 (got '$1', want '$2')"; fi
 }
 
+# mk_fixture DEST SED_EXPR WHAT
+# Writes a mutated copy of $TIERED to DEST and REPORTS A FAILURE if the
+# mutation was a no-op, i.e. if DEST came out byte-identical to the source.
+#
+# This exists because of a hole found in this very file: the fixtures below
+# were originally built with `sed 's/^TOLERANCE=8.8$/.../'`, whose anchor
+# silently matches nothing on any tree whose constant is not 8.8. Run against
+# such a tree, three bypass cases quietly tested an UNMODIFIED copy and
+# "passed" by asserting nothing -- the exact false-negative shape the rest of
+# this suite is written against, reproduced inside the suite itself. An
+# unapplied mutation is now a loud failure, so a fixture can never be vacuous.
+mk_fixture() {
+    local dest="$1" expr="$2" what="$3"
+    sed "$expr" "$TIERED" > "$dest"
+    if cmp -s "$TIERED" "$dest"; then
+        report false "fixture '$what' was NOT built (the mutation matched nothing) — any assertion using it would be vacuous"
+        return 1
+    fi
+    report true "fixture built: $what"
+}
+
+# The tolerance line as this tree actually ships it, so the mutations below
+# are anchored on what is there rather than on a hard-coded value. Refuses
+# loudly if there is no single such line, which would make every fixture
+# below meaningless.
+TOL_LINE=$(grep -E '^[[:space:]]*TOLERANCE=' "$TIERED" | head -1)
+if [[ -z "$TOL_LINE" ]]; then
+    echo "FATAL: $TIERED has no TOLERANCE= line; every fixture below would be vacuous." >&2
+    exit 1
+fi
+TOL_RE="^$(printf '%s' "$TOL_LINE" | sed 's/[][\.*^$\/]/\\&/g')\$"
+
 # refuses CMD... -- true when the command exits non-zero AND prints nothing
 # on stdout. Both halves are required: a guard that exits non-zero but still
 # echoes a number can be consumed as if it had succeeded, which is how
@@ -147,17 +179,17 @@ eq "$(xval_tolerance_matches_script "$TIERED")" "8.8" \
 
 # Exactly the value master shipped, undriven, for the whole life of the tool.
 MASTER_VALUE="$TMP/tiered_master_value.sh"
-sed 's/^TOLERANCE=8.8$/TOLERANCE=10/' "$TIERED" > "$MASTER_VALUE"
+mk_fixture "$MASTER_VALUE" "s/$TOL_RE/TOLERANCE=10/" "a copy shipping master's undriven TOLERANCE=10"
 grep -q '^TOLERANCE=10$' "$MASTER_VALUE" \
-  && report true "fixture built: a copy shipping master's undriven TOLERANCE=10" \
-  || report false "fixture NOT built — the red demonstration below would be vacuous"
+  && report true "that fixture really does assign 10" \
+  || report false "the fixture does not assign 10 — the red demonstration below would be vacuous"
 refuses "TOLERANCE=10 (master's undriven value) is REJECTED by the derivation guard" \
     xval_tolerance_matches_script "$MASTER_VALUE"
 
 # And a near-miss, so the guard is shown to be checking the value rather than
 # merely the presence of a digit.
 NEAR="$TMP/tiered_near.sh"
-sed 's/^TOLERANCE=8.8$/TOLERANCE=8.9/' "$TIERED" > "$NEAR"
+mk_fixture "$NEAR" "s/$TOL_RE/TOLERANCE=8.9/" "a copy 0.1 pp off the derived bound"
 refuses "TOLERANCE=8.9 (0.1 pp off) is rejected" xval_tolerance_matches_script "$NEAR"
 
 # ─────────── 3. BYPASS SUITE: every way the guard could fail to see ─────────
@@ -190,17 +222,19 @@ refuses "a script with NO TOLERANCE assignment refuses (absent is not a pass)" \
     xval_script_tolerance "$NO_ASSIGN"
 
 COMMENTED="$TMP/commented.sh"
-sed 's/^TOLERANCE=8.8$/#TOLERANCE=8.8/' "$TIERED" > "$COMMENTED"
+mk_fixture "$COMMENTED" "s/$TOL_RE/#&/" "the TOLERANCE line commented out"
 refuses "a COMMENTED-OUT TOLERANCE refuses (disabled is not satisfied)" \
     xval_script_tolerance "$COMMENTED"
 
 INDENT_COMMENT="$TMP/indent_commented.sh"
-sed 's/^TOLERANCE=8.8$/   # TOLERANCE=8.8/' "$TIERED" > "$INDENT_COMMENT"
+mk_fixture "$INDENT_COMMENT" "s/$TOL_RE/   # &/" "the TOLERANCE line indented and commented out"
 refuses "an indented commented-out TOLERANCE refuses" \
     xval_script_tolerance "$INDENT_COMMENT"
 
 DOUBLE="$TMP/double.sh"
-sed 's/^TOLERANCE=8.8$/TOLERANCE=8.8\nTOLERANCE=99/' "$TIERED" > "$DOUBLE"
+mk_fixture "$DOUBLE" "s/$TOL_RE/&\nTOLERANCE=99/" "a second, conflicting TOLERANCE assignment"
+eq "$(grep -cE '^[[:space:]]*TOLERANCE=' "$DOUBLE")" "2" \
+   "that fixture really does carry two assignments"
 refuses "two TOLERANCE assignments refuse (ambiguous which one gates)" \
     xval_script_tolerance "$DOUBLE"
 
