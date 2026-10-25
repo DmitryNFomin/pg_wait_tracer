@@ -237,6 +237,7 @@ test_data_query_text_context.py
 # section printed that 40% as its own row. Needs ../pgwt-server and
 # gen_test_traces, exactly like test_data_query_text_context.py above.
 test_dump_report.py
+test_build_version.py
 test_ui_live_smoke_lib.py
 test_ui_live_smoke_footage.py
 test_ui_live_smoke_failure.py
