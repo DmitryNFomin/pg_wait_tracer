@@ -102,6 +102,30 @@ type Bridge struct {
 
 	done      chan struct{} // closed by Close(): stop the supervisor
 	closeOnce sync.Once
+
+	// #351: the current upstream incarnation's stderr tap, so a startup
+	// refusal reason reaches the browser and not only the terminal log.
+	// See web/refusal.go.
+	tap stderrTap
+}
+
+// stderrTap returns the tap that retains the current upstream incarnation's
+// stderr lines. Never nil: a bridge that cannot remember a refusal reason
+// could only ever report the generic disconnect, which is the #351 defect.
+func (b *Bridge) stderrTap() *stderrTap { return &b.tap }
+
+// refusalReason is the current upstream incarnation's refusal reason, or ""
+// when none was established.
+func (b *Bridge) refusalReason() string {
+	// DELIBERATELY DISCONNECTED in this commit: it is the RED half of #351.
+	return ""
+}
+
+// transportError is transportError() plus this bridge's refusal reason, so
+// every connection-level failure the browser sees can name its cause.
+func (b *Bridge) transportError(id int64, msg string) []byte {
+	// DELIBERATELY the old envelope in this commit: the RED half of #351.
+	return transportError(id, msg)
 }
 
 // NewBridge creates a bridge that supervises the command built by factory.
