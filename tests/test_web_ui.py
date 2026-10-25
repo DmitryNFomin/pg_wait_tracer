@@ -3957,9 +3957,14 @@ def test_b5_metrics_panel(page):
 def test_compare_preset_reachability(page):
     """#549: the walk's DOM assertion must reject unreachable preset choices."""
     print('--- Test U4.9: Preset reachability against short served traces ---')
+    scripts_dir = os.path.abspath(
+        os.path.join(os.path.dirname(MOCK_SCRIPT), '../scripts'))
+    # demo-walk-record.py imports its own sibling lib by bare name, so the
+    # scripts dir has to be importable before exec_module runs it.
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
     spec = importlib.util.spec_from_file_location(
-        'compare_walk', os.path.join(os.path.dirname(MOCK_SCRIPT),
-                                    '../scripts/demo-walk-record.py'))
+        'compare_walk', os.path.join(scripts_dir, 'demo-walk-record.py'))
     walk = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(walk)
     for span in (35 * 60 * 10**9, 20 * 10**9, 500_000_000):
@@ -4090,11 +4095,30 @@ def test_compare_live_offset_follow(page):
 def test_compare_fidelity_mismatch(page):
     """D4: exact A vs sampled B renders deltas with a persistent warning."""
     print("--- Test U4.3: Compare fidelity mismatch ---")
-    _enable_compare_5m(page)
+    page.goto(COMPARE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    # The mock advances NOW on every info request, including other tests',
+    # but classifies B against a fixed trace-end cutoff. Anchor this evidence
+    # test to the served trace, so earlier tests cannot age B into exact AAS.
+    # U4.2 separately covers live follow; use the real URL + custom control.
+    end_ns = page.evaluate("window.__pgwt.server.toNs")
+    _enable_compare_5m(page, COMPARE_URL +
+                      f"#tab=overview&from={end_ns - 900_000_000_000}&to={end_ns}")
     text = page.text_content("#compare-header")
-    check("A Exact" in text and "B Sampled" in text,
+    expected_header = ("A vs 5 min agoA ExactB Sampled (estimated)"
+                       "⚠ Δ compares exact against sampled estimates")
+    check(text == expected_header,
           f"compare header keeps both fidelity badges ('{text}')")
-    check("Δ compares exact against sampled estimates" in text,
+
+    # Persistence is observable: restoring the same comparison must keep
+    # the explicit warning visible, with its complete text unchanged.
+    page.reload()
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_selector("#compare-header", state="visible")
+    page.wait_for_timeout(1000)
+    warning = page.locator("#compare-header .compare-warning")
+    check(warning.count() == 1 and warning.is_visible() and
+          warning.text_content() == "⚠ Δ compares exact against sampled estimates",
           "fidelity mismatch warning is persistent and explicit")
     check(page.locator("#aas-chart-container canvas").count() > 0,
           "fidelity mismatch flags but does not block rendering")
