@@ -267,6 +267,163 @@ TRACER_PID=""
 [[ ! -e "$SOCK" ]]
 check $? "socket unlinked on shutdown"
 
+
+# == #108: a tiered escalation window must produce EXECUTIONS ===============
+#
+# THE DEFECT. PGWT_EXACT_PROBE_ALL_MASK was QUERY_ID|ACTIVITY only, and the
+# four query__execute__ / query__plan__ USDT probes attached once at daemon
+# start in FULL MODE ONLY. In tiered mode an escalation therefore granted
+# exactness while the Waterfall ("executions") and Scatter ("exec_scatter")
+# tabs stayed empty.
+#
+# WHY THIS RUNS IN TIERED MODE AND NOTHING ELSE WOULD DO. In `--mode full`
+# the probes are attached from startup, so the same assertion passes on the
+# broken product. Neither capture below uses full mode, and the control
+# socket's own reported `mode` is asserted to be "tiered" before anything
+# is concluded from its data.
+#
+# ANTI-VACUITY: an A/B, not a single positive. Capture A runs the SAME
+# workload for the SAME duration with NO escalation and must yield ZERO
+# executions -- that is the always-on sampled tier's contract, and execution
+# rows exist only where an EXEC_START marker exists (src/compute.c), so a
+# build that pinned the phase probes always-on fails A. Capture B escalates
+# and must yield more than zero. One capture alone could pass either way.
+#
+# REFUSAL: every step that cannot be carried out FAILS with its reason. A
+# missing psql, a server that will not answer, a daemon that will not start
+# -- none of them skip.
+echo ""
+echo "-- #108: executions from a tiered escalation window --"
+
+PSQL_BIN=$(command -v psql || true)
+WL_PID=""
+CAP_DIR=""
+CAP_MODE=""
+CAP_TIER=""
+
+esc108_cleanup() {
+    [[ -n "$WL_STOP" ]] && rm -f "$WL_STOP"
+    if [[ -n "$WL_PID" ]] && kill -0 "$WL_PID" 2>/dev/null; then
+        kill -TERM "$WL_PID" 2>/dev/null; wait "$WL_PID" 2>/dev/null
+    fi
+    [[ -n "$CAP_DIR" ]] && rm -rf "$CAP_DIR"
+}
+WL_STOP=""
+
+# One tiered capture. $1 = tag, $2 = "escalate" | "noescalate".
+# Sets CAP_DIR (empty on failure), CAP_MODE, CAP_TIER. Runs in THIS shell
+# (not a subshell) so those assignments are visible to the caller.
+run_tiered_capture() {
+    local tag="$1" do_escalate="$2" log
+    CAP_DIR=""; CAP_MODE="?"; CAP_TIER="?"
+    local dir
+    dir=$(mktemp -d "/tmp/pgwt_esc108_${tag}_XXXXXX")
+    log=$(mktemp "/tmp/pgwt_esc108_${tag}_log_XXXXXX")
+    SOCK="$dir/pgwt.sock"
+    "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$dir" \
+        --mode tiered --sample-rate 50 --escalation-budget 120 -v \
+        >/dev/null 2>"$log" &
+    TRACER_PID=$!
+    local up=0
+    for _ in $(seq 1 40); do
+        if [[ -S "$SOCK" ]]; then up=1; break; fi
+        kill -0 "$TRACER_PID" 2>/dev/null || break
+        sleep 0.5
+    done
+    if [[ $up -ne 1 ]]; then
+        echo "  daemon ($tag) did not come up; log tail:"; tail -20 "$log"
+        kill -TERM "$TRACER_PID" 2>/dev/null; wait "$TRACER_PID" 2>/dev/null
+        TRACER_PID=""; rm -rf "$dir" "$log"; return 1
+    fi
+    CAP_MODE=$(ctl '{"cmd":"status"}' | jget "['mode']" 2>/dev/null || echo "?")
+    CAP_TIER=$(ctl '{"cmd":"status"}' | jget "['tier']" 2>/dev/null || echo "?")
+
+    WL_STOP=$(mktemp "/tmp/pgwt_esc108_${tag}_stop_XXXXXX")
+    (
+        while [[ -e "$WL_STOP" ]]; do
+            "$PSQL_BIN" -U postgres -d postgres -tAq -c \
+                "SELECT count(*) FROM generate_series(1, 50000) g" \
+                >/dev/null 2>&1 || sleep 0.2
+        done
+    ) &
+    WL_PID=$!
+    sleep 3
+    if [[ "$do_escalate" == "escalate" ]]; then
+        local r
+        r=$(ctl '{"cmd":"escalate","duration_s":8,"reason":"#108"}')
+        echo "  escalate($tag): $r"
+    fi
+    sleep 9
+    rm -f "$WL_STOP"; WL_STOP=""
+    sleep 1
+    kill -TERM "$WL_PID" 2>/dev/null; wait "$WL_PID" 2>/dev/null; WL_PID=""
+    kill -TERM "$TRACER_PID"
+    wait "$TRACER_PID" 2>/dev/null
+    TRACER_PID=""
+    rm -f "$log"
+    CAP_DIR="$dir"
+    return 0
+}
+
+# Row count for one pgwt-server data command. Prints an integer, or ERR.
+exec_rows() {
+    local dir="$1" cmd="$2" key="$3"
+    printf '{"id":1,"cmd":"%s","limit":500}\n' "$cmd" | \
+        "$SERVER" "$dir" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    line = sys.stdin.readline()
+    r = json.loads(line)
+    if r.get('error'):
+        print('ERR'); sys.exit(0)
+    print(len(r['$key']))
+except Exception:
+    print('ERR')
+"
+}
+
+if [[ -z "$PSQL_BIN" ]]; then
+    check 1 "#108: psql is available (cannot drive a workload without it)"
+else
+    trap 'cleanup; esc108_cleanup' EXIT
+
+    # -- A: sampled tier only, no escalation --------------------
+    run_tiered_capture control noescalate
+    check $? "#108: control capture started"
+    if [[ -n "$CAP_DIR" ]]; then
+        A_DIR="$CAP_DIR"; CAP_DIR=""
+        [[ "$CAP_MODE" == "tiered" ]]
+        check $? "#108: control capture ran in TIERED mode (got: $CAP_MODE)"
+        [[ "$CAP_TIER" == "sampled" ]]
+        check $? "#108: control capture never escalated (tier: $CAP_TIER)"
+        A_EXEC=$(exec_rows "$A_DIR" executions rows)
+        A_SCAT=$(exec_rows "$A_DIR" exec_scatter points)
+        [[ "$A_EXEC" != "ERR" && "$A_SCAT" != "ERR" ]]
+        check $? "#108: server answered the control capture (execs=$A_EXEC scatter=$A_SCAT)"
+        [[ "$A_EXEC" == "0" && "$A_SCAT" == "0" ]]
+        check $? "#108: always-on sampled tier yields NO executions (execs=$A_EXEC scatter=$A_SCAT)"
+        rm -rf "$A_DIR"
+    fi
+
+    # -- B: same workload, with an escalation window ------------
+    run_tiered_capture window escalate
+    check $? "#108: escalated capture started"
+    if [[ -n "$CAP_DIR" ]]; then
+        B_DIR="$CAP_DIR"; CAP_DIR=""
+        [[ "$CAP_MODE" == "tiered" ]]
+        check $? "#108: escalated capture ran in TIERED mode (got: $CAP_MODE)"
+        B_EXEC=$(exec_rows "$B_DIR" executions rows)
+        B_SCAT=$(exec_rows "$B_DIR" exec_scatter points)
+        [[ "$B_EXEC" != "ERR" && "$B_SCAT" != "ERR" ]]
+        check $? "#108: server answered the escalated capture (execs=$B_EXEC scatter=$B_SCAT)"
+        [[ "$B_EXEC" =~ ^[0-9]+$ && "$B_EXEC" -gt 0 ]]
+        check $? "#108: a TIERED escalation produces Waterfall executions (got: $B_EXEC)"
+        [[ "$B_SCAT" =~ ^[0-9]+$ && "$B_SCAT" -gt 0 ]]
+        check $? "#108: a TIERED escalation produces Scatter points (got: $B_SCAT)"
+        rm -rf "$B_DIR"
+    fi
+fi
+
 echo ""
 echo "$passed/$((passed + failed)) tests passed"
 [[ $failed -eq 0 ]]

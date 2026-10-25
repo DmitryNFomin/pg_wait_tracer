@@ -15,6 +15,12 @@ struct pgwt_daemon;
 enum pgwt_exact_probe_index {
     PGWT_EXACT_PROBE_QUERY_ID = 0,
     PGWT_EXACT_PROBE_ACTIVITY,
+    /* #108: the per-execution phase markers. One bundle member per USDT
+     * PAIR (query__execute__start+done, query__plan__start+done) -- the two
+     * links of a pair are attached and detached together, because half a
+     * pair produces executions that never close. */
+    PGWT_EXACT_PROBE_EXEC,
+    PGWT_EXACT_PROBE_PLAN,
     PGWT_EXACT_PROBE_COUNT,
 };
 
@@ -22,6 +28,13 @@ enum pgwt_exact_probe_index {
 #define PGWT_EXACT_PROBE_ATTR_MASK \
     (PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_QUERY_ID) | \
      PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_ACTIVITY))
+/* Phase markers are OPTIONAL members of the bundle: EL8 kernels without USDT
+ * semaphore refcounting have always run exact wait/query capture with these
+ * unavailable, so their attach failure degrades an escalation window, it
+ * never denies one. They are never part of the always-on sampled tier. */
+#define PGWT_EXACT_PROBE_PHASE_MASK \
+    (PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_EXEC) | \
+     PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_PLAN))
 #define PGWT_EXACT_PROBE_ALL_MASK PGWT_EXACT_PROBE_ATTR_MASK
 
 typedef void *(*pgwt_exact_attach_fn)(void *ctx,
