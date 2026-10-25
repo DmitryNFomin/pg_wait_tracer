@@ -252,6 +252,7 @@ test_mock_backend_activity_fixture.py
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_rehearsal_verdict_hardening.py
+test_harness_ownership.py
 test_rehearsal_workload_lifetime.py
 # #384: the per-frame panel-data probe (--diag-data) is reached FROM the
 # rehearsal's own run_tab call site, not merely present in ui_live_smoke.py.
