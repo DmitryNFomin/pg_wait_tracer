@@ -194,6 +194,9 @@ run python3 tests/test_rehearsal_workload_lifetime.py
 step "python: live-smoke verdict unit tests"
 run python3 tests/test_ui_live_smoke_lib.py
 
+step "python: #537 waterfall-readiness diagnostic refusal tests"
+run python3 tests/test_diag_537_waterfall.py
+
 step "python: live-smoke failure diagnostic capture (#544)"
 run python3 tests/test_ui_live_smoke_failure.py
 run python3 tests/test_ui_live_smoke_failure.py --snapshot-js
