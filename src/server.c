@@ -6855,6 +6855,20 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_transitions_result res;
     pgwt_compute_transitions(events, count, &req->filter, max_rows, &res);
 
+    /* #461: the pair table is unbounded now (it used to be 4096 slots with a
+     * probe loop that never terminated once full), so the only early exit is
+     * a real allocation failure. Report it instead of serialising a graph
+     * that is short but looks complete -- a missing EDGE reads as "that
+     * transition never happened", which is a wrong answer, not a smaller
+     * one. Same rule as handle_fingerprints / handle_top_sessions. */
+    if (res.failed) {
+        free(res.rows);
+        free(events);
+        emit_transitions_compute_failed(req,
+            "the transition-pair table could not be allocated");
+        return;
+    }
+
     /* Node totals go through the SAME accumulator the aggregate path uses
      * (pgwt_block_agg_add_events), so the per-node numbers cannot drift
      * between the two paths. A refusal means raw cannot answer either — emit

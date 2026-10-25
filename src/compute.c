@@ -3527,8 +3527,10 @@ struct trans_accum {
     uint64_t total_ns;
 };
 
-#define TRANS_HT_SIZE 4096
-#define TRANS_HT_MASK (TRANS_HT_SIZE - 1)
+/* #461: `#define TRANS_HT_SIZE 4096` / `TRANS_HT_MASK` used to live here.
+ * The transition-pair table grows now, so there is no size constant left for
+ * a probe loop to run out of -- removed rather than left behind, because a
+ * leftover bound is the next thing somebody writes a probe loop against. */
 
 /* TOTAL order: count DESC, then from_event ASC, then to_event ASC.
  *
@@ -3592,60 +3594,105 @@ void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,
 {
     memset(out, 0, sizeof(*out));
 
-    /* Hash table for (from, to) pairs */
-    struct trans_accum *ht = calloc(TRANS_HT_SIZE, sizeof(*ht));
-    int num_entries = 0;
+    /* #461: this was a FIXED `calloc(TRANS_HT_SIZE, ...)` (4096 slots)
+     * probed with
+     *
+     *     while (ht[h].count > 0 &&
+     *            (ht[h].from_event != from || ht[h].to_event != to))
+     *         h = (h + 1) & TRANS_HT_MASK;
+     *
+     * -- no fullness test. Once 4096 distinct (from, to) pairs occupied the
+     * table the 4097th found no free slot and the loop never exited;
+     * pgwt-server is single-threaded, so the request never answered and
+     * every tab stopped at once. Same shape as #327, which removed five
+     * other instances of it.
+     *
+     * The repair is NOT a bigger table, which only moves the number at which
+     * the same loop hangs. The pair is keyed through a pgwt_qid_index
+     * (src/qid_index.h: unbounded, doubles on load, `used`-byte occupancy)
+     * over an insertion-ordered accumulator array, so TERMINATION NO LONGER
+     * DEPENDS ON THE TABLE HAVING A FREE SLOT -- the index grows before it
+     * can fill, and its own probe walks `used` bytes in a table it keeps
+     * below 70% load. There is no bound left here to exceed.
+     *
+     * The key packs the pair, `from` in the high half and `to` in the low
+     * half, which is injective over the two uint32 ids -- so two different
+     * pairs can collide in the hash (handled, like any hash) but can never
+     * be merged into one row.
+     *
+     * The only remaining exit is a REAL allocation failure, and it refuses
+     * the whole result (`failed`) instead of returning a graph that is
+     * quietly missing edges. Dropping pairs on overflow is the failure class
+     * this release has spent its time eliminating: a short answer that looks
+     * complete is worse than a refusal, because nobody notices it. */
+    struct pgwt_qid_index ix;
+    pgwt_qid_index_init(&ix);
+    struct trans_accum *ht = NULL;
+    int num_entries = 0, cap_entries = 0, alloc_failed = 0;
     uint64_t total = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
         if (!pgwt_transition_record_counts(f, ev))
             continue;
 
         uint32_t from = ev->old_event;
         uint32_t to   = ev->new_event;
+        uint64_t key  = ((uint64_t)from << 32) | (uint64_t)to;
 
-        /* Hash: combine from and to */
-        uint32_t h = ((from * 0x45d9f3b) ^ (to * 0x9e3779b9)) & TRANS_HT_MASK;
-        while (ht[h].count > 0 &&
-               (ht[h].from_event != from || ht[h].to_event != to))
-            h = (h + 1) & TRANS_HT_MASK;
-
-        if (ht[h].count == 0) {
+        int h = pgwt_qid_index_find(&ix, key);
+        if (h < 0) {
+            if (accum_grow((void **)&ht, &cap_entries, num_entries + 1,
+                           sizeof(*ht), "transition_entries") != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            h = num_entries;
+            if (pgwt_qid_index_put(&ix, key, h) != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            num_entries++;
             ht[h].from_event = from;
             ht[h].to_event = to;
-            num_entries++;
         }
         ht[h].count++;
         ht[h].total_ns += ev->duration_ns;
         total++;
     }
+    pgwt_qid_index_free(&ix);
 
-    /* Collect into flat array for sorting */
-    struct trans_accum *arr = calloc(num_entries, sizeof(*arr));
-    int n = 0;
-    for (int i = 0; i < TRANS_HT_SIZE && n < num_entries; i++) {
-        if (ht[i].count > 0)
-            arr[n++] = ht[i];
+    if (alloc_failed) {
+        free(ht);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
     }
-    free(ht);
 
-    qsort(arr, n, sizeof(arr[0]), cmp_trans_desc);
+    int n = num_entries;
+    qsort(ht, (size_t)n, sizeof(ht[0]), cmp_trans_desc);
 
     /* Build result rows */
     int nr = n < max_rows ? n : max_rows;
-    struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+    struct pgwt_transition_row *rows = nr ? calloc((size_t)nr, sizeof(*rows))
+                                          : NULL;
+    if (nr && !rows) {
+        free(ht);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
     for (int i = 0; i < nr; i++) {
-        rows[i].from_event = arr[i].from_event;
-        rows[i].to_event   = arr[i].to_event;
-        rows[i].count      = arr[i].count;
-        rows[i].total_ns   = arr[i].total_ns;
-        pgwt_event_full_name(arr[i].from_event, rows[i].from_name,
+        rows[i].from_event = ht[i].from_event;
+        rows[i].to_event   = ht[i].to_event;
+        rows[i].count      = ht[i].count;
+        rows[i].total_ns   = ht[i].total_ns;
+        pgwt_event_full_name(ht[i].from_event, rows[i].from_name,
                              sizeof(rows[i].from_name));
-        pgwt_event_full_name(arr[i].to_event, rows[i].to_name,
+        pgwt_event_full_name(ht[i].to_event, rows[i].to_name,
                              sizeof(rows[i].to_name));
     }
-    free(arr);
+    free(ht);
 
     out->rows = rows;
     out->num_rows = nr;

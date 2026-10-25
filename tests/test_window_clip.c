@@ -1432,6 +1432,65 @@ static void test_transitions_table_full(void)
     }
 }
 
+/* 10f. #461's refusal path. Growing the table removed the hang, but the
+ * remaining exit -- a real allocation failure -- must REFUSE the whole
+ * graph, never return the edges it managed to place. A transitions graph
+ * missing edges reads as "that transition never happened", which is a wrong
+ * answer rather than a smaller one.
+ *
+ * Both allocators are injected separately, because a refusal wired to only
+ * one of them approves the other: the accumulator array (accum_grow,
+ * "transition_entries") and the pair index (qid_index.h, "qid_index_grow").
+ * The clean run on the SAME fixture is the control that says the refusal is
+ * caused by the injection and not by the fixture. */
+static void trans_refusal_case(const char *point, const char *label)
+{
+    struct pgwt_trace_event evs[4];
+    memset(evs, 0, sizeof(evs));
+    for (int i = 0; i < 4; i++) {
+        evs[i].pid          = 7;
+        evs[i].old_event    = EV(CLASS_IO, (uint32_t)i);
+        evs[i].new_event    = EV(CLASS_LOCK, (uint32_t)i);
+        evs[i].timestamp_ns = WFROM + (uint64_t)i;
+        evs[i].duration_ns  = 1000;
+        evs[i].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+    }
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    if (point) setenv("PGWT_TEST_ALLOC_FAIL", point, 1);
+    else       unsetenv("PGWT_TEST_ALLOC_FAIL");
+
+    struct pgwt_transitions_result tr;
+    pgwt_compute_transitions(evs, 4, &f, 50, &tr);
+
+    if (point) {
+        CHECK(tr.failed == 1 && tr.num_rows == 0 && tr.total_rows == 0 &&
+              tr.total_transitions == 0 && tr.rows == NULL,
+              label);
+    } else {
+        CHECK(tr.failed == 0 && tr.num_rows == 4 && tr.total_rows == 4 &&
+              tr.total_transitions == 4, label);
+    }
+    free(tr.rows);
+    unsetenv("PGWT_TEST_ALLOC_FAIL");
+}
+
+static void test_transitions_alloc_refusal(void)
+{
+    printf("--- 10f. #461: an allocation failure refuses the whole graph ---\n");
+    trans_refusal_case(NULL, "10f control: the fixture itself computes four "
+                             "pairs cleanly (no injection)");
+    trans_refusal_case("transition_entries",
+                       "10f: accumulator growth fails -> failed=1 and NOTHING "
+                       "is returned (never a partial graph)");
+    trans_refusal_case("qid_index_grow",
+                       "10f: pair-index growth fails -> failed=1 and NOTHING "
+                       "is returned");
+    trans_refusal_case(NULL, "10f control: the refusal does not latch -- the "
+                             "same fixture computes cleanly again afterwards");
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -1451,14 +1510,16 @@ int main(void)
     test_tie_break_is_identity();
     test_query_avg_needs_exact_evidence();
     test_transitions_table_full();
+    test_transitions_alloc_refusal();
 
     /* A suite that ran no assertions is a suite that proved nothing. The
      * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
      * assertions, and a floor left at 80 would have let any one of the three
      * silently stop running. Section 10 (#461) adds 11 -- and its 10e branch
      * asserts the SAME number of times whichever way the child goes, so a
-     * hang cannot satisfy the floor by running fewer checks. */
-    if (checks < 141) {
+     * hang cannot satisfy the floor by running fewer checks. 10f adds 4
+     * more (the two allocators' refusal paths and their two controls). */
+    if (checks < 145) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

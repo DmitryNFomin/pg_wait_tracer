@@ -525,6 +525,14 @@ struct pgwt_transitions_result {
     int    num_rows;
     int    total_rows;                 /* distinct links before max_rows cap */
     uint64_t total_transitions;
+    /* #461: see pgwt_sessions_result.failed. The pair table is unbounded
+     * now (it was 4096 slots with a probe loop that never terminated once
+     * full), so the only early exit is a real allocation failure -- and it
+     * withholds the WHOLE graph. A transitions graph quietly missing edges
+     * is indistinguishable from a workload that never made those
+     * transitions, so a trim is never an option here. When this is set every
+     * other field is zeroed; the caller must report, not render. */
+    int    failed;
 };
 
 /* #436: THE transition population, in one place.
