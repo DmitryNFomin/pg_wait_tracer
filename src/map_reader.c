@@ -628,7 +628,7 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * the per-second credits and the at-close remainder partition
              * the interval with no gap and no overlap.
              *
-             * v9's open-CPU OBSERVATION was wired here and is deliberately
+             * v10's open-CPU OBSERVATION was wired here and is deliberately
              * NOT here now (#424). On a gate-2 capture with watchpoints
              * attached and cpu_ns_total moving 0 -> 23.7 s, all three
              * open-CPU counters read zero — credited, refused AND
@@ -636,7 +636,7 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * on-CPU open interval at all, not that it declined. Without a
              * box this agent could not tell the remaining causes apart, and
              * a producer whose only evidence is "it compiles" is not a
-             * wired producer. So v9's writer capability stays DORMANT and
+             * wired producer. So v10's writer capability stays DORMANT and
              * unclaimed rather than claimed and silently falling back; the
              * v8 behaviour below is exactly what shipped before, and the
              * refusal it produces for an on-CPU gap is counted

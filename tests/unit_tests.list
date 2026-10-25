@@ -468,7 +468,7 @@ test_cpu_split_parity
 # table, a missing trace dir (the read-back must REFUSE, not agree with
 # nothing) and a late first note. A gate that cannot see must never approve.
 test_straddler_accounting
-# #424 / summary v9: an OPEN ON-CPU interval must be credited to the seconds
+# #424 / summary v10: an OPEN ON-CPU interval must be credited to the seconds
 # it occupies WITHOUT destroying v7's measured-CPU split -- the residual v8
 # deliberately left open, which made an in-flight pure-CPU statement absent
 # from the CPU rows of the 15-minute Overview until it ended. The producer

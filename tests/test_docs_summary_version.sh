@@ -4,9 +4,9 @@
 #
 # This drifted twice in one night. docs/AAS_SEMANTICS_DECISION.md listed
 # versions up to v6 while the constant was 8; the correction was written
-# against a v8 tree and landed on a branch that had meanwhile merged v9, so
+# against a v8 tree and landed on a branch that had meanwhile bumped the constant, so
 # docs/DEMO_RUNBOOK.md then told an operator to move aside anything "before
-# v8" — leaving a v8 directory in place for a v9 server, which refuses it on
+# v8" — leaving a v8 directory in place for a newer server, which refuses it on
 # the summary fast path and drops the 900 s Overview to the raw path with no
 # explanation. The runbook exists to prevent exactly that, so a stale number
 # in it is an operational defect, not a typo.

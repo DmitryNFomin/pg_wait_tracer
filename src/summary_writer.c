@@ -115,7 +115,7 @@ static struct pgwt_summary_event *find_or_insert_event(
         /* For event_id=0 (CPU), an empty slot looks identical to "found"
          * since both have event_id==0. Distinguish by CONTENT.
          *
-         * v9 (#424): the witness is `count > 0 || total_ns > 0`, not
+         * v10 (#424): the witness is `count > 0 || total_ns > 0`, not
          * `count > 0`. An open on-CPU gap's per-second credit adds TIME and
          * no count (counts are per-occurrence and ride the closing record),
          * so with the old test the id-0 row read as empty on every later
@@ -272,17 +272,17 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
 /* What the per-second open credits already placed for the interval this
  * record closes -- the matching subtraction, without which the credits
  * would be counted twice. v8 carried only `already_ns` as a bare argument;
- * v9 needs four more facts about the same interval, and passing them as one
+ * v10 needs four more facts about the same interval, and passing them as one
  * named struct is what stops a caller from supplying three of them.
  *
  * All-zero (the `{ 0 }` a non-open-interval caller passes) is exactly the
  * v7 close: nothing subtracted, no label override. */
 struct accum_close_ctx {
     uint64_t already_ns;       /* wall already credited to earlier seconds */
-    uint64_t already_cpu_ns;   /* MEASURED CPU already credited (v9)       */
-    uint32_t frozen_eff;       /* v9: the label the written seconds used   */
-    uint8_t  cpu_credited;     /* v9: this interval WAS credited open      */
-    uint8_t  tier_unknown;     /* v9: those credits went to the UNKNOWN tier */
+    uint64_t already_cpu_ns;   /* MEASURED CPU already credited (v10)       */
+    uint32_t frozen_eff;       /* v10: the label the written seconds used   */
+    uint8_t  cpu_credited;     /* v10: this interval WAS credited open      */
+    uint8_t  tier_unknown;     /* v10: those credits went to the UNKNOWN tier */
 };
 
 static int accum_event(struct pgwt_summary_accum *acc,
@@ -299,7 +299,7 @@ static int accum_event(struct pgwt_summary_accum *acc,
      * bucket downstream sees the relabel, and a partial application here
      * would not fix the divergence, it would relocate it. */
     uint32_t old_ev = eff_event;
-    /* v9 (#424), piece 3: an interval whose earlier seconds are already on
+    /* v10 (#424), piece 3: an interval whose earlier seconds are already on
      * disk under a FROZEN label keeps that label for its closing record
      * too. The producer's answer is a majority over the open prefix and can
      * have moved since; the written seconds cannot. Overriding here, before
@@ -394,7 +394,7 @@ static int accum_event(struct pgwt_summary_accum *acc,
      * idle, so it contributes to neither CPU scalar, exactly as on raw. */
     if (!ev_idle) {
         if (cls == PGWT_CLASS_CPU) {
-            /* v9 (#424), piece 4: an interval whose written seconds went to
+            /* v10 (#424), piece 4: an interval whose written seconds went to
              * the UNKNOWN tier must not now add its closing cpu_ns to the
              * MEASURED one -- CPU* is measured + unknown, so that would
              * count the credited wall twice. The tail is unknown like its
@@ -403,7 +403,7 @@ static int accum_event(struct pgwt_summary_accum *acc,
                 acc->cpu_unknown_ns += tns;
             } else if (cc->cpu_credited &&
                        evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
-                /* v9, piece 2: THE CLAMP DOMAIN IS THE WHOLE INTERVAL, not
+                /* v10, piece 2: THE CLAMP DOMAIN IS THE WHOLE INTERVAL, not
                  * the remaining second.
                  *
                  * The clamp exists to catch a cpu_ns that exceeds the wall
@@ -454,7 +454,7 @@ static int accum_event(struct pgwt_summary_accum *acc,
                  * it. Kept SEPARATE from cpu_measured_ns so a window mixing
                  * the two tiers still reports the measured part honestly.
                  *
-                 * v9 also lands here for the OTHER tier flip -- credits went
+                 * v10 also lands here for the OTHER tier flip -- credits went
                  * to the measured tier and the closing record has no
                  * measurement. The tail genuinely has none, so it is
                  * unknown; CPU* (measured + unknown) still totals at most
@@ -716,7 +716,7 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
     /* Per-event entries: only non-empty */
     for (int i = 0; i < SUMMARY_MAX_EVENTS; i++) {
         const struct pgwt_summary_event *e = &acc->events[i];
-        /* v9: `|| total_ns` -- see find_or_insert_event. An open on-CPU
+        /* v10: `|| total_ns` -- see find_or_insert_event. An open on-CPU
          * gap's credit gives the id-0 row time with no count, and skipping
          * it here while acc->num_events counted it desynchronises the
          * block header from the payload. */
@@ -1472,7 +1472,7 @@ static struct pgwt_summary_open *open_slot(struct pgwt_summary_writer *w,
  * (summary_writer.h's v8 note says why for each). io_worker intervals never
  * reach here: pgwt_summary_note_open_ex refuses them.
  *
- * v9 (#424): on-CPU gaps DO reach here now, with `we` set to the interval's
+ * v10 (#424): on-CPU gaps DO reach here now, with `we` set to the interval's
  * FROZEN effective id -- 0 (CPU) or PGWT_WEI_NONCMD_CPU (idle). The two CPU
  * SCALARS are not touched here: they need the per-interval measurement
  * bookkeeping and are handled by the caller, which is the only place that
@@ -1516,8 +1516,8 @@ static void accum_open_credit(struct pgwt_summary_accum *acc, uint32_t pid,
 
 /* Is this slot describing something the writer may credit right now?
  *
- * v9 (#424): `we == 0` is BOTH "nothing creditable" (v8's sentinel) and the
- * raw id of an on-CPU gap, which v9 does credit -- so every loop asks this
+ * v10 (#424): `we == 0` is BOTH "nothing creditable" (v8's sentinel) and the
+ * raw id of an on-CPU gap, which v10 does credit -- so every loop asks this
  * ONE predicate instead of testing `o->we` and leaving the new state
  * half-handled wherever someone forgot. */
 static inline bool open_creditable(const struct pgwt_summary_open *o)
@@ -1626,7 +1626,7 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec)
         }
         uint64_t slice = end - from;
         if (o->cpu_slot) {
-            /* v9 (#424), piece 3: FREEZE the classification and the
+            /* v10 (#424), piece 3: FREEZE the classification and the
              * measurement tier at the FIRST second this interval is written
              * into. Up to this instant the producer's answer was still free
              * to change (it is a majority over a growing prefix); from here
@@ -1650,7 +1650,7 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec)
                                                           slice);
                     w->open_cpu_measured_ns_total += m;
                     /* A CPU OBSERVATION, which is what this counter means
-                     * since v9: without it a window whose only CPU time is
+                     * since v10: without it a window whose only CPU time is
                      * one still-open gap reports has_measured_cpu = 0 and
                      * the reader discards the split it was just handed. */
                     w->accum.cpu_measured_records++;
@@ -1902,7 +1902,7 @@ void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
          * number rather than a belief, and the pid's watermark is left
          * alone.
          *
-         * WITH one (v9, #424) the obstacle is gone: the producer has
+         * WITH one (v10, #424) the obstacle is gone: the producer has
          * already measured the open prefix, so the writer can place wall
          * AND measurement second by second. */
         if (!cpu) {
@@ -2215,7 +2215,7 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
                 already = o->credited_ns;
                 if (already > evt->duration_ns)
                     already = evt->duration_ns;
-                /* v9 (#424): the CPU half of the same subtraction. The
+                /* v10 (#424): the CPU half of the same subtraction. The
                  * identity check above is the SAME one -- an on-CPU slot
                  * has o->we == 0, which matches a we == 0 record's
                  * old_event -- so the measurement is only ever subtracted
@@ -2265,7 +2265,7 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
                     if (already > evt->duration_ns)
                         already = evt->duration_ns;
                 }
-                /* v9: `|| o->cpu_slot` -- an open on-CPU slot also has
+                /* v10: `|| o->cpu_slot` -- an open on-CPU slot also has
                  * we == 0, so without it the one disagreement the new
                  * state can produce would be the only uncounted one. */
                 if (o->we != 0 || o->cpu_slot)
@@ -2282,7 +2282,7 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
         }
         /* The #379 residual, MEASURED rather than asserted: an on-CPU gap
          * longer than a second that landed WHOLE in its closing second
-         * because nothing credited it while it was open. v9 shrinks this to
+         * because nothing credited it while it was open. v10 shrinks this to
          * the gaps no producer observed (no notes at all, the lightweight
          * and sampled tiers, a gap that opened and closed between two
          * ticks); it does not redefine it, so the number stays comparable

@@ -21,7 +21,7 @@
 #  without — both spellings are accepted, so one file works on macOS and
 #  Linux.)
 
-# (No entries. The v9 producer call that needed one was reverted — see the
+# (No entries. The v10 producer call that needed one was reverted — see the
 # note at pgwt_summary_note_open in src/map_reader.c — and an entry for a
 # symbol nothing references is exactly the kind of rot this guard exists to
 # prevent. The mechanism is exercised by tests/test_check_link_closure.sh

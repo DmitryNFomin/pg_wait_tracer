@@ -198,7 +198,7 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           # #128 follow-up: sampled idle readings that contradict the same
           # tick's cmd_open (never a command boundary).
           'sampled_idle_in_command_total',
-          # #424 / summary v9: the open on-CPU producer. These seven were
+          # #424 / summary v10: the open on-CPU producer. These seven were
           # behind `#if PGWT_SUMMARY_VERSION >= 9` while the writer and the
           # producer lived on separate branches; the guard is gone and so is
           # the excuse for not asserting them. summary_open_cpu_credited_ns

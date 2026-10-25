@@ -77,23 +77,23 @@ run bash tests/test_gitignore_build_products.sh
 # then refuses on the summary fast path -- the 900 s Overview silently
 # drops to raw, which is the paint latency the runbook exists to avoid.
 # It drifted twice in one night (v6 while the code was 8; then a v8
-# correction landing on a tree that had merged v9), so it is checked rather
-# than proofread.
+# correction landing on a tree that had meanwhile bumped the constant),
+# so it is checked rather than proofread.
 step "bash: the docs name the PGWT_SUMMARY_VERSION the code defines"
 run bash tests/test_docs_summary_version.sh
 
 # The same number, held against the WIRING rather than the prose. The
 # open-CPU accounting rule is implemented in the writer and reached by no
-# producer; it holds a version number while dormant, and the next bump will
-# want a number for a different set of rules.
-# pgwt_summaries_window_current compares only the number, so a collision
-# there ships one number naming two accounting rules with no reader able to
-# tell the files apart -- the exact failure src/summary_writer.h spends 200
-# lines arguing against, enforced until now by nothing but that comment.
-# This step checks the dormant rule's number against whether a producer
-# calls it, and REFUSES (so the step fails) when it cannot read the
-# constant, cannot find exactly one acceptance test, finds no producer
-# sources to scan, or has no runner to read registration from.
+# producer; it held the number 9 while dormant, and the next bump wanted 9
+# for a different set of rules. pgwt_summaries_window_current compares only
+# the number, so that collision would have shipped one number naming two
+# accounting rules with no reader able to tell the files apart -- the exact
+# failure src/summary_writer.h spends 200 lines arguing against, enforced
+# until now by nothing but that comment. This step checks the dormant rule's
+# number against whether a producer calls it, and REFUSES (so the step
+# fails) when it cannot read the constant, cannot find exactly one
+# acceptance test, finds no producer sources to scan, or has no runner to
+# read registration from.
 step "bash: the dormant summary rule's number vs the shipped constant"
 run bash tests/test_summary_epoch_numbering.sh
 
@@ -122,7 +122,7 @@ run scripts/check-link-closure.sh
 # Runner-registration guard (#433): tests/run_all.sh (make box-check) and
 # tests/ci_smoke.sh (CI/nightly) have independent membership, so a test
 # wired into ci_smoke.sh alone makes box-check "green" prove nothing about
-# it (three real incidents: test_v9_open_cpu_wired registered ci_smoke-only
+# it (three real incidents: test_v10_open_cpu_wired registered ci_smoke-only
 # twice over, and test_capture_smoke mentioned in run_all.sh only inside a
 # comment while ci_smoke.sh actually runs it). Only the SELF-TEST (synthetic
 # fixtures) runs here, not scripts/check-runner-registration.sh itself

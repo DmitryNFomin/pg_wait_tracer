@@ -754,7 +754,7 @@ test_straddler_accounting: test_straddler_accounting.c \
                    $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
-# test_open_cpu_accounting: #424 / summary v9 -- the residual v8 deliberately
+# test_open_cpu_accounting: #424 / summary v10 -- the residual v8 deliberately
 # left open. An OPEN ON-CPU interval must be credited to the seconds it
 # occupies WITHOUT destroying v7's measured-CPU split, which v8 argued was
 # impossible because a per-second credit has no cpu_ns. It has one now: the

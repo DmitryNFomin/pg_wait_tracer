@@ -1,4 +1,4 @@
-/* test_open_cpu_accounting.c — #424 / summary v9: an OPEN on-CPU interval
+/* test_open_cpu_accounting.c — #424 / summary v10: an OPEN on-CPU interval
  * must be credited to the seconds it occupies WITHOUT destroying v7's
  * measured-CPU split.
  *
@@ -8,7 +8,7 @@
  * was ABSENT from the CPU rows of the summaries path until it ended. v8's
  * reason was real: a per-second credit has no cpu_ns, so spreading the wall
  * while the whole measurement arrived at close would clamp the entire
- * measurement into cpu_clamped_ns and leave ZERO measured. v9 credits the
+ * measurement into cpu_clamped_ns and leave ZERO measured. v10 credits the
  * gap from a producer-supplied CPU OBSERVATION
  * (pgwt_summary_note_open_ex + struct pgwt_summary_open_cpu) and must
  * therefore satisfy that constraint, not bypass it.
@@ -43,8 +43,8 @@
  *     so that double counts the credited wall. Red input: 16 s of CPU* on a
  *     10 s gap.
  *  §7 NON-VACUITY. A fixture with NO open CPU must be unchanged: every
- *     record BIT-IDENTICAL between the v8 entry point and the v9 one with an
- *     observation attached (which a wait must ignore), and every v9 counter
+ *     record BIT-IDENTICAL between the v8 entry point and the v10 one with an
+ *     observation attached (which a wait must ignore), and every v10 counter
  *     zero.
  *
  * THE BYPASS SUITE (§8) — one leg per way this gate's DETECTION could be
@@ -66,7 +66,7 @@
  *   h. NO RECORDS / NO DIRECTORY: the read-back must REFUSE. A gate that
  *      sums zero records agrees with everything.
  *   i. THE WRONG VERSION ON DISK: a v8-stamped file must be refused, so
- *      evidence gathered against the old accounting rule cannot green a v9
+ *      evidence gathered against the old accounting rule cannot green a v10
  *      run.
  *   j. A GAP THAT NEVER SPANS A SECOND: nothing to credit, and the answer
  *      must be the v8 one. This is the input that makes a careless
@@ -537,7 +537,7 @@ static void test_placement_split_conservation(void)
  * CLOSED in them) report MORE measured CPU than their own CPU wall. Must be
  * zero. The closing record is deliberately exempt and is excluded by the
  * count test: its remainder may exceed the tail of wall it carries, which
- * the v9 note states and §1 relies on.
+ * the v10 note states and §1 relies on.
  *
  * This is the assertion the per-second CAP exists for, and the only one that
  * can see it: without min(prefix, wall credited so far) the totals still
@@ -927,7 +927,7 @@ static void test_tiers(void)
 /* ── §7 NON-VACUITY: no open CPU => bit-identical records ─────────────── */
 
 /* A wait-only fixture: a 10 s Lock wait, ticked every second. Driven either
- * through the v8 entry point or through the v9 one WITH an observation
+ * through the v8 entry point or through the v10 one WITH an observation
  * attached, which a wait must ignore completely. */
 static void run_wait_fixture(struct wr *x, int via_ex)
 {
@@ -959,7 +959,7 @@ static void run_wait_fixture(struct wr *x, int via_ex)
 static void test_non_vacuity(void)
 {
     struct wr a, b;
-    if (wr_open(&a, "nv_v8") != 0 || wr_open(&b, "nv_v9") != 0) {
+    if (wr_open(&a, "nv_v8") != 0 || wr_open(&b, "nv_v10") != 0) {
         printf("  FAIL: setup\n"); failures++; return;
     }
     run_wait_fixture(&a, 0);
@@ -985,7 +985,7 @@ static void test_non_vacuity(void)
                    ra.rows[i].blob_hash != 0;
         CHECK(same,
               "NON-VACUITY: a fixture with NO open on-CPU interval is "
-              "BIT-IDENTICAL through the v9 entry point — all %d record "
+              "BIT-IDENTICAL through the v10 entry point — all %d record "
               "payloads hash equal", na);
         CHECK(rb_sum_class(&ra, PGWT_CLASS_LOCK) == 11 * S,
               "NON-VACUITY: and the v8 answer itself is still right "
@@ -993,7 +993,7 @@ static void test_non_vacuity(void)
               (unsigned long long)(rb_sum_class(&ra, PGWT_CLASS_LOCK) / MS));
     }
     CHECK(cpu_counters_b == 0,
-          "NON-VACUITY: every v9 on-CPU counter is zero (%llu) — a wait's "
+          "NON-VACUITY: every v10 on-CPU counter is zero (%llu) — a wait's "
           "note cannot reach the CPU path even with an observation attached",
           (unsigned long long)cpu_counters_b);
     wr_free(&a);
@@ -1231,7 +1231,7 @@ static void test_bypass_reader(void)
     }
 
     /* i. THE WRONG VERSION ON DISK. Evidence gathered under the v8
-     *    accounting rule must not green a v9 run: a file whose header says
+     *    accounting rule must not green a v10 run: a file whose header says
      *    v8 is refused outright, which is what turns a stale capture into a
      *    RAW RECOMPUTE instead of a plausible partial answer. */
     struct wr x;

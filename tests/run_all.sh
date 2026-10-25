@@ -488,7 +488,7 @@ LIVE_TESTS=(
     # directory to -T. Carries its own negative control (a root:root 0640 file
     # in the same directory the same reader must still be refused).
     "test_trace_sidecar_perms|bash|test_trace_sidecar_perms.sh"
-    # NOT registered: test_v9_open_cpu_wired.sh. The v9 open-CPU producer
+    # NOT registered: test_v10_open_cpu_wired.sh. The v10 open-CPU producer
     # was REVERTED (agent/424-daemon fc7d7f5) once its counters showed it
     # was never wired, so the check would be permanently red against a
     # capability nobody invokes -- which is neither a product bug being

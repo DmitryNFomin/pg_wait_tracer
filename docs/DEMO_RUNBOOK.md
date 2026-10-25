@@ -104,12 +104,14 @@ sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 > before starting the daemon. A fresh `mktemp -d` directory, as
 > `tests/demo_rehearsal.sh` uses, is never affected.
 >
-> **There is no v9 in this build.** The open on-CPU credit it would carry
+> **There is no v10 in this build.** The open on-CPU credit it would carry
 > is implemented in the writer but reached by no producer, so the constant
-> deliberately stays at 8 rather than shipping a number whose contract is
-> not yet true — see docs/AAS_SEMANTICS_DECISION.md. Nothing for an
-> operator to do; it is here so a "v9" in a commit message or a branch name
-> is not mistaken for something this build writes.
+> deliberately stays below it rather than shipping a number whose contract
+> is not yet true — see docs/AAS_SEMANTICS_DECISION.md. That rule was
+> numbered v9 until 2026-10-25, when the v9 epoch took the number and the
+> dormant rule moved to v10. Nothing for an operator to do; it is here so a
+> "v9" or "v10" in a commit message or a branch name is not mistaken for
+> something this build writes.
 
 (`-T`/`--trace-dir` enables recording and picks the directory, README.md
 "Trace Recording"; `-v`/`--verbose` prints diagnostics to stderr, README.md;

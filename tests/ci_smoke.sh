@@ -207,7 +207,7 @@ else
             python3 "$SCRIPT_DIR/test_deterministic.py" --pid "$PM_PID"
         run_section "execution-detail containing span on a real capture (#479)" \
             python3 "$SCRIPT_DIR/test_execution_span_live.py" --pid "$PM_PID"
-        # NOT invoked here: tests/test_v9_open_cpu_wired.sh. The v9 open-CPU
+        # NOT invoked here: tests/test_v10_open_cpu_wired.sh. The v10 open-CPU
         # producer was reverted (agent/424-daemon fc7d7f5), so the check has
         # no wired producer to confirm and BOTH its outcomes are non-zero --
         # FAIL when seconds demonstrably sealed, REFUSE (exit 2) when they

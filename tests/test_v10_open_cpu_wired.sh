@@ -1,8 +1,8 @@
 #!/bin/bash
-# test_v9_open_cpu_wired.sh — is the summary v9 open-CPU PRODUCER actually
+# test_v10_open_cpu_wired.sh — is the summary v10 open-CPU PRODUCER actually
 # wired, on a real capture?
 #
-# This is the one #424 failure that still looks green. The v9 writer can be
+# This is the one #424 failure that still looks green. The v10 writer can be
 # in the build, every unit test can pass, every control key can be present
 # and numeric, and the live loop can still never hand the writer an
 # observation — in which case `summary_open_cpu_credited_ns` stays 0 and
@@ -17,13 +17,13 @@
 #     watchpoint intervals; in sampled/lightweight a zero is CORRECT, so
 #     asserting non-zero there would fail a healthy daemon.
 #   - the control socket answers `metrics`.
-#   - the seven v9 keys are present.
+#   - the seven v10 keys are present.
 #   - the stimulus is PROVEN: a CPU-only statement must actually have been
 #     on-CPU across at least two ticks, evidenced by cpu_ns_total moving.
 #     Without that the assertion would be about the workload, not the wiring.
 # Only once all four hold does a zero count as a FAILURE (exit 1).
 #
-# Usage: sudo tests/test_v9_open_cpu_wired.sh [--pid POSTMASTER_PID]
+# Usage: sudo tests/test_v10_open_cpu_wired.sh [--pid POSTMASTER_PID]
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -43,10 +43,10 @@ if [[ -z "$PM_PID" ]]; then
     exit 2
 fi
 
-echo "=== test_v9_open_cpu_wired (#424, summary v9 producer) ==="
+echo "=== test_v10_open_cpu_wired (#424, summary v10 producer) ==="
 
-TRACE_DIR=$(mktemp -d /tmp/pgwt_v9wired_XXXXXX)
-DAEMON_LOG=$(mktemp /tmp/pgwt_v9wired_daemon_XXXXXX.log)
+TRACE_DIR=$(mktemp -d /tmp/pgwt_v10wired_XXXXXX)
+DAEMON_LOG=$(mktemp /tmp/pgwt_v10wired_daemon_XXXXXX.log)
 SOCK="$TRACE_DIR/pgwt.sock"
 TRACER_PID=""
 
@@ -158,12 +158,12 @@ for k in summary_open_cpu_credited_ns summary_open_cpu_measured_ns \
          summary_open_cpu_tier_mismatch_total summary_open_cpu_overcredit_ns; do
     if [[ -z "$(num "$M0" "$k")" ]]; then
         echo "REFUSE: control socket has no numeric '$k'."
-        echo "        The v9 keys are missing, so this test cannot tell a"
+        echo "        The v10 keys are missing, so this test cannot tell a"
         echo "        wired producer from an unwired one."
         exit 2
     fi
 done
-echo "  ok: all seven v9 control keys present and numeric"
+echo "  ok: all seven v10 control keys present and numeric"
 
 # ── the stimulus: a statement that is on-CPU, with NO wait event, across
 #    several 1 s ticks. generate_series is pure CPU in the backend. ───────
@@ -191,14 +191,14 @@ if [[ "$stim_ok" -eq 0 ]]; then
     exit 2
 fi
 STIM_S=$(( $(date +%s) - STIM_T0 ))
-# v9 credits an OPEN interval PER SECOND, so a statement that begins and
+# v10 credits an OPEN interval PER SECOND, so a statement that begins and
 # ends inside one second has nothing to spread and a zero would be correct.
 # The stimulus must therefore be on-CPU ACROSS tick boundaries, and that --
 # not merely "cpu_ns_total moved" -- is what has to be proven. 5 M rows ran
 # in ~0.75 s and proved nothing; 60 M spans several seconds.
 if [[ "$STIM_S" -lt 3 ]]; then
     echo "REFUSE: the CPU statements finished in ${STIM_S}s, too fast to"
-    echo "        span the tick boundaries v9 credits across. A zero would"
+    echo "        span the tick boundaries v10 credits across. A zero would"
     echo "        be correct and this check would be measuring nothing."
     exit 2
 fi
@@ -239,8 +239,8 @@ V8CRED=$(num "$M1" summary_open_credited_ns_total)
 echo "  summary_open_credited_ns_total = ${V8CRED:-n/a}  (the discriminator)"
 
 if [[ "$CRED" -gt 0 ]]; then
-    echo "  ok: the v9 open-CPU producer IS wired (credited $CRED ns)"
-    echo "=== test_v9_open_cpu_wired: PASS ==="
+    echo "  ok: the v10 open-CPU producer IS wired (credited $CRED ns)"
+    echo "=== test_v10_open_cpu_wired: PASS ==="
     exit 0
 fi
 
@@ -252,16 +252,16 @@ if [[ -n "$V8CRED" ]] && [[ "$V8CRED" -eq 0 ]]; then
     echo "          seal trigger (writer_seal_through is only called from"
     echo "          push_event and flush_completed, and returns immediately"
     echo "          while w->fp is NULL) before reading this check again."
-    echo "=== test_v9_open_cpu_wired: REFUSE ==="
+    echo "=== test_v10_open_cpu_wired: REFUSE ==="
     exit 2
 fi
 
 echo "  FAIL: summary_open_cpu_credited_ns is 0 on a capture whose CPU"
-echo "        statement is proven, with the v9 keys present, AND with"
+echo "        statement is proven, with the v10 keys present, AND with"
 echo "        summary_open_credited_ns_total = ${V8CRED:-n/a} proving seconds"
 echo "        really were sealed. So the open-CPU path was reached and"
 echo "        credited nothing: the producer is not wired, and the"
 echo "        accounting falls back to v8. refused_total=${REFUSED:-n/a}"
 echo "        uncredited_ns=${UNCRED:-n/a} is what it cost."
-echo "=== test_v9_open_cpu_wired: FAIL ==="
+echo "=== test_v10_open_cpu_wired: FAIL ==="
 exit 1

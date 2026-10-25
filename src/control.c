@@ -461,7 +461,7 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->summary_writer
                          ? d->summary_writer->io_worker_ns_excluded_total : 0);
 
-    /* ── Open-interval crediting (#379 v8, #424 v9) ──────────────────────
+    /* ── Open-interval crediting (#379 v8, #424 v10) ──────────────────────
      * The summary writer spreads a still-open interval across the seconds it
      * covers instead of charging its closing second. These counters are the
      * only way to tell a PRODUCER that feeds it observations from one that
@@ -477,7 +477,7 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->summary_writer
                          ? d->summary_writer->open_credit_records_total : 0);
     /* The v8 refusal of an OPEN on-CPU gap, counted rather than silent: it is
-     * what this daemon does until the v9 writer and the live-loop observation
+     * what this daemon does until the v10 writer and the live-loop observation
      * are in the same build. Non-zero here with
      * summary_open_cpu_credited_ns at 0 is the honest signature of that
      * state. summary_cpu_open_uncredited_ns_total (note: wire key is
@@ -535,7 +535,7 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * asserts all seven keys by name unconditionally. A live
      * conditional over a version constant is how the producer got
      * hidden the first time. */
-    /* v9 (#424). THE CAPABILITY IS DORMANT: no producer feeds the writer an
+    /* v10 (#424). THE CAPABILITY IS DORMANT: no producer feeds the writer an
      * open-CPU observation, deliberately (see the note at the v8
      * pgwt_summary_note_open call in src/map_reader.c). These counters are
      * published anyway, because they are what MADE that visible — on a
@@ -587,9 +587,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * counts credit the per-second cap had to refuse.
      *
      * TEMPORARY GUARD, not a supported configuration. These fields arrive
-     * with the v9 writer, which is on another branch; the conditional exists
+     * with the v10 writer, which is on another branch; the conditional exists
      * only so this branch builds and box-checks on its own, and the
-     * integration agent DELETES it when v9 folds in. At that moment add these
+     * integration agent DELETES it when v10 folds in. At that moment add these
      * seven keys to tests/test_control.sh's required-key list, by name
      * (they report a dormant capability honestly — zeros that mean "nobody
      * asked", not "nothing happened"):

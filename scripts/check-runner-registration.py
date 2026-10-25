@@ -27,7 +27,7 @@ other one: a test wired into ci_smoke.sh (so it only ever runs in CI or
 nightly, on the self-hosted gate boxes) that nobody also wired into
 run_all.sh, so `make box-check` -- the thing an agent runs before every PR
 -- reports green while that gate never executed at all:
-  1. test_v9_open_cpu_wired registered only in ci_smoke.sh; box-check
+  1. test_v10_open_cpu_wired registered only in ci_smoke.sh; box-check
      scored 134/134 while the gate it was meant to prove never ran.
   2. the same gate deregistered from run_all.sh but left invoked in
      ci_smoke.sh -- box-check stayed green for the same reason.
