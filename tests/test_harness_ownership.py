@@ -633,6 +633,144 @@ class ProcFallbackTests(unittest.TestCase):
             self.assertEqual(code, 2, err.getvalue())
 
 
+TM_WARNING = (
+    "lsof: WARNING: can't stat() smbfs file system "
+    "/Volumes/.timemachine/BACKUPMACHINE._smb._tcp.local./"
+    "75D3DCD7-2C05-4FC3-9820-5CADA12775AD/TimeMachine1\n"
+    "      Output information may be incomplete.\n"
+    '      assuming "dev=360000a8" from mount table\n')
+
+
+class LsofStderrTests(unittest.TestCase):
+    """macOS: a mount warning on stderr must not read as an inspection failure.
+
+    lsof exits 0 and still enumerates TCP sockets, but writes a WARNING about
+    a filesystem it could not stat. Treating any stderr as fatal refused every
+    ownership check on a Mac with a Time Machine SMB volume mounted, so no
+    branch on that machine could produce a `make check` stamp.
+
+    The bar: tolerate that exact shape, refuse anything else BY NAME, and keep
+    #544 -- a foreign owner still exits 2 -- on this platform too.
+    """
+    PORT = 8385
+    OURS = 42
+
+    def setUp(self):
+        self.owner = load_owner()
+
+    def run_cli(self, stdout, stderr, expected=OURS, returncode=0):
+        argv = ['bridge_owner.py', str(self.PORT)] + ([str(expected)] if expected else [])
+        err = io.StringIO()
+        with patch.object(self.owner.sys, 'platform', 'darwin'), \
+                patch.object(self.owner.sys, 'argv', argv), \
+                patch.object(self.owner.subprocess, 'run',
+                             return_value=subprocess.CompletedProcess(
+                                 [], returncode, stdout, stderr)) as command:
+                with contextlib.redirect_stderr(err):
+                    code = self.owner.cli()
+        self.assertEqual(command.call_args.args[0][0], 'lsof')
+        return code, err.getvalue()
+
+    def test_the_mount_warning_is_tolerated_and_ownership_still_verified(self):
+        code, output = self.run_cli(f'p{self.OURS}\nf7\n', TM_WARNING)
+        print(f'lsof mount warning + our listener: exit={code}', flush=True)
+        self.assertEqual(code, 0, output)
+        self.assertIn('tolerating a known-harmless lsof mount warning', output)
+        self.assertNotIn('REFUSE', output)
+
+    def test_foreign_listener_still_refuses_despite_the_warning(self):
+        """#544 on macOS: the warning must not become a free pass."""
+        code, output = self.run_cli('p41\nf7\n', TM_WARNING)
+        print(f'lsof mount warning + FOREIGN listener: exit={code}', flush=True)
+        self.assertEqual(code, 2, output)
+        self.assertIn(f'REFUSE bridge port {self.PORT}: occupied by listener '
+                      f'PID(s) [41]; expected {self.OURS}', output)
+
+    def test_foreign_listener_refuses_in_preflight_despite_the_warning(self):
+        code, output = self.run_cli('p41\nf7\n', TM_WARNING, expected=None)
+        self.assertEqual(code, 2, output)
+        self.assertIn('expected an unused port', output)
+
+    def test_warning_with_no_listener_is_still_an_honest_empty_answer(self):
+        for expected, code in ((self.OURS, 1), (None, 0)):
+            with self.subTest(expected=expected):
+                self.assertEqual(self.run_cli('', TM_WARNING, expected=expected)[0], code)
+
+    def test_two_unstattable_mounts_are_tolerated(self):
+        self.assertEqual(self.run_cli(f'p{self.OURS}\nf7\n', TM_WARNING * 2)[0], 0)
+
+    # --- bypass suite: every way tolerance could become a free pass ---------
+    def test_an_unrecognised_stderr_line_still_refuses_and_is_named(self):
+        for label, stderr in (
+                ('real failure alone', 'lsof: status error on /x: Permission denied\n'),
+                ('real failure after the warning',
+                 TM_WARNING + 'lsof: status error on /x: Permission denied\n'),
+                ('continuation lines with nothing to continue',
+                 '      Output information may be incomplete.\n'),
+                ('a different warning shape',
+                 "lsof: WARNING: can't stat() smbfs filesystem /Volumes/x\n"),
+                ('unrelated noise', 'lsof: no pwd entry for UID 501\n')):
+            with self.subTest(label):
+                code, output = self.run_cli(f'p{self.OURS}\nf7\n', stderr)
+                self.assertEqual(code, 2, output)
+                self.assertIn('cannot verify', output)
+                self.assertNotIn('tolerating', output)
+
+    def test_a_tolerated_warning_does_not_excuse_a_bad_exit_code(self):
+        for rc in (2, 126, 127):
+            with self.subTest(rc=rc):
+                code, output = self.run_cli(f'p{self.OURS}\nf7\n', TM_WARNING, returncode=rc)
+                self.assertEqual(code, 2, output)
+                self.assertIn(f'lsof exited {rc}', output)
+
+    def test_a_tolerated_warning_does_not_excuse_unparseable_output(self):
+        code, output = self.run_cli('COMMAND  PID USER\n', TM_WARNING)
+        self.assertEqual(code, 2, output)
+        self.assertIn('unparseable lsof output', output)
+
+    def test_listeners_without_pids_are_inspection_impossible_not_success(self):
+        code, output = self.run_cli('f7\nf8\n', TM_WARNING)
+        self.assertEqual(code, self.owner.INSPECTION_IMPOSSIBLE, output)
+        self.assertIn('without owning PIDs', output)
+
+    # Real lsof, real socket, real mount state: no mocking at all. Runs the
+    # CLI from TREE, so `--tree <parent>` goes RED here on this Mac while the
+    # volume is mounted. Skipped on Linux, where the lsof route is unused.
+    @unittest.skipUnless(sys.platform == 'darwin', 'lsof route is macOS-only')
+    def test_real_lsof_over_a_real_socket_with_the_live_mount_state(self):
+        temp = tempfile.TemporaryDirectory(prefix='lsof-real-')
+        self.addCleanup(temp.cleanup)
+        base = Path(temp.name)
+        ready = base / 'holder.ready'
+        (base / 'hold.py').write_text(
+            'import socket, sys, time\n'
+            's = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)\n'
+            'open(sys.argv[1], "w").write(str(s.getsockname()[1]))\n'
+            'time.sleep(60)\n')
+        holder = subprocess.Popen([sys.executable, str(base / 'hold.py'), str(ready)])
+        self.addCleanup(lambda: (holder.kill(), holder.wait(timeout=5)))
+        await_file(ready, holder)
+        port = int(ready.read_text())
+        bare = subprocess.run(['lsof', '-nP', '-iTCP', '-sTCP:LISTEN'],
+                              capture_output=True, text=True, timeout=20)
+        print(f'live lsof stderr: {bare.stderr.strip().splitlines()[:1]}', flush=True)
+
+        def cli(expected):
+            return subprocess.run([sys.executable, str(TREE / 'tests/bridge_owner.py'),
+                                   str(port), str(expected)],
+                                  capture_output=True, text=True, timeout=20)
+
+        owned = cli(holder.pid)
+        print(f'real lsof, owner={holder.pid}: exit={owned.returncode} '
+              f'{owned.stderr.strip()}', flush=True)
+        self.assertEqual(owned.returncode, 0, owned.stderr)
+        foreign = cli(holder.pid + 100000)
+        print(f'real lsof, foreign expectation: exit={foreign.returncode} '
+              f'{foreign.stderr.strip()}', flush=True)
+        self.assertEqual(foreign.returncode, 2, foreign.stderr)
+        self.assertIn(f'occupied by listener PID(s) [{holder.pid}]', foreign.stderr)
+
+
 class CallerExitCodeTests(unittest.TestCase):
     """The shell wrappers must treat exit 3 as a refusal, not readiness."""
 

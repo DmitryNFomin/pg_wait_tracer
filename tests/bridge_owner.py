@@ -4,6 +4,7 @@
 No expected PID: require an unused port (preflight only, not a reservation).
 Expected PID: require every listener on that port to belong to exactly it.
 Linux uses ss; lsof supports the same real-socket regression tests on macOS.
+Both routes refuse on anything they do not recognise, by name.
 
 Exit codes:
   0  the port is unused (no expected PID), or every listener on it is ours
@@ -68,6 +69,56 @@ class Unattributable(Exception):
     Deliberately NOT an OSError/RuntimeError subclass: the top-level handler
     must be able to tell this apart from a tool failure.
     """
+
+
+# lsof reports an unstattable mount as a WARNING on stderr while still
+# exiting 0 and still enumerating TCP sockets correctly. On a Mac with a Time
+# Machine SMB volume mounted that happens on EVERY call:
+#
+#   lsof: WARNING: can't stat() smbfs file system /Volumes/.timemachine/...
+#         Output information may be incomplete.
+#         assuming "dev=360000a8" from mount table
+#
+# Treating any non-empty stderr as fatal therefore refused every ownership
+# check on that machine -- no branch could produce a green `make check` stamp,
+# and the push guard needs one. A warning about a filesystem is not evidence
+# that a TCP listener is unattributable.
+#
+# It is matched by SHAPE, not by substring, and ALL of stderr must be
+# accounted for: lsof prints real failures ("status error on /x: Permission
+# denied") through the same channel, and swallowing one of those alongside a
+# warning would leave stdout empty, owners == [], and preflight reporting an
+# occupied port as unused -- #544 by another door. One unrecognised line and
+# we refuse exactly as before, naming it.
+#
+# Residual, stated rather than hidden: the warning's own "Output information
+# may be incomplete" refers to files on that mount. TCP socket enumeration
+# does not come from it. If it ever did hide a listener, the preflight would
+# call a busy port free and the bridge's own bind would then fail loudly --
+# not silently drive a foreign listener.
+LSOF_BENIGN = (
+    re.compile(r"lsof: WARNING: can't stat\(\) \S+ file system .+"),
+    re.compile(r"Output information may be incomplete\."),
+    re.compile(r'assuming "dev=[0-9a-fA-Fx]+" from mount table'),
+)
+
+
+def unrecognised_lsof_stderr(stderr):
+    """Lines of `stderr` that are NOT a known-harmless mount warning.
+
+    Returns "" when stderr is empty or consists solely of such a warning
+    (which must include at least one `can't stat()` line -- the continuation
+    lines alone are not a warning we claim to understand).
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    unknown = [l for l in lines if not any(p.fullmatch(l) for p in LSOF_BENIGN)]
+    if unknown:
+        return "\n".join(unknown)
+    if not any(LSOF_BENIGN[0].fullmatch(l) for l in lines):
+        return "\n".join(lines)  # continuations with nothing to continue
+    return ""
 
 
 def listening_inodes(port):
@@ -182,8 +233,13 @@ def listeners(port):
         return owners
     result = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
                             capture_output=True, text=True, timeout=2)
-    if result.stderr or result.returncode not in (0, 1):
-        raise RuntimeError(result.stderr or f"lsof exited {result.returncode}")
+    unrecognised = unrecognised_lsof_stderr(result.stderr)
+    if unrecognised or result.returncode not in (0, 1):
+        raise RuntimeError(unrecognised or f"lsof exited {result.returncode}")
+    if result.stderr.strip():
+        print(f"NOTE bridge ownership: tolerating a known-harmless lsof mount "
+              f"warning: {result.stderr.strip().splitlines()[0]}",
+              file=sys.stderr, flush=True)
     if result.stdout and not re.fullmatch(r"(?:[pf]\d+\n)+", result.stdout):
         raise RuntimeError(f"unparseable lsof output: {result.stdout!r}")
     pids = re.findall(r"^p(\d+)$", result.stdout, re.M)
