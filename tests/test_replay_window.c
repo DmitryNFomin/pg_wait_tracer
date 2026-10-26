@@ -462,8 +462,10 @@ static uint64_t qtot(struct pgwt_accumulator *acc, uint32_t we)
     return 0;
 }
 
-/* Write two real records, then install deterministic per-file clock anchors.
- * The second file uses a smaller monotonic clock, as after a reboot. */
+/* Write two real records, then install deterministic per-file clock anchors,
+ * as the daemon's own header does (wall = CLOCK_REALTIME at creation, mono =
+ * CLOCK_MONOTONIC at creation). Records land at mono and mono+300, so the
+ * file's spans are mono [mono, mono+300] and wall [wall, wall+300]. */
 static int write_range_trace(const char *dir, uint64_t wall, uint64_t mono)
 {
     struct pgwt_event_writer writer;
@@ -495,74 +497,298 @@ static int write_range_trace(const char *dir, uint64_t wall, uint64_t mono)
     return rc;
 }
 
-static void test_overlapping_files(void)
+/* Write a file and archive it under an hourly name, as rotation does. */
+static int write_archive(const char *dir, const char *name,
+                         uint64_t wall, uint64_t mono)
 {
-    printf("\nCASE: overlapping trace files must be refused\n");
+    if (write_range_trace(dir, wall, mono) != 0)
+        return -1;
+    char from[600], to[600], meta[600];
+    snprintf(from, sizeof(from), "%s/current.trace", dir);
+    snprintf(to, sizeof(to), "%s/%s.trace.lz4", dir, name);
+    snprintf(meta, sizeof(meta), "%s/current.trace.meta", dir);
+    if (rename(from, to) != 0)
+        return -1;
+    unlink(meta);
+    return 0;
+}
+
+/* Byte-for-byte copy: the "recovered archive restored under another name"
+ * shape, which carries the ORIGINAL header and therefore the original
+ * anchors in both clocks. */
+static int copy_file_bytes(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb");
+    if (!in) return -1;
+    FILE *out = fopen(to, "wb");
+    if (!out) { fclose(in); return -1; }
+    char buf[4096];
+    size_t got;
+    int rc = 0;
+    while ((got = fread(buf, 1, sizeof(buf), in)) > 0)
+        if (fwrite(buf, 1, got, out) != got) { rc = -1; break; }
+    if (ferror(in)) rc = -1;
+    if (fclose(out) != 0) rc = -1;
+    fclose(in);
+    return rc;
+}
+
+/* The span of one file, as pgwt_run_replay's loop computes it: from an
+ * already-open reader. corrupt_block >= 0 points that block's index entry
+ * past EOF so its header cannot be read — the "cannot see" case, which must
+ * refuse rather than report a narrower span that happens not to overlap. */
+static int span_of(const char *path, int corrupt_block,
+                   struct pgwt_trace_file_span *span)
+{
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, path) != 0)
+        return -2;
+    if (corrupt_block >= 0 && corrupt_block < r.num_blocks)
+        r.block_index[corrupt_block].file_offset = (uint64_t)1 << 40;
+    int rc = pgwt_reader_file_span(&r, span);
+    pgwt_reader_close(&r);
+    return rc;
+}
+
+static void check_span(const struct pgwt_trace_file_span *got,
+                       uint64_t wall, uint64_t mono, const char *who)
+{
+    CHECK(got->wall_start == wall && got->wall_end == wall + 300 &&
+          got->mono_start == mono && got->mono_end == mono + 300,
+          "%s span is exactly [wall, wall+300] / [mono, mono+300]", who);
+    printf("      %s: wall [%llu, %llu] mono [%llu, %llu]\n", who,
+           (unsigned long long)got->wall_start,
+           (unsigned long long)got->wall_end,
+           (unsigned long long)got->mono_start,
+           (unsigned long long)got->mono_end);
+}
+
+/* One negative control for the #612 overlap refusal.
+ *
+ * File A is written at (wall_a, mono_a) and archived. Then either A is
+ * byte-copied under a second hourly name (copy_of_a), or a second file is
+ * written at (wall_b, mono_b). The pair is then put to the predicate
+ * pgwt_run_replay uses.
+ *
+ * Every case also asserts that pgwt_scan_trace_files still returns BOTH
+ * files. The refusal belongs to replay alone: the scan is called at the start
+ * of every pgwt-server load and summary decision (coverage_refresh), and that
+ * caller stores the return into srv->num_files without checking it — a -1
+ * there makes the server report ZERO FILES with no diagnostic. So "the scan
+ * stays pure" is a product assertion, not tidiness. */
+static void overlap_case(const char *label, bool expect_refusal,
+                         uint64_t wall_a, uint64_t mono_a,
+                         bool copy_of_a, uint64_t wall_b, uint64_t mono_b)
+{
+    printf("  CASE: %s -> must %s\n", label,
+           expect_refusal ? "REFUSE" : "PASS");
     char dir[] = "/tmp/pgwt_replay_overlap_XXXXXX";
     if (!mkdtemp(dir)) { CHECK(0, "overlap fixture directory created"); return; }
-    char archive[600], current[600], meta[600];
-    snprintf(archive, sizeof(archive), "%s/2025-01-01_00.trace.lz4", dir);
+    char a_path[600], b_path[600], current[600], meta[600];
+    snprintf(a_path, sizeof(a_path), "%s/2025-01-01_10.trace.lz4", dir);
     snprintf(current, sizeof(current), "%s/current.trace", dir);
     snprintf(meta, sizeof(meta), "%s/current.trace.meta", dir);
-    CHECK(write_range_trace(dir, 1000, 10000) == 0,
-          "first readable trace has wall range [1000, 1300]");
-    CHECK(rename(current, archive) == 0, "first trace archived");
-    unlink(meta);
-    struct pgwt_trace_file_entry files[4];
-    CHECK(pgwt_scan_trace_files(dir, files, 4) == 1,
-          "archive alone is accepted (not an unreadable fixture)");
-    CHECK(write_range_trace(dir, 1200, 100) == 0,
-          "second readable trace has overlapping wall range [1200, 1500]");
-    struct pgwt_event_reader reader;
-    int opened = pgwt_reader_open(&reader, current);
-    CHECK(opened == 0, "overlapping current.trace opens successfully");
-    if (opened == 0) {
+
+    int ok = (write_archive(dir, "2025-01-01_10", wall_a, mono_a) == 0);
+    if (copy_of_a) {
+        snprintf(b_path, sizeof(b_path), "%s/2025-01-01_11.trace.lz4", dir);
+        ok = ok && (copy_file_bytes(a_path, b_path) == 0);
+        wall_b = wall_a;
+        mono_b = mono_a;
+    } else {
+        snprintf(b_path, sizeof(b_path), "%s", current);
+        ok = ok && (write_range_trace(dir, wall_b, mono_b) == 0);
+    }
+    CHECK(ok, "both fixture files written");
+    if (!ok) return;
+
+    /* The spans must come from real decodable records, or a case could pass
+     * on an empty or unreadable file and prove nothing. */
+    struct pgwt_event_reader probe;
+    if (pgwt_reader_open(&probe, b_path) == 0) {
         struct pgwt_trace_event decoded[2];
-        int count = pgwt_reader_decode_block(&reader, 0, decoded, 2);
-        CHECK(count == 2 && pgwt_reader_mono_to_wall(&reader, decoded[0].timestamp_ns) == 1200
-              && pgwt_reader_mono_to_wall(&reader, decoded[1].timestamp_ns) == 1500,
-              "second file really decodes both overlapping endpoint records");
-        pgwt_reader_close(&reader);
+        int count = pgwt_reader_decode_block(&probe, 0, decoded, 2);
+        CHECK(count == 2 &&
+              pgwt_reader_mono_to_wall(&probe, decoded[0].timestamp_ns) == wall_b &&
+              pgwt_reader_mono_to_wall(&probe, decoded[1].timestamp_ns) == wall_b + 300,
+              "second file really decodes both of its endpoint records");
+        pgwt_reader_close(&probe);
+    } else {
+        CHECK(0, "second file opens");
     }
 
-    FILE *diagnostic = tmpfile();
-    int saved_stderr = dup(STDERR_FILENO);
-    if (!diagnostic || saved_stderr < 0) {
-        CHECK(0, "overlap diagnostic capture opened");
-        if (diagnostic) fclose(diagnostic);
-        if (saved_stderr >= 0) close(saved_stderr);
-    } else {
-        fflush(stderr);
-        int redirected = dup2(fileno(diagnostic), STDERR_FILENO);
-        CHECK(redirected >= 0, "overlap diagnostic capture attached");
-        int count = pgwt_scan_trace_files(dir, files, 4);
-        fflush(stderr);
-        CHECK(dup2(saved_stderr, STDERR_FILENO) >= 0, "stderr restored");
-        close(saved_stderr);
-        rewind(diagnostic);
-        char message[2000] = {0};
-        fread(message, 1, sizeof(message) - 1, diagnostic);
-        fclose(diagnostic);
-        CHECK(count == -1, "overlapping files refuse the whole scan");
-        CHECK(strstr(message, "ERROR: overlapping trace files:") &&
-              strstr(message, archive) && strstr(message, current) &&
-              strstr(message, "[1000, 1300] ns") &&
-              strstr(message, "[1200, 1500] ns") &&
-              strstr(message, "refusing trace file scan"),
-              "refusal names both files and their exact wall ranges");
-    }
-    /* Replace current.trace explicitly; reinitialising over an existing
-     * file would exercise recovery and create a third archive instead. */
-    unlink(current);
-    unlink(meta);
-    CHECK(write_range_trace(dir, 1301, 100) == 0,
-          "second file moved to disjoint wall range [1301, 1601]");
+    struct pgwt_trace_file_span sa, sb;
+    CHECK(span_of(a_path, -1, &sa) == 0, "file A span established");
+    CHECK(span_of(b_path, -1, &sb) == 0, "file B span established");
+    check_span(&sa, wall_a, mono_a, "file A");
+    check_span(&sb, wall_b, mono_b, "file B");
+
+    CHECK(pgwt_trace_spans_collide(&sa, &sb) == expect_refusal,
+          expect_refusal ? "overlaps in BOTH clocks: replay must refuse"
+                         : "does not overlap in both clocks: replay accepts");
+    CHECK(pgwt_trace_spans_collide(&sb, &sa) == expect_refusal,
+          "verdict does not depend on which file is compared first");
+
+    struct pgwt_trace_file_entry files[4];
     CHECK(pgwt_scan_trace_files(dir, files, 4) == 2,
-          "disjoint files accepted across a monotonic clock reset");
-    unlink(archive);
+          "pgwt_scan_trace_files stays pure: both files, never -1");
+
+    unlink(a_path);
+    unlink(b_path);
     unlink(current);
     unlink(meta);
     rmdir(dir);
+}
+
+/* #612 follow-up: refuse a DUPLICATED trace file instead of silently
+ * interleaving one pid's records and attributing a wait to the wrong
+ * command — but refuse ONLY that, because the two legitimate shapes below
+ * look like duplicates in one clock each.
+ *
+ * Four controls, two refusing and two passing. Two are needed in each
+ * direction: a predicate that refuses everything (the wall-only check this
+ * replaces — it broke test_data_esc_coverage's FID-7) passes the first two
+ * and fails the last two, and a predicate that refuses nothing (no check at
+ * all) does the reverse. Neither can satisfy all four. */
+static void test_overlapping_files(void)
+{
+    printf("\nCASE: duplicated trace files refused, rotations and reboots not\n");
+
+    /* 1. A recovered duplicate: same boot, overlapping in wall AND mono.
+     *    No single daemon can write this — one file is a copy or there were
+     *    two writers in the directory. */
+    overlap_case("duplicate: overlaps in wall and mono", true,
+                 1000, 10000, false, 1100, 10100);
+
+    /* 2. The same file byte-copied under a different hourly name: identical
+     *    header, so identical spans in both clocks. The header carries no
+     *    sequence number and no boot id (src/event_writer.h), so there is no
+     *    identity to check instead — and this predicate catches it anyway. */
+    overlap_case("byte-copied archive under another hourly name", true,
+                 1000, 10000, true, 0, 0);
+
+    /* 3. A reboot: wall moves forward, the monotonic clock restarts near
+     *    zero. Mono ranges are disjoint AND so are wall ranges. This is the
+     *    shape #612's cross-file ordering was designed to handle. */
+    overlap_case("reboot: wall later, mono smaller, wall disjoint", false,
+                 1000, 10000, false, 1301, 100);
+
+    /* 4. FID-7 (tests/test_data_esc_coverage.py): a rotation plus a BACKWARD
+     *    NTP step. Same boot, so mono stays forward and disjoint —
+     *    CLOCK_MONOTONIC is immune to the step, and the writer flushes both
+     *    pending buffers into the old file before opening the new one
+     *    (pgwt_writer_check_rotation -> finalize_current_file). The step is
+     *    only in wall, where the ranges OVERLAP. A wall-only check refused
+     *    this; the server's coverage_refresh then reported zero files.
+     *
+     *    Shaped like FID-7 on purpose: the step (200) is applied to the
+     *    EARLIER file, and the creation-to-creation interval (400) is larger
+     *    than the step, so the wall-ascending scan order is still A then B.
+     *    A step larger than the rotation interval would reorder the files
+     *    instead, which no overlap check in either clock detects — that gap
+     *    is pre-existing and out of this fix's scope. */
+    overlap_case("rotation + backward NTP step: wall overlaps, mono does not",
+                 false, 10200, 10000, false, 10400, 10400);
+
+    /* 5. The mirror of case 4, and the one a MONO-ONLY predicate gets wrong:
+     *    a reboot whose post-reboot monotonic range overlaps the pre-reboot
+     *    file's, while wall moves cleanly forward. The monotonic clock
+     *    restarts at an arbitrary small value, so nothing stops it from
+     *    landing back inside the previous boot's range -- and wall is the
+     *    only clock that can tell the two boots apart. pgwt_trace_spans_
+     *    collide's own contract says this must be accepted; without this
+     *    control a mono-only predicate passes every other case here. */
+    overlap_case("reboot: mono OVERLAPS, wall disjoint", false,
+                 1000, 10000, false, 2000, 10100);
+
+    /* 6. Bypass: a file whose block header cannot be read. The span is then
+     *    unknown, and a narrower span computed from only the blocks that
+     *    could be read would make a real duplicate look disjoint. A gate that
+     *    cannot see must refuse, not approve. */
+    printf("  CASE: block header unreadable -> span refuses, never narrows\n");
+    {
+        char dir[] = "/tmp/pgwt_replay_overlap_XXXXXX";
+        if (!mkdtemp(dir)) { CHECK(0, "blind-span fixture directory created"); }
+        else {
+            char current[600], meta[600];
+            snprintf(current, sizeof(current), "%s/current.trace", dir);
+            snprintf(meta, sizeof(meta), "%s/current.trace.meta", dir);
+            CHECK(write_range_trace(dir, 1000, 10000) == 0,
+                  "blind-span fixture written");
+            struct pgwt_trace_file_span good, blind;
+            CHECK(span_of(current, -1, &good) == 0,
+                  "the intact file's span is established (positive control)");
+            CHECK(span_of(current, 0, &blind) == -1,
+                  "a file with an unreadable block header REFUSES a span");
+            unlink(current);
+            unlink(meta);
+            rmdir(dir);
+        }
+    }
+
+    /* 7. Why the refusal compares against EVERY accepted file and not just
+     *    the previous one. A duplicate and its original both overlap, in both
+     *    clocks, with each other -- but any file the wall sort puts BETWEEN
+     *    them can only be reached in wall, and a wall-only overlap is
+     *    legitimate (case 4). So one unrelated file in the middle makes a
+     *    consecutive-pairs check blind to the duplicate entirely, and replay
+     *    would interleave exactly what this gate exists to refuse. */
+    printf("  CASE: duplicate with a third file sorted between it and its "
+           "original -> must REFUSE\n");
+    {
+        char dir[] = "/tmp/pgwt_replay_overlap_XXXXXX";
+        if (!mkdtemp(dir)) { CHECK(0, "three-file fixture directory created"); }
+        else {
+            /* A: pre-reboot. B: a different boot, so its monotonic range is
+             * small -- disjoint from A in mono, overlapping in wall. C: a
+             * duplicate of A's interval in both clocks. Header walls
+             * 1000/1100/1200 put them in this order. */
+            int ok = write_archive(dir, "2025-01-01_10", 1000, 10000) == 0 &&
+                     write_archive(dir, "2025-01-01_11", 1100, 100) == 0 &&
+                     write_archive(dir, "2025-01-01_12", 1200, 10200) == 0;
+            CHECK(ok, "three archives written");
+            struct pgwt_trace_file_entry files[8];
+            int n = ok ? pgwt_scan_trace_files(dir, files, 8) : -1;
+            CHECK(n == 3, "all three archives scanned, never -1");
+            struct pgwt_trace_file_span sp[3];
+            int spans_ok = (n == 3);
+            for (int i = 0; i < 3 && spans_ok; i++)
+                if (span_of(files[i].path, -1, &sp[i]) != 0) spans_ok = 0;
+            CHECK(spans_ok, "spans established for all three archives");
+            if (spans_ok) {
+                for (int i = 0; i < 3; i++)
+                    printf("      [%d] wall [%llu, %llu] mono [%llu, %llu]\n", i,
+                           (unsigned long long)sp[i].wall_start,
+                           (unsigned long long)sp[i].wall_end,
+                           (unsigned long long)sp[i].mono_start,
+                           (unsigned long long)sp[i].mono_end);
+                /* The premise, asserted rather than assumed: if a consecutive
+                 * pair DID collide here, this case would prove nothing about
+                 * all-pairs. */
+                CHECK(!pgwt_trace_spans_collide(&sp[0], &sp[1]) &&
+                      !pgwt_trace_spans_collide(&sp[1], &sp[2]),
+                      "neither CONSECUTIVE pair collides (the blind spot)");
+                CHECK(pgwt_trace_spans_collide(&sp[0], &sp[2]),
+                      "but the first and third archives do duplicate each other");
+                CHECK(pgwt_trace_span_collision(sp, 2, &sp[2]) == 0,
+                      "all-pairs finds it, and names the FIRST archive");
+                /* Positive controls: it must not refuse the legitimate middle
+                 * file, and the first file (nothing accepted yet) is not a
+                 * collision either -- an empty accepted set means no pair
+                 * exists, not that the check was satisfied. */
+                CHECK(pgwt_trace_span_collision(sp, 1, &sp[1]) == -1,
+                      "and does not invent a collision for the middle file");
+                CHECK(pgwt_trace_span_collision(sp, 0, &sp[0]) == -1,
+                      "an empty accepted set yields no collision");
+            }
+            for (int i = 0; i < 3; i++) {
+                char p[600];
+                snprintf(p, sizeof(p), "%s/2025-01-01_1%d.trace.lz4", dir, i);
+                unlink(p);
+            }
+            rmdir(dir);
+        }
+    }
 }
 
 int main(void)

@@ -478,6 +478,100 @@ uint64_t pgwt_reader_mono_to_wall(const struct pgwt_event_reader *r, uint64_t mo
     return (uint64_t)((int64_t)mono_ns + r->mono_to_wall);
 }
 
+/* A trace file's full extent, in BOTH clocks: the header anchor widened by
+ * every block's first/last record timestamp. Every block, because the index
+ * is written in commit order and its final entry need not end latest. Record
+ * timestamps, not wait starts: a wait may legitimately span a rotation, but
+ * its closing record belongs to exactly one file.
+ *
+ * Monotonic is the computed domain and wall is DERIVED from it through this
+ * file's own constant offset (wall = mono + mono_to_wall), so the two ranges
+ * cannot disagree about which record is the earliest or the latest.
+ *
+ * Returns 0, or -1 if any block header cannot be read. It never narrows the
+ * span to what it could see: a caller asking "does this file overlap that
+ * one?" must refuse on a partial answer, not approve on one.
+ */
+int pgwt_reader_file_span(struct pgwt_event_reader *r,
+                          struct pgwt_trace_file_span *span)
+{
+    if (!r || !r->fp || !span)
+        return -1;
+    span->mono_start = span->mono_end = r->header.clock_offset_ns;
+    for (int b = 0; b < r->num_blocks; b++) {
+        struct pgwt_block_info bi;
+        if (pgwt_reader_block_info(r, b, &bi) != 0)
+            return -1;
+        if (bi.first_timestamp_ns < span->mono_start)
+            span->mono_start = bi.first_timestamp_ns;
+        if (bi.last_timestamp_ns > span->mono_end)
+            span->mono_end = bi.last_timestamp_ns;
+    }
+    span->wall_start = pgwt_reader_mono_to_wall(r, span->mono_start);
+    span->wall_end   = pgwt_reader_mono_to_wall(r, span->mono_end);
+    return 0;
+}
+
+/* True iff two trace files cover overlapping time in BOTH clocks.
+ *
+ * Wall alone is not enough, and neither is monotonic alone:
+ *  - a rotation followed by (or preceded by) an NTP step overlaps in WALL
+ *    only. CLOCK_MONOTONIC is immune to the step, and the writer flushes
+ *    both pending buffers into the old file before opening the new one
+ *    (pgwt_writer_check_rotation -> finalize_current_file), so one daemon's
+ *    consecutive files are always mono-disjoint. This is the legitimate case
+ *    a wall-only check refused (it broke test_data_esc_coverage's FID-7).
+ *  - a reboot overlaps in MONO only: the monotonic clock restarts near zero
+ *    while wall moves forward.
+ *  - a recovered duplicate, a hand-copied archive, or two writers in one
+ *    directory overlap in BOTH -- the one shape a single daemon cannot
+ *    produce, and the one that makes a pid's records interleave out of order
+ *    so the resolver attributes a wait to the wrong command.
+ *
+ * There is no cheaper identity to test: the file header carries magic,
+ * version, flags, pg_version, start_time_ns and clock_offset_ns and nothing
+ * else (src/event_writer.h) -- no boot id, no sequence number. An identity
+ * check on (start_time_ns, clock_offset_ns) would catch byte copies only,
+ * and this predicate already catches those.
+ *
+ * Endpoints are inclusive (a shared nanosecond is a shared record) and the
+ * test is symmetric, so it does not depend on the caller's visit order.
+ */
+bool pgwt_trace_spans_collide(const struct pgwt_trace_file_span *a,
+                              const struct pgwt_trace_file_span *b)
+{
+    return a->wall_start <= b->wall_end && b->wall_start <= a->wall_end &&
+           a->mono_start <= b->mono_end && b->mono_start <= a->mono_end;
+}
+
+/* Index of the first already-accepted span that `s` collides with, or -1.
+ *
+ * ALL of them, not just the one before it. A both-clock overlap between two
+ * files A and C forces only a WALL overlap with any file the scan sorts
+ * between them -- and a wall-only overlap is ACCEPTED by design, because
+ * that is exactly what a rotation across an NTP step looks like. So a
+ * consecutive-pairs check is blind to a duplicate with anything sorted in
+ * between: three archives at mono [10000,10300], [100,400] and
+ * [10200,10500] (a pre-reboot file, a different boot, and a duplicate of
+ * the first) have no colliding consecutive pair at all, while the first and
+ * third duplicate each other outright. Pinned in tests/test_replay_window.c.
+ *
+ * Comparing against every accepted file also removes any dependence on visit
+ * order, so a backward clock step large enough to reorder the wall-sorted
+ * scan cannot hide a duplicate either.
+ *
+ * n == 0 returns -1: the first file has nothing to collide with. That is the
+ * absence of a pair, not the absence of a check.
+ */
+int pgwt_trace_span_collision(const struct pgwt_trace_file_span *accepted,
+                              int n, const struct pgwt_trace_file_span *s)
+{
+    for (int i = 0; i < n; i++)
+        if (pgwt_trace_spans_collide(&accepted[i], s))
+            return i;
+    return -1;
+}
+
 /* ── Multi-file scanning ───────────────────────────────── */
 
 int pgwt_scan_trace_files(const char *trace_dir,
@@ -572,52 +666,6 @@ int pgwt_scan_trace_files(const char *trace_dir,
             j--;
         }
         entries[j + 1] = tmp;
-    }
-
-    /* Replay streams entire files in this order. Their wall ranges must be
-     * disjoint: a recovered duplicate or copied archive must not silently
-     * feed a pid's resolver records out of order. Include every block, since
-     * the index is in commit order and its final entry need not end latest.
-     * Use record timestamps, not wait starts: a wait can legitimately span
-     * a rotation, but its closing record belongs to just one file. */
-    int previous = -1;
-    uint64_t previous_start = 0, previous_end = 0;
-    for (int i = 0; i < n; i++) {
-        if (entries[i].placement_unknown)
-            continue;
-        struct pgwt_event_reader r;
-        if (pgwt_reader_open(&r, entries[i].path) != 0)
-            continue;  /* unreadable/empty files supply no replay records */
-        uint64_t start = entries[i].start_wall_ns, end = start;
-        for (int b = 0; b < r.num_blocks; b++) {
-            struct pgwt_block_info bi;
-            if (pgwt_reader_block_info(&r, b, &bi) != 0) {
-                fprintf(stderr, "ERROR: cannot establish wall range for %s "
-                        "(block %d); refusing trace file scan\n",
-                        entries[i].path, b);
-                pgwt_reader_close(&r);
-                return -1;
-            }
-            uint64_t first = pgwt_reader_mono_to_wall(&r, bi.first_timestamp_ns);
-            uint64_t last = pgwt_reader_mono_to_wall(&r, bi.last_timestamp_ns);
-            if (first < start) start = first;
-            if (last > end) end = last;
-        }
-        pgwt_reader_close(&r);
-        if (previous >= 0 && start <= previous_end) {
-            fprintf(stderr, "ERROR: overlapping trace files: %s wall range "
-                    "[%llu, %llu] ns and %s wall range [%llu, %llu] ns; "
-                    "refusing trace file scan\n",
-                    entries[previous].path,
-                    (unsigned long long)previous_start,
-                    (unsigned long long)previous_end,
-                    entries[i].path, (unsigned long long)start,
-                    (unsigned long long)end);
-            return -1;
-        }
-        previous = i;
-        previous_start = start;
-        previous_end = end;
     }
 
     return n;

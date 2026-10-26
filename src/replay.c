@@ -9,6 +9,11 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Trace files one replay will consider. One bound for the entry array and
+ * the span array both, so the overlap check below can never be handed more
+ * files than it has room to remember. */
+#define PGWT_REPLAY_MAX_FILES 256
+
 int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
                     const char *to_str)
 {
@@ -46,8 +51,9 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
 
     /* Scan trace files: pgwt_scan_trace_files sorts by header wall time,
      * so per-pid resolver state streams across rotations and clock domains. */
-    struct pgwt_trace_file_entry files[256];
-    int nfiles = pgwt_scan_trace_files(d->trace_dir, files, 256);
+    struct pgwt_trace_file_entry files[PGWT_REPLAY_MAX_FILES];
+    int nfiles = pgwt_scan_trace_files(d->trace_dir, files,
+                                       PGWT_REPLAY_MAX_FILES);
     if (nfiles < 0) {
         fprintf(stderr, "FATAL: cannot scan trace directory '%s'\n", d->trace_dir);
         return 1;
@@ -76,6 +82,13 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
     bool pg_version_set = false;
     struct pgwt_replay_stats rstats = {0};
     int lookahead = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
+    /* Extents of every file accepted so far, for the overlap refusal below.
+     * Four integers and a path per file, not kept-open readers: the
+     * comparison needs the ranges, not the files. Sized by the same constant
+     * as files[] above, so the two cannot drift apart. */
+    struct pgwt_trace_file_span spans[PGWT_REPLAY_MAX_FILES];
+    const char *span_paths[PGWT_REPLAY_MAX_FILES];
+    int nspans = 0;
 
     for (int fi = 0; fi < nfiles; fi++) {
         /* #586: older files can supply a command's left-edge marker seed.
@@ -97,6 +110,67 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
         struct pgwt_event_reader reader;
         if (pgwt_reader_open(&reader, files[fi].path) != 0)
             continue;
+
+        /* Cross-file ordering below is correct because the scan returns files
+         * in wall order and each file is internally sorted by its own
+         * monotonic clock -- no per-record conversion. That depends on the
+         * files actually being consecutive pieces of one capture. A recovered
+         * duplicate or a hand-copied archive breaks it: one pid's records
+         * interleave out of order and the resolver attributes a wait to the
+         * WRONG command, silently, and reports a successful back-fill (#612).
+         *
+         * Refuse, rather than sort around it or pick one -- interleaved files
+         * have no defined order to fall back on, so a warning would ship
+         * wrong per-pid totals.
+         *
+         * Two things bound what is refused. Only a BOTH-clock overlap counts
+         * (pgwt_trace_spans_collide: wall alone is a rotation across an NTP
+         * step, monotonic alone is a reboot), and the comparison is against
+         * EVERY file accepted so far, not just the previous one
+         * (pgwt_trace_span_collision: a duplicate with another file sorted
+         * between it and its original overlaps that middle file in wall
+         * only, so consecutive pairs cannot see it).
+         *
+         * This costs no extra open and no extra record pass: the loop has the
+         * reader already, and it is replay-only -- pgwt_scan_trace_files
+         * stays a pure scan, so pgwt-server's coverage_refresh (which calls
+         * it on every load and summary decision, and does not check its
+         * return value) is untouched. */
+        struct pgwt_trace_file_span span;
+        if (pgwt_reader_file_span(&reader, &span) != 0) {
+            fprintf(stderr, "FATAL: cannot establish the time range of %s: a "
+                    "block header could not be read, so whether it overlaps "
+                    "another file is unknown. Refusing to replay rather than "
+                    "replay an unknown subset of it.\n", files[fi].path);
+            pgwt_reader_close(&reader);
+            free(events);
+            return 1;
+        }
+        int clash = pgwt_trace_span_collision(spans, nspans, &span);
+        if (clash >= 0) {
+            fprintf(stderr, "FATAL: overlapping trace files: %s wall "
+                    "[%llu, %llu] ns mono [%llu, %llu] ns and %s wall "
+                    "[%llu, %llu] ns mono [%llu, %llu] ns. They overlap in "
+                    "BOTH clocks, which one daemon cannot produce -- this is "
+                    "a duplicated or copied trace file, not a rotation or a "
+                    "reboot. Remove the duplicate; refusing to replay.\n",
+                    span_paths[clash],
+                    (unsigned long long)spans[clash].wall_start,
+                    (unsigned long long)spans[clash].wall_end,
+                    (unsigned long long)spans[clash].mono_start,
+                    (unsigned long long)spans[clash].mono_end,
+                    files[fi].path,
+                    (unsigned long long)span.wall_start,
+                    (unsigned long long)span.wall_end,
+                    (unsigned long long)span.mono_start,
+                    (unsigned long long)span.mono_end);
+            pgwt_reader_close(&reader);
+            free(events);
+            return 1;
+        }
+        spans[nspans] = span;
+        span_paths[nspans] = files[fi].path;
+        nspans++;
 
         /* Get PG version from first successfully opened file */
         if (!pg_version_set && reader.header.pg_version > 0) {

@@ -134,6 +134,36 @@ uint64_t pgwt_reader_wall_to_mono(const struct pgwt_event_reader *r, uint64_t wa
 /* Convert monotonic nanoseconds to wall-clock for this file. */
 uint64_t pgwt_reader_mono_to_wall(const struct pgwt_event_reader *r, uint64_t mono_ns);
 
+/* A trace file's extent in both clocks (see pgwt_reader_file_span). */
+struct pgwt_trace_file_span {
+    uint64_t wall_start, wall_end;
+    uint64_t mono_start, mono_end;
+};
+
+/* Fill `span` from an ALREADY-OPEN reader: no extra open, no extra pass over
+ * record data -- block headers only. Returns 0, or -1 if any block header
+ * could not be read (the caller must then refuse, never approve on a partial
+ * span). */
+int pgwt_reader_file_span(struct pgwt_event_reader *r,
+                          struct pgwt_trace_file_span *span);
+
+/* True iff two trace files overlap in BOTH clocks -- the only shape a single
+ * daemon cannot produce (duplicate / copied archive / two writers), as
+ * opposed to a rotation across an NTP step (wall only) or a reboot (mono
+ * only), which are both legitimate. Symmetric; endpoints inclusive. Used by
+ * pgwt_run_replay, which refuses such a set rather than interleave it. */
+bool pgwt_trace_spans_collide(const struct pgwt_trace_file_span *a,
+                              const struct pgwt_trace_file_span *b);
+
+/* Index of the first span in accepted[0..n) that `s` collides with, else -1.
+ * ALL pairs, not consecutive ones: a duplicate with another file sorted
+ * between it and its original overlaps that middle file in WALL only, which
+ * is legitimate, so a consecutive check cannot see it. n == 0 is -1 (no pair
+ * exists yet), never an approval of an unchecked file. */
+int pgwt_trace_span_collision(const struct pgwt_trace_file_span *accepted,
+                              int n, const struct pgwt_trace_file_span *s);
+
+
 /* ── Multi-file scanning ───────────────────────────────── */
 
 struct pgwt_trace_file_entry {
@@ -148,11 +178,7 @@ struct pgwt_trace_file_entry {
     bool     placement_unknown;
 };
 
-/* Scan trace_dir for trace files. Returns count, sorted by header wall time
- * ascending, or -1 on error. Overlapping wall ranges are refused with a
- * diagnostic naming both files and their ranges; files are never merged or
- * deduplicated. Ranges include header creation time and all block timestamps
- * mapped through that file's own clock offset (not wait interval starts). */
+/* Scan trace_dir for trace files. Returns count, sorted by time ascending. */
 int pgwt_scan_trace_files(const char *trace_dir,
                            struct pgwt_trace_file_entry *entries,
                            int max_entries);
