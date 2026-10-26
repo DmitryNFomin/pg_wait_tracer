@@ -25,7 +25,7 @@ function denseDfg() {
         { name: 'Lock:tuple',              idle: false, total_ms: 480,  class: 'Lock' },
         { name: 'LWLock:BufferMapping',    idle: false, total_ms: 420,  class: 'LWLock' },
         { name: 'IO:WalWrite',             idle: false, total_ms: 350,  class: 'IO' },
-        { name: 'Timeout:VacuumDelay',     idle: false, total_ms: 300,  class: 'Timeout' },
+        { name: 'Timeout:VacuumDelay',     idle: true, total_ms: 300,  class: 'Timeout' },
         { name: 'Lock:relation',           idle: false, total_ms: 260,  class: 'Lock' },
         { name: 'IO:DataFileExtend',       idle: false, total_ms: 240,  class: 'IO' },
         { name: 'LWLock:LockManager',      idle: false, total_ms: 210,  class: 'LWLock' },
