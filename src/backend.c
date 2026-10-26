@@ -314,12 +314,6 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
         d->counters.wp_attach_failures_total++;
         return -1;
     }
-    /* #390: a fresh fd starts its own cumulative counters at 0 — reset the
-     * last-read baseline so the first per-tick delta is computed against
-     * this fd's own history, never a prior (possibly recycled-slot) fd's. */
-    be->wp_time_enabled_last = 0;
-    be->wp_time_running_last = 0;
-    be->wp_throttle_counted = false;
 
     if (be->attach_ts == 0)
         be->attach_ts = now_ns();

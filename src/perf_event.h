@@ -29,16 +29,4 @@ int pgwt_watchpoint_disable(int perf_fd);
 /* Close a watchpoint fd (auto-detaches the hardware breakpoint). */
 void pgwt_close_watchpoint(int perf_fd);
 
-/* #390: read this watchpoint's CUMULATIVE time_enabled/time_running (ns,
- * since the perf_event was created — PERF_EVENT_IOC_RESET is never called).
- * SET_BPF leaves no ring buffer and nothing ever sees PERF_RECORD_THROTTLE,
- * so a time_running shortfall against time_enabled is the only available
- * signal that the kernel rate-limited this watchpoint and it stopped
- * firing for part of that span. Returns 0 and fills both outputs on
- * success; -1 (both outputs zeroed) on a bad fd or an unexpected read
- * size. Caller tracks the previous cumulative pair to derive a per-tick
- * delta; this function does not. */
-int pgwt_watchpoint_read_times(int perf_fd, uint64_t *time_enabled,
-                               uint64_t *time_running);
-
 #endif /* PGWT_PERF_EVENT_H */

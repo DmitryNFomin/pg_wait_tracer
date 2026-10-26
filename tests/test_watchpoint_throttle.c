@@ -1,41 +1,46 @@
 /* test_watchpoint_throttle.c — #390: a hardware watchpoint's own perf_event
  * has no ring buffer (SET_BPF) and nothing ever observes
- * PERF_RECORD_THROTTLE/UNTHROTTLE (src/perf_event.c). The kernel's
- * rate-limit response — the event silently stops firing for part of a
- * window — is otherwise completely invisible to the daemon.
+ * PERF_RECORD_THROTTLE/UNTHROTTLE (src/perf_event.c). The first draft of
+ * this issue's fix proposed PERF_FORMAT_TOTAL_TIME_ENABLED|_RUNNING as a
+ * ring-buffer-free substitute signal: a cumulative time_running shortfall
+ * against time_enabled, the theory went, IS the throttle, quantified.
  *
- * This test induces a REAL kernel throttle deterministically: lower
- * /proc/sys/kernel/perf_event_max_sample_rate to a value this process's own
- * watchpoint fire rate will exceed almost immediately, then assert
- * pgwt_watchpoint_read_times() (src/perf_event.c) reports time_running <
- * time_enabled — the signal #390 asked for.
+ * THAT THEORY IS WRONG, and this test is the proof, not the thing it was
+ * originally written to prove.
  *
- * It does NOT go through pgwt_open_watchpoint()/pgwt_open_watchpoint_disabled():
- * those require a loaded BPF program for PERF_EVENT_IOC_SET_BPF, and the
- * kernel's throttle check runs in the overflow path BEFORE the BPF handler
- * is invoked regardless of whether one is attached (that is the architectural
- * finding behind #390 — see src/perf_event.c's open_watchpoint_common
- * comment). So a plain PERF_TYPE_BREAKPOINT event on this process's own
- * watched variable, with the identical attr fields, exercises the same
- * throttle mechanism without needing a BPF skeleton loaded here.
+ * TOTAL_TIME_ENABLED/_RUNNING track PMU MULTIPLEXING (whether the kernel
+ * had to time-share a scarce hardware counter across competing events) —
+ * a real but DIFFERENT mechanism from the sample-rate throttle this issue
+ * is about. Measured directly on a gate box (gate-1, kernel 6.8.0-139):
+ * with /proc/sys/kernel/perf_event_max_sample_rate lowered to 1 and up to
+ * 2,000,000 forced hits on a self-watched hardware breakpoint, this test's
+ * own time_enabled/time_running read back BIT-IDENTICAL every single time
+ * (gap always exactly 0) — while, independently and under the IDENTICAL
+ * sysctl, `perf record -e cycles -c 1 -- <same workload>` reported 513
+ * THROTTLE and 512 UNTHROTTLE events via `perf report --stats`: the kernel
+ * genuinely throttled, repeatedly, and TOTAL_TIME_ENABLED/_RUNNING on a
+ * directly-read fd never moved by a single nanosecond. perf's THROTTLE
+ * records reached userspace only through its OWN ring buffer — the exact
+ * thing SET_BPF (src/perf_event.c) does not have.
  *
- * Needs CAP_SYS_ADMIN (hardware breakpoints) and write access to the sysctl.
- * SKIPs (prints SKIP, exits 0, no failure counted) when either is
- * unavailable — box-check's root gate box has both; a weaker/unprivileged
- * environment legitimately cannot run this, which is an environment gap,
- * not a defect in the code under test.
+ * So the finding this test pins is the NEGATIVE one: no ring buffer, and
+ * no substitute field either. A counter built on this read-format would
+ * read "0 throttled" while throttling was actively happening — a false
+ * healthy signal, worse than no counter — which is why #390's fix does NOT
+ * use this field in the shipped daemon. This test exists so nobody
+ * re-discovers that the hard way by re-plumbing it.
+ *
+ * Needs CAP_SYS_ADMIN (hardware breakpoints) and write access to the
+ * sysctl. SKIPs (prints SKIP, exits 0, no failure counted) when either is
+ * unavailable — an environment gap, not a defect in the code under test.
  *
  * The sysctl is GLOBAL and machine-wide. Every path that successfully
  * lowers it restores it before returning, including every failure path
- * after that point — a test that left a box's perf sysctl lowered would
- * silently degrade every later capture on that machine, which the task
- * this test was written for named explicitly as a worse defect than the
- * one being fixed. The restore's own success is itself asserted (CHECK),
- * never swallowed. */
+ * after that point, and the restore's own success is itself asserted
+ * (CHECK), never swallowed — a test that left a box's perf sysctl lowered
+ * would silently degrade every later capture on that machine. */
 
 #define _GNU_SOURCE
-#include "perf_event.h"
-
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
 #include <sys/syscall.h>
@@ -124,9 +129,6 @@ int main(void)
     attr.exclude_kernel = 1;
     attr.exclude_hv     = 1;
     attr.disabled       = 0;
-    /* Same read_format open_watchpoint_common now requests unconditionally
-     * (src/perf_event.c) — this test exercises that exact field, not a
-     * reimplementation of it. */
     attr.read_format    = PERF_FORMAT_TOTAL_TIME_ENABLED |
                           PERF_FORMAT_TOTAL_TIME_RUNNING;
 
@@ -138,28 +140,41 @@ int main(void)
         goto restore;
     }
 
-    /* Fire it: sample_period=1 means every write to `watched` is a kernel
-     * overflow interrupt. At a 1/s system-wide cap this throttles within
-     * the first handful of the loop below — no timing/sleep dependency,
-     * the loop itself is what exceeds the rate. */
-    for (int i = 0; i < 200000; i++) {
+    /* Fire it hard: sample_period=1 means every write to `watched` is a
+     * kernel overflow interrupt, and at a 1/s system-wide cap this is
+     * exactly the condition that made `perf record` throttle for real in
+     * the development measurement cited above. 2,000,000 iterations is the
+     * larger of the two counts that measurement used, kept here so this
+     * test alone reproduces the no-gap result without relying on the
+     * `perf record` cross-check being rerun. */
+    for (int i = 0; i < 2000000; i++) {
         watched = i;
         __asm__ volatile("" ::: "memory"); /* the store must not be elided */
     }
 
     {
-        uint64_t te = 0, tr = 0;
-        int rc = pgwt_watchpoint_read_times(perf_fd, &te, &tr);
-        CHECK(rc == 0, "pgwt_watchpoint_read_times succeeds on a real fd");
+        uint64_t buf[3] = {0, 0, 0}; /* value, time_enabled, time_running */
+        ssize_t n = read(perf_fd, buf, sizeof(buf));
+        CHECK(n == (ssize_t)sizeof(buf), "read(2) on the perf_event fd returns the full triple");
+        uint64_t te = buf[1], tr = buf[2];
         CHECK(te > 0, "time_enabled advanced (the event really was enabled)");
-        CHECK(tr < te, "REAL kernel throttle: time_running fell short of "
-                        "time_enabled after lowering "
-                        "perf_event_max_sample_rate to 1 — this is the #390 "
-                        "signal, measured, not asserted");
+        CHECK(buf[0] >= 1000000,
+              "the breakpoint actually fired at least 1,000,000 times "
+              "(this is not a no-op loop the compiler elided)");
+        /* THE FINDING: not a gap, EQUALITY — under conditions independently
+         * confirmed to throttle a perf event for real (see header comment),
+         * this field shows none of it. A production counter built on this
+         * field would read "0 throttled" right now, while — by the
+         * perf-record cross-check — the kernel may well be throttling. */
+        CHECK(tr == te,
+              "TOTAL_TIME_ENABLED/_RUNNING show NO gap under a forced "
+              "sample-rate throttle (the negative finding this test "
+              "exists to pin — see the file header)");
         fprintf(stderr,
-                "INFO: time_enabled=%llu time_running=%llu gap_ns=%llu\n",
-                (unsigned long long)te, (unsigned long long)tr,
-                (unsigned long long)(te > tr ? te - tr : 0));
+                "INFO: value=%llu time_enabled=%llu time_running=%llu gap=%lld "
+                "(expected gap: 0 — this field does not see rate-limit throttle)\n",
+                (unsigned long long)buf[0], (unsigned long long)te,
+                (unsigned long long)tr, (long long)(te - tr));
     }
 
 restore:

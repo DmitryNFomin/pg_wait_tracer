@@ -355,60 +355,6 @@ static void drain_event_ring_for_tick(struct pgwt_daemon *d)
     }
 }
 
-/* #390: per-tick watchpoint throttle check. A hardware watchpoint attached
- * via PERF_EVENT_IOC_SET_BPF has no ring buffer and nothing ever observes
- * PERF_RECORD_THROTTLE (src/perf_event.c) — the kernel's rate-limit response
- * is a watchpoint that silently stops firing. TOTAL_TIME_ENABLED/_RUNNING
- * (requested unconditionally at open) is read back here, every tick, for
- * every backend with a live wp_fd; the two are CUMULATIVE since the fd was
- * opened, so the delta against the PREVIOUS tick's read is what this tick
- * contributed, and a shortfall there (delta_enabled > delta_running) is ns
- * this tick that the kernel did not schedule the watchpoint to run.
- *
- * Disclosure only: nothing here refuses, retries, or otherwise changes
- * capture behaviour — throttling is the kernel doing exactly what it is
- * supposed to do under load. */
-static void pgwt_watchpoint_throttle_check(struct pgwt_daemon *d)
-{
-    for (int i = 0; i < d->backends.count; i++) {
-        struct pgwt_backend *be = &d->backends.entries[i];
-        if (!be->is_alive || be->wp_fd < 0)
-            continue;
-
-        uint64_t enabled = 0, running = 0;
-        if (pgwt_watchpoint_read_times(be->wp_fd, &enabled, &running) != 0)
-            continue; /* fd closed under us mid-scan, or a bad read — next
-                       * tick's delta still has a sound baseline once the
-                       * fd settles, since the baseline only advances below. */
-
-        /* Cumulative counters never go backwards for a live fd, but guard
-         * anyway: a read racing a concurrent close-then-reopen of the same
-         * slot (wp_fd value reused by the kernel before this scan reaches
-         * it) could otherwise read a fresh fd's small counters against a
-         * stale large baseline and underflow into a huge bogus gap. */
-        if (enabled < be->wp_time_enabled_last ||
-            running < be->wp_time_running_last) {
-            be->wp_time_enabled_last = enabled;
-            be->wp_time_running_last = running;
-            continue;
-        }
-
-        uint64_t d_enabled = enabled - be->wp_time_enabled_last;
-        uint64_t d_running = running - be->wp_time_running_last;
-        be->wp_time_enabled_last = enabled;
-        be->wp_time_running_last = running;
-
-        if (d_enabled > d_running) {
-            uint64_t gap_ns = d_enabled - d_running;
-            d->counters.wp_throttled_ns_total += gap_ns;
-            if (!be->wp_throttle_counted) {
-                be->wp_throttle_counted = true;
-                d->counters.wp_throttled_backends_total++;
-            }
-        }
-    }
-}
-
 void pgwt_handle_timer(struct pgwt_daemon *d)
 {
     if (d->debug_dump_state)
@@ -553,13 +499,6 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         fflush(stdout);
         pgwt_debug_block_end(d, "view_output", 0, started_ns);
     }
-
-    /* #390: every tick, not gated to the 60s GC cadence — a throttle can be
-     * brief, and the per-tick delta (not a point-in-time snapshot) is what
-     * makes the accumulated total meaningful. */
-    started_ns = pgwt_debug_block_begin(d);
-    pgwt_watchpoint_throttle_check(d);
-    pgwt_debug_block_end(d, "watchpoint_throttle_check", 0, started_ns);
 
     /* GC: sweep backend table every 60s for dead processes.
      * Handles PIDs that exited without triggering on_exit tracepoint
@@ -1814,8 +1753,7 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
             "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
             "tick_drain_records_total=%llu tick_drain_max_records=%llu "
-            "tick_drain_truncated_total=%llu "
-            "wp_throttled_ns_total=%llu wp_throttled_backends_total=%llu\n",
+            "tick_drain_truncated_total=%llu\n",
             d->cpu_accounting ? 1 : 0, backends_tracked,
             (unsigned long long)d->debug_loop_iterations,
             (unsigned long long)d->debug_timer_entries,
@@ -1841,9 +1779,7 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.wait_gap_cpu_ns_total,
             (unsigned long long)d->counters.tick_drain_records_total,
             (unsigned long long)d->counters.tick_drain_max_records,
-            (unsigned long long)d->counters.tick_drain_truncated_total,
-            (unsigned long long)d->counters.wp_throttled_ns_total,
-            (unsigned long long)d->counters.wp_throttled_backends_total);
+            (unsigned long long)d->counters.tick_drain_truncated_total);
 
     uint32_t key = 0, next;
     struct pgwt_pid_state st;

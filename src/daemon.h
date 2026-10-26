@@ -35,27 +35,6 @@ struct pgwt_counters {
     uint64_t events_total;             /* trace events consumed from event_ringbuf */
     uint64_t lifecycle_events_total;   /* fork/init/exit/query_text events */
     uint64_t wp_attach_failures_total; /* watchpoint attach failures (incl. bootstrap) */
-    /* #390: a watchpoint has no ring buffer (SET_BPF) and nothing ever sees
-     * PERF_RECORD_THROTTLE, so the kernel's rate-limit response — the event
-     * stops firing, silently, for part of a window — would otherwise be
-     * completely invisible. Derived every tick from each live backend's
-     * PERF_FORMAT_TOTAL_TIME_ENABLED/_RUNNING delta (src/perf_event.c,
-     * src/daemon.c watchpoint_throttle_check). Disclosure, not a refusal:
-     * throttling is a legitimate kernel response under load, so a nonzero
-     * value here means "this window's exact-tier data is short by this
-     * much, here's how much", the same pattern as cpu_clamped_ns_total
-     * above, never a reason to reject the capture.
-     *  - wp_throttled_ns_total:       sum, over every tick and every
-     *                                 backend, of (time_enabled delta -
-     *                                 time_running delta) — the ns the
-     *                                 kernel did not schedule an armed
-     *                                 watchpoint to run.
-     *  - wp_throttled_backends_total: count of DISTINCT backends ever
-     *                                 observed with a nonzero gap (one per
-     *                                 backend, not one per tick it stays
-     *                                 throttled). */
-    uint64_t wp_throttled_ns_total;
-    uint64_t wp_throttled_backends_total;
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 

@@ -111,12 +111,13 @@ test_tick_drain: test_tick_drain.c $(LIFECYCLE_OBJS)
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
 	$(CC) $(CFLAGS) -o $@ $^
 
-# #390: exercises the real perf_event_open/read(2) throttle-visibility path
-# directly (its own PERF_TYPE_BREAKPOINT event, not through
-# pgwt_open_watchpoint/SET_BPF — see the file's own header comment for why
-# that is still the same mechanism). Only needs perf_event.o; no BPF skeleton,
-# no wraps. Root/CAP_SYS_ADMIN only — SKIPs itself otherwise.
-test_watchpoint_throttle: test_watchpoint_throttle.c $(BUILD)/perf_event.o
+# #390: pins a NEGATIVE finding — PERF_FORMAT_TOTAL_TIME_ENABLED/_RUNNING on a
+# directly-opened PERF_TYPE_BREAKPOINT event shows no gap under a real,
+# independently-confirmed kernel sample-rate throttle (see the file's own
+# header comment). Fully self-contained: its own perf_event_open syscall
+# wrapper, no src/ objects, no BPF skeleton, no wraps. Root/CAP_SYS_ADMIN
+# only — SKIPs itself otherwise.
+test_watchpoint_throttle: test_watchpoint_throttle.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_spawn: test_spawn.c ../src/spawn.c

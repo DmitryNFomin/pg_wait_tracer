@@ -33,18 +33,6 @@ struct pgwt_backend {
     uint64_t pgbs_resolve_retry_ns;
     uint8_t  pgbs_resolve_attempts;
     struct pgwt_pg13_synthetic_cache *pg13_synthetic_cache;
-
-    /* #390: last-read CUMULATIVE PERF_FORMAT_TOTAL_TIME_ENABLED/_RUNNING for
-     * wp_fd, so the per-tick throttle check (daemon.c) can derive a delta
-     * instead of re-reading the whole-lifetime gap every tick. Reset to 0
-     * whenever wp_fd is (re)opened — a stale baseline from a closed fd's
-     * last read would corrupt the delta against a fresh fd's own
-     * from-zero counters. wp_throttle_counted makes
-     * wp_throttled_backends_total edge-triggered: one count per backend
-     * ever seen throttled, not one per tick it stays throttled. */
-    uint64_t wp_time_enabled_last;
-    uint64_t wp_time_running_last;
-    bool     wp_throttle_counted;
 };
 
 struct pgwt_backend_table {
