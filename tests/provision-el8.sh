@@ -161,6 +161,45 @@ STEP="verify host bpftool and EL8 kernel BPF features (BTF, ringbuf, tracing, pe
 bpftool_works || die "no working host bpftool with required kernel features after package/source fallback; provisioning incomplete"
 bpftool version
 log "host bpftool OK ($(command -v bpftool))"
+
+# Rocky 8's libbpf-devel is 0.5.0, which predates USDT: no usdt.bpf.h, no
+# bpf_program__attach_usdt(). The daemon still links clean, because the top
+# Makefile falls back to a pinned libbpf built from source when the system
+# one lacks USDT (its "libbpf selection" comment / scripts/detect_libbpf_usdt.sh).
+# #615 forwards that resolved libbpf into tests/Makefile too, but nothing
+# here had ever exercised the fallback build itself or proved its *output*
+# actually resolves the two symbols the test tier's exact_probe.c needs
+# (bpf_program__attach_usdt, bpf_program__attach_uprobe_opts): the daemon can
+# link clean while the test binary fails with "undefined reference" (#532).
+# This is a scratch verification build, not an install: it proves the host
+# toolchain/network can produce a usable libbpf, independent of the real
+# build that tests/Makefile performs later.
+STEP="verify a USDT-capable libbpf for the test tier (bpf_program__attach_usdt, bpf_program__attach_uprobe_opts)"
+cat > "$WORK_DIR/usdt_probe.c" <<'EOF'
+#include <bpf/libbpf.h>
+void *pgwt_usdt_symbols[] = {
+    (void *)bpf_program__attach_usdt,
+    (void *)bpf_program__attach_uprobe_opts,
+};
+int main(void) { return 0; }
+EOF
+if gcc "$WORK_DIR/usdt_probe.c" -lbpf -o "$WORK_DIR/usdt_probe" 2>/dev/null \
+    && [[ -r /usr/include/bpf/usdt.bpf.h ]]; then
+    log "system libbpf already exposes USDT symbols; no fallback build needed"
+else
+    log "system libbpf lacks USDT (expected on Rocky 8.10); building the same pinned fallback tests/Makefile relies on"
+    PGWT_LIBBPF_VERSION="v1.4.7"  # must track LIBBPF_VERSION in the top-level Makefile
+    git clone -q --depth 1 --branch "$PGWT_LIBBPF_VERSION" \
+        https://github.com/libbpf/libbpf.git "$WORK_DIR/usdt-libbpf"
+    make -s -C "$WORK_DIR/usdt-libbpf/src" BUILD_STATIC_ONLY=1 \
+        PREFIX=/usr DESTDIR="$WORK_DIR/usdt-libbpf/root" install install_uapi_headers
+    gcc -I"$WORK_DIR/usdt-libbpf/root/usr/include" "$WORK_DIR/usdt_probe.c" \
+        "$WORK_DIR/usdt-libbpf/root/usr/lib64/libbpf.a" -lelf -lz \
+        -o "$WORK_DIR/usdt_probe" \
+        || die "pinned libbpf $PGWT_LIBBPF_VERSION built but a representative test binary still cannot resolve bpf_program__attach_usdt/bpf_program__attach_uprobe_opts; tests/Makefile's test tier will fail the same way (#532)"
+    log "pinned libbpf $PGWT_LIBBPF_VERSION fallback build OK; USDT symbols resolve"
+fi
+
 # EL8 exposes scheduler event IDs through debugfs/tracing. Persist the mount
 # for subsequent boots, and fail on missing events instead of sampling-only.
 if ! mountpoint -q /sys/kernel/debug; then
