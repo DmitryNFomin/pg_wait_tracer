@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
-	"runtime/debug"
 	"sort"
 )
 
@@ -36,30 +35,48 @@ var buildVersion = "dev"
 // response's idle_classification_complete readiness field (#515).
 const protocolRev = 2
 
-// clientVersion resolves the version to report: the linker-embedded one, or
-// (for plain `go build` without ldflags) the VCS revision Go stamps into the
-// binary, or "dev" when neither exists.
+// clientVersion is the linker-embedded build version, unmodified: whatever
+// `make pgwt-client` stamped via -ldflags, or the unset default when it
+// was not. unstampedBuildRefusal is what decides what to DO about the
+// unset default -- clientVersion itself makes no judgment call.
 func clientVersion() string {
-	if buildVersion != "dev" {
-		return buildVersion
+	return buildVersion
+}
+
+// unstampedBuildRefusal returns a non-empty, actionable message when version
+// is the unset ldflags default, or "" when the build is safe to run.
+//
+// #521: this used to fall back to Go's own VCS build-info stamp
+// (runtime/debug.ReadBuildInfo, "vcs.revision") when ldflags were not set,
+// on the theory that an unstamped build could still self-identify. Two
+// things killed that: (1) a linked git worktree -- which is how every agent
+// in this repo builds -- leaves `.git` as a FILE, not a directory, and Go's
+// VCS auto-stamping silently finds nothing there (no error, no git
+// subprocess invoked at all: confirmed with `go build -x`), so the fallback
+// returned bare "dev" anyway, exactly the string this issue is about; (2)
+// even when VCS info WAS available (a plain non-worktree clone), Go's
+// fallback produced "dev-<7-char-sha>", which can never equal the C side's
+// `git describe --tags --always --dirty` format (e.g.
+// "v0.13-429-gc723e96a-dirty") for the SAME commit -- so the fallback could
+// never actually prevent the false-positive skew it existed to avoid. A
+// value that is guaranteed to mismatch is worse than an honest refusal: it
+// buries the real cause (an unsupported build command) inside an unrelated
+// tool's error three steps later (here, the demo recorder's "cannot inspect
+// healthy panel" exit). versionSkewWarning's own comparison and its "warn,
+// never refuse" policy for a GENUINE skew are untouched -- this only
+// refuses when the client has no real identity to compare at all.
+func unstampedBuildRefusal(version string) string {
+	if version != "dev" {
+		return ""
 	}
-	if info, ok := debug.ReadBuildInfo(); ok {
-		rev, dirty := "", ""
-		for _, s := range info.Settings {
-			switch s.Key {
-			case "vcs.revision":
-				rev = s.Value
-			case "vcs.modified":
-				if s.Value == "true" {
-					dirty = "-dirty"
-				}
-			}
-		}
-		if len(rev) >= 7 {
-			return "dev-" + rev[:7] + dirty
-		}
-	}
-	return "dev"
+	return "pgwt was built without a version stamp (plain `go build`): " +
+		"the version handshake compares this string against pgwt-server's " +
+		"build, and \"dev\" is guaranteed to differ from any real build " +
+		"(or from another unstamped one, since #521 found Go's own VCS " +
+		"fallback cannot be relied on in a linked worktree). " +
+		"Run `make pgwt-client` instead, or build with " +
+		"-ldflags \"-X main.buildVersion=$(git describe --tags --always --dirty)\" " +
+		"yourself."
 }
 
 func main() {
@@ -85,6 +102,16 @@ func main() {
 	}
 	host := flag.Arg(0)
 
+	// #521: refuse before touching the network at all -- an unstamped
+	// build has no real version to hand the skew handshake, and serving
+	// "dev" anyway turns an unsupported build command into a confusing
+	// downstream refusal (the demo recorder's panel-health check, several
+	// tools away from the actual cause).
+	version := clientVersion()
+	if msg := unstampedBuildRefusal(version); msg != "" {
+		log.Fatal(msg)
+	}
+
 	// UI-12: per-session WebSocket token.
 	//
 	// Threat model: this WebSocket can escalate a PRODUCTION daemon to
@@ -104,7 +131,6 @@ func main() {
 	// backoff if the SSH session or the server dies — UI-3). The bridge also
 	// runs the version handshake against every (re)spawned server and warns
 	// on stderr when the pair is skewed (T7 / TST-11).
-	version := clientVersion()
 	log.Printf("pgwt %s (protocol %d)", version, protocolRev)
 	bridge := NewSSHBridge(host, *serverPath, *traceDir, token, version)
 	if err := bridge.Start(); err != nil {

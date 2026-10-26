@@ -1905,7 +1905,22 @@ static void left_needy_tab_free(struct left_needy_tab *t)
  * Returns -1 on allocation failure. Over-reporting is the safe direction: a
  * pid marked needy whose record rule 1 would have resolved anyway costs a
  * scan, never a wrong number -- the seed only ever supplies rule 2, which
- * rule 1 outranks. */
+ * rule 1 outranks.
+ *
+ * #588 MEASURED (tests/bench_left_seed.c, part A -- isolated, in-memory,
+ * warm, 10 iterations per size, 6 process runs on a loaded macOS laptop):
+ * ~0.9-2.2 ns/record at every size from 10k to 1M, identical whether the
+ * window straddles anything or not (this pass cannot tell until it
+ * finishes). ~1-1.5 ms at 1M records. IN THE NOISE against a bounded raw
+ * load's own ~22-52 ms at that record count on the same machine -- not
+ * gated. The SEPARATE downstream left_seed_resolve() marker lookback, which
+ * only runs when this pass finds a needy pid, is NOT free at the same
+ * scale: part B (end to end, real on-disk 900 s trace, same 6 runs) saw a
+ * consistently positive, growing delta through 500k records (+0.2 to +5.5
+ * ms), but at 1M records the delta ranged from -14.8 ms to +22.1 ms --
+ * swamped by this shared machine's noise, not pinned. Flagged to the owner
+ * as a distinct follow-up needing a quiet box to measure past 500k; not
+ * fixed here. */
 static int left_seed_find_needy(const struct pgwt_trace_event *events,
                                 int total, struct left_needy_tab *t,
                                 int *out_needy)
@@ -3340,6 +3355,229 @@ static struct pgwt_wfid window_fidelity(struct pgwt_server *srv,
     return wf;
 }
 
+/* ── Per-range window fidelity (#322/#341) ─────────────────────────────────
+ *
+ * `fidelity` above is ONE token for the whole window, so a window that spans
+ * a fidelity change -- an escalation starting or ending inside it -- reports
+ * "mixed" and the client bands the ENTIRE window as estimated, including the
+ * minutes that were captured exactly.
+ * web/static/lib/builders/fidelity.js has read an OPTIONAL `fidelity_ranges`
+ * since B5 ("show the band only over the sampled sub-ranges IF AVAILABLE,
+ * else mark the window mixed") and NOTHING ever produced it: the consumer
+ * shipped, the producer did not (#322/#341, `grep -c fidelity_ranges
+ * src/server.c` == 0 on master and on every agent branch). This is the
+ * producer.
+ *
+ * Shape read off the consumer, not invented: an array of
+ * { from, to, fidelity }, where from/to are WALL NANOSECONDS as raw JSON
+ * numbers -- the same domain and the same encoding as the aas bucket `t`
+ * emitted beside it. builders/aas.js clamps and converts both through the
+ * same nsToMs/clampX, and bandsToMarkArea feeds from/to straight into the
+ * markArea, so anything else (a string, or ms) would be a second unit in one
+ * axis domain.
+ *
+ * The partition MIRRORS window_fidelity() above, span for span, so the
+ * ranges can never contradict the single token beside them:
+ *   - exact ranges   = exact coverage spans clipped to the window;
+ *   - sampled ranges = for each sampled span whose clipped length exceeds its
+ *     exact coverage by MORE than one sample period (window_fidelity()'s own
+ *     slop rule, same comparison), the parts of that span lying outside exact
+ *     coverage;
+ *   - every remaining instant is "none" -- a real gap in coverage, said out
+ *     loud instead of left for the client to read as either.
+ * pgwt_fidelity_of(any exact range, any sampled range) therefore reproduces
+ * window_fidelity()'s verdict by construction, and add_fidelity_ranges()
+ * checks that at runtime against the token THIS response actually carries
+ * before emitting anything.
+ */
+
+#define PGWT_FID_SPAN_CAP   512   /* working spans per side */
+#define PGWT_MAX_FID_RANGES 256   /* emitted ranges; beyond this we refuse */
+
+struct pgwt_fid_range {
+    uint64_t from_ns, to_ns;     /* wall ns */
+    enum pgwt_fidelity fid;
+};
+
+/* Append [from,to) if it is non-empty. Returns 0 when the array is full, so
+ * the caller REFUSES to report rather than reporting a short partition --
+ * dropping a piece here would silently relabel that time as "none". */
+static int fid_span_push(struct pgwt_span *arr, int *n, int cap,
+                         uint64_t from, uint64_t to)
+{
+    if (to <= from)  return 1;
+    if (*n >= cap)   return 0;
+    arr[*n].start_ns = from;
+    arr[*n].end_ns   = to;
+    (*n)++;
+    return 1;
+}
+
+static int cmp_fid_span(const void *a, const void *b)
+{
+    const struct pgwt_span *x = a, *y = b;
+    if (x->start_ns != y->start_ns) return x->start_ns < y->start_ns ? -1 : 1;
+    if (x->end_ns   != y->end_ns)   return x->end_ns   < y->end_ns   ? -1 : 1;
+    return 0;
+}
+
+/* Sort and union-merge in place (touching spans merge: [a,b)+[b,c) = [a,c)).
+ * Returns the new count. */
+static int fid_spans_union(struct pgwt_span *s, int n)
+{
+    if (n <= 1) return n;
+    qsort(s, (size_t)n, sizeof(*s), cmp_fid_span);
+    int w = 0;
+    for (int i = 1; i < n; i++) {
+        if (s[i].start_ns <= s[w].end_ns) {
+            if (s[i].end_ns > s[w].end_ns) s[w].end_ns = s[i].end_ns;
+        } else {
+            s[++w] = s[i];
+        }
+    }
+    return w + 1;
+}
+
+/* Subtract the (sorted, disjoint) `cut` spans from `src`, appending what
+ * survives to `dst`. Returns 0 if `dst` ran out of room. */
+static int fid_spans_subtract(const struct pgwt_span *src, int n_src,
+                              const struct pgwt_span *cut, int n_cut,
+                              struct pgwt_span *dst, int *n_dst, int dst_cap)
+{
+    for (int i = 0; i < n_src; i++) {
+        uint64_t cursor = src[i].start_ns, end = src[i].end_ns;
+        for (int j = 0; j < n_cut && cursor < end; j++) {
+            if (cut[j].end_ns <= cursor) continue;
+            if (cut[j].start_ns >= end)  break;
+            if (cut[j].start_ns > cursor &&
+                !fid_span_push(dst, n_dst, dst_cap, cursor,
+                               cut[j].start_ns < end ? cut[j].start_ns : end))
+                return 0;
+            if (cut[j].end_ns > cursor)
+                cursor = cut[j].end_ns < end ? cut[j].end_ns : end;
+        }
+        if (cursor < end && !fid_span_push(dst, n_dst, dst_cap, cursor, end))
+            return 0;
+    }
+    return 1;
+}
+
+/* Fill `out` with the window's maximal constant-fidelity sub-ranges, in
+ * ascending time order, covering [from_wall, to_wall) with no gap and no
+ * overlap. Returns the count, or 0 when it REFUSES: an empty window, or more
+ * coverage fragments than the fixed working/output arrays can hold. A
+ * refusal is reported as the ABSENCE of the field, which the client already
+ * handles (whole-window band) -- never as a partial partition, which would
+ * mislabel the missing time. */
+static int window_fidelity_ranges(const struct pgwt_server *srv,
+                                  uint64_t from_wall, uint64_t to_wall,
+                                  struct pgwt_fid_range *out, int out_cap)
+{
+    if (!srv || to_wall <= from_wall || out_cap <= 0) return 0;
+
+    struct pgwt_span ex[PGWT_FID_SPAN_CAP];
+    struct pgwt_span sm[PGWT_FID_SPAN_CAP];
+    int n_ex = 0, n_sm = 0;
+
+    for (int g = 0; g < srv->num_gens; g++) {
+        const struct pgwt_gen_cov *gc = &srv->gens[g];
+        int64_t off = gc->canon_offset;
+        if ((int64_t)to_wall - off <= 0)
+            continue;
+        uint64_t fm = ((int64_t)from_wall - off) > 0
+                    ? (uint64_t)((int64_t)from_wall - off) : 0;
+        uint64_t tm = (uint64_t)((int64_t)to_wall - off);
+
+        for (int i = 0; i < gc->n_exact; i++) {
+            uint64_t s = gc->exact[i].start_ns > fm ? gc->exact[i].start_ns : fm;
+            uint64_t e = gc->exact[i].end_ns   < tm ? gc->exact[i].end_ns   : tm;
+            if (e <= s) continue;
+            if (!fid_span_push(ex, &n_ex, PGWT_FID_SPAN_CAP,
+                               (uint64_t)((int64_t)s + off),
+                               (uint64_t)((int64_t)e + off)))
+                return 0;
+        }
+
+        /* Same slop rule as window_fidelity(): a sampled span whose clipped
+         * length exceeds its exact coverage by no more than one sample period
+         * is edge jitter, not a fidelity change, and contributes no sampled
+         * range -- exactly as it contributes no has_uncovered_samples there. */
+        uint64_t slop = gc->sample_period_ns ? gc->sample_period_ns
+                                             : 1000000000ULL;
+        for (int i = 0; i < gc->n_sampled; i++) {
+            uint64_t s = gc->sampled[i].start_ns > fm ? gc->sampled[i].start_ns : fm;
+            uint64_t e = gc->sampled[i].end_ns   < tm ? gc->sampled[i].end_ns   : tm;
+            if (e <= s) continue;
+            uint64_t covered = 0;
+            for (int j = 0; j < gc->n_exact; j++)
+                covered += span_overlap(gc->exact[j].start_ns,
+                                        gc->exact[j].end_ns, s, e);
+            if (e - s <= covered + slop)
+                continue;
+            struct pgwt_span clipped = { s, e };
+            int n_piece = 0;
+            struct pgwt_span piece[PGWT_FID_SPAN_CAP];
+            if (!fid_spans_subtract(&clipped, 1, gc->exact, gc->n_exact,
+                                    piece, &n_piece, PGWT_FID_SPAN_CAP))
+                return 0;
+            for (int k = 0; k < n_piece; k++)
+                if (!fid_span_push(sm, &n_sm, PGWT_FID_SPAN_CAP,
+                                   (uint64_t)((int64_t)piece[k].start_ns + off),
+                                   (uint64_t)((int64_t)piece[k].end_ns + off)))
+                    return 0;
+        }
+    }
+
+    n_ex = fid_spans_union(ex, n_ex);
+    n_sm = fid_spans_union(sm, n_sm);
+
+    /* Exact wins on overlap ACROSS generations too, so the result is a
+     * partition: no instant may carry two fidelities. (Within a generation
+     * the subtraction above already did it.) */
+    struct pgwt_span sm_only[PGWT_FID_SPAN_CAP];
+    int n_sm_only = 0;
+    if (!fid_spans_subtract(sm, n_sm, ex, n_ex, sm_only, &n_sm_only,
+                            PGWT_FID_SPAN_CAP))
+        return 0;
+
+    int n_out = 0, i = 0, j = 0;
+    uint64_t cursor = from_wall;
+    while (cursor < to_wall) {
+        while (i < n_ex      && ex[i].end_ns      <= cursor) i++;
+        while (j < n_sm_only && sm_only[j].end_ns <= cursor) j++;
+        enum pgwt_fidelity fid;
+        uint64_t end;
+        if (i < n_ex && ex[i].start_ns <= cursor) {
+            fid = PGWT_FIDELITY_EXACT;
+            end = ex[i].end_ns;
+        } else if (j < n_sm_only && sm_only[j].start_ns <= cursor) {
+            fid = PGWT_FIDELITY_SAMPLED;
+            end = sm_only[j].end_ns;
+        } else {
+            fid = PGWT_FIDELITY_NONE;
+            end = to_wall;
+            if (i < n_ex      && ex[i].start_ns      < end) end = ex[i].start_ns;
+            if (j < n_sm_only && sm_only[j].start_ns < end) end = sm_only[j].start_ns;
+        }
+        if (end > to_wall) end = to_wall;
+        if (end <= cursor)
+            return 0;                 /* cannot advance: refuse, never loop */
+        if (n_out > 0 && out[n_out - 1].fid == fid &&
+            out[n_out - 1].to_ns == cursor) {
+            out[n_out - 1].to_ns = end;
+        } else {
+            if (n_out >= out_cap)
+                return 0;             /* too fragmented to report honestly */
+            out[n_out].from_ns = cursor;
+            out[n_out].to_ns   = end;
+            out[n_out].fid     = fid;
+            n_out++;
+        }
+        cursor = end;
+    }
+    return n_out;
+}
+
 /* ── Event loading ────────────────────────────────────────── */
 
 /*
@@ -4382,6 +4620,54 @@ static void add_fidelity_window(cJSON *root, const struct pgwt_wfid *wf)
         cjson_add_uint64(root, "sample_period_ns", wf->sample_period_ns);
 }
 
+/* #322/#341: emit the window's per-range fidelity breakdown beside the
+ * single `fidelity` token, so a window spanning a fidelity change bands only
+ * the estimated parts instead of the whole window.
+ *
+ * Called AFTER the response's `fidelity` is set, and it reads that token
+ * back: the ranges come from COVERAGE metadata (global, per clock
+ * generation) while the raw path's token comes from pgwt_load_info -- what
+ * actually contributed AFTER the request's pid filter. Those two CAN
+ * disagree (a pid with no samples inside a window that has sampled
+ * coverage). A sub-range breakdown that contradicts the label beside it
+ * would be worse than the whole-window band the client already falls back
+ * to, so on disagreement -- or on any refusal from
+ * window_fidelity_ranges() -- the field is simply ABSENT. A producer that
+ * cannot establish the answer says nothing; it never approximates it. */
+static void add_fidelity_ranges(cJSON *root, const struct pgwt_server *srv,
+                                uint64_t from_wall, uint64_t to_wall)
+{
+    const cJSON *tok = cJSON_GetObjectItem(root, "fidelity");
+    if (!cJSON_IsString(tok) || !tok->valuestring)
+        return;                  /* no label to be consistent WITH */
+
+    struct pgwt_fid_range r[PGWT_MAX_FID_RANGES];
+    int n = window_fidelity_ranges(srv, from_wall, to_wall, r,
+                                   PGWT_MAX_FID_RANGES);
+    if (n <= 0)
+        return;
+
+    int any_exact = 0, any_sampled = 0;
+    for (int i = 0; i < n; i++) {
+        if (r[i].fid == PGWT_FIDELITY_EXACT)   any_exact = 1;
+        if (r[i].fid == PGWT_FIDELITY_SAMPLED) any_sampled = 1;
+    }
+    if (strcmp(pgwt_fidelity_str(pgwt_fidelity_of(any_exact, any_sampled)),
+               tok->valuestring) != 0)
+        return;
+
+    cJSON *arr = cJSON_AddArrayToObject(root, "fidelity_ranges");
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        /* Raw JSON numbers in wall ns -- the same encoding as the aas bucket
+         * `t` the client plots these against (cjson_add_uint64). */
+        cjson_add_uint64(o, "from", r[i].from_ns);
+        cjson_add_uint64(o, "to",   r[i].to_ns);
+        cJSON_AddStringToObject(o, "fidelity", pgwt_fidelity_str(r[i].fid));
+        cJSON_AddItemToArray(arr, o);
+    }
+}
+
 /* Emit the structured "unavailable" response for an EXACT-required view over
  * a window with no transition coverage (sampled-only). NEVER a silent empty
  * result — the client renders an explicit "escalate to capture" state. */
@@ -4539,6 +4825,9 @@ static void handle_aas(struct pgwt_server *srv, struct pgwt_request *req)
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     if (from_summaries) add_fidelity_window(root, &wfid);
     else                add_fidelity(root, &linfo);
+    /* #322/#341: AFTER the token above -- add_fidelity_ranges() reads it
+     * back and stays silent rather than contradict it. */
+    add_fidelity_ranges(root, srv, from, to);
 
     if (aas.num_event_series > 0) {
         /* Event-breakdown mode */
@@ -6233,7 +6522,19 @@ static cJSON *serialize_exec_lane(const struct pgwt_exec_lane *lane,
          * "only when they differ": an optional key makes the clipped case
          * indistinguishable from an old server to every client, and the
          * cheapest way for a consumer to silently fall back to the wrong
-         * number is for the right one to sometimes be absent. */
+         * number is for the right one to sometimes be absent.
+         *
+         * CONSUMED as of this tree — the note here used to say the field
+         * was inert, and that is no longer true: the client half merged
+         * alongside the wire half. web/static/lib/builders/waterfall.js
+         * reads `ev.raw_dur_ns` (around :599-603) for both the per-bar
+         * tooltip and the click readout, printing the wall time and
+         * disclosing the #496 slice beside it when the two differ
+         * ("4.0ms (2.0ms in window)"). So the symptom #529 was filed for
+         * — a 4 ms wait reading 2 ms at the window edge — is fixed here,
+         * not merely wired. Keep this paragraph honest if either half
+         * moves: a comment claiming a gap the tree has closed misleads
+         * more than no comment, because the next reader trusts it. */
         cjson_add_uint64_string(item, "raw_dur_ns", ev->raw_duration_ns);
         if (ev->has_cpu)
             cjson_add_uint64_string(item, "cpu_ns", ev->cpu_ns);
