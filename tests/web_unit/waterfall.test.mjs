@@ -9,6 +9,7 @@ import {
     fmtExecutionDuration, executionsCountsLabel,
     executionsStatusLabel, executionsHasInferredEnd,
     execScopeNoteHtml, EXEC_SCOPE_NOTE_TEXT, zoomLabelText,
+    allExecutionsUndrawable, undrawablePageText,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -503,6 +504,38 @@ test('default selection falls back to the newest row when nothing is drawable', 
     assert.equal(pickDefaultExecution(rows), rows[0]);
     assert.equal(pickDefaultExecution([]), null);
     assert.equal(pickDefaultExecution(null), null);
+});
+
+// #587: the vacuity trap named in the issue -- a fixture with ONE drawable
+// row anywhere must make the case vanish. LIVE_ROWS[0]/[1] are both
+// n_events:0/n_workers:0/plan_ms:null (undrawable); LIVE_ROWS[2] has
+// n_events:2 (drawable).
+test('#587 allExecutionsUndrawable is true only when EVERY row is undrawable', () => {
+    assert.equal(allExecutionsUndrawable([LIVE_ROWS[0], LIVE_ROWS[1]]), true);
+    // the control: one drawable row anywhere makes it false
+    assert.equal(allExecutionsUndrawable(LIVE_ROWS), false);
+    assert.equal(allExecutionsUndrawable([LIVE_ROWS[2]]), false);
+    // absent-rather-than-wrong: an empty page is a DIFFERENT condition
+    // ("No execution matches..."), never this one.
+    assert.equal(allExecutionsUndrawable([]), false);
+    assert.equal(allExecutionsUndrawable(null), false);
+});
+
+test('#587 undrawablePageText names the count and the other sort, never the current one', () => {
+    assert.equal(undrawablePageText(100, EXECUTIONS_SORT_RECENT),
+        '100 executions, none with captured events at this sort — ' +
+        'try longest running first.');
+    assert.equal(undrawablePageText(1, EXECUTIONS_SORT_DURATION),
+        '1 execution, none with captured events at this sort — ' +
+        'try latest first.');
+    // the named sort is always the TARGET of the toggle, so it can never
+    // drift from the toggle button's own label (executionsSortToggleLabel).
+    for (const sort of [EXECUTIONS_SORT_RECENT, EXECUTIONS_SORT_DURATION]) {
+        const text = undrawablePageText(5, sort);
+        assert.match(text, new RegExp(executionsSortLabel(
+            executionsSortToggleTarget(sort)) + '\\.$'));
+        assert.doesNotMatch(text, new RegExp(executionsSortLabel(sort) + '\\.$'));
+    }
 });
 
 // #222: which slice the Waterfall tab asks the server for, and the toggle
