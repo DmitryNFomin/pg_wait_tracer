@@ -71,7 +71,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_open_ckpt \
             trace_closure_probe \
             open_ckpt_stub \
-            test_restart_second_identity
+            test_restart_second_identity \
+            test_background_unattributed
 
 .PHONY: all clean check
 
@@ -1065,11 +1066,15 @@ test_restart_second_identity: test_restart_second_identity.c \
                    $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
-# #596: append-only registration; all's earlier prerequisites were expanded
-# before this TESTS addition, so extend that target explicitly as well.
-TESTS += test_background_unattributed
-all: test_background_unattributed
-
+# test_background_unattributed: #596 -- query-less background/maintenance work
+# must be VISIBLE as unattributed time instead of being dropped from
+# top_queries, with an IO_WORKER control that must stay outside the query
+# model and a PACING-TIMEOUT leg that must stay out of both. Registered in
+# the TESTS variable above, not by a `TESTS +=` down here: the += form is
+# invisible to tests/test_unit_list_coverage.py, whose parser only reads the
+# `TESTS =` assignment, so deleting this test's unit_tests.list line would
+# have made it built-but-never-run with the coverage gate still green.
+# Server build, no BPF, no live PG; ~0.0 s.
 test_background_unattributed: test_background_unattributed.c ../src/compute.c \
                              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                              $(BUILD)/spawn.o $(BUILD)/cJSON.o
