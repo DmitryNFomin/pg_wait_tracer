@@ -629,6 +629,51 @@ def main():
           and any("delta" in l for l in lines),
           "§16g the log rendering of a finding names the bucket and the delta")
 
+    # §16h THE WIRING, not the library. §16a-g all passed while the live
+    # gate emitted NOTHING: the first cut collected bucket lines into a
+    # `bucket_lines` buffer and appended it AFTER `for l in lines: print(l)`,
+    # so a complete box run computed the measurement and printed none of it
+    # -- and tests/results/summary_raw_parity/summary.json is not synced back
+    # from the box, so the JSON channel was blind in the same run. A library
+    # test cannot see that. This does, by pinning the two structural
+    # properties that make the defect impossible:
+    #   1. the ONLY call site feeds `lines` directly (no deferred buffer to
+    #      forget to flush);
+    #   2. it sits BEFORE the loop that prints `lines`.
+    # It REFUSES rather than passing when it cannot find the gate file or the
+    # print loop -- a wiring check that locates neither approves every
+    # miswiring there will ever be.
+    gate_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "test_summary_raw_parity.py")
+    if not os.path.exists(gate_path):
+        check(False, "§16h REFUSE: cannot find %s -- nothing to check the "
+                     "wiring of" % gate_path)
+    else:
+        src = open(gate_path).read().splitlines()
+        emit = [i for i, l in enumerate(src)
+                if "lines.extend(P.bucket_diff_lines(" in l]
+        anycall = [i for i, l in enumerate(src)
+                   if "P.bucket_diff_lines(" in l]
+        printloop = [i for i, l in enumerate(src)
+                     if l.strip() == "for l in lines:"]
+        check(len(printloop) == 1,
+              "§16h REFUSE unless exactly one `for l in lines:` print loop is "
+              "locatable (found %d)" % len(printloop))
+        check(len(anycall) == 1 and len(emit) == 1,
+              "§16h the ONE bucket_diff_lines call site feeds `lines` "
+              "directly (calls=%d, feeding-lines=%d) -- a deferred buffer is "
+              "what made a whole box run emit nothing"
+              % (len(anycall), len(emit)))
+        check(bool(emit) and bool(printloop) and emit[0] < printloop[0],
+              "§16h the emission (line %s) comes BEFORE the print loop "
+              "(line %s)"
+              % (emit[0] + 1 if emit else None,
+                 printloop[0] + 1 if printloop else None))
+        check(not any("bucket_lines" in l and not l.lstrip().startswith("#")
+                      for l in src),
+              "§16h no `bucket_lines` buffer survives in the gate (the "
+              "identifier appears only in the comment explaining why)")
+
     print("--- %d checks, %d failed ---" % (CHECKS[0], len(FAILURES)))
     for f in FAILURES:
         print("  failed: %s" % f)

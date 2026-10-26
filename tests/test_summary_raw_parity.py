@@ -458,10 +458,17 @@ def main():
     # The detector self-test's verdict is part of the printed log and the
     # artifact, so a reader can see it ran rather than trusting that it did.
     lines = list(self_lines)
-    # #410 per-bucket diagnostic, collected per window and emitted as one
-    # block at the end so it reads as a measurement rather than being spread
-    # through the verdicts.
-    bucket_lines, bucket_reports = [], {}
+    # #410 per-bucket diagnostic. There is deliberately NO deferred list of
+    # bucket lines: the first cut of this collected them into `bucket_lines`
+    # and appended that AFTER the `for l in lines: print(l)` loop, so a whole
+    # box run produced the measurement and emitted none of it -- and
+    # summary.json is not synced back from the box either, so both channels
+    # were blind at once. The lines now go into the SAME `lines` the loop
+    # prints, at the point of computation, which makes
+    # "collected but never emitted" impossible rather than merely wrong.
+    # tests/test_summary_raw_parity_lib.py section 16h pins the absence of a
+    # deferred buffer.
+    bucket_reports = {}
     report["stale_detector_selftest_ok"] = self_ok
     report["stale_detector_selftest"] = self_lines
     try:
@@ -518,7 +525,7 @@ def main():
             # tests/test_summary_raw_parity_lib.py).
             bd = P.bucket_diff(r_ans.get("aas"), s_ans.get("aas"))
             bucket_reports[name] = bd
-            bucket_lines.extend(P.bucket_diff_lines(name, bd))
+            lines.extend(P.bucket_diff_lines(name, bd))
 
             if is_control:
                 # Both sides raw: every field must agree exactly, and the
@@ -594,9 +601,6 @@ def main():
     print("=== test_summary_raw_parity ===")
     for l in lines:
         print(l)
-    if bucket_lines:
-        lines.append("--- #410 per-bucket AAS comparison (diagnostic) ---")
-        lines.extend(bucket_lines)
     report["aas_buckets"] = bucket_reports
     report["ok"] = ok
     with open(os.path.join(RESULT_DIR, "summary.json"), "w") as f:
