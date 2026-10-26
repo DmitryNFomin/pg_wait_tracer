@@ -87,9 +87,15 @@ struct pgwt_counters {
      * must know about is happening" — each is paired with a loud log. */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
     uint64_t invalid_wait_reads_total; /* wait_event_info reads with a garbage class byte (CAP-2/5) */
-    uint64_t sampler_ticks_missed_total; /* sampler timer expirations coalesced/missed (SMP-3) */
     uint64_t state_reseeds_total;      /* frozen-stale state_map entries reseeded by
                                         * pgwt_sweep_stale_state (seed→arm race repair) */
+
+    /* Sampler timer is one-shot by design (anti-aliasing jitter, SMP-5), so
+     * expirations never coalesce. Lateness against the ARMED period is the
+     * signal; late_ns_total/(ticks_total*nominal_ns) is the fraction of
+     * sampling time lost. */
+    uint64_t sampler_ticks_total;         /* sampler timerfd ticks consumed */
+    uint64_t sampler_tick_late_ns_total;  /* cumulative ns late vs ARMED period */
 
     /* #416 per-tick event-ring drain (live-display conservation). The tick
      * used to be built from whatever the epoll loop happened to have drained,
@@ -229,6 +235,8 @@ struct pgwt_daemon {
     int epoll_fd;
     int timer_fd;
     int sample_timer_fd;   /* high-rate sampler tick (sampled/tiered); -1 if unused */
+    uint64_t sample_armed_ns;      /* the jittered period last armed */
+    uint64_t sample_armed_at_ns;   /* CLOCK_MONOTONIC instant it was armed */
     int signal_fd;
 
     /* Configuration */

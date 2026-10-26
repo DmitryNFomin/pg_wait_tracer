@@ -845,7 +845,6 @@ class DaemonState:
             "sampled_attr_shadow_query_id_mismatch_total": 0,
             # Capture hardening counters (T4): non-zero = loudly-logged
             # degradation (CAP-1/2/5/6, SMP-1/3).
-            "sampler_ticks_missed_total": 0,
             "state_map_full_total": 0,
             "seen_query_ids_full_total": 0,
             "sampled_text_pending": 0,
@@ -856,6 +855,10 @@ class DaemonState:
             "sampled_text_retry_exhausted_total": 0,
             "invalid_wait_reads_total": 0,
             "state_reseeds_total": 0,
+            # One-shot sampler ticks and cumulative lateness against the
+            # armed period.
+            "sampler_ticks_total": 0,
+            "sampler_tick_late_ns_total": 0,
             "sampler_healthy": True,
             "ringbuf_drops_total": 3,
             "trace_events_written_total": 1_250_000,
