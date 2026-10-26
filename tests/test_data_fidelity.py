@@ -275,6 +275,230 @@ def test_mixed_merge(t):
         cleanup_traces(trace_dir)
 
 
+
+# ── 5. Per-range fidelity on the wire (#322/#341) ─────────────────────────
+#
+# `fidelity` is ONE token per window, so a window spanning a fidelity change
+# reports "mixed" and web/static/lib/builders/fidelity.js bands the WHOLE
+# window as estimated -- including the part that was captured exactly. That
+# builder has read an optional `fidelity_ranges` since B5 and NOTHING ever
+# produced it (`grep -c fidelity_ranges src/server.c` == 0 before this
+# change): the consumer shipped, the producer did not.
+#
+# THE VACUITY TRAP these tests exist to close: a single-fidelity window
+# produces ONE range, so "fidelity_ranges is a non-empty list of
+# {from,to,fidelity}" passes with the field hardcoded to one whole-window
+# entry while #322 is entirely unfixed. So the mixed case below asserts
+# MORE THAN ONE range, at least TWO distinct fidelity tokens, and the
+# exact->sampled boundary at the exact timestamp the fixture puts it at --
+# BASE+2.0s, where the transition block's coverage ends and only samples
+# continue. The single-fidelity windows then assert exactly ONE range, so a
+# producer that always emits one partition-per-window, or always emits a
+# fixed two, fails one side or the other.
+
+RANGE_KEYS = {"from", "to", "fidelity"}
+
+
+def _check_range_shape(t, ranges, label):
+    """Type/shape checks, so a malformed or stringly-typed field FAILS rather
+    than slipping past a truthiness test. from/to must be plain JSON numbers
+    in wall ns -- the same domain and encoding as the aas bucket `t` the
+    client plots these bands against (builders/aas.js runs both through the
+    same nsToMs/clampX)."""
+    t.check(isinstance(ranges, list) and len(ranges) > 0,
+            f"{label}: fidelity_ranges is a non-empty list (got {ranges!r})")
+    if not isinstance(ranges, list):
+        return
+    for i, r in enumerate(ranges):
+        t.check(isinstance(r, dict) and set(r.keys()) == RANGE_KEYS,
+                f"{label}: range {i} has exactly {sorted(RANGE_KEYS)} "
+                f"(got {r!r})")
+        if not isinstance(r, dict):
+            continue
+        for key in ("from", "to"):
+            v = r.get(key)
+            t.check(isinstance(v, int) and not isinstance(v, bool),
+                    f"{label}: range {i} {key} is an integer ns value "
+                    f"(got {v!r})")
+        t.check(r.get("fidelity") in ("exact", "sampled", "mixed", "none"),
+                f"{label}: range {i} fidelity is a known token "
+                f"(got {r.get('fidelity')!r})")
+        if isinstance(r.get("from"), int) and isinstance(r.get("to"), int):
+            t.check(r["to"] > r["from"],
+                    f"{label}: range {i} is non-empty ({r['from']} -> {r['to']})")
+
+
+def _check_partition(t, ranges, win_from, win_to, label):
+    """The ranges must PARTITION the plotted window: start at its start, end
+    at its end, and be contiguous with no gap and no overlap. A breakdown
+    that leaves a hole mislabels that time as nothing at all, and one that
+    overlaps gives an instant two fidelities."""
+    t.check(ranges[0]["from"] == win_from,
+            f"{label}: first range starts at the window start "
+            f"({ranges[0]['from']} vs {win_from})")
+    t.check(ranges[-1]["to"] == win_to,
+            f"{label}: last range ends at the window end "
+            f"({ranges[-1]['to']} vs {win_to})")
+    gaps = [(ranges[i]["to"], ranges[i + 1]["from"])
+            for i in range(len(ranges) - 1)
+            if ranges[i]["to"] != ranges[i + 1]["from"]]
+    t.check(not gaps,
+            f"{label}: ranges are contiguous, no gap or overlap (got {gaps})")
+    merged = [(ranges[i]["fidelity"], ranges[i + 1]["fidelity"])
+              for i in range(len(ranges) - 1)
+              if ranges[i]["fidelity"] == ranges[i + 1]["fidelity"]]
+    t.check(not merged,
+            f"{label}: adjacent ranges never repeat a token (got {merged})")
+
+
+def _derived_token(ranges):
+    """The window token the ranges imply, by the same rule the server uses
+    (pgwt_fidelity_of). The response's own `fidelity` must equal this: a
+    breakdown that contradicts the label beside it is a wrong answer, not a
+    detail."""
+    kinds = {r["fidelity"] for r in ranges}
+    has_exact, has_sampled = "exact" in kinds, "sampled" in kinds
+    if has_exact and has_sampled:
+        return "mixed"
+    if has_exact:
+        return "exact"
+    if has_sampled:
+        return "sampled"
+    return "none"
+
+
+def test_fidelity_ranges(t):
+    print("\n### 5. Per-range fidelity (#322/#341) ###")
+    one_s = 1_000_000_000
+    scenario, _out_range, _exact_io_ms = build_mixed()
+    # build_mixed()'s coverage, restated so the expected boundary is written
+    # here rather than read back from the answer: the TRANSITIONS block spans
+    # [BASE+1.0s, BASE+2.0s] (exact), the SAMPLES block [BASE+1.0s, BASE+4.0s]
+    # (10 Hz). So exact coverage ends at BASE+2.0s and samples run on alone
+    # for two more seconds -- one fidelity change, at a timestamp this test
+    # pins absolutely.
+    exact_from, exact_to = BASE_TS + one_s, BASE_TS + 2 * one_s
+    sampled_from, sampled_to = BASE_TS + 2 * one_s, BASE_TS + 4 * one_s
+
+    trace_dir = generate_traces(scenario)
+    try:
+        with ServerHarness(trace_dir) as srv:
+            a = srv.query("aas")
+            t.check_eq(a.get("fidelity"), "mixed",
+                       "mixed window still reports fidelity = mixed")
+            ranges = a.get("fidelity_ranges")
+            _check_range_shape(t, ranges, "mixed window")
+            if not isinstance(ranges, list) or not ranges:
+                return
+
+            # THE non-vacuous assertion: a window spanning a fidelity change
+            # must break into MORE THAN ONE range carrying MORE THAN ONE
+            # token. A field hardcoded to a single whole-window entry fails
+            # both of these.
+            t.check(len(ranges) > 1,
+                    f"mixed window: more than one range (got {len(ranges)}: "
+                    f"{ranges!r})")
+            kinds = {r["fidelity"] for r in ranges}
+            t.check(len({k for k in kinds if k != "none"}) >= 2,
+                    f"mixed window: at least two data fidelities present "
+                    f"(got {sorted(kinds)})")
+
+            exact_r = [r for r in ranges if r["fidelity"] == "exact"]
+            sampled_r = [r for r in ranges if r["fidelity"] == "sampled"]
+            t.check(len(exact_r) == 1,
+                    f"exactly one exact range (got {exact_r!r})")
+            t.check(len(sampled_r) == 1,
+                    f"exactly one sampled range (got {sampled_r!r})")
+            if len(exact_r) == 1:
+                t.check_eq(exact_r[0]["from"], exact_from,
+                           "exact range starts where transition coverage does "
+                           "(BASE+1.0s)")
+                t.check_eq(exact_r[0]["to"], exact_to,
+                           "exact range ends where transition coverage does "
+                           "(BASE+2.0s) -- THE boundary")
+            if len(sampled_r) == 1:
+                t.check_eq(sampled_r[0]["from"], sampled_from,
+                           "sampled range starts at the SAME instant exact "
+                           "coverage ends (BASE+2.0s)")
+                t.check_eq(sampled_r[0]["to"], sampled_to,
+                           "sampled range ends where sample coverage does "
+                           "(BASE+4.0s)")
+
+            # The partition must cover exactly the axis the client plots the
+            # bands against: bucket starts, plus one bucket for the last.
+            buckets = a.get("buckets", [])
+            t.check(len(buckets) > 0, "aas returned buckets to anchor against")
+            if buckets:
+                win_from = buckets[0]["t"]
+                win_to = buckets[-1]["t"] + a["bucket_ns"]
+                _check_partition(t, ranges, win_from, win_to, "mixed window")
+
+            t.check_eq(_derived_token(ranges), a.get("fidelity"),
+                       "the ranges imply the SAME window token the response "
+                       "reports (no breakdown that contradicts its label)")
+
+            # A window wholly inside exact coverage: ONE exact range. This is
+            # the other half of the vacuity guard -- a producer that always
+            # emits the whole-trace partition, or always emits two ranges,
+            # fails here.
+            inside_exact = srv.query("aas", from_=exact_from + one_s // 4,
+                                       to_=exact_to - one_s // 4)
+            t.check_eq(inside_exact.get("fidelity"), "exact",
+                       "window inside transition coverage reports exact")
+            er = inside_exact.get("fidelity_ranges")
+            _check_range_shape(t, er, "exact-only window")
+            if isinstance(er, list) and er:
+                t.check(len(er) == 1 and er[0]["fidelity"] == "exact",
+                        f"exact-only window is ONE exact range (got {er!r})")
+                t.check_eq(_derived_token(er), "exact",
+                           "exact-only ranges imply exact")
+
+            # And one wholly inside the sampled-only tail: ONE sampled range,
+            # and its bounds track the REQUESTED window, not the trace.
+            s_from = sampled_from + one_s // 4
+            s_to = sampled_to - one_s // 4
+            inside_sampled = srv.query("aas", from_=s_from, to_=s_to)
+            t.check_eq(inside_sampled.get("fidelity"), "sampled",
+                       "window inside sample-only coverage reports sampled")
+            sr = inside_sampled.get("fidelity_ranges")
+            _check_range_shape(t, sr, "sampled-only window")
+            if isinstance(sr, list) and sr:
+                t.check(len(sr) == 1 and sr[0]["fidelity"] == "sampled",
+                        f"sampled-only window is ONE sampled range (got {sr!r})")
+                t.check(sr[0]["from"] >= s_from and sr[0]["to"] <= s_to,
+                        f"sampled-only range is clipped to the REQUESTED "
+                        f"window, not the trace ({sr[0]!r} vs "
+                        f"[{s_from}, {s_to}])")
+
+            # REFUSAL path, on real data rather than a hypothetical. The
+            # ranges come from COVERAGE (global, per clock generation) while
+            # the raw path's `fidelity` comes from pgwt_load_info -- what
+            # contributed AFTER the request's pid filter. Over this trace pid
+            # 1000 has only transitions and pid 1001 only samples, so each
+            # filtered window is labelled exact/sampled while coverage still
+            # spans a change: the two disagree, and a breakdown that
+            # contradicts the label beside it is worse than the whole-window
+            # band the client already falls back to. The field must be
+            # ABSENT, not approximated.
+            #
+            # These two assertions are vacuous on their own -- "absent" is
+            # also what a missing producer looks like. They are not vacuous
+            # HERE because the unfiltered window above asserts the field is
+            # PRESENT on the same server in the same test: delete the
+            # producer and that one fails first.
+            for pid, expect_token in ((1000, "exact"), (1001, "sampled")):
+                f = srv.query("aas", filters={"pid": pid})
+                t.check_eq(f.get("fidelity"), expect_token,
+                           f"pid {pid} window is labelled {expect_token} "
+                           f"(load-derived, after the pid filter)")
+                t.check("fidelity_ranges" not in f,
+                        f"pid {pid}: coverage-derived ranges contradict the "
+                        f"filtered label, so the field is REFUSED rather "
+                        f"than emitted wrong (got "
+                        f"{f.get('fidelity_ranges')!r})")
+    finally:
+        cleanup_traces(trace_dir)
+
 # ── 4. --dump annotates fidelity ──────────────────────────────────────
 
 def test_dump_annotation(t):
@@ -299,6 +523,7 @@ def main():
     test_sampled_only(t)
     test_exact_unavailable(t)
     test_mixed_merge(t)
+    test_fidelity_ranges(t)
     test_dump_annotation(t)
     sys.exit(0 if t.summary() else 1)
 
