@@ -659,9 +659,13 @@ except Exception as e:
     print(f"  Live UI smoke: could not read summary.json ({e})")
     sys.exit(0)
 
-line = "  Live UI smoke: overall=" + ("PASS" if s.get("ok") else "FAIL")
+status = ("FAIL" if s.get("failed_tabs") else "REFUSED (phase capability)"
+          if s.get("refused_tabs") else "PASS" if s.get("ok") else "FAIL")
+line = "  Live UI smoke: overall=" + status
 if s.get("failed_tabs"):
     line += " (failed: " + ", ".join(s["failed_tabs"]) + ")"
+if s.get("refused_tabs"):
+    line += " (refused: " + ", ".join(s["refused_tabs"]) + ")"
 if s.get("known_failing_tabs"):
     line += " (known-failing: " + ", ".join(s["known_failing_tabs"]) + ")"
 if s.get("xpass_tabs"):

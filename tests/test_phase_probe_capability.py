@@ -4,7 +4,7 @@
 Exercise the shared resolver, real Python entrypoints and the actual shell
 assertion blocks. No root, PG, BPF, build, lock, or remote machine is used.
 """
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import asdict
 import io
 import json
@@ -14,6 +14,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -37,6 +38,17 @@ def notes(names=cap.PHASE_NOTES, provider="postgresql"):
 def shell(text, env=None):
     return subprocess.run(["bash"], input=text, text=True,
                           capture_output=True, env=env, timeout=30)
+
+
+def available_evidence():
+    """Derive availability from both OS terms, without an env override."""
+    stack = ExitStack()
+    stack.enter_context(patch.dict(os.environ, {}, clear=True))
+    stack.enter_context(patch.object(cap, "REF_CTR_OFFSET"))
+    stack.enter_context(patch.object(cap.os, "readlink", return_value="/pg18/bin/postgres"))
+    stack.enter_context(patch.object(cap.subprocess, "run", return_value=Mock(
+        returncode=0, stdout=notes(), stderr="")))
+    return stack
 
 
 CHECK = between(ESC, "check() {", "# One pgwt-server data command")
@@ -141,19 +153,104 @@ cap.REF_CTR_OFFSET = MissingKernelAttribute()
                 self.assertIn("REFUSED (phase capability)", result.stdout)
                 self.assertIn("ref_ctr_offset is absent", result.stdout)
 
+    def ui_walk(self, tabs=None, empty=False, bad_tab=None):
+        # Real --url main loop, run_tab, navigation, screenshots and verdicts;
+        # only the browser protocol/clock are simulated. No phase env override.
+        import ui_live_smoke as smoke
+        from test_ui_live_smoke_footage import Browser, Page
+        visited = []
+
+        class WalkBrowser(Browser):
+            def new_context(self, **kwargs):
+                self.tab = Path(kwargs["record_video_dir"]).name
+                visited.append(self.tab)
+                return super().new_context(**kwargs)
+
+            def close(self):
+                if hasattr(self, "page"):
+                    super().close()
+
+        browser = WalkBrowser(None)
+        driver = SimpleNamespace(chromium=SimpleNamespace(launch=lambda: browser))
+        out_dir = Path(self.temp.name) / "ui"
+        argv = ["ui_live_smoke.py", "--url", "http://fixture/", "--pid", "123",
+                "--out-dir", str(out_dir), "--device-scale-factor", "1",
+                "--first-data-timeout", "0.01"]
+        if tabs:
+            argv += ["--tabs", ",".join(tabs)]
+        evaluate = Page.evaluate
+
+        def panel(page, js, arg=None):
+            if js in smoke.PANEL_CHECKS.values() and (empty or page.tab == bad_tab):
+                return {"ok": False, "detail": "empty data"}
+            return evaluate(page, js, arg)
+
+        with patch.object(sys, "argv", argv), \
+                patch.object(smoke, "sync_playwright", lambda: nullcontext(driver)), \
+                patch.object(smoke.time, "monotonic", lambda: browser.page.now / 1000), \
+                patch.object(Page, "evaluate", panel), \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
+            rc = smoke.main()
+        return rc, json.loads((out_dir / "summary.json").read_text()), out.getvalue(), visited
+
     def test_ui_invokes_shared_resolver_and_refuses(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(cap, "REF_CTR_OFFSET") as attribute:
+            attribute.stat.side_effect = FileNotFoundError
+            attribute.__str__.return_value = "/sys/bus/event_source/devices/uprobe/format/ref_ctr_offset"
+            rc, summary, output, visited = self.ui_walk()
+        self.assertEqual(rc, 78, output)
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["refused_tabs"], ["waterfall", "scatter"])
+        self.assertEqual(summary["failed_tabs"], [])
+        import ui_live_smoke as smoke
+        self.assertEqual(visited, [t for t in smoke.lib.TABS if t not in ("waterfall", "scatter")])
+        self.assertEqual(len(visited), 9)
+        for tab in visited:
+            self.assertTrue(summary["tabs"][tab]["ok"], tab)
+        self.assertIn("test_ui_live_smoke [waterfall]", output)
+        self.assertIn("test_ui_live_smoke [scatter]", output)
+        self.assertIn("ref_ctr_offset is absent", output)
+
+    def test_ui_refusal_cannot_hide_other_tab_failure(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(cap, "REF_CTR_OFFSET") as attribute:
+            attribute.stat.side_effect = FileNotFoundError
+            rc, summary, output, visited = self.ui_walk(bad_tab="sessions")
+        self.assertEqual(rc, 1, output)
+        self.assertEqual(summary["failed_tabs"], ["sessions"])
+        self.assertEqual(summary["refused_tabs"], ["waterfall", "scatter"])
+        self.assertIn("matrix", visited)
+
+    def test_ui_all_refusal_cannot_pass(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(cap, "REF_CTR_OFFSET") as attribute:
+            attribute.stat.side_effect = FileNotFoundError
+            rc, summary, output, visited = self.ui_walk(tabs=["waterfall", "scatter"])
+        self.assertEqual(rc, 78, output)
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["failed_tabs"], [])
+        self.assertEqual(summary["refused_tabs"], ["waterfall", "scatter"])
+        self.assertEqual(visited, [])
+
+    def test_ui_self_test_failure_takes_precedence_over_refusal(self):
         ui = (HERE / "ui_live_smoke.sh").read_text()
-        # The shipped guard, without unrelated port/PG/bridge preconditions.
-        guard = between(ui, 'python3 "$SCRIPT_DIR/phase_probe_capability.py"', '\n\n',)
-        result = shell(f'SCRIPT_DIR={shlex.quote(str(HERE))}\nPM_PID=123\n' + guard, self.env)
-        self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
-        self.assertIn("test_ui_live_smoke", result.stdout)
-        self.assertIn("ref_ctr_offset is absent", result.stdout)
+        tail = ui[ui.index('if [[ "$SELF_TEST_RC" -ne 0 ]]; then'):]
+        for smoke_rc, self_test_rc, expected in ((78, 0, 78), (78, 1, 1),
+                                                 (1, 0, 1), (1, 78, 1), (0, 0, 0)):
+            with self.subTest(smoke_rc=smoke_rc, self_test_rc=self_test_rc):
+                result = shell(f'SMOKE_RC={smoke_rc}\nSELF_TEST_RC={self_test_rc}\n' + tail,
+                               self.env)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
     def escalation_data(self, expected, prior_failures=0):
         # Use actual #108 branch + final exit precedence, faking only capture
         # and server inputs. Both captures contain zero phase-marker rows.
-        capability = cap.PhaseCapability(expected, "simulated available prerequisites" if expected else "not available on this kernel: ref_ctr_offset is absent (simulated)")
+        if expected:
+            with available_evidence():
+                capability = cap.resolve_phase_probes(123)
+        else:
+            capability = cap.PhaseCapability(False, "not available on this kernel: ref_ctr_offset is absent (simulated)")
         prefix = (f'SCRIPT_DIR={shlex.quote(str(HERE))}\n'
                   f'PHASE_CAPABILITY={shlex.quote(json.dumps(asdict(capability)))}\n'
                   f'passed=0\nfailed={prior_failures}\nphase_refused=0\nPSQL_BIN=psql\n'
@@ -221,7 +318,7 @@ exec_rows() { echo 0; }
     def test_available_cardinality_with_missing_fields_still_fails(self):
         import test_execution_cardinality as cardinality
         empty = dict(found={}, executions={name: {"rows": [], "completed_count": 0, "open_count": 0} for name in list(cardinality.COHORTS) + ["nested"]}, top_queries={"rows": []}, error_executions=None, error_row=None)
-        with patch.dict(os.environ, {cap.EXPECT_PHASE_ENV: "1"}), redirect_stdout(io.StringIO()) as out:
+        with available_evidence(), redirect_stdout(io.StringIO()) as out:
             cap.require_phase_probes("cardinality", 123)
             with patch.object(cardinality, "tests_failed", 0):
                 cardinality.assert_fixed_phase(empty)
@@ -234,7 +331,7 @@ exec_rows() { echo 0; }
         server.__enter__ = Mock(return_value=server)
         server.__exit__ = Mock(return_value=False)
         server.query.side_effect = [{"from_ns": 1, "to_ns": 100}, {"rows": []}]
-        with patch.dict(os.environ, {cap.EXPECT_PHASE_ENV: "1"}), patch.object(span, "ServerHarness", return_value=server), redirect_stdout(io.StringIO()) as out:
+        with available_evidence(), patch.object(span, "ServerHarness", return_value=server), redirect_stdout(io.StringIO()) as out:
             cap.require_phase_probes("span", 123)
             with self.assertRaises(SystemExit) as exc:
                 span.assert_spans(self.temp.name, 123, 10, 20, 2, 30)
@@ -245,17 +342,23 @@ exec_rows() { echo 0; }
         import ui_live_smoke as smoke
         from test_ui_live_smoke_failure import Browser, Page
         for tab in ("waterfall", "scatter"):
-            with self.subTest(tab=tab), \
-                    patch.dict(os.environ, {cap.EXPECT_PHASE_ENV: "1"}), \
-                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                cap.require_phase_probes("UI", 123)
-                # Real per-tab gate, with a browser stub whose data panel
-                # never renders. No waits, browser, bridge, or live workload.
-                result = smoke.run_tab(Browser(Page()), tab, "http://fixture/",
-                                       self.temp.name, 6, 0.01,
-                                       smoke.lib.BLINK_THRESHOLD)
+            with self.subTest(tab=tab), available_evidence():
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    cap.require_phase_probes("UI", 123)
+                    result = smoke.run_tab(Browser(Page()), tab, "http://fixture/",
+                                           self.temp.name, 6, 0.01,
+                                           smoke.lib.BLINK_THRESHOLD)
                 self.assertFalse(result["ok"])
                 self.assertIn("panel did not render", result["error"])
+                rc, summary, output, visited = self.ui_walk(tabs=[tab], empty=True)
+                result = summary["tabs"][tab]
+                self.assertEqual(rc, 1, output)
+                self.assertEqual(summary["failed_tabs"], [tab])
+                self.assertEqual(summary["refused_tabs"], [])
+                self.assertEqual(visited, [tab])
+                self.assertFalse(result["ok"])
+                self.assertIn("empty data", result["error"])
+                self.assertNotIn("REFUSED", output)
 
 
 if __name__ == "__main__":

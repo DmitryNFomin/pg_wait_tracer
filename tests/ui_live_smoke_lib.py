@@ -29,6 +29,10 @@ TABS = [
 # Tabs whose panel is a table (rendered check = "has rows").
 TABLE_TABS = {"overview", "events", "sessions", "queries"}
 
+# Only these panels require marker-identified executions; the other panels
+# gate on activity/wait data even when execute/plan probes are unavailable.
+PHASE_TABS = {"waterfall", "scatter"}
+
 # Live tick cadence the real app uses (app.js startAutoRefresh: 5000ms). The
 # orchestration waits for at least MIN_TICKS ticks per tab using this as the
 # per-tick timeout budget, never a blind sleep multiple.
@@ -1824,15 +1828,19 @@ def build_summary(tab_results):
     a KNOWN_FAILING_TABS tab's raw failure -- or unexpected pass -- never
     flips the overall verdict; `tabs[*].known_failing`/`xpass` (and the
     driver's printed KNOWN-FAILING/UNEXPECTED PASS lines) are how that stays
-    visible instead of silent."""
+    visible instead of silent. Phase capability refusals remain non-passing
+    and are listed separately from failures in `refused_tabs`."""
     excused = [t["tab"] for t in tab_results if t.get("known_failing")]
+    refused_tabs = [t["tab"] for t in tab_results if t.get("refused")]
     failed_tabs = [t["tab"] for t in tab_results
-                   if not t["ok"] and not t.get("known_failing")]
-    ok = len(tab_results) > 0 and len(failed_tabs) == 0
+                   if not t["ok"] and not t.get("known_failing")
+                   and not t.get("refused")]
+    ok = len(tab_results) > 0 and not failed_tabs and not refused_tabs
     return {
         "ok": ok,
         "tabs": {t["tab"]: t for t in tab_results},
         "failed_tabs": failed_tabs,
+        "refused_tabs": refused_tabs,
         "known_failing_tabs": excused,
         "xpass_tabs": [t["tab"] for t in tab_results if t.get("xpass")],
     }

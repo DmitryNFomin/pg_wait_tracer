@@ -147,11 +147,6 @@ if [[ -z "$PM_PID" ]]; then
     exit 1
 fi
 
-# The all-tab contract requires Waterfall and Scatter phase-marker data.
-# Refuse before workloads or changes to the host.
-python3 "$SCRIPT_DIR/phase_probe_capability.py" --caller test_ui_live_smoke \
-    --pid "$PM_PID" || exit $?
-
 echo "ui_live_smoke: postmaster PID $PM_PID"
 
 # PGPORT: three tiers, mirroring run_all.sh's own derivation (commit
@@ -415,7 +410,7 @@ fi
 if [[ -n "$DIAG_TABS" ]]; then
     echo "ui_live_smoke: ════ DIAGNOSTIC MODE (issue #384) -- this run DOES NOT GATE ════"
     echo "ui_live_smoke: diagnostic walk over [$DIAG_TABS] with per-frame data probes"
-    diag_args=(--url "$BASE_URL" --pgbench-pid "$PGBENCH_PID"
+    diag_args=(--url "$BASE_URL" --pid "$PM_PID" --pgbench-pid "$PGBENCH_PID"
                --workload-pid "$WORKLOAD_PID" --diag-data --tabs "$DIAG_TABS"
                --out-dir "$SCRIPT_DIR/results/ui_live_diag")
     [[ -n "$DIAG_TICKS" ]] && diag_args+=(--ticks "$DIAG_TICKS")
@@ -427,7 +422,7 @@ if [[ -n "$DIAG_TABS" ]]; then
     exit "$DIAG_RC"
 fi
 
-python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" --pid "$PM_PID" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" &
 WALK_PID=$!
 # Bash defers traps during a foreground command; wait is interruptible.
@@ -451,7 +446,7 @@ SMOKE_RC=$?
 # a gate that cannot prove it still detects a blink cannot be trusted just
 # because nothing blinked on this particular run.
 echo "ui_live_smoke: self-test -- injecting a synthetic blink and confirming the gate still catches it"
-python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" --pid "$PM_PID" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
     --out-dir "$SCRIPT_DIR/results/ui_live_self_test" \
     --inject-blink-ms 400 &
@@ -462,7 +457,11 @@ if [[ "$SELF_TEST_RC" -ne 0 ]]; then
     echo "ui_live_smoke: SELF-TEST FAILED (rc=$SELF_TEST_RC) -- the gate could not prove it still catches an injected blink; see results/ui_live_self_test/summary.json"
 fi
 
-if [[ "$SMOKE_RC" -ne 0 ]]; then
+# A tab or self-test failure takes precedence over phase-tab refusals.
+if [[ "$SMOKE_RC" -ne 0 && "$SMOKE_RC" -ne 78 ]]; then
     exit "$SMOKE_RC"
 fi
-exit "$SELF_TEST_RC"
+if [[ "$SELF_TEST_RC" -ne 0 ]]; then
+    exit "$SELF_TEST_RC"
+fi
+exit "$SMOKE_RC"

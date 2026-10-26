@@ -60,6 +60,11 @@ the state a real user reaches by pressing Live on one of these "heavy"
 views, which the app permits and therefore must render as well as any
 other live state.
 
+Live Waterfall and Scatter require execute/plan phase markers. When the
+shared resolver establishes that those probes are unavailable, only those
+tabs REFUSE; all other tabs still run and gate. Refusals are recorded apart
+from failures, with exit 78 after the walk unless a tab or self-test fails.
+
 Fail-safe: if the UI shows no data within FIRST_DATA_TIMEOUT_S (60s), the tab
 FAILS loudly -- never a skip (mirrors run_all.sh --require-live). Same for
 the controlled workload (pgbench + the lock/sleep sessions,
@@ -86,6 +91,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke_lib as lib
+from phase_probe_capability import CAPABILITY_REFUSAL, resolve_phase_probes
 
 PLAYWRIGHT_HINT = "ERROR: pip install playwright && playwright install chromium"
 try:
@@ -2054,6 +2060,9 @@ def main():
                     help="PID of the background pgbench process (from "
                     "tests/ui_live_smoke.sh); checked alive at every tab "
                     "boundary, FAILS LOUDLY if it is gone (review item 2)")
+    ap.add_argument("--pid", type=int, default=None,
+                    help="traced postmaster PID for phase capability evidence "
+                         "(otherwise discovered for a live phase-tab walk)")
     ap.add_argument("--workload-pid", type=int, default=None,
                     help="PID of the looping lock/sleep workload process "
                     "(from tests/ui_live_smoke.sh); same liveness check as "
@@ -2208,6 +2217,15 @@ def main():
                     else lib.TABS)
     if only_tabs:
         tabs_to_walk = only_tabs
+    # --mock supplies synthetic data. Every live phase-tab walk derives the
+    # expectation from the traced host/binary, independently of panel data.
+    phase_capability = None
+    if not args.mock and lib.PHASE_TABS.intersection(tabs_to_walk):
+        try:
+            phase_capability = resolve_phase_probes(args.pid)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"FAIL: cannot resolve phase capability: {exc}", file=sys.stderr)
+            return 1
     _require_playwright()
     try:
         with sync_playwright() as p:
@@ -2217,27 +2235,42 @@ def main():
                     print(f"=== {tab_id} ===")
                     inject_here = (args.inject_blink_ms is not None
                                    and tab_id == args.inject_tab)
-                    result = run_tab(browser, tab_id, url, out_dir,
-                                     args.ticks, args.first_data_timeout,
-                                     args.blink_threshold,
-                                     viewport={"width": args.viewport_width,
-                                              "height": args.viewport_height},
-                                     device_scale_factor=args.device_scale_factor,
-                                     inject_blink_ms=(args.inject_blink_ms
+                    refused = False
+                    if tab_id in lib.PHASE_TABS and phase_capability is not None:
+                        try:
+                            phase_capability.require(f"test_ui_live_smoke [{tab_id}]")
+                        except SystemExit as exc:
+                            if exc.code != CAPABILITY_REFUSAL:
+                                raise
+                            refused = True
+                    if refused:
+                        result = {"tab": tab_id, "ok": False, "refused": True,
+                                  "reason": phase_capability.reason,
+                                  "ticks_observed": 0, "rendered": False}
+                    else:
+                        result = run_tab(browser, tab_id, url, out_dir,
+                                         args.ticks, args.first_data_timeout,
+                                         args.blink_threshold,
+                                         viewport={"width": args.viewport_width,
+                                                   "height": args.viewport_height},
+                                         device_scale_factor=args.device_scale_factor,
+                                         inject_blink_ms=(args.inject_blink_ms
+                                                         if inject_here else None),
+                                         inject_tick=(args.inject_tick
                                                       if inject_here else None),
-                                     inject_tick=(args.inject_tick
-                                                  if inject_here else None),
-                                     inject_blink_frac=args.inject_blink_frac,
-                                     inject_frame_index=args.inject_frame,
-                                     diag_data=args.diag_data,
-                                     footage_only=args.footage_only)
+                                         inject_blink_frac=args.inject_blink_frac,
+                                         inject_frame_index=args.inject_frame,
+                                         diag_data=args.diag_data,
+                                         footage_only=args.footage_only)
                     results.append(result)
                     _assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                            f"after tab {tab_id!r}")
                     kf_line = lib.known_failing_report_line(tab_id, result["ok"])
-                    status = kf_line if kf_line else ("PASS" if result["ok"] else "FAIL")
+                    status = ("REFUSED (phase capability)" if result.get("refused")
+                              else kf_line if kf_line else ("PASS" if result["ok"] else "FAIL"))
                     if args.footage_only:
-                        status = ("FOOTAGE RECORDED" if result["footage_complete"] else "FOOTAGE FAILED")
+                        if not result.get("refused"):
+                            status = ("FOOTAGE RECORDED" if result["footage_complete"] else "FOOTAGE FAILED")
                         print(f"  image checks: {FOOTAGE_NOT_EVALUATED}")
                     print(f"  {status} [{tab_id}] "
                           f"ticks={result['ticks_observed']} "
@@ -2265,13 +2298,17 @@ def main():
         summary.update(footage_only=True, ok=False,
                        detail=FOOTAGE_NOT_EVALUATED,
                        footage_complete=bool(results) and all(
-                           r["footage_complete"] for r in results))
+                           r.get("footage_complete", False) for r in results))
         with open(summary_path, "w") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
             f.write("\n")
         print(f"  footage: {'RECORDED' if summary['footage_complete'] else 'FAILED'}")
         print(f"  image checks: {FOOTAGE_NOT_EVALUATED}")
         print(f"  summary: {summary_path}")
+        if any(not r.get("footage_complete") for r in results if not r.get("refused")):
+            return 1
+        if summary["refused_tabs"]:
+            return CAPABILITY_REFUSAL
         return 0 if summary["footage_complete"] else 1
 
     # issue #252 self-test (off unless --inject-blink-ms was given): pull
@@ -2315,18 +2352,25 @@ def main():
     for tab_id in tabs_to_walk:
         r = summary["tabs"].get(tab_id)
         kf_line = lib.known_failing_report_line(tab_id, r["ok"]) if r else None
-        label = kf_line if kf_line else ("PASS" if r and r["ok"] else "FAIL")
+        label = ("REFUSED (phase capability)" if r and r.get("refused")
+                 else kf_line if kf_line else ("PASS" if r and r["ok"] else "FAIL"))
         print(f"  {label} {tab_id}")
     print(f"  summary: {summary_path}")
-    print(f"  overall: {'PASS' if summary['ok'] else 'FAIL'}"
+    overall = ("FAIL" if summary["failed_tabs"] else "REFUSED (phase capability)"
+               if summary["refused_tabs"] else "PASS" if summary["ok"] else "FAIL")
+    print(f"  overall: {overall}"
           + (f" (failed: {', '.join(summary['failed_tabs'])})"
              if summary["failed_tabs"] else "")
+          + (f" (refused: {', '.join(summary['refused_tabs'])})"
+             if summary["refused_tabs"] else "")
           + (f" (known-failing: {', '.join(summary['known_failing_tabs'])})"
              if summary["known_failing_tabs"] else "")
           + (f" (xpass: {', '.join(summary['xpass_tabs'])})"
              if summary["xpass_tabs"] else ""))
 
     if args.inject_blink_ms is not None:
+        if summary["refused_tabs"]:
+            return CAPABILITY_REFUSAL
         # The self-test's own exit code supersedes the normal `summary["ok"]`
         # gate here: --inject-tab is DELIBERATELY broken by the overlay, so
         # summary["ok"] being False is expected and uninformative in this
@@ -2362,6 +2406,10 @@ def main():
               f"({detail})")
         return 0 if self_test_ok else 1
 
+    if summary["failed_tabs"]:
+        return 1
+    if summary["refused_tabs"]:
+        return CAPABILITY_REFUSAL
     return 0 if summary["ok"] else 1
 
 

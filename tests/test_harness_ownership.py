@@ -84,7 +84,8 @@ class HarnessTests(unittest.TestCase):
         for directory in ('tests', 'scripts', 'web/static', 'bin'):
             (self.repo / directory).mkdir(parents=True, exist_ok=True)
         for name in ('demo_rehearsal.sh', 'ui_live_smoke.sh', 'live_daemon_lib.sh',
-                     'bridge_owner.py', 'demo_rehearsal_lib.py', 'ui_live_smoke_lib.py'):
+                     'bridge_owner.py', 'demo_rehearsal_lib.py', 'ui_live_smoke_lib.py',
+                     'phase_probe_capability.py', 'testutil.py'):
             if (TREE / 'tests' / name).exists():
                 shutil.copy(TREE / 'tests' / name, self.repo / 'tests' / name)
         for name in ('demo-rehearsal.sh', 'demo-rehearsal-remote-run.sh'):
