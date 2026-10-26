@@ -580,6 +580,12 @@ dump_markers: dump_markers.c $(BUILD)/server_event_reader.o \
               $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
 
+# dump_raw_events: INSTRUMENT ONLY (#261/#306). Not in $(TESTS), not gated.
+dump_raw_events: dump_raw_events.c $(BUILD)/server_event_reader.o \
+              $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+              $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
 # test_alloc_tune: src/alloc_tune.h. Header-only, so this links nothing else.
 # The subject is an allocator property (a ~274 MB block served from the brk
 # heap, not returned on free, and re-touched without page faults), measured
