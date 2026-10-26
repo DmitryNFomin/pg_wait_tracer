@@ -949,6 +949,30 @@ def bucket_weighted_aas_ok(buckets, bucket_ns, from_ns, to_ns, time_model_aas,
     return ok, detail
 
 
+# ── Cross-tab bucket-count overshoot bound (issue #570) ──────────────────
+#
+# PR #564 investigated whether AAS_CROSS_TAB_NUM_BUCKETS could be tuned to
+# fix a weighted-vs-unweighted mismatch and concluded "sound, left alone":
+# src/compute.c:797 computes `bucket_ns = (range_ns + N - 1) / N` -- a
+# CEILING division -- so `N*bucket_ns - range_ns` (how far N full-width
+# buckets overshoot the true window) is bounded to [0, N-1] NANOSECONDS,
+# never one bucket width. That is what makes the weighted-vs-unweighted
+# AAS error structurally incapable of approaching TIME_MODEL_TOLERANCE_PCT
+# at any bucket count (see
+# test_cross_tab_weighted_vs_unweighted_error_has_wide_margin in
+# test_demo_rehearsal_lib.py). This helper reimplements that one-line
+# formula so the bound can be pinned by a committed test without
+# importing src/compute.c -- it is NEVER used by a live gate;
+# bucket_weighted_aas_ok above always takes bucket_ns from the server's
+# own response, not from this function.
+def cross_tab_bucket_ns(range_ns, num_buckets):
+    if num_buckets <= 0:
+        raise ValueError(f"num_buckets must be positive ({num_buckets!r})")
+    if range_ns < 0:
+        raise ValueError(f"range_ns must be non-negative ({range_ns!r})")
+    return (range_ns + num_buckets - 1) // num_buckets
+
+
 # 5s: web/static's own live-tick cadence (app.js startAutoRefresh, the same
 # reference RECENT_WINDOW_S's comment above uses). "Within 2 ticks of wall
 # clock" (criteria doc §5) is 10s.

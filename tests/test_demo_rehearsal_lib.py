@@ -1067,6 +1067,110 @@ def test_bucket_weighted_aas_ok_non_positive_window_fails():
     check(not ok, f"from_ns == to_ns fails rather than dividing by zero ({detail})")
 
 
+# ── cross_tab_bucket_ns overshoot bound (issue #570) ──────────────────────
+#
+# PR #564 concluded the cross-tab AAS leg is sound because
+# src/compute.c:797's ceiling bucket_ns formula bounds the overshoot
+# `N*bucket_ns - range_ns` to [0, N-1] nanoseconds. This pins that bound
+# (not the specific 9.11e-7% figure the probe measured) plus its
+# consequence for the weighted-vs-unweighted comparison, and a bypass-suite
+# case proving the bound test is not vacuous.
+#
+# Representative spread: the five AAS_CROSS_TAB_NUM_BUCKETS-scale bucket
+# counts and the five window spans PR #564's probe measured against
+# (12.3-90.1s, 7/59/60/61/600 buckets) -- all 25 combinations, not just
+# the 16 the probe happened to hit, since the bound must hold for every
+# (N, range) pair.
+_BOUND_TEST_N = (7, 59, 60, 61, 600)
+_BOUND_TEST_SPANS_S = (12.3, 45.0, 60.0, 61.000000001, 90.1)
+
+
+def test_cross_tab_bucket_ns_overshoot_bound_holds():
+    for n in _BOUND_TEST_N:
+        for span_s in _BOUND_TEST_SPANS_S:
+            range_ns = int(span_s * 1e9)
+            bucket_ns = lib.cross_tab_bucket_ns(range_ns, n)
+            overshoot = n * bucket_ns - range_ns
+            check(0 <= overshoot <= n - 1,
+                  f"N={n} range_ns={range_ns}: overshoot={overshoot} must "
+                  f"be in [0, {n - 1}] ns (bucket_ns={bucket_ns})")
+
+
+def test_cross_tab_bucket_ns_overshoot_bound_breaks_under_truncation():
+    # BYPASS-SUITE CASE -- if src/compute.c:797's ceiling division were
+    # ever replaced with plain truncation (floor), N full-width buckets
+    # would UNDERSHOOT the window instead (a negative "overshoot"),
+    # failing the lower bound -- exactly the mutation issue #570 requires
+    # this test to catch, and PR #559's review found a sibling truncation
+    # at compute.c:1845 left a related test green. This demonstrates the
+    # bound test above is not vacuous: it is sensitive to ceil vs.
+    # truncate specifically, not satisfied by just "some division
+    # formula". Most (N, span) pairs below are NOT evenly divisible
+    # (wall-clock windows essentially never are, per
+    # bucket_weighted_aas_ok's own module comment), so truncation fails
+    # the bound for the large majority of them.
+    total = len(_BOUND_TEST_N) * len(_BOUND_TEST_SPANS_S)
+    failures = 0
+    for n in _BOUND_TEST_N:
+        for span_s in _BOUND_TEST_SPANS_S:
+            range_ns = int(span_s * 1e9)
+            truncated_bucket_ns = range_ns // n  # the mutation: ceil -> floor
+            overshoot = n * truncated_bucket_ns - range_ns
+            if not (0 <= overshoot <= n - 1):
+                failures += 1
+    check(failures >= total // 2,
+          f"truncation breaks the overshoot bound for a majority of "
+          f"geometries ({failures}/{total}), proving the bound test above "
+          f"actually depends on ceil rather than passing for any formula")
+
+
+def test_cross_tab_weighted_vs_unweighted_error_has_wide_margin():
+    # Pins the CONSEQUENCE of the overshoot bound: for a uniform-rate
+    # workload (every bucket accumulates busy_ns at the same rate `r`; the
+    # server still divides the truncated tail bucket's partial
+    # accumulation by the FULL bucket_ns -- see bucket_weighted_aas_ok's
+    # module comment), the gap between an UNWEIGHTED mean of bucket aas
+    # values and the true rate stays many orders of magnitude below
+    # TIME_MODEL_TOLERANCE_PCT. This is the "left alone" argument from
+    # issue #570 / PR #564: the error this leg could ever introduce is
+    # nanosecond-scale against multi-millisecond-or-larger buckets, so it
+    # can never approach the 1% gate.
+    #
+    # "weighted" and "unweighted" are produced INDEPENDENTLY here, not
+    # through a shared helper: weighted_derived comes from
+    # bucket_weighted_aas_ok's own internal formula
+    # (sum(aas_i*bucket_ns)/range_ns, exercised via its (ok, detail)
+    # return); unweighted_mean is computed inline below with a DIFFERENT
+    # formula (sum(aas_i)/num_buckets) -- a mutation that breaks one does
+    # not automatically move the other.
+    rate = 2.0
+    worst_gap_pct = 0.0
+    for n in _BOUND_TEST_N:
+        for span_s in _BOUND_TEST_SPANS_S:
+            range_ns = int(span_s * 1e9)
+            bucket_ns = lib.cross_tab_bucket_ns(range_ns, n)
+            last_width_ns = range_ns - (n - 1) * bucket_ns
+            aas_values = [rate] * (n - 1) + [rate * last_width_ns / bucket_ns]
+            buckets = [{"t": i * bucket_ns, "cpu": a}
+                       for i, a in enumerate(aas_values)]
+
+            ok, detail = lib.bucket_weighted_aas_ok(
+                buckets, bucket_ns, 0, range_ns, rate)
+            check(ok, f"weighted derivation matches the true rate "
+                      f"(N={n} span={span_s}s): {detail}")
+
+            unweighted_mean = sum(aas_values) / n
+            gap_pct = abs(unweighted_mean - rate) / rate * 100.0
+            worst_gap_pct = max(worst_gap_pct, gap_pct)
+
+    margin = lib.TIME_MODEL_TOLERANCE_PCT / 10_000
+    check(worst_gap_pct < margin,
+          f"worst unweighted-vs-true-rate gap across {len(_BOUND_TEST_N)}x"
+          f"{len(_BOUND_TEST_SPANS_S)} geometries is {worst_gap_pct:.2e}%, "
+          f"must stay under {margin:.2e}% (tolerance "
+          f"{lib.TIME_MODEL_TOLERANCE_PCT}% / 10000x margin)")
+
+
 def test_freshness_recent_bucket_ok():
     now_ns = 1_000_000_000_000
     to_ns = now_ns - 3_000_000_000  # 3s old, well under the 10s bound
