@@ -120,6 +120,18 @@ run scripts/check-link-closure.sh
 step "runner-registration guard self-test"
 run tests/test_check_runner_registration.sh
 
+# #591 bypass suite: tests/test_uprobe_fired.py's exact-window mask gate is a
+# LIVE test (ci_smoke.sh only -- see the #433 gap above), so its own logic
+# would otherwise be provable only on a gate box. The resolver and the
+# three-part mask predicate are pure, and this runs them against every way the
+# gate could be made unable to SEE: an undeclared/unparseable expectation, an
+# absent or non-numeric mask field, phase markers absent where declared
+# present AND present where declared absent, an unknown bundle bit, plus two
+# subprocess cases proving the real test's main() actually consults the
+# resolver and that ci.yml still declares the expectation.
+step "exact-window mask gate bypass suite (#591)"
+run tests/test_uprobe_mask_gate.py
+
 # Runner-image pin guard (2026-10-22). GitHub rolled `ubuntu-latest` to Ubuntu
 # 26.04 and four gating jobs went red at once (run 39765852420): Playwright
 # 1.60.0 has no chromium for ubuntu26.04-x64, setup-python handed the

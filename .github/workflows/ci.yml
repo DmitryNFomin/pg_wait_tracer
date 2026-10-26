@@ -831,6 +831,17 @@ jobs:
           # PG16 = unsupported version: assert the loud-refusal contract.
           FLAGS=""
           [ "$V" = "16" ] && FLAGS="--expect-unsupported"
+          # #591: tests/test_uprobe_fired.py asserts the EXACT phase-marker
+          # bits of an open exact window (#108's execute/plan USDT markers)
+          # and REFUSES to run when this is unset -- it is deliberately not
+          # defaulted, so a new tier has to state its contract instead of
+          # inheriting a silently vacuous one. Declared here because the
+          # runner's provisioning is the only thing that knows: these cells
+          # run on the Ubuntu 24.04 gate boxes (kernel 6.8, so USDT semaphore
+          # refcounting is available) against PGDG builds carrying the SDT
+          # notes, so the markers MUST attach in every escalation window.
+          # An EL8 cell would declare 0 here (4.18 has no refcounting).
+          EXPECT_PHASE=1
           # sudo strips the environment: pass PATH (psql/pgbench), PGPORT
           # (the workload side — psql/pgbench in test_capture_smoke.py
           # connect with no explicit -p, so on the gate box's multi-cluster
@@ -843,6 +854,7 @@ jobs:
             "PGPORT=$CS_PGPORT" \
             "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
             "BPFTOOL=$BPFTOOL" \
+            "PGWT_EXPECT_PHASE_PROBES=$EXPECT_PHASE" \
             tests/ci_smoke.sh --pg-version "$V" $FLAGS
 
       # Preserve the provisioned PostgreSQL clusters; only this cell's
