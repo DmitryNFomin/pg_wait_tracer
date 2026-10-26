@@ -8199,7 +8199,14 @@ static void dump_daemon_status(const char *trace_dir)
 
     /* Read STATUS, not metrics: operators can see optional attach failures
      * in --dump even though metrics counters have no product view (#600). */
-    printf("Optional phase probes (latest attach):");
+    /* Outcomes survive release; show current links beside the history. */
+    cJSON *mask = cJSON_GetObjectItem(status, "exact_probe_attached_mask");
+    printf("Optional phase probes (latest attach; current attached_mask=");
+    if (cJSON_IsNumber(mask))
+        printf("%d", mask->valueint);
+    else
+        printf("unknown");
+    printf("):");
     const char *probes[] = { "exec", "plan" };
     for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
         char key[64];

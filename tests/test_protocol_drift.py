@@ -657,7 +657,8 @@ def check_optional_probe_control(t, trace_dir):
                         mock_fields = {k: v for k, v in mock["response"].items()
                                        if k.startswith("exact_probe_")}
                         if cmd == "metrics":
-                            t.check(not any(k.endswith("_attach_outcome")
+                            t.check(bool(mock_fields) and
+                                    not any(k.endswith("_attach_outcome")
                                             for k in mock_fields) and
                                     all(isinstance(v, (int, float))
                                         for v in mock_fields.values()),
@@ -674,12 +675,29 @@ def check_optional_probe_control(t, trace_dir):
                         "exec=attached (errno=0)" in dump.stdout and
                         f"plan=attach_failed (errno={errno.EACCES})" in dump.stdout,
                         "[probe dump] operator sees successful and failed attempt reasons")
+                # Expiry clears current links, retaining both successful attempts.
+                payloads["status"].update({
+                    "exact_probe_attached_mask": 0,
+                    "exact_probe_plan_attach_outcome": "attached",
+                    "exact_probe_plan_attach_errno": 0,
+                })
+                payloads["metrics"].update({
+                    "exact_probe_attached_mask": 0,
+                    "exact_probe_plan_attach_errno": 0,
+                })
+                dump = subprocess.run([SERVER_BIN, "--dump", trace_dir],
+                                      capture_output=True, text=True, timeout=10)
+                t.check(dump.returncode == 0 and
+                        "Optional phase probes (latest attach; current attached_mask=0):"
+                        " exec=attached (errno=0) plan=attached (errno=0)"
+                        in dump.stdout.splitlines(),
+                        "[probe dump] post-expiry retained successes disclose no current links")
             finally:
                 stop.set()
                 worker.join(timeout=4)
             t.check(not worker.is_alive() and not errors and
-                    requests == ["status", "metrics", "status", "metrics"],
-                    f"[probe control] all four socket requests reached fixture: {requests}, {errors}")
+                    requests == ["status", "metrics", "status", "metrics", "status", "metrics"],
+                    f"[probe control] all six socket requests reached fixture: {requests}, {errors}")
     finally:
         mock_server._DAEMON = old_daemon
         if os.path.exists(path):
