@@ -7,8 +7,8 @@ The true-positive path of that gate has never been the broken one: a stale
 and in every cycle. What this file exists for is the FALSE NEGATIVE -- every
 way the gate could be made unable to see, and therefore able to approve:
 
-  * the declaration is absent, empty or unparseable (so the gate would have
-    to guess, or default, which is how it goes vacuous);
+  * an explicit override is empty or unparseable; without an override the
+    shared resolver derives the expectation from kernel/binary evidence (#622);
   * the mask field is absent from the JSON, or is not a number;
   * the thing being checked is ABSENT rather than wrong -- phase bits missing
     where they were declared present (that is #591's live red), and phase bits
@@ -17,8 +17,8 @@ way the gate could be made unable to see, and therefore able to approve:
   * the required attribution pair is incomplete;
   * an unknown bundle bit appears (a plain `mask & ATTR_MASK` would accept it);
   * the gate is never CALLED at all -- two subprocess cases run the real
-    tests/test_uprobe_fired.py and prove its main() refuses an undeclared
-    environment before doing anything else, and gets past the declaration when
+    tests/test_uprobe_fired.py and prove its main() refuses an invalid explicit
+    override before doing anything else, and gets past the override when
     one is given;
   * the runner stops declaring the expectation -- a case reads
     .github/workflows/ci.yml and fails if the capture-smoke cell no longer
@@ -31,12 +31,14 @@ import io
 import os
 import subprocess
 import sys
+from unittest.mock import patch
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, SCRIPT_DIR)
 
 import test_uprobe_fired as uf  # noqa: E402
+from phase_probe_capability import resolve_phase_probes
 
 run = 0
 failed = 0
@@ -53,9 +55,10 @@ def report(ok, msg):
 
 
 def refuses(raw, label):
-    """resolve_expected_phase_mask must RAISE, not return a default."""
+    """An invalid explicit override must RAISE, never default."""
     try:
-        got = uf.resolve_expected_phase_mask(raw)
+        with patch.dict(os.environ, {uf.EXPECT_PHASE_ENV: raw}):
+            got = resolve_phase_probes().phase_mask
     except ValueError as exc:
         report(uf.EXPECT_PHASE_ENV in str(exc),
                f"{label}: refused, and the message names the variable")
@@ -65,7 +68,8 @@ def refuses(raw, label):
 
 def accepts(raw, want, label):
     try:
-        got = uf.resolve_expected_phase_mask(raw)
+        with patch.dict(os.environ, {uf.EXPECT_PHASE_ENV: raw}):
+            got = resolve_phase_probes().phase_mask
     except ValueError as exc:
         report(False, f"{label}: refused a valid declaration ({exc})")
         return
@@ -86,9 +90,13 @@ def mask_accepts(mask, expected_phase, label):
 
 print("=== #591 exact-window mask gate: bypass suite ===")
 
-# ── 1. The declaration cannot be skipped, defaulted or guessed ──────────
-print("\n-- declaration resolution --")
-refuses(None, "unset variable")
+# ── 1. The explicit override cannot be malformed ──────────
+print("\n-- capability resolution / explicit overrides --")
+with patch.dict(os.environ, {}, clear=True), \
+        patch("phase_probe_capability.Path.stat", side_effect=FileNotFoundError):
+    capability = resolve_phase_probes()
+    report(not capability.expected and "ref_ctr_offset" in capability.reason,
+           "unset override derives absent kernel capability (simulated sysfs)")
 refuses("", "empty variable")
 refuses("   ", "whitespace-only variable")
 refuses("2", "out-of-range value '2'")
@@ -145,13 +153,13 @@ if not os.path.exists(target):
     report(False, f"{target} is missing; cannot prove the gate is wired")
 else:
     env = dict(os.environ)
-    env.pop(uf.EXPECT_PHASE_ENV, None)
+    env[uf.EXPECT_PHASE_ENV] = "invalid"
     # --pid 1 so an absent postmaster cannot be the reason it exits.
     r = subprocess.run([sys.executable, target, "--pid", "1"],
                        env=env, capture_output=True, text=True, timeout=120)
     out = r.stdout + r.stderr
     report(r.returncode != 0 and uf.EXPECT_PHASE_ENV in out,
-           "undeclared environment: main() exits non-zero naming the "
+           "invalid explicit override: main() exits non-zero naming the "
            f"variable (rc={r.returncode})")
     report("must run as root" not in out,
            "the refusal happens BEFORE the root check, so it is reachable "

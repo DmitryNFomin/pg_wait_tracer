@@ -40,6 +40,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server_harness import SERVER_BIN, ServerHarness
 from testutil import find_postmaster
+from phase_probe_capability import require_phase_probes
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
@@ -399,6 +400,8 @@ def main():
     ap.add_argument("--pg-version", type=int, help="accepted for runner compatibility; ignored")
     args = ap.parse_args()
     print("test_execution_span_live: #479 containing spans with a real straddler")
+    pm_pid = args.pid or find_postmaster()
+    require_phase_probes("test_execution_span_live", pm_pid)
     if os.geteuid() != 0:
         fatal("requires root (eBPF capture)")
     if sys.platform != "linux":
@@ -407,7 +410,6 @@ def main():
         if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
             fatal(f"binary not built/executable: {binary}")
     try:
-        pm_pid = args.pid or find_postmaster()
         if not pm_pid:
             fatal("no PostgreSQL postmaster found")
         print(f"  postmaster pid {pm_pid}, PGPORT={os.environ.get('PGPORT')}")

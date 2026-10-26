@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import demo_rehearsal_lib as drlib
 from server_harness import ServerHarness
 from testutil import find_postmaster
+from phase_probe_capability import require_phase_probes
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
@@ -651,12 +652,13 @@ def main():
 
     print("test_execution_cardinality: #464 one execution per execution")
 
+    pm_pid = args.pid or find_postmaster(args.pg_version or None)
+    require_phase_probes("test_execution_cardinality", pm_pid)
     if os.geteuid() != 0:
         fatal("requires root (eBPF capture)")
     if not os.path.exists(TRACER):
         fatal(f"pg_wait_tracer not built at {TRACER}")
 
-    pm_pid = args.pid or find_postmaster(args.pg_version or None)
     if not pm_pid:
         fatal("no postmaster found")
     print(f"  postmaster pid {pm_pid}, PGPORT={os.environ.get('PGPORT')}")

@@ -146,6 +146,12 @@ if [[ -z "$PM_PID" ]]; then
     echo "ERROR: cannot find postmaster PID"
     exit 1
 fi
+
+# The all-tab contract requires Waterfall and Scatter phase-marker data.
+# Refuse before workloads or changes to the host.
+python3 "$SCRIPT_DIR/phase_probe_capability.py" --caller test_ui_live_smoke \
+    --pid "$PM_PID" || exit $?
+
 echo "ui_live_smoke: postmaster PID $PM_PID"
 
 # PGPORT: three tiers, mirroring run_all.sh's own derivation (commit

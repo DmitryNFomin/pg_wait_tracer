@@ -190,6 +190,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Resolve once for both the mid-window mask and the #108 data contract.
+PHASE_CAPABILITY=$(python3 "$SCRIPT_DIR/phase_probe_capability.py" --pid "$PM_PID" --json) || exit 1
+phase_refused=0
+
 # Send one JSON line, print the one-line response.
 ctl() {
     python3 - "$SOCK" "$1" <<'PYEOF'
@@ -260,6 +264,17 @@ check $? "escalate granted a 4s window"
 
 # tier must now be escalated
 STATUS=$(ctl '{"cmd":"status"}')
+echo "  open-window status: $STATUS"
+echo "$STATUS" | PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import json, sys
+from phase_probe_capability import PhaseCapability, exact_window_mask_ok
+capability = PhaseCapability(**json.loads(sys.argv[1]))
+r = json.load(sys.stdin)
+assert r["tier"] == "escalated" and r["escalation_seconds_remaining"] > 0, r
+ok, reason = exact_window_mask_ok(r.get("exact_probe_attached_mask"), capability.phase_mask)
+assert ok, (reason, capability.reason, r)
+' "$PHASE_CAPABILITY"
+check $? "open-window exact_probe_attached_mask matches resolved phase capability"
 TIER=$(echo "$STATUS" | jget "['tier']")
 [[ "$TIER" == "escalated" ]]
 check $? "tier flipped to escalated (got: $TIER)"
@@ -505,7 +520,10 @@ run_tiered_capture() {
     return 0
 }
 
-if [[ -z "$PSQL_BIN" ]]; then
+if [[ $(echo "$PHASE_CAPABILITY" | jget "['expected']") == "False" ]]; then
+    echo "REFUSED (phase capability): test_escalation #108: $(echo "$PHASE_CAPABILITY" | jget "['reason']")"
+    phase_refused=1
+elif [[ -z "$PSQL_BIN" ]]; then
     check 1 "#108: psql is available (cannot drive a workload without it)"
 else
     trap 'cleanup; esc108_cleanup' EXIT
@@ -564,4 +582,5 @@ fi
 
 echo ""
 echo "$passed/$((passed + failed)) tests passed"
-[[ $failed -eq 0 ]]
+[[ $failed -eq 0 ]] || exit 1
+[[ $phase_refused -eq 0 ]] || exit 78

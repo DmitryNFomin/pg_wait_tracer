@@ -6,6 +6,8 @@
 # the gate for capture-behavior phases (Trust Milestone standing rule): an
 # all-skip run used to exit 0 (TST-4), which is how "green" runs happened on
 # boxes where nothing live actually executed. Use it on the real test box.
+# Phase-capability REFUSED (exit 78) is a separate, loud platform outcome;
+# it is neither a live skip nor an executed pass (issue #622).
 #
 # PGPORT: derived automatically from the resolved postmaster's own
 # postmaster.pid (falling back to the multi-PG gate box's port convention,
@@ -122,6 +124,8 @@ skipped=0
 excluded=0
 known_failing=0
 xpass=0
+refused=0
+refused_names=()
 
 # KNOWN_FAILING: test name -> tracking issue number. ONLY for a test that
 # reproduces a real, filed product bug (e.g. #97, #98) — never for timing or
@@ -189,7 +193,11 @@ run_test() {
     local rc=0
     "$@" || rc=$?
     local issue
-    if issue=$(known_failing_issue "$name"); then
+    if [[ "$rc" -eq 78 && "$name" =~ ^(test_execution_cardinality|test_execution_span_live|test_escalation|test_ui_live_smoke)$ ]]; then
+        echo "  $name — REFUSED (phase capability; reason and evidence above)"
+        refused=$((refused + 1))
+        refused_names+=("$name")
+    elif issue=$(known_failing_issue "$name"); then
         # A listed test that could not even run (126: found but not
         # executable, 127: command/file not found) is not the known product
         # bug being tracked — it's a broken test, and must fail the gate
@@ -666,9 +674,12 @@ echo ""
 echo "════════════════════════════════════════"
 echo "  SUMMARY"
 echo "════════════════════════════════════════"
-total=$((passed + failed + skipped + excluded + known_failing))
+total=$((passed + failed + skipped + excluded + known_failing + refused))
 executed=$((passed + failed + known_failing))
-echo "  Executed: $executed (passed $passed, failed $failed, known-failing $known_failing ($xpass xpass)), skipped $skipped, excluded $excluded, total $total"
+echo "  Executed: $executed (passed $passed, failed $failed, known-failing $known_failing ($xpass xpass)), skipped $skipped, excluded $excluded, refused $refused, total $total"
+for refused_name in ${refused_names[@]+"${refused_names[@]}"}; do
+    echo "  REFUSED (phase capability): $refused_name — see reason and evidence in its test output"
+done
 tier_report
 if [[ $REQUIRE_LIVE -eq 1 ]]; then
     echo "  Mode:     --require-live (live-section skips counted as failures)"
