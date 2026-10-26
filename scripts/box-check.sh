@@ -409,7 +409,7 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
 # web/pgwt and fails loudly if it is missing, same as the other binaries).
 #
-# issue #567: `make -C tests clean` BEFORE `make -C tests`, not top-level
+# issue #567: `make -C tests clean` BEFORE `make build-tests`, not top-level
 # `make clean`. The object_excludes above stop a NEW tests/*.o from being
 # sent, but excluded files are not deleted by --delete either (that needs
 # --delete-excluded, which would also delete /build -- itself excluded on
@@ -423,9 +423,12 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # test_exec_index and $(TESTS) -- not the top-level `clean` target, which
 # also deletes $(BUILD_DIR) and the generated BPF skeleton headers and would
 # force a full daemon rebuild on every single box-check run.
+# issue #615: build-tests forwards the top-level resolved libbpf headers and
+# library to the tests sub-make. On EL8 these must be the bundled versions;
+# the tests' default -lbpf would silently select the old system library.
 lock_header='exec 9>/tmp/pgwt-box-check.lock; if flock -n 9; then echo "box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)"; else lock_wait_start_ns=$(date +%s%N); echo "box-check: waiting for /tmp/pgwt-box-check.lock"; flock 9 || exit; lock_wait_ms=$(( ($(date +%s%N) - lock_wait_start_ns) / 1000000 )); echo "box-check: lock acquired (waited_for_lock=yes, lock_wait_ms=${lock_wait_ms})"; fi;'
 ssh -o BatchMode=yes $ssh_strict "$target" \
-    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header $preflight make -j\$(nproc) && make -C tests clean && make -C tests && make pgwt-client && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
+    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header $preflight make -j\$(nproc) && make -C tests clean && make build-tests && make pgwt-client && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
     2>&1 | tee -a "$log"
 rc=${PIPESTATUS[0]}
 
