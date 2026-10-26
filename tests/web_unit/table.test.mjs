@@ -1178,11 +1178,11 @@ test('#439-label Overview renders a row name unchanged (no display remap)', () =
     assert.ok(!legacyHtml.includes('Background idle (parked)'), legacyHtml);
 });
 
-// ── #589: the test above (and overviewDisplayName itself) hardcode the Idle
-// remainder row's name as a THIRD copy of the string that src/compute.c
-// actually emits (compute.c:1283's `snprintf(rows[nr].name, ..., "Other
-// (background)")`). Nothing ties those two copies together -- #439's own
-// rename (on a sibling branch) renamed the C literal and left a JS
+// ── #589: the test above hardcodes the Idle remainder row's name as a
+// THIRD copy of the string that src/compute.c actually emits
+// (compute.c:1283's `snprintf(rows[nr].name, ..., "Other idle (parked
+// background loops)")`). Nothing ties those two copies together -- #439's
+// own rename (on a sibling branch) renamed the C literal and left a JS
 // consumer's hardcoded match on the stale string for hours, caught only by
 // a human grep during integration. These extractors read the ACTUAL
 // current literal out of each file (never a third hardcoded copy) and
@@ -1190,15 +1190,22 @@ test('#439-label Overview renders a row name unchanged (no display remap)', () =
 // be found, so a reword of either site fails loudly instead of the test
 // quietly passing on no evidence.
 //
-// NOTE for whoever lands the #439 rename / buildSessionsScopeNote
-// integration: this branch predates that lineage, so buildSessionsScopeNote
-// and DB_TIME_MEMBERSHIP do not exist here yet -- overviewDisplayName's
-// `name === 'Other (background)'` comparison is the ONLY hand-synced copy
-// of the literal actually present in this tree. Once that integration
-// lands, re-point extractDisplayNameMatchLiteral (or add a second extractor)
-// at buildSessionsScopeNote's prose so the gate covers that coupling too --
-// this was not aimed at the wrong target, it is aimed at the coupling that
-// exists on THIS tree.
+// RE-POINTED at integration (agent/integration-20261026b): this branch
+// (#589) predated the #439 rename / buildSessionsScopeNote lineage, so the
+// hand-synced copy it originally anchored on was overviewDisplayName's own
+// `name === 'Other (background)'` comparison in table-configs.js. #439's
+// follow-up (already in master by the time this integration ran) deleted
+// overviewDisplayName entirely -- the raw server string now renders as-is,
+// no client-side remap -- which also deleted the coupling this test
+// existed to guard, not just the function it read. The SAME coupling still
+// exists on this tree in a different place: buildSessionsScopeNote's prose
+// (table-configs.js) hardcodes the identical idle-remainder name split
+// across two adjacent string literals ('...the Other idle (parked ' +
+// 'background loops) row on Overview...'), per the #589 author's own
+// integration note that used to sit here ("re-point
+// extractDisplayNameMatchLiteral ... at buildSessionsScopeNote's prose so
+// the gate covers that coupling too -- this was not aimed at the wrong
+// target"). The extractor below reads that prose instead.
 
 const COMPUTE_C_PATH = fileURLToPath(
     new URL('../../src/compute.c', import.meta.url));
@@ -1220,32 +1227,33 @@ function extractIdleRemainderLiteral(computeCSource) {
     return m[1];
 }
 
-/* Anchored on overviewDisplayName's own `name === '...'` comparison -- the
- * one place in table-configs.js that must match the C literal exactly, or
- * the remap silently stops firing (no crash, no visible break -- the raw,
- * un-relabeled name just renders). */
+/* Anchored on buildSessionsScopeNote's own parked-idle sentence, which
+ * splits the row name across two adjacent string literals: `'...the ' +
+ * NAME + ' (parked ' + REST + ') row on Overview...'`. This is the one
+ * remaining place in table-configs.js that hand-codes the C literal, now
+ * that overviewDisplayName (#589's original anchor) is gone (#439). */
 function extractDisplayNameMatchLiteral(tableConfigsSource) {
     const m = tableConfigsSource.match(
-        /function overviewDisplayName\(name\)\s*\{\s*if\s*\(name === '([^']+)'\)/);
+        /the ([^']+) \(parked '\s*\+\s*'([^']+)\) row on Overview/);
     if (!m) {
-        throw new Error('#589: could not find overviewDisplayName\'s ' +
-            '`if (name === \'...\')` comparison in table-configs.js -- the ' +
-            'anchor moved or was reworded; update the extractor rather than ' +
-            'letting this pass on no evidence');
+        throw new Error('#589: could not find buildSessionsScopeNote\'s ' +
+            '"the ... (parked \' + \'...) row on Overview" sentence in ' +
+            'table-configs.js -- the anchor moved or was reworded; update ' +
+            'the extractor rather than letting this pass on no evidence');
     }
-    return m[1];
+    return m[1] + ' (parked ' + m[2] + ')';
 }
 
 test('#589 the Idle remainder row name is the SAME string in src/compute.c ' +
-    'and the JS that matches it by hand (overviewDisplayName)', () => {
+    'and the JS that matches it by hand (buildSessionsScopeNote)', () => {
     const computeC = readFileSync(COMPUTE_C_PATH, 'utf8');
     const tableConfigsJs = readFileSync(TABLE_CONFIGS_JS_PATH, 'utf8');
     const cLiteral = extractIdleRemainderLiteral(computeC);
     const jsLiteral = extractDisplayNameMatchLiteral(tableConfigsJs);
     assert.equal(jsLiteral, cLiteral,
-        'overviewDisplayName compares against "' + jsLiteral + '" but ' +
-        'src/compute.c now emits "' + cLiteral + '" -- the remap in ' +
-        'table-configs.js silently stopped firing');
+        'buildSessionsScopeNote compares against "' + jsLiteral + '" but ' +
+        'src/compute.c now emits "' + cLiteral + '" -- the hand-synced copy ' +
+        'in table-configs.js silently went stale');
 });
 
 // ── Bypass suite: a gate that cannot find either literal must REFUSE
@@ -1265,9 +1273,8 @@ test('#589 bypass: extractIdleRemainderLiteral refuses on an empty file', () => 
 
 test('#589 bypass: extractDisplayNameMatchLiteral refuses when the JS anchor is missing', () => {
     const rewordedJsSource =
-        "function overviewDisplayName(name) {\n" +
-        "    const map = { 'Other (background)': 'Background idle (parked)' };\n" +
-        "    return map[name] || name;\n" +
+        "function buildSessionsScopeNote() {\n" +
+        "    return 'their parked-idle time is excluded everywhere';\n" +
         "}\n";
     assert.throws(() => extractDisplayNameMatchLiteral(rewordedJsSource), /#589/);
 });
@@ -1282,12 +1289,10 @@ test('#589 bypass: extractDisplayNameMatchLiteral refuses on an empty file', () 
 
 test('#589 control: extractors agree when the two literals match', () => {
     const cSource = 'if (other > 0) {\n' +
-        '    snprintf(rows[nr].name, sizeof(rows[nr].name), "Renamed row");\n' +
+        '    snprintf(rows[nr].name, sizeof(rows[nr].name), "Renamed row (parked loops)");\n' +
         '}\n';
-    const jsSource = "function overviewDisplayName(name) {\n" +
-        "    if (name === 'Renamed row') return 'Display name';\n" +
-        "    return name;\n" +
-        "}\n";
+    const jsSource = "const parked = 'their parked-idle time, the Renamed row (parked ' +\n" +
+        "    'loops) row on Overview, is outside it in both';\n";
     assert.equal(extractDisplayNameMatchLiteral(jsSource),
         extractIdleRemainderLiteral(cSource));
 });
@@ -1295,24 +1300,20 @@ test('#589 control: extractors agree when the two literals match', () => {
 test('#589 control: extractors disagree (and the real check would go red) ' +
     'when only the C literal is renamed', () => {
     const cSource = 'if (other > 0) {\n' +
-        '    snprintf(rows[nr].name, sizeof(rows[nr].name), "New row name");\n' +
+        '    snprintf(rows[nr].name, sizeof(rows[nr].name), "New row name (parked background loops)");\n' +
         '}\n';
-    const jsSource = "function overviewDisplayName(name) {\n" +
-        "    if (name === 'Other (background)') return 'Background idle (parked)';\n" +
-        "    return name;\n" +
-        "}\n";
+    const jsSource = "const parked = 'their parked-idle time, the Other idle (parked ' +\n" +
+        "    'background loops) row on Overview, is outside it in both';\n";
     assert.notEqual(extractDisplayNameMatchLiteral(jsSource),
         extractIdleRemainderLiteral(cSource));
 });
 
 test('#589 control: extractors disagree when only the JS literal is renamed', () => {
     const cSource = 'if (other > 0) {\n' +
-        '    snprintf(rows[nr].name, sizeof(rows[nr].name), "Other (background)");\n' +
+        '    snprintf(rows[nr].name, sizeof(rows[nr].name), "Other idle (parked background loops)");\n' +
         '}\n';
-    const jsSource = "function overviewDisplayName(name) {\n" +
-        "    if (name === 'Stale copy') return 'Background idle (parked)';\n" +
-        "    return name;\n" +
-        "}\n";
+    const jsSource = "const parked = 'their parked-idle time, the Stale copy (parked ' +\n" +
+        "    'background loops) row on Overview, is outside it in both';\n";
     assert.notEqual(extractDisplayNameMatchLiteral(jsSource),
         extractIdleRemainderLiteral(cSource));
 });
