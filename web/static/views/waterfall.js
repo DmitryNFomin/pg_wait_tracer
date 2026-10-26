@@ -7,6 +7,7 @@ import {
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     executionsStatusLabel, execScopeNoteHtml, zoomLabelText,
+    allExecutionsUndrawable, undrawablePageText,
 } from '../lib/builders/waterfall.js';
 import { backendActivityHtml } from '../lib/builders/backend-span.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
@@ -287,9 +288,9 @@ export function createWaterfallView() {
                     sort: sortMode, filters: ctx.filters.snapshot(),
                 });
             if (isUnavailable(executions))
-                return { executions, detail: null, selected: null, windowTo };
+                return { executions, detail: null, selected: null, windowTo, sortMode };
             const chosen = chooseExecution(executions.rows || [], ctx.filters.snapshot());
-            if (!chosen) return { executions, detail: null, selected: null, windowTo };
+            if (!chosen) return { executions, detail: null, selected: null, windowTo, sortMode };
             const detailEnd = chosen.end_ns != null
                 ? String(chosen.end_ns) : String(Math.round(ctx.timeRange.to));
             const detailFilters = { pid: chosen.pid, query_id: chosen.query_id };
@@ -310,7 +311,7 @@ export function createWaterfallView() {
                     // The visible context refuses to claim pre-execution timing.
                 }
             }
-            return { executions, detail, activityTimeline, selected: chosen, detailEnd, windowTo };
+            return { executions, detail, activityTimeline, selected: chosen, detailEnd, windowTo, sortMode };
         },
 
         build(data) {
@@ -321,8 +322,18 @@ export function createWaterfallView() {
                 executionStart: data.selected.start_ns,
                 executionEnd: data.detailEnd,
             }) : null;
+            // #587: is the page the user is looking at the REASON the
+            // selected execution has no chart, rather than that execution
+            // alone? Computed from the same rows the executions table
+            // renders, so the count in the message always matches what is
+            // on screen above it.
+            const pageRows = (data.executions && data.executions.rows) || [];
+            const undrawable = allExecutionsUndrawable(pageRows);
             return { table, waterfall: wf, detail: data.detail,
                 selected: data.selected, detailEnd: data.detailEnd,
+                allUndrawable: undrawable,
+                undrawableText: undrawable
+                    ? undrawablePageText(pageRows.length, data.sortMode) : null,
                 context: waterfallContextHtml(data.detail, data.selected, data.activityTimeline),
                 // Keep only detailed metadata collapsed; identity, wait, span and
                 // scope live in the always-visible context inside the pane.
@@ -379,6 +390,18 @@ export function createWaterfallView() {
                     '<div class="loading">' + (model.selected
                         ? 'No detail was returned for the selected execution.'
                         : 'No execution matches the selected query/session filters and time range.') + '</div>';
+                return;
+            }
+            // #587: every execution on this page is undrawable (not just
+            // the one pickDefaultExecution() had to settle for) -- say so
+            // instead of the generic "No execution events captured", which
+            // reads as "nothing was captured" when 100 executions were.
+            if (!model.waterfall.hasData && model.allUndrawable) {
+                disposeChart();
+                document.getElementById('waterfall-chart').innerHTML =
+                    '<div class="loading">' + esc(model.undrawableText) + '</div>';
+                document.getElementById('waterfall-truncation').textContent = '';
+                document.getElementById('waterfall-truncation').className = '';
                 return;
             }
             detailRef = model.detail;
