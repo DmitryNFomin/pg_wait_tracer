@@ -252,6 +252,11 @@ test('#438 cpuNote coexists with an unrelated notes entry (hidden-count disclosu
 test('#438: a truly degenerate matrix (every link touches CPU*) states the L-shape fact', () => {
     const p = {
         total: 10,
+        // #438/#591: the fidelity of the claim depends on the link set being
+        // COMPLETE, which only the server can attest (`truncated`). This
+        // fixture says so explicitly -- see the capped-response tests below
+        // for why an ABSENT flag is not read as "complete".
+        truncated: false, link_count: 3, total_link_count: 3,
         nodes: [
             { name: 'CPU*', class: 'CPU', event_id: 0 },
             { name: 'IO:A', class: 'IO', event_id: 1 },
@@ -293,6 +298,190 @@ test('#438: a non-degenerate matrix (a real wait->wait link exists) does NOT cla
     assert.ok(m.cpuNote.includes('literal intermediate state'));
     assert.ok(!m.cpuNote.includes('Every transition in this workload passes through CPU*'),
         'non-degenerate fixture must not claim the L-shape fact: ' + JSON.stringify(m.cpuNote));
+});
+
+// ── #438 follow-up: the "every transition" claim vs the SERVER link cap ────
+//
+// Found while diagnosing #591's transition_matrix snapshot failure. The
+// sentence above is asserted from `data.links`, which is the SERVER-CAPPED
+// link set: emit_transitions_response() in src/server.c emits
+// `truncated = shown < total_links` and fills `links` with `shown` entries
+// only. The payload the snapshot actually bakes -- tests/mock_server.py's
+// canned transitions reply -- is `truncated: true, link_count: 5,
+// total_link_count: 8`, so "Every transition in this workload passes
+// through CPU*" was being stated from 5 links with 3 never examined. If one
+// of the 3 omitted links were a direct wait -> wait edge, the UI would state
+// the exact opposite of the truth.
+//
+// #438's own guard was written for client-side top-N LABEL truncation (that
+// is why it reads `links` rather than the shown labels) and does not see the
+// server cap at all.
+//
+// THE VACUITY TRAP these tests exist to close: an UNCAPPED fixture makes
+// `links` complete, so the claim is sound and ANY wiring -- including none
+// -- passes. Every case below therefore pins a capped or unprovable payload
+// against an uncapped control, and each absence assertion is paired with a
+// POSITIVE assertion that the base note is still there, so an early return
+// (links: []) or a null cpuNote cannot satisfy it vacuously.
+
+/* The mock's canned transitions payload, copied literally from
+ * tests/mock_server.py (cmd == "transitions"): 5 of 8 links, truncated,
+ * every returned link incident to CPU*. This is the response the
+ * transition_matrix snapshot cell renders, so this fixture IS the regression. */
+function cappedAllCpuPayload() {
+    return {
+        total: 1800, link_count: 5, total_link_count: 8, truncated: true,
+        idle_classification_complete: true,
+        nodes: [
+            { name: 'CPU*', total_ms: 4800, class: 'CPU', event_id: 0, idle: false },
+            { name: 'Client:ClientRead', total_ms: 9153, class: 'Client',
+              event_id: 0x06000000, idle: true },
+            { name: 'IO:DataFileRead', total_ms: 2100, class: 'IO',
+              event_id: 0x01000015, idle: false },
+            { name: 'LWLock:WALInsert', total_ms: 900, class: 'LWLock',
+              event_id: 0x04000007, idle: false },
+        ],
+        links: [
+            { source: 'Client:ClientRead', target: 'CPU*', value: 900, duration_ms: 9000.0 },
+            { source: 'CPU*', target: 'Client:ClientRead', value: 560, duration_ms: 5000.0 },
+            { source: 'CPU*', target: 'IO:DataFileRead', value: 100, duration_ms: 500.0 },
+            { source: 'IO:DataFileRead', target: 'CPU*', value: 80, duration_ms: 320.0 },
+            { source: 'CPU*', target: 'LWLock:WALInsert', value: 30, duration_ms: 90.0 },
+        ],
+    };
+}
+
+const EVERY = 'Every transition in this workload passes through CPU*';
+
+test('#438/#591: a SERVER-CAPPED response must not claim every transition passes through CPU*', () => {
+    const m = buildMatrixOption(cappedAllCpuPayload());
+    // Positive half first: the note exists and carries the base explanation,
+    // so the absence assertion below cannot be satisfied by a null cpuNote.
+    assert.ok(m.labels.includes('CPU*'), 'CPU* is on the axes for this payload');
+    assert.ok(typeof m.cpuNote === 'string' &&
+        m.cpuNote.includes('literal intermediate state'),
+        'the base CPU* explanation must survive: ' + JSON.stringify(m.cpuNote));
+    // The claim itself: unsupportable from 5 of 8 links.
+    assert.ok(!m.cpuNote.includes(EVERY),
+        'a 5-of-8 capped response must not assert a claim about EVERY ' +
+        'transition: ' + JSON.stringify(m.cpuNote));
+    assert.ok(!m.cpuNote.includes('the L shape is the data'),
+        'nor the conclusion drawn from it: ' + JSON.stringify(m.cpuNote));
+    // And the reader is still told why the grid is sparse -- the disclosure
+    // is relocated to the cap footer, not removed from the UI.
+    assert.ok(m.notes.some(n => n.includes('5 of 8') && n.includes('link cap')),
+        'the cap footer must still disclose the omission: ' + JSON.stringify(m.notes));
+    assert.equal(m.serverTruncated, true);
+});
+
+test('#438/#591 CONTROL: an UNCAPPED all-CPU response still states the L-shape fact', () => {
+    // Same link shape, but the server says it returned everything. Without
+    // this control the test above would be satisfied by deleting the feature.
+    const p = cappedAllCpuPayload();
+    p.truncated = false;
+    p.link_count = p.links.length;
+    p.total_link_count = p.links.length;
+    const m = buildMatrixOption(p);
+    assert.ok(m.cpuNote.includes(EVERY),
+        'an uncapped all-CPU response must keep the #438 sentence: ' +
+        JSON.stringify(m.cpuNote));
+    assert.ok(m.cpuNote.includes('the L shape is the data, not a rendering bug'),
+        m.cpuNote);
+    assert.ok(!m.notes.some(n => n.includes('link cap')),
+        'no cap footer when nothing was capped: ' + JSON.stringify(m.notes));
+});
+
+// ── Bypass suite: each way the new guard's detection could be made
+// unreachable, so it approves without having checked anything. ────────────
+
+test('#438/#591 bypass: an ABSENT cap flag is not evidence of completeness', () => {
+    // A payload with no `truncated` key at all -- an older/other producer, a
+    // hand-written fixture, a bridge that dropped the field. The real server
+    // emits `truncated` unconditionally, so its absence means the link set's
+    // provenance cannot be established. A check that cannot see must refuse.
+    const p = cappedAllCpuPayload();
+    delete p.truncated;
+    delete p.link_count;
+    delete p.total_link_count;
+    const m = buildMatrixOption(p);
+    assert.ok(m.cpuNote.includes('literal intermediate state'));
+    assert.ok(!m.cpuNote.includes(EVERY),
+        'no cap flag => completeness unproven => no universal claim: ' +
+        JSON.stringify(m.cpuNote));
+});
+
+test('#438/#591 bypass: counts that CONTRADICT truncated:false refuse the claim', () => {
+    // `truncated: false` with total_link_count (8) above the number of links
+    // that actually arrived (5) is a self-contradictory payload: something
+    // trimmed the array after the flag was computed. Trusting the flag alone
+    // would restate the claim from an incomplete set.
+    const p = cappedAllCpuPayload();
+    p.truncated = false;           // claims complete ...
+    p.link_count = 5;
+    p.total_link_count = 8;        // ... while declaring 8 exist
+    const m = buildMatrixOption(p);
+    assert.ok(m.cpuNote.includes('literal intermediate state'));
+    assert.ok(!m.cpuNote.includes(EVERY),
+        'contradictory counts must refuse the claim: ' + JSON.stringify(m.cpuNote));
+
+    // Mirror: link_count above the array length (the array was trimmed).
+    const q = cappedAllCpuPayload();
+    q.truncated = false;
+    q.link_count = 9;
+    q.total_link_count = 9;
+    const n = buildMatrixOption(q);
+    assert.ok(!n.cpuNote.includes(EVERY),
+        'link_count above the links that arrived must refuse: ' +
+        JSON.stringify(n.cpuNote));
+});
+
+test('#438/#591 bypass: UNPARSEABLE cap fields refuse rather than approve', () => {
+    // A string "false" is truthy, and a non-numeric count is NaN. Neither may
+    // read as "complete" through a loose coercion.
+    const p = cappedAllCpuPayload();
+    p.truncated = 'false';
+    const m = buildMatrixOption(p);
+    assert.ok(m.cpuNote.includes('literal intermediate state'));
+    assert.ok(!m.cpuNote.includes(EVERY),
+        'truncated as a string must not read as false: ' + JSON.stringify(m.cpuNote));
+
+    const q = cappedAllCpuPayload();
+    q.truncated = false;
+    q.link_count = 5;
+    q.total_link_count = 'many';   // present but unparseable
+    const n = buildMatrixOption(q);
+    assert.ok(n.cpuNote.includes('literal intermediate state'));
+    assert.ok(!n.cpuNote.includes(EVERY),
+        'an unparseable total_link_count must refuse: ' + JSON.stringify(n.cpuNote));
+});
+
+test('#438/#591 bypass: the thing being checked ABSENT, not wrong', () => {
+    // (a) No links at all: the builder returns early. cpuNote must be absent
+    //     rather than a claim about a workload with no transitions.
+    const empty = buildMatrixOption({ total: 0, nodes: [], links: [],
+        truncated: false, link_count: 0, total_link_count: 0 });
+    assert.equal(empty.hasData, false);
+    assert.ok(!empty.cpuNote, 'no cpuNote for an empty response: ' +
+        JSON.stringify(empty.cpuNote));
+
+    // (b) A capped response in which CPU* is not on the axes at all: the
+    //     whole note is absent, so there is nothing to weaken -- this pins
+    //     that the new guard did not turn "no CPU*" into a partial sentence.
+    const p = {
+        total: 100, truncated: true, link_count: 1, total_link_count: 4,
+        nodes: [
+            { name: 'IO:A', class: 'IO', event_id: 1 },
+            { name: 'Lock:B', class: 'Lock', event_id: 2 },
+        ],
+        links: [{ source: 'IO:A', target: 'Lock:B', value: 5, duration_ms: 1 }],
+    };
+    const m = buildMatrixOption(p);
+    assert.ok(!m.labels.includes('CPU*'));
+    assert.equal(m.cpuNote, null, 'no CPU* label => no cpuNote: ' +
+        JSON.stringify(m.cpuNote));
+    // ... and the cap footer is still rendered, so the user is not left with
+    // a silently partial grid.
+    assert.ok(m.notes.some(n => n.includes('link cap')), JSON.stringify(m.notes));
 });
 
 // #473 item 2 (video review): several IO event names render dark blue on
