@@ -1177,6 +1177,16 @@ test('#439-label Overview renders "Other (background)" as "Background idle (park
 // REFUSE -- throw, not silently match nothing -- when either anchor can't
 // be found, so a reword of either site fails loudly instead of the test
 // quietly passing on no evidence.
+//
+// NOTE for whoever lands the #439 rename / buildSessionsScopeNote
+// integration: this branch predates that lineage, so buildSessionsScopeNote
+// and DB_TIME_MEMBERSHIP do not exist here yet -- overviewDisplayName's
+// `name === 'Other (background)'` comparison is the ONLY hand-synced copy
+// of the literal actually present in this tree. Once that integration
+// lands, re-point extractDisplayNameMatchLiteral (or add a second extractor)
+// at buildSessionsScopeNote's prose so the gate covers that coupling too --
+// this was not aimed at the wrong target, it is aimed at the coupling that
+// exists on THIS tree.
 
 const COMPUTE_C_PATH = fileURLToPath(
     new URL('../../src/compute.c', import.meta.url));
