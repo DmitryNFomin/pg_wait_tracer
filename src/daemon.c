@@ -609,7 +609,14 @@ static void arm_sample_timer_jittered(struct pgwt_daemon *d)
     };
     d->sample_armed_ns = armed;
     d->sample_armed_at_ns = pgwt_debug_monotonic_ns();
-    timerfd_settime(d->sample_timer_fd, 0, &sits, NULL);
+    int ret = timerfd_settime(d->sample_timer_fd, 0, &sits, NULL);
+    if (ret != 0) {
+        /* No rate limiting needed: a failed arm means no further tick or
+         * call here, so at most one line is printed. */
+        fprintf(stderr, "ERROR: timerfd_settime: %s; sampler timer is now dead; "
+                "sampler_ticks_total and sampler_tick_late_ns_total will stop "
+                "advancing.\n", strerror(errno));
+    }
 }
 
 static void handle_sample_timer(struct pgwt_daemon *d)
