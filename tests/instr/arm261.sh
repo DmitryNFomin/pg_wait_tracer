@@ -59,16 +59,23 @@ dmesg | grep -c "interrupt took too long" > "$OUT/nmi_long_before.txt" 2>/dev/nu
 # breakpoint event was stopped, since PERF_RECORD_THROTTLE goes to a ring
 # buffer this daemon never maps and hw.state is not reflected in
 # PERF_FORMAT_TOTAL_TIME_RUNNING.
-BT_PID=""
-if command -v bpftrace >/dev/null 2>&1; then
-    nohup bpftrace -e 'kprobe:perf_log_throttle { @throttle[arg1] = count(); }
-                       interval:s:3600 { exit(); }' \
-        > "$OUT/throttle.txt" 2> "$OUT/throttle.err" &
-    BT_PID=$!
-    sleep 4
-    echo "bpftrace_pid=$BT_PID" >> "$OUT/arm.txt"
+TR=/sys/kernel/tracing
+KPROBE_OK=0
+throttle_nhit() { awk '$1=="pgwtthr"{print $2}' "$TR/kprobe_profile" 2>/dev/null | head -1; }
+if [[ -w "$TR/kprobe_events" ]]; then
+    echo 0 > "$TR/events/kprobes/pgwtthr/enable" 2>/dev/null
+    echo '-:pgwtthr' >> "$TR/kprobe_events" 2>/dev/null
+    if echo 'p:pgwtthr perf_log_throttle' >> "$TR/kprobe_events" 2>/dev/null \
+       && echo 1 > "$TR/events/kprobes/pgwtthr/enable" 2>/dev/null; then
+        KPROBE_OK=1
+    fi
+fi
+if [[ "$KPROBE_OK" -eq 1 ]]; then
+    echo "throttle_nhit_before=$(throttle_nhit)" | tee -a "$OUT/arm.txt"
 else
-    echo "bpftrace=MISSING — throttle counting UNAVAILABLE (this arm cannot answer #306)" | tee -a "$OUT/arm.txt"
+    echo "throttle_kprobe=UNAVAILABLE -- this arm CANNOT answer #306; refusing" \
+        | tee -a "$OUT/arm.txt"
+    exit 4
 fi
 
 # ── daemon ──────────────────────────────────────────────────────────────
@@ -122,7 +129,9 @@ kill "$PGB" 2>/dev/null; wait "$PGB" 2>/dev/null
 kill -TERM "$TPID" 2>/dev/null; wait "$TPID" 2>/dev/null
 
 # ── #306 observables, AFTER ─────────────────────────────────────────────
-if [[ -n "$BT_PID" ]]; then kill -TERM "$BT_PID" 2>/dev/null; wait "$BT_PID" 2>/dev/null; fi
+echo "throttle_nhit_after=$(throttle_nhit)" | tee -a "$OUT/arm.txt"
+echo 0 > "$TR/events/kprobes/pgwtthr/enable" 2>/dev/null
+echo '-:pgwtthr' >> "$TR/kprobe_events" 2>/dev/null
 dmesg | grep -c "interrupt took too long" > "$OUT/nmi_long_after.txt" 2>/dev/null || echo 0 > "$OUT/nmi_long_after.txt"
 echo "perf_event_max_sample_rate_after=$(cat /proc/sys/kernel/perf_event_max_sample_rate)" >> "$OUT/arm.txt"
 if [[ -n "$PERF_RATE" ]]; then
