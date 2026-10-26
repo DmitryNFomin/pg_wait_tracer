@@ -148,7 +148,11 @@ struct pgwt_trace_file_entry {
     bool     placement_unknown;
 };
 
-/* Scan trace_dir for trace files. Returns count, sorted by time ascending. */
+/* Scan trace_dir for trace files. Returns count, sorted by header wall time
+ * ascending, or -1 on error. Overlapping wall ranges are refused with a
+ * diagnostic naming both files and their ranges; files are never merged or
+ * deduplicated. Ranges include header creation time and all block timestamps
+ * mapped through that file's own clock offset (not wait interval starts). */
 int pgwt_scan_trace_files(const char *trace_dir,
                            struct pgwt_trace_file_entry *entries,
                            int max_entries);

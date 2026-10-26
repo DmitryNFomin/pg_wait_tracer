@@ -574,6 +574,52 @@ int pgwt_scan_trace_files(const char *trace_dir,
         entries[j + 1] = tmp;
     }
 
+    /* Replay streams entire files in this order. Their wall ranges must be
+     * disjoint: a recovered duplicate or copied archive must not silently
+     * feed a pid's resolver records out of order. Include every block, since
+     * the index is in commit order and its final entry need not end latest.
+     * Use record timestamps, not wait starts: a wait can legitimately span
+     * a rotation, but its closing record belongs to just one file. */
+    int previous = -1;
+    uint64_t previous_start = 0, previous_end = 0;
+    for (int i = 0; i < n; i++) {
+        if (entries[i].placement_unknown)
+            continue;
+        struct pgwt_event_reader r;
+        if (pgwt_reader_open(&r, entries[i].path) != 0)
+            continue;  /* unreadable/empty files supply no replay records */
+        uint64_t start = entries[i].start_wall_ns, end = start;
+        for (int b = 0; b < r.num_blocks; b++) {
+            struct pgwt_block_info bi;
+            if (pgwt_reader_block_info(&r, b, &bi) != 0) {
+                fprintf(stderr, "ERROR: cannot establish wall range for %s "
+                        "(block %d); refusing trace file scan\n",
+                        entries[i].path, b);
+                pgwt_reader_close(&r);
+                return -1;
+            }
+            uint64_t first = pgwt_reader_mono_to_wall(&r, bi.first_timestamp_ns);
+            uint64_t last = pgwt_reader_mono_to_wall(&r, bi.last_timestamp_ns);
+            if (first < start) start = first;
+            if (last > end) end = last;
+        }
+        pgwt_reader_close(&r);
+        if (previous >= 0 && start <= previous_end) {
+            fprintf(stderr, "ERROR: overlapping trace files: %s wall range "
+                    "[%llu, %llu] ns and %s wall range [%llu, %llu] ns; "
+                    "refusing trace file scan\n",
+                    entries[previous].path,
+                    (unsigned long long)previous_start,
+                    (unsigned long long)previous_end,
+                    entries[i].path, (unsigned long long)start,
+                    (unsigned long long)end);
+            return -1;
+        }
+        previous = i;
+        previous_start = start;
+        previous_end = end;
+    }
+
     return n;
 }
 

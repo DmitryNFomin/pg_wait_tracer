@@ -462,6 +462,109 @@ static uint64_t qtot(struct pgwt_accumulator *acc, uint32_t we)
     return 0;
 }
 
+/* Write two real records, then install deterministic per-file clock anchors.
+ * The second file uses a smaller monotonic clock, as after a reboot. */
+static int write_range_trace(const char *dir, uint64_t wall, uint64_t mono)
+{
+    struct pgwt_event_writer writer;
+    if (pgwt_writer_init(&writer, dir, 18, 24, NULL) != 0)
+        return -1;
+    struct pgwt_trace_event records[] = {
+        {.timestamp_ns = mono, .pid = TPID, .old_event = EV_IN, .duration_ns = 5},
+        {.timestamp_ns = mono + 300, .pid = TPID, .old_event = EV_IN,
+         .duration_ns = 5},
+    };
+    int rc = 0;
+    for (int i = 0; i < 2; i++)
+        if (pgwt_writer_push_event(&writer, &records[i]) != 0) rc = -1;
+    if (pgwt_writer_close(&writer) != 0) rc = -1;
+    pgwt_writer_destroy(&writer);
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    FILE *fp = fopen(path, "r+b");
+    struct pgwt_trace_file_header header;
+    if (!fp) return -1;
+    if (fread(&header, sizeof(header), 1, fp) != 1) rc = -1;
+    else {
+        header.start_time_ns = wall;
+        header.clock_offset_ns = mono;
+        rewind(fp);
+        if (fwrite(&header, sizeof(header), 1, fp) != 1) rc = -1;
+    }
+    if (fclose(fp) != 0) rc = -1;
+    return rc;
+}
+
+static void test_overlapping_files(void)
+{
+    printf("\nCASE: overlapping trace files must be refused\n");
+    char dir[] = "/tmp/pgwt_replay_overlap_XXXXXX";
+    if (!mkdtemp(dir)) { CHECK(0, "overlap fixture directory created"); return; }
+    char archive[600], current[600], meta[600];
+    snprintf(archive, sizeof(archive), "%s/2025-01-01_00.trace.lz4", dir);
+    snprintf(current, sizeof(current), "%s/current.trace", dir);
+    snprintf(meta, sizeof(meta), "%s/current.trace.meta", dir);
+    CHECK(write_range_trace(dir, 1000, 10000) == 0,
+          "first readable trace has wall range [1000, 1300]");
+    CHECK(rename(current, archive) == 0, "first trace archived");
+    unlink(meta);
+    struct pgwt_trace_file_entry files[4];
+    CHECK(pgwt_scan_trace_files(dir, files, 4) == 1,
+          "archive alone is accepted (not an unreadable fixture)");
+    CHECK(write_range_trace(dir, 1200, 100) == 0,
+          "second readable trace has overlapping wall range [1200, 1500]");
+    struct pgwt_event_reader reader;
+    int opened = pgwt_reader_open(&reader, current);
+    CHECK(opened == 0, "overlapping current.trace opens successfully");
+    if (opened == 0) {
+        struct pgwt_trace_event decoded[2];
+        int count = pgwt_reader_decode_block(&reader, 0, decoded, 2);
+        CHECK(count == 2 && pgwt_reader_mono_to_wall(&reader, decoded[0].timestamp_ns) == 1200
+              && pgwt_reader_mono_to_wall(&reader, decoded[1].timestamp_ns) == 1500,
+              "second file really decodes both overlapping endpoint records");
+        pgwt_reader_close(&reader);
+    }
+
+    FILE *diagnostic = tmpfile();
+    int saved_stderr = dup(STDERR_FILENO);
+    if (!diagnostic || saved_stderr < 0) {
+        CHECK(0, "overlap diagnostic capture opened");
+        if (diagnostic) fclose(diagnostic);
+        if (saved_stderr >= 0) close(saved_stderr);
+    } else {
+        fflush(stderr);
+        int redirected = dup2(fileno(diagnostic), STDERR_FILENO);
+        CHECK(redirected >= 0, "overlap diagnostic capture attached");
+        int count = pgwt_scan_trace_files(dir, files, 4);
+        fflush(stderr);
+        CHECK(dup2(saved_stderr, STDERR_FILENO) >= 0, "stderr restored");
+        close(saved_stderr);
+        rewind(diagnostic);
+        char message[2000] = {0};
+        fread(message, 1, sizeof(message) - 1, diagnostic);
+        fclose(diagnostic);
+        CHECK(count == -1, "overlapping files refuse the whole scan");
+        CHECK(strstr(message, "ERROR: overlapping trace files:") &&
+              strstr(message, archive) && strstr(message, current) &&
+              strstr(message, "[1000, 1300] ns") &&
+              strstr(message, "[1200, 1500] ns") &&
+              strstr(message, "refusing trace file scan"),
+              "refusal names both files and their exact wall ranges");
+    }
+    /* Replace current.trace explicitly; reinitialising over an existing
+     * file would exercise recovery and create a third archive instead. */
+    unlink(current);
+    unlink(meta);
+    CHECK(write_range_trace(dir, 1301, 100) == 0,
+          "second file moved to disjoint wall range [1301, 1601]");
+    CHECK(pgwt_scan_trace_files(dir, files, 4) == 2,
+          "disjoint files accepted across a monotonic clock reset");
+    unlink(archive);
+    unlink(current);
+    unlink(meta);
+    rmdir(dir);
+}
+
 int main(void)
 {
     char dir[]  = "/tmp/pgwt_replay_win_XXXXXX";
@@ -471,6 +574,7 @@ int main(void)
         perror("mkdtemp"); return 1;
     }
     pgwt_init_event_names(18);
+    test_overlapping_files();
 
     if (write_trace(dir) != 0) {
         fprintf(stderr, "FATAL: could not write the test trace\n");
