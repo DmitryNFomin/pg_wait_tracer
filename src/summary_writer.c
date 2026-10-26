@@ -219,10 +219,39 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * Events tab drilled into one query over a >= 120 s window came back
      * missing the whole CPU* row and its db_time_ms was short by that
      * query's entire CPU time: measured raw 7002.426 ms vs summary 2949.426
-     * ms, -57.9%, on the cross-check fixture. REACHABLE -- handle_top_events
-     * adds no query guard, unlike handle_top_sessions and handle_heatmap.
+     * ms, -57.9%, on the cross-check fixture.
      *
-     * Filing it, rather than guarding the handler into the raw path, because
+     * NO LONGER REACHABLE -- CLOSED BY A HANDLER GUARD (#526). This note used
+     * to read "REACHABLE -- handle_top_events adds no query guard, unlike
+     * handle_top_sessions and handle_heatmap", and that hole was real: a
+     * query-filtered Events request over a >= 120 s window took the summary
+     * path and read THIS list, whose time is the record's FULL duration
+     * (accum_query_add is called with `dur`, :571 -- correct for a
+     * per-occurrence table, which is deliberately never credited open),
+     * while the unfiltered read takes events[], filled with the in-second
+     * slice `tns`. Over a window whose edge an interval crosses the two
+     * answered the same question differently: 719,200.346 ms filtered
+     * against 716,200.203 ms unfiltered on one Lock:relation row.
+     *
+     * handle_top_events now carries the same `req->filter.query_id == 0`
+     * guard its three siblings have, so a filtered Events request routes to
+     * raw and this list no longer answers any window-clipped question. It is
+     * still the per-query event breakdown for everything else, and `dur`
+     * remains the right quantity for it.
+     *
+     * WHAT WAS CONSIDERED AND DROPPED, so it is not re-derived: switching
+     * this call to `tns` alone makes things WORSE, not better. Because
+     * queries[] is never credited open, `dur` is the only way it totals an
+     * interval at all -- `tns` would drop everything the open path already
+     * credited, turning a window-edge over-report into an under-report of
+     * the whole credited part. Crediting queries[] open instead is blocked
+     * ACROSS SEALED SECONDS specifically (#277: a written second is
+     * immutable) and by #128 (the id can arrive after the wait ends) -- NOT
+     * universally: an attribution resolved before its second sealed could in
+     * principle credit buffered slices. Nobody is proposing that; it is
+     * recorded so the next reader does not infer the stronger prohibition.
+     *
+     * Keeping the list, rather than removing it, because
      * the Events tab is the one users drill and this is the content the
      * summary is for; and because nothing else needed changing to read it:
      * the slot sentinel is not event_id but num_top_events (the lookup loop
