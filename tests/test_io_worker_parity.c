@@ -1277,6 +1277,7 @@ static void bypass_suite(const struct fixture *fx)
         free(untagged);
     }
 skip_no_registry:
+    ; /* A label must precede a statement, even before a declaration. */
 
     /* 6f. the THING IS ABSENT rather than wrong: a capture with no io_worker
      * records at all. Both paths agree, and that agreement means nothing. */
