@@ -41,8 +41,8 @@
  * straddler present at all, bad arguments, empty input, and the impossible
  * record that must not wrap a uint64.
  *
- * Links the daemon-flavour event_reader.c (which holds pgwt_replay_events and
- * pgwt_replay_file) against the BPF-free accumulator core -- no bpftool, runs
+ * Links event_reader.c and replay_accum.c against the BPF-free accumulator
+ * core -- no bpftool, runs
  * anywhere.
  */
 #include "event_reader.h"
@@ -397,6 +397,8 @@ static struct pgwt_accumulator *replay(const char *path,
 
     pgwt_replay_file(&r, acc, from, to, buf, PGWT_BLOCK_EVENTS,
                      budget, st, &decoded);
+    pgwt_replay_finish(acc);
+    CHECK(pgwt_replay_check_finished(acc) == 0, "replay attribution finalized");
 
     if (out_decoded) *out_decoded = decoded;
     free(buf);
@@ -935,6 +937,7 @@ int main(void)
         pgwt_replay_events(a, &bad, 1, W_FROM, W_TO, &bi, &sb);
         CHECK_EQ(tot(a, EV_IN), 0,
                  "an impossible record contributes 0, not a wrapped uint64");
+        pgwt_replay_finish(a);
         free(a);
     }
 

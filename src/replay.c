@@ -44,7 +44,8 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
         return 1;
     }
 
-    /* Scan trace files */
+    /* Scan trace files: pgwt_scan_trace_files sorts by header wall time,
+     * so per-pid resolver state streams across rotations and clock domains. */
     struct pgwt_trace_file_entry files[256];
     int nfiles = pgwt_scan_trace_files(d->trace_dir, files, 256);
     if (nfiles < 0) {
@@ -77,11 +78,8 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
     int lookahead = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
 
     for (int fi = 0; fi < nfiles; fi++) {
-        /* Quick filter: skip files that end before our --from time. Factored
-         * into event_reader.c (pgwt_trace_file_quick_skip) so it is pinned
-         * by tests/test_replay_window.c without linking the daemon. */
-        if (pgwt_trace_file_quick_skip(files, nfiles, fi, from_wall))
-            continue;
+        /* #586: older files can supply a command's left-edge marker seed.
+         * Do not quick-skip them before the resolver can see that evidence. */
 
         /* #405: a file whose header could not place it in time is disabled
          * rather than guessed at — src/event_reader.c already refused to
@@ -133,7 +131,7 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
                           "scanning every block by header)");
 
         /* The block scan, including the budgeted right-edge lookahead, lives
-         * in pgwt_replay_file (src/event_reader.c) next to the record rule it
+         * in pgwt_replay_file (src/replay_accum.c) next to the record rule it
          * has to agree with. It used to be a loop here that stopped at the
          * last block before --to, which discarded every record still running
          * at --to before the record loop could clip it (#424). `lookahead`
@@ -141,15 +139,22 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
          * closing record can sit in the next hourly file, and one budget for
          * the whole replay is what keeps that bounded. */
         uint64_t decoded = 0;
-        pgwt_replay_file(&reader, &d->accum, from_mono, to_mono, events,
+        int replay_rc = pgwt_replay_file(&reader, &d->accum, from_mono, to_mono, events,
                          PGWT_BLOCK_EVENTS, &lookahead, &rstats, &decoded);
         total_events += decoded;
 
         pgwt_reader_close(&reader);
         files_read++;
+        if (replay_rc != 0) {
+            free(events);
+            return 1;
+        }
     }
 
+    pgwt_replay_finish(&d->accum);
     free(events);
+    if (pgwt_replay_check_finished(&d->accum) != 0)
+        return 1;
 
     if (files_read == 0) {
         fprintf(stderr, "FATAL: could not read any trace files\n");

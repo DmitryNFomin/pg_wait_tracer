@@ -130,6 +130,7 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/event_writer.c \
              $(SRC_DIR)/event_reader.c \
              $(SRC_DIR)/replay.c \
+             $(SRC_DIR)/replay_accum.c \
              $(SRC_DIR)/summary_writer.c \
              $(SRC_DIR)/query_text.c \
              $(SRC_DIR)/pgss_resolver.c \
