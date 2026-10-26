@@ -10,12 +10,12 @@ CC       ?= gcc
 # class of bug invisible again — this flag keeps it fatal on every compiler
 # we build with. tests/test_ci_runner_pin.sh asserts it is still here and
 # that every recipe below still passes $(CFLAGS).
-CFLAGS    = -g -O2 -Wall -Werror=implicit-function-declaration -I../src -I../include
+CFLAGS    = -g -O2 -Wall -Werror=implicit-function-declaration $(LIBBPF_INC) -I../src -I../include
 BUILD     = ../build
 
-# libbpf link flags. Defaults to the system shared library; the top-level
-# Makefile overrides this (LIBBPF_LIB="path/to/libbpf.a -lelf -lz") on
-# Rocky 8 / RHEL 8 where the bundled static libbpf is used instead.
+# The top-level build-tests target forwards the daemon's resolved libbpf
+# headers and link flags, including the bundled static library on EL8.
+LIBBPF_INC ?=
 LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
