@@ -1610,6 +1610,56 @@ test('#456 nodes-less response is visibly refused by the view, never rendered as
     assert.equal(h.elements.has('dfg-total'), false);
 });
 
+// #510 THROUGH THE REAL VIEW. The pure builder cannot see whether
+// views/transitions.js actually routes a coverage-gap payload to the graph
+// instead of the error panel, nor where the reason lands. views/transitions.js
+// needed NO edit for this -- it gates its error panel on transitionsDataError,
+// and moving the idle check out of that function is what lets the payload
+// through -- so this test is the only thing standing between "the split
+// compiles" and "the degrade reaches the page". The three #456 tests above
+// pin that STRUCTURAL faults still reach the alert panel.
+test('#510 view: a coverage-gap payload renders the graph and shows the withheld '
+    + 'reason in #dfg-total (above the canvas), with no error panel', t => {
+    const h = viewHarness456(t);
+    const { payload, victimName } = replay456WithOneIdleGap();
+    h.mount(payload);
+
+    assert.ok(!h.root.innerHTML.includes('role="alert"'),
+        'no error panel for a drawable payload');
+    assert.ok(!h.root.innerHTML.includes('Transitions data incomplete'),
+        'and not the structural-refusal text either');
+    assert.ok(h.paints.length > 0, 'the graph actually painted: ' + h.paints.length);
+
+    const totalEl = h.elements.get('dfg-total');
+    assert.ok(totalEl, '#dfg-total exists (the above-canvas disclosure slot)');
+    assert.match(totalEl.textContent, /dominant-wait ranking withheld/);
+    assert.ok(totalEl.textContent.includes(victimName),
+        'the reason names the node whose verdict is missing: ' +
+        JSON.stringify(totalEl.textContent));
+    assert.ok(!totalEl.textContent.includes('Lock:relation omitted'),
+        'no omitted-dominant claim: ' + JSON.stringify(totalEl.textContent));
+    assert.ok(!totalEl.textContent.includes('largest source-dwell'),
+        'no source-dwell superlative: ' + JSON.stringify(totalEl.textContent));
+    // #dfg-total lives in the control bar the shell emits BEFORE
+    // #dfg-container, so the reason is above the canvas in DOM order -- the
+    // deliberate contrast with #438's below-the-canvas Matrix notes slot.
+    const html = h.root.innerHTML;
+    assert.ok(html.indexOf('id="dfg-total"') < html.indexOf('id="dfg-container"'),
+        'the disclosure slot precedes the canvas in DOM order');
+});
+
+test('#510 view CONTROL: the same payload with complete coverage paints AND '
+    + 'states both claims, so the test above is not satisfied by a blank line', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456());
+    assert.ok(h.paints.length > 0);
+    const totalEl = h.elements.get('dfg-total');
+    assert.match(totalEl.textContent, /Lock:relation omitted \(1533\.6s total\)/);
+    assert.ok(!totalEl.textContent.includes('ranking withheld'),
+        'nothing withheld when coverage is complete: ' +
+        JSON.stringify(totalEl.textContent));
+});
+
 test('#456 missing Lock:relation keeps the headline totals but is visibly refused', t => {
     const h = viewHarness456(t);
     const payload = replay456();
