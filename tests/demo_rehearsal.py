@@ -723,13 +723,11 @@ def main():
               f"{exec_card['detail']}")
         extra_checks["execution_cardinality"] = exec_card
 
-        # Cross-tab agreement (criteria doc §5): top_events answers the
-        # Top Events tab and carries its OWN top-level db_time_ms (not a
-        # sum of its own possibly-truncated row list -- src/server.c
-        # handle_top_events emits it independently), so this is a safe,
-        # direct comparison against time_model's (the Overview tab) number
-        # for the IDENTICAL window -- no bucket-weighted re-derivation
-        # needed.
+        # Cross-tab attribution (criteria doc §5): query both endpoints for
+        # the identical recent raw window. Their DB-Time totals sum the
+        # same clipped non-idle, non-io_worker events, so comparing those
+        # totals cannot detect dropped class attribution (#258). The
+        # mandatory per-class comparison below supplies that constraint.
         recent_from_ns = max(from_ns, to_ns - int(drlib.RECENT_WINDOW_S * 1_000_000_000))
         top_events_resp = srv.query("top_events", from_=recent_from_ns, to_=to_ns,
                                     timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
@@ -737,20 +735,6 @@ def main():
         time_model_recent = srv.query("time_model", from_=recent_from_ns, to_=to_ns,
                                       timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
         time_model_err = _error_or_none(time_model_recent, "time_model (cross-tab)")
-        if top_events_err is not None or time_model_err is not None:
-            cross_tab_ok = False
-            cross_tab_detail = f"query error(s): {top_events_err!r} / {time_model_err!r}"
-        else:
-            cross_tab_ok, cross_tab_detail = drlib.cross_tab_db_time_agreement_ok(
-                time_model_recent.get("db_time_ms"), top_events_resp.get("db_time_ms"))
-        print(f"demo_rehearsal: cross_tab_db_time_agreement: "
-              f"{'PASS' if cross_tab_ok else 'FAIL'} -- {cross_tab_detail}")
-        extra_checks["cross_tab_db_time_agreement"] = {
-            "ok": cross_tab_ok, "detail": cross_tab_detail,
-            "note": ("compares Overview's time_model against Top Events' "
-                    "top_events for the identical recent window"),
-        }
-
         # Per-class attribution, re-derived from the OTHER endpoint (#517).
         # time_model_conserves above compares db_time_ms against the sum of
         # the SAME response's class rows, which the raw path makes an
@@ -760,9 +744,8 @@ def main():
         # regroups top_events' own rows by their own `class` field and
         # compares per class, so a class whose time time_model never
         # attributes to its own row -- which the identity absorbs into
-        # Off-CPU* and still closes to 0.0 -- shows up here. No new query:
-        # both responses are the ones the DB-Time leg above already has,
-        # for the identical window.
+        # Off-CPU* and still closes to 0.0 -- shows up here. Both responses
+        # are from the identical window queried above.
         if top_events_err is not None or time_model_err is not None:
             class_attr_ok = False
             class_attr_detail = (f"query error(s): {top_events_err!r} / "
