@@ -602,7 +602,7 @@ def test_evaluate_window_skips_extra_floors_by_default():
     check("aas_floor" not in result, "aas_floor absent when not requested")
 
 
-# ── cross_tab_db_time_agreement_ok / freshness_ok (criteria doc §5) ──────
+# ── Historical DB-Time diagnostic (non-gating since #258) ───────────────
 
 def test_cross_tab_agreement_within_tolerance_ok():
     ok, detail = lib.cross_tab_db_time_agreement_ok(10000.0, 10050.0)
@@ -728,6 +728,55 @@ def test_class_attribution_catches_the_dropped_class_the_identity_absorbs():
           f"and names the dropped class and both numbers (got: {detail})")
     check("CPU: time_model=3980.0ms vs top_events=1980.0ms" in detail,
           f"and names the row the time landed in instead (got: {detail})")
+
+
+def test_class_attribution_subsumes_total_check_for_one_dropped_event():
+    # Captured from the production raw accumulators on d02b7bd6, 60s window:
+    # one 1000ms CPU gap (cpu_ns == duration_ns), one 2000ms Lock:relation.
+    # In a /tmp copy of compute.c, continue after db_time_ns += dur_ns for
+    # that ONE Lock event, before class attribution. No loader/event loss:
+    # DB Time stays 3000ms; the residual emits the lost 2000ms as Off-CPU.
+    # These are the resulting rows, not an independently edited total.
+    tm_rows = [
+        {"name": "DB Time", "ms": 3000.0, "indent": 0},
+        {"name": "CPU (running)", "ms": 1000.0, "indent": 1},
+        {"name": "CPU (waiting for a core)", "ms": 2000.0, "indent": 1},
+    ]
+    te_rows = [
+        {"class": "Lock", "name": "Lock:relation", "total_ms": 2000.0,
+         "pct": 66.66666666666666},
+        {"class": "CPU", "name": "CPU*", "total_ms": 1000.0,
+         "pct": 33.33333333333333},
+    ]
+    tm_db_time_ms = tm_rows[0]["ms"]
+    te_db_time_ms = 3000.0
+    cons_ok, cons_detail = lib.time_model_conservation(tm_rows, tm_db_time_ms)
+    check(cons_ok and "gap=0.0ms" in cons_detail,
+          f"one dropped wait event is absorbed by Off-CPU ({cons_detail})")
+    total_ok, total_detail = lib.cross_tab_db_time_agreement_ok(
+        tm_db_time_ms, te_db_time_ms)
+    check(total_ok and "gap=0.00%" in total_detail,
+          f"cross_tab_db_time_agreement: PASS -- {total_detail}")
+    class_ok, class_detail = lib.class_rows_vs_top_events_ok(
+        tm_rows, te_rows, te_db_time_ms)
+    check(not class_ok and
+          "Lock: time_model=0.0ms vs top_events=2000.0ms (100.00%)" in class_detail,
+          f"cross_tab_class_attribution: FAIL -- {class_detail}")
+    check("CPU: time_model=3000.0ms vs top_events=1000.0ms" in class_detail,
+          "the surviving gate also detects the 2000ms moved into Off-CPU")
+
+    # Exercise the real mandatory set with every other check passing.
+    checks = {name: {"ok": True} for name in lib.REQUIRED_EXTRA_CHECKS}
+    checks["cross_tab_class_attribution"] = {"ok": class_ok}
+    summary = lib.build_demo_summary(
+        _passing_walk(), checks, required_checks=lib.REQUIRED_EXTRA_CHECKS)
+    check(summary["failed"] == ["cross_tab_class_attribution"],
+          "the dropped event fails the rehearsal verdict via the surviving gate")
+    del checks["cross_tab_class_attribution"]
+    summary = lib.build_demo_summary(
+        _passing_walk(), checks, required_checks=lib.REQUIRED_EXTRA_CHECKS)
+    check("missing_required_check:cross_tab_class_attribution" in summary["failed"],
+          "omitting the surviving gate also fails the rehearsal verdict")
 
 
 def test_class_attribution_class_missing_from_top_events_fails():
@@ -966,6 +1015,15 @@ def test_class_attribution_is_a_mandatory_rehearsal_check():
           "cross_tab_class_attribution is in REQUIRED_EXTRA_CHECKS "
           "(test_required_check_names_all_exist_in_demo_rehearsal then "
           "forces demo_rehearsal.py to actually insert it)")
+    check("cross_tab_db_time_agreement" not in lib.REQUIRED_EXTRA_CHECKS,
+          "the redundant total diagnostic is no longer mandatory (#258)")
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "demo_rehearsal.py")
+    with open(path) as fh:
+        source = fh.read()
+    check("drlib.cross_tab_db_time_agreement_ok(" not in source and
+          'extra_checks["cross_tab_db_time_agreement"]' not in source,
+          "the rehearsal neither runs nor gates the historical total diagnostic")
 
 
 # ── bucket_weighted_aas_ok (criteria doc §5, item 2.2) ───────────────────
