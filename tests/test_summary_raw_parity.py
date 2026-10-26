@@ -258,9 +258,39 @@ def ask(trace_dir, frm, to, stderr_path):
 #          CONSEQUENCE FOR SCOPE: #526 is NOT reader-side and cannot be
 #          fixed by changing src/compute.c. Spreading queries[] per second
 #          is an on-disk accounting-rule change, so it belongs in the
-#          PGWT_SUMMARY_VERSION bump as its own numbered rule. The #425
-#          residual (7,393.0 ms, summary column only) has the same shape and
-#          wants the same test applied before it is classified.
+#          PGWT_SUMMARY_VERSION bump as its own numbered rule.
+#
+#          #425's RESIDUAL IS NOT THIS MECHANISM -- test applied, answer no.
+#          Its closing comment reports 7,393.0 ms left "in the summary path's
+#          own column" on a 1928.26 s / 7,405,568-event trace whose raw Idle
+#          is 22,183,933.4 ms against a ground truth of 22,183,933.1 ms. Two
+#          independent reasons #324 cannot be the cause:
+#            1. the quantity is WHOLE-CAPTURE IDLE, unfiltered. #324 lives in
+#               queries[], which only the FILTERED read touches, and the
+#               unfiltered read takes rec->idle_ns, which the writer already
+#               accumulates per second (summary_writer.c:378,
+#               `acc->idle_ns += tns`). More fundamentally: #324 RELOCATES
+#               time between windows and therefore cannot change a
+#               whole-capture SUM at all. Its predicted contribution here is
+#               0.0 ms.
+#            2. the five windows pinned in summary_raw_parity_expected.json
+#               include `to_capture_close` and `fractional_bounds`, and NONE
+#               of them pins an Idle divergence -- Idle agrees on every one.
+#               So this fixture does not reproduce the residual and is not
+#               the instrument for it.
+#          WHAT THE NUMBER DOES LOOK LIKE: that trace carries 11,504.6 ms of
+#          idle wall per second of capture (~11.5 backends idle), so 7,393.0
+#          ms is 0.6426 SECONDS of capture wall -- sub-one-second, which is
+#          the shape of a partial second at a capture edge that the writer
+#          never sealed (it writes COMPLETE seconds only), not of an
+#          accounting rule. That is a COVERAGE difference, and on this
+#          reading it needs no format change and does not ride the bump.
+#          STILL ARITHMETIC, NOT A MEASUREMENT: confirming it needs a REAL
+#          capture (the live tier, not this synthetic fixture) compared raw
+#          vs summary on Idle over (a) the whole capture and (b) a
+#          whole-second window strictly inside it. If the residual vanishes
+#          on (b) it is edge coverage; if it survives, it is something else
+#          and this note is wrong.
 #   #319 — `top_wait` means "largest total" on raw and "longest single wait"
 #          on the summary path.
 #   #410 — the four divergences THIS gate found on its first run: max_aas

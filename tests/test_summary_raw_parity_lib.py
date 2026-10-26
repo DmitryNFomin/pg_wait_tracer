@@ -629,6 +629,96 @@ def main():
           and any("delta" in l for l in lines),
           "§16g the log rendering of a finding names the bucket and the delta")
 
+    # §16i THE PER-CLASS BREAKDOWN -- what turns "bucket 6 gained 2.1875"
+    # into "which class moved", and with a synthetic fixture the class plus
+    # the bucket names the record. The two properties that make it honest:
+    #   - a class present on ONE SIDE ONLY is marked <absent>, never read as
+    #     0.0, because a 0 blames a magnitude difference for an absence;
+    #   - a divergent bucket that NOTHING in the breakdown accounts for is
+    #     refused, not printed as though it had been explained.
+    # There is deliberately NO "the deltas sum to the bucket delta" assertion:
+    # both walks share P._is_class_key, so that identity holds by
+    # construction. The first cut asserted it anyway and no mutant could make
+    # it fail -- a guard that cannot fire, which is the very defect this
+    # suite exists to catch, so the sharing replaced the assertion.
+    def b2(*pairs, **kw):
+        w = kw.pop("width", 16000000000)
+        return {"bucket_ns": w,
+                "buckets": [dict(t=1000 + i, **d) for i, d in
+                            enumerate(pairs)]}
+
+    d = P.bucket_diff(b2({"IO": 2.0, "Lock": 1.0}, {"IO": 2.0, "Lock": 1.0}),
+                      b2({"IO": 0.5, "Lock": 1.0}, {"IO": 3.5, "Lock": 1.0}))
+    bd = d.get("breakdown", {})
+    check(d["status"] == P.BUCKET_OK
+          and [c[0] for c in bd.get(0, [])] == ["IO"]
+          and [c[0] for c in bd.get(1, [])] == ["IO"],
+          "§16i the breakdown names the class that moved and not the one that "
+          "did not (got %s)"
+          % {k: [c[0] for c in v] for k, v in bd.items()})
+
+    # ABSENCE, the Q1 input: IO present on raw, missing entirely on summary.
+    d = P.bucket_diff(b2({"IO": 2.0, "Lock": 1.0}, {"IO": 2.0, "Lock": 1.0}),
+                      b2({"Lock": 1.0}, {"IO": 4.0, "Lock": 1.0}))
+    row = d.get("breakdown", {}).get(0, [[None] * 4])[0]
+    check(d["status"] == P.BUCKET_OK and row[0] == "IO"
+          and row[2] == P.CLASS_ABSENT and row[1] == 2.0,
+          "§16i a class present on ONE SIDE ONLY is marked %r, not 0.0 "
+          "(got raw=%r summary=%r)" % (P.CLASS_ABSENT, row[1], row[2]))
+
+    # A bucket with no class keys AT ALL is unparseable, and _bucket_total
+    # says so before the breakdown is reached -- that is the right answer and
+    # the right place for it.
+    d = P.bucket_diff({"bucket_ns": 16000000000,
+                       "buckets": [{"t": 1, "IO": 3.0}]},
+                      {"bucket_ns": 16000000000, "buckets": [{"t": 1}]})
+    check(d["status"] == P.BUCKET_REFUSED
+          and "unparseable" in (d.get("reason") or ""),
+          "§16i a bucket with no class keys is UNPARSEABLE, refused before "
+          "the breakdown (got %r)" % (d.get("reason") or d.get("status")))
+
+    # THE UNATTRIBUTABLE CASE IS REAL AND NEEDS THIS FIXTURE. The first cut of
+    # this check used the bucket above and passed on the `unparseable` refusal
+    # instead, leaving the attribution leg untested and looking covered. The
+    # leg is reached when the bucket's TOTAL differs by more than tol while
+    # every INDIVIDUAL class delta is within tol -- many tiny per-class
+    # differences that add up. Four classes off by exactly tol each: the
+    # breakdown skips all four, the total is 4x tol, and a divergence with an
+    # empty breakdown must refuse rather than print a cause it does not have.
+    # tol=1.0 makes the arithmetic unambiguous: each class moves by exactly
+    # 1.0 (skipped, not > tol), four of them, so the bucket total moves 4.0
+    # (> tol, hence divergent) with an empty breakdown.
+    d = P.bucket_diff(
+        {"bucket_ns": 16000000000,
+         "buckets": [{"t": 1, "A": 1.0, "B": 1.0, "C": 1.0, "D": 1.0}]},
+        {"bucket_ns": 16000000000,
+         "buckets": [{"t": 1, "A": 2.0, "B": 2.0, "C": 2.0, "D": 2.0}]},
+        tol=1.0)
+    check(d["status"] == P.BUCKET_REFUSED
+          and "cannot be attributed" in (d.get("reason") or ""),
+          "§16i a divergent bucket whose per-class deltas are each within tol "
+          "REFUSES rather than reporting an unattributed divergence (got %r)"
+          % (d.get("reason") or d.get("status")))
+
+    d = P.bucket_diff({"bucket_ns": 16000000000,
+                       "buckets": [{"t": 1, "IO": "lots"}]},
+                      b2({"IO": 1.0}))
+    check(d["status"] == P.BUCKET_REFUSED,
+          "§16i a non-numeric class value REFUSES")
+
+    # Determinism: largest |delta| first, name as tiebreak, so two runs of the
+    # gate produce byte-identical logs and a diff of two box runs is readable.
+    d = P.bucket_diff(b2({"AAA": 1.0, "ZZZ": 1.0, "MMM": 1.0}),
+                      b2({"AAA": 2.0, "ZZZ": 2.0, "MMM": 5.0}))
+    order = [c[0] for c in d.get("breakdown", {}).get(0, [])]
+    check(order == ["MMM", "AAA", "ZZZ"],
+          "§16i the breakdown is ordered by |delta| then name (got %s)"
+          % order)
+
+    lines = P.bucket_diff_lines("w", d)
+    check(any("MMM" in l and "delta=+4.0" in l for l in lines),
+          "§16i the breakdown REACHES the log under its bucket")
+
     # §16h THE WIRING, not the library. §16a-g all passed while the live
     # gate emitted NOTHING: the first cut collected bucket lines into a
     # `bucket_lines` buffer and appended it AFTER `for l in lines: print(l)`,

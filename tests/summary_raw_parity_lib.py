@@ -722,15 +722,28 @@ BUCKET_REFUSED = "REFUSED"
 BUCKET_OK = "ok"
 
 
+def _is_class_key(k):
+    """The ONE definition of "this key is load", shared by _bucket_total and
+    _class_delta. It is one function rather than two copies of `k in ("t",
+    "cat")` so the two walks CANNOT drift apart: the identity "Σ per-class
+    deltas == the bucket's own delta" then holds by construction. The first
+    cut asserted that identity instead, and the assertion was a tautology --
+    both sides filtered keys the same way, so no input could make it fail, and
+    no mutant could demonstrate it firing. An unfirable guard is the exact
+    defect this gate's own suite exists to catch, so it was deleted and the
+    possibility removed instead. `t` is the timestamp and `cat` the category
+    sub-object; neither is load."""
+    return k not in ("t", "cat")
+
+
 def _bucket_total(b):
-    """Σ of a bucket's class/category values, or None if unparseable. `t` is
-    the timestamp and `cat` the category sub-object -- neither is load."""
+    """Σ of a bucket's class/category values, or None if unparseable."""
     if not isinstance(b, dict):
         return None
     total = 0.0
     seen = 0
     for k, v in b.items():
-        if k in ("t", "cat"):
+        if not _is_class_key(k):
             continue
         if not _num(v):
             return None
@@ -739,6 +752,57 @@ def _bucket_total(b):
     if seen == 0:
         return None
     return total
+
+
+CLASS_ABSENT = "<absent>"
+
+
+def _class_delta(rbkt, sbkt, tol):
+    """Per-class (raw, summary, delta) for one bucket, over the UNION of class
+    keys, sorted by |delta| descending then by name so the log is
+    byte-deterministic.
+
+    A class present on ONE SIDE ONLY is marked CLASS_ABSENT on the missing
+    side and never silently read as 0.0 -- "absent is not equal" is this
+    gate's rule everywhere else, and a 0 here would blame a magnitude
+    difference for an absence. Its delta still participates in the
+    conservation sum (the missing side contributes nothing to that side's
+    total, which is exactly what _bucket_total did), so the identity holds
+    while the ABSENCE stays visible.
+
+    Returns (rows, total_delta) where `rows` is the DISPLAY subset (deltas
+    above `tol`) and `total_delta` is the sum over EVERY class key, filtered
+    or not. The caller's conservation check uses `total_delta`: summing the
+    display subset instead would make the tolerance filter and the
+    conservation identity contradict each other, so a bucket whose classes
+    each moved by less than tol would be reported as a breakdown that does
+    not add up. Returns None if either bucket is not a dict or a class value
+    is non-numeric -- the caller refuses on that.
+    """
+    if not isinstance(rbkt, dict) or not isinstance(sbkt, dict):
+        return None
+    keys = [k for k in set(rbkt) | set(sbkt) if _is_class_key(k)]
+    out = []
+    total = 0.0
+    for k in keys:
+        rv = rbkt.get(k, None)
+        sv = sbkt.get(k, None)
+        if rv is not None and not _num(rv):
+            return None
+        if sv is not None and not _num(sv):
+            return None
+        rnum = float(rv) if rv is not None else 0.0
+        snum = float(sv) if sv is not None else 0.0
+        delta = snum - rnum
+        total += delta
+        if abs(delta) <= tol:
+            continue
+        out.append([k,
+                    CLASS_ABSENT if rv is None else rnum,
+                    CLASS_ABSENT if sv is None else snum,
+                    delta])
+    out.sort(key=lambda c: (-abs(c[3]), c[0]))
+    return out, total
 
 
 def bucket_diff(raw_aas, sum_aas, tol=1e-9):
@@ -780,6 +844,7 @@ def bucket_diff(raw_aas, sum_aas, tol=1e-9):
 
     n = min(len(rb), len(sb))
     rows = []
+    breakdown = {}
     for i in range(n):
         rt = _bucket_total(rb[i])
         st = _bucket_total(sb[i])
@@ -788,6 +853,17 @@ def bucket_diff(raw_aas, sum_aas, tol=1e-9):
                           "(raw=%r, summary=%r)" % (i, rb[i], sb[i]))
         t = rb[i].get("t") if isinstance(rb[i], dict) else None
         rows.append([i, t, rt, st, st - rt])
+        got = _class_delta(rb[i], sb[i], tol)
+        if got is None:
+            return refuse("bucket %d's per-class breakdown is unparseable"
+                          % i)
+        cls, _cls_total = got
+        # No conservation assertion here on purpose: _bucket_total and
+        # _class_delta share _is_class_key, so Σ per-class deltas equals the
+        # bucket's own delta by construction. See _is_class_key for why a
+        # check was removed rather than kept.
+        if cls:
+            breakdown[i] = cls
 
     raw_integral = sum(r[2] for r in rows) * rw / 1e6
     sum_integral = sum(r[3] for r in rows) * rw / 1e6
@@ -807,7 +883,18 @@ def bucket_diff(raw_aas, sum_aas, tol=1e-9):
         "rows": rows,
         "divergent": divergent,
         "first_divergent": divergent[0][0] if divergent else None,
+        "breakdown": breakdown,
     }
+    # A non-zero bucket delta with NOTHING in its breakdown is a contradiction,
+    # not a quiet "no class explains it": it means every class key was skipped
+    # (a bucket carrying only `t`), so the instrument would print a divergence
+    # it cannot attribute. Say so instead.
+    unattributed = [r[0] for r in divergent if not breakdown.get(r[0])]
+    if unattributed:
+        return refuse("buckets %s differ but have no per-class breakdown at "
+                      "all -- their class keys were all skipped, so the "
+                      "divergence cannot be attributed to anything"
+                      % unattributed)
     if len(rb) != len(sb):
         out["length_mismatch"] = [len(rb), len(sb)]
     return out
@@ -828,4 +915,15 @@ def bucket_diff_lines(name, d):
     for i, t, rt, st, delta in d["divergent"]:
         lines.append("    bucket %d t=%s raw=%.6f summary=%.6f delta=%+.6f"
                      % (i, t, rt, st, delta))
+        # The per-class breakdown is what distinguishes a writer artifact from
+        # a reader one: it names the CLASS that moved, and with a synthetic
+        # fixture the class plus the bucket names the record. Rendered under
+        # its bucket rather than collected elsewhere -- same reason as the
+        # emission site itself (see section 16h).
+        for name, rv, sv, cdelta in d.get("breakdown", {}).get(i, []):
+            lines.append("      %-14s raw=%s summary=%s delta=%+.6f"
+                         % (name,
+                            rv if rv == CLASS_ABSENT else "%.6f" % rv,
+                            sv if sv == CLASS_ABSENT else "%.6f" % sv,
+                            cdelta))
     return lines
