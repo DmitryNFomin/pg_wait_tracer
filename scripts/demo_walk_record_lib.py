@@ -109,6 +109,145 @@ def young_capture_refusal(server_from_ns,window_from_ns):
                    "the capture to warm up, or pass --allow-young to override")
 
 
+# issue #571: the recorder gated hard on console errors, panel population
+# and chart motion, but NOTHING verified that the daemon writing the trace
+# was still alive. If it dies mid-capture the bridge keeps serving what is
+# already on disk: every panel stays populated, no console error appears,
+# and the walk very likely passes -- recording a window that LOOKS live but
+# stopped advancing at the moment of death. This is the #544 class one layer
+# down: #544 proved the bridge was an orphan serving a 12-hour-old trace
+# while kill -0 and HTTP 200 both passed, and its fix (PR #558) established
+# pid OWNERSHIP of the bridge. Owning the bridge does not prove the CAPTURE
+# is advancing.
+#
+# WHAT IS MEASURED, AND WHY THIS QUANTITY. The trace's own latest timestamp
+# (`info.to_ns`, src/server.c's srv->latest_wall_ns -- the newest event wall
+# time across the scanned blocks) sampled at walk start, at the drill
+# hand-off and at walk end, required to have advanced by roughly the walk's
+# own wall-clock duration. Three alternatives were considered and rejected:
+#   * a pid/liveness check on the daemon. A process can be alive and wedged,
+#     and a pid check cannot tell that from healthy -- the exact failure
+#     shape this gate exists for. It also cannot run at all in the normal
+#     topology: the recorder drives Chrome on a Mac against a bridge
+#     forwarded from the Linux box, so the daemon's pid is on another host.
+#   * sampling the daemon's control socket. Same host problem (the socket is
+#     box-side), and the UI's own control-plane poll already treats
+#     "daemon not running" as an ordinary static-replay state rather than an
+#     error (app.js pollDaemon), so a daemon-absent reply is not even
+#     distinguishable there from a legitimate archived replay.
+#   * `info.now_ns`. This is the WRONG field and would defeat the gate
+#     completely: now_ns is the bridge's own clock (src/server.c reads
+#     CLOCK_REALTIME per request), so it keeps advancing exactly as fast
+#     whether the daemon is alive, wedged or dead.
+#
+# KNOWN LIMIT, stated rather than hidden: to_ns advances only when new
+# EVENTS land, so a capture whose workload goes genuinely quiet also stalls
+# it. That is why the whole-walk bar is a fraction of the walk's duration
+# rather than ~1.0, and why the per-segment bar below is "moved at all"
+# rather than a rate. A capture quiet enough to trouble this gate already
+# refuses at check_overview_wait_mix() and at the AAS motion gates.
+CAPTURE_ADVANCE_FRACTION = 0.5
+
+CAPTURE_ADVANCE_CHECKED = ("capture-advance check: the trace's latest timestamp advanced "
+                           "with the walk's own wall-clock")
+CAPTURE_ADVANCE_SKIPPED_ARCHIVED = ("capture-advance check skipped: archived window (the capture "
+                                    "ended before this walk began, so its latest timestamp "
+                                    "cannot advance by construction)")
+
+
+def _usable_sample(sample):
+    """A sample is usable only if BOTH fields are real finite numbers.
+
+    Deliberately not a truthiness test: a missing `to_ns`, a string, a
+    JSON null, NaN/inf or a JS boolean must all land in the REFUSE branch,
+    never be coerced into "0, so it did not advance... but also not be
+    silently skipped". A gate that cannot see must refuse, never approve.
+    """
+    if not isinstance(sample, dict):
+        return False
+    tip, at = sample.get("tip_ns"), sample.get("at_s")
+    for value, positive in ((tip, True), (at, False)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if not math.isfinite(value):
+            return False
+        if positive and value <= 0:
+            return False
+        if not positive and value < 0:
+            return False
+    return True
+
+
+def capture_advance_check(samples, archived=False):
+    """Refuse (code 10) unless the trace kept growing across the walk.
+
+    `samples` are [{"label":str,"at_s":monotonic seconds,"tip_ns":int}, ...]
+    in recording order, taken by demo-walk-record.py's probe_trace_tip().
+
+    Two sub-checks, BOTH required, measuring different spans so neither can
+    paper over the other:
+      1. whole walk: (tip_end - tip_start) >= CAPTURE_ADVANCE_FRACTION x
+         (at_end - at_start). Catches a capture that was already dead or
+         wedged when the walk started, and any death in the first half.
+      2. the FINAL segment (drill hand-off -> walk end): the tip must have
+         moved AT ALL. Check 1 alone cannot see a daemon that died late --
+         a death at 60% of the walk still leaves 60% of advance, which
+         clears a 50% bar. A dead daemon's tip does not move one
+         nanosecond in the segment after it died.
+    Plus two fail-safe refusals that are not about the product at all: a
+    tip that went BACKWARDS (a different trace is being served -- #544's
+    orphan shape), and an unreadable/absent sample.
+    """
+    if archived:
+        return {"checked": False, "verdict": CAPTURE_ADVANCE_SKIPPED_ARCHIVED,
+                "fraction_floor": CAPTURE_ADVANCE_FRACTION, "samples": samples}
+    if not isinstance(samples, list) or len(samples) < 2:
+        raise Refusal(10, "capture-advance check has fewer than two samples of the trace's "
+                      f"latest timestamp ({samples!r}); it cannot tell whether the capture "
+                      "advanced, so it refuses instead of approving")
+    for sample in samples:
+        if not _usable_sample(sample):
+            raise Refusal(10, "capture-advance check could not read the trace's latest "
+                          f"timestamp: unusable sample {sample!r}; refusing rather than "
+                          "assuming the capture is still advancing")
+    for before, after in zip(samples, samples[1:]):
+        if after["tip_ns"] < before["tip_ns"]:
+            raise Refusal(10, "the trace's latest timestamp went BACKWARDS between "
+                          f"{before['label']!r} ({before['tip_ns']}) and {after['label']!r} "
+                          f"({after['tip_ns']}): the backend is serving a different trace "
+                          "than it was, not a capture that is still advancing")
+    first, last, penultimate = samples[0], samples[-1], samples[-2]
+    elapsed_s = last["at_s"] - first["at_s"]
+    if elapsed_s <= 0:
+        raise Refusal(10, "capture-advance check has a zero-length measurement window "
+                      f"({first['label']!r} and {last['label']!r} are both at "
+                      f"{first['at_s']}s); nothing could be measured, so it refuses")
+    advance_s = (last["tip_ns"] - first["tip_ns"]) / 1e9
+    required_s = CAPTURE_ADVANCE_FRACTION * elapsed_s
+    tail_elapsed_s = last["at_s"] - penultimate["at_s"]
+    tail_advance_s = (last["tip_ns"] - penultimate["tip_ns"]) / 1e9
+    result = {"checked": True, "verdict": CAPTURE_ADVANCE_CHECKED,
+              "walk_elapsed_s": elapsed_s, "trace_advance_s": advance_s,
+              "required_advance_s": required_s, "fraction_floor": CAPTURE_ADVANCE_FRACTION,
+              "tail_segment": {"from": penultimate["label"], "to": last["label"],
+                               "elapsed_s": tail_elapsed_s, "advance_s": tail_advance_s},
+              "samples": samples}
+    if advance_s < required_s:
+        raise Refusal(10, f"capture stopped advancing: the trace's latest timestamp moved "
+                      f"{advance_s:.1f}s while the walk ran for {elapsed_s:.1f}s of "
+                      f"wall-clock (need >= {required_s:.1f}s, i.e. "
+                      f"{CAPTURE_ADVANCE_FRACTION:.0%} of the walk). The daemon writing this "
+                      "trace is dead or wedged; the recording shows a window that looks live "
+                      "but stopped advancing")
+    if tail_advance_s <= 0:
+        raise Refusal(10, f"capture stopped advancing before the walk finished: the trace's "
+                      f"latest timestamp did not move at all between {penultimate['label']!r} "
+                      f"and {last['label']!r} ({tail_elapsed_s:.1f}s of wall-clock), even "
+                      f"though it had advanced {advance_s:.1f}s earlier in the walk. The "
+                      "daemon writing this trace died mid-capture")
+    return result
+
+
 def frame_indices(frames, start, end):
     return [f["index"] for f in frames if start <= f["timestamp_s"] <= end]
 
@@ -316,6 +455,19 @@ def write_analysis(root, walk):
                   "capture, fixed, because the capture ended well before this walk ran. Treat this "
                   "as evidence of what the UI renders for that data, not as a recording of the live "
                   "rolling-window gesture.", ""]
+    # issue #571: the capture-liveness verdict is stated verbatim, never
+    # inferred. A SKIPPED check that reads like a passed one is the defect
+    # class this project has hit repeatedly (see wait_mix_check below).
+    advance = walk.get("capture_advance")
+    if advance and advance.get("verdict"):
+        line = f"Capture liveness: {advance['verdict']}"
+        if advance.get("checked"):
+            line += (f" -- the trace's latest timestamp moved "
+                     f"{advance['trace_advance_s']:.1f}s over {advance['walk_elapsed_s']:.1f}s "
+                     f"of walk wall-clock (floor {advance['required_advance_s']:.1f}s), and "
+                     f"{advance['tail_segment']['advance_s']:.1f}s of that in the final "
+                     f"{advance['tail_segment']['elapsed_s']:.1f}s segment.")
+        lines += [line, ""]
     for tab in walk["tabs"]:
         observations = tab["observations"]
         first, last = observations[0], observations[-1]

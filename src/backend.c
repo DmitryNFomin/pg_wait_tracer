@@ -1076,6 +1076,22 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     if (d->summary_writer)
         pgwt_summary_forget_open(d->summary_writer, (uint32_t)pid);
 
+    /* #156 item 2: the pid is gone, so nothing will ever report an id for
+     * it again -- resolve its deferred query attribution now (rule 2, else
+     * the unattributed bucket) instead of leaving it in the per-pid entry.
+     *
+     * HERE and not in the event callback because only the FULL tier gets a
+     * trace record with new_event == PGWT_EVENT_EXIT (src/event_stream.c
+     * flushes on that); the sampled tier has no exit record at all, so a
+     * backend terminated while its status still read in-command silently
+     * lost up to PGWT_QATTR_PENDING_MAX aggregates. The lifecycle ringbuf
+     * reaches here in EVERY tier. Idempotent, so the full tier's own flush
+     * (whichever of the two runs first) cannot double-count. Above the
+     * `if (!be)` return for the same reason as the line above it: BPF
+     * enrolls at fork, so a pid can be sampled before a registry entry
+     * exists. */
+    pgwt_live_qattr_pid_exit(d->event_accum, (uint32_t)pid);
+
     /* BPF enrolls at fork, before a userspace registry entry exists. Even
      * a retired-before-enrollment target must have those maps cleaned. */
     if (!be) return 0;

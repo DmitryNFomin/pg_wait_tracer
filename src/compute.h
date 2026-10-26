@@ -143,6 +143,62 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
                            uint64_t to_ns)
     __attribute__((warn_unused_result));
 
+/* #586: one pid's query id as it stood AT THE WINDOW'S LEFT EDGE.
+ *
+ * The mirror of `to_ns` above, and it exists for the mirror-image reason.
+ * A record straddling `from` arrives whole -- its close is inside the
+ * window, so it is a real occurrence of this window -- but the
+ * EXEC_START/PLAN_START that reported its command's query id can sit before
+ * `from` and is therefore NOT in the array. #128's rule 2 ("the last id
+ * reported EARLIER in the same command", `cmd_qid`) is built by the forward
+ * pass over the loaded array alone, so it has no evidence and the record
+ * falls to rule 3, the UNATTRIBUTED bucket. No per-query filter can reach
+ * that bucket (pgwt_filter.query_id == 0 means "no filter"), so the
+ * drill-down LOSES the record rather than mis-filing it: 183 records summed
+ * over 22 query filters against 184 unfiltered, one Lock:relation of
+ * 2435.069 ms.
+ *
+ * A seed is the ONE thing the loader can supply from outside the array, and
+ * it is deliberately the only thing this changes. `cmd_qid` is read in
+ * exactly one place (fwd[], rule 2's fallback), so a seed can move a record
+ * BETWEEN queries and can do nothing else: no record is added, no duration
+ * is changed, `seen_cmd` stays untouched so the in-command majority rule and
+ * the PGWT_WEI_NONCMD_CPU relabel behind DB Time are not reachable from here.
+ * Both halves of that are pinned as numbers in tests/test_left_edge_attrib.c
+ * sections 3 and 4.
+ *
+ * `pgwt_tag_events_window()` is this call with no seeds, so every existing
+ * caller and the unbounded path stay bit-identical. A seed for a pid that
+ * reports an id inside the window is harmless by construction: the forward
+ * pass overwrites cmd_qid at the first id it meets, and rule 1 (an id
+ * reported LATER) already takes precedence over rule 2. */
+struct pgwt_qid_seed {
+    uint32_t pid;
+    uint64_t query_id;      /* nonzero: a 0 seed is the absence of a seed */
+};
+
+int pgwt_tag_events_window_seeded(struct pgwt_trace_event *events, int count,
+                                  const struct pgwt_pid_cat *cats, int n_cats,
+                                  uint64_t to_ns,
+                                  const struct pgwt_qid_seed *seeds,
+                                  int n_seeds)
+    __attribute__((warn_unused_result));
+
+/* The forward pass's MARKER rule for cmd_qid, in one place so the loader's
+ * left-edge lookback (src/server.c) decides a seed with the same rule the
+ * in-array forward pass uses rather than with a transcription of it:
+ *
+ *   CMD_START      — a new command: forget the previous statement's id. (The
+ *                    id BPF resolved AT CMD_START is the PREVIOUS statement's,
+ *                    which is why this is a reset and not an observation.)
+ *   ESCALATE_*     — pack a reason, not an id: ignored.
+ *   any other with  a nonzero query_id — the command's reported id.
+ *
+ * Not CMD_END: a run straddling CMD_END still closes after it, so cmd_qid
+ * survives a command's close (query_attr.h). */
+void pgwt_qid_marker_step(uint32_t marker, uint64_t query_id,
+                          uint64_t *cmd_qid);
+
 /* Category of a tagged record: 0..PGWT_NUM_CATS-1, or -1 for idle. */
 int pgwt_event_category(const struct pgwt_trace_event *ev);
 
@@ -307,9 +363,10 @@ struct pgwt_tm_result {
     double cpu_clamped_ms;
     double wait_gap_cpu_ms;
     /* The Idle row's named children must account for its total exactly. A
-     * POSITIVE remainder is expected and labelled ("Other (background)": the
-     * hidden Activity share, plus anything the summary path's bounded
-     * per-event tables could not hold). A NEGATIVE one -- children exceeding
+     * POSITIVE remainder is expected and labelled ("Other idle (parked
+     * background loops)": the hidden Activity share, plus anything the
+     * summary path's bounded per-event tables could not hold). A NEGATIVE
+     * one -- children exceeding
      * the parent -- cannot happen by construction on any of the three paths,
      * so if it ever does it means the writer and the reader have diverged
      * about what counts as idle. Surfaced here rather than clamped away,
@@ -435,8 +492,29 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
 struct pgwt_session_row {
     uint32_t pid;
     double   db_time_ms;
+    /* #562: the MEASURED on-CPU share of this session's DB Time, not the
+     * on-CPU gaps' wall. The gap between two waits is "on a core" only for
+     * the part sum_exec_runtime actually advanced; the rest is runqueue
+     * time, reported as offcpu_ms below. Where no in-window gap of this
+     * response carried a measurement (sampled / v2 / no CPU capability, and
+     * the summary routing) this is the unsplit gap WALL by gap-inference,
+     * and pgwt_sessions_result.has_measured_cpu says which of the two it
+     * is. */
     double   cpu_pct;
+    /* #562: Σ(this session's wait intervals) / DB Time -- the live
+     * semantics. It used to be `100 - cpu_pct`, which is ALGEBRAICALLY the
+     * same number only while cpu_pct carried the gap wall (DB Time is
+     * exactly gaps + waits). Once cpu_pct became the measurement it stopped
+     * being the wait share, so this had to move with it. */
     double   wait_pct;
+    /* #562: the runqueue / throttle remainder of this session's MEASURED
+     * gaps -- their in-window wall minus the measurement, the same quantity
+     * pgwt_compute_time_model reports as "CPU (waiting for a core)". It is
+     * INSIDE db_time_ms but on neither percentage above, so cpu + wait +
+     * offcpu accounts for the row; without it the time the CPU column no
+     * longer claims would simply be missing. 0 where has_measured_cpu is 0
+     * -- a refusal to split, never a claim that off-CPU time was zero. */
+    double   offcpu_ms;
     char     top_wait[64];
     uint32_t top_wait_id;
 };
@@ -450,6 +528,37 @@ struct pgwt_sessions_result {
      * this field exists to prevent. Set by both the raw and the summary
      * path. */
     int failed;
+    /* #562: the same contract pgwt_events_result carries for Top Events
+     * (#553/PR #559), field for field rather than a parallel one.
+     *
+     *   has_measured_cpu != 0 — at least one in-window on-CPU GAP in this
+     *       response carried a measurement, so every row's cpu_pct is
+     *       measured on-CPU time (part inference on mixed data, where some
+     *       gaps are UNKNOWN) and offcpu_ms is the measured gaps' runqueue
+     *       remainder. NOT the same predicate as pgwt_tm_result's, whose
+     *       scope is the whole window rather than one response; it IS the
+     *       narrow one #575 settled on.
+     *   has_measured_cpu == 0 — no in-window gap carried a measurement, so
+     *       cpu_pct is the unsplit gap wall and every offcpu_ms is 0.
+     *
+     * pgwt_compute_top_sessions_from_summaries leaves it 0 ON PURPOSE: the
+     * per-second record's struct pgwt_summary_session stores `cpu_ns += tns`
+     * — WALL (src/summary_writer.c) — and the format has no measured column,
+     * so that routing cannot report a measurement and says so. That is a
+     * REAL divergence at the 120 s routing threshold, not a comparability
+     * artefact, pinned as an identity (raw cpu + raw offcpu == summary cpu)
+     * in tests/test_window_clip.c section 13d.
+     *
+     * cpu_clamped_ms is the skew self-check, same name and meaning as
+     * pgwt_tm_result's: measured CPU that exceeded its own clipped gap wall
+     * (sum_exec_runtime is only current at a tick or a context switch, so a
+     * sub-ms burst can be attributed past its interval). Clamped OUT of the
+     * row — it is not time that happened — and counted here, so a skewed
+     * measurement is visible instead of silently absorbed. Outside every
+     * row and outside db_time_ms. */
+    double offcpu_ms;          /* Σ of the rows' offcpu_ms, for the response */
+    double cpu_clamped_ms;
+    int    has_measured_cpu;
 };
 
 void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
@@ -574,6 +683,14 @@ struct pgwt_transitions_result {
     int    num_rows;
     int    total_rows;                 /* distinct links before max_rows cap */
     uint64_t total_transitions;
+    /* #461: see pgwt_sessions_result.failed. The pair table is unbounded
+     * now (it was 4096 slots with a probe loop that never terminated once
+     * full), so the only early exit is a real allocation failure -- and it
+     * withholds the WHOLE graph. A transitions graph quietly missing edges
+     * is indistinguishable from a workload that never made those
+     * transitions, so a trim is never an option here. When this is set every
+     * other field is zeroed; the caller must report, not render. */
+    int    failed;
 };
 
 /* #436: THE transition population, in one place.
@@ -801,6 +918,19 @@ struct pgwt_exec_event {
                                * not the event's whole wall time; cpu_ns is
                                * prorated onto the same slice. Both are set in
                                * detail_lane_add() in compute.c */
+    uint64_t raw_duration_ns; /* #529: the record's OWN wall time, unclipped.
+                               * duration_ns is what a client SUMS (it cannot
+                               * exceed the execution's duration); this is
+                               * what a client DISPLAYS for one bar. Before
+                               * this existed the Waterfall tooltip answered
+                               * "how long was this wait?" with the clipped
+                               * slice -- a 4 ms wait that opened 2 ms before
+                               * EXEC_START read 2 ms -- and the true figure
+                               * was on no field and no wire key, so no
+                               * client could have told. Serialised as
+                               * `raw_dur_ns` (src/server.c
+                               * serialize_exec_lane); equal to duration_ns
+                               * for every event the boundary does not cut. */
     uint64_t cpu_ns;
     int      has_cpu;
 };
@@ -828,8 +958,11 @@ struct pgwt_execution_detail_result {
 
 /* Build one marker-identified execution waterfall. Only exact transition
  * records are eligible; sampled observations never acquire fabricated
- * interval durations. Events are selected by interval overlap and keep their
- * raw starts/durations. */
+ * interval durations. Events are selected by interval overlap; since #496
+ * their start_ns/duration_ns are CLIPPED to the execution window, and since
+ * #529 raw_duration_ns carries the record's own wall time beside it. (The
+ * previous sentence here still read "keep their raw starts/durations", which
+ * #496 had already made false.) */
 void pgwt_compute_execution_detail(
     const struct pgwt_trace_event *events, int count,
     uint32_t leader_pid, uint64_t start_ns, uint64_t end_ns,

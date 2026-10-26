@@ -147,7 +147,10 @@ static void test_best_effort_startup_keeps_available_probe(void)
     uint32_t pinned = pgwt_exact_probe_core_pin_best_effort(
         &core, PGWT_EXACT_PROBE_ALL_MASK, 1, &ops, &f);
 
-    CHECK(pinned == PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_ACTIVITY) &&
+    /* #108: full-mode startup now pins the phase markers too, so the
+     * surviving set is everything except the probe that failed. */
+    CHECK(pinned == (PGWT_EXACT_PROBE_ALL_MASK &
+                     ~PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_QUERY_ID)) &&
           core.attached_mask == pinned && core.pinned_mask == pinned,
           "startup drops a failed probe but keeps the available probe");
     CHECK(f.attach_calls[PGWT_EXACT_PROBE_QUERY_ID] == 1 &&
@@ -193,6 +196,315 @@ static void test_empty_rollback_and_refcount(void)
           "last exact consumer detaches the bundle");
     CHECK(f.detach_order[f.detach_count - 1] == PGWT_EXACT_PROBE_QUERY_ID,
           "bundle detaches in reverse attach order");
+}
+
+/* ── #108: the per-execution phase markers belong to the escalation bundle ──
+ *
+ * Before this, PGWT_EXACT_PROBE_ALL_MASK was QUERY_ID|ACTIVITY only and the
+ * four query__execute__ and query__plan__ USDT probes were attached once
+ * daemon start, FULL MODE ONLY (src/daemon.c). So a tiered-mode escalation
+ * granted exactness and the Waterfall/Scatter tabs still had no executions
+ * to show: the feature did not deliver what the control socket promised.
+ *
+ * Every case below runs the TIERED shape -- a core with nothing pinned,
+ * which is what pgwt_exact_probe_startup() leaves behind on a validated
+ * PG13-18 layout. In FULL mode the phase probes are pinned from startup and
+ * no assertion here could fail; that is the vacuity trap this file avoids by
+ * asserting core.attached_mask == 0 before every acquire. */
+static void test_escalation_bundle_carries_phase_probes(void)
+{
+    CHECK(PGWT_EXACT_PROBE_COUNT >= 4,
+          "#108: the exact bundle has execute and plan members");
+    CHECK((PGWT_EXACT_PROBE_ALL_MASK & PGWT_EXACT_PROBE_PHASE_MASK) ==
+              PGWT_EXACT_PROBE_PHASE_MASK,
+          "#108: an exact window's bundle includes the phase markers");
+    CHECK((PGWT_EXACT_PROBE_ATTR_MASK & PGWT_EXACT_PROBE_PHASE_MASK) == 0,
+          "#108: phase markers are not attribution probes");
+
+    struct pgwt_exact_probe_core core = {0};
+    struct fake_ops f = {.fail_at = -1};
+    /* Anti-vacuity: nothing is pre-attached, so an attach MUST happen for
+     * the assertion below to be satisfiable at all. */
+    CHECK(core.attached_mask == 0 && core.pinned_mask == 0,
+          "#108: tiered baseline starts with no exact link attached");
+
+    CHECK(pgwt_exact_probe_core_acquire(&core, PGWT_EXACT_PROBE_ALL_MASK, 5,
+                                        &ops, &f) == 0,
+          "#108: tiered escalation acquires the bundle");
+    CHECK(f.attach_calls[PGWT_EXACT_PROBE_EXEC] == 1 &&
+          f.attach_calls[PGWT_EXACT_PROBE_PLAN] == 1,
+          "#108: the escalation window ATTACHES execute and plan probes");
+    CHECK(core.attached_mask == PGWT_EXACT_PROBE_ALL_MASK,
+          "#108: the window's attached set is the whole bundle");
+
+    pgwt_exact_probe_core_release(&core, &ops, &f);
+    CHECK(f.detach_calls[PGWT_EXACT_PROBE_EXEC] == 1 &&
+          f.detach_calls[PGWT_EXACT_PROBE_PLAN] == 1 &&
+          core.attached_mask == 0,
+          "#108: de-escalation detaches the phase probes with the bundle");
+    pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+}
+
+/* The other half of the contract: the ALWAYS-ON sampled tier never carries
+ * them. A phase probe left attached outside a window would fire on every
+ * statement for the life of the daemon -- the overhead the sampled tier's
+ * <1% claim rests on. */
+static void test_sampled_tier_never_pins_phase_probes(void)
+{
+    const enum pgwt_mode tiers[2] = { PGWT_MODE_SAMPLED, PGWT_MODE_TIERED };
+    for (int t = 0; t < 2; t++) {
+        for (int major = 13; major <= 18; major++) {
+            struct PgBackendStatusLayout valid = validated_layout(major);
+            struct PgBackendStatusLayout degraded = valid;
+            degraded.validation = PGWT_PGBS_VALIDATION_DEGRADED;
+            uint32_t m_valid = pgwt_exact_probe_startup_mask(
+                tiers[t], major, &valid, false, false);
+            uint32_t m_degraded = pgwt_exact_probe_startup_mask(
+                tiers[t], major, &degraded, false, false);
+            CHECK((m_valid & PGWT_EXACT_PROBE_PHASE_MASK) == 0 &&
+                  (m_degraded & PGWT_EXACT_PROBE_PHASE_MASK) == 0,
+                  "#108: sampled/tiered startup never pins a phase probe");
+        }
+    }
+    /* And the degraded fallback that DOES pin attribution probes still
+     * attaches zero phase links through the real pin path. */
+    struct PgBackendStatusLayout degraded17 = validated_layout(17);
+    degraded17.validation = PGWT_PGBS_VALIDATION_DEGRADED;
+    struct pgwt_exact_probe_core core = {0};
+    struct fake_ops f = {.fail_at = -1};
+    uint32_t mask = pgwt_exact_probe_startup_mask(PGWT_MODE_TIERED, 17,
+                                                  &degraded17, false, false);
+    CHECK(mask == PGWT_EXACT_PROBE_ATTR_MASK,
+          "#108: degraded tiered fallback still pins attribution probes");
+    pgwt_exact_probe_core_pin_best_effort(&core, mask, 0, &ops, &f);
+    CHECK(f.attach_calls[PGWT_EXACT_PROBE_EXEC] == 0 &&
+          f.attach_calls[PGWT_EXACT_PROBE_PLAN] == 0,
+          "#108: the degraded sampled fallback attaches no phase probe");
+    pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+}
+
+/* EL8 and any kernel without USDT semaphore refcounting: the phase markers
+ * cannot attach. That must DEGRADE the window (exact waits and attribution
+ * still granted), never DENY it -- the behaviour full mode has always had,
+ * where a failed USDT attach printed a WARN and capture continued. */
+static void test_phase_probe_failure_degrades_but_never_denies(void)
+{
+    for (int which = PGWT_EXACT_PROBE_EXEC; which <= PGWT_EXACT_PROBE_PLAN;
+         which++) {
+        struct pgwt_exact_probe_core core = {0};
+        struct fake_ops f = {.fail_at = which};
+        CHECK(pgwt_exact_probe_core_acquire(&core, PGWT_EXACT_PROBE_ALL_MASK,
+                                            9, &ops, &f) == 0,
+              "#108: a phase-probe attach failure still grants the window");
+        CHECK((core.attached_mask & PGWT_EXACT_PROBE_ATTR_MASK) ==
+                  PGWT_EXACT_PROBE_ATTR_MASK,
+              "#108: attribution probes survive a phase-probe failure");
+        /* Anti-vacuity: the failure path is only meaningful if the attach
+         * was ATTEMPTED. Without this the case passes on a tree that never
+         * tries to attach a phase probe at all -- the very defect. */
+        CHECK(f.attach_calls[which] == 1,
+              "#108: the window actually attempted the phase-probe attach");
+        CHECK((core.attached_mask & PGWT_EXACT_PROBE_BIT(which)) == 0,
+              "#108: the failed phase probe is not recorded as attached");
+        CHECK(core.consumers == 1,
+              "#108: the degraded window still has exactly one consumer");
+        pgwt_exact_probe_core_release(&core, &ops, &f);
+        CHECK(core.attached_mask == 0,
+              "#108: a degraded window still detaches everything it took");
+        pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+    }
+
+    /* The converse must stay true: an ATTRIBUTION probe failure still DENIES
+     * the window atomically. Making phase failures soft must not make the
+     * required members soft too. */
+    struct pgwt_exact_probe_core core = {0};
+    struct fake_ops f = {.fail_at = PGWT_EXACT_PROBE_ACTIVITY};
+    CHECK(pgwt_exact_probe_core_acquire(&core, PGWT_EXACT_PROBE_ALL_MASK, 9,
+                                        &ops, &f) != 0 &&
+          core.attached_mask == 0 && core.consumers == 0,
+          "#108: an attribution-probe failure still denies and rolls back");
+    CHECK(f.attach_calls[PGWT_EXACT_PROBE_EXEC] == 0 &&
+          f.attach_calls[PGWT_EXACT_PROBE_PLAN] == 0,
+          "#108: a denied window never reaches the optional phase attach");
+    pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+}
+
+/* Bypass case: the probe core must REFUSE rather than report success when it
+ * has no way to attach anything at all (no ops table). A bundle that cannot
+ * see its own links must not hand out an exact generation. */
+static void test_acquire_refuses_without_ops(void)
+{
+    struct pgwt_exact_probe_core core = {0};
+    static const struct pgwt_exact_probe_ops no_attach = {
+        .attach = NULL, .detach = fake_detach,
+    };
+    CHECK(pgwt_exact_probe_core_acquire(&core, PGWT_EXACT_PROBE_ALL_MASK, 3,
+                                        &no_attach, NULL) != 0 &&
+          core.consumers == 0 && core.attached_mask == 0,
+          "#108: acquire refuses when it cannot attach at all");
+}
+
+/* #108 follow-up: a daemon-mode RE-ATTACH (PostgreSQL restarted) gets a
+ * fresh, EMPTY exec_site_allow map. If exec_sites_published survived the
+ * teardown the publish would be skipped, every address would be refused by
+ * exec_site_admitted(), and the capture would report ZERO executions with
+ * healthy-looking links -- a silent zero.
+ *
+ * What is asserted is the CONTRACT, both directions: skeleton-derived state
+ * is forgotten, and restart-safe work (the resolved FILE offsets) is kept.
+ * A "forget everything" implementation fails the second half, which is why
+ * it is here and not just the first. */
+/* ── #580 should-fix: the "both links or neither" PAIR invariant ─────────
+ *
+ * THE COVERAGE GAP. attach_usdt_pair/detach_usdt_pair sit behind
+ * #ifndef PGWT_SERVER, so the invariant this branch INTRODUCES had no unit
+ * coverage, and the live A/B in tests/test_escalation.sh provably cannot see
+ * it: a half-attached pair still yields executions > 0, so both captures
+ * agree while on_exec_done sits live in the sampled tier. The rule now lives
+ * in pgwt_exact_probe_pair_attach/_detach (pure) and the libbpf wrappers
+ * only supply the primitives.
+ *
+ * The scenario that must go red: a future edit detaching only pair->start,
+ * leaving on_exec_done attached past the window. */
+struct fake_pair_ops {
+    int attach_calls[2];
+    int detach_calls[2];
+    int detach_order[8];
+    int detach_count;
+    int fail_at;          /* -1 = never */
+};
+
+static void *fake_pair_attach(void *ctx, int which)
+{
+    struct fake_pair_ops *f = ctx;
+    if (which < 0 || which > 1)
+        return NULL;
+    f->attach_calls[which]++;
+    if (f->fail_at == which)
+        return NULL;
+    return (void *)(uintptr_t)(which + 0x10);
+}
+
+static void fake_pair_detach(void *ctx, int which, void *link)
+{
+    struct fake_pair_ops *f = ctx;
+    (void)link;
+    if (which < 0 || which > 1)
+        return;
+    f->detach_calls[which]++;
+    if (f->detach_count < 8)
+        f->detach_order[f->detach_count++] = which;
+}
+
+static void test_pair_both_or_neither(void)
+{
+    /* 1. Success: both links recorded, in order. */
+    struct pgwt_exact_probe_pair pair;
+    memset(&pair, 0, sizeof(pair));
+    struct fake_pair_ops f = {.fail_at = -1};
+    CHECK(pgwt_exact_probe_pair_attach(&pair, fake_pair_attach,
+                                       fake_pair_detach, &f) == 0,
+          "#580: a pair with both links available attaches");
+    CHECK(pair.start != NULL && pair.done != NULL,
+          "#580: both links of the pair are recorded");
+    CHECK(f.attach_calls[PGWT_EXACT_PAIR_START] == 1 &&
+          f.attach_calls[PGWT_EXACT_PAIR_DONE] == 1 &&
+          f.detach_count == 0,
+          "#580: a successful pair attach detaches nothing");
+
+    /* 2. Detach takes BOTH, DONE first, and zeroes the pair. The half-detach
+     * mutant (only pair->start) fails here. */
+    pgwt_exact_probe_pair_detach(&pair, fake_pair_detach, &f);
+    CHECK(f.detach_calls[PGWT_EXACT_PAIR_START] == 1 &&
+          f.detach_calls[PGWT_EXACT_PAIR_DONE] == 1,
+          "#580: detach releases BOTH links -- never half a pair");
+    CHECK(f.detach_count == 2 &&
+          f.detach_order[0] == PGWT_EXACT_PAIR_DONE &&
+          f.detach_order[1] == PGWT_EXACT_PAIR_START,
+          "#580: detach is the reverse of attach (done, then start)");
+    CHECK(pair.start == NULL && pair.done == NULL,
+          "#580: the pair is empty after detach");
+
+    /* 3. Idempotent: release and cleanup both run, and must not
+     * double-destroy a link. */
+    pgwt_exact_probe_pair_detach(&pair, fake_pair_detach, &f);
+    CHECK(f.detach_count == 2,
+          "#580: a repeated detach destroys nothing a second time");
+
+    /* 4. START fails: nothing attached, nothing to release, no half pair. */
+    memset(&pair, 0, sizeof(pair));
+    memset(&f, 0, sizeof(f));
+    f.fail_at = PGWT_EXACT_PAIR_START;
+    CHECK(pgwt_exact_probe_pair_attach(&pair, fake_pair_attach,
+                                       fake_pair_detach, &f) != 0,
+          "#580: a failed START denies the pair");
+    CHECK(pair.start == NULL && pair.done == NULL,
+          "#580: a failed START leaves no link behind");
+    CHECK(f.attach_calls[PGWT_EXACT_PAIR_DONE] == 0 &&
+          f.detach_count == 0,
+          "#580: a failed START never attaches DONE on its own");
+
+    /* 5. THE ONE THAT MATTERS. DONE fails AFTER START succeeded: the START
+     * link must be given back. Leaving it is precisely the half pair --
+     * query__execute__start live with no done, so executions open and never
+     * close, invisibly. */
+    memset(&pair, 0, sizeof(pair));
+    memset(&f, 0, sizeof(f));
+    f.fail_at = PGWT_EXACT_PAIR_DONE;
+    CHECK(pgwt_exact_probe_pair_attach(&pair, fake_pair_attach,
+                                       fake_pair_detach, &f) != 0,
+          "#580: a failed DONE denies the pair");
+    CHECK(f.attach_calls[PGWT_EXACT_PAIR_START] == 1 &&
+          f.attach_calls[PGWT_EXACT_PAIR_DONE] == 1,
+          "#580: both were attempted -- the case is not vacuous");
+    CHECK(f.detach_calls[PGWT_EXACT_PAIR_START] == 1,
+          "#580: a failed DONE RELEASES the START link it already took");
+    CHECK(pair.start == NULL && pair.done == NULL,
+          "#580: a denied pair is left empty, never half attached");
+
+    /* 6. Refuse when it cannot act at all, rather than reporting success. */
+    memset(&pair, 0, sizeof(pair));
+    CHECK(pgwt_exact_probe_pair_attach(&pair, NULL, fake_pair_detach,
+                                       &f) != 0 &&
+          pgwt_exact_probe_pair_attach(&pair, fake_pair_attach, NULL,
+                                       &f) != 0 &&
+          pgwt_exact_probe_pair_attach(NULL, fake_pair_attach,
+                                       fake_pair_detach, &f) != 0,
+          "#580: pair attach refuses without a usable ops pair");
+    pgwt_exact_probe_pair_detach(NULL, fake_pair_detach, &f);
+    pgwt_exact_probe_pair_detach(&pair, NULL, &f);
+    CHECK(1, "#580: pair detach tolerates NULL arguments");
+}
+
+static void test_bundle_forget_skeleton(void)
+{
+    struct pgwt_exact_probe_bundle b;
+    memset(&b, 0, sizeof(b));
+    b.query_offset = 0x1234;
+    b.activity_offset = 0x5678;
+    b.sampled_warmup_reconciled = true;
+    b.exec_links.start = (void *)1;
+    b.exec_links.done = (void *)2;
+    b.plan_links.start = (void *)3;
+    b.plan_links.done = (void *)4;
+    b.exec_sites_published = true;
+
+    pgwt_exact_probe_bundle_forget_skeleton(&b);
+
+    CHECK(!b.exec_sites_published,
+          "#108: a re-attach re-publishes the #464 canonical-site allowlist");
+    CHECK(b.exec_links.start == NULL && b.exec_links.done == NULL &&
+          b.plan_links.start == NULL && b.plan_links.done == NULL,
+          "#108: the destroyed skeleton's phase links are forgotten");
+    CHECK(b.query_offset == 0x1234 && b.activity_offset == 0x5678,
+          "#108: resolved FILE offsets survive a restart, they do not move");
+    CHECK(b.sampled_warmup_reconciled,
+          "#108: unrelated bundle state is left alone");
+
+    /* A NULL bundle must not crash: cleanup runs on partially initialised
+     * daemons. */
+    pgwt_exact_probe_bundle_forget_skeleton(NULL);
+    CHECK(1, "#108: forget_skeleton tolerates a NULL bundle");
 }
 
 static void test_generation_merge(void)
@@ -304,6 +616,12 @@ int main(void)
     test_idempotent_pin_and_partial_rollback();
     test_best_effort_startup_keeps_available_probe();
     test_empty_rollback_and_refcount();
+    test_escalation_bundle_carries_phase_probes();
+    test_sampled_tier_never_pins_phase_probes();
+    test_phase_probe_failure_degrades_but_never_denies();
+    test_acquire_refuses_without_ops();
+    test_pair_both_or_neither();
+    test_bundle_forget_skeleton();
     test_generation_merge();
     test_straddler_context_persistence();
     printf("%d/%d checks passed\n", passed, total);

@@ -315,19 +315,30 @@ def test_parser_refuses_what_it_cannot_read(t):
 def test_all_runqueue_gap(t):
     """2d. The gap was measured at ZERO on-CPU: all of it was runqueue.
 
-    A measured zero is a SIGNAL, not absence, and it is the corner where this
-    table and the Time Model table disagree about whether the row exists:
+    A measured zero is a SIGNAL, not absence. This used to be the corner
+    where this table and the Time Model table disagreed about whether the
+    row exists at all:
       - here: CPU* 0.0 ms, '<OFFCPU_ROW>' = the whole gap wall, column 100%;
-      - time_model: NO CPU rows at all, because its rows sit behind
+      - time_model, PRE-#575: NO CPU rows at all, because its rows sat behind
         `classes[PGWT_CLASS_CPU].total_ns <= 0 -> continue` and the measured
-        total is 0 -- so 100 ms of real DB Time appears on no row of that
-        section and its column stops at 33.3%.
-    That shortfall is pre-existing time_model behaviour, filed as #575, NOT a
-    defect in the table under test. It is pinned here with numbers so that
-    fixing #575 turns this case red and whoever fixes it updates this comment
-    instead of discovering the overlap by accident.
+        total is 0 -- so 100 ms of real DB Time appeared on no row of that
+        section and its column stopped at 33.3%.
+    That shortfall was pinned here WITH ITS NUMBERS as a deliberate
+    tripwire, so that fixing #575 would turn this case red and force whoever
+    fixed it to update this docstring rather than discover the overlap by
+    accident.
+
+    IT FIRED, EXACTLY AS DESIGNED. #575 was fixed on
+    agent/laneC-raw-compute and the red surfaced when that branch was merged
+    with this file, which it had never been built against -- this file was
+    added by f6fdf8ec, AFTER laneC's branch point, so laneC could not have
+    seen it. The expectations below are therefore the FIXED behaviour: both
+    CPU class rows present, 'CPU (running)' a measured 0.0 ms beside a
+    sibling carrying the whole gap, and the class column closing at 100% on
+    both sections. That is a stricter assertion than the one it replaces,
+    not a relaxed one.
     """
-    print("\n### 2d. an all-runqueue gap (#575 divergence, pinned) ###")
+    print("\n### 2d. an all-runqueue gap (#575 FIXED, both rows pinned) ###")
     sc = scenario(measured=True)
     for e in sc["events"]:
         if e["old"] == CPU:
@@ -358,12 +369,26 @@ def test_all_runqueue_gap(t):
     t.check(abs(sum(printed) - 100.0) <= 0.15,
             f"Top Events still accounts for 100% ({sum(printed):.1f}%)")
 
-    # The #575 divergence, in both directions, with its numbers.
-    t.check(find(tm, OFFCPU_ROW)[0] is None and
-            find(tm, "CPU (running)")[0] is None,
-            "#575: the Time Model section prints NEITHER CPU row here (its "
-            "CPU class total is 0), so the two sections differ by design of "
-            "the gate, not by this table being wrong")
+    # #575 IS NOW FIXED (agent/laneC-raw-compute), so this case asserts the
+    # FIXED behaviour, which is what its own text below used to instruct.
+    # THE TRIPWIRE FIRED AS INTENDED -- it is not a regression. This section
+    # was deliberately written against the then-wrong output (the class
+    # column stopping at IO alone) precisely so that fixing #575 would turn
+    # it red and force this edit. Anyone finding a red-then-edited
+    # expectation in the history should read it that way: the test was doing
+    # its job on the integration that merged the fix, not being relaxed to
+    # accommodate one. The replacement is STRICTER, not looser -- it pins
+    # both rows by value and requires the class column to close at 100%.
+    tm_running = find(tm, "CPU (running)")[0]
+    tm_offcpu = find(tm, OFFCPU_ROW)[0]
+    t.check_eq(tm_running, 0.0,
+               "#575 fixed: the Time Model section prints 'CPU (running)' as "
+               "a measured 0.0 ms -- a measured zero is evidence, not an "
+               "absent row (pre-fix it printed neither CPU row)")
+    t.check_eq(tm_offcpu, all_off,
+               f"#575 fixed: ...and its runqueue sibling carries the whole "
+               f"{all_off} ms gap, so Time Model and Top Events now agree "
+               f"row for row instead of diverging by the gap")
     # The Time Model table is hierarchical (DB Time / class / sub-event), so
     # only the CLASS level -- exactly four leading spaces -- is a column that
     # should add up to 100% of DB Time. Here it holds IO alone.
@@ -374,15 +399,16 @@ def test_all_runqueue_gap(t):
                       for line in section(text, "Time Model",
                                           "Top Events").splitlines())
                   if m]
-    t.check([n for n, _ in tm_classes] == ["IO"],
-            f"premise: IO is the only class row time_model printed "
-            f"({[n for n, _ in tm_classes]})")
-    t.check(abs(sum(p for _, p in tm_classes)
-                - round(IO_MS / DB_TIME_MS * 100.0, 1)) <= 0.15,
-            f"#575: ...so that section's class column stops at "
-            f"{sum(p for _, p in tm_classes):.1f}% of DB Time -- when #575 is "
-            f"fixed this goes red and this case should expect 100% on both "
-            f"sections")
+    t.check(sorted(n for n, _ in tm_classes)
+            == sorted(["IO", "CPU (running)", OFFCPU_ROW]),
+            f"premise: time_model prints IO *and* both CPU class rows "
+            f"({[n for n, _ in tm_classes]}) -- pre-#575 this read ['IO'] "
+            f"alone, which is the shape this case was written to catch")
+    t.check(abs(sum(p for _, p in tm_classes) - 100.0) <= 0.15,
+            f"#575 fixed: that section's class column closes at "
+            f"{sum(p for _, p in tm_classes):.1f}% of DB Time -- 100% on "
+            f"BOTH sections, which is what this case said to expect once "
+            f"#575 was fixed")
 
 
 def test_dump_failure_is_not_a_skip(t):

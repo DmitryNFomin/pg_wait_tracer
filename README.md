@@ -20,9 +20,12 @@ time. The sampler's top-5 wait-event *ranking* matches the exact tier's
 (5/5 events, every rate, every run measured) — but its CPU-share estimate still
 runs low, by a tenth to a quarter, after the
 [read-order bias](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294)
-that used to account for most of it was fixed. See [Cross-validation: sampling
-vs exact](#cross-validation-sampling-vs-exact) for the before/after per rate and
-for what remains.
+that used to account for most of it was fixed. The accuracy the test actually
+certifies is **±8.8 percentage points of per-event share**, of which about
+6.5 pp is that known, still-unexplained CPU under-read rather than sampling
+noise. See [Cross-validation: sampling vs
+exact](#cross-validation-sampling-vs-exact) for the before/after per rate, the
+derivation of that bound, and for what remains.
 
 Key capabilities:
 
@@ -1602,8 +1605,44 @@ windows), one capture per cell:
 | 100 Hz | 12.8 pp → **6.5 pp** | 11.6 pp → **4.3 pp** |
 | 200 Hz | 10.8 pp → **3.9 pp** | 15.0 pp → **1.7 pp** |
 
-**All four rates are now inside the test's ±10 pp tolerance on both machines**;
-before, all four were outside it on the AMD box and two were on the Intel box.
+**Read every cell above as a single draw, not as an accuracy figure.** Each is
+one capture, and the quantity it reports — "max share disagreement" — is the
+*maximum* over the events clearing a 2% share floor, so it is an order
+statistic over a set whose membership changes between runs. On one box, at the
+shipped 10 Hz, this number has been observed at 0.4, 3.7, 6.0, 6.9, 7.2 and
+7.6 pp, with the maximising event sometimes `CPU` and sometimes
+`transactionid`. A "stable 6 pp regression" was filed on the strength of two
+such draws and then withdrawn; no single-run figure of this metric is citable
+without an n and a spread.
+
+**What the sampled tier's accuracy actually is, stated as a bound.** The gate
+(`tests/test_cross_validate_tiered.sh`) holds every swept rate to **±8.8
+percentage points**, and that number is derived rather than chosen:
+
+```
+bound = BIAS + z(K) × SE  =  6.52 + 2.5688 × 0.8937  =  8.8 pp
+```
+
+- **6.52 pp** is the systematic CPU under-read at the shipped operating point
+  (10 Hz, 8 clients, ordinary scheduling). It is *known bias*, not noise — see
+  the residual described immediately below, which is **still open**.
+- **0.8937 pp** is the binomial standard error at the worst-case share on a
+  3,130-sample capture — the thinnest seen on the diagnostic driver this input
+  was taken from. The gate's own harness runs slightly thinner (2,918–3,274
+  DB-time samples, mean 3,102, n=11), where the same SE is 0.90–0.93 pp; that
+  moves the bound by under 0.1 pp, so it is reported rather than folded in.
+  The gate separately refuses any capture below a derived **2,587**-sample
+  floor as structurally broken rather than merely noisy.
+- **2.5688** gives 95% coverage of the *maximum* of the K=5 eligible events,
+  not of one event: a 2σ per-event figure would cover about 23% of runs.
+
+So roughly three quarters of the permitted ±8.8 pp is disclosed bias and only
+about a quarter is sampling noise. **The bound is a disclosure, not a clean
+bill of health**, and it applies to the escalation-window comparison described
+here. The previous tolerance was ±10 pp, carried since the tool's first commit
+with no derivation on record; the derivation, the provenance of every input,
+and what the bound does *not* cover are in `tests/xval_tolerance.sh`, which
+`make check` re-verifies against the shipped constant on every run.
 
 A read-order bias accounted for that difference and **is fixed**: the sampler
 read a backend's `cmd_open` in its polling loop before reading `wait_event_info`

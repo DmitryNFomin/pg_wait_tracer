@@ -152,6 +152,38 @@ export function percentileBasisHtml(model) {
         'font-style:italic;margin:6px 2px 0">' + esc(model.text) + '</div>';
 }
 
+/* ── #351: the degraded-transport overlay's reason detail ───────────────────
+ *
+ * Before this, a startup refusal (pgwt-server exits with a reason on stderr,
+ * e.g. "pgwt-server: no trace files found in <dir>") reached only the
+ * terminal running the bridge; a browser just saw "server unavailable
+ * (reconnecting)" / "server disconnected" with no explanation at all. The
+ * bridge now forwards the upstream's own refusal line as the transport
+ * error's `reason` field (web/refusal.go, #351) ONLY when one was
+ * established; app.js's TransportError carries it through as `err.reason`
+ * (lib/transport.js).
+ *
+ * `shortReason` is the existing short message (e.g. "server disconnected") --
+ * always shown. `upstreamCause`, when present, is the deeper WHY and renders
+ * as a second, visually distinct line -- never replacing the short message,
+ * since a plain WS close (no upstream cause available) must keep explaining
+ * itself exactly as it did before this field existed. */
+export function buildDegradedDetail(shortReason, upstreamCause) {
+    const reasonText = (shortReason != null) ? String(shortReason) : '';
+    const trimmedCause = (upstreamCause != null) ? String(upstreamCause).trim() : '';
+    return { reasonText, causeText: trimmedCause };
+}
+
+export function degradedDetailHtml(model) {
+    if (!model) return '';
+    let html = model.reasonText ? esc(model.reasonText) : '';
+    if (model.causeText) {
+        html += (html ? '<br>' : '') +
+            '<span class="degraded-cause">Why: ' + esc(model.causeText) + '</span>';
+    }
+    return html;
+}
+
 /* Render the unavailable/escalate panel into `el` for an EXACT-only view whose
  * response was {"unavailable": ...}. `data` is that response; ctx supplies the
  * transport (for escalate) + escalation status + a refresh hook. */

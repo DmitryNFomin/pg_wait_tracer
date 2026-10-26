@@ -407,25 +407,43 @@ _CANNED["top_events"] = {
 # field merges optionally into the same numeric schema (test_protocol_drift.py).
 
 _CANNED["top_sessions"] = {
+    # #562 (additive, protocol shape -- gated by tests/test_protocol_drift.py):
+    # the real server emits these on EVERY top_sessions response, and an
+    # offcpu_ms on every row.
+    #
+    # has_measured_cpu says which quantity the cpu_pct column IS -- measured
+    # on-CPU time (v3 exact data) or the unsplit on-CPU gap wall (sampled/v2
+    # data, and the summary routing, whose per-second record stores wall).
+    #
+    # Canned as the UNSPLIT shape (False, every remainder 0.0), because that
+    # is the one consistent with these canned rows: their cpu_pct + wait_pct
+    # is exactly 100 on every row, which is only true when no runqueue time
+    # has been split out. Claiming has_measured_cpu=True beside a 0 remainder
+    # and a 100%-summing pair would be a payload the real server cannot
+    # produce. The measured shape is pinned in C instead, in
+    # tests/test_window_clip.c section 13.
+    "has_measured_cpu": False,
+    "offcpu_ms": 0.0,
+    "cpu_clamped_ms": 0.0,
     "rows": [
         {"pid": 1001, "type": "client", "user": "postgres", "db": "testdb",
          "db_time_ms": 5200, "cpu_pct": 45.0, "wait_pct": 55.0,
-         "top_wait": "IO:DataFileRead", "top_wait_id": 0x01000015},
+         "offcpu_ms": 0.0, "top_wait": "IO:DataFileRead", "top_wait_id": 0x01000015},
         {"pid": 1002, "type": "client", "user": "postgres", "db": "testdb",
          "db_time_ms": 3800, "cpu_pct": 38.0, "wait_pct": 62.0,
-         "top_wait": "Lock:relation", "top_wait_id": 0x03000000},
+         "offcpu_ms": 0.0, "top_wait": "Lock:relation", "top_wait_id": 0x03000000},
         {"pid": 1003, "type": "client", "user": "app", "db": "mydb",
          "db_time_ms": 2500, "cpu_pct": 52.0, "wait_pct": 48.0,
-         "top_wait": "LWLock:WALWrite", "top_wait_id": 0x04000008},
+         "offcpu_ms": 0.0, "top_wait": "LWLock:WALWrite", "top_wait_id": 0x04000008},
         {"pid": 1004, "type": "client", "user": "app", "db": "mydb",
          "db_time_ms": 1000, "cpu_pct": 30.0, "wait_pct": 70.0,
-         "top_wait": "Timeout:PgSleep", "top_wait_id": 0x09000002},
+         "offcpu_ms": 0.0, "top_wait": "Timeout:PgSleep", "top_wait_id": 0x09000002},
         {"pid": 4870, "type": "checkpointer", "user": "", "db": "",
          "db_time_ms": 800, "cpu_pct": 10.0, "wait_pct": 90.0,
-         "top_wait": "Timeout:CheckpointWriteDelay", "top_wait_id": 0x09000000},
+         "offcpu_ms": 0.0, "top_wait": "Timeout:CheckpointWriteDelay", "top_wait_id": 0x09000000},
         {"pid": 4871, "type": "bgwriter", "user": "", "db": "",
          "db_time_ms": 200, "cpu_pct": 5.0, "wait_pct": 95.0,
-         "top_wait": "IO:DataFileWrite", "top_wait_id": 0x01000018},
+         "offcpu_ms": 0.0, "top_wait": "IO:DataFileWrite", "top_wait_id": 0x01000018},
     ],
 }
 
@@ -1206,11 +1224,20 @@ def _handle_request_inner(cmd, req_id, msg):
                     **_mock_exec_span(pid)}
         if pid == 1002:
             events = [
+                # #529: dur_ns is the clipped slice a client sums,
+                # raw_dur_ns the wait's own wall time a tooltip displays.
+                # The real server emits BOTH on every event
+                # (serialize_exec_lane); this one deliberately STRADDLES so
+                # the mock exercises the case where they differ -- a mock
+                # where raw_dur_ns always equalled dur_ns would let a client
+                # that reads the wrong field look correct.
                 {"we": 0x0100004e, "name": "IO:WalSync",
-                 "start_ns": start, "dur_ns": "20000000", "cpu_ns": None},
+                 "start_ns": start, "dur_ns": "20000000",
+                 "raw_dur_ns": "24000000", "cpu_ns": None},
                 {"we": 0, "name": "CPU*",
                  "start_ns": str(_EXEC_BASE_NS + 130_000_000),
-                 "dur_ns": "30000000", "cpu_ns": None},
+                 "dur_ns": "30000000", "raw_dur_ns": "30000000",
+                 "cpu_ns": None},
             ]
             return {"id": req_id, "query_id": qid,
                     "leader": {"pid": pid, "query_id": qid,
@@ -1220,13 +1247,15 @@ def _handle_request_inner(cmd, req_id, msg):
                     "total_count": 2, "kept_count": 2, "truncated": False,
                     **_mock_exec_span(pid)}
         event = {"we": 0x01000015, "name": "IO:DataFileRead",
-                 "start_ns": start, "dur_ns": "10000000", "cpu_ns": None}
+                 "start_ns": start, "dur_ns": "10000000",
+                 "raw_dur_ns": "10000000", "cpu_ns": None}
         return {"id": req_id, "query_id": qid,
                 "leader": {"pid": pid, "query_id": qid,
                            "events": [event,
                                 {"we": 0, "name": "CPU*",
                                  "start_ns": str(_EXEC_BASE_NS + 12_000_000),
-                                "dur_ns": "8000000", "cpu_ns": None}],
+                                "dur_ns": "8000000",
+                                "raw_dur_ns": "8000000", "cpu_ns": None}],
                            "total_count": 2, "truncated": False},
                 "workers": [
                     {"pid": 1006, "events": [dict(event)],

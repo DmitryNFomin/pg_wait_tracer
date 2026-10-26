@@ -1946,6 +1946,128 @@ static void test_query_attr_sampled(void)
  * smoke, intermittent). The same pair is also a legitimate steady state: a
  * backend inside a command waiting on the client (COPY FROM STDIN). Neither
  * closes a command. */
+/* ── #156 item 2: a backend that EXITS mid-command, in the sampled tier ──
+ *
+ * THE DEFECT. Only the full tier sees a trace record with
+ * new_event == PGWT_EVENT_EXIT, and src/event_stream.c flushes the pid's
+ * deferred attribution on it. The sampled tier has no such record and had
+ * no exit hook at all, so a backend terminated while its status still read
+ * in-command left its pending aggregates in the per-pid entry forever:
+ * the time stayed in the per-pid and system rows and reached neither a
+ * query row nor the unattributed bucket.
+ *
+ * WHY THE ASSERTIONS CANNOT PASS VACUOUSLY. Each case asserts the rows are
+ * EMPTY immediately before the exit call and populated immediately after,
+ * so only the exit call can satisfy them; and the negative cases below
+ * assert that an exit with nothing pending, or for a pid the accumulator
+ * never saw, adds nothing at all. */
+/* The sampler folds the system row and the time model INLINE (src/sampler.c)
+ * and then calls pgwt_live_qattr_sample for the query step. Mirroring both
+ * halves here is what makes the conservation assertions below independent:
+ * the two sides are read from accumulators the exit flush does not write. */
+static void sample_live_accounted(struct pgwt_accumulator *acc,
+                                  struct pgwt_pid_accum *pa, uint64_t qid,
+                                  uint32_t we, uint64_t period)
+{
+    struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, we);
+    if (se) { se->count++; se->total_ns += period; }
+    pgwt_update_time_model(&acc->tm, we, period);
+    sample_live(acc, pa, qid, we, period);
+}
+
+static void test_query_attr_sampled_exit_flush(void)
+{
+    printf("--- #156: sampled tier flushes a pid's pending waits on EXIT ---\n");
+    const uint64_t P = MS(100), S = 0x61;
+    struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+    pgwt_accum_init(acc);
+
+    /* pid 11: between commands, then two parse-phase lock waits with no id
+     * reported yet -- then pg_terminate_backend. Rule 3: unattributed. */
+    struct pgwt_pid_accum *p11 = pgwt_get_or_create_pid(acc, 11);
+    sample_live_accounted(acc, p11, 0, PG_WAIT_CLIENT_READ, P);
+    sample_live_accounted(acc, p11, 0, LOCK_RELATION, P);
+    sample_live_accounted(acc, p11, 0, LOCK_RELATION, P);
+
+    /* pid 12: reports S, then a trailing lock wait whose own sample carries
+     * no id -- then exits. Rule 2: the time belongs to S, not to the
+     * unattributed bucket. */
+    struct pgwt_pid_accum *p12 = pgwt_get_or_create_pid(acc, 12);
+    sample_live_accounted(acc, p12, 0, PG_WAIT_CLIENT_READ, P);
+    sample_live_accounted(acc, p12, S, 0, P);
+    sample_live_accounted(acc, p12, 0, LOCK_RELATION, P);
+
+    /* ANTI-VACUITY: the lost time is genuinely nowhere in the per-query
+     * rows right now. If this were already populated, every assertion
+     * below would pass without the exit hook doing anything. */
+    CHECK(qrow(acc, 0, LOCK_RELATION) == 0 && qrow(acc, S, LOCK_RELATION) == 0 &&
+          acc->qattr_unattributed_ns == 0,
+          "#156: before EXIT the parse-phase waits are in no query row");
+    uint64_t db_before = acc->tm.db_time_ns;
+    uint64_t sys_before = sys_row(acc, LOCK_RELATION);
+    CHECK(sys_before == 3 * P,
+          "#156: the system row already holds all 3 lock waits (%.0f ms)",
+          sys_before / 1e6);
+
+    pgwt_live_qattr_pid_exit(acc, 11);
+    pgwt_live_qattr_pid_exit(acc, 12);
+
+    CHECK(qrow(acc, 0, LOCK_RELATION) == 2 * P,
+          "#156: pid 11's two parse-phase waits reach the unattributed "
+          "bucket on exit (%.0f ms)", qrow(acc, 0, LOCK_RELATION) / 1e6);
+    CHECK(qrow(acc, S, LOCK_RELATION) == P,
+          "#156: pid 12's trailing wait reaches S by rule 2 on exit (%.0f ms)",
+          qrow(acc, S, LOCK_RELATION) / 1e6);
+    CHECK(acc->qattr_unattributed_ns == 2 * P &&
+          acc->qattr_backfilled_ns == P,
+          "#156: the exit flush is counted (un %.0f ms, bf %.0f ms)",
+          acc->qattr_unattributed_ns / 1e6, acc->qattr_backfilled_ns / 1e6);
+
+    /* CONSERVATION, independently derived: the flush moves attribution, it
+     * must not create DB Time or duplicate a system row. Both sides are
+     * read from DIFFERENT accumulators (tm / system_events) than the one
+     * the flush writes (query_events), so this cannot be an identity. */
+    CHECK(acc->tm.db_time_ns == db_before,
+          "#156: the exit flush adds no DB Time");
+    CHECK(sys_row(acc, LOCK_RELATION) == sys_before,
+          "#156: the exit flush adds no system-row time");
+
+    /* IDEMPOTENT: the full tier may already have flushed through its EXIT
+     * record, and backend.c calls this for every tier. A second call must
+     * not double-count. */
+    pgwt_live_qattr_pid_exit(acc, 11);
+    pgwt_live_qattr_pid_exit(acc, 12);
+    CHECK(qrow(acc, 0, LOCK_RELATION) == 2 * P &&
+          qrow(acc, S, LOCK_RELATION) == P &&
+          acc->qattr_unattributed_ns == 2 * P,
+          "#156: a repeated exit flush double-counts nothing");
+
+    /* An exit for a pid the accumulator never saw must not CREATE a pid
+     * entry or a query row -- that would be a fabricated row on a backend
+     * no sample ever covered. */
+    int pids_before = acc->num_pids;
+    int qrows_before = acc->num_query_events;
+    pgwt_live_qattr_pid_exit(acc, 9999);
+    CHECK(acc->num_pids == pids_before &&
+          acc->num_query_events == qrows_before,
+          "#156: exit for an unseen pid creates no pid entry and no row");
+
+    /* A pid with nothing pending emits nothing: no zero-duration row. */
+    struct pgwt_pid_accum *p13 = pgwt_get_or_create_pid(acc, 13);
+    sample_live_accounted(acc, p13, 0, PG_WAIT_CLIENT_READ, P);
+    qrows_before = acc->num_query_events;
+    pgwt_live_qattr_pid_exit(acc, 13);
+    CHECK(acc->num_query_events == qrows_before,
+          "#156: exit with nothing pending adds no row");
+
+    /* A NULL accumulator must refuse, not crash: backend.c calls this
+     * before d->event_accum exists in modes that allocate it late. */
+    pgwt_live_qattr_pid_exit(NULL, 11);
+    CHECK(1, "#156: exit flush tolerates a NULL accumulator");
+
+    free(acc);
+}
+
 static void test_query_attr_sampled_idle_skew(void)
 {
     printf("--- #128: an in-command idle sample never closes the command ---\n");
@@ -2223,6 +2345,7 @@ int main(void)
     test_cross_check_query_attr();
     test_query_attr_sampled();
     test_query_attr_sampled_idle_skew();
+    test_query_attr_sampled_exit_flush();
     test_query_attr_pacing_not_a_boundary();
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

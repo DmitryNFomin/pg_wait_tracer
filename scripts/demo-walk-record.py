@@ -20,9 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
 from compare_presets import assert_compare_presets_reachable
-from demo_walk_record_lib import (Refusal, chart_change, compose, coverage, frame_indices,
-                                  MOTION_LEVEL, sample_indices, save_walk, write_analysis, write_gif,
-                                  young_capture_refusal)
+from demo_walk_record_lib import (capture_advance_check, Refusal, chart_change, compose, coverage,
+                                  frame_indices, MOTION_LEVEL, sample_indices, save_walk,
+                                  write_analysis, write_gif, young_capture_refusal)
 from PIL import Image, ImageChops
 
 WIDTH, HEIGHT, DPR = 1710, 981, 2
@@ -97,6 +97,47 @@ OBSERVE_JS = """() => {
             tab:window.__pgwt?.activeTab, range:document.querySelector('#time-range')?.innerText,
             live:document.querySelector('#live-btn')?.classList.contains('active')};
 }"""
+
+
+# issue #571: read the trace's OWN latest timestamp fresh from the backend,
+# through the page's already-connected transport, rather than reading the
+# UI's cached window.__pgwt.server.toNs. The cached value only advances when
+# app.js's 5-second live loop happens to have run and happens not to be in
+# its degraded branch, so gating on it would couple a capture-liveness
+# verdict to the UI's refresh scheduling -- a live capture could be marked
+# dead because a tick was late, and that false refusal is exactly how a gate
+# gets disabled by the next person. One `info` request is the same request
+# the live loop itself makes; it has no side effects on the recording.
+# to_ns is ~1.8e18, past JS Number's exact-integer range, so it arrives with
+# ~hundreds-of-nanoseconds granularity. The comparison here is in seconds.
+TRACE_TIP_JS = """async () => {
+    if (!window.__pgwt || !window.__pgwt.transport) return {ok:false, why:'no transport handle'};
+    const info = await window.__pgwt.transport.send('info', {});
+    if (!info) return {ok:false, why:'backend returned no info response'};
+    return {ok:true, to_ns:info.to_ns};
+}"""
+
+
+def probe_trace_tip(page, label):
+    """One sample of the trace's latest timestamp, or Refusal(10).
+
+    Every way this can fail to OBSERVE -- transport missing, request
+    throwing, empty reply, non-numeric to_ns -- refuses here. It never
+    returns a placeholder for capture_advance_check() to interpret: an
+    unobserved capture must not be able to read as an advancing one.
+    """
+    try:
+        reply = page.evaluate(TRACE_TIP_JS)
+    except Exception as exc:
+        raise Refusal(10, f"capture-advance probe at {label!r} could not reach the backend: "
+                      f"{type(exc).__name__}: {exc}; refusing rather than assuming the "
+                      "capture is still advancing") from exc
+    at_s = time.monotonic()
+    if not isinstance(reply, dict) or not reply.get("ok"):
+        why = reply.get("why") if isinstance(reply, dict) else repr(reply)
+        raise Refusal(10, f"capture-advance probe at {label!r} could not read the trace's "
+                      f"latest timestamp: {why}")
+    return {"label": label, "at_s": at_s, "tip_ns": reply.get("to_ns")}
 
 
 def runbook_plan(tabs, overrides):
@@ -913,6 +954,10 @@ def record(args, staging):
                 refusal = young_capture_refusal(server_from_ns,window_from_ns)
                 if refusal:
                     raise refusal
+            # issue #571: first capture-advance sample, taken before the
+            # first frame is recorded so the measured window covers the
+            # WHOLE recording, not a convenient part of it.
+            advance_samples = [probe_trace_tip(page, "walk start")]
             capture.pulse()
             walk = {"schema_version":1,"complete":False,"run_id":args.run_id,
                 "source":"mock_server.py with changing Overview fixture" if args.mock else "real bridge",
@@ -937,10 +982,17 @@ def record(args, staging):
                                aas_inspection_path(page) if tab == 'overview' else None)
                 result['compare_presets'] = compare_presets
                 walk["tabs"].append(result)
+            # issue #571: mid sample. The final segment it opens is what
+            # catches a daemon that dies LATE -- a death at 60% of the walk
+            # still leaves 60% of advance, enough to clear the whole-walk
+            # fraction on its own.
+            advance_samples.append(probe_trace_tip(page, "drill start"))
             print("Recording continuous Queries → execution → wait interaction",flush=True)
             interaction, query_crop, execution_crop = drill(page,smoke,capture,args.timeout,args.archived)
             walk["drill"] = interaction
             capture.stop(); capture.guard()
+            advance_samples.append(probe_trace_tip(page, "walk end"))
+            walk["capture_advance"] = capture_advance_check(advance_samples, args.archived)
             overview = walk["tabs"][0]
             overview["wait_mix_check"] = check_overview_wait_mix(overview["observations"], args.archived)
             overview["chart_change"] = chart_change(staging,capture.frames,overview["frame_indices"],headline_crop[0][0])

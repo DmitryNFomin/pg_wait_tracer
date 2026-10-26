@@ -26,18 +26,51 @@ TRACER="$SCRIPT_DIR/../pg_wait_tracer"
 XVAL="$SCRIPT_DIR/cross_validate"
 source "$SCRIPT_DIR/testutil.sh"
 source "$SCRIPT_DIR/cross_validate_rate_output.sh"
+source "$SCRIPT_DIR/xval_tolerance.sh"
 
 PM_PID=""
 RATES="10 50 100 200"
 ESC_SECONDS=60
 CLIENTS=8
-# +/-10 percentage points. This number has shipped since the A4 tool's
-# original commit (eaf31b0, "A4: escalation integration test + sampled-vs-
-# exact cross-validation") with no derivation recorded anywhere in the repo
-# (docs/, commit message, or code comment) that this search found -- issue
-# #309 asked for the derivation or an explicit admission there isn't one.
-# Treat 10pp as a value someone should revisit, not a measured bound.
-TOLERANCE=10
+# +/-8.8 percentage points, DERIVED. Was 10 pp from the A4 tool's original
+# commit (eaf31b0) with no derivation anywhere in the repo, and this comment
+# used to say so -- "treat 10pp as a value someone should revisit, not a
+# measured bound". Issue #309 asked for a derivation; this is it.
+#
+#   bound = BIAS + z(K) * 100*sqrt(0.25/N)
+#         = 6.52 + 2.5688 * 0.8937  =  8.8 pp
+#
+#   BIAS = 6.52 pp   systematic CPU under-read at the SHIPPED operating point
+#                    (#306 arm A median, SCHED_OTHER, 10 Hz, 8 clients). Not
+#                    3.9 pp -- that is arm B under SCHED_FIFO, which the
+#                    product does not ship.
+#   N    = 3130      smallest observed "Samples in window" at that operating
+#                    point; samples are (tick, backend) pairs, so a 60 s
+#                    10 Hz run yields thousands, not 600.
+#   z(5) = 2.5688    95% FAMILY-WISE quantile over the K=5 events that clear
+#                    cross_validate's 2% eligibility floor. The gated metric
+#                    is a MAXIMUM over those events, so a per-event 2-sigma
+#                    figure would cover ~23% of runs, not 95%. #321 was
+#                    opened as a "stable 6 pp regression" and withdrawn by
+#                    its own author for exactly this reason.
+#
+# The full derivation, every input's provenance, what the bound does NOT
+# cover, and the guard that keeps this constant equal to its derivation live
+# in tests/xval_tolerance.sh -- which `make check` runs on every push via
+# tests/test_xval_tolerance_derivation.sh. Editing the number here without
+# editing the derivation there (or vice versa) turns `make check` red; that
+# is deliberate, and is the only reason this comment cannot rot.
+#
+# Derived for 10 Hz and applied to every rate in the sweep: the published
+# post-#310 gate-1 medians fall with rate (6.0 / 6.4 / 5.5 / 2.5 pp at
+# 10 / 50 / 100 / 200 Hz), so the 10 Hz bound is the loosest of the four. A
+# 200 Hz pass is therefore NOT evidence that rate is inside a bound derived
+# for it; that needs its own n>=5.
+#
+# NOT a certificate of accuracy: 6.52 of the 8.8 pp is #306's OPEN residual
+# under-read, which this bound discloses rather than explains.
+TOLERANCE=8.8
+TOLERANCE_OVERRIDDEN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -45,7 +78,7 @@ while [[ $# -gt 0 ]]; do
         --rates) RATES="$2"; shift 2 ;;
         --esc-seconds) ESC_SECONDS="$2"; shift 2 ;;
         --clients) CLIENTS="$2"; shift 2 ;;
-        --tolerance) TOLERANCE="$2"; shift 2 ;;
+        --tolerance) TOLERANCE="$2"; TOLERANCE_OVERRIDDEN=1; shift 2 ;;
         *) echo "Usage: $0 [--pid PID] [--rates \"10 50 100\"] [--esc-seconds N] [--clients N]"; exit 1 ;;
     esac
 done
@@ -56,6 +89,33 @@ if [[ ! -x "$XVAL" ]]; then echo "ERROR: build tests/cross_validate first (make 
 
 echo "=== test_cross_validate_tiered (PID $PM_PID) ==="
 echo "Rates: $RATES   escalation: ${ESC_SECONDS}s   clients: $CLIENTS"
+
+# The tolerance this run gates on must be the DERIVED one, not whatever the
+# constant above happens to say. `make check` already enforces that on the
+# Mac; this re-checks it here because the gate box builds from an rsync'd
+# tree and the whole point of the derivation is that the number cannot drift
+# away from it unnoticed. An explicit --tolerance is a human override and is
+# allowed, but it is announced, so a log can never be read as evidence about
+# the derived bound when it was not run against it.
+if [[ "$TOLERANCE_OVERRIDDEN" -eq 1 ]]; then
+    echo "NOTE: tolerance OVERRIDDEN on the command line to +/-${TOLERANCE}pp;" \
+         "this run is NOT evidence about the derived bound" \
+         "($(derive_xval_tolerance "$XVAL_PREREG_BIAS_PP" "$XVAL_PREREG_SAMPLES" "$XVAL_PREREG_K" 2>/dev/null || echo '?') pp)."
+# $SCRIPT_DIR + basename, not a bare ${BASH_SOURCE[0]}: run_all.sh happens to
+# invoke this with an absolute path, so BASH_SOURCE works there, but a caller
+# that passed a relative path AND changed directory would make the guard
+# unable to read its own file -- and an unreadable file is a REFUSAL, i.e. a
+# spurious gate failure for an invocation style that is otherwise fine.
+# SCRIPT_DIR is already absolutised at the top of this file.
+elif ! DERIVED_TOL=$(xval_tolerance_matches_script "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"); then
+    echo "ERROR: this script's TOLERANCE does not match the pre-registered"
+    echo "       derivation in tests/xval_tolerance.sh (see the message above)."
+    echo "       Refusing to run: a gate whose threshold it cannot justify"
+    echo "       would certify whatever it happens to measure."
+    exit 1
+else
+    echo "Tolerance: +/-${TOLERANCE}pp, derived (BIAS ${XVAL_PREREG_BIAS_PP} pp + z(${XVAL_PREREG_K})*SE at N=${XVAL_PREREG_SAMPLES}) — see tests/xval_tolerance.sh"
+fi
 
 ctl() {
     python3 - "$1" "$2" <<'PYEOF'
@@ -133,6 +193,48 @@ for RATE in $RATES; do
     DELTA_INFO=$(extract_max_delta "$OUT")
     rate_delta[$RATE]="${DELTA_INFO%%|*}"
     rate_event[$RATE]="${DELTA_INFO#*|}"
+
+    # Did the comparator see enough of a capture for the derived bound to
+    # mean anything? Two distinct refusals, both leaving rate_result UNSET
+    # so the summary prints NO RESULT and all_passed counts it as a failure
+    # (the #309 pass-by-omission rule):
+    #
+    #  1. N absent or unparseable -- the gate is blind. A blind gate must
+    #     refuse, never approve; this is the same disposition
+    #     extract_max_delta already takes for a missing delta line.
+    #  2. N below the DERIVED floor (derive_xval_sample_floor, 2587), which
+    #     marks a structurally broken capture -- stalled daemon, mis-aligned
+    #     window, dead workload -- rather than ordinary variation. It sits
+    #     4.4 sd below the mean of this harness's own capture-thickness
+    #     distribution (mean 3102, sd 117, n=11), so ordinary variation
+    #     cannot trip it; see the derivation in tests/xval_tolerance.sh.
+    #
+    #     ROUND 1 GOT THIS WRONG and the correction is the point: the floor
+    #     was XVAL_PREREG_SAMPLES (3130), the minimum of a prior n=5 taken
+    #     on a DIFFERENT harness, and it fired on 5 of 10 ordinary captures
+    #     -- a false failure, not a detection. The tolerance's N and the
+    #     validity floor are two different quantities and are now two
+    #     different numbers.
+    #
+    #     Applied at EVERY rate: at 50/100/200 Hz the observed N is
+    #     15,718 / 30,527 / 62,864, so the floor cannot cause a false
+    #     failure there, but it still catches a broken capture -- which the
+    #     previous "any N >= 1" rule at those rates did not.
+    SAMP=$(extract_samples_in_window "$OUT")
+    if ! SAMP_MIN=$(derive_xval_sample_floor); then
+        echo "  RATE ${RATE}Hz: REFUSED — the capture-thickness floor could not be derived;" \
+             "thickness cannot be judged, so this counts as a failure, not a skip"
+        rm -rf "$TRACE_DIR" "$LOG"
+        continue
+    fi
+    if ! refuse_unless_samples_sufficient "$SAMP" "$SAMP_MIN" >/dev/null; then
+        echo "  RATE ${RATE}Hz: REFUSED — capture too thin / sample count unreadable" \
+             "(N=${SAMP}, need >=${SAMP_MIN}); counts as a failure, not a skip"
+        rm -rf "$TRACE_DIR" "$LOG"
+        continue
+    fi
+    echo "  samples in window: $SAMP (>= $SAMP_MIN required for the derived bound)"
+
     if [[ "$OUT" == *"RESULT: PASS"* ]]; then
         rate_result[$RATE]="PASS"
         [[ -z "$best_rate" ]] && best_rate="$RATE"

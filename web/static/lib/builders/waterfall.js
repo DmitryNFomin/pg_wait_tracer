@@ -259,10 +259,20 @@ export function waterfallContextHtml(detail, selected, timeline) {
     const shownNames = relation.length ? ['Lock:relation', ...names.filter(n => n !== 'Lock:relation')] : names;
     const waitText = shownNames.slice(0, 3).join(', ') + (shownNames.length > 3
         ? ' (+' + (shownNames.length - 3) + ' other wait names)' : '');
+    // #523: three independent readers (two advisers plus the owner relaying
+    // their conclusion) read "Observed waits: Lock:transactionid,
+    // IO:WalWrite, IO:WalSync" as describing the EXECUTOR bars below --
+    // sub-pixel bars that do not exist -- because the scope qualifier lived
+    // in the NEXT <div> ("Bars show executor phase only..."), and a GIF
+    // crop of this pane can keep one line and lose the other. The scope now
+    // sits INLINE in the label itself, abutting the wait names in the SAME
+    // div, so no crop boundary can separate the claim from its scope.
     return '<div data-context>PID ' + esc(String(selected.pid)) + ' · Query ' + esc(String(selected.query_id || '0')) +
         ' · Executor interval: ' + esc(fmtExecutionDuration(selected).text) + '</div>' +
         '<div data-context>Containing backend activity: ' + esc(line) + ' · ' +
-        esc(names.length ? 'Observed waits: ' + waitText : 'Wait evidence unavailable') + '</div>' +
+        esc(names.length
+            ? 'Observed waits (containing backend, not these bars): ' + waitText
+            : 'Wait evidence unavailable') + '</div>' +
         '<div data-context>' + esc(scope) + ' Planner phase is marked separately.</div>';
 }
 

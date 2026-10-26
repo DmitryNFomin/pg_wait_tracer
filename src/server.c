@@ -215,6 +215,12 @@ struct pgwt_file_cov {
     char     path[512];
     int      present;              /* seen in the latest directory scan */
     int      valid;                /* readable, has at least one block */
+    /* #333: present, and the reader REFUSED it while its own header and its
+     * .meta say it holds committed blocks. Distinct from !valid, which also
+     * covers every legitimate way a file holds no data yet. A corrupt file
+     * used to be indistinguishable from an empty window: both produced
+     * `fidelity: "none"` and zeros, which the UI renders as "No data". */
+    int      unreadable;
     int      is_current;
     uint64_t hdr_start_wall_ns;    /* identity: header fields change when */
     uint64_t hdr_mono_ns;          /* the daemon restarts + truncates */
@@ -258,6 +264,11 @@ struct file_cache_entry {
     struct pgwt_trace_event *events;
     int      count;
     int      immutable;
+    /* #333: blocks of this file that would not decode when the entry was
+     * built. The entry is CACHED, so without remembering this the first
+     * request would see the failure and every later one would be served a
+     * silently short array -- two different answers to the same question. */
+    int      unreadable_blocks;
     uint64_t first_mono_ns;  /* earliest event timestamp (for range skip) */
     uint64_t last_mono_ns;   /* latest event timestamp */
 };
@@ -370,6 +381,10 @@ struct pgwt_load_info {
                                    partial; handlers MUST error, not render */
     int      allocation_failed; /* working/merge allocation failed — never
                                    misreport this as a range-size refusal */
+    /* #333: a present trace file could not be read, so this window's
+     * contents are UNKNOWN rather than empty. Handlers refuse (reject_overload)
+     * instead of serving zeros under a "No data" label. */
+    int      trace_unreadable;
     /* #424 straddler diagnostics. Not a fidelity label. Two of them ARE on
      * the wire and two are not, and the difference is deliberate:
      *
@@ -407,6 +422,30 @@ struct pgwt_load_info {
      * cut. Reported with the flag so "incomplete" comes with the bound that
      * made it incomplete instead of leaving the caller to guess. */
     uint64_t right_edge_scan_ns;
+    /* #586 LEFT-edge seed diagnostics, the mirror of the two above.
+     *
+     * A record straddling the LEFT edge arrives whole (its close is inside
+     * the window), but the EXEC_START/PLAN_START carrying its command's
+     * query id can sit before `from` and is therefore not loaded, so
+     * #128's rule 2 has no evidence and the record reaches no per-query
+     * drill-down at all. The loader looks BACK a bounded distance for that
+     * marker and seeds the tag pass with it; it admits no record and
+     * widens no window.
+     *
+     *   left_seeds_resolved — pids handed a nonzero id by the lookback.
+     *   left_edge_truncated — the lookback stopped at its horizon (or
+     *                         refused) with trace data still before it, so
+     *                         a seed FURTHER back may be missing. Same
+     *                         meaning as right_edge_truncated: "may be
+     *                         incomplete", never "is". 0 when the scan
+     *                         reached the start of the capture, because
+     *                         then nothing was missed.
+     *   left_edge_scan_ns   — the horizon that was in force, reported with
+     *                         the flag so "incomplete" arrives with the
+     *                         bound that made it incomplete. */
+    int      left_seeds_resolved;
+    int      left_edge_truncated;
+    uint64_t left_edge_scan_ns;
 };
 
 struct pgwt_server {
@@ -445,6 +484,17 @@ struct pgwt_server {
     /* Coverage / clock-domain state (refreshed per request) */
     struct pgwt_file_cov cov[256];
     int  cov_count;
+    /* #333: trace data this request could not READ, as opposed to a window
+     * that holds nothing. Two shapes, counted separately because they are
+     * different evidence: a present file the reader refused to open at all
+     * (cov_unreadable, decided in cov_scan_file), and a COMMITTED block that
+     * would not decode (blocks_unreadable -- committed blocks are immutable
+     * and complete by the daemon's contract, so one that will not decode is
+     * damage). Both are recomputed per refresh and never latched: a
+     * rewritten or rotated-away file stops being a refusal. */
+    int  cov_unreadable;
+    int  blocks_unreadable;
+    char cov_unreadable_path[512];   /* the first path of either kind */
     int  any_samples;              /* any file has SAMPLES blocks */
     struct pgwt_gen_cov *gens;
     int  num_gens;
@@ -485,6 +535,28 @@ struct pgwt_server {
     struct pgwt_pid_cat *pid_cats;
     int  n_pid_cats;
 };
+
+/* #333: record trace data this request could not read.
+ *
+ * A block that will not decode is MISSING records, not zero records, and the
+ * loader's `if (n < 0) continue;` made those two indistinguishable: the
+ * response came back `fidelity: "none"` with db_time 0, which the UI renders
+ * as a "No data" badge. The operator could not tell an idle window from a
+ * damaged file. Counted here and refused at the top level (reject_overload /
+ * dump_summary), never repaired and never silently skipped.
+ *
+ * Reset by coverage_refresh, which runs at the start of every load, so the
+ * counts describe THIS request. */
+static void trace_bad_note(struct pgwt_server *srv, const char *path,
+                           int nblocks)
+{
+    if (!srv || nblocks <= 0)
+        return;
+    if (srv->cov_unreadable_path[0] == '\0')
+        snprintf(srv->cov_unreadable_path, sizeof(srv->cov_unreadable_path),
+                 "%s", path);
+    srv->blocks_unreadable += nblocks;
+}
 
 /* Paint-latency Phase 1 forward declaration: the block-aggregate cache is
  * defined with the rest of the transitions fast path, far below, but the
@@ -1438,8 +1510,13 @@ get_cached_immutable(struct pgwt_server *srv, const char *path)
 {
     /* Look for existing entry */
     for (int i = 0; i < srv->cache_count; i++) {
-        if (strcmp(srv->cache[i].path, path) == 0)
+        if (strcmp(srv->cache[i].path, path) == 0) {
+            /* #333: a cached entry remembers that it is short. Re-raise it
+             * on every use, or the second identical request answers "no
+             * data" where the first refused. */
+            trace_bad_note(srv, path, srv->cache[i].unreadable_blocks);
             return &srv->cache[i];
+        }
     }
 
     /* Check compressed file size — skip caching if too large.
@@ -1485,7 +1562,13 @@ get_cached_immutable(struct pgwt_server *srv, const char *path)
         struct pgwt_block_info bi;
         int n = pgwt_reader_decode_block_info(&reader, b, block_buf,
                                               PGWT_BLOCK_EVENTS, &bi);
-        if (n < 0) continue;
+        if (n < 0) {
+            /* #333: remembered ON THE ENTRY as well as counted, because the
+             * entry outlives this request. */
+            ce->unreadable_blocks++;
+            trace_bad_note(srv, path, 1);
+            continue;
+        }
 
         for (int i = 0; i < n; i++) {
             if (ce->count >= cap) {
@@ -1667,6 +1750,277 @@ static int straddle_file_unseen(int enabled, uint64_t mono_first,
     if (mono_last < from_m)
         return 0;                      /* entirely before the window */
     return mono_first > scan_to_m;     /* begins past where we looked */
+}
+
+/* #586: defined with the other raw-load entry points below; declared here
+ * because the left-edge seed scan is its only caller. */
+static struct pgwt_trace_event *
+server_load_seed_markers(struct pgwt_server *srv,
+                         uint64_t from_wall_ns, uint64_t to_wall_ns,
+                         uint32_t pid,
+                         int *out_count, struct pgwt_load_info *info);
+
+/* ── #586: left-edge query-id seed lookback ───────────────────────────────
+ *
+ * THE MIRROR OF #424, AND THE ONE WAY IT DIFFERS. #424's problem was a
+ * RECORD living in blocks past `to`, so admission had to look forward. Here
+ * the record already arrives: a wait straddling `from` closes inside the
+ * window, which is what makes it an occurrence of this window. What does not
+ * arrive is the EXEC_START/PLAN_START that reported its command's query id,
+ * because the loader admits by `ts_mono >= from_mono` and that marker is
+ * older than `from`. #128's rule 2 ("the last id reported EARLIER in the same
+ * command") is built by pgwt_tag_events' forward pass over the loaded array
+ * alone, so it has no evidence, the record falls to the UNATTRIBUTED bucket,
+ * and no per-query filter can reach that bucket at all
+ * (pgwt_filter.query_id == 0 means "no filter"). The drill-down LOSES the
+ * record: 183 summed over 22 query filters against 184 unfiltered, one
+ * Lock:relation of 2435.069 ms.
+ *
+ * So this scan looks back for a MARKER and seeds cmd_qid with it. It ADMITS
+ * NOTHING. That is not a style choice, it is the two hazards of the obvious
+ * alternative removed by construction:
+ *
+ *   - no DOUBLE ADMISSION. A record admitted here as well as by the normal
+ *     `ts_mono >= from_mono` test would be counted twice -- 185 where 184 is
+ *     right -- which is a worse answer than the one being fixed. The array
+ *     this scan hands back is byte-identical; only cmd_qid's starting value
+ *     changes.
+ *   - no WIDER WINDOW. A left-straddler's full duration is NOT this window's
+ *     time; event_window_ns clips it, and #328/#427 settled the edges as
+ *     [from, to). Seeding cannot move a duration: cmd_qid is read in exactly
+ *     one place, fwd[] in pgwt_tag_events_window_seeded, which decides
+ *     WHICH QUERY a record belongs to and nothing else.
+ *
+ * Both are pinned as numbers in tests/test_left_edge_attrib.c §3 and §4.
+ *
+ * THE BOUND. As on the right there is no a-priori limit: without trace
+ * format v4 nothing says how far back a command's id marker is, and a
+ * backend can hold one command for a whole capture. So the scan is "back
+ * from `from`, BUDGETED":
+ *
+ *   PGWT_LEFT_SEED_LOOKBACK_NS   time horizon before `from` (default 30 s)
+ *
+ * and it runs AT ALL only for pids the loaded window shows to have a rule-2
+ * hole at the left edge (left_seed_find_needy below). A window whose every
+ * pid reports an id inside it costs nothing.
+ *
+ * REFUSAL, NOT APPROXIMATION. The horizon running out, the horizon being set
+ * to 0, the marker load refusing (overload, allocation failure, an
+ * unreadable trace) -- each leaves the record UNATTRIBUTED, which is the
+ * pre-#586 answer, and sets pgwt_load_info.left_edge_truncated so the answer
+ * says "a seed further back may be missing". It is NOT set when the scan
+ * reached the start of the capture: there nothing was missed and
+ * UNATTRIBUTED is the complete truth (a command that genuinely never
+ * reported an id). A scan that cannot see must refuse, never approve, and
+ * must not cry wolf when it saw everything.
+ */
+#define PGWT_LEFT_SEED_LOOKBACK_DEFAULT_NS  (30ULL * 1000000000ULL)
+
+/* Not cached in a static, for the same reason straddle_lookahead_ns() is not:
+ * a cached copy survives fork(), so a test that lowers the horizon in a child
+ * would silently keep the parent's value and measure nothing. An UNPARSEABLE
+ * value falls back to the default rather than to 0 -- "disabled by a typo" is
+ * a gate switched off with nothing to show it. */
+static uint64_t left_seed_lookback_ns(void)
+{
+    const char *env = getenv("PGWT_LEFT_SEED_LOOKBACK_NS");
+    if (env && *env) {
+        char *end = NULL;
+        unsigned long long v = strtoull(env, &end, 10);
+        if (end && *end == '\0')
+            return (uint64_t)v;        /* 0 = disabled, deliberately */
+    }
+    return PGWT_LEFT_SEED_LOOKBACK_DEFAULT_NS;
+}
+
+struct left_seed_scan {
+    int      enabled;        /* the caller asked for a bounded LEFT edge */
+    uint64_t lookback_ns;
+    int      resolved;       /* pids handed a nonzero seed */
+    int      truncated;      /* a bound, or a refusal, stopped the scan */
+};
+
+/* One pid's left-edge state.
+ *   closed — the loaded window itself decides this pid's cmd_qid (it reports
+ *            an id inside the window, or a CMD_START/idle boundary resets it
+ *            before any query-less record), so a seed cannot change anything.
+ *   needy  — a query-less foreground record of this pid sits in the window
+ *            with cmd_qid still 0: rule 2 has a hole here.
+ *   qid    — the seed, as the lookback resolves it. */
+struct left_needy {
+    uint32_t pid;
+    uint64_t qid;
+    int      closed;
+    int      needy;
+};
+
+struct left_needy_tab {
+    struct pgwt_pid_index ix;
+    struct left_needy *e;
+    int n, cap;
+};
+
+/* NULL on a real allocation failure; the caller REFUSES rather than skipping
+ * the pid, because a pid silently without a slot is a pid silently without a
+ * seed, which is the pre-fix answer wearing the post-fix flag. */
+static struct left_needy *left_needy_get(struct left_needy_tab *t,
+                                         uint32_t pid)
+{
+    int h = pgwt_pid_index_find(&t->ix, pid);
+    if (h >= 0)
+        return &t->e[h];
+    if (t->n + 1 > t->cap) {
+        int newcap = t->cap ? t->cap * 2 : 64;
+        struct left_needy *tmp =
+            test_load_alloc_failure("left_needy_grow") ? NULL :
+            realloc(t->e, (size_t)newcap * sizeof(*tmp));
+        if (!tmp)
+            return NULL;
+        memset(tmp + t->cap, 0,
+               (size_t)(newcap - t->cap) * sizeof(*tmp));
+        t->e = tmp;
+        t->cap = newcap;
+    }
+    h = t->n;
+    if (pgwt_pid_index_put(&t->ix, pid, h) != 0)
+        return NULL;
+    t->n++;
+    t->e[h].pid = pid;
+    return &t->e[h];
+}
+
+static void left_needy_tab_free(struct left_needy_tab *t)
+{
+    pgwt_pid_index_free(&t->ix);
+    free(t->e);
+    memset(t, 0, sizeof(*t));
+}
+
+/* Which pids have a rule-2 hole at the left edge? One ascending pass over the
+ * window, mirroring the order and the decisions of pgwt_tag_events' forward
+ * pass: the first event of a pid that SETS or RESETS cmd_qid settles that pid
+ * (a seed is overwritten from then on and changes nothing), and a query-less
+ * record met before any such event is the hole.
+ *
+ * Returns -1 on allocation failure. Over-reporting is the safe direction: a
+ * pid marked needy whose record rule 1 would have resolved anyway costs a
+ * scan, never a wrong number -- the seed only ever supplies rule 2, which
+ * rule 1 outranks. */
+static int left_seed_find_needy(const struct pgwt_trace_event *events,
+                                int total, struct left_needy_tab *t,
+                                int *out_needy)
+{
+    *out_needy = 0;
+    for (int i = 0; i < total; i++) {
+        const struct pgwt_trace_event *ev = &events[i];
+        struct left_needy *e = left_needy_get(t, ev->pid);
+        if (!e)
+            return -1;
+        if (e->closed)
+            continue;
+        if (PGWT_IS_MARKER(ev->old_event)) {
+            /* Ask THE rule whether this marker decides cmd_qid, rather than
+             * re-listing which markers carry an id -- one copy, in
+             * pgwt_qid_marker_step, so a new id-carrying marker cannot be
+             * added there and forgotten here. Two sentinels because a marker
+             * whose query_id happens to equal one of them must still be
+             * detected through the other. */
+            uint64_t a = 1, b = 2;
+            pgwt_qid_marker_step(ev->old_event, ev->query_id, &a);
+            pgwt_qid_marker_step(ev->old_event, ev->query_id, &b);
+            if (a != 1 || b != 2)
+                e->closed = 1;
+            continue;
+        }
+        if (ev->query_id != 0) {
+            e->closed = 1;          /* the window reports its own id */
+            continue;
+        }
+        if ((ev->flags & PGWT_EVENT_FLAG_SAMPLE) &&
+            pgwt_is_session_idle_event(ev->new_event ? ev->new_event
+                                                     : ev->old_event)) {
+            e->closed = 1;          /* the sampled tier's command boundary */
+            continue;
+        }
+        e->needy = 1;
+        e->closed = 1;
+        (*out_needy)++;
+    }
+    return 0;
+}
+
+/* Resolve the needy pids' seeds from the markers in
+ * [from_wall_ns - horizon, from_wall_ns), applying pgwt_qid_marker_step in
+ * ascending timestamp order -- which is why the marker load's final ordering
+ * pass matters: a CMD_START between the previous statement's id and `from`
+ * must RESET the seed, and that is only true if the markers arrive in time
+ * order. tests/test_left_edge_attrib.c §5 is that case. */
+static void left_seed_resolve(struct pgwt_server *srv,
+                              struct left_seed_scan *ls,
+                              uint64_t from_wall_ns, uint32_t pid,
+                              struct left_needy_tab *t)
+{
+    if (ls->lookback_ns == 0) {
+        /* Disabled restores the pre-#586 selection, and that is exactly a
+         * cut left edge -- said out loud, as #424 says it for a 0 horizon. */
+        ls->truncated = 1;
+        return;
+    }
+    if (from_wall_ns <= srv->earliest_wall_ns)
+        return;                     /* nothing before the window exists */
+
+    uint64_t seed_from = from_wall_ns > ls->lookback_ns
+                       ? from_wall_ns - ls->lookback_ns : 0;
+    int reached_start = 0;
+    if (seed_from <= srv->earliest_wall_ns) {
+        seed_from = srv->earliest_wall_ns;
+        reached_start = 1;
+    }
+
+    if (test_load_alloc_failure("left_seeds")) {
+        ls->truncated = 1;
+        return;                     /* refused before reading anything */
+    }
+
+    int mcount = 0;
+    struct pgwt_load_info minfo;
+    memset(&minfo, 0, sizeof(minfo));
+    /* `from_wall_ns - 1`: a marker AT `from` is in the main load already, and
+     * selection is inclusive at both ends. Markers only, and with the
+     * right-edge straddler lookahead off -- a marker has duration 0 and can
+     * never be admitted as a straddler, so scanning blocks past this call's
+     * right edge would decode up to the 300 s #424 horizon for records that
+     * cannot exist. */
+    struct pgwt_trace_event *m =
+        server_load_seed_markers(srv, seed_from, from_wall_ns - 1, pid,
+                                 &mcount, &minfo);
+    if (!m || minfo.overloaded || minfo.allocation_failed ||
+        minfo.trace_unreadable) {
+        /* Every one of these is "the scan could not see", not "there was
+         * nothing there". Degrade to the pre-#586 answer and SAY SO. */
+        free(m);
+        ls->truncated = 1;
+        return;
+    }
+    for (int i = 0; i < mcount; i++) {
+        if (!PGWT_IS_MARKER(m[i].old_event))
+            continue;               /* markers_only already guarantees this */
+        int h = pgwt_pid_index_find(&t->ix, m[i].pid);
+        if (h < 0 || !t->e[h].needy)
+            continue;
+        pgwt_qid_marker_step(m[i].old_event, m[i].query_id, &t->e[h].qid);
+    }
+    free(m);
+
+    for (int i = 0; i < t->n; i++) {
+        if (!t->e[i].needy)
+            continue;
+        if (t->e[i].qid != 0)
+            ls->resolved++;
+        else if (!reached_start)
+            ls->truncated = 1;      /* the HORIZON ended the search, not the
+                                     * data: a seed may exist further back */
+    }
 }
 
 /* The per-load straddler bookkeeping, passed down into every admission site
@@ -1903,7 +2257,16 @@ static void load_file_range_mono(struct pgwt_server *srv,
         } else {
             n = pgwt_reader_decode_block_info(&reader, b, block_buf,
                                               PGWT_BLOCK_EVENTS, &bi);
-            if (n < 0) continue;
+            if (n < 0) {
+                /* #333: a COMMITTED block that will not decode. The daemon
+                 * publishes its committed count only after the block is
+                 * flushed and committed blocks are immutable, so this is
+                 * damage, not a race. Nothing is cached for it (that happens
+                 * on success only), so the failure recurs on every request
+                 * instead of being answered from a short cache. */
+                trace_bad_note(srv, path, 1);
+                continue;
+            }
             rec = block_buf;
             if (cc) {
                 cc->stat_blocks_decoded++;
@@ -2294,13 +2657,76 @@ static void cov_decode_markers(struct pgwt_server *srv,
 /* Incrementally scan one file's block headers into its coverage entry.
  * Marker decode is deferred (cov_decode_markers) so full-mode dirs — where
  * no samples exist and coverage is never consulted — never pay for it. */
+/* #333: the reader refused this path -- is that CORRUPTION or one of the
+ * legitimate ways a trace file holds no data yet?
+ *
+ * "pgwt_reader_open failed" alone is not the question. It also fails for a
+ * capture that has committed nothing (header written, no block flushed), for
+ * a file whose header names an unsupported version (deliberately SKIPPED,
+ * src/event_reader.c: "garbage must never surface as data"), and for a file
+ * that disappeared between the directory scan and the open. Treating any of
+ * those as corruption would turn an idle capture or a forward-version file
+ * into a total outage.
+ *
+ * So the claim is made only where the file itself asserts there is readable
+ * data and the reader could not find it:
+ *
+ *   - the header must be present, ours, and a version this build reads --
+ *     otherwise there is nothing claiming the rest of the file is a trace;
+ *   - and either its .meta names at least one COMMITTED block (the daemon
+ *     renames that high-watermark into place only after the block is
+ *     flushed, and committed blocks are immutable, so failing to read them
+ *     is damage by definition), or the .meta exists but cannot be parsed, or
+ *     the file is a ROTATED one, which is complete by construction.
+ *
+ * A current.trace with no .meta at all is the one case left as "not yet
+ * data": the first block may be mid-write. */
+static int cov_file_unreadable(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;               /* gone, or not ours to read: no claim */
+    struct pgwt_trace_file_header hdr;
+    size_t got = fread(&hdr, 1, sizeof(hdr), f);
+    fclose(f);
+    if (got != sizeof(hdr))
+        return 0;               /* too short to hold a header: being created */
+    if (hdr.magic != PGWT_TRACE_MAGIC)
+        return 0;               /* not a trace file at all */
+    if (hdr.version < 2 || hdr.version > PGWT_TRACE_VERSION)
+        return 0;               /* unsupported version: skipped on purpose */
+
+    char meta_path[600];
+    snprintf(meta_path, sizeof(meta_path), "%s.meta", path);
+    FILE *mf = fopen(meta_path, "r");
+    if (mf) {
+        int committed = 0;
+        int parsed = (fscanf(mf, "%d", &committed) == 1);
+        fclose(mf);
+        if (!parsed)
+            return 1;           /* a high-watermark we cannot read is not 0 */
+        return committed >= 1;   /* 0 == nothing committed yet, honestly */
+    }
+    /* No .meta. A rotated file carries its own footer and is complete; only
+     * current.trace can legitimately be between its header and its first
+     * committed block. */
+    return !is_current_trace(path);
+}
+
 static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
 {
     struct pgwt_event_reader reader;
     if (pgwt_reader_open(&reader, fc->path) != 0) {
         fc->valid = 0;
+        fc->unreadable = cov_file_unreadable(fc->path);
+        if (fc->unreadable)
+            fprintf(stderr, "ERROR: trace file %s is unreadable (its header "
+                    "and committed-block count say it holds data, but no "
+                    "block could be read) -- requests covering it are "
+                    "REFUSED, not answered as empty\n", fc->path);
         return;
     }
+    fc->unreadable = 0;
 
     fc->is_current = is_current_trace(fc->path);
 
@@ -2568,6 +2994,11 @@ static void coverage_refresh(struct pgwt_server *srv)
     }
 
     int had_samples = srv->any_samples;
+    /* #333: recomputed from scratch every refresh, so a rewritten or rotated
+     * file clears the refusal instead of latching it for the process. */
+    srv->cov_unreadable = 0;
+    srv->blocks_unreadable = 0;
+    srv->cov_unreadable_path[0] = '\0';
     for (int i = 0; i < srv->num_files; i++) {
         struct pgwt_file_cov *fc = cov_find_or_add(srv, srv->files[i].path);
         if (!fc) continue;
@@ -2575,6 +3006,12 @@ static void coverage_refresh(struct pgwt_server *srv)
         cov_scan_file(srv, fc);
         if (fc->has_samples)
             srv->any_samples = 1;
+        if (fc->unreadable) {
+            if (srv->cov_unreadable == 0)
+                snprintf(srv->cov_unreadable_path,
+                         sizeof(srv->cov_unreadable_path), "%s", fc->path);
+            srv->cov_unreadable++;
+        }
     }
 
     /* If samples appeared for the first time, files scanned earlier may
@@ -2940,6 +3377,7 @@ static struct pgwt_trace_event *
 server_load_events_fi_mode(struct pgwt_server *srv,
                            uint64_t from_wall_ns, uint64_t to_wall_ns,
                            uint32_t pid, int markers_only,
+                           int no_straddle_scan,
                            int *out_count, struct pgwt_load_info *info)
 {
     *out_count = 0;
@@ -2954,7 +3392,10 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * can close, so disabling it there is both free and the guarantee that
      * an unbounded request stays bit-identical to pre-#424. */
     struct straddle_scan ss = {
-        .enabled      = to_wall_ns != 0,
+        /* #586: `no_straddle_scan` is only ever set by
+         * server_load_seed_markers, whose records are markers -- duration 0,
+         * so never a right-edge straddler. See the note there. */
+        .enabled      = to_wall_ns != 0 && !no_straddle_scan,
         .lookahead_ns = straddle_lookahead_ns(),
         .max_blocks   = straddle_max_blocks(),
     };
@@ -2979,6 +3420,18 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         if (!have_current)
             cur_cache_drop(&srv->cur);
     }
+
+    /* #586: the left-edge seed lookback, like #424's right-edge lookahead,
+     * only applies when the CALLER asked for a bounded edge. A whole-capture
+     * request (from_wall_ns == 0) is defaulted to the first record below, and
+     * nothing exists before that, so disabling it there is both free and the
+     * guarantee that an unbounded request stays bit-identical to pre-#586.
+     * Read BEFORE the defaulting, because afterwards the two are
+     * indistinguishable. */
+    struct left_seed_scan ls = {
+        .enabled     = from_wall_ns != 0 && !markers_only,
+        .lookback_ns = left_seed_lookback_ns(),
+    };
 
     if (from_wall_ns == 0)
         from_wall_ns = srv->earliest_wall_ns;
@@ -3355,12 +3808,50 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         stable_sort_events(events, total) != 0)
         allocation_failed = 1;
 
+    /* #586: the left-edge query-id seeds, resolved BEFORE the tag pass (it is
+     * the pass that consumes them) and only for the pids this window shows to
+     * have a rule-2 hole at `from`. Nothing is appended to `events` and no
+     * duration changes -- see the header above left_seed_lookback_ns. */
+    struct pgwt_qid_seed *seeds = NULL;
+    int n_seeds = 0;
+    struct left_needy_tab needy;
+    memset(&needy, 0, sizeof(needy));
+    pgwt_pid_index_init(&needy.ix);
+    if (ls.enabled && !overloaded && !allocation_failed && events && total > 0) {
+        int n_needy = 0;
+        if (left_seed_find_needy(events, total, &needy, &n_needy) != 0) {
+            /* The table itself could not be built, so WHICH pids have a hole
+             * is unknown. Unknown is never "none": refuse the seeding and say
+             * the left edge was not scanned. */
+            ls.truncated = 1;
+        } else if (n_needy > 0) {
+            left_seed_resolve(srv, &ls, from_wall_ns, pid, &needy);
+            if (ls.resolved > 0) {
+                seeds = test_load_alloc_failure("left_seed_array") ? NULL
+                      : calloc((size_t)ls.resolved, sizeof(*seeds));
+                if (!seeds) {
+                    ls.resolved = 0;
+                    ls.truncated = 1;
+                } else {
+                    for (int i = 0; i < needy.n && n_seeds < ls.resolved; i++)
+                        if (needy.e[i].needy && needy.e[i].qid != 0) {
+                            seeds[n_seeds].pid = needy.e[i].pid;
+                            seeds[n_seeds].query_id = needy.e[i].qid;
+                            n_seeds++;
+                        }
+                }
+            }
+        }
+    }
+    left_needy_tab_free(&needy);
+
     /* T2: annotate the merged window with categories (pid types from
      * backends.jsonl) and the PLAN/EXEC/CMD marker windows; classify exact
      * we==0 intervals against the command gate. One pass feeding every raw
      * estimator (docs/AAS_SEMANTICS_DECISION.md). */
     if (!markers_only &&
-        !pgwt_tag_events_window(events, total, srv->pid_cats, srv->n_pid_cats,
+        !pgwt_tag_events_window_seeded(
+                                events, total, srv->pid_cats, srv->n_pid_cats,
                                 /* #424: the request's right edge, in the
                                  * WALL domain the merge above re-anchored
                                  * the array to. 0 when the caller asked for
@@ -3369,7 +3860,8 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                                  * majority judge a straddler on its
                                  * in-window portion instead of on data this
                                  * window never loaded. */
-                                ss.enabled ? to_wall_ns : 0)) {
+                                ss.enabled ? to_wall_ns : 0,
+                                seeds, n_seeds)) {
         /* #363: the tagged array is the oracle, so a pass that stopped
          * partway is a wrong answer, not a short one. Route it through this
          * loader's EXISTING degradation channel — every raw consumer reads
@@ -3391,6 +3883,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         events = NULL;
         total = 0;
     }
+    free(seeds);
 
     if (info) {
         info->has_transitions = has_transitions;
@@ -3398,9 +3891,22 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         info->sample_period_ns = has_samples ? sample_period_ns : 0;
         info->overloaded = overloaded;
         info->allocation_failed = allocation_failed;
+        /* #333: computed AFTER the loads, because one of its two inputs is
+         * produced by them (a committed block that would not decode); the
+         * other (a file the reader refused to open) was decided by the
+         * coverage_refresh above. Either one makes this window's contents
+         * UNKNOWN rather than empty. Every raw consumer reaches it through
+         * reject_overload, and dump_summary reads the flag itself -- the
+         * channel the overload and allocation-failure refusals already use,
+         * so no handler is left serving zeros under a "No data" label. */
+        info->trace_unreadable = srv->cov_unreadable > 0 ||
+                                 srv->blocks_unreadable > 0;
         info->straddlers_admitted = ss.admitted;
         info->right_edge_truncated = ss.truncated;
         info->right_edge_scan_ns = ss.enabled ? ss.lookahead_ns : 0;
+        info->left_seeds_resolved = ls.resolved;
+        info->left_edge_truncated = ls.truncated;
+        info->left_edge_scan_ns = ls.enabled ? ls.lookback_ns : 0;
         info->headers_unreadable = ss.headers_unreadable;
     }
     /* Outside the `if (info)`: a caller that wants no load_info still ran a
@@ -3414,6 +3920,11 @@ server_load_events_fi_mode(struct pgwt_server *srv,
     if (allocation_failed)
         fprintf(stderr, "ERROR: memory allocation failed while loading or "
                 "merging the requested event window\n");
+    if (srv->blocks_unreadable > 0)
+        fprintf(stderr, "ERROR: %d committed block(s) of %s would not decode "
+                "-- this window's contents are UNKNOWN, not empty; requests "
+                "covering it are REFUSED\n",
+                srv->blocks_unreadable, srv->cov_unreadable_path);
 
     *out_count = total;
     return events;
@@ -3426,7 +3937,7 @@ server_load_events_fi(struct pgwt_server *srv,
                       int *out_count, struct pgwt_load_info *info)
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 0,
-                                      out_count, info);
+                                      0, out_count, info);
 }
 
 /* Lifecycle context is sparse but can span a long capture. Retain only
@@ -3439,7 +3950,28 @@ server_load_markers_fi(struct pgwt_server *srv,
                        int *out_count, struct pgwt_load_info *info)
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
-                                      out_count, info);
+                                      0, out_count, info);
+}
+
+/* #586: the left-edge seed scan's marker load. Markers only, and with the
+ * #424 right-edge straddler lookahead OFF -- not as an optimisation but
+ * because it cannot apply: the lookahead admits a record whose interval
+ * overlaps the right edge, a marker's duration is 0 so its interval cannot
+ * overlap anything past its own timestamp, and leaving it on would make this
+ * call decode every block up to 300 s past its right edge looking for records
+ * that cannot exist. The two wrappers above pass 0, so every pre-#586 caller
+ * is bit-identical. */
+static struct pgwt_trace_event *
+server_load_seed_markers(struct pgwt_server *srv,
+                         uint64_t from_wall_ns, uint64_t to_wall_ns,
+                         uint32_t pid,
+                         int *out_count, struct pgwt_load_info *info)
+{
+    /* DUR-9's pid pushdown applies here too: when the request is
+     * pid-filtered the main load holds ONE pid's records, so every needy pid
+     * is that pid and loading the other backends' markers is pure waste. */
+    return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
+                                      1, out_count, info);
 }
 
 /* ── #274: the executions/exec_scatter pre-window prefix ──────────────────
@@ -3603,6 +4135,11 @@ server_load_prefix_from_index(struct pgwt_server *srv, uint64_t to_wall_ns,
     if (allocation_failed)
         fprintf(stderr, "ERROR: memory allocation failed while loading or "
                 "merging the requested event window\n");
+    if (srv->blocks_unreadable > 0)
+        fprintf(stderr, "ERROR: %d committed block(s) of %s would not decode "
+                "-- this window's contents are UNKNOWN, not empty; requests "
+                "covering it are REFUSED\n",
+                srv->blocks_unreadable, srv->cov_unreadable_path);
 
     *out_count = total;
     return events;
@@ -3867,15 +4404,41 @@ static int reject_overload(struct pgwt_server *srv,
                            struct pgwt_trace_event *events,
                            const struct pgwt_load_info *info)
 {
-    if (!info->overloaded && !info->allocation_failed)
+    if (!info->overloaded && !info->allocation_failed &&
+        !info->trace_unreadable)
         return 0;
     free(events);
+    /* #333: snapshot the unreadable counts BEFORE the refresh below, which
+     * recomputes them. Reading them after it would report 0 blocks for the
+     * very refusal being emitted -- the refresh re-scans files but does not
+     * re-decode blocks, so the block count it produces is always 0. */
+    int  bad_files  = srv->cov_unreadable;
+    int  bad_blocks = srv->blocks_unreadable;
+    char bad_path[512];
+    snprintf(bad_path, sizeof(bad_path), "%s", srv->cov_unreadable_path);
     /* Keep the failure's fidelity label in the same freshly-refreshed
      * coverage generation as the load which detected the bound. */
     coverage_refresh(srv);
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
-    if (info->allocation_failed) {
+    /* #333 FIRST, because it subsumes the other two as an explanation: a
+     * window whose files cannot be read has unknown size and unknown
+     * contents, so "window too large" and "allocation failed" would both be
+     * guesses about data nobody read. The other way round, a genuinely
+     * oversized window on readable files never sets this flag. */
+    if (info->trace_unreadable) {
+        cJSON_AddStringToObject(root, "error",
+            "trace file unreadable — this window's contents are unknown");
+        cJSON_AddStringToObject(root, "code", "trace_unreadable");
+        cJSON_AddStringToObject(root, "unreadable_file", bad_path);
+        cJSON_AddNumberToObject(root, "unreadable_files", bad_files);
+        cJSON_AddNumberToObject(root, "unreadable_blocks", bad_blocks);
+        cJSON_AddStringToObject(root, "hint",
+            "the file's header and committed-block count say it holds data "
+            "but no block could be read: it is truncated or damaged. Check "
+            "the daemon's log and the filesystem; a rotated copy of the same "
+            "window may still be readable. This is NOT an empty window.");
+    } else if (info->allocation_failed) {
         cJSON_AddStringToObject(root, "error", "memory allocation failed");
         cJSON_AddStringToObject(root, "code", "allocation_failed");
         cJSON_AddStringToObject(root, "hint",
@@ -4381,6 +4944,19 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
                                 top_wait_unavailable_reason);
     }
 
+    /* #562 (additive): which quantity the cpu_pct column IS. true -- measured
+     * on-CPU time, with each row's runqueue remainder in its offcpu_ms;
+     * false -- the unsplit on-CPU gap wall by gap-inference (sampled/v2 data
+     * and the SUMMARY routing, whose per-second record stores wall and has no
+     * measured column), with every offcpu_ms 0. Same field names and the same
+     * meaning as the time_model and top_events responses.
+     * cpu_clamped_ms is the skew self-check: measured CPU that exceeded its
+     * own clipped gap wall, clamped out of the column and counted here. It is
+     * outside every row and outside db_time_ms. */
+    cJSON_AddBoolToObject(root, "has_measured_cpu", res.has_measured_cpu);
+    cJSON_AddNumberToObject(root, "offcpu_ms", res.offcpu_ms);
+    cJSON_AddNumberToObject(root, "cpu_clamped_ms", res.cpu_clamped_ms);
+
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
         cJSON *r = cJSON_CreateObject();
@@ -4388,6 +4964,13 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
         cJSON_AddNumberToObject(r, "db_time_ms", res.rows[i].db_time_ms);
         cJSON_AddNumberToObject(r, "cpu_pct", res.rows[i].cpu_pct);
         cJSON_AddNumberToObject(r, "wait_pct", res.rows[i].wait_pct);
+        /* #562 (additive): the runqueue remainder of this session's MEASURED
+         * on-CPU gaps -- inside db_time_ms but on neither percentage, so a
+         * client can account for the row (cpu + wait + offcpu) instead of
+         * reading the difference as missing time. 0 where the response's
+         * has_measured_cpu is false: a refusal to split, not a measured
+         * zero. */
+        cJSON_AddNumberToObject(r, "offcpu_ms", res.rows[i].offcpu_ms);
         if (top_wait_unavailable) {
             cJSON_AddNullToObject(r, "top_wait");
             cJSON_AddNumberToObject(r, "top_wait_id", 0);
@@ -5644,6 +6227,14 @@ static cJSON *serialize_exec_lane(const struct pgwt_exec_lane *lane,
         cJSON_AddStringToObject(item, "name", ev->name);
         cjson_add_uint64_string(item, "start_ns", ev->start_ns);
         cjson_add_uint64_string(item, "dur_ns", ev->duration_ns);
+        /* #529: the pair, always both. `dur_ns` is the #496 slice a client
+         * sums; `raw_dur_ns` is the wait's own wall time, which is what a
+         * per-bar tooltip is asking for. Emitted unconditionally rather than
+         * "only when they differ": an optional key makes the clipped case
+         * indistinguishable from an old server to every client, and the
+         * cheapest way for a consumer to silently fall back to the wrong
+         * number is for the right one to sometimes be absent. */
+        cjson_add_uint64_string(item, "raw_dur_ns", ev->raw_duration_ns);
         if (ev->has_cpu)
             cjson_add_uint64_string(item, "cpu_ns", ev->cpu_ns);
         else
@@ -6870,6 +7461,20 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_transitions_result res;
     pgwt_compute_transitions(events, count, &req->filter, max_rows, &res);
 
+    /* #461: the pair table is unbounded now (it used to be 4096 slots with a
+     * probe loop that never terminated once full), so the only early exit is
+     * a real allocation failure. Report it instead of serialising a graph
+     * that is short but looks complete -- a missing EDGE reads as "that
+     * transition never happened", which is a wrong answer, not a smaller
+     * one. Same rule as handle_fingerprints / handle_top_sessions. */
+    if (res.failed) {
+        free(res.rows);
+        free(events);
+        emit_transitions_compute_failed(req,
+            "the transition-pair table could not be allocated");
+        return;
+    }
+
     /* Node totals go through the SAME accumulator the aggregate path uses
      * (pgwt_block_agg_add_events), so the per-node numbers cannot drift
      * between the two paths. A refusal means raw cannot answer either — emit
@@ -7605,6 +8210,19 @@ static void dump_summary(struct pgwt_server *srv)
     struct pgwt_load_info linfo = {0};
     struct pgwt_trace_event *events =
         server_load_events_fi(srv, from, to, 0, &count, &linfo);
+    /* #333: same rule as reject_overload, and first for the same reason --
+     * a text report that printed zeros here read exactly like a capture in
+     * which nothing happened. */
+    if (linfo.trace_unreadable) {
+        printf("ERROR: trace data in %s could not be READ — %d file(s) the "
+               "reader refused and %d committed block(s) that would not "
+               "decode. This window's contents are UNKNOWN; it is NOT an "
+               "empty capture\n",
+               srv->cov_unreadable_path, srv->cov_unreadable,
+               srv->blocks_unreadable);
+        free(events);
+        return;
+    }
     if (linfo.allocation_failed) {
         printf("ERROR: memory allocation failed while loading the trace\n");
         free(events);

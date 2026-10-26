@@ -49,6 +49,50 @@ export const TOP_PEAKS_CAPTION =
     'sessions in a single bucket. The red markers on the chart count ' +
     'something else and are listed separately under Burst Events.';
 
+/* #442 (owner diagnosis, issue comment 2026-10-16): the server's bursts are
+ * an ABSOLUTE 4-sessions-within-10ms test, so any workload with >=4
+ * habitually concurrent sessions satisfies it in nearly every bucket BY
+ * CONSTRUCTION -- the marker then carries zero information regardless of
+ * whether the arithmetic is right ("the contract is wrong, not the
+ * computation"). Raising the absolute number only moves the same defect to
+ * a different density (explicitly rejected by the owner: "do not simply
+ * raise the threshold until the markers look sparse"). So the CHART
+ * redefines what it marks as notable RELATIVE to the window, not in
+ * absolute session count: once bursts cover more than
+ * BURST_NOTABLE_FRACTION of the CAPTURED buckets, the per-bucket signal is
+ * gone and the triangles are replaced by one panel-level disclosure
+ * (burstNoiseNote) instead of a marker on every bucket.
+ *
+ * This can only ever SUPPRESS what the server already detected -- it adds
+ * no new bursts and never promotes a below-threshold moment, so a true
+ * minority-of-buckets burst (the "isolated real burst" case) is always
+ * still drawn. The Burst Events TABLE is never touched by this: #276 /
+ * style.css's "rows the server just started reporting honestly ... must
+ * all stay reachable" governs every burst the server returned, independent
+ * of whether the chart currently finds them visually informative.
+ *
+ * BURST_NOTABLE_MIN_BUCKETS guards tiny windows (a handful of buckets, a
+ * drag-zoom): a fraction computed over 1-2 captured buckets is not evidence
+ * of anything either way, so the chart keeps its old (always-show)
+ * behavior below this floor. */
+export const BURST_NOTABLE_FRACTION = 0.5;
+export const BURST_NOTABLE_MIN_BUCKETS = 10;
+
+/* PURE: the panel-level sentence explaining why the chart's burst markers
+ * are hidden (#442). '' whenever they are not (too few captured buckets, or
+ * bursts are still a minority) -- a note that always shows is a note nobody
+ * reads, same rule as burstSelectionNote below. */
+export function burstNoiseNote(capturedBucketCount, burstBucketCount) {
+    if (!(capturedBucketCount >= BURST_NOTABLE_MIN_BUCKETS)) return '';
+    if (!(burstBucketCount > 0)) return '';
+    if (burstBucketCount / capturedBucketCount <= BURST_NOTABLE_FRACTION) return '';
+    return 'Chart burst markers hidden: the 4-sessions-within-10ms threshold ' +
+        'is absolute, so it fired in ' + burstBucketCount.toLocaleString() + ' of ' +
+        capturedBucketCount.toLocaleString() + ' captured buckets here -- too ' +
+        'often to distinguish unusual activity from ordinary concurrency on ' +
+        'this workload (#442). Every detected burst is still listed below.';
+}
+
 /* data: concurrency response { peaks[], bursts[], bucket_ns }
  * opts.captureFromNs (optional): the server's earliest captured timestamp
  * (ctx.server.fromNs — "earliest ts in the trace"). Buckets that START
@@ -57,15 +101,20 @@ export const TOP_PEAKS_CAPTION =
  * "Not captured" markArea, so the pre-capture span never reads as measured
  * idle time.
  * Returns { option, hasData, topPeaks, bursts, bucketNs, notCapturedCount,
- * burstNote } -- burstNote is the #276 completeness sentence (empty when the
- * server declared nothing to withhold).
+ * burstsMarkersSuppressed, burstNote } -- burstNote combines the #442 noise
+ * disclosure (when burstsMarkersSuppressed) and the #276 completeness
+ * sentence (empty when the server declared nothing to withhold).
+ * burstsMarkersSuppressed (#442) is true when bursts cover more than a
+ * minority of captured buckets: the chart's markers are hidden (the
+ * `bursts` table is NOT), since a marker on nearly every bucket carries no
+ * information.
  * The HTML tables are left to the view's mount (cheap string templating);
  * the row models here are the pure data the templates iterate. */
 export function buildConcurrencyOption(data, opts) {
     opts = opts || {};
     if (!data || !data.peaks || data.peaks.length === 0) {
         return { option: null, hasData: false, topPeaks: [], bursts: [], bucketNs: 0,
-            notCapturedCount: 0, burstNote: '' };
+            notCapturedCount: 0, burstsMarkersSuppressed: false, burstNote: '' };
     }
     const bns = data.bucket_ns || 0;
     const times = data.peaks.map(p => p.t);
@@ -91,6 +140,24 @@ export function buildConcurrencyOption(data, opts) {
     // captured" band, or a Burst Events row for a moment the chart says has
     // no data). Drop it from BOTH the markPoint and the table below.
     const capturedBursts = burstsWithBucket.filter(({ at }) => at >= notCapturedCount);
+    /* Bucket -> the burst to describe (the largest, matching the server's
+     * one-per-bucket selection) -- computed over ALL captured bursts, before
+     * the #442 notability decision, because the decision itself is a
+     * function of how many DISTINCT buckets carry one (burstByBucketAll.size),
+     * not of the individual burst count. */
+    const burstByBucketAll = new Map();
+    capturedBursts.forEach(({ b, at }) => {
+        const cur = burstByBucketAll.get(at);
+        if (!cur || b.sessions > cur.sessions) burstByBucketAll.set(at, b);
+    });
+    const capturedBucketCount = times.length - notCapturedCount;
+    // #442: see burstNoiseNote above -- bursts stop being drawn on the chart
+    // once they are no longer the minority of captured buckets. The Burst
+    // Events TABLE (shownBursts below) is never affected by this flag.
+    const burstsMarkersSuppressed = capturedBucketCount >= BURST_NOTABLE_MIN_BUCKETS &&
+        burstByBucketAll.size / capturedBucketCount > BURST_NOTABLE_FRACTION;
+    const markedBursts = burstsMarkersSuppressed ? [] : capturedBursts;
+    const burstByBucket = burstsMarkersSuppressed ? new Map() : burstByBucketAll;
     /* #384: the burst marker is an ANNOTATION on the line, never a second
      * value drawn in the line's own place.
      *
@@ -112,7 +179,7 @@ export function buildConcurrencyOption(data, opts) {
      * it, and y taken strictly from the plotted series — never `|| b.sessions`,
      * which planted a burst COUNT at a line COORDINATE whenever the bucket's
      * peak was 0. */
-    const burstPoints = capturedBursts.map(({ b, at }) => ({
+    const burstPoints = markedBursts.map(({ b, at }) => ({
         coord: [at, peakData[at]],
         value: b.sessions, symbol: 'triangle', symbolRotate: 180,
         symbolSize: Math.min(8 + b.sessions, 18),
@@ -120,13 +187,6 @@ export function buildConcurrencyOption(data, opts) {
         itemStyle: { color: '#f44' },
         label: { show: false },
     }));
-    /* Bucket -> the burst to describe in that bucket's tooltip (the largest,
-     * matching the server's one-per-bucket selection). */
-    const burstByBucket = new Map();
-    capturedBursts.forEach(({ b, at }) => {
-        const cur = burstByBucket.get(at);
-        if (!cur || b.sessions > cur.sessions) burstByBucket.set(at, b);
-    });
 
     const option = {
         animation: false,
@@ -207,10 +267,17 @@ export function buildConcurrencyOption(data, opts) {
     const topPeaks = data.peaks.filter((p, i) => i >= notCapturedCount && p.max > 1)
         .sort((a, b) => b.max - a.max).slice(0, 10);
 
+    // #442: the TABLE always lists every captured burst the server
+    // detected, regardless of burstsMarkersSuppressed -- only the chart's
+    // own markers are ever hidden (#276 "must all stay reachable").
     const shownBursts = capturedBursts.map(({ b }) => b);
+    const burstNote = [
+        burstNoiseNote(capturedBucketCount, burstByBucketAll.size),
+        burstSelectionNote(data, shownBursts.length),
+    ].filter(Boolean).join(' ');
     return { option, hasData: true, topPeaks,
         bursts: shownBursts, bucketNs: bns, notCapturedCount,
-        burstNote: burstSelectionNote(data, shownBursts.length) };
+        burstsMarkersSuppressed, burstNote };
 }
 
 /* PURE: the panel-level completeness sentence for the burst list (#276).

@@ -398,6 +398,24 @@ void pgwt_live_qattr_marker(struct pgwt_accumulator *acc,
 void pgwt_live_qattr_between_commands(struct pgwt_accumulator *acc,
                                       struct pgwt_pid_accum *pa);
 
+/* #156 item 2: the backend exited. Nothing further will ever be reported
+ * for this pid, so whatever its deferred query attribution still holds
+ * resolves NOW -- rule 2 (the command's last known id) or rule 3 (the
+ * unattributed bucket) -- instead of sitting in the per-pid entry forever.
+ *
+ * Needed because only the FULL tier sees a trace record with
+ * new_event == PGWT_EVENT_EXIT (src/event_stream.c); the sampled tier has
+ * no such record, so a backend terminated while its status still read
+ * in-command lost up to PGWT_QATTR_PENDING_MAX aggregates of per-query
+ * attribution. `pg_terminate_backend` on a parse-blocked backend is the
+ * realistic way to hit it.
+ *
+ * Takes a pid rather than a pgwt_pid_accum so an exit for a pid with no
+ * accumulator entry can never CREATE one: that would be a fabricated row
+ * on a dead backend. Idempotent -- the full tier may already have flushed
+ * through its EXIT record, and a second call emits nothing. */
+void pgwt_live_qattr_pid_exit(struct pgwt_accumulator *acc, uint32_t pid);
+
 /* The sampled tier's whole per-sample query-attribution step: record the
  * sample, and close the pid's command on an idle sample — but ONLY when
  * the tick's PgBackendStatus read agrees that no command is open.

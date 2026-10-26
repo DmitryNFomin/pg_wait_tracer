@@ -404,6 +404,189 @@ def check_transitions_idle_flag(t, srv):
                 f"(got {node.get('idle')!r})")
 
 
+def check_top_sessions_cpu_fields(t, srv):
+    """#562: the measured-CPU contract on Top Sessions, asserted POSITIVELY.
+
+    The schema comparison above is symmetric: if BOTH the real server and the
+    mock omitted these fields it would pass, which is the false negative that
+    matters here -- the fields went in to say which quantity the cpu_pct
+    column is, and a response without them is the ambiguity #562 is about.
+    So the real server's own response is checked for presence and type, and
+    every row for its remainder, independently of the mock.
+    """
+    real = srv.query("top_sessions")
+    t.check("error" not in real,
+            "[sessions cpu] real server answered without error"
+            + (f" (got: {real.get('error')})" if "error" in real else ""))
+    if "error" in real:
+        return
+    t.check(isinstance(real.get("has_measured_cpu"), bool),
+            "[sessions cpu] has_measured_cpu is a boolean "
+            f"(got {real.get('has_measured_cpu')!r})")
+    for field in ("offcpu_ms", "cpu_clamped_ms"):
+        v = real.get(field)
+        t.check(isinstance(v, (int, float)) and not isinstance(v, bool),
+                f"[sessions cpu] {field} is a number (got {v!r})")
+    rows = real.get("rows", [])
+    t.check(len(rows) > 0, "[sessions cpu] the fixture produces session rows")
+    for row in rows:
+        v = row.get("offcpu_ms")
+        t.check(isinstance(v, (int, float)) and not isinstance(v, bool),
+                f"[sessions cpu] pid {row.get('pid')} carries a numeric "
+                f"offcpu_ms (got {v!r})")
+    # The response-level total is the sum over the rows, which is what lets a
+    # client account for the time without walking them.
+    total = sum(r.get("offcpu_ms", 0.0) for r in rows)
+    t.check(abs(total - real.get("offcpu_ms", -1.0)) < 1e-6,
+            "[sessions cpu] response offcpu_ms == the sum over rows "
+            f"(got {real.get('offcpu_ms')!r}, rows sum to {total!r})")
+
+
+# ── #333: a corrupt trace must not answer as an empty one ───────────────────
+#
+# Lives here because this is the suite that owns "what the real server's
+# responses are allowed to look like", and because a truncated file needs a
+# real pgwt-server reading real bytes -- the mock cannot have the bug.
+#
+# THE DEFECT. Truncate current.trace so the coverage layer can no longer read
+# it and every raw-path command answers as though the window were simply
+# empty: `{"fidelity": "none", "db_time_ms": 0, "rows": []}`. The UI renders
+# fidelity "none" as a "No data" badge, so this is a LABELLED absence, not a
+# silent zero -- but "no data" and "the file holding your data is corrupt"
+# are different facts and the operator cannot tell them apart. Two separate
+# review rounds on agent/block-transition-aggregate mistook exactly this for
+# a fidelity regression.
+#
+# WHAT THIS PINS, and the ways it could be satisfied without checking
+# anything (each has its own case below):
+#   - the baseline: the SAME dir, before truncation, answers with data. A
+#     refusal that fired on the healthy fixture too would prove nothing.
+#   - an EMPTY trace directory is still "no data", never "corrupt". A gate
+#     that refuses on absence has stopped distinguishing the two facts, which
+#     is the whole point of the issue.
+#   - a trace whose header names an UNSUPPORTED VERSION stays SKIPPED, as
+#     src/event_reader.c documents, rather than becoming a corruption
+#     refusal: that is a deliberate forward-compatibility behaviour and
+#     turning it into an outage would be a regression dressed as a fix.
+#   - every raw-path command refuses, not just the one that was checked.
+#
+# Nothing here is timed: a server is started, three or four requests are
+# sent, the server is stopped.
+
+CORRUPT_CMDS = ("top_events", "time_model", "top_sessions", "top_queries",
+                "transitions")
+
+
+def _corrupt_probe(t, trace_dir, label, want_refusal, **qargs):
+    """Query every raw command and report how each one answered."""
+    with ServerHarness(trace_dir) as srv:
+        for cmd in CORRUPT_CMDS:
+            r = srv.query(cmd, **qargs)
+            code = r.get("code")
+            if want_refusal:
+                t.check(code == "trace_unreadable",
+                        f"[{label}] {cmd} refuses with code "
+                        f"'trace_unreadable' (got {code!r}, "
+                        f"fidelity={r.get('fidelity')!r})")
+                t.check(isinstance(r.get("hint"), str) and r.get("hint"),
+                        f"[{label}] {cmd} refusal carries a hint")
+                t.check("unreadable_file" in r,
+                        f"[{label}] {cmd} refusal names the file it could "
+                        f"not read")
+            else:
+                t.check(code != "trace_unreadable",
+                        f"[{label}] {cmd} is NOT reported as corrupt "
+                        f"(got {code!r})")
+
+
+def check_corrupt_trace_refusal(t):
+    import shutil
+
+    # 1. Control: the untouched fixture answers with data, and no command
+    #    claims corruption.
+    trace_dir = generate_traces(SCENARIO)
+    try:
+        with ServerHarness(trace_dir) as srv:
+            r = srv.query("top_events")
+            t.check(r.get("fidelity") == "exact" and r.get("db_time_ms", 0) > 0,
+                    "[corrupt trace] control: the intact fixture answers "
+                    f"with data (fidelity={r.get('fidelity')!r}, "
+                    f"db_time_ms={r.get('db_time_ms')!r})")
+        _corrupt_probe(t, trace_dir, "corrupt trace/intact", False)
+
+        # 2. The defect: truncate current.trace to a third of its length,
+        #    leaving current.trace.meta claiming its committed blocks.
+        path = os.path.join(trace_dir, "current.trace")
+        size = os.path.getsize(path)
+        with open(path, "r+b") as f:
+            f.truncate(size // 3)
+        t.check(os.path.getsize(path) < size,
+                "[corrupt trace] the fixture file really was truncated")
+        _corrupt_probe(t, trace_dir, "corrupt trace/truncated", True)
+    finally:
+        cleanup_traces(trace_dir)
+
+    # 2b. The OTHER corruption shape, and the other half of the fix: cut the
+    #     file so short that the reader cannot open it at all (no block index
+    #     by any of its three strategies) while current.trace.meta still
+    #     claims a committed block. 2 above exercises the decode counter in
+    #     the loader; this one exercises the coverage layer's own refusal.
+    #     Without it that detector is code no test reaches.
+    short_dir = generate_traces(SCENARIO)
+    try:
+        path = os.path.join(short_dir, "current.trace")
+        with open(path, "r+b") as f:
+            f.truncate(30)          # header (28 B) + 2 stray bytes
+        with open(path + ".meta") as f:
+            t.check(int(f.read().strip()) >= 1,
+                    "[corrupt trace] the meta still claims a committed block")
+        _corrupt_probe(t, short_dir, "corrupt trace/unopenable", True)
+    finally:
+        cleanup_traces(short_dir)
+
+    # 3. A capture that has committed NOTHING yet is absence, not corruption:
+    #    header only, and a meta that says zero blocks. The reader cannot open
+    #    such a file either (no block index by any of its three strategies),
+    #    so this is the case that separates "the reader refused" from "the
+    #    bytes are damaged" -- a detector keyed on the refusal alone would
+    #    call this corrupt and report an outage on an idle capture.
+    #    (A trace directory with NO files at all cannot be probed: pgwt-server
+    #    exits at startup with "no trace files found", which is already a
+    #    loud and separate refusal.)
+    fresh_dir = generate_traces(SCENARIO)
+    try:
+        path = os.path.join(fresh_dir, "current.trace")
+        with open(path, "r+b") as f:
+            f.truncate(28)          # sizeof(struct pgwt_trace_file_header)
+        with open(path + ".meta", "w") as f:
+            f.write("0\n")
+        _corrupt_probe(t, fresh_dir, "corrupt trace/nothing committed", False)
+    finally:
+        cleanup_traces(fresh_dir)
+
+    # 3b. A window with no events in it is absence too, on a perfectly
+    #     readable file.
+    empty_window = generate_traces(SCENARIO)
+    try:
+        _corrupt_probe(t, empty_window, "corrupt trace/empty window", False,
+                       from_=BASE + 10 ** 12, to_=BASE + 2 * 10 ** 12)
+    finally:
+        cleanup_traces(empty_window)
+
+    # 4. An unsupported trace VERSION stays skipped, not refused. The header
+    #    is `magic u32 | version u16 | ...` (src/event_writer.h), so writing
+    #    a version the reader does not know is a 2-byte patch at offset 4.
+    future_dir = generate_traces(SCENARIO)
+    try:
+        path = os.path.join(future_dir, "current.trace")
+        with open(path, "r+b") as f:
+            f.seek(4)
+            f.write((99).to_bytes(2, "little"))
+        _corrupt_probe(t, future_dir, "corrupt trace/future version", False)
+    finally:
+        cleanup_traces(future_dir)
+
+
 def main():
     t = TestRunner("test_protocol_drift")
     trace_dir = generate_traces(SCENARIO)
@@ -430,8 +613,13 @@ def main():
                     print(f"    DRIFT: {d}")
             check_transitions_idle_flag(t, srv)
             check_protocol_revision(t, srv)
+            check_top_sessions_cpu_fields(t, srv)
     finally:
         cleanup_traces(trace_dir)
+
+    # #333: its own trace dirs (one of them deliberately corrupt), so it runs
+    # after the schema comparison above has had an intact fixture.
+    check_corrupt_trace_refusal(t)
 
     ok = t.summary()
     sys.exit(0 if ok else 1)

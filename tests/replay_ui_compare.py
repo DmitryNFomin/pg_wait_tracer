@@ -172,8 +172,6 @@ def compare_table(tab, table, response, to_ns):
     by_identity = {}
     for row in rows:
         identity = str(row[key])
-        if identity == 'Other (background)':
-            identity = 'Background idle (parked)'
         if tab == 'waterfall':
             value = int(row[key])
             identity = datetime.fromtimestamp(value // 10**9, timezone.utc).strftime('%H:%M:%S')

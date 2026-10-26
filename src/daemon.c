@@ -813,7 +813,7 @@ static void handle_signal(struct pgwt_daemon *d)
  * stderr and, like the other PGWT_TEST_* hooks in this tree, exists only
  * for the gate.
  */
-static int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin)
+int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin)
 {
     struct pgwt_exec_site_plan plan;
     if (pgwt_resolve_exec_sites(bin, d->postmaster_pid, &plan) != 0) {
@@ -1198,44 +1198,14 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     if (pgwt_exact_probe_startup(d) != 0)
         goto fail;
 
-    /* Plan/execute USDT probes remain full-mode-only, as before Stage 3.
-     * They are not part of the two-link per-query bundle: EL8 kernels without
-     * USDT semaphore refcounting have always run exact wait/query capture with
-     * these optional phase markers unavailable. */
-    if (d->mode == PGWT_MODE_FULL && !d->lightweight_mode &&
-        !d->skip_usdt && d->pg_binary_saved) {
-        const char *bin = d->pg_binary_saved;
-        /* #464: the execution probes are attached by NAME, which covers
-         * BOTH of PostgreSQL's query__execute__* sites — the PortalRun pair
-         * and the inner pair in the static helper PortalRunMulti calls.
-         * Every plannable non-SELECT statement therefore produced two
-         * nested EXEC_START/EXEC_END pairs (Execs 368 against Plans 184;
-         * SELECTs, which never reach the second site, 91/91). Resolve the
-         * canonical sites from this binary and publish the allowlist the
-         * BPF handlers filter on BEFORE attaching. On refusal, attach
-         * NOTHING: execution telemetry is absent and loud, never doubled
-         * and quiet. */
-        if (pgwt_publish_exec_sites(d, bin) == 0) {
-            d->skel->links.on_exec_start = bpf_program__attach_usdt(
-                d->skel->progs.on_exec_start, -1, bin,
-                "postgresql", "query__execute__start", NULL);
-            d->skel->links.on_exec_done = bpf_program__attach_usdt(
-                d->skel->progs.on_exec_done, -1, bin,
-                "postgresql", "query__execute__done", NULL);
-            if (!d->skel->links.on_exec_start || !d->skel->links.on_exec_done)
-                fprintf(stderr, "WARN: optional full-mode execution USDT "
-                        "phase markers unavailable\n");
-        }
-        d->skel->links.on_plan_start = bpf_program__attach_usdt(
-            d->skel->progs.on_plan_start, -1, bin,
-            "postgresql", "query__plan__start", NULL);
-        d->skel->links.on_plan_done = bpf_program__attach_usdt(
-            d->skel->progs.on_plan_done, -1, bin,
-            "postgresql", "query__plan__done", NULL);
-        if (!d->skel->links.on_plan_start || !d->skel->links.on_plan_done)
-            fprintf(stderr, "WARN: optional full-mode plan USDT phase "
-                    "markers unavailable\n");
-    }
+    /* #108: the plan/execute USDT phase markers are bundle members now --
+     * pgwt_exact_probe_startup() pins them in full mode (same best-effort
+     * contract as before: a failed attach warns and capture continues),
+     * and an escalation window attaches them in tiered mode, where they
+     * used to be absent for the life of the daemon. They are deliberately
+     * NOT attached in the always-on sampled tier. See
+     * PGWT_EXACT_PROBE_PHASE_MASK and the #464 allowlist publish, which
+     * moved into the EXEC member's attach with them. */
 
     /* Set up lifecycle ring buffer consumer */
     int rb_map_fd = bpf_map__fd(d->skel->maps.lifecycle_rb);

@@ -120,6 +120,18 @@ run scripts/check-link-closure.sh
 step "runner-registration guard self-test"
 run tests/test_check_runner_registration.sh
 
+# #591 bypass suite: tests/test_uprobe_fired.py's exact-window mask gate is a
+# LIVE test (ci_smoke.sh only -- see the #433 gap above), so its own logic
+# would otherwise be provable only on a gate box. The resolver and the
+# three-part mask predicate are pure, and this runs them against every way the
+# gate could be made unable to SEE: an undeclared/unparseable expectation, an
+# absent or non-numeric mask field, phase markers absent where declared
+# present AND present where declared absent, an unknown bundle bit, plus two
+# subprocess cases proving the real test's main() actually consults the
+# resolver and that ci.yml still declares the expectation.
+step "exact-window mask gate bypass suite (#591)"
+run tests/test_uprobe_mask_gate.py
+
 # Runner-image pin guard (2026-10-22). GitHub rolled `ubuntu-latest` to Ubuntu
 # 26.04 and four gating jobs went red at once (run 39765852420): Playwright
 # 1.60.0 has no chromium for ubuntu26.04-x64, setup-python handed the
@@ -193,6 +205,9 @@ run python3 tests/test_rehearsal_workload_lifetime.py
 
 step "python: live-smoke verdict unit tests"
 run python3 tests/test_ui_live_smoke_lib.py
+
+step "python: #537 waterfall-readiness diagnostic refusal tests"
+run python3 tests/test_diag_537_waterfall.py
 
 step "python: live-smoke failure diagnostic capture (#544)"
 run python3 tests/test_ui_live_smoke_failure.py
@@ -285,6 +300,9 @@ run bash tests/test_classify_changed_files.sh
 
 step "cross-validate rate-sweep gate unit tests (issue #309)"
 run bash tests/test_cross_validate_rate_gate.sh
+
+step "cross-validate tolerance derivation + bypass suite (issues #294/#306/#321)"
+run bash tests/test_xval_tolerance_derivation.sh
 
 if [[ $FAST -eq 0 ]]; then
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─

@@ -434,6 +434,20 @@ void pgwt_live_qattr_between_commands(struct pgwt_accumulator *acc,
         pgwt_qattr_boundary(&pa->qattr, true, qattr_emit, acc);
 }
 
+void pgwt_live_qattr_pid_exit(struct pgwt_accumulator *acc, uint32_t pid)
+{
+    /* Find-only: an exit for a pid this accumulator never saw must not
+     * create an entry (a fabricated row on a dead backend). */
+    struct pgwt_pid_accum *pa = acc ? pgwt_find_pid_accum(acc, pid) : NULL;
+    if (!pa)
+        return;
+    /* new_command = true: the pid is gone, so cmd_qid must not survive into
+     * whatever reuses this slot. Idempotent -- pgwt_qattr_flush() resets
+     * npending, so the full tier's EXIT-record flush and this one cannot
+     * double-count. */
+    pgwt_qattr_boundary(&pa->qattr, true, qattr_emit, acc);
+}
+
 bool pgwt_live_qattr_sample(struct pgwt_accumulator *acc,
                             struct pgwt_pid_accum *pa, uint64_t query_id,
                             uint32_t we, uint64_t stat_ns, uint32_t cat_flag,

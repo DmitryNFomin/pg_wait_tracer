@@ -198,6 +198,22 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
                PGWT_REPLAY_LOOKAHEAD_BLOCKS);
     }
 
+    /* #534: measured CPU that exceeded its interval's wall. The live path
+     * reports this (src/daemon.h cpu_clamped_ns_total) precisely so an
+     * operator can tell "this capture is fine" from "this capture has a
+     * problem"; replay clamped the same quantity and said nothing, which
+     * is indistinguishable from zero. Printed only when non-zero: absence
+     * stays absence, it does not become a reassuring 0.0 ms line. */
+    if (rstats.cpu_clamped_ns > 0) {
+        printf("NOTE: %.1f ms of measured CPU exceeded the wall time of the "
+               "interval it belongs to\n"
+               "      and was clamped (clock skew, or a CPU read straddling "
+               "an interval boundary).\n"
+               "      The CPU numbers below are therefore a lower bound for "
+               "the affected intervals.\n\n",
+               rstats.cpu_clamped_ns / 1e6);
+    }
+
     if (rstats.blocks_unreadable > 0) {
         printf("NOTE: %llu block(s) in this trace could not be decoded and "
                "are missing from\n"

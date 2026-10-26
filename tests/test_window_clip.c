@@ -44,6 +44,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 static int failures = 0;
 static int checks   = 0;
@@ -86,14 +91,26 @@ static int checks   = 0;
     else printf("  ok: %s (%llu)\n", msg, _g);                       \
 } while (0)
 
-/* compute.c's only foreign symbol (summary streaming) — unused here. */
+/* compute.c's only foreign symbol (summary streaming).
+ *
+ * It REFUSES by default, which is what keeps every section below on the raw
+ * path. Section 12c points it at one synthetic per-second record so the
+ * SUMMARY twin of pgwt_compute_time_model can be driven in-process: the
+ * >= 120 s unfiltered routing is a different function with its own copy of
+ * the CPU-row rule, and a fix applied to only one of the two creates a
+ * discontinuity at 120 seconds — the same class of hole #559 hit. */
+static const struct pgwt_summary_accum *fake_summary_rec = NULL;
+
 int pgwt_visit_summaries(const char *trace_dir, uint64_t from_wall_ns,
                          uint64_t to_wall_ns, pgwt_summary_visitor visitor,
                          void *ctx)
 {
     (void)trace_dir; (void)from_wall_ns; (void)to_wall_ns;
-    (void)visitor; (void)ctx;
-    return -1;
+    if (!fake_summary_rec)
+        return -1;
+    if (visitor(fake_summary_rec, ctx) != 0)
+        return -1;
+    return 1;
 }
 
 /* ── Fixture vocabulary ───────────────────────────────────────────────── */
@@ -1662,6 +1679,1130 @@ static void test_cpu_row_measured_bypass(void)
     free(r.rows);
 }
 
+/* ── Integration note (agent/integration-20261025b) ─────────────────────
+ *
+ * The sections that follow arrived from agent/laneC-raw-compute, which
+ * numbered them 10-13 against the same base that #553's sections above
+ * numbered 10-11. BOTH series are kept verbatim rather than renumbered:
+ * every "10b", "12a", "13d" label also appears inside ~100 assertion
+ * MESSAGE strings, and rewriting those as part of a merge resolution is
+ * exactly how a dropped assertion hides inside textual churn. So
+ * "section 10" is ambiguous in this file — #553's is above, #461's is
+ * below — and main()'s assertion floor is the MEASURED union of both
+ * arms (288; see the note on the floor in main()).
+ */
+
+/* ── 10. #461: pgwt_compute_transitions must TERMINATE on a full table ──
+ *
+ * `while (ht[h].count > 0 && (from/to mismatch)) h = (h+1) & TRANS_HT_MASK;`
+ * had no fullness test. Once 4096 distinct (from, to) pairs occupy the
+ * 4096-slot table, the 4097th distinct pair finds no free slot and the loop
+ * runs forever: pgwt-server is single-threaded, so the request never
+ * answers and every tab stops at once. Same shape as #327.
+ *
+ * A HANG IS NOT A FAILING TEST, so this section runs the reducer in a
+ * forked child behind a watchdog: no answer within the deadline is a FAIL
+ * with a named reason, never a stalled suite. The watchdog is itself the
+ * thing most likely to make this gate unreachable — one that never fires,
+ * or that reports "ok" for a child that produced nothing, would approve the
+ * hang it exists to catch — so 10b/10c/10d exercise its three outcomes
+ * directly before 10e uses it.
+ *
+ * Timing: the only clock here is the watchdog deadline. The real fixture is
+ * 4097 in-memory records and returns in milliseconds against a 20 s
+ * deadline (measured 0.004 s wall for the whole suite); the hang it detects
+ * is INFINITE, not slow, so no runner load can turn a pass into a failure
+ * or the reverse. The spin control uses a 1.5 s deadline for the same
+ * reason — it can never finish.
+ */
+
+/* Distinct pairs in the fixture: one more than TRANS_HT_SIZE (4096), which
+ * is the first count the old probe loop could not place. */
+#define TRANS_FULL_PAIRS 4097
+/* Below the table size: the SAME fixture shape, provably admitted by
+ * pgwt_transition_record_counts, which is what keeps 10e from passing
+ * vacuously on a fixture the filter throws away. */
+#define TRANS_SAFE_PAIRS 4000
+
+struct trans_probe {
+    int32_t  num_rows;
+    int32_t  total_rows;
+    uint64_t total_transitions;
+};
+
+enum { CHILD_OK = 0, CHILD_TIMEOUT = 1, CHILD_NO_RESULT = 2, CHILD_HARNESS = 3 };
+
+static const char *child_rc_name(int rc)
+{
+    switch (rc) {
+    case CHILD_OK:        return "returned a result";
+    case CHILD_TIMEOUT:   return "DID NOT RETURN (watchdog fired)";
+    case CHILD_NO_RESULT: return "exited without a result";
+    default:              return "harness error (fork/pipe failed)";
+    }
+}
+
+/* Run `body` in a child with a deadline. CHILD_OK only when the child wrote
+ * the whole result: a child that dies, or writes a short record, is
+ * CHILD_NO_RESULT, never a silent zero-filled "pass". */
+static int run_child(void (*body)(int wfd), int timeout_ms,
+                     void *out, size_t len)
+{
+    int fds[2];
+    memset(out, 0xA5, len);     /* poison: an unwritten result cannot read 0 */
+    if (pipe(fds) != 0)
+        return CHILD_HARNESS;
+    fflush(NULL);               /* no duplicated stdio buffer in the child */
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return CHILD_HARNESS; }
+    if (pid == 0) {
+        close(fds[0]);
+        body(fds[1]);
+        _exit(0);
+    }
+    close(fds[1]);
+
+    struct pollfd pf;
+    pf.fd = fds[0];
+    pf.events = POLLIN;
+    pf.revents = 0;
+    int pr;
+    do { pr = poll(&pf, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
+
+    int rc;
+    if (pr == 0) {
+        kill(pid, SIGKILL);
+        rc = CHILD_TIMEOUT;
+    } else if (pr < 0) {
+        kill(pid, SIGKILL);
+        rc = CHILD_HARNESS;
+    } else {
+        size_t got = 0;
+        while (got < len) {
+            ssize_t k = read(fds[0], (char *)out + got, len - got);
+            if (k <= 0) break;
+            got += (size_t)k;
+        }
+        rc = (got == len) ? CHILD_OK : CHILD_NO_RESULT;
+    }
+    close(fds[0]);
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    return rc;
+}
+
+/* The fixture: `pairs` records, each a DISTINCT (from, to). Both ids are
+ * ordinary wait events (IO / Lock), so every record passes
+ * pgwt_transition_record_counts — asserted, not assumed, by 10e's
+ * below-the-bound twin. */
+static void trans_pairs_child(int wfd, int pairs)
+{
+    struct pgwt_trace_event *evs = calloc((size_t)pairs, sizeof(*evs));
+    if (!evs)
+        _exit(2);               /* CHILD_NO_RESULT, never a zeroed pass */
+    for (int i = 0; i < pairs; i++) {
+        evs[i].pid          = 4242;
+        evs[i].old_event    = EV(CLASS_IO,   (uint32_t)(i >> 7));
+        evs[i].new_event    = EV(CLASS_LOCK, (uint32_t)(i & 127));
+        evs[i].timestamp_ns = WFROM + (uint64_t)i;
+        evs[i].duration_ns  = 1000;
+        evs[i].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+    }
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_transitions_result tr;
+    pgwt_compute_transitions(evs, pairs, &f, 50, &tr);
+
+    struct trans_probe r;
+    r.num_rows          = tr.num_rows;
+    r.total_rows        = tr.total_rows;
+    r.total_transitions = tr.total_transitions;
+    free(tr.rows);
+    free(evs);
+    if (write(wfd, &r, sizeof(r)) != (ssize_t)sizeof(r))
+        _exit(3);
+}
+
+static void child_full_table(int wfd) { trans_pairs_child(wfd, TRANS_FULL_PAIRS); }
+static void child_safe_table(int wfd) { trans_pairs_child(wfd, TRANS_SAFE_PAIRS); }
+
+/* Watchdog controls. `volatile` so the spin cannot be optimised away. */
+static volatile unsigned long spin_sink;
+static void child_spin_forever(int wfd) { (void)wfd; for (;;) spin_sink++; }
+static void child_prompt_result(int wfd)
+{
+    struct trans_probe r = { 11, 22, 33 };
+    if (write(wfd, &r, sizeof(r)) != (ssize_t)sizeof(r)) _exit(3);
+}
+static void child_exit_silently(int wfd) { (void)wfd; _exit(9); }
+static void child_short_write(int wfd)
+{
+    char half[sizeof(struct trans_probe) / 2] = {0};
+    if (write(wfd, half, sizeof(half)) != (ssize_t)sizeof(half)) _exit(3);
+}
+
+static void test_transitions_table_full(void)
+{
+    printf("--- 10. #461: transitions probe loop terminates on a full table ---\n");
+
+    struct trans_probe r;
+
+    /* 10b. The watchdog FIRES on a child that never finishes. Without this,
+     * a watchdog wired to a deadline it can never reach would report every
+     * hang as a pass — the exact false negative this gate exists to avoid. */
+    int rc = run_child(child_spin_forever, 1500, &r, sizeof(r));
+    CHECK(rc == CHILD_TIMEOUT,
+          "10b control: the watchdog FIRES on a child that never returns");
+
+    /* 10c. …and does NOT fire on one that answers promptly. */
+    rc = run_child(child_prompt_result, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_OK && r.num_rows == 11 && r.total_rows == 22 &&
+          r.total_transitions == 33,
+          "10c control: a prompt child is CHILD_OK and its result arrives "
+          "intact");
+
+    /* 10d. A child that produces NOTHING is not a pass. Two shapes: a silent
+     * exit, and a truncated record. Both must be CHILD_NO_RESULT — a gate
+     * that reads an unwritten buffer as zeros approves absence. */
+    rc = run_child(child_exit_silently, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_NO_RESULT,
+          "10d control: a child that exits without writing is NO_RESULT, not OK");
+    rc = run_child(child_short_write, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_NO_RESULT,
+          "10d control: a child that writes a PARTIAL result is NO_RESULT");
+
+    /* 10e-pre. The fixture shape is admitted by the transition filter. This
+     * runs BELOW the table bound, so it passes on the broken tree too — it
+     * is the control that says 10e's failure is about FULLNESS and not
+     * about a fixture the reducer throws away. */
+    rc = run_child(child_safe_table, 20000, &r, sizeof(r));
+    CHECK(rc == CHILD_OK,
+          "10e-pre: 4000 distinct pairs (below the 4096 bound) return");
+    if (rc == CHILD_OK) {
+        CHECK_U64(r.total_rows, TRANS_SAFE_PAIRS,
+                  "…and every one of them is a row (the filter admits this "
+                  "fixture)");
+        CHECK_U64(r.total_transitions, TRANS_SAFE_PAIRS,
+                  "…and every record is counted");
+    }
+
+    /* 10e. THE DEFECT. 4097 distinct pairs — one past the 4096-slot table. */
+    rc = run_child(child_full_table, 20000, &r, sizeof(r));
+    if (rc != CHILD_OK)
+        printf("  (child outcome: %s)\n", child_rc_name(rc));
+    CHECK(rc == CHILD_OK,
+          "10e: 4097 distinct (from,to) pairs — one more than the 4096-slot "
+          "table — and pgwt_compute_transitions RETURNS");
+    if (rc == CHILD_OK) {
+        CHECK_U64(r.total_rows, TRANS_FULL_PAIRS,
+                  "…with every distinct pair present (no silently dropped "
+                  "edge: a graph quietly missing links is the other way this "
+                  "could be 'fixed')");
+        CHECK_U64(r.total_transitions, TRANS_FULL_PAIRS,
+                  "…and every record counted");
+        CHECK_U64(r.num_rows, 50,
+                  "…and max_rows still caps the returned rows at 50");
+    } else {
+        /* Keep the assertion count stable whichever way 10e goes, so the
+         * floor below cannot be satisfied by a shorter run. */
+        CHECK(0, "…total_rows unavailable: the reducer did not return");
+        CHECK(0, "…total_transitions unavailable: the reducer did not return");
+        CHECK(0, "…num_rows unavailable: the reducer did not return");
+    }
+}
+
+/* 10f. #461's refusal path. Growing the table removed the hang, but the
+ * remaining exit -- a real allocation failure -- must REFUSE the whole
+ * graph, never return the edges it managed to place. A transitions graph
+ * missing edges reads as "that transition never happened", which is a wrong
+ * answer rather than a smaller one.
+ *
+ * Both allocators are injected separately, because a refusal wired to only
+ * one of them approves the other: the accumulator array (accum_grow,
+ * "transition_entries") and the pair index (qid_index.h, "qid_index_grow").
+ * The clean run on the SAME fixture is the control that says the refusal is
+ * caused by the injection and not by the fixture. */
+static void trans_refusal_case(const char *point, const char *label)
+{
+    struct pgwt_trace_event evs[4];
+    memset(evs, 0, sizeof(evs));
+    for (int i = 0; i < 4; i++) {
+        evs[i].pid          = 7;
+        evs[i].old_event    = EV(CLASS_IO, (uint32_t)i);
+        evs[i].new_event    = EV(CLASS_LOCK, (uint32_t)i);
+        evs[i].timestamp_ns = WFROM + (uint64_t)i;
+        evs[i].duration_ns  = 1000;
+        evs[i].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+    }
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    if (point) setenv("PGWT_TEST_ALLOC_FAIL", point, 1);
+    else       unsetenv("PGWT_TEST_ALLOC_FAIL");
+
+    struct pgwt_transitions_result tr;
+    pgwt_compute_transitions(evs, 4, &f, 50, &tr);
+
+    if (point) {
+        CHECK(tr.failed == 1 && tr.num_rows == 0 && tr.total_rows == 0 &&
+              tr.total_transitions == 0 && tr.rows == NULL,
+              label);
+    } else {
+        CHECK(tr.failed == 0 && tr.num_rows == 4 && tr.total_rows == 4 &&
+              tr.total_transitions == 4, label);
+    }
+    free(tr.rows);
+    unsetenv("PGWT_TEST_ALLOC_FAIL");
+}
+
+static void test_transitions_alloc_refusal(void)
+{
+    printf("--- 10f. #461: an allocation failure refuses the whole graph ---\n");
+    trans_refusal_case(NULL, "10f control: the fixture itself computes four "
+                             "pairs cleanly (no injection)");
+    trans_refusal_case("transition_entries",
+                       "10f: accumulator growth fails -> failed=1 and NOTHING "
+                       "is returned (never a partial graph)");
+    trans_refusal_case("qid_index_grow",
+                       "10f: pair-index growth fails -> failed=1 and NOTHING "
+                       "is returned");
+    trans_refusal_case(NULL, "10f control: the refusal does not latch -- the "
+                             "same fixture computes cleanly again afterwards");
+}
+
+/* ── 11. #374: the per-pid TAGGING table must not have a fixed bound ──
+ *
+ * pgwt_tag_events' `tag_pid_state ht[TAG_HT_SIZE]` was the LAST fixed-size
+ * pid table (#327 grew the other five). Past 4096 distinct pids in one
+ * loaded window, tag_pid_get() ran out of slots and the pass refused the
+ * whole array — correct as a fail-safe (#363), but the array IS the oracle
+ * every raw estimator reads, so the refusal becomes a TOTAL OUTAGE: every
+ * request on that window answers `code: "allocation_failed"`, "memory
+ * allocation failed", hint "retry the request". Nothing was allocated and
+ * retrying never helps. Distinct pids per window are driven by connection
+ * CHURN, not concurrency, so 4097 is ordinary on a long capture — and
+ * `pgwt-server --dump` loads the WHOLE trace, where it is close to certain.
+ *
+ * Nothing here is timed, ordered against anything, or shared: one in-memory
+ * array, one call.
+ */
+
+#define TAG_OVER_PIDS  5000     /* > the old 4096-slot table */
+#define TAG_UNDER_PIDS 4000     /* < it: the same shape, admitted either way */
+
+/* One IO wait per pid, pids 10000.. ascending. Each pid is declared either
+ * BACKGROUND or MAINT by index parity — two DIFFERENT non-zero flags, so the
+ * probe below is a positive assertion on both records it reads.
+ *
+ * That shape is deliberate. An earlier draft marked odd pids with flag 0 and
+ * happened to probe an odd pid, so "the record carries its pid's flag" read
+ * `(flags & BACKGROUND) == 0` — true for an untagged record too, and true on
+ * the broken tree. Expecting ZERO proves nothing about whether the pass ran;
+ * the possibility is removed here rather than asserted around. */
+static int tag_scale_case(int n_pids, uint32_t *last_flags, uint32_t *prev_flags)
+{
+    struct pgwt_trace_event *evs = calloc((size_t)n_pids, sizeof(*evs));
+    struct pgwt_pid_cat *cats = calloc((size_t)n_pids, sizeof(*cats));
+    if (!evs || !cats) { free(evs); free(cats); return -1; }
+
+    for (int i = 0; i < n_pids; i++) {
+        uint32_t pid = 10000u + (uint32_t)i;
+        evs[i].pid          = pid;
+        evs[i].old_event    = IO_READ;
+        evs[i].new_event    = CPU_GAP;
+        evs[i].timestamp_ns = WFROM + S(1) + (uint64_t)i;
+        evs[i].duration_ns  = 1000;
+        evs[i].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+        /* pid_cat_lookup binary-searches, so cats must be pid-ascending. */
+        cats[i].pid  = pid;
+        cats[i].flag = (i % 2 == 0) ? PGWT_EVENT_FLAG_BACKGROUND
+                                    : PGWT_EVENT_FLAG_MAINT;
+    }
+
+    int ok = pgwt_tag_events(evs, n_pids, cats, n_pids);
+    /* The last two records: past the old bound, and the ones a pass that
+     * stopped early would never reach. Their expected flags DIFFER, so a
+     * blanket stamp fails one of them. */
+    *prev_flags = evs[n_pids - 2].flags;
+    *last_flags = evs[n_pids - 1].flags;
+    free(evs);
+    free(cats);
+    return ok;
+}
+
+/* n_pids is even in both cases below, so index n-2 is a BACKGROUND pid and
+ * index n-1 a MAINT one. Both expectations are non-zero. */
+static int tag_probe_ok(uint32_t last_flags, uint32_t prev_flags)
+{
+    return (prev_flags & PGWT_EVENT_FLAG_BACKGROUND) != 0 &&
+           (prev_flags & PGWT_EVENT_FLAG_MAINT) == 0 &&
+           (last_flags & PGWT_EVENT_FLAG_MAINT) != 0 &&
+           (last_flags & PGWT_EVENT_FLAG_BACKGROUND) == 0;
+}
+
+static void test_tag_table_scale(void)
+{
+    printf("--- 11. #374: the tagging pid table is not fixed at 4096 ---\n");
+
+    uint32_t last = 0, prev = 0;
+
+    /* 11a control, below the old bound: passes on the broken tree too. It is
+     * what says 11b's failure is about the BOUND and not about a fixture
+     * pgwt_tag_events would reject for some other reason. */
+    int ok = tag_scale_case(TAG_UNDER_PIDS, &last, &prev);
+    CHECK(ok == 1, "11a control: 4000 distinct pids tag successfully");
+    CHECK(tag_probe_ok(last, prev),
+          "11a control: …and the last two records carry their OWN pids' "
+          "distinct category flags (the pass is neither a no-op that returns "
+          "1 nor a blanket stamp)");
+
+    /* 11b. THE DEFECT: one more distinct pid than the fixed table held is a
+     * total refusal of every raw request on the window. */
+    last = prev = 0;
+    ok = tag_scale_case(TAG_OVER_PIDS, &last, &prev);
+    CHECK(ok == 1,
+          "11b: 5000 distinct pids (past the old 4096-slot table) still tag "
+          "successfully — connection churn is not an allocation failure");
+    CHECK(tag_probe_ok(last, prev),
+          "11b: …and the records BEYOND the old bound carry their own flags, "
+          "so the pass grew the table rather than quietly skipping the "
+          "surplus pids");
+
+    /* 11c. The refusal that must SURVIVE: a real allocation failure still
+     * refuses the whole array (#363). Three injection points — the historic
+     * one and both allocators the growable table uses — because a refusal
+     * wired to only one of them approves the others. */
+    struct pgwt_trace_event one[1];
+    struct pgwt_pid_cat cat1[1];
+    const char *pts[3] = { "tag_ht", "tag_pid_entries", "pid_index_grow" };
+    const char *envs[3] = { "PGWT_TEST_LOAD_ALLOC_FAIL",
+                            "PGWT_TEST_ALLOC_FAIL", "PGWT_TEST_ALLOC_FAIL" };
+    for (int k = 0; k < 3; k++) {
+        memset(one, 0, sizeof(one));
+        one[0].pid = 777; one[0].old_event = IO_READ;
+        one[0].timestamp_ns = WFROM + S(1); one[0].duration_ns = 1000;
+        one[0].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        cat1[0].pid = 777; cat1[0].flag = PGWT_EVENT_FLAG_BACKGROUND;
+        setenv(envs[k], pts[k], 1);
+        int r = pgwt_tag_events(one, 1, cat1, 1);
+        unsetenv(envs[k]);
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "11c: a REAL allocation failure at \"%s\" still refuses the "
+                 "whole array", pts[k]);
+        CHECK(r == 0, msg);
+    }
+
+    /* …and the refusal does not latch: the same call succeeds once the
+     * injection is gone. Without this, 11c would also pass if the function
+     * had simply started refusing everything. */
+    memset(one, 0, sizeof(one));
+    one[0].pid = 777; one[0].old_event = IO_READ;
+    one[0].timestamp_ns = WFROM + S(1); one[0].duration_ns = 1000;
+    one[0].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    cat1[0].pid = 777; cat1[0].flag = PGWT_EVENT_FLAG_BACKGROUND;
+    int r = pgwt_tag_events(one, 1, cat1, 1);
+    CHECK(r == 1 && (one[0].flags & PGWT_EVENT_FLAG_BACKGROUND) != 0,
+          "11c control: with no injection the same call succeeds and tags");
+
+    /* An empty array is a complete success, not a refusal (compute.h). */
+    CHECK(pgwt_tag_events(NULL, 0, NULL, 0) == 1,
+          "11d: an empty window is a complete tagging result, not a failure");
+}
+
+/* ── 12. #575: time_model must not hide a non-zero off-CPU sibling ──
+ *
+ * Both CPU rows sat INSIDE the `classes[c].total_ns <= 0 -> continue` guard.
+ * An all-runqueue gap — a backend that was ready and never scheduled, which
+ * is exactly the condition this tool exists to show — measures cpu_ns == 0
+ * over a non-zero wall, so the CPU class total is 0, the guard skips the
+ * class, and BOTH CPU rows disappear. The time is still inside DB Time, so
+ * the Time Model shows a DB Time it does not account for and the reader
+ * concludes there was no CPU activity.
+ *
+ * TWO DEFECTS, not one, and 12b is the second:
+ *   (1) the row guard above, which is in the raw path AND in its summary
+ *       twin (pgwt_compute_time_model_from_summaries), so fixing one alone
+ *       would make the Time Model disagree with itself across the 120 s
+ *       summary-routing threshold. 12a and 12c pin both.
+ *   (2) has_measured_cpu was also raised by MEASURED SPIN INSIDE A WAIT
+ *       (the else branch's wait_gap_cpu_ns), which is a different question
+ *       from "is this response's CPU row a measurement". With an UNKNOWN CPU
+ *       gap next to such a wait, time_model labelled an UNMEASURED wall
+ *       "CPU (running)" and printed a 0.0 ms runqueue sibling beside it.
+ *       Different cause, different line, so: a second bug. The summary
+ *       twin's flag was already the narrow one (cpu_measured_records > 0),
+ *       which is also the evidence for which of the two predicates is
+ *       intended.
+ *
+ * Nothing here is timed or ordered: in-memory arrays and, for 12c, one
+ * synthetic summary record fed through the stub above.
+ */
+
+static double tm_row_ms(const struct pgwt_tm_result *tm, const char *name)
+{
+    return tm_class_ms(tm, name);      /* -1.0 == the row is ABSENT */
+}
+
+static int tm_row_count(const struct pgwt_tm_result *tm, const char *name)
+{
+    int n = 0;
+    for (int i = 0; i < tm->num_rows; i++)
+        if (tm->rows[i].indent == 1 && strcmp(tm->rows[i].name, name) == 0)
+            n++;
+    return n;
+}
+
+static void test_time_model_offcpu_sibling(void)
+{
+    printf("--- 12. #575: an all-runqueue gap must still report both CPU rows ---\n");
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* 12a. One 10 ms on-CPU gap, MEASURED as 0 ns on a core. */
+    {
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(900, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 0 /* measured 0 */);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+
+        CHECK_MS(tm.db_time_ms, 10.0, "12a: the gap is 10 ms of DB Time");
+        CHECK(tm.has_measured_cpu == 1,
+              "12a: the window HAS a measured CPU row (a measured zero is a "
+              "signal, not an absence)");
+        CHECK_MS(tm.offcpu_ms, 10.0,
+                 "12a: …and the scalar off-CPU total is the whole gap");
+        CHECK_MS(tm_row_ms(&tm, "CPU (running)"), 0.0,
+                 "12a: the 'CPU (running)' ROW is present and reads 0.0 ms — "
+                 "nothing ran, measured");
+        CHECK_MS(tm_row_ms(&tm, "CPU (waiting for a core)"), 10.0,
+                 "12a: and its sibling ROW reports the whole 10 ms "
+                 "(this is the defect: both rows used to vanish)");
+        CHECK(tm_row_count(&tm, "CPU*") == 0,
+              "12a: …and the un-split 'CPU*' label is NOT used, because this "
+              "window can separate running from waiting");
+        free(tm.rows);
+    }
+
+    /* 12b. An UNKNOWN gap plus a wait carrying measured spin. The gap's wall
+     * is NOT a measurement of on-CPU time and must not be labelled one. */
+    {
+        struct pgwt_trace_event evs[2];
+        evs[0] = mk(901, CPU_GAP, WFROM + S(1), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        evs[1] = mk(901, LOCK_RELATION, WFROM + S(2), 5000000ULL, 0,
+                    1000000ULL /* 1 ms of spin inside the wait */);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 2, &f, WFROM, WTO, 10000.0, &tm);
+
+        CHECK_MS(tm.db_time_ms, 15.0, "12b: DB Time is 10 + 5 ms");
+        CHECK(tm.has_measured_cpu == 0,
+              "12b: has_measured_cpu is 0 — spin measured INSIDE A WAIT is "
+              "not a measurement of THIS response's CPU row");
+        CHECK_MS(tm_row_ms(&tm, "CPU*"), 10.0,
+                 "12b: the gap is the un-split 'CPU*' row by gap-inference");
+        CHECK(tm_row_ms(&tm, "CPU (running)") < 0.0,
+              "12b: …NOT labelled 'CPU (running)', which claimed an "
+              "unmeasured wall was measured on-CPU time");
+        CHECK(tm_row_ms(&tm, "CPU (waiting for a core)") < 0.0,
+              "12b: …and there is NO 0.0 ms runqueue sibling: off-CPU time "
+              "here is unavailable, which is not the same as zero");
+        CHECK_MS(tm.wait_gap_cpu_ms, 1.0,
+                 "12b: the wait's spin is still reported as the observability "
+                 "sum it always was — narrowing the flag loses no number");
+        free(tm.rows);
+    }
+
+    /* 12c. The SUMMARY twin, same all-runqueue second, through the stub. The
+     * routing threshold is 120 s, so these two functions answer the same
+     * question on either side of it and must not disagree. */
+    {
+        struct pgwt_summary_accum rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.second_wall_ns = WFROM + S(1);
+        rec.total_events = 1;
+        rec.class_ns[PGWT_CLASS_CPU] = 10000000ULL;   /* 10 ms of DB Time */
+        rec.cpu_measured_ns = 0;                      /* measured: none on a core */
+        rec.cpu_unknown_ns = 0;
+        rec.cpu_measured_records = 1;                 /* …but it WAS measured */
+        fake_summary_rec = &rec;
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model_from_summaries("/nonexistent", WFROM, WTO,
+                                               &f, 10000.0, &tm);
+        fake_summary_rec = NULL;
+
+        CHECK_MS(tm.db_time_ms, 10.0, "12c: the summary twin sees 10 ms of DB Time");
+        CHECK(tm.has_measured_cpu == 1, "12c: …and a measured CPU row");
+        CHECK_MS(tm_row_ms(&tm, "CPU (running)"), 0.0,
+                 "12c: the summary twin ALSO emits 'CPU (running)' 0.0 ms");
+        CHECK_MS(tm_row_ms(&tm, "CPU (waiting for a core)"), 10.0,
+                 "12c: …and its 10 ms sibling — identical to 12a, so the "
+                 "Time Model does not change answer at the 120 s threshold");
+        free(tm.rows);
+    }
+
+    /* 12d controls. Each removes a way the fix could be "always print the
+     * CPU rows", which would be a different wrong answer. */
+    {
+        /* A MEASURED, non-zero gap: 10 ms wall, 4 ms on a core. Unchanged. */
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(902, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 4000000ULL);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+        CHECK_MS(tm_row_ms(&tm, "CPU (running)"), 4.0,
+                 "12d control: a measured non-zero gap still reports the "
+                 "MEASURED 4 ms on the running row");
+        CHECK_MS(tm_row_ms(&tm, "CPU (waiting for a core)"), 6.0,
+                 "12d control: …and 6 ms on the runqueue row");
+        free(tm.rows);
+    }
+    {
+        /* UNKNOWN only, no wait spin anywhere: one combined row, no sibling. */
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(903, CPU_GAP, WFROM + S(1), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+        CHECK_MS(tm_row_ms(&tm, "CPU*"), 10.0,
+                 "12d control: an UNKNOWN-only window keeps ONE combined "
+                 "'CPU*' row");
+        CHECK(tm_row_ms(&tm, "CPU (waiting for a core)") < 0.0,
+              "12d control: …with no runqueue sibling (unavailable is not 0)");
+        free(tm.rows);
+    }
+    {
+        /* NO CPU record at all: neither CPU row may be invented. */
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(904, IO_READ, WFROM + S(1), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+        CHECK(tm_row_ms(&tm, "CPU (running)") < 0.0 &&
+              tm_row_ms(&tm, "CPU*") < 0.0 &&
+              tm_row_ms(&tm, "CPU (waiting for a core)") < 0.0,
+              "12d control: a window with NO on-CPU gap reports NO CPU row "
+              "of any kind — the fix must not conjure a 0.0/0.0 pair");
+        free(tm.rows);
+    }
+}
+
+/* ── 13. #562: Top Sessions' CPU column is MEASURED on-CPU time ──
+ *
+ * `if (ev->old_event == 0) ht[h].cpu_ns += clip_u;` added the window-clipped
+ * WALL of each on-CPU gap where the MEASURED cpu_ns belongs — the sibling of
+ * #553 (top_events, PR #559) and #531 (CLI replay, PR #554), on the function
+ * #553's issue text actually quoted. For a WAIT row wall IS the wait; the gap
+ * between two waits is "on a core" only for the part sum_exec_runtime
+ * actually advanced, and the rest is runqueue time.
+ *
+ * AN AGREEMENT OR SUMS-TO-100% CHECK CANNOT SEE THIS, and that is not a
+ * guess: on the broken tree `wait_pct = 100 - cpu_pct` with cpu_pct taken
+ * from the gap wall is ALGEBRAICALLY equal to Σwaits/db, because db is
+ * exactly gaps + waits. So the two columns summed to a flat 100.0% while the
+ * CPU column overstated on-CPU time by 150% (10.0 ms where 4.0 was right).
+ * Every assertion below is therefore against its OWN literal, and the
+ * conservation check names each of its three terms separately — the sum
+ * alone is vacuous, since off-CPU is wall − measured by construction.
+ *
+ * The contract is #559's, field for field, not a parallel one: measured
+ * on-CPU ns on the row, an offcpu_ms remainder beside it, a response-level
+ * has_measured_cpu saying which quantity the CPU column IS, and
+ * cpu_clamped_ms as the skew self-check. wait_pct additionally moves to the
+ * live semantics Σwaits/db, which is forced BY the CPU fix: once cpu_pct is
+ * the measurement, 100 − cpu_pct is no longer the wait share.
+ *
+ * 13d pins the SUMMARY twin, which is a registered HOLE rather than a fix:
+ * the per-second record's struct pgwt_summary_session carries
+ * `cpu_ns += tns` — wall (src/summary_writer.c) — and there is no measured
+ * column in the format, so that routing reports the unsplit gap wall and
+ * says so with has_measured_cpu = 0. should_use_summaries routes an
+ * unfiltered window >= 120 s there and every UI preset is >= 300 s, so this
+ * is a REAL user-visible divergence awaiting a format change, pinned here as
+ * an identity (raw CPU + raw off-CPU == summary CPU) so the day the writer
+ * carries the measurement, this is the test that notices.
+ *
+ * Nothing here is timed: in-memory arrays, and one synthetic summary record
+ * through the stub at the top of this file.
+ */
+
+static const struct pgwt_session_row *sess_row(const struct pgwt_sessions_result *r,
+                                               uint32_t pid)
+{
+    for (int i = 0; i < r->num_rows; i++)
+        if (r->rows[i].pid == pid) return &r->rows[i];
+    return NULL;
+}
+
+static void test_sessions_measured_cpu(void)
+{
+    printf("--- 13. #562: Top Sessions' CPU column is measured, not wall ---\n");
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* 13a. pid 100: a 10 ms gap MEASURED at 4 ms on a core, plus a 5 ms Lock
+     * wait. db = 15 ms; CPU 4 ms (26.666…%), waits 5 ms (33.333…%), off-CPU
+     * 6 ms (the remainder). On the broken tree: CPU 10 ms / 66.667%. */
+    {
+        struct pgwt_trace_event evs[2];
+        evs[0] = mk(100, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 4000000ULL);
+        evs[1] = mk(100, LOCK_RELATION, WFROM + S(2), 5000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        struct pgwt_sessions_result ts;
+        pgwt_compute_top_sessions(evs, 2, &f, WFROM, WTO, 10000.0, &ts);
+
+        const struct pgwt_session_row *r = sess_row(&ts, 100);
+        CHECK(r != NULL, "13a: pid 100 has a row");
+        CHECK(ts.has_measured_cpu == 1,
+              "13a: the response says its CPU column IS a measurement");
+        if (r) {
+            CHECK_MS(r->db_time_ms, 15.0,
+                     "13a: DB Time is the full 15 ms of wall (unchanged)");
+            CHECK_NUM(r->cpu_pct, 4.0 / 15.0 * 100.0,
+                      "13a: cpu_pct is the MEASURED 4 ms over DB Time "
+                      "(26.667%), not the gap's 10 ms wall (66.667%)");
+            CHECK_NUM(r->wait_pct, 5.0 / 15.0 * 100.0,
+                      "13a: wait_pct is Σwaits/db — the live semantics — "
+                      "not 100 − cpu_pct, which would now read 73.333%");
+            CHECK_MS(r->offcpu_ms, 6.0,
+                     "13a: and the 6 ms the CPU row no longer claims is "
+                     "REPORTED as the off-CPU remainder, not dropped");
+            /* Conservation, each term against its own literal. */
+            double cpu_ms = r->cpu_pct / 100.0 * r->db_time_ms;
+            double wait_ms = r->wait_pct / 100.0 * r->db_time_ms;
+            CHECK_MS(cpu_ms, 4.0, "13a conservation: the CPU term is 4 ms");
+            CHECK_MS(wait_ms, 5.0, "13a conservation: the wait term is 5 ms");
+            CHECK_MS(r->offcpu_ms, 6.0,
+                     "13a conservation: the off-CPU term is 6 ms");
+            CHECK_MS(cpu_ms + wait_ms + r->offcpu_ms, 15.0,
+                     "13a conservation: …and the three add up to DB Time "
+                     "(the sum ALONE would be vacuous — off-CPU is wall "
+                     "minus measured by construction)");
+        }
+        CHECK_MS(ts.cpu_clamped_ms, 0.0,
+                 "13a: nothing was clamped (the measurement fits its wall)");
+        free(ts.rows);
+    }
+
+    /* 13b. UNKNOWN only (sampled / v2 / no CPU capability): gap-inference is
+     * kept — the whole gap wall is the CPU column — and the response says so
+     * rather than claiming a measured zero remainder. */
+    {
+        struct pgwt_trace_event evs[2];
+        evs[0] = mk(200, CPU_GAP, WFROM + S(1), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        evs[1] = mk(200, LOCK_RELATION, WFROM + S(2), 10000000ULL, 0,
+                    PGWT_CPU_NS_UNKNOWN);
+        struct pgwt_sessions_result ts;
+        pgwt_compute_top_sessions(evs, 2, &f, WFROM, WTO, 10000.0, &ts);
+        const struct pgwt_session_row *r = sess_row(&ts, 200);
+        CHECK(ts.has_measured_cpu == 0,
+              "13b: an UNKNOWN-only window does NOT claim a measurement");
+        CHECK(r != NULL, "13b: pid 200 has a row");
+        if (r) {
+            CHECK_NUM(r->cpu_pct, 50.0,
+                      "13b: the CPU column is the unsplit gap wall (50%)");
+            CHECK_NUM(r->wait_pct, 50.0, "13b: and Σwaits/db is the other half");
+            CHECK_MS(r->offcpu_ms, 0.0,
+                     "13b: off-CPU is 0 as a REFUSAL to split, which "
+                     "has_measured_cpu == 0 is what distinguishes from a "
+                     "measured zero");
+        }
+        free(ts.rows);
+    }
+
+    /* 13c. A gap STRADDLING the window edge contributes only the CPU that
+     * happened inside it: 10 ms wall / 4 ms measured, half in window ->
+     * 5 ms of DB Time, 2 ms measured, 3 ms off-CPU. The same fraction split
+     * the time model and #559 use, record for record.
+     * Plus the clamp: pid 400's measurement exceeds its own wall. */
+    {
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(300, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 4000000ULL);
+        /* Window opens 5 ms before the record closes: half of it is inside. */
+        uint64_t wfrom = WFROM + S(1) - 5000000ULL;
+        struct pgwt_sessions_result ts;
+        pgwt_compute_top_sessions(evs, 1, &f, wfrom, WTO, 10000.0, &ts);
+        const struct pgwt_session_row *r = sess_row(&ts, 300);
+        CHECK(r != NULL, "13c: the straddling session has a row");
+        if (r) {
+            CHECK_MS(r->db_time_ms, 5.0, "13c: only the in-window 5 ms of wall");
+            CHECK_NUM(r->cpu_pct, 2.0 / 5.0 * 100.0,
+                      "13c: and only the in-window HALF of the measurement "
+                      "(2 ms of 5 ms = 40%), never the whole 4 ms");
+            CHECK_MS(r->offcpu_ms, 3.0, "13c: with 3 ms of off-CPU remainder");
+        }
+        free(ts.rows);
+    }
+    {
+        struct pgwt_trace_event evs[1];
+        evs[0] = mk(400, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 12000000ULL);
+        struct pgwt_sessions_result ts;
+        pgwt_compute_top_sessions(evs, 1, &f, WFROM, WTO, 10000.0, &ts);
+        const struct pgwt_session_row *r = sess_row(&ts, 400);
+        CHECK(r != NULL, "13c: the over-measured session has a row");
+        if (r) {
+            CHECK_NUM(r->cpu_pct, 100.0,
+                      "13c: a measurement past its own wall is CLAMPED to "
+                      "the wall (sum_exec_runtime is only current at a tick)");
+            CHECK_MS(r->offcpu_ms, 0.0, "13c: leaving no off-CPU remainder");
+        }
+        CHECK_MS(ts.cpu_clamped_ms, 2.0,
+                 "13c: …and the 2 ms excess is COUNTED, not silently "
+                 "absorbed — the same self-check the time model reports");
+        free(ts.rows);
+    }
+
+    /* 13d. The SUMMARY twin: the registered hole, and the identity across it.
+     * One synthetic per-second record describing the SAME session as 13a —
+     * 15 ms of DB Time of which the gap's wall was 10 ms, which is all the
+     * format records. */
+    {
+        struct pgwt_summary_accum rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.second_wall_ns = WFROM + S(1);
+        rec.sessions[0].pid = 100;
+        rec.sessions[0].db_time_ns = 15000000ULL;
+        rec.sessions[0].cpu_ns = 10000000ULL;    /* WALL: all the format has */
+        rec.sessions[0].top_wait_id = LOCK_RELATION;
+        rec.sessions[0].top_wait_ns = 5000000ULL;
+        rec.num_sessions = 1;
+        fake_summary_rec = &rec;
+        struct pgwt_sessions_result sum;
+        pgwt_compute_top_sessions_from_summaries("/nonexistent", WFROM, WTO,
+                                                 &f, 10000.0, &sum);
+        fake_summary_rec = NULL;
+
+        const struct pgwt_session_row *sr = sess_row(&sum, 100);
+        CHECK(sum.has_measured_cpu == 0,
+              "13d: the summary routing does NOT claim a measurement — the "
+              "format stores wall for the CPU column");
+        CHECK(sr != NULL, "13d: the summary row exists");
+        if (sr) {
+            CHECK_NUM(sr->cpu_pct, 10.0 / 15.0 * 100.0,
+                      "13d: …so it reports the unsplit 10 ms gap wall "
+                      "(66.667%), which is the divergence #562 registers");
+            CHECK_MS(sr->offcpu_ms, 0.0,
+                     "13d: and no remainder, because it never split one off");
+            /* wait_pct is the SAME quantity on both paths, and must be the
+             * same floating-point EXPRESSION too: it used to read
+             * `100 - cpu_pct` here, which is algebraically Σwaits/db on this
+             * path but differs from it in the last bit, and
+             * tests/test_agg_raw_crosscheck.c compares the two paths with
+             * exact equality (`!(a == b)`). 5 ms of 15. */
+            CHECK_NUM(sr->wait_pct, 5.0 / 15.0 * 100.0,
+                      "13d: the summary wait_pct is Σwaits/db, computed as "
+                      "the integer (db − cpu) over db, exactly as raw "
+                      "divides");
+            /* The identity: the two paths describe the SAME total two ways.
+             * Rebuilt from the raw path rather than from 13a's locals, so
+             * this compares two computations and not one. */
+            struct pgwt_trace_event evs[2];
+            evs[0] = mk(100, CPU_GAP, WFROM + S(1), 10000000ULL, 0, 4000000ULL);
+            evs[1] = mk(100, LOCK_RELATION, WFROM + S(2), 5000000ULL, 0,
+                        PGWT_CPU_NS_UNKNOWN);
+            struct pgwt_sessions_result raw;
+            pgwt_compute_top_sessions(evs, 2, &f, WFROM, WTO, 10000.0, &raw);
+            const struct pgwt_session_row *rr = sess_row(&raw, 100);
+            CHECK(rr != NULL, "13d: the raw row exists for the same session");
+            if (rr) {
+                double raw_cpu_ms = rr->cpu_pct / 100.0 * rr->db_time_ms;
+                double sum_cpu_ms = sr->cpu_pct / 100.0 * sr->db_time_ms;
+                CHECK_MS(raw_cpu_ms + rr->offcpu_ms, sum_cpu_ms,
+                         "13d identity: raw CPU + raw off-CPU == summary CPU "
+                         "— one total, split two ways, so the day the writer "
+                         "carries the measurement this is what notices");
+                CHECK_MS(rr->db_time_ms, sr->db_time_ms,
+                         "13d: DB Time itself does NOT diverge — only the "
+                         "CPU column does");
+            }
+            free(raw.rows);
+        }
+        free(sum.rows);
+    }
+}
+
+/* ── 14. #529: the execution-detail tooltip's wall time ───────────────────
+ *
+ * THE DEFECT. #496 made `pgwt_exec_event.duration_ns` the slice INSIDE the
+ * execution window, which is right for the column that gets SUMMED (before
+ * #496 the per-event durations added up past the execution's own duration).
+ * But the clipped value became the ONLY one there is, and the Waterfall
+ * tooltip reads it as the event's wall time: a 4 ms wait that opened 2 ms
+ * before EXEC_START displays as 2 ms. The record's own duration was on no
+ * wire field at all, so no client could say what the wait actually was.
+ *
+ * So the struct carries BOTH: `duration_ns` (clipped, summable) and
+ * `raw_duration_ns` (the record's own wall time). src/server.c serialises
+ * them as `dur_ns` and `raw_dur_ns`.
+ *
+ * WHY THE ASSERTIONS ARE ABSOLUTE LITERALS AND NOT AN AGREEMENT. Lane C's
+ * #562 trap in miniature: "the two fields differ on a straddler" is
+ * satisfied by any pair of different numbers, and "they agree on an interior
+ * event" is satisfied by emitting one value twice. Each arm below names the
+ * nanosecond count it requires, and the two arms disagree about which field
+ * moves, so no single wrong implementation satisfies both:
+ *
+ *   straddler  dur_ns = 2 ms   raw_dur_ns = 4 ms   (#529's measured pair)
+ *   interior   dur_ns = 5 ms   raw_dur_ns = 5 ms
+ *
+ * - emit the raw value into dur_ns (i.e. revert #496): straddler dur_ns
+ *   reads 4 ms, fails.
+ * - emit the clipped value into raw_dur_ns (the no-op field): straddler
+ *   raw_dur_ns reads 2 ms, fails.
+ * - leave raw_duration_ns unset: reads 0, fails.
+ * - raw_dur_ns = 2 * dur_ns (which the straddler alone cannot tell apart):
+ *   the interior event reads 10 ms, fails.
+ *
+ * Nothing here touches a clock, a socket or a subprocess: two in-memory
+ * arrays and absolute ns literals. There is no ordering to get wrong either
+ * — events are located by event id, never by index.
+ */
+
+#define EXEC_PID        100u
+#define EXEC_QID        4242ULL
+#define EXEC_START_NS   (T0 + S(1))
+#define EXEC_END_NS     (T0 + S(3))
+#define MS(x)           ((uint64_t)(x) * 1000000ULL)
+
+/* Locate one lane entry by event id. Returns NULL when the lane does not
+ * carry it — and section 14b REQUIRES that NULL for an id the fixture never
+ * produced, so "the helper found nothing" can never read as a pass. */
+static const struct pgwt_exec_event *
+lane_event(const struct pgwt_exec_lane *lane, uint32_t event_id)
+{
+    for (int i = 0; i < lane->num_events; i++)
+        if (lane->events[i].event_id == event_id)
+            return &lane->events[i];
+    return NULL;
+}
+
+/* The fixture. `straddle` chooses whether the Lock:relation record crosses
+ * EXEC_START (the #529 case) or sits wholly inside the execution (14b's
+ * control, where clipping must be a no-op). Everything else is identical, so
+ * the control differs from the case in exactly one property. */
+static int build_exec_fixture(struct pgwt_trace_event *ev, int straddle)
+{
+    int n = 0;
+    /* EXEC_START must be the first record of the pid the scan sees: the lane
+     * only accepts events while inside_exec. */
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_START, EXEC_START_NS, 0,
+                 EXEC_QID, 0);
+    /* The straddler: 4 ms long, closing 2 ms after EXEC_START, so 2 ms of it
+     * is inside the execution. Non-straddling control: the same 4 ms record
+     * closing 6 ms after EXEC_START, wholly inside. */
+    ev[n++] = mk(EXEC_PID, LOCK_RELATION,
+                 straddle ? EXEC_START_NS + MS(2) : EXEC_START_NS + MS(6),
+                 MS(4), EXEC_QID, PGWT_CPU_NS_UNKNOWN);
+    /* The interior event, 5 ms, never clipped on either fixture. */
+    ev[n++] = mk(EXEC_PID, IO_READ, EXEC_START_NS + S(1), MS(5),
+                 EXEC_QID, PGWT_CPU_NS_UNKNOWN);
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_END, EXEC_END_NS, 0, EXEC_QID, 0);
+    return n;
+}
+
+static void test_exec_detail_raw_duration(void)
+{
+    printf("\n14. #529: a clipped slice is not the event's wall time\n");
+
+    struct pgwt_trace_event ev[8];
+    int n = build_exec_fixture(ev, 1);
+
+    struct pgwt_execution_detail_result res;
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+
+    CHECK(!res.failed, "14a: the detail pass completed");
+    CHECK(res.found_execution == 1,
+          "14a: the requested EXEC_START matched — the lane is populated by "
+          "the scan and not by an empty-result shortcut");
+    CHECK_U64(res.leader.num_events, 2,
+              "14a: both records entered the leader lane");
+
+    const struct pgwt_exec_event *str = lane_event(&res.leader, LOCK_RELATION);
+    const struct pgwt_exec_event *in  = lane_event(&res.leader, IO_READ);
+    CHECK(str != NULL, "14a: the straddling Lock:relation record is present");
+    CHECK(in != NULL, "14a: the interior IO:DataFileRead record is present");
+
+    if (str) {
+        /* The #496 contract, unchanged: what clients SUM is the slice. */
+        CHECK_U64(str->duration_ns, MS(2),
+                  "14a: duration_ns is the 2 ms slice inside the execution "
+                  "(#496) — a client summing the lane still cannot exceed "
+                  "the execution's own duration");
+        /* The #529 contract: what a tooltip DISPLAYS is the wait. */
+        CHECK_U64(str->raw_duration_ns, MS(4),
+                  "14a: raw_duration_ns is the record's own 4 ms wall time "
+                  "— the number #529 measured displaying as 2 ms");
+        CHECK(str->raw_duration_ns > str->duration_ns,
+              "14a: and on a straddler the two are not the same number");
+        CHECK_U64(str->start_ns, EXEC_START_NS,
+                  "14a: start_ns stays clamped to the execution start, so the "
+                  "slice is (start_ns, start_ns+duration_ns) and still lies "
+                  "inside the execution");
+    }
+    if (in) {
+        CHECK_U64(in->duration_ns, MS(5),
+                  "14a: the interior record's slice is its whole 5 ms");
+        CHECK_U64(in->raw_duration_ns, MS(5),
+                  "14a: and its raw wall time is the same 5 ms — which is "
+                  "what kills raw_dur_ns = 2 * dur_ns, a rule the straddler "
+                  "alone cannot distinguish");
+    }
+    pgwt_free_execution_detail(&res);
+}
+
+/* 14b. FALSE NEGATIVES. Every way section 14a could be satisfied without
+ * checking anything. A gate that cannot see must refuse, never approve. */
+static void test_exec_detail_raw_duration_bypass(void)
+{
+    printf("\n14b. #529 bypass: the ways this gate could stop seeing\n");
+
+    struct pgwt_trace_event ev[8];
+    int n = build_exec_fixture(ev, 1);
+    struct pgwt_execution_detail_result res;
+
+    /* (1) THE THING IS ABSENT RATHER THAN WRONG. An id the fixture never
+     * produced must come back NULL, so 14a's `if (str)` guards sit behind a
+     * CHECK that the record exists — not behind a silent skip. */
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    CHECK(lane_event(&res.leader, CLIENT_READ) == NULL,
+          "14b1: an event id the fixture never emitted is NOT found — the "
+          "lookup cannot manufacture a row to assert on");
+    CHECK(lane_event(&res.leader, LOCK_RELATION) != NULL,
+          "14b1 control: the same lookup DOES find the id the fixture emits, "
+          "so 14b1 is not passing because the helper always returns NULL");
+    pgwt_free_execution_detail(&res);
+
+    /* (2) EMPTY INPUT. No events at all: the lane is empty and the execution
+     * was not found. 14a's found_execution and num_events assertions are the
+     * ones that separate this from a real answer. */
+    pgwt_compute_execution_detail(NULL, 0, EXEC_PID, EXEC_START_NS,
+                                  EXEC_END_NS, NULL, NULL, 0, 16, &res);
+    CHECK_U64(res.leader.num_events, 0, "14b2: empty input -> empty lane");
+    CHECK(res.found_execution == 0,
+          "14b2: and found_execution is 0, which is what 14a asserts against "
+          "— an empty answer cannot pose as a populated one");
+    pgwt_free_execution_detail(&res);
+
+    /* (3) THE LANE CAP MAKES THE PASS UNREACHABLE. max_events_per_lane 0
+     * returns before the scan runs at all. This is the readiness-gate
+     * failure mode: it must look like nothing happened, not like a pass. */
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 0, &res);
+    CHECK_U64(res.leader.num_events, 0,
+              "14b3: max_events_per_lane 0 -> no lane entries");
+    CHECK(res.found_execution == 0,
+          "14b3: and the scan never ran, so found_execution stays 0");
+    pgwt_free_execution_detail(&res);
+
+    /* (4) NO MATCHING EXECUTION. start_ns that no EXEC_START carries: the
+     * records are all outside an open execution, so nothing is admitted.
+     * A fixture that quietly stopped matching would otherwise assert over an
+     * empty lane and pass. */
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS + 1,
+                                  EXEC_END_NS, NULL, NULL, 0, 16, &res);
+    CHECK(res.found_execution == 0,
+          "14b4: an unresolvable execution start is not found");
+    CHECK_U64(res.leader.num_events, 0,
+              "14b4: and admits nothing, rather than admitting unclipped "
+              "records under a window it could not resolve");
+    pgwt_free_execution_detail(&res);
+
+    /* (5) THE FIXTURE DOES NOT ACTUALLY STRADDLE. The same record 4 ms long,
+     * moved wholly inside the execution. Now clipping is a no-op and the two
+     * fields MUST agree — which is what proves 14a's inequality comes from
+     * the straddle and not from the field being unconditionally different. */
+    n = build_exec_fixture(ev, 0);
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    {
+        const struct pgwt_exec_event *e = lane_event(&res.leader,
+                                                     LOCK_RELATION);
+        CHECK(e != NULL, "14b5: the non-straddling record is present");
+        if (e) {
+            CHECK_U64(e->duration_ns, MS(4),
+                      "14b5: a record wholly inside the execution is not "
+                      "clipped");
+            CHECK_U64(e->raw_duration_ns, MS(4),
+                      "14b5: and its raw wall time is the same 4 ms — the two "
+                      "fields differ ONLY where the boundary cuts");
+        }
+    }
+    pgwt_free_execution_detail(&res);
+
+    /* (6) A RIGHT-OPEN RECORD. #424 flags a wait still running at the window
+     * edge; the detail scan drops it, so it contributes NO lane entry. The
+     * hazard this guards is the opposite of 14a's: a dropped record must not
+     * reappear carrying a raw duration the execution never contained. */
+    n = build_exec_fixture(ev, 1);
+    ev[1].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    CHECK(lane_event(&res.leader, LOCK_RELATION) == NULL,
+          "14b6: a RIGHT_OPEN straddler is excluded from the lane entirely "
+          "— neither field is emitted for it");
+    CHECK_U64(res.leader.num_events, 1,
+              "14b6: and the interior record still arrives, so 14b6 is not "
+              "passing because the whole lane went empty");
+    pgwt_free_execution_detail(&res);
+
+    /* (7) A CORRUPT RECORD whose duration exceeds its own timestamp. The
+     * hazard would be a wrapped subtraction producing a vast raw figure.
+     * It is UNREACHABLE, and this block asserts the DEADNESS rather than
+     * asserting against it. The first draft did assert the admitted
+     * record's two fields and went red: the record never arrives at all.
+     *
+     * pgwt_filter_matches refuses `duration_ns > timestamp_ns`
+     * (src/compute.c:375) before pgwt_compute_execution_detail's selection
+     * reaches detail_lane_add, so no caller can hand that function a record
+     * whose raw_start underflows. Both arms are needed: on its own, "the
+     * lane does not carry it" is also satisfied by a fixture that stopped
+     * producing records for an unrelated reason. */
+    n = 0;
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_START, EXEC_START_NS, 0,
+                 EXEC_QID, 0);
+    ev[n++] = mk(EXEC_PID, LOCK_RELATION, EXEC_START_NS + MS(2),
+                 EXEC_START_NS + MS(2) + 1, EXEC_QID, PGWT_CPU_NS_UNKNOWN);
+    ev[n++] = mk(EXEC_PID, PGWT_MARKER_EXEC_END, EXEC_END_NS, 0, EXEC_QID, 0);
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    CHECK(res.found_execution == 1,
+          "14b7: the execution itself still resolves, so the emptiness below "
+          "is the record being refused and not the scan failing to run");
+    CHECK(lane_event(&res.leader, LOCK_RELATION) == NULL,
+          "14b7: a record whose duration exceeds its own timestamp never "
+          "reaches detail_lane_add -- raw_start cannot underflow because the "
+          "input cannot exist, not because a clamp catches it");
+    pgwt_free_execution_detail(&res);
+
+    /* 14b7 CONTROL: the same record at the same timestamp with a duration
+     * that can be true. It IS admitted and carries both fields, which is
+     * what makes the refusal above attributable to the impossible
+     * duration. */
+    ev[1].duration_ns = MS(4);
+    pgwt_compute_execution_detail(ev, n, EXEC_PID, EXEC_START_NS, EXEC_END_NS,
+                                  NULL, NULL, 0, 16, &res);
+    {
+        const struct pgwt_exec_event *e = lane_event(&res.leader,
+                                                     LOCK_RELATION);
+        CHECK(e != NULL,
+              "14b7 control: a possible duration at the same timestamp IS "
+              "admitted");
+        if (e) {
+            CHECK_U64(e->raw_duration_ns, MS(4),
+                      "14b7 control: and carries its own 4 ms wall time");
+            CHECK_U64(e->duration_ns, MS(2),
+                      "14b7 control: clipped to the 2 ms inside the "
+                      "execution");
+        }
+    }
+    pgwt_free_execution_detail(&res);
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -1682,18 +2823,45 @@ int main(void)
     test_query_avg_needs_exact_evidence();
     test_cpu_row_is_measured();
     test_cpu_row_measured_bypass();
+    test_transitions_table_full();
+    test_transitions_alloc_refusal();
+    test_tag_table_scale();
+    test_time_model_offcpu_sibling();
+    test_sessions_measured_cpu();
+    test_exec_detail_raw_duration();
+    test_exec_detail_raw_duration_bypass();
 
     /* A suite that ran no assertions is a suite that proved nothing. The
      * floor moves WITH the suite: sections 7-9 (#426, #440, #441) add 44
      * assertions, and a floor left at 80 would have let any one of the three
-     * silently stop running. Sections 10-11 (#553) add 66 more (5 of them
-     * inside guards that are only skipped when the guarding assertion has
-     * already failed), so the floor rises with them -- a dropped call in
-     * main() is exactly the false negative this floor exists to catch.
-     * 11e's clamp counter, 11j's idle-class sweep and 11m's rounding gate
-     * add 14 after that: the whole suite runs 211, and the floor moves with
-     * it rather than staying where a deleted section would still clear it. */
-    if (checks < 211) {
+     * silently stop running.
+     *
+     * Both arms of the integration raise it. #553's sections 10-11 add 66,
+     * then 11e's clamp counter, 11j's idle-class sweep and 11m's rounding
+     * gate add 14 (floor 211 on that branch). #461's section 10 adds 11 --
+     * and its 10e branch asserts the SAME number of times whichever way the
+     * child goes, so a hang cannot satisfy the floor by running fewer
+     * checks -- 10f adds 4 more, #374's section 11 adds 9, #575's section 12
+     * adds 21 and #562's section 13 adds 32 (floor 208 on that branch).
+     * Sections behind `if (r)` guards would run FEWER checks rather than
+     * failing each one, which is exactly what this floor is for.
+     *
+     * The union is MEASURED, not added up from the two branch floors: the
+     * base suite runs 131 against a floor of 130, so naively summing the
+     * two deltas off the FLOOR gives 289 and the test fails. Built and run
+     * on the merged tree it reports 288 (131 base + 80 from the #553 arm
+     * + 77 from the #461 arm), and 288 is what is pinned here. A dropped
+     * call in main() is the false negative this floor exists to catch, so
+     * it moves with the union rather than staying where a deleted section
+     * would still clear it.
+     *
+     * #529's section 14 adds 11 and its 14b bypass suite 18 (floor 237 on
+     * agent/laneC2-raw-compute). 14a's field assertions sit behind
+     * `if (str)` / `if (in)` for the same reason section 13's do -- the
+     * record-present CHECK is what fails, and the shortfall in this count
+     * is what catches a section that stopped running its body at all.
+     * Measured on the merged tree: 317. */
+    if (checks < 317) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;
