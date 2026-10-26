@@ -16,26 +16,52 @@ static long sys_perf_event_open(struct perf_event_attr *attr, pid_t pid,
     return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
 
+/* No-throttle invariant (issue #390): measured on a Linux 6.8.0 gate box,
+ * HZ=1000, with kernel.perf_event_max_sample_rate lowered to 250: the per-tick
+ * allowance was 1 sample. 200000 writes to a watched 4-byte word produced
+ * exactly 200000 BPF-handler invocations and 200000 kernel-counted events,
+ * with zero PERF_RECORD_THROTTLE records in a ring mmap-ed on the fd.
+ * Positive control: the same box and kernel DO throttle a cpu-clock event;
+ * perf record -F 100000 over the same interval logged 5123 THROTTLE and
+ * 5124 UNTHROTTLE records. Throttling is live; the zero is a real absence,
+ * not a blind measurement.
+ * perf_swevent_overflow() calls perf_swevent_set_period() and iterates with
+ * throttle=0 on the FIRST overflow, setting it to 1 only for later ones.
+ * __perf_event_account_interrupt() can hit MAX_INTERRUPTS only with throttle=1.
+ * sample_period=1 and freq=0 give exactly one overflow per breakpoint write,
+ * making per-tick throttling unreachable. PERF_TYPE_BREAKPOINT REJECTS
+ * attr.freq with EINVAL (also measured), so sample_period is the only lever:
+ * raising it above 1 would make per-tick throttling reachable.
+ * test_wp_attr pins the ATTRIBUTE, not the loss: it is a structural pin on
+ * the one input the measurement showed to be load-bearing, and is not itself
+ * a measurement that no fire was lost.
+ */
+void pgwt_fill_watchpoint_attr(struct perf_event_attr *attr, uint64_t addr,
+                               int start_enabled)
+{
+    memset(attr, 0, sizeof(*attr));
+
+    attr->type           = PERF_TYPE_BREAKPOINT;
+    attr->size           = sizeof(*attr);
+    attr->bp_type        = HW_BREAKPOINT_W;
+    attr->bp_addr        = addr;
+    attr->bp_len         = HW_BREAKPOINT_LEN_4;
+    attr->sample_period  = 1;
+    attr->sample_type    = 0;             /* no sample data needed (BPF reads directly) */
+    attr->wakeup_events  = 0;            /* BPF handles events, no perf buffer wakeup */
+    attr->exclude_kernel = 1;            /* PGPROC is userspace-only */
+    attr->exclude_hv     = 1;            /* no hypervisor writes */
+    /* CAP-8: callers that preseed the BPF state_map open the watchpoint
+     * disabled, seed, then enable — so the first fire always sees a seeded
+     * state and the opening interval is timed correctly. */
+    attr->disabled       = start_enabled ? 0 : 1;
+}
+
 static int open_watchpoint_common(pid_t pid, uint64_t addr, int bpf_prog_fd,
                                   int start_enabled)
 {
     struct perf_event_attr attr;
-    memset(&attr, 0, sizeof(attr));
-
-    attr.type           = PERF_TYPE_BREAKPOINT;
-    attr.size           = sizeof(attr);
-    attr.bp_type        = HW_BREAKPOINT_W;
-    attr.bp_addr        = addr;
-    attr.bp_len         = HW_BREAKPOINT_LEN_4;
-    attr.sample_period  = 1;
-    attr.sample_type    = 0;             /* no sample data needed (BPF reads directly) */
-    attr.wakeup_events  = 0;            /* BPF handles events, no perf buffer wakeup */
-    attr.exclude_kernel = 1;            /* PGPROC is userspace-only */
-    attr.exclude_hv     = 1;            /* no hypervisor writes */
-    /* CAP-8: callers that preseed the BPF state_map open the watchpoint
-     * disabled, seed, then enable — so the first fire always sees a seeded
-     * state and the opening interval is timed correctly. */
-    attr.disabled       = start_enabled ? 0 : 1;
+    pgwt_fill_watchpoint_attr(&attr, addr, start_enabled);
 
     int fd = sys_perf_event_open(&attr, pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
     if (fd < 0) {

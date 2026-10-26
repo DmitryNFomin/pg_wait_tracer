@@ -20,6 +20,7 @@ LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
+            test_wp_attr \
             test_trace_perms \
             test_exact_probe \
             test_effective_cores \
@@ -114,6 +115,10 @@ test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
 
 test_spawn: test_spawn.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
+
+# #390: pin the attributes using the production builder, without privileges.
+test_wp_attr: test_wp_attr.c ../src/perf_event.c ../src/perf_event.h
+	$(CC) $(CFLAGS) -o $@ test_wp_attr.c ../src/perf_event.c
 
 test_event_writer: test_event_writer.c $(BUILD)/event_writer.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4

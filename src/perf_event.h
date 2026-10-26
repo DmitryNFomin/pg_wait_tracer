@@ -4,6 +4,11 @@
 
 #include <sys/types.h>
 #include <stdint.h>
+#include <linux/perf_event.h>
+
+/* Fill the production hardware-watchpoint attributes without opening an fd. */
+void pgwt_fill_watchpoint_attr(struct perf_event_attr *attr, uint64_t addr,
+                               int start_enabled);
 
 /* Open a hardware write-watchpoint on addr for pid, attach bpf_prog_fd,
  * and ENABLE it immediately.
