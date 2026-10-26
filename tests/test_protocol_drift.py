@@ -19,10 +19,16 @@ Run: python3 tests/test_protocol_drift.py
 """
 import os
 import sys
+import errno
+import json
+import socket
+import subprocess
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
+    SERVER_BIN,
     CPU, IO_DATA_FILE_READ, LWLOCK_WAL_WRITE, TIMEOUT_PG_SLEEP,
 )
 import mock_server
@@ -587,6 +593,99 @@ def check_corrupt_trace_refusal(t):
         cleanup_traces(future_dir)
 
 
+def check_optional_probe_control(t, trace_dir):
+    """#592: exercise the real server's control proxy and --dump via a Unix
+    socket. Existing COMMANDS have no daemon, so they cannot cover status.
+    C test_optional_attach_outcomes separately drives the real daemon JSON
+    builder with counted errno failures; this fixture tests transport/rendering.
+    Compare the additive disclosure's keys/types recursively with both mock
+    replies, without excusing any drift in the existing data-view COMMANDS.
+    """
+    disclosure = {
+        "exact_probe_attached_mask": 7,
+        "exact_probe_exec_attach_outcome": "attached",
+        "exact_probe_exec_attach_errno": 0,
+        "exact_probe_plan_attach_outcome": "attach_failed",
+        "exact_probe_plan_attach_errno": errno.EACCES,
+    }
+    payloads = {
+        "status": {"ok": True, **disclosure},
+        "metrics": {"ok": True, **{k: v for k, v in disclosure.items()
+                                  if not k.endswith("_attach_outcome")}},
+    }
+    path = os.path.join(trace_dir, "pgwt.sock")
+    errors, requests = [], []
+    stop = threading.Event()
+    old_daemon = mock_server._DAEMON
+    mock_server._DAEMON = mock_server.DaemonState()
+    mock_server._DAEMON.enabled = True
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(path)
+            listener.listen(4)
+            listener.settimeout(0.2)
+
+            def serve():
+                try:
+                    while not stop.is_set():
+                        try:
+                            conn, _ = listener.accept()
+                        except socket.timeout:
+                            continue
+                        with conn:
+                            conn.settimeout(3)
+                            with conn.makefile("rb") as stream:
+                                request = json.loads(stream.readline())
+                            requests.append(request["cmd"])
+                            conn.sendall((json.dumps(payloads[request["cmd"]]) + "\n").encode())
+                except Exception as exc:
+                    errors.append(str(exc))
+
+            worker = threading.Thread(target=serve, daemon=True)
+            worker.start()
+            try:
+                with ServerHarness(trace_dir) as srv:
+                    for cmd in ("status", "metrics"):
+                        real = srv.query("control", request={"cmd": cmd})
+                        t.check(real.get("response") == payloads[cmd],
+                                f"[probe {cmd}] proxy preserves probe diagnostics")
+                        mock = mock_server.handle_request({
+                            "id": real["id"], "cmd": "control", "request": {"cmd": cmd},
+                        })
+                        # The old mock daemon already omits unrelated status
+                        # fields. Pin ALL exact_probe_* fields added here.
+                        mock_fields = {k: v for k, v in mock["response"].items()
+                                       if k.startswith("exact_probe_")}
+                        if cmd == "metrics":
+                            t.check(not any(k.endswith("_attach_outcome")
+                                            for k in mock_fields) and
+                                    all(isinstance(v, (int, float))
+                                        for v in mock_fields.values()),
+                                    "[probe metrics] mock probe diagnostics stay numeric")
+                        real_fields = {k: v for k, v in real.get("response", {}).items()
+                                       if k.startswith("exact_probe_")}
+                        diffs = []
+                        diff_schemas(schema_of({"response": real_fields}),
+                                     schema_of({"response": mock_fields}), "", diffs)
+                        t.check(not diffs, f"[probe {cmd}] recursive mock schema matches: {diffs}")
+                dump = subprocess.run([SERVER_BIN, "--dump", trace_dir],
+                                      capture_output=True, text=True, timeout=10)
+                t.check(dump.returncode == 0 and
+                        "exec=attached (errno=0)" in dump.stdout and
+                        f"plan=attach_failed (errno={errno.EACCES})" in dump.stdout,
+                        "[probe dump] operator sees successful and failed attempt reasons")
+            finally:
+                stop.set()
+                worker.join(timeout=4)
+            t.check(not worker.is_alive() and not errors and
+                    requests == ["status", "metrics", "status", "metrics"],
+                    f"[probe control] all four socket requests reached fixture: {requests}, {errors}")
+    finally:
+        mock_server._DAEMON = old_daemon
+        if os.path.exists(path):
+            os.unlink(path)
+
+
 def main():
     t = TestRunner("test_protocol_drift")
     trace_dir = generate_traces(SCENARIO)
@@ -614,6 +713,7 @@ def main():
             check_transitions_idle_flag(t, srv)
             check_protocol_revision(t, srv)
             check_top_sessions_cpu_fields(t, srv)
+        check_optional_probe_control(t, trace_dir)
     finally:
         cleanup_traces(trace_dir)
 
