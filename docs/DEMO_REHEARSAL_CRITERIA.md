@@ -715,8 +715,9 @@ a single `make box-check` run. n=1, never reproduced (the issue itself notes
 result). This criteria commit does NOT re-run that reproduction. Separately,
 the 35-minute rehearsal referenced elsewhere in this document recorded its
 own eight conservation samples through the capture as all 0.00% gap, with
-cross-tab DB Time agreement also 0.00% — evidence against the same defect
-showing up in *this* workload, not evidence the #202 report was wrong. **#202
+cross-tab DB Time agreement also 0.00%. The latter is the shared-total
+identity retired from the gate under #258, so it supplies no independent
+attribution evidence and cannot refute #202. **#202
 is NOT a demo blocker and must NOT be closed** on the strength of that
 absence; it is a known, unreproduced product report, tracked and left open.
 
@@ -978,8 +979,51 @@ substitute one family for the other.
   project has already made in prose. The AAS leg requires a bucket-weighted
   re-derivation over the identical window; an unweighted mean of buckets
   cannot establish it.
+  The automated attribution constraint is mandatory
+  `cross_tab_class_attribution` (`class_rows_vs_top_events_ok`): regroup
+  Top Events rows labeled by `pgwt_class_name` against Overview class rows
+  attributed by `pgwt_wait_class_index`, over the identical recent window.
+  Query errors fail the check; a missing entry fails required-check membership.
+  It runs unconditionally in the same path that formerly ran the total check.
 - Freshness: at the end of the walk, every time-axis tab's newest bucket is
   within 2 ticks of wall clock. A frozen chart is neither blank nor throwing.
+
+**#258: retired total-only gate and measured subsumption (2026-10-26).**
+On master `d02b7bd6`, the 60s recent window is below the server's 120s
+summary threshold. Both handlers use `server_load_events_fi` with identical
+bounds and PID, then sum clipped non-idle, non-io_worker intervals. The hidden
+Activity events skipped by Top Events are already idle. The accumulators are
+double vs integer nanoseconds, but there is no independent attribution input
+in that total comparison. `cross_tab_db_time_agreement` no longer runs or
+appears in `REQUIRED_EXTRA_CHECKS`; its helper remains a non-gating historical
+diagnostic used by the mutation regression test. Per-class agreement supplies
+the attribution constraint that the shared totals cannot supply.
+
+Measured with the production raw accumulators over a 60s window: one 1000ms
+CPU event with `cpu_ns == duration_ns`, and ONE 2000ms `Lock:relation` event.
+Both checks passed before injection. In a temporary copy of `compute.c`,
+skip only that Lock event's attribution immediately after adding its duration
+to `db_time_ns`. Top Events receives the unchanged two-event array. Both DB
+Time totals remain 3000ms; time_model's Off-CPU remainder grows from 0 to
+2000ms. The observed outputs on that same mutated input were:
+
+```text
+cross_tab_class_attribution: FAIL -- 2 classes, worst gap 100.00% (tolerance 1.0%): CPU tm=3000.0/te=1000.0 (66.67%); Lock tm=0.0/te=2000.0 (100.00%) -- DISAGREES: CPU: time_model=3000.0ms vs top_events=1000.0ms (66.67%); Lock: time_model=0.0ms vs top_events=2000.0ms (100.00%)
+cross_tab_db_time_agreement: PASS -- a=3000.0ms b=3000.0ms gap=0.00% (tolerance 1.0%)
+```
+
+`test_class_attribution_subsumes_total_check_for_one_dropped_event` preserves
+these response rows and asserts both outcomes, residual conservation, and
+failure of the rehearsal verdict when the surviving gate fails or is absent.
+The old total comparison's zero gap is not evidence of correct attribution.
+
+Separate existing limitation observed on this same tree: with the healthy
+CPU event measured at 500ms instead of 1000ms, Top Events reports 500ms
+separately as `offcpu_ms`. Its rows then sum to 2500ms against 3000ms DB Time,
+and the current class comparator refuses with a 16.67% row-sum gap. Its
+precondition still expects the earlier unsplit CPU row. This is a false
+failure on healthy measured Off-CPU data, not a skip; #258 leaves that
+assertion unchanged.
 
 ### 6. Daemon integrity
 
@@ -1072,7 +1116,7 @@ left to be discovered.
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — positive attempted count is also required, and each tab sweep refuses early-window absence (no tick with a valid first sample before 500 ms); every per-tick miss remains visible, with strictness deferred under #397; landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
 | §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈3.4x margin** (worst observed: transitions at 893 ms) — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) now gates every automated tab/navigation at the registered <= 3000 ms bound; absence refuses, and failure detail names the tab/value. This is the VM regression detector; the Mac-side measurement remains separate. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
-| §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: DB-Time leg yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside the DB-Time leg. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
+| §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: per-class attribution yes (mandatory `cross_tab_class_attribution`, `class_rows_vs_top_events_ok`, same recent window); the redundant total-only `cross_tab_db_time_agreement` gate was retired under #258 (helper retained only as a diagnostic for regression proof); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside per-class attribution. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
 | §6 lost-event counters, overhead envelope | lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **measured 2026-10-13** — 30.31% ± 0.58pp (n=3, 4 clients, unthrottled, gate-1, inside the registered band), see §6's own paragraph above and `tests/results/overhead-envelope/ENVELOPE.md`. Every box-check also still runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh` as an ongoing regression check (default pgbench load, `--mode full`, appends to `tests/results/overhead_trend.csv` on the box, not synced back or committed) — that is a different, continuous measurement and does not substitute for this one-time demo-workload figure, which is now recorded separately |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
 | §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
