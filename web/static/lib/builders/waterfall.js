@@ -462,6 +462,33 @@ export function pickDefaultExecution(rows) {
         rows[0];
 }
 
+/* #587: true exactly when pickDefaultExecution() above had to fall through
+ * to its last-resort rows[0] because NOTHING on the page was drawable --
+ * every returned execution a sub-millisecond statement with no events, no
+ * workers and no plan. That is the one condition under which the Waterfall
+ * can show "No execution events captured" even though executions WERE
+ * captured (100 of them): the wording is true of the selected row and false
+ * of the capture. An empty page (rows.length === 0) is a different, already
+ * -handled case ("No execution matches...") and must not read as this one. */
+export function allExecutionsUndrawable(rows) {
+    return !!(rows && rows.length) && rows.every(r => !executionHasDetail(r));
+}
+
+/* The disclosure shown in place of the bare empty-chart message when
+ * allExecutionsUndrawable() is true: say what happened (N executions were
+ * captured and returned) and what to do about it (the other sort), instead
+ * of silently substituting a row the user did not select (#587 -- chosen
+ * over having pickDefaultExecution() reach past the sort for a drawable
+ * row, which would hide that the current sort is unhelpful). Reuses
+ * executionsSortLabel/executionsSortToggleTarget so the wording can never
+ * name a sort the toggle button itself disagrees with. */
+export function undrawablePageText(rowCount, sortMode) {
+    const n = count(rowCount);
+    const otherSort = executionsSortLabel(executionsSortToggleTarget(sortMode));
+    return n.toLocaleString() + ' execution' + (n === 1 ? '' : 's') +
+        ', none with captured events at this sort — try ' + otherSort + '.';
+}
+
 export function waterfallRenderItem(params, api) {
     const start = api.coord([api.value(0), api.value(2)]);
     const end = api.coord([api.value(1), api.value(2)]);
