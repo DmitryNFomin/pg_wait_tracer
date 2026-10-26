@@ -3123,6 +3123,21 @@ def test_matrix_cpu_note_sits_above_the_canvas(page):
           f"#matrix-cpu-note carries the actual explanation, not just the name ({geo})")
     check(geo is not None and geo["noteTop"] < geo["chartTop"],
           f"#matrix-cpu-note sits ABOVE #matrix-chart in the real page ({geo})")
+    # #438/#591: the mock's transitions reply is link-CAPPED (truncated,
+    # link_count 5, total_link_count 8) and every RETURNED link is incident
+    # to CPU*. The "every transition in this workload" sentence was being
+    # rendered here from 5 of 8 links -- a universal claim with 3 links never
+    # examined. This pins the real page against the real capped payload, not
+    # just the pure builder: the sentence must be gone, and the cap footer
+    # (which is what explains the sparse grid) must still be present.
+    note_text = geo["text"] if geo else ""
+    check("Every transition in this workload" not in note_text,
+          "#438/#591: the capped mock response does not claim EVERY transition "
+          f"passes through CPU* ({note_text!r})")
+    cap_note = page.evaluate(
+        "() => (document.getElementById('matrix-notes') || {}).textContent || ''")
+    check("link cap" in cap_note and "5 of 8" in cap_note,
+          f"#438/#591: the link-cap footer still discloses the omission ({cap_note!r})")
 
 
 def test_matrix_chart_clears_the_fold_at_the_demo_viewport(page):

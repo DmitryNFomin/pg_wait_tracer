@@ -112,6 +112,52 @@ test('shading: mixed window WITH sub-ranges → bands only over sampled parts', 
     assert.ok(s.bands.every(b => b.kind === 'sampled'));
 });
 
+// #322/#341: the shape src/server.c's add_fidelity_ranges() ACTUALLY emits.
+// The existing sub-range test above hand-writes a partition of sampled/exact
+// only; the real producer partitions the WHOLE requested window, so it also
+// emits "none" ranges for the parts with no coverage at all (the aas default
+// window is expanded well past the data). Those must be left unshaded -- a
+// gap with no data is not sampled, and banding it sampled would claim
+// estimates over time nothing was recorded for.
+test('shading: producer-shaped ranges (none + exact + sampled) band ONLY the sampled part', () => {
+    const data = {
+        fidelity: 'mixed',
+        fidelity_ranges: [
+            { from: 1000, to: 1200, fidelity: 'none' },
+            { from: 1200, to: 1500, fidelity: 'exact' },
+            { from: 1500, to: 1800, fidelity: 'sampled' },
+            { from: 1800, to: 2000, fidelity: 'none' },
+        ],
+    };
+    const s = buildFidelityShading(data, WIN);
+    assert.equal(s.bands.length, 1);
+    assert.deepEqual(s.bands[0], { from: 1500, to: 1800, kind: 'sampled' });
+    // The whole-window 'mixed' fallback must NOT also be drawn -- that is the
+    // over-shading #322 exists to remove.
+    assert.ok(!s.bands.some(b => b.kind === 'mixed'),
+        'no whole-window mixed band once sub-ranges are available: ' +
+        JSON.stringify(s.bands));
+    assert.equal(s.markArea.data.length, 1);
+    assert.equal(s.markArea.data[0][0].xAxis, 1500);
+    assert.equal(s.markArea.data[0][1].xAxis, 1800);
+});
+
+// Bypass case for the same consumer: a partition with NO sampled range (a
+// mixed label whose ranges carry none/exact only) must fall back to the
+// whole-window mixed band rather than silently drawing nothing. "Cannot
+// locate the estimated part" has to over-shade, never under-shade.
+test('shading: mixed label with no sampled sub-range falls back to the whole-window band', () => {
+    const s = buildFidelityShading({
+        fidelity: 'mixed',
+        fidelity_ranges: [
+            { from: 1000, to: 1500, fidelity: 'none' },
+            { from: 1500, to: 2000, fidelity: 'exact' },
+        ],
+    }, WIN);
+    assert.equal(s.bands.length, 1);
+    assert.deepEqual(s.bands[0], { from: 1000, to: 2000, kind: 'mixed' });
+});
+
 test('bandsToMarkArea: null for empty; dashed border per kind', () => {
     assert.equal(bandsToMarkArea([]), null);
     const ma = bandsToMarkArea([{ from: 1, to: 2, kind: 'sampled' }]);

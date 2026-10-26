@@ -10,6 +10,7 @@ wait for an actual 30-45 minute rehearsal run to surface it.
 Usage: python3 tests/test_demo_rehearsal_lib.py
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -601,7 +602,7 @@ def test_evaluate_window_skips_extra_floors_by_default():
     check("aas_floor" not in result, "aas_floor absent when not requested")
 
 
-# ── cross_tab_db_time_agreement_ok / freshness_ok (criteria doc §5) ──────
+# ── Historical DB-Time diagnostic (non-gating since #258) ───────────────
 
 def test_cross_tab_agreement_within_tolerance_ok():
     ok, detail = lib.cross_tab_db_time_agreement_ok(10000.0, 10050.0)
@@ -727,6 +728,55 @@ def test_class_attribution_catches_the_dropped_class_the_identity_absorbs():
           f"and names the dropped class and both numbers (got: {detail})")
     check("CPU: time_model=3980.0ms vs top_events=1980.0ms" in detail,
           f"and names the row the time landed in instead (got: {detail})")
+
+
+def test_class_attribution_subsumes_total_check_for_one_dropped_event():
+    # Captured from the production raw accumulators on d02b7bd6, 60s window:
+    # one 1000ms CPU gap (cpu_ns == duration_ns), one 2000ms Lock:relation.
+    # In a /tmp copy of compute.c, continue after db_time_ns += dur_ns for
+    # that ONE Lock event, before class attribution. No loader/event loss:
+    # DB Time stays 3000ms; the residual emits the lost 2000ms as Off-CPU.
+    # These are the resulting rows, not an independently edited total.
+    tm_rows = [
+        {"name": "DB Time", "ms": 3000.0, "indent": 0},
+        {"name": "CPU (running)", "ms": 1000.0, "indent": 1},
+        {"name": "CPU (waiting for a core)", "ms": 2000.0, "indent": 1},
+    ]
+    te_rows = [
+        {"class": "Lock", "name": "Lock:relation", "total_ms": 2000.0,
+         "pct": 66.66666666666666},
+        {"class": "CPU", "name": "CPU*", "total_ms": 1000.0,
+         "pct": 33.33333333333333},
+    ]
+    tm_db_time_ms = tm_rows[0]["ms"]
+    te_db_time_ms = 3000.0
+    cons_ok, cons_detail = lib.time_model_conservation(tm_rows, tm_db_time_ms)
+    check(cons_ok and "gap=0.0ms" in cons_detail,
+          f"one dropped wait event is absorbed by Off-CPU ({cons_detail})")
+    total_ok, total_detail = lib.cross_tab_db_time_agreement_ok(
+        tm_db_time_ms, te_db_time_ms)
+    check(total_ok and "gap=0.00%" in total_detail,
+          f"cross_tab_db_time_agreement: PASS -- {total_detail}")
+    class_ok, class_detail = lib.class_rows_vs_top_events_ok(
+        tm_rows, te_rows, te_db_time_ms)
+    check(not class_ok and
+          "Lock: time_model=0.0ms vs top_events=2000.0ms (100.00%)" in class_detail,
+          f"cross_tab_class_attribution: FAIL -- {class_detail}")
+    check("CPU: time_model=3000.0ms vs top_events=1000.0ms" in class_detail,
+          "the surviving gate also detects the 2000ms moved into Off-CPU")
+
+    # Exercise the real mandatory set with every other check passing.
+    checks = {name: {"ok": True} for name in lib.REQUIRED_EXTRA_CHECKS}
+    checks["cross_tab_class_attribution"] = {"ok": class_ok}
+    summary = lib.build_demo_summary(
+        _passing_walk(), checks, required_checks=lib.REQUIRED_EXTRA_CHECKS)
+    check(summary["failed"] == ["cross_tab_class_attribution"],
+          "the dropped event fails the rehearsal verdict via the surviving gate")
+    del checks["cross_tab_class_attribution"]
+    summary = lib.build_demo_summary(
+        _passing_walk(), checks, required_checks=lib.REQUIRED_EXTRA_CHECKS)
+    check("missing_required_check:cross_tab_class_attribution" in summary["failed"],
+          "omitting the surviving gate also fails the rehearsal verdict")
 
 
 def test_class_attribution_class_missing_from_top_events_fails():
@@ -965,6 +1015,15 @@ def test_class_attribution_is_a_mandatory_rehearsal_check():
           "cross_tab_class_attribution is in REQUIRED_EXTRA_CHECKS "
           "(test_required_check_names_all_exist_in_demo_rehearsal then "
           "forces demo_rehearsal.py to actually insert it)")
+    check("cross_tab_db_time_agreement" not in lib.REQUIRED_EXTRA_CHECKS,
+          "the redundant total diagnostic is no longer mandatory (#258)")
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "demo_rehearsal.py")
+    with open(path) as fh:
+        source = fh.read()
+    check("drlib.cross_tab_db_time_agreement_ok(" not in source and
+          'extra_checks["cross_tab_db_time_agreement"]' not in source,
+          "the rehearsal neither runs nor gates the historical total diagnostic")
 
 
 # ── bucket_weighted_aas_ok (criteria doc §5, item 2.2) ───────────────────
@@ -1065,6 +1124,259 @@ def test_bucket_weighted_aas_ok_non_positive_window_fails():
     ok, detail = lib.bucket_weighted_aas_ok(
         [{"t": 0, "cpu": 2.0}], 1_000_000_000, 1_000_000_000, 1_000_000_000, 2.0)
     check(not ok, f"from_ns == to_ns fails rather than dividing by zero ({detail})")
+
+
+# ── cross_tab_bucket_ns overshoot bound (issue #570) ──────────────────────
+#
+# PR #564 concluded the cross-tab AAS leg is sound because
+# src/compute.c:797's ceiling bucket_ns formula bounds the overshoot
+# `N*bucket_ns - range_ns` to [0, N-1] nanoseconds. This pins that bound
+# (not the specific 9.11e-7% figure the probe measured) plus its
+# consequence for the weighted-vs-unweighted comparison, and a bypass-suite
+# case proving the bound test is not vacuous.
+#
+# Representative spread: the five AAS_CROSS_TAB_NUM_BUCKETS-scale bucket
+# counts and the five window spans PR #564's probe measured against
+# (12.3-90.1s, 7/59/60/61/600 buckets) -- all 25 combinations, not just
+# the 16 the probe happened to hit, since the bound must hold for every
+# (N, range) pair.
+_BOUND_TEST_N = (7, 59, 60, 61, 600)
+_BOUND_TEST_SPANS_S = (12.3, 45.0, 60.0, 61.000000001, 90.1)
+
+
+def test_cross_tab_bucket_ns_overshoot_bound_holds():
+    for n in _BOUND_TEST_N:
+        for span_s in _BOUND_TEST_SPANS_S:
+            range_ns = int(span_s * 1e9)
+            bucket_ns = lib.cross_tab_bucket_ns(range_ns, n)
+            overshoot = n * bucket_ns - range_ns
+            check(0 <= overshoot <= n - 1,
+                  f"N={n} range_ns={range_ns}: overshoot={overshoot} must "
+                  f"be in [0, {n - 1}] ns (bucket_ns={bucket_ns})")
+
+
+def test_cross_tab_bucket_ns_overshoot_bound_breaks_under_truncation():
+    # BYPASS-SUITE CASE -- if src/compute.c:797's ceiling division were
+    # ever replaced with plain truncation (floor), N full-width buckets
+    # would UNDERSHOOT the window instead (a negative "overshoot"),
+    # failing the lower bound -- exactly the mutation issue #570 requires
+    # this test to catch, and PR #559's review found a sibling truncation
+    # at compute.c:1845 left a related test green. This demonstrates the
+    # bound test above is not vacuous: it is sensitive to ceil vs.
+    # truncate specifically, not satisfied by just "some division
+    # formula". Most (N, span) pairs below are NOT evenly divisible
+    # (wall-clock windows essentially never are, per
+    # bucket_weighted_aas_ok's own module comment), so truncation fails
+    # the bound for the large majority of them.
+    total = len(_BOUND_TEST_N) * len(_BOUND_TEST_SPANS_S)
+    failures = 0
+    for n in _BOUND_TEST_N:
+        for span_s in _BOUND_TEST_SPANS_S:
+            range_ns = int(span_s * 1e9)
+            truncated_bucket_ns = range_ns // n  # the mutation: ceil -> floor
+            overshoot = n * truncated_bucket_ns - range_ns
+            if not (0 <= overshoot <= n - 1):
+                failures += 1
+    check(failures >= total // 2,
+          f"truncation breaks the overshoot bound for a majority of "
+          f"geometries ({failures}/{total}), proving the bound test above "
+          f"actually depends on ceil rather than passing for any formula")
+
+
+def test_cross_tab_weighted_vs_unweighted_error_has_wide_margin():
+    # Pins the CONSEQUENCE of the overshoot bound: for a uniform-rate
+    # workload (every bucket accumulates busy_ns at the same rate `r`; the
+    # server still divides the truncated tail bucket's partial
+    # accumulation by the FULL bucket_ns -- see bucket_weighted_aas_ok's
+    # module comment), the gap between an UNWEIGHTED mean of bucket aas
+    # values and the true rate stays many orders of magnitude below
+    # TIME_MODEL_TOLERANCE_PCT. This is the "left alone" argument from
+    # issue #570 / PR #564: the error this leg could ever introduce is
+    # nanosecond-scale against multi-millisecond-or-larger buckets, so it
+    # can never approach the 1% gate.
+    #
+    # "weighted" and "unweighted" are produced INDEPENDENTLY here, not
+    # through a shared helper: weighted_derived comes from
+    # bucket_weighted_aas_ok's own internal formula
+    # (sum(aas_i*bucket_ns)/range_ns, exercised via its (ok, detail)
+    # return); unweighted_mean is computed inline below with a DIFFERENT
+    # formula (sum(aas_i)/num_buckets) -- a mutation that breaks one does
+    # not automatically move the other.
+    rate = 2.0
+    worst_gap_pct = 0.0
+    for n in _BOUND_TEST_N:
+        for span_s in _BOUND_TEST_SPANS_S:
+            range_ns = int(span_s * 1e9)
+            bucket_ns = lib.cross_tab_bucket_ns(range_ns, n)
+            last_width_ns = range_ns - (n - 1) * bucket_ns
+            aas_values = [rate] * (n - 1) + [rate * last_width_ns / bucket_ns]
+            buckets = [{"t": i * bucket_ns, "cpu": a}
+                       for i, a in enumerate(aas_values)]
+
+            ok, detail = lib.bucket_weighted_aas_ok(
+                buckets, bucket_ns, 0, range_ns, rate)
+            check(ok, f"weighted derivation matches the true rate "
+                      f"(N={n} span={span_s}s): {detail}")
+
+            unweighted_mean = sum(aas_values) / n
+            gap_pct = abs(unweighted_mean - rate) / rate * 100.0
+            worst_gap_pct = max(worst_gap_pct, gap_pct)
+
+    margin = lib.TIME_MODEL_TOLERANCE_PCT / 10_000
+    check(worst_gap_pct < margin,
+          f"worst unweighted-vs-true-rate gap across {len(_BOUND_TEST_N)}x"
+          f"{len(_BOUND_TEST_SPANS_S)} geometries is {worst_gap_pct:.2e}%, "
+          f"must stay under {margin:.2e}% (tolerance "
+          f"{lib.TIME_MODEL_TOLERANCE_PCT}% / 10000x margin)")
+
+
+# ── Coupling check: does src/compute.c still USE the ceiling formula? ─────
+#
+# The three tests above prove the overshoot bound holds FOR THE CEILING
+# FORMULA -- they say nothing about whether src/compute.c still computes
+# bucket_ns that way. cross_tab_bucket_ns() in demo_rehearsal_lib.py is a
+# reimplementation (its own docstring says so); a reimplementation can
+# drift from its original silently, exactly the #589 class of bug (a C
+# literal renamed, a JS copy of it left stale through a full `make check`,
+# caught only by a human grep during integration).
+#
+# So: extract the REAL formula text out of src/compute.c's pgwt_compute_aas
+# (never a second hardcoded copy of the formula itself) and assert,
+# structurally, that it is still a ceiling-division shape -- the divisor
+# appearing both as the "+B-1" addend and as the final divisor, whatever
+# that variable happens to be called. Raises (refuses) rather than
+# reporting "nothing found, nothing to check" when the function or the
+# assignment can't be located, per issue #570's bypass-suite requirement.
+COMPUTE_C_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "src", "compute.c")
+
+
+def extract_cross_tab_bucket_ns_statement(compute_c_source):
+    """Extract the literal `uint64_t bucket_ns = ...;` statement from
+    inside pgwt_compute_aas (the AAS endpoint -- the same function
+    bucket_weighted_aas_ok's bucket_ns argument comes from). Anchored on
+    the function name so the THREE other near-identical bucket_ns
+    assignments elsewhere in compute.c (for other endpoints, not gated by
+    this issue) are never matched instead. Raises if the function or the
+    assignment can't be found -- a reworded anchor must fail loudly, not
+    silently pass having checked nothing."""
+    func_match = re.search(r'\bpgwt_compute_aas\s*\(', compute_c_source)
+    if not func_match:
+        raise AssertionError(
+            "#570: could not find pgwt_compute_aas(...) in src/compute.c "
+            "-- the function was renamed or moved; update the extractor "
+            "rather than letting the coupling check pass on no evidence")
+    window = compute_c_source[func_match.start():func_match.start() + 4000]
+    stmt_match = re.search(r'uint64_t\s+bucket_ns\s*=\s*(.+?);', window)
+    if not stmt_match:
+        raise AssertionError(
+            "#570: could not find a `uint64_t bucket_ns = ...;` "
+            "assignment inside pgwt_compute_aas in src/compute.c -- the "
+            "statement was reworded; update the extractor rather than "
+            "letting the coupling check pass on no evidence")
+    return stmt_match.group(0).strip()
+
+
+def bucket_ns_statement_is_ceiling_division(statement):
+    """Structural check, not a literal-string copy of the formula: matches
+    `uint64_t bucket_ns = (A + [cast]B - 1) / [cast]C;` and returns
+    whether B and C are the SAME variable (any cast stripped) -- the
+    shape that makes it ceiling division of A by that divisor. Returns
+    None (not False) when the statement doesn't even have this shape at
+    all (e.g. plain truncating division with no "+ ... - 1" term) so
+    callers can tell "found a non-ceiling assignment" apart from "found
+    nothing" if they need to, though issue #570's own gate treats both as
+    not-proven-ceiling."""
+    m = re.match(
+        r'uint64_t\s+bucket_ns\s*=\s*\(\s*(?P<a>[\w.]+)\s*\+\s*'
+        r'(?:\(\s*[A-Za-z_][A-Za-z_0-9 ]*\s*\)\s*)?(?P<b>\w+)\s*-\s*1\s*\)'
+        r'\s*/\s*(?:\(\s*[A-Za-z_][A-Za-z_0-9 ]*\s*\)\s*)?(?P<c>\w+)\s*;',
+        statement)
+    if not m:
+        return None
+    return m.group('b') == m.group('c')
+
+
+def test_compute_c_cross_tab_bucket_ns_is_still_ceiling_division():
+    with open(COMPUTE_C_PATH, "r") as f:
+        source = f.read()
+    statement = extract_cross_tab_bucket_ns_statement(source)
+    is_ceiling = bucket_ns_statement_is_ceiling_division(statement)
+    check(is_ceiling is True,
+          f"src/compute.c's AAS bucket_ns assignment is still ceiling "
+          f"division -- the premise the three overshoot-bound tests above "
+          f"depend on ({statement!r})")
+
+
+def test_extract_cross_tab_bucket_ns_statement_refuses_missing_function():
+    try:
+        extract_cross_tab_bucket_ns_statement(
+            "void some_other_function(void) { int x = 1; }")
+        check(False, "should have raised when pgwt_compute_aas is absent")
+    except AssertionError as e:
+        check("#570" in str(e), f"raises a #570-tagged error ({e})")
+
+
+def test_extract_cross_tab_bucket_ns_statement_refuses_empty_source():
+    try:
+        extract_cross_tab_bucket_ns_statement("")
+        check(False, "should have raised on an empty file")
+    except AssertionError as e:
+        check("#570" in str(e), f"raises a #570-tagged error ({e})")
+
+
+def test_extract_cross_tab_bucket_ns_statement_refuses_reworded_assignment():
+    # Function is found, but the assignment itself was reworded to
+    # something the statement regex can't parse at all (e.g. split across
+    # a helper call) -- must still refuse, not silently find nothing and
+    # report success.
+    source = ("void pgwt_compute_aas(uint64_t from_ns, uint64_t to_ns, "
+               "int num_buckets) {\n"
+               "    uint64_t bucket_ns = compute_bucket_width(from_ns, "
+               "to_ns, num_buckets)\n"  # no trailing ';' on this line
+               "        + extra_padding_ns;\n"
+               "}\n")
+    try:
+        extract_cross_tab_bucket_ns_statement(source)
+        check(False, "should have raised when the assignment has no "
+                      "single-statement `= ...;` shape on one line")
+    except AssertionError as e:
+        check("#570" in str(e), f"raises a #570-tagged error ({e})")
+
+
+def test_bucket_ns_statement_is_ceiling_division_true_for_the_real_shape():
+    check(bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = (range_ns + (uint64_t)num_buckets - 1) / "
+        "(uint64_t)num_buckets;") is True,
+        "the real cast-and-all shape is recognised as ceiling division")
+
+
+def test_bucket_ns_statement_is_ceiling_division_true_without_casts():
+    check(bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = (range_ns + num_buckets - 1) / num_buckets;")
+        is True, "a cast-free ceiling shape is recognised too")
+
+
+def test_bucket_ns_statement_is_ceiling_division_false_for_truncation():
+    # BYPASS-SUITE CASE -- the exact mutation issue #570 requires this
+    # coupling check to catch: ceil replaced by plain truncating division.
+    result = bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = range_ns / (uint64_t)num_buckets;")
+    check(result is not True,
+          f"plain truncating division is NOT recognised as ceiling "
+          f"division (got {result!r})")
+
+
+def test_bucket_ns_statement_is_ceiling_division_false_for_mismatched_divisor():
+    # The addend and the final divisor must be the SAME variable -- a
+    # formula that adds one variable's "-1" but divides by a different
+    # one is not ceiling division of range_ns by that divisor at all.
+    result = bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = (range_ns + (uint64_t)num_buckets - 1) / "
+        "(uint64_t)other_var;")
+    check(result is False,
+          f"a mismatched addend/divisor is explicitly False, not treated "
+          f"as ceiling (got {result!r})")
 
 
 def test_freshness_recent_bucket_ok():
