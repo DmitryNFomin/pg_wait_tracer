@@ -3,7 +3,7 @@
 # box. Runs ON the box, as root.
 #
 #   tests/provision-runner.sh ubuntu
-#   tests/provision-runner.sh el8    # stub — step 4 of docs/DEV_LOOP_PLAN.md
+#   tests/provision-runner.sh el8    # Rocky Linux 8.10, real EL8 kernel
 #   tests/provision-runner.sh el9    # stub — step 4 of docs/DEV_LOOP_PLAN.md
 #
 #   tests/provision-runner.sh ubuntu --runner-token TOKEN
@@ -111,9 +111,11 @@ fi
 
 case "$OS" in
     el8)
-        echo "STUB: el8 provisioning is not implemented yet — it is step 4" >&2
-        echo "of docs/DEV_LOOP_PLAN.md (ephemeral VMs + real OS matrix)." >&2
-        exit 1
+        if [[ -n "$RUNNER_TOKEN" ]]; then
+            echo "FATAL: --runner-token / PGWT_RUNNER_TOKEN registration is supported only on ubuntu" >&2
+            exit 2
+        fi
+        exec bash "$(dirname "${BASH_SOURCE[0]}")/provision-el8.sh"
         ;;
     el9)
         echo "STUB: el9 provisioning is not implemented yet — it is step 4" >&2
