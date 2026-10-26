@@ -4733,8 +4733,20 @@ static int reject_overload(struct pgwt_server *srv,
         cJSON_AddStringToObject(root, "error", "window too large");
         cJSON_AddStringToObject(root, "code", "window_too_large");
         cJSON_AddNumberToObject(root, "max_events", load_max_events());
-        cJSON_AddStringToObject(root, "hint",
-            "narrow the time range or add a pid/query filter");
+        /* #526: the standing hint advises adding a filter -- which, on a
+         * request that ALREADY has a query filter, is the advice that caused
+         * this refusal. A query filter forces the exact path (the summary
+         * per-query table cannot answer a window-clipped question), so that
+         * request can only narrow the range. Telling the operator to add the
+         * filter they already added is worse than a bare refusal: it reads as
+         * "you did not try the obvious thing". */
+        if (req->filter.query_id != 0)
+            cJSON_AddStringToObject(root, "hint",
+                "a query filter forces the exact path, which loads raw "
+                "events; narrow the time range");
+        else
+            cJSON_AddStringToObject(root, "hint",
+                "narrow the time range or add a pid/query filter");
     }
     uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
     uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
@@ -4995,7 +5007,35 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
 
-    if (should_use_summaries(srv, req, &wfid)) {
+    /* #526: a QUERY-FILTERED Events request goes to raw. Two siblings already
+     * force raw for a query filter: handle_top_sessions (:5187), through
+     * sessions_filter_needs_raw (:5160, includes query_id != 0), and
+     * handle_heatmap (:6013), through the same query_id == 0 conjunct.
+     * Events is the third handler that needs this guard and lacked it.
+     * handle_top_queries (:5579) guards only on !has_event_filter (class/event):
+     * its per-query summary table deliberately answers query filters.
+     * handle_aas (:4821, !detail_events) and handle_time_model (:4914, no
+     * additional guard) also permit query-filtered summaries, each answered
+     * by its own compute.
+     *
+     * WHY, because the asymmetry was reachable from the UI's default range:
+     * the filtered summary read takes its time from queries[].top_events[],
+     * which the writer fills with the record's FULL duration (dur,
+     * summary_writer.c:600 -- correct for a per-occurrence table, which is
+     * never credited open), while the unfiltered read takes events[], filled
+     * with the in-second slice (tns, :524). Over a window whose edge an
+     * interval crosses, the two therefore answer the same question
+     * differently -- measured on #526 as 719,200.346 ms filtered against
+     * 716,200.203 ms unfiltered for one Lock:relation row.
+     *
+     * This ELIMINATES the divergence rather than disclosing it: the raw path
+     * clips to [from, to) exactly as the unfiltered summary path does, so the
+     * two now differ only by the raw-vs-summary residual
+     * tests/summary_raw_parity_expected.json already pins. The cost is that a
+     * filtered drill loses the summary fast path and becomes subject to
+     * reject_overload -- paid deliberately, and the refusal says so (see the
+     * query_filter_exact hint there). */
+    if (should_use_summaries(srv, req, &wfid) && req->filter.query_id == 0) {
         pgwt_compute_top_events_from_summaries(srv->trace_dir, from, to,
                                                 &req->filter, wall_ms, &res);
         from_summaries = 1;
