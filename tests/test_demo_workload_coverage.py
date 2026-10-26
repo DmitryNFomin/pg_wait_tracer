@@ -364,6 +364,42 @@ def test_waterfall_populated_in_progress_excluded():
 
 # ── waterfall_floor_excludes_inferred (#222 review round 2, addition 2) ────
 
+def test_run_coverage_waterfall_distinguishes_missing_and_inferred_slow_rows():
+    """#602: inferred slow spans are captured, but cannot prove the measured floor."""
+    fast = {"query_id": "fast", "duration_ms": 12.0,
+            "in_progress": False, "end_inferred": False}
+    inferred = [
+        {"query_id": "cancelled", "duration_ms": 700.0,
+         "in_progress": False, "end_inferred": True},
+        {"query_id": "timed-out", "duration_ms": 1300.0,
+         "in_progress": False, "end_inferred": True},
+    ]
+    cases = [
+        ([fast], "no slow completed statements captured",
+         "slow completed rows=0, inferred-close slow rows=0"),
+        ([fast] + inferred,
+         "slow statements captured but every slow row is inferred-close",
+         "slow completed rows=2, inferred-close slow rows=2"),
+    ]
+    for rows, reason, counts in cases:
+        result = cov.run_coverage(
+            _retention_server({"rows": rows}), 0, 1)["waterfall"]
+        check(result["ok"] is False,
+              f"waterfall still fails without a measured slow row ({result['detail']})")
+        check(reason in result["detail"] and counts in result["detail"],
+              f"waterfall failure names the case and its counts: {reason}; "
+              f"{counts} ({result['detail']})")
+
+    # The same inferred spans plus a measured row at the inclusive floor pass.
+    measured = {"query_id": "measured", "duration_ms": 500.0,
+                "in_progress": False, "end_inferred": False}
+    result = cov.run_coverage(
+        _retention_server({"rows": [fast] + inferred + [measured]}),
+        0, 1)["waterfall"]
+    check(result["ok"] is True,
+          f"waterfall passes with a real measured slow row ({result['detail']})")
+
+
 def test_waterfall_floor_excludes_inferred_measured_row_passes():
     resp = {"rows": [{"query_id": "1", "duration_ms": 700.0,
                        "end_inferred": False}]}

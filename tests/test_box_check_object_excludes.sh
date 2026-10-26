@@ -169,8 +169,8 @@ rc4=$?
 report "$ok" "a missing script file makes the extractor refuse (rc=$rc4, want 2), not silently approve"
 
 # =============================================================================
-# 4. The remote build: `make -C tests clean` must run BEFORE `make -C
-#    tests`, so a stale object already sitting in a persistent remote_dir
+# 4. The remote build: `make -C tests clean` must run BEFORE `make
+#    build-tests`, so a stale object already sitting in a persistent remote_dir
 #    (from a run before this fix, or carried over any other way) cannot
 #    survive on mtime grounds -- rsync's -t preserves the Mac's mtime, which
 #    is typically newer than a freshly-synced source file, so plain `make`
@@ -180,15 +180,15 @@ remote_line=$(grep 'nproc' "$BOX_CHECK")
 [[ -n "$remote_line" ]] && ok=true || ok=false
 report "$ok" "found the remote build command line in box-check.sh"
 clean_pos=$(printf '%s' "$remote_line" | grep -bo 'make -C tests clean' | head -1 | cut -d: -f1)
-build_pos=$(printf '%s' "$remote_line" | grep -bo 'make -C tests &&' | head -1 | cut -d: -f1)
+build_pos=$(printf '%s' "$remote_line" | grep -bo 'make build-tests &&' | head -1 | cut -d: -f1)
 [[ -n "$clean_pos" && -n "$build_pos" ]] && ok=true || ok=false
-report "$ok" "remote command contains both 'make -C tests clean' and 'make -C tests &&' (clean_pos=${clean_pos:-<missing>} build_pos=${build_pos:-<missing>})"
+report "$ok" "remote command contains both 'make -C tests clean' and 'make build-tests &&' (clean_pos=${clean_pos:-<missing>} build_pos=${build_pos:-<missing>})"
 if [[ -n "$clean_pos" && -n "$build_pos" ]]; then
     [[ "$clean_pos" -lt "$build_pos" ]] && ok=true || ok=false
 else
     ok=false
 fi
-report "$ok" "'make -C tests clean' runs BEFORE 'make -C tests' in the remote command"
+report "$ok" "'make -C tests clean' runs BEFORE 'make build-tests' in the remote command"
 
 # RED: a pre-#567-style remote line (no clean step) must be recognized as
 # missing the guard, not silently accepted as "ordering is fine".

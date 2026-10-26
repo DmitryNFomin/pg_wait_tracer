@@ -255,6 +255,18 @@ def waterfall_floor_excludes_inferred(resp):
     ok = len(measured_slow) >= 1
     detail = (f"measured (end_inferred=False) completed rows >= "
               f"{WATERFALL_INTERESTING_MS}ms: {len(measured_slow)}")
+    if not ok:
+        # #602: inferred closes have real wall-clock spans. Distinguish
+        # their presence from missing slow work without weakening the floor.
+        inferred_slow = [r for r in slow if r.get("end_inferred")]
+        if not slow:
+            detail += " | no slow completed statements captured"
+        elif len(inferred_slow) == len(slow):
+            detail += (" | slow statements captured but every slow row is "
+                       "inferred-close; real wall-clock durations, but no "
+                       "measured slow execution to satisfy the floor")
+        detail += (f" | slow completed rows={len(slow)}, "
+                   f"inferred-close slow rows={len(inferred_slow)}")
     if missing:
         detail += (f" | FAIL-CLOSED: {len(missing)} row(s) >= "
                    f"{WATERFALL_INTERESTING_MS}ms carry NO end_inferred "
