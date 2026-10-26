@@ -781,6 +781,10 @@ test_server_alloc_tune.py
 
 test_backend_lifecycle
 
+# #390: real perf_event_open throttle-visibility signal (root/CAP_SYS_ADMIN
+# only; SKIPs itself gracefully otherwise — see the test file's own header).
+test_watchpoint_throttle
+
 # THE SUMMARY-vs-RAW PARITY GATE's pure comparison core (#408, #379, #319).
 # pgwt-server answers an unfiltered window >= 120 s from per-second summaries
 # and everything shorter from raw events, and nothing had ever compared the

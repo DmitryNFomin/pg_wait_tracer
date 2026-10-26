@@ -32,6 +32,18 @@ static int open_watchpoint_common(pid_t pid, uint64_t addr, int bpf_prog_fd,
     attr.wakeup_events  = 0;            /* BPF handles events, no perf buffer wakeup */
     attr.exclude_kernel = 1;            /* PGPROC is userspace-only */
     attr.exclude_hv     = 1;            /* no hypervisor writes */
+    /* #390: SET_BPF below means this event has no mmap'd ring buffer and
+     * nothing ever reads PERF_RECORD_THROTTLE/UNTHROTTLE — the kernel's
+     * rate-limit check (perf_event_max_sample_rate) runs in the overflow
+     * path BEFORE the BPF handler either way, so a throttled watchpoint
+     * just stops firing, silently, however this event is configured. A
+     * plain read(2) of the fd works regardless of SET_BPF/no-ring-buffer,
+     * so TOTAL_TIME_ENABLED/_RUNNING is the one signal available: a
+     * cumulative time_running shortfall against time_enabled IS the
+     * throttle, quantified in ns. Requested unconditionally — the read is
+     * cheap and unused bytes cost nothing if a caller never reads them. */
+    attr.read_format    = PERF_FORMAT_TOTAL_TIME_ENABLED |
+                          PERF_FORMAT_TOTAL_TIME_RUNNING;
     /* CAP-8: callers that preseed the BPF state_map open the watchpoint
      * disabled, seed, then enable — so the first fire always sees a seeded
      * state and the opening interval is timed correctly. */
@@ -109,4 +121,35 @@ void pgwt_close_watchpoint(int perf_fd)
 {
     if (perf_fd >= 0)
         close(perf_fd);
+}
+
+/* #390: the throttle-visibility read. Layout for read_format ==
+ * PERF_FORMAT_TOTAL_TIME_ENABLED|_RUNNING with no GROUP/ID bit set (the
+ * only format open_watchpoint_common ever requests) is fixed by the ABI:
+ * value, then time_enabled, then time_running, 8 bytes each, in that order
+ * — see the perf_event_open(2) "Reading results" section. Both are
+ * CUMULATIVE since the event was created (or since the last
+ * PERF_EVENT_IOC_RESET, which this codebase never calls), so a caller
+ * wanting a per-tick delta must track the previous read itself; this
+ * function only reports the raw cumulative pair. */
+int pgwt_watchpoint_read_times(int perf_fd, uint64_t *time_enabled,
+                               uint64_t *time_running)
+{
+    if (time_enabled)
+        *time_enabled = 0;
+    if (time_running)
+        *time_running = 0;
+    if (perf_fd < 0)
+        return -1;
+
+    uint64_t buf[3]; /* value, time_enabled, time_running */
+    ssize_t n = read(perf_fd, buf, sizeof(buf));
+    if (n != (ssize_t)sizeof(buf))
+        return -1;
+
+    if (time_enabled)
+        *time_enabled = buf[1];
+    if (time_running)
+        *time_running = buf[2];
+    return 0;
 }

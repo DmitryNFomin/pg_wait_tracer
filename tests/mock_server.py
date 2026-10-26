@@ -808,6 +808,12 @@ class DaemonState:
             "events_per_sec": 4200.0,
             "lifecycle_events_total": 90000,
             "wp_attach_failures_total": 0,
+            # #390: a watchpoint has no ring buffer and never sees
+            # PERF_RECORD_THROTTLE; derived every tick from a
+            # TOTAL_TIME_ENABLED/_RUNNING delta instead. 0 here = no
+            # throttle observed, never "not measured".
+            "wp_throttled_ns_total": 0,
+            "wp_throttled_backends_total": 0,
             "backends_tracked": 6,
             "samples_total": 540000,
             "samples_per_sec": 60.0,

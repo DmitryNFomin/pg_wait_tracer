@@ -213,7 +213,11 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'summary_open_cpu_eff_rejected_total',
           'summary_open_cpu_class_divergent_ns',
           'summary_open_cpu_tier_mismatch_total',
-          'summary_open_cpu_overcredit_ns'):
+          'summary_open_cpu_overcredit_ns',
+          # #390: a watchpoint has no ring buffer and never sees
+          # PERF_RECORD_THROTTLE — derived every tick from TOTAL_TIME_ENABLED
+          # vs _RUNNING instead. Disclosure, not a refusal.
+          'wp_throttled_ns_total', 'wp_throttled_backends_total'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.

@@ -18,7 +18,7 @@ BUILD     = ../build
 # Rocky 8 / RHEL 8 where the bundled static libbpf is used instead.
 LIBBPF_LIB ?= -lbpf
 
-TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
+TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_watchpoint_throttle test_spawn test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
             test_trace_perms \
             test_exact_probe \
@@ -109,6 +109,14 @@ test_tick_drain: test_tick_drain.c $(LIFECYCLE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=ring_buffer__consume $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+# #390: exercises the real perf_event_open/read(2) throttle-visibility path
+# directly (its own PERF_TYPE_BREAKPOINT event, not through
+# pgwt_open_watchpoint/SET_BPF — see the file's own header comment for why
+# that is still the same mechanism). Only needs perf_event.o; no BPF skeleton,
+# no wraps. Root/CAP_SYS_ADMIN only — SKIPs itself otherwise.
+test_watchpoint_throttle: test_watchpoint_throttle.c $(BUILD)/perf_event.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_spawn: test_spawn.c ../src/spawn.c

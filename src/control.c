@@ -222,6 +222,18 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "wp_attach_failures_total",
                      ctr->wp_attach_failures_total);
 
+    /* #390: a watchpoint's own perf_event has no ring buffer and never sees
+     * PERF_RECORD_THROTTLE — these are derived every tick from each live
+     * backend's TOTAL_TIME_ENABLED/_RUNNING delta (src/daemon.c
+     * pgwt_watchpoint_throttle_check). Disclosure, not a refusal: a nonzero
+     * wp_throttled_ns_total means this capture's exact-tier data is short
+     * by that much, quantified, same pattern as cpu_clamped_ns below —
+     * never a reason this response is withheld. */
+    cjson_add_uint64(root, "wp_throttled_ns_total",
+                     ctr->wp_throttled_ns_total);
+    cjson_add_uint64(root, "wp_throttled_backends_total",
+                     ctr->wp_throttled_backends_total);
+
     cJSON_AddNumberToObject(root, "backends_tracked", count_backends(d));
 
     /* Sampled tier counters (0 when not sampling) */
