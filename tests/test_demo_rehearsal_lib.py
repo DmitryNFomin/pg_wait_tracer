@@ -10,6 +10,7 @@ wait for an actual 30-45 minute rehearsal run to surface it.
 Usage: python3 tests/test_demo_rehearsal_lib.py
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1169,6 +1170,155 @@ def test_cross_tab_weighted_vs_unweighted_error_has_wide_margin():
           f"{len(_BOUND_TEST_SPANS_S)} geometries is {worst_gap_pct:.2e}%, "
           f"must stay under {margin:.2e}% (tolerance "
           f"{lib.TIME_MODEL_TOLERANCE_PCT}% / 10000x margin)")
+
+
+# ── Coupling check: does src/compute.c still USE the ceiling formula? ─────
+#
+# The three tests above prove the overshoot bound holds FOR THE CEILING
+# FORMULA -- they say nothing about whether src/compute.c still computes
+# bucket_ns that way. cross_tab_bucket_ns() in demo_rehearsal_lib.py is a
+# reimplementation (its own docstring says so); a reimplementation can
+# drift from its original silently, exactly the #589 class of bug (a C
+# literal renamed, a JS copy of it left stale through a full `make check`,
+# caught only by a human grep during integration).
+#
+# So: extract the REAL formula text out of src/compute.c's pgwt_compute_aas
+# (never a second hardcoded copy of the formula itself) and assert,
+# structurally, that it is still a ceiling-division shape -- the divisor
+# appearing both as the "+B-1" addend and as the final divisor, whatever
+# that variable happens to be called. Raises (refuses) rather than
+# reporting "nothing found, nothing to check" when the function or the
+# assignment can't be located, per issue #570's bypass-suite requirement.
+COMPUTE_C_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "src", "compute.c")
+
+
+def extract_cross_tab_bucket_ns_statement(compute_c_source):
+    """Extract the literal `uint64_t bucket_ns = ...;` statement from
+    inside pgwt_compute_aas (the AAS endpoint -- the same function
+    bucket_weighted_aas_ok's bucket_ns argument comes from). Anchored on
+    the function name so the THREE other near-identical bucket_ns
+    assignments elsewhere in compute.c (for other endpoints, not gated by
+    this issue) are never matched instead. Raises if the function or the
+    assignment can't be found -- a reworded anchor must fail loudly, not
+    silently pass having checked nothing."""
+    func_match = re.search(r'\bpgwt_compute_aas\s*\(', compute_c_source)
+    if not func_match:
+        raise AssertionError(
+            "#570: could not find pgwt_compute_aas(...) in src/compute.c "
+            "-- the function was renamed or moved; update the extractor "
+            "rather than letting the coupling check pass on no evidence")
+    window = compute_c_source[func_match.start():func_match.start() + 4000]
+    stmt_match = re.search(r'uint64_t\s+bucket_ns\s*=\s*(.+?);', window)
+    if not stmt_match:
+        raise AssertionError(
+            "#570: could not find a `uint64_t bucket_ns = ...;` "
+            "assignment inside pgwt_compute_aas in src/compute.c -- the "
+            "statement was reworded; update the extractor rather than "
+            "letting the coupling check pass on no evidence")
+    return stmt_match.group(0).strip()
+
+
+def bucket_ns_statement_is_ceiling_division(statement):
+    """Structural check, not a literal-string copy of the formula: matches
+    `uint64_t bucket_ns = (A + [cast]B - 1) / [cast]C;` and returns
+    whether B and C are the SAME variable (any cast stripped) -- the
+    shape that makes it ceiling division of A by that divisor. Returns
+    None (not False) when the statement doesn't even have this shape at
+    all (e.g. plain truncating division with no "+ ... - 1" term) so
+    callers can tell "found a non-ceiling assignment" apart from "found
+    nothing" if they need to, though issue #570's own gate treats both as
+    not-proven-ceiling."""
+    m = re.match(
+        r'uint64_t\s+bucket_ns\s*=\s*\(\s*(?P<a>[\w.]+)\s*\+\s*'
+        r'(?:\(\s*[A-Za-z_][A-Za-z_0-9 ]*\s*\)\s*)?(?P<b>\w+)\s*-\s*1\s*\)'
+        r'\s*/\s*(?:\(\s*[A-Za-z_][A-Za-z_0-9 ]*\s*\)\s*)?(?P<c>\w+)\s*;',
+        statement)
+    if not m:
+        return None
+    return m.group('b') == m.group('c')
+
+
+def test_compute_c_cross_tab_bucket_ns_is_still_ceiling_division():
+    with open(COMPUTE_C_PATH, "r") as f:
+        source = f.read()
+    statement = extract_cross_tab_bucket_ns_statement(source)
+    is_ceiling = bucket_ns_statement_is_ceiling_division(statement)
+    check(is_ceiling is True,
+          f"src/compute.c's AAS bucket_ns assignment is still ceiling "
+          f"division -- the premise the three overshoot-bound tests above "
+          f"depend on ({statement!r})")
+
+
+def test_extract_cross_tab_bucket_ns_statement_refuses_missing_function():
+    try:
+        extract_cross_tab_bucket_ns_statement(
+            "void some_other_function(void) { int x = 1; }")
+        check(False, "should have raised when pgwt_compute_aas is absent")
+    except AssertionError as e:
+        check("#570" in str(e), f"raises a #570-tagged error ({e})")
+
+
+def test_extract_cross_tab_bucket_ns_statement_refuses_empty_source():
+    try:
+        extract_cross_tab_bucket_ns_statement("")
+        check(False, "should have raised on an empty file")
+    except AssertionError as e:
+        check("#570" in str(e), f"raises a #570-tagged error ({e})")
+
+
+def test_extract_cross_tab_bucket_ns_statement_refuses_reworded_assignment():
+    # Function is found, but the assignment itself was reworded to
+    # something the statement regex can't parse at all (e.g. split across
+    # a helper call) -- must still refuse, not silently find nothing and
+    # report success.
+    source = ("void pgwt_compute_aas(uint64_t from_ns, uint64_t to_ns, "
+               "int num_buckets) {\n"
+               "    uint64_t bucket_ns = compute_bucket_width(from_ns, "
+               "to_ns, num_buckets)\n"  # no trailing ';' on this line
+               "        + extra_padding_ns;\n"
+               "}\n")
+    try:
+        extract_cross_tab_bucket_ns_statement(source)
+        check(False, "should have raised when the assignment has no "
+                      "single-statement `= ...;` shape on one line")
+    except AssertionError as e:
+        check("#570" in str(e), f"raises a #570-tagged error ({e})")
+
+
+def test_bucket_ns_statement_is_ceiling_division_true_for_the_real_shape():
+    check(bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = (range_ns + (uint64_t)num_buckets - 1) / "
+        "(uint64_t)num_buckets;") is True,
+        "the real cast-and-all shape is recognised as ceiling division")
+
+
+def test_bucket_ns_statement_is_ceiling_division_true_without_casts():
+    check(bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = (range_ns + num_buckets - 1) / num_buckets;")
+        is True, "a cast-free ceiling shape is recognised too")
+
+
+def test_bucket_ns_statement_is_ceiling_division_false_for_truncation():
+    # BYPASS-SUITE CASE -- the exact mutation issue #570 requires this
+    # coupling check to catch: ceil replaced by plain truncating division.
+    result = bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = range_ns / (uint64_t)num_buckets;")
+    check(result is not True,
+          f"plain truncating division is NOT recognised as ceiling "
+          f"division (got {result!r})")
+
+
+def test_bucket_ns_statement_is_ceiling_division_false_for_mismatched_divisor():
+    # The addend and the final divisor must be the SAME variable -- a
+    # formula that adds one variable's "-1" but divides by a different
+    # one is not ceiling division of range_ns by that divisor at all.
+    result = bucket_ns_statement_is_ceiling_division(
+        "uint64_t bucket_ns = (range_ns + (uint64_t)num_buckets - 1) / "
+        "(uint64_t)other_var;")
+    check(result is False,
+          f"a mismatched addend/divisor is explicitly False, not treated "
+          f"as ceiling (got {result!r})")
 
 
 def test_freshness_recent_bucket_ok():
