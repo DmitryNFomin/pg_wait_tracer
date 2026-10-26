@@ -6524,16 +6524,17 @@ static cJSON *serialize_exec_lane(const struct pgwt_exec_lane *lane,
          * cheapest way for a consumer to silently fall back to the wrong
          * number is for the right one to sometimes be absent.
          *
-         * INERT ON THIS BRANCH — stated rather than left to a reviewer. No
-         * client reads it yet: web/static/lib/builders/waterfall.js still
-         * does `rawDuration: ev.dur_ns` and its tooltip/readout formatters
-         * print that same clipped slice, so the user-visible symptom #529
-         * was filed for (a 4 ms wait reading 2 ms at the window edge) is
-         * NOT fixed by this branch — only the wire half is. The client half
-         * lives on agent/529-client-tooltip, with its own web_unit tests;
-         * one branch at a time may touch web/, so it is not touched here.
-         * A dormant field nobody discloses is how a feature ships looking
-         * done; a disclosed one is a sequencing fact. */
+         * CONSUMED as of this tree — the note here used to say the field
+         * was inert, and that is no longer true: the client half merged
+         * alongside the wire half. web/static/lib/builders/waterfall.js
+         * reads `ev.raw_dur_ns` (around :599-603) for both the per-bar
+         * tooltip and the click readout, printing the wall time and
+         * disclosing the #496 slice beside it when the two differ
+         * ("4.0ms (2.0ms in window)"). So the symptom #529 was filed for
+         * — a 4 ms wait reading 2 ms at the window edge — is fixed here,
+         * not merely wired. Keep this paragraph honest if either half
+         * moves: a comment claiming a gap the tree has closed misleads
+         * more than no comment, because the next reader trusts it. */
         cjson_add_uint64_string(item, "raw_dur_ns", ev->raw_duration_ns);
         if (ev->has_cpu)
             cjson_add_uint64_string(item, "cpu_ns", ev->cpu_ns);
