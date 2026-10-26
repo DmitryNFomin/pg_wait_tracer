@@ -34,8 +34,9 @@
  * itself. A floor ("at least 2000 ms") would have passed on the parent tree.
  *
  * It is also placement-sensitive, not just total-sensitive: §1 asserts the
- * PER-FILE split (5 s before the rotation, 6 s after) and that every record
- * carries exactly 1000 ms, so a "fix" that re-credited the interval from its
+ * PER-FILE split after close (5 s before the rotation, 6.2 s after) and that
+ * every record carries exactly 1000 ms before close, with one final 200 ms
+ * record at close (#632). A "fix" that re-credited the interval from its
  * start into the new file, double-counted the rotation's own second, or
  * dumped the whole pause into one record fails here rather than passing on
  * the total.
@@ -383,13 +384,15 @@ static void seed(struct wr *x)
 /* Ticks 2..LAST_TICK, rotating at ROT_TICK. flush_completed's rule (a tick at
  * BASE + k s + 200 ms seals every second strictly below BASE + k s) makes the
  * sealable span seconds 1..LAST_TICK-1 -- the interval starts at BASE + 1 s
- * -- so the conservation target is a literal consequence of the schedule and
- * not of any writer counter. */
+ * -- so the live conservation target follows literally from the schedule.
+ * #632: close also settles the final 200 ms confirmed by the last note at
+ * BASE + LAST_TICK s + 200 ms. Neither target uses a writer counter. */
 #define ROT_TICK   6
 #define LAST_TICK  12
 #define WANT_NS    ((uint64_t)(LAST_TICK - 1) * S)          /* 11 s */
 #define WANT_BEFORE ((uint64_t)(ROT_TICK - 1) * S)          /*  5 s */
-#define WANT_AFTER  (WANT_NS - WANT_BEFORE)                 /*  6 s */
+#define WANT_CLOSED_NS (WANT_NS + 200 * MS)                 /* 11.2 s */
+#define WANT_AFTER  (WANT_CLOSED_NS - WANT_BEFORE)           /*  6.2 s */
 
 static void run_ticks(struct wr *x, bool rotate)
 {
@@ -449,12 +452,32 @@ static void test_conservation_no_push(void)
               n, rb_rows_not_one_second(&rb));
     }
 
-    /* Close, then split the same total by FILE. The seconds that completed
-     * before the rotation belong to the archived hour and the ones after to
+    /* Close settles another 200 ms through the final note, then split by
+     * FILE. Seconds completed before rotation belong to the archived hour,
+     * and the ones after to
      * the file the seal reopened; a fix that re-credited the interval from
      * its start, or re-sealed the rotation's own second into the new file,
      * moves these two numbers without moving the total. */
     pgwt_summary_close(x.w);
+    n = read_back(x.dir, &rb);
+    CHECK(n == LAST_TICK && rb_sum_sess(&rb) == WANT_CLOSED_NS,
+          "CLOSE: %d records carry exactly %llu ms through the final note "
+          "at +12200 ms, from the start at +1000 ms", n,
+          (unsigned long long)(rb_sum_sess(&rb) / MS));
+    int final_rows = 0, bad_rows = 0;
+    for (int i = 0; i < rb.n; i++) {
+        if (rb.rows[i].wall == BASE_MONO + LAST_TICK * S) {
+            final_rows++;
+            if (rb.rows[i].sess_db_ns != 200 * MS)
+                bad_rows++;
+        } else if (rb.rows[i].sess_db_ns != S) {
+            bad_rows++;
+        }
+    }
+    CHECK(final_rows == 1 && bad_rows == 0,
+          "CLOSE PLACEMENT: eleven full seconds and one final 200 ms "
+          "second, none beyond the last note (%d final, %d wrong)",
+          final_rows, bad_rows);
     struct per_file pf;
     int pn = read_per_file(x.dir, PID_A, &pf);
     CHECK(pn == 2, "per-file: both files opened and decoded (%d)", pn);
@@ -474,12 +497,12 @@ static void test_conservation_no_push(void)
                   pf.sess_ns[cur] == WANT_AFTER,
                   "SPLIT: %llu ms in %s and %llu ms in %s — the %llu s that "
                   "completed before the rotation stayed in the hour they "
-                  "belong to, the %llu s after went to the file the seal "
+                  "belong to, the %llu ms after went to the file the seal "
                   "reopened, nothing counted twice and nothing skipped",
                   (unsigned long long)(pf.sess_ns[arch] / MS), pf.name[arch],
                   (unsigned long long)(pf.sess_ns[cur] / MS), pf.name[cur],
                   (unsigned long long)(WANT_BEFORE / S),
-                  (unsigned long long)(WANT_AFTER / S));
+                  (unsigned long long)(WANT_AFTER / MS));
     }
 
     CHECK(x.w->open_seal_reopens_total == 1,
@@ -490,7 +513,7 @@ static void test_conservation_no_push(void)
     CHECK(x.w->open_seal_reopen_failures_total == 0,
           "COUNTED: no reopen failed (%llu)",
           (unsigned long long)x.w->open_seal_reopen_failures_total);
-    CHECK(x.w->open_credited_ns_total == WANT_NS,
+    CHECK(x.w->open_credited_ns_total == WANT_CLOSED_NS,
           "COUNTED: open_credited_ns_total = %llu ms, agreeing with the disk",
           (unsigned long long)(x.w->open_credited_ns_total / MS));
     wr_free(&x);
@@ -644,12 +667,12 @@ static void test_reopen_failure_is_counted_and_recoverable(void)
     int n = read_back(x.dir, &rb);
     CHECK(n > 0, "reopen-fail: records read back (%d)", n);
     if (n > 0)
-        CHECK(rb_sum_sess(&rb) == WANT_NS,
+        CHECK(rb_sum_sess(&rb) == WANT_CLOSED_NS,
               "BYPASS §5: the owed seconds survived the failure — %llu ms on "
-              "disk == %llu ms, so the failure DELAYED the credit and did not "
-              "destroy it",
+              "disk == %llu ms through the final note, so the failure DELAYED "
+              "the credit and did not destroy it",
               (unsigned long long)(rb_sum_sess(&rb) / MS),
-              (unsigned long long)(WANT_NS / MS));
+              (unsigned long long)(WANT_CLOSED_NS / MS));
     wr_free(&x);
 }
 
@@ -703,13 +726,14 @@ static void test_no_rotation_same_total(void)
     int n = read_back(x.dir, &rb);
     CHECK(n > 0, "no-rotation: records read back (%d)", n);
     if (n > 0)
-        CHECK(rb_sum_sess(&rb) == WANT_NS,
+        CHECK(rb_sum_sess(&rb) == WANT_CLOSED_NS,
               "BYPASS §7 (rotation absent): the identical tick schedule "
-              "WITHOUT a rotation also reads %llu ms == %llu ms. So §1's "
-              "number is the schedule's, and the rotation is the only "
+              "WITHOUT a rotation also reads %llu ms == %llu ms through the "
+              "final note. So §1's number is the schedule's, and rotation "
+              "is the only "
               "variable between them",
               (unsigned long long)(rb_sum_sess(&rb) / MS),
-              (unsigned long long)(WANT_NS / MS));
+              (unsigned long long)(WANT_CLOSED_NS / MS));
     CHECK(x.w->open_seal_reopens_total == 0,
           "BYPASS §7: no reopen without a rotation (%llu)",
           (unsigned long long)x.w->open_seal_reopens_total);
@@ -1064,6 +1088,116 @@ static void test_widen_preserves_clock_mapping(void)
     wr_free(&x);
 }
 
+/* At close each interval keeps its own last-note bound, even when another
+ * interval's note is more than the staleness timeout later. The gap between
+ * them must stay absent rather than becoming empty summary records. */
+static void test_close_separated_notes(void)
+{
+    struct wr x;
+    if (wr_open(&x, "close_separated") != 0) {
+        printf("  FAIL: setup\n"); failures++; return;
+    }
+    struct pgwt_trace_event e =
+        mkev(PID_SEED, BASE_MONO + 10 * MS, MS, EV_LOCK, 0);
+    pgwt_summary_push_event(x.w, &e, 0, e.old_event);
+    pgwt_summary_flush(x.w);
+    /* No active accumulator: earliest_open_second must find the older
+     * interval before considering the later note's second. */
+    const uint64_t older = BASE_MONO + S + 50 * MS;
+    const uint64_t newer = older + PGWT_SUMMARY_OPEN_STALE_NS + 2 * S;
+    pgwt_summary_note_open(x.w, PID_A, EV_LOCK, older, 0, older + 100 * MS);
+    pgwt_summary_note_open(x.w, PID_A + 2, EV_LOCK, newer, 0,
+                           newer + 100 * MS);
+    pgwt_summary_close(x.w);
+    CHECK(x.w->total_records_written == 3,
+          "separated notes: EXACTLY seed + two partials, no gap records "
+          "(%llu)", (unsigned long long)x.w->total_records_written);
+    CHECK(x.w->open_notes_expired_total == 0 &&
+          x.w->open_credited_ns_total == 200 * MS,
+          "separated notes: both confirmed prefixes survive close, "
+          "no staleness retirement (%llu ns, %llu expired)",
+          (unsigned long long)x.w->open_credited_ns_total,
+          (unsigned long long)x.w->open_notes_expired_total);
+    struct readback rb = { .want_pid = PID_A };
+    int n = read_back(x.dir, &rb);
+    CHECK(n == 3 && rb_sum_sess(&rb) == 100 * MS &&
+          rb.rows[1].wall == BASE_MONO + S &&
+          rb.rows[2].wall == BASE_MONO + 6 * S,
+          "separated notes: older prefix is 100 ms on disk, only seconds "
+          "0, 1 and 6 exist (%d records)", n);
+    rb.want_pid = PID_A + 2;
+    n = read_back(x.dir, &rb);
+    CHECK(n == 3 && rb_sum_sess(&rb) == 100 * MS,
+          "separated notes: newer prefix is also exactly 100 ms on disk");
+    wr_free(&x);
+}
+
+/* A first observation at the interval's start confirms no elapsed time.
+ * Without the close-only from >= noted guard this adds exactly one empty
+ * record; the finite close bound then terminates the loop. */
+static void test_close_empty_note(void)
+{
+    struct wr x;
+    if (wr_open(&x, "close_empty_note") != 0) {
+        printf("  FAIL: setup\n"); failures++; return;
+    }
+    struct pgwt_trace_event e =
+        mkev(PID_SEED, BASE_MONO + 10 * MS, MS, EV_LOCK, 0);
+    pgwt_summary_push_event(x.w, &e, 0, e.old_event);
+    pgwt_summary_flush(x.w);
+    const uint64_t start = BASE_MONO + S + 50 * MS;
+    pgwt_summary_note_open(x.w, PID_A, EV_LOCK, start, 0, start);
+    pgwt_summary_close(x.w);
+    CHECK(x.w->total_records_written == 1 &&
+          x.w->open_credited_ns_total == 0,
+          "empty note: EXACTLY the seed record, no confirmed open time "
+          "(%llu records)", (unsigned long long)x.w->total_records_written);
+    struct readback rb = { .want_pid = PID_SEED };
+    int n = read_back(x.dir, &rb);
+    CHECK(n == 1 && rb_sum_sess(&rb) == MS,
+          "empty note: disk has only the seed's 1 ms (%d records)", n);
+    wr_free(&x);
+}
+
+/* A seal failure and the final flush retry must count one lost second.
+ * Without open notes only the final flush runs; it must still count too.
+ * Shrinking the serializer buffer is the existing deterministic failure
+ * seam used by test_idle_summary, with no filesystem failure dependency. */
+static void test_close_failure_count(void)
+{
+    for (int with_note = 0; with_note <= 1; with_note++) {
+        struct wr x;
+        if (wr_open(&x, with_note ? "close_seal_fail" : "close_flush_fail")
+            != 0) {
+            printf("  FAIL: setup\n"); failures++; return;
+        }
+        struct pgwt_trace_event e =
+            mkev(PID_SEED, BASE_MONO + 10 * MS, MS, EV_LOCK, 0);
+        pgwt_summary_push_event(x.w, &e, 0, e.old_event);
+        if (with_note)
+            pgwt_summary_note_open(x.w, PID_A, EV_LOCK,
+                                   BASE_MONO + 50 * MS, 0,
+                                   BASE_MONO + 150 * MS);
+        CHECK(x.w->fp && x.w->accum_active &&
+              x.w->flush_failures_total == 0,
+              "close failure setup (note=%d): one active second, no failures",
+              with_note);
+        size_t real_size = x.w->encode_buf_size;
+        x.w->encode_buf_size = PGWT_SUMMARY_SERIALIZE_MAX - 1;
+        pgwt_summary_close(x.w);
+        x.w->encode_buf_size = real_size;
+        CHECK(x.w->flush_failures_total == 1 &&
+              x.w->total_records_written == 0 && !x.w->fp,
+              "close (note=%d): one lost second counts EXACTLY once (%llu)",
+              with_note, (unsigned long long)x.w->flush_failures_total);
+        CHECK(x.w->open_credited_ns_total == (with_note ? 100 * MS : 0),
+              "close (note=%d): the failed seal credited only its confirmed "
+              "prefix (%llu ns)", with_note,
+              (unsigned long long)x.w->open_credited_ns_total);
+        wr_free(&x);
+    }
+}
+
 int main(void)
 {
     printf("=== test_rotation_open_credit: #430 rotation must not pause "
@@ -1091,6 +1225,12 @@ int main(void)
     test_push_open_failure_is_counted();
     printf("-- 12: the widening must not move the file's clock mapping --\n");
     test_widen_preserves_clock_mapping();
+    printf("-- 13: close counts one failing second once --\n");
+    test_close_failure_count();
+    printf("-- 14: close preserves separate last-note bounds --\n");
+    test_close_separated_notes();
+    printf("-- 15: close invents no record for an empty note --\n");
+    test_close_empty_note();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     printf("=== test_rotation_open_credit: %s ===\n",
