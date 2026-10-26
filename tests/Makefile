@@ -70,7 +70,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_trace_closure \
             test_open_ckpt \
             trace_closure_probe \
-            open_ckpt_stub
+            open_ckpt_stub \
+            test_restart_second_identity
 
 .PHONY: all clean check
 
@@ -1026,3 +1027,40 @@ test_replay_window: test_replay_window.c ../src/event_reader.c \
 
 clean:
 	rm -f $(TESTS) test_exec_index map_reader_core.o
+
+# test_restart_second_identity: #284 -- a daemon restart INSIDE a second
+# writes that second twice (the outgoing daemon's pgwt_summary_close
+# force-flushes the partial second; the incoming one writes the rest of the
+# same second) and pgwt_visit_summaries sums both records. #284 filed that as
+# an OVER-count, with n=0: a reading of the code and no fixture. This settles
+# it by measurement -- one event schedule replayed through writer A (closed at
+# t_death inside S), then writer B (attached at t_attach inside S, in the SAME
+# directory, so the product's own recover_current_summary archives A's file),
+# then through a SINGLE writer as ground truth.
+#   MEASURED: the CLOSED records tile EXACTLY (12 of 12 counted once; per
+# second the closed time is identical ns for ns) even though the second is in
+# two records, so there is no over-count. The OPEN-interval credit is SHORT by
+# exactly t_attach - sec_start(S) -- 2411 ms vs 3011 ms here -- all of it in
+# the restart second, and the deficit tracks t_attach while being independent
+# of t_death, which attributes it to the partial second nobody credits.
+# Asserted: both exact identities, the boundary-handover control (exact with
+# nothing open across it; short by exactly one second when something is),
+# disjoint files with a gap, and the clamped-vs-unclamped inherited start
+# (map_reader passes BPF's last_ts, preseed_state_map seeds it to attach_ts;
+# unclamped would EXCEED the truth by 1500 ms and write two pre-attach seconds
+# twice). Perturbation legs move one nanosecond of duration, of credited range
+# and of the attach instant, and require each predicate to go FALSE. Bypass
+# suite: refusing reads, a disabled writer, no notes at all (the shape
+# absent), a PARTIAL file set, an unparseable file, a missing directory, and a
+# closed record lost in the restart gap. The two under-counts it measured
+# (the dark window; the FLUSH_LAG tail at a clean stop) are #632.
+# Server build, no BPF, no live PG;
+# ~0.1 s.
+test_restart_second_identity: test_restart_second_identity.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                   $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm

@@ -971,3 +971,31 @@ test_replay_ui.py
 # #567: box-check.sh's up-rsync must never send tests/*.o (or *.a/*.so) to
 # the Linux box, and a stale object already there must not survive either.
 test_box_check_object_excludes.sh
+
+# #284: a daemon restart INSIDE a second writes that second twice (the
+# outgoing daemon force-flushes the partial second, the incoming one writes
+# the rest of the same second) and pgwt_visit_summaries sums both. The issue
+# filed that as an OVER-count; it was n=0, a reading of the code. This
+# settles it by measurement: one event schedule replayed through writer A
+# (closed at t_death inside S), then writer B (attached at t_attach inside S,
+# same directory, so the product's own recover_current_summary archives A's
+# file), then through a SINGLE writer as ground truth.
+#   ANSWER: the closed records TILE exactly (12 of 12 counted once, per-second
+# closed time identical ns for ns) -- there is no over-count. The open-
+# interval credit is SHORT by exactly t_attach - sec_start(S) (600 ms here,
+# 2411 vs 3011 ms), all of it in the restart second, and the deficit tracks
+# t_attach while being independent of t_death -- so the partial second the
+# outgoing daemon still had a fresh note for is simply never credited.
+# A boundary handover holds the identity EXACTLY (nothing open across it) and
+# is short by exactly one second when something is (the second completed too
+# late in PGWT_SUMMARY_FLUSH_LAG_NS terms for the last tick to seal it).
+# Also pins what the producer passes for an INHERITED start (map_reader hands
+# BPF's last_ts, which preseed_state_map seeds to attach_ts -- clamped) and
+# measures the unclamped alternative: +1500 ms, two seconds written twice.
+# Perturbation legs show the identity and the deficit predicates both going
+# FALSE on ONE nanosecond. Bypass suite: empty/refusing reads, a disabled
+# writer, the shape absent (no notes at all), a PARTIAL file set, an
+# unparseable file, a missing directory, and a closed record lost in the
+# restart gap (which would read as missing credit). The two under-counts it
+# measured (the dark window; the FLUSH_LAG tail at a clean stop) are #632.
+test_restart_second_identity
