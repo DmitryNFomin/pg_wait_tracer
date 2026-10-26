@@ -97,6 +97,9 @@ struct pgwt_pid_cat {
  *     (or earlier) — FLAG_QUERY_BACKFILL — else FLAG_QUERY_UNATTRIB, so
  *     top_queries reports it as unattributed_ms instead of dropping it.
  *     The live consumers apply the same rule record by record.
+ *   - #596: non-idle background/maintenance records with query_id 0 are
+ *     flagged QUERY_UNATTRIB directly, never backfilled. IO_WORKER records
+ *     remain outside the query model.
  * cats may be NULL/empty (no metadata: everything is foreground).
  *
  * #363 — RETURN VALUE. 1 when every record in the array was tagged, 0 when

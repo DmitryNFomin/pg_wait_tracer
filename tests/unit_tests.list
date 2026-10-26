@@ -971,3 +971,6 @@ test_replay_ui.py
 # #567: box-check.sh's up-rsync must never send tests/*.o (or *.a/*.so) to
 # the Linux box, and a stale object already there must not survive either.
 test_box_check_object_excludes.sh
+
+# #596: query-less background/maintenance load, with an IO_WORKER control.
+test_background_unattributed

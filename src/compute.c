@@ -838,8 +838,16 @@ int pgwt_tag_events_window_seeded(struct pgwt_trace_event *events, int count,
                 st->next_qid = 0;
                 continue;
             }
-            if (st->cat_flag != 0)
-                continue;   /* background / maintenance / io_worker: query-less */
+            if (st->cat_flag & PGWT_EVENT_FLAG_IO_WORKER)
+                continue;   /* structurally query-less; outside DB Time */
+            if (st->cat_flag & (PGWT_EVENT_FLAG_BACKGROUND |
+                                PGWT_EVENT_FLAG_MAINT)) {
+                /* #596: this work has no query to backfill. Keep its load
+                 * visible as unattributed without borrowing a command id. */
+                if (!pgwt_is_idle_event(we))
+                    ev->flags |= PGWT_EVENT_FLAG_QUERY_UNATTRIB;
+                continue;
+            }
             uint64_t q = st->next_qid ? st->next_qid : fwd[i];
             if (q != 0) {
                 ev->query_id = q;
@@ -2407,8 +2415,8 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
          * latency, not a share of the window. */
         uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
         if (ev->query_id == 0) {
-            /* #128: foreground non-idle time whose command never reported
-             * an id is reported, not dropped. */
+            /* #128/#596: non-idle time without a query (foreground,
+             * background or maintenance) is reported, not dropped. */
             if (ev->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) {
                 unattributed_ns += clip_u;        /* INTERVAL */
                 /* INSTANT (#424), both bounds */

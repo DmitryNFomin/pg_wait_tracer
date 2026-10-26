@@ -1026,3 +1026,13 @@ test_replay_window: test_replay_window.c ../src/event_reader.c \
 
 clean:
 	rm -f $(TESTS) test_exec_index map_reader_core.o
+
+# #596: append-only registration; all's earlier prerequisites were expanded
+# before this TESTS addition, so extend that target explicitly as well.
+TESTS += test_background_unattributed
+all: test_background_unattributed
+
+test_background_unattributed: test_background_unattributed.c ../src/compute.c \
+                             $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                             $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
