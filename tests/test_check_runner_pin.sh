@@ -283,6 +283,19 @@ check_makefile_cflags() {
             print message > "/dev/stderr"
             failed = 1
         }
+        function has_compile_command(command, rest, before) {
+            rest = command
+            while (match(rest, /[$][(]CC[)]/)) {
+                before = substr(rest, 1, RSTART - 1)
+                # Exclude only CC assignment values (bare or quoted).
+                # Keep scanning: the same fragment may also compile.
+                if (before !~ /(^|[[:space:]])CC="?$/ &&
+                    before !~ ("(^|[[:space:]])CC=" sprintf("%c", 39) "$"))
+                    return 1
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            return 0
+        }
         function inspect(line, value, commands, n, i, command, quote, end_quote) {
             sub(/[[:space:]]*#.*/, "", line)
             if (line !~ /^\t/ && line ~ assignment) {
@@ -293,14 +306,14 @@ check_makefile_cflags() {
                     has_flag = 1
             }
             if (line ~ /^\t/) {
-                # Only command tokens count, after recipe prefixes or shell
-                # separators. CC="$(CC)" on a sub-make is merely a value.
+                # Scan anywhere, including shell keywords and pipelines.
+                # CC="$(CC)" on a sub-make is merely a forwarded value.
                 sub(/^\t[[:space:]@+-]*/, "", line)
                 n = split(line, commands, /&&|;/)
                 for (i = 1; i <= n; i++) {
                     command = commands[i]
                     sub(/^[[:space:]]*/, "", command)
-                    if (command ~ /^[$][(]CC[)]([[:space:]]|$)/) {
+                    if (has_compile_command(command)) {
                         recipes++
                         if (!index(command, "$(" flags_var ")"))
                             reject("FAIL: " FILENAME ":" first_line \
@@ -487,6 +500,26 @@ for recipe in 'cd x && $(CC) -o a a.c' '@-+$(CC) -o a a.c' 'cd x; $(CC) -o a a.c
     printf '\t%s\n' "$recipe" >> "$tmpdir/root-command-bypass.mk"
     expect_root_fail "$tmpdir/root-command-bypass.mk" 'does not pass $(CFLAGS)' \
         "root gate rejects compiler command without flags: $recipe"
+done
+
+# Each wrapped compile has a compliant sibling: missing it must fail for
+# missing CFLAGS, never merely because the gate saw no compile recipes.
+for recipe in 'for f in extra/*.c; do $(CC) -c $$f; done' \
+              '@if true; then $(CC) -c probe.c; fi' \
+              'echo probe.c | xargs $(CC) -c' \
+              'false || $(CC) -c probe.c' \
+              '($(CC) -c probe.c)' \
+              'if false; then true; else $(CC) -c probe.c; fi' \
+              'env CC="$(CC)" $(CC) -c probe.c'; do
+    cat > "$tmpdir/root-wrapped-bypass.mk" <<'MK'
+CFLAGS = -Wall -Werror=implicit-function-declaration
+good:
+	$(CC) $(CFLAGS) -c main.c
+bad:
+MK
+    printf '\t%s\n' "$recipe" >> "$tmpdir/root-wrapped-bypass.mk"
+    expect_root_fail "$tmpdir/root-wrapped-bypass.mk" 'does not pass $(CFLAGS)' \
+        "root gate rejects wrapped compile with compliant sibling: $recipe"
 done
 
 cp "$tmpdir/root-forward.mk" "$tmpdir/root-override.mk"
