@@ -135,6 +135,30 @@ def _is_compare_baseline(msg):
     return req_to < _TO_NS
 
 
+def _fidelity_ranges(fidelity):
+    """#322/#341: mirror of add_fidelity_ranges() in src/server.c -- the
+    window partitioned into maximal constant-fidelity sub-ranges, in wall ns
+    as plain JSON numbers, the same domain and encoding as the bucket `t`
+    these bands are plotted against.
+
+    MIXED is TWO ranges with the change in the middle, so the UI's sub-range
+    banding is drivable against the mock at all: that is the whole of #322 --
+    before it the client fell back to shading a mixed window end to end,
+    including the part captured exactly. The token a partition implies
+    (pgwt_fidelity_of over the tokens present) always equals `fidelity`,
+    which is the consistency the real server checks before it emits
+    anything."""
+    mid = _FROM_NS + (_TO_NS - _FROM_NS) // 2
+    if fidelity == "mixed":
+        return [{"from": _FROM_NS, "to": mid, "fidelity": "exact"},
+                {"from": mid, "to": _TO_NS, "fidelity": "sampled"}]
+    if fidelity == "sampled":
+        return [{"from": _FROM_NS, "to": _TO_NS, "fidelity": "sampled"}]
+    if fidelity == "exact":
+        return [{"from": _FROM_NS, "to": _TO_NS, "fidelity": "exact"}]
+    return [{"from": _FROM_NS, "to": _TO_NS, "fidelity": "none"}]
+
+
 def _baseline_rows(rows, value_key):
     """Deterministic B variants: real changes, one gone entity, one floor row."""
     out = []
@@ -973,6 +997,13 @@ def handle_request(msg):
         resp["fidelity"] = response_fidelity
         if response_fidelity in ("sampled", "mixed"):
             resp["sample_period_ns"] = _FID.sample_period_ns
+    # #322/#341: the per-range breakdown, emitted by src/server.c's
+    # add_fidelity_ranges() on the aas response (the only surface whose
+    # client consumes it: builders/fidelity.js via aas.js / uplot-aas.js).
+    # tests/test_protocol_drift.py compares key sets and value types
+    # recursively, so a field added on one side only fails the gate.
+    if cmd == "aas" and "error" not in resp and "unavailable" not in resp:
+        resp["fidelity_ranges"] = _fidelity_ranges(resp.get("fidelity"))
     # FID-3 (T1): over a sampled-only window the real server gates the
     # latency columns — samples carry no real durations, so avg/percentiles
     # are null and the UI renders "—". Mirror it so the web tests exercise
