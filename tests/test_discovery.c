@@ -110,6 +110,55 @@ static void test_validation_exclusions_reset_per_discovery_cycle(void)
     free(d);
 }
 
+/* #584: exact_probes.query_offset / .activity_offset are FILE offsets into
+ * the postgres binary, lazily computed ONCE by exact_probe.c's attach_link
+ * and never reset by pgwt_exact_probe_bundle_forget_skeleton (exact_probe.h
+ * says so explicitly: they "do not move when a process restarts" -- true
+ * for a SAME-binary restart, false across a re-attach onto a DIFFERENT
+ * binary, where the comment itself calls this "pre-existing and not
+ * addressed"). Before this fix nothing ever cleared them, so a second
+ * pgwt_discover() cycle left whatever a prior cycle had computed completely
+ * untouched -- a stale file offset handed to the new binary's uprobe
+ * attach, not detected, not refused: a uprobe fires on whatever instruction
+ * happens to sit at that byte offset in the NEW binary, producing
+ * plausible-looking garbage rather than an error.
+ *
+ * Non-vacuous without a second PostgreSQL binary or a live database: a
+ * sentinel that cannot possibly be a real computed offset (0xdeadbeef) is
+ * set BEFORE the discovery cycle; the assertion is that it is gone AFTER,
+ * regardless of what pgwt_discover() recomputes it to. Re-attaching to the
+ * SAME binary cannot distinguish "recomputed to the same value" from
+ * "never touched" -- which is exactly the trap a same-binary re-attach test
+ * would fall into -- but a changed sentinel proves the cache was cleared
+ * independent of what it was cleared TO. This test binary has neither
+ * `pgstat_report_query_id` nor `pgstat_report_activity`, so both offsets
+ * land back on 0 after discovery: the "symbol not found, refuse" case the
+ * fix is meant to route into exact_probe.c's existing fail-closed rollback
+ * (PGWT_ESC_FAIL_EXACT_ATTACH) rather than a silent stale attach. */
+static void test_exact_probe_offsets_reset_per_discovery_cycle(void)
+{
+    struct pgwt_daemon *d = calloc(1, sizeof(*d));
+    CHECK(d != NULL, "allocate discovery fixture");
+    if (!d)
+        return;
+
+    d->exact_probes.query_offset = 0xdeadbeefULL;
+    d->exact_probes.activity_offset = 0xdeadbeefULL;
+    d->postmaster_pid = getpid();
+    int rc = pgwt_discover(d);
+
+    CHECK(rc == 0, "discovery cycle succeeds against this test binary");
+    CHECK(d->exact_probes.query_offset != 0xdeadbeefULL,
+          "a new discovery cycle does not leave a prior cycle's "
+          "query_offset untouched");
+    CHECK(d->exact_probes.activity_offset != 0xdeadbeefULL,
+          "a new discovery cycle does not leave a prior cycle's "
+          "activity_offset untouched");
+
+    free(d->pg_binary_saved);
+    free(d);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -297,6 +346,7 @@ int main(int argc, char **argv)
 
     /* A daemon re-enters pgwt_discover() after each PostgreSQL restart. */
     test_validation_exclusions_reset_per_discovery_cycle();
+    test_exact_probe_offsets_reset_per_discovery_cycle();
 
     printf("\n%d/%d tests passed\n", ok, run);
     return (ok == run) ? 0 : 1;
