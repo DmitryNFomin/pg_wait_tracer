@@ -515,9 +515,20 @@ accounting rule and not about the byte layout:
   9"* — and chose the second, holding at 8 so the re-wiring commit could
   take 9. The next bump then went elsewhere: 9 is the consolidated epoch
   (`sessions_overflow` on disk, the measured-CPU split for the per-event
-  tables, `max_aas` over seconds, `[from, to)` boundaries, a growable
-  session table), landed as one recompute instead of six. So this rule
-  moves to **10**. Nothing about the rule changed; only its number.
+  tables, an observability-only `idle_cpu_ns`, per-second `queries[]`
+  spreading, `[from, to)` boundaries, a growable session table), landed as
+  one recompute instead of six. So this rule moves to **10**. Nothing about
+  the rule changed; only its number.
+
+  > **`max_aas` was in that list until 2026-10-26 and is not any more.** The
+  > claim "the summary path's peak is over seconds, the raw path's over
+  > buckets" was never measured. A per-bucket comparison found the two
+  > paths' AAS **areas identical to the millisecond on all six parity
+  > windows** while the peak merely *relocated*, so there is no peak rule to
+  > change — and `max_aas` is computed by the reader and never stored, so it
+  > could not ride a format bump regardless. What survives is an
+  > open-interval **placement** question (#410), still open and with its
+  > live magnitude unmeasured.
 
   **WHY THE CONSTANT DOES NOT ADVANCE TO 10 HERE.** With no producer, v10
   credits nothing, so its only semantic difference from the shipped rule

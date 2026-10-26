@@ -500,8 +500,22 @@
  * number -- "ship 9 and require the re-wiring commit to bump to 10, or hold
  * at 8 and let that commit set 9" -- and the next bump went to the
  * consolidated epoch (sessions_overflow on disk, the measured-CPU split for
- * the per-event tables, max_aas over seconds, [from, to) boundaries, a
- * growable session table), not to this rule. So the epoch is 9 and this
+ * the per-event tables, an observability-only idle_cpu_ns, per-second
+ * queries[] spreading, [from, to) boundaries, a growable session table),
+ * not to this rule.
+ *
+ * `max_aas` WAS in that list and was REMOVED on 2026-10-26, because the
+ * claim was never measured. A per-bucket comparison showed the two paths'
+ * AAS areas identical to the millisecond on all six parity windows while
+ * the PEAK relocated, so `max_aas` needs no rule of its own -- and
+ * `max_aas` is computed by the reader and never stored, so it could not
+ * have ridden a FORMAT bump in any case. What is left of that finding is an
+ * open-interval PLACEMENT question (#410), still open: the writer's
+ * open_credit_late_ns_total accounts for it on the synthetic fixture, but
+ * the fixture notes open intervals only when a record is pushed, which is
+ * not the live producer's cadence, and the live magnitude has NOT been
+ * measured yet. So neither "it rides the epoch" nor "it is a residual" is
+ * established, and this list claims neither. So the epoch is 9 and this
  * rule, still dormant, is 10. Renumbering is the whole point of the
  * paragraph below: a dormant rule may not sit on a number a shipping
  * contract also claims.
