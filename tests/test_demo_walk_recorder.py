@@ -52,10 +52,16 @@ class RecorderTests(unittest.TestCase):
     def test_any_recorded_error_still_refuses(self):
         # No error kind is exempt (#401's favicon 404 is handled by serving
         # the asset -- web/main.go -- never by teaching this gate to look
-        # away from a message). This is deliberately the plainest possible
-        # case: one pageerror, nothing favicon-shaped about it. It fails
-        # for TWO distinct reasons if the gate is weakened, both load-bearing
-        # on this test's name, not just the one most recently seen:
+        # away from a message). Capture.error() fires for exactly TWO kinds
+        # -- "console" and "pageerror" (Capture.__init__'s two page.on
+        # registrations) -- and BOTH are exercised here, nothing favicon-
+        # shaped about either: a test named "any" that covered only one kind
+        # would demonstrate the name for one instance and claim it for all,
+        # which is how a guard goes quietly vacuous the day a third kind is
+        # added and nothing here would have caught it staying unguarded.
+        # Each kind fails for TWO distinct reasons if the gate is weakened,
+        # both load-bearing on this test's name, not just the one most
+        # recently seen:
         #   - guard() stops raising entirely (the gate is gone)
         #   - guard() starts excluding a specific error kind (the gate grew
         #     a hole, e.g. an overbroad future fix for one noisy message)
@@ -65,12 +71,15 @@ class RecorderTests(unittest.TestCase):
         # and this test does not, and cannot, cover it.
         class Events:
             def on(self,*args): pass
-        with tempfile.TemporaryDirectory() as temp:
-            capture=driver.Capture(Events(),Events(),Path(temp),12)
-            capture.error("pageerror","TypeError: x is not a function")
-            with self.assertRaises(lib.Refusal) as failed:
-                capture.guard()
-            self.assertEqual(failed.exception.code,4)
+        for kind, message in (("pageerror","TypeError: x is not a function"),
+                              ("console","Failed to load resource: the server "
+                               "responded with a status of 404 (Not Found)")):
+            with tempfile.TemporaryDirectory() as temp:
+                capture=driver.Capture(Events(),Events(),Path(temp),12)
+                capture.error(kind,message)
+                with self.assertRaises(lib.Refusal) as failed:
+                    capture.guard()
+                self.assertEqual(failed.exception.code,4,kind)
 
     def test_frame_count_cannot_hide_a_hole(self):
         with self.assertRaises(lib.Refusal) as failed:
