@@ -335,7 +335,7 @@ export function timelineAggTooltipFormatter(params) {
 }
 
 /* The banner: ONE line, one number format, one zoom instruction, covering
- * truncation and density together (they are different facts, but two yellow
+ * truncation, density, and non-overlapping events together (different facts, but two yellow
  * lines above one chart read as two problems). Pure so the text is
  * unit-tested; null when there is nothing to say.
  *
@@ -344,18 +344,24 @@ export function timelineAggTooltipFormatter(params) {
  * the series length alone cannot tell the two paths apart). That substring is
  * load-bearing: reword the rest of the sentence freely, but keep it, or update
  * the smoke's check in the same commit. */
-export function timelineBannerNote(count, totalCount, truncated, spansPerPx) {
+export function timelineBannerNote(count, totalCount, truncated, spansPerPx, drawnCount = count) {
     const shown = count.toLocaleString();
     const of = truncated && totalCount > count
         ? ' of ' + totalCount.toLocaleString() : '';
+    const noun = (of ? totalCount : count) === 1 ? ' event' : ' events';
+    if (count > 0 && drawnCount === 0) {
+        return shown + of + noun +
+            ' returned, none overlap this window' + (truncated
+                ? ' — drag to zoom in for the rest of the window.' : '.');
+    }
     if (spansPerPx) {
-        return 'Showing ' + shown + of + ' events, aggregated at ' +
+        return 'Showing ' + shown + of + noun + ', aggregated at ' +
             spansPerPx.toLocaleString() + ' per px into per-pixel class shares' +
             ' — individual waits and their queries appear when you drag to zoom in.';
     }
     if (truncated) {
-        return 'Showing ' + shown + of +
-            ' events — drag to zoom in for the rest of the window.';
+        return 'Showing ' + shown + of + noun +
+            ' — drag to zoom in for the rest of the window.';
     }
     return null;
 }
@@ -365,7 +371,7 @@ export function timelineBannerNote(count, totalCount, truncated, spansPerPx) {
  *       chart host's pixel width, used to size the density aggregation)
  * Returns { option, hasData, chartHeight, truncated, total_count, count,
  *           aggregated, bannerNote, spansPerPx, columns, segmentCount }.
- * bannerNote is the single banner line (truncation and density in one
+ * bannerNote is the single banner line (truncation, density, and non-overlap in one
  * sentence), null when there is nothing to say. */
 export function buildTimelineOption(data, opts) {
     opts = opts || {};
@@ -429,9 +435,9 @@ export function buildTimelineOption(data, opts) {
     const spansPerPx = aggregated ? Math.max(1, Math.round(density)) : 0;
     const truncated = !!(data && data.truncated);
     const total_count = (data && data.total_count) || 0;
-    // ONE banner line for both facts (truncation and density).
+    // ONE banner line for truncation, density, and events with no window overlap.
     const bannerNote = timelineBannerNote(events.length, total_count, truncated,
-        spansPerPx);
+        spansPerPx, barData.length);
 
     const option = {
         backgroundColor: 'transparent',
