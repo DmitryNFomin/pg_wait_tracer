@@ -411,7 +411,47 @@ struct tag_pid_table {
     struct pgwt_pid_index ix;
     struct tag_pid_state *st;
     int n, cap;
+    int grows;             /* completed+attempted growths, for the hook below */
 };
+
+/* Test-only COUNTED allocation injection for this table's growth.
+ *
+ * #374 (4e0e2260) deleted the fixed 4096-slot bound, so the ONLY thing left
+ * that can stop this pass is a real allocation failure — and that one can
+ * land on ANY growth, including one deep in the array with records already
+ * rewritten. The three name-only points ("tag_ht", "tag_fwd",
+ * "tag_pid_entries") all fire on the FIRST growth (cap 0 -> 128), i.e.
+ * before record 0 is touched, which would leave the MID-ARRAY refusal — the
+ * one whose partial state is the reason the caller must discard the array
+ * instead of using what it got — unreachable. An unreachable refusal is
+ * indistinguishable from one that approves; that is the whole shape of #363.
+ *
+ * Syntax: PGWT_TEST_LOAD_ALLOC_FAIL=tag_pid_grow@N fails the N-th growth of
+ * this table, N counting from 1. A bare name, a non-positive or
+ * unparseable N, or an N this run never reaches must fail NOTHING: an
+ * unreadable value is never "fail always" (which would satisfy every
+ * refusal assertion without the counter working at all) and the refusal is
+ * never contingent on the variable merely being set. Production never sets
+ * it; tests/test_tag_refusal.c section 4 drives every case above. */
+static int tag_alloc_fail_nth(const char *point, int nth)
+{
+    const char *v = getenv("PGWT_TEST_LOAD_ALLOC_FAIL");
+    if (!v)
+        return 0;
+    size_t len = strlen(point);
+    /* strncmp stops at the first differing byte, so a value SHORTER than
+     * the point name mismatches on its NUL and v[len] is never read. */
+    if (strncmp(v, point, len) != 0 || v[len] != '@')
+        return 0;
+    const char *digits = v + len + 1;
+    if (*digits < '1' || *digits > '9')     /* empty, 0, or not a number */
+        return 0;
+    char *end = NULL;
+    long want = strtol(digits, &end, 10);
+    if (!end || *end != '\0')               /* trailing junk: unparseable */
+        return 0;
+    return want == (long)nth;
+}
 
 /* #374: pid 0 is a KEY LIKE ANY OTHER here, which it was not before: the old
  * table used `pid == 0` as its empty-slot marker, so a pid-0 record (the
@@ -423,6 +463,14 @@ static struct tag_pid_state *tag_pid_get(struct tag_pid_table *t, uint32_t pid)
     int h = pgwt_pid_index_find(&t->ix, pid);
     if (h >= 0)
         return &t->st[h];
+    if (t->n + 1 > t->cap) {
+        /* The same predicate accum_grow() uses to decide it must allocate,
+         * counted here so a test can choose WHICH growth fails — see
+         * tag_alloc_fail_nth above. No growth, no count. */
+        t->grows++;
+        if (tag_alloc_fail_nth("tag_pid_grow", t->grows))
+            return NULL;        /* a REAL allocation failure, mid-array */
+    }
     if (accum_grow((void **)&t->st, &t->cap, t->n + 1, sizeof(*t->st),
                    "tag_pid_entries") != 0)
         return NULL;            /* a REAL allocation failure: caller refuses */

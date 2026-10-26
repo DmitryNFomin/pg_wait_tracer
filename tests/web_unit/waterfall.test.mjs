@@ -9,6 +9,7 @@ import {
     fmtExecutionDuration, executionsCountsLabel,
     executionsStatusLabel, executionsHasInferredEnd,
     execScopeNoteHtml, EXEC_SCOPE_NOTE_TEXT, zoomLabelText,
+    allExecutionsUndrawable, undrawablePageText,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -92,6 +93,74 @@ test('clipping changes draw geometry only; raw tooltip start/duration/cpu surviv
     assert.ok(tip.includes(fmtTimeNs(at(2_000_000), 1_000_000) + ' UTC'));
     assert.ok(tip.includes('Measured CPU'));
     assert.equal(buildWaterfallReadout(io).cpu, '1.2ms');
+});
+
+// ── #529: raw_dur_ns carries the event's true, unclipped wall duration;
+// dur_ns (#496) is clipped to the execution's own boundary. A boundary
+// straddler must show the RAW figure in the tooltip/readout, with the
+// clipped (in-window) figure disclosed alongside it, not substituted for it.
+function straddleDetail() {
+    return {
+        query_id: '42',
+        leader: { pid: 1000, total_count: 2, truncated: false, events: [
+            // Straddler: clipped to 2ms at the boundary, true wall time 4ms.
+            { we: 0x01000015, name: 'IO:DataFileRead',
+              start_ns: at(0), dur_ns: '2000000', raw_dur_ns: '4000000',
+              cpu_ns: null },
+            // Interior event, NOT a straddler: raw == clipped == 5ms. A
+            // bug that computes wallDuration as (say) 2 * dur_ns rather
+            // than reading raw_dur_ns would show 10ms here and fail this
+            // assertion even though it happens to pass the straddler case.
+            { we: 0, name: 'CPU*', start_ns: at(10_000_000),
+              dur_ns: '5000000', raw_dur_ns: '5000000', cpu_ns: null },
+        ]},
+        workers: [],
+    };
+}
+
+test('#529: tooltip shows the raw wall duration, with the clipped figure '
+    + 'disclosed, not substituted', () => {
+    const m = buildWaterfallOption(straddleDetail(), {
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const straddler = m.bars.find(b => b[3] === 'IO:DataFileRead');
+    assert.equal(straddler[6], '2000000'); // dur_ns stays clipped (draw geometry)
+    const tip = waterfallTooltipFormatter({ data: straddler });
+    assert.ok(tip.includes('4.0ms'), tip);
+    assert.ok(tip.includes('2.0ms in window'), tip);
+    assert.equal(buildWaterfallReadout(straddler).duration, '4.0ms (2.0ms in window)');
+});
+
+test('#529 negative control: an interior (non-straddling) event shows one '
+    + 'figure only, guarding against a raw-duration bug that fires on every '
+    + 'event rather than only straddlers', () => {
+    const m = buildWaterfallOption(straddleDetail(), {
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const interior = m.bars.find(b => b[3] === 'CPU*');
+    const tip = waterfallTooltipFormatter({ data: interior });
+    assert.ok(tip.includes('5.0ms'), tip);
+    assert.ok(!tip.includes('in window'), tip);
+    assert.equal(buildWaterfallReadout(interior).duration, '5.0ms');
+});
+
+test('#529 fallback: a response with no raw_dur_ns field (older server) '
+    + 'shows the clipped value as-is, with no spurious note', () => {
+    const data = {
+        query_id: '42',
+        leader: { pid: 1000, total_count: 1, truncated: false, events: [
+            { we: 0x01000015, name: 'IO:DataFileRead',
+              start_ns: at(0), dur_ns: '2000000', cpu_ns: null },
+        ]},
+        workers: [],
+    };
+    const m = buildWaterfallOption(data, {
+        executionStart: String(START), executionEnd: at(20_000_000),
+    });
+    const io = m.bars.find(b => b[3] === 'IO:DataFileRead');
+    const tip = waterfallTooltipFormatter({ data: io });
+    assert.ok(tip.includes('2.0ms'), tip);
+    assert.ok(!tip.includes('in window'), tip);
 });
 
 test('event bars use stable eventColor identity tint, not matrix/plan colors', () => {
@@ -503,6 +572,38 @@ test('default selection falls back to the newest row when nothing is drawable', 
     assert.equal(pickDefaultExecution(rows), rows[0]);
     assert.equal(pickDefaultExecution([]), null);
     assert.equal(pickDefaultExecution(null), null);
+});
+
+// #587: the vacuity trap named in the issue -- a fixture with ONE drawable
+// row anywhere must make the case vanish. LIVE_ROWS[0]/[1] are both
+// n_events:0/n_workers:0/plan_ms:null (undrawable); LIVE_ROWS[2] has
+// n_events:2 (drawable).
+test('#587 allExecutionsUndrawable is true only when EVERY row is undrawable', () => {
+    assert.equal(allExecutionsUndrawable([LIVE_ROWS[0], LIVE_ROWS[1]]), true);
+    // the control: one drawable row anywhere makes it false
+    assert.equal(allExecutionsUndrawable(LIVE_ROWS), false);
+    assert.equal(allExecutionsUndrawable([LIVE_ROWS[2]]), false);
+    // absent-rather-than-wrong: an empty page is a DIFFERENT condition
+    // ("No execution matches..."), never this one.
+    assert.equal(allExecutionsUndrawable([]), false);
+    assert.equal(allExecutionsUndrawable(null), false);
+});
+
+test('#587 undrawablePageText names the count and the other sort, never the current one', () => {
+    assert.equal(undrawablePageText(100, EXECUTIONS_SORT_RECENT),
+        '100 executions, none with captured events at this sort — ' +
+        'try longest running first.');
+    assert.equal(undrawablePageText(1, EXECUTIONS_SORT_DURATION),
+        '1 execution, none with captured events at this sort — ' +
+        'try latest first.');
+    // the named sort is always the TARGET of the toggle, so it can never
+    // drift from the toggle button's own label (executionsSortToggleLabel).
+    for (const sort of [EXECUTIONS_SORT_RECENT, EXECUTIONS_SORT_DURATION]) {
+        const text = undrawablePageText(5, sort);
+        assert.match(text, new RegExp(executionsSortLabel(
+            executionsSortToggleTarget(sort)) + '\\.$'));
+        assert.doesNotMatch(text, new RegExp(executionsSortLabel(sort) + '\\.$'));
+    }
 });
 
 // #222: which slice the Waterfall tab asks the server for, and the toggle

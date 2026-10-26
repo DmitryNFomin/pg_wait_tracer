@@ -3,10 +3,20 @@
  * The custom-series tuple deliberately carries both clipped draw geometry and
  * raw values:
  *   [drawStart, drawEnd, lane, name, eventId, rawStart, rawDuration,
- *    cpuNs, pid, kind, color]
+ *    cpuNs, pid, kind, color, wallDuration]
  * `kind` is "event" or "plan".  The view owns ECharts and all gestures; this
  * module only maps server data to option/table/readout models.
- */
+ *
+ * rawDuration (index 6) is server dur_ns -- since #496, clipped to the
+ * execution's own [start_ns, end_ns) boundary, so a 4ms event that straddles
+ * the boundary arrives as 2ms. wallDuration (index 11) is the event's true,
+ * unclipped span: server raw_dur_ns when the response carries it, else falls
+ * back to rawDuration itself (no straddle, or a response from a server that
+ * predates the field -- the two agree, so the fallback is silent). #529: the
+ * tooltip/readout duration text must report wallDuration, not rawDuration --
+ * a tooltip on a single bar is answering "how long was this wait", not "how
+ * much of it fell in this execution's window". Bar draw geometry still uses
+ * rawDuration/the display zoom window, which is a different, correct clip. */
 
 import { eventColor, fmtTimeNs, fmtUs, fmtMs, esc } from '../format.js';
 import { buildTableModel } from '../table.js';
@@ -462,6 +472,33 @@ export function pickDefaultExecution(rows) {
         rows[0];
 }
 
+/* #587: true exactly when pickDefaultExecution() above had to fall through
+ * to its last-resort rows[0] because NOTHING on the page was drawable --
+ * every returned execution a sub-millisecond statement with no events, no
+ * workers and no plan. That is the one condition under which the Waterfall
+ * can show "No execution events captured" even though executions WERE
+ * captured (100 of them): the wording is true of the selected row and false
+ * of the capture. An empty page (rows.length === 0) is a different, already
+ * -handled case ("No execution matches...") and must not read as this one. */
+export function allExecutionsUndrawable(rows) {
+    return !!(rows && rows.length) && rows.every(r => !executionHasDetail(r));
+}
+
+/* The disclosure shown in place of the bare empty-chart message when
+ * allExecutionsUndrawable() is true: say what happened (N executions were
+ * captured and returned) and what to do about it (the other sort), instead
+ * of silently substituting a row the user did not select (#587 -- chosen
+ * over having pickDefaultExecution() reach past the sort for a drawable
+ * row, which would hide that the current sort is unhelpful). Reuses
+ * executionsSortLabel/executionsSortToggleTarget so the wording can never
+ * name a sort the toggle button itself disagrees with. */
+export function undrawablePageText(rowCount, sortMode) {
+    const n = count(rowCount);
+    const otherSort = executionsSortLabel(executionsSortToggleTarget(sortMode));
+    return n.toLocaleString() + ' execution' + (n === 1 ? '' : 's') +
+        ', none with captured events at this sort — try ' + otherSort + '.';
+}
+
 export function waterfallRenderItem(params, api) {
     const start = api.coord([api.value(0), api.value(2)]);
     const end = api.coord([api.value(1), api.value(2)]);
@@ -494,12 +531,30 @@ export function waterfallRenderItem(params, api) {
     };
 }
 
+/* #529: d[6] (dur_ns) is clipped to the execution window; d[11] (wallDuration,
+ * from raw_dur_ns) is the event's true, unclipped span -- the number a
+ * tooltip on a single bar must report as "how long was this wait". When the
+ * two disagree (the event straddled the execution boundary) the clipped
+ * figure is disclosed alongside it rather than dropped, matching this
+ * project's "disclose, don't substitute" idiom (the truncation notice,
+ * #487's Lock:relation note). Compared as BigInt, not Number: duration_ns
+ * values exceed Number.MAX_SAFE_INTEGER on long-running waits. */
+function eventDurationText(wallDur, clippedDur) {
+    const text = fmtUs(ns(wallDur) / 1000);
+    const wb = nsBig(wallDur), cb = nsBig(clippedDur);
+    if (wb != null && cb != null && wb !== cb) {
+        return text + ' (' + fmtUs(ns(clippedDur) / 1000) + ' in window)';
+    }
+    return text;
+}
+
 export function waterfallTooltipFormatter(params) {
     const d = params.data;
+    const wallDur = d[11] != null ? d[11] : d[6];
     let html = '<b>' + esc(d[3]) + '</b><br>' +
         'Lane: PID ' + esc(String(d[8])) + '<br>' +
         'Start: ' + fmtTimeNs(d[5], 1_000_000) + ' UTC<br>' +
-        'Duration: <b>' + fmtUs(ns(d[6]) / 1000) + '</b>';
+        'Duration: <b>' + eventDurationText(wallDur, d[6]) + '</b>';
     if (d[7] != null) html += '<br>Measured CPU: ' + fmtUs(ns(d[7]) / 1000);
     return html;
 }
@@ -511,7 +566,7 @@ export function buildWaterfallReadout(tuple) {
         name: String(tuple[3]),
         pid: Number(tuple[8]),
         start: fmtTimeNs(tuple[5], 1_000_000) + ' UTC',
-        duration: fmtUs(ns(tuple[6]) / 1000),
+        duration: eventDurationText(tuple[11] != null ? tuple[11] : tuple[6], tuple[6]),
         cpu: tuple[7] == null ? null : fmtUs(ns(tuple[7]) / 1000),
         kind: tuple[9],
     };
@@ -541,17 +596,24 @@ export function buildWaterfallOption(data, opts) {
         (lane.events || []).forEach(ev => {
             const start = nsBig(ev.start_ns), dur = nsBig(ev.dur_ns);
             if (start == null || dur == null) return;
+            // #529: raw_dur_ns is the event's true, unclipped wall duration.
+            // Fall back to dur_ns itself when the server omits the field (no
+            // straddle happened, or an older server) -- the fallback then
+            // equals the clipped value and the tooltip note is silent.
+            const wallDuration = ev.raw_dur_ns != null ? String(ev.raw_dur_ns) : ev.dur_ns;
             raw.push({ start, end: start + dur, laneIdx, name: ev.name,
                 eventId: ev.we, rawStart: ev.start_ns, rawDuration: ev.dur_ns,
-                cpu: ev.cpu_ns, pid: lane.pid, kind: 'event',
+                wallDuration, cpu: ev.cpu_ns, pid: lane.pid, kind: 'event',
                 color: eventColor(null, ev.name) });
         });
     });
     if (data && data.plan) {
         const start = nsBig(data.plan.start_ns), end = nsBig(data.plan.end_ns);
         if (start != null && end != null && end >= start) {
+            const planDuration = String(end - start);
             raw.push({ start, end, laneIdx: 0, name: 'Plan phase', eventId: null,
-                rawStart: String(data.plan.start_ns), rawDuration: String(end - start),
+                rawStart: String(data.plan.start_ns), rawDuration: planDuration,
+                wallDuration: planDuration,
                 cpu: null, pid: lanes[0].pid, kind: 'plan', color: PLAN_COLOR });
         }
     }
@@ -577,7 +639,7 @@ export function buildWaterfallOption(data, opts) {
         axis(fromNs == null || b.start > fromNs ? b.start : fromNs),
         axis(toNs == null || b.end < toNs ? b.end : toNs),
         b.laneIdx, b.name, b.eventId, b.rawStart, b.rawDuration, b.cpu,
-        b.pid, b.kind, b.color,
+        b.pid, b.kind, b.color, b.wallDuration,
     ]);
 
     const laneTruncations = lanes.map(l => ({

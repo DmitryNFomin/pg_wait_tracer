@@ -112,6 +112,19 @@ export function matrixLegendBucketMax(x) {
  * so two events already on screen never swap rows/columns just because their
  * scores nudged past each other. Color maps log1p(count) through a piecewise
  * single-hue ramp; class identity appears only in axis-label text colors. */
+/* #438/#591: a reported link count corroborates `truncated: false`. Absent
+ * (undefined/null) is "not reported", which `truncated: false` already
+ * covers on its own; PRESENT means it must be a finite number equal to the
+ * number of links that actually arrived. A present-but-unparseable count is
+ * a refusal, not a pass -- NaN comparisons are false either way, but saying
+ * so explicitly keeps the next reader from "simplifying" it into a loose
+ * coercion that approves. */
+function linkCountAgrees(reported, arrived) {
+    if (reported === undefined || reported === null) return true;
+    return typeof reported === 'number' && Number.isFinite(reported) &&
+        reported === arrived;
+}
+
 export function buildMatrixOption(data, opts) {
     opts = opts || {};
     const links = (data && data.links) || [];
@@ -203,7 +216,41 @@ export function buildMatrixOption(data, opts) {
     // wait -> CPU -> wait. State that fact explicitly rather than leaving
     // an empty-looking grid to read as broken; keep the literal
     // transitions unchanged (no wait -> wait edges are synthesized).
-    const allLinksTouchCpu = links.length > 0 &&
+    //
+    // #438 follow-up (#591): the sentence is a UNIVERSAL claim, so it may
+    // only be made from a COMPLETE link set -- and `links` is the
+    // SERVER-CAPPED set. emit_transitions_response() in src/server.c fills
+    // `links` with `shown` entries and emits
+    // `truncated = shown < total_links`; the payload this very snapshot
+    // bakes (tests/mock_server.py's canned transitions reply) is 5 of 8,
+    // truncated, with every RETURNED link incident to CPU*. Asserting
+    // "every transition" there examined 5 links and ignored 3, and a capped
+    // direct wait -> wait edge would have made the sentence the exact
+    // opposite of the truth.
+    //
+    // SUPPRESSED rather than weakened, deliberately. The weakened form
+    // ("...across the links the server returned") is read in ISOLATION: the
+    // cap count lives in `notes`, which views/matrix.js renders BELOW the
+    // canvas -- below the fold at the demo viewport, which is the whole
+    // reason #473-1 moved this sentence above it in the first place. A
+    // reader would get a universal-sounding claim with no visible way to
+    // learn it covers 5 of 8. Nothing is lost by dropping it: the base
+    // explanation still removes the #438 misreading (that the matrix
+    // measures running CPU), and the link-cap footer already explains why
+    // the grid is sparse. A disclosure that might be false is worse than one
+    // that is merely absent.
+    //
+    // Completeness is established POSITIVELY, never inferred from a missing
+    // field: the real server emits `truncated` unconditionally, so a payload
+    // without it is one whose provenance cannot be seen, and a check that
+    // cannot see must refuse. Counts that contradict the flag (declaring
+    // more links than arrived, or disagreeing with the array that did)
+    // refuse too -- that is a payload something trimmed after the flag was
+    // computed.
+    const linkSetComplete = !!data && data.truncated === false &&
+        linkCountAgrees(data.link_count, links.length) &&
+        linkCountAgrees(data.total_link_count, links.length);
+    const allLinksTouchCpu = linkSetComplete && links.length > 0 &&
         links.every(l => l.source === 'CPU*' || l.target === 'CPU*');
     const cpuNote = labels.includes('CPU*')
         ? 'CPU* is a literal intermediate state between waits, not ' +
