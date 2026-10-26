@@ -5,35 +5,7 @@
 #include "event_sort.h"
 #include "map_reader.h"
 #include "wait_event.h"
-
-/* Window clipping for replay — the SAME rule as the server's raw path
- * (event_window_ns, src/compute.c).
- *
- * A trace record's timestamp_ns is when the wait ENDED and duration_ns is how
- * long it ran, so the record covers the interval [ts - dur, ts]. A record
- * that straddles a window edge contributes only the part inside the window.
- *
- * Deliberately a verbatim copy of compute.c's helper rather than a shared
- * symbol: compute.c belongs to the pgwt-server build and replay_accum.c
- * belongs to the daemon build. Keep the two in step — tests/test_replay_window.c pins this one on the same straddler cases
- * tests/test_window_clip.c pins the other.
- *
- * Returns 0 for a record wholly outside the window (never a wrapped uint64
- * difference), and 0 for the impossible record (duration longer than its own
- * absolute monotonic timestamp) that compute.c refuses the same way.
- * from_ns == 0 / to_ns == 0 mean "unbounded on that side", so a whole-capture
- * replay still credits exactly duration_ns. */
-static inline uint64_t replay_window_ns(const struct pgwt_trace_event *ev,
-                                        uint64_t from_ns, uint64_t to_ns)
-{
-    if (ev->duration_ns > ev->timestamp_ns)
-        return 0;
-    uint64_t start = ev->timestamp_ns - ev->duration_ns;
-    uint64_t end   = ev->timestamp_ns;
-    if (from_ns != 0 && start < from_ns) start = from_ns;
-    if (to_ns   != 0 && end   > to_ns)   end   = to_ns;
-    return end > start ? end - start : 0;
-}
+#include "window_clip.h"
 
 /* The resolver is the live resolver; only the emitted statistics differ:
  * replay clips time and selects occurrence statistics independently. */
@@ -149,7 +121,7 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
              * window at the very end of a still-growing capture still
              * under-reports it until the close is written. That needs
              * open-interval markers in the trace format. */
-            add_ns = replay_window_ns(evt, from_mono_ns, to_mono_ns);
+            add_ns = event_window_ns(evt, from_mono_ns, to_mono_ns);
             closed_in_window =
                 (from_mono_ns == 0 || evt->timestamp_ns >= from_mono_ns) &&
                 (to_mono_ns   == 0 || evt->timestamp_ns <= to_mono_ns);

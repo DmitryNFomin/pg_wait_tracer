@@ -160,8 +160,9 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
 # test_live_accum: compute.c compiled directly with -DPGWT_SERVER, its only
 # foreign symbol (pgwt_visit_summaries) stubbed in the test. Runs anywhere.
 test_window_clip: test_window_clip.c ../src/compute.c \
-                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
-	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+                  ../src/window_clip.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(filter-out %.h,$^) -lm
 
 # #387: out-of-window / zero-duration CPU records cannot supply a measured
 # signal. Same BPF-free build and summary visitor stub as test_window_clip.
@@ -438,10 +439,10 @@ test_coop: test_coop.c ../src/provider_coop.c
 map_reader_core.o: ../src/map_reader.c ../src/map_reader.h ../src/query_attr.h
 	$(CC) $(CFLAGS) -DPGWT_SERVER -c -o $@ $<
 
-replay_compute_core.o: ../src/compute.c ../src/compute.h
+replay_compute_core.o: ../src/compute.c ../src/compute.h ../src/window_clip.h
 	$(CC) $(CFLAGS) -DPGWT_SERVER -c -o $@ $<
 
-replay_accum.o: ../src/replay_accum.c ../src/event_reader.h ../src/event_sort.h ../src/map_reader.h ../src/query_attr.h
+replay_accum.o: ../src/replay_accum.c ../src/event_reader.h ../src/event_sort.h ../src/map_reader.h ../src/query_attr.h ../src/window_clip.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c replay_accum.o \
