@@ -59,6 +59,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_top_wait_backfill \
             test_tick_drain \
             test_window_overlap \
+            test_left_edge_attrib \
             test_semantics_wire \
             test_lock_chain_disclosure \
             test_system_event_offcpu \
@@ -902,6 +903,16 @@ test_top_wait_backfill: test_top_wait_backfill.c ../src/server.c $(TRANSITIONS_L
 # gated on the close, together. Same server.c-included recipe (the real
 # writer, the real loader, the real compute).
 test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+# test_left_edge_attrib: #586 -- the mirror of test_window_overlap on the
+# LEFT edge. The straddling RECORD already arrives there; what does not is
+# the EXEC_START/PLAN_START carrying its command's query id, so #128's rule 2
+# has no evidence and the record reaches no per-query drill-down. Same
+# server.c-included recipe (the real writer, the real loader, the real
+# compute), because the defect is a property of what the loader hands the
+# tag pass.
+test_left_edge_attrib: test_left_edge_attrib.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # test_semantics_wire: #435/#436/#441 -- four contracts that live in the JSON

@@ -143,6 +143,62 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
                            uint64_t to_ns)
     __attribute__((warn_unused_result));
 
+/* #586: one pid's query id as it stood AT THE WINDOW'S LEFT EDGE.
+ *
+ * The mirror of `to_ns` above, and it exists for the mirror-image reason.
+ * A record straddling `from` arrives whole -- its close is inside the
+ * window, so it is a real occurrence of this window -- but the
+ * EXEC_START/PLAN_START that reported its command's query id can sit before
+ * `from` and is therefore NOT in the array. #128's rule 2 ("the last id
+ * reported EARLIER in the same command", `cmd_qid`) is built by the forward
+ * pass over the loaded array alone, so it has no evidence and the record
+ * falls to rule 3, the UNATTRIBUTED bucket. No per-query filter can reach
+ * that bucket (pgwt_filter.query_id == 0 means "no filter"), so the
+ * drill-down LOSES the record rather than mis-filing it: 183 records summed
+ * over 22 query filters against 184 unfiltered, one Lock:relation of
+ * 2435.069 ms.
+ *
+ * A seed is the ONE thing the loader can supply from outside the array, and
+ * it is deliberately the only thing this changes. `cmd_qid` is read in
+ * exactly one place (fwd[], rule 2's fallback), so a seed can move a record
+ * BETWEEN queries and can do nothing else: no record is added, no duration
+ * is changed, `seen_cmd` stays untouched so the in-command majority rule and
+ * the PGWT_WEI_NONCMD_CPU relabel behind DB Time are not reachable from here.
+ * Both halves of that are pinned as numbers in tests/test_left_edge_attrib.c
+ * sections 3 and 4.
+ *
+ * `pgwt_tag_events_window()` is this call with no seeds, so every existing
+ * caller and the unbounded path stay bit-identical. A seed for a pid that
+ * reports an id inside the window is harmless by construction: the forward
+ * pass overwrites cmd_qid at the first id it meets, and rule 1 (an id
+ * reported LATER) already takes precedence over rule 2. */
+struct pgwt_qid_seed {
+    uint32_t pid;
+    uint64_t query_id;      /* nonzero: a 0 seed is the absence of a seed */
+};
+
+int pgwt_tag_events_window_seeded(struct pgwt_trace_event *events, int count,
+                                  const struct pgwt_pid_cat *cats, int n_cats,
+                                  uint64_t to_ns,
+                                  const struct pgwt_qid_seed *seeds,
+                                  int n_seeds)
+    __attribute__((warn_unused_result));
+
+/* The forward pass's MARKER rule for cmd_qid, in one place so the loader's
+ * left-edge lookback (src/server.c) decides a seed with the same rule the
+ * in-array forward pass uses rather than with a transcription of it:
+ *
+ *   CMD_START      — a new command: forget the previous statement's id. (The
+ *                    id BPF resolved AT CMD_START is the PREVIOUS statement's,
+ *                    which is why this is a reset and not an observation.)
+ *   ESCALATE_*     — pack a reason, not an id: ignored.
+ *   any other with  a nonzero query_id — the command's reported id.
+ *
+ * Not CMD_END: a run straddling CMD_END still closes after it, so cmd_qid
+ * survives a command's close (query_attr.h). */
+void pgwt_qid_marker_step(uint32_t marker, uint64_t query_id,
+                          uint64_t *cmd_qid);
+
 /* Category of a tagged record: 0..PGWT_NUM_CATS-1, or -1 for idle. */
 int pgwt_event_category(const struct pgwt_trace_event *ev);
 

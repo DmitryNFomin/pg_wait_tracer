@@ -493,9 +493,34 @@ int pgwt_tag_events(struct pgwt_trace_event *events, int count,
     return pgwt_tag_events_window(events, count, cats, n_cats, 0);
 }
 
+/* #586: the forward pass's marker rule for cmd_qid, extracted so the
+ * loader's left-edge lookback applies THE rule and not a copy of it. See
+ * the contract above the declaration in compute.h. */
+void pgwt_qid_marker_step(uint32_t marker, uint64_t query_id,
+                          uint64_t *cmd_qid)
+{
+    if (marker == PGWT_MARKER_CMD_START)
+        *cmd_qid = 0;
+    else if (marker != PGWT_MARKER_ESCALATE_START &&
+             marker != PGWT_MARKER_ESCALATE_END &&
+             query_id != 0)
+        *cmd_qid = query_id;
+}
+
 int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
                            const struct pgwt_pid_cat *cats, int n_cats,
                            uint64_t to_ns)
+{
+    /* No left-edge seeds: the pre-#586 behaviour, bit for bit. */
+    return pgwt_tag_events_window_seeded(events, count, cats, n_cats, to_ns,
+                                         NULL, 0);
+}
+
+int pgwt_tag_events_window_seeded(struct pgwt_trace_event *events, int count,
+                                  const struct pgwt_pid_cat *cats, int n_cats,
+                                  uint64_t to_ns,
+                                  const struct pgwt_qid_seed *seeds,
+                                  int n_seeds)
 {
     /* An absent window is not a failure: there is nothing to tag, so the
      * result is complete. Refusing here would turn every empty window into
@@ -513,6 +538,26 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
     pgwt_pid_index_init(&tbl.ix);
     if (tag_alloc_fail("tag_ht"))
         return 0;   /* refused before touching a single record */
+    /* #586: install the left-edge seeds BEFORE the forward pass, so the
+     * first records of a command that was already running at `from` see
+     * rule 2's evidence. A zero seed is the absence of a seed and is
+     * dropped here rather than stored, so "seeded with 0" and "never
+     * seeded" cannot become two different states of the same field.
+     *
+     * A seeding failure REFUSES, like every other allocation failure in
+     * this pass: a partly seeded table would attribute some of a window's
+     * left-edge records and not others, which is a wrong answer that looks
+     * exactly like a right one. */
+    for (int i = 0; i < n_seeds; i++) {
+        if (seeds[i].query_id == 0)
+            continue;
+        struct tag_pid_state *st = tag_pid_get(&tbl, seeds[i].pid);
+        if (!st) {
+            tag_pid_table_free(&tbl);
+            return 0;
+        }
+        st->cmd_qid = seeds[i].query_id;
+    }
     /* #128: per-record cmd_qid at the record's time (rule 2 fallback for
      * the backward pass). #363: the back-fill is part of the tagged result,
      * not an optional extra — without it a foreground record keeps its
@@ -536,12 +581,9 @@ int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
              * the command; CMD_START forgets the previous command's id
              * (the id BPF resolved AT CMD_START is the previous
              * statement's). Escalation markers pack a reason, not an id. */
-            if (ev->old_event == PGWT_MARKER_CMD_START)
-                st->cmd_qid = 0;
-            else if (ev->old_event != PGWT_MARKER_ESCALATE_START &&
-                     ev->old_event != PGWT_MARKER_ESCALATE_END &&
-                     ev->query_id != 0)
-                st->cmd_qid = ev->query_id;
+            /* #586: ONE copy of this rule, shared with the loader's
+             * left-edge seed scan (pgwt_qid_marker_step). */
+            pgwt_qid_marker_step(ev->old_event, ev->query_id, &st->cmd_qid);
             switch (ev->old_event) {
             case PGWT_MARKER_PLAN_START: st->plan_open = 1; break;
             case PGWT_MARKER_PLAN_END:   st->plan_open = 0; break;

@@ -422,6 +422,30 @@ struct pgwt_load_info {
      * cut. Reported with the flag so "incomplete" comes with the bound that
      * made it incomplete instead of leaving the caller to guess. */
     uint64_t right_edge_scan_ns;
+    /* #586 LEFT-edge seed diagnostics, the mirror of the two above.
+     *
+     * A record straddling the LEFT edge arrives whole (its close is inside
+     * the window), but the EXEC_START/PLAN_START carrying its command's
+     * query id can sit before `from` and is therefore not loaded, so
+     * #128's rule 2 has no evidence and the record reaches no per-query
+     * drill-down at all. The loader looks BACK a bounded distance for that
+     * marker and seeds the tag pass with it; it admits no record and
+     * widens no window.
+     *
+     *   left_seeds_resolved — pids handed a nonzero id by the lookback.
+     *   left_edge_truncated — the lookback stopped at its horizon (or
+     *                         refused) with trace data still before it, so
+     *                         a seed FURTHER back may be missing. Same
+     *                         meaning as right_edge_truncated: "may be
+     *                         incomplete", never "is". 0 when the scan
+     *                         reached the start of the capture, because
+     *                         then nothing was missed.
+     *   left_edge_scan_ns   — the horizon that was in force, reported with
+     *                         the flag so "incomplete" arrives with the
+     *                         bound that made it incomplete. */
+    int      left_seeds_resolved;
+    int      left_edge_truncated;
+    uint64_t left_edge_scan_ns;
 };
 
 struct pgwt_server {
@@ -1726,6 +1750,277 @@ static int straddle_file_unseen(int enabled, uint64_t mono_first,
     if (mono_last < from_m)
         return 0;                      /* entirely before the window */
     return mono_first > scan_to_m;     /* begins past where we looked */
+}
+
+/* #586: defined with the other raw-load entry points below; declared here
+ * because the left-edge seed scan is its only caller. */
+static struct pgwt_trace_event *
+server_load_seed_markers(struct pgwt_server *srv,
+                         uint64_t from_wall_ns, uint64_t to_wall_ns,
+                         uint32_t pid,
+                         int *out_count, struct pgwt_load_info *info);
+
+/* ── #586: left-edge query-id seed lookback ───────────────────────────────
+ *
+ * THE MIRROR OF #424, AND THE ONE WAY IT DIFFERS. #424's problem was a
+ * RECORD living in blocks past `to`, so admission had to look forward. Here
+ * the record already arrives: a wait straddling `from` closes inside the
+ * window, which is what makes it an occurrence of this window. What does not
+ * arrive is the EXEC_START/PLAN_START that reported its command's query id,
+ * because the loader admits by `ts_mono >= from_mono` and that marker is
+ * older than `from`. #128's rule 2 ("the last id reported EARLIER in the same
+ * command") is built by pgwt_tag_events' forward pass over the loaded array
+ * alone, so it has no evidence, the record falls to the UNATTRIBUTED bucket,
+ * and no per-query filter can reach that bucket at all
+ * (pgwt_filter.query_id == 0 means "no filter"). The drill-down LOSES the
+ * record: 183 summed over 22 query filters against 184 unfiltered, one
+ * Lock:relation of 2435.069 ms.
+ *
+ * So this scan looks back for a MARKER and seeds cmd_qid with it. It ADMITS
+ * NOTHING. That is not a style choice, it is the two hazards of the obvious
+ * alternative removed by construction:
+ *
+ *   - no DOUBLE ADMISSION. A record admitted here as well as by the normal
+ *     `ts_mono >= from_mono` test would be counted twice -- 185 where 184 is
+ *     right -- which is a worse answer than the one being fixed. The array
+ *     this scan hands back is byte-identical; only cmd_qid's starting value
+ *     changes.
+ *   - no WIDER WINDOW. A left-straddler's full duration is NOT this window's
+ *     time; event_window_ns clips it, and #328/#427 settled the edges as
+ *     [from, to). Seeding cannot move a duration: cmd_qid is read in exactly
+ *     one place, fwd[] in pgwt_tag_events_window_seeded, which decides
+ *     WHICH QUERY a record belongs to and nothing else.
+ *
+ * Both are pinned as numbers in tests/test_left_edge_attrib.c §3 and §4.
+ *
+ * THE BOUND. As on the right there is no a-priori limit: without trace
+ * format v4 nothing says how far back a command's id marker is, and a
+ * backend can hold one command for a whole capture. So the scan is "back
+ * from `from`, BUDGETED":
+ *
+ *   PGWT_LEFT_SEED_LOOKBACK_NS   time horizon before `from` (default 30 s)
+ *
+ * and it runs AT ALL only for pids the loaded window shows to have a rule-2
+ * hole at the left edge (left_seed_find_needy below). A window whose every
+ * pid reports an id inside it costs nothing.
+ *
+ * REFUSAL, NOT APPROXIMATION. The horizon running out, the horizon being set
+ * to 0, the marker load refusing (overload, allocation failure, an
+ * unreadable trace) -- each leaves the record UNATTRIBUTED, which is the
+ * pre-#586 answer, and sets pgwt_load_info.left_edge_truncated so the answer
+ * says "a seed further back may be missing". It is NOT set when the scan
+ * reached the start of the capture: there nothing was missed and
+ * UNATTRIBUTED is the complete truth (a command that genuinely never
+ * reported an id). A scan that cannot see must refuse, never approve, and
+ * must not cry wolf when it saw everything.
+ */
+#define PGWT_LEFT_SEED_LOOKBACK_DEFAULT_NS  (30ULL * 1000000000ULL)
+
+/* Not cached in a static, for the same reason straddle_lookahead_ns() is not:
+ * a cached copy survives fork(), so a test that lowers the horizon in a child
+ * would silently keep the parent's value and measure nothing. An UNPARSEABLE
+ * value falls back to the default rather than to 0 -- "disabled by a typo" is
+ * a gate switched off with nothing to show it. */
+static uint64_t left_seed_lookback_ns(void)
+{
+    const char *env = getenv("PGWT_LEFT_SEED_LOOKBACK_NS");
+    if (env && *env) {
+        char *end = NULL;
+        unsigned long long v = strtoull(env, &end, 10);
+        if (end && *end == '\0')
+            return (uint64_t)v;        /* 0 = disabled, deliberately */
+    }
+    return PGWT_LEFT_SEED_LOOKBACK_DEFAULT_NS;
+}
+
+struct left_seed_scan {
+    int      enabled;        /* the caller asked for a bounded LEFT edge */
+    uint64_t lookback_ns;
+    int      resolved;       /* pids handed a nonzero seed */
+    int      truncated;      /* a bound, or a refusal, stopped the scan */
+};
+
+/* One pid's left-edge state.
+ *   closed — the loaded window itself decides this pid's cmd_qid (it reports
+ *            an id inside the window, or a CMD_START/idle boundary resets it
+ *            before any query-less record), so a seed cannot change anything.
+ *   needy  — a query-less foreground record of this pid sits in the window
+ *            with cmd_qid still 0: rule 2 has a hole here.
+ *   qid    — the seed, as the lookback resolves it. */
+struct left_needy {
+    uint32_t pid;
+    uint64_t qid;
+    int      closed;
+    int      needy;
+};
+
+struct left_needy_tab {
+    struct pgwt_pid_index ix;
+    struct left_needy *e;
+    int n, cap;
+};
+
+/* NULL on a real allocation failure; the caller REFUSES rather than skipping
+ * the pid, because a pid silently without a slot is a pid silently without a
+ * seed, which is the pre-fix answer wearing the post-fix flag. */
+static struct left_needy *left_needy_get(struct left_needy_tab *t,
+                                         uint32_t pid)
+{
+    int h = pgwt_pid_index_find(&t->ix, pid);
+    if (h >= 0)
+        return &t->e[h];
+    if (t->n + 1 > t->cap) {
+        int newcap = t->cap ? t->cap * 2 : 64;
+        struct left_needy *tmp =
+            test_load_alloc_failure("left_needy_grow") ? NULL :
+            realloc(t->e, (size_t)newcap * sizeof(*tmp));
+        if (!tmp)
+            return NULL;
+        memset(tmp + t->cap, 0,
+               (size_t)(newcap - t->cap) * sizeof(*tmp));
+        t->e = tmp;
+        t->cap = newcap;
+    }
+    h = t->n;
+    if (pgwt_pid_index_put(&t->ix, pid, h) != 0)
+        return NULL;
+    t->n++;
+    t->e[h].pid = pid;
+    return &t->e[h];
+}
+
+static void left_needy_tab_free(struct left_needy_tab *t)
+{
+    pgwt_pid_index_free(&t->ix);
+    free(t->e);
+    memset(t, 0, sizeof(*t));
+}
+
+/* Which pids have a rule-2 hole at the left edge? One ascending pass over the
+ * window, mirroring the order and the decisions of pgwt_tag_events' forward
+ * pass: the first event of a pid that SETS or RESETS cmd_qid settles that pid
+ * (a seed is overwritten from then on and changes nothing), and a query-less
+ * record met before any such event is the hole.
+ *
+ * Returns -1 on allocation failure. Over-reporting is the safe direction: a
+ * pid marked needy whose record rule 1 would have resolved anyway costs a
+ * scan, never a wrong number -- the seed only ever supplies rule 2, which
+ * rule 1 outranks. */
+static int left_seed_find_needy(const struct pgwt_trace_event *events,
+                                int total, struct left_needy_tab *t,
+                                int *out_needy)
+{
+    *out_needy = 0;
+    for (int i = 0; i < total; i++) {
+        const struct pgwt_trace_event *ev = &events[i];
+        struct left_needy *e = left_needy_get(t, ev->pid);
+        if (!e)
+            return -1;
+        if (e->closed)
+            continue;
+        if (PGWT_IS_MARKER(ev->old_event)) {
+            /* Ask THE rule whether this marker decides cmd_qid, rather than
+             * re-listing which markers carry an id -- one copy, in
+             * pgwt_qid_marker_step, so a new id-carrying marker cannot be
+             * added there and forgotten here. Two sentinels because a marker
+             * whose query_id happens to equal one of them must still be
+             * detected through the other. */
+            uint64_t a = 1, b = 2;
+            pgwt_qid_marker_step(ev->old_event, ev->query_id, &a);
+            pgwt_qid_marker_step(ev->old_event, ev->query_id, &b);
+            if (a != 1 || b != 2)
+                e->closed = 1;
+            continue;
+        }
+        if (ev->query_id != 0) {
+            e->closed = 1;          /* the window reports its own id */
+            continue;
+        }
+        if ((ev->flags & PGWT_EVENT_FLAG_SAMPLE) &&
+            pgwt_is_session_idle_event(ev->new_event ? ev->new_event
+                                                     : ev->old_event)) {
+            e->closed = 1;          /* the sampled tier's command boundary */
+            continue;
+        }
+        e->needy = 1;
+        e->closed = 1;
+        (*out_needy)++;
+    }
+    return 0;
+}
+
+/* Resolve the needy pids' seeds from the markers in
+ * [from_wall_ns - horizon, from_wall_ns), applying pgwt_qid_marker_step in
+ * ascending timestamp order -- which is why the marker load's final ordering
+ * pass matters: a CMD_START between the previous statement's id and `from`
+ * must RESET the seed, and that is only true if the markers arrive in time
+ * order. tests/test_left_edge_attrib.c §5 is that case. */
+static void left_seed_resolve(struct pgwt_server *srv,
+                              struct left_seed_scan *ls,
+                              uint64_t from_wall_ns, uint32_t pid,
+                              struct left_needy_tab *t)
+{
+    if (ls->lookback_ns == 0) {
+        /* Disabled restores the pre-#586 selection, and that is exactly a
+         * cut left edge -- said out loud, as #424 says it for a 0 horizon. */
+        ls->truncated = 1;
+        return;
+    }
+    if (from_wall_ns <= srv->earliest_wall_ns)
+        return;                     /* nothing before the window exists */
+
+    uint64_t seed_from = from_wall_ns > ls->lookback_ns
+                       ? from_wall_ns - ls->lookback_ns : 0;
+    int reached_start = 0;
+    if (seed_from <= srv->earliest_wall_ns) {
+        seed_from = srv->earliest_wall_ns;
+        reached_start = 1;
+    }
+
+    if (test_load_alloc_failure("left_seeds")) {
+        ls->truncated = 1;
+        return;                     /* refused before reading anything */
+    }
+
+    int mcount = 0;
+    struct pgwt_load_info minfo;
+    memset(&minfo, 0, sizeof(minfo));
+    /* `from_wall_ns - 1`: a marker AT `from` is in the main load already, and
+     * selection is inclusive at both ends. Markers only, and with the
+     * right-edge straddler lookahead off -- a marker has duration 0 and can
+     * never be admitted as a straddler, so scanning blocks past this call's
+     * right edge would decode up to the 300 s #424 horizon for records that
+     * cannot exist. */
+    struct pgwt_trace_event *m =
+        server_load_seed_markers(srv, seed_from, from_wall_ns - 1, pid,
+                                 &mcount, &minfo);
+    if (!m || minfo.overloaded || minfo.allocation_failed ||
+        minfo.trace_unreadable) {
+        /* Every one of these is "the scan could not see", not "there was
+         * nothing there". Degrade to the pre-#586 answer and SAY SO. */
+        free(m);
+        ls->truncated = 1;
+        return;
+    }
+    for (int i = 0; i < mcount; i++) {
+        if (!PGWT_IS_MARKER(m[i].old_event))
+            continue;               /* markers_only already guarantees this */
+        int h = pgwt_pid_index_find(&t->ix, m[i].pid);
+        if (h < 0 || !t->e[h].needy)
+            continue;
+        pgwt_qid_marker_step(m[i].old_event, m[i].query_id, &t->e[h].qid);
+    }
+    free(m);
+
+    for (int i = 0; i < t->n; i++) {
+        if (!t->e[i].needy)
+            continue;
+        if (t->e[i].qid != 0)
+            ls->resolved++;
+        else if (!reached_start)
+            ls->truncated = 1;      /* the HORIZON ended the search, not the
+                                     * data: a seed may exist further back */
+    }
 }
 
 /* The per-load straddler bookkeeping, passed down into every admission site
@@ -3082,6 +3377,7 @@ static struct pgwt_trace_event *
 server_load_events_fi_mode(struct pgwt_server *srv,
                            uint64_t from_wall_ns, uint64_t to_wall_ns,
                            uint32_t pid, int markers_only,
+                           int no_straddle_scan,
                            int *out_count, struct pgwt_load_info *info)
 {
     *out_count = 0;
@@ -3096,7 +3392,10 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * can close, so disabling it there is both free and the guarantee that
      * an unbounded request stays bit-identical to pre-#424. */
     struct straddle_scan ss = {
-        .enabled      = to_wall_ns != 0,
+        /* #586: `no_straddle_scan` is only ever set by
+         * server_load_seed_markers, whose records are markers -- duration 0,
+         * so never a right-edge straddler. See the note there. */
+        .enabled      = to_wall_ns != 0 && !no_straddle_scan,
         .lookahead_ns = straddle_lookahead_ns(),
         .max_blocks   = straddle_max_blocks(),
     };
@@ -3121,6 +3420,18 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         if (!have_current)
             cur_cache_drop(&srv->cur);
     }
+
+    /* #586: the left-edge seed lookback, like #424's right-edge lookahead,
+     * only applies when the CALLER asked for a bounded edge. A whole-capture
+     * request (from_wall_ns == 0) is defaulted to the first record below, and
+     * nothing exists before that, so disabling it there is both free and the
+     * guarantee that an unbounded request stays bit-identical to pre-#586.
+     * Read BEFORE the defaulting, because afterwards the two are
+     * indistinguishable. */
+    struct left_seed_scan ls = {
+        .enabled     = from_wall_ns != 0 && !markers_only,
+        .lookback_ns = left_seed_lookback_ns(),
+    };
 
     if (from_wall_ns == 0)
         from_wall_ns = srv->earliest_wall_ns;
@@ -3497,12 +3808,50 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         stable_sort_events(events, total) != 0)
         allocation_failed = 1;
 
+    /* #586: the left-edge query-id seeds, resolved BEFORE the tag pass (it is
+     * the pass that consumes them) and only for the pids this window shows to
+     * have a rule-2 hole at `from`. Nothing is appended to `events` and no
+     * duration changes -- see the header above left_seed_lookback_ns. */
+    struct pgwt_qid_seed *seeds = NULL;
+    int n_seeds = 0;
+    struct left_needy_tab needy;
+    memset(&needy, 0, sizeof(needy));
+    pgwt_pid_index_init(&needy.ix);
+    if (ls.enabled && !overloaded && !allocation_failed && events && total > 0) {
+        int n_needy = 0;
+        if (left_seed_find_needy(events, total, &needy, &n_needy) != 0) {
+            /* The table itself could not be built, so WHICH pids have a hole
+             * is unknown. Unknown is never "none": refuse the seeding and say
+             * the left edge was not scanned. */
+            ls.truncated = 1;
+        } else if (n_needy > 0) {
+            left_seed_resolve(srv, &ls, from_wall_ns, pid, &needy);
+            if (ls.resolved > 0) {
+                seeds = test_load_alloc_failure("left_seed_array") ? NULL
+                      : calloc((size_t)ls.resolved, sizeof(*seeds));
+                if (!seeds) {
+                    ls.resolved = 0;
+                    ls.truncated = 1;
+                } else {
+                    for (int i = 0; i < needy.n && n_seeds < ls.resolved; i++)
+                        if (needy.e[i].needy && needy.e[i].qid != 0) {
+                            seeds[n_seeds].pid = needy.e[i].pid;
+                            seeds[n_seeds].query_id = needy.e[i].qid;
+                            n_seeds++;
+                        }
+                }
+            }
+        }
+    }
+    left_needy_tab_free(&needy);
+
     /* T2: annotate the merged window with categories (pid types from
      * backends.jsonl) and the PLAN/EXEC/CMD marker windows; classify exact
      * we==0 intervals against the command gate. One pass feeding every raw
      * estimator (docs/AAS_SEMANTICS_DECISION.md). */
     if (!markers_only &&
-        !pgwt_tag_events_window(events, total, srv->pid_cats, srv->n_pid_cats,
+        !pgwt_tag_events_window_seeded(
+                                events, total, srv->pid_cats, srv->n_pid_cats,
                                 /* #424: the request's right edge, in the
                                  * WALL domain the merge above re-anchored
                                  * the array to. 0 when the caller asked for
@@ -3511,7 +3860,8 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                                  * majority judge a straddler on its
                                  * in-window portion instead of on data this
                                  * window never loaded. */
-                                ss.enabled ? to_wall_ns : 0)) {
+                                ss.enabled ? to_wall_ns : 0,
+                                seeds, n_seeds)) {
         /* #363: the tagged array is the oracle, so a pass that stopped
          * partway is a wrong answer, not a short one. Route it through this
          * loader's EXISTING degradation channel — every raw consumer reads
@@ -3533,6 +3883,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         events = NULL;
         total = 0;
     }
+    free(seeds);
 
     if (info) {
         info->has_transitions = has_transitions;
@@ -3553,6 +3904,9 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         info->straddlers_admitted = ss.admitted;
         info->right_edge_truncated = ss.truncated;
         info->right_edge_scan_ns = ss.enabled ? ss.lookahead_ns : 0;
+        info->left_seeds_resolved = ls.resolved;
+        info->left_edge_truncated = ls.truncated;
+        info->left_edge_scan_ns = ls.enabled ? ls.lookback_ns : 0;
         info->headers_unreadable = ss.headers_unreadable;
     }
     /* Outside the `if (info)`: a caller that wants no load_info still ran a
@@ -3583,7 +3937,7 @@ server_load_events_fi(struct pgwt_server *srv,
                       int *out_count, struct pgwt_load_info *info)
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 0,
-                                      out_count, info);
+                                      0, out_count, info);
 }
 
 /* Lifecycle context is sparse but can span a long capture. Retain only
@@ -3596,7 +3950,28 @@ server_load_markers_fi(struct pgwt_server *srv,
                        int *out_count, struct pgwt_load_info *info)
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
-                                      out_count, info);
+                                      0, out_count, info);
+}
+
+/* #586: the left-edge seed scan's marker load. Markers only, and with the
+ * #424 right-edge straddler lookahead OFF -- not as an optimisation but
+ * because it cannot apply: the lookahead admits a record whose interval
+ * overlaps the right edge, a marker's duration is 0 so its interval cannot
+ * overlap anything past its own timestamp, and leaving it on would make this
+ * call decode every block up to 300 s past its right edge looking for records
+ * that cannot exist. The two wrappers above pass 0, so every pre-#586 caller
+ * is bit-identical. */
+static struct pgwt_trace_event *
+server_load_seed_markers(struct pgwt_server *srv,
+                         uint64_t from_wall_ns, uint64_t to_wall_ns,
+                         uint32_t pid,
+                         int *out_count, struct pgwt_load_info *info)
+{
+    /* DUR-9's pid pushdown applies here too: when the request is
+     * pid-filtered the main load holds ONE pid's records, so every needy pid
+     * is that pid and loading the other backends' markers is pure waste. */
+    return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
+                                      1, out_count, info);
 }
 
 /* ── #274: the executions/exec_scatter pre-window prefix ──────────────────

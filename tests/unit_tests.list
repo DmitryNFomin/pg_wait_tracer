@@ -43,6 +43,14 @@ test_window_clip
 # box-check or merge. Alone, the C tier exits 127 on a binary that does not
 # exist yet -- correctly: a listed test that cannot run fails the gate.
 test_window_overlap
+# #586: the same edge problem on the LEFT. A record straddling `from` arrives
+# whole, but the marker carrying its command's query id sits before `from` and
+# is never loaded, so #128's rule 2 has nothing to resolve it with and the
+# record reaches no per-query drill-down at all (183 of 184 records on the
+# capture that filed it). The loader looks BACK a bounded distance for that
+# marker and seeds the tag pass; it admits no record and widens no window,
+# which is what sections 3 and 4 of the test pin.
+test_left_edge_attrib
 # #435/#436/#441: the four semantics contracts that are properties of the
 # RESPONSE rather than of a compute result -- Overview's idle %DB as JSON null
 # (not a numeric 0), the Queries latency average suppressed where no
