@@ -12,7 +12,7 @@ import {
     isIdleTransitionNode, p95TruncationMarker, findOmittedDominantNode,
     restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder, isLayoutAnchorNode,
     buildTransitionsDisclosure, findDominantSourceDwellNode, TRANSITIONS_SEMANTICS_NOTE,
-    transitionsDataError,
+    transitionsDataError, transitionsIdleCoverageGap,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
@@ -68,14 +68,24 @@ for (const rank of [findOmittedDominantNode, findDominantSourceDwellNode]) {
 // layer up: transitionsDataError (and therefore buildTransitionsOption, which
 // calls it before any ranking runs) rejects the WHOLE payload the moment any
 // node's idle verdict is unknown -- total absence or just one node among many.
-test('#487 follow-up: transitionsDataError rejects a node with a non-boolean idle field', () => {
+test('#510 (was #487 follow-up): an unknown idle verdict is a COVERAGE GAP, not a '
+    + 'structural error -- transitionsDataError stays silent and the dedicated '
+    + 'predicate reports it', () => {
     assert.equal(transitionsDataError({
         nodes: [{ name: 'CPU*', total_ms: 10, idle: false }],
         links: [],
     }), null, 'sanity: a fully-flagged catalog is not itself rejected');
+    assert.equal(transitionsIdleCoverageGap({
+        nodes: [{ name: 'CPU*', total_ms: 10, idle: false }],
+        links: [],
+    }), null, 'sanity: a fully-flagged catalog has no coverage gap');
     for (const idle of [undefined, null, 0, 'false', 'true']) {
         const data = { nodes: [{ name: 'CPU*', total_ms: 10, idle }], links: [] };
-        assert.equal(transitionsDataError(data), 'node missing idle verdict: CPU*');
+        // #510: the payload is still RENDERABLE -- the graph is real data.
+        assert.equal(transitionsDataError(data), null,
+            'an idle gap is no longer a structural reject: ' + JSON.stringify(idle));
+        assert.equal(transitionsIdleCoverageGap(data), 'idle verdict missing for CPU*',
+            'but it IS reported as a coverage gap: ' + JSON.stringify(idle));
     }
 });
 
@@ -93,11 +103,24 @@ test('#487 follow-up: a PARTIAL catalog -- one real, large-total_ms node with '
         ],
     };
 
-    assert.equal(transitionsDataError(payload), 'node missing idle verdict: Lock:relation');
-    assert.throws(
-        () => buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true),
-        /node missing idle verdict: Lock:relation/,
-        'buildTransitionsOption must refuse before omittedDominant/dominantSourceDwell ever run');
+    // #510: the graph is REAL data and now renders; what is withheld is the
+    // ranking, not the picture. The guarantee #487 bought is unchanged --
+    // the 10ms node is still never crowned.
+    assert.equal(transitionsDataError(payload), null,
+        'the payload is structurally sound, so it must no longer be rejected whole');
+    assert.equal(transitionsIdleCoverageGap(payload),
+        'idle verdict missing for Lock:relation');
+    const degraded = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+    assert.equal(degraded.omittedDominant, null,
+        'omittedDominant withheld on a partial catalog');
+    assert.equal(degraded.dominantSourceDwell, null,
+        'dominantSourceDwell withheld TOGETHER with it -- never one without the other');
+    assert.equal(degraded.idleCoverageGap, 'idle verdict missing for Lock:relation');
+    const degradedText = buildTransitionsDisclosure(degraded, payload.total);
+    assert.ok(!degradedText.includes('IO:DataFileRead'),
+        'the 10ms node must not be crowned anything: ' + JSON.stringify(degradedText));
+    assert.ok(!degradedText.includes('largest source-dwell'),
+        'no superlative at all while coverage is partial: ' + JSON.stringify(degradedText));
 
     // Negative control named explicitly: if the exclusion-only fix (what
     // findOmittedDominantNode already does on its own, demonstrated in the
@@ -121,9 +144,217 @@ test('#487 follow-up: total absence (every node missing idle) is refused the sam
     + 'as a single missing node, not just the all-flagged or none-flagged ends', () => {
     const payload = replay456();
     for (const n of payload.nodes) delete n.idle;
-    assert.match(transitionsDataError(payload), /^node missing idle verdict: /);
+    assert.equal(transitionsDataError(payload), null,
+        'total absence is still not a STRUCTURAL error');
+    assert.match(transitionsIdleCoverageGap(payload), /^idle verdict missing for /);
+    const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+    assert.ok(built.option, 'the graph still renders with no idle verdicts at all');
+    assert.equal(built.omittedDominant, null);
+    assert.equal(built.dominantSourceDwell, null);
+    assert.match(built.idleCoverageGap, /^idle verdict missing for /);
+});
+
+// ── #510: degrade to a rendered graph with WITHHELD dominance claims ──────
+//
+// Before this, `transitionsDataError` rejected the WHOLE payload on any
+// non-boolean `idle`, so one unknown verdict among 41 nodes replaced a real
+// graph with an error panel. The graph is real data; only the dominance
+// RANKING depends on a complete idle catalogue (#509's false-superlative
+// lesson: an incomplete catalogue lets a 10ms node win by default). So the
+// graph renders and the two superlatives are withheld together, with one
+// disclosed reason.
+//
+// THE VACUITY TRAP: a fixture with COMPLETE idle coverage passes anything
+// written here, including nothing. Worse, "both claims are absent" is
+// trivially true for any payload with no rankable node. Both are closed by
+// deriving the incomplete fixture from replay456() -- a real 41-node capture
+// whose complete-coverage control DOES name Lock:relation (1533.6s) -- and
+// pinning the control in the same test, so the only difference between
+// "claims present" and "claims withheld" is the coverage gap itself.
+
+/* replay456() with ONE small node's idle verdict removed. Deliberately not
+ * the would-be winner: Lock:relation keeps its idle:false, so a ranking
+ * WOULD still have a plausible answer to give. That is the point -- the
+ * claim is withheld because the catalogue is partial, not because the
+ * ranking came up empty. */
+function replay456WithOneIdleGap() {
+    const payload = replay456();
+    const victim = payload.nodes.find(n => n.name !== 'Lock:relation' &&
+        (n.total_ms || 0) < 1000);
+    assert.ok(victim, 'fixture must contain a small non-winner node to blank');
+    delete victim.idle;
+    return { payload, victimName: victim.name };
+}
+
+test('#510: an incomplete idle catalogue RENDERS the graph and withholds BOTH '
+    + 'dominance claims, with the other disclosures intact', () => {
+    const { payload, victimName } = replay456WithOneIdleGap();
+
+    // Structural soundness is unchanged -- this is the whole point of the split.
+    assert.equal(transitionsDataError(payload), null);
+    assert.equal(transitionsIdleCoverageGap(payload),
+        'idle verdict missing for ' + victimName);
+
+    const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+
+    // RENDERS: a real graph, not an error panel. Population first -- an empty
+    // graph would satisfy the withholding assertions vacuously.
+    assert.ok(built.option, 'option is built');
+    assert.ok(built.visibleCount > 0, 'nodes are laid out: ' + built.visibleCount);
+    assert.ok(built.shownLinks > 0, 'edges are drawn: ' + built.shownLinks);
+
+    // WITHHELD, and withheld TOGETHER -- never one superlative without the other.
+    assert.equal(built.omittedDominant, null);
+    assert.equal(built.dominantSourceDwell, null);
+    assert.equal(built.idleCoverageGap, 'idle verdict missing for ' + victimName);
+
+    const text = buildTransitionsDisclosure(built, payload.total);
+    assert.ok(!text.includes('Lock:relation omitted'),
+        'the omitted-dominant phrase must be gone: ' + JSON.stringify(text));
+    assert.ok(!text.includes('largest source-dwell'),
+        'the source-dwell superlative must be gone: ' + JSON.stringify(text));
+    assert.match(text, /ranking withheld/,
+        'and the reason must be stated, not silently dropped: ' + JSON.stringify(text));
+    assert.ok(text.includes(victimName),
+        'the reason names what is missing: ' + JSON.stringify(text));
+    // The three unrelated omission disclosures are untouched -- withholding the
+    // ranking must not take the volume accounting down with it.
+    assert.match(text, /849,416 idle \(ClientRead\) hidden/);
+    assert.match(text, /70,110 below the simplify threshold/);
+    assert.match(text, /^3,466,745 transitions/);
+});
+
+test('#510 CONTROL: the SAME payload with COMPLETE coverage still makes both '
+    + 'claims -- so the test above cannot be satisfied by deleting the feature', () => {
+    const payload = replay456();
+    assert.equal(transitionsIdleCoverageGap(payload), null);
+    const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+    assert.equal(built.idleCoverageGap, null);
+    assert.deepEqual(built.omittedDominant, { name: 'Lock:relation', ms: 1533607.757399 },
+        'complete coverage still names the omitted dominant wait');
+    assert.ok(built.dominantSourceDwell && built.dominantSourceDwell.name === 'Lock:relation',
+        'and still names the largest source-dwell node: ' +
+        JSON.stringify(built.dominantSourceDwell));
+    const text = buildTransitionsDisclosure(built, payload.total);
+    assert.match(text, /Lock:relation omitted \(1533\.6s total\)/);
+    assert.ok(!text.includes('ranking withheld'),
+        'no withholding notice when nothing is withheld: ' + JSON.stringify(text));
+});
+
+// ── Bypass suite: each way this gate's detection could be made unreachable ──
+
+test('#510 bypass: the SERVER attestation is actually consulted -- '
+    + 'idle_classification_complete:false withholds even with every node flagged', () => {
+    // Invisible to the per-node scan: every verdict is a boolean, so only the
+    // server's own readiness flag can report the gap (#515 -- the Timeout half
+    // of the classification needs a runtime-only pacing mask the client cannot
+    // replicate, so a boolean here can be PRESENT and WRONG). Nothing in
+    // web/static/ read this field before #510.
+    const payload = replay456();
+    assert.ok(payload.nodes.every(n => typeof n.idle === 'boolean'),
+        'precondition: the per-node scan finds nothing to complain about');
+    payload.idle_classification_complete = false;
+
+    assert.equal(transitionsDataError(payload), null);
+    assert.equal(transitionsIdleCoverageGap(payload),
+        'the server reported its idle classification incomplete');
+    const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+    assert.ok(built.option && built.visibleCount > 0, 'still renders');
+    assert.equal(built.omittedDominant, null);
+    assert.equal(built.dominantSourceDwell, null);
+    assert.match(buildTransitionsDisclosure(built, payload.total), /ranking withheld/);
+
+    // Control on the same field: an explicit TRUE must not withhold.
+    const ok = replay456();
+    ok.idle_classification_complete = true;
+    assert.equal(transitionsIdleCoverageGap(ok), null);
+    const okBuilt = buildTransitionsOption(ok, 20, { width: 800, height: 550 }, null, true);
+    assert.deepEqual(okBuilt.omittedDominant, { name: 'Lock:relation', ms: 1533607.757399 });
+});
+
+test('#510 bypass: a PRESENT but unparseable attestation refuses rather than approves', () => {
+    // A truthy string must not read as "complete", and no non-boolean may
+    // establish completeness by coercion. ABSENT is different from PRESENT-
+    // AND-UNREADABLE: absent means the server said nothing, and the per-node
+    // scan already inspects every verdict directly, so absence alone is not a
+    // gap (contrast #438's link cap, which the client had NO independent way
+    // to observe -- there the missing flag had to refuse).
+    for (const bad of ['true', 'false', 0, 1, {}, []]) {
+        const payload = replay456();
+        payload.idle_classification_complete = bad;
+        assert.equal(transitionsIdleCoverageGap(payload),
+            'the server reported its idle classification incomplete',
+            'unparseable attestation must refuse: ' + JSON.stringify(bad));
+        const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+        assert.equal(built.omittedDominant, null, JSON.stringify(bad));
+        assert.equal(built.dominantSourceDwell, null, JSON.stringify(bad));
+    }
+    // ABSENT (and explicit null) = not reported -> fall back to the per-node
+    // scan, which finds nothing wrong here, so the claims stand.
+    for (const absent of [undefined, null]) {
+        const payload = replay456();
+        payload.idle_classification_complete = absent;
+        assert.equal(transitionsIdleCoverageGap(payload), null, JSON.stringify(absent));
+        const built = buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true);
+        assert.ok(built.omittedDominant, JSON.stringify(absent));
+    }
+});
+
+test('#510 bypass: STRUCTURAL rejects stay HARD -- degrading must not swallow them', () => {
+    const cases = [
+        ['missing nodes array', (p) => { delete p.nodes; }],
+        ['missing links array', (p) => { delete p.links; }],
+        ['invalid node name or dwell time', (p) => { p.nodes[0].total_ms = -1; }],
+        ['invalid link endpoints', (p) => { p.links[0].source = 42; }],
+        ['missing node: ', (p) => { p.links[0].source = 'Nope:NotInCatalog'; }],
+    ];
+    for (const [expected, mutate] of cases) {
+        const payload = replay456();
+        mutate(payload);
+        const err = transitionsDataError(payload);
+        assert.ok(err && err.startsWith(expected),
+            'still a structural error: ' + JSON.stringify(err) + ' for ' + expected);
+        assert.throws(
+            () => buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true),
+            /Transitions data incomplete/,
+            'and still refuses to build: ' + expected);
+    }
+});
+
+test('#510 bypass: a gap plus a structural fault reports the STRUCTURAL one '
+    + '-- the hard failure is never downgraded to a disclosure', () => {
+    const payload = replay456();
+    delete payload.nodes[1].idle;                      // coverage gap ...
+    payload.links[0].source = 'Nope:NotInCatalog';     // ... and a hard fault
+    assert.match(transitionsDataError(payload), /^missing node: Nope:NotInCatalog/);
     assert.throws(() => buildTransitionsOption(payload, 20, { width: 800, height: 550 }, null, true),
-        /node missing idle verdict:/);
+        /Transitions data incomplete/);
+});
+
+test('#510 bypass: an EMPTY node catalogue has no gap to report and no claim to make', () => {
+    // The thing being checked is ABSENT rather than wrong: no nodes means
+    // nothing to classify, so the predicate must not invent a gap -- and
+    // there is no superlative either way.
+    const empty = { total: 0, nodes: [], links: [] };
+    assert.equal(transitionsDataError(empty), null);
+    assert.equal(transitionsIdleCoverageGap(empty), null);
+    const built = buildTransitionsOption(empty, 20, { width: 800, height: 550 }, null, true);
+    assert.equal(built.idleCoverageGap, null);
+    assert.equal(built.omittedDominant, null);
+    assert.equal(built.dominantSourceDwell, null);
+    assert.ok(!buildTransitionsDisclosure(built, 0).includes('ranking withheld'));
+});
+
+test('#510 bypass: the predicate is WIRED -- transitionsContext tolerates a gap '
+    + 'but still throws on a structural fault', () => {
+    // A predicate nobody calls is a gate that cannot fire. transitionsContext
+    // is the other public entry point that used to refuse an idle gap.
+    const { payload } = replay456WithOneIdleGap();
+    const ctx = transitionsContext(payload);
+    assert.ok(ctx.nodeMap && ctx.maxEdgeCount > 0, 'context builds over a partial catalogue');
+    const broken = replay456();
+    delete broken.links;
+    assert.throws(() => transitionsContext(broken), /Transitions data incomplete/);
 });
 
 function data() {
@@ -1377,6 +1608,56 @@ test('#456 nodes-less response is visibly refused by the view, never rendered as
     assert.match(h.root.innerHTML, /missing nodes/);
     assert.equal(h.paints.length, 0);
     assert.equal(h.elements.has('dfg-total'), false);
+});
+
+// #510 THROUGH THE REAL VIEW. The pure builder cannot see whether
+// views/transitions.js actually routes a coverage-gap payload to the graph
+// instead of the error panel, nor where the reason lands. views/transitions.js
+// needed NO edit for this -- it gates its error panel on transitionsDataError,
+// and moving the idle check out of that function is what lets the payload
+// through -- so this test is the only thing standing between "the split
+// compiles" and "the degrade reaches the page". The three #456 tests above
+// pin that STRUCTURAL faults still reach the alert panel.
+test('#510 view: a coverage-gap payload renders the graph and shows the withheld '
+    + 'reason in #dfg-total (above the canvas), with no error panel', t => {
+    const h = viewHarness456(t);
+    const { payload, victimName } = replay456WithOneIdleGap();
+    h.mount(payload);
+
+    assert.ok(!h.root.innerHTML.includes('role="alert"'),
+        'no error panel for a drawable payload');
+    assert.ok(!h.root.innerHTML.includes('Transitions data incomplete'),
+        'and not the structural-refusal text either');
+    assert.ok(h.paints.length > 0, 'the graph actually painted: ' + h.paints.length);
+
+    const totalEl = h.elements.get('dfg-total');
+    assert.ok(totalEl, '#dfg-total exists (the above-canvas disclosure slot)');
+    assert.match(totalEl.textContent, /dominant-wait ranking withheld/);
+    assert.ok(totalEl.textContent.includes(victimName),
+        'the reason names the node whose verdict is missing: ' +
+        JSON.stringify(totalEl.textContent));
+    assert.ok(!totalEl.textContent.includes('Lock:relation omitted'),
+        'no omitted-dominant claim: ' + JSON.stringify(totalEl.textContent));
+    assert.ok(!totalEl.textContent.includes('largest source-dwell'),
+        'no source-dwell superlative: ' + JSON.stringify(totalEl.textContent));
+    // #dfg-total lives in the control bar the shell emits BEFORE
+    // #dfg-container, so the reason is above the canvas in DOM order -- the
+    // deliberate contrast with #438's below-the-canvas Matrix notes slot.
+    const html = h.root.innerHTML;
+    assert.ok(html.indexOf('id="dfg-total"') < html.indexOf('id="dfg-container"'),
+        'the disclosure slot precedes the canvas in DOM order');
+});
+
+test('#510 view CONTROL: the same payload with complete coverage paints AND '
+    + 'states both claims, so the test above is not satisfied by a blank line', t => {
+    const h = viewHarness456(t);
+    h.mount(replay456());
+    assert.ok(h.paints.length > 0);
+    const totalEl = h.elements.get('dfg-total');
+    assert.match(totalEl.textContent, /Lock:relation omitted \(1533\.6s total\)/);
+    assert.ok(!totalEl.textContent.includes('ranking withheld'),
+        'nothing withheld when coverage is complete: ' +
+        JSON.stringify(totalEl.textContent));
 });
 
 test('#456 missing Lock:relation keeps the headline totals but is visibly refused', t => {
