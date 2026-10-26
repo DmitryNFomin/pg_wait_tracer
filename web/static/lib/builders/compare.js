@@ -5,6 +5,8 @@
  * shared table renderer sees any rows. No DOM/network/state lives here.
  */
 
+import { isIdleRow } from './table-configs.js';
+
 const VALUE_KEY = {
     overview: 'ms',
     events: 'total_ms',
@@ -36,7 +38,7 @@ function entityLabel(kind, row) {
 function isDeltaEntity(kind, row) {
     if (kind !== 'overview' || !row || Number(row.indent) !== 0) return true;
     const name = String(row.name || '');
-    return name !== 'DB Time' && !name.includes('Idle');
+    return name !== 'DB Time' && !isIdleRow(row);
 }
 
 function dbTimeMs(data) {
