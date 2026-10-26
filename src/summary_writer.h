@@ -608,6 +608,13 @@
  *                                      + SUMMARY_QUERY_TOP_EVENTS*20 + 8)
  *   trailer    8 (idle_ns) + 4 (events_overflow)
  *              + v7: 5 * 8 (the measured-CPU scalars)
+ *              + v9: 4 (sessions_overflow) + 8 (idle_cpu_ns)
+ *
+ * The v9 term is 12, and it MUST be here: pgwt_summary_serialize refuses to
+ * write past out_size and the writer sizes its buffer from this macro, so a
+ * trailer the macro does not know about makes serialize return 0 and the
+ * writer stop producing records -- silently, because nothing downstream
+ * distinguishes "no records this second" from "the buffer was too small".
  */
 #define PGWT_SUMMARY_SERIALIZE_MAX                                            \
     ((size_t)(PGWT_NUM_CLASSES * 8)                                           \
@@ -615,7 +622,7 @@
      + (size_t)SUMMARY_MAX_SESSIONS * 32                                      \
      + (size_t)SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES * 8 + 1          \
                                        + SUMMARY_QUERY_TOP_EVENTS * 20 + 8)   \
-     + 12 + 40)
+     + 12 + 40 + 12)
 
 /* ── Per-second accumulator ───────────────────────────────── */
 
@@ -721,6 +728,36 @@ struct pgwt_summary_accum {
     uint64_t wait_gap_cpu_ns;       /* Sigma cpu_ns on WAIT records (obs.)    */
     uint64_t cpu_measured_records;  /* CPU observations: records with
                                      * cpu_ns != UNKNOWN, plus v10 credits     */
+
+    /* v9 (#194): MEASURED on-CPU ns observed on IDLE records.
+     *
+     * OBSERVABILITY ONLY -- never added to CPU*, DB Time or any class. The
+     * reader reports it beside wait_gap_cpu_ns, for the same reason: a
+     * quantity worth knowing that would be wrong to spend.
+     *
+     * WHY NOT DB TIME, which was the live question.
+     * docs/AAS_SEMANTICS_DECISION.md already decides it: a client backend's
+     * on-CPU time counts only inside the command-open window, and
+     * "post-command protocol/idle time, which PostgreSQL itself reports as
+     * idle" is excluded BY DECISION, with Client:ClientRead kept
+     * idle-but-visible. Crediting an idle record's cpu_ns to DB Time would
+     * contradict the rule the dormant v10 note carries for a we == 0 gap
+     * outside a command (PGWT_WEI_NONCMD_CPU is idle). The measurement is
+     * also of MIXED PROVENANCE -- part boundary-leaked tail of the preceding
+     * in-command gap, part post-wake protocol -- and the parts cannot be
+     * separated, so it cannot honestly enter CPU* at all.
+     *
+     * A third option, adding it to CPU* without moving wall, fails too: that
+     * keeps DB == Sigma only by shrinking Off-CPU*, and unsaturated -- which
+     * is where #194's 1.69 pp lives -- Off-CPU* is ~0, so the credit lands in
+     * cpu_clamped_ns and is invisible.
+     *
+     * WHY COUNT IT AT ALL: without it the KERNEL residue does not close.
+     * #194 measured its understatement against the kernel, and the identity
+     * that closes is CPU* + wait_gap_cpu + idle_cpu, not CPU* alone.
+     * src/compute.c's idle branch dropped ev->cpu_ns while every other
+     * branch in that loop read it; this is the summary twin of reading it. */
+    uint64_t idle_cpu_ns;
 
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];

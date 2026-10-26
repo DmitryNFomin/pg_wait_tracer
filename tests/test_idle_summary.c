@@ -1524,6 +1524,15 @@ static size_t strip_v4_additions(const uint8_t *in, size_t in_size,
      * bytes as part of round 2's addition and the assertion reads 68 where
      * it means 28. */
     p += 40;                             /* DROP the v7 record trailer */
+    /* v9 WILL add a THIRD record trailer (sessions_overflow + idle_cpu_ns),
+     * appended last again, and it will have to come off here for the same
+     * reason v7's does. It is NOT dropped yet because serialize does not
+     * write it yet -- the constant is still 8. The commit that sets the
+     * constant to 9 adds `p += 12;` here AND the matching `+ 12` to the size
+     * assertion below; this comment is the pointer so neither is forgotten.
+     * Measured while staging that change: adding the trailer without
+     * updating these two turns this assertion red with 80 where it means
+     * 68, which is the independent layout statement doing its job. */
     (void)in_size;
     return (size_t)(o - out);
 }
@@ -3080,6 +3089,237 @@ static void test_sessions_overflow_is_reported(void)
     }
 }
 
+/* ── 15. THE v9 TRAILER: the two hazards named in its own spec ────────────
+ *
+ * 15a THE CLOBBER TRAP. pgwt_summary_deserialize ALREADY writes
+ *     acc->sessions_overflow -- in the session loop, which runs BEFORE the
+ *     trailer is read -- counting entries it had to drop because the table
+ *     could not hold them. It is the ONLY witness to those. A plain
+ *     `memcpy(&acc->sessions_overflow, p, 4)` in the trailer would overwrite
+ *     the reader's count with the writer's and lose exactly the drops nothing
+ *     else records. The field is pre-set here because that is precisely the
+ *     state the session loop leaves behind by the time the trailer is read,
+ *     and deserialize does not reset it on entry (it resets only the three
+ *     num_* counters). So this is the real sequence, not an analogue.
+ *
+ * 15b THE SHORT RECORD. A truncated v9 block must FAIL to decode, not decode
+ *     with the new fields left at 0: a zero sessions_overflow reads as
+ *     "nothing was dropped", which is UNKNOWN, not false -- and it is the
+ *     exact signal #555 exists to carry. Every truncation from 1 to 12 bytes
+ *     must be refused, not just the one that happens to cut a field in half.
+ */
+static void test_v9_trailer(void)
+{
+    printf("\n--- 15. the v9 trailer: clobber trap + short-record refusal ---\n");
+
+    struct pgwt_summary_accum *acc = calloc(1, sizeof(*acc));
+    uint8_t *buf = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
+    CHECK(acc && buf, "alloc");
+    if (!acc || !buf) { free(acc); free(buf); return; }
+
+    /* A minimal but non-empty record: one event, one session, one query, and
+     * both v9 fields non-zero and DISTINCT so neither can be mistaken for
+     * the other or for a stray zero. */
+    acc->second_wall_ns = 1000000000ULL;
+    acc->class_ns[PGWT_CLASS_CPU] = 5000;
+    acc->events[0].event_id = 0;
+    acc->events[0].count    = 1;
+    acc->events[0].total_ns = 5000;
+    acc->num_events = 1;
+    acc->sessions[0].pid = 4242;
+    acc->sessions[0].db_time_ns = 5000;
+    acc->num_sessions = 1;
+    acc->queries[0].query_id = 77;
+    acc->queries[0].count    = 1;
+    acc->queries[0].total_ns = 5000;
+    acc->num_queries = 1;
+    const uint32_t W_OVERFLOW = 11;      /* what the WRITER dropped */
+    const uint64_t IDLE_CPU   = 123456789ULL;
+    acc->sessions_overflow = W_OVERFLOW;
+    acc->idle_cpu_ns       = IDLE_CPU;
+
+    size_t n = pgwt_summary_serialize(acc, buf, PGWT_SUMMARY_SERIALIZE_MAX);
+    CHECK(n > 0, "15 the record serializes (%zu bytes)", n);
+    if (n == 0) { free(acc); free(buf); return; }
+
+    /* pgwt_summary_serialize does NOT write the v9 trailer yet -- the
+     * constant is still 8, and a v9 layout inside a v8-labelled file is the
+     * mistake this format's version notes exist to prevent (see the comment
+     * at that site). So this appends the 12 bytes the way the writer will,
+     * which is what makes 15a and 15b tests of the READER rather than of
+     * whether the writer has been switched on. When the epoch commit sets
+     * the constant and uncomments those two memcpys, THIS block is what
+     * comes out -- and 15b's twelve refusals then cover the writer's own
+     * bytes unchanged. */
+    CHECK(n + 12 <= PGWT_SUMMARY_SERIALIZE_MAX,
+          "15 SERIALIZE_MAX already reserves the v9 trailer (%zu + 12 <= %zu)",
+          n, (size_t)PGWT_SUMMARY_SERIALIZE_MAX);
+    memcpy(buf + n, &acc->sessions_overflow, 4);
+    memcpy(buf + n + 4, &acc->idle_cpu_ns, 8);
+    n += 12;
+
+    /* ── 15a: ADD, not assign ───────────────────────────────────────────── */
+    {
+        const uint32_t R_OVERFLOW = 7;   /* what the READER dropped */
+        struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
+        CHECK(back != NULL, "alloc");
+        if (back) {
+            back->num_events = 1; back->num_sessions = 1; back->num_queries = 1;
+            back->sessions_overflow = R_OVERFLOW;
+            CHECK(pgwt_summary_deserialize(buf, n, back, 9) == 0,
+                  "15a the v9 payload decodes at version 9");
+            CHECK(back->sessions_overflow == R_OVERFLOW + W_OVERFLOW,
+                  "15a sessions_overflow is the SUM of both witnesses "
+                  "(%u = reader %u + writer %u), not the writer's alone",
+                  back->sessions_overflow, R_OVERFLOW, W_OVERFLOW);
+            CHECK(back->idle_cpu_ns == IDLE_CPU,
+                  "15a idle_cpu_ns round-trips (%llu == %llu)",
+                  (unsigned long long)back->idle_cpu_ns,
+                  (unsigned long long)IDLE_CPU);
+            free(back);
+        }
+    }
+
+    /* A v8 reader must NOT consume the v9 trailer: the gate is the version
+     * number, and this is what it is protecting. The reader's own count has
+     * to survive untouched, because at v8 the writer's value is not there to
+     * add. */
+    {
+        struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
+        CHECK(back != NULL, "alloc");
+        if (back) {
+            back->num_events = 1; back->num_sessions = 1; back->num_queries = 1;
+            back->sessions_overflow = 3;
+            CHECK(pgwt_summary_deserialize(buf, n, back, 8) == 0,
+                  "15a the same bytes decode at version 8 (trailing bytes "
+                  "ignored)");
+            CHECK(back->sessions_overflow == 3,
+                  "15a ...and a v8 decode leaves the reader's own count "
+                  "alone (%u == 3)", back->sessions_overflow);
+            CHECK(back->idle_cpu_ns == 0,
+                  "15a ...and reads no idle_cpu_ns (%llu == 0)",
+                  (unsigned long long)back->idle_cpu_ns);
+            free(back);
+        }
+    }
+
+    /* ── 15b: every truncation is refused ───────────────────────────────── */
+    {
+        int refused = 0;
+        for (size_t cut = 1; cut <= 12; cut++) {
+            struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
+            if (!back) break;
+            back->num_events = 1; back->num_sessions = 1; back->num_queries = 1;
+            if (pgwt_summary_deserialize(buf, n - cut, back, 9) == -1)
+                refused++;
+            free(back);
+        }
+        CHECK(refused == 12,
+              "15b all 12 truncations of the v9 trailer are REFUSED "
+              "(%d of 12) -- a zero sessions_overflow would read as "
+              "'nothing was dropped', which is unknown, not false", refused);
+    }
+
+    /* NON-VACUITY: the untruncated payload decodes, so 15b's twelve refusals
+     * are about the truncation and not about the fixture being undecodable. */
+    {
+        struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
+        if (back) {
+            back->num_events = 1; back->num_sessions = 1; back->num_queries = 1;
+            CHECK(pgwt_summary_deserialize(buf, n, back, 9) == 0,
+                  "15b NON-VACUITY: the same payload UNtruncated decodes");
+            free(back);
+        }
+    }
+
+    /* ── 15c: THE WRITER ACTUALLY FILLS IT ──────────────────────────────
+     *
+     * 15a and 15b both SET acc->idle_cpu_ns by hand and then check the
+     * bytes, so they prove the field round-trips and say nothing about
+     * whether anything ever populates it. Measured: a mutant that deletes
+     * the #194 hook entirely -- restoring the defect, an idle record's
+     * cpu_ns dropped on the floor exactly as src/compute.c:1393-1397 drops
+     * it -- passed all 379 checks. So this leg drives the REAL writer with a
+     * real idle record and asserts the accumulator, which is the only thing
+     * that can see the hook at all. */
+    {
+        const char *dir = fresh_dir("v9idlecpu");
+        struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+        CHECK(w != NULL && pgwt_summary_writer_init(w, dir, 24, NULL) == 0,
+              "15c writer opens");
+        if (w) {
+            struct pgwt_trace_event e;
+            memset(&e, 0, sizeof(e));
+            e.pid = 515;
+            e.new_event = EV_IO;
+            e.timestamp_ns = mono_origin() + 100 * MS;
+
+            /* An IDLE record (Client:ClientRead) carrying a measurement. */
+            e.old_event   = EV_CLIENTREAD;
+            e.duration_ns = 10 * MS;
+            e.cpu_ns      = 3 * MS;
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
+            CHECK(w->accum.idle_cpu_ns == (uint64_t)(3 * MS),
+                  "15c an idle record's measured cpu_ns reaches idle_cpu_ns "
+                  "(%llu == %llu)",
+                  (unsigned long long)w->accum.idle_cpu_ns,
+                  (unsigned long long)(3 * MS));
+
+            /* ...and it is NOT spent anywhere else. idle_ns keeps the WALL;
+             * the measurement must not appear in CPU*, in a class, or in
+             * cpu_measured_records (whose only consumer is
+             * "> 0 => this window can split running from waiting", which an
+             * idle record cannot support). */
+            CHECK(w->accum.idle_ns == (uint64_t)(10 * MS),
+                  "15c ...while idle_ns still holds the WALL (%llu)",
+                  (unsigned long long)w->accum.idle_ns);
+            CHECK(w->accum.cpu_measured_ns == 0 &&
+                  w->accum.cpu_unknown_ns == 0 &&
+                  w->accum.wait_gap_cpu_ns == 0 &&
+                  w->accum.cpu_measured_records == 0,
+                  "15c ...and no CPU scalar moved (measured %llu, unknown "
+                  "%llu, wait_gap %llu, records %llu)",
+                  (unsigned long long)w->accum.cpu_measured_ns,
+                  (unsigned long long)w->accum.cpu_unknown_ns,
+                  (unsigned long long)w->accum.wait_gap_cpu_ns,
+                  (unsigned long long)w->accum.cpu_measured_records);
+
+            /* THE PER-RECORD CLAMP, same reason the CPU branch has one:
+             * sum_exec_runtime is only current at a tick or a context
+             * switch, so one record's cpu_ns can exceed its own wall. */
+            uint64_t before = w->accum.idle_cpu_ns;
+            e.timestamp_ns += 10 * MS;
+            e.duration_ns   = 4 * MS;
+            e.cpu_ns        = 9 * MS;      /* > wall */
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
+            CHECK(w->accum.idle_cpu_ns - before == (uint64_t)(4 * MS),
+                  "15c a cpu_ns larger than the record's wall is CLAMPED to "
+                  "the wall (+%llu == %llu)",
+                  (unsigned long long)(w->accum.idle_cpu_ns - before),
+                  (unsigned long long)(4 * MS));
+
+            /* NON-VACUITY: an UNKNOWN measurement must add nothing, so the
+             * two assertions above are about the value and not about the
+             * branch firing for every idle record. */
+            before = w->accum.idle_cpu_ns;
+            e.timestamp_ns += 10 * MS;
+            e.duration_ns   = 6 * MS;
+            e.cpu_ns        = PGWT_CPU_NS_UNKNOWN;
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
+            CHECK(w->accum.idle_cpu_ns == before,
+                  "15c NON-VACUITY: an UNKNOWN cpu_ns adds nothing (%llu "
+                  "unchanged)", (unsigned long long)before);
+
+            pgwt_summary_close(w);
+            pgwt_summary_destroy(w);
+            free(w);
+        }
+    }
+
+    free(acc);
+    free(buf);
+}
+
 int main(void)
 {
     printf("=== test_idle_summary ===\n");
@@ -3115,6 +3355,7 @@ int main(void)
     test_archived_file_is_timezone_independent();
     test_unplaceable_archive_is_refused();
     test_sessions_overflow_is_reported();
+    test_v9_trailer();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);
     if (system(cmd) != 0) { /* ignore */ }

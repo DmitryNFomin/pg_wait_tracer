@@ -470,6 +470,30 @@ static int accum_event(struct pgwt_summary_accum *acc,
             acc->wait_gap_cpu_ns += evt->cpu_ns;
             acc->cpu_measured_records++;
         }
+    } else if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+        /* v9 (#194): an IDLE record's measured on-CPU ns. Until v9 this
+         * branch did not exist and the value was dropped -- while the two
+         * branches above both read it -- which is the summary twin of
+         * src/compute.c's idle branch doing `idle_time_ns += dur_ns;
+         * continue;` without ever touching ev->cpu_ns. #194 measured the
+         * resulting understatement at 1.69 pp against the kernel.
+         *
+         * OBSERVABILITY ONLY, and the clamp is per-record exactly as the
+         * CPU branch's is: cpu_ns comes from sum_exec_runtime, which is only
+         * current at a tick or a context switch, so one record's cpu_ns can
+         * exceed its own wall. Nothing here enters class_ns, idle_ns, CPU* or
+         * DB Time -- idle_ns above already holds this record's wall, and
+         * adding the measurement anywhere else would double count it.
+         *
+         * cpu_measured_records is NOT incremented. Its single consumer is
+         * `> 0 => has_measured_cpu`, i.e. "this window can split running
+         * from waiting", and an idle record's measurement cannot support
+         * that split: it is excluded from both CPU rows by decision. Letting
+         * an idle-only window claim has_measured_cpu would make the reader
+         * emit a measured CPU split out of nothing. */
+        uint64_t m = evt->cpu_ns;
+        if (m > dur) m = dur;
+        acc->idle_cpu_ns += m;
     }
 
     /* Per-event stats */
@@ -786,6 +810,32 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
     memcpy(p, &acc->wait_gap_cpu_ns, 8);      p += 8;
     memcpy(p, &acc->cpu_measured_records, 8); p += 8;
 
+    /* v9 record trailer (sessions_overflow + idle_cpu_ns), appended after
+     * v7's for the same reason every trailer before it was: an older reader
+     * stops before it, and the version gate is what keeps a v8 record --
+     * which ends 12 bytes earlier -- from being read as if these fields were
+     * present.
+     *
+     * DELIBERATELY NOT WRITTEN YET, and this is the discipline the file's own
+     * version notes demand. PGWT_SUMMARY_VERSION is still 8, and writing
+     * these 12 bytes now would put a v9 LAYOUT inside a file labelled v8 --
+     * the mirror of the mistake those notes spend 200 lines arguing against.
+     * No reader would be confused today (a v8 decode stops before the
+     * trailer and ignores it; test_idle_summary section 15a pins exactly
+     * that), but the rule is that the number and the bytes move together.
+     *
+     * Everything else for these two fields is in place and tested: the
+     * accumulator carries them, PGWT_SUMMARY_SERIALIZE_MAX already reserves
+     * the 12 bytes, pgwt_summary_deserialize reads them under
+     * `version >= 9` and refuses a short record, and the #194 writer hook
+     * fills idle_cpu_ns. The COMMIT THAT SETS THE CONSTANT TO 9 is the one
+     * that uncomments these two lines, together with the rest of the epoch's
+     * rules. Until then this is a seam, not a format.
+     *
+     *   memcpy(p, &acc->sessions_overflow, 4);    p += 4;
+     *   memcpy(p, &acc->idle_cpu_ns, 8);          p += 8;
+     */
+
     return (size_t)(p - out);
 }
 
@@ -950,6 +1000,29 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
         memcpy(&acc->cpu_clamped_ns, p, 8);       p += 8;
         memcpy(&acc->wait_gap_cpu_ns, p, 8);      p += 8;
         memcpy(&acc->cpu_measured_records, p, 8); p += 8;
+    }
+
+    /* v9: REFUSE a short record, same argument as v7's above. A zero in
+     * sessions_overflow is NOT neutral -- it reads as "nothing was dropped",
+     * which is unknown, not false, and it is the exact signal #555 exists to
+     * carry. */
+    if (version >= 9) {
+        if (p + 12 > end) return -1;
+
+        /* ADD, NEVER ASSIGN. This function has ALREADY written
+         * acc->sessions_overflow, in the session loop above, counting the
+         * entries it had to drop because the table could not hold them --
+         * and it is the ONLY witness to those. A plain memcpy here would
+         * overwrite the reader's own count with the writer's and lose
+         * exactly the drops nothing else records. Read into a local and sum:
+         * both sides' denials are real and both cost sessions[] data.
+         * tests/test_idle_summary.c section 14e pins the reader's count and
+         * goes red if it is clobbered. */
+        uint32_t w_sessions_overflow;
+        memcpy(&w_sessions_overflow, p, 4);       p += 4;
+        acc->sessions_overflow += w_sessions_overflow;
+
+        memcpy(&acc->idle_cpu_ns, p, 8);          p += 8;
     }
 
     return 0;
