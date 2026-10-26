@@ -262,6 +262,8 @@ expect_ok "$R" "FP1 pinned value whose comment names ubuntu-latest"
 # refuse: missing files, ambiguous/absent definitions, or no $(CC) recipes.
 # Join continuations before inspecting definitions and recipes; comments and
 # BPF_CFLAGS must not satisfy either the flag or the $(CFLAGS) requirement.
+# Compiler forwarding is not compilation. Sub-make CFLAGS overrides must
+# preserve the flags too: command-line assignments replace the child defaults.
 check_makefile_cflags() {
     local mk="$1" flags_var="$2"
     if [[ ! -f "$mk" || ! -r "$mk" ]]; then
@@ -281,7 +283,20 @@ check_makefile_cflags() {
             print message > "/dev/stderr"
             failed = 1
         }
-        function inspect(line, value) {
+        function has_compile_command(command, rest, before) {
+            rest = command
+            while (match(rest, /[$][(]CC[)]/)) {
+                before = substr(rest, 1, RSTART - 1)
+                # Exclude only CC assignment values (bare or quoted).
+                # Keep scanning: the same fragment may also compile.
+                if (before !~ /(^|[[:space:]])CC="?$/ &&
+                    before !~ ("(^|[[:space:]])CC=" sprintf("%c", 39) "$"))
+                    return 1
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            return 0
+        }
+        function inspect(line, value, commands, n, i, command, quote, end_quote) {
             sub(/[[:space:]]*#.*/, "", line)
             if (line !~ /^\t/ && line ~ assignment) {
                 definitions++
@@ -290,11 +305,41 @@ check_makefile_cflags() {
                 if (value ~ "(^|[[:space:]])" flag "([[:space:]]|$)")
                     has_flag = 1
             }
-            if (line ~ /^\t/ && index(line, "$(CC)")) {
-                recipes++
-                if (!index(line, "$(" flags_var ")"))
-                    reject("FAIL: " FILENAME ":" first_line \
-                           " $(CC) recipe does not pass $(" flags_var "): " line)
+            if (line ~ /^\t/) {
+                # Scan anywhere, including shell keywords and pipelines.
+                # CC="$(CC)" on a sub-make is merely a forwarded value.
+                sub(/^\t[[:space:]@+-]*/, "", line)
+                n = split(line, commands, /&&|;/)
+                for (i = 1; i <= n; i++) {
+                    command = commands[i]
+                    sub(/^[[:space:]]*/, "", command)
+                    if (has_compile_command(command)) {
+                        recipes++
+                        if (!index(command, "$(" flags_var ")"))
+                            reject("FAIL: " FILENAME ":" first_line \
+                                   " $(CC) recipe does not pass $(" flags_var "): " line)
+                    }
+                    if (command ~ /^[$][(]MAKE[)]([[:space:]]|$)/ &&
+                        command ~ "[[:space:]]" flags_var "=") {
+                        overrides++
+                        value = command
+                        sub("^.*[[:space:]]" flags_var "=", "", value)
+                        # Inspect the assigned value, not unrelated arguments
+                        # that might also happen to mention $(CFLAGS).
+                        quote = substr(value, 1, 1)
+                        if (quote == "\"" || quote == sprintf("%c", 39)) {
+                            value = substr(value, 2)
+                            end_quote = index(value, quote)
+                            if (!end_quote) value = ""
+                            else value = substr(value, 1, end_quote - 1)
+                        } else {
+                            sub(/[[:space:]].*/, "", value)
+                        }
+                        if (!index(value, "$(" flags_var ")"))
+                            reject("FAIL: " FILENAME ":" first_line \
+                                   " $(MAKE) override does not preserve $(" flags_var "): " line)
+                    }
+                }
             }
         }
         BEGIN { assignment = "^[ ]*" flags_var "[[:space:]]*[:?+!]*=" }
@@ -319,6 +364,7 @@ check_makefile_cflags() {
                 reject("REFUSE: " FILENAME " has no $(CC) compile recipes")
             if (failed) exit 1
             print "implicit-decl flag: " recipes " $(CC) recipe(s) checked, all pass $(" flags_var ")"
+            print "implicit-decl flag: " (overrides + 0) " sub-make override(s) checked"
         }
     ' "$mk"
 }
@@ -330,6 +376,16 @@ expect_root_fail() {  # <makefile> <substring> <what>
         report true "$what (exit $status, matched '$needle')"
     else
         report false "$what — expected nonzero exit and '$needle'; got exit $status: $result"
+    fi
+}
+
+expect_root_ok() {  # <makefile> <what>
+    local mk="$1" what="$2" result status
+    result="$(check_makefile_cflags "$mk" CFLAGS 2>&1)"; status=$?
+    if (( status == 0 )); then
+        report true "$what (exit 0)"
+    else
+        report false "$what — expected exit 0; got exit $status: $result"
     fi
 }
 
@@ -427,6 +483,66 @@ cp "$ROOT_MK" "$tmpdir/root-bypass.mk"
 printf '\nbypass:\n\t$(CC) $(BPF_CFLAGS) -c probe.c\n' >> "$tmpdir/root-bypass.mk"
 expect_root_fail "$tmpdir/root-bypass.mk" 'does not pass $(CFLAGS)' \
     'root gate rejects a recipe passing only BPF_CFLAGS'
+
+echo
+echo "== root Makefile: command tokens and sub-make overrides =="
+cat > "$tmpdir/root-forward.mk" <<'MK'
+CFLAGS = -Wall -Werror=implicit-function-declaration
+all:
+	$(CC) $(CFLAGS) -c probe.c
+	$(MAKE) -C tests CC="$(CC)" LIBBPF_LIB="../build/libbpf.a -lelf -lz"
+MK
+expect_root_ok "$tmpdir/root-forward.mk" \
+    'root gate approves compiler forwarding without a CFLAGS override'
+
+for recipe in 'cd x && $(CC) -o a a.c' '@-+$(CC) -o a a.c' 'cd x; $(CC) -o a a.c'; do
+    cp "$tmpdir/root-forward.mk" "$tmpdir/root-command-bypass.mk"
+    printf '\t%s\n' "$recipe" >> "$tmpdir/root-command-bypass.mk"
+    expect_root_fail "$tmpdir/root-command-bypass.mk" 'does not pass $(CFLAGS)' \
+        "root gate rejects compiler command without flags: $recipe"
+done
+
+# Each wrapped compile has a compliant sibling: missing it must fail for
+# missing CFLAGS, never merely because the gate saw no compile recipes.
+for recipe in 'for f in extra/*.c; do $(CC) -c $$f; done' \
+              '@if true; then $(CC) -c probe.c; fi' \
+              'echo probe.c | xargs $(CC) -c' \
+              'false || $(CC) -c probe.c' \
+              '($(CC) -c probe.c)' \
+              'if false; then true; else $(CC) -c probe.c; fi' \
+              'env CC="$(CC)" $(CC) -c probe.c'; do
+    cat > "$tmpdir/root-wrapped-bypass.mk" <<'MK'
+CFLAGS = -Wall -Werror=implicit-function-declaration
+good:
+	$(CC) $(CFLAGS) -c main.c
+bad:
+MK
+    printf '\t%s\n' "$recipe" >> "$tmpdir/root-wrapped-bypass.mk"
+    expect_root_fail "$tmpdir/root-wrapped-bypass.mk" 'does not pass $(CFLAGS)' \
+        "root gate rejects wrapped compile with compliant sibling: $recipe"
+done
+
+cp "$tmpdir/root-forward.mk" "$tmpdir/root-override.mk"
+printf '\t$(MAKE) -C tests CFLAGS="-O2"\n' >> "$tmpdir/root-override.mk"
+expect_root_fail "$tmpdir/root-override.mk" 'override does not preserve $(CFLAGS)' \
+    'root gate rejects a sub-make CFLAGS override with no compiler token'
+
+cp "$tmpdir/root-forward.mk" "$tmpdir/root-override-unrelated.mk"
+printf '\tcd x && $(MAKE) -C tests CFLAGS=-O2 OTHER="$(CFLAGS)"\n' \
+    >> "$tmpdir/root-override-unrelated.mk"
+expect_root_fail "$tmpdir/root-override-unrelated.mk" 'override does not preserve $(CFLAGS)' \
+    'root gate rejects an override despite CFLAGS in an unrelated argument'
+
+cp "$tmpdir/root-forward.mk" "$tmpdir/root-override-preserved.mk"
+printf '\t@+$(MAKE) pgwt-server CFLAGS="$(CFLAGS) -fsanitize=address"\n' \
+    >> "$tmpdir/root-override-preserved.mk"
+expect_root_ok "$tmpdir/root-override-preserved.mk" \
+    'root gate approves a sub-make override preserving CFLAGS (test-asan shape)'
+
+printf 'CFLAGS = -Werror=implicit-function-declaration\nall:\n\t$(MAKE) -C tests CC="$(CC)"\n' \
+    > "$tmpdir/root-forward-only.mk"
+expect_root_fail "$tmpdir/root-forward-only.mk" 'no $(CC) compile recipes' \
+    'root gate refuses forwarding alone as evidence of compilation'
 
 # Exercise both arguments and continuation handling on a positive fixture.
 printf 'USER_CFLAGS = -Wall \\\n -Werror=implicit-function-declaration\nall:\n\t$(CC) \\\n $(USER_CFLAGS) -c probe.c\n' \
