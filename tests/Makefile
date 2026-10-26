@@ -55,7 +55,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             wait_cpu_scan wait_cpu_fixture \
             test_summary_tick_flush \
-            test_block_agg bench_block_agg test_transitions_loader \
+            test_block_agg bench_block_agg bench_left_seed test_transitions_loader \
             test_top_wait_backfill \
             test_tick_drain \
             test_window_overlap \
