@@ -102,6 +102,43 @@ type Bridge struct {
 
 	done      chan struct{} // closed by Close(): stop the supervisor
 	closeOnce sync.Once
+
+	// #351: the current upstream incarnation's stderr tap, so a startup
+	// refusal reason reaches the browser and not only the terminal log.
+	// See web/refusal.go.
+	tap stderrTap
+}
+
+// stderrTap returns the tap that retains the current upstream incarnation's
+// stderr lines. Never nil: a bridge that cannot remember a refusal reason
+// could only ever report the generic disconnect, which is the #351 defect.
+func (b *Bridge) stderrTap() *stderrTap { return &b.tap }
+
+// refusalReason is the current upstream incarnation's refusal reason, or ""
+// when none was established. Never guesses: see RefusalReason().
+func (b *Bridge) refusalReason() string { return b.tap.Reason() }
+
+// transportError is transportError() plus this bridge's refusal reason, so
+// a connection-level failure the browser sees can name its cause instead of
+// collapsing into "server disconnected" (#351). The envelope is
+// byte-identical to transportError() when there is no reason, so the
+// existing client path is untouched.
+//
+// A reason is attached ONLY while the upstream is DOWN. The `timeout`
+// envelope (requestTimeout elapsed) is the one that fires against a
+// perfectly healthy, still-running server, and a reason there could only
+// ever mislabel it: the server is not gone, so nothing on its stderr
+// explains why one request was slow. "server unavailable (reconnecting)"
+// and "server disconnected" are both raised with the process already dead,
+// which is when its last words ARE the explanation.
+func (b *Bridge) transportError(id int64, msg string) []byte {
+	b.mu.Lock()
+	up := b.up
+	b.mu.Unlock()
+	if up {
+		return transportError(id, msg)
+	}
+	return TransportErrorWithReason(id, msg, b.refusalReason())
 }
 
 // NewBridge creates a bridge that supervises the command built by factory.
@@ -169,7 +206,14 @@ func (b *Bridge) spawn() (*bufio.Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = log.Writer()
+	// #351: tee stderr. The log keeps every byte exactly as before (someone
+	// watching the pgwt-client terminal sees the same thing); the tap
+	// retains the last few lines so a startup refusal can also reach the
+	// BROWSER, which is the surface where it is most needed. Reset FIRST, so
+	// a reason always belongs to this incarnation and never explains a
+	// failure that is already over.
+	b.tap.Reset()
+	cmd.Stderr = io.MultiWriter(log.Writer(), &b.tap)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start: %w", err)
 	}
@@ -444,7 +488,7 @@ func (b *Bridge) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		b.mu.Unlock()
 		if !up {
 			// Upstream down and respawning: fail fast (UI-3), no 30s stall.
-			send(transportError(clientID, "server unavailable (reconnecting)"))
+			send(b.transportError(clientID, "server unavailable (reconnecting)"))
 			continue
 		}
 
@@ -473,7 +517,7 @@ func (b *Bridge) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			b.pendMu.Lock()
 			delete(b.pending, bridgeID)
 			b.pendMu.Unlock()
-			send(transportError(clientID, "server unavailable (reconnecting)"))
+			send(b.transportError(clientID, "server unavailable (reconnecting)"))
 			continue
 		}
 
@@ -487,13 +531,13 @@ func (b *Bridge) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					resp = rewriteResponseID(line, clientID)
 				} else {
 					// failAllPending closed us: upstream died mid-request.
-					resp = transportError(clientID, "server disconnected")
+					resp = b.transportError(clientID, "server disconnected")
 				}
 			case <-time.After(requestTimeout):
 				b.pendMu.Lock()
 				delete(b.pending, bridgeID)
 				b.pendMu.Unlock()
-				resp = transportError(clientID, "timeout")
+				resp = b.transportError(clientID, "timeout")
 			}
 			send(resp)
 		}(clientID, bridgeID, ch)

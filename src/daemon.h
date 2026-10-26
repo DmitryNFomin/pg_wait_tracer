@@ -473,6 +473,15 @@ static inline bool pgwt_mode_uses_sampler(const struct pgwt_daemon *d)
 /* Initialize daemon: load BPF, attach tracepoints, scan backends. */
 int pgwt_daemon_init(struct pgwt_daemon *d);
 
+/* #464/#108: resolve the canonical query__execute__* sites from BIN and
+ * publish them into the BPF exec_site_allow map. Returns 0 when the
+ * allowlist is in place and the caller may attach the execution probes,
+ * -1 when it could not be established, in which case the caller MUST NOT
+ * attach them (with both PortalRun sites live every plannable non-SELECT
+ * is counted twice). Non-static because the execution phase markers are
+ * bundle members now and src/exact_probe.c attaches them.  */
+int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
+
 /* One display tick: drain the event ring, build the display from the
  * cumulative accumulator plus the live state_map, print, maintain.
  * Non-static ONLY so tests/test_tick_drain.c can drive the real handler

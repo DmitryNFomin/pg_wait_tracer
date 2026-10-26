@@ -15,6 +15,12 @@ struct pgwt_daemon;
 enum pgwt_exact_probe_index {
     PGWT_EXACT_PROBE_QUERY_ID = 0,
     PGWT_EXACT_PROBE_ACTIVITY,
+    /* #108: the per-execution phase markers. One bundle member per USDT
+     * PAIR (query__execute__start+done, query__plan__start+done) -- the two
+     * links of a pair are attached and detached together, because half a
+     * pair produces executions that never close. */
+    PGWT_EXACT_PROBE_EXEC,
+    PGWT_EXACT_PROBE_PLAN,
     PGWT_EXACT_PROBE_COUNT,
 };
 
@@ -22,7 +28,15 @@ enum pgwt_exact_probe_index {
 #define PGWT_EXACT_PROBE_ATTR_MASK \
     (PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_QUERY_ID) | \
      PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_ACTIVITY))
-#define PGWT_EXACT_PROBE_ALL_MASK PGWT_EXACT_PROBE_ATTR_MASK
+/* Phase markers are OPTIONAL members of the bundle: EL8 kernels without USDT
+ * semaphore refcounting have always run exact wait/query capture with these
+ * unavailable, so their attach failure degrades an escalation window, it
+ * never denies one. They are never part of the always-on sampled tier. */
+#define PGWT_EXACT_PROBE_PHASE_MASK \
+    (PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_EXEC) | \
+     PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_PLAN))
+#define PGWT_EXACT_PROBE_ALL_MASK \
+    (PGWT_EXACT_PROBE_ATTR_MASK | PGWT_EXACT_PROBE_PHASE_MASK)
 
 typedef void *(*pgwt_exact_attach_fn)(void *ctx,
                                       enum pgwt_exact_probe_index index);
@@ -45,12 +59,82 @@ struct pgwt_exact_probe_core {
     unsigned consumers;
 };
 
+/* One bundle member, two bpf_links: a USDT phase marker is only meaningful
+ * as a start/done PAIR. Both attach or neither does, and they detach
+ * together, so an escalation window can never leave executions that open
+ * and never close (or close and never open). */
+struct pgwt_exact_probe_pair {
+    void *start;
+    void *done;
+};
+
 struct pgwt_exact_probe_bundle {
     struct pgwt_exact_probe_core core;
     uint64_t query_offset;
     uint64_t activity_offset;
     bool sampled_warmup_reconciled;
+    /* #108: the execute/plan link pairs, owned by the bundle member whose
+     * index they belong to. */
+    struct pgwt_exact_probe_pair exec_links;
+    struct pgwt_exact_probe_pair plan_links;
+    /* The #464 canonical-site allowlist is published once per daemon
+     * lifetime; re-publishing on every escalation would re-parse the
+     * postgres ELF inside the window. */
+    bool exec_sites_published;
 };
+
+/* #108: the "both links or neither" rule for one USDT start/done pair.
+ *
+ * PURE (libbpf-free), so the invariant this branch introduces is a unit
+ * test rather than something only a live box could exercise -- and the live
+ * A/B in tests/test_escalation.sh provably CANNOT see it: a half-attached
+ * pair still yields executions > 0, so both sides of that A/B agree while
+ * on_exec_done sits live in the sampled tier.
+ *
+ * PGWT_EXACT_PAIR_START / _DONE are the `which` values handed to the
+ * callbacks. attach returns an opaque link or NULL on failure.
+ *
+ * pgwt_exact_probe_pair_attach: attaches START, then DONE. If either fails,
+ * anything already attached is detached and the pair is left ZEROED --
+ * returns -1 and never a half pair, because half a pair produces
+ * executions that open and never close (or the reverse), which is worse
+ * than absent telemetry because it is invisible.
+ *
+ * pgwt_exact_probe_pair_detach: detaches DONE then START (reverse of
+ * attach) and zeroes the pair. Idempotent: a second call is a no-op, so a
+ * release and a cleanup cannot double-destroy a link. */
+#define PGWT_EXACT_PAIR_START 0
+#define PGWT_EXACT_PAIR_DONE  1
+
+typedef void *(*pgwt_exact_pair_attach_fn)(void *ctx, int which);
+typedef void (*pgwt_exact_pair_detach_fn)(void *ctx, int which, void *link);
+
+int pgwt_exact_probe_pair_attach(struct pgwt_exact_probe_pair *pair,
+                                 pgwt_exact_pair_attach_fn attach,
+                                 pgwt_exact_pair_detach_fn detach,
+                                 void *ctx);
+void pgwt_exact_probe_pair_detach(struct pgwt_exact_probe_pair *pair,
+                                  pgwt_exact_pair_detach_fn detach,
+                                  void *ctx);
+
+/* #108: forget everything in the bundle that belongs to a DESTROYED BPF
+ * skeleton, keeping what survives one.
+ *
+ * Cleared: the execute/plan link pairs, and exec_sites_published -- the
+ * #464 canonical-site allowlist is RUNTIME addresses in a map owned by that
+ * skeleton. A daemon-mode re-attach (PostgreSQL restarted) loads a fresh,
+ * EMPTY exec_site_allow and may see a different load base, so the publish
+ * has to happen again. Keeping the flag would leave the BPF handlers'
+ * exec_site_admitted() refusing every address while the links looked
+ * healthy: zero executions, silently -- the exact silent-zero shape the
+ * allowlist refusal exists to prevent.
+ *
+ * Kept: query_offset / activity_offset, which are FILE offsets into the
+ * postgres binary and do not move when a process restarts. (They do move
+ * if the restart is onto a DIFFERENT binary; that is pre-existing and not
+ * addressed here.) */
+void pgwt_exact_probe_bundle_forget_skeleton(
+    struct pgwt_exact_probe_bundle *bundle);
 
 uint32_t pgwt_exact_probe_startup_mask(
     enum pgwt_mode mode, int pg_major,
