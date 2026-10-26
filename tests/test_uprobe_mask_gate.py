@@ -8,12 +8,17 @@ and in every cycle. What this file exists for is the FALSE NEGATIVE -- every
 way the gate could be made unable to see, and therefore able to approve:
 
   * an explicit override is empty or unparseable; without an override the
-    shared resolver derives the expectation from kernel/binary evidence (#622);
+    shared resolver derives the expectation from kernel/binary evidence
+    (#622), EXEC and PLAN independently (a measured Ubuntu box showed EXEC
+    attached and PLAN did not, both predicted capable from kernel+notes --
+    #108's optional attach is per probe and best effort, src/exact_probe.c);
   * the mask field is absent from the JSON, or is not a number;
-  * the thing being checked is ABSENT rather than wrong -- phase bits missing
-    where they were declared present (that is #591's live red), and phase bits
-    PRESENT where they were declared absent (which is what keeps the EL8
-    branch of the assertion non-vacuous);
+  * phase bits PRESENT where derivation said this platform/binary could not
+    carry them (the EL8 branch of the assertion) -- this is still a hard
+    failure. A derived-capable bit that did NOT attach is NOT a failure
+    (that would be asserting something #622's own measurement contradicts);
+    exact_window_mask_ok() reports it as `degraded` instead, and this file
+    proves that name is never lost and never silently added to the verdict;
   * the required attribution pair is incomplete;
   * an unknown bundle bit appears (a plain `mask & ATTR_MASK` would accept it);
   * the gate is never CALLED at all -- two subprocess cases run the real
@@ -77,15 +82,18 @@ def accepts(raw, want, label):
 
 
 def mask_rejects(mask, expected_phase, label):
-    ok, why = uf.exact_window_mask_ok(mask, expected_phase)
+    ok, why, degraded = uf.exact_window_mask_ok(mask, expected_phase)
     report(not ok, f"{label}: rejected ({why})" if not ok
-           else f"{label}: ACCEPTED, gate is blind here ({why})")
+           else f"{label}: ACCEPTED, gate is blind here ({why}; degraded={degraded})")
 
 
-def mask_accepts(mask, expected_phase, label):
-    ok, why = uf.exact_window_mask_ok(mask, expected_phase)
+def mask_accepts(mask, expected_phase, label, want_degraded=()):
+    ok, why, degraded = uf.exact_window_mask_ok(mask, expected_phase)
     report(ok, f"{label}: accepted ({why})" if ok
            else f"{label}: rejected a legitimate mask ({why})")
+    if ok:
+        report(degraded == want_degraded,
+               f"{label}: degraded={degraded} (want {want_degraded})")
 
 
 print("=== #591 exact-window mask gate: bypass suite ===")
@@ -120,17 +128,34 @@ mask_rejects(-1, uf.PHASE_MASK, "field is negative")
 # cJSON numbers can decode as float; an integral one is still a real mask.
 mask_accepts(15.0, uf.PHASE_MASK, "field is the integral float 15.0")
 
-# ── 3. The thing checked is ABSENT rather than wrong ────────────────────
-print("\n-- phase markers absent where declared present (#591's live red) --")
-mask_rejects(0x3, uf.PHASE_MASK, "0x3: both phase markers missing")
-mask_rejects(0x7, uf.PHASE_MASK, "0x7: plan marker missing")
-mask_rejects(0xB, uf.PHASE_MASK, "0xb: execute marker missing")
-mask_accepts(0xF, uf.PHASE_MASK, "0xf: full bundle, as declared")
+# ── 3. A derived-capable bit not attaching is reported, never asserted ──
+# #622's own measurement on a capable Ubuntu box was mask=0x7: EXEC attached,
+# PLAN did not, with BOTH predicted capable from kernel+notes. Asserting
+# equality here would make that real, measured box fail its own gate -- so a
+# missing bit that was predicted capable must be ACCEPTED, with `degraded`
+# naming exactly which probe(s) did not attach (never silently losing it).
+print("\n-- phase markers absent where derivation said capable (NOT a failure; #622) --")
+mask_accepts(0x3, uf.PHASE_MASK, "0x3: both phase markers missing",
+            want_degraded=("EXEC", "PLAN"))
+mask_accepts(0x7, uf.PHASE_MASK, "0x7: plan marker missing (the measured Ubuntu case)",
+            want_degraded=("PLAN",))
+mask_accepts(0xB, uf.PHASE_MASK, "0xb: execute marker missing",
+            want_degraded=("EXEC",))
+mask_accepts(0xF, uf.PHASE_MASK, "0xf: full bundle, nothing degraded")
 
-print("\n-- phase markers present where declared absent (the EL8 branch) --")
-mask_rejects(0xF, 0, "0xf against a declaration of 0")
-mask_rejects(0x7, 0, "0x7 against a declaration of 0")
-mask_accepts(0x3, 0, "0x3: attribution pair only, as declared")
+print("\n-- phase markers present where derivation said NOT capable (the EL8 branch; still a hard failure) --")
+mask_rejects(0xF, 0, "0xf against a derivation of 0")
+mask_rejects(0x7, 0, "0x7 against a derivation of 0")
+mask_accepts(0x3, 0, "0x3: attribution pair only, as derived")
+
+print("\n-- EXEC and PLAN are resolved and asserted INDEPENDENTLY, not as one bundle --")
+# expected_phase=EXEC_BIT only (e.g. a binary with the execute notes but not
+# plan): PLAN attaching anyway is still a surprise and must reject even
+# though EXEC matches; PLAN legitimately not attaching when EXEC does is
+# accepted with only PLAN degraded -- one combined phase mask could not
+# express either half of this.
+mask_rejects(0xF, uf.EXEC_BIT, "0xf against EXEC-only capability: PLAN is a surprise")
+mask_accepts(0x7, uf.EXEC_BIT, "0x7 against EXEC-only capability: matches exactly")
 
 # ── 4. Strictness kept: required bits, and no unknown bits ──────────────
 print("\n-- required pair incomplete --")

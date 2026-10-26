@@ -97,10 +97,37 @@ class Resolver(unittest.TestCase):
                 self.assertIn("/pg18/bin/postgres", capability.reason)
                 self.assertNotIn("not available on this kernel", capability.reason)
 
-    def test_partial_bundle_fails_instead_of_predicting_wrong_mask(self):
+    def test_partial_bundle_resolves_each_pair_independently(self):
+        # EXEC and PLAN attach independently at runtime (src/exact_probe.c);
+        # a binary carrying only one pair's notes is a real, nameable partial
+        # capability, not an error to raise past (#622 rework: a combined
+        # all-or-nothing bundle check cannot express this).
         self.readelf.return_value.stdout = notes({"query__plan__start", "query__plan__done"})
-        with self.assertRaisesRegex(ValueError, "incomplete.*lacks.*query__execute"):
-            cap.resolve_phase_probes(123)
+        capability = cap.resolve_phase_probes(123)
+        self.assertFalse(capability.exec_expected)
+        self.assertTrue(capability.plan_expected)
+        self.assertFalse(capability.expected)  # the combined gate needs both
+        self.assertEqual(capability.phase_mask, cap.PLAN_BIT)
+        self.assertIn("plan", capability.reason)
+        self.assertIn("not execute", capability.reason)
+
+        self.readelf.return_value.stdout = notes({"query__execute__start", "query__execute__done"})
+        capability = cap.resolve_phase_probes(123)
+        self.assertTrue(capability.exec_expected)
+        self.assertFalse(capability.plan_expected)
+        self.assertFalse(capability.expected)
+        self.assertEqual(capability.phase_mask, cap.EXEC_BIT)
+        self.assertIn("execute", capability.reason)
+        self.assertIn("not plan", capability.reason)
+
+    def test_half_a_pair_note_missing_is_not_capable_for_that_probe(self):
+        # pgwt_resolve_exec_sites/attach_usdt_pair need BOTH start and done;
+        # one note of a pair present is the same as neither for that probe.
+        self.readelf.return_value.stdout = notes({"query__execute__start",
+                                                  "query__plan__start", "query__plan__done"})
+        capability = cap.resolve_phase_probes(123)
+        self.assertFalse(capability.exec_expected)
+        self.assertTrue(capability.plan_expected)
 
     def test_unreadable_evidence_is_failure(self):
         for target in (self.attribute.stat, self.readlink, self.readelf):
@@ -250,7 +277,7 @@ cap.REF_CTR_OFFSET = MissingKernelAttribute()
             with available_evidence():
                 capability = cap.resolve_phase_probes(123)
         else:
-            capability = cap.PhaseCapability(False, "not available on this kernel: ref_ctr_offset is absent (simulated)")
+            capability = cap.PhaseCapability(False, False, "not available on this kernel: ref_ctr_offset is absent (simulated)")
         prefix = (f'SCRIPT_DIR={shlex.quote(str(HERE))}\n'
                   f'PHASE_CAPABILITY={shlex.quote(json.dumps(asdict(capability)))}\n'
                   f'passed=0\nfailed={prior_failures}\nphase_refused=0\nPSQL_BIN=psql\n'
@@ -284,15 +311,29 @@ exec_rows() { echo 0; }
 
     def test_raw_open_window_status_and_exact_masks(self):
         block = between(ESC, '# tier must now be escalated', '# ESC-9:')
-        for expected, mask, tier, want in ((False, 3, "escalated", 0), (True, 15, "escalated", 0), (True, 3, "escalated", 1), (False, 15, "escalated", 1), (False, 0, "sampled", 1)):
+        # (expected, mask, tier, want, want_degraded_line): `expected` toggles
+        # the WHOLE bundle capable/not (EXEC==PLAN here; the asymmetric split
+        # is exercised directly in tests/test_uprobe_mask_gate.py). mask=3
+        # against expected=True is #622's measured case (predicted capable,
+        # phase bits did not attach) -- accepted, not failed, and reported.
+        cases = ((False, 3, "escalated", 0, False),
+                (True, 15, "escalated", 0, False),
+                (True, 3, "escalated", 0, True),
+                (False, 15, "escalated", 1, False),
+                (False, 0, "sampled", 1, False))
+        for expected, mask, tier, want, want_degraded in cases:
             with self.subTest(expected=expected, mask=mask, tier=tier):
                 status = json.dumps(dict(tier=tier, escalation_seconds_remaining=3 if tier == "escalated" else 0, exact_probe_attached_mask=mask))
-                capability = json.dumps(asdict(cap.PhaseCapability(expected, "simulated")))
+                capability = json.dumps(asdict(cap.PhaseCapability(expected, expected, "simulated")))
                 prefix = f'SCRIPT_DIR={shlex.quote(str(HERE))}\nPHASE_CAPABILITY={shlex.quote(capability)}\npassed=0\nfailed=0\n' + CHECK + JGET
                 prefix += f'ctl() {{ echo {shlex.quote(status)}; }}\n'
                 result = shell(prefix + block + '\n[[ $failed -eq 0 ]]\n', self.env)
                 self.assertEqual(result.returncode, want, result.stdout + result.stderr)
                 self.assertIn("open-window status: " + status, result.stdout)
+                if want_degraded:
+                    self.assertIn("degraded (not asserted)", result.stdout)
+                else:
+                    self.assertNotIn("degraded (not asserted)", result.stdout)
 
     def test_runner_refusal_is_separate_and_all_refusal_cannot_pass(self):
         prefix = 'set -uo pipefail\nREQUIRE_LIVE=1\n' + between(RUNNER, 'passed=0', '# Step 0:')

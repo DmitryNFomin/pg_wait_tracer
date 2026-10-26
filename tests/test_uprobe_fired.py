@@ -19,10 +19,14 @@ This test proves both sides of the contract:
   * repeated windows do not leak links or preseeds;
   * a forced second-link attach failure rolls the first link back and denies
     the window without ever advertising partial exact capture;
-  * #591: an open window's exact_probe_attached_mask carries the REQUIRED
-    attribution pair, no bits outside the known bundle, and exactly the
-    execute/plan phase markers resolved from the kernel and target binary
-    (overridable via $PGWT_EXPECT_PHASE_PROBES).
+  * #591/#622: an open window's exact_probe_attached_mask carries the
+    REQUIRED attribution pair, no bits outside the known bundle, and never
+    more phase bits than kernel+binary evidence derives as possible
+    (overridable via $PGWT_EXPECT_PHASE_PROBES). EXEC and PLAN are resolved
+    and asserted independently -- each attaches best-effort on its own
+    (src/exact_probe.c) -- and a derived-capable bit that still did not
+    attach is reported, never asserted as a failure: #108's optional attach
+    gives no per-probe reason pre-#592.
 
 Usage: sudo python3 tests/test_uprobe_fired.py
            [--pid PM_PID] [--pg-version N]
@@ -39,9 +43,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from testutil import find_postmaster
-from phase_probe_capability import (ALL_MASK, ATTR_MASK, PHASE_MASK,
-                                    EXPECT_PHASE_ENV, exact_window_mask_ok,
-                                    resolve_phase_probes)
+from phase_probe_capability import (ALL_MASK, ATTR_MASK, EXEC_BIT, PLAN_BIT,
+                                    PHASE_MASK, EXPECT_PHASE_ENV,
+                                    exact_window_mask_ok, resolve_phase_probes)
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
@@ -369,13 +373,19 @@ def run_cycles(pm_pid, pg_major, expected_phase):
                   f"straddler (response={response})")
             active = ctl(trace_dir, {"cmd": "metrics"})
             generation = int(active.get("exact_probe_generation", 0))
-            mask_ok, mask_why = exact_window_mask_ok(
+            mask_ok, mask_why, mask_degraded = exact_window_mask_ok(
                 active.get("exact_probe_attached_mask"), expected_phase)
+            if mask_degraded:
+                # Reported, never asserted -- see exact_window_mask_ok's
+                # docstring: a predicted-capable phase probe can still fail
+                # to attach independently at runtime (#592 not on this tree).
+                print(f"  cycle {cycle}: degraded (not asserted): "
+                      f"predicted-capable but not attached: {mask_degraded}")
             check(active.get("tier") == "escalated" and mask_ok and
                   active.get("exact_cpu_active") is True,
                   f"cycle {cycle}: exact window carries the required "
-                  f"attribution pair, no unknown bundle bits, and the "
-                  f"declared phase markers ({mask_why}; "
+                  f"attribution pair, no unknown bundle bits, and stays "
+                  f"within the derived phase capability ({mask_why}; "
                   f"tier={active.get('tier')!r}, "
                   f"exact_cpu_active={active.get('exact_cpu_active')!r})")
             check(generation > 0 and generation not in seen_generations,

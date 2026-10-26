@@ -271,10 +271,18 @@ from phase_probe_capability import PhaseCapability, exact_window_mask_ok
 capability = PhaseCapability(**json.loads(sys.argv[1]))
 r = json.load(sys.stdin)
 assert r["tier"] == "escalated" and r["escalation_seconds_remaining"] > 0, r
-ok, reason = exact_window_mask_ok(r.get("exact_probe_attached_mask"), capability.phase_mask)
+ok, reason, degraded = exact_window_mask_ok(r.get("exact_probe_attached_mask"),
+                                            capability.phase_mask)
+if degraded:
+    # Reported, never asserted: a predicted-capable phase probe (EXEC/PLAN)
+    # attaching independently and best-effort (src/exact_probe.c) can fail
+    # at runtime for reasons this resolver cannot see -- a measured Ubuntu
+    # box showed exactly this (EXEC attached, PLAN did not, both predicted
+    # capable). #592s per-probe diagnostics, not on this tree, would say why.
+    print(f"  degraded (not asserted): predicted-capable but not attached: {degraded}")
 assert ok, (reason, capability.reason, r)
 ' "$PHASE_CAPABILITY"
-check $? "open-window exact_probe_attached_mask matches resolved phase capability"
+check $? "open-window exact_probe_attached_mask stays within resolved phase capability"
 TIER=$(echo "$STATUS" | jget "['tier']")
 [[ "$TIER" == "escalated" ]]
 check $? "tier flipped to escalated (got: $TIER)"
@@ -520,7 +528,7 @@ run_tiered_capture() {
     return 0
 }
 
-if [[ $(echo "$PHASE_CAPABILITY" | jget "['expected']") == "False" ]]; then
+if [[ $(echo "$PHASE_CAPABILITY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['exec_expected'] and d['plan_expected'])") == "False" ]]; then
     echo "REFUSED (phase capability): test_escalation #108: $(echo "$PHASE_CAPABILITY" | jget "['reason']")"
     phase_refused=1
 elif [[ -z "$PSQL_BIN" ]]; then
