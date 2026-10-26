@@ -85,6 +85,7 @@ from server_harness import (                                    # noqa: E402
     ServerHarness, generate_traces, cleanup_traces,
     CPU, IO_DATA_FILE_READ, LWLOCK_WAL_WRITE,
     make_event_id, CLASS_CLIENT, CLASS_LOCK, SERVER_BIN, GEN_BIN,
+    gen_stderr_lines,
 )
 import summary_raw_parity_lib as P                              # noqa: E402
 # The stale arm's detector self-test lives in the FALSE-NEGATIVE suite, which
@@ -501,6 +502,17 @@ def main():
     bucket_reports = {}
     report["stale_detector_selftest_ok"] = self_ok
     report["stale_detector_selftest"] = self_lines
+
+    # #410: the writer's open-interval counters for the SUMMARY dir, read back
+    # out of the generator's retained stderr. gen_stderr_lines() returns a
+    # line naming the problem rather than nothing when the channel is broken,
+    # so a blind run looks different from a quiet one. Appended to `lines`
+    # here, at the point of reading -- same discipline as the per-bucket
+    # block (section 16h): there is no deferred buffer to forget to flush.
+    oc = gen_stderr_lines(sum_dir_used, "SUMMARY-OPEN-COUNTERS:")
+    lines.append("--- #410 writer open-interval counters (summary dir) ---")
+    lines.extend("  " + l for l in oc)
+    report["open_interval_counters"] = oc
     try:
         version = int(summary_format_version())
         if version <= 1:

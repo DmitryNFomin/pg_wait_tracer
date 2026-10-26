@@ -49,7 +49,9 @@ up — the same reasoning as tests/test_demo_rehearsal_lib.py.
 """
 
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import summary_raw_parity_lib as P                              # noqa: E402
@@ -763,6 +765,111 @@ def main():
                       for l in src),
               "§16h no `bucket_lines` buffer survives in the gate (the "
               "identifier appears only in the comment explaining why)")
+
+    # §16j THE GENERATOR'S COUNTER CHANNEL. gen_test_traces now prints the
+    # writer's open-interval counters (SUMMARY-OPEN-COUNTERS:, #410) so the
+    # 36 s of unspread `io` wall can be attributed to a named counter rather
+    # than guessed at. That dump goes to STDERR, and server_harness's
+    # generate_traces() runs the binary with capture_output=True and surfaces
+    # stderr ONLY on a non-zero exit -- so on every successful run, which is
+    # every run that matters, a bare fprintf would be discarded. That is the
+    # same "computed, never emitted" failure that made a whole box-check
+    # produce no measurement at 3f0ddde6, about to be repeated one layer
+    # down. So the stderr is retained to a file and read back, and these
+    # cases pin the half that can go quiet.
+    import server_harness as H
+    scratch16 = tempfile.mkdtemp()
+    try:
+        # 1. the happy path
+        with open(os.path.join(scratch16, H.GEN_STDERR_NAME), "w") as f:
+            f.write("Wrote 3 events\nSUMMARY-OPEN-COUNTERS: credited_ns=7 "
+                    "late_ns=0 expired=0 mismatch=0 fill_capped=0 "
+                    "cpu_refused=0 cpu_uncredited_ns=0\n")
+        got = H.gen_stderr_lines(scratch16, "SUMMARY-OPEN-COUNTERS:")
+        check(len(got) == 1 and "credited_ns=7" in got[0],
+              "§16j the retained counter line is read back (got %r)" % got)
+
+        # 2. THE CHANNEL BROKEN: no file at all. Must name the problem, never
+        #    return an empty list -- empty reads as "the generator had nothing
+        #    to say", which is indistinguishable from "this is blind again".
+        got = H.gen_stderr_lines(os.path.join(scratch16, "nope"),
+                                 "SUMMARY-OPEN-COUNTERS:")
+        check(len(got) == 1 and got[0].startswith("MISSING"),
+              "§16j a missing stderr file NAMES the problem instead of "
+              "returning nothing (got %r)" % got)
+
+        # 3. file present, dump absent (prefix changed, or it never ran)
+        with open(os.path.join(scratch16, H.GEN_STDERR_NAME), "w") as f:
+            f.write("Wrote 3 events + 0 samples to /tmp/x\n")
+        got = H.gen_stderr_lines(scratch16, "SUMMARY-OPEN-COUNTERS:")
+        check(len(got) == 1 and got[0].startswith("NO "),
+              "§16j stderr retained but the dump ABSENT names that distinctly "
+              "(got %r)" % got)
+
+        # 4. an empty stderr file is the same kind of silence
+        open(os.path.join(scratch16, H.GEN_STDERR_NAME), "w").close()
+        got = H.gen_stderr_lines(scratch16, "SUMMARY-OPEN-COUNTERS:")
+        check(len(got) == 1 and got[0].startswith("NO "),
+              "§16j an EMPTY retained stderr names the problem (got %r)" % got)
+
+        # 6. THE RETENTION HALF, behaviourally. Cases 1-5 all write the file
+        # by hand and only exercise the READER, so the mutant that matters
+        # most -- retaining stderr only when the exit code is non-zero, which
+        # IS the original trap -- sailed straight through them (measured: 108
+        # checks, 0 failed, G1 survived). generate_traces() is therefore
+        # driven here with subprocess stubbed, on a SUCCESSFUL exit, because
+        # success is the only case that was ever broken.
+        class _Res:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stdout = ""
+                self.stderr = ("Wrote 1 events + 0 samples to /tmp/x\n"
+                               "SUMMARY-OPEN-COUNTERS: credited_ns=42 "
+                               "late_ns=1 expired=2 mismatch=3 fill_capped=4 "
+                               "cpu_refused=5 cpu_uncredited_ns=6\n")
+        real_run, real_bin = H.subprocess.run, H.GEN_BIN
+        for rc, label in ((0, "exit 0"), (1, "exit 1")):
+            outdir = tempfile.mkdtemp()
+            try:
+                H.subprocess.run = lambda *a, **k: _Res(rc)
+                H.GEN_BIN = "/bin/sh"     # must merely exist
+                try:
+                    H.generate_traces({"events": []}, output_dir=outdir)
+                except RuntimeError:
+                    pass                  # expected for rc != 0
+                got = H.gen_stderr_lines(outdir, "SUMMARY-OPEN-COUNTERS:")
+                check(len(got) == 1 and "credited_ns=42" in got[0],
+                      "§16j generate_traces RETAINS the counter line on %s "
+                      "(got %r)" % (label, got[0][:48]))
+            finally:
+                H.subprocess.run, H.GEN_BIN = real_run, real_bin
+                shutil.rmtree(outdir, ignore_errors=True)
+        # 5. a None/'' trace dir must not raise -- it is the shape a failed
+        #    generation leaves behind
+        got = H.gen_stderr_lines(None, "SUMMARY-OPEN-COUNTERS:")
+        check(len(got) == 1 and got[0].startswith("MISSING"),
+              "§16j a None trace dir REFUSES in words, without raising")
+    finally:
+        shutil.rmtree(scratch16, ignore_errors=True)
+
+    # And the wiring, same reasoning as §16h: read into the printed `lines`,
+    # before the print loop, with no deferred buffer.
+    if os.path.exists(gate_path):
+        src = open(gate_path).read().splitlines()
+        # Match the ASSIGNMENT, not the bare name: the comment above the call
+        # site names the function too, so "gen_stderr_lines(" alone counts
+        # two and the check fails for the wrong reason (it did, first run).
+        rd = [i for i, l in enumerate(src)
+              if l.strip().startswith("oc = gen_stderr_lines(")]
+        pl = [i for i, l in enumerate(src) if l.strip() == "for l in lines:"]
+        ext = [i for i, l in enumerate(src)
+               if "lines.extend(\"  \" + l for l in oc)" in l]
+        check(len(rd) == 1 and len(pl) == 1 and len(ext) == 1
+              and rd[0] < pl[0] and ext[0] < pl[0],
+              "§16j the counter read (line %s) and its emission (line %s) "
+              "both precede the print loop (line %s)"
+              % (rd[0] + 1 if rd else None, ext[0] + 1 if ext else None,
+                 pl[0] + 1 if pl else None))
 
     print("--- %d checks, %d failed ---" % (CHECKS[0], len(FAILURES)))
     for f in FAILURES:

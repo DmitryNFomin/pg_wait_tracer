@@ -22,6 +22,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 SERVER_BIN = os.path.join(PROJECT_DIR, "pgwt-server")
 GEN_BIN = os.path.join(SCRIPT_DIR, "gen_test_traces")
+GEN_STDERR_NAME = "_gen_stderr.txt"
 
 
 class ServerHarness:
@@ -229,12 +230,47 @@ def generate_traces(scenario, output_dir=None, wall_offset_ns=None, rotate=None)
     if rotate is not None:
         cmd += ["--rotate", rotate]
     result = subprocess.run(cmd, capture_output=True, text=True)
+    # Keep the generator's stderr on a SUCCESSFUL run too. It carries the
+    # writer's open-interval counters (SUMMARY-OPEN-COUNTERS:, #410), and
+    # capture_output=True otherwise discards them the moment the exit code is
+    # 0 -- which is every run that matters. A measurement that only survives
+    # a failure is the "computed, never emitted" shape that cost a whole
+    # box-check at 3f0ddde6.
+    try:
+        with open(os.path.join(output_dir, GEN_STDERR_NAME), "w") as f:
+            f.write(result.stderr or "")
+    except OSError:
+        pass          # diagnostics must never break trace generation
     if result.returncode != 0:
         raise RuntimeError(
             f"gen_test_traces failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
     return output_dir
+
+
+def gen_stderr_lines(trace_dir, prefix):
+    """The generator's retained stderr lines starting with `prefix`.
+
+    Returns a one-element list naming the problem when the file is missing,
+    unreadable or carries no such line -- never an empty list, because an
+    empty list reads as "the generator had nothing to say" and that is
+    indistinguishable from "this channel is broken again", which is exactly
+    the confusion this plumbing exists to end.
+    """
+    path = os.path.join(trace_dir or "", GEN_STDERR_NAME)
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as exc:
+        return ["MISSING %s: %s -- the generator's stderr was not retained, "
+                "so its counters cannot be read" % (GEN_STDERR_NAME, exc)]
+    hits = [l.strip() for l in text.splitlines() if l.startswith(prefix)]
+    if not hits:
+        return ["NO %r LINE in %s (%d bytes of stderr retained) -- the dump "
+                "did not run or its prefix changed"
+                % (prefix, GEN_STDERR_NAME, len(text))]
+    return hits
 
 
 def cleanup_traces(trace_dir):

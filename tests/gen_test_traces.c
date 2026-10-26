@@ -616,6 +616,45 @@ static int write_traces(const char *dir, struct scenario *sc,
 
     pgwt_writer_close(&ew);
     pgwt_summary_close(&sw);
+
+    /* #410: WHICH counter owns the unspread wall.
+     *
+     * The per-bucket comparison in tests/summary_raw_parity_lib.py showed 36 s
+     * of `io` wall charged to the bucket holding an interval's CLOSING second
+     * instead of spread across the four buckets it spans (interior_160s:
+     * buckets 3/4/5 lose 0.250 + 1.000 + 1.000 AAS, bucket 6 gains 2.250,
+     * summing to exactly 0). It is not a note-cadence artifact -- gen_open_note
+     * above re-notes EVERY pid's open interval on EVERY pushed record, so this
+     * generator's notes never go stale against PGWT_SUMMARY_OPEN_STALE_NS. So
+     * the writer was told and did not spread, and these counters say which of
+     * its paths declined: credited (it did spread, and the divergence is
+     * elsewhere), expired (the note went stale after all), mismatch (the note
+     * disagreed with the record that closed it), late (the second had already
+     * completed), or fill-capped.
+     *
+     * READ AFTER pgwt_summary_close(), deliberately: close() flushes the final
+     * open second, so crediting can still happen inside it, and it does not
+     * reset these fields.
+     *
+     * Printed on stderr with a stable prefix, and PLUMBED rather than merely
+     * printed: tests/server_harness.py's generate_traces() runs this binary
+     * with capture_output=True and surfaces stderr ONLY on a non-zero exit, so
+     * a bare fprintf here would be discarded on every successful run -- the
+     * same "computed, never emitted" failure that made a whole box-check
+     * produce no measurement at 3f0ddde6. generate_traces() therefore writes
+     * this stderr to _gen_stderr.txt in the output directory, and the parity
+     * gate reads it back into its printed log. */
+    fprintf(stderr, "SUMMARY-OPEN-COUNTERS: credited_ns=%llu late_ns=%llu "
+            "expired=%llu mismatch=%llu fill_capped=%llu "
+            "cpu_refused=%llu cpu_uncredited_ns=%llu\n",
+            (unsigned long long)sw.open_credited_ns_total,
+            (unsigned long long)sw.open_credit_late_ns_total,
+            (unsigned long long)sw.open_notes_expired_total,
+            (unsigned long long)sw.open_note_mismatch_total,
+            (unsigned long long)sw.open_fill_capped_total,
+            (unsigned long long)sw.open_cpu_refused_total,
+            (unsigned long long)sw.cpu_open_uncredited_ns_total);
+
     pgwt_writer_destroy(&ew);
     pgwt_summary_destroy(&sw);
 
