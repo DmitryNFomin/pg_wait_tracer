@@ -251,8 +251,9 @@ test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
 
 # test_tag_refusal: #363 — pgwt_tag_events was declared `void` and had two
 # ways to stop partway (a working-allocation failure, or more distinct pids
-# than its 4096-slot per-pid table holds), each leaving the records it never
-# reached with their raw old_event/query_id while returning normally. That
+# than its then-4096-slot per-pid table held — #374 made that table grow, so
+# an allocation failure is the only one left), each leaving the records it
+# never reached with their raw old_event/query_id while returning normally. That
 # array is the oracle, so the result was confidently wrong, not short. Same
 # link shape as test_pid_cap (compute.c with -DPGWT_SERVER,
 # pgwt_visit_summaries stubbed in the test). Allocation failures ride

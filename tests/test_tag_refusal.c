@@ -11,6 +11,13 @@
  *      (TAG_HT_SIZE+1)-th distinct pid and the caller did `continue`, so
  *      every record of every surplus pid stayed exactly as it came off disk.
  *
+ * SINCE 4e0e2260 (#374) THERE IS NO SUCH TABLE SIZE. The 4096-slot array is
+ * a growing one, so a pid count is no longer a bound and no longer a reason
+ * to refuse; the only bound left is a real allocation failure. Section 4
+ * below records what that deleted the search for, and what it did not — the
+ * refusal and the partial state it leaves are unchanged properties with a
+ * new trigger, not resolved ones.
+ *
  * WHY THAT IS WORSE THAN AN OOM. This array IS the oracle: #357 established
  * that every aggregate path reconciles to it, never the reverse. The pass
  * rewrites old_event 0 -> PGWT_WEI_NONCMD_CPU (post/between-command time the
@@ -40,14 +47,16 @@
  * build fails it), and section 6 pins the refusals against the ways they
  * could be reached without checking anything — an injection name that does
  * not exist, an empty env var, an injection point that cannot be reached
- * (count 0), a fixture with nothing to tag (absent, not wrong), and
- * leakage from one case to the next.
+ * (count 0, and a counted point armed past this run's growths), a value the
+ * counted point cannot parse (which must fail nothing, never everything), a
+ * fixture with nothing to tag (absent, not wrong), and leakage from one case
+ * to the next.
  *
  * TIMING AND ORDERING. Nothing here reads a clock, allocates concurrently,
  * or depends on scheduling: in-memory arrays, synthetic timestamps. The one
- * order-dependent property is WHERE the failure lands — section 2/3 refuse
- * BEFORE any record is touched (asserted by memcmp against the input), while
- * section 4 refuses MID-ARRAY, with partial rewrites already applied
+ * order-dependent property is WHERE the failure lands — sections 2/3 and 4d
+ * refuse BEFORE any record is touched (asserted by memcmp against the input),
+ * while section 4b refuses MID-ARRAY, with partial rewrites already applied
  * (asserted by memcmp showing a difference, and by a relabel count strictly
  * between zero and complete). That partial state is the whole reason the
  * caller must invalidate the count instead of using what it got.
@@ -100,7 +109,8 @@ static struct {
     int backfills_seen;       /* records the success path re-attributed */
     int cat_flags_seen;       /* records stamped from the pid->category table */
     int refusals_alloc;       /* refusals from an injected allocation failure */
-    int refusals_exhaustion;  /* refusals from the REAL pid table filling up */
+    int refusals_midarray;    /* refusals from a growth failing MID-array */
+    int past_bound_tagged;    /* pids tagged beyond the deleted 4096 bound */
     int partial_relabels;     /* relabels present in a REFUSED array */
     int unreached_injections; /* injection points set but not reachable */
 } led;
@@ -314,70 +324,112 @@ static void s3_pid_state_table_allocation_failure(void)
     refused_before_any_mutation("tag_ht", "tag_ht");
 }
 
-/* ── 4. PID-table EXHAUSTION — the real table, no test hook ───────────────
- * This is the path the issue is really about: no allocation failed, the
- * machine is healthy, the window simply holds more distinct pids than the
- * table has slots (connection CHURN, not concurrency, drives that count).
+/* ── 4. The pid BOUND is gone (#374); what replaced it ────────────────────
+ * DELETED HERE, deliberately: until 4e0e2260 (#374) this section searched
+ * upwards for a distinct-pid count at which the pass refused, because the
+ * per-pid state lived in a FIXED 4096-slot open-addressed array whose probe
+ * returned NULL for the 4097th pid. That bound is gone on purpose — distinct
+ * pids come from connection CHURN and `--dump` loads the whole trace, so it
+ * fired on perfectly healthy captures and answered `allocation_failed` about
+ * a machine that was fine. The search goes with it: there is no threshold
+ * left to find, so all a search could report is its own obsolescence.
  *
- * The table size is private to compute.c, so this searches for the bound
- * instead of hard-coding it: a future change that grows the table makes the
- * search find a bigger threshold, and one that removes the bound entirely
- * makes it REFUSE at the ceiling rather than quietly becoming a
- * success-path test. Both failure modes are loud. */
-#define PID_CEILING (1 << 17)
+ * What is NOT deleted, because the properties survive the change:
+ *
+ *  4a. the removal itself, asserted POSITIVELY — the pid count that used to
+ *      refuse now tags COMPLETELY, every pid's records rewritten. Red on
+ *      4e0e2260's parent, which is what stops "the bound is gone" from
+ *      being a claim nothing checks.
+ *  4b. the NEW bound, which is a real allocation failure (accum_grow /
+ *      pgwt_pid_index_put returning -1: nothing is trimmed, nothing is
+ *      dropped, the array is left usable and the caller refuses). It still
+ *      fails CLOSED — return 0, whole window withheld.
+ *  4c. PARTIAL MUTATION on refusal. That is a property of WHERE the refusal
+ *      lands, not of where the bound sits: a growth failure at the 129th
+ *      pid leaves 128 pids' records already rewritten, exactly as the
+ *      4097th pid did when the table was 4096 slots. It is the reason the
+ *      caller must DISCARD the array rather than use what it got, so the
+ *      check is kept and only its trigger changes.
+ *
+ * Reachability, which is why src/compute.c gained a counted injection point
+ * in the same commit: "tag_ht", "tag_fwd" and "tag_pid_entries" all fire
+ * before record 0, so with name-only hooks the mid-array refusal could not
+ * be driven at all — 4c would have been deleted for being untestable rather
+ * than for being false. `tag_pid_grow@N` fails the N-th table growth; 4b
+ * uses @2 (the 129th pid, mid-array), 4d uses @1 (the first pid, before any
+ * mutation), and 6f/6g pin the ways @N could fire without counting. */
+#define NPIDS_PAST_OLD_BOUND 8192   /* 2x the deleted TAG_HT_SIZE */
+#define NPIDS_MIDARRAY        200   /* > 128 = the first growth's capacity */
 
-static void s4_pid_table_exhaustion(void)
+static void s4a_the_old_pid_bound_is_gone(void)
 {
-    printf("--- 4. the per-pid table fills up (no injection) ---\n");
-    int refuse_at = 0, last_ok = 0;
-    for (int npids = 256; npids <= PID_CEILING; npids *= 2) {
-        int n;
-        struct pgwt_trace_event *ev = alloc_fixture(npids, &n);
-        int rc = pgwt_tag_events(ev, n, NULL, 0);
-        free(ev);
-        if (rc) { last_ok = npids; continue; }
-        refuse_at = npids;
-        break;
-    }
-
-    if (!refuse_at) {
-        checks++; failures++;
-        printf("  FAIL: REFUSE — no distinct-pid count up to %d made the "
-               "tagging pass refuse, so this case cannot see the defect "
-               "it exists for. Either the per-pid table is now unbounded "
-               "(delete this section and say so) or the refusal was lost.\n",
-               PID_CEILING);
-        return;
-    }
-    printf("  (bound located: %d pids tag completely, %d refuse)\n",
-           last_ok, refuse_at);
-    CHECK(last_ok > 0,
-          "a pid count just under the bound still tags COMPLETELY, so the "
-          "refusal is a bound and not an unconditional 0");
-
-    /* At the refusing count: refuse, and prove the partial state is real. */
+    printf("--- 4a. past the deleted 4096-slot bound: COMPLETE ---\n");
     int n;
-    struct pgwt_trace_event *ev = alloc_fixture(refuse_at, &n);
+    struct pgwt_trace_event *ev = alloc_fixture(NPIDS_PAST_OLD_BOUND, &n);
+    CHECK(pgwt_tag_events(ev, n, NULL, 0) == 1,
+          "8192 distinct pids — twice the deleted bound — tag completely "
+          "(before 4e0e2260 this window returned 0 on a healthy machine)");
+    CHECK_INT(count_relabels(ev, n), NPIDS_PAST_OLD_BOUND,
+              "every pid got its relabel, so the pass ran to the END rather "
+              "than returning 1 having skipped the surplus pids");
+    CHECK_INT(count_backfills(ev, n), NPIDS_PAST_OLD_BOUND * 2,
+              "and the backward back-fill pass covered all of them too");
+    led.past_bound_tagged += count_relabels(ev, n);
+    free(ev);
+}
+
+/* 4b + 4c. The new bound, and the partial state it leaves behind. */
+static void s4b_midarray_growth_failure_refuses(void)
+{
+    printf("--- 4b/4c. a growth fails MID-ARRAY (the new bound) ---\n");
+    int n;
+    struct pgwt_trace_event *ev = alloc_fixture(NPIDS_MIDARRAY, &n);
     struct pgwt_trace_event *before = calloc((size_t)n, sizeof(*before));
     memcpy(before, ev, (size_t)n * sizeof(*ev));
+
+    setenv(ENV_FAIL, "tag_pid_grow@2", 1);
     int rc = pgwt_tag_events(ev, n, NULL, 0);
-    CHECK(rc == 0, "more distinct pids than the table holds returns 0");
-    if (rc == 0) led.refusals_exhaustion++;
+    unsetenv(ENV_FAIL);
+
+    CHECK(rc == 0,
+          "the SECOND table growth failing returns 0: the only bound left "
+          "is an allocation failure, and it fails CLOSED (whole window "
+          "withheld, not a smaller answer)");
+    if (rc == 0) led.refusals_midarray++;
 
     int partial = count_relabels(ev, n);
     led.partial_relabels += partial;
     CHECK(memcmp(before, ev, (size_t)n * sizeof(*ev)) != 0,
           "the refused array IS partly rewritten — which is why the caller "
           "must discard it rather than use what it got");
-    CHECK(partial > 0 && partial < refuse_at,
+    CHECK(partial > 0 && partial < NPIDS_MIDARRAY,
           "the partial rewrite covers SOME pids and not all: this is the "
-          "silently-wrong array the pre-fix code handed back");
+          "silently-wrong array a caller that ignored the 0 would serve");
+    /* And it covers EXACTLY the first growth's worth of pids: accum_grow's
+     * first allocation is `newcap = *cap ? *cap : 128` (src/compute.c), so
+     * the 2nd growth is the 129th pid and the 128 before it are already
+     * rewritten. Pinned as a number because `partial > 0` alone is also
+     * satisfied by a hook that fires on the 2nd PID rather than the 2nd
+     * GROWTH — which would refuse one record in, not mid-array. */
+    CHECK_INT(partial, 128,
+              "the refusal landed on the 129th pid: the first growth's 128 "
+              "slots were all in use before a second was needed");
     CHECK_INT(count_flag(ev, n, PGWT_EVENT_FLAG_QUERY_BACKFILL), 0,
               "the back-fill pass did not run at all, so the surviving "
               "query ids are emission-time ids (the wrong statement)");
 
     free(before);
     free(ev);
+}
+
+/* 4d. The SAME point name with N=1 must refuse somewhere ELSE: the first
+ * growth is the first pid, so nothing is rewritten. Two different observable
+ * outcomes from one point name are what prove N is read rather than the
+ * variable merely being present. */
+static void s4d_first_growth_failure_refuses_before_mutation(void)
+{
+    printf("--- 4d. the FIRST growth fails: refused before any record ---\n");
+    refused_before_any_mutation("tag_pid_grow@1", "tag_pid_grow@1");
 }
 
 /* ── 5. Absent input is a COMPLETE result, not a refusal ──────────────────
@@ -513,6 +565,65 @@ static void s6e_no_leakage_between_cases(void)
     free(ev);
 }
 
+/* 6f. THE false-negative check for 4b. The counted point is armed with the
+ * same value 4b refuses on, against a fixture whose pid count never reaches
+ * that growth (3 pids: only growth 1 happens). It must tag COMPLETELY — so
+ * 4b's refusal came from the growth it names actually failing, not from
+ * `tag_pid_grow` appearing in the environment. A gate armed at a point it
+ * cannot reach must pass cleanly, never refuse for the wrong reason. */
+static void s6f_counted_point_beyond_reach_fails_nothing(void)
+{
+    printf("--- 6f. the counted point armed past this run's growths ---\n");
+    int n;
+    struct pgwt_trace_event *ev = alloc_fixture(NPIDS_OK, &n);
+    setenv(ENV_FAIL, "tag_pid_grow@2", 1);
+    int rc = pgwt_tag_events(ev, n, NULL, 0);
+    unsetenv(ENV_FAIL);
+    CHECK(rc == 1,
+          "a 3-pid window never reaches the 2nd growth, so @2 refuses "
+          "nothing (4b refused because the GROWTH failed, not because the "
+          "variable was set)");
+    CHECK_INT(count_relabels(ev, n), NPIDS_OK,
+              "and the pass did its full work under it");
+    if (rc == 1) led.unreached_injections++;
+    free(ev);
+}
+
+/* 6g. A value the counted point cannot read must fail NOTHING. The
+ * dangerous direction is "fail always": under it 4b, 4d and every other
+ * refusal assertion in this file pass with the counter never consulted.
+ * The other direction (silently never firing) is covered by 4b/4d going red.
+ * `@1` IS reachable with this fixture, so each form below that does not
+ * parse as the integer 1 proves itself by NOT refusing. */
+static void s6g_unreadable_counted_values_fail_nothing(void)
+{
+    printf("--- 6g. unparseable / non-selecting counted values ---\n");
+    static const char *const forms[] = {
+        "tag_pid_grow",       /* bare name: this point requires @N        */
+        "tag_pid_grow@",      /* no number at all                         */
+        "tag_pid_grow@0",     /* growths count from 1                     */
+        "tag_pid_grow@-1",    /* negative                                 */
+        "tag_pid_grow@abc",   /* not a number                             */
+        "tag_pid_grow@1x",    /* trailing junk after a value that WOULD   */
+        "tag_pid_grow@ 1",    /* leading space (strtol would accept it)   */
+        "tag_pid_growth@1",   /* misspelled point name, reachable N       */
+        "tag_pid@1",          /* a PREFIX of the point name               */
+    };
+    for (size_t f = 0; f < sizeof(forms) / sizeof(forms[0]); f++) {
+        int n;
+        struct pgwt_trace_event *ev = alloc_fixture(NPIDS_OK, &n);
+        setenv(ENV_FAIL, forms[f], 1);
+        int rc = pgwt_tag_events(ev, n, NULL, 0);
+        unsetenv(ENV_FAIL);
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "\"%s\" refuses nothing and the pass does its full work",
+                 forms[f]);
+        CHECK(rc == 1 && count_relabels(ev, n) == NPIDS_OK, msg);
+        free(ev);
+    }
+}
+
 static void ledger(void)
 {
     printf("--- non-vacuity ledger ---\n");
@@ -522,11 +633,15 @@ static void ledger(void)
           "the success path back-filled query ids somewhere in this file");
     CHECK(led.cat_flags_seen > 0,
           "the success path stamped category flags somewhere in this file");
-    CHECK(led.refusals_alloc >= 3,
-          "both injected allocation failures, and the no-work fixture, "
-          "actually produced refusals");
-    CHECK(led.refusals_exhaustion > 0,
-          "the REAL pid-table bound produced a refusal with no test hook");
+    CHECK(led.refusals_alloc >= 4,
+          "the two pre-loop allocation failures, the first-growth failure "
+          "and the no-work fixture all actually produced refusals");
+    CHECK_INT(led.past_bound_tagged, NPIDS_PAST_OLD_BOUND,
+              "a window past the DELETED 4096-pid bound was tagged in full "
+              "(4a ran, so 'the bound is gone' is a measurement here)");
+    CHECK(led.refusals_midarray > 0,
+          "a growth failing deep in the array produced a refusal — the only "
+          "bound this table has left");
     CHECK(led.partial_relabels > 0,
           "a refused array was observed partly rewritten (the reason the "
           "caller must invalidate the count, not just flag it)");
@@ -545,18 +660,33 @@ int main(void)
                "inherited value.\n", ENV_FAIL, getenv(ENV_FAIL));
         return 1;
     }
+    /* Since #374 the pass also reaches accum_grow and pgwt_pid_index_put,
+     * whose injection points ("tag_pid_entries", "pid_index_grow") ride the
+     * OTHER variable. Inheriting either would refuse every window here,
+     * which reads as a product failure. A gate that cannot control its own
+     * inputs refuses to run rather than reporting on them. */
+    if (getenv("PGWT_TEST_ALLOC_FAIL")) {
+        printf("REFUSE: PGWT_TEST_ALLOC_FAIL is set in the environment "
+               "(%s); the growth points this suite exercises read it.\n",
+               getenv("PGWT_TEST_ALLOC_FAIL"));
+        return 1;
+    }
 
     s1_success_is_complete_and_does_real_work();
     s1b_category_flags_are_stamped();
     s2_forward_array_allocation_failure();
     s3_pid_state_table_allocation_failure();
-    s4_pid_table_exhaustion();
+    s4a_the_old_pid_bound_is_gone();
+    s4b_midarray_growth_failure_refuses();
+    s4d_first_growth_failure_refuses_before_mutation();
     s5_empty_is_success();
     s6a_unknown_injection_point_fails_nothing();
     s6b_empty_injection_value_fails_nothing();
     s6c_injection_set_but_unreachable();
     s6d_nothing_to_tag_is_not_a_refusal();
     s6e_no_leakage_between_cases();
+    s6f_counted_point_beyond_reach_fails_nothing();
+    s6g_unreadable_counted_values_fail_nothing();
     ledger();
 
     printf("\n=== %d checks, %d failures ===\n", checks, failures);
