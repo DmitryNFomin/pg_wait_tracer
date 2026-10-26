@@ -970,6 +970,16 @@ bench_block_agg: bench_block_agg.c ../src/block_agg.c ../src/compute.c \
                  $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
 
+# bench_left_seed: #588 -- measures #586's needy-pid pass (left_seed_find_needy,
+# one O(total) hash probe per record on EVERY bounded raw load) in isolation,
+# plus the end-to-end cost of the straddling path's downstream marker lookback
+# (left_seed_resolve) against a real on-disk 900 s trace. Same server.c-included
+# recipe as test_left_edge_attrib. Deliberately NOT in unit_tests.list, same
+# reason as bench_block_agg above: a wall-clock assertion on a shared runner is
+# runner noise dressed up as a gate. Built so the number can be reproduced.
+bench_left_seed: bench_left_seed.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
 # test_interval_index: the CONCURRENCY INTERVAL INDEX (paint-latency plan,
 # Phase 4, src/interval_index.c). A differential against the real
 # pgwt_compute_concurrency over every block split of every fixture, asserting
