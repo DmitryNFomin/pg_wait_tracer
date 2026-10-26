@@ -587,6 +587,93 @@ def check_corrupt_trace_refusal(t):
         cleanup_traces(future_dir)
 
 
+def check_aas_fidelity_ranges(t, srv):
+    """#322/#341: `fidelity_ranges` on the aas response, asserted POSITIVELY
+    against the real server.
+
+    The schema comparison above is SYMMETRIC: if both the real server and the
+    mock omitted this field it would pass clean -- which is exactly the state
+    this change exists to leave behind (the consumer in
+    web/static/lib/builders/fidelity.js has read the field since B5 while
+    `grep -c fidelity_ranges src/server.c` returned 0). So the real server's
+    own response is checked here, independently of the mock.
+
+    Non-vacuous on THIS fixture even though it is transitions-only: the
+    server expands the default window well past the fixture's ~40ms of
+    events, so an honest coverage-derived partition has "none" ranges around
+    one "exact" range that is STRICTLY INSIDE the window. A field stamped
+    from the window bounds -- one whole-window entry -- fails both of the
+    last two checks. The multi-fidelity case (more than one range, two
+    tokens, the boundary at a pinned timestamp) needs a window that spans a
+    fidelity change and lives in tests/test_data_fidelity.py's
+    test_fidelity_ranges, which has the mixed fixture.
+    """
+    real = srv.query("aas")
+    t.check("error" not in real,
+            "[fidelity ranges] real server answered without error"
+            + (f" (got: {real.get('error')})" if "error" in real else ""))
+    if "error" in real:
+        return
+    ranges = real.get("fidelity_ranges")
+    t.check(isinstance(ranges, list) and len(ranges) > 0,
+            f"[fidelity ranges] aas carries a non-empty fidelity_ranges "
+            f"(got {ranges!r})")
+    if not isinstance(ranges, list) or not ranges:
+        return
+    for i, r in enumerate(ranges):
+        t.check(isinstance(r, dict) and
+                set(r.keys()) == {"from", "to", "fidelity"},
+                f"[fidelity ranges] range {i} keys are from/to/fidelity "
+                f"(got {r!r})")
+        if not isinstance(r, dict):
+            continue
+        for key in ("from", "to"):
+            v = r.get(key)
+            t.check(isinstance(v, int) and not isinstance(v, bool),
+                    f"[fidelity ranges] range {i} {key} is an integer ns "
+                    f"value, matching the bucket `t` domain (got {v!r})")
+        t.check(r.get("fidelity") in ("exact", "sampled", "mixed", "none"),
+                f"[fidelity ranges] range {i} fidelity is a known token "
+                f"(got {r.get('fidelity')!r})")
+
+    buckets = real.get("buckets", [])
+    t.check(len(buckets) > 0, "[fidelity ranges] aas returned buckets")
+    if buckets and isinstance(real.get("bucket_ns"), int):
+        win_from = buckets[0]["t"]
+        win_to = buckets[-1]["t"] + real["bucket_ns"]
+        t.check(ranges[0].get("from") == win_from and
+                ranges[-1].get("to") == win_to,
+                f"[fidelity ranges] the partition spans the plotted window "
+                f"({ranges[0].get('from')}..{ranges[-1].get('to')} vs "
+                f"{win_from}..{win_to})")
+        gaps = [(ranges[i]["to"], ranges[i + 1]["from"])
+                for i in range(len(ranges) - 1)
+                if ranges[i]["to"] != ranges[i + 1]["from"]]
+        t.check(not gaps,
+                f"[fidelity ranges] contiguous, no gap or overlap ({gaps})")
+        exact = [r for r in ranges if r.get("fidelity") == "exact"]
+        t.check(len(exact) >= 1,
+                f"[fidelity ranges] the transition fixture yields an exact "
+                f"range (got {[r.get('fidelity') for r in ranges]})")
+        t.check(any(r.get("fidelity") == "none" for r in ranges),
+                f"[fidelity ranges] the uncovered part of the expanded window "
+                f"is reported as 'none', not folded into the data range "
+                f"(got {[r.get('fidelity') for r in ranges]})")
+        t.check(all(r["from"] > win_from or r["to"] < win_to for r in exact),
+                f"[fidelity ranges] the exact range is strictly inside the "
+                f"window -- derived from COVERAGE, not stamped from the "
+                f"window bounds (got {exact!r}, window {win_from}..{win_to})")
+
+    kinds = {r.get("fidelity") for r in ranges}
+    derived = ("mixed" if {"exact", "sampled"} <= kinds
+               else "exact" if "exact" in kinds
+               else "sampled" if "sampled" in kinds else "none")
+    t.check(derived == real.get("fidelity"),
+            f"[fidelity ranges] the ranges imply the same window token the "
+            f"response reports (derived {derived!r} vs "
+            f"{real.get('fidelity')!r})")
+
+
 def main():
     t = TestRunner("test_protocol_drift")
     trace_dir = generate_traces(SCENARIO)
@@ -614,6 +701,7 @@ def main():
             check_transitions_idle_flag(t, srv)
             check_protocol_revision(t, srv)
             check_top_sessions_cpu_fields(t, srv)
+            check_aas_fidelity_ranges(t, srv)
     finally:
         cleanup_traces(trace_dir)
 

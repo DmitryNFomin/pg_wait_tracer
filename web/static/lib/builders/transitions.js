@@ -139,20 +139,12 @@ export function transitionsDataError(data) {
             !Number.isFinite(node.total_ms) || node.total_ms < 0) {
             return 'invalid node name or dwell time';
         }
-        // #487 follow-up: findOmittedDominantNode/findDominantSourceDwellNode
-        // require an explicit `idle` boolean per candidate and fail closed
-        // (exclude) when it is missing -- but exclusion alone is not enough
-        // on a PARTIAL catalog. A 715000ms node with no idle verdict gets
-        // excluded while a genuinely-idle 10ms node with idle:false (a
-        // contradiction, but the field is only ever trusted, never
-        // cross-checked) would then be announced as "largest source-dwell"
-        // -- an unqualified false superlative, not a silent omission. Reject
-        // the WHOLE payload the moment any node's idle verdict is unknown,
-        // one node or all of them, rather than let the ranking quietly pick
-        // from whatever is left.
-        if (typeof node.idle !== 'boolean') {
-            return 'node missing idle verdict: ' + node.name;
-        }
+        // #510: an unknown idle verdict is NOT a structural fault -- see
+        // transitionsIdleCoverageGap() below. It used to be rejected here,
+        // which threw away a real 80-link graph over one node's missing
+        // flag. Structural faults (this function) stay hard; coverage gaps
+        // (that predicate) degrade to a rendered graph with the dominance
+        // superlatives withheld.
         if (names.has(node.name)) return 'duplicate node: ' + node.name;
         names.add(node.name);
     }
@@ -165,6 +157,66 @@ export function transitionsDataError(data) {
         }
         for (const name of [link.source, link.target]) {
             if (!names.has(name)) return 'missing node: ' + name;
+        }
+    }
+    return null;
+}
+
+/* #510: IDLE-COVERAGE completeness, kept deliberately separate from
+ * transitionsDataError above.
+ *
+ * Returns null when the idle catalogue is complete enough to RANK over, or a
+ * human reason string when it is not. The distinction that matters:
+ *
+ *   - transitionsDataError = the payload cannot be DRAWN (missing arrays,
+ *     bad node/link shape, an endpoint with no catalogue entry). Hard
+ *     failure, error panel, nothing rendered.
+ *   - this = the payload draws fine, but the two dominance SUPERLATIVES
+ *     (findOmittedDominantNode / findDominantSourceDwellNode) cannot be
+ *     claimed from it. The graph renders; the claims are withheld together
+ *     and the reason is disclosed.
+ *
+ * Why withhold both together, never one: they rank the same population with
+ * the same tie-break, so an incomplete catalogue makes them wrong in the
+ * same way. #509's lesson is that excluding unknown-idle candidates is NOT
+ * enough on a partial catalogue -- a 715,000ms node with no verdict drops
+ * out and a 10ms node flagged idle:false is then announced as "largest
+ * source-dwell", an unqualified false superlative. Ranking over the partial
+ * subset is the bug; withholding is the fix.
+ *
+ * Incompleteness is established POSITIVELY, from evidence in the payload:
+ *
+ *   1. `idle_classification_complete` -- the server's own readiness
+ *      attestation, emitted unconditionally by emit_transitions_response()
+ *      in src/server.c and mirrored by tests/mock_server.py. Nothing in
+ *      web/static/ read it before #510. It is the ONLY way to see the #515
+ *      hazard: the Timeout half of pgwt_is_idle_event() depends on a
+ *      runtime-only pacing mask the client cannot replicate, so a per-node
+ *      verdict can be PRESENT and WRONG. Only an explicit boolean `true`
+ *      attests completeness; anything else PRESENT (false, a string, a
+ *      number, an object) is a payload whose readiness we cannot read, and
+ *      a check that cannot read its evidence refuses.
+ *   2. Any node whose `idle` is not a boolean -- a directly observed gap.
+ *
+ * ABSENT (undefined/null) is deliberately NOT a gap, and that is the one
+ * place this departs from #438's link-cap guard. There, the client had no
+ * independent way to observe how many links the server had dropped, so a
+ * missing `truncated` flag meant no evidence at all and had to refuse.
+ * Here rule 2 inspects every verdict in the catalogue directly, so a server
+ * that simply never sent the field leaves the client with real evidence of
+ * its own -- absence of the attestation is not absence of evidence. An
+ * empty catalogue has nothing to classify and so has no gap (and no
+ * superlative to make either way). */
+export function transitionsIdleCoverageGap(data) {
+    if (!data || !Array.isArray(data.nodes)) return null;
+    const attested = data.idle_classification_complete;
+    if (attested !== undefined && attested !== null && attested !== true) {
+        return 'the server reported its idle classification incomplete';
+    }
+    for (const node of data.nodes) {
+        if (!node || typeof node.idle !== 'boolean') {
+            return 'idle verdict missing for ' +
+                (node && typeof node.name === 'string' ? node.name : 'an unnamed node');
         }
     }
     return null;
@@ -359,6 +411,10 @@ export function computeGridOrder(n, cols, rows) {
 export function buildTransitionsOption(data, threshold, dims, posOverrides, hideIdle) {
     const error = transitionsDataError(data);
     if (error) throw new Error('Transitions data incomplete: ' + error);
+    // #510: computed BEFORE any ranking runs, and checked at the two
+    // superlative sites below. A structural fault above is still a hard
+    // failure -- a coverage gap never downgrades one into a disclosure.
+    const idleCoverageGap = transitionsIdleCoverageGap(data);
     dims = dims || {};
     const cW = dims.width || 800, cH = dims.height || 550;
     const rawLinks = (data && data.links) || [];
@@ -389,10 +445,18 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
             ? Number(data.link_count) : rawLinks.length,
         serverTotalLinkCount: Number.isFinite(Number(data && data.total_link_count))
             ? Number(data.total_link_count) : rawLinks.length,
-        omittedDominant: findOmittedDominantNode(nodeMap, visibleNodes),
+        // #510: the two dominance superlatives are WITHHELD TOGETHER when the
+        // idle catalogue is incomplete -- never ranked over the partial
+        // subset, which is how #509's false superlative happened. The graph
+        // itself is unaffected: everything above this line is volume
+        // accounting over data the server actually sent.
+        omittedDominant: idleCoverageGap
+            ? null : findOmittedDominantNode(nodeMap, visibleNodes),
         // #456: persistent, computed regardless of whether anything is
         // actually hidden right now — see findDominantSourceDwellNode.
-        dominantSourceDwell: findDominantSourceDwellNode(nodeMap, visibleNodes),
+        dominantSourceDwell: idleCoverageGap
+            ? null : findDominantSourceDwellNode(nodeMap, visibleNodes),
+        idleCoverageGap,
     };
 
     if (visibleNodes.size === 0) {
@@ -614,6 +678,24 @@ export function buildTransitionsDisclosure(built, serverTotal) {
     if (built.dominantSourceDwell && built.dominantSourceDwell.visible) {
         parts.push(built.dominantSourceDwell.name + ' is the largest source-dwell node (' +
             fmtMs(built.dominantSourceDwell.ms) + '), shown');
+    }
+    // #510: ONE reason for BOTH withheld superlatives, in this same line.
+    //
+    // Placement is deliberate and is the one thing that differs from #438's
+    // sibling note. There, the cap count lives in the Matrix `notes` slot,
+    // which views/matrix.js renders BELOW the canvas -- below the fold at
+    // the demo viewport -- so a reader would have got a universal-sounding
+    // claim with no visible way to learn what it was computed from, and the
+    // claim had to be suppressed outright with no replacement text. This
+    // line is #dfg-total, which views/transitions.js puts in the control bar
+    // ABOVE #dfg-container, beside the three other omission reasons. So the
+    // superlatives are suppressed AND the reason is stated right where the
+    // reader is already looking for "why is this graph smaller than the
+    // total". Mutually exclusive with the two phrases above by construction
+    // (they are null exactly when this is set), so the line never both
+    // makes a claim and withholds it.
+    if (built.idleCoverageGap) {
+        parts.push('dominant-wait ranking withheld: ' + built.idleCoverageGap);
     }
     return parts.join(' · ');
 }
