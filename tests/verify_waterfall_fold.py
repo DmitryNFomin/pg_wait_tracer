@@ -83,6 +83,7 @@ def chart_metrics(page):
         const host = document.querySelector('#waterfall-chart');
         const chart = echarts.getInstanceByDom(host);
         const data = chart.getModel().getSeriesByIndex(0).getData();
+        const seriesData = chart.getOption().series[0].data;
         const bars = [];
         for (let i = 0; i < data.count(); i++) {
             const graphic = data.getItemGraphicEl(i);
@@ -90,8 +91,25 @@ def chart_metrics(page):
             const box = graphic.getBoundingRect();
             if (box.width > 0 && box.height > 0) bars.push({i, box});
         }
-        const widest = bars.sort((a, b) => b.box.width - a.box.width)[0];
-        const tuple = widest && chart.getOption().series[0].data[widest.i];
+        // #538: "widest rendered bar" is not "an execution". Tuple shape is
+        // [drawStart, drawEnd, lane, name, eventId, rawStart, rawDuration,
+        // cpuNs, pid, kind, color] (web/static/lib/builders/waterfall.js).
+        // On any real mixed workload the widest bar is structurally CPU* --
+        // on-CPU time dwarfs individual waits -- so picking by width alone
+        // always aims the click at a bar with no execution-list row behind
+        // it. A click target must be kind 'event' (never 'plan', the
+        // pre-execution phase marker, which is never clickable either) and
+        // name != 'CPU*'. If a capture's only event-kind bars are ALL CPU*,
+        // `candidates` is empty ON PURPOSE: `click` stays null below and
+        // `click_target_candidates: 0` says why, so the readout_clickable
+        // assertion downstream FAILS loudly instead of silently skipping
+        // the click check.
+        const candidates = bars.filter(b => {
+            const t = seriesData[b.i];
+            return t[9] === 'event' && t[3] !== 'CPU*';
+        });
+        const widest = candidates.sort((a, b) => b.box.width - a.box.width)[0];
+        const tuple = widest && seriesData[widest.i];
         const canvas = host.querySelector('canvas').getBoundingClientRect();
         const point = tuple && chart.convertToPixel({gridIndex: 0},
             [(tuple[0] + tuple[1]) / 2, tuple[2]]);
@@ -100,6 +118,7 @@ def chart_metrics(page):
             minimum_height: parseFloat(getComputedStyle(host).minHeight),
             canvas_height: canvas.height, rendered_bars: bars.length,
             minimum_bar_height: bars.length ? Math.min(...bars.map(b => b.box.height)) : 0,
+            click_target_candidates: candidates.length,
             click: point ? {x: canvas.left + point[0], y: canvas.top + point[1],
                 name: tuple[3]} : null,
         };
