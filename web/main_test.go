@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 // #401: Chrome's implicit GET /favicon.ico must not 404 -- a 404 there is
@@ -62,5 +68,74 @@ func TestStaticRoutesDispatchThroughRealMux(t *testing.T) {
 	}
 	if code, _ := get("/no-such-path"); code != http.StatusNotFound {
 		t.Fatalf("GET /no-such-path = %d, want %d", code, http.StatusNotFound)
+	}
+}
+
+// #521: unstampedBuildRefusal is the decision main() acts on. Pinned
+// directly so the message content (which names the fix) is covered without
+// needing a subprocess for every case; TestPlainGoBuildRefusesRatherThanServeDev
+// below covers the wiring itself (that main() actually calls this).
+func TestUnstampedBuildRefusal(t *testing.T) {
+	if got := unstampedBuildRefusal("v0.13-429-gc723e96a"); got != "" {
+		t.Errorf("stamped version refused: %q", got)
+	}
+	got := unstampedBuildRefusal("dev")
+	if got == "" {
+		t.Fatal("unstamped \"dev\" was not refused")
+	}
+	if !strings.Contains(got, "make pgwt-client") {
+		t.Errorf("refusal does not name the supported build path: %q", got)
+	}
+}
+
+// #521: a plain `go build` (no -ldflags) leaves buildVersion at its unset
+// "dev" default, which used to be served as the client's version -- a value
+// guaranteed to mismatch any real pgwt-server, silently tripping the UI's
+// skew banner and, downstream, the demo recorder's panel-health refusal.
+//
+// This runs the REAL, unmodified `go build .` command -- the exact one the
+// issue is about -- rather than asserting on unstampedBuildRefusal in
+// isolation: a regression that reverted main()'s call to that check (while
+// leaving the function itself, and its unit test above, untouched) would
+// still pass a test that only called the function directly. Only exercising
+// the actual binary catches that.
+//
+// It must not hang: the bug's failure mode is not a clean error, it is
+// UI-3's respawn-with-backoff retrying SSH forever, which is exactly what a
+// bare (timeout-less) cmd.Wait() would reproduce here. The bounded context
+// turns "the fix is absent" into an explicit, fast failure instead of a
+// test that never returns.
+func TestPlainGoBuildRefusesRatherThanServeDev(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "pgwt-plainbuild")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("plain `go build .` failed: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	run := exec.CommandContext(ctx, bin, "--server-path", "/nonexistent", "nobody@127.0.0.1")
+	var stderr bytes.Buffer
+	run.Stderr = &stderr
+	if err := run.Start(); err != nil {
+		t.Fatalf("starting plain-built binary: %v", err)
+	}
+	waitErr := run.Wait()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("plain-built binary was still running after 5s instead of "+
+			"refusing immediately -- it kept retrying a connection rather "+
+			"than refusing an unstamped build (stderr so far: %s)", stderr.String())
+	}
+	if waitErr == nil {
+		t.Fatalf("plain-built binary exited 0; want a refusal before it "+
+			"ever attempts to connect (stderr: %s)", stderr.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "make pgwt-client") {
+		t.Errorf("refusal does not name the supported build path: %s", got)
+	}
+	if strings.Contains(got, "SSH connected") {
+		t.Errorf("binary proceeded to connect despite an unstamped build: %s", got)
 	}
 }
