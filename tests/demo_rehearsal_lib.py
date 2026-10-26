@@ -610,16 +610,16 @@ def aas_floor_ok(aas, floor=AAS_FLOOR):
     return None, detail
 
 
-# ── Cross-tab agreement and freshness (criteria doc §5) ──────────────────
+# ── Historical total comparison: diagnostic only (#258) ────────────────
 #
-# Two endpoints answering queries for the SAME window must report the same
-# DB Time within TIME_MODEL_TOLERANCE_PCT -- a disagreeing denominator
-# between tabs is the product-facing version of a bookkeeping error. Uses
-# the SAME 1% bound as the identity check (docs/DEMO_REHEARSAL_CRITERIA.md
-# section 5 pins it to TIME_MODEL_TOLERANCE_PCT explicitly, not a separate
-# number).
+# Retained to reproduce the old gate's false negative in mutation tests.
+# The rehearsal no longer calls this or includes it in REQUIRED_EXTRA_CHECKS:
+# its two totals sum the same clipped non-idle, non-io_worker events on the
+# recent raw path. Dropped wait attribution leaves both totals unchanged;
+# class_rows_vs_top_events_ok detects the per-class disagreement instead.
 def cross_tab_db_time_agreement_ok(db_time_a, db_time_b,
                                    tolerance_pct=TIME_MODEL_TOLERANCE_PCT):
+    """Legacy diagnostic, never a rehearsal verdict constraint (#258)."""
     if db_time_a is None or db_time_b is None:
         return False, f"missing db_time_ms (a={db_time_a!r}, b={db_time_b!r})"
     if db_time_a < MIN_DB_TIME_MS or db_time_b < MIN_DB_TIME_MS:
@@ -1487,7 +1487,6 @@ REQUIRED_EXTRA_CHECKS = (
     "time_model_conserves",
     "waterfall_query_latency",
     "execution_cardinality",
-    "cross_tab_db_time_agreement",
     "cross_tab_class_attribution",
     "cross_tab_aas_agreement",
     "capture_freshness",
