@@ -183,6 +183,7 @@ struct sec_row {
     uint64_t wall;
     uint64_t lock_ns;        /* class_ns[PGWT_CLASS_LOCK] of this record */
     uint64_t sess_db_ns;     /* want_pid's db_time_ns in this record     */
+    bool empty;             /* no class time, idle time, or event counts */
 };
 
 struct readback {
@@ -200,6 +201,13 @@ static int rb_visit(const struct pgwt_summary_accum *rec, void *vctx)
     memset(r, 0, sizeof(*r));
     r->wall    = rec->second_wall_ns;
     r->lock_ns = rec->class_ns[PGWT_CLASS_LOCK];
+    r->empty = (rec->idle_ns == 0);
+    for (int i = 0; i < PGWT_NUM_CLASSES; i++)
+        if (rec->class_ns[i])
+            r->empty = false;
+    for (int i = 0; i < SUMMARY_MAX_EVENTS; i++)
+        if (rec->events[i].count)
+            r->empty = false;
     for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
         if (rec->sessions[i].pid == rb->want_pid)
             r->sess_db_ns = rec->sessions[i].db_time_ns;
@@ -1133,7 +1141,7 @@ static void test_close_separated_notes(void)
 }
 
 /* A first observation at the interval's start confirms no elapsed time.
- * Without the close-only from >= noted guard this adds exactly one empty
+ * Without the close-only from >= end guard this adds exactly one empty
  * record; the finite close bound then terminates the loop. */
 static void test_close_empty_note(void)
 {
@@ -1159,40 +1167,117 @@ static void test_close_empty_note(void)
     wr_free(&x);
 }
 
+/* The old confirmed prefix lies entirely before the last flushed second.
+ * It cannot receive credit in the bumped candidate second. A later note
+ * keeps the finite close bound ahead of that candidate, exposing a loop
+ * that used to invent empty seconds 6 and 7 before reaching second 8. */
+static void test_close_already_flushed_note(void)
+{
+    struct wr x;
+    if (wr_open(&x, "close_already_flushed") != 0) {
+        printf("  FAIL: setup\n"); failures++; return;
+    }
+    struct pgwt_trace_event e = mkev(PID_SEED,
+        BASE_MONO + 5 * S + 10 * MS, MS, (PG_WAIT_IO << 24) | 1, 0);
+    pgwt_summary_push_event(x.w, &e, 0, e.old_event);
+    pgwt_summary_flush(x.w);
+    CHECK(x.w->have_flushed_second && !x.w->accum_active &&
+          x.w->last_flushed_second_mono_ns == BASE_MONO + 5 * S,
+          "already-flushed setup: second 5 is on disk, no active accumulator");
+    pgwt_summary_note_open(x.w, PID_A, EV_LOCK,
+        BASE_MONO + S + 50 * MS, 0, BASE_MONO + S + 150 * MS);
+    pgwt_summary_note_open(x.w, PID_A + 2, EV_LOCK,
+        BASE_MONO + 8 * S + 50 * MS, 0, BASE_MONO + 8 * S + 150 * MS);
+    pgwt_summary_close(x.w);
+
+    struct readback rb = { .want_pid = PID_A + 2 };
+    int n = read_back(x.dir, &rb);
+    CHECK(n == 2,
+          "already-flushed close: EXACTLY seed + later partial (%d records)", n);
+    int empty = 0, at_close = 0;
+    for (int i = 0; i < rb.n; i++) {
+        if (rb.rows[i].wall > BASE_MONO + 5 * S)
+            at_close++;
+        if (rb.rows[i].empty)
+            empty++;
+    }
+    CHECK(at_close > 0 && empty == 0,
+          "already-flushed close: %d records written at close, %d EMPTY "
+          "(no class time, idle time, or events)", at_close, empty);
+    CHECK(n == 2 && rb.rows[1].wall == BASE_MONO + 8 * S &&
+          rb_sum_sess(&rb) == 100 * MS,
+          "already-flushed close: only second 8 receives the later 100 ms");
+    wr_free(&x);
+}
+
 /* A seal failure and the final flush retry must count one lost second.
  * Without open notes only the final flush runs; it must still count too.
+ * An active second beyond the last note's rounded-up bound also belongs
+ * only to the final flush. Count serialization refusals to distinguish one
+ * attempt from a seal plus retry: success output and the deduplicated lost-
+ * second counter cannot expose an unbounded seal here (the N7 mutant).
  * Shrinking the serializer buffer is the existing deterministic failure
  * seam used by test_idle_summary, with no filesystem failure dependency. */
 static void test_close_failure_count(void)
 {
-    for (int with_note = 0; with_note <= 1; with_note++) {
+    for (int note_case = 0; note_case <= 2; note_case++) {
         struct wr x;
-        if (wr_open(&x, with_note ? "close_seal_fail" : "close_flush_fail")
+        if (wr_open(&x, note_case == 2 ? "close_bounded_fail" :
+                         note_case == 1 ? "close_seal_fail" : "close_flush_fail")
             != 0) {
             printf("  FAIL: setup\n"); failures++; return;
         }
         struct pgwt_trace_event e =
-            mkev(PID_SEED, BASE_MONO + 10 * MS, MS, EV_LOCK, 0);
+            mkev(PID_SEED, BASE_MONO + (note_case == 2 ? 5 * S : 0) +
+                 10 * MS, MS, EV_LOCK, 0);
         pgwt_summary_push_event(x.w, &e, 0, e.old_event);
-        if (with_note)
+        if (note_case)
             pgwt_summary_note_open(x.w, PID_A, EV_LOCK,
                                    BASE_MONO + 50 * MS, 0,
                                    BASE_MONO + 150 * MS);
         CHECK(x.w->fp && x.w->accum_active &&
               x.w->flush_failures_total == 0,
-              "close failure setup (note=%d): one active second, no failures",
-              with_note);
+              "close failure setup (case=%d): one active second, no failures",
+              note_case);
+        fflush(stderr);
+        int saved_err = dup(STDERR_FILENO);
+        FILE *cap = tmpfile();
+        bool capturing = saved_err >= 0 && cap &&
+                         dup2(fileno(cap), STDERR_FILENO) >= 0;
+        CHECK(capturing,
+              "close failure (case=%d): capture serialization attempts", note_case);
+        if (!capturing) {
+            if (saved_err >= 0) close(saved_err);
+            if (cap) fclose(cap);
+            wr_free(&x);
+            return;
+        }
         size_t real_size = x.w->encode_buf_size;
         x.w->encode_buf_size = PGWT_SUMMARY_SERIALIZE_MAX - 1;
         pgwt_summary_close(x.w);
         x.w->encode_buf_size = real_size;
+        fflush(stderr);
+        int restored = dup2(saved_err, STDERR_FILENO);
+        close(saved_err);
+        CHECK(restored >= 0, "close failure: restored stderr");
+        rewind(cap);
+        int attempts = 0;
+        char line[512];
+        while (fgets(line, sizeof(line), cap))
+            if (strstr(line, "ERROR: summary serialize refused"))
+                attempts++;
+        fclose(cap);
+        CHECK(attempts == (note_case == 1 ? 2 : 1),
+              "close failure (case=%d): %d serialization attempts, expected %d "
+              "(seal only within confirmed bound, then final flush)",
+              note_case, attempts, note_case == 1 ? 2 : 1);
         CHECK(x.w->flush_failures_total == 1 &&
               x.w->total_records_written == 0 && !x.w->fp,
-              "close (note=%d): one lost second counts EXACTLY once (%llu)",
-              with_note, (unsigned long long)x.w->flush_failures_total);
-        CHECK(x.w->open_credited_ns_total == (with_note ? 100 * MS : 0),
-              "close (note=%d): the failed seal credited only its confirmed "
-              "prefix (%llu ns)", with_note,
+              "close (case=%d): one lost second counts EXACTLY once (%llu)",
+              note_case, (unsigned long long)x.w->flush_failures_total);
+        CHECK(x.w->open_credited_ns_total == (note_case == 1 ? 100 * MS : 0),
+              "close (case=%d): the failed seal credited only its confirmed "
+              "prefix (%llu ns)", note_case,
               (unsigned long long)x.w->open_credited_ns_total);
         wr_free(&x);
     }
@@ -1231,6 +1316,8 @@ int main(void)
     test_close_separated_notes();
     printf("-- 15: close invents no record for an empty note --\n");
     test_close_empty_note();
+    printf("-- 16: close skips confirmed time in already-flushed seconds --\n");
+    test_close_already_flushed_note();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     printf("=== test_rotation_open_credit: %s ===\n",

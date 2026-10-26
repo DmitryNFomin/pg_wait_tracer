@@ -1678,9 +1678,10 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec,
     }
 }
 
-/* The earliest second any fresh open interval still owes credit for, or
- * UINT64_MAX if nothing is open. Only consulted when no accumulator exists,
- * i.e. when a whole second passed with no event at all. */
+/* The earliest writable second any creditable open interval still owes
+ * credit for, or UINT64_MAX if none does. At close the interval must be able
+ * to receive confirmed credit in that second. Only consulted when no
+ * accumulator exists, i.e. when a whole second passed with no event at all. */
 static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
                                      uint64_t now_hint, bool closing)
 {
@@ -1706,11 +1707,31 @@ static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
         }
         uint64_t from = o->start_ns > o->credited_until_ns
                       ? o->start_ns : o->credited_until_ns;
-        /* At close, a partial second is owed only while some confirmed
-         * time remains in this interval. */
-        if (closing && from >= o->noted_ns)
-            continue;
         uint64_t sec = (from / PGWT_NS_PER_SEC) * PGWT_NS_PER_SEC;
+        /* Apply the flushed-second bump here, before deciding whether the
+         * interval can receive credit in the second we will actually write.
+         * Moving it inside the minimum preserves the tick path because
+         * max(min(a,b),c) == min(max(a,c),max(b,c)). */
+        if (w->have_flushed_second && sec <= w->last_flushed_second_mono_ns)
+            sec = w->last_flushed_second_mono_ns + PGWT_NS_PER_SEC;
+        if (closing) {
+            uint64_t end = sec + PGWT_NS_PER_SEC;
+            if (end > o->noted_ns)
+                end = o->noted_ns;
+            /* Mirror credit_open_second's refusals: this second must be
+             * able to receive credit, and this interval must have some
+             * confirmed time left. Otherwise we would invent an empty
+             * record without advancing the interval's watermark. */
+            /* Confirmed [from, noted_ns) lies in immutable on-disk seconds (#277).
+             * At stop no closing record can carry it, so deliberately drop it.
+             * open_credit_late_ns_total promises a closing record carries the time,
+             * so cannot count this loss. Close used to credit nothing and drop it
+             * uncounted too; a dedicated counter is a possible follow-up. */
+            if (end <= sec)
+                continue;
+            if (from >= end)
+                continue;
+        }
         if (sec < best)
             best = sec;
     }
@@ -1837,12 +1858,7 @@ static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec,
         } else {
             sec = earliest_open_second(w, to_sec, closing);
             if (sec >= to_sec)
-                return;    /* nothing open: no empty record is invented */
-            if (w->have_flushed_second &&
-                sec <= w->last_flushed_second_mono_ns)
-                sec = w->last_flushed_second_mono_ns + PGWT_NS_PER_SEC;
-            if (sec >= to_sec)
-                return;
+                return;    /* nothing owed before this bound: invent no record */
             /* BEFORE second_wall_ns is derived: open_summary_file re-reads
              * the clock anchor (unless an offline producer pinned it), and
              * the record's wall must come from the anchor of the file it is
