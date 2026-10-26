@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeQueriesConfig } from '../../web/static/lib/builders/table-configs.js';
 import { createWaterfallView } from '../../web/static/views/waterfall.js';
+import { EXECUTIONS_SORT_RECENT } from '../../web/static/lib/builders/waterfall.js';
 
 const span = { pid: 661380, measurement: 'measured', completion: 'closed',
     start_ns: '1000000000', end_ns: '10900000000', completed_duration_ms: 9900,
@@ -108,6 +109,62 @@ test('empty executions and unmatched filters explain why no chart is shown', () 
     } finally {
         globalThis.document = previous;
     }
+});
+
+/* #587: the vacuity trap is the whole test -- EVERY one of these 100 rows
+ * must be undrawable (n_events:0, n_workers:0, plan_ms:null), the way a
+ * high-rate OLTP workload fills a `start_desc` page with sub-millisecond
+ * statements. One drawable row anywhere makes the case vanish, which is
+ * exactly why mock_server.py's start_desc fixture (keyed on filters.pid
+ * only, drawable row 0 by construction) could never reproduce it. */
+const UNDRAWABLE_ROWS = Array.from({ length: 100 }, (_, i) => ({
+    pid: 9000 + i, query_id: '1', start_ns: String(1_000_000_000 + i),
+    end_ns: String(1_000_004_000 + i), duration_ms: 0.004,
+    plan_ms: null, n_events: 0, n_workers: 0, in_progress: false,
+}));
+const EMPTY_LEADER_DETAIL = { leader: { pid: UNDRAWABLE_ROWS[0].pid, events: [] },
+    workers: [], plan: null, total_count: 0, kept_count: 0, truncated: false };
+
+test('#587 every execution undrawable at this sort: disclosure names the count, not "No execution events captured"', () => {
+    const previous = globalThis.document;
+    try {
+        const elements = new Map();
+        const element = id => {
+            if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', className: '',
+                style: {}, classList: { remove() {}, toggle() {} } });
+            return elements.get(id);
+        };
+        globalThis.document = { getElementById: element, querySelector: element };
+        const view = createWaterfallView();
+        const data = { executions: { rows: UNDRAWABLE_ROWS }, selected: UNDRAWABLE_ROWS[0],
+            detail: EMPTY_LEADER_DETAIL, detailEnd: UNDRAWABLE_ROWS[0].end_ns,
+            windowTo: 2_000_000_000, sortMode: EXECUTIONS_SORT_RECENT };
+        const model = view.build(data);
+        assert.equal(model.allUndrawable, true);
+        view.mount({}, model, { mountTable() {} });
+        const chart = element('waterfall-chart').innerHTML;
+        assert.match(chart, /100 executions, none with captured events at this sort/);
+        assert.match(chart, /try longest running first\./);
+        assert.doesNotMatch(chart, /No execution events captured/);
+    } finally {
+        globalThis.document = previous;
+    }
+});
+
+test('#587 control: one drawable row among many still selects normally and the disclosure does not appear', () => {
+    const drawableRow = { ...UNDRAWABLE_ROWS[50], n_events: 2 };
+    const rows = UNDRAWABLE_ROWS.map((r, i) => (i === 50 ? drawableRow : r));
+    const detailWithEvents = { leader: { pid: drawableRow.pid, events: [
+        { we: 1, name: 'IO:DataFileRead', start_ns: drawableRow.start_ns, dur_ns: '2000', cpu_ns: null },
+    ] }, workers: [], plan: null, total_count: 1, kept_count: 1, truncated: false };
+    const view = createWaterfallView();
+    const model = view.build({ executions: { rows }, selected: drawableRow,
+        detail: detailWithEvents, detailEnd: drawableRow.end_ns,
+        windowTo: 2_000_000_000, sortMode: EXECUTIONS_SORT_RECENT });
+    assert.equal(model.allUndrawable, false);
+    assert.equal(model.undrawableText, null);
+    assert.equal(model.selected, drawableRow);
+    assert.equal(model.waterfall.hasData, true);
 });
 
 const detail = { backend_activity_span: span, leader: { pid: 661380,

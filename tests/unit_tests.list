@@ -161,12 +161,17 @@ test_pid_cap
 # second flag would have left that route serving half-tagged records.
 # Bypass suite, because "refuse always" satisfies every refusal assertion
 # and "never refuse" satisfies every success one: the success path is pinned
-# by literal tag counts, the REAL pid bound is located by search (so growing
-# the table finds a bigger bound and REMOVING it fails loudly instead of
-# silently becoming a success-path test), and an unknown injection name, an
-# empty one, an injection armed but unreachable (count 0), an empty window,
-# a negative count, a fixture with nothing to tag, and leakage between cases
-# each have their own case. Non-vacuity ledger: seven counters, each failing
+# by literal tag counts, and an unknown injection name, an empty one, an
+# injection armed but unreachable (count 0, or a counted point armed past
+# this run's growths), a counted value that cannot be parsed (which must fail
+# nothing, never everything), an empty window, a negative count, a fixture
+# with nothing to tag, and leakage between cases each have their own case.
+# #374 deleted the 4096-slot pid table, so the bound SEARCH that used to live
+# in section 4 is gone with it (there is no threshold left to find); what
+# replaced it asserts the removal positively (8192 pids tag in full) and
+# covers the bound that is left — a real allocation failure, which can land
+# mid-array and leave the refused array partly rewritten.
+# Non-vacuity ledger: seven counters, each failing
 # the test at zero. The call site is in server.c, which no C unit can link —
 # tests/test_data_tag_refusal.py covers it through the real binary, on both
 # the reject_overload and dump_summary routes.
