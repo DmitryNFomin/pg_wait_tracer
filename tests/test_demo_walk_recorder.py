@@ -4,9 +4,11 @@ import base64
 import io
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -731,6 +733,252 @@ class RecorderTests(unittest.TestCase):
                 width=20, window_s=3.0)
             self.assertGreater(score, 0.5)
             self.assertFalse(start == 0 and end == 3, "picked the spike-and-return window")
+
+    # ── issue #571: capture-advance gate ─────────────────────────────────
+    # The recorder gated on console errors, panel population and chart
+    # motion, but nothing verified the daemon writing the trace was still
+    # alive. If it dies mid-capture the bridge keeps serving the on-disk
+    # trace, every panel stays populated and the walk passes -- recording a
+    # window that looks live but stopped advancing.
+    #
+    # A test asserting "the walk passes when the daemon is alive" proves
+    # nothing; that already passed before this gate existed. Every test
+    # below is either (a) a REFUSAL the gate must produce, or (b) a way the
+    # gate's DETECTION could be made unreachable -- absent sample, missing
+    # transport, dependency throwing, unparseable field, partial sample
+    # range, zero-length window, the archived skip -- because a false
+    # negative, not a false positive, is this project's recurring defect.
+
+    @staticmethod
+    def _samples(*pairs):
+        """(label, at_s, tip_seconds_past_an_arbitrary_epoch) -> samples."""
+        base = 1_774_000_000_000_000_000
+        return [{"label": label, "at_s": float(at), "tip_ns": base + int(tip * 1e9)}
+                for label, at, tip in pairs]
+
+    def test_healthy_walk_passes_the_capture_advance_check(self):
+        # The control: a live daemon's trace tip tracks wall-clock, so a
+        # correct walk must NOT be refused. A gate that refuses correct runs
+        # gets disabled by the next person, which is worse than no gate.
+        samples = self._samples(("walk start", 0, 0), ("drill start", 100, 99.4),
+                                ("walk end", 140, 139.1))
+        result = lib.capture_advance_check(samples)
+        self.assertTrue(result["checked"])
+        self.assertEqual(result["verdict"], lib.CAPTURE_ADVANCE_CHECKED)
+        self.assertAlmostEqual(result["trace_advance_s"], 139.1, places=3)
+        self.assertAlmostEqual(result["walk_elapsed_s"], 140.0, places=3)
+        self.assertEqual(result["tail_segment"]["from"], "drill start")
+
+    def test_daemon_dead_from_the_start_is_refused(self):
+        # The bridge keeps serving the on-disk trace: the tip never moves.
+        samples = self._samples(("walk start", 0, 0), ("drill start", 100, 0),
+                                ("walk end", 140, 0))
+        with self.assertRaises(lib.Refusal) as failed:
+            lib.capture_advance_check(samples)
+        self.assertEqual(failed.exception.code, 10)
+        self.assertIn("capture stopped advancing", str(failed.exception))
+        self.assertIn("140.0s", str(failed.exception))
+
+    def test_daemon_dying_in_the_first_half_is_refused_by_the_whole_walk_bar(self):
+        samples = self._samples(("walk start", 0, 0), ("drill start", 100, 30),
+                                ("walk end", 140, 30))
+        with self.assertRaises(lib.Refusal) as failed:
+            lib.capture_advance_check(samples)
+        self.assertEqual(failed.exception.code, 10)
+        self.assertIn("moved 30.0s", str(failed.exception))
+        self.assertIn("need >= 70.0s", str(failed.exception))
+
+    def test_daemon_dying_late_still_refuses_via_the_final_segment(self):
+        # NON-VACUITY of the second sub-check, and the reason it exists: a
+        # death at ~71% of the walk leaves 99.4s of advance over 140s, which
+        # CLEARS the 50% whole-walk bar on its own. Only the final-segment
+        # check ("did the tip move at all after the drill hand-off") sees
+        # it. Without that sub-check this input passes -- verified by the
+        # assertion below that the whole-walk arithmetic is satisfied.
+        samples = self._samples(("walk start", 0, 0), ("drill start", 100, 99.4),
+                                ("walk end", 140, 99.4))
+        self.assertGreaterEqual(99.4, lib.CAPTURE_ADVANCE_FRACTION * 140.0)
+        with self.assertRaises(lib.Refusal) as failed:
+            lib.capture_advance_check(samples)
+        self.assertEqual(failed.exception.code, 10)
+        self.assertIn("did not move at all", str(failed.exception))
+        self.assertIn("'drill start'", str(failed.exception))
+
+    def test_threshold_is_derived_from_elapsed_not_from_the_advance(self):
+        # The two sides of the comparison must come from DIFFERENT sources
+        # (the conservation-check defect: a check whose two sides are the
+        # same sum cannot fail). Same 60s of real advance: fine against a
+        # 100s walk, refused against a 600s one.
+        lib.capture_advance_check(self._samples(("a", 0, 0), ("b", 50, 30), ("c", 100, 60)))
+        with self.assertRaises(lib.Refusal) as failed:
+            lib.capture_advance_check(self._samples(("a", 0, 0), ("b", 300, 30), ("c", 600, 60)))
+        self.assertEqual(failed.exception.code, 10)
+
+    def test_identical_start_and_end_sample_cannot_satisfy_the_check(self):
+        # The same object twice -- the degenerate "both sides are one
+        # reading" input. Zero advance over zero elapsed must refuse, not
+        # pass on a 0 >= 0 arithmetic accident.
+        one = self._samples(("walk start", 10, 5))[0]
+        with self.assertRaises(lib.Refusal) as failed:
+            lib.capture_advance_check([one, one])
+        self.assertEqual(failed.exception.code, 10)
+        self.assertIn("zero-length measurement window", str(failed.exception))
+
+    def test_a_regressing_trace_tip_is_refused_naming_both_samples(self):
+        # #544's orphan shape: the backend starts serving a DIFFERENT trace.
+        samples = self._samples(("walk start", 0, 100), ("drill start", 100, 60),
+                                ("walk end", 140, 240))
+        with self.assertRaises(lib.Refusal) as failed:
+            lib.capture_advance_check(samples)
+        self.assertEqual(failed.exception.code, 10)
+        self.assertIn("BACKWARDS", str(failed.exception))
+        self.assertIn("'walk start'", str(failed.exception))
+        self.assertIn("'drill start'", str(failed.exception))
+
+    def test_unreadable_or_absent_samples_refuse_instead_of_approving(self):
+        # Every way the gate can fail to SEE. Each of these inputs, fed to
+        # a truthiness-based implementation, either reads as 0 (and could
+        # be mistaken for "measured, did not advance" of an untrusted
+        # number) or raises a TypeError the caller might swallow. All must
+        # be code 10.
+        good = self._samples(("walk start", 0, 0), ("walk end", 140, 140))
+        for broken in ([], [good[0]], None, "not a list",
+                       [good[0], {"label": "walk end", "at_s": 140.0}],
+                       [good[0], {"label": "walk end", "at_s": 140.0, "tip_ns": None}],
+                       [good[0], {"label": "walk end", "at_s": 140.0, "tip_ns": "1774e18"}],
+                       [good[0], {"label": "walk end", "at_s": 140.0, "tip_ns": float("nan")}],
+                       [good[0], {"label": "walk end", "at_s": 140.0, "tip_ns": float("inf")}],
+                       [good[0], {"label": "walk end", "at_s": 140.0, "tip_ns": True}],
+                       [good[0], {"label": "walk end", "at_s": 140.0, "tip_ns": 0}],
+                       [good[0], {"label": "walk end", "at_s": None, "tip_ns": 1}],
+                       [good[0], {"label": "walk end", "at_s": float("nan"), "tip_ns": 1}],
+                       [{"tip_ns": 1, "at_s": 0}, "junk"]):
+            with self.assertRaises(lib.Refusal) as failed:
+                lib.capture_advance_check(broken)
+            self.assertEqual(failed.exception.code, 10, broken)
+
+    def test_archived_walk_records_a_skip_that_cannot_read_as_a_pass(self):
+        # An archived capture's tip cannot advance by construction, so the
+        # check is not applicable -- but the skip must be RECORDED, with a
+        # distinct string, so walk.json/analysis.md never show a skipped
+        # check where a reader expects a passed one.
+        samples = self._samples(("walk start", 0, 0), ("walk end", 140, 0))
+        result = lib.capture_advance_check(samples, archived=True)
+        self.assertFalse(result["checked"])
+        self.assertEqual(result["verdict"], lib.CAPTURE_ADVANCE_SKIPPED_ARCHIVED)
+        self.assertIn("skipped", result["verdict"])
+        self.assertIn("archived", result["verdict"])
+        self.assertNotEqual(lib.CAPTURE_ADVANCE_SKIPPED_ARCHIVED, lib.CAPTURE_ADVANCE_CHECKED)
+        # ...and the SAME input refuses on the live path, so the skip is the
+        # only thing standing between this data and a refusal.
+        with self.assertRaises(lib.Refusal):
+            lib.capture_advance_check(samples, archived=False)
+
+    def test_probe_refuses_when_the_transport_handle_is_missing(self):
+        # The gate's dependency is absent rather than broken -- the eBPF
+        # analogue of a tool exiting 127. It must refuse, not skip.
+        class Page:
+            def evaluate(self, code): return {"ok": False, "why": "no transport handle"}
+        with self.assertRaises(lib.Refusal) as failed:
+            driver.probe_trace_tip(Page(), "walk start")
+        self.assertEqual(failed.exception.code, 10)
+        self.assertIn("no transport handle", str(failed.exception))
+
+    def test_probe_refuses_when_the_info_request_throws(self):
+        class Page:
+            def evaluate(self, code): raise TimeoutError("ws closed")
+        with self.assertRaises(lib.Refusal) as failed:
+            driver.probe_trace_tip(Page(), "walk end")
+        self.assertEqual(failed.exception.code, 10)
+        self.assertIn("could not reach the backend", str(failed.exception))
+        self.assertIn("ws closed", str(failed.exception))
+
+    def test_probe_refuses_on_a_reply_that_is_not_a_usable_object(self):
+        for reply in (None, [], "ok", {}, {"ok": True, "to_ns": None}, {"ok": False}):
+            class Page:
+                def evaluate(self, code, reply=reply): return reply
+            if isinstance(reply, dict) and reply.get("ok"):
+                # A truthy "ok" with a null to_ns gets past the probe and
+                # must then be refused by the check -- never silently
+                # treated as a reading.
+                sample = driver.probe_trace_tip(Page(), "walk end")
+                with self.assertRaises(lib.Refusal) as failed:
+                    lib.capture_advance_check([{"label": "walk start", "at_s": 0.0,
+                                                "tip_ns": 1}, sample])
+            else:
+                with self.assertRaises(lib.Refusal) as failed:
+                    driver.probe_trace_tip(Page(), "walk end")
+            self.assertEqual(failed.exception.code, 10, reply)
+
+    def test_probe_returns_a_sample_the_check_can_use(self):
+        class Page:
+            def evaluate(self, code): return {"ok": True, "to_ns": 1_774_000_000_000_000_000}
+        sample = driver.probe_trace_tip(Page(), "walk start")
+        self.assertEqual(sample["label"], "walk start")
+        self.assertEqual(sample["tip_ns"], 1_774_000_000_000_000_000)
+        self.assertIsInstance(sample["at_s"], float)
+
+    def test_the_recorder_reads_to_ns_and_never_now_ns(self):
+        # now_ns is the BRIDGE's clock: it advances at exactly the same rate
+        # whether the daemon is alive, wedged or dead, so a gate reading it
+        # could never fail. Pin the field the probe asks for.
+        self.assertIn("info.to_ns", driver.TRACE_TIP_JS)
+        self.assertNotIn("now_ns", driver.TRACE_TIP_JS)
+
+    def test_write_analysis_states_the_capture_liveness_verdict_verbatim(self):
+        for advance, expected in [
+            ({"checked": True, "verdict": lib.CAPTURE_ADVANCE_CHECKED, "trace_advance_s": 139.1,
+              "walk_elapsed_s": 140.0, "required_advance_s": 70.0,
+              "tail_segment": {"elapsed_s": 40.0, "advance_s": 39.7}},
+             lib.CAPTURE_ADVANCE_CHECKED),
+            ({"checked": False, "verdict": lib.CAPTURE_ADVANCE_SKIPPED_ARCHIVED},
+             lib.CAPTURE_ADVANCE_SKIPPED_ARCHIVED)]:
+            walk = self._minimal_walk(None)
+            walk["capture_advance"] = advance
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                lib.write_analysis(root, walk)
+                text = (root/"analysis.md").read_text()
+                self.assertIn(expected, text)
+                self.assertIn("Capture liveness:", text)
+
+    def test_write_analysis_omits_the_liveness_line_when_absent(self):
+        # An older walk.json with no capture_advance key must not grow a
+        # phantom line claiming a check that never ran.
+        walk = self._minimal_walk(None)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lib.write_analysis(root, walk)
+            self.assertNotIn("Capture liveness", (root/"analysis.md").read_text())
+
+    def test_mock_trace_tip_advances_and_freezes_on_demand(self):
+        # The fixture half of the red/green pair: the mock must behave like
+        # a live daemon by default (else the gate refuses every mock walk),
+        # and must be able to simulate one that died while the bridge keeps
+        # serving (else the refusal cannot be demonstrated end to end).
+        # The clock is pinned rather than slept on, so these are exact
+        # equalities with no timing dependence at all.
+        import importlib
+        import mock_server
+        for stall, elapsed_s, expected_advance_s in [(None, 40.0, 40.0), ("0", 40.0, 40.0),
+                                                     ("25", 40.0, 25.0), ("25", 10.0, 10.0)]:
+            env = {} if stall is None else {"PGWT_MOCK_STALL_AFTER_S": stall}
+            with patch.dict(os.environ, env, clear=False):
+                if stall is None:
+                    os.environ.pop("PGWT_MOCK_STALL_AFTER_S", None)
+                fixture = importlib.reload(importlib.import_module("demo_walk_mock"))
+            label = (stall, elapsed_s)
+            with patch.object(fixture, "_STARTED_AT", 1000.0), \
+                 patch.object(time, "monotonic", return_value=1000.0 + elapsed_s):
+                tip = fixture.trace_tip_ns()
+                reply = fixture.handle_request({"cmd": "info", "id": 1})
+            self.assertEqual(tip, mock_server._TO_NS + int(expected_advance_s * 1e9), label)
+            # `info` carries the simulated tip, never the canned constant.
+            self.assertEqual(reply["to_ns"], tip, label)
+            # now_ns stays pinned: gating on it would be useless (a dead
+            # daemon does not stop the bridge's clock), and advancing it
+            # would slide the canned fixtures inside the live window.
+            self.assertEqual(reply["now_ns"], mock_server._TO_NS, label)
 
     def test_observed_empty_is_distinct_from_failed_observation(self):
         class Capture:
