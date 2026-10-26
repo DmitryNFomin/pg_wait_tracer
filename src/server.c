@@ -1905,7 +1905,22 @@ static void left_needy_tab_free(struct left_needy_tab *t)
  * Returns -1 on allocation failure. Over-reporting is the safe direction: a
  * pid marked needy whose record rule 1 would have resolved anyway costs a
  * scan, never a wrong number -- the seed only ever supplies rule 2, which
- * rule 1 outranks. */
+ * rule 1 outranks.
+ *
+ * #588 MEASURED (tests/bench_left_seed.c, part A -- isolated, in-memory,
+ * warm, 10 iterations per size, 6 process runs on a loaded macOS laptop):
+ * ~0.9-2.2 ns/record at every size from 10k to 1M, identical whether the
+ * window straddles anything or not (this pass cannot tell until it
+ * finishes). ~1-1.5 ms at 1M records. IN THE NOISE against a bounded raw
+ * load's own ~22-52 ms at that record count on the same machine -- not
+ * gated. The SEPARATE downstream left_seed_resolve() marker lookback, which
+ * only runs when this pass finds a needy pid, is NOT free at the same
+ * scale: part B (end to end, real on-disk 900 s trace, same 6 runs) saw a
+ * consistently positive, growing delta through 500k records (+0.2 to +5.5
+ * ms), but at 1M records the delta ranged from -14.8 ms to +22.1 ms --
+ * swamped by this shared machine's noise, not pinned. Flagged to the owner
+ * as a distinct follow-up needing a quiet box to measure past 500k; not
+ * fixed here. */
 static int left_seed_find_needy(const struct pgwt_trace_event *events,
                                 int total, struct left_needy_tab *t,
                                 int *out_needy)
@@ -6507,7 +6522,18 @@ static cJSON *serialize_exec_lane(const struct pgwt_exec_lane *lane,
          * "only when they differ": an optional key makes the clipped case
          * indistinguishable from an old server to every client, and the
          * cheapest way for a consumer to silently fall back to the wrong
-         * number is for the right one to sometimes be absent. */
+         * number is for the right one to sometimes be absent.
+         *
+         * INERT ON THIS BRANCH — stated rather than left to a reviewer. No
+         * client reads it yet: web/static/lib/builders/waterfall.js still
+         * does `rawDuration: ev.dur_ns` and its tooltip/readout formatters
+         * print that same clipped slice, so the user-visible symptom #529
+         * was filed for (a 4 ms wait reading 2 ms at the window edge) is
+         * NOT fixed by this branch — only the wire half is. The client half
+         * lives on agent/529-client-tooltip, with its own web_unit tests;
+         * one branch at a time may touch web/, so it is not touched here.
+         * A dormant field nobody discloses is how a feature ships looking
+         * done; a disclosed one is a sequencing fact. */
         cjson_add_uint64_string(item, "raw_dur_ns", ev->raw_duration_ns);
         if (ev->has_cpu)
             cjson_add_uint64_string(item, "cpu_ns", ev->cpu_ns);

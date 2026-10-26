@@ -251,8 +251,9 @@ test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
 
 # test_tag_refusal: #363 — pgwt_tag_events was declared `void` and had two
 # ways to stop partway (a working-allocation failure, or more distinct pids
-# than its 4096-slot per-pid table holds), each leaving the records it never
-# reached with their raw old_event/query_id while returning normally. That
+# than its then-4096-slot per-pid table held — #374 made that table grow, so
+# an allocation failure is the only one left), each leaving the records it
+# never reached with their raw old_event/query_id while returning normally. That
 # array is the oracle, so the result was confidently wrong, not short. Same
 # link shape as test_pid_cap (compute.c with -DPGWT_SERVER,
 # pgwt_visit_summaries stubbed in the test). Allocation failures ride
@@ -969,6 +970,16 @@ bench_block_agg: bench_block_agg.c ../src/block_agg.c ../src/compute.c \
                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                  $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
+
+# bench_left_seed: #588 -- measures #586's needy-pid pass (left_seed_find_needy,
+# one O(total) hash probe per record on EVERY bounded raw load) in isolation,
+# plus the end-to-end cost of the straddling path's downstream marker lookback
+# (left_seed_resolve) against a real on-disk 900 s trace. Same server.c-included
+# recipe as test_left_edge_attrib. Deliberately NOT in unit_tests.list, same
+# reason as bench_block_agg above: a wall-clock assertion on a shared runner is
+# runner noise dressed up as a gate. Built so the number can be reproduced.
+bench_left_seed: bench_left_seed.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # test_interval_index: the CONCURRENCY INTERVAL INDEX (paint-latency plan,
 # Phase 4, src/interval_index.c). A differential against the real
