@@ -99,7 +99,14 @@ struct pgwt_pid_cat {
  *     The live consumers apply the same rule record by record.
  *   - #596: non-idle background/maintenance records with query_id 0 are
  *     flagged QUERY_UNATTRIB directly, never backfilled. IO_WORKER records
- *     remain outside the query model.
+ *     remain outside the query model. "Non-idle" is the LOAD rule, so a
+ *     checkpointer in Timeout:CheckpointWriteDelay is neither attributed nor
+ *     unattributed. SCOPE: the sentence above about live consumers belongs to
+ *     the #128 bullet and is NOT extended here -- the live tier still drops
+ *     any categorised record with query_id 0 (src/map_reader.c's
+ *     `if (cat_flag != 0) return;`), so #596 holds in the archived/replay
+ *     path only. Closing that gap is #641; do not read this bullet as a
+ *     claim that it is already closed.
  * cats may be NULL/empty (no metadata: everything is foreground).
  *
  * #363 — RETURN VALUE. 1 when every record in the array was tagged, 0 when
