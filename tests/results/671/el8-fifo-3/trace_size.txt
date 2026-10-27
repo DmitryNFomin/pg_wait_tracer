@@ -1,0 +1,10 @@
+324M	/tmp/pgwt671_8kAA5K
+total 331348
+-rw-r--r--. 1 root root         13593 Oct 27 18:09 backends.jsonl
+-rw-r-----. 1 root postgres    676233 Oct 27 18:09 current.summary
+-rw-r--r--. 1 root root             4 Oct 27 18:09 current.summary.meta
+-rw-r-----. 1 root postgres 338578194 Oct 27 18:09 current.trace
+-rw-r--r--. 1 root root             5 Oct 27 18:09 current.trace.meta
+-rw-r-----. 1 root postgres         0 Oct 27 18:04 query_sources.jsonl
+-rw-r-----. 1 root postgres      2017 Oct 27 18:04 query_texts.jsonl
+-rw-r-----. 1 root postgres      5696 Oct 27 18:04 wait_event_names.json

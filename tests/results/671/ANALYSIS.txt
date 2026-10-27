@@ -1,0 +1,37 @@
+run                pol            E_ns          S_ns          G_ns    E/G    S/G  cpuEx%  cpuSm%    dpp  maxD  res steal% pol_rb noncmd/G
+el8-fifo-1         fifo   581784732289  466598422993  708819994710  0.821  0.658   27.28   22.81   4.47   4.5 PASS   0.00      1   0.0772
+el8-fifo-2         fifo   595067381249  493792237159  736344669964  0.808  0.671   28.58   24.79   3.79   3.8 PASS   0.00      1   0.0786
+el8-fifo-3         fifo   608615318657  486083018877  736194258901  0.827  0.660   28.73   24.22   4.51   4.5 PASS   0.00      1   0.0847
+el8-other-1        other  612311783388  376452843283  732993897808  0.835  0.514   28.50   19.04   9.46   9.5 FAIL   0.00      0   0.0379
+el8-other-2        other  610840216110  371347551873  736023526868  0.830  0.504   28.73   19.12   9.61   9.6 FAIL   0.00      0   0.0367
+el8-other-3        other  607507114065  368280883530  737049568551  0.824  0.500   28.54   18.85   9.69   9.7 FAIL   0.00      0   0.0380
+gate3-fifo-1       fifo   785426508155  713902712038  810183034235  0.969  0.881   45.97   43.26   2.71   2.7 PASS   0.00      1   0.1827
+gate3-fifo-2       fifo   778284276392  703995211814  809650940199  0.961  0.870   46.02   42.55   3.47   3.5 PASS   0.00      1   0.1812
+gate3-fifo-3       fifo   790418632422  694790990015  804605481560  0.982  0.864   46.25   42.45   3.80   3.8 PASS   0.00      1   0.1782
+gate3-other-1      other  801865679875  634536234628  805688430496  0.995  0.788   46.24   38.88   7.36   7.4 PASS   0.00      0   0.1533
+gate3-other-2      other  800508813451  627923420971  807974710659  0.991  0.777   46.64   38.54   8.10   8.1 PASS   0.00      0   0.1497
+gate3-other-3      other  794066546501  652741797515  808816959355  0.982  0.807   45.92   39.26   6.66   6.7 PASS   0.00      0   0.1785
+
+el8 other n=3  median E/G=0.830 (<<G)  S/G=0.504 (<<G)  cpu_share_delta=9.61 pp  maxD=9.6 pp  noncmd/G=0.0379
+el8 fifo  n=3  median E/G=0.821 (<<G)  S/G=0.660 (<<G)  cpu_share_delta=4.47 pp  maxD=4.5 pp  noncmd/G=0.0786
+gate3 other n=3  median E/G=0.991 (~=G)  S/G=0.788 (<<G)  cpu_share_delta=7.36 pp  maxD=7.4 pp  noncmd/G=0.1533
+gate3 fifo  n=3  median E/G=0.969 (~=G)  S/G=0.870 (between)  cpu_share_delta=3.47 pp  maxD=3.5 pp  noncmd/G=0.1812
+
+EL8 SCHED_OTHER VERDICT: INCONCLUSIVE: E/G=<<G S/G=<<G share_gap=9.61 pp
+
+PROVENANCE
+  tree commit (both boxes, identical rsync source): 6b1fb8b2 (+ b85fb701 for
+  the pre-registered thresholds; the probe binary tree is 6b1fb8b2's)
+  EL8   : Hetzner cx33 id 172861451, 188.245.153.28, nbg1, rocky-8,
+          4.18.0-553.157.1.el8_10.x86_64, AMD EPYC-Rome, PG 18.4 (PGDG) port 5418
+  Ubuntu: pgwt-gate-3, 46.225.142.12, cx33, 6.8.0-139-generic,
+          AMD EPYC-Rome, PG 18.6 (PGDG) port 5418
+  12 runs, 3 per arm per host, OTHER/FIFO interleaved, 10 Hz, 8 clients, 300 s.
+
+DISCLOSED CONFOUND (host configuration, not kernel)
+  tests/cloud-init-rocky8-pg18.yaml preloads pg_wait_sampling; gate-3's
+  cluster does not. EL8 therefore carries one extra background worker parked
+  in Extension for the whole window: 14.4% of exact DB time, 16.1% of sampled.
+  Removing that row from BOTH denominators makes the EL8 gap LARGER
+  (9.61 -> 10.72 pp median) and leaves Ubuntu unchanged, so it is not the
+  cause of the EL8 excess.

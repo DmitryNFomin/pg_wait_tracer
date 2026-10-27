@@ -1,0 +1,3 @@
+tid=70587 policy=0 rtprio=0
+tid=70613 policy=0 rtprio=0
+tid=70614 policy=0 rtprio=0

@@ -1,0 +1,12 @@
+328M	/tmp/pgwt671_BGEkuP
+total 334980
+-rw-r-----. 1 root postgres    109309 Oct 27 18:00 2026-10-27_17.summary.lz4
+-rw-r-----. 1 root postgres  54510540 Oct 27 18:00 2026-10-27_17.trace.lz4
+-rw-r--r--. 1 root root         13851 Oct 27 18:04 backends.jsonl
+-rw-r-----. 1 root postgres    561294 Oct 27 18:04 current.summary
+-rw-r--r--. 1 root root             4 Oct 27 18:04 current.summary.meta
+-rw-r-----. 1 root postgres 287788151 Oct 27 18:04 current.trace
+-rw-r--r--. 1 root root             5 Oct 27 18:04 current.trace.meta
+-rw-r-----. 1 root postgres         0 Oct 27 17:59 query_sources.jsonl
+-rw-r-----. 1 root postgres      2018 Oct 27 17:59 query_texts.jsonl
+-rw-r-----. 1 root postgres      5696 Oct 27 17:59 wait_event_names.json

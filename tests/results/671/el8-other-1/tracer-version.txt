@@ -1,0 +1,109 @@
+/root/pgwt-671/pg_wait_tracer: unrecognized option '--version'
+Usage: /root/pgwt-671/pg_wait_tracer [OPTIONS]
+
+Target (auto-detect if omitted for single instance):
+  -p, --pid <PID>       Postmaster PID
+  -D, --pgdata <DIR>    PGDATA directory (reads postmaster.pid)
+
+Output control:
+  -V, --view <VIEW>     time_model (default), system_event, session_event,
+                        histogram, query_event, active
+  -S, --sort <MODE>     Sort for active view: wait_time (default), db_time,
+                        pid, event
+  -f, --format <FMT>    tui | text (default: auto-detect TTY)
+  -i, --interval <SEC>  Refresh interval in seconds (default: 5)
+  -d, --duration <SEC>  Run for N seconds then exit (default: unlimited)
+  -n, --count <N>       Print N intervals then exit
+  -w, --window <W1,W2,W3>  Time windows, e.g. 5s,1m,5m (first = interval)
+
+Filters:
+  -e, --event <NAME>    Event filter (histogram: required; query_event: by event)
+  -P, --pid-filter <PID> Show detail for specific backend (session_event)
+  -Q, --query-id <ID>   Filter query_event to one query
+
+Recording:
+  -T, --trace-dir <DIR>      Write raw trace files to DIR
+  -R, --trace-retention <H>  Keep trace files for H hours (default: 24)
+      --retention-gb <G>     Also cap total trace-dir size at G GiB
+                             (oldest archives deleted first; fractional
+                             values allowed; default: no size cap)
+      --trace-group <GROUP>  Group that may read trace files (default:
+                             dba if it exists, else the group
+                             PostgreSQL runs under)
+
+Replay (offline analysis — no root, no PostgreSQL needed):
+      --replay               Replay trace files instead of live tracing
+      --from <TIME>          Start time: ISO 8601, relative (1h, 30m), or 'now'
+      --to <TIME>            End time (same formats as --from)
+
+Daemon:
+      --daemon               Run as daemon (reconnect on PG restart)
+
+Capture tier:
+      --mode <MODE>          tiered (default) | sampled | full | coop
+                             tiered: low-overhead always-on sampler; escalate
+                                     to full fidelity for bounded, budgeted
+                                     windows (on demand or on anomaly). The
+                                     default — safe to leave running 24/7.
+                             sampled: userspace ASH-style sampling, ~zero PG cost.
+                             full: hardware watchpoints, exact transitions
+                                   (always-on, 6-30% overhead).
+                             coop: cooperative (PG extension) — not available in
+                                   this build; ships in the extension track.
+      --sample-rate <HZ>     Sampling rate for sampled/tiered (1-1000, default 10)
+      --escalation-budget <S>  Tiered: full-fidelity seconds allowed per
+                             rolling hour (default 300). 0 = escalation
+                             DISABLED (deny all); 'unlimited' = no cap.
+                             Escalate via the control socket:
+                             {"cmd":"escalate","duration_s":N}.
+
+Anomaly triggers (tiered mode — auto-escalate on the sampled stream):
+      --anomaly-aas-factor <K>   Fire when AAS > K*rolling_baseline (default 3.0)
+      --anomaly-aas-ticks <N>    ...sustained for N consecutive ticks (default 3)
+      --anomaly-lock-fraction <F>  Fire when Lock-class share of active
+                             samples > F (default 0.30), sustained N ticks
+      --anomaly-lock-min-aas <A>  ...AND lock-class AAS >= A (default 2.0), so a
+                             single backend's routine lock wait can't escalate
+      --anomaly-cooldown-s <S>   Min seconds between auto-escalations (default 120)
+      --anomaly-window-s <S>     Full-fidelity window length per auto-trigger (default 60)
+      --anomaly-cpu-capacity <C> Override target effective logical CPU cores
+                             (default: affinity/cgroup discovery; use when
+                             discovered capacity is known to be uncertain)
+      --anomaly-cpu-min-aas <A> Absolute CPU AAS required to fire (default 2.0)
+      --anomaly-cpu-margin <M>  Extra utilization slack for affinity-only
+                             capacity (default 0.02; zero for quota/override)
+      --anomaly-cpu-cusum-k <K> CPU saturation slack/reference (default 0.80)
+      --anomaly-cpu-cusum-h <H> CPU saturation evidence threshold (default 1.50)
+      --anomaly-cpu-cusum-cap <U> Cap CPU demand/capacity ratio (default 1.25)
+      --anomaly-cpu-coverage-gap-s <S> Blind duration before CPU evidence
+                             resets (default 2.0s; derived at sample rate)
+      --anomaly-cpu-cusum-disable  Disable only the CPU saturation guard
+                             (--anomaly-aas-factor >= 1000000 also disables it)
+
+Performance tuning:
+      --lightweight          BPF accumulator only (no per-event ringbuf).
+                             Reduces overhead ~40%, loses histogram/session/query views
+      --skip-query-id        Skip query_id reads in BPF (saves ~1% overhead).
+                             Disables query_event view
+
+Other:
+  -q, --quiet           Suppress view output (daemon mode: record only)
+  -v, --verbose         Verbose output to stderr
+  -h, --help            Show this help
+
+Examples:
+  sudo /root/pgwt-671/pg_wait_tracer                                           # auto-detect instance
+  sudo /root/pgwt-671/pg_wait_tracer --pid 12345 --count 1                     # one-shot
+  sudo /root/pgwt-671/pg_wait_tracer --view system_event --count 5             # 5 intervals
+  sudo /root/pgwt-671/pg_wait_tracer --view histogram --event IO:DataFileRead
+  sudo /root/pgwt-671/pg_wait_tracer --window 5s,1m,5m --count 3                 # time windows
+  sudo /root/pgwt-671/pg_wait_tracer --count 10 | cat                          # text mode (piped)
+
+  # Daemon (reconnects on PG restart):
+  sudo /root/pgwt-671/pg_wait_tracer --daemon -T /tmp/traces
+  sudo /root/pgwt-671/pg_wait_tracer --daemon --pgdata /var/lib/pgsql/18/data
+
+  # Replay (no root needed):
+  /root/pgwt-671/pg_wait_tracer --replay -T /tmp/traces --view time_model
+  /root/pgwt-671/pg_wait_tracer --replay -T /tmp/traces --from 1h --view system_event
+  /root/pgwt-671/pg_wait_tracer --replay -T /tmp/traces --from '2025-02-25T14:00:00' --to '2025-02-25T15:00:00'

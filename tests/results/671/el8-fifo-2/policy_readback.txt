@@ -1,0 +1,3 @@
+tid=24840 policy=1 rtprio=10
+tid=24864 policy=1 rtprio=10
+tid=24865 policy=1 rtprio=10

@@ -1,0 +1,48 @@
+label=gate3-fifo-2 policy=fifo rate=10 clients=8 esc=300s pm=953 port=5418
+pgbench_accounts rows: 1000000
+policy readback: main tid 69956 -> 1 (3 tasks)
+
+escalate: {"ok":true,"escalated":true,"granted_s":300,"seconds_remaining":299.987634851,"budget_remaining_s":899.987634661}
+G t0 pids: 8
+G t1 pids: 8
+
+cross_validate rc=0
+{
+ "E_ns": 778284276392.0,
+ "E_over_G": 0.9613,
+ "G_bias_ratio_noncmd_over_G": 0.1812,
+ "G_ns": 809650940199,
+ "G_pid_churn": 0,
+ "G_pids": 8,
+ "S_ns": 703995211814.0,
+ "S_over_G": 0.8695,
+ "commit": "unknown",
+ "cpu_busy_pct": 81.19,
+ "cpu_share_delta_pp": 3.47,
+ "cpu_share_exact_pct": 46.02,
+ "cpu_share_sampled_pct": 42.55,
+ "label": "gate3-fifo-2",
+ "loadavg_after": "7.01 6.23 4.61 2/196 70526",
+ "loadavg_before": "5.91 5.72 3.90 3/195 70059",
+ "max_delta_event": "CPU",
+ "max_delta_pp": 3.5,
+ "model": "AMD EPYC-Rome Processor",
+ "noncmd_cpu_ns_est": 146700000000.0,
+ "noncmd_cpu_samples": 1467,
+ "policy": "fifo",
+ "policy_readback_main": "tid=69956 policy=1 rtprio=10",
+ "sample_period_ns": 100000000.0,
+ "sampler_ticks_missed_delta": 0,
+ "samples_in_window": 16133,
+ "samples_total_delta": 46804,
+ "steal_pct": 0.0,
+ "tick_read_failures_delta": 24296,
+ "total_exact_ns": 1691210161816.0,
+ "total_sampled_ns": 1654705455958.0,
+ "uname_r": "6.8.0-139-generic",
+ "vendor": "AuthenticAMD",
+ "win_s_comparator": 300.000218,
+ "win_s_wallclock": 300.074,
+ "xval_result": "PASS"
+}
+JSONL {"E_ns": 778284276392.0, "E_over_G": 0.9613, "G_bias_ratio_noncmd_over_G": 0.1812, "G_ns": 809650940199, "G_pid_churn": 0, "G_pids": 8, "S_ns": 703995211814.0, "S_over_G": 0.8695, "commit": "unknown", "cpu_busy_pct": 81.19, "cpu_share_delta_pp": 3.47, "cpu_share_exact_pct": 46.02, "cpu_share_sampled_pct": 42.55, "label": "gate3-fifo-2", "loadavg_after": "7.01 6.23 4.61 2/196 70526", "loadavg_before": "5.91 5.72 3.90 3/195 70059", "max_delta_event": "CPU", "max_delta_pp": 3.5, "model": "AMD EPYC-Rome Processor", "noncmd_cpu_ns_est": 146700000000.0, "noncmd_cpu_samples": 1467, "policy": "fifo", "policy_readback_main": "tid=69956 policy=1 rtprio=10", "sample_period_ns": 100000000.0, "sampler_ticks_missed_delta": 0, "samples_in_window": 16133, "samples_total_delta": 46804, "steal_pct": 0.0, "tick_read_failures_delta": 24296, "total_exact_ns": 1691210161816.0, "total_sampled_ns": 1654705455958.0, "uname_r": "6.8.0-139-generic", "vendor": "AuthenticAMD", "win_s_comparator": 300.000218, "win_s_wallclock": 300.074, "xval_result": "PASS"}
