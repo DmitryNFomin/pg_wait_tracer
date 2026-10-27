@@ -2,9 +2,32 @@
 #include "exact_probe.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "synthetic_query.h"
+#include "cJSON.h"
+
+void pgwt_exact_probe_add_attach_status(cJSON *root,
+                                        const struct pgwt_exact_probe_core *core)
+{
+    cJSON_AddNumberToObject(root, "exact_probe_attached_mask", core->attached_mask);
+    for (int i = PGWT_EXACT_PROBE_EXEC; i <= PGWT_EXACT_PROBE_PLAN; i++) {
+        const char *outcome = "not_attempted";
+        switch (core->attach_outcome[i]) {
+        case PGWT_EXACT_ATTACH_ATTACHED: outcome = "attached"; break;
+        case PGWT_EXACT_ATTACH_FAILED: outcome = "attach_failed"; break;
+        case PGWT_EXACT_ATTACH_DISABLED: outcome = "disabled"; break;
+        case PGWT_EXACT_ATTACH_NOT_ATTEMPTED: break;
+        }
+        char key[64];
+        const char *probe = i == PGWT_EXACT_PROBE_EXEC ? "exec" : "plan";
+        snprintf(key, sizeof(key), "exact_probe_%s_attach_outcome", probe);
+        cJSON_AddStringToObject(root, key, outcome);
+        snprintf(key, sizeof(key), "exact_probe_%s_attach_errno", probe);
+        cJSON_AddNumberToObject(root, key, core->attach_errno[i]);
+    }
+}
 
 static int attach_missing(struct pgwt_exact_probe_core *core, uint32_t mask,
                           const struct pgwt_exact_probe_ops *ops, void *ctx,
@@ -17,8 +40,15 @@ static int attach_missing(struct pgwt_exact_probe_core *core, uint32_t mask,
         uint32_t bit = PGWT_EXACT_PROBE_BIT(i);
         if (!(mask & bit) || (core->attached_mask & bit))
             continue;
+        /* Outcomes are diagnostics; only the requested mask gates attempts.
+         * Clear stale errno so callbacks without a reason report unknown (0),
+         * not an unrelated earlier syscall's error. */
+        errno = 0;
         void *link = ops->attach(ctx, (enum pgwt_exact_probe_index)i);
         if (!link) {
+            int attach_errno = errno;
+            core->attach_outcome[i] = PGWT_EXACT_ATTACH_FAILED;
+            core->attach_errno[i] = attach_errno;
             for (int j = PGWT_EXACT_PROBE_COUNT - 1; j >= 0; j--) {
                 uint32_t rollback_bit = PGWT_EXACT_PROBE_BIT(j);
                 if (!(*new_mask & rollback_bit))
@@ -29,8 +59,11 @@ static int attach_missing(struct pgwt_exact_probe_core *core, uint32_t mask,
                 core->attached_mask &= ~rollback_bit;
             }
             *new_mask = 0;
+            errno = attach_errno;
             return -1;
         }
+        core->attach_outcome[i] = PGWT_EXACT_ATTACH_ATTACHED;
+        core->attach_errno[i] = 0;
         core->links[i] = link;
         core->attached_mask |= bit;
         *new_mask |= bit;
@@ -47,12 +80,16 @@ int pgwt_exact_probe_pair_attach(struct pgwt_exact_probe_pair *pair,
         return -1;
     pair->start = NULL;
     pair->done = NULL;
+    errno = 0;
     void *a = attach(ctx, PGWT_EXACT_PAIR_START);
     if (!a)
         return -1;
+    errno = 0;
     void *b = attach(ctx, PGWT_EXACT_PAIR_DONE);
     if (!b) {
+        int attach_errno = errno;
         detach(ctx, PGWT_EXACT_PAIR_START, a);
+        errno = attach_errno;
         return -1;
     }
     pair->start = a;
@@ -101,6 +138,13 @@ uint32_t pgwt_exact_probe_startup_mask(
     bool validated_tick_source = pg_major >= 13 &&
         pgwt_pgbs_sampled_attr_enabled(layout);
     return validated_tick_source ? 0 : PGWT_EXACT_PROBE_ATTR_MASK;
+}
+
+uint32_t pgwt_exact_probe_acquire_mask(bool lightweight_mode, bool skip_usdt)
+{
+    /* Policy gates attempts through the mask, preserving seeded diagnostics. */
+    return lightweight_mode || skip_usdt ? PGWT_EXACT_PROBE_ATTR_MASK
+                                         : PGWT_EXACT_PROBE_ALL_MASK;
 }
 
 int pgwt_exact_probe_core_pin(struct pgwt_exact_probe_core *core,
@@ -180,7 +224,9 @@ int pgwt_exact_probe_core_acquire(struct pgwt_exact_probe_core *core,
         if (!(optional & bit) || (core->attached_mask & bit))
             continue;
         uint32_t got = 0;
-        (void)attach_missing(core, bit, ops, ctx, &got);
+        /* attach_missing records the optional member's outcome and errno. */
+        if (attach_missing(core, bit, ops, ctx, &got) != 0)
+            continue;
     }
     return 0;
 }
@@ -248,7 +294,6 @@ void pgwt_exact_probe_core_cleanup(struct pgwt_exact_probe_core *core,
 #include "discovery.h"
 #include "sampler.h"
 
-#include <stdio.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -293,12 +338,13 @@ static void *usdt_pair_attach_one(void *ctx, int which)
     struct usdt_pair_ctx *c = ctx;
     if (which < 0 || which > 1)
         return NULL;
+    errno = 0;
     struct bpf_link *l = bpf_program__attach_usdt(
         c->prog[which], -1, c->bin, "postgresql", c->note[which], NULL);
-    if (libbpf_get_error(l))
-        l = NULL;
-    if (!l) {
-        errno = ENOTSUP;
+    long err = libbpf_get_error(l);
+    if (err || !l) {
+        if (err)
+            errno = (int)-err;
         return NULL;
     }
     if (c->slot[which])
@@ -331,7 +377,6 @@ static void *attach_usdt_pair(struct pgwt_daemon *d,
     };
     if (pgwt_exact_probe_pair_attach(pair, usdt_pair_attach_one,
                                      usdt_pair_detach_one, &c) != 0) {
-        errno = ENOTSUP;
         return NULL;
     }
     return pair;
@@ -367,12 +412,12 @@ static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
         atoi(escalation_fail) == (int)index &&
         d->escalation.generation != 0;
     if (force_startup_or_exact || force_escalation) {
-        errno = EIO;
         fprintf(stderr, "WARN: %s=%d -- forcing exact-link attach failure "
                 "(TEST ONLY)\n",
                 force_startup_or_exact ? "PGWT_TEST_EXACT_PROBE_FAIL_AT" :
                 "PGWT_TEST_EXACT_PROBE_ESCALATION_FAIL_AT",
                 index);
+        errno = EIO;
         return NULL;
     }
     if (!bin) {
@@ -418,10 +463,6 @@ static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
             d->exact_probes.activity_offset, &opts);
         break;
     case PGWT_EXACT_PROBE_EXEC:
-        if (d->lightweight_mode || d->skip_usdt) {
-            errno = ENOTSUP;
-            break;
-        }
         /* #464: publish the canonical-site allowlist BEFORE attaching.
          * On refusal, attach NOTHING: execution telemetry is absent and
          * loud, never doubled and quiet. Published once per daemon --
@@ -430,7 +471,9 @@ static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
          * need. */
         if (!d->exact_probes.exec_sites_published) {
             if (pgwt_publish_exec_sites(d, bin) != 0) {
-                errno = ENOTSUP;
+                /* This helper does not promise an errno (it can refuse an
+                 * ambiguous canonical site). Do not fabricate ENOTSUP. */
+                errno = 0;
                 break;
             }
             d->exact_probes.exec_sites_published = true;
@@ -443,10 +486,6 @@ static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
                                 "query__execute__start",
                                 "query__execute__done");
     case PGWT_EXACT_PROBE_PLAN:
-        if (d->lightweight_mode || d->skip_usdt) {
-            errno = ENOTSUP;
-            break;
-        }
         return attach_usdt_pair(d, &d->exact_probes.plan_links,
                                 d->skel->progs.on_plan_start,
                                 d->skel->progs.on_plan_done,
@@ -513,6 +552,12 @@ static int set_config(struct pgwt_daemon *d, uint64_t generation,
 
 int pgwt_exact_probe_startup(struct pgwt_daemon *d)
 {
+    if (d->lightweight_mode || d->skip_usdt || d->mode == PGWT_MODE_COOP) {
+        for (int i = PGWT_EXACT_PROBE_EXEC; i <= PGWT_EXACT_PROBE_PLAN; i++) {
+            d->exact_probes.core.attach_outcome[i] = PGWT_EXACT_ATTACH_DISABLED;
+            d->exact_probes.core.attach_errno[i] = 0;
+        }
+    }
     uint32_t mask = pgwt_exact_probe_startup_mask(
         d->mode, d->pg_major_version, &d->backend_status_layout,
         d->lightweight_mode != 0, d->skip_usdt != 0);
@@ -603,8 +648,10 @@ int pgwt_exact_probe_acquire(struct pgwt_daemon *d, uint64_t generation,
 {
     if (set_config(d, generation, attach_boundary_ns, true) != 0)
         return -1;
+    uint32_t mask = pgwt_exact_probe_acquire_mask(
+        d->lightweight_mode != 0, d->skip_usdt != 0);
     if (pgwt_exact_probe_core_acquire(&d->exact_probes.core,
-                                      PGWT_EXACT_PROBE_ALL_MASK, generation,
+                                      mask, generation,
                                       &live_ops, d) != 0) {
         set_config(d, 0, 0, true);
         return -1;
