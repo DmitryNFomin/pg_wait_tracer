@@ -49,15 +49,34 @@ struct pgwt_exact_probe_ops {
     pgwt_exact_detach_fn detach;
 };
 
+enum pgwt_exact_attach_outcome {
+    PGWT_EXACT_ATTACH_NOT_ATTEMPTED = 0,
+    PGWT_EXACT_ATTACH_ATTACHED,
+    PGWT_EXACT_ATTACH_FAILED,
+    PGWT_EXACT_ATTACH_DISABLED,
+};
+
 /* The core is deliberately libbpf-free so idempotency, reference ownership,
  * and partial-attach rollback are deterministic unit-test targets. */
 struct pgwt_exact_probe_core {
     void *links[PGWT_EXACT_PROBE_COUNT];
     uint32_t attached_mask;
+    /* Latest attempt or policy refusal, retained after release; diagnostics
+     * never gate attempts. attached_mask is CURRENT state.
+     * errno is 0 on success or when the failing callback supplied no reason.
+     * No support claim: even ENOTSUP is an attempt error, not an independently
+     * measured kernel/binary capability. Only optional members are published. */
+    enum pgwt_exact_attach_outcome attach_outcome[PGWT_EXACT_PROBE_COUNT];
+    int attach_errno[PGWT_EXACT_PROBE_COUNT];
     uint32_t pinned_mask;
     uint64_t generation;
     unsigned consumers;
 };
+
+struct cJSON;
+/* Flat, additive disclosure beside the mask, independent of window fidelity. */
+void pgwt_exact_probe_add_attach_status(struct cJSON *root,
+                                        const struct pgwt_exact_probe_core *core);
 
 /* One bundle member, two bpf_links: a USDT phase marker is only meaningful
  * as a start/done PAIR. Both attach or neither does, and they detach
@@ -140,6 +159,9 @@ uint32_t pgwt_exact_probe_startup_mask(
     enum pgwt_mode mode, int pg_major,
     const struct PgBackendStatusLayout *layout,
     bool lightweight_mode, bool skip_usdt);
+
+/* Escalation retains attribution probes; flags disable only phase markers. */
+uint32_t pgwt_exact_probe_acquire_mask(bool lightweight_mode, bool skip_usdt);
 
 int pgwt_exact_probe_core_pin(struct pgwt_exact_probe_core *core,
                               uint32_t mask, uint64_t generation,
