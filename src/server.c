@@ -8393,6 +8393,8 @@ static void handle_control(struct pgwt_server *srv, struct pgwt_request *req,
         return;
     }
 
+    /* #592: retain additive diagnostics such as optional-probe attach
+     * outcomes and errno verbatim on the websocket control response. */
     cJSON_AddItemToObject(root, "response", daemon_resp);
     emit_json(root);
 }
@@ -8493,8 +8495,31 @@ static void dump_daemon_status(const char *trace_dir)
     }
 
     printf("Daemon: running    mode: %s    uptime: %.0fs    "
-           "events/s: %.0f    backends: %d    pg_pid: %d\n\n",
+           "events/s: %.0f    backends: %d    pg_pid: %d\n",
            mode, uptime_s, events_per_sec, backends, pg_pid);
+
+    /* Read STATUS, not metrics: operators can see optional attach failures
+     * in --dump even though metrics counters have no product view (#600). */
+    /* Outcomes survive release; show current links beside the history. */
+    cJSON *mask = cJSON_GetObjectItem(status, "exact_probe_attached_mask");
+    printf("Optional phase probes (latest attach; current attached_mask=");
+    if (cJSON_IsNumber(mask))
+        printf("%d", mask->valueint);
+    else
+        printf("unknown");
+    printf("):");
+    const char *probes[] = { "exec", "plan" };
+    for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        char key[64];
+        snprintf(key, sizeof(key), "exact_probe_%s_attach_outcome", probes[i]);
+        cJSON *outcome = cJSON_GetObjectItem(status, key);
+        snprintf(key, sizeof(key), "exact_probe_%s_attach_errno", probes[i]);
+        cJSON *reason = cJSON_GetObjectItem(status, key);
+        printf(" %s=%s (errno=%d)", probes[i],
+               cJSON_IsString(outcome) ? outcome->valuestring : "unknown",
+               cJSON_IsNumber(reason) ? reason->valueint : 0);
+    }
+    printf("\n\n");
 
     cJSON_Delete(status);
 }

@@ -1271,6 +1271,36 @@ int pgwt_discover(struct pgwt_daemon *d)
     if (d->verbose)
         fprintf(stderr, "INFO: postgres binary: %s\n", binary);
 
+    /* #584: exact_probes.query_offset / .activity_offset are FILE offsets
+     * into THIS binary (exact_probe.c's attach_link computes each lazily,
+     * once, and reuses the cached value forever after — see
+     * pgwt_exact_probe_bundle_forget_skeleton's comment in exact_probe.h,
+     * which deliberately does NOT clear them for exactly that reason: a
+     * same-binary PostgreSQL restart leaves the file, and therefore these
+     * offsets, unchanged). That is only safe across a SAME-binary restart.
+     * Across a re-attach onto a DIFFERENT binary (minor-version upgrade, or
+     * a rebuild) the file offset a symbol sits at can move, and the stale
+     * cached value then gets handed to bpf_program__attach_uprobe_opts()
+     * against the NEW binary — attaching at whatever instruction happens to
+     * sit at that byte offset, not at the probed function: a uprobe that
+     * fires on the wrong code, producing plausible-looking garbage as if it
+     * were a query id or activity string, never an error. There is no
+     * signal here cheap enough to detect "did the binary content change"
+     * (a file path match proves nothing — a rebuild keeps the same path),
+     * so re-deriving unconditionally on every discover() call is the fix:
+     * cheap (one symbol lookup, already paid for the sibling offsets right
+     * below) and idempotent on a same-binary restart (recomputes to the
+     * identical value). If the symbol cannot be resolved in the new binary,
+     * attach_link() already refuses (offset stays 0 -> errno ENOENT -> NULL
+     * link), and attach_missing()'s existing atomic rollback already turns
+     * that into a fail-closed, reason-carrying escalation refusal
+     * (escalation.c: PGWT_ESC_FAIL_EXACT_ATTACH, "exact probe bundle attach
+     * failed; escalation rolled back") instead of a silent wrong attach —
+     * this fix only has to make that existing refusal reachable on
+     * re-attach, not invent a new one. */
+    d->exact_probes.query_offset = 0;
+    d->exact_probes.activity_offset = 0;
+
     /* Detect PostgreSQL major version */
     d->pg_major_version = pgwt_detect_pg_version(binary);
     if (d->pg_major_version == 0) {

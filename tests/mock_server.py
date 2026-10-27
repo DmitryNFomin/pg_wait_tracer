@@ -795,9 +795,22 @@ class DaemonState:
         self.reason = "manual" if self.tier == "escalated" else "none"
         self.windows_total = 1 if self.tier == "escalated" else 0
         self.denied_total = 0
+        self.phase_attempted = self.tier == "escalated"
+
+    def probe_attach_status(self):
+        # #592: latest attempt survives de-escalation; only the mask clears.
+        outcome = "attached" if self.phase_attempted else "not_attempted"
+        return {
+            "exact_probe_attached_mask": 15 if self.tier == "escalated" else 0,
+            "exact_probe_exec_attach_outcome": outcome,
+            "exact_probe_exec_attach_errno": 0,
+            "exact_probe_plan_attach_outcome": outcome,
+            "exact_probe_plan_attach_errno": 0,
+        }
 
     def status(self):
         return {
+            **self.probe_attach_status(),
             "ok": True,
             "mode": "tiered",
             "uptime_s": 123.4,
@@ -826,6 +839,8 @@ class DaemonState:
 
     def metrics(self):
         return {
+            **{k: v for k, v in self.probe_attach_status().items()
+               if not k.endswith("_attach_outcome")},
             "ok": True,
             "uptime_s": 123.4,
             "events_total": 1_250_000,
@@ -910,6 +925,7 @@ class DaemonState:
         if self.tier != "escalated":
             self.windows_total += 1
         self.tier = "escalated"
+        self.phase_attempted = True
         self.reason = reason or "manual"
         self.seconds_remaining = max(self.seconds_remaining, duration_s)
         self.budget_remaining_s = max(0.0, self.budget_remaining_s - duration_s)
