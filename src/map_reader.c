@@ -329,8 +329,8 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
         }
     }
 
-    /* Query-level accumulation (no histogram; issue #128: a closed record
-     * without an id is deferred until the pid reports one). */
+    /* Query-level accumulation (no histogram; issue #128: a closed
+     * foreground record without an id may wait for the pid to report one). */
     pgwt_live_qattr_record(acc, pa, iv->query_id, we, stat_ns, iv->cat_flag,
                            iv->closed);
 }
@@ -377,8 +377,26 @@ void pgwt_live_qattr_record(struct pgwt_accumulator *acc,
         qattr_add_row(acc, query_id, we, 1, stat_ns, stat_ns, stat_ns);
         return;
     }
+    if (cat_flag & (PGWT_EVENT_FLAG_BACKGROUND | PGWT_EVENT_FLAG_MAINT)) {
+        /* #641: mirror compute.c's #596 arm. IO_WORKER was decided FIRST:
+         * it outranks background/maintenance even when both bits are set.
+         * Non-idle is the LOAD rule (pgwt_is_idle_event), so a checkpointer
+         * in Timeout:CheckpointWriteDelay is neither attributed nor
+         * unattributed. NEVER defer into pa->qattr.pending or backfill from
+         * an earlier/later id, including the pid's cmd_qid. This applies
+         * regardless of defer: the label is final even for a tick-time open
+         * stretch, unlike the foreground "not yet" rule below, where a
+         * closing record may supply an id. The TOTAL cat_flag != 0 refusal
+         * below must remain: an unknown category is visibly under-counted,
+         * never allowed to borrow another statement's id. */
+        if (!pgwt_is_idle_event(we)) {
+            qattr_add_row(acc, 0, we, 1, stat_ns, stat_ns, stat_ns);
+            acc->qattr_unattributed_ns += stat_ns;
+        }
+        return;
+    }
     if (cat_flag != 0)
-        return;   /* background / maintenance: never attributed (as before) */
+        return;   /* unknown category: drop rather than borrow an id */
     /* COMMAND BOUNDARY, so pgwt_is_session_idle_event and NOT the load rule
      * (src/idle_rule.h explains the split). 2026-10-06: six Timeout events
      * became load-idle, and a foreground backend DOES hit one of them --
