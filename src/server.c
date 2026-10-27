@@ -4733,14 +4733,20 @@ static int reject_overload(struct pgwt_server *srv,
         cJSON_AddStringToObject(root, "error", "window too large");
         cJSON_AddStringToObject(root, "code", "window_too_large");
         cJSON_AddNumberToObject(root, "max_events", load_max_events());
-        /* #526: the standing hint advises adding a filter -- which, on a
-         * request that ALREADY has a query filter, is the advice that caused
-         * this refusal. A query filter forces the exact path (the summary
-         * per-query table cannot answer a window-clipped question), so that
-         * request can only narrow the range. Telling the operator to add the
-         * filter they already added is worse than a bare refusal: it reads as
-         * "you did not try the obvious thing". */
-        if (req->filter.query_id != 0)
+        /* #526: only explain a query-forced raw load where that is true.
+         * TRUE: handle_top_events (:5047, query_id == 0 guard),
+         * handle_top_sessions (:5238/:5160, sessions_filter_needs_raw),
+         * handle_heatmap (:6024, query_id == 0 guard): reject_overload is
+         * reached only from their raw else branches.
+         * FALSE: handle_top_queries (:5578) loads raw unconditionally BEFORE
+         * routing, with pid pushdown disabled (:5576); handle_aas (:4830)
+         * guards only !detail_events; handle_time_model (:4923) has no query
+         * guard. A query filter does not force raw at those sites, so they
+         * and all other commands keep the original hint. */
+        if (req->filter.query_id != 0 &&
+            (strcmp(req->cmd, "top_events") == 0 ||
+             strcmp(req->cmd, "top_sessions") == 0 ||
+             strcmp(req->cmd, "heatmap") == 0))
             cJSON_AddStringToObject(root, "hint",
                 "a query filter forces the exact path, which loads raw "
                 "events; narrow the time range");

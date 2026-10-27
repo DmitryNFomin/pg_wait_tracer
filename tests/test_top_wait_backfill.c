@@ -477,6 +477,64 @@ static void test_overload_reports_absence(const char *dir)
           WIFEXITED(status) ? WEXITSTATUS(status) : -1, !WIFEXITED(status));
 }
 
+/* ── Section 2b: query-filter overload hints describe the actual route ── */
+/* Like section 2, fork BEFORE the parent's first load_max_events() call so
+ * each child's tiny budget reaches an unset cache. Positively require a
+ * window_too_large refusal BEFORE inspecting the hint: an absent refusal
+ * must fail, never make this gate pass vacuously. Events forces raw for a
+ * query filter; Queries loads raw regardless, so keeps the original hint. */
+static int child_query_filter_overload_hint(const char *dir, int queries)
+{
+    setenv("PGWT_LOAD_MAX_EVENTS", "3", 1);
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    if (!srv || server_init(srv, dir) != 0) return 1;
+    struct pgwt_request req = {0};
+    snprintf(req.cmd, sizeof(req.cmd), "%s",
+             queries ? "top_queries" : "top_events");
+    req.filter.query_id = TARGET_QID;
+    cJSON *out = queries ? call_top_queries(srv, &req)
+                         : call_top_events(srv, &req);
+    cJSON *code = cJSON_GetObjectItem(out, "code");
+    if (!cJSON_IsString(code) ||
+        strcmp(code->valuestring, "window_too_large") != 0) {
+        fprintf(stderr, "child: %s did not reach window_too_large\n", req.cmd);
+        cJSON_Delete(out);
+        free(srv);
+        return 2;
+    }
+    cJSON *hint = cJSON_GetObjectItem(out, "hint");
+    int ok = cJSON_IsString(hint) && (queries
+        ? strcmp(hint->valuestring,
+                 "narrow the time range or add a pid/query filter") == 0 &&
+          strstr(hint->valuestring, "forces the exact path") == NULL
+        : strstr(hint->valuestring, "forces the exact path") != NULL);
+    if (!ok)
+        fprintf(stderr, "child: %s has the wrong overload hint: %s\n",
+                req.cmd, cJSON_IsString(hint) ? hint->valuestring : "(missing)");
+    cJSON_Delete(out);
+    free(srv);
+    return ok ? 0 : 3;
+}
+
+static void test_query_filter_overload_hints(const char *dir)
+{
+    printf("--- 2b. query-filter overload hints match Events and Queries "
+           "routing ---\n");
+    for (int queries = 0; queries <= 1; queries++) {
+        fflush(stdout);
+        pid_t pid = fork();
+        if (pid == 0) _exit(child_query_filter_overload_hint(dir, queries));
+        int status = 0;
+        int waited = pid > 0 ? waitpid(pid, &status, 0) : -1;
+        CHECK(waited == pid && pid > 0 && WIFEXITED(status) &&
+              WEXITSTATUS(status) == 0,
+              "%s child must reach window_too_large and report the %s "
+              "hint (exit %d)", queries ? "top_queries" : "top_events",
+              queries ? "original" : "query-forces-raw",
+              WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    }
+}
+
 /* ── Section 3: the Top Queries backfill ────────────────────────────────── */
 static void test_queries_backfill_matches_raw(const char *dir)
 {
@@ -970,11 +1028,12 @@ int main(void)
     build_fixture(dir_noqueries_nosum, base_mono, 0, FIXTURE_NO_QUERIES);
     build_fixture(dir_straddle, base_mono, 1, FIXTURE_STRADDLE);
 
-    /* Section 2 forks BEFORE this process ever calls load_max_events()
+    /* Sections 2 and 2b fork BEFORE this process ever calls load_max_events()
      * (section 1 does, via server_load_events_fi inside the backfill), so
      * the child's PGWT_LOAD_MAX_EVENTS=3 override lands in a process whose
      * cache is still unset, and never leaks into section 1's budget. */
     test_overload_reports_absence(dir);
+    test_query_filter_overload_hints(dir);
     test_backfill_matches_raw(dir, base_mono);
     test_queries_backfill_matches_raw(dir);
     test_route_predicate_discriminates(dir_nosum);
@@ -989,7 +1048,7 @@ int main(void)
 
     /* Require the observed assertion total: a truncated run must fail
      * even when all assertions it did execute passed. */
-    if (tests_run < 104) {
+    if (tests_run < 106) {
         printf("FAIL: only %d assertions executed -- a truncated run must "
                "not read as a pass\n", tests_run);
         tests_failed++;

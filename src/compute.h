@@ -621,9 +621,11 @@ struct pgwt_queries_result {
      * never reported an id, plus background/maintenance work) — reported
      * here instead of being dropped — and how much row time was
      * attributed to an id reported after the interval closed
-     * (PGWT_EVENT_FLAG_QUERY_BACKFILL). Raw path only: the summary fast
-     * path leaves both 0 (its per-query table has no unattributed bucket;
-     * the server marks the response unattributed_available: false). */
+     * (PGWT_EVENT_FLAG_QUERY_BACKFILL). The per-query summary table has no
+     * unattributed bucket, but handle_top_queries copies all three scalars
+     * from the raw pass it already runs on the summary route, so both routes
+     * populate them. unattributed_available: false means only that the raw
+     * pass failed. */
     double   unattributed_ms;
     uint64_t unattributed_count;
     double   backfilled_ms;
