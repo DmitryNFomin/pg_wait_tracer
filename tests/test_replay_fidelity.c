@@ -803,18 +803,21 @@ static void test_replay_flag_mask_closure(void)
     snprintf(path, sizeof(path), "%s/flags.h", dir);
     CHECK(scan_defined_event_flags(path, &mask, &count) == -1,
           "flag scanner refuses a nonexistent path");
+    /* Except for the no-event-flags case, each fixture needs a valid define;
+     * otherwise the zero-defines rule masks the rule it is meant to test. */
     const struct {
         const char *text;
         const char *message;
     } bypasses[] = {
         { "#define SOMETHING_ELSE 0x1U\n",
           "flag scanner refuses a file with no event flag defines" },
-        { "#define PGWT_EVENT_FLAG_WEIRD (1u << 13)\n",
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n#define PGWT_EVENT_FLAG_WEIRD (1u << 13)\n",
           "flag scanner refuses an unparseable flag value" },
         { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n"
           "#define PGWT_EVENT_FLAG_DUPLICATE 0x1U\n",
           "flag scanner refuses a duplicate bit" },
-        { "#define PGWT_EVENT_FLAG_MULTIBIT 0x30U\n",
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n"
+          "#define PGWT_EVENT_FLAG_MULTIBIT 0x30U\n",
           "flag scanner refuses a multi-bit value" },
     };
     for (size_t i = 0; i < sizeof(bypasses) / sizeof(bypasses[0]); i++) {
