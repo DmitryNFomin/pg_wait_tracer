@@ -130,11 +130,11 @@ static void test_validation_exclusions_reset_per_discovery_cycle(void)
  * SAME binary cannot distinguish "recomputed to the same value" from
  * "never touched" -- which is exactly the trap a same-binary re-attach test
  * would fall into -- but a changed sentinel proves the cache was cleared
- * independent of what it was cleared TO. This test binary has neither
- * `pgstat_report_query_id` nor `pgstat_report_activity`, so both offsets
- * land back on 0 after discovery: the "symbol not found, refuse" case the
- * fix is meant to route into exact_probe.c's existing fail-closed rollback
- * (PGWT_ESC_FAIL_EXACT_ATTACH) rather than a silent stale attach. */
+ * independent of what it was cleared TO. The stronger assertions below
+ * pin both offsets to 0: pgwt_discover() never calls exact_probe.c, so it
+ * cannot resolve them regardless of the fixture's symbol table. Mistaking
+ * missing symbols for the reason could lead a reader to weaken == 0 back
+ * to != 0xdeadbeef, re-opening the bypass #584 closed. */
 static void test_exact_probe_offsets_reset_per_discovery_cycle(void)
 {
     struct pgwt_daemon *d = calloc(1, sizeof(*d));
@@ -163,15 +163,60 @@ static void test_exact_probe_offsets_reset_per_discovery_cycle(void)
      * these two symbols (no exact_probe.c call anywhere in discovery.c --
      * attach_link() does the lazy lookup later), so the only correct state
      * on return is the cleared one: 0, the "not resolved yet" value that
-     * makes attach_link() re-derive, and -- here, where the fixture binary
-     * exports neither `pgstat_report_query_id` nor `pgstat_report_activity`
-     * -- the "symbol not found" value that routes into attach_missing()'s
-     * existing fail-closed rollback (PGWT_ESC_FAIL_EXACT_ATTACH) rather
-     * than a silent attach at the wrong instruction. */
+     * makes attach_link() re-derive later. The fixture's symbol table is
+     * irrelevant to this state. Attributing it to missing symbols could
+     * invite weakening == 0 back to != 0xdeadbeef, re-opening the bypass
+     * #584 closed. */
     CHECK(d->exact_probes.query_offset == 0,
           "query_offset is cleared to the re-derive/refuse value, not to junk");
     CHECK(d->exact_probes.activity_offset == 0,
           "activity_offset is cleared to the re-derive/refuse value, not to junk");
+
+    free(d->pg_binary_saved);
+    free(d);
+}
+
+/* #664: a PG13 -> PG14+ re-attach must discard the prior PG13 attribution
+ * state. This binary reports PG17 via --version. Check allocation and
+ * discovery success, then pin the non-PG13 version so a changed fixture
+ * cannot accidentally exercise legitimate PG13 re-initialization instead.
+ * The cleared flag selects pgstat_report_query_id and preserves the
+ * st_query_id refusal; each offset must be exactly 0 because daemon.c
+ * copies it verbatim into BPF rodata. pgss_loaded must also be re-derived.
+ * Check the sentinel precondition before discovery: an already-zeroed
+ * struct would satisfy every reset assertion vacuously without the fix. */
+static void test_pg13_query_attr_reset_per_discovery_cycle(void)
+{
+    struct pgwt_daemon *d = calloc(1, sizeof(*d));
+    CHECK(d != NULL, "PG13 re-attach: allocate discovery fixture");
+    if (!d)
+        return;
+
+    d->use_myproc = true;
+    d->pgss_loaded = true;
+    d->use_pg13_query_attr = true;
+    d->pg13_qd_plannedstmt_off = 0x5101;
+    d->pg13_ps_queryid_off = 0x5102;
+    d->pg13_qd_sourcetext_off = 0x5103;
+    CHECK(d->use_pg13_query_attr && d->pg13_qd_plannedstmt_off != 0 &&
+          d->pg13_ps_queryid_off != 0 && d->pg13_qd_sourcetext_off != 0,
+          "PG13 re-attach: prior-cycle sentinel state is present");
+
+    d->postmaster_pid = getpid();
+    int rc = pgwt_discover(d);
+
+    CHECK(rc == 0, "PG13 re-attach: discovery succeeds");
+    CHECK(d->pg_major_version != 13,
+          "PG13 re-attach: fixture reports a different major version");
+    CHECK(!d->use_pg13_query_attr,
+          "PG13 re-attach: clear use_pg13_query_attr for symbol selection");
+    CHECK(d->pg13_qd_plannedstmt_off == 0,
+          "PG13 re-attach: pg13_qd_plannedstmt_off is zero");
+    CHECK(d->pg13_ps_queryid_off == 0,
+          "PG13 re-attach: pg13_ps_queryid_off is zero");
+    CHECK(d->pg13_qd_sourcetext_off == 0,
+          "PG13 re-attach: pg13_qd_sourcetext_off is zero");
+    CHECK(!d->pgss_loaded, "PG13 re-attach: clear pgss_loaded");
 
     free(d->pg_binary_saved);
     free(d);
@@ -365,6 +410,7 @@ int main(int argc, char **argv)
     /* A daemon re-enters pgwt_discover() after each PostgreSQL restart. */
     test_validation_exclusions_reset_per_discovery_cycle();
     test_exact_probe_offsets_reset_per_discovery_cycle();
+    test_pg13_query_attr_reset_per_discovery_cycle();
 
     printf("\n%d/%d tests passed\n", ok, run);
     return (ok == run) ? 0 : 1;

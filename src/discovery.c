@@ -1290,16 +1290,31 @@ int pgwt_discover(struct pgwt_daemon *d)
      * so re-deriving unconditionally on every discover() call is the fix:
      * cheap (one symbol lookup, already paid for the sibling offsets right
      * below) and idempotent on a same-binary restart (recomputes to the
-     * identical value). If the symbol cannot be resolved in the new binary,
-     * attach_link() already refuses (offset stays 0 -> errno ENOENT -> NULL
-     * link), and attach_missing()'s existing atomic rollback already turns
-     * that into a fail-closed, reason-carrying escalation refusal
-     * (escalation.c: PGWT_ESC_FAIL_EXACT_ATTACH, "exact probe bundle attach
-     * failed; escalation rolled back") instead of a silent wrong attach —
-     * this fix only has to make that existing refusal reachable on
-     * re-attach, not invent a new one. */
+     * identical value). This closes the stale-offset class, provided the
+     * symbol is correctly chosen. If that symbol cannot be resolved in the
+     * new binary, attach_link() already refuses (offset stays 0 -> errno
+     * ENOENT -> NULL link), and attach_missing()'s existing atomic rollback
+     * turns that into PGWT_ESC_FAIL_EXACT_ATTACH. A wrongly chosen symbol
+     * can still resolve successfully; #664 below fixes that separate case. */
     d->exact_probes.query_offset = 0;
     d->exact_probes.activity_offset = 0;
+
+    /* #664 invariant: every fact derived from the postgres binary is
+     * re-derived on each discover() call. Clear the PG13 attribution group
+     * before version detection and all later reads: a stale flag selects
+     * standard_ExecutorStart (which still resolves on PG14+) and stale
+     * offsets are copied verbatim into BPF rodata, yielding garbage query
+     * ids; the flag also suppresses the st_query_id offset FATAL refusal.
+     * On PG14+ the cleared flag selects pgstat_report_query_id. On PG13
+     * where pgss is no longer loaded, it makes attach_link resolve that
+     * unexported symbol -> offset 0 -> ENOENT -> the existing fail-closed
+     * PGWT_ESC_FAIL_EXACT_ATTACH rollback: refuse rather than attach with
+     * a layout we cannot know. */
+    d->pgss_loaded = false;
+    d->use_pg13_query_attr = false;
+    d->pg13_qd_plannedstmt_off = 0;
+    d->pg13_ps_queryid_off = 0;
+    d->pg13_qd_sourcetext_off = 0;
 
     /* Detect PostgreSQL major version */
     d->pg_major_version = pgwt_detect_pg_version(binary);
