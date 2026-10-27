@@ -26,6 +26,20 @@ baselines were regenerated in the same PR (see Baseline history below): they
 now pin the CORRECT full multi-layer stacked render with UTC time-axis
 labels.
 
+`transition_matrix.png` sits at `matrixChartFitHeight`'s floor-clamp boundary.
+Its captured height is BIMODAL under ordinary local-vs-CI font drift: on
+identical code, the CI `snapshots` job produced 1240×454 (chart clamped to
+`MATRIX_CHART_MIN_PX` = 360), while local `make ui-gallery` produced 1240×472
+(chart about 378px, above the floor and unclamped). Both use the snapshot
+suite's `VIEWPORT` 1280×800 and `DEVICE_SCALE` 1; `tests/ui_gallery.sh` sets
+neither itself. The clamp input is `host.getBoundingClientRect().top`, which
+depends on the rendered height of the title, tab bar and cpu-note text above
+the chart. A subpixel text difference can flip this cell across the boundary
+and become an 18px captured-height difference. For THIS cell, two different
+heights from the same code do not establish that the code changed — the
+height is bimodal by construction. Regeneration from the CI `snapshots` job
+remains mandatory (`VERSION` RULE 2), whichever height a local run produces.
+
 ## Regenerating a SUBSET (intentional single-baseline change)
 
 `--only=<patterns>` (or `PGWT_SNAP_ONLY=<patterns>`, comma-separated fnmatch)
