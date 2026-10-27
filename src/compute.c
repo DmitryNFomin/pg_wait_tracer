@@ -848,6 +848,18 @@ int pgwt_tag_events_window_seeded(struct pgwt_trace_event *events, int count,
                     ev->flags |= PGWT_EVENT_FLAG_QUERY_UNATTRIB;
                 continue;
             }
+            /* FAIL-SAFE, and the reason this is a `!= 0` and not an else:
+             * the arm it replaced was TOTAL over every category. Listing
+             * three bits above would let a category added later fall
+             * through to the backfill below and BORROW another statement's
+             * id -- turning a visible under-count into a confident wrong
+             * answer, the opposite of the direction src/idle_rule.h sets.
+             * Unreachable today (bm_type_to_cat_flag and
+             * pgwt_backend_type_flag are both total over io_worker /
+             * maint / background / foreground), so this is about the next
+             * category, not this one. */
+            if (st->cat_flag != 0)
+                continue;
             uint64_t q = st->next_qid ? st->next_qid : fwd[i];
             if (q != 0) {
                 ev->query_id = q;
