@@ -29,6 +29,8 @@
 #include "wait_event.h"
 #include "pg_wait_tracer.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -720,6 +722,119 @@ static void test_replay_commit_order(void)
     if (system(cmd) != 0) { /* best effort */ }
 }
 
+/* Refuse unreadable input and definitions outside the single-bit hex-literal
+ * format. Only publish the result after the entire file was read successfully. */
+static int scan_defined_event_flags(const char *path, uint32_t *mask,
+                                    int *count)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+    char *line = NULL;
+    size_t capacity = 0;
+    uint32_t found = 0;
+    int n = 0, rc = -1;
+    while (getline(&line, &capacity, fp) != -1) {
+        char *p = line;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "#define", 7) != 0 ||
+            !isspace((unsigned char)p[7]))
+            continue;
+        p += 7;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "PGWT_EVENT_FLAG_", 16) != 0) continue;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "0x", 2) != 0 ||
+            !isxdigit((unsigned char)p[2]))
+            goto out;
+        errno = 0;
+        char *end;
+        unsigned long value = strtoul(p, &end, 16);
+        if (errno || value > UINT32_MAX || *end != 'U') goto out;
+        p = end + 1;
+        /* Only whitespace and comments may follow the literal, not an
+         * expression that happens to begin with a valid hex bit. */
+        for (;;) {
+            while (isspace((unsigned char)*p)) p++;
+            if (strncmp(p, "/*", 2) != 0) break;
+            char *close = strstr(p + 2, "*/");
+            if (!close) goto out;
+            p = close + 2;
+        }
+        if (*p && strncmp(p, "//", 2) != 0) goto out;
+        uint32_t bit = (uint32_t)value;
+        if (!bit || (bit & (bit - 1)) || (found & bit)) goto out;
+        found |= bit;
+        n++;
+    }
+    if (!feof(fp) || ferror(fp) || n == 0) goto out;
+    rc = 0;
+out:
+    free(line);
+    if (fclose(fp) != 0) rc = -1;
+    if (rc == 0) {
+        *mask = found;
+        *count = n;
+    }
+    return rc;
+}
+
+static void test_replay_flag_mask_closure(void)
+{
+    uint32_t mask = 0;
+    int count = 0;
+    CHECK(scan_defined_event_flags("../src/pg_wait_tracer.h", &mask, &count) == 0,
+          "event flag header can be scanned completely");
+    CHECK_EQ_U64(mask, PGWT_REPLAY_KNOWN_FLAGS,
+                 "every header flag is listed in replay's known flags");
+    CHECK(count >= 12, "header contains at least twelve event flag defines");
+    CHECK((PGWT_REPLAY_KNOWN_FLAGS & ~PGWT_REPLAY_NONCAT_FLAGS) ==
+              PGWT_REPLAY_CAT_FLAGS,
+          "known flags are classified as category or non-category");
+    CHECK((PGWT_REPLAY_CAT_FLAGS & PGWT_REPLAY_NONCAT_FLAGS) == 0,
+          "category and non-category flag lists do not overlap");
+
+    char dir[] = "/tmp/pgwt_replay_flags_XXXXXX";
+    if (!mkdtemp(dir)) {
+        CHECK(0, "create flag scanner bypass directory");
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/flags.h", dir);
+    CHECK(scan_defined_event_flags(path, &mask, &count) == -1,
+          "flag scanner refuses a nonexistent path");
+    const struct {
+        const char *text;
+        const char *message;
+    } bypasses[] = {
+        { "#define SOMETHING_ELSE 0x1U\n",
+          "flag scanner refuses a file with no event flag defines" },
+        { "#define PGWT_EVENT_FLAG_WEIRD (1u << 13)\n",
+          "flag scanner refuses an unparseable flag value" },
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n"
+          "#define PGWT_EVENT_FLAG_DUPLICATE 0x1U\n",
+          "flag scanner refuses a duplicate bit" },
+        { "#define PGWT_EVENT_FLAG_MULTIBIT 0x30U\n",
+          "flag scanner refuses a multi-bit value" },
+    };
+    for (size_t i = 0; i < sizeof(bypasses) / sizeof(bypasses[0]); i++) {
+        FILE *fp = fopen(path, "w");
+        if (!fp) {
+            CHECK(0, "open flag scanner bypass fixture for writing");
+            break;
+        }
+        int written = fputs(bypasses[i].text, fp) >= 0;
+        if (fclose(fp) != 0) written = 0;
+        CHECK(written, "write flag scanner bypass fixture completely");
+        if (!written) break;
+        CHECK(scan_defined_event_flags(path, &mask, &count) == -1,
+              bypasses[i].message);
+    }
+    /* If the first open failed, no fixture exists to remove. */
+    CHECK(unlink(path) == 0 || errno == ENOENT, "remove flag scanner fixture");
+    CHECK(rmdir(dir) == 0, "remove flag scanner bypass directory");
+}
+
 static void test_replay_unattributed_categories(void)
 {
     const struct pgwt_block_info bi = { .block_type = PGWT_BLOCK_TRANSITIONS };
@@ -1183,6 +1298,7 @@ int main(void)
     test_cpu_replay(false);
     test_parse_phase_replay();
     test_replay_commit_order();
+    test_replay_flag_mask_closure();
     test_replay_unattributed_categories();
     test_replay_resolver_edges();
     test_replay_wall_clocks();

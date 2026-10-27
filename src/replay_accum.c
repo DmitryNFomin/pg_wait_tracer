@@ -7,17 +7,6 @@
 #include "wait_event.h"
 #include "window_clip.h"
 
-/* Every flag bit that is NOT a category. `cat` is the REMAINDER, so a
- * flag bit added to pg_wait_tracer.h and not classified here reaches
- * the refusal below (under-count) instead of the back-fill (another
- * statement's id). #642 narrowed a total guard to three named bits and
- * turned a visible under-count into a silently borrowed query id. */
-#define PGWT_REPLAY_NONCAT_FLAGS (PGWT_EVENT_FLAG_SAMPLE | \
-    PGWT_EVENT_FLAG_CMD_OPEN | PGWT_EVENT_FLAG_PLAN | \
-    PGWT_EVENT_FLAG_EXEC | PGWT_EVENT_FLAG_QUERY_SYNTH | \
-    PGWT_EVENT_FLAG_SAMPLE_CONT | PGWT_EVENT_FLAG_QUERY_BACKFILL | \
-    PGWT_EVENT_FLAG_QUERY_UNATTRIB | PGWT_EVENT_FLAG_RIGHT_OPEN)
-
 /* The resolver is the live resolver; only the emitted statistics differ:
  * replay clips time and selects occurrence statistics independently. */
 static void replay_qattr_emit(void *ctx, uint64_t qid, uint32_t we,
@@ -281,8 +270,10 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                 replay_qattr_emit(acc, 0, we, &p, false);
             }
         } else if (cat != 0) {
-            /* An unclassified flag bit reaches this total refusal: under-count
-             * an unknown category rather than borrow another statement's id. */
+            /* An unknown CATEGORY is under-counted here. The static assertion
+             * in event_reader.h requires known bits to be classified, so a
+             * known non-category bit cannot quietly reach this refusal; the
+             * companion header-scan test catches bits missing from that list. */
         } else if (pa) {
             if (idle) {
                 if (!sampled || !(evt->flags & PGWT_EVENT_FLAG_CMD_OPEN))
