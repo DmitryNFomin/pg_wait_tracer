@@ -307,8 +307,23 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                                 ? 100.0 * (double)pm.sample_read_valid
                                   / (double)pm.sample_read_targets
                                 : 0.0);
-    cjson_add_uint64(root, "sampler_ticks_missed_total",
-                     ctr->sampler_ticks_missed_total);
+    /* The operator-facing quantity is mean lateness per tick, in nanoseconds:
+     * sampler_tick_late_ns_total / sampler_ticks_total; both terms are
+     * exported here. Dividing this mean by the sampling period configured
+     * with --sample-rate (1e9/Hz) gives the fraction of sampling time lost to
+     * lateness; the period is deliberately not exported.
+     * BOTH terms come from the timer alone, so it cannot be reconstructed
+     * from samples_total, backends_tracked, uptime_s or any read outcome.
+     * A derived "shortfall" substitute used for #115 shared a numerator with
+     * the quantity it was being correlated against and was withdrawn; do
+     * not reintroduce one.
+     * uptime_s is NOT the denominator: it runs from daemon start and counts
+     * seconds before any workload existed, one of the three faults that
+     * invalidated that withdrawn shortfall. */
+    cjson_add_uint64(root, "sampler_ticks_total",
+                     ctr->sampler_ticks_total);
+    cjson_add_uint64(root, "sampler_tick_late_ns_total",
+                     ctr->sampler_tick_late_ns_total);
 
     /* Capture hardening (T4): any non-zero here is a loudly-logged problem.
      * state_map_full_total = BPF-side insert failures + userspace

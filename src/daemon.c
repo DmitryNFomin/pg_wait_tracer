@@ -9,6 +9,7 @@
 #include "output.h"
 #include "perf_event.h"
 #include "provider_coop.h"
+#include "sampler.h"
 #include "wait_event.h"
 
 #include <stdio.h>
@@ -606,7 +607,16 @@ static void arm_sample_timer_jittered(struct pgwt_daemon *d)
         .it_value = { .tv_sec  = (time_t)(armed / 1000000000ULL),
                       .tv_nsec = (long)(armed % 1000000000ULL) },
     };
-    timerfd_settime(d->sample_timer_fd, 0, &sits, NULL);
+    d->sample_armed_ns = armed;
+    d->sample_armed_at_ns = pgwt_debug_monotonic_ns();
+    int ret = timerfd_settime(d->sample_timer_fd, 0, &sits, NULL);
+    if (ret != 0) {
+        /* No rate limiting needed: a failed arm means no further tick or
+         * call here, so at most one line is printed. */
+        fprintf(stderr, "ERROR: timerfd_settime: %s; sampler timer is now dead; "
+                "sampler_ticks_total and sampler_tick_late_ns_total will stop "
+                "advancing.\n", strerror(errno));
+    }
 }
 
 static void handle_sample_timer(struct pgwt_daemon *d)
@@ -615,14 +625,16 @@ static void handle_sample_timer(struct pgwt_daemon *d)
     uint64_t started_ns = pgwt_debug_block_begin(d);
     ssize_t r = read(d->sample_timer_fd, &expirations, sizeof(expirations));
     pgwt_debug_block_end(d, "sample_timerfd_read", 0, started_ns);
-    /* SMP-3: expirations > 1 means the daemon stalled and ticks coalesced —
-     * those samples are gone. The sampler compensates by weighting each tick
-     * with the MEASURED inter-tick elapsed time (see pgwt_sampler_poll), so
-     * the loss is in resolution, not in total weight. Count it so a chronic
-     * stall is visible on the control socket. (One-shot arming makes >1
-     * unlikely, but a stalled daemon can still miss re-arms late.) */
-    if (r == (ssize_t)sizeof(expirations) && expirations > 1)
-        d->counters.sampler_ticks_missed_total += expirations - 1;
+    /* The timer is one-shot BY DESIGN for anti-aliasing, so expiration
+     * coalescing cannot occur and lateness is the real signal recorded by
+     * sampler_ticks_total and sampler_tick_late_ns_total. */
+    if (r == (ssize_t)sizeof(expirations)) {
+        uint64_t now = pgwt_debug_monotonic_ns();
+        uint64_t late = pgwt_sampler_tick_lateness(d->sample_armed_ns,
+                                                   d->sample_armed_at_ns, now);
+        d->counters.sampler_ticks_total++;
+        d->counters.sampler_tick_late_ns_total += late;
+    }
     /* Re-arm FIRST so a slow poll delays the next tick (measured-elapsed
      * weighting absorbs it) instead of bursting. */
     started_ns = pgwt_debug_block_begin(d);
@@ -899,6 +911,9 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin)
 int pgwt_daemon_init(struct pgwt_daemon *d)
 {
     int err;
+
+    d->sample_armed_ns = 0;
+    d->sample_armed_at_ns = 0;
 
     /* Cache the debug env once per daemon lifecycle. All liveness clocks and
      * duration probes key off this bool; when unset they do no syscalls and
