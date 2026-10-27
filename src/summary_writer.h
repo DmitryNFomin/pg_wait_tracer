@@ -324,13 +324,15 @@
  *
  * NOTHING IS INVENTED. The writer never derives an open interval from the
  * record stream; it only credits what a producer explicitly noted, and only
- * while that note stays fresh (PGWT_SUMMARY_OPEN_STALE_NS). A producer that
- * notes nothing degrades EXACTLY to v7 -- which is what pgwt_summary_push_event
- * does on its own, and what the lightweight/sampled tiers (no state_map
- * intervals) get. The alternative -- inferring the open interval from each
- * record's new_event -- would fabricate time on any stream whose records do
- * not tile the timeline, which is every synthetic fixture and every mode
- * where records are dropped.
+ * while that note stays fresh (PGWT_SUMMARY_OPEN_STALE_NS) on periodic ticks.
+ * At close, credit extends through each interval's own last note, including
+ * a partial final second, without applying the staleness window.
+ * A producer that notes nothing degrades EXACTLY to v7 -- which is what
+ * pgwt_summary_push_event does on its own, and what the lightweight/sampled
+ * tiers (no state_map intervals) get. The alternative -- inferring the open
+ * interval from each record's new_event -- would fabricate time on any stream
+ * whose records do not tile the timeline, which is every synthetic fixture
+ * and every mode where records are dropped.
  *
  * WHY THE VERSION HAS TO MOVE: it is an ACCOUNTING-RULE change, the same
  * reason v3-v7 exist. A v7 second holds a long interval's whole duration and a
@@ -447,8 +449,10 @@
  *     row with time and no count and another with count and no time.
  *
  * NOTHING IS INVENTED, same as v8: the writer credits only what a producer
- * explicitly noted, only while the note is fresher than
- * PGWT_SUMMARY_OPEN_STALE_NS, and only up to seconds that have completed.
+ * explicitly noted, with periodic ticks bounded by PGWT_SUMMARY_OPEN_STALE_NS
+ * and restricted to completed seconds. At close, each interval's own last
+ * note bounds credit, including a partial final second, rather than the
+ * staleness window.
  *
  * WHAT IS NOT IN THIS VERSION, stated because it is easy to over-read:
  *   - A CLOSED CPU interval is still charged to its CLOSING second, exactly

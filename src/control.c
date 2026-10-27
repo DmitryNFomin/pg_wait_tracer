@@ -133,8 +133,7 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cJSON_AddBoolToObject(root, "escalation_supported", d->escalation.enabled);
     cjson_add_uint64(root, "exact_probe_generation",
                      d->escalation.generation);
-    cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
-                            d->exact_probes.core.attached_mask);
+    pgwt_exact_probe_add_attach_status(root, &d->exact_probes.core);
     cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
                           d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
@@ -283,6 +282,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                          (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_ACTIVITY));
     cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
                             d->exact_probes.core.attached_mask);
+    cJSON_AddNumberToObject(root, "exact_probe_exec_attach_errno",
+                            d->exact_probes.core.attach_errno[PGWT_EXACT_PROBE_EXEC]);
+    cJSON_AddNumberToObject(root, "exact_probe_plan_attach_errno",
+                            d->exact_probes.core.attach_errno[PGWT_EXACT_PROBE_PLAN]);
     cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
                           d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);

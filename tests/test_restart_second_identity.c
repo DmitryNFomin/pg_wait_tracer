@@ -8,13 +8,13 @@
  * pgwt_visit_summaries sums every record it finds. #284 called that an
  * over-count.
  *
- * ANSWER (this file is the measurement, not a fix): they tile for closed
- * records, so #284 is not the over-count it was filed as. The two
- * under-counts it did expose are #632, which is also where any fix goes.
+ * ANSWER: closed records tile, and #632 settles open credit at shutdown
+ * through the producer's last observation. Only a genuine observation gap
+ * remains uncredited; without a gap, even an inside-second restart is exact.
  *
  * It is NOT a duplicate and neither record is a superset: the outgoing
- * partial holds the records that CLOSED in [sec_start, t_death], the
- * incoming one holds [t_attach, sec_end]. Summing disjoint partials is what
+ * partial holds closed records and open credit through its last grid tick;
+ * the incoming one holds [t_attach, sec_end]. Summing disjoint partials is what
  * a half-open, second-keyed reader should do. The only question is whether
  * the two partials TILE or OVERLAP, and this file answers it by measurement:
  * one event schedule, replayed three ways —
@@ -32,21 +32,17 @@
  *    4) and it is NOT over-counted. The CLOSED-record terms tile EXACTLY:
  *    12 of 12 records counted once in both runs, and per second the closed
  *    IO time is identical ns for ns. #284's over-count does not exist.
- *    The OPEN-interval credit term does not tile — it is SHORT. For a 3 s
- *    Lock wait open across the restart second the split reads 2411 ms where
- *    the single writer reads 3011 ms: a DEFICIT of exactly 600 ms =
- *    t_attach - sec_start(S), all of it inside the restart second
- *    (403 ms + 600 ms == 1003 ms), with every other second identical. The
- *    error is in the OPPOSITE direction to the one filed, and it is pinned
- *    as an exact identity (split == gt - DARK), never as a tolerance.
- *    WHICH TERM, pinned by varying the instants rather than by arithmetic:
- *    the deficit tracks t_attach (attach at +100 ms -> 100 ms; at +600 ms ->
- *    600 ms) and does NOT move when t_death moves from +50 ms to +500 ms
- *    into S (600 ms both). So the slice [sec_start, t_death) that the
- *    outgoing daemon still had a FRESH NOTE for contributes nothing:
- *    pgwt_summary_close force-flushes the partial second without crediting
- *    what is open in it, and the incoming writer starts at its attach
- *    instant. That is the whole mechanism.
+ *    Open credit is short ONLY by the genuine dark window: from the last
+ *    outgoing GRID TICK at or before t_death to t_attach. A 3 s Lock wait
+ *    across a death at +500 ms and attach at +600 ms gives 2911 ms against
+ *    3011 ms truth, exactly 100 ms short, all in the restart second
+ *    (903 ms + 100 ms == 1003 ms). Moving attach moves the deficit;
+ *    moving death from +50 ms (last tick +0 ms) to +500 ms reduces it from
+ *    600 ms to 100 ms. With death == attach == +500 ms there is NO dark
+ *    window: the twice-written second and the total tile EXACTLY, ns for ns.
+ *    Every unperturbed, clamped comparison also asserts that neither the
+ *    total nor any individual second exceeds truth: crediting to sec_end
+ *    instead of the last note must fail, including inside a restart second.
  * §2 THE BOUNDARY CONTROL. A handover exactly ON a second boundary.
  *    (i) nothing open across it: the identity holds EXACTLY (2204 ms both,
  *        every second identical) with credit live on BOTH sides (an interval
@@ -55,11 +51,9 @@
  *        attributable to the credit term alone. §1 asserts its own restart
  *        is NOT boundary-aligned, so the suite cannot silently degenerate
  *        into this easy case.
- *    (ii) an interval open ACROSS the boundary: 2004 ms vs 3004 ms, short by
- *        exactly one second — the second the outgoing writer COMPLETED but
- *        never sealed, because PGWT_SUMMARY_FLUSH_LAG_NS means its last tick
- *        at T could only seal seconds ending before T - LAG. A second,
- *        distinct under-count; still never an over-count.
+ *    (ii) an interval open ACROSS the boundary: EXACT identity, 3004 ms
+ *        both, short by 0 ns. Close settles the completed second held back
+ *        by PGWT_SUMMARY_FLUSH_LAG_NS as well as a partial final second.
  * §3 TWO FILES WITH NO SHARED SECOND, separated by a gap: every second in
  *    exactly one record, all five pushed records readable once (5 ms total),
  *    and the seconds inside the gap ABSENT rather than fabricated.
@@ -78,12 +72,10 @@
  *    alternative would do to this very fixture: pgwt_summary_note_open_ex
  *    stores start_ns unclamped and earliest_open_second floors it, so the
  *    incoming writer seals TWO seconds that were entirely before it existed
- *    and the sum EXCEEDS the truth: 4511 ms vs 3011 ms, +1500 ms. That is a
+ *    and the sum EXCEEDS the truth: 5011 ms vs 3011 ms, +2000 ms. That is a
  *    pinned measurement of today's writer and the reason the clamp is
- *    load-bearing; the writer-side clamp that would remove the hazard
- *    (max(start_mono_ns, the writer's anchor) at note time) belongs to #632,
- *    and the instruction for replacing this leg when it lands sits at the
- *    assertion itself.
+ *    load-bearing. A writer-side anchor clamp is a separate change; this
+ *    fix deliberately leaves the producer contract and this bypass intact.
  * §6 BYPASS SUITE — every way this measurement could fail to SEE (false
  *    negatives, which is the failure mode here, not false positives):
  *    a. a read that saw nothing (0 == 0 agrees with anything): read_secs
@@ -457,12 +449,36 @@ static const struct sched sched_main = {
 #define SEC(n)  (BASE + (uint64_t)(n) * S)
 #define RESTART_SEC SEC(2)
 
-/* How many CLOSED records fall inside [t_death, t_attach] -- the window in
- * which no daemon is running. It must be ZERO for a deficit measurement to
- * mean anything: a record lost in the gap adds its duration to the deficit
- * and is indistinguishable from missing open-interval credit. MEASURED
- * during development: a probe whose gap swallowed two 1 ms records reported
- * a 602 ms deficit where the credit term was 600 ms. */
+/* replay() observes only on this grid, even if death is between ticks. */
+static uint64_t last_observation(uint64_t t_death)
+{
+    return BASE + ((t_death - BASE) / GRID_STEP) * GRID_STEP;
+}
+
+/* All ordinary clamped runs must stay below truth in EVERY second, not
+ * just after cancellation in the total. Deliberately biased (§4) and
+ * unclamped (§5) inputs are separate probes that can exceed the truth. */
+static void check_no_overshoot(const struct run_out *gt,
+                               const struct run_out *sp)
+{
+    int bounded = all_total(&sp->t) <= all_total(&gt->t);
+    for (int i = 0; i < sp->t.n; i++)
+        if (sp->t.total_ns[i] > sec_total(&gt->t, sp->t.wall[i]))
+            bounded = 0;
+    CHECK(bounded,
+          "split NEVER EXCEEDS ground truth, in total or in any second "
+          "(%llu <= %llu ns total)",
+          (unsigned long long)all_total(&sp->t),
+          (unsigned long long)all_total(&gt->t));
+}
+
+/* How many CLOSED records fall inside (last_observation, t_attach) -- the
+ * window in which no daemon observes anything. It must be ZERO for a
+ * deficit measurement to mean anything: a record lost in the gap adds its
+ * duration to the deficit and is indistinguishable from missing
+ * open-interval credit. MEASURED during development: a probe whose gap
+ * swallowed two 1 ms records reported a 602 ms deficit where the credit
+ * term was 600 ms. */
 static int records_in_gap(const struct sched *s, uint64_t t_death,
                           uint64_t t_attach)
 {
@@ -473,7 +489,7 @@ static int records_in_gap(const struct sched *s, uint64_t t_death,
      * make this guard miss exactly the case it exists for -- it did, during
      * development, and the two records it missed showed up as 2 ms of
      * "missing credit". */
-    uint64_t cutoff = BASE + ((t_death - BASE) / GRID_STEP) * GRID_STEP;
+    uint64_t cutoff = last_observation(t_death);
     int n = 0;
     for (int i = 0; i < s->nev; i++)
         if (s->ev[i].ts > cutoff && s->ev[i].ts < t_attach)
@@ -500,6 +516,16 @@ static int64_t deficit(uint64_t t_death, uint64_t t_attach)
                gt.nrec, sp.nrec);
         return 0;
     }
+    CHECK(all_total(&gt.t) == 3 * S + 11 * SHORT_DUR &&
+          sec_total(&gt.t, RESTART_SEC) == S + 3 * SHORT_DUR,
+          "1 probe: literal truth is 3011000000 ns total, 1003000000 ns "
+          "in the restart second");
+    check_no_overshoot(&gt, &sp);
+    CHECK((int64_t)all_total(&gt.t) - (int64_t)all_total(&sp.t) ==
+          (int64_t)(t_attach - last_observation(t_death)),
+          "1 probe: deficit is EXACTLY attach minus the last grid "
+          "observation (%llu ns)",
+          (unsigned long long)(t_attach - last_observation(t_death)));
     CHECK(all_events(&sp.t) == all_events(&gt.t),
           "1 probe: both runs carry the same %llu closed records",
           (unsigned long long)all_events(&gt.t));
@@ -510,7 +536,7 @@ static void test_restart_second(void)
 {
     const uint64_t t_death  = BASE + 2500 * MS;
     const uint64_t t_attach = BASE + 2600 * MS;
-    const uint64_t dark     = t_attach - RESTART_SEC;     /* 600 ms */
+    const uint64_t dark     = t_attach - last_observation(t_death); /* 100 ms */
 
     printf("--- 1. the restart second: do the two partials tile? ---\n");
 
@@ -580,16 +606,17 @@ static void test_restart_second(void)
               "(%llu ns both)", i,
               (unsigned long long)gt.t.io_ns[i]);
 
-    /* THE ANSWER, part 2: the OPEN-interval credit does not tile — it is
-     * short by exactly the part of the restart second that preceded the
-     * incoming daemon's attach. A DEFICIT, not the filed over-count. */
+    /* Only unobserved wall remains missing; close settles the outgoing
+     * writer's confirmed prefix, never the unconfirmed tail to sec_end. */
+    check_no_overshoot(&gt, &sp);
     CHECK(all_total(&sp.t) < all_total(&gt.t),
           "1 the split reports LESS than the truth (%llu ms vs %llu ms) — "
           "#284's over-count does not occur",
           (unsigned long long)(all_total(&sp.t) / MS),
           (unsigned long long)(all_total(&gt.t) / MS));
     CHECK(all_total(&gt.t) - all_total(&sp.t) == dark,
-          "1 DEFICIT = %llu ns, exactly t_attach - sec_start(S) = %llu ns",
+          "1 DEFICIT = %llu ns, exactly t_attach - last grid observation "
+          "= %llu ns",
           (unsigned long long)(all_total(&gt.t) - all_total(&sp.t)),
           (unsigned long long)dark);
     CHECK(sec_total(&sp.t, RESTART_SEC) + dark ==
@@ -605,14 +632,8 @@ static void test_restart_second(void)
                   "1 second %d is IDENTICAL across the restart (%llu ns)", i,
                   (unsigned long long)gt.t.total_ns[i]);
 
-    /* WHICH TERM, measured by varying the two instants rather than by
-     * arithmetic on the literals above.
-     *   - the deficit tracks t_attach: two attach instants, two deficits;
-     *   - it does NOT depend on how long the outgoing writer survived into
-     *     S: two t_death values, one deficit. So the [sec_start, t_death)
-     *     slice the outgoing writer still had a fresh note for contributes
-     *     nothing — pgwt_summary_close force-flushes the partial second
-     *     without crediting what is open in it. */
+    /* Death between grid steps retains only the last grid observation.
+     * Later attach increases the dark window; later observation shrinks it. */
     int64_t d_attach_early = deficit(BASE + 2050 * MS, BASE + 2100 * MS);
     int64_t d_attach_late  = deficit(BASE + 2050 * MS, BASE + 2600 * MS);
     int64_t d_death_late   = deficit(BASE + 2500 * MS, BASE + 2600 * MS);
@@ -622,11 +643,39 @@ static void test_restart_second(void)
     CHECK(d_attach_late == 600 * (int64_t)MS,
           "1 attach at +600 ms into S: deficit 600 ms (%lld ns) — it TRACKS "
           "the attach instant", (long long)d_attach_late);
-    CHECK(d_death_late == d_attach_late,
-          "1 moving t_death from +50 ms to +500 ms into S leaves the deficit "
-          "unchanged (%lld vs %lld ns): the outgoing writer's observation of "
-          "the partial second contributes NOTHING",
+    CHECK(d_death_late == 100 * (int64_t)MS &&
+          d_attach_late - d_death_late == 500 * (int64_t)MS,
+          "1 moving t_death from +50 ms (last tick +0 ms) to +500 ms "
+          "REDUCES the deficit to 100 ms (%lld vs %lld ns): the outgoing "
+          "writer's confirmed 500 ms now contributes",
           (long long)d_death_late, (long long)d_attach_late);
+
+    /* A grid-aligned observation strictly INSIDE a second permits a
+     * handover with no dark window at all. The restart second is still
+     * written twice, so this cannot degenerate into the boundary control. */
+    struct run_out no_dark;
+    run_split("no_dark", &sched_main, t_death, t_death, &no_dark, 1, 0, 0);
+    CHECK(t_death % S != 0 && last_observation(t_death) == t_death &&
+          records_in_gap(&sched_main, t_death, t_death) == 0,
+          "1 ZERO DARK WINDOW: death == attach at +500 ms inside S, "
+          "exactly on the observation grid");
+    CHECK(no_dark.nrec == 5 && sec_records(&no_dark.t, RESTART_SEC) == 2,
+          "1 ZERO DARK WINDOW: 5 records, restart second still written "
+          "twice (%d records, %d in S)", no_dark.nrec,
+          sec_records(&no_dark.t, RESTART_SEC));
+    CHECK(all_total(&no_dark.t) == 3 * S + 11 * SHORT_DUR &&
+          all_total(&no_dark.t) == all_total(&gt.t),
+          "1 ZERO DARK WINDOW: EXACT total identity, %llu ns == "
+          "3011000000 ns truth",
+          (unsigned long long)all_total(&no_dark.t));
+    CHECK(no_dark.t.n == gt.t.n,
+          "1 ZERO DARK WINDOW: same four seconds, none invented (%d)",
+          no_dark.t.n);
+    for (int i = 0; i < gt.t.n; i++)
+        CHECK(sec_total(&no_dark.t, gt.t.wall[i]) == gt.t.total_ns[i],
+              "1 ZERO DARK WINDOW: second %d EXACT to the nanosecond "
+              "(%llu ns)", i, (unsigned long long)gt.t.total_ns[i]);
+    check_no_overshoot(&gt, &no_dark);
 
     /* §6d: the thing being checked ABSENT rather than wrong. With no
      * producer notes there is no credit term, the identity holds trivially,
@@ -641,7 +690,10 @@ static void test_restart_second(void)
           "1 ABSENT CASE: with no notes at all the identity holds exactly "
           "(%llu ns both) — closed records alone always tile",
           (unsigned long long)all_total(&gt0.t));
+    check_no_overshoot(&gt0, &sp0);
     CHECK(gt0.credited_ns == 0 &&
+          all_total(&gt0.t) == 3 * S + 11 * SHORT_DUR &&
+          sec_total(&gt0.t, RESTART_SEC) == 3 * SHORT_DUR &&
           sec_total(&gt0.t, RESTART_SEC) != sec_total(&gt.t, RESTART_SEC),
           "1 ... and that run is NOT the one section 1 measures: 0 ns "
           "credited and the restart second holds %llu ns instead of %llu ns "
@@ -702,6 +754,7 @@ static void test_boundary_handover(void)
     CHECK(shared == 0,
           "2 no second is written twice: the handover is on the boundary "
           "(%d seconds in >1 record)", shared);
+    check_no_overshoot(&gt, &sp);
     CHECK(all_total(&sp.t) == all_total(&gt.t),
           "2 IDENTITY HOLDS EXACTLY: %llu ns both, to the nanosecond",
           (unsigned long long)all_total(&sp.t));
@@ -712,11 +765,8 @@ static void test_boundary_handover(void)
               "2 second %d identical (%llu ns)", i,
               (unsigned long long)gt.t.total_ns[i]);
 
-    /* (ii) The same boundary handover, with an interval open ACROSS it. The
-     * identity does NOT hold, and the missing term is a different one: the
-     * second the outgoing writer COMPLETED but never sealed, because
-     * PGWT_SUMMARY_FLUSH_LAG_NS means its last tick at T could only seal
-     * seconds that ended before T - LAG. Still an under-count. */
+    /* (ii) Close also settles the COMPLETED second still held back by
+     * PGWT_SUMMARY_FLUSH_LAG_NS at the outgoing writer's final tick. */
     static const struct sched_event ev_x[] = {
         { BASE +  100 * MS, PID_SHORT, (PG_WAIT_IO << 24) | 1, SHORT_DUR },
         { BASE + 1100 * MS, PID_SHORT, (PG_WAIT_IO << 24) | 1, SHORT_DUR },
@@ -737,15 +787,17 @@ static void test_boundary_handover(void)
           "2ii both runs read back (%d / %d records)", gx.nrec, sx_out.nrec);
     if (gx.nrec <= 0 || sx_out.nrec <= 0)
         return;
-    CHECK(all_total(&sx_out.t) < all_total(&gx.t),
-          "2ii with an interval open ACROSS the boundary the split is still "
-          "SHORT, never long (%llu ns vs %llu ns)",
+    CHECK(all_total(&gx.t) == 3 * S + 4 * SHORT_DUR,
+          "2ii literal ground truth: %llu ns (3000 ms Lock + four 1 ms IO)",
+          (unsigned long long)all_total(&gx.t));
+    check_no_overshoot(&gx, &sx_out);
+    CHECK(all_total(&sx_out.t) == all_total(&gx.t),
+          "2ii open ACROSS the boundary: EXACT IDENTITY (%llu ns vs %llu ns)",
           (unsigned long long)all_total(&sx_out.t),
           (unsigned long long)all_total(&gx.t));
-    CHECK(all_total(&gx.t) - all_total(&sx_out.t) == 1 * S,
-          "2ii and it is short by exactly one second (%llu ns): the second "
-          "the outgoing writer completed but could not seal within "
-          "PGWT_SUMMARY_FLUSH_LAG_NS of its last tick",
+    CHECK(all_total(&gx.t) - all_total(&sx_out.t) == 0,
+          "2ii short by exactly 0 ns (%llu ns): close settles the completed "
+          "second held back by PGWT_SUMMARY_FLUSH_LAG_NS",
           (unsigned long long)(all_total(&gx.t) - all_total(&sx_out.t)));
 }
 
@@ -807,6 +859,8 @@ static void test_perturbation(void)
     if (gt.nrec <= 0 || sp_dur.nrec <= 0 || sp_note.nrec <= 0)
         return;
 
+    CHECK(all_total(&gt.t) == 2 * 1100 * MS + 4 * SHORT_DUR,
+          "4 literal ground truth: 2204000000 ns");
     CHECK(!(all_total(&sp_dur.t) == all_total(&gt.t)),
           "4a the section-2 identity predicate is FALSE when one closed "
           "record is 1 ns longer (%llu vs %llu ns)",
@@ -857,6 +911,10 @@ static void test_unclamped_inherited_start(void)
     if (gt.nrec <= 0 || cl.nrec <= 0 || un.nrec <= 0)
         return;
 
+    CHECK(all_total(&gt.t) == 3 * S + 11 * SHORT_DUR &&
+          sec_total(&gt.t, RESTART_SEC) == S + 3 * SHORT_DUR,
+          "5 literal truth: 3011000000 ns total, 1003000000 ns in S");
+    check_no_overshoot(&gt, &cl);
     CHECK(all_total(&cl.t) < all_total(&gt.t),
           "5 CLAMPED (what src/backend.c's preseed_state_map seeds into "
           "BPF's last_ts, which src/map_reader.c passes verbatim): the sum "
@@ -869,15 +927,15 @@ static void test_unclamped_inherited_start(void)
      * preseed_state_map seeding last_ts = attach_ts. It deliberately does
      * NOT assert the clamped behaviour a writer-side fix would give, because
      * nothing implements that yet.
-     * INSTRUCTION FOR WHOEVER DOES #632: the writer-side anchor clamp
-     * (max(start_mono_ns, the writer's own anchor) in
-     * pgwt_summary_note_open_ex) makes this leg go red. When it lands,
-     * replace this CHECK and the `un != cl` one below with
-     * `all_total(&un.t) == all_total(&cl.t)` — an unclamped note must then
-     * be indistinguishable from a clamped one — and keep the pre_anchor
-     * leg, inverted to `pre_anchor == 0`. Do not simply delete them: they
-     * are the only coverage of the inherited-start hazard. */
-    CHECK(all_total(&un.t) > all_total(&gt.t),
+     * This fixture cannot see a writer-side anchor clamp in
+     * pgwt_summary_note_open_ex: new_writer() pins BOTH anchors to BASE,
+     * before the inherited start at BASE + 500 ms, so the clamp is a no-op.
+     * A future change needs a fixture whose incoming writer anchors LATER
+     * than the inherited start. The same clamp breaks
+     * test_rotation_open_credit's fixture today. Keep the pre_anchor and
+     * `un != cl` legs here as measurements of the inherited-start hazard. */
+    CHECK(all_total(&un.t) == 5 * S + 11 * SHORT_DUR &&
+          all_total(&un.t) > all_total(&gt.t),
           "5 UNCLAMPED: the incoming writer seals seconds BEFORE IT EXISTED "
           "and the sum EXCEEDS the truth by %lld ns (%llu vs %llu) — a "
           "larger defect than the one #284 filed, and the reason the "

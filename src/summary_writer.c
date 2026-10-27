@@ -1591,14 +1591,24 @@ static uint64_t credit_open_cpu_measured(struct pgwt_summary_accum *acc,
 
 /* Credit [sec, sec+1s) of every creditable open interval into the
  * accumulator, which the caller guarantees is the record for `sec`. */
-static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec)
+static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec,
+                               bool closing)
 {
     if (!w->open)
         return;
-    uint64_t end = sec + PGWT_NS_PER_SEC;
     for (int i = 0; i < SUMMARY_MAX_OPEN; i++) {
         struct pgwt_summary_open *o = &w->open[i];
         if (!open_creditable(o))
+            continue;
+        uint64_t end = sec + PGWT_NS_PER_SEC;
+        /* At shutdown an open interval is credited only for wall time the
+         * producer CONFIRMED it was open for, and only once. Its last note
+         * is that evidence; close time cannot prove an undrained wait is
+         * still open. Bound both the slice and the watermark by this end.
+         * Complete-second seals retain the periodic staleness rule below. */
+        if (closing && end > o->noted_ns)
+            end = o->noted_ns;
+        if (end <= sec)
             continue;
         /* FAIL-SAFE (the one way this could fabricate time): a note the
          * producer stopped refreshing describes a pid that may no longer
@@ -1668,11 +1678,12 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec)
     }
 }
 
-/* The earliest second any fresh open interval still owes credit for, or
- * UINT64_MAX if nothing is open. Only consulted when no accumulator exists,
- * i.e. when a whole second passed with no event at all. */
+/* The earliest writable second any creditable open interval still owes
+ * credit for, or UINT64_MAX if none does. At close the interval must be able
+ * to receive confirmed credit in that second. Only consulted when no
+ * accumulator exists, i.e. when a whole second passed with no event at all. */
 static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
-                                     uint64_t now_hint)
+                                     uint64_t now_hint, bool closing)
 {
     uint64_t best = UINT64_MAX;
     if (!w->open)
@@ -1681,13 +1692,15 @@ static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
         struct pgwt_summary_open *o = &w->open[i];
         if (!open_creditable(o))
             continue;
-        if (o->noted_ns + PGWT_SUMMARY_OPEN_STALE_NS < now_hint) {
+        if (!closing && o->noted_ns + PGWT_SUMMARY_OPEN_STALE_NS < now_hint) {
             /* The SAME fail-safe credit_open_second applies, retired here
              * too -- and counted here too. Without this, a note that goes
              * stale while no accumulator is open is silently skipped
              * forever and open_notes_expired_total reads 0: the fail-safe
              * would be working and invisible, which is the state in which
-             * nobody notices it stop working. */
+             * nobody notices it stop working. At close, even an old note
+             * confirms time through its own instant; retiring it against
+             * another interval's later note would discard confirmed time. */
             open_stop_crediting(o);
             w->open_notes_expired_total++;
             continue;
@@ -1695,6 +1708,30 @@ static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
         uint64_t from = o->start_ns > o->credited_until_ns
                       ? o->start_ns : o->credited_until_ns;
         uint64_t sec = (from / PGWT_NS_PER_SEC) * PGWT_NS_PER_SEC;
+        /* Apply the flushed-second bump here, before deciding whether the
+         * interval can receive credit in the second we will actually write.
+         * Moving it inside the minimum preserves the tick path because
+         * max(min(a,b),c) == min(max(a,c),max(b,c)). */
+        if (w->have_flushed_second && sec <= w->last_flushed_second_mono_ns)
+            sec = w->last_flushed_second_mono_ns + PGWT_NS_PER_SEC;
+        if (closing) {
+            uint64_t end = sec + PGWT_NS_PER_SEC;
+            if (end > o->noted_ns)
+                end = o->noted_ns;
+            /* Mirror credit_open_second's refusals: this second must be
+             * able to receive credit, and this interval must have some
+             * confirmed time left. Otherwise we would invent an empty
+             * record without advancing the interval's watermark. */
+            /* Confirmed [from, noted_ns) lies in immutable on-disk seconds (#277).
+             * At stop no closing record can carry it, so deliberately drop it.
+             * open_credit_late_ns_total promises a closing record carries the time,
+             * so cannot count this loss. Close used to credit nothing and drop it
+             * uncounted too; a dedicated counter is a possible follow-up. */
+            if (end <= sec)
+                continue;
+            if (from >= end)
+                continue;
+        }
         if (sec < best)
             best = sec;
     }
@@ -1780,6 +1817,8 @@ static bool seal_can_write(struct pgwt_summary_writer *w)
 
 /* Seal every second STRICTLY BEFORE `to_sec`: credit the open intervals into
  * it, write it, and open the next one if anything is still open there.
+ * At close, `to_sec` is the latest creditable note rounded up to a second:
+ * the same loop bounds apply, including for a partial final second.
  *
  * This replaces the bare second-boundary flush. The loop is what makes a
  * long interval appear in the seconds it spans even when no event closes in
@@ -1798,7 +1837,8 @@ static bool seal_can_write(struct pgwt_summary_writer *w)
  * refusal, one site. The loop below reaches seal_can_write only once it knows
  * it has a second to write, so a writer with nothing open still creates no
  * file and no record. */
-static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec)
+static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec,
+                                bool closing)
 {
     int guard = PGWT_SUMMARY_OPEN_FILL_MAX_SECONDS;
     for (;;) {
@@ -1816,14 +1856,9 @@ static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec)
             if (!seal_can_write(w))
                 return;
         } else {
-            sec = earliest_open_second(w, to_sec);
+            sec = earliest_open_second(w, to_sec, closing);
             if (sec >= to_sec)
-                return;    /* nothing open: no empty record is invented */
-            if (w->have_flushed_second &&
-                sec <= w->last_flushed_second_mono_ns)
-                sec = w->last_flushed_second_mono_ns + PGWT_NS_PER_SEC;
-            if (sec >= to_sec)
-                return;
+                return;    /* nothing owed before this bound: invent no record */
             /* BEFORE second_wall_ns is derived: open_summary_file re-reads
              * the clock anchor (unless an offline producer pinned it), and
              * the record's wall must come from the anchor of the file it is
@@ -1835,7 +1870,7 @@ static void writer_seal_through(struct pgwt_summary_writer *w, uint64_t to_sec)
             w->accum_active = true;
             w->open_credit_records_total++;
         }
-        credit_open_second(w, sec);
+        credit_open_second(w, sec, closing);
         if (flush_accum(w) != 0) {
             /* The accumulator stays open and is retried at the next
              * boundary (flush_accum's contract). Returning rather than
@@ -2131,7 +2166,7 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
      * flush_accum): the second is retried at the next boundary rather than
      * silently becoming a hole in the window. Counted so the gap is
      * attributable instead of merely absent. */
-    writer_seal_through(w, evt_second);
+    writer_seal_through(w, evt_second, false);
     if (w->accum_active && evt_second > w->accum.second_mono_ns) {
         /* Only reachable when writer_seal_through gave up (a failed write),
          * since it seals every second below evt_second. Kept so a sealing
@@ -2352,7 +2387,7 @@ int pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
                     - PGWT_NS_PER_SEC;          /* last complete second's ts */
     uint64_t complete_before = (latest / PGWT_NS_PER_SEC) * PGWT_NS_PER_SEC
                              + PGWT_NS_PER_SEC; /* first INcomplete second  */
-    writer_seal_through(w, complete_before);
+    writer_seal_through(w, complete_before, false);
     return 0;
 }
 
@@ -2437,8 +2472,24 @@ int pgwt_summary_close(struct pgwt_summary_writer *w)
 {
     if (!w->fp) return 0;
 
+    /* Settle only seconds containing confirmed open time. With no creditable
+     * intervals, zero leaves the ordinary final-accumulator flush below. */
+    uint64_t close_before = 0;
+    if (w->open) {
+        for (int i = 0; i < SUMMARY_MAX_OPEN; i++) {
+            struct pgwt_summary_open *o = &w->open[i];
+            if (open_creditable(o) && o->noted_ns > close_before)
+                close_before = o->noted_ns;
+        }
+    }
+    close_before = ((close_before + PGWT_NS_PER_SEC - 1) / PGWT_NS_PER_SEC)
+                 * PGWT_NS_PER_SEC;
+    uint64_t failures_before = w->flush_failures_total;
+    writer_seal_through(w, close_before, true);
     if (flush_accum(w) != 0) {
-        w->flush_failures_total++;
+        /* A failed seal leaves this same second active for the retry. */
+        if (w->flush_failures_total == failures_before)
+            w->flush_failures_total++;
         fprintf(stderr, "ERROR: summary close lost the open second "
                 "(flush failed)\n");
     }

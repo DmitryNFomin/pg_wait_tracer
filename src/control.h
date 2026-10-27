@@ -3,6 +3,16 @@
  * Listens on {trace_dir}/pgwt.sock (mode 0600). One JSON object per
  * line, request/response. Commands (Phase A0):
  *   {"cmd":"status"}  → mode, uptime, backends tracked, pg_pid, version
+ *     Status also carries exact_probe_{exec,plan}_attach_outcome
+ *     (not_attempted | disabled | attached | attach_failed). Status and metrics
+ *     carry *_attach_errno beside exact_probe_attached_mask; outcome strings
+ *     are status-only to keep metrics numeric. Outcomes describe the latest
+ *     attempt or explicit policy refusal (lightweight, skip-USDT, or COOP),
+ *     retained after release; the mask describes current links. errno 0 on a
+ *     failure means unknown. ENOTSUP is an attach error, not a support claim:
+ *     kernel/binary support is not measured independently here. These flat
+ *     diagnostics follow the cpu_clamped/offcpu disclosure idiom and do not
+ *     change window_fidelity or fidelity_ranges.
  *   {"cmd":"metrics"} → self-observability counters (stable snake_case
  *                       names with units: *_total, *_per_sec, *_bytes —
  *                       a future Prometheus exporter consumes these)

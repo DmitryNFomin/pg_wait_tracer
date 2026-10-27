@@ -1335,9 +1335,12 @@ static void test_bypass_short_gap_and_roundtrip(void)
         tick_cpu(&y, now, PID_A, BASE_MONO + 1 * S, 0, 0,
                  cpu60(now - (BASE_MONO + 1 * S)));
     }
+    /* #632: close writes the confirmed final 200 ms as another record.
+     * Take serialization counters AFTER that write, and independently check
+     * wall and measured time against the literal last observation. */
+    wr_close(&y);
     uint64_t open_records = y.w->open_credit_records_total;
     uint64_t written = y.w->total_records_written;
-    wr_close(&y);
     struct readback rb2 = { .want_pid = PID_A };
     int n2 = read_back(y.dir, &rb2);
     CHECK(n2 > 0, "round trip: records read back (%d)", n2);
@@ -1346,6 +1349,12 @@ static void test_bypass_short_gap_and_roundtrip(void)
           "records (nothing closed in them, a gap was open)",
           (unsigned long long)open_records);
     if (n2 > 0) {
+        CHECK(rb_sum_class(&rb2, PGWT_CLASS_CPU) == 9200 * MS &&
+              RB_SUM(&rb2, cpu_measured_ns) == 5520 * MS,
+              "ROUND TRIP: confirmed CPU prefix [1 s, 10.2 s) is exactly "
+              "%llu ms wall, %llu ms measured (60%%), including close",
+              (unsigned long long)(rb_sum_class(&rb2, PGWT_CLASS_CPU) / MS),
+              (unsigned long long)(RB_SUM(&rb2, cpu_measured_ns) / MS));
         CHECK((uint64_t)n2 == written,
               "ROUND TRIP: every one of the %llu records written decoded "
               "(%d read) — a desynchronised block header would lose whole "
