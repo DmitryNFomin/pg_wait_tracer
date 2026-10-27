@@ -32,13 +32,12 @@
  *     the same time — Off-CPU* is defined as the residual, so anything a bug
  *     fails to attribute flows into it and the identity still holds. So every
  *     component is asserted against a number computed from the fixture.
- *  5. CPU ON and ADJACENT TO a pacing wait. src/compute.c skips the whole idle
- *     interval INCLUDING its measured cpu_ns. That is the ClientRead precedent
- *     and it generalises, but it means CPU measured inside a pacing span is
- *     dropped — and CPU measurement does spill across interval boundaries
- *     (se.sum_exec_runtime is only current at a tick or a context switch). This
- *     section asserts the behaviour and asserts that pacing and ClientRead are
- *     treated IDENTICALLY, which is the claim "we followed the precedent".
+ *  5. CPU ON and ADJACENT TO a pacing wait. The raw time model credits measured
+ *     CPU inside VISIBLE idle to CPU* and DB Time, removing the same amount
+ *     from Idle. Pacing and ClientRead are treated identically; Off-CPU* and
+ *     total wall stay unchanged. Section 5b pins refusal for UNKNOWN, measured
+ *     zero, hidden idle (including NONCMD_CPU, #97/#408) and non-idle, plus
+ *     clamping and window scaling. Other consumers do not apply this credit.
  *  9. THE IDLE ROW'S AAS. pct_db_time is 0 on an idle row because a share
  *     of DB Time is undefined there; AAS is NOT that case -- it is a rate
  *     over wall clock, and it was hardcoded to 0, so 807 s of checkpointer
@@ -608,32 +607,30 @@ static void test_conservation_components(void)
 
 /* ── 5. CPU recorded ON and ADJACENT TO a pacing wait ──────────────────────
  *
- * src/compute.c skips an idle interval WHOLE, including its measured cpu_ns.
- * That is what ClientRead has always done; this section asserts (a) what the
- * numbers are, and (b) that pacing and ClientRead come out IDENTICAL, which is
- * the actual content of "we followed the precedent".
- *
- * The leak this documents is PRE-EXISTING and deliberately not fixed here:
- * se.sum_exec_runtime is only current at a tick or a context switch, so a
- * sub-ms CPU burst just before a wait is attributed to the FOLLOWING interval.
- * Checkpointer write CPU therefore lands in the CheckpointWriteDelay span that
- * follows it and is now dropped from CPU* — exactly as backend CPU before a
- * ClientRead already was. It surfaces in wait_gap_cpu_ms, the trace's own
- * self-check, which is asserted here so the quantity stays observable.
+ * se.sum_exec_runtime is only current at a tick or a context switch, so CPU
+ * can spill into the following interval. Visible idle must not swallow that
+ * measurement: moving it equally into DB Time and CPU* keeps Off-CPU* and
+ * total wall unchanged. Non-idle wait CPU still stays with its wait label.
  */
+static int build_cpu_adjacent_fixture(struct pgwt_trace_event *ev,
+                                      uint32_t idle_ev, uint64_t idle_cpu_ns)
+{
+    uint64_t t = 2000ULL * 1000000000ULL;
+    ev[0] = mk(t + 1 * MS, 201, 0,       100, 90 * MS);
+    ev[1] = mk(t + 2 * MS, 201, idle_ev, 500, idle_cpu_ns);
+    ev[2] = mk(t + 3 * MS, 201, EV_LOCK, 200, 10 * MS);
+    return 3;
+}
+
 static void cpu_adjacent_case(uint32_t idle_ev, const char *label,
                               double *out_cpu, double *out_db,
                               double *out_idle, double *out_gapcpu)
 {
     struct pgwt_trace_event ev[4];
-    int n = 0;
-    uint64_t t = 2000ULL * 1000000000ULL;
-    /* An on-CPU gap with real measured CPU, immediately BEFORE the idle wait. */
-    ev[n++] = mk(t + 1 * MS, 201, 0,       100,  90 * MS);
-    /* The idle wait itself, carrying measured CPU (spillover). */
-    ev[n++] = mk(t + 2 * MS, 201, idle_ev, 500,  40 * MS);
-    /* A non-idle wait after it, also carrying measured CPU. */
-    ev[n++] = mk(t + 3 * MS, 201, EV_LOCK, 200,  10 * MS);
+    int n = build_cpu_adjacent_fixture(ev, idle_ev, 40 * MS);
+    uint64_t credit = pgwt_idle_cpu_credit_ns(idle_ev, ev[1].duration_ns,
+                                              ev[1].cpu_ns, NULL);
+    CHECK(credit > 0, "%s: fixture must credit NON-ZERO idle CPU", label);
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
@@ -643,23 +640,31 @@ static void cpu_adjacent_case(uint32_t idle_ev, const char *label,
     *out_idle   = tm.idle_time_ms;
     *out_gapcpu = tm.wait_gap_cpu_ms;
 
-    CHECK(NEAR(tm.db_time_ms, 300.0),
-          "%s: DB Time = 100 (CPU gap) + 200 (Lock) = 300, got %.1f",
+    CHECK(NEAR(tm.db_time_ms, 340.0),
+          "%s: DB Time = 100 (CPU gap) + 200 (Lock) + 40 (idle CPU), got %.1f",
           label, tm.db_time_ms);
-    CHECK(NEAR(tm.idle_time_ms, 500.0),
-          "%s: Idle = the 500 ms idle wall, got %.1f", label, tm.idle_time_ms);
-    CHECK(NEAR(tm.cpu_ms, 90.0),
-          "%s: CPU* = 90 ms (the idle interval's 40 ms of measured CPU is "
-          "DROPPED with the interval; the Lock interval's 10 ms stays with its "
-          "label), got %.1f", label, tm.cpu_ms);
+    CHECK(NEAR(tm.idle_time_ms, 460.0),
+          "%s: Idle = 500 wall - 40 CPU = 460 ms, got %.1f",
+          label, tm.idle_time_ms);
+    CHECK(NEAR(tm.cpu_ms, 130.0),
+          "%s: CPU* = 90 gap + 40 idle CPU; Lock CPU keeps its label, got %.1f",
+          label, tm.cpu_ms);
     CHECK(NEAR(tm.offcpu_ms, 10.0),
-          "%s: Off-CPU* = 300 - 90 - 200 = 10 ms, got %.1f", label,
+          "%s: Off-CPU* = 340 - 130 - 200 = 10 ms (unchanged), got %.1f", label,
           tm.offcpu_ms);
     CHECK(NEAR(tm.wait_gap_cpu_ms, 10.0),
-          "%s: wait_gap_cpu_ms = 10 ms — only the NON-idle wait's CPU is "
-          "observable here; the 40 ms inside the idle span is not even "
-          "counted as an observability sum, got %.1f",
+          "%s: wait_gap_cpu_ms = 10 ms (unchanged non-idle wait CPU), got %.1f",
           label, tm.wait_gap_cpu_ms);
+    CHECK(tm.has_measured_cpu, "%s: CPU* includes a measurement", label);
+    CHECK(NEAR(tm.db_time_ms + tm.idle_time_ms, 800.0),
+          "%s: DB Time + Idle conserves 800 ms wall", label);
+    const char *idle_name = idle_ev == EV_CLIENTREAD
+        ? "Client:ClientRead" : "Timeout:CheckpointWriteDelay";
+    const struct pgwt_tm_row *idle = row_at(&tm, idle_name, 2);
+    CHECK(idle != NULL && NEAR(idle->time_ms, 460.0),
+          "%s: named idle child excludes the credited 40 ms", label);
+    CHECK(NEAR(sum_indent(&tm, 1), tm.db_time_ms),
+          "%s: CPU* + Off-CPU* + waits still equals DB Time", label);
     CHECK(tm.cpu_clamped_ms == 0.0, "%s: no clamp (got %.4f)", label,
           tm.cpu_clamped_ms);
     free(tm.rows);
@@ -671,18 +676,13 @@ static void test_cpu_on_and_adjacent_to_pacing(void)
     double c1, d1, i1, g1, c2, d2, i2, g2;
     cpu_adjacent_case(EV_CHECKPOINT_DELAY, "pacing", &c1, &d1, &i1, &g1);
     cpu_adjacent_case(EV_CLIENTREAD,       "ClientRead", &c2, &d2, &i2, &g2);
-    /* THE PRECEDENT, asserted rather than claimed: a pacing sleep is treated
-     * exactly as ClientRead is. If a future change special-cases one of them,
-     * this is where it shows. */
+    /* Both are visible idle; special-casing either would lose real CPU. */
     CHECK(NEAR(c1, c2) && NEAR(d1, d2) && NEAR(i1, i2) && NEAR(g1, g2),
           "pacing and ClientRead must be accounted identically: "
           "cpu %.1f/%.1f db %.1f/%.1f idle %.1f/%.1f gapcpu %.1f/%.1f",
           c1, c2, d1, d2, i1, i2, g1, g2);
 
-    /* CLAMP: measured CPU larger than the interval's wall is a clock-skew
-     * inconsistency and must be counted, on the CPU gap. Put the oversized
-     * cpu_ns on the on-CPU gap (where the clamp lives) and check it surfaces
-     * instead of inflating CPU* past the wall. */
+    /* The gap's clamp remains observable beside a valid idle CPU credit. */
     struct pgwt_trace_event ev[3];
     int n = 0;
     uint64_t t = 3000ULL * 1000000000ULL;
@@ -692,14 +692,211 @@ static void test_cpu_on_and_adjacent_to_pacing(void)
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
     pgwt_compute_time_model(ev, n, &f, 0, 0, 1000.0, &tm);
-    CHECK(NEAR(tm.cpu_ms, 100.0),
-          "CPU* clamped to the 100 ms gap, got %.1f", tm.cpu_ms);
+    CHECK(NEAR(tm.cpu_ms, 500.0),
+          "CPU* = 100 ms clamped gap + 400 ms idle credit, got %.1f", tm.cpu_ms);
     CHECK(NEAR(tm.cpu_clamped_ms, 80.0),
           "cpu_clamped_ms = 80 ms (180 measured - 100 wall), got %.1f",
           tm.cpu_clamped_ms);
-    CHECK(NEAR(tm.db_time_ms, 100.0) && NEAR(tm.idle_time_ms, 500.0),
-          "the pacing interval's 400 ms of CPU does not leak into DB Time "
+    CHECK(NEAR(tm.db_time_ms, 500.0) && NEAR(tm.idle_time_ms, 100.0),
+          "400 ms of pacing CPU moves from Idle into DB Time "
           "(db=%.1f idle=%.1f)", tm.db_time_ms, tm.idle_time_ms);
+    free(tm.rows);
+}
+
+/* ── 5b. Bypasses for visible-idle CPU credit (#194) ──────────────────────
+ * Drive the real model as well as the shared rule: a correct predicate alone
+ * cannot prove that the caller preserves UNKNOWN or scales the measurement.
+ */
+static void test_idle_cpu_credit_bypasses(void)
+{
+    printf("--- 5b. visible-idle CPU credit bypasses ---\n");
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_trace_event ev[4];
+    struct pgwt_tm_result measured, tm;
+    int n = build_cpu_adjacent_fixture(ev, EV_CHECKPOINT_DELAY, 40 * MS);
+    pgwt_compute_time_model(ev, n, &f, 0, 0, 1000.0, &measured);
+    CHECK(measured.cpu_ms > 90.0 && measured.db_time_ms > 300.0,
+          "measured control must move a positive amount out of Idle");
+
+    /* b1 UNKNOWN is absence, b2 zero is a valid measurement, b3 hidden
+     * NONCMD_CPU is the foreground outside-command decision (#97/#408).
+     * None may move time or create a clamp, even beside measured gap CPU. */
+    const struct {
+        const char *label;
+        uint32_t event;
+        uint64_t cpu_ns;
+    } refused[] = {
+        { "b1 UNKNOWN", EV_CHECKPOINT_DELAY, PGWT_CPU_NS_UNKNOWN },
+        { "b2 measured ZERO", EV_CHECKPOINT_DELAY, 0 },
+        { "b3 hidden NONCMD_CPU", PGWT_WEI_NONCMD_CPU, 40 * MS },
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        n = build_cpu_adjacent_fixture(ev, refused[i].event, refused[i].cpu_ns);
+        uint64_t excess = 123;
+        CHECK(pgwt_idle_cpu_credit_ns(refused[i].event, 500 * MS,
+                                     refused[i].cpu_ns, &excess) == 0 &&
+              excess == 0,
+              "%s: no credit and excess is initialised", refused[i].label);
+        pgwt_compute_time_model(ev, n, &f, 0, 0, 1000.0, &tm);
+        CHECK(NEAR(tm.db_time_ms, 300.0) && NEAR(tm.idle_time_ms, 500.0) &&
+              NEAR(tm.cpu_ms, 90.0),
+              "%s: nothing moves (db=%.1f idle=%.1f cpu=%.1f)",
+              refused[i].label, tm.db_time_ms, tm.idle_time_ms, tm.cpu_ms);
+        CHECK(!NEAR(tm.db_time_ms, measured.db_time_ms) &&
+              !NEAR(tm.cpu_ms, measured.cpu_ms) &&
+              !NEAR(tm.idle_time_ms, measured.idle_time_ms),
+              "%s: differs from measured control; always refusing cannot pass",
+              refused[i].label);
+        CHECK(NEAR(tm.offcpu_ms, 10.0) && NEAR(tm.wait_gap_cpu_ms, 10.0) &&
+              tm.cpu_clamped_ms == 0.0,
+              "%s: residual and wait CPU unchanged, no clamp", refused[i].label);
+        free(tm.rows);
+
+        /* Without the gap, none of these cases can set has_measured_cpu. */
+        pgwt_compute_time_model(&ev[1], 1, &f, 0, 0, 1000.0, &tm);
+        CHECK(!tm.has_measured_cpu && tm.cpu_ms == 0.0 &&
+              tm.db_time_ms == 0.0 && NEAR(tm.idle_time_ms, 500.0) &&
+              tm.cpu_clamped_ms == 0.0,
+              "%s: alone, creates no measured CPU row or clamp", refused[i].label);
+        free(tm.rows);
+    }
+    free(measured.rows);
+
+    /* b4 NON-idle measured CPU keeps the wait's full wall and its label. */
+    uint64_t excess = 123;
+    CHECK(pgwt_idle_cpu_credit_ns(EV_LOCK, 200 * MS, 10 * MS, &excess) == 0 &&
+          excess == 0, "b4 Lock is refused by the idle credit rule");
+    ev[0] = mk(4000ULL * 1000000000ULL, 501, EV_LOCK, 200, 10 * MS);
+    pgwt_compute_time_model(ev, 1, &f, 0, 0, 1000.0, &tm);
+    CHECK(NEAR(tm.db_time_ms, 200.0) && tm.idle_time_ms == 0.0 &&
+          tm.cpu_ms == 0.0 && tm.offcpu_ms == 0.0 && !tm.has_measured_cpu &&
+          NEAR(tm.wait_gap_cpu_ms, 10.0) && tm.cpu_clamped_ms == 0.0,
+          "b4 Lock CPU remains only the wait observability sum");
+    const struct pgwt_tm_row *lock = row_at(&tm, "Lock", 1);
+    CHECK(lock != NULL && NEAR(lock->time_ms, 200.0),
+          "b4 Lock keeps its full 200 ms wall and label");
+    free(tm.rows);
+
+    /* b5 Every PG18 visible idle id, not just the original two examples. */
+    const uint32_t visible[] = {
+        EV_CLIENTREAD,
+        WEI(PG_WAIT_TIMEOUT, 0), WEI(PG_WAIT_TIMEOUT, 1),
+        WEI(PG_WAIT_TIMEOUT, 3), WEI(PG_WAIT_TIMEOUT, 4),
+        WEI(PG_WAIT_TIMEOUT, 7), WEI(PG_WAIT_TIMEOUT, 9),
+    };
+    CHECK(sizeof(visible) / sizeof(visible[0]) == PGWT_MAX_VISIBLE_IDLE_EVENTS,
+          "b5 fixture names the whole visible idle set");
+    for (size_t i = 0; i < sizeof(visible) / sizeof(visible[0]); i++) {
+        uint32_t wei = visible[i];
+        CHECK(pgwt_is_idle_event(wei) && !pgwt_is_hidden_event(wei),
+              "b5 visible fixture event %zu is visible idle", i);
+        excess = 123;
+        CHECK(pgwt_idle_cpu_credit_ns(wei, 500 * MS, 40 * MS, &excess) ==
+              40 * MS && excess == 0,
+              "b5 visible event %zu credits measured CPU", i);
+        CHECK(pgwt_idle_cpu_credit_ns(wei, 500 * MS, 40 * MS, NULL) == 40 * MS,
+              "b5 visible event %zu accepts a NULL excess pointer", i);
+        CHECK(pgwt_idle_cpu_credit_ns(wei, 0, 40 * MS, &excess) == 0 &&
+              excess == 40 * MS, "b5 zero wall credits zero, reports excess");
+        CHECK(pgwt_idle_cpu_credit_ns(wei, 500 * MS, 600 * MS, &excess) ==
+              500 * MS && excess == 100 * MS,
+              "b5 CPU above wall clamps and reports excess");
+        CHECK(pgwt_idle_cpu_credit_ns(wei, 500 * MS, 500 * MS, &excess) ==
+              500 * MS && excess == 0, "b5 CPU equal to wall has no excess");
+        CHECK(pgwt_idle_cpu_credit_ns(wei, 0, PGWT_CPU_NS_UNKNOWN, &excess) == 0 &&
+              excess == 0, "b5 UNKNOWN is refused before any clamp");
+
+        ev[0] = mk(4000ULL * 1000000000ULL, 501, wei, 500, 40 * MS);
+        pgwt_compute_time_model(ev, 1, &f, 0, 0, 1000.0, &tm);
+        CHECK(NEAR(tm.db_time_ms, 40.0) && NEAR(tm.cpu_ms, 40.0) &&
+              NEAR(tm.idle_time_ms, 460.0) && tm.has_measured_cpu &&
+              tm.offcpu_ms == 0.0 && tm.cpu_clamped_ms == 0.0,
+              "b5 visible event %zu alone produces a measured CPU credit", i);
+        free(tm.rows);
+        ev[0].cpu_ns = 600 * MS;
+        pgwt_compute_time_model(ev, 1, &f, 0, 0, 1000.0, &tm);
+        CHECK(NEAR(tm.db_time_ms, 500.0) && NEAR(tm.cpu_ms, 500.0) &&
+              tm.idle_time_ms == 0.0 && NEAR(tm.cpu_clamped_ms, 100.0) &&
+              tm.offcpu_ms == 0.0,
+              "b5 visible event %zu clamps in the real model too", i);
+        free(tm.rows);
+    }
+
+    /* All 18 named PG18 Activity ids, an unknown Activity id, and the
+     * synthetic foreground gap are hidden. Large CPU must not even clamp. */
+    for (uint32_t i = 0; i < 20; i++) {
+        uint32_t wei = i < 18 ? WEI(PG_WAIT_ACTIVITY, i) :
+                       i == 18 ? WEI(PG_WAIT_ACTIVITY, 12345) : PGWT_WEI_NONCMD_CPU;
+        CHECK(pgwt_is_idle_event(wei) && pgwt_is_hidden_event(wei),
+              "b5 hidden fixture event %u is hidden idle", i);
+        excess = 123;
+        CHECK(pgwt_idle_cpu_credit_ns(wei, 500 * MS, 600 * MS, &excess) == 0 &&
+              excess == 0, "b5 hidden event %u is refused before clamping", i);
+        ev[0] = mk(4000ULL * 1000000000ULL, 501, wei, 500, 40 * MS);
+        pgwt_compute_time_model(ev, 1, &f, 0, 0, 1000.0, &tm);
+        CHECK(tm.db_time_ms == 0.0 && tm.cpu_ms == 0.0 &&
+              NEAR(tm.idle_time_ms, 500.0) && !tm.has_measured_cpu &&
+              tm.cpu_clamped_ms == 0.0,
+              "b5 hidden event %u keeps its whole wall in Idle", i);
+        free(tm.rows);
+    }
+    const uint32_t nonidle[] = {
+        0, EV_LOCK, EV_CLIENTWRITE, EV_PGSLEEP, EV_SPINDELAY,
+        WEI(PG_WAIT_TIMEOUT, 5), WEI(PG_WAIT_TIMEOUT, 8),
+        WEI(PG_WAIT_TIMEOUT, 32), WEI(PG_WAIT_CLIENT, 12345), WEI(0xFE, 12345),
+    };
+    for (size_t i = 0; i < sizeof(nonidle) / sizeof(nonidle[0]); i++) {
+        excess = 123;
+        CHECK(pgwt_idle_cpu_credit_ns(nonidle[i], 1, 2, &excess) == 0 &&
+              excess == 0, "b5 non-idle/unknown event %zu is totally refused", i);
+    }
+
+    /* b6 WINDOW: cut each edge separately. The 500 ms interval contains
+     * 40 ms measured CPU; either half must credit exactly 20 ms, not 40. */
+    uint64_t start = 5000ULL * 1000000000ULL;
+    ev[0] = mk(start + 500 * MS, 501, EV_CHECKPOINT_DELAY, 500, 40 * MS);
+    for (int edge = 0; edge < 2; edge++) {
+        uint64_t from = start + (edge ? 250 * MS : 0);
+        uint64_t to = start + (edge ? 750 * MS : 250 * MS);
+        pgwt_compute_time_model(ev, 1, &f, from, to, 500.0, &tm);
+        CHECK(tm.cpu_ms > 0.0 && tm.cpu_ms < 40.0,
+              "b6 edge %d: credit is strictly between zero and full CPU", edge);
+        CHECK(NEAR(tm.cpu_ms, 20.0) && NEAR(tm.db_time_ms, 20.0) &&
+              NEAR(tm.idle_time_ms, 230.0) && tm.has_measured_cpu &&
+              tm.cpu_clamped_ms == 0.0 && tm.offcpu_ms == 0.0,
+              "b6 edge %d: only in-window CPU and wall are credited", edge);
+        CHECK(NEAR(tm.db_time_ms + tm.idle_time_ms, 250.0),
+              "b6 edge %d: clipped wall is conserved", edge);
+        free(tm.rows);
+    }
+    ev[0].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    pgwt_compute_time_model(ev, 1, &f, start + 250 * MS, start + 750 * MS,
+                            500.0, &tm);
+    CHECK(tm.cpu_ms == 0.0 && tm.db_time_ms == 0.0 &&
+          NEAR(tm.idle_time_ms, 250.0) && tm.cpu_clamped_ms == 0.0 &&
+          !tm.has_measured_cpu,
+          "b6 clipped UNKNOWN stays UNKNOWN, never multiplied into CPU");
+    free(tm.rows);
+
+    ev[0].cpu_ns = 40 * MS;
+    pgwt_compute_time_model(ev, 1, &f, start + 600 * MS, start + 750 * MS,
+                            150.0, &tm);
+    CHECK(tm.cpu_ms == 0.0 && tm.db_time_ms == 0.0 && tm.idle_time_ms == 0.0 &&
+          tm.cpu_clamped_ms == 0.0 && !tm.has_measured_cpu,
+          "b6 no overlap credits nothing and sets no measurement flag");
+    free(tm.rows);
+
+    /* Sub-nanosecond scaled CPU must round to nearest, not truncate. Use
+     * exact comparisons here: the existing EPS is a whole nanosecond in ms. */
+    ev[0].timestamp_ns = start + 3;
+    ev[0].duration_ns = 3;
+    ev[0].cpu_ns = 1;
+    pgwt_compute_time_model(ev, 1, &f, start, start + 2, 1.0, &tm);
+    CHECK(tm.cpu_ms == 1.0 / 1e6 && tm.db_time_ms == 1.0 / 1e6 &&
+          tm.idle_time_ms == 1.0 / 1e6 && tm.has_measured_cpu &&
+          tm.cpu_clamped_ms == 0.0,
+          "b6 2/3 ns measured CPU rounds to 1 ns, conserving 2 ns wall");
     free(tm.rows);
 }
 
@@ -1421,6 +1618,7 @@ int main(void)
     test_idle_row_named_children();
     test_conservation_components();
     test_cpu_on_and_adjacent_to_pacing();
+    test_idle_cpu_credit_bypasses();
     test_tag_events_pacing_not_a_boundary();
     test_idle_breakdown_at_its_bound();
     test_idle_aas_is_a_rate();
