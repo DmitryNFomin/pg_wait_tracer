@@ -285,6 +285,16 @@ ssh_strict=""
 rsync_e="ssh"
 [[ -n "$ssh_strict" ]] && rsync_e="ssh $ssh_strict"
 
+# #622: the launcher knows which tier it provisioned. A caller override
+# stays authoritative, including an empty/invalid declaration that must fail.
+if [[ "${PGWT_EXPECT_PHASE_PROBES+x}" != "x" ]]; then
+    if [[ "$OS" == "el8" ]]; then
+        PGWT_EXPECT_PHASE_PROBES=0
+    else
+        PGWT_EXPECT_PHASE_PROBES=1
+    fi
+fi
+
 # Record exactly what tree is about to be synced (the rsync two lines
 # below sends ./, the Mac-side working tree, as-is) -- recorded here,
 # immediately before that rsync, so nothing can change the tree in
@@ -294,7 +304,7 @@ rsync_e="ssh"
 # run) and still look like evidence. A reviewer matches these two values
 # against the PR head and `scripts/tree-hash.sh` output.
 echo "box-check: commit=$(git rev-parse HEAD) tree-hash=$(scripts/tree-hash.sh)" | tee -a "$log"
-echo "box-check: target=$target OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL -> $remote_dir (log: $log)" | tee -a "$log"
+echo "box-check: target=$target OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES -> $remote_dir (log: $log)" | tee -a "$log"
 ssh -o BatchMode=yes $ssh_strict "$target" \
     "mkdir -p '$remote_dir' && printf 'box-check: remote hostname=%s machine_id=%s\\n' \"\$(hostname -f 2>/dev/null || hostname)\" \"\$(cat /etc/machine-id 2>/dev/null || echo unavailable)\"" \
     2>&1 | tee -a "$log"
@@ -379,6 +389,7 @@ pgarg=""; [[ -n "$PG" ]] && pgarg="--pg-version $PG"
 # actually set on the Mac side, explicitly, via `sudo env VAR=val ...` (sudo
 # itself, not the shell inheriting an already-reset environment).
 sudo_env=""
+sudo_env="$sudo_env PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES"
 [[ -n "${PGWT_PGPORT:-}" ]] && sudo_env="$sudo_env PGWT_PGPORT=$PGWT_PGPORT"
 [[ -n "${PGWT_PG_PORT_BASE:-}" ]] && sudo_env="$sudo_env PGWT_PG_PORT_BASE=$PGWT_PG_PORT_BASE"
 # Preflight (runs on the box, inside the same flock, before `make`): a

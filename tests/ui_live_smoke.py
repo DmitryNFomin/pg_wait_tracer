@@ -86,6 +86,8 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke_lib as lib
+from testutil import (resolve_declared_phase_mask, PHASE_MASK,
+                      PHASE_REFUSED_EXIT, PHASE_REFUSED_MARKER)
 
 PLAYWRIGHT_HINT = "ERROR: pip install playwright && playwright install chromium"
 try:
@@ -1301,7 +1303,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             inject_blink_ms=None, inject_tick=None,
             inject_blink_frac=DEFAULT_INJECT_BLINK_FRAC,
             inject_frame_index=lib.INJECT_FRAME_INDEX, diag_data=False,
-            footage_only=False, replay_probe=None):
+            footage_only=False, replay_probe=None, phase_absence=False, phase_measure=False):
     """replay_probe: optional replay observer, attached before navigation and
     verified after the existing navigation/render checks. Requires ticks=0;
     fixed-window URL hydration keeps Live off. The replay result reports only
@@ -1426,6 +1428,48 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     guard = ConsoleErrorGuard(page)
     console_errors = []
     pgwt_errors = []
+    # #622: count the actual tab responses, including explicit UNAVAIL.
+    # A DOM timeout or an unreadable response must never masquerade as zero.
+    marker_counts = []
+    if phase_measure and tab_id in ("waterfall", "scatter"):
+        command, key = (("executions", "rows") if tab_id == "waterfall"
+                        else ("exec_scatter", "points"))
+
+        def watch_socket(ws):
+            requests = {}
+
+            def sent(raw):
+                data = json.loads(raw)
+                requests[data.get("id")] = data.get("cmd")
+
+            def received(raw):
+                data = json.loads(raw)
+                if requests.get(data.get("id")) != command:
+                    return
+                if (data.get("code") == "full_fidelity_required"
+                        and data.get("fidelity") in ("sampled", "none")
+                        and key not in data and not data.get("error")):
+                    marker_counts.append(None)
+                elif isinstance(data.get(key), list) and not data.get("error"):
+                    marker_counts.append(len(data[key]))
+                else:
+                    marker_counts.append("unreadable %s response" % command)
+
+            ws.on("framesent", sent)
+            ws.on("framereceived", received)
+
+        page.on("websocket", watch_socket)
+
+    def measured_marker_count():
+        if not marker_counts:
+            return "no marker-derived response was measured"
+        bad = next((c for c in marker_counts if c is not None
+                    and not isinstance(c, int)), None)
+        if bad is not None:
+            return bad
+        counts = [c for c in marker_counts if c is not None]
+        return max(counts) if counts else None
+
     tick_paths = []
     video_path = None
     footage_ticks = 0
@@ -1468,6 +1512,25 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if time.monotonic() > deadline:
                 raise SmokeFailure(f"UI showed no data within {first_data_timeout}s")
             page.wait_for_timeout(200)
+
+        if phase_absence:
+            # #622: measure the negative half without waiting for a chart
+            # that cannot render without markers. Only the shared verdict
+            # later may turn this measured absence into REFUSED.
+            page.click(".tab[data-tab='%s']" % tab_id)
+            deadline = time.monotonic() + first_data_timeout
+            while not marker_counts and time.monotonic() < deadline:
+                page.wait_for_timeout(100)
+            for error in guard.drain():
+                (pgwt_errors if _is_pgwt_error(error) else console_errors).append(error)
+            if console_errors:
+                raise SmokeFailure("unexpected console errors during phase measurement")
+            result = {"tab": tab_id, "ok": False, "rendered": False,
+                      "ticks_observed": 0, "phase_pending": True,
+                      "marker_count": measured_marker_count(), "artifacts": {},
+                      "clean": {"ok": True, "console_errors": console_errors,
+                                "pgwt_errors": pgwt_errors}}
+            return result
 
         page.evaluate(TICK_HOOK_JS)
         ttfp_ms = _navigate_to_tab(page, tab_id, first_data_timeout,
@@ -2016,6 +2079,11 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 print(f"  note: could not finalize video for {tab_id}: {e}",
                       file=sys.stderr)
 
+        if phase_absence and "result" in locals():
+            result["artifacts"] = {"frames": tick_paths, "video": video_path}
+
+    if phase_measure and tab_id in ("waterfall", "scatter"):
+        result["marker_count"] = measured_marker_count()
     if footage_only:
         _mark_footage_result(result, footage_ticks, ticks, video_path)
     result["artifacts"] = {"frames": tick_paths, "video": video_path}
@@ -2029,6 +2097,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", help="page URL of an already-running UI "
                     "(phase 2: the real Go bridge)")
+    ap.add_argument("--control-socket", help="#622: live daemon status socket")
     ap.add_argument("--mock", action="store_true",
                     help="start tests/mock_server.py and walk against it")
     ap.add_argument("--footage-only", action="store_true",
@@ -2151,6 +2220,39 @@ def main():
         if os.path.commonpath([gate_dir, footage_dir]) in (gate_dir, footage_dir):
             ap.error("--footage-only requires an --out-dir separate from the gating results tree")
 
+    phase_enabled = (not args.mock and args.inject_blink_ms is None
+                     and not args.diag_data and not args.footage_only)
+    expected_phase = None
+    masks = []
+    if phase_enabled:
+        try:
+            expected_phase = resolve_declared_phase_mask()
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if not args.control_socket:
+            ap.error("--control-socket is required for the live phase contract")
+
+    def sample_phase_mask():
+        if not phase_enabled:
+            return
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(5)
+                client.connect(args.control_socket)
+                client.sendall(b'{"cmd":"status"}\n')
+                data = b""
+                while b"\n" not in data:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            status = json.loads(data.splitlines()[0])
+            masks.append(status.get("exact_probe_attached_mask"))
+        except (OSError, ValueError, IndexError) as exc:
+            print("  phase mask unreadable: %s" % exc)
+            masks.append(None)
+
     mock_proc = None
     if args.mock:
         mock_proc = start_mock_server(MOCK_PORT)
@@ -2214,6 +2316,7 @@ def main():
             browser = p.chromium.launch()
             try:
                 for tab_id in tabs_to_walk:
+                    sample_phase_mask()
                     print(f"=== {tab_id} ===")
                     inject_here = (args.inject_blink_ms is not None
                                    and tab_id == args.inject_tab)
@@ -2230,12 +2333,18 @@ def main():
                                      inject_blink_frac=args.inject_blink_frac,
                                      inject_frame_index=args.inject_frame,
                                      diag_data=args.diag_data,
-                                     footage_only=args.footage_only)
+                                     footage_only=args.footage_only,
+                                     phase_measure=phase_enabled,
+                                     phase_absence=(phase_enabled and expected_phase == 0
+                                                    and tab_id in ("waterfall", "scatter")))
+                    sample_phase_mask()
                     results.append(result)
                     _assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                            f"after tab {tab_id!r}")
                     kf_line = lib.known_failing_report_line(tab_id, result["ok"])
                     status = kf_line if kf_line else ("PASS" if result["ok"] else "FAIL")
+                    if result.get("phase_pending"):
+                        status = "MEASURED (phase contract pending)"
                     if args.footage_only:
                         status = ("FOOTAGE RECORDED" if result["footage_complete"] else "FOOTAGE FAILED")
                         print(f"  image checks: {FOOTAGE_NOT_EVALUATED}")
@@ -2259,8 +2368,29 @@ def main():
         if mock_proc is not None:
             stop_mock_server(mock_proc)
 
+    phase_contract = None
+    if phase_enabled:
+        sample_phase_mask()
+        verdict, reason = lib.phase_tab_expectation(expected_phase, masks, results)
+        phase_contract = {"declared": 1 if expected_phase == PHASE_MASK else 0,
+                          "masks": masks, "verdict": verdict, "reason": reason}
+        print("  %s: phase contract: %s" % (verdict.upper(), reason))
+        print("  mid-window mask samples: %r" % masks)
+        if verdict == "refuse":
+            print("%s: %s" % (PHASE_REFUSED_MARKER, reason))
+            for result in results:
+                if result.get("phase_pending"):
+                    result.update(refused=True, phase_reason=reason)
+
     summary_path = os.path.join(out_dir, "summary.json")
     summary = lib.write_summary(summary_path, results)
+    if phase_contract is not None:
+        summary["phase_contract"] = phase_contract
+        if phase_contract["verdict"] == "fail":
+            summary["ok"] = False
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+            f.write("\n")
     if args.footage_only:
         summary.update(footage_only=True, ok=False,
                        detail=FOOTAGE_NOT_EVALUATED,
@@ -2316,9 +2446,15 @@ def main():
         r = summary["tabs"].get(tab_id)
         kf_line = lib.known_failing_report_line(tab_id, r["ok"]) if r else None
         label = kf_line if kf_line else ("PASS" if r and r["ok"] else "FAIL")
+        if r and r.get("refused"):
+            label = "REFUSED"
         print(f"  {label} {tab_id}")
     print(f"  summary: {summary_path}")
-    print(f"  overall: {'PASS' if summary['ok'] else 'FAIL'}"
+    overall = ("REFUSED" if summary["ok"] and summary.get("refused_tabs")
+               else "PASS" if summary["ok"] else "FAIL")
+    print(f"  overall: {overall}"
+          + (" (refused: %s)" % ", ".join(summary["refused_tabs"])
+             if summary.get("refused_tabs") else "")
           + (f" (failed: {', '.join(summary['failed_tabs'])})"
              if summary["failed_tabs"] else "")
           + (f" (known-failing: {', '.join(summary['known_failing_tabs'])})"
@@ -2362,6 +2498,8 @@ def main():
               f"({detail})")
         return 0 if self_test_ok else 1
 
+    if summary["ok"] and summary.get("refused_tabs"):
+        return PHASE_REFUSED_EXIT
     return 0 if summary["ok"] else 1
 
 

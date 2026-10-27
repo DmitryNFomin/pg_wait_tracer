@@ -58,7 +58,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import demo_rehearsal_lib as drlib
 from server_harness import ServerHarness
-from testutil import find_postmaster
+from testutil import (find_postmaster, resolve_declared_phase_mask,
+                      phase_contract_apply)
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
@@ -253,10 +254,13 @@ def start_daemon(pm_pid, admit_all):
         env.pop("PGWT_TEST_EXEC_SITE_ADMIT_ALL", None)
     err_path = os.path.join(trace_dir, "daemon.err")
     err = open(err_path, "w")
+    # #622: --skip-usdt is the EL8 proxy, like the #464 execution-site hook.
+    phase_args = (["--skip-usdt"]
+                  if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1" else [])
     proc = subprocess.Popen(
         [TRACER, "--mode", "full", "--pid", str(pm_pid),
          "--trace-dir", trace_dir, "--duration", str(CAPTURE_DURATION_S),
-         "--interval", "1", "--quiet"],
+         "--interval", "1", "--quiet"] + phase_args,
         stdout=subprocess.DEVNULL, stderr=err, env=env)
     # Readiness is the control socket ANSWERING, not a sleep: a daemon that
     # never comes up must fail HERE with its stderr attached, not stall
@@ -285,7 +289,8 @@ def start_daemon(pm_pid, admit_all):
         proc.kill()
         fatal(f"daemon never became ready (admit_all={admit_all}); "
               f"stderr tail:\n{log}")
-    return proc, trace_dir, err, err_path
+    masks = [ctl(trace_dir, {"cmd": "status"}).get("exact_probe_attached_mask")]
+    return proc, trace_dir, err, err_path, masks
 
 
 def stop_daemon(proc, err):
@@ -342,14 +347,21 @@ def rows_by_table(top_queries_rows):
 def capture_phase(pm_pid, admit_all):
     """One full capture: start the daemon, run the cohorts, drain, stop,
     then collect everything the assertions need."""
-    proc, trace_dir, err, err_path = start_daemon(pm_pid, admit_all)
+    proc, trace_dir, err, err_path, masks = start_daemon(pm_pid, admit_all)
     try:
         time.sleep(CAPTURE_SETTLE_S)
         pids, cohort_from_ns, cohort_to_ns = run_cohorts()
         time.sleep(CAPTURE_DRAIN_S)
     finally:
-        stop_daemon(proc, err)
+        try:
+            masks.append(ctl(trace_dir, {"cmd": "status"}).get(
+                "exact_probe_attached_mask"))
+        except (OSError, ValueError, IndexError) as exc:
+            print(f"  post-capture mask could not be read: {exc}")
+        finally:
+            stop_daemon(proc, err)
 
+    print("  mid-window mask samples: %r" % masks)
     with open(err_path) as fh:
         daemon_log = fh.read()
 
@@ -383,6 +395,7 @@ def capture_phase(pm_pid, admit_all):
                                      filters={"pid": pids["errors"],
                                               "query_id": row.get("query_id")})
     return {
+        "masks": masks,
         "admit_all": admit_all,
         "trace_dir": trace_dir,
         "daemon_log": daemon_log,
@@ -400,23 +413,12 @@ def capture_phase(pm_pid, admit_all):
 
 # ── Assertions ───────────────────────────────────────────────────────────
 
-def assert_capture_is_usable(phase):
+def assert_capture_is_usable(phase, expected_phase):
     """Preconditions. Each of these, left unchecked, is a way for the
     cardinality assertions to pass without having examined a real capture."""
     tag = "mutant" if phase["admit_all"] else "fixed"
     log = phase["daemon_log"]
     site_lines = [l for l in log.splitlines() if "site(s)" in l]
-
-    check("REFUSED" not in log,
-          f"{tag}: daemon did not refuse execution telemetry")
-    if phase["admit_all"]:
-        check("PGWT_TEST_EXEC_SITE_ADMIT_ALL=1" in log,
-              f"{tag}: the mutant hook really was active")
-        check("4 site(s) admitted" in log,
-              f"{tag}: all four declared probe sites published ({site_lines})")
-    else:
-        check("2 site(s) admitted" in log and "2 excluded" in log,
-              f"{tag}: exactly 2 sites admitted and 2 excluded ({site_lines})")
 
     # The window must FULLY contain the cohort. A capture that started late
     # or stopped early measures a fraction of N, and a fraction that happens
@@ -447,6 +449,37 @@ def assert_capture_is_usable(phase):
         check(phase["executions"].get(
                   _cohort_name_for_table(t)) is not None,
               f"{tag}: raw executions answered for {t}")
+
+    # #622: count what was actually measured before any phase assertion.
+    # Keep each cohort for declared 0: a positive count must never cancel a
+    # bad/negative one in a total and turn a refusal into a vacuous approval.
+    artifacts = {}
+    totals = {"exec_count": 0, "plan_count": 0}
+    for table, rows in phase["found"].items():
+        for i, row in enumerate(rows):
+            for field in totals:
+                count = row.get(field)
+                if count is not None and (isinstance(count, bool)
+                                          or not isinstance(count, int) or count < 0):
+                    fatal("%s/%s has unreadable count %r" % (table, field, count))
+                totals[field] += count or 0
+                if expected_phase == 0:
+                    artifacts["%s/%s/%s" % (table, i, field)] = count
+    artifacts.update(totals)
+    if tests_failed:
+        fatal("capture preconditions failed before the phase contract")
+    phase_contract_apply(expected_phase, phase["masks"], artifacts, tag, fail=fatal)
+
+    check("REFUSED" not in log,
+          f"{tag}: daemon did not refuse execution telemetry")
+    if phase["admit_all"]:
+        check("PGWT_TEST_EXEC_SITE_ADMIT_ALL=1" in log,
+              f"{tag}: the mutant hook really was active")
+        check("4 site(s) admitted" in log,
+              f"{tag}: all four declared probe sites published ({site_lines})")
+    else:
+        check("2 site(s) admitted" in log and "2 excluded" in log,
+              f"{tag}: exactly 2 sites admitted and 2 excluded ({site_lines})")
 
 
 def _cohort_name_for_table(table):
@@ -649,6 +682,11 @@ def main():
     ap.add_argument("--pg-version", type=int, default=0)
     args = ap.parse_args()
 
+    try:
+        expected_phase = resolve_declared_phase_mask()
+    except ValueError as exc:
+        fatal(str(exc))
+
     print("test_execution_cardinality: #464 one execution per execution")
 
     if os.geteuid() != 0:
@@ -665,12 +703,12 @@ def main():
 
     print("--- phase 1: shipped filter (canonical PortalRun site only) ---")
     fixed = capture_phase(pm_pid, admit_all=False)
-    assert_capture_is_usable(fixed)
+    assert_capture_is_usable(fixed, expected_phase)
     assert_fixed_phase(fixed)
 
     print("--- phase 2: PGWT_TEST_EXEC_SITE_ADMIT_ALL=1 (the #464 mutant) ---")
     mutant = capture_phase(pm_pid, admit_all=True)
-    assert_capture_is_usable(mutant)
+    assert_capture_is_usable(mutant, expected_phase)
     assert_mutant_phase(mutant)
 
     print(f"\ntest_execution_cardinality: {tests_run - tests_failed}/"

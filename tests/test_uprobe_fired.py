@@ -39,105 +39,11 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from testutil import find_postmaster
+from testutil import (find_postmaster, EXPECT_PHASE_ENV, ATTR_MASK, PHASE_MASK,
+                      ALL_MASK, resolve_expected_phase_mask, exact_window_mask_ok)
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
-
-# exact_probe_attached_mask bundle bits, mirroring src/exact_probe.h.
-#   ATTR_MASK  = QUERY_ID|ACTIVITY, the REQUIRED attribution pair: a window
-#                missing either one hands out half-exact answers.
-#   PHASE_MASK = EXEC|PLAN, #108's OPTIONAL execute/plan USDT phase markers,
-#                attached best effort inside pgwt_exact_probe_core_acquire()
-#                AFTER the window is granted (src/exact_probe.c).
-ATTR_MASK = 0x3
-PHASE_MASK = 0xC
-ALL_MASK = ATTR_MASK | PHASE_MASK
-
-# #591: this file predates #108 and asserted `mask == ATTR_MASK`, which went
-# deterministically red everywhere the phase markers attach (0xf). Widening it
-# to "required bits present" alone is not enough -- the interesting half of
-# #108 is then unasserted on a live kernel, and the check can no longer tell a
-# window that got both markers from one that got neither.
-#
-# The expectation cannot be derived from the product:
-#   * from the mask itself -- circular; the assertion could not fail.
-#   * from the daemon -- src/exact_probe.c discards the optional attach's
-#     result (`(void)attach_missing(...)`), so the bit IS the only state.
-#   * from the kernel's /sys/.../uprobe/format/ref_ctr_offset -- that says the
-#     kernel supports USDT semaphore refcounting, not that THESE probes
-#     attach, which also needs the SDT notes in the postgres binary, the #464
-#     execution-site allowlist, and neither --skip-usdt nor --lightweight. It
-#     would redden a legitimate capable-kernel/no-notes configuration.
-#   * from /etc/os-release -- a guess about a kernel capability.
-# So whatever PROVISIONED the tier declares it, via the environment, and an
-# UNDECLARED tier is refused rather than defaulted: a default is exactly how
-# this assertion would go quietly vacuous again the next time a tier is added.
-EXPECT_PHASE_ENV = "PGWT_EXPECT_PHASE_PROBES"
-
-
-def resolve_expected_phase_mask(raw):
-    """Map $PGWT_EXPECT_PHASE_PROBES to the phase bits an open exact window
-    must carry: PHASE_MASK for "1", 0 for "0".
-
-    Raises ValueError for everything else -- unset (None), empty, or
-    unparseable -- so a tier that never declared an expectation fails loudly
-    instead of being approved by a silent default.
-    """
-    if raw is None:
-        raise ValueError(
-            "%s is not set. This tier must DECLARE whether #108's "
-            "execute/plan USDT phase markers are expected to attach in an "
-            "exact window: 1 = must attach (kernel with USDT semaphore "
-            "refcounting, postgres built with the SDT notes), 0 = must not "
-            "(e.g. EL8). There is deliberately no default -- one would make "
-            "the phase-bit assertion vacuous. Declare it next to the PG "
-            "version in the runner that invokes this test." % EXPECT_PHASE_ENV)
-    value = raw.strip()
-    if value == "1":
-        return PHASE_MASK
-    if value == "0":
-        return 0
-    raise ValueError(
-        "%s=%r is neither '0' nor '1'; refusing rather than guessing which "
-        "phase-marker contract this tier has." % (EXPECT_PHASE_ENV, raw))
-
-
-def exact_window_mask_ok(mask, expected_phase):
-    """The three-part contract on an OPEN exact window's
-    exact_probe_attached_mask. Returns (ok, reason-for-the-check-line).
-
-      1. the REQUIRED attribution pair is present   (mask & 0x3) == 0x3
-      2. no bits outside the known bundle           (mask & ~0xf) == 0
-      3. the phase markers match the declaration    (mask & 0xc) == expected
-
-    (2) is why this is not written as a plain `mask & ATTR_MASK`: a new,
-    unknown bundle member appearing in the JSON must still fail here rather
-    than be silently accepted. An absent or unparseable field fails too -- a
-    check that cannot read what it is checking refuses, it never approves.
-    """
-    if isinstance(mask, bool) or not isinstance(mask, (int, float)):
-        return False, "exact_probe_attached_mask is not a number (%r)" % (mask,)
-    if isinstance(mask, float):
-        if mask != int(mask):
-            return False, ("exact_probe_attached_mask is not an integer (%r)"
-                           % (mask,))
-        mask = int(mask)
-    if mask < 0:
-        return False, "exact_probe_attached_mask is negative (%r)" % (mask,)
-    if (mask & ATTR_MASK) != ATTR_MASK:
-        return False, ("required attribution pair incomplete: mask=0x%x, "
-                       "(mask & 0x%x)=0x%x" % (mask, ATTR_MASK,
-                                               mask & ATTR_MASK))
-    unknown = mask & ~ALL_MASK
-    if unknown:
-        return False, ("unknown bundle bits set: mask=0x%x, outside 0x%x: "
-                       "0x%x" % (mask, ALL_MASK, unknown))
-    phase = mask & PHASE_MASK
-    if phase != expected_phase:
-        return False, ("phase markers 0x%x but %s requires 0x%x (mask=0x%x)"
-                       % (phase, EXPECT_PHASE_ENV, expected_phase, mask))
-    return True, "mask=0x%x, phase=0x%x as declared" % (mask, phase)
 
 tests_run = 0
 tests_failed = 0
