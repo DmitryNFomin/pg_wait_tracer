@@ -273,15 +273,20 @@ def load_expected():
 #   * aas/max_aas — the summary path's peak is the max over SECONDS, the raw
 #     path's is the max over the requested buckets. The same
 #     two-meanings-one-field shape as #319.
-#   * queries/backfilled_ms, queries/unattributed_available — the summary
-#     path has no unattributed/backfilled accounting to offer.
 #   * time_model/io_worker_busy_pct — absent from the summary response.
 # Listed here rather than falling through to the per-window rules so that a
 # NEW divergence in one of these endpoints cannot inherit #410 by accident.
+#
+# queries/backfilled_ms and queries/unattributed_available WERE here and are
+# gone: #598 fixed them, this gate reported them `xpass ... delete this
+# entry`, and removing the pins was the last step of landing that fix. They
+# are deliberately NOT left behind "just in case": a field with no rule falls
+# through to UNEXPLAINED, which refuses, whereas a stale entry would let a
+# brand-new divergence in those two endpoints inherit a closed item of #410 —
+# the exact accident the sentence above exists to prevent. #410 itself stays
+# OPEN for the two below.
 FOUND_BY_THIS_GATE = {
     "aas/max_aas": 410,
-    "queries/backfilled_ms": 410,
-    "queries/unattributed_available": 410,
     "time_model/io_worker_busy_pct": 410,
 }
 
