@@ -190,6 +190,16 @@ write_files:
       else
           log "WARNING: playwright chromium install FAILED on EL8"
       fi
+      # MEASURED, box-check run 2: chrome-headless-shell died with
+      # "error while loading shared libraries: libatk-1.0.so.0". Playwright's
+      # `install --with-deps` only knows apt distributions, so on EL8 the OS
+      # libraries must be named here. With these installed the bundled
+      # ubuntu24.04-x64 build DOES run on EL8's glibc 2.28 (measured:
+      # `chrome-headless-shell --version` -> Google Chrome for Testing
+      # 148.0.7778.96), so EL8 is NOT excluded from the live-UI-smoke tier.
+      dnf install -y atk at-spi2-atk at-spi2-core cups-libs libdrm \
+          libXcomposite libXdamage libXfixes libXrandr mesa-libgbm pango \
+          cairo alsa-lib nss nspr libxkbcommon libxshmfence
 
       # root@localhost ssh self-trust loop (web/bridge.go's NewSSHBridge runs
       # ssh -o BatchMode=yes, which refuses rather than prompts).
