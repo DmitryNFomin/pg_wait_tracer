@@ -1,0 +1,214 @@
+#cloud-config
+# Rocky Linux 8 (kernel 4.18) + PostgreSQL 18 — the EL8 LIVE tier.
+#
+# Why this file exists (#622 / #532): the repo's only Red Hat-family recipe
+# was tests/cloud-init-rocky9-pg18.yaml, and Rocky 9 runs kernel 5.14, which
+# HAS uprobe ref_ctr_offset. The whole EL8 argument behind #622's
+# phase-marker contract is that 4.18 does NOT, so the optional execute/plan
+# USDT markers cannot attach and an open exact window's
+# exact_probe_attached_mask reads 0x3 instead of 0xF. Rocky 9 cannot
+# reproduce that; Rocky 8 can. `make box-check OS=el8` then drives it with
+# PGWT_EXPECT_PHASE_PROBES=0 (scripts/box-check.sh picks that from the tier).
+#
+#   tests/hetzner-vm.sh create --image rocky-8 --type cx33 \
+#       --name pgwt-el8-probe --cloud-init tests/cloud-init-rocky8-pg18.yaml \
+#       --labels pgwt=ephemeral,created=$(date +%s),owner=el8
+#   export PGWT_BOX_EL8=root@<ip>
+#   make box-check OS=el8 PG=18
+#
+# Differences from the Rocky 9 file that are NOT cosmetic:
+#   * `powertools` (EL8), not `crb` (EL9).
+#   * `dnf -qy module disable postgresql` — EL8 ships an AppStream
+#     postgresql module that shadows PGDG's packages; EL9's CRB-era repo
+#     layout does not need the dance in the same way, and the Rocky 9 file
+#     omits it.
+#   * PostgreSQL 18 IS available for EL8 (PGDG publishes
+#     postgresql18-server-18.x-*.rhel8*.rpm and pg_wait_sampling_18 under
+#     .../yum/18/redhat/rhel-8-x86_64/), so this tier runs the same major
+#     the Ubuntu gate box's primary cluster runs — no version skew to argue
+#     about when comparing the two tiers' masks.
+#   * Port 5418, matching tests/provision-runner.sh's 54<major> convention
+#     and the ambient PGPORT the live tests expect. The Rocky 9 file left
+#     PostgreSQL on 5432.
+#   * python3.11 via `alternatives`: EL8's default python3 is 3.6, which is
+#     too old for the test suite. dnf itself uses platform-python, so
+#     re-pointing /usr/bin/python3 is safe here.
+#   * libbpf: EL8 ships libbpf 0.5.0, which predates USDT entirely. The
+#     Makefile already detects this (scripts/detect_libbpf_usdt.sh) and
+#     builds a pinned libbpf + bpftool from source into build/. So
+#     libbpf-devel is installed for -lelf/-lz/headers parity, but the build
+#     deliberately does not depend on it being new enough — git and a
+#     compiler are the real requirements for that fallback path.
+#   * SELinux set permissive: Rocky 8 enforces by default and would be a
+#     confound for "did the uprobe attach" measurements. Declared here
+#     rather than silently worked around.
+#
+# All real work is in /root/provision-el8.sh so it can be re-run by hand
+# over ssh, idempotently, without recreating the VM.
+
+write_files:
+  - path: /root/provision-el8.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Idempotent EL8 provisioning for the pg_wait_tracer LIVE tier.
+      set -euo pipefail
+      log() { echo "[provision-el8] $*"; }
+      PGV=18
+      PGBIN=/usr/pgsql-$PGV/bin
+      PGDATA=/var/lib/pgsql/$PGV/data
+      PORT=54$PGV
+
+      log "kernel: $(uname -r)"
+
+      # SELinux permissive — declared, not worked around (see the header).
+      setenforce 0 2>/dev/null || true
+      sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
+
+      # Never let a kernel change out from under a live capture.
+      systemctl disable --now dnf-automatic.timer 2>/dev/null || true
+      systemctl mask dnf-automatic.timer 2>/dev/null || true
+
+      log "repos"
+      dnf install -y epel-release
+      dnf config-manager --set-enabled powertools
+      dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+      # EL8's AppStream postgresql module shadows PGDG's packages.
+      dnf -qy module disable postgresql
+
+      log "build + runtime deps"
+      dnf install -y gcc make git tar jq rsync bc procps-ng findutils \
+          diffutils util-linux sudo curl which \
+          clang llvm bpftool libbpf-devel elfutils-libelf-devel \
+          zlib-devel lz4-devel elfutils perf golang \
+          python3.11 python3.11-pip python3.11-devel
+
+      # EL8's /usr/bin/python3 is 3.6; the test suite needs 3.11.
+      alternatives --set python3 /usr/bin/python3.11
+      log "python3: $(python3 -V)"
+      log "clang:   $(clang --version | head -n1)"
+      log "go:      $(go version)"
+
+      # scripts/box-check.sh's preflight requires BOTH of these.
+      bpftool version >/dev/null || { echo "FATAL: bpftool broken" >&2; exit 1; }
+      test -r /sys/kernel/btf/vmlinux || {
+          echo "FATAL: /sys/kernel/btf/vmlinux not readable — BPF build needs BTF" >&2
+          exit 1; }
+
+      log "PostgreSQL $PGV"
+      dnf install -y postgresql$PGV-server postgresql$PGV-contrib \
+          pg_wait_sampling_$PGV
+      if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
+          "$PGBIN/postgresql-$PGV-setup" initdb
+      fi
+      sed -i -E 's/(ident|peer|scram-sha-256|md5)$/trust/' "$PGDATA/pg_hba.conf"
+      # Written directly: ALTER SYSTEM needs a running server, and this runs
+      # before the first start.
+      cat > "$PGDATA/conf.d-pgwt.conf" <<CONF
+      port = $PORT
+      compute_query_id = on
+      max_parallel_workers_per_gather = 2
+      shared_preload_libraries = 'pg_stat_statements, pg_wait_sampling'
+      pg_stat_statements.track = 'all'
+      pg_wait_sampling.profile_period = 10
+      CONF
+      grep -q "conf.d-pgwt.conf" "$PGDATA/postgresql.conf" || \
+          echo "include = 'conf.d-pgwt.conf'" >> "$PGDATA/postgresql.conf"
+      systemctl enable postgresql-$PGV
+      systemctl restart postgresql-$PGV
+      for _ in $(seq 1 60); do
+          "$PGBIN/pg_isready" -p "$PORT" >/dev/null 2>&1 && break
+          sleep 1
+      done
+
+      # psql/pgbench on PATH for everything that does not use $PGBIN.
+      for b in psql pgbench pg_config pg_isready; do
+          ln -sf "$PGBIN/$b" "/usr/local/bin/$b"
+      done
+      grep -q '^PGPORT=' /etc/environment || echo "PGPORT=$PORT" >> /etc/environment
+
+      psqlp() { sudo -u postgres "$PGBIN/psql" -p "$PORT" "$@"; }
+      psqlp -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null
+      psqlp -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_wait_sampling" >/dev/null
+
+      # Fixtures the live tests document but do not create themselves —
+      # same set and sizes tests/provision-runner.sh builds on Ubuntu.
+      SCALE=10
+      ROWS=$(psqlp -tAc "SELECT count(*) FROM pgbench_accounts" 2>/dev/null || echo 0)
+      if [[ "${ROWS:-0}" -lt $((SCALE * 100000)) ]]; then
+          log "pgbench -i -s $SCALE"
+          sudo -u postgres "$PGBIN/pgbench" -p "$PORT" -i -s "$SCALE" -q postgres
+      fi
+      IO_ROWS=$(psqlp -tAc "SELECT count(*) FROM _smoke_io_load" 2>/dev/null || echo 0)
+      if [[ "${IO_ROWS:-0}" -lt 3000000 ]]; then
+          log "building _smoke_io_load"
+          psqlp -d postgres -v ON_ERROR_STOP=1 -c "
+              DROP TABLE IF EXISTS _smoke_io_load;
+              CREATE TABLE _smoke_io_load (
+                  id bigint PRIMARY KEY, filler text, ctr int NOT NULL DEFAULT 0);
+              INSERT INTO _smoke_io_load (id, filler, ctr)
+                  SELECT g, repeat('x', 200), 0 FROM generate_series(1, 3000000) g;
+          " >/dev/null
+      fi
+      psqlp -d postgres -v ON_ERROR_STOP=1 -c "
+          CREATE TABLE IF NOT EXISTS _smoke_lockmgr_fanout (id bigint, val int)
+              PARTITION BY RANGE (id);
+          DO \$\$
+          DECLARE i int;
+          BEGIN
+              FOR i IN 0..199 LOOP
+                  EXECUTE format(
+                      'CREATE TABLE IF NOT EXISTS %I PARTITION OF _smoke_lockmgr_fanout '
+                      'FOR VALUES FROM (%s) TO (%s)',
+                      '_smoke_lockmgr_fanout_p' || i, i * 1000, (i + 1) * 1000);
+              END LOOP;
+          END \$\$;" >/dev/null
+
+      log "python test deps"
+      python3 -m pip install -q --upgrade pip
+      python3 -m pip install -q playwright==1.60.0 websockets pillow numpy
+      # `playwright install --with-deps` only knows apt distributions; on EL8
+      # the browser is fetched without the OS-dependency step. Best effort,
+      # and loud: tests/ui_live_smoke.sh is the one live test that needs it,
+      # and EL8's glibc 2.28 may be too old for the bundled Chromium.
+      if python3 -m playwright install chromium; then
+          log "playwright chromium installed"
+      else
+          log "WARNING: playwright chromium install FAILED on EL8"
+      fi
+
+      # root@localhost ssh self-trust loop (web/bridge.go's NewSSHBridge runs
+      # ssh -o BatchMode=yes, which refuses rather than prompts).
+      mkdir -p /root/.ssh; chmod 700 /root/.ssh
+      [[ -f /root/.ssh/id_ed25519 ]] || \
+          ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519 -C "pgwt-el8-self" >/dev/null
+      touch /root/.ssh/authorized_keys
+      grep -qxF "$(cat /root/.ssh/id_ed25519.pub)" /root/.ssh/authorized_keys || \
+          cat /root/.ssh/id_ed25519.pub >> /root/.ssh/authorized_keys
+      chmod 600 /root/.ssh/authorized_keys
+      touch /root/.ssh/known_hosts
+      for h in localhost 127.0.0.1; do
+          tmp=$(mktemp)
+          if ssh-keyscan -H "$h" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+              ssh-keygen -R "$h" -f /root/.ssh/known_hosts >/dev/null 2>&1 || true
+              cat "$tmp" >> /root/.ssh/known_hosts
+          fi
+          rm -f "$tmp"
+      done
+      chmod 600 /root/.ssh/known_hosts
+      ssh -o BatchMode=yes -o ConnectTimeout=5 root@localhost true || {
+          echo "FATAL: root@localhost ssh self-trust loop failed" >&2; exit 1; }
+
+      # The lock scripts/box-check.sh takes, writable by a non-root runner.
+      touch /tmp/pgwt-box-check.lock; chmod 0666 /tmp/pgwt-box-check.lock
+
+      cat > /etc/pgwt-gate-box <<MARK
+      # Written by tests/cloud-init-rocky8-pg18.yaml's /root/provision-el8.sh.
+      # EL8 (kernel $(uname -r)) LIVE tier: PostgreSQL $PGV on port $PORT.
+      provisioned_at=$(date -u +%FT%TZ)
+      tier=el8
+      MARK
+      log "provisioning complete"
+
+runcmd:
+  - [ bash, -lc, "/root/provision-el8.sh 2>&1 | tee /var/log/pgwt-el8-provision.log" ]
