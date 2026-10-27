@@ -38,7 +38,7 @@ done
 
 # #622: the tier must declare PGWT_EXPECT_PHASE_PROBES before live work.
 if [[ $SELF_TEST_ONLY -eq 0 ]]; then
-    PHASE_EXPECT=$(python3 "$SCRIPT_DIR/testutil.py" phase-expectation) || exit $?
+    python3 "$SCRIPT_DIR/testutil.py" phase-expectation >/dev/null || exit $?
 fi
 # #622: --skip-usdt is the EL8 proxy; it removes only the phase probes.
 PHASE_ARGS=()

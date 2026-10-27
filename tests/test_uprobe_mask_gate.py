@@ -340,13 +340,16 @@ for file in ("test_execution_cardinality.py", "test_execution_span_live.py",
              "test_escalation.sh", "ui_live_smoke.sh"):
     source = io.open(os.path.join(SCRIPT_DIR, file), encoding="utf-8").read()
     report("PGWT_TEST_FORCE_NO_PHASE_PROBES" in source and "--skip-usdt" in source,
-           "%s starts the EL8 proxy when requested" % file)
+           "%s passes --skip-usdt when requested" % file)
 
 # Exercise the real runner functions without its build/live preconditions.
 # Text wiring alone cannot prove a stray 78 stays red, or that KNOWN_FAILING
 # still refuses 126/127. No copy of the classifier lives in this harness.
 print("\n-- #622 runner exit classification --")
-functions = []
+marker = re.search(r'^PHASE_REFUSED_MARKER="([^"]*)"$', runner, re.MULTILINE)
+report(marker is not None and marker.group(1) == tu.PHASE_REFUSED_MARKER,
+       "runner marker literal equals testutil.PHASE_REFUSED_MARKER")
+functions = [marker.group(0)] if marker else []
 for name in ("known_failing_issue", "phase_dependent_test", "run_test",
              "undeclared_phase_test"):
     match = re.search(r"(?ms)^" + name + r"\(\) \{.*?^\}", runner)
@@ -354,12 +357,37 @@ for name in ("known_failing_issue", "phase_dependent_test", "run_test",
     if match:
         functions.append(match.group(0))
 runner_harness = "\n".join(functions) + """
+set -o pipefail
 passed=0; failed=0; refused=0; known_failing=0; xpass=0
 phase_expectation="$1"
 KNOWN_FAILING=("known|622")
-run_test "$2" bash -c 'exit "$1"' unused "$3"
+[[ "$6" == "1" ]] && KNOWN_FAILING+=("$2|622")
+run_test "$2" bash -c '
+    if [[ "$3" == "stderr" ]]; then
+        printf "%s\\n" "$2" >&2
+    else
+        printf "%s\\n" "$2"
+    fi
+    exit "$1"
+' unused "$3" "$4" "$5"
 printf 'COUNTS %s %s %s %s %s\n' "$passed" "$failed" "$refused" "$known_failing" "$xpass"
 """
+
+
+def runner_case(declared, name, rc, want, output=tu.PHASE_REFUSED_MARKER,
+                stream="stdout", known=False, diagnostic=""):
+    result = subprocess.run(["bash", "-uc", runner_harness, "runner-test",
+                             declared, name, str(rc), output, stream,
+                             "1" if known else "0"], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, universal_newlines=True)
+    report(result.returncode == 0 and "COUNTS " + want in result.stdout
+           and diagnostic in result.stdout,
+           "declared=%r %s exit %s, %s on %s%s: %s" %
+           (declared, name, rc, "marker" if output else "no marker", stream,
+            ", known-failing" if known else "",
+            result.stdout.strip().split("\n")[-1]))
+
+
 for declared, name, rc, want in (
         ("0", "test_execution_cardinality", 78, "0 0 1 0 0"),
         ("0", "test_execution_span_live", 78, "0 0 1 0 0"),
@@ -372,13 +400,20 @@ for declared, name, rc, want in (
         ("0", "known", 127, "0 1 0 0 0"),
         ("0", "known", 1, "0 0 0 1 0"),
         ("0", "known", 0, "0 0 0 1 1"),
-        ("0", "unrelated", 0, "1 0 0 0 0")):
-    result = subprocess.run(["bash", "-uc", runner_harness, "runner-test",
-                             declared, name, str(rc)], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, universal_newlines=True)
-    report(result.returncode == 0 and "COUNTS " + want in result.stdout,
-           "declared=%r %s exit %s: %s" %
-           (declared, name, rc, result.stdout.strip().split("\n")[-1]))
+        ("0", "unrelated", 0, "1 0 0 0 0"),
+        ("0", "unrelated", 1, "0 1 0 0 0")):
+    diagnostic = ""
+    if rc == 78 and declared != "0":
+        diagnostic = 'declaration not "0"'
+    elif rc == 78 and name == "unrelated":
+        diagnostic = "test is not phase-dependent"
+    runner_case(declared, name, rc, want, diagnostic=diagnostic)
+
+runner_case("0", "test_execution_cardinality", 78, "0 1 0 0 0", output="",
+            diagnostic="refusal marker absent")
+runner_case("0", "test_execution_cardinality", 78, "0 0 1 0 0", stream="stderr")
+runner_case("0", "test_execution_cardinality", 78, "0 0 0 1 0", known=True,
+            diagnostic="KNOWN-FAILING (issue #622)")
 
 print(f"\n{run - failed}/{run} checks passed")
 sys.exit(0 if failed == 0 else 1)

@@ -119,6 +119,8 @@ fi
 passed=0
 refused=0
 phase_expectation=""
+# Must stay equal to PHASE_REFUSED_MARKER in tests/testutil.py.
+PHASE_REFUSED_MARKER="PHASE-CONTRACT-REFUSED"
 failed=0
 skipped=0
 excluded=0
@@ -189,17 +191,15 @@ run_test() {
     echo "  $name"
     echo "════════════════════════════════════════"
     local rc=0
-    "$@" || rc=$?
+    local capture; capture=$(mktemp "${TMPDIR:-/tmp}/pgwt_run_test_XXXXXX") || {
+        echo "  FAILED (cannot capture test output)"
+        failed=$((failed + 1))
+        return
+    }
+    "$@" 2>&1 | tee "$capture"
+    rc=${PIPESTATUS[0]}
     local issue
-    if [[ "$rc" -eq 78 ]] && phase_dependent_test "$name"; then
-        if [[ "$phase_expectation" == "0" ]]; then
-            echo "  REFUSED (phase markers not expected on this tier: PGWT_EXPECT_PHASE_PROBES=0, negative contract checked)"
-            refused=$((refused + 1))
-        else
-            echo "  FAILED (exit 78 without a declared-0 phase contract)"
-            failed=$((failed + 1))
-        fi
-    elif issue=$(known_failing_issue "$name"); then
+    if issue=$(known_failing_issue "$name"); then
         # A listed test that could not even run (126: found but not
         # executable, 127: command/file not found) is not the known product
         # bug being tracked — it's a broken test, and must fail the gate
@@ -215,11 +215,24 @@ run_test() {
             echo "  KNOWN-FAILING (issue #$issue)"
             known_failing=$((known_failing + 1))
         fi
+    elif [[ "$rc" -eq 78 ]]; then
+        local missing=""
+        [[ "$phase_expectation" == "0" ]] || missing+=" declaration not \"0\";"
+        phase_dependent_test "$name" || missing+=" test is not phase-dependent;"
+        grep -Fq "$PHASE_REFUSED_MARKER" "$capture" || missing+=" refusal marker absent;"
+        if [[ -z "$missing" ]]; then
+            echo "  REFUSED (phase markers not expected on this tier: PGWT_EXPECT_PHASE_PROBES=0, negative contract checked)"
+            refused=$((refused + 1))
+        else
+            echo "  FAILED (exit 78:$missing)"
+            failed=$((failed + 1))
+        fi
     elif [[ "$rc" -eq 0 ]]; then
         passed=$((passed + 1))
     else
         failed=$((failed + 1))
     fi
+    rm -f "$capture"
 }
 
 skip_test() {

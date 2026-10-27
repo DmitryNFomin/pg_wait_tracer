@@ -254,7 +254,17 @@ def start_daemon(pm_pid, admit_all):
         env.pop("PGWT_TEST_EXEC_SITE_ADMIT_ALL", None)
     err_path = os.path.join(trace_dir, "daemon.err")
     err = open(err_path, "w")
-    # #622: --skip-usdt is the EL8 proxy, like the #464 execution-site hook.
+    # #622: --skip-usdt faithfully proxies EL8 only in TIERED escalation:
+    # src/exact_probe.c:421,446 returns ENOTSUP for EXEC/PLAN while the plain
+    # QUERY_ID/ACTIVITY uprobes attach (mask 0x3). This capture uses FULL mode;
+    # pgwt_exact_probe_startup_mask() (src/exact_probe.c:92-97) returns 0 for
+    # the flag, declining the attribution pair too: mask 0x0, not 0x3. The
+    # contract would fail on "required attribution pair incomplete", but the
+    # capture's own preconditions fail first. This does not rehearse declared-0
+    # REFUSAL; that path remains pending a real EL8 run. On EL8 FULL mode
+    # skip_usdt is false: startup pins best-effort (src/exact_probe.c:536),
+    # drops phase bits with the "optional full-mode ... USDT phase markers
+    # unavailable" warning, and retains mask 0x3.
     phase_args = (["--skip-usdt"]
                   if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1" else [])
     proc = subprocess.Popen(

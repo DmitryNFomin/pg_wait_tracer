@@ -165,7 +165,16 @@ def start_daemon(pm_pid, trace_dir):
     # Full mode is essential: tiered records the long ClientRead as SAMPLED.
     # Samples cannot be straddlers or satisfy execution_detail's exact-fidelity
     # requirement, so a tiered capture would prove nothing about #479.
-    # #622: --skip-usdt is the EL8 proxy for unavailable phase markers.
+    # #622: --skip-usdt faithfully proxies EL8 only in TIERED escalation:
+    # src/exact_probe.c:421,446 returns ENOTSUP for EXEC/PLAN while the plain
+    # QUERY_ID/ACTIVITY uprobes attach (mask 0x3). This test needs FULL mode,
+    # where pgwt_exact_probe_startup_mask() (src/exact_probe.c:92-97) returns 0
+    # for the flag, declining even the attribution pair: mask 0x0, not 0x3.
+    # The contract fails on "required attribution pair incomplete", so this
+    # does not rehearse declared-0 REFUSAL; that path awaits a real EL8 run.
+    # On EL8 FULL mode skip_usdt is false: startup pins best-effort
+    # (src/exact_probe.c:536), drops phase bits with the "optional full-mode
+    # ... USDT phase markers unavailable" warning, and retains mask 0x3.
     phase_args = (["--skip-usdt"]
                   if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1" else [])
     try:
