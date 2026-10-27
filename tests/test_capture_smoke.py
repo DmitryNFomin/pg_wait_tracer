@@ -780,6 +780,7 @@ def assert_wait_events(events, source, sleep_hi=6000, core=False):
 # ── phases ─────────────────────────────────────────────────────────
 
 def phase_live_system_event(pm_pid, mode, core=False):
+    failures_before = tests_failed
     print(f"--- Phase 1: live view (system_event, --mode {mode}) ---")
     wl = Workload()
     wl.open_sessions()
@@ -834,12 +835,14 @@ def phase_live_system_event(pm_pid, mode, core=False):
     events = parse_system_events(out)
     # THE zero-event guard: an empty view here means capture is dead (#30).
     check(len(events) > 0,
-          "live view shows at least one event" if events else
-          f"live view shows at least one event (stderr tail: {err[-300:]!r})")
+          "live view shows at least one event")
     # ESC-3: the live view must now match the trace view within the tight
     # tolerance (no sampler+exact double-count during escalation). core mode
     # relaxes the pg_sleep magnitude floor where watchpoints don't fire.
     assert_wait_events(events, f"live/{mode}", core=core)
+
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def parse_query_event_rows(output):
@@ -885,6 +888,7 @@ def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
     mode, or an escalation window in tiered mode) is what makes the strict
     assertion hold. core mode (container, no firing watchpoints) is
     sampled-only and only asserts the never-dropped guarantee."""
+    failures_before = tests_failed
     print(f"--- Phase 1b: query attribution of the lock wait (query_event, "
           f"--mode {mode}) ---")
     lock_floor = 100 if core else 4000
@@ -940,8 +944,7 @@ def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
             f"pgss={truth}")
     check(len(rows) > 0,
           f"qattr/{mode} Mode A: the waiter's Lock:relation (>= {lock_floor}ms) "
-          f"is in query_event at all — never dropped ({desc})"
-          + ("" if rows else f" (stderr tail: {err[-300:]!r})"))
+          f"is in query_event at all — never dropped ({desc})")
     if core:
         print(f"  INFO: qattr/{mode} [core] sampled-only: {desc}")
     elif synthetic_keys:
@@ -956,12 +959,16 @@ def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
               f"qattr/{mode} Mode A: Lock:relation is attributed to the "
               f"waiter statement's query_id ({desc}) [issue #128]")
 
+    if tests_failed > failures_before:
+        print(f"  Mode A daemon stderr tail: {err[-300:]!r}")
+
     # Mode C (the drill) -------------------------------------------------
     if core or synthetic_keys or truth is None:
         print(f"  INFO: qattr/{mode}: Mode C drill skipped "
               f"(core={core}, synthetic_keys={synthetic_keys}, truth={truth})")
         psql(f"DROP TABLE IF EXISTS {Workload.LOCK_TABLE}")
         return
+    failures_before = tests_failed
     wl = Workload()
     wl.open_sessions()
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_qattr_c_")
@@ -1003,8 +1010,10 @@ def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
           f"Lock:relation = {lock_ms:.0f}ms (expect >= {lock_floor}) "
           f"[issue #128]"
           + ("" if lock_ms >= lock_floor else
-             f" (rows: {[(e['name'], e['total_ms']) for e in profile]}, "
-             f"stderr tail: {err[-300:]!r})"))
+             f" (rows: {[(e['name'], e['total_ms']) for e in profile]})"))
+
+    if tests_failed > failures_before:
+        print(f"  Mode C daemon stderr tail: {err[-300:]!r}")
 
 
 def phase_live_query_event(pm_pid, mode, pg_major, smoke_db, core=False):
@@ -1020,6 +1029,7 @@ def phase_live_query_event(pm_pid, mode, pg_major, smoke_db, core=False):
     statements is cluster-wide, so pgss_query_ids() below still finds
     these queries while connected (via psql()) to "postgres"."""
     print(f"--- Phase 2: query attribution (query_event, --mode {mode}) ---")
+    failures_before = tests_failed
 
     pgb_init = subprocess.run(
         ["pgbench", "-U", "postgres", "-d", smoke_db, "-i", "-s", "1"],
@@ -1083,8 +1093,7 @@ def phase_live_query_event(pm_pid, mode, pg_major, smoke_db, core=False):
     if pg_major == 13 and mode == "tiered":
         check(len(view_ids) > 0,
               f"PG13 sampled query_event has synthetic grouping keys "
-              f"(view={len(view_ids)}; intentionally not joined to pgss ids)"
-              + ("" if view_ids else f" (stderr tail: {err[-300:]!r})"))
+              f"(view={len(view_ids)}; intentionally not joined to pgss ids)")
     elif core:
         # Phantom-id guard only: does the id exist at all in pgss, no calls
         # floor (issue #92 — a real single-call id, e.g. the tracer's own
@@ -1105,8 +1114,15 @@ def phase_live_query_event(pm_pid, mode, pg_major, smoke_db, core=False):
               f"(view={len(view_ids)}, pgss={len(truth)}, matched={len(matched)}) "
               f"[PR #31 regression]")
 
+    # Any failed check needs the daemon diagnostics, including the phantom-id
+    # guard: otherwise an absent exclusion message says nothing (#614).
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
+
 
 def phase_trace_file(pm_pid, mode, pg_major, smoke_db, core=False):
+    failures_before = tests_failed
+    err = ""
     print(f"--- Phase 3: written trace file (pgwt-server read, --mode {mode}) ---")
     trace_dir = tempfile.mkdtemp(prefix=f"pgwt_smoke_{mode}_")
     os.chmod(trace_dir, 0o755)
@@ -1424,17 +1440,14 @@ def phase_trace_file(pm_pid, mode, pg_major, smoke_db, core=False):
         clean_finalization = tracer.returncode == 0
         check(clean_finalization,
               f"trace/{mode}: single-shot tracer finalized cleanly "
-              f"(rc={tracer.returncode})" if clean_finalization else
-              f"trace/{mode}: single-shot tracer finalized cleanly "
-              f"(rc={tracer.returncode}, stderr tail={err[-300:]!r})")
+              f"(rc={tracer.returncode})")
         if not clean_finalization:
             return
 
         resp = server_query(trace_dir, "top_events")
         rows = resp.get("rows", [])
         check(len(rows) > 0,
-              f"trace file has events (top_events rows={len(rows)})" if rows
-              else f"trace file has events (daemon stderr tail: {err[-300:]!r})")
+              f"trace file has events (top_events rows={len(rows)})")
         events = [{'name': r.get('name'), 'count': r.get('count', 0),
                    'total_ms': r.get('total_ms', 0.0)} for r in rows]
         assert_wait_events(events, f"trace/{mode}", core=core)
@@ -1660,6 +1673,8 @@ def phase_trace_file(pm_pid, mode, pg_major, smoke_db, core=False):
                       f"{len(pgbench_pgss_rows)})")
     finally:
         cleanup_phase()
+        if tests_failed > failures_before:
+            print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def phase_fork_after_attach(pm_pid, mode):
@@ -1671,6 +1686,7 @@ def phase_fork_after_attach(pm_pid, mode):
     T4 fix re-checks the pointer immediately after arming the bootstrap
     watchpoint, closing the gap. In tiered mode the same phase guards the
     sampler's lazy-resolve path for post-attach forks."""
+    failures_before = tests_failed
     print(f"--- Phase 4: fork-after-attach (--mode {mode}) ---")
 
     tracer = subprocess.Popen(
@@ -1698,10 +1714,7 @@ def phase_fork_after_attach(pm_pid, mode):
     events = parse_system_events(out)
     names = [e['name'] for e in events]
     check(len(events) > 0,
-          "fork-after-attach: events captured from post-attach backends"
-          if events else
-          f"fork-after-attach: events captured from post-attach backends "
-          f"(stderr tail: {err[-300:]!r})")
+          "fork-after-attach: events captured from post-attach backends")
 
     sleep_ev = [e for e in events if e['name'] == 'Timeout:PgSleep']
     check(len(sleep_ev) > 0,
@@ -1717,6 +1730,9 @@ def phase_fork_after_attach(pm_pid, mode):
     check(len(lock_ev) > 0,
           f"fork-after-attach: Lock:relation from a post-attach backend "
           f"(saw: {names})")
+
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 class CpuStorm:
@@ -1944,6 +1960,7 @@ def phase_cpu_straddle(pm_pid, mode):
     starts. sampled tier is fixed by the per-tick debug_query_string gate;
     exact tier by seeding cmd_open from debug_query_string at preseed. Pre-fix
     both asserted CPU ~0."""
+    failures_before = tests_failed
     print(f"--- Phase: CPU straddle, --mode {mode} (command in flight at attach) ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_straddle_")
     os.chmod(trace_dir, 0o755)
@@ -1987,8 +2004,7 @@ def phase_cpu_straddle(pm_pid, mode):
                         extra={"from": win_from, "to": win_to, "buckets": 7})
     buckets = resp.get("buckets", [])
     check(len(buckets) > 0,
-          "aas view has buckets over the straddle window" if buckets else
-          f"aas view has buckets (stderr tail: {err[-300:]!r})")
+          "aas view has buckets over the straddle window")
     if buckets:
         cpu_mean = sum(b.get("cpu", 0.0) for b in buckets) / len(buckets)
         # The single straddling backend is ~1 CPU-active session the whole
@@ -1998,6 +2014,9 @@ def phase_cpu_straddle(pm_pid, mode):
               f"cpu AAS = {cpu_mean:.2f} (edge-vs-level regression; pre-fix ~0)")
 
     subprocess.run(["rm", "-rf", trace_dir])
+
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def phase_pure_cpu_straddle(pm_pid, mode):
@@ -2016,6 +2035,7 @@ def phase_pure_cpu_straddle(pm_pid, mode):
     comparing it with consumed /proc CPU falsely fails under CPU contention.
     The loop count is huge so it straddles capture end on any box; it starts
     BEFORE the tracer so its command start-edge is already past at attach."""
+    failures_before = tests_failed
     print(f"--- Phase: PURE-CPU straddle, --mode {mode} (no waits — empty-trace "
           f"repro) ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_purecpu_")
@@ -2119,7 +2139,7 @@ def phase_pure_cpu_straddle(pm_pid, mode):
                 print(_line)
     check(live_cpu > 0.0,
           f"pure-CPU straddle live view shows CPU* > 0 (--mode {mode}): "
-          f"CPU* = {live_cpu:.0f}ms (pre-T8 ~0; stderr {err[-160:]!r})")
+          f"CPU* = {live_cpu:.0f}ms (pre-T8 ~0)")
 
     # 2) TRACE (terminal flush): whole-trace time_model must carry CPU.
     #    In --mode full this proves the flush closed the open on-CPU stretch;
@@ -2167,6 +2187,9 @@ def phase_pure_cpu_straddle(pm_pid, mode):
               f"after={oncpu_after})")
 
     subprocess.run(["rm", "-rf", trace_dir])
+
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def run_event_ring_stall_capture(pm_pid, extra_env):
@@ -2275,6 +2298,7 @@ def phase_event_ring_drain_budget(pm_pid):
     budget this single drain spans the capture: timer_ticks=0, live CPU*=0,
     while the terminal flush and /proc both show the waitless hog's CPU.
     """
+    failures_before = tests_failed
     print("--- Phase: event-ring drain budget DETERMINISTIC "
           "(slow callback + sustained producer) ---")
     out, err, hog_pid, proc_ms, hog_trace_ms = run_event_ring_stall_capture(
@@ -2292,8 +2316,7 @@ def phase_event_ring_drain_budget(pm_pid):
           "bounded slow-callback hook active")
     check(re.search(r"STATEDUMP-BLOCK: op=event_ring_(?:consume|drain).*"
                     r"callbacks=[1-9][0-9]*", err) is not None,
-          f"slow drain reports callback count and attribution "
-          f"(stderr tail {err[-300:]!r})")
+          "slow drain reports callback count and attribution")
     timer_match = re.search(r"STATEDUMP-META: .*timer_ticks=(\d+)", err)
     timer_ticks = int(timer_match.group(1)) if timer_match else 0
     yield_match = re.search(r"STATEDUMP-META: .*event_drain_yields=(\d+)",
@@ -2314,6 +2337,10 @@ def phase_event_ring_drain_budget(pm_pid):
     check(hog_trace_ms > 500.0,
           f"terminal trace flush preserves the hog CPU "
           f"(pid={hog_pid}, trace={hog_trace_ms:.0f}ms)")
+
+    if tests_failed > failures_before:
+        print(f"  positive daemon stderr tail: {err[-300:]!r}")
+    failures_before = tests_failed
 
     # Negative: same bounded fault and producer, but explicitly restore the
     # pre-fix unbounded libbpf call. It must recreate all three mode-4
@@ -2348,6 +2375,9 @@ def phase_event_ring_drain_budget(pm_pid):
           f"negative terminal trace remains correct "
           f"(pid={neg_hog_pid}, trace={neg_trace_ms:.0f}ms)")
 
+    if tests_failed > failures_before:
+        print(f"  negative daemon stderr tail: {neg_err[-300:]!r}")
+
 
 def phase_straddle_recovery(pm_pid, mode):
     """DETERMINISTIC regression for the initial-scan straddle race
@@ -2361,6 +2391,7 @@ def phase_straddle_recovery(pm_pid, mode):
     CPU*>0. Without the recovery (PGWT_TEST_NO_RECOVERY) this reads ~0 — that is
     the exact CI failure. Runs -v so the scan-skip WARN and the recovery INFO
     are both visible and asserted."""
+    failures_before = tests_failed
     print(f"--- Phase: straddle recovery, --mode {mode} (scan forced to miss "
           f"the in-flight backend) ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_recover_")
@@ -2406,8 +2437,7 @@ def phase_straddle_recovery(pm_pid, mode):
           "scan was forced to skip the in-flight backend (test hook active)")
     # The recovery — not the scan — must have attached it.
     check("recovered unattached backend" in err,
-          "pgwt_recover_unattached_backends attached the scan-missed straddler "
-          f"(stderr {err[-200:]!r})")
+          "pgwt_recover_unattached_backends attached the scan-missed straddler")
     # And the payoff: its CPU is visible despite the scan miss.
     live = parse_time_model(out)
     live_cpu = live.get('CPU*', 0.0)
@@ -2416,6 +2446,9 @@ def phase_straddle_recovery(pm_pid, mode):
           f"(--mode {mode}): CPU* = {live_cpu:.0f}ms")
 
     subprocess.run(["rm", "-rf", trace_dir])
+
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def phase_straddle_livecpu_deterministic(pm_pid):
@@ -2440,6 +2473,7 @@ def phase_straddle_livecpu_deterministic(pm_pid):
     on_cpu_ts and the live view reads CPU* ≈ wall-since-loop-start; WITHOUT it
     on_cpu_ts stays 0 and CPU* is exactly 0 — the exact CI failure, made
     deterministic. Full mode only (needs watchpoints + cpu_accounting)."""
+    failures_before = tests_failed
     print("--- Phase: straddle live-CPU DETERMINISTIC (pg_sleep→loop, "
           "sched_switch inert) ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_detcpu_")
@@ -2501,10 +2535,12 @@ def phase_straddle_livecpu_deterministic(pm_pid):
     check(live_cpu > 2000.0,
           f"pg_sleep→loop straddler shows MULTI-SECOND live CPU* via the "
           f"watchpoint on_cpu_ts open (sched_switch inert): CPU* = {live_cpu:.0f}ms "
-          f"(pre-fix ~0 loop CPU, only a ~tens-of-ms background floor; "
-          f"stderr {err[-120:]!r})")
+          f"(pre-fix ~0 loop CPU, only a ~tens-of-ms background floor)")
 
     subprocess.run(["rm", "-rf", trace_dir])
+
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def run_stale_seed_capture(pm_pid, extra_env):
@@ -2654,6 +2690,7 @@ def phase_stale_seed_sweep(pm_pid):
     EL8 box read 24ms (7990ms) for the identical build. The hog-scoped gates
     (>2000ms positive, <500ms negative vs the measured ~8-13s signal) hold on
     both. Full mode only (needs watchpoints + cpu_accounting)."""
+    failures_before = tests_failed
     print("--- Phase: stale-seed sweep DETERMINISTIC (seed→arm race, "
           "poisoned attach seed) ---")
 
@@ -2671,8 +2708,7 @@ def phase_stale_seed_sweep(pm_pid):
     check("PGWT_TEST_NO_SCHED_ONCPU" in err,
           "sched_switch on_cpu_ts open suppressed (isolation hook active)")
     check("reseeded stale state" in err,
-          f"pgwt_sweep_stale_state repaired the frozen entry "
-          f"(stderr {err[-200:]!r})")
+          "pgwt_sweep_stale_state repaired the frozen entry")
     live_cpu = parse_time_model(out).get('CPU*', 0.0)
     check(live_cpu > 2000.0,
           f"stale-seeded pure-CPU straddler shows MULTI-SECOND live CPU* via "
@@ -2681,6 +2717,10 @@ def phase_stale_seed_sweep(pm_pid):
           f"positive: THE HOG's own trace CPU is multi-second (pid-scoped "
           f"aas integral, ambient-noise-immune): {hog_cpu_ms:.0f}ms "
           f"(pid={hog_pid})")
+
+    if tests_failed > failures_before:
+        print(f"  positive daemon stderr tail: {err[-300:]!r}")
+    failures_before = tests_failed
 
     # Negative: sweep disabled (ONLY the sweep — recovery stays active) — the
     # poisoned entry must stay frozen. DISCRIMINATOR IS PID-SCOPED: on busy
@@ -2710,6 +2750,9 @@ def phase_stale_seed_sweep(pm_pid):
           f"entry attributes its whole run to the dead wait — the exact CI "
           f"failure, isolated from ambient-backend CPU)")
 
+    if tests_failed > failures_before:
+        print(f"  negative daemon stderr tail: {err[-300:]!r}")
+
 
 def phase_sampled_aas_truth(pm_pid):
     """T2 (AAS-1) CPU-observability contract, independent of escalation
@@ -2720,6 +2763,7 @@ def phase_sampled_aas_truth(pm_pid):
     -98%%). Anomaly escalation is disabled (huge factor) so the window is
     PURE sampled tier. The legacy huge-factor switch also disables the CPU
     saturation guard, so this phase cannot pass because of escalation."""
+    failures_before = tests_failed
     print("--- Phase 5: CPU observability in pure sampled AAS ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_aas_")
     os.chmod(trace_dir, 0o755)
@@ -2887,8 +2931,7 @@ def phase_sampled_aas_truth(pm_pid):
               "AAS view has buckets for all four controlled backends"
               if have_pid_buckets else
               f"AAS view has per-PID buckets "
-              f"(sets={list(map(len, bucket_sets))}, "
-              f"stderr tail: {err[-300:]!r})")
+              f"(sets={list(map(len, bucket_sets))})")
         if have_pid_buckets:
             tracer_mean = sum(
                 sum(aas_bucket_total(b) for b in buckets) / len(buckets)
@@ -2910,6 +2953,8 @@ def phase_sampled_aas_truth(pm_pid):
     finally:
         cleanup_resources()
         subprocess.run(["rm", "-rf", trace_dir])
+        if tests_failed > failures_before:
+            print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def phase_cpu_storm_escalation(pm_pid):
@@ -2917,6 +2962,7 @@ def phase_cpu_storm_escalation(pm_pid):
     explicit C=2 override, so three CPU-demand sessions are deterministically
     saturating regardless of runner size. Assert the distinct CPU CUSUM rule,
     full-tier transition, and continuity across the sampled->exact switch."""
+    failures_before = tests_failed
     print("--- Phase 6: CPU saturation CUSUM escalation; no AAS step ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_esc_")
     os.chmod(trace_dir, 0o755)
@@ -3117,9 +3163,7 @@ def phase_cpu_storm_escalation(pm_pid):
     check(cpu_fires >= 1 and windows >= 1,
           f"CPU saturation rule opened a full-fidelity window "
           f"(cpu_fires={cpu_fires}, escalation_windows_total={windows}, "
-          f"tier={metrics.get('tier')!r})"
-          + ("" if cpu_fires >= 1 else
-             f" (tracer stderr tail: {err[-300:]!r})"))
+          f"tier={metrics.get('tier')!r})")
     check(status.get("tier") == "escalated" and
           status.get("escalation_reason") == "cpu_saturation",
           f"CPU-rule window is full tier with distinct reason "
@@ -3173,12 +3217,17 @@ def phase_cpu_storm_escalation(pm_pid):
 
     subprocess.run(["rm", "-rf", trace_dir])
 
+    if tests_failed > failures_before:
+        print(f"  daemon stderr tail: {err[-300:]!r}")
+
 
 def phase_escalation_billing(pm_pid):
     """T3 (ESC-1/2): a MANUAL escalation window bills its full-fidelity time
     honestly (budget drops by ~the window length), and a wait that is still
     OPEN when the window closes is flushed into the trace exactly once (ESC-2)
     instead of vanishing into an end-of-window hole."""
+    failures_before = tests_failed
+    err = ""
     print("--- Phase 7: manual escalation billing + de-escalation flush ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_esc2_")
     os.chmod(trace_dir, 0o755)
@@ -3246,14 +3295,16 @@ def phase_escalation_billing(pm_pid):
         lock_ev = [e for e in events if e['name'] == 'Lock:relation']
         check(len(lock_ev) > 0,
               f"Lock:relation spanning the window boundary is in the trace "
-              f"(saw {names}) [ESC-2 flush]"
-              + ("" if lock_ev else f" (stderr tail: {err[-300:]!r})"))
+              f"(saw {names}) [ESC-2 flush]")
     except subprocess.TimeoutExpired:
         tracer.kill()
-        tracer.communicate()
+        _, stderr = tracer.communicate()
+        err = stderr.decode('utf-8', errors='replace')
     finally:
         wl.stop()
         subprocess.run(["rm", "-rf", trace_dir])
+        if tests_failed > failures_before:
+            print(f"  daemon stderr tail: {err[-300:]!r}")
 
 
 def main():
