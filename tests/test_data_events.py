@@ -286,7 +286,8 @@ def check_query_filtered_summary_gating(t):
 
     # The wire no longer reaches exact_count > 0 / has_latency_dist == 0
     # through per-query summaries. That compute invariant is covered in
-    # test_agg_raw_crosscheck.c:2394-2402 and test_top_wait_backfill.c:658.
+    # tests/test_agg_raw_crosscheck.c:2392-2404, which carries a lat_raw > 0
+    # positive control so the gate cannot pass on absent latency everywhere.
     # A sampled-only row reaches the serializer's null/false branch here,
     # with exact_count == 0 and has_latency_dist == 0, not the former case.
     sampled_scenario = {

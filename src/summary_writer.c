@@ -226,18 +226,18 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * handle_top_sessions and handle_heatmap", and that hole was real: a
      * query-filtered Events request over a >= 120 s window took the summary
      * path and read THIS list, whose time is the record's FULL duration
-     * (accum_query_add is called with `dur`, :571 -- correct for a
+     * (accum_query_add is called with `dur`, :600 -- correct for a
      * per-occurrence table, which is deliberately never credited open),
      * while the unfiltered read takes events[], filled with the in-second
      * slice `tns`. Over a window whose edge an interval crosses the two
      * answered the same question differently: 719,200.346 ms filtered
      * against 716,200.203 ms unfiltered on one Lock:relation row.
      *
-     * handle_top_events now carries the same `req->filter.query_id == 0`
-     * guard its three siblings have, so a filtered Events request routes to
-     * raw and this list no longer answers any window-clipped question. It is
-     * still the per-query event breakdown for everything else, and `dur`
-     * remains the right quantity for it.
+     * handle_top_events now shares its query guard with handle_top_sessions
+     * (server.c:5238/:5160) and handle_heatmap (:6024): TWO siblings.
+     * handle_top_queries (:5578, !has_event_filter) deliberately serves query
+     * filters from this table; handle_aas (:4830, !detail_events) and
+     * handle_time_model (:4923) also permit them. `dur` remains correct here.
      *
      * WHAT WAS CONSIDERED AND DROPPED, so it is not re-derived: switching
      * this call to `tns` alone makes things WORSE, not better. Because
