@@ -46,6 +46,11 @@ int pgwt_visit_summaries(const char *dir, uint64_t from, uint64_t to,
 #define IO_READ  0x0A000015u   /* IO:DataFileRead */
 #define LOCK_REL 0x03000000u   /* Lock:relation */
 
+/* An unclassified flag bit standing in for a category a future build adds.
+ * The inverse mask in replay_accum.c must route it to the total refusal
+ * rather than the back-fill. */
+#define FUTURE_CAT_FLAG 0x2000u
+
 static int failures = 0;
 /* #531 bypass suite: EXPECT_RED runs a probe that MUST register a failure,
  * so the probe's own PASS/FAIL lines are noise. `quiet` silences them; it
@@ -715,6 +720,123 @@ static void test_replay_commit_order(void)
     if (system(cmd) != 0) { /* best effort */ }
 }
 
+static void test_replay_unattributed_categories(void)
+{
+    const struct pgwt_block_info bi = { .block_type = PGWT_BLOCK_TRANSITIONS };
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    if (!a) { failures++; return; }
+    /* Activity-class events are idle without any version/name registry. */
+    const uint32_t idle = WEI(PG_WAIT_ACTIVITY, 0);
+    struct pgwt_trace_event arr[] = {
+        ev(101, 1000, 11, LOCK_REL, 0, 0),
+        ev(102, 2000, 23, IO_READ, 0, 0),
+        ev(102, 3000, 41, IO_READ, 0, 4242),
+        ev(103, 4000, 37, LOCK_REL, 0, 0),
+        ev(104, 5000, 53, LOCK_REL, 0, 0),
+        ev(104, 6000, 67, LOCK_REL, 0, 4242),
+        ev(105, 7000, 71, IO_READ, 0, 0),
+        ev(106, 8000, 83, idle, 0, 0),
+    };
+    arr[1].flags = arr[2].flags = PGWT_EVENT_FLAG_BACKGROUND;
+    arr[3].flags = PGWT_EVENT_FLAG_MAINT;
+    /* Deliberately under-count an unknown category: its 53 ns must never
+     * borrow the later statement's id, even on this same foreground-like pid. */
+    arr[4].flags = FUTURE_CAT_FLAG;
+    arr[6].flags = PGWT_EVENT_FLAG_IO_WORKER;
+    arr[7].flags = PGWT_EVENT_FLAG_BACKGROUND;
+
+    printf("CASE #665: replay zero-id categories and total refusal\n");
+    pgwt_replay_events(a, arr, 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    const struct pgwt_query_event_stats *q = find_query_ev(a, 0, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 11 &&
+          q->min_ns == 11 && q->max_ns == 11,
+          "foreground without a later id retains its exact 11 ns in qid 0 (#128)");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 11, "foreground contributes 11 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "foreground without an id never backfills");
+    EXPECT_RED("missing foreground qid-0 row goes red", {
+        a->num_query_events = 0;
+        CHECK(find_query_ev(a, 0, LOCK_REL) != NULL, "foreground qid-0 row present");
+        a->num_query_events = 1;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[1], 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    q = find_query_ev(a, 0, IO_READ);
+    CHECK(q && q->count == 1 && q->total_ns == 23 &&
+          q->min_ns == 23 && q->max_ns == 23,
+          "background retains its exact 23 ns in qid 0 despite a later real id");
+    q = find_query_ev(a, 4242, IO_READ);
+    CHECK(q && q->count == 1 && q->total_ns == 41 &&
+          q->min_ns == 41 && q->max_ns == 41,
+          "same background pid's query 4242 contains only its own 41 ns");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 23, "background contributes 23 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "background zero-id work never backfills");
+    EXPECT_RED("lost background time goes red", {
+        a->query_events[0].total_ns = 0;
+        q = find_query_ev(a, 0, IO_READ);
+        CHECK(q && q->total_ns == 23, "background qid 0 retains 23 ns");
+        a->query_events[0].total_ns = 23;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[3], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    q = find_query_ev(a, 0, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 37 &&
+          q->min_ns == 37 && q->max_ns == 37,
+          "maintenance retains its exact 37 ns and one occurrence in qid 0");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 37, "maintenance contributes 37 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "maintenance zero-id work never backfills");
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[4], 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, LOCK_REL) == NULL, "unknown category creates no qid-0 row");
+    q = find_query_ev(a, 4242, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 67 &&
+          q->min_ns == 67 && q->max_ns == 67,
+          "unknown category never adds its 53 ns to the later query's 67 ns");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "unknown category moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "unknown category moves no backfilled counter");
+    EXPECT_RED("borrowing an unknown category's time goes red", {
+        a->query_events[0].total_ns = 53 + 67;
+        q = find_query_ev(a, 4242, LOCK_REL);
+        CHECK(q && q->total_ns == 67, "query 4242 contains only its own 67 ns");
+        a->query_events[0].total_ns = 67;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[6], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, IO_READ) == NULL, "IO worker creates no qid-0 IO row");
+    CHECK_EQ_U64(a->num_query_events, 0, "IO worker creates no query rows at all");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "IO worker moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "IO worker moves no backfilled counter");
+
+    pgwt_accum_init(a);
+    CHECK(pgwt_is_idle_event(idle), "Activity fixture is idle under the load rule");
+    pgwt_replay_events(a, &arr[7], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, idle) == NULL, "idle background creates no qid-0 row");
+    CHECK_EQ_U64(a->num_query_events, 0, "idle background creates no query rows");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "idle background moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "idle background moves no backfilled counter");
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, arr, sizeof(arr) / sizeof(arr[0]), 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    /* Independent literal budget: unknown 53, IO-worker 71 and idle 83 ns
+     * are intentionally excluded from query accounting. */
+    CHECK_EQ_U64(query_total(a), 11 + 23 + 41 + 37 + 67,
+                 "query totals conserve the independent per-record ns budget");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 11 + 23 + 37,
+                 "only foreground, background and maintenance zero-id ns are unattributed");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "combined fixture never borrows a query id");
+    free(a);
+}
+
 static void test_replay_resolver_edges(void)
 {
     const uint64_t MS = 1000000ULL, BASE = 10000000000000ULL;
@@ -1061,6 +1183,7 @@ int main(void)
     test_cpu_replay(false);
     test_parse_phase_replay();
     test_replay_commit_order();
+    test_replay_unattributed_categories();
     test_replay_resolver_edges();
     test_replay_wall_clocks();
     test_replay_two_hours();
