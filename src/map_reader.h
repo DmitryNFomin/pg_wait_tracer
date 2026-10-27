@@ -380,7 +380,16 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
  *                        else no query row yet (NOT unattributed: the id
  *                        is not known yet, and its closing record will
  *                        carry it — see pgwt_live_qattr_record).
- * `stat_ns` is the row value (CPU ns for we==0, wall otherwise). */
+ * `stat_ns` is the row value (CPU ns for we==0, wall otherwise).
+ * Since #641, this background/maintenance rule covers live closed records,
+ * open stretches and samples; the raw/reader tag pass (compute.c) also
+ * applies it. Offline replay (event_reader.c pgwt_replay_events) files rows
+ * only for nonzero query_id, dropping all query_id-0 time, including the
+ * #128 foreground bucket. The summary writer (summary_writer.c
+ * summary_qattr_step) defers query-less background/maintenance without a
+ * category arm or load-rule exclusion: pacing is over-counted into
+ * summary_query_unattributed_ns_total when resolved without an id, and a
+ * later observed id or cmd_qid at a boundary can still backfill this time. */
 void pgwt_live_qattr_record(struct pgwt_accumulator *acc,
                             struct pgwt_pid_accum *pa, uint64_t query_id,
                             uint32_t we, uint64_t stat_ns, uint32_t cat_flag,

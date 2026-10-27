@@ -103,10 +103,19 @@ struct pgwt_pid_cat {
  *     flagged QUERY_UNATTRIB directly, never backfilled. IO_WORKER records
  *     remain outside the query model. "Non-idle" is the LOAD rule, so a
  *     checkpointer in Timeout:CheckpointWriteDelay is neither attributed nor
- *     unattributed. #641 applies this same rule in the live tier to closed
- *     records, open stretches and samples: their unattributed label is final,
- *     so they never wait for an id. Unknown categories are still dropped
- *     rather than allowed to borrow an id in either tier.
+ *     unattributed. The raw/reader tag pass (compute.c) applies this rule.
+ *     Since #641, the live accumulator (map_reader.c) applies it to closed
+ *     records, open stretches and samples: the unattributed label is final,
+ *     so they never wait for an id. Both paths drop unknown categories
+ *     rather than let them borrow an id. Offline replay (event_reader.c,
+ *     pgwt_replay_events) files a query row only for a nonzero query_id,
+ *     dropping query_id-0 time entirely, including the #128 foreground
+ *     unattributed bucket. The summary writer (summary_writer.c,
+ *     summary_qattr_step) defers query-less background/maintenance records
+ *     with no category arm or load-rule exclusion: pacing is over-counted
+ *     into summary_query_unattributed_ns_total when resolved without an id,
+ *     and a later observed id or cmd_qid at a boundary can still backfill
+ *     this time onto a real statement.
  * cats may be NULL/empty (no metadata: everything is foreground).
  *
  * #363 — RETURN VALUE. 1 when every record in the array was tagged, 0 when

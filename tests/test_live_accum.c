@@ -2383,6 +2383,8 @@ static void query_attr_background_control(uint32_t category, const char *name)
         { .pid = 70, .we = LOCK_RELATION, .wall_ns = MS(300),
           .cat_flag = PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_BACKGROUND },
         { .pid = 20, .we = LOCK_RELATION, .wall_ns = MS(100), .query_id = 42 },
+        { .pid = 10, .we = 0, .wall_ns = MS(120), .cpu_ns = MS(120),
+          .cat_flag = category },
     };
     enum { NRECORDS = sizeof(records) / sizeof(records[0]) };
     for (int i = 0; i < NRECORDS; i++)
@@ -2475,8 +2477,30 @@ static void query_attr_background_control(uint32_t category, const char *name)
           "%s: parity stream includes attributed foreground load (42 row %.1f ms)",
           name, qrow(acc, 42, LOCK_RELATION) / 1e6);
 
+    /* On-CPU load also gets its final label immediately. Match measured
+     * CPU to wall so the live row and reader duration sum agree exactly. */
+    pgwt_accum_add_interval(acc, &records[11]);
+    struct pgwt_pid_accum *cpu_pa = pgwt_find_pid_accum(acc, 10);
+    CHECK(qrow(acc, 0, 0) == MS(120) &&
+          acc->qattr_unattributed_ns == MS(850) && cpu_pa->qattr.npending == 0 &&
+          acc->qattr_backfilled_ns == backfilled,
+          "%s: on-CPU load is immediately unattributed (row %.1f, counter %.1f, "
+          "backfilled %.1f ms, pending %d)", name, qrow(acc, 0, 0) / 1e6,
+          acc->qattr_unattributed_ns / 1e6, acc->qattr_backfilled_ns / 1e6,
+          cpu_pa->qattr.npending);
+    un_before = acc->qattr_unattributed_ns;
+
     /* i. Compare the SAME closed records before adding open/sample time.
+     * This covers the live accumulator and raw/reader tag pass only.
+     * Offline replay (event_reader.c pgwt_replay_events) still drops all
+     * query_id-0 time, including the #128 foreground bucket. The summary
+     * writer (summary_writer.c summary_qattr_step) defers query-less
+     * background/maintenance with no category arm or load-rule exclusion:
+     * pacing is over-counted into summary_query_unattributed_ns_total when
+     * resolved without an id, and a later observed id or cmd_qid at a
+     * boundary can still backfill this time onto a real statement.
      * End stamps increase in array order, preserving both borrow directions.
+     * No pid has CMD markers, so the CPU record stays we==0 in the tag pass.
      * Neither a refused tag pass nor two empty answers count as agreement. */
     struct pgwt_trace_event events[NRECORDS];
     uint64_t end_ns = MS(1000);
@@ -2485,7 +2509,8 @@ static void query_attr_background_control(uint32_t category, const char *name)
         events[i] = (struct pgwt_trace_event) {
             .timestamp_ns = end_ns, .duration_ns = records[i].wall_ns,
             .pid = records[i].pid, .old_event = records[i].we,
-            .query_id = records[i].query_id, .cpu_ns = PGWT_CPU_NS_UNKNOWN,
+            .query_id = records[i].query_id,
+            .cpu_ns = records[i].we == 0 ? records[i].cpu_ns : PGWT_CPU_NS_UNKNOWN,
         };
     }
     const struct pgwt_pid_cat cats[] = {
@@ -2506,7 +2531,7 @@ static void query_attr_background_control(uint32_t category, const char *name)
             if (events[i].flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB)
                 server_unattributed_ns += events[i].duration_ns;
         CHECK(server_unattributed_ns == acc->qattr_unattributed_ns,
-              "%s: LIVE/server unattributed parity (LIVE %.1f, server %.1f ms)",
+              "%s: live accumulator vs reader pgwt_tag_events_window unattributed parity on this fixture (live %.1f, reader %.1f ms)",
               name, acc->qattr_unattributed_ns / 1e6, server_unattributed_ns / 1e6);
         CHECK(server_unattributed_ns > 0,
               "%s: parity cannot be vacuous (server %.1f ms)",
