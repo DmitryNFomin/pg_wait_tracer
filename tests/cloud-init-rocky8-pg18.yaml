@@ -126,6 +126,20 @@ write_files:
           ln -sf "$PGBIN/$b" "/usr/local/bin/$b"
       done
       grep -q '^PGPORT=' /etc/environment || echo "PGPORT=$PORT" >> /etc/environment
+      # MEASURED defect, first EL8 box-check run: 13 live tests died with
+      # FileNotFoundError: 'pgbench' / "pgbench exited immediately". RHEL
+      # and Rocky sudoers reset PATH to secure_path
+      # (/sbin:/bin:/usr/sbin:/usr/bin), which contains neither
+      # /usr/local/bin nor PGDG's /usr/pgsql-NN/bin -- and the live tier
+      # runs as `sudo env ... tests/run_all.sh`, with tests that call bare
+      # `pgbench`/`psql`. Debian/Ubuntu's sudo is built without
+      # secure_path, which is why tests/provision-runner.sh never needed
+      # this. Symlinks into /usr/local/bin alone are NOT enough.
+      cat > /etc/sudoers.d/pgwt-pgbin <<SUDOERS
+      Defaults secure_path="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin:$PGBIN"
+      SUDOERS
+      chmod 0440 /etc/sudoers.d/pgwt-pgbin
+      visudo -c >/dev/null
 
       psqlp() { sudo -u postgres "$PGBIN/psql" -p "$PORT" "$@"; }
       psqlp -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null
