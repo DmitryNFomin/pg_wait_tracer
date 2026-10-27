@@ -2,6 +2,9 @@
  *
  * Direct port of client/src/compute.rs. Works on raw pgwt_trace_event arrays.
  * All result structs use malloc'd arrays — caller frees with free(result->rows).
+ * #194: only the raw time model credits measured CPU inside visible idle.
+ * Top events, AAS, per-session/per-query rows and every *_from_summaries
+ * twin do not; summary format v8 has no per-record idle CPU to credit.
  */
 #include "compute.h"
 
@@ -21,7 +24,8 @@
 
 /* Fraction of an event that lies inside the window, for quantities measured
  * per-event rather than in wall time (cpu_ns). Matches the ov/dur split
- * pgwt_compute_aas applies per bucket, so CPU* agrees between the two paths.
+ * pgwt_compute_aas applies per bucket; this is shared scaling, not CPU* parity
+ * (see the #194 scope note above).
  * Exactly 1.0 when the window does not cut the event, which keeps the
  * no-window path bit-identical. */
 static inline double event_window_frac(uint64_t clip_ns, uint64_t dur_ns)
@@ -1507,8 +1511,26 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
         }
 
         if (pgwt_is_idle_event(ev->old_event)) {
-            idle_time_ns += dur_ns;
-            idle_accum_add(idle_ev, &n_idle_ev, ev->old_event, dur_ns);
+            /* #194: move measured visible-idle CPU into DB Time and CPU*.
+             * Both increase equally, so Off-CPU* (DB Time - CPU* - sum(waits))
+             * is unchanged, and DB Time + Idle conserves the same total wall.
+             * Top events, AAS, per-session/per-query rows and all
+             * *_from_summaries twins still omit this credit; summary v8 has
+             * no per-record idle CPU. Do not assume parity with those paths. */
+            uint64_t cpu_scaled = PGWT_CPU_NS_UNKNOWN;
+            if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN)
+                cpu_scaled = (uint64_t)((double)ev->cpu_ns * frac + 0.5);
+            uint64_t excess_ns;
+            uint64_t credit = pgwt_idle_cpu_credit_ns(ev->old_event,
+                                  (uint64_t)(dur_ns + 0.5), cpu_scaled,
+                                  &excess_ns);
+            cpu_clamped_ns += excess_ns;
+            db_time_ns += credit;
+            cpu_measured_ns += credit;
+            if (credit > 0 && frac > 0.0)
+                has_measured_cpu = 1;
+            idle_time_ns += dur_ns - credit;
+            idle_accum_add(idle_ev, &n_idle_ev, ev->old_event, dur_ns - credit);
             continue;
         }
 
