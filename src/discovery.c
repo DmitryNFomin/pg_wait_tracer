@@ -104,6 +104,29 @@ done:
     return result;
 }
 
+/* The re-attach supervisor in src/pg_wait_tracer.c retries pgwt_discover()
+ * every 5 s in the "waiting for PostgreSQL to restart..." while (!found)
+ * loop. Memoize only the st_query_id refusal made reachable by #664,
+ * deliberately leaving pre-existing repeats alone: widening a behaviour
+ * change past what the fix makes reachable is how a regression hides
+ * inside a cleanup. The verdict (-1) is unchanged; only print frequency
+ * differs. Keep the memo file-static: one daemon per process, and
+ * src/daemon.h belongs to another branch. */
+static char discovery_last_refusal[256];
+
+static void discovery_refusal_forget(void)
+{
+    discovery_last_refusal[0] = '\0';
+}
+
+static bool discovery_refusal_is_new(const char *reason)
+{
+    if (strcmp(reason, discovery_last_refusal) == 0)
+        return false;
+    snprintf(discovery_last_refusal, sizeof(discovery_last_refusal), "%s", reason);
+    return true;
+}
+
 /* Get the ELF base virtual address (lowest PT_LOAD p_vaddr).
  * For PIE (ET_DYN) this is typically 0; for non-PIE (ET_EXEC) it's
  * the actual load address (e.g. 0x400000). */
@@ -1555,10 +1578,13 @@ int pgwt_discover(struct pgwt_daemon *d)
                     d->st_query_id_offset, d->pg_major_version);
     } else if (!d->use_pg13_query_attr) {
         if (d->view == PGWT_VIEW_QUERY_EVENT && d->pg_major_version != 13) {
-            fprintf(stderr, "FATAL: st_query_id offset not found for PG%d — "
-                    "query_event view unavailable\n"
-                    "  Hint: install postgresql-%d-dbgsym for DWARF-based detection\n",
-                    d->pg_major_version, d->pg_major_version);
+            char reason[256];
+            snprintf(reason, sizeof(reason), "st_query_id offset not found for PG%d",
+                     d->pg_major_version);
+            if (discovery_refusal_is_new(reason) || d->verbose)
+                fprintf(stderr, "FATAL: %s — query_event view unavailable\n"
+                        "  Hint: install postgresql-%d-dbgsym for DWARF-based detection\n",
+                        reason, d->pg_major_version);
             return -1;
         }
         if (d->verbose && d->pg_major_version != 13)
@@ -1578,5 +1604,6 @@ int pgwt_discover(struct pgwt_daemon *d)
                     "query text capture disabled\n");
     }
 
+    discovery_refusal_forget();
     return 0;
 }

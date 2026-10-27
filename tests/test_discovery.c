@@ -32,6 +32,11 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <elf.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 
 static int run = 0, ok = 0;
 #define CHECK(c, ...) do { \
@@ -222,10 +227,273 @@ static void test_pg13_query_attr_reset_per_discovery_cycle(void)
     free(d);
 }
 
+static int discover_capture_stderr(struct pgwt_daemon *d, char *text,
+                                   size_t textsz, const char *step)
+{
+    text[0] = '\0';
+    FILE *capture = tmpfile();
+    CHECK(capture != NULL, "refusal transition %s: create stderr capture", step);
+    if (!capture)
+        return -2;
+
+    int saved_stderr = dup(STDERR_FILENO);
+    CHECK(saved_stderr >= 0, "refusal transition %s: save real stderr", step);
+    if (saved_stderr < 0) {
+        fclose(capture);
+        return -2;
+    }
+
+    fflush(stderr);
+    int redirected = dup2(fileno(capture), STDERR_FILENO);
+    CHECK(redirected >= 0, "refusal transition %s: redirect stderr", step);
+    if (redirected < 0) {
+        close(saved_stderr);
+        fclose(capture);
+        return -2;
+    }
+
+    int rc = pgwt_discover(d);
+    fflush(stderr);
+    int restored = dup2(saved_stderr, STDERR_FILENO);
+    CHECK(restored >= 0, "refusal transition %s: restore real stderr", step);
+    close(saved_stderr);
+
+    rewind(capture);
+    size_t n = fread(text, 1, textsz - 1, capture);
+    text[n] = '\0';
+    CHECK(!ferror(capture) && feof(capture),
+          "refusal transition %s: read complete stderr capture", step);
+    fclose(capture);
+    return rc;
+}
+
+static void stop_stripped_discovery_fixture(pid_t pid, const char *copy)
+{
+    if (pid > 0) {
+        CHECK(kill(pid, SIGKILL) == 0,
+              "refusal transition: kill stripped fixture");
+        pid_t reaped;
+        do {
+            reaped = waitpid(pid, NULL, 0);
+        } while (reaped < 0 && errno == EINTR);
+        CHECK(reaped == pid, "refusal transition: reap stripped fixture");
+    }
+    if (copy[0] != '\0')
+        CHECK(unlink(copy) == 0, "refusal transition: unlink stripped fixture");
+}
+
+static pid_t start_stripped_discovery_fixture(char *copy, size_t copysz)
+{
+    char exe[4096];
+    int source = -1, target = -1;
+    pid_t pid = -1;
+    copy[0] = '\0';
+
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    CHECK(n > 0 && n < (ssize_t)sizeof(exe) - 1,
+          "refusal transition: locate binary for stripped fixture");
+    if (n <= 0 || n >= (ssize_t)sizeof(exe) - 1)
+        return -1;
+    exe[n] = '\0';
+    source = open(exe, O_RDONLY);
+    CHECK(source >= 0, "refusal transition: open binary for stripped fixture");
+    if (source < 0)
+        return -1;
+
+    int len = snprintf(copy, copysz, "/tmp/pgwt_test_discovery_stripped.XXXXXX");
+    CHECK(len >= 0 && (size_t)len < copysz,
+          "refusal transition: stripped fixture path fits");
+    if (len < 0 || (size_t)len >= copysz) {
+        copy[0] = '\0';
+        goto fail;
+    }
+    target = mkstemp(copy);
+    CHECK(target >= 0, "refusal transition: create stripped fixture copy");
+    if (target < 0) {
+        copy[0] = '\0';
+        goto fail;
+    }
+    int chmod_rc = fchmod(target, 0755);
+    CHECK(chmod_rc == 0, "refusal transition: make stripped fixture executable");
+    if (chmod_rc != 0)
+        goto fail;
+
+    char bytes[16384];
+    int copied = 1;
+    for (;;) {
+        n = read(source, bytes, sizeof(bytes));
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            copied = (n == 0);
+            break;
+        }
+        ssize_t offset = 0;
+        while (offset < n) {
+            ssize_t written = write(target, bytes + offset, (size_t)(n - offset));
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written <= 0) {
+                copied = 0;
+                break;
+            }
+            offset += written;
+        }
+        if (!copied)
+            break;
+    }
+    CHECK(copied, "refusal transition: copy complete fixture binary");
+    int close_rc = close(target);
+    target = -1;
+    CHECK(close_rc == 0, "refusal transition: close fixture copy before stripping");
+    close(source);
+    source = -1;
+    if (!copied || close_rc != 0)
+        goto fail;
+
+    /* Keep .symtab: discovery still needs my_wait_event_info and MyBEEntry. */
+    char command[4096];
+    snprintf(command, sizeof(command), "objcopy --strip-debug %s 2>/dev/null", copy);
+    int strip_rc = system(command);
+    if (strip_rc != 0) {
+        snprintf(command, sizeof(command), "strip --strip-debug %s 2>/dev/null", copy);
+        strip_rc = system(command);
+    }
+    CHECK(strip_rc == 0,
+          "refusal transition: objcopy/strip tool missing or --strip-debug failed");
+    if (strip_rc != 0)
+        goto fail;
+
+    int ready[2];
+    int pipe_rc = pipe(ready);
+    CHECK(pipe_rc == 0, "refusal transition: create stripped fixture handshake pipe");
+    if (pipe_rc != 0)
+        goto fail;
+    pid = fork();
+    if (pid == 0) {
+        close(ready[0]);
+        char fdstr[32];
+        snprintf(fdstr, sizeof(fdstr), "%d", ready[1]);
+        execl(copy, copy, "--pgwt-test-stay-alive", fdstr, (char *)NULL);
+        _exit(127);
+    }
+    close(ready[1]);
+    CHECK(pid > 0, "refusal transition: fork stripped fixture");
+    if (pid < 0) {
+        close(ready[0]);
+        goto fail;
+    }
+    char byte;
+    do {
+        n = read(ready[0], &byte, 1);
+    } while (n < 0 && errno == EINTR);
+    close(ready[0]);
+    CHECK(n == 1, "refusal transition: stripped fixture exec handshake succeeds");
+    if (n != 1)
+        goto fail;
+    return pid;
+
+fail:
+    if (source >= 0)
+        close(source);
+    if (target >= 0)
+        close(target);
+    stop_stripped_discovery_fixture(pid, copy);
+    copy[0] = '\0';
+    return -1;
+}
+
+/* The debug build's own PgBackendStatus DWARF supplies st_query_id=104;
+ * the known-offset table supplies 424 for PG17/18 on x86_64; and the
+ * PGPROC wait offset is known only for PG13, so PG14/15/16 fail earlier.
+ * PG13 is exempt from this refusal. Thus PG19+ with no DWARF is the only
+ * reachable configuration: a PG13 daemon re-attaching to PG19 installed
+ * without a -dbgsym/-debuginfo package. Do not simplify this fixture back
+ * into a discovery that never reaches the refusal under test. */
+static void test_repeated_refusal_logs_once_per_transition(void)
+{
+    char copy[512] = "";
+    pid_t pid = -1;
+    struct pgwt_daemon *reset = calloc(1, sizeof(*reset));
+    struct pgwt_daemon *a = calloc(1, sizeof(*a));
+    struct pgwt_daemon *b = calloc(1, sizeof(*b));
+    CHECK(reset != NULL, "refusal transition: allocate initial successful daemon");
+    CHECK(a != NULL, "refusal transition: allocate refusing daemon A");
+    CHECK(b != NULL, "refusal transition: allocate successful daemon B");
+    if (!reset || !a || !b)
+        goto cleanup;
+
+    int env_rc = setenv("PGWT_TEST_FIXTURE_PG_VERSION", "19.0", 1);
+    CHECK(env_rc == 0, "refusal transition: configure PG19 fixture version");
+    if (env_rc != 0)
+        goto cleanup;
+    pid = start_stripped_discovery_fixture(copy, sizeof(copy));
+    if (pid < 0)
+        goto cleanup;
+
+    /* The memo is file-static. A successful default-view discovery first
+     * clears it so this test does not depend on which tests ran before it. */
+    reset->postmaster_pid = pid;
+    CHECK(pgwt_discover(reset) == 0,
+          "refusal transition: initial default-view discovery clears memo");
+
+    a->view = PGWT_VIEW_QUERY_EVENT;
+    a->postmaster_pid = pid;
+    a->verbose = false;
+    char text[16384];
+    int rc1 = discover_capture_stderr(a, text, sizeof(text), "first call");
+    CHECK(rc1 == -1, "refusal transition: the refusal is reachable at all");
+    CHECK(text[0] != '\0', "refusal transition: first stderr capture is non-empty");
+    CHECK(strstr(text, "st_query_id offset not found for PG19") != NULL,
+          "refusal transition: first call logs exact PG19 refusal reason");
+
+    int rc2 = discover_capture_stderr(a, text, sizeof(text), "repeat call");
+    CHECK(rc2 == -1, "refusal transition: suppressed repeat still refuses discovery");
+    CHECK(strstr(text, "st_query_id offset not found") == NULL,
+          "refusal transition: immediate repeat suppresses reason");
+
+    b->postmaster_pid = pid;
+    CHECK(pgwt_discover(b) == 0,
+          "refusal transition: daemon B default-view success clears memo");
+
+    int rc3 = discover_capture_stderr(a, text, sizeof(text), "recurring call");
+    CHECK(rc3 == -1, "refusal transition: recurrence after success refuses discovery");
+    CHECK(strstr(text, "st_query_id offset not found for PG19") != NULL,
+          "refusal transition: recurrence after success logs exact PG19 reason again");
+
+cleanup:
+    stop_stripped_discovery_fixture(pid, copy);
+    CHECK(unsetenv("PGWT_TEST_FIXTURE_PG_VERSION") == 0,
+          "refusal transition: clear fixture version override");
+    if (reset)
+        free(reset->pg_binary_saved);
+    free(reset);
+    if (a)
+        free(a->pg_binary_saved);
+    free(a);
+    if (b)
+        free(b->pg_binary_saved);
+    free(b);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "--pgwt-test-stay-alive") == 0) {
+        int fd = atoi(argv[2]);
+        ssize_t n;
+        do {
+            n = write(fd, "x", 1);
+        } while (n < 0 && errno == EINTR);
+        close(fd);
+        if (n != 1)
+            return 127;
+        for (;;)
+            pause();
+    }
+
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
-        puts("postgres (PostgreSQL) 17.0");
+        const char *version = getenv("PGWT_TEST_FIXTURE_PG_VERSION");
+        printf("postgres (PostgreSQL) %s\n", version && version[0] ? version : "17.0");
         return 0;
     }
 
@@ -411,6 +679,7 @@ int main(int argc, char **argv)
     test_validation_exclusions_reset_per_discovery_cycle();
     test_exact_probe_offsets_reset_per_discovery_cycle();
     test_pg13_query_attr_reset_per_discovery_cycle();
+    test_repeated_refusal_logs_once_per_transition();
 
     printf("\n%d/%d tests passed\n", ok, run);
     return (ok == run) ? 0 : 1;
