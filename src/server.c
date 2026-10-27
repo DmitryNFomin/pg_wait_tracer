@@ -5560,6 +5560,9 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_load_info linfo = {0};
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
+    /* #598 AVAILABILITY: this tracks measurement, not the response route;
+     * the summary route also measures via its existing raw backfill pass. */
+    int unattributed_available = 1;
     int top_wait_unavailable = 0;
     const char *top_wait_unavailable_reason = NULL;
 
@@ -5577,26 +5580,40 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         pgwt_compute_top_queries_from_summaries(srv->trace_dir, from, to,
                                                  &req->filter, wall_ms, &res);
         from_summaries = 1;
+        unattributed_available = 0;
 
         /* #319: same backfill as handle_top_sessions, and cheaper here --
          * `all_events` above is ALREADY a full raw load of this exact
          * window (lifecycle stats need it unconditionally) and has ALREADY
          * cleared reject_overload, so there is no second raw load and no
-         * window-too-large case to degrade for: the only way this can fail
-         * is the same allocation failure res.failed below already reports
-         * for the summary path. struct pgwt_summary_query's top_wait_ns is
+         * window-too-large case to degrade for: only an allocation failure
+         * in the raw compute can make this backfill unavailable.
+         * struct pgwt_summary_query's top_wait_ns is
          * the same per-second "longest single wait" shape as sessions' (see
          * accum_query_add in summary_writer.c), so it answers a different
          * question from raw's per-event-TOTAL argmax the same way. */
-        if (!res.failed && res.num_rows > 0) {
+        /* #598 EMPTY summary result: no query rows can still mean real
+         * unattributed time. Run the raw pass even with zero summary rows.
+         * Summary FAILURE (res.failed) is terminal: the compute_failed block
+         * below returns before any unattributed fields can be emitted. */
+        if (!res.failed) {
             struct pgwt_queries_result raw_res;
             pgwt_compute_top_queries(all_events, ecount, &req->filter,
                                      req->from_ns, req->to_ns, wall_ms,
                                      &raw_res);
             if (raw_res.failed) {
+                /* #598 raw-pass FAILURE is nonterminal: leave availability
+                 * false and all three summary scalars zero. An allocation
+                 * failure is not a measured zero. */
                 top_wait_unavailable = 1;
                 top_wait_unavailable_reason = "compute_failed";
             } else {
+                res.unattributed_ms = raw_res.unattributed_ms;
+                res.unattributed_count = raw_res.unattributed_count;
+                res.backfilled_ms = raw_res.backfilled_ms;
+                unattributed_available = 1;
+                /* The per-row backfill is naturally a no-op over zero rows;
+                 * only these row fields depend on rows being present. */
                 for (int i = 0; i < res.num_rows; i++) {
                     for (int j = 0; j < raw_res.num_rows; j++) {
                         if (raw_res.rows[j].query_id != res.rows[i].query_id)
@@ -5948,11 +5965,12 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddNumberToObject(root, "db_time_ms", res.db_time_ms);
     /* #128: never silent — foreground time no query claimed, and how much
      * row time was attributed to an id reported after the interval closed.
-     * Only the raw-event path measures these: the per-second summaries
-     * attribute at write time (the daemon's summary writer runs the same
-     * deferral, so their rows DO carry late-reported ids) but have no
-     * unattributed bucket, so the fast path cannot report what it dropped
-     * — unattributed_available says which case this response is. */
+     * The per-second summaries attribute at write time (their rows DO carry
+     * late-reported ids) but have no unattributed bucket. Both routes now
+     * measure these scalars from raw events: the summary route reuses its
+     * existing backfill pass. unattributed_available means measured, even
+     * when zero; false means that raw pass failed, not that summaries served
+     * the rows. */
     /* #441: the SCOPE of the exec/plan columns, stated on the wire instead of
      * assumed by the reader. "whole-query" means every pid that ran the
      * query, which is what a class/event filter deliberately leaves alone;
@@ -5964,7 +5982,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     if (lifecycle_pid_unscoped)
         cJSON_AddStringToObject(root, "exec_stats_unavailable_reason",
                                 "execution statistics are not scoped to a pid");
-    cJSON_AddBoolToObject(root, "unattributed_available", !from_summaries);
+    cJSON_AddBoolToObject(root, "unattributed_available", unattributed_available);
     cJSON_AddNumberToObject(root, "unattributed_ms", res.unattributed_ms);
     cJSON_AddNumberToObject(root, "unattributed_count",
                             (double)res.unattributed_count);
