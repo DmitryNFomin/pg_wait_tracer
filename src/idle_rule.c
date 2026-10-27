@@ -117,6 +117,23 @@ int pgwt_is_hidden_event(uint32_t wei)
     return WE_CLASS(wei) == PG_WAIT_ACTIVITY;
 }
 
+uint64_t pgwt_idle_cpu_credit_ns(uint32_t wei, uint64_t wall_ns,
+                                  uint64_t cpu_ns, uint64_t *excess_ns)
+{
+    if (excess_ns)
+        *excess_ns = 0;
+    if (!(pgwt_is_idle_event(wei) && !pgwt_is_hidden_event(wei)))
+        return 0;
+    if (cpu_ns == PGWT_CPU_NS_UNKNOWN)
+        return 0;
+    if (cpu_ns > wall_ns) {
+        if (excess_ns)
+            *excess_ns = cpu_ns - wall_ns;
+        return wall_ns;
+    }
+    return cpu_ns;
+}
+
 int pgwt_is_session_idle_event(uint32_t wei)
 {
     return WE_CLASS(wei) == PG_WAIT_ACTIVITY ||

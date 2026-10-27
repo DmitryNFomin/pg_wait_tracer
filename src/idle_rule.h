@@ -135,6 +135,23 @@ int pgwt_is_idle_event(uint32_t wait_event_info);
  * counted as DB Time, because marking it idle deleted it from every view. */
 int pgwt_is_hidden_event(uint32_t wait_event_info);
 
+/* #194: measured on-CPU time inside VISIBLE idle is CPU* and DB Time,
+ * bounded by the interval's wall time; excess_ns (if supplied) is always
+ * initialised and reports any measured excess over wall.
+ *
+ * The hidden-idle Activity class includes both genuine background main loops
+ * and PGWT_WEI_NONCMD_CPU: a synthetic foreground we==0 gap outside a command.
+ * Its on-CPU time was deliberately adjudicated as NOT DB Time in
+ * docs/AAS_SEMANTICS_DECISION.md (#97/#408). Crediting hidden idle here would
+ * silently reverse that decision. The credited set is therefore exactly
+ * VISIBLE idle: Client:ClientRead plus the Timeout pacing events.
+ *
+ * Refusal is TOTAL: anything not provably in that set, and any value that is
+ * not a measurement (PGWT_CPU_NS_UNKNOWN), moves nothing. Under-counting stays
+ * visible; inventing CPU does not. */
+uint64_t pgwt_idle_cpu_credit_ns(uint32_t wei, uint64_t wall_ns,
+                                  uint64_t cpu_ns, uint64_t *excess_ns);
+
 /* SESSION STATE, deliberately NARROWER than pgwt_is_idle_event: returns true
  * only if the event means "this session has NO command running".
  *
