@@ -155,6 +155,24 @@ static void test_exact_probe_offsets_reset_per_discovery_cycle(void)
           "a new discovery cycle does not leave a prior cycle's "
           "activity_offset untouched");
 
+    /* "Changed" alone is too weak to be evidence: an implementation that
+     * overwrote the cache with any non-sentinel junk (say 1) would satisfy
+     * the two assertions above and still hand a wrong FILE offset to
+     * bpf_program__attach_uprobe_opts(), which is the entire bug. Pin the
+     * value, not just the change. pgwt_discover() itself never resolves
+     * these two symbols (no exact_probe.c call anywhere in discovery.c --
+     * attach_link() does the lazy lookup later), so the only correct state
+     * on return is the cleared one: 0, the "not resolved yet" value that
+     * makes attach_link() re-derive, and -- here, where the fixture binary
+     * exports neither `pgstat_report_query_id` nor `pgstat_report_activity`
+     * -- the "symbol not found" value that routes into attach_missing()'s
+     * existing fail-closed rollback (PGWT_ESC_FAIL_EXACT_ATTACH) rather
+     * than a silent attach at the wrong instruction. */
+    CHECK(d->exact_probes.query_offset == 0,
+          "query_offset is cleared to the re-derive/refuse value, not to junk");
+    CHECK(d->exact_probes.activity_offset == 0,
+          "activity_offset is cleared to the re-derive/refuse value, not to junk");
+
     free(d->pg_binary_saved);
     free(d);
 }
