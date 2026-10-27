@@ -1527,8 +1527,13 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
             cpu_clamped_ns += excess_ns;
             db_time_ns += credit;
             cpu_measured_ns += credit;
-            if (credit > 0 && frac > 0.0)
-                has_measured_cpu = 1;
+            /* Like #575's wait-spin case below, this credit cannot answer
+             * "is THIS RESPONSE'S CPU row a measurement?" An UNKNOWN gap
+             * beside measured idle CPU still infers its whole wall as CPU*.
+             * Raising the flag here would label that inference "CPU (running)"
+             * beside a 0.0 ms "CPU (waiting for a core)" row. The credit
+             * still enters CPU* and DB Time; keep the conservative CPU* label
+             * until a measured GAP justifies the stronger claim. */
             idle_time_ns += dur_ns - credit;
             idle_accum_add(idle_ev, &n_idle_ev, ev->old_event, dur_ns - credit);
             continue;
@@ -1995,9 +2000,9 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
          * tells the caller.
          *
          * Idle rows are untouched, including an idle interval's own cpu_ns:
-         * the time model skips such an interval whole (ClientRead precedent,
-         * tests/test_idle_accounting.c), and its time is not in DB Time here
-         * either. That falls out of the CLASS selector below and needs no
+         * the raw time model credits visible-idle CPU (#194), but this table
+         * deliberately does not -- one of the divergences in the header note.
+         * That follows from the CLASS selector below and needs no
          * `!pgwt_is_idle_event()` conjunct of its own: PGWT_CLASS_CPU is
          * reachable only for event_id 0 (pgwt_wait_class_index special-cases
          * it; every other id is classified by its class byte), and 0 is not

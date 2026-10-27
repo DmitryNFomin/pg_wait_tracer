@@ -234,8 +234,8 @@ The rule is implemented as a **static, per-event list** (`src/idle_rule.c`,
 That is not a weakening of the owner's rule; a dynamic test would be an unfaithful
 implementation of it. `se.sum_exec_runtime` is only current at a scheduler tick
 or a context switch, so a sub-millisecond CPU burst just before a wait is
-attributed to the FOLLOWING interval (the known leak at `src/compute.c`'s idle
-skip, see "Known leak" below). Measured CPU inside a pacing span is therefore
+attributed to the FOLLOWING interval (see "Partially converted idle CPU
+accounting" below). Measured CPU inside a pacing span is therefore
 largely *measurement spillover from the preceding work*, not work done during
 the sleep. A dynamic rule would reclassify the same event run to run depending
 on where a tick happened to land, and DB Time would stop being reproducible —
@@ -360,16 +360,22 @@ simply never emitted the row. Hidden (`Activity`-class) idle time stays inside
 the parent total and gets no child row: `pgwt_is_hidden_event` is unchanged, and
 a background process parked in its main loop is not a diagnostic.
 
-### Known leak, documented and NOT fixed here
+### Partially converted idle CPU accounting
 
-`src/compute.c` skips an idle interval WHOLE, including its measured `cpu_ns`.
-Combined with the spillover above, checkpointer write CPU that leaks into the
-following `CheckpointWriteDelay` span is now dropped from `CPU*` — exactly as
-backend CPU before a `Client:ClientRead` already was. This is the ClientRead
-precedent generalising, not a new behaviour, and it is pinned by
-`tests/test_idle_accounting.c` section 5, which asserts the two events are
-accounted identically. Fixing the spillover means changing how `cpu_ns` is
-attributed across interval boundaries, which is a separate change.
+The raw time model in `src/compute.c` credits measured CPU inside **visible
+idle** to `CPU*` and DB Time (#194), subtracting the same amount from Idle.
+This includes CPU spilling into `Client:ClientRead` or a pacing Timeout span;
+`tests/test_idle_accounting.c` section 5 pins their identical treatment. Hidden
+Activity-class idle, including `PGWT_WEI_NONCMD_CPU`, is still refused. That
+preserves this document's decision that foreground CPU outside a command is
+not DB Time (#97/#408).
+
+The credit is **raw-time-model only**. AAS, top events, per-session and
+per-query rows, and every summary twin do not apply it. Summary v8 carries no
+per-record idle CPU, so converting those paths is blocked on summary v9.
+`tests/test_window_clip.c` section 2b pins the expected measured divergence
+between the AAS chart and the raw Overview. This accounting credit does not
+change how `cpu_ns` is attributed across interval boundaries.
 
 ### The totals are exact; only the breakdown is bounded
 

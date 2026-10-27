@@ -18,7 +18,8 @@
  * WHAT THIS PINS
  *   1. the straddler itself (section 1) — this is what fails on master;
  *   2. the cross-tab identity Σ(AAS buckets)·bucket_ns == time_model DB ns,
- *      computed by two independent code paths (section 2);
+ *      computed by two independent code paths for UNKNOWN idle CPU (section
+ *      2), and the expected measured-idle CPU divergence (#194, section 2b);
  *   3. that the fix does NOT over-clip: no-window requests, interior events
  *      and latency columns are untouched (sections 3 and 5).
  *
@@ -291,12 +292,13 @@ static void test_straddler_trailing_edge(void)
     free(tm.rows);
 }
 
-/* ── 2. Cross-tab: AAS chart and Overview must agree ──────────────────── */
+/* ── 2. Cross-tab: AAS chart and Overview agree for UNKNOWN idle CPU ───── */
 
 /* The invariant the demo shows on one screen. Built from a mixed workload
  * with straddlers on both edges, interior waits, an idle record, a CPU gap
  * with measured cpu_ns and a CPU gap that straddles — so the CPU* split and
- * the Off-CPU* residual are exercised too, not just wall time. */
+ * the Off-CPU* residual are exercised too, not just wall time. This agreement
+ * pins ONLY the UNKNOWN-idle case; measured idle CPU diverges in 2b. */
 static void test_cross_tab_agreement(void)
 {
     printf("--- 2. Σ(AAS buckets)·bucket_ns == time_model DB ns ---\n");
@@ -319,6 +321,11 @@ static void test_cross_tab_agreement(void)
         mk(7, LOCK_RELATION,   WTO   + S(3), S(5), 16, PGWT_CPU_NS_UNKNOWN),
     };
     int n = (int)(sizeof(evs) / sizeof(evs[0]));
+    CHECK_U64(pgwt_idle_cpu_credit_ns(CLIENT_READ, S(3),
+                                    PGWT_CPU_NS_UNKNOWN, NULL), 0,
+              "UNKNOWN idle fixture contributes zero #194 credit");
+    CHECK(evs[5].cpu_ns == PGWT_CPU_NS_UNKNOWN,
+          "agreement fixture must remain the UNKNOWN-idle case");
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
 
@@ -368,6 +375,52 @@ static void test_cross_tab_agreement(void)
         free(aas.buckets);
         free(aas.event_aas);
     }
+    free(tm.rows);
+}
+
+/* ── 2b. Expected measured divergence: AAS chart vs raw Overview (#194) ──
+ * AAS still skips idle whole; the raw time model credits measured visible-idle
+ * CPU. Converting the other paths is blocked on summary v9. Pin the exact
+ * difference against fixture literals, independent of either traversal. */
+static void test_cross_tab_measured_idle_divergence(void)
+{
+    printf("--- 2b. measured idle CPU: expected AAS/Overview divergence ---\n");
+    struct pgwt_trace_event evs[] = {
+        mk(1, LOCK_RELATION,   WFROM + S(1), S(4), 11, PGWT_CPU_NS_UNKNOWN),
+        mk(2, TIMEOUT_PGSLEEP, WFROM + S(2), S(6), 12, PGWT_CPU_NS_UNKNOWN),
+        mk(3, IO_READ,         WFROM + S(5), S(2), 13, PGWT_CPU_NS_UNKNOWN),
+        mk(4, CPU_GAP,         WFROM + S(6), S(1), 14, 400000000ULL),
+        mk(5, CPU_GAP,         WFROM + S(1), S(2), 15, S(1)),
+        /* The sole change from section 2: 300 ms measured over 3 s,
+         * of which 2 s is in-window, so the credit is exactly 200 ms. */
+        mk(6, CLIENT_READ,     WFROM + S(2), S(3), 0, 300000000ULL),
+        mk(7, LOCK_RELATION,   WTO   + S(3), S(5), 16, PGWT_CPU_NS_UNKNOWN),
+    };
+    int n = (int)(sizeof(evs) / sizeof(evs[0]));
+    const uint64_t credit_ns = 300000000ULL * 2 / 3;
+    /* Lock 1+2 s, Timeout 2 s, IO 2 s and CPU gaps 1+1 s. */
+    const uint64_t old_db_ns = S(1) + S(2) + S(2) + S(1) + S(1) + S(2);
+    CHECK(credit_ns > 0 &&
+          pgwt_idle_cpu_credit_ns(CLIENT_READ, S(2), credit_ns, NULL) == credit_ns,
+          "2b premise: visible-idle CPU contributes a non-zero 200 ms credit");
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(evs, n, &f, WFROM, WTO, 10000.0, &tm);
+    struct pgwt_aas_result aas;
+    /* One-second buckets align every boundary: no overhang or rounding slop. */
+    pgwt_compute_aas(evs, n, &f, WFROM, WTO, 10, 0, 0, &aas);
+    CHECK(aas.bucket_ns == S(1) && aas.num_buckets == 10,
+          "2b buckets exactly partition the ten-second window");
+    double chart_db_ns = aas_db_ns(&aas);
+    CHECK(chart_db_ns == (double)old_db_ns,
+          "2b AAS still counts exactly the old 9 s DB figure");
+    CHECK(tm.db_time_ms == (double)(old_db_ns + credit_ns) / 1e6,
+          "2b raw Overview counts exactly 9 s plus 200 ms idle CPU");
+    CHECK(tm.db_time_ms * 1e6 - chart_db_ns == (double)credit_ns,
+          "2b measured AAS/Overview divergence is EXACTLY the fixture's credit");
+    free(aas.buckets);
+    free(aas.event_aas);
     free(tm.rows);
 }
 
@@ -1536,9 +1589,10 @@ static void test_cpu_row_measured_bypass(void)
     free(j.rows);
 
     /* 11j. An IDLE interval carrying a measurement (Client:ClientRead). The
-     * time model skips such an interval WHOLE, including its cpu_ns
-     * (tests/test_idle_accounting.c); this table lists it at wall but outside
-     * DB Time, so neither CPU* nor off-CPU may take anything from it.
+     * raw time model now credits its cpu_ns (#194, test_idle_accounting.c).
+     * This table deliberately does not: it lists idle at wall outside DB
+     * Time, so neither CPU* nor off-CPU takes anything from it. That divergence
+     * is documented in compute.c's header note.
      *
      * WHAT KEEPS IT OUT is the CPU-CLASS selector, not an idle test. This
      * case used to be labelled as covering a `!pgwt_is_idle_event()` conjunct
@@ -2810,6 +2864,7 @@ int main(void)
     test_straddler_leading_edge();
     test_straddler_trailing_edge();
     test_cross_tab_agreement();
+    test_cross_tab_measured_idle_divergence();
     test_unbounded_window_unchanged();
     test_bypass_paths();
     test_latency_columns_keep_full_duration();
@@ -2860,8 +2915,9 @@ int main(void)
      * `if (str)` / `if (in)` for the same reason section 13's do -- the
      * record-present CHECK is what fails, and the shortfall in this count
      * is what catches a section that stopped running its body at all.
-     * Measured on the merged tree: 317. */
-    if (checks < 317) {
+     * Measured on the merged tree: 317. #194 adds two UNKNOWN-idle guards
+     * in section 2 and five exact divergence checks in section 2b. */
+    if (checks < 324) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

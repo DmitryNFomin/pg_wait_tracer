@@ -37,7 +37,9 @@
  *     from Idle. Pacing and ClientRead are treated identically; Off-CPU* and
  *     total wall stay unchanged. Section 5b pins refusal for UNKNOWN, measured
  *     zero, hidden idle (including NONCMD_CPU, #97/#408) and non-idle, plus
- *     clamping and window scaling. Other consumers do not apply this credit.
+ *     clamping and window scaling. Section 5c keeps the CPU* label when a
+ *     measured idle credit sits beside an UNKNOWN gap. Other consumers do
+ *     not apply this credit.
  *  9. THE IDLE ROW'S AAS. pct_db_time is 0 on an idle row because a share
  *     of DB Time is undefined there; AAS is NOT that case -- it is a rate
  *     over wall clock, and it was hardcoded to 0, so 807 s of checkpointer
@@ -655,7 +657,7 @@ static void cpu_adjacent_case(uint32_t idle_ev, const char *label,
     CHECK(NEAR(tm.wait_gap_cpu_ms, 10.0),
           "%s: wait_gap_cpu_ms = 10 ms (unchanged non-idle wait CPU), got %.1f",
           label, tm.wait_gap_cpu_ms);
-    CHECK(tm.has_measured_cpu, "%s: CPU* includes a measurement", label);
+    CHECK(tm.has_measured_cpu, "%s: the CPU gap carries a measurement", label);
     CHECK(NEAR(tm.db_time_ms + tm.idle_time_ms, 800.0),
           "%s: DB Time + Idle conserves 800 ms wall", label);
     const char *idle_name = idle_ev == EV_CLIENTREAD
@@ -787,6 +789,31 @@ static void test_idle_cpu_credit_bypasses(void)
     };
     CHECK(sizeof(visible) / sizeof(visible[0]) == PGWT_MAX_VISIBLE_IDLE_EVENTS,
           "b5 fixture names the whole visible idle set");
+    /* A size check alone misses a new idle class that is not hidden. Pin the
+     * credited universe independently of both classification predicates. */
+    uint32_t pacing_mask = pgwt_idle_rule_timeout_mask();
+    uint32_t first_mismatch = 0;
+    int mismatch = 0, credited = 0, refused_count = 0;
+    for (uint32_t cls = 0; cls < 256; cls++) {
+        for (uint32_t id = 0; id < 64; id++) {
+            uint32_t wei = WEI(cls, id);
+            int gets_credit = pgwt_idle_cpu_credit_ns(wei, 1000, 100, NULL) > 0;
+            int expected = wei == WEI(PG_WAIT_CLIENT, 0) ||
+                (WE_CLASS(wei) == PG_WAIT_TIMEOUT && id < 32 &&
+                 ((pacing_mask >> id) & 1u));
+            if (gets_credit) credited++;
+            else refused_count++;
+            if (gets_credit != expected && !mismatch) {
+                first_mismatch = wei;
+                mismatch = 1;
+            }
+        }
+    }
+    CHECK(!mismatch, "b5 credited universe: first mismatching wei=0x%08x",
+          first_mismatch);
+    CHECK(credited > 0 && refused_count > 0,
+          "b5 sweep must see both credited and refused events (got %d/%d)",
+          credited, refused_count);
     for (size_t i = 0; i < sizeof(visible) / sizeof(visible[0]); i++) {
         uint32_t wei = visible[i];
         CHECK(pgwt_is_idle_event(wei) && !pgwt_is_hidden_event(wei),
@@ -810,9 +837,9 @@ static void test_idle_cpu_credit_bypasses(void)
         ev[0] = mk(4000ULL * 1000000000ULL, 501, wei, 500, 40 * MS);
         pgwt_compute_time_model(ev, 1, &f, 0, 0, 1000.0, &tm);
         CHECK(NEAR(tm.db_time_ms, 40.0) && NEAR(tm.cpu_ms, 40.0) &&
-              NEAR(tm.idle_time_ms, 460.0) && tm.has_measured_cpu &&
+              NEAR(tm.idle_time_ms, 460.0) && !tm.has_measured_cpu &&
               tm.offcpu_ms == 0.0 && tm.cpu_clamped_ms == 0.0,
-              "b5 visible event %zu alone produces a measured CPU credit", i);
+              "b5 visible event %zu credits CPU without claiming a measured gap", i);
         free(tm.rows);
         ev[0].cpu_ns = 600 * MS;
         pgwt_compute_time_model(ev, 1, &f, 0, 0, 1000.0, &tm);
@@ -863,7 +890,7 @@ static void test_idle_cpu_credit_bypasses(void)
         CHECK(tm.cpu_ms > 0.0 && tm.cpu_ms < 40.0,
               "b6 edge %d: credit is strictly between zero and full CPU", edge);
         CHECK(NEAR(tm.cpu_ms, 20.0) && NEAR(tm.db_time_ms, 20.0) &&
-              NEAR(tm.idle_time_ms, 230.0) && tm.has_measured_cpu &&
+              NEAR(tm.idle_time_ms, 230.0) && !tm.has_measured_cpu &&
               tm.cpu_clamped_ms == 0.0 && tm.offcpu_ms == 0.0,
               "b6 edge %d: only in-window CPU and wall are credited", edge);
         CHECK(NEAR(tm.db_time_ms + tm.idle_time_ms, 250.0),
@@ -894,9 +921,58 @@ static void test_idle_cpu_credit_bypasses(void)
     ev[0].cpu_ns = 1;
     pgwt_compute_time_model(ev, 1, &f, start, start + 2, 1.0, &tm);
     CHECK(tm.cpu_ms == 1.0 / 1e6 && tm.db_time_ms == 1.0 / 1e6 &&
-          tm.idle_time_ms == 1.0 / 1e6 && tm.has_measured_cpu &&
+          tm.idle_time_ms == 1.0 / 1e6 && !tm.has_measured_cpu &&
           tm.cpu_clamped_ms == 0.0,
           "b6 2/3 ns measured CPU rounds to 1 ns, conserving 2 ns wall");
+    free(tm.rows);
+}
+
+/* ── 5c. Measured idle CPU beside an UNKNOWN gap is still CPU* ───────────
+ * #575's claim is about the CPU gap, not any measurement in the window.
+ * An idle credit must not promote an inferred gap to "CPU (running)". */
+static void test_idle_cpu_credit_mixed_tier(void)
+{
+    printf("--- 5c. idle credit preserves the mixed-tier CPU* claim ---\n");
+    struct pgwt_trace_event ev[] = {
+        mk(6000ULL * 1000000000ULL + 500 * MS, 601,
+           EV_CLIENTREAD, 500, 40 * MS),
+        mk(6000ULL * 1000000000ULL + 600 * MS, 601,
+           0, 100, PGWT_CPU_NS_UNKNOWN),
+        mk(6000ULL * 1000000000ULL + 800 * MS, 601,
+           EV_LOCK, 200, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(ev, 3, &f, 6000ULL * 1000000000ULL,
+                            6001ULL * 1000000000ULL, 1000.0, &tm);
+    CHECK(tm.db_time_ms == 100.0 + 200.0 + 40.0 && tm.idle_time_ms == 460.0,
+          "5c premise: idle credit gives DB Time 340 ms and Idle 460 ms");
+    CHECK(tm.has_measured_cpu == 0,
+          "5c measured idle credit cannot claim the UNKNOWN gap was measured");
+    const struct pgwt_tm_row *cpu = row_by_name(&tm, "CPU*");
+    CHECK(cpu != NULL && row_by_name(&tm, "CPU (running)") == NULL,
+          "5c inferred gap keeps the CPU* row name");
+    CHECK(row_by_name(&tm, "CPU (waiting for a core)") == NULL,
+          "5c no runqueue sibling is invented for an UNKNOWN gap");
+    CHECK(cpu != NULL && cpu->time_ms == 100.0 + 40.0,
+          "5c CPU* retains the whole inferred gap and 40 ms idle credit");
+    CHECK(tm.offcpu_ms == 0.0, "5c UNKNOWN gap has no off-CPU split");
+    free(tm.rows);
+
+    /* Only the GAP changes: an always-zero flag must fail this contrast. */
+    ev[1].cpu_ns = 60 * MS;
+    pgwt_compute_time_model(ev, 3, &f, 6000ULL * 1000000000ULL,
+                            6001ULL * 1000000000ULL, 1000.0, &tm);
+    CHECK(tm.has_measured_cpu == 1,
+          "5c measured GAP justifies the measured CPU claim");
+    cpu = row_by_name(&tm, "CPU (running)");
+    CHECK(cpu != NULL && row_by_name(&tm, "CPU*") == NULL,
+          "5c measured GAP changes the row name to CPU (running)");
+    CHECK(cpu != NULL && cpu->time_ms == 60.0 + 40.0 &&
+          tm.offcpu_ms == 40.0 && tm.db_time_ms == 340.0 &&
+          tm.idle_time_ms == 460.0,
+          "5c contrast preserves the credit and splits only the measured gap");
     free(tm.rows);
 }
 
@@ -1619,6 +1695,7 @@ int main(void)
     test_conservation_components();
     test_cpu_on_and_adjacent_to_pacing();
     test_idle_cpu_credit_bypasses();
+    test_idle_cpu_credit_mixed_tier();
     test_tag_events_pacing_not_a_boundary();
     test_idle_breakdown_at_its_bound();
     test_idle_aas_is_a_rate();

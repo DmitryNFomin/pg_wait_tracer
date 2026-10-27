@@ -368,16 +368,18 @@ struct pgwt_tm_result {
      * cat_ms[PGWT_CAT_IO_WORKER] is io_worker BUSY ms — outside DB Time. */
     double cat_ms[PGWT_NUM_CATS];
     double io_worker_busy_pct;  /* busy ms / (io_worker pids × wall) × 100 */
-    /* T8 measured CPU. When has_measured_cpu is set (v3 exact data present),
-     * the CPU* row is the measured on-CPU time and offcpu_ms is its off-CPU /
-     * runqueue-unaccounted sibling (both inside DB Time); when unset the CPU*
-     * row is the legacy full-gap inference and there is NO Off-CPU* row (the
+    /* T8 CPU. has_measured_cpu is set only by an in-window measured GAP,
+     * including measured zero (#575). The CPU row sums measured gaps and
+     * full-wall UNKNOWN gap inferences, plus raw visible-idle CPU credit
+     * (#194). offcpu_ms is the measured gaps' runqueue-unaccounted sibling
+     * (inside DB Time). Without a measured gap the row keeps the CPU* label,
+     * even if it contains idle credit, and there is NO Off-CPU* row (the
      * quantity is unavailable, not zero). cpu_clamped_ms and wait_gap_cpu_ms
      * are the self-checks: CPU that exceeded a gap's wall (clock skew) and CPU
      * measured during wait-labeled gaps (should be ≈0 — a sleeping task burns
      * no CPU). */
     double offcpu_ms;
-    double cpu_ms;              /* measured CPU (== the CPU* row) */
+    double cpu_ms;              /* CPU row: measurements and gap inference */
     int    has_measured_cpu;
     double cpu_clamped_ms;
     double wait_gap_cpu_ms;
@@ -465,11 +467,14 @@ struct pgwt_events_result {
      *       Off-CPU*. DB Time still holds BOTH, so the rows' %DB sums to
      *       100% − offcpu_ms/db_time_ms, not to 100%.
      *
-     *       NOT the same predicate as pgwt_tm_result.has_measured_cpu, which
-     *       is also raised by measured spin inside a WAIT and whose Off-CPU*
-     *       row is additionally gated on a non-zero CPU class total. The two
-     *       therefore disagree in two corners (#575); this one is the
-     *       narrower, and src/server.c's dump_summary names both.
+     *       The raw time model uses the same measured-GAP predicate: #575
+     *       removed its wait-spin flag raise and fixed its zero-CPU row
+     *       guard, resolving the two old disagreements. #194 adds a third
+     *       corner: pgwt_tm_result's CPU* row can contain credited visible-idle
+     *       CPU while its has_measured_cpu is 0. That row is part measurement
+     *       even when the flag declines to claim it; pgwt_events_result's
+     *       CPU* row has no idle credit at all. src/server.c's dump_summary
+     *       still names both fields.
      *   has_measured_cpu == 0 — no in-window CPU gap carried a measurement
      *       (sampled / v2 / no CPU capability, or no CPU gap at all). CPU* is
      *       then the unsplit gap wall by gap-inference and offcpu_ms is 0 —
