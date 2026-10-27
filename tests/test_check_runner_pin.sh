@@ -264,6 +264,8 @@ expect_ok "$R" "FP1 pinned value whose comment names ubuntu-latest"
 # BPF_CFLAGS must not satisfy either the flag or the $(CFLAGS) requirement.
 # Compiler forwarding is not compilation. Sub-make CFLAGS overrides must
 # preserve the flags too: command-line assignments replace the child defaults.
+# Compiler aliases and built-in COMPILE/LINK variables refuse: their expansion
+# can hide flags or another command, which this static gate cannot verify.
 check_makefile_cflags() {
     local mk="$1" flags_var="$2"
     if [[ ! -f "$mk" || ! -r "$mk" ]]; then
@@ -296,8 +298,36 @@ check_makefile_cflags() {
             }
             return 0
         }
-        function inspect(line, value, commands, n, i, command, quote, end_quote) {
+        function compiler_reference(value, include_cc, name) {
+            while (match(value, /[$][({][A-Za-z_][A-Za-z0-9_.]*[)}]/)) {
+                name = substr(value, RSTART + 2, RLENGTH - 3)
+                value = substr(value, RSTART + RLENGTH)
+                if ((include_cc || name != "CC") &&
+                    (compiler_variables[name] || name ~ /^(COMPILE|LINK)[.]/))
+                    return name
+            }
+            return ""
+        }
+        function inspect(line, value, name) {
+            # Comments are not executable evidence. Decide explicitly whether
+            # a full-line comment hides a compiler recipe after aliases are
+            # known; inline comments cannot supply flags to an active recipe.
+            if (line ~ /^[[:space:]]*#/) {
+                comment_lines[++comments] = line
+                comment_numbers[comments] = first_line
+                return
+            }
             sub(/[[:space:]]*#.*/, "", line)
+            if (line !~ /^\t/ && line ~ /^[ ]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*[:?+!]*=/) {
+                name = line
+                sub(/[[:space:]]*[:?+!]*=.*/, "", name)
+                sub(/^[ ]*/, "", name)
+                value = line
+                sub(/^[^=]*=/, "", value)
+                # Retain every definition conservatively. Conditional or
+                # overridden aliases must not hide a compiler reference.
+                alias_values[name] = alias_values[name] " " value
+            }
             if (line !~ /^\t/ && line ~ assignment) {
                 definitions++
                 value = line
@@ -306,45 +336,70 @@ check_makefile_cflags() {
                     has_flag = 1
             }
             if (line ~ /^\t/) {
-                # Scan anywhere, including shell keywords and pipelines.
-                # CC="$(CC)" on a sub-make is merely a forwarded value.
-                sub(/^\t[[:space:]@+-]*/, "", line)
-                n = split(line, commands, /&&|;/)
-                for (i = 1; i <= n; i++) {
-                    command = commands[i]
-                    sub(/^[[:space:]]*/, "", command)
-                    if (has_compile_command(command)) {
-                        recipes++
-                        if (!index(command, "$(" flags_var ")"))
-                            reject("FAIL: " FILENAME ":" first_line \
-                                   " $(CC) recipe does not pass $(" flags_var "): " line)
+                # Defer until all aliases are known, including definitions
+                # below their use. Store the already joined logical recipe.
+                recipe_lines[++logical_recipes] = line
+                recipe_numbers[logical_recipes] = first_line
+            }
+        }
+        function inspect_comment(line, first_line) {
+            sub(/^[[:space:]]*#[[:space:]@+-]*/, "", line)
+            # Prose may mention a compiler; a commented-out command is a
+            # blind recipe and refuses, rather than passing by non-match.
+            if (match(line, /^[$][({][A-Za-z_][A-Za-z0-9_.]*[)}]/) &&
+                compiler_reference(substr(line, 1, RLENGTH), 1) != "")
+                reject("REFUSE: " FILENAME ":" first_line \
+                       " commented-out compiler recipe cannot be verified: " line)
+        }
+        function inspect_recipe(line, first_line, value, commands, n, i, command, quote, end_quote, indirect) {
+            # Scan anywhere, including shell keywords and pipelines.
+            # CC="$(CC)" on a sub-make is merely a forwarded value.
+            sub(/^\t[[:space:]@+-]*/, "", line)
+            n = split(line, commands, /&&|;/)
+            for (i = 1; i <= n; i++) {
+                command = commands[i]
+                sub(/^[[:space:]]*/, "", command)
+                indirect = compiler_reference(command, 0)
+                if (indirect != "")
+                    reject("REFUSE: " FILENAME ":" first_line \
+                           " recipe compiles through an indirection the gate cannot resolve (" \
+                           indirect "): " line)
+                if (has_compile_command(command)) {
+                    recipes++
+                    if (!index(command, "$(" flags_var ")"))
+                        reject("FAIL: " FILENAME ":" first_line \
+                               " $(CC) recipe does not pass $(" flags_var "): " line)
+                }
+                if (command ~ /^[$][(]MAKE[)]([[:space:]]|$)/ &&
+                    command ~ "[[:space:]]" flags_var "=") {
+                    overrides++
+                    value = command
+                    sub("^.*[[:space:]]" flags_var "=", "", value)
+                    # Inspect the assigned value, not unrelated arguments
+                    # that might also happen to mention $(CFLAGS).
+                    quote = substr(value, 1, 1)
+                    if (quote == "\"" || quote == sprintf("%c", 39)) {
+                        value = substr(value, 2)
+                        end_quote = index(value, quote)
+                        if (!end_quote) value = ""
+                        else value = substr(value, 1, end_quote - 1)
+                    } else {
+                        sub(/[[:space:]].*/, "", value)
                     }
-                    if (command ~ /^[$][(]MAKE[)]([[:space:]]|$)/ &&
-                        command ~ "[[:space:]]" flags_var "=") {
-                        overrides++
-                        value = command
-                        sub("^.*[[:space:]]" flags_var "=", "", value)
-                        # Inspect the assigned value, not unrelated arguments
-                        # that might also happen to mention $(CFLAGS).
-                        quote = substr(value, 1, 1)
-                        if (quote == "\"" || quote == sprintf("%c", 39)) {
-                            value = substr(value, 2)
-                            end_quote = index(value, quote)
-                            if (!end_quote) value = ""
-                            else value = substr(value, 1, end_quote - 1)
-                        } else {
-                            sub(/[[:space:]].*/, "", value)
-                        }
-                        if (!index(value, "$(" flags_var ")"))
-                            reject("FAIL: " FILENAME ":" first_line \
-                                   " $(MAKE) override does not preserve $(" flags_var "): " line)
-                    }
+                    if (!index(value, "$(" flags_var ")"))
+                        reject("FAIL: " FILENAME ":" first_line \
+                               " $(MAKE) override does not preserve $(" flags_var "): " line)
                 }
             }
         }
-        BEGIN { assignment = "^[ ]*" flags_var "[[:space:]]*[:?+!]*=" }
+        BEGIN {
+            assignment = "^[ ]*" flags_var "[[:space:]]*[:?+!]*="
+            compiler_variables["CC"] = 1
+        }
         {
             if (pending == "") first_line = NR
+            # Join physical lines BEFORE definitions, comments or command
+            # predicates are inspected; keep the first physical line number.
             if (sub(/\\$/, "")) {
                 pending = pending $0 " "
             } else {
@@ -355,6 +410,21 @@ check_makefile_cflags() {
         END {
             if (pending != "")
                 reject("REFUSE: " FILENAME " has an unfinished continuation")
+            # Propagate compiler dependencies without expanding or executing
+            # make variables. A finite fixed point also handles alias chains
+            # and cycles without recursion or dependence on definition order.
+            do {
+                changed = 0
+                for (name in alias_values)
+                    if (!compiler_variables[name] && compiler_reference(alias_values[name], 1) != "") {
+                        compiler_variables[name] = 1
+                        changed = 1
+                    }
+            } while (changed)
+            for (j = 1; j <= comments; j++)
+                inspect_comment(comment_lines[j], comment_numbers[j])
+            for (j = 1; j <= logical_recipes; j++)
+                inspect_recipe(recipe_lines[j], recipe_numbers[j])
             if (definitions != 1)
                 reject("REFUSE: " FILENAME " expected exactly 1 " flags_var \
                        " definition; found " (definitions + 0))
@@ -386,6 +456,17 @@ expect_root_ok() {  # <makefile> <what>
         report true "$what (exit 0)"
     else
         report false "$what — expected exit 0; got exit $status: $result"
+    fi
+}
+
+expect_root_blind_fail() {  # <makefile> <substring> <what>
+    local mk="$1" needle="$2" what="$3" result status
+    result="$(check_makefile_cflags "$mk" CFLAGS 2>&1)"; status=$?
+    if (( status != 0 )) && [[ "$result" == *"$needle"* &&
+                              "$result" != *'no $(CC) compile recipes'* ]]; then
+        report true "$what (exit $status, matched '$needle', no fallback)"
+    else
+        report false "$what — expected '$needle' without the no-recipes fallback; got exit $status: $result"
     fi
 }
 
@@ -510,7 +591,8 @@ for recipe in 'for f in extra/*.c; do $(CC) -c $$f; done' \
               'false || $(CC) -c probe.c' \
               '($(CC) -c probe.c)' \
               'if false; then true; else $(CC) -c probe.c; fi' \
-              'env CC="$(CC)" $(CC) -c probe.c'; do
+              'env CC="$(CC)" $(CC) -c probe.c' \
+              '$(MAKE) -C tests CC="$(CC)" && $(CC) -c probe.c'; do
     cat > "$tmpdir/root-wrapped-bypass.mk" <<'MK'
 CFLAGS = -Wall -Werror=implicit-function-declaration
 good:
@@ -521,6 +603,82 @@ MK
     expect_root_fail "$tmpdir/root-wrapped-bypass.mk" 'does not pass $(CFLAGS)' \
         "root gate rejects wrapped compile with compliant sibling: $recipe"
 done
+
+echo
+echo "== root Makefile: blind spots with compliant siblings (#621) =="
+# Every negative fixture starts with a real compliant compile. A refusal
+# because there were no compile recipes would mask the blind spot under test.
+cat > "$tmpdir/root-continued-bypass.mk" <<'MK'
+CFLAGS = -Wall -Werror=implicit-function-declaration
+good:
+	$(CC) $(CFLAGS) -c main.c
+bad:
+	@echo compiling; \
+	    $(CC) \
+	    -c probe.c
+MK
+expect_root_blind_fail "$tmpdir/root-continued-bypass.mk" 'does not pass $(CFLAGS)' \
+    '621 continued compiler command with compliant sibling'
+
+# Flags after two continued lines belong to the same compiler command.
+cat > "$tmpdir/root-continued-good.mk" <<'MK'
+CFLAGS = -Wall -Werror=implicit-function-declaration
+all:
+	@echo compiling; \
+	    $(CC) \
+	    $(CFLAGS) -c probe.c
+MK
+expect_root_ok "$tmpdir/root-continued-good.mk" \
+    '621 flags on a later continuation reach the compiler'
+
+cp "$tmpdir/root-continued-bypass.mk" "$tmpdir/root-unfinished.mk"
+printf '\t$(CC) \\' >> "$tmpdir/root-unfinished.mk"
+expect_root_blind_fail "$tmpdir/root-unfinished.mk" 'unfinished continuation' \
+    '621 unfinished continuation with compliant sibling refuses'
+
+for compiler in '$(COMPILE.c)' '$(HOSTCC)' '${HOSTCC}' '$(OUTERCC)'; do
+    cat > "$tmpdir/root-indirect-bypass.mk" <<'MK'
+CFLAGS = -Wall -Werror=implicit-function-declaration
+good:
+	$(CC) $(CFLAGS) -c main.c
+bad:
+MK
+    printf '\t%s -c probe.c\n' "$compiler" >> "$tmpdir/root-indirect-bypass.mk"
+    # Definitions after use must be seen too; expanding make is not safe.
+    cat >> "$tmpdir/root-indirect-bypass.mk" <<'MK'
+OUTERCC = $(HOSTCC)
+HOSTCC = $(CC)
+MK
+    expect_root_blind_fail "$tmpdir/root-indirect-bypass.mk" \
+        'recipe compiles through an indirection the gate cannot resolve' \
+        "621 indirect compiler with compliant sibling: $compiler"
+done
+
+for comment in '# $(CC) -c disabled.c' \
+               $'\t# $(CC) -c disabled.c' \
+               '# $(COMPILE.c) -c disabled.c' \
+               '# $(HOSTCC) -c disabled.c'; do
+    cp "$tmpdir/root-forward.mk" "$tmpdir/root-commented-recipe.mk"
+    printf '%s\nHOSTCC = $(CC)\n' "$comment" >> "$tmpdir/root-commented-recipe.mk"
+    expect_root_blind_fail "$tmpdir/root-commented-recipe.mk" \
+        'commented-out compiler recipe cannot be verified' \
+        "621 commented-out recipe with compliant sibling: $comment"
+done
+
+cp "$tmpdir/root-forward.mk" "$tmpdir/root-comment-flags.mk"
+printf 'bad:\n\t$(CC) -c probe.c # $(CC) $(CFLAGS) -c disabled.c\n' \
+    >> "$tmpdir/root-comment-flags.mk"
+expect_root_blind_fail "$tmpdir/root-comment-flags.mk" 'does not pass $(CFLAGS)' \
+    '621 active compiler cannot borrow flags from a commented-out recipe'
+
+cp "$tmpdir/root-forward.mk" "$tmpdir/root-prose-comment.mk"
+cat >> "$tmpdir/root-prose-comment.mk" <<'MK'
+# Use $(CC) for compilation; this is documentation, not a disabled command.
+documentation:
+	# Explain $(CC) and $(COMPILE.c) without compiling anything.
+MK
+expect_root_ok "$tmpdir/root-prose-comment.mk" \
+    '621 prose comments may mention compiler references'
 
 cp "$tmpdir/root-forward.mk" "$tmpdir/root-override.mk"
 printf '\t$(MAKE) -C tests CFLAGS="-O2"\n' >> "$tmpdir/root-override.mk"
