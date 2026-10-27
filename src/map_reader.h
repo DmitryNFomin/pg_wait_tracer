@@ -127,9 +127,9 @@ struct pgwt_accumulator {
     int num_system_events;
 
     /* Query-level event aggregation. query_id 0 rows are the UNATTRIBUTED
-     * bucket (issue #128, query_attr.h): foreground non-idle time whose
-     * command never reported an id — shown as "unattributed", never
-     * dropped. */
+     * bucket (#128/#641, query_attr.h): foreground time whose command never
+     * reported an id, plus non-idle background/maintenance time without an
+     * id — shown as "unattributed", never dropped. */
     struct pgwt_query_event_stats query_events[MAX_QUERY_EVENTS];
     int num_query_events;
 
@@ -364,14 +364,17 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
  *
  * The query-level step of every live consumer (closed records, the open
  * state_map stretch, sampled-tier samples):
+ *   io_worker          → nothing, regardless of id or other category bits;
  *   query_id != 0      → its row; a closed record also observes the id for
  *                        the pid (rule 1 for what is pending, cmd_qid for
  *                        rule 2);
- *   query_id == 0, background/maintenance/io_worker → nothing (query-less
- *                        by construction, as before);
- *   query_id == 0, foreground idle → a command boundary (keeps cmd_qid);
- *   query_id == 0, foreground non-idle, defer → pending on the pid until
- *                        its next observe/boundary;
+ *   query_id == 0, background/maintenance → unattributed if non-idle by the
+ *                        LOAD rule (pgwt_is_idle_event), else nothing;
+ *                        never deferred/backfilled, including open stretches;
+ *   query_id == 0, unknown category → nothing (never borrows an id);
+ *   query_id == 0, foreground session-idle → a command boundary (keeps cmd_qid);
+ *   query_id == 0, foreground non-session-idle, defer → pending on the pid
+ *                        until its next observe/boundary;
  *   …not deferrable (the open stretch at tick time, no per-pid state) →
  *                        cmd_qid now if the command already reported one,
  *                        else no query row yet (NOT unattributed: the id
