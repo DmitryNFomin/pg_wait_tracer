@@ -5,16 +5,6 @@
    "raw": 2.96975,
    "summary": 4.501
   },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
-  },
   "sessions/has_measured_cpu": {
    "issue": 562,
    "raw": true,
@@ -56,16 +46,6 @@
    "issue": 410,
    "raw": 3.001,
    "summary": 4.3135
-  },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
   },
   "sessions/has_measured_cpu": {
    "issue": 562,
@@ -109,16 +89,6 @@
    "raw": 2.9385,
    "summary": 4.501
   },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
-  },
   "sessions/has_measured_cpu": {
    "issue": 562,
    "raw": true,
@@ -156,11 +126,6 @@
   }
  },
  "straddle_130s": {
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 70000,
-   "summary": 0
-  },
   "queries/db_time_ms": {
    "issue": 324,
    "raw": 252114,
@@ -200,11 +165,6 @@
    "issue": 324,
    "raw": 41000,
    "summary": 101000
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
   },
   "sessions/has_measured_cpu": {
    "issue": 562,
@@ -257,16 +217,6 @@
    "issue": 410,
    "raw": 2.813859649122807,
    "summary": 4.123801169590643
-  },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
   },
   "sessions/has_measured_cpu": {
    "issue": 562,
