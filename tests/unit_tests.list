@@ -999,3 +999,11 @@ test_box_check_object_excludes.sh
 # restart gap (which would read as missing credit). The two under-counts it
 # measured (the dark window; the FLUSH_LAG tail at a clean stop) are #632.
 test_restart_second_identity
+
+# #596: query-less background/maintenance load, with an IO_WORKER control,
+# a pacing-Timeout leg (neither attributed nor unattributed), a
+# never-backfilled leg (an id IS available on the pid and must still be
+# refused -- autovacuum time billed to a user statement is the wrong
+# answer #596 exists to prevent) and the fail-safe direction for a
+# category nobody has added yet: dropped, never borrowed.
+test_background_unattributed
