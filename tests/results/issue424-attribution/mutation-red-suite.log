@@ -1,0 +1,54 @@
+### BASELINE (unmutated) — all of §10 must be green ###
+  exit=0
+    ok:   10a: nine gaps that end inside their own second are ACCEPTED and retired unplaced (notes 9, unplaced 9, credited 0) with every refusal counter 0 (io_worker 0, refused 0, expired 0, uncredited 0) — the 2026-10-28 reading, now attributable
+    ok:   10b: a credited multi-second gap is NOT unplaced (credited 10000 ms, unplaced 0, notes 9) — the counter is the OUTCOME 'nothing was written', not 'an interval ended'
+    ok:   10c: the io_worker refusal is 18 notes but only 9 of them carried an observation (notes 9, all 18) — the subset is disjoint from the WAIT notes and bounded by notes_total
+    ok:   10d: a WAIT-only io_worker daemon refuses nine notes and asks nothing about CPU (notes 0, all 9, cpu subset 0)
+    ok:   10e: a stale note is counted BOTH as expired (1, the reason) and as unplaced (1, the outcome) — deliberately not a partition
+    ok:   10f: a disabled writer attributes nothing (io_worker subset 0, unplaced 0) — the reading stays REFUSE
+  101 checks, 0 failures
+
+=== MUTANT: S1: counted for every retirement (the cpu_frozen test dropped)
+    must turn red: 10b
+    FAIL: 10b: a credited multi-second gap is NOT unplaced (credited 10000 ms, unplaced 1, notes 9) — the counter is the OUTCOME 'nothing was written', not 'an interval ended'
+  101 checks, 1 failures
+  exit=1
+
+=== MUTANT: S2: unplaced increment deleted (counter permanently 0)
+    must turn red: 10a, 10e
+    FAIL: 10a: nine gaps that end inside their own second are ACCEPTED and retired unplaced (notes 9, unplaced 0, credited 0) with every refusal counter 0 (io_worker 0, refused 0, expired 0, uncredited 0) — the 2026-10-28 reading, now attributable
+    FAIL: 10e: a stale note is counted BOTH as expired (1, the reason) and as unplaced (0, the outcome) — deliberately not a partition
+  101 checks, 2 failures
+  exit=1
+
+=== MUTANT: S3: the subset counted for WAIT notes too (no longer a subset)
+    must turn red: 10c, 10d
+    FAIL: 10c: the io_worker refusal is 18 notes but only 18 of them carried an observation (notes 9, all 18) — the subset is disjoint from the WAIT notes and bounded by notes_total
+    FAIL: 10d: a WAIT-only io_worker daemon refuses nine notes and asks nothing about CPU (notes 0, all 9, cpu subset 9)
+  101 checks, 2 failures
+  exit=1
+
+=== MUTANT: S4: the subset increment deleted (the overlap unknown again)
+    must turn red: 10c
+    FAIL: 10c: the io_worker refusal is 18 notes but only 0 of them carried an observation (notes 9, all 18) — the subset is disjoint from the WAIT notes and bounded by notes_total
+  101 checks, 1 failures
+  exit=1
+
+=== MUTANT: S5: a second, UNCOUNTED retire path used by the close site
+    must turn red: 10a
+    FAIL: 10a: nine gaps that end inside their own second are ACCEPTED and retired unplaced (notes 9, unplaced 0, credited 0) with every refusal counter 0 (io_worker 0, refused 0, expired 0, uncredited 0) — the 2026-10-28 reading, now attributable
+  101 checks, 1 failures
+  exit=1
+
+=== MUTANT: S6: counted at the note (both sides from the same event)
+    must turn red: 10b
+    FAIL: 10b: a credited multi-second gap is NOT unplaced (credited 10000 ms, unplaced 9, notes 9) — the counter is the OUTCOME 'nothing was written', not 'an interval ended'
+  101 checks, 1 failures
+  exit=1
+
+=== MUTANT: S7: the §10 dispatcher line removed from main()
+    must turn red: the banner disappears and the check count drops
+  exit=0  (#686: a missing section does NOT change the exit status)
+  '-- 10:' banner lines: 0 (baseline: 1)
+  mutant:   95 checks, 0 failures
+  baseline: 101 checks, 0 failures

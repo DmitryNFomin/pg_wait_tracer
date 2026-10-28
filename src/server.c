@@ -5235,13 +5235,18 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
 
     /* #562 (additive): which quantity the cpu_pct column IS. true -- measured
      * on-CPU time, with each row's runqueue remainder in its offcpu_ms;
-     * false -- the unsplit on-CPU gap wall by gap-inference (sampled/v2 data
-     * and the SUMMARY routing, whose per-second record stores wall and has no
-     * measured column), with every offcpu_ms 0. Same field names and the same
+     * false -- the unsplit on-CPU gap wall by gap-inference (sampled/v2
+     * data), with every offcpu_ms 0. Same field names and the same
      * meaning as the time_model and top_events responses.
+     * The SUMMARY routing is NO LONGER in the false list: summary v9 gives
+     * struct pgwt_summary_session a measured-CPU column (cpu_offcpu_ns plus
+     * a saturating cpu_measured_records), so this endpoint reports the same
+     * two quantities whichever path answered.
      * cpu_clamped_ms is the skew self-check: measured CPU that exceeded its
      * own clipped gap wall, clamped out of the column and counted here. It is
-     * outside every row and outside db_time_ms. */
+     * outside every row and outside db_time_ms -- and it is the ONE residual
+     * on the summary path, which has no per-session source for it and
+     * therefore reports 0. */
     cJSON_AddBoolToObject(root, "has_measured_cpu", res.has_measured_cpu);
     cJSON_AddNumberToObject(root, "offcpu_ms", res.offcpu_ms);
     cJSON_AddNumberToObject(root, "cpu_clamped_ms", res.cpu_clamped_ms);

@@ -81,14 +81,15 @@ executions query needs, are gated on --mode full only"*).
 sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 ```
 
-> **START ON AN EMPTY TRACE DIRECTORY.** Summary files are now **v8**
-> (`PGWT_SUMMARY_VERSION`, `src/summary_writer.h`) — most recently bumped
-> 2026-10-15, when the writer began spreading a long interval across the
-> seconds it covers instead of charging its closing second (issue #379).
+> **START ON AN EMPTY TRACE DIRECTORY.** Summary files are now **v9**
+> (`PGWT_SUMMARY_VERSION`, `src/summary_writer.h`): the producer now supplies
+> measured CPU for open on-CPU intervals (issue #424), and per-session
+> entries now store the measured-CPU split (#562/#573's sessions half).
 > Each bump (v3's idle-event exclusion, v4's exact idle scalars, v5's
 > missing CPU* row, v6's io_worker exclusion, v7's measured-CPU split,
-> v8's long-interval spread) changed the accounting rule the
-> per-second records precompute at WRITE time, so a directory holding
+> v8's long-interval spread, v9's open on-CPU credit and per-session split)
+> changed the accounting rule the per-second records precompute at WRITE
+> time, so a directory holding
 > seconds from two different versions would blend two accounting rules
 > inside one window — `pgwt-server` therefore **refuses** the summary fast
 > path for any window overlapping a non-current-version file and recomputes
@@ -98,17 +99,12 @@ sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 > The answer is still correct, but the 900 s Overview window is exactly the
 > request that fast path exists for: taking the raw path for it costs the
 > paint latency this project spent a week reducing, live, during a walk. If
-> `/var/lib/pgwt/traces` holds anything written before today's v8 upgrade
-> (or any earlier version), move it aside (`mv traces traces.pre-v8`)
+> a v8 directory is left in place for a v9 server, it is refused on the
+> summary fast path and the 900 s Overview silently drops to the raw path.
+> If `/var/lib/pgwt/traces` holds anything written before the v9 upgrade
+> (or any earlier version), move it aside (`mv traces traces.pre-v9`)
 > before starting the daemon. A fresh `mktemp -d` directory, as
 > `tests/demo_rehearsal.sh` uses, is never affected.
->
-> **There is no v9 in this build.** The open on-CPU credit it would carry
-> is implemented in the writer but reached by no producer, so the constant
-> deliberately stays at 8 rather than shipping a number whose contract is
-> not yet true — see docs/AAS_SEMANTICS_DECISION.md. Nothing for an
-> operator to do; it is here so a "v9" in a commit message or a branch name
-> is not mistaken for something this build writes.
 
 (`-T`/`--trace-dir` enables recording and picks the directory, README.md
 "Trace Recording"; `-v`/`--verbose` prints diagnostics to stderr, README.md;

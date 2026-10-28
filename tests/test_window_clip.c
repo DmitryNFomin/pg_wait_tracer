@@ -2313,17 +2313,13 @@ static void test_time_model_offcpu_sibling(void)
  * live semantics Σwaits/db, which is forced BY the CPU fix: once cpu_pct is
  * the measurement, 100 − cpu_pct is no longer the wait share.
  *
- * 13d pins the SUMMARY twin, which is a registered HOLE rather than a fix:
- * the per-second record's struct pgwt_summary_session carries
- * `cpu_ns += tns` — wall (src/summary_writer.c) — and there is no measured
- * column in the format, so that routing reports the unsplit gap wall and
- * says so with has_measured_cpu = 0. should_use_summaries routes an
- * unfiltered window >= 120 s there and every UI preset is >= 300 s, so this
- * is a REAL user-visible divergence awaiting a format change, pinned here as
- * an identity (raw CPU + raw off-CPU == summary CPU) so the day the writer
- * carries the measurement, this is the test that notices.
+ * 13d pins the v9 SUMMARY twin on the same 15 ms fixture as 13a: a 10 ms
+ * gap measured at 4 ms on a core, plus a 5 ms wait. CPU and off-CPU must each
+ * match raw, independently, while wait_pct still uses the full gap wall.
+ * 13e is its UNKNOWN-only control: without an observation the summary must
+ * keep the gap wall unsplit and refuse to label it a measurement.
  *
- * Nothing here is timed: in-memory arrays, and one synthetic summary record
+ * Nothing here is timed: in-memory arrays, and synthetic summary records
  * through the stub at the top of this file.
  */
 
@@ -2455,17 +2451,18 @@ static void test_sessions_measured_cpu(void)
         free(ts.rows);
     }
 
-    /* 13d. The SUMMARY twin: the registered hole, and the identity across it.
+    /* 13d. The v9 SUMMARY twin: measured CPU and off-CPU match 13a per term.
      * One synthetic per-second record describing the SAME session as 13a —
-     * 15 ms of DB Time of which the gap's wall was 10 ms, which is all the
-     * format records. */
+     * 15 ms of DB Time, a 10 ms gap wall, and 4 ms measured on a core. */
     {
         struct pgwt_summary_accum rec;
         memset(&rec, 0, sizeof(rec));
         rec.second_wall_ns = WFROM + S(1);
         rec.sessions[0].pid = 100;
         rec.sessions[0].db_time_ns = 15000000ULL;
-        rec.sessions[0].cpu_ns = 10000000ULL;    /* WALL: all the format has */
+        rec.sessions[0].cpu_ns = 10000000ULL;          /* total gap WALL */
+        rec.sessions[0].cpu_offcpu_ns = 6000000ULL;    /* wall - measured */
+        rec.sessions[0].cpu_measured_records = 1;
         rec.sessions[0].top_wait_id = LOCK_RELATION;
         rec.sessions[0].top_wait_ns = 5000000ULL;
         rec.num_sessions = 1;
@@ -2476,27 +2473,26 @@ static void test_sessions_measured_cpu(void)
         fake_summary_rec = NULL;
 
         const struct pgwt_session_row *sr = sess_row(&sum, 100);
-        CHECK(sum.has_measured_cpu == 0,
-              "13d: the summary routing does NOT claim a measurement — the "
-              "format stores wall for the CPU column");
+        CHECK(sum.has_measured_cpu == 1,
+              "13d: the summary routing DECLARES a measurement");
         CHECK(sr != NULL, "13d: the summary row exists");
         if (sr) {
-            CHECK_NUM(sr->cpu_pct, 10.0 / 15.0 * 100.0,
-                      "13d: …so it reports the unsplit 10 ms gap wall "
-                      "(66.667%), which is the divergence #562 registers");
-            CHECK_MS(sr->offcpu_ms, 0.0,
-                     "13d: and no remainder, because it never split one off");
+            CHECK_NUM(sr->cpu_pct, 4.0 / 15.0 * 100.0,
+                      "13d: CPU is the measured 4 ms over 15 ms DB Time");
+            CHECK_MS(sr->offcpu_ms, 6.0,
+                     "13d: the 6 ms runqueue remainder is reported");
             /* wait_pct is the SAME quantity on both paths, and must be the
              * same floating-point EXPRESSION too: it used to read
              * `100 - cpu_pct` here, which is algebraically Σwaits/db on this
              * path but differs from it in the last bit, and
              * tests/test_agg_raw_crosscheck.c compares the two paths with
-             * exact equality (`!(a == b)`). 5 ms of 15. */
+             * exact equality (`!(a == b)`). Subtract the FULL gap wall,
+             * not measured CPU: 5 ms of 15. */
             CHECK_NUM(sr->wait_pct, 5.0 / 15.0 * 100.0,
                       "13d: the summary wait_pct is Σwaits/db, computed as "
                       "the integer (db − cpu) over db, exactly as raw "
                       "divides");
-            /* The identity: the two paths describe the SAME total two ways.
+            /* Each term must agree independently on this fixture.
              * Rebuilt from the raw path rather than from 13a's locals, so
              * this compares two computations and not one. */
             struct pgwt_trace_event evs[2];
@@ -2510,15 +2506,53 @@ static void test_sessions_measured_cpu(void)
             if (rr) {
                 double raw_cpu_ms = rr->cpu_pct / 100.0 * rr->db_time_ms;
                 double sum_cpu_ms = sr->cpu_pct / 100.0 * sr->db_time_ms;
-                CHECK_MS(raw_cpu_ms + rr->offcpu_ms, sum_cpu_ms,
-                         "13d identity: raw CPU + raw off-CPU == summary CPU "
-                         "— one total, split two ways, so the day the writer "
-                         "carries the measurement this is what notices");
+                CHECK_MS(raw_cpu_ms, sum_cpu_ms,
+                         "13d identity: raw CPU ms == summary CPU ms");
+                CHECK_MS(rr->offcpu_ms, sr->offcpu_ms,
+                         "13d identity: raw off-CPU == summary off-CPU");
                 CHECK_MS(rr->db_time_ms, sr->db_time_ms,
-                         "13d: DB Time itself does NOT diverge — only the "
-                         "CPU column does");
+                         "13d: raw DB Time == summary DB Time");
+                CHECK(sum_cpu_ms != 10.0,
+                      "13d non-vacuity: measured CPU differs from the "
+                      "10 ms gap wall");
             }
             free(raw.rows);
+        }
+        free(sum.rows);
+    }
+
+    /* 13e. An UNKNOWN-only window must STILL refuse to split. */
+    {
+        struct pgwt_summary_accum rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.second_wall_ns = WFROM + S(1);
+        rec.sessions[0].pid = 100;
+        rec.sessions[0].db_time_ns = 15000000ULL;
+        rec.sessions[0].cpu_ns = 10000000ULL;  /* full UNKNOWN gap wall */
+        rec.sessions[0].cpu_offcpu_ns = 0;
+        rec.sessions[0].cpu_measured_records = 0;
+        rec.sessions[0].top_wait_id = LOCK_RELATION;
+        rec.sessions[0].top_wait_ns = 5000000ULL;
+        rec.num_sessions = 1;
+        fake_summary_rec = &rec;
+        struct pgwt_sessions_result sum;
+        pgwt_compute_top_sessions_from_summaries("/nonexistent", WFROM, WTO,
+                                                 &f, 10000.0, &sum);
+        fake_summary_rec = NULL;
+
+        const struct pgwt_session_row *sr = sess_row(&sum, 100);
+        /* Otherwise inferred wall would print as "CPU (running)" beside a
+         * 0.0 ms runqueue sibling, which the compute contract forbids. */
+        CHECK(sum.has_measured_cpu == 0,
+              "13e: an UNKNOWN-only summary does NOT claim a measurement");
+        CHECK(sr != NULL, "13e: the UNKNOWN-only summary row exists");
+        if (sr) {
+            CHECK_NUM(sr->cpu_pct, 10.0 / 15.0 * 100.0,
+                      "13e: CPU is the unsplit gap wall, by gap-inference");
+            CHECK_MS(sr->offcpu_ms, 0.0,
+                     "13e: off-CPU is 0 as a REFUSAL to split, which "
+                     "has_measured_cpu == 0 is what distinguishes from a "
+                     "measured zero");
         }
         free(sum.rows);
     }

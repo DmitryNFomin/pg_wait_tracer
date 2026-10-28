@@ -214,7 +214,38 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'summary_open_cpu_eff_rejected_total',
           'summary_open_cpu_class_divergent_ns',
           'summary_open_cpu_tier_mismatch_total',
-          'summary_open_cpu_overcredit_ns'):
+          'summary_open_cpu_overcredit_ns',
+          # #424 follow-up: summary_open_cpu_credited_ns == 0 is TWO states
+          # -- the writer was never asked, or it was asked and the credit
+          # path dropped it -- and the 2026-10-28 gate capture was read as
+          # the second when nothing established which. notes_total is the
+          # only reading that separates them; the other three are silent
+          # early exits between the note and the credit that src/control.c
+          # did not publish, so an observation thrown away looked exactly
+          # like a producer that never ran. Named here so a refactor cannot
+          # drop them back out of the response in silence.
+          'summary_open_cpu_notes_total',
+          'summary_open_io_worker_refused_total',
+          'summary_open_table_full_total',
+          'summary_open_notes_expired_total',
+          # The two that make a zero ATTRIBUTABLE rather than one of three
+          # states. summary_open_io_worker_refused_total above counts WAIT
+          # notes too, so on the 2026-10-28 capture it read 39 beside 34
+          # notes and the overlap was unknown; the on-CPU subset ends that
+          # by subtraction. unplaced_total is the outcome no refusal counter
+          # can express -- accepted, then retired with no second written,
+          # which is the CORRECT answer for a gap that ends inside its own
+          # second and indistinguishable from a broken seal without it.
+          # tests/test_v9_open_cpu_wired.sh REFUSES when either is missing,
+          # so dropping them from this response disarms that fixture rather
+          # than failing it.
+          'summary_open_cpu_io_worker_refused_total',
+          'summary_open_cpu_unplaced_total',
+          # Without this one, summary_cpu_open_uncredited_ns_total is not
+          # comparable across captures: it adds a closed CPU record's whole
+          # duration whenever the close-time identity check refuses, and this
+          # is the only counter that says so (src/control.c has the detail).
+          'summary_open_note_mismatch_total'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.

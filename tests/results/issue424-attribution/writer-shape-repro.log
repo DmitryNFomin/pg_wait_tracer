@@ -1,0 +1,30 @@
+=== stable ===
+open_cpu_notes_total        = 12
+open_cpu_credited_ns_total  = 11000000000
+open_cpu_measured_ns_total  = 9900000000
+open_cpu_io_worker_refused  = 0
+open_cpu_unplaced_total     = 0
+open_cpu_refused_total      = 0
+open_io_worker_refused_total= 0
+open_notes_expired_total    = 0
+open_table_full_total       = 0
+=== chatty ===
+open_cpu_notes_total        = 12
+open_cpu_credited_ns_total  = 0
+open_cpu_measured_ns_total  = 0
+open_cpu_io_worker_refused  = 0
+open_cpu_unplaced_total     = 12
+open_cpu_refused_total      = 0
+open_io_worker_refused_total= 0
+open_notes_expired_total    = 0
+open_table_full_total       = 0
+=== ioworker ===
+open_cpu_notes_total        = 12
+open_cpu_credited_ns_total  = 0
+open_cpu_measured_ns_total  = 0
+open_cpu_io_worker_refused  = 12
+open_cpu_unplaced_total     = 0
+open_cpu_refused_total      = 0
+open_io_worker_refused_total= 12
+open_notes_expired_total    = 0
+open_table_full_total       = 0

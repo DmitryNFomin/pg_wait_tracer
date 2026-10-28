@@ -3374,6 +3374,8 @@ struct ts_summary_ht_entry {
     uint32_t pid;
     uint64_t db_time_ns;
     uint64_t cpu_ns;
+    uint64_t offcpu_ns;
+    uint64_t measured_records;
     uint32_t top_wait_id;
     uint64_t top_wait_ns;
 };
@@ -3403,10 +3405,11 @@ struct ts_summary_ctx {
  * question under a filtered label.
  *
  * struct pgwt_summary_session is {pid, db_time_ns, cpu_ns, top_wait_id,
- * top_wait_ns} -- there is no per-session per-event breakdown anywhere in the
- * record. (The issue proposed filtering here on the stated grounds that the
- * record "does carry per-event totals per session"; it does not. events[] is
- * system-wide and top_events[] is per QUERY.) Honouring the filter would
+ * top_wait_ns, cpu_offcpu_ns, cpu_measured_records} -- there is no per-session
+ * per-event breakdown anywhere in the record. (The issue proposed filtering
+ * here on the stated grounds that the record "does carry per-event totals
+ * per session"; it does not. events[] is system-wide and top_events[] is per
+ * QUERY.) Honouring the filter would
  * require a new per-session per-event table, and any BOUNDED version of it --
  * a top-8 list like the per-query one -- would re-introduce exactly the kind
  * of silent inexactness this whole comparison exists to catch.
@@ -3450,6 +3453,8 @@ static int ts_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
         }
         ctx->ht[h].db_time_ns += ss->db_time_ns;
         ctx->ht[h].cpu_ns += ss->cpu_ns;
+        ctx->ht[h].offcpu_ns += ss->cpu_offcpu_ns;
+        ctx->ht[h].measured_records += ss->cpu_measured_records;
         if (ss->top_wait_ns > ctx->ht[h].top_wait_ns) {
             ctx->ht[h].top_wait_id = ss->top_wait_id;
             ctx->ht[h].top_wait_ns = ss->top_wait_ns;
@@ -3504,33 +3509,27 @@ void pgwt_compute_top_sessions_from_summaries(
         row->pid        = ctx.ht[i].pid;
         row->db_time_ms = (double)ctx.ht[i].db_time_ns / 1e6;
         double db = (double)ctx.ht[i].db_time_ns;
-        /* #562: WALL, and the response says so. struct pgwt_summary_session
-         * stores `cpu_ns += tns` (src/summary_writer.c) -- the on-CPU gap's
-         * wall -- and the format has no measured column, so this routing
-         * reports the unsplit total and leaves has_measured_cpu / offcpu_ms
-         * at 0 (the memset above). A REAL divergence from the raw path at
-         * should_use_summaries' 120 s threshold, not a comparability
-         * artefact; pinned as an identity in tests/test_window_clip.c 13d
-         * so the day the writer carries the measurement this is what
-         * notices.
-         *
-         * wait_pct, by contrast, is the SAME quantity on both paths and is
-         * now computed the same WAY, which it was not: it read
-         * `100 - cpu_pct`, algebraically Σwaits/db here (db is exactly gaps
-         * + waits, and this path's cpu IS the gap wall) but not the same
-         * floating-point expression -- 100.0 - 7/12*100 differs from
-         * 5/12*100 in the last bit, and tests/test_agg_raw_crosscheck.c
-         * compares the two paths with exact equality. The record carries no
-         * per-wait list to sum, but db_time_ns - cpu_ns IS that sum
-         * (summary_writer.c adds tns to db_time_ns for every non-idle record
-         * and to cpu_ns for the gaps), so the subtraction is done in integer
-         * ns and divided exactly as the raw path divides. Clamped at 0
-         * because the input is a file, not a guarantee. */
-        row->cpu_pct  = db > 0 ? (double)ctx.ht[i].cpu_ns / db * 100.0 : 0;
+        /* v9 (#424, #562): subtract only MEASURED gaps' off-CPU remainder.
+         * UNKNOWN gaps stay whole in the CPU column; only observations
+         * below can establish that this window has a measurement. */
+        uint64_t cpu_col_ns = ctx.ht[i].cpu_ns > ctx.ht[i].offcpu_ns
+                            ? ctx.ht[i].cpu_ns - ctx.ht[i].offcpu_ns : 0;
+        row->cpu_pct   = db > 0 ? (double)cpu_col_ns / db * 100.0 : 0;
+        row->offcpu_ms = (double)ctx.ht[i].offcpu_ns / 1e6;
+        /* wait_pct is the SAME quantity on both paths and must use the same
+         * floating-point EXPRESSION too. It once read `100 - cpu_pct`, which
+         * is algebraically Sigma waits/db here when CPU is the full gap wall,
+         * but differs in the last bit; tests/test_agg_raw_crosscheck.c compares
+         * the two paths with EXACT equality. db_time_ns - cpu_ns IS that sum
+         * of waits, computed in integer ns and divided exactly as the raw
+         * path divides. Clamp at 0 because the input is a file, not a
+         * guarantee. Deliberately use the FULL gap wall here, not the new
+         * measured CPU column. */
         uint64_t wait_total_ns = ctx.ht[i].db_time_ns > ctx.ht[i].cpu_ns
                                ? ctx.ht[i].db_time_ns - ctx.ht[i].cpu_ns : 0;
         row->wait_pct = db > 0 ? (double)wait_total_ns / db * 100.0 : 0;
-        row->offcpu_ms = 0.0;
+        if (ctx.ht[i].measured_records > 0)
+            out->has_measured_cpu = 1;
         row->top_wait_id = ctx.ht[i].top_wait_id;
         if (ctx.ht[i].top_wait_id == 0)
             snprintf(row->top_wait, sizeof(row->top_wait), "CPU*");
@@ -3546,10 +3545,11 @@ void pgwt_compute_top_sessions_from_summaries(
 
     out->rows     = rows;
     out->num_rows = nr;
-    /* #562: has_measured_cpu / offcpu_ms / cpu_clamped_ms stay 0 (the memset
-     * above) ON PURPOSE -- see the per-row note on cpu_pct. Bringing this
-     * routing onto the measurement needs a per-session measured column in
-     * the summary format, which is a format change and a separate issue. */
+    double off_total_ms = 0.0;
+    for (int i = 0; i < nr; i++)
+        off_total_ms += rows[i].offcpu_ms;
+    out->offcpu_ms = off_total_ms;
+    /* #562: cpu_clamped_ms is the one residual: no per-session source, so 0. */
 }
 
 /* ── Top Queries from summaries ───────────────────────────── */

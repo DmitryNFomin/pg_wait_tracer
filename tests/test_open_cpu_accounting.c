@@ -1278,6 +1278,357 @@ static void test_bypass_reader(void)
     wr_free(&y);
 }
 
+/* ── §9: open_cpu_notes_total — "was the writer ASKED?" ──────────────────
+ *
+ * WHY THIS SECTION EXISTS, and it is a measurement rather than a worry.
+ * tests/test_v9_open_cpu_wired.sh printed "the producer is not wired" on the
+ * gate capture of 2026-10-28 (box-check-ubuntu-20261028-121033, commit
+ * 31a03da6: 1.23 M events, cpu_ns_total 0.80 s -> 58.76 s, 75.85 s of WAIT
+ * credit through the same seal) because credited / refused / uncredited all
+ * read 0. Those three zeros are TWO states:
+ *
+ *   never asked  -> the producer offered no observation. The credit path was
+ *                   not exercised and a zero is the correct answer.
+ *   asked, dropped -> an observation arrived every tick and the credit path
+ *                   placed none of it.
+ *
+ * Nothing on the wire separated them, so the verdict was a guess. The whole
+ * job of open_cpu_notes_total is to make them two different readings, which
+ * means the cases below are about what the counter must NOT count as much as
+ * what it must. Each one is a way the discrimination can be made
+ * unreachable: a WAIT-only daemon, the v8 no-observation path, and a writer
+ * that is not running at all. In every one of them credited_ns is 0 too, so
+ * a counter that also read non-zero there would restate the quantity it is
+ * supposed to discriminate and the fixture would keep guessing. */
+static void test_notes_counter(void)
+{
+    /* The banner is printed HERE, not beside the call in main(), on purpose.
+     * #686 measured that deleting a section's dispatcher line leaves this
+     * suite at exit 0, and with the banner in main() the log still shows the
+     * heading for a section that never ran -- so the heading was evidence of
+     * nothing. Printed from inside, its ABSENCE from the log is the witness.
+     * Verified by mutant M6 in the suite's mutation log. */
+    printf("-- 9: open_cpu_notes_total — was the writer ASKED? --\n");
+    struct pgwt_trace_event seed =
+        mkev(PID_A, BASE_MONO + 1 * S, 1 * S, EV_LOCK_REL, 0, 0,
+             PGWT_CPU_NS_UNKNOWN);
+
+    /* 9a. ASKED AND CREDITED: the healthy daemon. One count per on-CPU note
+     *     carrying an observation, and credit actually placed. */
+    struct wr x;
+    if (wr_open(&x, "notes_ok") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(x.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 10; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        tick_cpu(&x, now, PID_A, BASE_MONO + 1 * S, 0, 0,
+                 cpu60(now - (BASE_MONO + 1 * S)));
+    }
+    uint64_t ok_notes  = x.w->open_cpu_notes_total;
+    uint64_t ok_credit = x.w->open_cpu_credited_ns_total;
+    wr_close(&x);
+    CHECK(ok_notes == 9 && ok_credit > 0,
+          "9a: nine on-CPU notes are counted as nine "
+          "(open_cpu_notes_total = %llu) and credit was placed (%llu ms)",
+          (unsigned long long)ok_notes, (unsigned long long)(ok_credit / MS));
+    wr_free(&x);
+
+    /* 9b. THE DISCRIMINATOR, the state the fixture must call FAIL: an
+     *     io_worker pid is ASKED nine times and credited nothing. If the
+     *     counter were bumped only where credit lands, this would read 0
+     *     and be indistinguishable from 9c below -- the two sides of the
+     *     reading would come from the same place, which is the shape that
+     *     cannot fail. */
+    struct wr y;
+    if (wr_open(&y, "notes_dropped") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(y.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 10; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        tick_cpu(&y, now, PID_IOW, BASE_MONO + 1 * S,
+                 PGWT_EVENT_FLAG_IO_WORKER, 0,
+                 cpu60(now - (BASE_MONO + 1 * S)));
+    }
+    uint64_t drop_notes  = y.w->open_cpu_notes_total;
+    uint64_t drop_credit = y.w->open_cpu_credited_ns_total;
+    wr_close(&y);
+    CHECK(drop_notes == 9 && drop_credit == 0,
+          "9b: ASKED-AND-DROPPED is visible — open_cpu_notes_total = %llu "
+          "with credited = %llu. Counted at the note, before the refusal.",
+          (unsigned long long)drop_notes, (unsigned long long)drop_credit);
+    wr_free(&y);
+
+    /* 9c. THE MUTANT THIS COUNTER DIES TO: a WAIT-only daemon. Every note is
+     *     a wait, so the on-CPU branch is never entered and the writer was
+     *     never asked. Moving the increment above the class test -- the one
+     *     edit that makes it cheaper to write -- makes this read 9 and the
+     *     fixture would then FAIL every healthy wait-only capture while
+     *     reporting "the credit path dropped it". */
+    struct wr z;
+    if (wr_open(&z, "notes_waitonly") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(z.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 10; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        pgwt_summary_note_open_ex(z.w, PID_B, EV_LOCK_REL,
+                                  BASE_MONO + 1 * S, 0, now, NULL);
+        pgwt_summary_flush_completed(z.w, now);
+    }
+    uint64_t wait_notes  = z.w->open_cpu_notes_total;
+    uint64_t wait_credit = z.w->open_credited_ns_total;
+    wr_close(&z);
+    CHECK(wait_notes == 0 && wait_credit > 0,
+          "9c: a WAIT-only daemon was never ASKED (open_cpu_notes_total = "
+          "%llu) even though wait credit flowed (%llu ms) — so the counter "
+          "is not a restatement of 'the seal ran'",
+          (unsigned long long)wait_notes,
+          (unsigned long long)(wait_credit / MS));
+    wr_free(&z);
+
+    /* 9d. THE v8 ENTRY POINT. A tier with no measurement calls
+     *     pgwt_summary_note_open, which is "I have no CPU observation" --
+     *     the correct answer there, not a defect. It must NOT read as
+     *     asked, or the fixture would FAIL a healthy sampled daemon; the
+     *     existing open_cpu_refused_total is what counts that case. */
+    struct wr v;
+    if (wr_open(&v, "notes_v8") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(v.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 10; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        tick_cpu_v8(&v, now, PID_A, BASE_MONO + 1 * S, 0);
+    }
+    uint64_t v8_notes   = v.w->open_cpu_notes_total;
+    uint64_t v8_refused = v.w->open_cpu_refused_total;
+    wr_close(&v);
+    CHECK(v8_notes == 0 && v8_refused == 9,
+          "9d: the v8 no-observation path is NOT 'asked' "
+          "(open_cpu_notes_total = %llu) and is still counted where it "
+          "always was (open_cpu_refused_total = %llu)",
+          (unsigned long long)v8_notes, (unsigned long long)v8_refused);
+    wr_free(&v);
+
+    /* 9e. THE THING BEING CHECKED IS ABSENT RATHER THAN WRONG: a writer that
+     *     is not enabled returns before anything in this function runs. The
+     *     counter must stay 0 so the fixture REFUSES ("never asked") instead
+     *     of approving or accusing the credit path. A gate that cannot see
+     *     must refuse. */
+    struct wr q;
+    if (wr_open(&q, "notes_disabled") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    q.w->enabled = false;
+    for (int s = 2; s <= 10; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        tick_cpu(&q, now, PID_A, BASE_MONO + 1 * S, 0, 0,
+                 cpu60(now - (BASE_MONO + 1 * S)));
+    }
+    uint64_t off_notes  = q.w->open_cpu_notes_total;
+    uint64_t off_credit = q.w->open_cpu_credited_ns_total;
+    CHECK(off_notes == 0 && off_credit == 0,
+          "9e: a disabled writer is never asked and credits nothing "
+          "(notes = %llu, credited = %llu), so the reading is REFUSE and "
+          "not a verdict about the credit path",
+          (unsigned long long)off_notes, (unsigned long long)off_credit);
+    wr_free(&q);
+}
+
+/* ── §10: WHICH exit took it — the two counters that make a zero
+ *        credited_ns attributable instead of merely ambiguous ────────────
+ *
+ * §9 separated "never asked" from "asked and dropped". The gate capture of
+ * 2026-10-28 (box-check-ubuntu-20261028-154345.log) landed in the second
+ * state and was still unreadable: 34 on-CPU notes, 0 credited, refused /
+ * table_full / notes_expired / eff_rejected / overcredit all 0, and
+ * summary_open_io_worker_refused_total = 39 -- a number LARGER than the
+ * notes, of unknown overlap with them, because the io_worker counter counts
+ * WAIT notes too and the notes counter is bumped one line earlier. From
+ * that pair, "the io_worker rule ate every observation" and "it ate none of
+ * them" read identically. The fixture chose the second and named
+ * src/summary_writer.c.
+ *
+ * Two readings were missing, and each is a separate way for an observation
+ * to vanish with every published counter at zero:
+ *
+ *   open_cpu_io_worker_refused_total  the on-CPU SUBSET of the io_worker
+ *                                     refusal. notes minus this is what the
+ *                                     credit path was offered.
+ *   open_cpu_unplaced_total           ACCEPTED, then retired without one
+ *                                     second written. This is the CORRECT
+ *                                     outcome for a gap that ends inside
+ *                                     the second it was noted in -- a
+ *                                     backend alternating CPU and IO waits
+ *                                     thousands of times a second has no
+ *                                     second to spread -- and it is exactly
+ *                                     what a broken seal would also look
+ *                                     like, so without the number the two
+ *                                     are one reading.
+ *
+ * The cases below are a bypass suite, not a happy path: each is a way the
+ * discrimination can be made unreachable, including the two that would make
+ * the new counters restate something else (a healthy multi-second gap must
+ * read unplaced == 0, and a WAIT-only io_worker daemon must leave the CPU
+ * subset at 0). */
+static void test_attribution_counters(void)
+{
+    /* Banner printed from inside, same reason as §9 (#686): a deleted
+     * dispatcher line must take the heading with it. */
+    printf("-- 10: which exit took the observation --\n");
+    struct pgwt_trace_event seed =
+        mkev(PID_A, BASE_MONO + 1 * S, 1 * S, EV_LOCK_REL, 0, 0,
+             PGWT_CPU_NS_UNKNOWN);
+
+    /* 10a. THE GATE CAPTURE'S SHAPE. Nine ticks, each noting an on-CPU gap
+     *      that opened 100 ms earlier and closes 100 ms later -- the shape a
+     *      backend writing a spilled tuplestore produces, where every
+     *      on-CPU stretch is far shorter than the second it lives in.
+     *      Nothing is creditable and nothing is wrong; before
+     *      open_cpu_unplaced_total that was indistinguishable from a seal
+     *      that drops what it is handed. */
+    struct wr x;
+    if (wr_open(&x, "attr_unplaced") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(x.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 10; s++) {
+        uint64_t gap_start = BASE_MONO + (uint64_t)s * S + 100 * MS;
+        tick_cpu(&x, gap_start + 100 * MS, PID_A, gap_start, 0, 0, 80 * MS);
+        struct pgwt_trace_event cl =
+            mkev(PID_A, gap_start + 200 * MS, 200 * MS, 0, EV_LOCK_REL, 0,
+                 160 * MS);
+        pgwt_summary_push_event(x.w, &cl, 0, cl.old_event);
+    }
+    uint64_t a_notes    = x.w->open_cpu_notes_total;
+    uint64_t a_unplaced = x.w->open_cpu_unplaced_total;
+    uint64_t a_credit   = x.w->open_cpu_credited_ns_total;
+    uint64_t a_iow      = x.w->open_cpu_io_worker_refused_total;
+    uint64_t a_refused  = x.w->open_cpu_refused_total;
+    uint64_t a_expired  = x.w->open_notes_expired_total;
+    uint64_t a_uncred   = x.w->cpu_open_uncredited_ns_total;
+    wr_close(&x);
+    CHECK(a_notes == 9 && a_unplaced == 9 && a_credit == 0 && a_iow == 0 &&
+          a_refused == 0 && a_expired == 0 && a_uncred == 0,
+          "10a: nine gaps that end inside their own second are ACCEPTED and "
+          "retired unplaced (notes %llu, unplaced %llu, credited %llu) with "
+          "every refusal counter 0 (io_worker %llu, refused %llu, expired "
+          "%llu, uncredited %llu) — the 2026-10-28 reading, now attributable",
+          (unsigned long long)a_notes, (unsigned long long)a_unplaced,
+          (unsigned long long)a_credit, (unsigned long long)a_iow,
+          (unsigned long long)a_refused, (unsigned long long)a_expired,
+          (unsigned long long)a_uncred);
+    wr_free(&x);
+
+    /* 10b. THE FALSE NEGATIVE THAT WOULD TURN THE GATE OFF. A healthy
+     *      multi-second gap, credited and then closed, must read
+     *      unplaced == 0. Counting every retirement (cpu_slot instead of
+     *      !cpu_frozen) is the cheaper edit, and it would make the live
+     *      fixture REFUSE every healthy capture with "nothing to spread" --
+     *      a gate that approves by refusing to look. */
+    struct wr y;
+    if (wr_open(&y, "attr_healthy") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    run_gap_fixture(&y, 1);
+    uint64_t b_unplaced = y.w->open_cpu_unplaced_total;
+    uint64_t b_credit   = y.w->open_cpu_credited_ns_total;
+    uint64_t b_notes    = y.w->open_cpu_notes_total;
+    wr_close(&y);
+    CHECK(b_credit > 0 && b_unplaced == 0 && b_notes == 9,
+          "10b: a credited multi-second gap is NOT unplaced (credited %llu "
+          "ms, unplaced %llu, notes %llu) — the counter is the OUTCOME "
+          "'nothing was written', not 'an interval ended'",
+          (unsigned long long)(b_credit / MS),
+          (unsigned long long)b_unplaced, (unsigned long long)b_notes);
+    wr_free(&y);
+
+    /* 10c. THE OVERLAP, MEASURED. One io_worker pid, nine on-CPU notes AND
+     *      nine WAIT notes. The old counter reads 18 against 9 notes, which
+     *      is the pair that made the gate capture unreadable; the new one
+     *      reads exactly the on-CPU nine, so notes - subset = 0 says the
+     *      credit path was offered nothing. */
+    struct wr z;
+    if (wr_open(&z, "attr_iow_split") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(z.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 10; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        tick_cpu(&z, now, PID_IOW, BASE_MONO + 1 * S,
+                 PGWT_EVENT_FLAG_IO_WORKER, 0,
+                 cpu60(now - (BASE_MONO + 1 * S)));
+        pgwt_summary_note_open_ex(z.w, PID_IOW, EV_LOCK_REL,
+                                  BASE_MONO + 1 * S,
+                                  PGWT_EVENT_FLAG_IO_WORKER, now, NULL);
+    }
+    uint64_t c_notes = z.w->open_cpu_notes_total;
+    uint64_t c_all   = z.w->open_io_worker_refused_total;
+    uint64_t c_cpu   = z.w->open_cpu_io_worker_refused_total;
+    uint64_t c_credit = z.w->open_cpu_credited_ns_total;
+    wr_close(&z);
+    CHECK(c_notes == 9 && c_all == 18 && c_cpu == 9 && c_credit == 0 &&
+          c_cpu <= c_notes,
+          "10c: the io_worker refusal is 18 notes but only %llu of them "
+          "carried an observation (notes %llu, all %llu) — the subset is "
+          "disjoint from the WAIT notes and bounded by notes_total",
+          (unsigned long long)c_cpu, (unsigned long long)c_notes,
+          (unsigned long long)c_all);
+    wr_free(&z);
+
+    /* 10d. A WAIT-ONLY io_worker daemon. The subset must stay 0, or
+     *      notes - subset goes NEGATIVE in the live fixture and its
+     *      "offered to the credit path" arithmetic silently inverts. */
+    struct wr v;
+    if (wr_open(&v, "attr_iow_waits") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(v.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 10; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        pgwt_summary_note_open_ex(v.w, PID_IOW, EV_LOCK_REL,
+                                  BASE_MONO + 1 * S,
+                                  PGWT_EVENT_FLAG_IO_WORKER, now, NULL);
+        pgwt_summary_flush_completed(v.w, now);
+    }
+    uint64_t d_notes = v.w->open_cpu_notes_total;
+    uint64_t d_all   = v.w->open_io_worker_refused_total;
+    uint64_t d_cpu   = v.w->open_cpu_io_worker_refused_total;
+    wr_close(&v);
+    CHECK(d_notes == 0 && d_all == 9 && d_cpu == 0,
+          "10d: a WAIT-only io_worker daemon refuses nine notes and asks "
+          "nothing about CPU (notes %llu, all %llu, cpu subset %llu)",
+          (unsigned long long)d_notes, (unsigned long long)d_all,
+          (unsigned long long)d_cpu);
+    wr_free(&v);
+
+    /* 10e. THE OVERLAP THAT IS DELIBERATE, pinned so a later reader does
+     *      not treat these counters as a partition and conclude the wrong
+     *      thing from arithmetic. A note that goes STALE is retired by the
+     *      fail-safe: it is counted as expired (the reason) AND as unplaced
+     *      (the outcome). Both must move. */
+    struct wr q;
+    if (wr_open(&q, "attr_stale") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(q.w, &seed, 0, seed.old_event);
+    tick_cpu(&q, BASE_MONO + 2 * S + 200 * MS, PID_A, BASE_MONO + 2 * S,
+             0, 0, 100 * MS);
+    /* Well past PGWT_SUMMARY_OPEN_STALE_NS with no refresh. */
+    pgwt_summary_flush_completed(q.w, BASE_MONO + 20 * S);
+    uint64_t e_expired  = q.w->open_notes_expired_total;
+    uint64_t e_unplaced = q.w->open_cpu_unplaced_total;
+    wr_close(&q);
+    CHECK(e_expired > 0 && e_unplaced > 0,
+          "10e: a stale note is counted BOTH as expired (%llu, the reason) "
+          "and as unplaced (%llu, the outcome) — deliberately not a "
+          "partition",
+          (unsigned long long)e_expired, (unsigned long long)e_unplaced);
+    wr_free(&q);
+
+    /* 10f. THE THING BEING CHECKED IS ABSENT RATHER THAN WRONG: a disabled
+     *      writer. Both counters must stay 0 so the live fixture REFUSES
+     *      on the §9 reading instead of attributing a zero to an exit that
+     *      never ran. */
+    struct wr o;
+    if (wr_open(&o, "attr_disabled") != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    o.w->enabled = false;
+    for (int s = 2; s <= 10; s++) {
+        uint64_t gap_start = BASE_MONO + (uint64_t)s * S + 100 * MS;
+        tick_cpu(&o, gap_start + 100 * MS, PID_IOW, gap_start,
+                 PGWT_EVENT_FLAG_IO_WORKER, 0, 80 * MS);
+    }
+    uint64_t f_cpu      = o.w->open_cpu_io_worker_refused_total;
+    uint64_t f_unplaced = o.w->open_cpu_unplaced_total;
+    CHECK(f_cpu == 0 && f_unplaced == 0,
+          "10f: a disabled writer attributes nothing (io_worker subset "
+          "%llu, unplaced %llu) — the reading stays REFUSE",
+          (unsigned long long)f_cpu, (unsigned long long)f_unplaced);
+    wr_free(&o);
+}
+
 static void test_bypass_short_gap_and_roundtrip(void)
 {
     /* j. A GAP THAT NEVER SPANS A SECOND BOUNDARY. There is nothing to
@@ -1406,6 +1757,8 @@ int main(void)
     test_bypass_reader();
     printf("-- 8j,k: bypass — sub-second gap, and the round trip --\n");
     test_bypass_short_gap_and_roundtrip();
+    test_notes_counter();   /* prints its own banner -- see #686 there */
+    test_attribution_counters();   /* ditto */
 
     printf("\n%d checks, %d failures\n", checks, failures);
     printf("=== test_open_cpu_accounting: %s ===\n",

@@ -15,36 +15,6 @@
    "raw": true,
    "summary": false
   },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 20100,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.583333333333332,
-   "summary": 32.6388888888889
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 18800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
-  },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
@@ -67,36 +37,6 @@
    "raw": true,
    "summary": false
   },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 20100,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.583333333333332,
-   "summary": 32.6388888888889
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 18800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
-  },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
@@ -118,36 +58,6 @@
    "issue": 410,
    "raw": true,
    "summary": false
-  },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 20100,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.583333333333332,
-   "summary": 32.6388888888889
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 18800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
@@ -206,46 +116,6 @@
    "raw": true,
    "summary": false
   },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 16300,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.473684210526315,
-   "summary": 32.4561403508772
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 14800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1000,
-   "summary": 0
-  },
-  "sessions/row/1003/cpu_pct": {
-   "issue": 562,
-   "raw": 1.2195121951219512,
-   "summary": 2.4390243902439024
-  },
-  "sessions/row/1003/offcpu_ms": {
-   "issue": 562,
-   "raw": 500,
-   "summary": 0
-  },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
@@ -267,36 +137,6 @@
    "issue": 410,
    "raw": true,
    "summary": false
-  },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 21700,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.615384615384617,
-   "summary": 32.6923076923077
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 20400,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,

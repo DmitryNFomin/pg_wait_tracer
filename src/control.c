@@ -448,9 +448,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * unlike events_overflow the per-record field is not yet serialized, so a
      * capture analysed later carries no record of its dropped pids and only
      * the daemon's own WARN lines do. That gap is sequenced, not declined --
-     * the PGWT_SUMMARY_VERSION 8 -> 9 bump that puts the field on disk is
-     * approved and is being landed with the other pending format change so
-     * the two cost one recompute of retained traces instead of two. */
+     * the PGWT_SUMMARY_VERSION 8 -> 9 bump is landing with the open-CPU
+     * producer and per-session measured-CPU split. The trailer follows in a
+     * later commit on this branch within this version epoch, so these
+     * changes cost one recompute of retained traces instead of another. */
     cjson_add_uint64(root, "summary_sessions_overflow_total",
                      d->summary_writer ? d->summary_writer->sessions_overflow_total : 0);
     /* #277: events that arrived after their second had already been written
@@ -507,6 +508,84 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_open_cpu_refused_total",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_refused_total : 0);
+    /* WAS THE WRITER ASKED AT ALL? Published because without it every
+     * reading of a zero summary_open_cpu_credited_ns is a guess between two
+     * defects in two different files:
+     *
+     *   notes_total == 0  -> the PRODUCER never offered an on-CPU
+     *                        observation. Nothing in the writer ran, so no
+     *                        refusal counter can be non-zero either, and
+     *                        re-wiring the credit path moves nothing.
+     *   notes_total >  0  -> the writer was asked notes_total times and
+     *                        credited nothing. The three keys below say
+     *                        which refusal ate it; all three zero with
+     *                        notes_total non-zero narrows it to the seal.
+     *
+     * Measured on the gate box 2026-10-28 (box-check-ubuntu-20261028-121033,
+     * commit 31a03da6): credited / refused / uncredited were ALL 0 on a
+     * capture with 1.23 M events and 75.8 s of WAIT credit through the same
+     * seal, and nothing published could tell the two apart — the fixture
+     * reported "the producer is not wired" without that being established.
+     *
+     * open_io_worker_refused_total, open_table_full_total and
+     * open_notes_expired_total already existed and were counted INTERNALLY
+     * only: each is a silent early exit on the way from the note to the
+     * credit, so a producer that is wired and an observation that is thrown
+     * away were indistinguishable from outside the daemon. */
+    cjson_add_uint64(root, "summary_open_cpu_notes_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_notes_total : 0);
+    cjson_add_uint64(root, "summary_open_io_worker_refused_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_io_worker_refused_total : 0);
+    /* The two keys that make a zero summary_open_cpu_credited_ns
+     * ATTRIBUTABLE rather than merely ambiguous, and they are the pair the
+     * 2026-10-28 capture needed and did not have (34 notes, 0 credit, every
+     * refusal counter 0, 39 io_worker refusals of unknown overlap):
+     *
+     *   cpu_io_worker_refused  the SUBSET of notes_total the io_worker rule
+     *                          declined. notes_total minus this is what the
+     *                          credit path was actually offered.
+     *   cpu_unplaced           observations ACCEPTED, then retired without a
+     *                          single second written. Equal to what the
+     *                          credit path was offered means every observed
+     *                          gap ended inside one second -- a capture with
+     *                          no multi-second on-CPU gap in it, where a zero
+     *                          credit is the CORRECT answer and the stimulus,
+     *                          not the writer, is what has to change. Short
+     *                          of that, the seal really is dropping
+     *                          observations it was handed. */
+    cjson_add_uint64(root, "summary_open_cpu_io_worker_refused_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_io_worker_refused_total
+                         : 0);
+    cjson_add_uint64(root, "summary_open_cpu_unplaced_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_unplaced_total : 0);
+    /* Why a MISMATCH counter sits beside the uncredited one, and why it was
+     * not readable before: summary_cpu_open_uncredited_ns_total adds the
+     * WHOLE duration of a closed CPU record over one second whenever
+     * `already == 0`, and `already` is taken from the note's credit ONLY
+     * when the close-time identity check holds (same pid, same wait id,
+     * same start -- pgwt_summary_push_event). When it does not hold,
+     * `already` falls back to the pid's watermark, which is normally 0, so
+     * an interval that WAS credited second by second can still be counted
+     * whole into uncredited. open_note_mismatch_total is the only thing
+     * that tells those apart, and it was counted internally and published
+     * nowhere -- which is why the 2026-10-28 runs showed uncredited at
+     * 9.02 s, 9.07 s and 18.19 s with nothing able to say whether the
+     * spread was a different background population or the identity check
+     * refusing. A reader comparing uncredited across captures needs this
+     * number in the same response or the comparison is not interpretable. */
+    cjson_add_uint64(root, "summary_open_note_mismatch_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_note_mismatch_total : 0);
+    cjson_add_uint64(root, "summary_open_table_full_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_table_full_total : 0);
+    cjson_add_uint64(root, "summary_open_notes_expired_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_notes_expired_total : 0);
     cjson_add_uint64(root, "summary_cpu_open_uncredited_ns_total",
                      d->summary_writer
                          ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
@@ -553,13 +632,16 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * asserts all seven keys by name unconditionally. A live
      * conditional over a version constant is how the producer got
      * hidden the first time. */
-    /* v9 (#424). THE CAPABILITY IS DORMANT: no producer feeds the writer an
-     * open-CPU observation, deliberately (see the note at the v8
-     * pgwt_summary_note_open call in src/map_reader.c). These counters are
-     * published anyway, because they are what MADE that visible — on a
-     * gate-2 capture with watchpoints attached and cpu_ns_total moving
-     * 0 -> 23.7 s, credited, refused AND uncredited all read zero, which
-     * says the writer was never asked rather than that it declined.
+    /* v9 (#424): the producer is wired in src/map_reader.c's
+     * pgwt_read_state_map. CORRECTED 2026-10-28, because this paragraph said
+     * the opposite and a live capture refuted it: a zero
+     * summary_open_cpu_credited_ns with watchpoints attached, cpu_ns_total
+     * moving and seconds sealing does NOT by itself mean unwired. It is
+     * equally the signature of an observation that was offered and then
+     * dropped on one of the writer's silent early exits. Only
+     * summary_open_cpu_notes_total above separates the two, which is why it
+     * exists. tests/test_v9_open_cpu_wired.sh is the live acceptance test
+     * and reads notes_total before it reads a verdict out of a zero.
      *
      * THE FOURTH OUTCOME, found by reading the writer rather than by
      * reasoning from the counters: a note can be ACCEPTED and then credited
@@ -591,11 +673,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * same capture.
      *   zero too  -> nothing sealed at all; the seal trigger is the bug and
      *                re-wiring the producer will not move a single counter;
-     *   non-zero  -> seconds were sealed, so the CPU path really was asked
-     *                and declined somewhere, and THEN the producer is worth
-     *                looking at.
-     * Neither is distinguishable without a live capture, which is why the
-     * wiring was reverted rather than guessed at.
+     *   non-zero  -> seconds were sealed; if CPU credit is still zero with
+     *                watchpoints attached and cpu_ns_total moving, inspect
+     *                whether the producer's observation reached the writer.
+     * A live capture distinguishes those outcomes.
      *
      * The rest are the writer's own self-checks: eff_rejected_total should
      * read 0 in any build (the producer passes a classification the writer
@@ -604,13 +685,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * counts a measurement tier that changed mid-interval, and overcredit_ns
      * counts credit the per-second cap had to refuse.
      *
-     * TEMPORARY GUARD, not a supported configuration. These fields arrive
-     * with the v9 writer, which is on another branch; the conditional exists
-     * only so this branch builds and box-checks on its own, and the
-     * integration agent DELETES it when v9 folds in. At that moment add these
-     * seven keys to tests/test_control.sh's required-key list, by name
-     * (they report a dormant capability honestly — zeros that mean "nobody
-     * asked", not "nothing happened"):
+     * All seven keys are published unconditionally and named in
+     * tests/test_control.sh's required-key list:
      *
      *     summary_open_cpu_credited_ns
      *     summary_open_cpu_measured_ns
@@ -618,12 +694,7 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      *     summary_open_cpu_eff_rejected_total
      *     summary_open_cpu_class_divergent_ns
      *     summary_open_cpu_tier_mismatch_total
-     *     summary_open_cpu_overcredit_ns
-     *
-     * (that file is a live-tier test shared with other branches, which is why
-     * this branch does not edit it). Until then the keys are absent and the
-     * daemon reports the v8 refusal in summary_open_cpu_refused_total /
-     * summary_cpu_open_uncredited_ns_total above — visible, never silent. */
+     *     summary_open_cpu_overcredit_ns */
     cjson_add_uint64(root, "summary_open_cpu_credited_ns",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_credited_ns_total : 0);
