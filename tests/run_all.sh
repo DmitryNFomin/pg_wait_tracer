@@ -488,14 +488,17 @@ LIVE_TESTS=(
     # directory to -T. Carries its own negative control (a root:root 0640 file
     # in the same directory the same reader must still be refused).
     "test_trace_sidecar_perms|bash|test_trace_sidecar_perms.sh"
-    # NOT registered: test_v9_open_cpu_wired.sh. The v9 open-CPU producer
-    # was REVERTED (agent/424-daemon fc7d7f5) once its counters showed it
-    # was never wired, so the check would be permanently red against a
-    # capability nobody invokes -- which is neither a product bug being
-    # fixed in src/ (the only thing KNOWN_FAILING is for) nor a gate worth
-    # 40 minutes a run. The script stays in tests/ as the ACCEPTANCE test
-    # for whoever re-wires it: run it by hand, and re-add this line in the
-    # same commit that makes it pass.
+    # #424: the v9 open-CPU producer's ACCEPTANCE test, registered now that
+    # the producer IS wired (pgwt_read_state_map, src/map_reader.c) and the
+    # constant is 9 -- this line is what the previous note asked for, and
+    # without it the one check that can tell "wired" from "merely compiled"
+    # runs nowhere. It REFUSES (exit 2) rather than passing when its
+    # preconditions do not hold: no watchpoints / not tier=exact, no control
+    # socket, the seven v9 keys absent, or a stimulus it cannot prove was
+    # on-CPU across two ticks. Only once all four hold does a zero count as
+    # a failure -- so a tier where the zero is CORRECT cannot make it red,
+    # and a tier that cannot see cannot make it green either.
+    "test_v9_open_cpu_wired|bash|test_v9_open_cpu_wired.sh"
     "test_escalation|bash|test_escalation.sh"
     # Tiered-capture live tests (were built for A4/A5 but wired into
     # nothing — TST-7). test_cross_validate_tiered is the test that

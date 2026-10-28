@@ -17,13 +17,12 @@
 # supplies the symbol, and the Makefile has to agree.
 #
 # Format:  <symbol>  <provider-object-basename>   # justification
+# The basename carries NO .o suffix: the guard appends it (it checks the
+# Makefile for `$(BUILD)/<basename>.o`), so an entry written as
+# `summary_writer.o` is looked up as `summary_writer.o.o` and fails.
 # (symbol as `nm` prints it, with the platform's leading underscore or
 #  without — both spellings are accepted, so one file works on macOS and
 #  Linux.)
 
-# (No entries. The v9 producer call that needed one was reverted — see the
-# note at pgwt_summary_note_open in src/map_reader.c — and an entry for a
-# symbol nothing references is exactly the kind of rot this guard exists to
-# prevent. The mechanism is exercised by tests/test_check_link_closure.sh
-# against a synthetic repo, so it does not depend on a live entry to stay
-# honest.)
+# The v9 producer call is now wired in pgwt_read_state_map in src/map_reader.c.
+pgwt_summary_note_open_ex  summary_writer   # Every target linking map_reader.o already links summary_writer.o, and has since #379 because the daemon build already called v8's pgwt_summary_note_open (see tests/Makefile); v9 uses the same provider, not a new one. The guard independently re-checks this against tests/Makefile.
