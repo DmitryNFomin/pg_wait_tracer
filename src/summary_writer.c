@@ -234,10 +234,14 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * against 716,200.203 ms unfiltered on one Lock:relation row.
      *
      * handle_top_events now shares its query guard with handle_top_sessions
-     * (server.c:5238/:5160) and handle_heatmap (:6024): TWO siblings.
-     * handle_top_queries (:5578, !has_event_filter) deliberately serves query
-     * filters from this table; handle_aas (:4830, !detail_events) and
-     * handle_time_model (:4923) also permit them. `dur` remains correct here.
+     * (server.c:5193/:5166) and handle_heatmap (:5929): TWO siblings.
+     * handle_top_queries computes raw unconditionally (:5579); no summary route.
+     * tq_summary_visitor (compute.c:3584) has no production caller.
+     * The remaining production readers of queries[] are tm_summary_visitor
+     * (compute.c:2886; per-query read only under a query filter, :2891)
+     * and aas_summary_visitor (:2717; same gate, :2730). `dur` still matters
+     * for query-filtered Time Model and AAS; their full-duration-at-close
+     * window-edge limitation remains.
      *
      * WHAT WAS CONSIDERED AND DROPPED, so it is not re-derived: switching
      * this call to `tns` alone makes things WORSE, not better. Because
@@ -251,13 +255,9 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * principle credit buffered slices. Nobody is proposing that; it is
      * recorded so the next reader does not infer the stronger prohibition.
      *
-     * Keeping the list, rather than removing it, because
-     * the Events tab is the one users drill and this is the content the
-     * summary is for; and because nothing else needed changing to read it:
-     * the slot sentinel is not event_id but num_top_events (the lookup loop
-     * and the serializer both bound themselves by it), and te_summary_visitor
-     * probes its hash table on `count > 0`, so an occupied slot holding
-     * event_id 0 is unambiguous on the wire and in the reader.
+     * Keeping top_events[] for query-filtered Time Model's named event rows.
+     * The slot sentinel is num_top_events, not event_id; the lookup and
+     * serializer use that bound, so event_id 0 is unambiguous on the wire.
      *
      * It does consume one of the 8 slots. CPU is normally among a query's
      * largest consumers, so that is the right slot to spend; the bounded-list

@@ -119,9 +119,9 @@
  *      hole with a measured value on both sides, not an absent one.
  *
  *  N2. pgwt_queries_result.unattributed_ms / .unattributed_count /
- *      .backfilled_ms — both routes populate these; the summary route uses its
- *      existing raw backfill pass. `unattributed_available: false` means only
- *      that this raw pass failed (src/compute.h:620-628).
+ *      .backfilled_ms — one raw computation populates all three scalars.
+ *      `unattributed_available` is always true on a success response
+ *      (src/server.c:5901); failure is terminal and emits compute_failed.
  *
  *  N3. pgwt_aas_bucket.cat_aas[] / .offcpu_aas — raw path only (same reason as
  *      N1); aas_summary_visitor never writes them.

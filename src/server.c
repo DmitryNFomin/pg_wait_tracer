@@ -4734,13 +4734,13 @@ static int reject_overload(struct pgwt_server *srv,
         cJSON_AddStringToObject(root, "code", "window_too_large");
         cJSON_AddNumberToObject(root, "max_events", load_max_events());
         /* #526: only explain a query-forced raw load where that is true.
-         * TRUE: handle_top_events (:5047, query_id == 0 guard),
-         * handle_top_sessions (:5238/:5160, sessions_filter_needs_raw),
-         * handle_heatmap (:6024, query_id == 0 guard): reject_overload is
+         * TRUE: handle_top_events (:5044, query_id == 0 guard),
+         * handle_top_sessions (:5193/:5166, sessions_filter_needs_raw),
+         * handle_heatmap (:5929, query_id == 0 guard): reject_overload is
          * reached only from their raw else branches.
-         * FALSE: handle_top_queries (:5578) loads raw unconditionally BEFORE
-         * routing, with pid pushdown disabled (:5576); handle_aas (:4830)
-         * guards only !detail_events; handle_time_model (:4923) has no query
+         * FALSE: handle_top_queries computes raw unconditionally (:5579),
+         * with pid pushdown disabled (:5576); handle_aas (:4827)
+         * guards only !detail_events; handle_time_model (:4920) has no query
          * guard. A query filter does not force raw at those sites, so they
          * and all other commands keep the original hint. */
         if (req->filter.query_id != 0 &&
@@ -5014,13 +5014,13 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
     int from_summaries = 0;
 
     /* #526: a QUERY-FILTERED Events request goes to raw. Two siblings already
-     * force raw for a query filter: handle_top_sessions (:5187), through
-     * sessions_filter_needs_raw (:5160, includes query_id != 0), and
-     * handle_heatmap (:6013), through the same query_id == 0 conjunct.
+     * force raw for a query filter: handle_top_sessions (:5193), through
+     * sessions_filter_needs_raw (:5166, includes query_id != 0), and
+     * handle_heatmap (:5929), through the same query_id == 0 conjunct.
      * Events is the third handler that needs this guard and lacked it.
-     * handle_top_queries (:5579) guards only on !has_event_filter (class/event):
-     * its per-query summary table deliberately answers query filters.
-     * handle_aas (:4821, !detail_events) and handle_time_model (:4914, no
+     * handle_top_queries takes NO summary route: it computes from raw
+     * unconditionally (:5579) and therefore needs no query guard.
+     * handle_aas (:4827, !detail_events) and handle_time_model (:4920, no
      * additional guard) also permit query-filtered summaries, each answered
      * by its own compute.
      *
@@ -5159,7 +5159,7 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
      * EVENT-filtered Sessions tab over a >= 120 s window was answered from
      * summaries that ignored the filter entirely and returned UNFILTERED
      * session numbers under a filtered label, marked "fidelity":"exact".
-     * handle_top_queries (class_name / event_id) and handle_heatmap
+     * handle_top_queries (always raw) and handle_heatmap
      * (query_id) already force raw for filters they cannot serve; this is the
      * same rule, stated once for all three filter kinds. ts_summary_visitor
      * refuses them too, as a fail-safe if this guard is ever edited away. */
