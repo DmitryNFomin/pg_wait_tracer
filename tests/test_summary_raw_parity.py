@@ -336,25 +336,19 @@ def issue_for(field, window):
         # occur in that window, and falling through would label them #324 --
         # inheriting an issue by sitting next to one.
         return 562                      # Top Sessions raw measures, summary walls
-    if window == "straddle_130s":
-        # The quiet zones guarantee the ONLY record straddling this window's
-        # edges is the deliberate 100 s Client:ClientRead, so every remaining
-        # divergence here is the whole-record-into-closing-second mechanism.
-        #
-        # #324, NOT #379 -- and the distinction is load-bearing. #379 (the
-        # writer charging a long record's whole duration to its closing
-        # second) IS FIXED and CLOSED: v8 spreads the duration across the
-        # seconds it covers, which is why this window's time_model/* rows now
-        # AGREE where 21 #379 pins used to sit. What remains is v8's
-        # DOCUMENTED carve-out: only the duration is spread, while queries[]
-        # stays once-at-close with the full duration because an open
-        # interval's query attribution is unresolved at credit time
-        # (src/summary_writer.c "queries[] (never credited open; see the v8
-        # note)"; dd93d523; the Queries tab raw-loads, #324 -- which is OPEN).
-        # Pointing these pins at closed #379 would arm a trap: this gate's own
-        # rule is "delete an entry the moment its issue is fixed", so the next
-        # reader would delete eight live pins and silently blind this window.
-        return 324
+    # The straddle_130s -> #324 fallback is GONE, with #324. It used to say
+    # that because the quiet zones leave one deliberate 100 s straddler, every
+    # remaining divergence in this window had to be the
+    # whole-record-into-closing-second mechanism -- and its subject was
+    # queries[], which the server no longer reads at all (handle_top_queries
+    # forces raw). Keeping it would do the precise thing the docstring above
+    # forbids: label a brand-new, unrelated divergence with a CLOSED issue
+    # just for occurring in this window. Verified before removal that no
+    # remaining pin relied on it -- straddle_130s' other pins resolve through
+    # FOUND_BY_THIS_GATE (#410) and SESSIONS_MEASURED_CPU_562, both of which
+    # are matched earlier. A future divergence here now falls through to
+    # UNEXPLAINED, which REFUSES the table rather than approving it: for a
+    # gate, not knowing must never read as nothing-to-see.
     return "UNEXPLAINED"
 
 
