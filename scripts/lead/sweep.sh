@@ -161,7 +161,7 @@ else
       echo "   UNKNOWN: $var not set"
       continue
     fi
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=4 -o StrictHostKeyChecking=no "$box" \
+    out=$(ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no "$box" \
           'echo LOCK:; fuser /tmp/pgwt-box-check.lock 2>&1; echo UPTIME:; uptime' 2>&1)
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$out" ]; then
