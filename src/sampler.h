@@ -330,6 +330,11 @@ uint64_t pgwt_sampler_effective_period(uint64_t nominal_ns,
                                        uint64_t last_tick_ns,
                                        uint64_t now_ns);
 
+/* Pure lateness against the armed jittered period; no upper clamp. */
+uint64_t pgwt_sampler_tick_lateness(uint64_t armed_ns,
+                                    uint64_t armed_at_ns,
+                                    uint64_t now_ns);
+
 /* SMP-1: note one tick's read outcome. n_targets == 0 ticks are neutral.
  * Returns the log action the caller must perform (the state machine is
  * pure; the logging side effect stays with the daemon). */

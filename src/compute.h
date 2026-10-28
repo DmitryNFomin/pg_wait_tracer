@@ -92,21 +92,30 @@ struct pgwt_pid_cat {
  *   - samples: foreground samples with a query_id are tagged FLAG_EXEC
  *     (the cheap sampled-tier phase attribution; plan/exec sub-windows
  *     need the exact tier's markers);
- *   - #128 (query_attr.h): a foreground non-idle record that closed with
+ *   - #128 (query_attr.h): a foreground non-session-idle record that closed with
  *     query_id 0 is re-attributed to the id its command reported later
  *     (or earlier) — FLAG_QUERY_BACKFILL — else FLAG_QUERY_UNATTRIB, so
  *     top_queries reports it as unattributed_ms instead of dropping it.
- *     The live consumers apply the same rule record by record.
+ *     Live consumers defer closed foreground records until an id or command
+ *     boundary resolves them by the same rules; foreground open stretches
+ *     use a known command id or await their closing record.
  *   - #596: non-idle background/maintenance records with query_id 0 are
  *     flagged QUERY_UNATTRIB directly, never backfilled. IO_WORKER records
  *     remain outside the query model. "Non-idle" is the LOAD rule, so a
  *     checkpointer in Timeout:CheckpointWriteDelay is neither attributed nor
- *     unattributed. SCOPE: the sentence above about live consumers belongs to
- *     the #128 bullet and is NOT extended here -- the live tier still drops
- *     any categorised record with query_id 0 (src/map_reader.c's
- *     `if (cat_flag != 0) return;`), so #596 holds in the archived/replay
- *     path only. Closing that gap is #641; do not read this bullet as a
- *     claim that it is already closed.
+ *     unattributed. The raw/reader tag pass (compute.c) applies this rule.
+ *     Since #641, the live accumulator (map_reader.c) applies it to closed
+ *     records, open stretches and samples: the unattributed label is final,
+ *     so they never wait for an id. Both paths drop unknown categories
+ *     rather than let them borrow an id. Offline replay (event_reader.c,
+ *     pgwt_replay_events) files a query row only for a nonzero query_id,
+ *     dropping query_id-0 time entirely, including the #128 foreground
+ *     unattributed bucket. The summary writer (summary_writer.c,
+ *     summary_qattr_step) defers query-less background/maintenance records
+ *     with no category arm or load-rule exclusion: pacing is over-counted
+ *     into summary_query_unattributed_ns_total when resolved without an id,
+ *     and a later observed id or cmd_qid at a boundary can still backfill
+ *     this time onto a real statement.
  * cats may be NULL/empty (no metadata: everything is foreground).
  *
  * #363 — RETURN VALUE. 1 when every record in the array was tagged, 0 when
@@ -608,8 +617,9 @@ struct pgwt_queries_result {
     struct pgwt_query_row *rows;   /* malloc'd, caller frees */
     int    num_rows;
     double db_time_ms;
-    /* #128: foreground non-idle time whose command never reported an id —
-     * reported here instead of being dropped — and how much row time was
+    /* #128/#596: non-idle time without a query (foreground commands that
+     * never reported an id, plus background/maintenance work) — reported
+     * here instead of being dropped — and how much row time was
      * attributed to an id reported after the interval closed
      * (PGWT_EVENT_FLAG_QUERY_BACKFILL). Raw path only: the summary fast
      * path leaves both 0 (its per-query table has no unattributed bucket;

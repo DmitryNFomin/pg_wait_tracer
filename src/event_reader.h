@@ -252,6 +252,39 @@ struct pgwt_replay_stats {
  * carries no bound on how long a single wait can be. */
 #define PGWT_REPLAY_LOOKAHEAD_BLOCKS 1024
 
+/* pgwt_replay_events() treats flags & ~PGWT_REPLAY_NONCAT_FLAGS as the
+ * record's category, so every defined bit must be on exactly one of the
+ * category and non-category lists below. An unclassified CATEGORY bit is
+ * under-counted -- the safe direction. An unclassified NON-category bit is
+ * NOT safe: it reads as an unknown category and silently strips foreground
+ * query attribution from every record carrying it, with no counter and no
+ * message.
+ *
+ * Issue #642 narrowed exactly this guard to three named bits and turned a
+ * visible under-count into a silently borrowed query id.
+ *
+ * The assertion makes adding a known flag without classifying it a COMPILE
+ * error rather than a runtime surprise. Its runtime companion in
+ * tests/test_replay_fidelity.c scans pg_wait_tracer.h to catch a flag added
+ * there but never mentioned in PGWT_REPLAY_KNOWN_FLAGS at all. */
+#define PGWT_REPLAY_CAT_FLAGS (PGWT_EVENT_FLAG_IO_WORKER | \
+    PGWT_EVENT_FLAG_MAINT | PGWT_EVENT_FLAG_BACKGROUND)
+#define PGWT_REPLAY_NONCAT_FLAGS (PGWT_EVENT_FLAG_SAMPLE | \
+    PGWT_EVENT_FLAG_CMD_OPEN | PGWT_EVENT_FLAG_PLAN | \
+    PGWT_EVENT_FLAG_EXEC | PGWT_EVENT_FLAG_QUERY_SYNTH | \
+    PGWT_EVENT_FLAG_SAMPLE_CONT | PGWT_EVENT_FLAG_QUERY_BACKFILL | \
+    PGWT_EVENT_FLAG_QUERY_UNATTRIB | PGWT_EVENT_FLAG_RIGHT_OPEN)
+#define PGWT_REPLAY_KNOWN_FLAGS (PGWT_EVENT_FLAG_SAMPLE | \
+    PGWT_EVENT_FLAG_CMD_OPEN | PGWT_EVENT_FLAG_IO_WORKER | \
+    PGWT_EVENT_FLAG_MAINT | PGWT_EVENT_FLAG_BACKGROUND | \
+    PGWT_EVENT_FLAG_PLAN | PGWT_EVENT_FLAG_EXEC | PGWT_EVENT_FLAG_QUERY_SYNTH | \
+    PGWT_EVENT_FLAG_SAMPLE_CONT | PGWT_EVENT_FLAG_QUERY_BACKFILL | \
+    PGWT_EVENT_FLAG_QUERY_UNATTRIB | PGWT_EVENT_FLAG_RIGHT_OPEN)
+_Static_assert((PGWT_REPLAY_KNOWN_FLAGS & ~PGWT_REPLAY_NONCAT_FLAGS) ==
+                   PGWT_REPLAY_CAT_FLAGS,
+               "every known replay flag must be classified exactly once: "
+               "update the category or non-category list in event_reader.h");
+
 /* Replay timestamp-ordered decoded records, filtering by time range.
  * `bi` is the block's header info for direct decoded-block callers:
  *   - TRANSITIONS records accumulate exactly (durations, histograms);
