@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code PreToolUse hook (Bash matcher only): a narrow, four-rule
+# Claude Code PreToolUse hook (Bash matcher only): a narrow, five-rule
 # substring denylist -- no shell parsing, no repository resolution, no
 # quoting logic (#230). scripts/git-hooks/pre-push (#332, already on
 # master) is the SOLE enforcement for an actual push's stamp/tree check;
@@ -7,7 +7,7 @@
 # it cannot be fooled by shell shape the way a text parser can.
 #
 # What a git hook structurally cannot see is its OWN disarming. So this
-# hook denies any Bash tool command whose text matches one of four
+# hook denies any Bash tool command whose text matches one of five
 # rules, whether or not the command is a push at all:
 #
 #   1. PGWT_SKIP_PUSH_GUARD=1 -- the documented humans-only escape hatch;
@@ -20,6 +20,9 @@
 #      A git-hooks mention alone (e.g. reading the hook) is allowed.
 #   4. --no-verify            -- the one git flag that skips a pre-push
 #      hook outright; nothing server-side can see it.
+#   5. git send-pack         -- the one way a push reaches the remote
+#      without the real pre-push hook ever being invoked: git plumbing,
+#      not a shell trick (#687).
 #
 # Deliberately dumb, on purpose. The retired scripts/hooks/push-guard.sh
 # (through #230) parsed shell grammar to decide whether a command was a
@@ -76,6 +79,12 @@ case "$input" in
     *'--no-verify'*)
         deny "--no-verify" \
             "the one flag that bypasses a pre-push hook outright" ;;
+esac
+
+case "$input" in
+    *'git send-pack'*)
+        deny "git send-pack" \
+            "git plumbing bypasses the pre-push hook entirely (#687)" ;;
 esac
 
 exit 0

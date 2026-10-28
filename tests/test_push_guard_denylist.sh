@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # test_push_guard_denylist.sh -- scripts/hooks/push-guard.sh (#230) is a
-# four-rule substring denylist with NO shell grammar: no repository
+# five-rule substring denylist with NO shell grammar: no repository
 # resolution, no quoting logic, nothing to be "ambiguous" about. This
 # drives it exactly as Claude Code does, with real JSON on stdin, and
 # checks only what a substring test can be checked for: each rule
 # denies, a command matching none passes untouched, and -- the control
 # that matters -- a heredoc with an odd number of apostrophes and none of
-# the four terms passes, which is the exact shape the RETIRED command-text
+# the five terms passes, which is the exact shape the RETIRED command-text
 # parser (scripts/hooks/push-guard.sh before #230) rejected outright with
 # "invalid or unparseable tool command: No closing quotation" even though
 # it contained no push at all.
@@ -65,11 +65,12 @@ allowed() {
     check "$([[ $rc -eq 0 ]] && echo true || echo false)" "$label: allowed (exit 0)"
 }
 
-# ── Each of the four rules denies ────────────────────────────────────────
+# ── Each of the five rules denies ────────────────────────────────────────
 denied 'PGWT_SKIP_PUSH_GUARD=1 git push origin main' "PGWT_SKIP_PUSH_GUARD=1"
 denied 'git config core.hooksPath /tmp/somewhere' "core.hooksPath"
 denied 'chmod -x scripts/git-hooks/pre-push' "chmod + git-hooks together"
 denied 'git push --no-verify origin main' "--no-verify"
+denied 'git send-pack origin HEAD' "git send-pack bypasses pre-push entirely (#687)"
 
 # ── Write-shaped operations together with git-hooks deny ────────────────
 denied 'rm -f scripts/git-hooks/pre-push' "removal + git-hooks"
@@ -93,12 +94,12 @@ allowed 'git log -- scripts/git-hooks/pre-push' "history query for git-hooks"
 allowed 'git commit -m "doc: explain git-hooks in README"' \
     "a commit message merely mentioning git-hooks with no write-shaped operation"
 
-# ── A command with none of the four terms passes untouched ───────────────
-allowed 'git push origin main' "an ordinary push with none of the four terms"
-allowed 'git status && git log --oneline -5' "an unrelated command with none of the four terms"
+# ── A command with none of the five terms passes untouched ───────────────
+allowed 'git push origin main' "an ordinary push with none of the five terms"
+allowed 'git status && git log --oneline -5' "an unrelated command with none of the five terms"
 
 # ── THE control that matters: odd apostrophe count, no push, none of the
-#    four denylist terms -- must pass. The retired parser rejected exactly
+#    five denylist terms -- must pass. The retired parser rejected exactly
 #    this shape outright, blocking an unrelated command for a quoting
 #    reason that had nothing to do with pushing or disarming anything. ──
 odd_apostrophe_heredoc=$(cat <<'INNER'
