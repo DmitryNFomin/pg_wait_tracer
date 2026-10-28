@@ -11,7 +11,7 @@
 
 import { buildTableModel, buildTruncationRow, orderResetKey } from '../lib/table.js';
 import {
-    overviewConfig, compareOverviewConfig, createOverviewOrder,
+    overviewConfig, compareOverviewConfig, createOverviewOrder, isIdleRow,
 } from '../lib/builders/table-configs.js';
 import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
 import { shiftWindow } from '../lib/camera.js';
@@ -27,7 +27,7 @@ import { fmtMs, fmtAas } from '../lib/format.js';
 export function buildSummary(data, numCpus, window) {
     if (!data || !data.rows || data.rows.length === 0) return [];
     const dbRow = data.rows[0];  // "DB Time" always first
-    const idleRow = data.rows.find(r => r.indent === 0 && r.name === 'Idle');
+    const idleRow = data.rows.find(isIdleRow);
 
     const out = [{ label: 'DB Time', value: fmtMs(dbRow.ms) }];
     if (data.wall_ms) out.push({ label: 'Wall', value: fmtMs(data.wall_ms) });

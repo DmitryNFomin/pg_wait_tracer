@@ -161,9 +161,9 @@ function pctlCell(key) {
  * fact, server.c:3661 — a recorded CONTRADICTION, src/ owner's to fix, not
  * this file's); this predicate makes the client-side presentation rule hold
  * regardless of which shape arrives, so the "meaningful 0%" bug cannot come
- * back if the server-side 0 reappears after a refactor. Matches the
- * existing idle-row finder in views/overview.js's buildSummary(). */
-function isIdleRow(r) {
+ * back if the server-side 0 reappears after a refactor. Shared with the
+ * overview summary and delta comparison so their idle-row rules stay aligned. */
+export function isIdleRow(r) {
     return r.indent === 0 && typeof r.name === 'string' && r.name === 'Idle';
 }
 

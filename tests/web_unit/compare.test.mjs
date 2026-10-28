@@ -79,6 +79,22 @@ test('overview delta ranking excludes DB Time aggregate and Idle accounting row'
     assert.ok(!d.rows.some(r => r.name === 'DB Time' || r.name === 'Idle'));
 });
 
+test('#490 overview delta keeps a synthetic name containing Idle as a change entity', () => {
+    const a = { rows: [
+        { indent: 0, name: 'DB Time', ms: 12_500 },
+        { indent: 0, name: 'IdleInTransaction', ms: 3200 },
+        { indent: 0, name: 'Idle', ms: 45_000 },
+    ] };
+    const b = { rows: [
+        { indent: 0, name: 'DB Time', ms: 10_000 },
+        { indent: 0, name: 'IdleInTransaction', ms: 1600 },
+        { indent: 0, name: 'Idle', ms: 36_000 },
+    ] };
+    const d = buildDeltaComparison('overview', a, b);
+    assert.deepEqual(d.rows.map(r => r.name), ['IdleInTransaction']);
+    assert.equal(d.rows[0].delta_ms, 1600);
+});
+
 test('noise floor uses investigation window A even when baseline B is much busier', () => {
     const d = buildDeltaComparison('events',
         { db_time_ms: 1_000, rows: [ev(77, 'Lock:new-in-A', 100)] },
