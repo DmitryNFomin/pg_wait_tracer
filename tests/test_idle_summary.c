@@ -247,22 +247,31 @@ static int build_stream(struct pgwt_trace_event *out, uint64_t base_mono)
     return n;
 }
 
-/* Write the stream through the real writer. */
-static void write_summaries(const char *dir, const struct pgwt_trace_event *ev,
-                            int n)
+/* Write the stream through the real writer. Return the accepted push count
+ * so #681 can refuse a comparison if the writer could not commit its input. */
+static int write_summaries(const char *dir, const struct pgwt_trace_event *ev,
+                           int n)
 {
     struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
-    if (!w) { printf("  FAIL: calloc writer\n"); tests_failed++; return; }
+    if (!w) { printf("  FAIL: calloc writer\n"); tests_failed++; return -1; }
     if (pgwt_summary_writer_init(w, dir, 24, NULL) != 0) {
         printf("  FAIL: writer init on %s\n", dir);
-        tests_failed++; free(w); return;
+        tests_failed++; free(w); return -1;
     }
+    int accepted = 0;
     for (int i = 0; i < n; i++)
-        pgwt_summary_push_event(w, &ev[i], 0, ev[i].old_event);
-    pgwt_summary_flush(w);          /* close the last, still-open second */
+        if (pgwt_summary_push_event(w, &ev[i], 0, ev[i].old_event) == 0 &&
+            w->enabled)
+            accepted++;
+    /* A zero push return also means "disabled"; enabled and the flush
+     * counter distinguish acceptance from silently losing the stream. */
+    /* Close the last, still-open second. */
+    if (pgwt_summary_flush(w) != 0 || w->flush_failures_total != 0)
+        accepted = -1;
     pgwt_summary_close(w);
     pgwt_summary_destroy(w);
     free(w);
+    return accepted;
 }
 
 /* ── 12. A FAILED ROTATION FLUSH MUST DISCARD THE SECOND, NOT MISFILE IT ───
@@ -3095,16 +3104,332 @@ static void test_sessions_overflow_is_reported(void)
     }
 }
 
-/* ── 15. v9 session measurements survive the format ───────────────────── */
+/* ── 15. measured CPU inside a VISIBLE idle interval (#681, the #194 gate) ──
+ * All 16 original cpu_ns assignments were UNKNOWN. They could not see #194
+ * crediting the protocol tail of ClientRead to CPU on raw alone: both tiers
+ * currently discard that measurement. Keep this stream separate from slice[]
+ * and build_stream(): 130 seconds each carry 40 ms idle / 12 ms measured CPU,
+ * a 50 ms CPU gap / 30 ms measured CPU, and a 20 ms UNKNOWN Lock wait.
+ * The 1560 ms at risk is 17.142857 pp of this fixture's 9100 ms DB Time.
+ * Every new ms comparison is exact: all contributions are integer ns divided
+ * by 1e6, with no window-edge clipping or second-boundary straddlers. */
+
+struct measured_idle_probe {
+    struct pgwt_tm_result raw, sum;
+    uint64_t measured_idle_ns;
+};
+
+#define IDLE_CPU_REFUSAL(a) (1U << ((a) - 1))
+
+/* Run the SAME A gate for the baseline and every bypass. Expected refusals
+ * are observations, not failed parity checks; callers must assert the reason.
+ * Collect all reasons in A1..A7 order: zero CPU fails A3's positive sum AND
+ * A4's strict-partial requirement, so D2 must explicitly witness A4 too. */
+static unsigned measured_idle_gate(const char *label, const char *dir,
+                                   const struct pgwt_trace_event *ev, int n,
+                                   int accepted, uint64_t origin,
+                                   uint64_t committed_from,
+                                   uint64_t from, uint64_t to,
+                                   int expect_refusal,
+                                   struct measured_idle_probe *p)
+{
+    struct rec_ctx c;
+    memset(&c, 0, sizeof(c));
+    int read = pgwt_visit_summaries(dir, from, to, rec_visitor, &c);
+    uint64_t span = to > from ? to - from : 0;
+    /* Translate the COMMITTED wall window back to this one monotonic origin,
+     * including D5's displaced window; never take another clock reading. */
+    uint64_t raw_from = origin + (from - committed_from);
+    uint64_t raw_to = raw_from + span;
+    double wall_ms = (double)span / 1e6;
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    memset(p, 0, sizeof(*p));
+    pgwt_compute_time_model(ev, n, &f, raw_from, raw_to, wall_ms, &p->raw);
+    pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms,
+                                          &p->sum);
+
+    int measured = 0, invalid = 0;
+    for (int i = 0; i < n; i++) {
+        const struct pgwt_trace_event *e = &ev[i];
+        if (e->timestamp_ns <= raw_from || e->timestamp_ns > raw_to ||
+            !pgwt_is_idle_event(e->old_event) ||
+            e->cpu_ns == PGWT_CPU_NS_UNKNOWN)
+            continue;
+        measured++;
+        p->measured_idle_ns += e->cpu_ns;
+        if (e->cpu_ns == 0 || e->cpu_ns >= e->duration_ns)
+            invalid++;
+    }
+    double measured_ms = (double)p->measured_idle_ns / 1e6;
+    double pp = p->sum.db_time_ms > 0
+                ? measured_ms / p->sum.db_time_ms * 100.0 : 0.0;
+    int considered = -1, unusable = -1;
+    unsigned refused = 0;
+
+#define IDLE_CPU_REQUIRE(a, cond, fmt, ...) do {                          \
+    int ok = (cond);                                                     \
+    if (!expect_refusal)                                                 \
+        CHECK(ok, "%s: REFUSED A%d: " fmt, label, a, ##__VA_ARGS__);       \
+    if (!ok) {                                                          \
+        refused |= IDLE_CPU_REFUSAL(a);                                  \
+        printf("  %s: REFUSED A%d: " fmt "\n", label, a, ##__VA_ARGS__);   \
+    }                                                                   \
+} while (0)
+
+    IDLE_CPU_REQUIRE(1, accepted == n && n > 0 && read > 0 &&
+                        c.records == 130 && c.events_overflow == 0,
+                     "accepted %d/%d pushes, reader %d, records %d/130, "
+                     "overflow %u", accepted, n, read, c.records,
+                     c.events_overflow);
+    IDLE_CPU_REQUIRE(2, span >= 120ULL * ONE_SEC,
+                     "window %.6f s (requires >= 120 s)",
+                     (double)span / 1e9);
+    IDLE_CPU_REQUIRE(3, p->measured_idle_ns > 0 && measured > 0,
+                     "measured idle CPU %.6f ms in %d records (both > 0)",
+                     measured_ms, measured);
+    IDLE_CPU_REQUIRE(4, invalid == 0,
+                     "%d/%d measured idle records violate 0 < cpu_ns < "
+                     "duration_ns (measured %.6f ms)", invalid, measured,
+                     measured_ms);
+    IDLE_CPU_REQUIRE(5, p->raw.idle_time_ms > 0 && p->sum.idle_time_ms > 0 &&
+                        p->raw.idle_time_ms == 40.0 * 130 &&
+                        p->sum.idle_time_ms == 40.0 * 130,
+                     "Idle raw %.6f / summary %.6f ms, fixture 5200 ms; "
+                     "measured CPU inside the visible idle intervals %.6f ms",
+                     p->raw.idle_time_ms, p->sum.idle_time_ms, measured_ms);
+    IDLE_CPU_REQUIRE(6, pp > 0.0 && p->raw.db_time_ms > 0,
+                     "blast radius %.6f pp of DB Time "
+                     "(%.6f ms measured / %.6f ms summary, raw %.6f ms)",
+                     pp, measured_ms, p->sum.db_time_ms, p->raw.db_time_ms);
+    int verdict = pgwt_summaries_window_current(dir, from, to, &considered,
+                                                &unusable);
+    IDLE_CPU_REQUIRE(7, verdict == 1 && considered > 0 && unusable == 0,
+                     "preflight verdict %d, considered %d, unusable %d",
+                     verdict, considered, unusable);
+#undef IDLE_CPU_REQUIRE
+
+    if (refused == 0) {
+        printf("  %s: accepted %d/%d pushes, records %d, overflow %u; "
+               "window %.6f s; measured idle CPU %.6f ms in %d records, "
+               "%d invalid measurements\n", label, accepted, n, c.records,
+               c.events_overflow, (double)span / 1e9, measured_ms, measured,
+               invalid);
+        printf("  %s: Idle raw %.6f / summary %.6f ms (fixture 5200 ms); "
+               "blast radius %.6f pp of DB Time; preflight verdict %d, "
+               "considered %d, unusable %d\n", label, p->raw.idle_time_ms,
+               p->sum.idle_time_ms, pp, verdict, considered, unusable);
+    }
+    return refused;
+}
+
+static void test_measured_cpu_inside_visible_idle(void)
+{
+    printf("--- 15. measured CPU inside a VISIBLE idle interval "
+           "(#681, the #194 gate) ---\n");
+    enum { SECONDS = 130, EVENTS = SECONDS * 3 };
+    struct pgwt_trace_event ev[EVENTS], credited[SECONDS * 4];
+    uint64_t origin = mono_origin();
+    int n = 0;
+    for (int s = 0; s < SECONDS; s++) {
+        uint64_t sec = origin + (uint64_t)s * ONE_SEC;
+        struct pgwt_trace_event e;
+        memset(&e, 0, sizeof(e));
+        e.pid = 981;
+        e.query_id = QID_A;
+        /* Contiguous intervals at [100,140), [140,190), [190,210) ms,
+         * emitted by END timestamp: #277 must not fold a late event. No
+         * category flag and no pre-relabelled non-command id (#408). */
+        e.timestamp_ns = sec + 140 * MS;
+        e.old_event = EV_CLIENTREAD; e.new_event = 0;
+        e.duration_ns = 40 * MS; e.cpu_ns = 12 * MS;
+        ev[n++] = e;
+        e.timestamp_ns = sec + 190 * MS;
+        e.old_event = 0; e.new_event = EV_LOCK;
+        e.duration_ns = 50 * MS; e.cpu_ns = 30 * MS;
+        ev[n++] = e;
+        e.timestamp_ns = sec + 210 * MS;
+        e.old_event = EV_LOCK; e.new_event = EV_CLIENTREAD;
+        e.duration_ns = 20 * MS; e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        ev[n++] = e;
+    }
+
+    char dir[600];
+    snprintf(dir, sizeof(dir), "%s", fresh_dir("measured_visible_idle"));
+    int accepted = write_summaries(dir, ev, n);
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    int have_window = window_from_records(dir, &from, &to, &records);
+    CHECK(have_window && records > 0,
+          "REFUSED A1: committed window available=%d, records=%d",
+          have_window, records);
+    if (!have_window) return;
+
+    struct measured_idle_probe p;
+    unsigned refused = measured_idle_gate("15 A", dir, ev, n, accepted,
+                                          origin, from, from, to, 0, &p);
+    if (refused) {
+        free(p.raw.rows);
+        free(p.sum.rows);
+        return;                     /* a blind gate never reaches parity */
+    }
+
+    /* B. The #194 gate stays RED on a real one-sided change. CPU rows must
+     * exist as measured, non-zero quantities before their equality matters. */
+    double measured_ms = (double)p.measured_idle_ns / 1e6;
+    CHECK(p.raw.db_time_ms == p.sum.db_time_ms,
+          "DB Time raw %.6f / summary %.6f ms: the measured CPU inside the "
+          "visible idle intervals (%.6f ms) is credited the same way by "
+          "both tiers", p.raw.db_time_ms, p.sum.db_time_ms, measured_ms);
+    CHECK(p.raw.idle_time_ms == p.sum.idle_time_ms,
+          "Idle raw %.6f / summary %.6f ms: the measured CPU inside the "
+          "visible idle intervals (%.6f ms) is credited the same way by "
+          "both tiers", p.raw.idle_time_ms, p.sum.idle_time_ms, measured_ms);
+    CHECK(p.raw.has_measured_cpu && p.sum.has_measured_cpu,
+          "CPU split is measured on both tiers (%d/%d)",
+          p.raw.has_measured_cpu, p.sum.has_measured_cpu);
+    const char *cpu_rows[] = {"CPU (running)", "CPU (waiting for a core)"};
+    for (int i = 0; i < 2; i++) {
+        const struct pgwt_tm_row *r = row_at(&p.raw, cpu_rows[i], 1);
+        const struct pgwt_tm_row *s = row_at(&p.sum, cpu_rows[i], 1);
+        CHECK(r && s && r->time_ms > 0 && s->time_ms > 0,
+              "%s exists and is positive: raw %.6f / summary %.6f ms",
+              cpu_rows[i], r ? r->time_ms : 0.0, s ? s->time_ms : 0.0);
+        if (r && s)
+            CHECK(r->time_ms == s->time_ms,
+                  "%s raw %.6f / summary %.6f ms: the measured CPU inside "
+                  "the visible idle intervals (%.6f ms) is credited the "
+                  "same way by both tiers", cpu_rows[i], r->time_ms,
+                  s->time_ms, measured_ms);
+    }
+
+    /* C. Credit ONLY raw's 12 ms prefix, leaving 28 ms of ClientRead.
+     * Summary input and answer stay unchanged. There is no PROVOKE idiom
+     * in this file: assert the inequalities directly instead of blessing a
+     * raw-vs-summary disagreement in the baseline above. */
+    int nc = 0;
+    for (int i = 0; i < n; i++) {
+        struct pgwt_trace_event e = ev[i];
+        if (e.old_event == EV_CLIENTREAD) {
+            struct pgwt_trace_event cpu = e;
+            cpu.timestamp_ns = e.timestamp_ns - e.duration_ns + e.cpu_ns;
+            cpu.old_event = 0;
+            cpu.new_event = EV_CLIENTREAD;
+            cpu.duration_ns = e.cpu_ns;
+            credited[nc++] = cpu;
+            e.duration_ns -= e.cpu_ns;
+            e.cpu_ns = 0;           /* all 12 measured ms moved to the prefix */
+        }
+        credited[nc++] = e;
+    }
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_tm_result control;
+    pgwt_compute_time_model(credited, nc, &f, origin, origin + (to - from),
+                             (double)(to - from) / 1e6, &control);
+    CHECK(control.db_time_ms != p.sum.db_time_ms &&
+          control.idle_time_ms != p.sum.idle_time_ms,
+          "C1: raw-only #194 credit must DIVERGE: DB Time %.6f/%.6f, "
+          "Idle %.6f/%.6f ms", control.db_time_ms, p.sum.db_time_ms,
+          control.idle_time_ms, p.sum.idle_time_ms);
+    CHECK(control.db_time_ms - p.sum.db_time_ms == measured_ms,
+          "C2: DB Time higher by exactly %.6f ms (got %.6f ms)",
+          measured_ms, control.db_time_ms - p.sum.db_time_ms);
+    CHECK(p.sum.idle_time_ms - control.idle_time_ms == measured_ms,
+          "C2: Idle lower by exactly %.6f ms (got %.6f ms)",
+          measured_ms, p.sum.idle_time_ms - control.idle_time_ms);
+    CHECK(control.cpu_ms - p.sum.cpu_ms == measured_ms,
+          "C2: CPU higher by exactly %.6f ms (got %.6f ms)",
+          measured_ms, control.cpu_ms - p.sum.cpu_ms);
+    printf("  C3: raw-only #194 credit: DB Time +%.6f ms, Idle -%.6f ms, "
+           "%.6f pp of unchanged summary DB Time\n",
+           control.db_time_ms - p.sum.db_time_ms,
+           p.sum.idle_time_ms - control.idle_time_ms,
+           (control.db_time_ms - p.sum.db_time_ms) / p.sum.db_time_ms * 100.0);
+    free(control.rows);
+    free(p.raw.rows);
+    free(p.sum.rows);
+
+    /* D1..D4. Copy the LOCAL stream, never the shared fixture. fresh_dir's
+     * static buffer is copied because the baseline is still needed by D5/6. */
+    const char *labels[] = {"D1 UNKNOWN idle CPU", "D2 zero idle CPU",
+                            "D3 whole-wall idle CPU", "D4 no idle records"};
+    const unsigned want[] = {
+        IDLE_CPU_REFUSAL(3) | IDLE_CPU_REFUSAL(6),
+        IDLE_CPU_REFUSAL(3) | IDLE_CPU_REFUSAL(4) | IDLE_CPU_REFUSAL(6),
+        IDLE_CPU_REFUSAL(4),
+        IDLE_CPU_REFUSAL(3) | IDLE_CPU_REFUSAL(5) | IDLE_CPU_REFUSAL(6),
+    };
+    for (int leg = 0; leg < 4; leg++) {
+        struct pgwt_trace_event bypass[EVENTS];
+        int nb = 0;
+        for (int i = 0; i < n; i++) {
+            struct pgwt_trace_event e = ev[i];
+            if (e.old_event == EV_CLIENTREAD) {
+                if (leg == 3) continue;
+                e.cpu_ns = leg == 0 ? PGWT_CPU_NS_UNKNOWN :
+                           leg == 1 ? 0 : e.duration_ns;
+            }
+            bypass[nb++] = e;
+        }
+        char name[64], bypass_dir[600];
+        snprintf(name, sizeof(name), "measured_idle_bypass_%d", leg + 1);
+        snprintf(bypass_dir, sizeof(bypass_dir), "%s", fresh_dir(name));
+        int pushed = write_summaries(bypass_dir, bypass, nb);
+        uint64_t bf = 0, bt = 0;
+        int br = 0;
+        int window = window_from_records(bypass_dir, &bf, &bt, &br);
+        CHECK(window && br == SECONDS && pushed == nb,
+              "%s setup: window=%d, records=%d, accepted=%d/%d",
+              labels[leg], window, br, pushed, nb);
+        if (!window) continue;
+        refused = measured_idle_gate(labels[leg], bypass_dir, bypass, nb,
+                                      pushed, origin, bf, bf, bt, 1, &p);
+        CHECK(refused == want[leg],
+              "%s must be REFUSED (reasons 0x%x, required 0x%x)",
+              labels[leg], refused, want[leg]);
+        free(p.raw.rows);
+        free(p.sum.rows);
+    }
+
+    /* D5. Healthy files, but the reader sees no record an hour after the
+     * committed end. D6 removes that SAME directory after a successful write.
+     * Neither leg is allowed to evaluate a parity equality on empty output. */
+    uint64_t far_from = to + 3600ULL * ONE_SEC;
+    refused = measured_idle_gate("D5 empty reader window", dir, ev, n,
+                                  accepted, origin, from, far_from,
+                                  far_from + (to - from), 1, &p);
+    CHECK((refused & IDLE_CPU_REFUSAL(1)) != 0,
+          "D5 must be REFUSED by A1's record gate (reasons 0x%x)", refused);
+    free(p.raw.rows);
+    free(p.sum.rows);
+
+    char remove_cmd[800];
+    snprintf(remove_cmd, sizeof(remove_cmd), "rm -rf '%s'", dir);
+    int removed = system(remove_cmd);
+    struct stat st;
+    CHECK(removed == 0 && stat(dir, &st) != 0 && access(dir, F_OK) != 0,
+          "D6 removed the written summary directory %s", dir);
+    refused = measured_idle_gate("D6 removed summary directory", dir, ev, n,
+                                  accepted, origin, from, from, to, 1, &p);
+    CHECK((refused & IDLE_CPU_REFUSAL(1)) != 0 &&
+          (refused & IDLE_CPU_REFUSAL(7)) != 0,
+          "D6 must be REFUSED by A1 and A7 (reasons 0x%x)", refused);
+    free(p.raw.rows);
+    free(p.sum.rows);
+}
+#undef IDLE_CPU_REFUSAL
+
+/* ── 16. v9 session measurements survive the format ───────────────────── */
 static void test_v9_session_fields(void)
 {
-    printf("--- 15. v9 session fields: round-trip, refusal, v8, saturation ---\n");
+    printf("--- 16. v9 session fields: round-trip, refusal, v8, saturation ---\n");
 
     struct pgwt_summary_accum *acc = malloc(sizeof(*acc));
     struct pgwt_summary_accum *back = malloc(sizeof(*back));
     uint8_t *v9 = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
     uint8_t *v8 = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
-    CHECK(acc && back && v9 && v8, "15: alloc accumulators and buffers");
+    CHECK(acc && back && v9 && v8, "16: alloc accumulators and buffers");
     if (!acc || !back || !v9 || !v8) {
         free(acc); free(back); free(v9); free(v8); return;
     }
@@ -3123,19 +3448,19 @@ static void test_v9_session_fields(void)
     acc->idle_ns = 23 * MS;
     acc->events_overflow = 11;
 
-    /* 15a. Distinct non-zero values prevent a wrong-offset copy from
+    /* 16a. Distinct non-zero values prevent a wrong-offset copy from
      * passing as a successful round trip of both fields. */
     CHECK(acc->sessions[0].cpu_offcpu_ns != 0 &&
           acc->sessions[0].cpu_measured_records != 0 &&
           acc->sessions[0].cpu_offcpu_ns != acc->sessions[0].cpu_measured_records &&
           acc->sessions[0].cpu_offcpu_ns != acc->sessions[0].cpu_ns &&
           acc->sessions[0].cpu_measured_records != acc->sessions[0].cpu_ns,
-          "15a non-vacuity: both new fields are non-zero and distinct "
+          "16a non-vacuity: both new fields are non-zero and distinct "
           "from each other and cpu_ns");
     size_t size = pgwt_summary_serialize(acc, v9, PGWT_SUMMARY_SERIALIZE_MAX);
     const size_t prefix = (size_t)PGWT_NUM_CLASSES * 8;
     CHECK(size == prefix + 44 + 12 + 40,
-          "15a: one v9 session and both trailers serialize (%zu bytes)", size);
+          "16a: one v9 session and both trailers serialize (%zu bytes)", size);
     if (size != prefix + 44 + 12 + 40) {
         free(acc); free(back); free(v9); free(v8); return;
     }
@@ -3143,21 +3468,21 @@ static void test_v9_session_fields(void)
     back->second_wall_ns = acc->second_wall_ns;
     back->num_sessions = 1;
     int rc = pgwt_summary_deserialize(v9, size, back, 9);
-    CHECK(rc == 0, "15a: v9 session deserializes (rc=%d)", rc);
+    CHECK(rc == 0, "16a: v9 session deserializes (rc=%d)", rc);
     const struct pgwt_summary_session *ss = NULL;
     for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
         if (back->sessions[i].pid == 301) { ss = &back->sessions[i]; break; }
-    CHECK(ss != NULL, "15a: the decoded session exists");
+    CHECK(ss != NULL, "16a: the decoded session exists");
     if (ss) {
         CHECK(ss->cpu_offcpu_ns == acc->sessions[0].cpu_offcpu_ns,
-              "15a: cpu_offcpu_ns round-trips EXACTLY (%llu)",
+              "16a: cpu_offcpu_ns round-trips EXACTLY (%llu)",
               (unsigned long long)ss->cpu_offcpu_ns);
         CHECK(ss->cpu_measured_records == acc->sessions[0].cpu_measured_records,
-              "15a: cpu_measured_records round-trips EXACTLY (%u)",
+              "16a: cpu_measured_records round-trips EXACTLY (%u)",
               ss->cpu_measured_records);
     }
 
-    /* 15b. End INSIDE the 44-byte session entry, not inside a trailer.
+    /* 16b. End INSIDE the 44-byte session entry, not inside a trailer.
      * Zero-filling this short record would invent an unmeasured window.
      *
      * WHAT THIS LEG DOES NOT PROVE, stated because the opposite is the
@@ -3177,9 +3502,9 @@ static void test_v9_session_fields(void)
     back->second_wall_ns = acc->second_wall_ns;
     back->num_sessions = 1;
     rc = pgwt_summary_deserialize(v9, prefix + 40, back, 9);
-    CHECK(rc != 0, "15b: a truncated v9 session is REFUSED (rc=%d)", rc);
+    CHECK(rc != 0, "16b: a truncated v9 session is REFUSED (rc=%d)", rc);
 
-    /* 15c. Reconstruct the actual v8 payload: keep the 32-byte session,
+    /* 16c. Reconstruct the actual v8 payload: keep the 32-byte session,
      * drop its 12 v9 bytes, and retain both record trailers. */
     memcpy(v8, v9, prefix + 32);
     memcpy(v8 + prefix + 32, v9 + prefix + 44, size - prefix - 44);
@@ -3187,35 +3512,35 @@ static void test_v9_session_fields(void)
     back->second_wall_ns = acc->second_wall_ns;
     back->num_sessions = 1;
     rc = pgwt_summary_deserialize(v8, size - 12, back, 8);
-    CHECK(rc == 0, "15c: the actual v8 payload parses as v8 (rc=%d)", rc);
+    CHECK(rc == 0, "16c: the actual v8 payload parses as v8 (rc=%d)", rc);
     ss = NULL;
     for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
         if (back->sessions[i].pid == 301) { ss = &back->sessions[i]; break; }
-    CHECK(ss != NULL, "15c: the v8 session exists");
+    CHECK(ss != NULL, "16c: the v8 session exists");
     if (ss) {
         CHECK(ss->db_time_ns == acc->sessions[0].db_time_ns,
-              "15c: v8 DB Time came back (%llu)",
+              "16c: v8 DB Time came back (%llu)",
               (unsigned long long)ss->db_time_ns);
         CHECK(ss->cpu_ns == acc->sessions[0].cpu_ns,
-              "15c: v8 CPU wall came back (%llu)",
+              "16c: v8 CPU wall came back (%llu)",
               (unsigned long long)ss->cpu_ns);
-        /* These zeros are meaningful beside 15a's distinct non-zero
+        /* These zeros are meaningful beside 16a's distinct non-zero
          * round trip: reading v9 bytes at v8 offsets must not invent CPU. */
         CHECK(ss->cpu_offcpu_ns == 0,
-              "15c: v8 retains zero off-CPU, refusing to split");
+              "16c: v8 retains zero off-CPU, refusing to split");
         CHECK(ss->cpu_measured_records == 0,
-              "15c: v8 retains zero observations, refusing a measurement");
+              "16c: v8 retains zero observations, refusing a measurement");
     }
 
-    /* 15d. Reach the saturation arm through the public push path: seed a
+    /* 16d. Reach the saturation arm through the public push path: seed a
      * real session, set its counter to UINT32_MAX, then add another measured
      * gap in the SAME second. The time increments witness that it ran. */
     struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
-    CHECK(w != NULL, "15d: alloc writer");
+    CHECK(w != NULL, "16d: alloc writer");
     if (w) {
         int init_rc = pgwt_summary_writer_init(w, fresh_dir("v9_saturation"),
                                                 24, NULL);
-        CHECK(init_rc == 0, "15d: writer initializes (rc=%d)", init_rc);
+        CHECK(init_rc == 0, "16d: writer initializes (rc=%d)", init_rc);
         if (init_rc == 0) {
             struct pgwt_trace_event e;
             memset(&e, 0, sizeof(e));
@@ -3226,53 +3551,53 @@ static void test_v9_session_fields(void)
             e.duration_ns = 10 * MS;
             e.cpu_ns = 4 * MS;
             int push_rc = pgwt_summary_push_event(w, &e, 0, e.old_event);
-            CHECK(push_rc == 0, "15d: first measured gap accepted (%d)", push_rc);
+            CHECK(push_rc == 0, "16d: first measured gap accepted (%d)", push_rc);
             struct pgwt_summary_session *live = NULL;
             for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
                 if (w->accum.sessions[i].pid == e.pid) {
                     live = &w->accum.sessions[i]; break;
                 }
-            CHECK(live != NULL, "15d: the real writer created the session");
+            CHECK(live != NULL, "16d: the real writer created the session");
             if (live) {
                 CHECK(live->cpu_measured_records == 1,
-                      "15d: first gap counted one measurement (%u)",
+                      "16d: first gap counted one measurement (%u)",
                       live->cpu_measured_records);
                 CHECK(live->cpu_offcpu_ns == 6 * MS,
-                      "15d: first gap contributed 6 ms off-CPU (%llu)",
+                      "16d: first gap contributed 6 ms off-CPU (%llu)",
                       (unsigned long long)live->cpu_offcpu_ns);
                 live->cpu_measured_records = UINT32_MAX;
                 e.timestamp_ns += 20 * MS;
                 push_rc = pgwt_summary_push_event(w, &e, 0, e.old_event);
-                CHECK(push_rc == 0, "15d: next measured gap accepted (%d)", push_rc);
+                CHECK(push_rc == 0, "16d: next measured gap accepted (%d)", push_rc);
                 CHECK(live->cpu_ns == 20 * MS,
-                      "15d: both gaps contributed wall time (%llu)",
+                      "16d: both gaps contributed wall time (%llu)",
                       (unsigned long long)live->cpu_ns);
                 CHECK(live->cpu_offcpu_ns == 12 * MS,
-                      "15d: the next measurement contributed its remainder (%llu)",
+                      "16d: the next measurement contributed its remainder (%llu)",
                       (unsigned long long)live->cpu_offcpu_ns);
                 CHECK(live->cpu_measured_records == UINT32_MAX,
-                      "15d: the real writer SATURATES instead of wrapping (%u)",
+                      "16d: the real writer SATURATES instead of wrapping (%u)",
                       live->cpu_measured_records);
 
                 size = pgwt_summary_serialize(&w->accum, v9,
                                               PGWT_SUMMARY_SERIALIZE_MAX);
-                CHECK(size > 0, "15d: serialize the saturated session (%zu)", size);
+                CHECK(size > 0, "16d: serialize the saturated session (%zu)", size);
                 memset(back, 0, sizeof(*back));
                 back->second_wall_ns = w->accum.second_wall_ns;
                 back->num_events = w->accum.num_events;
                 back->num_sessions = w->accum.num_sessions;
                 back->num_queries = w->accum.num_queries;
                 rc = pgwt_summary_deserialize(v9, size, back, 9);
-                CHECK(rc == 0, "15d: saturated v9 session parses (%d)", rc);
+                CHECK(rc == 0, "16d: saturated v9 session parses (%d)", rc);
                 ss = NULL;
                 for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
                     if (back->sessions[i].pid == e.pid) {
                         ss = &back->sessions[i]; break;
                     }
-                CHECK(ss != NULL, "15d: the saturated session exists on readback");
+                CHECK(ss != NULL, "16d: the saturated session exists on readback");
                 if (ss)
                     CHECK(ss->cpu_measured_records == UINT32_MAX,
-                          "15d: UINT32_MAX survives the format as UINT32_MAX (%u)",
+                          "16d: UINT32_MAX survives the format as UINT32_MAX (%u)",
                           ss->cpu_measured_records);
             }
             pgwt_summary_close(w);
@@ -3318,6 +3643,7 @@ int main(void)
     test_archived_file_is_timezone_independent();
     test_unplaceable_archive_is_refused();
     test_sessions_overflow_is_reported();
+    test_measured_cpu_inside_visible_idle();
     test_v9_session_fields();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);

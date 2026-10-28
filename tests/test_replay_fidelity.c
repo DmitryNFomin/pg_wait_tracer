@@ -29,6 +29,8 @@
 #include "wait_event.h"
 #include "pg_wait_tracer.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +47,11 @@ int pgwt_visit_summaries(const char *dir, uint64_t from, uint64_t to,
 
 #define IO_READ  0x0A000015u   /* IO:DataFileRead */
 #define LOCK_REL 0x03000000u   /* Lock:relation */
+
+/* An unclassified flag bit standing in for a category a future build adds.
+ * The inverse mask in replay_accum.c must route it to the total refusal
+ * rather than the back-fill. */
+#define FUTURE_CAT_FLAG 0x2000u
 
 static int failures = 0;
 /* #531 bypass suite: EXPECT_RED runs a probe that MUST register a failure,
@@ -715,6 +722,239 @@ static void test_replay_commit_order(void)
     if (system(cmd) != 0) { /* best effort */ }
 }
 
+/* Refuse unreadable input and definitions outside the single-bit hex-literal
+ * format. Only publish the result after the entire file was read successfully. */
+static int scan_defined_event_flags(const char *path, uint32_t *mask,
+                                    int *count)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+    char *line = NULL;
+    size_t capacity = 0;
+    uint32_t found = 0;
+    int n = 0, rc = -1;
+    while (getline(&line, &capacity, fp) != -1) {
+        char *p = line;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "#define", 7) != 0 ||
+            !isspace((unsigned char)p[7]))
+            continue;
+        p += 7;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "PGWT_EVENT_FLAG_", 16) != 0) continue;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "0x", 2) != 0 ||
+            !isxdigit((unsigned char)p[2]))
+            goto out;
+        errno = 0;
+        char *end;
+        unsigned long value = strtoul(p, &end, 16);
+        if (errno || value > UINT32_MAX || *end != 'U') goto out;
+        p = end + 1;
+        /* Only whitespace and comments may follow the literal, not an
+         * expression that happens to begin with a valid hex bit. */
+        for (;;) {
+            while (isspace((unsigned char)*p)) p++;
+            if (strncmp(p, "/*", 2) != 0) break;
+            char *close = strstr(p + 2, "*/");
+            if (!close) goto out;
+            p = close + 2;
+        }
+        if (*p && strncmp(p, "//", 2) != 0) goto out;
+        uint32_t bit = (uint32_t)value;
+        if (!bit || (bit & (bit - 1)) || (found & bit)) goto out;
+        found |= bit;
+        n++;
+    }
+    if (!feof(fp) || ferror(fp) || n == 0) goto out;
+    rc = 0;
+out:
+    free(line);
+    if (fclose(fp) != 0) rc = -1;
+    if (rc == 0) {
+        *mask = found;
+        *count = n;
+    }
+    return rc;
+}
+
+static void test_replay_flag_mask_closure(void)
+{
+    uint32_t mask = 0;
+    int count = 0;
+    CHECK(scan_defined_event_flags("../src/pg_wait_tracer.h", &mask, &count) == 0,
+          "event flag header can be scanned completely");
+    CHECK_EQ_U64(mask, PGWT_REPLAY_KNOWN_FLAGS,
+                 "every header flag is listed in replay's known flags");
+    CHECK(count >= 12, "header contains at least twelve event flag defines");
+    CHECK((PGWT_REPLAY_KNOWN_FLAGS & ~PGWT_REPLAY_NONCAT_FLAGS) ==
+              PGWT_REPLAY_CAT_FLAGS,
+          "known flags are classified as category or non-category");
+    CHECK((PGWT_REPLAY_CAT_FLAGS & PGWT_REPLAY_NONCAT_FLAGS) == 0,
+          "category and non-category flag lists do not overlap");
+
+    char dir[] = "/tmp/pgwt_replay_flags_XXXXXX";
+    if (!mkdtemp(dir)) {
+        CHECK(0, "create flag scanner bypass directory");
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/flags.h", dir);
+    CHECK(scan_defined_event_flags(path, &mask, &count) == -1,
+          "flag scanner refuses a nonexistent path");
+    /* Except for the no-event-flags case, each fixture needs a valid define;
+     * otherwise the zero-defines rule masks the rule it is meant to test. */
+    const struct {
+        const char *text;
+        const char *message;
+    } bypasses[] = {
+        { "#define SOMETHING_ELSE 0x1U\n",
+          "flag scanner refuses a file with no event flag defines" },
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n#define PGWT_EVENT_FLAG_WEIRD (1u << 13)\n",
+          "flag scanner refuses an unparseable flag value" },
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n"
+          "#define PGWT_EVENT_FLAG_DUPLICATE 0x1U\n",
+          "flag scanner refuses a duplicate bit" },
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n"
+          "#define PGWT_EVENT_FLAG_MULTIBIT 0x30U\n",
+          "flag scanner refuses a multi-bit value" },
+    };
+    for (size_t i = 0; i < sizeof(bypasses) / sizeof(bypasses[0]); i++) {
+        FILE *fp = fopen(path, "w");
+        if (!fp) {
+            CHECK(0, "open flag scanner bypass fixture for writing");
+            break;
+        }
+        int written = fputs(bypasses[i].text, fp) >= 0;
+        if (fclose(fp) != 0) written = 0;
+        CHECK(written, "write flag scanner bypass fixture completely");
+        if (!written) break;
+        CHECK(scan_defined_event_flags(path, &mask, &count) == -1,
+              bypasses[i].message);
+    }
+    /* If the first open failed, no fixture exists to remove. */
+    CHECK(unlink(path) == 0 || errno == ENOENT, "remove flag scanner fixture");
+    CHECK(rmdir(dir) == 0, "remove flag scanner bypass directory");
+}
+
+static void test_replay_unattributed_categories(void)
+{
+    const struct pgwt_block_info bi = { .block_type = PGWT_BLOCK_TRANSITIONS };
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    if (!a) { failures++; return; }
+    /* Activity-class events are idle without any version/name registry. */
+    const uint32_t idle = WEI(PG_WAIT_ACTIVITY, 0);
+    struct pgwt_trace_event arr[] = {
+        ev(101, 1000, 11, LOCK_REL, 0, 0),
+        ev(102, 2000, 23, IO_READ, 0, 0),
+        ev(102, 3000, 41, IO_READ, 0, 4242),
+        ev(103, 4000, 37, LOCK_REL, 0, 0),
+        ev(104, 5000, 53, LOCK_REL, 0, 0),
+        ev(104, 6000, 67, LOCK_REL, 0, 4242),
+        ev(105, 7000, 71, IO_READ, 0, 0),
+        ev(106, 8000, 83, idle, 0, 0),
+    };
+    arr[1].flags = arr[2].flags = PGWT_EVENT_FLAG_BACKGROUND;
+    arr[3].flags = PGWT_EVENT_FLAG_MAINT;
+    /* Deliberately under-count an unknown category: its 53 ns must never
+     * borrow the later statement's id, even on this same foreground-like pid. */
+    arr[4].flags = FUTURE_CAT_FLAG;
+    arr[6].flags = PGWT_EVENT_FLAG_IO_WORKER;
+    arr[7].flags = PGWT_EVENT_FLAG_BACKGROUND;
+
+    printf("CASE #665: replay zero-id categories and total refusal\n");
+    pgwt_replay_events(a, arr, 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    const struct pgwt_query_event_stats *q = find_query_ev(a, 0, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 11 &&
+          q->min_ns == 11 && q->max_ns == 11,
+          "foreground without a later id retains its exact 11 ns in qid 0 (#128)");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 11, "foreground contributes 11 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "foreground without an id never backfills");
+    EXPECT_RED("missing foreground qid-0 row goes red", {
+        a->num_query_events = 0;
+        CHECK(find_query_ev(a, 0, LOCK_REL) != NULL, "foreground qid-0 row present");
+        a->num_query_events = 1;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[1], 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    q = find_query_ev(a, 0, IO_READ);
+    CHECK(q && q->count == 1 && q->total_ns == 23 &&
+          q->min_ns == 23 && q->max_ns == 23,
+          "background retains its exact 23 ns in qid 0 despite a later real id");
+    q = find_query_ev(a, 4242, IO_READ);
+    CHECK(q && q->count == 1 && q->total_ns == 41 &&
+          q->min_ns == 41 && q->max_ns == 41,
+          "same background pid's query 4242 contains only its own 41 ns");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 23, "background contributes 23 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "background zero-id work never backfills");
+    EXPECT_RED("lost background time goes red", {
+        a->query_events[0].total_ns = 0;
+        q = find_query_ev(a, 0, IO_READ);
+        CHECK(q && q->total_ns == 23, "background qid 0 retains 23 ns");
+        a->query_events[0].total_ns = 23;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[3], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    q = find_query_ev(a, 0, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 37 &&
+          q->min_ns == 37 && q->max_ns == 37,
+          "maintenance retains its exact 37 ns and one occurrence in qid 0");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 37, "maintenance contributes 37 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "maintenance zero-id work never backfills");
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[4], 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, LOCK_REL) == NULL, "unknown category creates no qid-0 row");
+    q = find_query_ev(a, 4242, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 67 &&
+          q->min_ns == 67 && q->max_ns == 67,
+          "unknown category never adds its 53 ns to the later query's 67 ns");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "unknown category moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "unknown category moves no backfilled counter");
+    EXPECT_RED("borrowing an unknown category's time goes red", {
+        a->query_events[0].total_ns = 53 + 67;
+        q = find_query_ev(a, 4242, LOCK_REL);
+        CHECK(q && q->total_ns == 67, "query 4242 contains only its own 67 ns");
+        a->query_events[0].total_ns = 67;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[6], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, IO_READ) == NULL, "IO worker creates no qid-0 IO row");
+    CHECK_EQ_U64(a->num_query_events, 0, "IO worker creates no query rows at all");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "IO worker moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "IO worker moves no backfilled counter");
+
+    pgwt_accum_init(a);
+    CHECK(pgwt_is_idle_event(idle), "Activity fixture is idle under the load rule");
+    pgwt_replay_events(a, &arr[7], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, idle) == NULL, "idle background creates no qid-0 row");
+    CHECK_EQ_U64(a->num_query_events, 0, "idle background creates no query rows");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "idle background moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "idle background moves no backfilled counter");
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, arr, sizeof(arr) / sizeof(arr[0]), 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    /* Independent literal budget: unknown 53, IO-worker 71 and idle 83 ns
+     * are intentionally excluded from query accounting. */
+    CHECK_EQ_U64(query_total(a), 11 + 23 + 41 + 37 + 67,
+                 "query totals conserve the independent per-record ns budget");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 11 + 23 + 37,
+                 "only foreground, background and maintenance zero-id ns are unattributed");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "combined fixture never borrows a query id");
+    free(a);
+}
+
 static void test_replay_resolver_edges(void)
 {
     const uint64_t MS = 1000000ULL, BASE = 10000000000000ULL;
@@ -1061,6 +1301,8 @@ int main(void)
     test_cpu_replay(false);
     test_parse_phase_replay();
     test_replay_commit_order();
+    test_replay_flag_mask_closure();
+    test_replay_unattributed_categories();
     test_replay_resolver_edges();
     test_replay_wall_clocks();
     test_replay_two_hours();

@@ -1,5 +1,74 @@
 # pg_wait_tracer — working agreement for agents
 
+## RULE 0 — no status report reaches the owner unaudited. No exceptions.
+
+The owner must not be the one who checks the lead's claims. Before **any** status
+report, progress summary or answer about why work is or is not happening:
+
+```
+scripts/lead/audit-report.sh <draft-file>     # codex re-derives every claim; returns SEND or BLOCK
+```
+
+A draft that comes back **BLOCK** is not sent until it is fixed. Paste the verdict
+line with the report.
+
+**A held claim requires evidence.** Run `scripts/lead/held.sh <path>...` — it prints `HELD <path> by #N` or
+`FREE <path>`. Permitted vocabulary, nothing else:
+
+- `RUNNING <item> <PR/agent> since <t>`
+- `HELD <item> by #N on <files>` — must paste **this turn's** `held.sh` output
+- `READY-NOT-STARTED <item>: my choice — I ran <X> instead`
+
+If `held.sh` says FREE and the item is not running, the state is
+**READY-NOT-STARTED by my choice**. Saying "blocked" there converts a scheduling
+decision into an external constraint, which is the failure that cost the owner
+eleven hours on the v9 epoch (files free from 14:19Z and 19:12Z; reported blocked
+in three consecutive reports). Every report must carry a line for the **top ledger
+item not running**, with `held.sh` output or the words "my choice".
+
+Likewise forbidden without a pasted command and its output: any **count**, any
+**absence** ("exists nowhere", "not merged", "unreachable"), any claim about
+**permissions** ("I can't"), and any claim about what is **running**. One denied
+operation proves one attempt failed, nothing more. Lacking evidence, write
+`UNVERIFIED:` — never a cause.
+
+## RULE 1 — advisers first, the owner last. Never ask the owner what an adviser can answer.
+
+Any question of design, scope, sequencing, approach or "which of these options" goes to
+**both advisers first** — `codex exec` and `.claude/agents/adviser.md`, dispatched in
+parallel. The owner is asked **only** when: the advisers disagree and the lead cannot
+adjudicate on evidence; the lead disagrees with both; or the decision is the owner's by
+nature (money, machines, release timing, accepting a defect under RULE 2).
+
+Asking the owner to choose between options the advisers were never shown is a waste of
+his time and has been called out as such. When the lead does go to him, the message must
+say what both advisers said and where the lead disagrees.
+
+**A failure the owner is told about must come with what was tried.** A bare caveat --
+"this does not work, FYI" -- converts the lead's unsolved problem into the owner's
+information, which is the same move as "blocked". State what was attempted and what
+happened, or solve it first.
+
+The sequence is fixed: **try it, and when it fails, take it to both advisers with what was
+tried and what happened.** The owner hears about it afterwards, and only as **options with
+a recommendation**, never as "this does not work, FYI". If both advisers also fail to find
+a way, that is itself the finding and worth the owner's time -- stated as "both advisers
+considered X, Y and Z; here is what each costs".
+
+## RULE 2 — never ship a known defect. "Good enough" is not a state.
+
+If a branch is green but the lead knows a number is wrong, a path diverges, a percentage
+is computed on mismatched bases, or two views of the same quantity disagree — **it does
+not ship.** The fix is the correct fix, not a disclosure and not a caveat in a note.
+
+The only exception is an **explicit exclusion from the owner**, in his words, recorded on
+the issue. The lead may not grant it, infer it, or derive it from "it is strictly better
+than master".
+
+Corollary, stated because it has been got wrong: **"we cannot report matching numbers" is
+itself a product defect**, not a presentation choice. Two views of one quantity must agree
+or the product is wrong. Do not ask which wrong number to display — fix the disagreement.
+
 eBPF wait-event tracer for PostgreSQL (C + BPF daemon, `pgwt-server` analysis
 backend, Go WebSocket bridge, ECharts/uPlot web UI). Plan and status:
 `docs/ROADMAP_AND_STATUS.md`. Nothing eBPF-related runs on macOS.
