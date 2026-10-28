@@ -562,6 +562,24 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_open_cpu_unplaced_total",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_unplaced_total : 0);
+    /* Why a MISMATCH counter sits beside the uncredited one, and why it was
+     * not readable before: summary_cpu_open_uncredited_ns_total adds the
+     * WHOLE duration of a closed CPU record over one second whenever
+     * `already == 0`, and `already` is taken from the note's credit ONLY
+     * when the close-time identity check holds (same pid, same wait id,
+     * same start -- pgwt_summary_push_event). When it does not hold,
+     * `already` falls back to the pid's watermark, which is normally 0, so
+     * an interval that WAS credited second by second can still be counted
+     * whole into uncredited. open_note_mismatch_total is the only thing
+     * that tells those apart, and it was counted internally and published
+     * nowhere -- which is why the 2026-10-28 runs showed uncredited at
+     * 9.02 s, 9.07 s and 18.19 s with nothing able to say whether the
+     * spread was a different background population or the identity check
+     * refusing. A reader comparing uncredited across captures needs this
+     * number in the same response or the comparison is not interpretable. */
+    cjson_add_uint64(root, "summary_open_note_mismatch_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_note_mismatch_total : 0);
     cjson_add_uint64(root, "summary_open_table_full_total",
                      d->summary_writer
                          ? d->summary_writer->open_table_full_total : 0);

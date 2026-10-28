@@ -347,6 +347,7 @@ UNCRED=$(num "$M1" summary_cpu_open_uncredited_ns_total)
 IOREF=$(num "$M1" summary_open_io_worker_refused_total)
 IOREF_CPU=$(num "$M1" summary_open_cpu_io_worker_refused_total)
 UNPLACED=$(num "$M1" summary_open_cpu_unplaced_total)
+MISMATCH=$(num "$M1" summary_open_note_mismatch_total)
 TBLFULL=$(num "$M1" summary_open_table_full_total)
 EXPIRED=$(num "$M1" summary_open_notes_expired_total)
 V8CRED=$(num "$M1" summary_open_credited_ns_total)
@@ -359,6 +360,14 @@ echo "  summary_cpu_open_uncredited_ns_total = ${UNCRED:-n/a}"
 echo "  summary_open_io_worker_refused_total = ${IOREF:-n/a}  (WAIT notes included)"
 echo "  summary_open_cpu_io_worker_refused_total = ${IOREF_CPU:-n/a}  (the on-CPU subset)"
 echo "  summary_open_cpu_unplaced_total      = ${UNPLACED:-n/a}"
+# Printed next to uncredited because it is the only thing that makes
+# uncredited COMPARABLE across captures. uncredited adds a closed CPU
+# record's WHOLE duration whenever `already == 0`, and `already` is the
+# note's credit only while the close-time identity check holds; when it does
+# not, an interval that WAS credited is still counted whole. Non-zero here
+# means a reading of uncredited is partly that, not a population of
+# never-credited gaps. See the comment at this key in src/control.c.
+echo "  summary_open_note_mismatch_total     = ${MISMATCH:-n/a}  (makes uncredited comparable)"
 echo "  summary_open_table_full_total        = ${TBLFULL:-n/a}"
 echo "  summary_open_notes_expired_total     = ${EXPIRED:-n/a}"
 echo "  summary_open_credited_ns_total = ${V8CRED:-n/a}  (WAIT credit, same seal)"
@@ -405,20 +414,31 @@ if [[ "$CRED" -gt 0 ]]; then
     #   (3) 4 * measured >= DELTA   the BULK of the stimulus, not a token
     #                               second. DELTA is this daemon's own
     #                               schedstat total across the stimulus
-    #                               (cpu_ns_total, independent provenance
-    #                               from the credit). A gap of L seconds
-    #                               can place about L - 2.1 of them (the
-    #                               second must complete, plus
-    #                               PGWT_SUMMARY_FLUSH_LAG_NS, plus the
-    #                               first partial second, which rides the
-    #                               closing record instead) -- so at the
-    #                               >= 3 s floor enforced above the placed
-    #                               fraction is already ~30%, and DELTA
-    #                               also carries the aux backends' CPU,
-    #                               which only makes the denominator
-    #                               bigger. 25% leaves that headroom while
-    #                               still rejecting a one-second credit of
-    #                               a ten-second gap (10%).
+    #                               (cpu_ns_total), which is independent
+    #                               provenance from the credit -- that part
+    #                               is what makes the comparison worth
+    #                               making at all.
+    #
+    # THE 25% IS EMPIRICAL, NOT DERIVED, and this comment said otherwise
+    # until 2026-10-28. The retracted argument ran "a gap of L seconds can
+    # place about L - 2.1 of them, so at the >= 3 s floor above the placed
+    # fraction is already ~30%". It does not hold, for two independent
+    # reasons, and a reviewer relied on it:
+    #   - the >= 3 s check measures the BATCH wall time of three concurrent
+    #     psql children. It bounds no individual interval's length, which is
+    #     the quantity the L - 2.1 argument needs.
+    #   - DELTA carries every other backend's CPU as well. Calling that
+    #     "headroom" assumes its sign without measuring it, and on an idle
+    #     box versus a loaded one it is exactly what moves the ratio.
+    # So the floor is what it is: a number set BELOW every value measured so
+    # far, whose job is to reject a token credit. MEASURED on pgwt-gate-3 and
+    # one ephemeral VM, same stimulus, n = 3: 86%, 61%, 60% (min 60, spread
+    # 26 pp; the 86% is a hand-run on an otherwise idle box, which is the
+    # smaller denominator). 25% is 2.4x below the minimum observed and 2.5x
+    # above the ~10% a first-second-only credit produces (harness scenario
+    # J). It is NOT a model of the seal lag, and nobody should read one out
+    # of it: if a future run lands under 25%, that is a finding about the
+    # seal to investigate, not noise to absorb by widening this number.
     DELTA=$(( CPU1 - CPU0 ))
     bad=0
     if [[ -z "$MEAS" ]] || [[ "$MEAS" -le 0 ]]; then

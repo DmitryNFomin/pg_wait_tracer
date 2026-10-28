@@ -240,7 +240,12 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           # so dropping them from this response disarms that fixture rather
           # than failing it.
           'summary_open_cpu_io_worker_refused_total',
-          'summary_open_cpu_unplaced_total'):
+          'summary_open_cpu_unplaced_total',
+          # Without this one, summary_cpu_open_uncredited_ns_total is not
+          # comparable across captures: it adds a closed CPU record's whole
+          # duration whenever the close-time identity check refuses, and this
+          # is the only counter that says so (src/control.c has the detail).
+          'summary_open_note_mismatch_total'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.
