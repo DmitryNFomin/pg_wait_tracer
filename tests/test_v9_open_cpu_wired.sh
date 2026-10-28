@@ -215,6 +215,30 @@ if [[ -z "$CPU1" ]] || [[ "$CPU1" -le "$CPU0" ]]; then
 fi
 echo "  ok: stimulus PROVEN -- cpu_ns_total moved $CPU0 -> $CPU1"
 
+# THE DAEMON IS NOT EMPTY, asserted on the SAME metrics object the counter
+# below is read from. Without this, a zero credited_ns has two readings --
+# "the credit path never fired" and "this read happened before any event was
+# processed" -- and the second one makes the real assertion vacuous, which is
+# the shape #681 spent a day deleting. events_total is the daemon's own count
+# of processed ring events; a daemon that has handled none cannot have
+# credited anything, so a zero would be correct rather than a defect.
+# A PRECONDITION, not a wait: nothing here sleeps or retries waiting for the
+# number to appear. By this point the stimulus has already been reaped with
+# `wait` and cpu_ns_total has already been proven to move, so if events_total
+# is still 0 the daemon is genuinely not processing events and that -- not the
+# counter -- is the finding.
+EVT=$(num "$M1" events_total)
+if [[ -z "$EVT" ]] || [[ "$EVT" -le 0 ]]; then
+    echo "  REFUSE: events_total=${EVT:-absent} on the same metrics read the"
+    echo "          credited_ns assertion uses. The daemon processed no"
+    echo "          events, so credited_ns == 0 is the CORRECT answer and"
+    echo "          this check never tested the credit path at all. The"
+    echo "          defect is in this fixture, not in src/."
+    echo "=== test_v9_open_cpu_wired: REFUSE ==="
+    exit 2
+fi
+echo "  ok: the daemon is not empty -- events_total = $EVT on the same read"
+
 CRED=$(num "$M1" summary_open_cpu_credited_ns)
 REFUSED=$(num "$M1" summary_open_cpu_refused_total)
 UNCRED=$(num "$M1" summary_cpu_open_uncredited_ns_total)
