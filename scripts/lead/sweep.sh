@@ -226,9 +226,37 @@ echo "-- [9] dispatch queue -> $DQ"
 LEDGER="/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead/.active-agents"
 SANITY_MAX=20   # generous over the 3-agent cap (reviewers/advisers share the ledger too)
 RUNNING_N=$(/usr/bin/python3 "$SELFDIR/agent-ledger.py" count "$LEDGER" 2>/dev/null)
-/usr/bin/python3 - "$TMP" "$DQ" "$RUNNING_N" "$SANITY_MAX" <<'PY'
+
+# ---- independent corroboration for a LOW running count ---------------------
+# SANITY_MAX above catches "too high" (227 against a cap of 3). This is the
+# mirror and the more dangerous direction: "too low against evidence to the
+# contrary" fires escalation hardest exactly when the ledger knows least --
+# cold start, before any already-running agent has ever lived through a
+# fresh SubagentStart/Stop pair to populate it. Two independent signals,
+# checked only when the ledger says running==0:
+#   - a `make check` actually holding the machine-wide lock RIGHT NOW
+#     (scripts/check-lock.py processes -- pgrep, no portability concern)
+#   - a worktree's own git ADMIN dir touched recently. Deliberately
+#     .git/worktrees/<name>/HEAD, not the worktree's checked-out file tree
+#     (which can sit unmodified for a long session with no commits) and not
+#     the worktree directory's own mtime (which only changes when entries
+#     are added/removed inside it, never when HEAD moves -- confirmed by
+#     hand: 14 worktrees had a HEAD touched in the last 2h while the
+#     directory-mtime version of this same check read zero).
+# Either signal nonzero while running==0 is a disagreement, not an answer:
+# refuse, the same discipline SANITY_MAX already applies at the other end.
+CHECK_PROCS=$(pgrep -f 'scripts/check-lock.py' 2>/dev/null | wc -l | tr -d ' ')
+WT_CUTOFF=$(date -v-2H +"%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+if [ -n "$WT_CUTOFF" ]; then
+  RECENT_WT=$(find .git/worktrees -maxdepth 2 -name 'HEAD' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
+else
+  RECENT_WT=""   # `date -v` unsupported on this host -- unknown, not zero
+fi
+
+/usr/bin/python3 - "$TMP" "$DQ" "$RUNNING_N" "$SANITY_MAX" "$CHECK_PROCS" "$RECENT_WT" <<'PY'
 import json, os, re, sys
 t, dq, running_raw, sanity_max = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+check_procs_raw, recent_wt_raw = sys.argv[5], sys.argv[6]
 
 def write_unknown(reason):
     tmp = dq + ".tmp"
@@ -249,6 +277,22 @@ if running > sanity_max:
         f"running-agent count {running} is implausible for a 3-agent-cap "
         f"project (> SANITY_MAX={sanity_max}) -- refusing to trust the proxy "
         f"rather than writing a running/cap pair nobody could act on"
+    ); raise SystemExit
+
+def _int_or_none(s):
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+check_procs = _int_or_none(check_procs_raw) or 0
+recent_wt = _int_or_none(recent_wt_raw)  # None if `date -v` was unavailable
+if running == 0 and (check_procs > 0 or (recent_wt or 0) > 0):
+    write_unknown(
+        f"running-agent ledger reports 0 but independent evidence disagrees "
+        f"(check-lock processes={check_procs}, worktrees with HEAD touched "
+        f"<2h={'n/a' if recent_wt is None else recent_wt}) -- a cold-start "
+        f"ledger against contrary evidence is a disagreement, not an answer"
     ); raise SystemExit
 
 try:
