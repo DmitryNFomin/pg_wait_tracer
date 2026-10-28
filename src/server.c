@@ -5555,7 +5555,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     uint64_t to   = req->to_ns   ? req->to_ns   : srv->latest_wall_ns;
     double wall_ms = (double)(to - from) / 1e6;
 
-    /* Force raw events when class/event filter active (need per-event breakdown) */
+    /* Class/event filters need an explicit backend activity scope note below. */
     int has_event_filter = (req->filter.class_name[0] != '\0' ||
                             req->filter.has_event_filter);
 
@@ -5564,92 +5564,20 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_trace_event *all_events = NULL;
     struct pgwt_queries_result res;
     struct pgwt_load_info linfo = {0};
-    struct pgwt_wfid wfid = {0};
-    int from_summaries = 0;
-    /* #598 AVAILABILITY: this tracks measurement, not the response route;
-     * the summary route also measures via its existing raw backfill pass. */
-    int unattributed_available = 1;
-    int top_wait_unavailable = 0;
-    const char *top_wait_unavailable_reason = NULL;
 
-    /* Use summaries for large ranges (>120s) for the class breakdown.
-     * Always load raw events for lifecycle stats (exec/plan counts).
-     * A file too large to cache is read on-demand, so this is safe; a cached
-     * one (immutable, or #283's committed-block run for current.trace) costs
-     * memory bounded by cache_max_events() rather than by this call.
-     * No pid pushdown: the lifecycle stats below read exec/plan markers
-     * across ALL pids (markers never pass the uniform filter). */
+    /* Always compute Queries from raw: summary queries[] files the full
+     * duration at close, mixing bases with raw-measured unattributed time
+     * and query-filtered Events. #324's own fix is to force raw, measured
+     * 1.7-1.8x faster than summaries at every window (n=3).
+     * A file too large to cache is read on-demand; cached memory is bounded
+     * by cache_max_events(). Reuse this load for lifecycle and context stats.
+     * No pid pushdown: lifecycle stats read exec/plan markers across ALL
+     * pids (markers never pass the uniform filter). */
     all_events = server_load_events_fi(srv, req->from_ns, req->to_ns, 0,
                                        &ecount, &linfo);
     if (reject_overload(srv, req, all_events, &linfo)) return;
-    if (!has_event_filter && should_use_summaries(srv, req, &wfid)) {
-        pgwt_compute_top_queries_from_summaries(srv->trace_dir, from, to,
-                                                 &req->filter, wall_ms, &res);
-        from_summaries = 1;
-        unattributed_available = 0;
-
-        /* #319: same backfill as handle_top_sessions, and cheaper here --
-         * `all_events` above is ALREADY a full raw load of this exact
-         * window (lifecycle stats need it unconditionally) and has ALREADY
-         * cleared reject_overload, so there is no second raw load and no
-         * window-too-large case to degrade for: only an allocation failure
-         * in the raw compute can make this backfill unavailable.
-         * struct pgwt_summary_query's top_wait_ns is
-         * the same per-second "longest single wait" shape as sessions' (see
-         * accum_query_add in summary_writer.c), so it answers a different
-         * question from raw's per-event-TOTAL argmax the same way. */
-        /* #598 EMPTY summary result: no query rows can still mean real
-         * unattributed time. Run the raw pass even with zero summary rows.
-         * Summary FAILURE (res.failed) is terminal: the compute_failed block
-         * below returns before any unattributed fields can be emitted. */
-        if (!res.failed) {
-            struct pgwt_queries_result raw_res;
-            pgwt_compute_top_queries(all_events, ecount, &req->filter,
-                                     req->from_ns, req->to_ns, wall_ms,
-                                     &raw_res);
-            if (raw_res.failed) {
-                /* #598 raw-pass FAILURE is nonterminal: leave availability
-                 * false and all three summary scalars zero. An allocation
-                 * failure is not a measured zero. */
-                top_wait_unavailable = 1;
-                top_wait_unavailable_reason = "compute_failed";
-            } else {
-                res.unattributed_ms = raw_res.unattributed_ms;
-                res.unattributed_count = raw_res.unattributed_count;
-                res.backfilled_ms = raw_res.backfilled_ms;
-                unattributed_available = 1;
-                /* The per-row backfill is naturally a no-op over zero rows;
-                 * only these row fields depend on rows being present. */
-                for (int i = 0; i < res.num_rows; i++) {
-                    for (int j = 0; j < raw_res.num_rows; j++) {
-                        if (raw_res.rows[j].query_id != res.rows[i].query_id)
-                            continue;
-                        res.rows[i].top_wait_id = raw_res.rows[j].top_wait_id;
-                        memcpy(res.rows[i].top_wait, raw_res.rows[j].top_wait,
-                              sizeof(res.rows[i].top_wait));
-                        /* #441: and the latency average, from the SAME raw
-                         * pass, for the SAME window and filter. The summary
-                         * records carry no full durations, so
-                         * pgwt_compute_top_queries_from_summaries now leaves
-                         * exact_count 0 (= unavailable) instead of dividing
-                         * in-window DB Time by an interval count and calling
-                         * the result a latency. Backfilling here means the
-                         * two paths do not merely "agree" by coincidence --
-                         * there is exactly ONE definition of this column,
-                         * computed in one place. A query the raw pass has no
-                         * row for keeps exact_count 0 and is emitted null. */
-                        res.rows[i].exact_count = raw_res.rows[j].exact_count;
-                        res.rows[i].avg_us      = raw_res.rows[j].avg_us;
-                        break;
-                    }
-                }
-            }
-            free(raw_res.rows);
-        }
-    } else {
-        pgwt_compute_top_queries(all_events, ecount, &req->filter,
-                                 req->from_ns, req->to_ns, wall_ms, &res);
-    }
+    pgwt_compute_top_queries(all_events, ecount, &req->filter,
+                             req->from_ns, req->to_ns, wall_ms, &res);
 
     /* Compute per-query exec/plan stats from markers (same events, no
      * second load). #275: this used to be inline here with a fixed
@@ -5694,9 +5622,9 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     pgwt_query_ctx_index_build(&qctx, all_events, ecount,
                                srv_bm_context_resolver, srv);
     /* #327: `res.failed` joins this condition rather than adding a second
-     * arm — the per-query-id table in pgwt_compute_top_queries (and in the
-     * summary path) is unbounded now, and an allocation failure there fails
-     * the request for the same reason the lifecycle scan's does. `qctx` is
+     * arm — the per-query-id table in pgwt_compute_top_queries is unbounded
+     * now, and an allocation failure there fails the request for the same
+     * reason the lifecycle scan's does. `qctx` is
      * here for the same reason, and because a half-built context table
      * reports rows as context-less, which is exactly what a legitimately
      * context-less row looks like: absence is never reported as zero. */
@@ -5715,8 +5643,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                                         : "query context index build failed");
         cJSON_AddStringToObject(err, "code", "compute_failed");
         cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
-        if (from_summaries) add_fidelity_window(err, &wfid);
-        else                add_fidelity(err, &linfo);
+        add_fidelity(err, &linfo);
         emit_json(err);
         return;
     }
@@ -5763,14 +5690,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
-    if (from_summaries) add_fidelity_window(root, &wfid);
-    else                add_fidelity(root, &linfo);
-    /* #319: see the matching comment in handle_top_sessions. */
-    if (top_wait_unavailable) {
-        cJSON_AddTrueToObject(root, "top_wait_unavailable");
-        cJSON_AddStringToObject(root, "top_wait_unavailable_reason",
-                                top_wait_unavailable_reason);
-    }
+    add_fidelity(root, &linfo);
 
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
@@ -5796,20 +5716,12 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
             cJSON_AddNullToObject(r, "avg_us");
         cJSON_AddNumberToObject(r, "pct", res.rows[i].pct_db);
 
-        /* #319: emitted at the SAME POINT relative to the CPU-dominance
-         * override below as before this change (that override mutates
-         * res.rows[i].top_wait/top_wait_id AFTER the JSON node already
-         * holds a copy of the old value -- a pre-existing, unrelated
-         * no-op this fix does not touch either way). */
-        if (top_wait_unavailable) {
-            cJSON_AddNullToObject(r, "top_wait");
-            cJSON_AddNumberToObject(r, "top_wait_id", 0);
-        } else {
-            cJSON_AddStringToObject(r, "top_wait", res.rows[i].top_wait);
-            cJSON_AddNumberToObject(r, "top_wait_id", res.rows[i].top_wait_id);
-        }
+        /* Emit the raw winner before the existing CPU-dominance override,
+         * preserving the raw response's emission order. */
+        cJSON_AddStringToObject(r, "top_wait", res.rows[i].top_wait);
+        cJSON_AddNumberToObject(r, "top_wait_id", res.rows[i].top_wait_id);
 
-        /* Override top_wait if CPU dominates (summary path doesn't track CPU as a wait) */
+        /* Override top_wait if CPU dominates. */
         if (res.rows[i].class_ms[PGWT_CLASS_CPU] > 0) {
             double cpu_ms = res.rows[i].class_ms[PGWT_CLASS_CPU];
             /* Check if CPU is the largest class */
@@ -5866,7 +5778,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
             cJSON_AddItemToArray(classes,
                 cJSON_CreateNumber(res.rows[i].class_ms[c]));
 
-        /* Per-event breakdown (when available from raw events path) */
+        /* Per-event breakdown from the raw computation. */
         if (res.rows[i].num_events > 0) {
             char ename[64];
             cJSON *events_arr = cJSON_AddArrayToObject(r, "events");
@@ -5969,14 +5881,9 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     }
 
     cJSON_AddNumberToObject(root, "db_time_ms", res.db_time_ms);
-    /* #128: never silent — foreground time no query claimed, and how much
-     * row time was attributed to an id reported after the interval closed.
-     * The per-second summaries attribute at write time (their rows DO carry
-     * late-reported ids) but have no unattributed bucket. Both routes now
-     * measure these scalars from raw events: the summary route reuses its
-     * existing backfill pass. unattributed_available means measured, even
-     * when zero; false means that raw pass failed, not that summaries served
-     * the rows. */
+    /* #128: report foreground time no query claimed, and how much row
+     * time was attributed to an id reported after the interval closed.
+     * All totals, rows and these scalars share the same raw computation. */
     /* #441: the SCOPE of the exec/plan columns, stated on the wire instead of
      * assumed by the reader. "whole-query" means every pid that ran the
      * query, which is what a class/event filter deliberately leaves alone;
@@ -5988,7 +5895,10 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     if (lifecycle_pid_unscoped)
         cJSON_AddStringToObject(root, "exec_stats_unavailable_reason",
                                 "execution statistics are not scoped to a pid");
-    cJSON_AddBoolToObject(root, "unattributed_available", unattributed_available);
+    /* #598: the sole raw compute always measures these scalars; failure is
+     * terminal above, so availability cannot be false in a success response.
+     * Retain this constant true field for wire compatibility. */
+    cJSON_AddTrueToObject(root, "unattributed_available");
     cJSON_AddNumberToObject(root, "unattributed_ms", res.unattributed_ms);
     cJSON_AddNumberToObject(root, "unattributed_count",
                             (double)res.unattributed_count);

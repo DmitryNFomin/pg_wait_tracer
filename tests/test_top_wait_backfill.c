@@ -1,39 +1,19 @@
-/* test_top_sessions_backfill.c — #319: top_wait answers a DIFFERENT question
- * on the summary path (longest single wait, per second) than on the raw
- * path (largest per-event TOTAL over the whole window), on BOTH the
- * Sessions and the Top Queries tabs (struct pgwt_summary_session and struct
- * pgwt_summary_query each keep their own per-second "dur > top_wait_ns",
- * same shape, same bug). handle_top_sessions and handle_top_queries now
- * each backfill top_wait from a raw computation over the SAME window
- * already being served, so every other field (db_time_ms, cpu_pct,
- * wait_pct / count, total_ms, the row set) stays the cheap summary answer
- * and only top_wait becomes the bit-exact raw one.
+/* test_top_wait_backfill.c — Sessions retain #319's raw top_wait backfill;
+ * Queries now compute their entire answer directly from raw events.
+ * Summary-only top_wait (longest single wait per second) disagrees with
+ * raw's largest per-event TOTAL over the window in the shared fixture:
+ * IO:WalSync has one 40 ms wait; Lock:relation has ten 10 ms waits.
  *
- * Section 1 proves the Sessions backfill: a session (pid 501, query id
- * TARGET_QID) whose summary-only top_wait would read IO:WalSync (one 40 ms
- * wait, the single longest interval any second records) while its raw
- * total is dominated by Lock:relation (10 x 10 ms = 100 ms). Without the
- * backfill, handle_top_sessions reports IO:WalSync — this file pins the GAP
- * by computing the summary-only answer directly off the same files and
- * asserting it disagrees with raw, so a revert of the backfill is caught
- * (demonstrated in the PR body's red-run log).
- *
- * Section 2 proves the Sessions fail-safe: when the raw load the backfill
- * needs would itself overload (PGWT_LOAD_MAX_EVENTS set tiny), the response
- * reports top_wait_unavailable with a reason and top_wait: null — never the
- * (possibly wrong) summary-only name, and never a silently blank field. Run
- * in a forked child so the process-wide load_max_events() cache picked up
- * by the child's deliberately small override never leaks into section 1.
- *
- * Section 3 proves the Top Queries backfill, same fixture (the same
- * TARGET_PID events all carry query_id TARGET_QID): the served row for
- * TARGET_QID must read Lock, not IO. handle_top_queries loads its raw
- * events UNCONDITIONALLY (lifecycle stats need them regardless of route),
- * so its backfill has no analogous overload case to pin here — a raw load
- * that would overload fails the WHOLE request earlier, through the existing
- * reject_overload, unchanged by this fix; only an allocation failure inside
- * the backfill's own compute could produce top_wait_unavailable there, and
- * that shares the same reporting path pinned by section 2.
+ * Sections 1 and 2 pin the Sessions backfill and overload degradation.
+ * Section 2b pins the existing Events/Queries overload hints.
+ * Section 3 pins Queries' raw top_wait against the summary-only IO answer.
+ * Section 3b requires an unfiltered >=120 s request that would qualify for
+ * summaries to match direct raw computation, including clipped row totals
+ * and percentages. Its straddling interval forces a numeric disagreement
+ * with summaries: a fixture that cannot distinguish the routes must fail.
+ * Sections 4 and 5 retain summary-predicate and query-filtered Events gates.
+ * Sections 6 and 7 pin raw unattributed/backfilled measurements, empty
+ * controls with and without summaries, and terminal raw compute failure.
  */
 #define main pgwt_server_main
 #include "../src/server.c"
@@ -232,18 +212,11 @@ static void build_fixture(const char *dir, uint64_t base_mono, int with_summarie
     }
 }
 
-/* ROUTE ASSERTION (bypass-suite plug). Sections 1 and 3 assert the SERVED
- * top_wait is the raw winner -- but the raw path produces that answer too,
- * for free. So if should_use_summaries ever stops returning true for this
- * fixture (a missing/old-version summary file, a window that slips under
- * the 120 s floor, a future routing change), the handler would serve raw,
- * both sections would stay GREEN, and the backfill they exist to pin would
- * never execute. This is the exact false negative the gate must refuse
- * rather than approve: every section that claims to test the backfill
- * first proves the backfill's route was taken. Section 4 proves this
- * predicate is not vacuously true by showing it FALSE on a fixture with no
- * summary file. */
-static int route_is_summaries(struct pgwt_server *srv, struct pgwt_request *req)
+/* Sessions still route on this predicate. Queries deliberately override a
+ * true result, so their gates must pair it with direct raw expectations and
+ * a summary-only answer that differs. Events also has a query-id guard.
+ * Summary-less controls prove the predicate is not vacuously true. */
+static int summaries_would_be_used(struct pgwt_server *srv, struct pgwt_request *req)
 {
     struct pgwt_wfid wf = {0};
     return should_use_summaries(srv, req, &wf);
@@ -329,7 +302,7 @@ static void test_backfill_matches_raw(const char *dir, uint64_t base_mono)
     req.from_ns = 0;
     req.to_ns = 0; /* use server's own discovered coverage */
 
-    CHECK(route_is_summaries(srv, &req),
+    CHECK(summaries_would_be_used(srv, &req),
           "the SUMMARY route is taken for this request -- otherwise the raw "
           "path answers it, the backfill never runs, and every assertion "
           "below passes without testing anything");
@@ -535,10 +508,33 @@ static void test_query_filter_overload_hints(const char *dir)
     }
 }
 
-/* ── Section 3: the Top Queries backfill ────────────────────────────────── */
-static void test_queries_backfill_matches_raw(const char *dir)
+static void compute_raw_queries(struct pgwt_server *srv,
+                                 struct pgwt_request *req,
+                                 struct pgwt_queries_result *raw)
 {
-    printf("--- 3. queries backfill matches raw, not the summary-only "
+    int count = 0;
+    struct pgwt_load_info linfo = {0};
+    struct pgwt_trace_event *events =
+        server_load_events_fi(srv, req->from_ns, req->to_ns, 0, &count, &linfo);
+    CHECK(events != NULL && count > 0, "raw query expectation has events");
+    uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
+    uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
+    pgwt_compute_top_queries(events, count, &req->filter,
+                             req->from_ns, req->to_ns,
+                             (double)(to - from) / 1e6, raw);
+    CHECK(!raw->failed, "direct raw query computation succeeds");
+    free(events);
+}
+
+static int json_number_equals(cJSON *value, double expected)
+{
+    return cJSON_IsNumber(value) && fabs(value->valuedouble - expected) < 1e-6;
+}
+
+/* ── Section 3: Top Queries answers top_wait directly from raw ────────── */
+static void test_queries_top_wait_matches_raw(const char *dir)
+{
+    printf("--- 3. Queries serves raw top_wait instead of summary-only "
            "longest wait ---\n");
 
     struct pgwt_server *srv = calloc(1, sizeof(*srv));
@@ -549,9 +545,8 @@ static void test_queries_backfill_matches_raw(const char *dir)
     req.from_ns = 0;
     req.to_ns = 0;
 
-    CHECK(route_is_summaries(srv, &req),
-          "the SUMMARY route is taken for this request -- see the comment on "
-          "route_is_summaries");
+    CHECK(summaries_would_be_used(srv, &req),
+          "should_use_summaries WOULD accept this window; Queries forces raw");
 
     cJSON *out = call_top_queries(srv, &req);
     CHECK(out != NULL, "handle_top_queries produced parseable JSON");
@@ -580,14 +575,12 @@ static void test_queries_backfill_matches_raw(const char *dir)
         CHECK(tw && cJSON_IsString(tw) &&
               strstr(tw->valuestring, "WalSync") == NULL,
               "served top_wait is NOT IO:WalSync (the summary-only, "
-              "single-longest-wait answer this backfill replaces), got %s",
+              "single-longest-wait answer raw replaces), got %s",
               tw && cJSON_IsString(tw) ? tw->valuestring : "(null)");
     }
 
-    /* THE GAP THIS CLOSES, same shape as section 1: the summary path's OWN
-     * per-query answer, read directly off the same files with no backfill
-     * in the loop, is IO -- so removing the backfill in handle_top_queries
-     * would make the served row disagree with raw again. */
+    /* The summary-only answer remains IO. Queries now serves the raw Lock
+     * winner directly, rather than overwriting summary rows in a backfill. */
     struct pgwt_queries_result summary_only;
     struct pgwt_filter empty_filter = {0};
     pgwt_compute_top_queries_from_summaries(dir, srv->earliest_wall_ns,
@@ -601,8 +594,7 @@ static void test_queries_backfill_matches_raw(const char *dir)
         CHECK(strstr(summary_only.rows[i].top_wait, "IO") != NULL,
               "fixture is well-formed: the UNPATCHED summary-only answer "
               "for query %llu is IO (single longest wait), got %s -- "
-              "otherwise this test cannot tell a working backfill from a "
-              "no-op one", (unsigned long long)TARGET_QID,
+              "otherwise this fixture cannot distinguish raw from summaries", (unsigned long long)TARGET_QID,
               summary_only.rows[i].top_wait);
     }
     CHECK(found_summary_only, "query_id %llu present in the summary-only "
@@ -613,8 +605,134 @@ static void test_queries_backfill_matches_raw(const char *dir)
     free(srv);
 }
 
+/* 3b: summary eligibility must never select the Queries compute anymore.
+ * The window cuts a 2500 ms wait at 1500 ms, before its summary close.
+ * Require a real numeric gap, then compare every compute-derived field of
+ * every served row with the direct raw answer over these same events. */
+static void test_queries_force_raw(const char *dir)
+{
+    printf("--- 3b. unfiltered >=120 s Queries forces raw despite summary "
+           "eligibility ---\n");
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    CHECK(srv != NULL && server_init(srv, dir) == 0, "server_init");
+    if (!srv) return;
+    struct pgwt_request req = {0};
+    req.from_ns = srv->earliest_wall_ns;
+    req.to_ns = srv->earliest_wall_ns - 10 * MS + 127 * ONE_SEC;
+    CHECK(req.to_ns - req.from_ns >= 120 * ONE_SEC,
+          "unfiltered Queries window spans >=120 s");
+    CHECK(summaries_would_be_used(srv, &req),
+          "should_use_summaries is TRUE; handler must override its answer");
+
+    struct pgwt_queries_result raw, summary_only;
+    compute_raw_queries(srv, &req, &raw);
+    pgwt_compute_top_queries_from_summaries(dir, req.from_ns, req.to_ns,
+                                           &req.filter,
+                                           (double)(req.to_ns - req.from_ns) / 1e6,
+                                           &summary_only);
+    CHECK(!summary_only.failed, "direct summary query computation succeeds");
+    CHECK(fabs(raw.db_time_ms - summary_only.db_time_ms) > 1e-6,
+          "fixture MUST distinguish raw DB Time from summaries "
+          "(raw %.9f, summary %.9f)", raw.db_time_ms, summary_only.db_time_ms);
+    const struct pgwt_query_row *raw_target = NULL, *summary_target = NULL;
+    for (int i = 0; i < raw.num_rows; i++)
+        if (raw.rows[i].query_id == TARGET_QID) raw_target = &raw.rows[i];
+    for (int i = 0; i < summary_only.num_rows; i++)
+        if (summary_only.rows[i].query_id == TARGET_QID)
+            summary_target = &summary_only.rows[i];
+    CHECK(raw_target && fabs(raw_target->total_ms -
+                            (140 + STRADDLE_IN_WINDOW_MS)) < 1e-6,
+          "raw query total includes exactly 1500 ms of the straddling wait");
+    CHECK(raw_target && summary_target &&
+          fabs(raw_target->total_ms - summary_target->total_ms) > 1e-6,
+          "fixture MUST distinguish raw query-row time from summaries");
+
+    cJSON *out = call_top_queries(srv, &req);
+    CHECK(out && cJSON_GetObjectItem(out, "error") == NULL,
+          "unfiltered long-window Queries request succeeds");
+    cJSON *db_time = cJSON_GetObjectItem(out, "db_time_ms");
+    CHECK(json_number_equals(db_time, raw.db_time_ms),
+          "served DB Time equals direct raw computation");
+    CHECK(cJSON_IsNumber(db_time) &&
+          fabs(db_time->valuedouble - summary_only.db_time_ms) > 1e-6,
+          "served DB Time MUST differ from summary-only computation");
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItem(out, "unattributed_available")),
+          "raw measurements are available");
+    CHECK(json_number_equals(cJSON_GetObjectItem(out, "unattributed_ms"),
+                             raw.unattributed_ms) &&
+          json_number_equals(cJSON_GetObjectItem(out, "unattributed_count"),
+                             (double)raw.unattributed_count) &&
+          json_number_equals(cJSON_GetObjectItem(out, "backfilled_ms"),
+                             raw.backfilled_ms),
+          "all three measurement scalars equal direct raw computation");
+    CHECK(cJSON_GetObjectItem(out, "top_wait_unavailable") == NULL &&
+          cJSON_GetObjectItem(out, "top_wait_unavailable_reason") == NULL,
+          "raw response has no summary-backfill unavailability fields");
+    cJSON *rows = cJSON_GetObjectItem(out, "rows");
+    CHECK(cJSON_IsArray(rows) && cJSON_GetArraySize(rows) == raw.num_rows,
+          "served row count equals direct raw computation");
+    for (int i = 0; i < raw.num_rows; i++) {
+        const struct pgwt_query_row *expected = &raw.rows[i];
+        cJSON *row = find_query_row(rows, expected->query_id);
+        CHECK(row != NULL, "raw query %llu is served",
+              (unsigned long long)expected->query_id);
+        CHECK(json_number_equals(cJSON_GetObjectItem(row, "count"),
+                                 (double)expected->count),
+              "served observation count equals raw");
+        CHECK(json_number_equals(cJSON_GetObjectItem(row, "total_ms"),
+                                 expected->total_ms),
+              "served query time equals clipped raw time");
+        CHECK(json_number_equals(cJSON_GetObjectItem(row, "pct"),
+                                 expected->pct_db),
+              "served percentage uses the same raw numerator and denominator");
+        cJSON *avg = cJSON_GetObjectItem(row, "avg_us");
+        CHECK(expected->exact_count ? json_number_equals(avg, expected->avg_us)
+                                    : cJSON_IsNull(avg),
+              "served latency equals raw full-duration latency or null");
+        cJSON *top_wait = cJSON_GetObjectItem(row, "top_wait");
+        CHECK(cJSON_IsString(top_wait) &&
+              strcmp(top_wait->valuestring, expected->top_wait) == 0 &&
+              json_number_equals(cJSON_GetObjectItem(row, "top_wait_id"),
+                                 expected->top_wait_id),
+              "served top_wait name and id equal raw");
+        cJSON *classes = cJSON_GetObjectItem(row, "classes");
+        int classes_match = cJSON_IsArray(classes) &&
+                            cJSON_GetArraySize(classes) == PGWT_NUM_CLASSES;
+        for (int c = 0; c < PGWT_NUM_CLASSES; c++)
+            classes_match &= json_number_equals(cJSON_GetArrayItem(classes, c),
+                                                 expected->class_ms[c]);
+        CHECK(classes_match, "every served class total equals raw");
+        cJSON *events = cJSON_GetObjectItem(row, "events");
+        int events_match = expected->num_events > 0
+            ? cJSON_IsArray(events) &&
+              cJSON_GetArraySize(events) == expected->num_events
+            : events == NULL;
+        for (int e = 0; e < expected->num_events; e++) {
+            cJSON *event = cJSON_GetArrayItem(events, e);
+            events_match &= json_number_equals(cJSON_GetObjectItem(event, "id"),
+                                                expected->event_ids[e]) &&
+                            json_number_equals(cJSON_GetObjectItem(event, "ms"),
+                                                expected->event_ms[e]);
+        }
+        CHECK(events_match, "every served per-event total and id equals raw");
+    }
+    cJSON *served_target = find_query_row(rows, TARGET_QID);
+    cJSON *served_total = cJSON_GetObjectItem(served_target, "total_ms");
+    CHECK(summary_target && cJSON_IsNumber(served_total) &&
+          fabs(served_total->valuedouble - summary_target->total_ms) > 1e-6,
+          "served query row MUST differ from the summary-only total");
+    printf("  Queries ms: summary %.9f, raw %.9f, served %.9f\n",
+           summary_target ? summary_target->total_ms : -1.0,
+           raw_target ? raw_target->total_ms : -1.0,
+           cJSON_IsNumber(served_total) ? served_total->valuedouble : -1.0);
+    cJSON_Delete(out);
+    free(raw.rows);
+    free(summary_only.rows);
+    free(srv);
+}
+
 /* -- Section 4: the route assertion can actually be FALSE ---------------- */
-/* Without this, route_is_summaries could be a constant-true predicate (a
+/* Without this, summaries_would_be_used could be a constant-true predicate (a
  * typo'd field, a short-circuit, a refactor that makes should_use_summaries
  * always take the summary branch) and sections 1 and 3 would still read as
  * if they had proved the route. Same fixture events, same 130 s window,
@@ -641,8 +759,8 @@ static void test_route_predicate_discriminates(const char *dir_no_summaries)
           "here is the missing summary file and not a too-short window "
           "(span %.1f s)",
           (double)(srv->latest_wall_ns - srv->earliest_wall_ns) / 1e9);
-    CHECK(!route_is_summaries(srv, &req),
-          "route_is_summaries is FALSE with no summary file -- so the TRUE "
+    CHECK(!summaries_would_be_used(srv, &req),
+          "summaries_would_be_used is FALSE with no summary file -- so the TRUE "
           "it returns in sections 1 and 3 is a real observation, not a "
           "constant");
 
@@ -698,7 +816,7 @@ static void test_events_query_filter_uses_raw(const char *dir, int straddle)
     req.filter.query_id = TARGET_QID;
     if (straddle)
         req.to_ns = srv->earliest_wall_ns - 10 * MS + 127 * ONE_SEC;
-    CHECK(route_is_summaries(srv, &req),
+    CHECK(summaries_would_be_used(srv, &req),
           "should_use_summaries WOULD accept the query-filtered window; "
           "the handler's query_id conjunct is the guard under test");
 
@@ -791,39 +909,21 @@ static void test_events_query_filter_uses_raw(const char *dir, int straddle)
     free(srv);
 }
 
-/* -- Section 6: #598 preserves all three raw scalars on summaries -------- */
+/* -- Section 6: #598 preserves all three measured raw scalars ------------ */
 /* PRESENCE alone passes against the old hardwired zeros. Require real
  * unattributed AND backfilled time, and compare every scalar to a direct
- * raw computation over the handler's exact events/window/filter. The route
- * CHECK prevents a raw fallback from silently bypassing the wiring. */
-static void compute_raw_queries(struct pgwt_server *srv,
-                                 struct pgwt_request *req,
-                                 struct pgwt_queries_result *raw)
-{
-    int count = 0;
-    struct pgwt_load_info linfo = {0};
-    struct pgwt_trace_event *events =
-        server_load_events_fi(srv, req->from_ns, req->to_ns, 0, &count, &linfo);
-    CHECK(events != NULL && count > 0, "raw query expectation has events");
-    uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
-    uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
-    pgwt_compute_top_queries(events, count, &req->filter,
-                             req->from_ns, req->to_ns,
-                             (double)(to - from) / 1e6, raw);
-    CHECK(!raw->failed, "direct raw query computation succeeds");
-    free(events);
-}
-
+ * raw computation over the handler's exact events/window/filter. Prove the
+ * predicate would have accepted summaries, while Queries still uses raw. */
 static void test_queries_unattributed_survives(const char *dir)
 {
-    printf("--- 6. summary Queries retain measured unattributed/backfilled "
+    printf("--- 6. Queries retain measured raw unattributed/backfilled "
            "time (#598) ---\n");
     struct pgwt_server *srv = calloc(1, sizeof(*srv));
     CHECK(srv != NULL && server_init(srv, dir) == 0, "server_init");
     if (!srv) return;
     struct pgwt_request req = {0};
-    CHECK(route_is_summaries(srv, &req),
-          "summary route is taken; otherwise #598 wiring is unreachable");
+    CHECK(summaries_would_be_used(srv, &req),
+          "should_use_summaries WOULD accept this unfiltered Queries window");
     struct pgwt_queries_result raw;
     compute_raw_queries(srv, &req, &raw);
     CHECK(raw.unattributed_ms > 0 && raw.unattributed_count > 0,
@@ -831,9 +931,9 @@ static void test_queries_unattributed_survives(const char *dir)
     CHECK(raw.backfilled_ms > 0, "fixture really contains backfilled time");
     cJSON *out = call_top_queries(srv, &req);
     CHECK(out != NULL && cJSON_GetObjectItem(out, "error") == NULL,
-          "summary Queries request succeeds");
+          "raw Queries request succeeds");
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(out, "unattributed_available")),
-          "summary route reports that it measured unattributed time");
+          "Queries reports that it measured unattributed time");
     cJSON *ms = cJSON_GetObjectItem(out, "unattributed_ms");
     cJSON *n = cJSON_GetObjectItem(out, "unattributed_count");
     cJSON *backfill = cJSON_GetObjectItem(out, "backfilled_ms");
@@ -855,17 +955,20 @@ static void test_queries_unattributed_survives(const char *dir)
 /* 7a: a zero measurement is available, not unmeasured. A second control has
  * NO query rows but DOES have unattributed time: testing only nonempty
  * results would miss the old res.num_rows > 0 gate around the raw pass. */
-static void test_queries_empty_controls(const char *dir, int no_query_rows)
+static void test_queries_empty_controls(const char *dir, int no_query_rows,
+                                         int with_summaries)
 {
-    printf("--- 7a. %s ---\n", no_query_rows
+    printf("--- 7a. %s, %s summaries ---\n", no_query_rows
            ? "zero query rows still measure real unattributed time"
-           : "no unattributed records is a measured zero");
+           : "no unattributed records is a measured zero",
+           with_summaries ? "with" : "without");
     struct pgwt_server *srv = calloc(1, sizeof(*srv));
     CHECK(srv != NULL && server_init(srv, dir) == 0, "server_init");
     if (!srv) return;
     struct pgwt_request req = {0};
-    CHECK(route_is_summaries(srv, &req),
-          "empty-input control really uses summaries, not a raw fallback");
+    if (with_summaries)
+        CHECK(summaries_would_be_used(srv, &req),
+              "should_use_summaries WOULD accept the empty-input control");
     struct pgwt_queries_result raw;
     compute_raw_queries(srv, &req, &raw);
     CHECK(no_query_rows ? (raw.num_rows == 0 && raw.unattributed_ms > 0)
@@ -873,7 +976,7 @@ static void test_queries_empty_controls(const char *dir, int no_query_rows)
           "raw control has the intended empty-input shape");
     cJSON *out = call_top_queries(srv, &req);
     CHECK(out != NULL && cJSON_GetObjectItem(out, "error") == NULL,
-          "empty-input summary request succeeds");
+          "empty-input raw Queries request succeeds");
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(out, "unattributed_available")),
           "successful raw pass is available even with an empty result");
     cJSON *ms = cJSON_GetObjectItem(out, "unattributed_ms");
@@ -896,44 +999,29 @@ static void test_queries_empty_controls(const char *dir, int no_query_rows)
     free(srv);
 }
 
-/* 7b: PGWT_LOAD_MAX_EVENTS refuses the WHOLE Queries request earlier, so it
- * cannot reach raw_res.failed. The existing queries_entries allocation hook
- * fails ONLY the raw computation (summaries use tq_summary_entries). In a
- * forked child, positively require the degraded response before checking
- * its availability invariant; an implication alone could pass vacuously.
- * Also pin the distinct terminal summary failure, which emits no scalars. */
-static int child_queries_failure(const char *dir, int summary_failure)
+/* 7b: queries_entries fails the sole raw computation, which is TERMINAL.
+ * Fork to isolate the allocation hook and positively require compute_failed
+ * plus absence of all measurement fields; no degraded response exists. */
+static int child_queries_failure(const char *dir)
 {
-    setenv("PGWT_TEST_ALLOC_FAIL", summary_failure
-           ? "tq_summary_entries" : "queries_entries", 1);
+    setenv("PGWT_TEST_ALLOC_FAIL", "queries_entries", 1);
     struct pgwt_server *srv = calloc(1, sizeof(*srv));
     if (!srv || server_init(srv, dir) != 0) return 1;
     struct pgwt_request req = {0};
-    if (!route_is_summaries(srv, &req)) return 2;
+    if (!summaries_would_be_used(srv, &req)) return 2;
     cJSON *out = call_top_queries(srv, &req);
     if (!out) return 3;
-    int ok;
-    if (summary_failure) {
-        cJSON *code = cJSON_GetObjectItem(out, "code");
-        ok = cJSON_IsString(code) && strcmp(code->valuestring, "compute_failed") == 0 &&
-             cJSON_GetObjectItem(out, "error") != NULL &&
+    cJSON *code = cJSON_GetObjectItem(out, "code");
+    cJSON *fidelity = cJSON_GetObjectItem(out, "fidelity");
+    int ok = cJSON_IsString(code) &&
+             strcmp(code->valuestring, "compute_failed") == 0 &&
+             cJSON_IsString(cJSON_GetObjectItem(out, "error")) &&
+             cJSON_IsString(fidelity) &&
+             strcmp(fidelity->valuestring, "exact") == 0 &&
              cJSON_GetObjectItem(out, "unattributed_available") == NULL &&
              cJSON_GetObjectItem(out, "unattributed_ms") == NULL &&
              cJSON_GetObjectItem(out, "unattributed_count") == NULL &&
              cJSON_GetObjectItem(out, "backfilled_ms") == NULL;
-    } else {
-        cJSON *ms = cJSON_GetObjectItem(out, "unattributed_ms");
-        cJSON *n = cJSON_GetObjectItem(out, "unattributed_count");
-        cJSON *backfill = cJSON_GetObjectItem(out, "backfilled_ms");
-        cJSON *row = find_query_row(cJSON_GetObjectItem(out, "rows"), TARGET_QID);
-        ok = cJSON_GetObjectItem(out, "error") == NULL &&
-             cJSON_IsTrue(cJSON_GetObjectItem(out, "top_wait_unavailable")) &&
-             cJSON_IsFalse(cJSON_GetObjectItem(out, "unattributed_available")) &&
-             cJSON_IsNumber(ms) && ms->valuedouble == 0 &&
-             cJSON_IsNumber(n) && n->valuedouble == 0 &&
-             cJSON_IsNumber(backfill) && backfill->valuedouble == 0 &&
-             row != NULL && cJSON_IsNull(cJSON_GetObjectItem(row, "top_wait"));
-    }
     cJSON_Delete(out);
     free(srv);
     return ok ? 0 : 4;
@@ -941,66 +1029,43 @@ static int child_queries_failure(const char *dir, int summary_failure)
 
 static void test_queries_failures(const char *dir)
 {
-    printf("--- 7b. raw-pass failure is unavailable; summary failure is "
-           "terminal ---\n");
-    for (int summary_failure = 0; summary_failure <= 1; summary_failure++) {
-        fflush(stdout);
-        pid_t pid = fork();
-        if (pid == 0) _exit(child_queries_failure(dir, summary_failure));
-        int status = 0;
-        int waited = pid > 0 ? waitpid(pid, &status, 0) : -1;
-        CHECK(waited == pid && pid > 0 && WIFEXITED(status) &&
-              WEXITSTATUS(status) == 0,
-              "%s failure child must reach the intended arm and report its "
-              "availability shape (exit %d)",
-              summary_failure ? "summary" : "raw-pass",
-              WIFEXITED(status) ? WEXITSTATUS(status) : -1);
-    }
+    printf("--- 7b. raw Queries compute failure is terminal ---\n");
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) _exit(child_queries_failure(dir));
+    int status = 0;
+    int waited = pid > 0 ? waitpid(pid, &status, 0) : -1;
+    CHECK(waited == pid && pid > 0 && WIFEXITED(status) &&
+          WEXITSTATUS(status) == 0,
+          "raw failure child must report compute_failed with fidelity and "
+          "no measurement fields (exit %d)",
+          WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 }
 
-/* 7c: one negative control per distinct request shape on the mixed
- * fixture, plus REAL summary-less twins of both section 7a fixtures. */
-static void test_new_routes_discriminate(const char *dir_nosum,
-                                         const char *dir_noattrib_nosum,
-                                         const char *dir_noqueries_nosum)
+/* 7c: retain the Events route discriminator. Queries always uses raw;
+ * its summary-less empty-input twins are exercised directly in 7a. */
+static void test_events_routes_discriminate(const char *dir_nosum)
 {
-    printf("--- 7c. distinct request shapes and both empty-input fixtures "
-           "can route to RAW ---\n");
-    const char *dirs[] = {dir_nosum, dir_noattrib_nosum, dir_noqueries_nosum};
-    const char *labels[] = {"mixed", "no unattributed records", "no query rows"};
-    for (int i = 0; i < 3; i++) {
-        struct pgwt_server *srv = calloc(1, sizeof(*srv));
-        CHECK(srv != NULL && server_init(srv, dirs[i]) == 0,
-              "server_init on summary-less %s fixture", labels[i]);
-        if (!srv) continue;
-        CHECK(srv->latest_wall_ns > srv->earliest_wall_ns &&
-              srv->latest_wall_ns - srv->earliest_wall_ns >= 120 * ONE_SEC,
-              "summary-less %s fixture still spans >= 120 s (span %.1f s)",
-              labels[i],
-              (double)(srv->latest_wall_ns - srv->earliest_wall_ns) / 1e9);
-        struct pgwt_request req = {0};
-        if (i == 0) {
-            req.filter.query_id = TARGET_QID;
-            CHECK(!route_is_summaries(srv, &req),
-                  "section 5 query-filtered Events request routes RAW "
-                  "without summaries");
-            req.to_ns = srv->earliest_wall_ns - 10 * MS + 127 * ONE_SEC;
-            CHECK(req.to_ns - srv->earliest_wall_ns >= 120 * ONE_SEC,
-                  "section 5 straddle window also spans >= 120 s");
-            CHECK(!route_is_summaries(srv, &req),
-                  "section 5 bounded query-filtered Events request routes "
-                  "RAW without summaries");
-            req.to_ns = 0;
-            req.filter.query_id = 0;
-        }
-        /* Sections 6, 7a and 7b all issue this identical unfiltered Queries
-         * request shape: one control on the mixed fixture covers all three.
-         * The other iterations separately test 7a's two different fixtures. */
-        CHECK(!route_is_summaries(srv, &req),
-              "unfiltered Queries request routes RAW on summary-less %s fixture",
-              labels[i]);
-        free(srv);
-    }
+    printf("--- 7c. query-filtered Events can route RAW without summaries ---\n");
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    CHECK(srv != NULL && server_init(srv, dir_nosum) == 0,
+          "server_init on summary-less mixed fixture");
+    if (!srv) return;
+    CHECK(srv->latest_wall_ns > srv->earliest_wall_ns &&
+          srv->latest_wall_ns - srv->earliest_wall_ns >= 120 * ONE_SEC,
+          "summary-less mixed fixture still spans >= 120 s (span %.1f s)",
+          (double)(srv->latest_wall_ns - srv->earliest_wall_ns) / 1e9);
+    struct pgwt_request req = {0};
+    req.filter.query_id = TARGET_QID;
+    CHECK(!summaries_would_be_used(srv, &req),
+          "section 5 query-filtered Events request routes RAW without summaries");
+    req.to_ns = srv->earliest_wall_ns - 10 * MS + 127 * ONE_SEC;
+    CHECK(req.to_ns - srv->earliest_wall_ns >= 120 * ONE_SEC,
+          "section 5 straddle window also spans >= 120 s");
+    CHECK(!summaries_would_be_used(srv, &req),
+          "section 5 bounded query-filtered Events request routes RAW "
+          "without summaries");
+    free(srv);
 }
 
 int main(void)
@@ -1035,20 +1100,22 @@ int main(void)
     test_overload_reports_absence(dir);
     test_query_filter_overload_hints(dir);
     test_backfill_matches_raw(dir, base_mono);
-    test_queries_backfill_matches_raw(dir);
+    test_queries_top_wait_matches_raw(dir);
+    test_queries_force_raw(dir_straddle);
     test_route_predicate_discriminates(dir_nosum);
     test_events_query_filter_uses_raw(dir, 0);
     test_events_query_filter_uses_raw(dir_straddle, 1);
     test_queries_unattributed_survives(dir);
-    test_queries_empty_controls(dir_noattrib, 0);
-    test_queries_empty_controls(dir_noqueries, 1);
+    test_queries_empty_controls(dir_noattrib, 0, 1);
+    test_queries_empty_controls(dir_noqueries, 1, 1);
+    test_queries_empty_controls(dir_noattrib_nosum, 0, 0);
+    test_queries_empty_controls(dir_noqueries_nosum, 1, 0);
     test_queries_failures(dir);
-    test_new_routes_discriminate(dir_nosum, dir_noattrib_nosum,
-                                 dir_noqueries_nosum);
+    test_events_routes_discriminate(dir_nosum);
 
     /* Require the observed assertion total: a truncated run must fail
      * even when all assertions it did execute passed. */
-    if (tests_run < 106) {
+    if (tests_run < 151) {
         printf("FAIL: only %d assertions executed -- a truncated run must "
                "not read as a pass\n", tests_run);
         tests_failed++;
