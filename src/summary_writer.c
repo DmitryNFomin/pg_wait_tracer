@@ -1569,8 +1569,10 @@ static inline bool open_creditable(const struct pgwt_summary_open *o)
  * producer withdrew it. The per-PID watermark deliberately SURVIVES (it is
  * what keeps a later record from double counting); only the description of
  * what is open is cleared. */
-static void open_stop_crediting(struct pgwt_summary_open *o)
+static void open_stop_crediting(struct pgwt_summary_writer *w,
+                                struct pgwt_summary_open *o)
 {
+    bool was_cpu = o->cpu_slot;
     o->we = 0;
     o->cpu_slot = 0;
     o->cpu_frozen = 0;
@@ -1578,6 +1580,8 @@ static void open_stop_crediting(struct pgwt_summary_open *o)
     o->cpu_eff_we = 0;
     o->cpu_prefix_ns = PGWT_CPU_NS_UNKNOWN;
     o->cpu_credited_ns = 0;
+    if (was_cpu)
+        w->open_cpu_retired_total++;
 }
 
 /* The measured-CPU half of one per-second credit of an open on-CPU gap.
@@ -1648,21 +1652,27 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec,
          * Complete-second seals retain the periodic staleness rule below. */
         if (closing && end > o->noted_ns)
             end = o->noted_ns;
-        if (end <= sec)
+        if (end <= sec) {
+            if (o->cpu_slot)
+                w->open_cpu_skip_end_le_sec_total++;
             continue;
+        }
         /* FAIL-SAFE (the one way this could fabricate time): a note the
          * producer stopped refreshing describes a pid that may no longer
          * exist. Stop crediting it, count the expiry, and keep the pid's
          * watermark so a later record still cannot double count. */
         if (o->noted_ns + PGWT_SUMMARY_OPEN_STALE_NS < end) {
-            open_stop_crediting(o);
+            open_stop_crediting(w, o);
             w->open_notes_expired_total++;
             continue;
         }
         uint64_t from = o->start_ns > o->credited_until_ns
                       ? o->start_ns : o->credited_until_ns;
-        if (from >= end)
+        if (from >= end) {
+            if (o->cpu_slot)
+                w->open_cpu_skip_from_ge_end_total++;
             continue;
+        }
         if (from < sec) {
             /* The seconds before this one are already on disk and immutable
              * (#277), so that part cannot be credited to the seconds it
@@ -1745,7 +1755,7 @@ static uint64_t earliest_open_second(struct pgwt_summary_writer *w,
              * nobody notices it stop working. At close, even an old note
              * confirms time through its own instant; retiring it against
              * another interval's later note would discard confirmed time. */
-            open_stop_crediting(o);
+            open_stop_crediting(w, o);
             w->open_notes_expired_total++;
             continue;
         }
@@ -1962,7 +1972,7 @@ void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
         w->open_io_worker_refused_total++;
         struct pgwt_summary_open *ex = open_slot(w, pid, false);
         if (ex)
-            open_stop_crediting(ex);
+            open_stop_crediting(w, ex);
         return;
     }
     struct pgwt_summary_open *o = open_slot(w, pid, true);
@@ -1985,7 +1995,7 @@ void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
          * already measured the open prefix, so the writer can place wall
          * AND measurement second by second. */
         if (!cpu) {
-            open_stop_crediting(o);
+            open_stop_crediting(w, o);
             o->start_ns = start_mono_ns;
             w->open_cpu_refused_total++;
             return;
@@ -2009,11 +2019,12 @@ void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
              * MEASURED side needs no pre-charge: its credit is bounded per
              * second by that second's own slice, never by a cumulative
              * figure a previous interval contributed to. */
-            open_stop_crediting(o);
+            open_stop_crediting(w, o);
             o->credited_ns = 0;
             if (o->credited_until_ns > start_mono_ns)
                 o->credited_ns = o->credited_until_ns - start_mono_ns;
             o->cpu_slot = 1;
+            w->open_cpu_noted_total++;
             o->start_ns = start_mono_ns;
         }
         /* Until the first second of this interval is WRITTEN the answer is
@@ -2029,7 +2040,7 @@ void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
      * outright so no part of it can survive into a later gap, and let the
      * branch below treat this as a new interval (o->we, still 0, != we). */
     if (o->cpu_slot)
-        open_stop_crediting(o);
+        open_stop_crediting(w, o);
     if (o->we != we || o->start_ns != start_mono_ns) {
         /* A DIFFERENT interval from the one last noted. Its per-interval
          * credit starts at zero -- except for any part of it the pid's
@@ -2063,7 +2074,7 @@ void pgwt_summary_forget_open(struct pgwt_summary_writer *w, uint32_t pid)
      * without breaking the probe chain of every key that passed through it.
      * Clearing `we` stops the credit, which is the point; the slot is reused
      * by the same pid and reclaimed when the writer is destroyed. */
-    open_stop_crediting(o);
+    open_stop_crediting(w, o);
     o->start_ns = 0;
     o->credited_until_ns = 0;
     o->credited_ns = 0;
@@ -2355,7 +2366,9 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
              * bumped here -- it advances only where credit was actually
              * placed, which is what keeps a mismatched record from eating
              * another interval's accounting. */
-            open_stop_crediting(o);
+            if (o->cpu_slot)
+                w->open_cpu_retired_by_record_total++;
+            open_stop_crediting(w, o);
             o->start_ns = evt->timestamp_ns;
             o->credited_ns = 0;
         }

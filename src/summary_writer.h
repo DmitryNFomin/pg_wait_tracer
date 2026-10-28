@@ -1148,6 +1148,29 @@ struct pgwt_summary_writer {
     uint64_t      open_cpu_class_divergent_ns_total;
     uint64_t      open_cpu_tier_mismatch_total;
     uint64_t      open_cpu_overcredit_ns_total;
+
+    /* #424: WHERE does an open on-CPU slot go uncredited? The credit totals
+     * above cannot distinguish entry, retirement before a seal, and a seal
+     * that skips the slot. Count each so a live capture can answer:
+     *   noted_total              cpu_slot was set: an ENTRY, not a refresh.
+     *   retired_total            an on-CPU slot was cleared, for any reason.
+     *   retired_by_record_total  that clear was by a closing record.
+     *   skip_end_le_sec_total    a seal skipped an on-CPU slot: end <= sec.
+     *   skip_from_ge_end_total   a seal skipped an on-CPU slot: from >= end.
+     * A: noted == 0 means the on-CPU branch never reached slot entry.
+     * B: noted > 0 with retired_by_record approximately equal to noted means
+     *    closing records retire the slots before a second can be sealed.
+     * C: a nonzero skip counter means a seal reached a slot and skipped it.
+     * D: credited > 0 with all these counters zero would mean the credit
+     *    counter is wrong rather than the path. These are questions for the
+     *    capture, not conclusions about one we have not measured.
+     * Purely ADDITIVE: none of these counters gates anything. A counter that
+     * changed behaviour would be the bug it is meant to find. */
+    uint64_t      open_cpu_noted_total;
+    uint64_t      open_cpu_retired_total;
+    uint64_t      open_cpu_retired_by_record_total;
+    uint64_t      open_cpu_skip_end_le_sec_total;
+    uint64_t      open_cpu_skip_from_ge_end_total;
 };
 
 /* ── Public API ───────────────────────────────────────────── */

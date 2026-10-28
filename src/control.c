@@ -635,6 +635,38 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_open_cpu_overcredit_ns",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_overcredit_ns_total : 0);
+    /* #424: tell "the producer was never asked" from "it was asked and the
+     * slot was lost". The three published open-CPU credit counters alone
+     * cannot distinguish those paths. Entry, retirement and seal skips give
+     * them separate numbers; publish the existing refusal/table-full counts
+     * too so those early exits are visible. All of them at zero, together
+     * with nonzero summary_open_credited_ns_total, means the on-CPU branch
+     * is never reached. A live capture must supply that evidence; these
+     * additive counters gate nothing. */
+    cjson_add_uint64(root, "summary_open_cpu_noted_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_noted_total : 0);
+    cjson_add_uint64(root, "summary_open_cpu_retired_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_retired_total : 0);
+    cjson_add_uint64(root, "summary_open_cpu_retired_by_record_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_retired_by_record_total
+                         : 0);
+    cjson_add_uint64(root, "summary_open_cpu_skip_end_le_sec_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_skip_end_le_sec_total
+                         : 0);
+    cjson_add_uint64(root, "summary_open_cpu_skip_from_ge_end_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_skip_from_ge_end_total
+                         : 0);
+    cjson_add_uint64(root, "summary_open_io_worker_refused_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_io_worker_refused_total : 0);
+    cjson_add_uint64(root, "summary_open_table_full_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_table_full_total : 0);
 
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);
