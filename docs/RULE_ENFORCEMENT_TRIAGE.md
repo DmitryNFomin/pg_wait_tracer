@@ -19,6 +19,11 @@ is stated explicitly and it is **not** counted as an existing check.
 
 ## Taxonomy reminder
 
+The scheme is **four buckets, plus one documented exception** (row 100, tagged
+`i/ii`, a composite because that single rule genuinely spans a tool-call gate
+and a turn-boundary gate). It is not a five-way taxonomy; no other row uses a
+composite tag.
+
 | bucket | mechanism |
 |---|---|
 | (i) tool call | `PreToolUse` hook — deny, or inject `additionalContext` |
@@ -197,22 +202,27 @@ are marked EXISTS (already mechanically covered today); the remainder (all of
 bucket iv, 39 rows, plus almost all of bucket i/ii, 69 rows) have no mechanical
 coverage.
 
-## Migration candidates (rule 3): counter already collected, baseline verified this session
+## Migration candidates (rule 3): counter already collected, baseline MEASURED this session
 
 A rule qualifies here only if an existing, already-wired mechanism computes
 the compliance fact on every run, independent of whether an agent reads the
-CLAUDE.md prose. Presence of every script below was verified this session by
-`git ls-tree origin/master` / `git show origin/master:<path>`, not assumed
-from the prior inventory:
+CLAUDE.md prose. The first pass of this section named the mechanism but not
+its current reading, which is not a baseline ("a script exists" cannot show
+whether violations rose later). Every number below was produced by running
+the named command in this worktree this session, on commit `eb94efc3` with a
+clean tree; the exact command is given so it can be re-run and compared.
+A reading of **zero is a measured fact**, kept visually distinct from
+`NO-BASELINE` (a failed or impossible read) — no row below needed
+`NO-BASELINE`, since every counter in scope was directly readable.
 
-| id(s) | rule | counter | baseline verified this session |
-|---|---|---|---|
-| 29, 135, 138 | push only with a passing stamp; activate the guard per clone | scripts/git-hooks/pre-push + scripts/hooks/push-guard.sh exit code on a stamp/tree-hash mismatch | both files present on origin/master; this branch's own make check run (below) exercises the stamp path |
-| 32 | EPHEMERAL=1 supports OS=ubuntu only | scripts/box-check.sh exit code when invoked with EPHEMERAL=1 OS=el8 or el9 | script present; not re-invoked this session since this is a docs-only branch with no box-check requirement, so the baseline is "present and self-tested," not "re-run live today" |
-| 37-42, 125 | hetzner-sweep protections (6h cutoff, protected names, 1h floor, unknown-age refusal) | tests/test_hetzner_sweep.sh pass/fail inside make check | registered at tests/unit_tests.list:311; runs every make check |
-| 91 | check-lock.sh serializes Mac make check | tests/test_check_lock.sh pass/fail | not in tests/unit_tests.list; invoked directly at Makefile:331, and the lock itself wraps the real check.sh call at Makefile:332, two independent mechanical facts, not just a test |
-| 128, 130 | run_all.sh known-failing/xpass/126-127 classification | tests/run_all.sh's own run_test() logic (Linux-only, exercised by box-check, not make check) | present on origin/master; not re-verified live this session, this branch is docs-only and does not run box-check (see Constraints) |
-| 132 | C tests must be in tests/unit_tests.list | tests/test_unit_list_coverage.py pass/fail | registered at tests/unit_tests.list:214; runs every make check |
+| id(s) | rule | counter | command run this session | baseline value |
+|---|---|---|---|---|
+| 29, 135, 138 | push only with a passing stamp; activate the guard per clone | stamp vs fresh tree-hash mismatch count | `cat .pgwt-check.stamp` and `scripts/tree-hash.sh` | **0 mismatches** — both read `3376dc7d08a41410823d0742079df79cd30f7919` |
+| 32 | EPHEMERAL=1 supports OS=ubuntu only | exit code of a live EPHEMERAL=1 run against a non-ubuntu OS | `EPHEMERAL=1 OS=el8 scripts/box-check.sh` | **rc=2**, refused with `EPHEMERAL=1 only supports OS=ubuntu (the only OS with a pgwt=gate-snapshot image so far)` (not one of the six rows the request named, included anyway since the command was already run and free) |
+| 37-42, 125 | hetzner-sweep protections (6h cutoff, protected names, 1h floor, unknown-age refusal) | live pgwt=ephemeral VMs the sweep currently finds older than 6h | `tests/hetzner-sweep.sh` (invoked automatically by the box-check.sh run above) and independently `tests/hetzner-vm.sh list` | **0** — sweep's own line: `hetzner-sweep: done (deleted=0 warned=0 dry_run=0 cutoff=6h force_all=0)`; the VM list shows 3 live VMs total (`pgwt-gate`, `pgwt-gate-2`, `pgwt-gate-3`), none labeled `pgwt=ephemeral`, consistent with 0 |
+| 91 | check-lock.sh serializes Mac make check | tests/test_check_lock.sh pass/fail, re-run fresh | `bash tests/test_check_lock.sh` | **18/18 passed** (fresh run this session, not reused from the earlier `make check` log) |
+| 128, 130 | run_all.sh known-failing legitimacy / xpass count / 126-127 guard | live `KNOWN_FAILING` entry count in `tests/run_all.sh`; presence of the 126/127 guard | `grep -n "KNOWN_FAILING=()" tests/run_all.sh` and `grep -n "126\|127" tests/run_all.sh` | **0 live KNOWN_FAILING entries** (`tests/run_all.sh:160` is the literal, currently-empty array) — a real, directly-read zero, not a substitute for a live run. Consequently **0 xpass is vacuous**, not measured by exercising `run_test()`: with zero entries there is nothing for the gate to produce an xpass against. The 126/127 guard itself is confirmed present in source at `tests/run_all.sh:197` (1 occurrence); it was **not** exercised end-to-end this session because that requires `box-check`, out of scope for a docs-only branch (see Constraints) |
+| 132 | C tests must be in tests/unit_tests.list | built-but-unlisted test count, from the coverage script's own self-check | `python3 tests/test_unit_list_coverage.py` | **PASSED** — "parsed 83 Makefile targets," "no built-but-never-run unit test (missing: none)" → **0 missing** of 83 |
 
 **What this means for CLAUDE.md, not acted on here (out of scope, this branch
 does not edit CLAUDE.md):** these rows could become a single "(why: ...)"
@@ -249,6 +259,19 @@ row (#109), so they are not ranked here even though they are plausible
 bucket-i candidates, see Questions for the owner.
 
 ## Already covered, not proposed again
+
+**Addendum, discovered while measuring the migration baselines above (not
+acted on further, out of scope for this pass):** `#716` merged into
+`origin/master` as `c1ea5a68` at `2026-10-28T22:27:02Z`, confirmed via
+`gh pr view 716 --json state,mergedAt,mergeCommit`, after this branch forked
+from `88d161c6` and after the table below was first written. The "#716 (open,
+NOT merged...)" framing immediately below, and the "near-migration"/"none yet"
+notes on rows #10, #90, #105 and #121 in the main table, were accurate when
+checked but are now stale: `agent-ledger.py`, `absence-prepass.py`,
+`box-evidence-bulk.py` and `check-box-evidence.sh` are live on `origin/master`
+today. Re-verifying those four rows' existing-check column against the merged
+code is a real follow-up, not done here since it was not what this pass was
+asked to fix and would reopen more than the one column requested.
 
 - **#690 (merged, blocking Stop/SubagentStop hook).** Mechanically live today
   for: #5 (held.sh is the sanctioned source), #7/#8 (sweep.sh [6]
