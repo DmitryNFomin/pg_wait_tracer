@@ -127,9 +127,9 @@ struct pgwt_accumulator {
     int num_system_events;
 
     /* Query-level event aggregation. query_id 0 rows are the UNATTRIBUTED
-     * bucket (issue #128, query_attr.h): foreground non-idle time whose
-     * command never reported an id — shown as "unattributed", never
-     * dropped. */
+     * bucket (#128/#641, query_attr.h): foreground time whose command never
+     * reported an id, plus non-idle background/maintenance time without an
+     * id — shown as "unattributed", never dropped. */
     struct pgwt_query_event_stats query_events[MAX_QUERY_EVENTS];
     int num_query_events;
 
@@ -364,20 +364,32 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
  *
  * The query-level step of every live consumer (closed records, the open
  * state_map stretch, sampled-tier samples):
+ *   io_worker          → nothing, regardless of id or other category bits;
  *   query_id != 0      → its row; a closed record also observes the id for
  *                        the pid (rule 1 for what is pending, cmd_qid for
  *                        rule 2);
- *   query_id == 0, background/maintenance/io_worker → nothing (query-less
- *                        by construction, as before);
- *   query_id == 0, foreground idle → a command boundary (keeps cmd_qid);
- *   query_id == 0, foreground non-idle, defer → pending on the pid until
- *                        its next observe/boundary;
+ *   query_id == 0, background/maintenance → unattributed if non-idle by the
+ *                        LOAD rule (pgwt_is_idle_event), else nothing;
+ *                        never deferred/backfilled, including open stretches;
+ *   query_id == 0, unknown category → nothing (never borrows an id);
+ *   query_id == 0, foreground session-idle → a command boundary (keeps cmd_qid);
+ *   query_id == 0, foreground non-session-idle, defer → pending on the pid
+ *                        until its next observe/boundary;
  *   …not deferrable (the open stretch at tick time, no per-pid state) →
  *                        cmd_qid now if the command already reported one,
  *                        else no query row yet (NOT unattributed: the id
  *                        is not known yet, and its closing record will
  *                        carry it — see pgwt_live_qattr_record).
- * `stat_ns` is the row value (CPU ns for we==0, wall otherwise). */
+ * `stat_ns` is the row value (CPU ns for we==0, wall otherwise).
+ * Since #641, this background/maintenance rule covers live closed records,
+ * open stretches and samples; the raw/reader tag pass (compute.c) also
+ * applies it. Offline replay (event_reader.c pgwt_replay_events) files rows
+ * only for nonzero query_id, dropping all query_id-0 time, including the
+ * #128 foreground bucket. The summary writer (summary_writer.c
+ * summary_qattr_step) defers query-less background/maintenance without a
+ * category arm or load-rule exclusion: pacing is over-counted into
+ * summary_query_unattributed_ns_total when resolved without an id, and a
+ * later observed id or cmd_qid at a boundary can still backfill this time. */
 void pgwt_live_qattr_record(struct pgwt_accumulator *acc,
                             struct pgwt_pid_accum *pa, uint64_t query_id,
                             uint32_t we, uint64_t stat_ns, uint32_t cat_flag,

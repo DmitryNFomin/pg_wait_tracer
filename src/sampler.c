@@ -463,6 +463,16 @@ uint64_t pgwt_sampler_effective_period(uint64_t nominal_ns,
     return elapsed;
 }
 
+uint64_t pgwt_sampler_tick_lateness(uint64_t armed_ns,
+                                    uint64_t armed_at_ns,
+                                    uint64_t now_ns)
+{
+    if (armed_at_ns == 0 || now_ns <= armed_at_ns)
+        return 0;
+    uint64_t elapsed = now_ns - armed_at_ns;
+    return elapsed > armed_ns ? elapsed - armed_ns : 0;
+}
+
 enum pgwt_sampler_health_action
 pgwt_sampler_health_note(struct pgwt_sampler_health *h, int n_targets,
                          int n_read, int err_no, uint64_t now_ns)
