@@ -10,6 +10,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **test: guard per-section registration in C suites (#686).** `make check`
+  now verifies that every numbered section's owning function is reachable
+  from `main()` through same-file call sites, with a fail-closed bypass suite.
+  Headers bind to the first local call in their own section window; windows
+  with only whitespace after masking fail as missing dispatch sites, while
+  inline sections remain valid.
+  Deleting a dispatcher call fails even when the binary still exits 0.
+
 - **fix: replace the unreachable sampler missed-tick counter (#620).**
   `sampler_ticks_missed_total` could only ever read 0 and is removed from the
   control socket: the sampler timerfd is armed one-shot with +/-10% phase
