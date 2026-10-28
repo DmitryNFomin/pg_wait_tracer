@@ -1077,6 +1077,41 @@ struct pgwt_summary_writer {
      * carrying an observation, so a WAIT note must leave it alone (a bump
      * above the class test would make every live daemon look asked). */
     uint64_t      open_cpu_notes_total;
+    /* The SUBSET of open_cpu_notes_total the io_worker rule declined.
+     *
+     * open_io_worker_refused_total above counts EVERY note carrying the flag,
+     * WAIT notes included, and the notes counter is bumped one line earlier —
+     * so the two overlap by construction and neither says by how much. On the
+     * 2026-10-28 gate capture that was 34 notes next to 39 io_worker
+     * refusals, two numbers of the same magnitude from which "the io_worker
+     * rule ate every observation" and "it ate none of them" are equally
+     * readable. This one is disjoint from every other refusal and is a subset
+     * of notes_total by construction (same `on_cpu_note && cpu` test, one
+     * branch later), so the question is answered by subtraction instead of
+     * by inference. */
+    uint64_t      open_cpu_io_worker_refused_total;
+    /* An ACCEPTED on-CPU observation whose interval ended before ANY second
+     * of it was written — counted once per interval, at the single site that
+     * retires one (open_stop_crediting).
+     *
+     * This is the OUTCOME the refusal counters cannot express. They say why
+     * an observation was declined at the note; this says the note was taken,
+     * the slot was armed, and the interval was over before the seal reached
+     * the second it lived in. That is the CORRECT answer for a backend that
+     * alternates CPU and waits thousands of times a second — a 45 us on-CPU
+     * stretch has no second to spread and its time rides its own closing
+     * record — and it is indistinguishable, in every other counter, from a
+     * seal that drops observations it should have placed. Both read
+     * credited = 0 with every refusal at 0, which is how the 2026-10-28
+     * capture was read as a credit-path defect.
+     *
+     * Deliberately NOT disjoint from open_notes_expired_total: expiry is a
+     * REASON an interval was retired, this is the OUTCOME that nothing was
+     * placed, and an expired note is both. cpu_frozen is the test, not
+     * cpu_slot: an interval that contributed even one second is placed, and
+     * its remainder riding the closing record is v7's arithmetic, not a
+     * loss. */
+    uint64_t      open_cpu_unplaced_total;
     uint64_t      open_cpu_refused_total;
     uint64_t      cpu_open_uncredited_ns_total;
     uint64_t      open_fill_capped_total;

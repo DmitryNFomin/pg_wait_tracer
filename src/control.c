@@ -538,6 +538,30 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_open_io_worker_refused_total",
                      d->summary_writer
                          ? d->summary_writer->open_io_worker_refused_total : 0);
+    /* The two keys that make a zero summary_open_cpu_credited_ns
+     * ATTRIBUTABLE rather than merely ambiguous, and they are the pair the
+     * 2026-10-28 capture needed and did not have (34 notes, 0 credit, every
+     * refusal counter 0, 39 io_worker refusals of unknown overlap):
+     *
+     *   cpu_io_worker_refused  the SUBSET of notes_total the io_worker rule
+     *                          declined. notes_total minus this is what the
+     *                          credit path was actually offered.
+     *   cpu_unplaced           observations ACCEPTED, then retired without a
+     *                          single second written. Equal to what the
+     *                          credit path was offered means every observed
+     *                          gap ended inside one second -- a capture with
+     *                          no multi-second on-CPU gap in it, where a zero
+     *                          credit is the CORRECT answer and the stimulus,
+     *                          not the writer, is what has to change. Short
+     *                          of that, the seal really is dropping
+     *                          observations it was handed. */
+    cjson_add_uint64(root, "summary_open_cpu_io_worker_refused_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_io_worker_refused_total
+                         : 0);
+    cjson_add_uint64(root, "summary_open_cpu_unplaced_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_unplaced_total : 0);
     cjson_add_uint64(root, "summary_open_table_full_total",
                      d->summary_writer
                          ? d->summary_writer->open_table_full_total : 0);

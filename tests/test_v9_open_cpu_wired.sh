@@ -198,20 +198,46 @@ for k in summary_open_cpu_credited_ns summary_open_cpu_measured_ns \
 done
 echo "  ok: all seven v9 control keys present and numeric"
 
-# ── the stimulus: a statement that is on-CPU, with NO wait event, across
-#    several 1 s ticks. generate_series is pure CPU in the backend. ───────
+# ── the stimulus: ONE on-CPU interval per backend, held open across
+#    several 1 s ticks, because that is the only thing v9 can spread. ─────
+#
+# NOT `SELECT count(*) FROM generate_series(1,60000000)`, which this script
+# used until 2026-10-28 and which does not produce that interval at all. A
+# set-returning function in FROM is a FunctionScan, and FunctionScan
+# MATERIALISES its result into a tuplestore: 60 M rows is ~1.5 GB against a
+# 4 MB work_mem, so the backend spends the statement writing temp files and
+# changes wait event thousands of times a second. Every on-CPU stretch is
+# tens of microseconds long, there is no interval open across a second
+# boundary, and a zero open-CPU credit is then the CORRECT answer.
+#
+# The gate capture of 2026-10-28 (box-check-ubuntu-20261028-154345.log) says
+# so in its own numbers: 34 on-CPU notes, 0 credited, every refusal counter
+# 0, and -- the one that settles it -- summary_cpu_open_uncredited_ns_total
+# also 0. That counter adds the WHOLE duration of every closed record whose
+# class is CPU and whose duration exceeds one second that no second had
+# credited. Zero, on a capture that burned 34 s of measured CPU, means not
+# one on-CPU interval longer than a second CLOSED in it. The statement was
+# proven to burn CPU; it was never proven to hold a gap, and those are
+# different facts.
+#
+# A plpgsql FOR loop over a scalar assignment has no rows, no tuplestore, no
+# temp file and no wait event: one interval, open from the first iteration to
+# the last. Sized so it exceeds the >= 3 s check below on the gate box while
+# staying well inside its own timeout; the dollar quoting is single-quoted so
+# bash cannot expand $$ into its PID.
+CPU_LOOP_SQL='DO $$ DECLARE s bigint := 0; i bigint; BEGIN FOR i IN 1..40000000 LOOP s := s + i; END LOOP; END $$;'
 # EVERY leg is bounded. The first version of this block ran three
 # unbounded psql children and then a bare `wait`, and the whole test was
 # killed by its harness at 400 s with no verdict -- a HANG, which is the
 # one outcome worse than a failure because it reports nothing. A psql that
-# blocks on authentication, or a generate_series sized for a faster box,
-# produces exactly that. Each child now self-terminates, and the stimulus
-# not completing is a REFUSAL, not a silent pass.
+# blocks on authentication, or a loop sized for a faster box, produces
+# exactly that. Each child now self-terminates, and the stimulus not
+# completing is a REFUSAL, not a silent pass.
 STIM_PIDS=""
 STIM_T0=$(date +%s)
 for _ in 1 2 3; do
-    timeout 45 psql -U postgres -d postgres -tAc \
-        "SELECT count(*) FROM generate_series(1,60000000);" >/dev/null 2>&1 &
+    timeout 120 psql -U postgres -d postgres -tAc "$CPU_LOOP_SQL" \
+        >/dev/null 2>&1 &
     STIM_PIDS="$STIM_PIDS $!"
 done
 stim_ok=0
@@ -288,43 +314,118 @@ if [[ "$NOTES" -le 0 ]]; then
 fi
 echo "  ok: the writer WAS asked -- summary_open_cpu_notes_total = $NOTES"
 
+
 CRED=$(num "$M1" summary_open_cpu_credited_ns)
+MEAS=$(num "$M1" summary_open_cpu_measured_ns)
 REFUSED=$(num "$M1" summary_open_cpu_refused_total)
 UNCRED=$(num "$M1" summary_cpu_open_uncredited_ns_total)
 IOREF=$(num "$M1" summary_open_io_worker_refused_total)
+IOREF_CPU=$(num "$M1" summary_open_cpu_io_worker_refused_total)
+UNPLACED=$(num "$M1" summary_open_cpu_unplaced_total)
 TBLFULL=$(num "$M1" summary_open_table_full_total)
 EXPIRED=$(num "$M1" summary_open_notes_expired_total)
+V8CRED=$(num "$M1" summary_open_credited_ns_total)
 echo "  summary_open_cpu_credited_ns   = $CRED"
+echo "  summary_open_cpu_measured_ns   = ${MEAS:-n/a}"
 echo "  summary_open_cpu_refused_total = ${REFUSED:-n/a}"
 echo "  summary_cpu_open_uncredited_ns_total = ${UNCRED:-n/a}"
-# The three silent early exits between the note and the credit, so a FAIL
-# names which one ate the observation instead of leaving it to be inferred.
-echo "  summary_open_io_worker_refused_total = ${IOREF:-n/a}"
+# Every exit between the note and the credit, so a verdict NAMES the one
+# that took the observation instead of leaving it to be inferred.
+echo "  summary_open_io_worker_refused_total = ${IOREF:-n/a}  (WAIT notes included)"
+echo "  summary_open_cpu_io_worker_refused_total = ${IOREF_CPU:-n/a}  (the on-CPU subset)"
+echo "  summary_open_cpu_unplaced_total      = ${UNPLACED:-n/a}"
 echo "  summary_open_table_full_total        = ${TBLFULL:-n/a}"
 echo "  summary_open_notes_expired_total     = ${EXPIRED:-n/a}"
+echo "  summary_open_credited_ns_total = ${V8CRED:-n/a}  (WAIT credit, same seal)"
 
-# THREE ZEROS HAVE TWO MEANINGS, and this script originally reported only
-# one of them. agent/424-daemon (dc23287) found the fourth outcome by
-# reading the writer: crediting happens only in writer_seal_through(),
-# whose first statement is `if (!w->fp) return;` and whose only callers are
-# pgwt_summary_push_event and pgwt_summary_flush_completed. A capture whose
-# in-flight statements are pure CPU emits no wait boundaries, so nothing is
-# pushed, nothing seals, and credited/refused/uncredited all stay 0 even
-# with a perfectly wired producer. "The producer never ran" is what I read
-# three zeros as, and it was not established.
-#
-# summary_open_credited_ns_total -- the v8 WAIT crediting, which goes
-# through the same seal -- is the discriminator, so this script now reports
-# it instead of leaving the next reader to make the same inference.
-V8CRED=$(num "$M1" summary_open_credited_ns_total)
-echo "  summary_open_credited_ns_total = ${V8CRED:-n/a}  (the discriminator)"
+# The two keys that make a zero ATTRIBUTABLE are preconditions, not
+# decoration: without them this script is back to inferring which of three
+# states a zero is, which is the mistake of 2026-10-28. A daemon that
+# predates them cannot be read, and will not be guessed at.
+if [[ -z "$IOREF_CPU" ]] || [[ -z "$UNPLACED" ]]; then
+    echo "  REFUSE: metrics has no numeric"
+    echo "          'summary_open_cpu_io_worker_refused_total' /"
+    echo "          'summary_open_cpu_unplaced_total'. Without the first,"
+    echo "          summary_open_io_worker_refused_total overlaps"
+    echo "          notes_total by an unknown amount (34 notes beside 39"
+    echo "          refusals on the 2026-10-28 capture); without the second,"
+    echo "          'every gap ended inside its own second' and 'the seal"
+    echo "          dropped them' are the same three zeros. This daemon"
+    echo "          predates both and cannot name a defect."
+    exit 2
+fi
+
+# What the CREDIT PATH was actually offered: notes minus the ones the
+# io_worker rule declined at the note. Subtraction, not inference.
+OFFERED=$(( NOTES - IOREF_CPU ))
+echo "  offered to the credit path     = $OFFERED  (notes $NOTES - io_worker $IOREF_CPU)"
 
 if [[ "$CRED" -gt 0 ]]; then
-    echo "  ok: the v9 open-CPU producer IS wired (credited $CRED ns)"
+    # ── A NUMBER, not "greater than zero" ───────────────────────────────
+    # "credited > 0" is the weakest assertion this capture can carry, and
+    # one second of credit out of a ten-second gap satisfies it -- i.e. a
+    # credit path that places the FIRST second and then stops passes it.
+    # So the verdict is a band, derived from quantities this same run
+    # measured rather than from a constant someone chose:
+    #
+    #   (1) measured > 0            v7's split survived the spread. A
+    #                               credit that places wall and no
+    #                               measurement destroys the CPU*/Off-CPU*
+    #                               split, which is the whole reason v8
+    #                               refused to spread on-CPU gaps at all.
+    #   (2) measured <= wall        coherence. A second cannot hold more
+    #                               measured CPU than its own wall; the
+    #                               reverse makes the reader's
+    #                               DB - CPU* - Sigma residual negative.
+    #   (3) 4 * measured >= DELTA   the BULK of the stimulus, not a token
+    #                               second. DELTA is this daemon's own
+    #                               schedstat total across the stimulus
+    #                               (cpu_ns_total, independent provenance
+    #                               from the credit). A gap of L seconds
+    #                               can place about L - 2.1 of them (the
+    #                               second must complete, plus
+    #                               PGWT_SUMMARY_FLUSH_LAG_NS, plus the
+    #                               first partial second, which rides the
+    #                               closing record instead) -- so at the
+    #                               >= 3 s floor enforced above the placed
+    #                               fraction is already ~30%, and DELTA
+    #                               also carries the aux backends' CPU,
+    #                               which only makes the denominator
+    #                               bigger. 25% leaves that headroom while
+    #                               still rejecting a one-second credit of
+    #                               a ten-second gap (10%).
+    DELTA=$(( CPU1 - CPU0 ))
+    bad=0
+    if [[ -z "$MEAS" ]] || [[ "$MEAS" -le 0 ]]; then
+        echo "  FAIL: credited $CRED ns of WALL with measured CPU"
+        echo "        ${MEAS:-n/a} -- the spread placed time and destroyed"
+        echo "        v7's measured split, which is worse than refusing to"
+        echo "        spread. src/summary_writer.c credit_open_cpu_measured."
+        bad=1
+    elif [[ "$MEAS" -gt "$CRED" ]]; then
+        echo "  FAIL: measured $MEAS ns > wall $CRED ns. A second cannot"
+        echo "        hold more measured CPU than its own wall; this makes"
+        echo "        the reader's DB - CPU* - Sigma residual negative."
+        bad=1
+    elif (( MEAS * 4 < DELTA )); then
+        echo "  FAIL: measured $MEAS ns is under a quarter of the"
+        echo "        stimulus' own $DELTA ns of schedstat CPU. The credit"
+        echo "        path placed a token amount, not the gap -- which is"
+        echo "        what 'credited > 0' alone would have approved."
+        bad=1
+    fi
+    if [[ "$bad" -ne 0 ]]; then
+        echo "=== test_v9_open_cpu_wired: FAIL ==="
+        exit 1
+    fi
+    echo "  ok: the v9 open-CPU producer IS wired and the credit is coherent"
+    echo "      wall $CRED ns, measured $MEAS ns, stimulus CPU $DELTA ns"
+    echo "      (measured/stimulus = $(( MEAS * 100 / (DELTA > 0 ? DELTA : 1) ))%, floor 25%)"
     echo "=== test_v9_open_cpu_wired: PASS ==="
     exit 0
 fi
 
+# ── credited == 0. Four states, and each names a different file. ─────────
 if [[ -n "$V8CRED" ]] && [[ "$V8CRED" -eq 0 ]]; then
     echo "  REFUSE: summary_open_cpu_credited_ns is 0, but so is"
     echo "          summary_open_credited_ns_total -- NOTHING sealed in this"
@@ -336,18 +437,44 @@ if [[ -n "$V8CRED" ]] && [[ "$V8CRED" -eq 0 ]]; then
     exit 2
 fi
 
+if [[ "$OFFERED" -le 0 ]]; then
+    echo "  REFUSE: all $NOTES on-CPU observations carried the io_worker"
+    echo "          flag ($IOREF_CPU of $NOTES), and io_worker time is"
+    echo "          outside the time model by rule (summary v6), so"
+    echo "          declining them is CORRECT. The credit path was offered"
+    echo "          nothing. On a PG18 io_method=worker cluster the io"
+    echo "          workers are the only backends with an on-CPU gap when"
+    echo "          the stimulus itself does not hold one -- so this says"
+    echo "          the stimulus failed, not the writer."
+    exit 2
+fi
+
+if [[ "$UNPLACED" -gt 0 ]]; then
+    echo "  REFUSE: the credit path was offered $OFFERED observations and"
+    echo "          retired $UNPLACED intervals without writing a single"
+    echo "          second of any of them -- every on-CPU gap in this"
+    echo "          capture ended INSIDE the second it was noted in. v9"
+    echo "          spreads an interval across the seconds it occupies, so"
+    echo "          there was nothing to spread and a zero is the CORRECT"
+    echo "          answer. The STIMULUS is what has to change, not the"
+    echo "          writer: a statement that burns CPU is not the same"
+    echo "          thing as one that holds an on-CPU interval open across"
+    echo "          a tick boundary (a FunctionScan over generate_series"
+    echo "          spills a tuplestore and changes wait event thousands of"
+    echo "          times a second; a plpgsql loop does not)."
+    exit 2
+fi
+
 echo "  FAIL: summary_open_cpu_credited_ns is 0 on a capture whose CPU"
-echo "        statement is proven, with the v9 keys present, with"
+echo "        stimulus is proven, with the v9 keys present, with"
 echo "        summary_open_credited_ns_total = ${V8CRED:-n/a} proving seconds"
-echo "        really were sealed, AND with the writer ASKED $NOTES times"
-echo "        (summary_open_cpu_notes_total). So the observation reached the"
-echo "        writer and the CREDIT PATH placed none of it -- which is a"
-echo "        different defect from an unwired producer, and the counter"
-echo "        above is what distinguishes them. Which early exit took it:"
-echo "        io_worker=${IOREF:-n/a} table_full=${TBLFULL:-n/a}"
-echo "        notes_expired=${EXPIRED:-n/a} eff_rejected/overcredit above."
-echo "        All of those zero narrows it to the seal placing no second."
-echo "        refused_total=${REFUSED:-n/a}"
+echo "        really were sealed, with $OFFERED observations OFFERED to the"
+echo "        credit path after the io_worker rule, and with"
+echo "        summary_open_cpu_unplaced_total = 0 -- so not one of them was"
+echo "        retired early either. They were accepted and the SEAL placed"
+echo "        none of them: src/summary_writer.c credit_open_second /"
+echo "        writer_seal_through. refused_total=${REFUSED:-n/a}"
+echo "        table_full=${TBLFULL:-n/a} notes_expired=${EXPIRED:-n/a}"
 echo "        uncredited_ns=${UNCRED:-n/a} is what it cost."
 echo "=== test_v9_open_cpu_wired: FAIL ==="
 exit 1
