@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # test_push_guard_denylist.sh -- scripts/hooks/push-guard.sh (#230) is a
-# four-term substring denylist with NO shell grammar: no repository
+# four-rule substring denylist with NO shell grammar: no repository
 # resolution, no quoting logic, nothing to be "ambiguous" about. This
 # drives it exactly as Claude Code does, with real JSON on stdin, and
-# checks only what a substring test can be checked for: each term alone
-# denies, a command with none of them passes untouched, and -- the control
+# checks only what a substring test can be checked for: each rule
+# denies, a command matching none passes untouched, and -- the control
 # that matters -- a heredoc with an odd number of apostrophes and none of
 # the four terms passes, which is the exact shape the RETIRED command-text
 # parser (scripts/hooks/push-guard.sh before #230) rejected outright with
@@ -65,15 +65,33 @@ allowed() {
     check "$([[ $rc -eq 0 ]] && echo true || echo false)" "$label: allowed (exit 0)"
 }
 
-# ── Each of the four terms alone denies ───────────────────────────────────
+# ── Each of the four rules denies ────────────────────────────────────────
 denied 'PGWT_SKIP_PUSH_GUARD=1 git push origin main' "PGWT_SKIP_PUSH_GUARD=1"
 denied 'git config core.hooksPath /tmp/somewhere' "core.hooksPath"
 denied 'chmod -x scripts/git-hooks/pre-push' "chmod + git-hooks together"
 denied 'git push --no-verify origin main' "--no-verify"
 
-# ── chmod and git-hooks only deny TOGETHER, not alone ─────────────────────
+# ── Write-shaped operations together with git-hooks deny ────────────────
+denied 'rm -f scripts/git-hooks/pre-push' "removal + git-hooks"
+denied ': > scripts/git-hooks/pre-push' "truncating redirection + git-hooks"
+denied 'install -m 000 /dev/null scripts/git-hooks/pre-push' "permission-stripping install + git-hooks"
+denied 'echo exit 0 > scripts/git-hooks/pre-push' "overwrite via redirection + git-hooks"
+allowed 'git commit -m "it'"'"'s fine, just discussing scripts/git-hooks/pre-push here"' \
+    "apostrophe-bearing commit message mentioning git-hooks, no write-shaped operation: allowed"
+
+# ── Write-shaped operations and git-hooks only deny TOGETHER ─────────────
 allowed 'chmod +x my-script.sh' "chmod alone (no git-hooks mention)"
 allowed 'ls -la scripts/git-hooks' "git-hooks alone (no chmod)"
+allowed 'cat scripts/git-hooks/pre-push' "reading git-hooks"
+allowed 'cat scripts/git-hooks/pre-push 2>&1' \
+    "benign read with > in stderr redirection, without writing to the hook"
+allowed 'echo "see scripts/git-hooks/pre-push -> it skips a non-executable hook"' \
+    "benign prose with ->, without writing to the hook"
+allowed 'diff <(cat a) <(cat scripts/git-hooks/pre-push) > /dev/null' \
+    "benign comparison with > targeting /dev/null, without writing to the hook"
+allowed 'git log -- scripts/git-hooks/pre-push' "history query for git-hooks"
+allowed 'git commit -m "doc: explain git-hooks in README"' \
+    "a commit message merely mentioning git-hooks with no write-shaped operation"
 
 # ── A command with none of the four terms passes untouched ───────────────
 allowed 'git push origin main' "an ordinary push with none of the four terms"

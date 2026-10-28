@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code PreToolUse hook (Bash matcher only): a narrow, four-term
+# Claude Code PreToolUse hook (Bash matcher only): a narrow, four-rule
 # substring denylist -- no shell parsing, no repository resolution, no
 # quoting logic (#230). scripts/git-hooks/pre-push (#332, already on
 # master) is the SOLE enforcement for an actual push's stamp/tree check;
@@ -7,15 +7,17 @@
 # it cannot be fooled by shell shape the way a text parser can.
 #
 # What a git hook structurally cannot see is its OWN disarming. So this
-# hook denies any Bash tool command that merely CONTAINS one of four
-# strings, whether or not the command is a push at all:
+# hook denies any Bash tool command whose text matches one of four
+# rules, whether or not the command is a push at all:
 #
 #   1. PGWT_SKIP_PUSH_GUARD=1 -- the documented humans-only escape hatch;
 #      nothing else stops an agent from setting it itself.
 #   2. core.hooksPath         -- the git config that arms the real hook.
-#   3. chmod together with git-hooks -- could strip the real hook's +x
-#      bit; git silently SKIPS a non-executable pre-push hook (see
-#      tests/test_pre_push_hook.sh's documented residual for that fact).
+#   3. git-hooks together with a write-shaped operation -- permission
+#      changes, removal, replacement, file writes, or output redirection
+#      could disarm the real hook. git silently SKIPS a non-executable
+#      pre-push hook (see tests/test_pre_push_hook.sh's documented residual).
+#      A git-hooks mention alone (e.g. reading the hook) is allowed.
 #   4. --no-verify            -- the one git flag that skips a pre-push
 #      hook outright; nothing server-side can see it.
 #
@@ -29,8 +31,9 @@
 # is not, so it cannot be "ambiguous".
 #
 # The one accepted false positive: a commit message, doc edit, or code
-# comment (such as this file) that merely MENTIONS one of the four
-# strings. That costs one blocked command and a visible stderr line,
+# comment (such as this file) that merely MENTIONS a denied string or
+# git-hooks together with a write-shaped operation. That costs one
+# blocked command and a visible stderr line,
 # never a silent gap -- the tradeoff this file exists to make.
 #
 # Fed the Claude Code hook JSON on stdin ({"tool_input":{"command":...}}).
@@ -59,11 +62,12 @@ case "$input" in
 esac
 
 case "$input" in
-    *'chmod'*)
+    *'git-hooks'*)
         case "$input" in
-            *'git-hooks'*)
-                deny "chmod ... git-hooks" \
-                    "could strip the pre-push hook's executable bit, which git then silently skips" ;;
+            *'chmod'*|*'rm '*|*'unlink '*|*'mv '*|*'cp '*|*'install '*|*'truncate '*|*'touch '*|*'tee '*|*'dd '*|\
+            *'> scripts/git-hooks'*|*'>scripts/git-hooks'*)
+                deny "write-shaped operation ... git-hooks" \
+                    "could remove, overwrite, or disable the pre-push hook" ;;
         esac
         ;;
 esac
