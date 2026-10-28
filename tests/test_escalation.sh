@@ -36,6 +36,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# #622: the tier must declare PGWT_EXPECT_PHASE_PROBES before live work.
+if [[ $SELF_TEST_ONLY -eq 0 ]]; then
+    python3 "$SCRIPT_DIR/testutil.py" phase-expectation >/dev/null || exit $?
+fi
+# #622: --skip-usdt is the EL8 proxy; it removes only the phase probes.
+PHASE_ARGS=()
+[[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]] && PHASE_ARGS+=(--skip-usdt)
+
 if [[ -z "$PM_PID" && $SELF_TEST_ONLY -eq 0 ]]; then
     PM_PID=$(find_postmaster)
     if [[ -z "$PM_PID" ]]; then
@@ -58,6 +66,7 @@ BUDGET=10
 
 passed=0
 failed=0
+PHASE_REFUSED=0
 
 check() {
     if [[ "$1" -eq 0 ]]; then
@@ -213,6 +222,7 @@ jget() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
 # ── Start daemon in tiered mode ───────────────────────────────
 "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" \
     --mode tiered --sample-rate 50 --escalation-budget "$BUDGET" -v \
+    ${PHASE_ARGS[@]+"${PHASE_ARGS[@]}"} \
     >/dev/null 2>"$DAEMON_LOG" &
 TRACER_PID=$!
 
@@ -423,6 +433,8 @@ CAP_MODE=""
 CAP_TIER=""
 CAP_TIER_END=""
 CAP_WINDOWS=""
+CAP_MASKS=""
+CAP_MASK_SAMPLES=0
 
 esc108_cleanup() {
     [[ -n "$WL_STOP" ]] && rm -f "$WL_STOP"
@@ -448,6 +460,7 @@ WL_STOP=""
 run_tiered_capture() {
     local tag="$1" do_escalate="$2" log
     CAP_DIR=""; CAP_MODE="?"; CAP_TIER="?"; CAP_TIER_END="?"; CAP_WINDOWS="?"
+    CAP_MASKS=""; CAP_MASK_SAMPLES=0
     local dir
     dir=$(mktemp -d "/tmp/pgwt_esc108_${tag}_XXXXXX")
     log=$(mktemp "/tmp/pgwt_esc108_${tag}_log_XXXXXX")
@@ -456,6 +469,7 @@ run_tiered_capture() {
         --mode tiered --sample-rate 50 --escalation-budget 120 -v \
         --anomaly-aas-factor 1000000 --anomaly-cpu-cusum-disable \
         --anomaly-lock-fraction 1 --anomaly-lock-min-aas 1000000 \
+        ${PHASE_ARGS[@]+"${PHASE_ARGS[@]}"} \
         >/dev/null 2>"$log" &
     TRACER_PID=$!
     local up=0
@@ -486,8 +500,36 @@ run_tiered_capture() {
         local r
         r=$(ctl '{"cmd":"escalate","duration_s":8,"reason":"#108"}')
         echo "  escalate($tag): $r"
+        # #622: bits are assembled one at a time. Keep EVERY open-window
+        # sample, so a torn read cannot hide a phase bit seen earlier.
+        local sample active mask
+        for _ in $(seq 1 18); do
+            # status carries the mask; metrics carries escalation_active.
+            # Require both replies rather than treating missing state as idle.
+            if active=$(ctl '{"cmd":"metrics"}') && sample=$(ctl '{"cmd":"status"}'); then
+                mask=$(printf '%s\n' "$sample" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+active = json.loads(sys.argv[1])["escalation_active"]
+if active is True and r.get("tier") == "escalated":
+    print(json.dumps(r.get("exact_probe_attached_mask")))
+' "$active")
+                if [[ $? -ne 0 ]]; then
+                    check 1 "#622: unreadable mid-window status/metrics response"
+                fi
+                if [[ -n "$mask" ]]; then
+                    CAP_MASKS="$CAP_MASKS $mask"
+                    CAP_MASK_SAMPLES=$((CAP_MASK_SAMPLES + 1))
+                fi
+            else
+                check 1 "#622: status could not be read during the exact window"
+            fi
+            sleep 0.5
+        done
+        echo "  mid-window mask samples: $CAP_MASKS (samples: $CAP_MASK_SAMPLES)"
+    else
+        sleep 9
     fi
-    sleep 9
     rm -f "$WL_STOP"; WL_STOP=""
     sleep 1
     kill -TERM "$WL_PID" 2>/dev/null; wait "$WL_PID" 2>/dev/null; WL_PID=""
@@ -554,14 +596,43 @@ else
         B_SCAT=$(exec_rows "$B_DIR" exec_scatter points)
         [[ "$B_EXEC" != "ERR" && "$B_SCAT" != "ERR" ]]
         check $? "#108: server answered the escalated capture (execs=$B_EXEC scatter=$B_SCAT)"
-        [[ "$B_EXEC" =~ ^[0-9]+$ && "$B_EXEC" -gt 0 ]]
-        check $? "#108: a TIERED escalation produces Waterfall executions (got: $B_EXEC)"
-        [[ "$B_SCAT" =~ ^[0-9]+$ && "$B_SCAT" -gt 0 ]]
-        check $? "#108: a TIERED escalation produces Scatter points (got: $B_SCAT)"
+        PHASE_RESULT=$(PYTHONPATH="$SCRIPT_DIR" python3 -c '
+import json, sys
+from testutil import phase_contract_verdict, resolve_declared_phase_mask
+masks = [json.loads(v) for v in sys.argv[1].split()]
+def count(raw):
+    return None if raw == "UNAVAIL" else int(raw) if raw.isdigit() else raw
+verdict, reason = phase_contract_verdict(
+    resolve_declared_phase_mask(), masks,
+    {"executions": count(sys.argv[2]), "exec_scatter": count(sys.argv[3])})
+print(verdict)
+print(reason)
+' "$CAP_MASKS" "$B_EXEC" "$B_SCAT")
+        PHASE_RC=$?
+        PHASE_VERDICT=$(printf '%s\n' "$PHASE_RESULT" | head -n 1)
+        PHASE_REASON=$(printf '%s\n' "$PHASE_RESULT" | tail -n +2)
+        echo "  phase contract: $PHASE_VERDICT: $PHASE_REASON"
+        if [[ "$PHASE_RC" -ne 0 ]]; then
+            check 1 "#622: phase contract could not be evaluated"
+        elif [[ "$PHASE_VERDICT" == "pass" ]]; then
+            [[ "$B_EXEC" =~ ^[0-9]+$ && "$B_EXEC" -gt 0 ]]
+            check $? "#108: a TIERED escalation produces Waterfall executions (got: $B_EXEC)"
+            [[ "$B_SCAT" =~ ^[0-9]+$ && "$B_SCAT" -gt 0 ]]
+            check $? "#108: a TIERED escalation produces Scatter points (got: $B_SCAT)"
+        elif [[ "$PHASE_VERDICT" == "refuse" ]]; then
+            echo "PHASE-CONTRACT-REFUSED: $PHASE_REASON"
+            PHASE_REFUSED=1
+            echo "  SKIP: #108 Waterfall/Scatter positive checks (phase contract REFUSED)"
+        else
+            check 1 "$PHASE_REASON"
+        fi
         rm -rf "$B_DIR"
     fi
 fi
 
 echo ""
 echo "$passed/$((passed + failed)) tests passed"
+if [[ $failed -eq 0 && $PHASE_REFUSED -eq 1 ]]; then
+    exit 78
+fi
 [[ $failed -eq 0 ]]

@@ -117,6 +117,10 @@ elif [[ -n "$PG_VERSION" ]]; then
 fi
 
 passed=0
+refused=0
+phase_expectation=""
+# Must stay equal to PHASE_REFUSED_MARKER in tests/testutil.py.
+PHASE_REFUSED_MARKER="PHASE-CONTRACT-REFUSED"
 failed=0
 skipped=0
 excluded=0
@@ -187,7 +191,13 @@ run_test() {
     echo "  $name"
     echo "════════════════════════════════════════"
     local rc=0
-    "$@" || rc=$?
+    local capture; capture=$(mktemp "${TMPDIR:-/tmp}/pgwt_run_test_XXXXXX") || {
+        echo "  FAILED (cannot capture test output)"
+        failed=$((failed + 1))
+        return
+    }
+    "$@" 2>&1 | tee "$capture"
+    rc=${PIPESTATUS[0]}
     local issue
     if issue=$(known_failing_issue "$name"); then
         # A listed test that could not even run (126: found but not
@@ -205,11 +215,24 @@ run_test() {
             echo "  KNOWN-FAILING (issue #$issue)"
             known_failing=$((known_failing + 1))
         fi
+    elif [[ "$rc" -eq 78 ]]; then
+        local missing=""
+        [[ "$phase_expectation" == "0" ]] || missing+=" declaration not \"0\";"
+        phase_dependent_test "$name" || missing+=" test is not phase-dependent;"
+        grep -Fq "$PHASE_REFUSED_MARKER" "$capture" || missing+=" refusal marker absent;"
+        if [[ -z "$missing" ]]; then
+            echo "  REFUSED (phase markers not expected on this tier: PGWT_EXPECT_PHASE_PROBES=0, negative contract checked)"
+            refused=$((refused + 1))
+        else
+            echo "  FAILED (exit 78:$missing)"
+            failed=$((failed + 1))
+        fi
     elif [[ "$rc" -eq 0 ]]; then
         passed=$((passed + 1))
     else
         failed=$((failed + 1))
     fi
+    rm -f "$capture"
 }
 
 skip_test() {
@@ -237,6 +260,23 @@ skip_live_test() {
     else
         skip_test "$name" "$reason"
     fi
+}
+
+# #622: only these four tests may report an executed phase refusal (78).
+phase_dependent_test() {
+    case "$1" in
+        test_execution_cardinality|test_execution_span_live|test_escalation|test_ui_live_smoke) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+undeclared_phase_test() {
+    local name="$1" reason="$2"
+    echo ""
+    echo "════════════════════════════════════════"
+    echo "  $name — FAILED (undeclared phase-marker expectation: $reason)"
+    echo "════════════════════════════════════════"
+    failed=$((failed + 1))
 }
 
 # A test whose documented/known minimum PostgreSQL major is above the one
@@ -514,8 +554,20 @@ LIVE_TESTS=(
 
 # Step 4: integration + live-correctness tests (root + running PG)
 if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
+    # #622: the provisioner declares the tier. Never infer it from the kernel
+    # or the mask, and never block unrelated live tests on a bad declaration.
+    phase_error_file=$(mktemp /tmp/pgwt_phase_expectation_XXXXXX)
+    phase_rc=0
+    phase_expectation=$(python3 "$SCRIPT_DIR/testutil.py" phase-expectation 2>"$phase_error_file") || phase_rc=$?
+    phase_error=$(cat "$phase_error_file")
+    rm -f "$phase_error_file"
+    export PGWT_EXPECT_PHASE_PROBES
     for entry in "${LIVE_TESTS[@]}"; do
         IFS='|' read -r name runner file min_pg <<< "$entry"
+        if [[ "$phase_rc" -ne 0 ]] && phase_dependent_test "$name"; then
+            undeclared_phase_test "$name" "$phase_error"
+            continue
+        fi
         if [[ -n "$min_pg" && -n "$PG_VERSION" && "$PG_VERSION" -lt "$min_pg" ]]; then
             exclude_test "$name" "needs PostgreSQL >= $min_pg, running PG$PG_VERSION"
             continue
@@ -651,7 +703,11 @@ except Exception as e:
     print(f"  Live UI smoke: could not read summary.json ({e})")
     sys.exit(0)
 
-line = "  Live UI smoke: overall=" + ("PASS" if s.get("ok") else "FAIL")
+line = "  Live UI smoke: overall=" + (
+    "REFUSED" if s.get("ok") and s.get("refused_tabs") else
+    "PASS" if s.get("ok") else "FAIL")
+if s.get("refused_tabs"):
+    line += " (refused: " + ", ".join(s["refused_tabs"]) + ")"
 if s.get("failed_tabs"):
     line += " (failed: " + ", ".join(s["failed_tabs"]) + ")"
 if s.get("known_failing_tabs"):
@@ -666,9 +722,9 @@ echo ""
 echo "════════════════════════════════════════"
 echo "  SUMMARY"
 echo "════════════════════════════════════════"
-total=$((passed + failed + skipped + excluded + known_failing))
-executed=$((passed + failed + known_failing))
-echo "  Executed: $executed (passed $passed, failed $failed, known-failing $known_failing ($xpass xpass)), skipped $skipped, excluded $excluded, total $total"
+total=$((passed + failed + refused + skipped + excluded + known_failing))
+executed=$((passed + failed + refused + known_failing))
+echo "  Executed: $executed (passed $passed, failed $failed, refused $refused, known-failing $known_failing ($xpass xpass)), skipped $skipped, excluded $excluded, total $total"
 tier_report
 if [[ $REQUIRE_LIVE -eq 1 ]]; then
     echo "  Mode:     --require-live (live-section skips counted as failures)"
