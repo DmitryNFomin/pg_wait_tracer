@@ -462,8 +462,18 @@ def main():
     # §13 the issue attribution itself, and the refusal that stops `--record`
     #     from laundering a brand-new divergence into "known".
     import test_summary_raw_parity as G
-    check(G.issue_for("time_model/row/CPU*/ms", "interior_160s") == 408,
-          "§13 a CPU row field is attributed to #408")
+    # The CPU rule is GONE, on purpose, and this is the assertion that says
+    # so. #408 and #562 are closed by the summary v9 epoch (the record now
+    # carries the per-session measured-CPU split and the sessions routing
+    # reports it), and a rule still mapping a CPU divergence to a closed
+    # issue is worse than no rule: the next one would be filed into a closed
+    # ticket and vanish. UNEXPLAINED is the loud answer, and `--record`
+    # refuses to write it -- so a new CPU divergence cannot be laundered
+    # into "known" by a regeneration.
+    check(G.issue_for("time_model/row/CPU*/ms", "interior_160s")
+          == "UNEXPLAINED",
+          "§13 a CPU row field is UNEXPLAINED now that #408/#562 are closed "
+          "-- never attributed to a closed issue")
     check(G.issue_for("sessions/row/1001/top_wait", "interior_160s") == 319,
           "§13 a top_wait field is attributed to #319")
     check(G.issue_for("time_model/row/Client/ms", "straddle_130s") == 324,
@@ -477,8 +487,9 @@ def main():
           "(no issue covers it -- interior windows must agree)")
     check(G.unexplained({"w": {"f": {"issue": "UNEXPLAINED"}}}) == [("w", "f")],
           "§13 --record refuses to write an UNEXPLAINED entry")
-    check(G.unexplained({"w": {"f": {"issue": 408}}}) == [],
-          "§13 ... and does not block an attributed one")
+    check(G.unexplained({"w": {"f": {"issue": 324}}}) == [],
+          "§13 ... and does not block an attributed one (#324, which is "
+          "OPEN -- the example is deliberately not a closed issue)")
     check(G.load_expected.__doc__ and "EMPTY" in G.load_expected.__doc__,
           "§13 a missing expected table is documented as fail-loud")
 
