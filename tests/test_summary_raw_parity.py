@@ -335,8 +335,8 @@ def issue_for(field, window):
         return 562                      # Top Sessions raw measures, summary walls
     # No straddle_130s catch-all for #324: handle_top_queries always uses raw
     # (server.c:5579). The remaining production readers of the full-duration
-    # per-query table are tm_summary_visitor (compute.c:2886, gate :2891)
-    # and aas_summary_visitor (:2717, gate :2730); both require query_id != 0
+    # per-query table are tm_summary_visitor (compute.c:2886, gate :2892)
+    # and aas_summary_visitor (:2717, gate :2731); both require query_id != 0
     # (AAS sets has_query_filter from that predicate at :2825). All four CMDS
     # above are requested UNFILTERED, so #324 cannot cause a divergence here.
     # An unmatched field must remain UNEXPLAINED for unexplained()/--record

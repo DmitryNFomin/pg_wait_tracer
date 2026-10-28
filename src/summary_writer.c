@@ -238,8 +238,8 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * handle_top_queries computes raw unconditionally (:5579); no summary route.
      * tq_summary_visitor (compute.c:3584) has no production caller.
      * The remaining production readers of queries[] are tm_summary_visitor
-     * (compute.c:2886; per-query read only under a query filter, :2891)
-     * and aas_summary_visitor (:2717; same gate, :2730). `dur` still matters
+     * (compute.c:2886; per-query read only under a query filter, :2892)
+     * and aas_summary_visitor (:2717; same gate, :2731). `dur` still matters
      * for query-filtered Time Model and AAS; their full-duration-at-close
      * window-edge limitation remains.
      *
