@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mechanical definition-of-done gates. Run from inside the agent worktree.
-# Usage: scripts/pr-ready.sh [OS=ubuntu|el8|el9] [PG=major]
+# Usage: scripts/pr-ready.sh [OS=ubuntu|el8|el9] [PG=major] [EPHEMERAL=0|1] [KEEP=0|1]
 set -uo pipefail
 
 die() { printf 'pr-ready: REFUSED: %s\n' "$*" >&2; exit 1; }
@@ -8,6 +8,8 @@ event() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&3; }
 
 box_args=(box-check)
 os=${OS:-ubuntu}
+ephemeral=${EPHEMERAL:-0}
+keep=${KEEP:-0}
 for arg in "$@"; do
     case "$arg" in
         OS=*) os=${arg#OS=}; box_args+=("$arg") ;;
@@ -15,20 +17,27 @@ for arg in "$@"; do
             pg=${arg#PG=}
             [[ -n "$pg" && "$pg" != *[!0-9]* ]] || die "PG must be a major version number"
             box_args+=("$arg") ;;
-        *) die "usage: scripts/pr-ready.sh [OS=ubuntu|el8|el9] [PG=major]" ;;
+        EPHEMERAL=*) ephemeral=${arg#EPHEMERAL=}; box_args+=("$arg") ;;
+        KEEP=*) keep=${arg#KEEP=}; box_args+=("$arg") ;;
+        --fast) die "--fast is not supported here; pr-ready requires the full check" ;;
+        *) die "unrecognized argument '$arg'; usage: scripts/pr-ready.sh [OS=ubuntu|el8|el9] [PG=major] [EPHEMERAL=0|1] [KEEP=0|1]" ;;
     esac
 done
 case "$os" in ubuntu|el8|el9) ;; *) die "unsupported OS=$os" ;; esac
+case "$ephemeral" in 0|1) ;; *) die "EPHEMERAL must be 0 or 1" ;; esac
+case "$keep" in 0|1) ;; *) die "KEEP must be 0 or 1" ;; esac
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repository"
 cd "$root" || die "cannot enter repository root"
 branch=$(git symbolic-ref --quiet --short HEAD) || die "not on an agent/ branch (detached HEAD)"
 [[ "$branch" == agent/?* ]] || die "not on an agent/ branch: $branch"
-[[ -n "${PGWT_BOX:-}" ]] || die 'PGWT_BOX is unset or empty; configure a live box'
-case "$os" in
-    el8) [[ -n "${PGWT_BOX_EL8:-}" ]] || die 'OS=el8 requires PGWT_BOX_EL8' ;;
-    el9) [[ -n "${PGWT_BOX_EL9:-}" ]] || die 'OS=el9 requires PGWT_BOX_EL9' ;;
-esac
+if [[ "$ephemeral" != 1 ]]; then
+    [[ -n "${PGWT_BOX:-}" ]] || die 'PGWT_BOX is unset or empty; configure a live box'
+    case "$os" in
+        el8) [[ -n "${PGWT_BOX_EL8:-}" ]] || die 'OS=el8 requires PGWT_BOX_EL8' ;;
+        el9) [[ -n "${PGWT_BOX_EL9:-}" ]] || die 'OS=el9 requires PGWT_BOX_EL9' ;;
+    esac
+fi
 command -v make >/dev/null 2>&1 || die "make is unavailable"
 [[ -f Makefile ]] || die "Makefile is missing"
 [[ -x scripts/tree-hash.sh ]] || die "scripts/tree-hash.sh is missing or not executable"
@@ -36,19 +45,19 @@ command -v make >/dev/null 2>&1 || die "make is unavailable"
 base=master
 git rev-parse --verify --quiet "$base^{commit}" >/dev/null || base=origin/master
 merge_base=$(git merge-base "$base" HEAD) || die "cannot compare changes against master or origin/master"
-web_changed=0
-git diff --quiet "$merge_base" -- web/
+gallery_changed=0
+git diff --quiet "$merge_base" -- web/static/ tests/web_snapshots/
 case $? in
     0) ;;
-    1) web_changed=1 ;;
-    *) die "cannot inspect web/ changes against $base" ;;
+    1) gallery_changed=1 ;;
+    *) die "cannot inspect gallery changes against $base" ;;
 esac
-untracked_web=$(git ls-files --others --exclude-standard -- web/) || die "cannot inspect untracked web/ files"
-[[ -z "$untracked_web" ]] || web_changed=1
+untracked_gallery=$(git ls-files --others --exclude-standard -- web/static/ tests/web_snapshots/) || die "cannot inspect untracked gallery files"
+[[ -z "$untracked_gallery" ]] || gallery_changed=1
 
 # Require actual explicit rules, not merely names in a .PHONY declaration.
 targets=(box-check check)
-[[ "$web_changed" -eq 0 ]] || targets+=(ui-gallery)
+[[ "$gallery_changed" -eq 0 ]] || targets+=(ui-gallery)
 for target in "${targets[@]}"; do
     awk -v target="$target" '
         /^[^# \t][^=]*:/ {
@@ -62,7 +71,7 @@ done
 log_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-pr-ready.XXXXXX") || die "cannot create log directory"
 exec 3>&1
 printf 'pr-ready: logs: %s\n' "$log_dir"
-printf 'pr-ready: web/ changed versus %s: %s\n' "$base" "$web_changed"
+printf 'pr-ready: web/static/ or tests/web_snapshots/ changed versus %s: %s\n' "$base" "$gallery_changed"
 printf '%s\n' 'pr-ready: UNCHECKED: required OS/PG coverage, box log provenance and live-UI-smoke verdict, gallery cell justifications, and fresh reviewer approval remain with the caller (CLAUDE.md).'
 
 # A stamp from a previous run must not turn an unavailable check into a pass.
@@ -86,8 +95,8 @@ wait "$box_pid"
 box_rc=$?
 
 gallery_rc=0
-if [[ "$web_changed" -eq 1 ]]; then
-    event "ui-gallery start (web/ changed)"
+if [[ "$gallery_changed" -eq 1 ]]; then
+    event "ui-gallery start (web/static/ or tests/web_snapshots/ changed)"
     finish_target ui-gallery 2>&1 | tee "$log_dir/ui-gallery.log"
     gallery_rc=$?
 fi
@@ -118,7 +127,7 @@ if [[ "${check_status[1]}" -ne 0 ]]; then
     printf 'pr-ready: FAILED to record check log\n' >&2
     failed=1
 fi
-if [[ "$web_changed" -eq 1 ]]; then
+if [[ "$gallery_changed" -eq 1 ]]; then
     printf 'pr-ready: ui-gallery ran (exit %s); log: %s/ui-gallery.log\n' "$gallery_rc" "$log_dir"
     [[ "$gallery_rc" -eq 0 ]] || failed=1
 fi
