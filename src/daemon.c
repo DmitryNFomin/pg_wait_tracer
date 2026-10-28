@@ -598,10 +598,9 @@ static void start_sampler_sched(struct pgwt_daemon *d)
         fprintf(stderr, "INFO: sampler scheduling: left unchanged (default); "
                 "the sampled tier CPU figure is a lower bound under CPU "
                 "contention because the daemon observes only when the "
-                "scheduler runs it. Measured on Ubuntu 6.8, 4 vCPU, "
-                "8 clients: S/G 0.81 at SCHED_OTHER vs 0.88 under SCHED_FIFO; "
-                "PGWT_SAMPLER_NICE does NOT close that gap "
-                "(nice is a CFS weight, not a scheduling class).\n");
+                "scheduler runs it. PGWT_SAMPLER_NICE does not remove "
+                "that bias, because nice is a CFS weight and not a "
+                "scheduling class.\n");
         return;
     case PGWT_SAMPLER_SCHED_APPLY:
         pgwt_sampler_apply_sched(want, &d->sampler_sched);
