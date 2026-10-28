@@ -5,8 +5,44 @@
 # The lead does not send a report that comes back BLOCK without fixing it.
 set -u
 D="${1:?usage: audit-report.sh <draft-file>}"
+# Resolve our own directory BEFORE the cd below, and resolve $D to an
+# absolute path too -- a relative draft path would otherwise point at the
+# wrong tree once we cd into the main checkout.
+SELFDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "$D" in
+  /*) : ;;
+  *) D="$(pwd)/$D" ;;
+esac
 cd /Users/dmitryfomin/work/git/pg_wait_tracer
+
+# ---- deterministic pre-pass, before any codex call -------------------------
+# RULE 0: any absence claim ("exists nowhere", "not merged", "unreachable",
+# "no mechanical check", "not implemented", ...) needs a pasted command and
+# its output. This has been violated routinely -- including reporting checks
+# as nonexistent that were written that same morning. Catch the unevidenced
+# ones mechanically so a BLOCK does not wait on codex noticing the same
+# thing. See absence-prepass.py for the vocabulary and the proximity rule.
+if [ ! -r "$D" ]; then
+  printf 'PREPASS ERROR: cannot read draft %s -- treat as BLOCK.\n' "$D"
+  printf '\nVERDICT: BLOCK\nVERDICT BLOCK for draft=unreadable -- do not send.\n'
+  exit 1
+fi
 H=$(shasum -a 256 "$D" | cut -c1-16)
+PP_OUT=$(/usr/bin/python3 "$SELFDIR/absence-prepass.py" "$D" 2>&1)
+PP_RC=$?
+if [ "$PP_RC" -eq 1 ]; then
+  printf '%s\n' "$PP_OUT"
+  printf '\nVERDICT: BLOCK\nVERDICT BLOCK for draft=%s -- do not send (pre-pass, no codex call made).\n' "$H"
+  exit 1
+elif [ "$PP_RC" -ne 0 ]; then
+  # Pre-pass itself failed to run (bad interpreter, unreadable file, etc.) --
+  # fail closed exactly like a crashed codex auditor would.
+  printf '%s\n' "$PP_OUT"
+  printf '\nPREPASS INCONCLUSIVE (exit %s) -- treat as BLOCK. draft=%s\n' "$PP_RC" "$H"
+  exit 2
+fi
+printf '%s\n' "$PP_OUT"
+
 OUT=$(mktemp); trap 'rm -f "$OUT"' EXIT
 codex exec "You are auditing a status report before it reaches the project owner.
 The owner is tired of correcting it himself; that is your job now, not his.
