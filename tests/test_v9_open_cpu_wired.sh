@@ -225,7 +225,32 @@ echo "  ok: all seven v9 control keys present and numeric"
 # the last. Sized so it exceeds the >= 3 s check below on the gate box while
 # staying well inside its own timeout; the dollar quoting is single-quoted so
 # bash cannot expand $$ into its PID.
-CPU_LOOP_SQL='DO $$ DECLARE s bigint := 0; i bigint; BEGIN FOR i IN 1..40000000 LOOP s := s + i; END LOOP; END $$;'
+# SIZED BY THE CLOCK, not by an iteration count. The first version of this
+# loop ran `FOR i IN 1..40000000`, which the gate box finished in 2 s --
+# under the >= 3 s floor below, so the fixture REFUSED (correctly: a stimulus
+# that cannot span a tick boundary measures nothing, and plpgsql turns out to
+# do ~20 M scalar assignments a second on that machine). A constant tuned to
+# one box is a stimulus that silently stops spanning ticks the next time the
+# hardware changes, so the loop runs until a DEADLINE instead and is right on
+# any box. The clock is read once per 200 k iterations (tens of ms) so the
+# read itself is not the workload; clock_timestamp() is a plain gettimeofday
+# and sets no wait event.
+CPU_LOOP_SECONDS=9
+CPU_LOOP_SQL="DO \$\$
+DECLARE
+    s bigint := 0;
+    i bigint := 0;
+    deadline timestamptz := clock_timestamp()
+                            + interval '$CPU_LOOP_SECONDS seconds';
+BEGIN
+    LOOP
+        i := i + 1;
+        s := s + i;
+        IF i % 200000 = 0 AND clock_timestamp() > deadline THEN
+            EXIT;
+        END IF;
+    END LOOP;
+END \$\$;"
 # EVERY leg is bounded. The first version of this block ran three
 # unbounded psql children and then a bare `wait`, and the whole test was
 # killed by its harness at 400 s with no verdict -- a HANG, which is the
