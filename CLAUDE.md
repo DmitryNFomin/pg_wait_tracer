@@ -13,7 +13,7 @@ A draft that comes back **BLOCK** is not sent until it is fixed. Paste the verdi
 line with the report.
 
 **A held claim requires evidence.** Run `scripts/lead/held.sh <path>...` — it prints `HELD <path> by #N` or
-`FREE <path> (last holder #N merged <t>)`. Permitted vocabulary, nothing else:
+`FREE <path>`. Permitted vocabulary, nothing else:
 
 - `RUNNING <item> <PR/agent> since <t>`
 - `HELD <item> by #N on <files>` — must paste **this turn's** `held.sh` output
