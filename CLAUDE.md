@@ -30,7 +30,7 @@ Treat one denied operation as one failed attempt only. Without evidence, write
 ## RULE 1 — advisers first, the owner last. Never ask the owner what an adviser can answer.
 
 Send design, scope, sequencing, approach and option questions to **both advisers first**:
-`codex exec` and `.claude/agents/adviser.md`, in parallel. Ask the owner only if
+Fable (`.claude/agents/adviser.md`) and Astra, in parallel. Ask the owner only if
 the advisers disagree and the lead cannot adjudicate on evidence; the lead disagrees with both;
 or the decision is the owner's (money, machines, release timing, RULE 2 exclusions).
 Tell the owner what both advisers said and where the lead disagrees.
@@ -118,9 +118,16 @@ code bigger than a one-liner.
 
 - **Models** are pinned in `.claude/agents/*.md`, overridden at spawn time.
   Use the cheapest model that does good work; **spend on review, economise on implementation**.
-  `implementer` = **Sonnet** for UI, tests, tooling and docs; **Opus** for anything
-  under `src/` (BPF, capture, discovery, backend layout, accounting) and for
-  design-heavy UI after a Sonnet attempt failed.
+  Owner rule 2026-10-28, four operative instructions:
+  1. `codex` writes the code. Every PR gets a NEW `codex` agent with fresh
+     context — never a resumed or reused one.
+  2. Claude agents review and challenge that code. Never the agent that wrote it.
+  3. Astra writes designs. Fable challenges design decisions. (Astra's concrete
+     invocation is not yet wired — no model id, CLI or `.claude/agents/` file
+     exists for it; the name is a placeholder until the owner maps it.)
+  4. Any doubt, uncertainty or weird result — the lead's or a coder's — MUST go
+     to both Fable and Astra as advisers/tech leads, not only when it seems
+     worth it.
   `reviewer` = **Sonnet** (high effort), **Opus for `src/` logic** — that
   review is where silent-wrong-answer bugs get caught, so it is never
   downgraded. `ui-reviewer` = Sonnet. `Explore`/triage: Sonnet or Haiku.
@@ -129,9 +136,9 @@ code bigger than a one-liner.
   `run_in_background` wait, then read results; do not loop. Reviewers stop polling agents.
   Keep agent reports at most ~15 lines.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#models-and-review`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#polling-cost`)
-- **Fable**: use as standing adviser, not implementer; leave implementation
-  unused except explicit escalation for a `src/` problem after an Opus
-  implementer has already failed a round. If escalation is not worthwhile, park and report
+- **Fable**: use as standing adviser (design-challenge, per Models above), not
+  implementer; leave implementation unused except explicit escalation for a
+  `src/` problem after `codex` has already failed a round. If escalation is not worthwhile, park and report
   the task to the owner; never silently retry or downgrade. Record it in memory
   `fable-parked-tasks`. Check the budget before repeating "out of Fable tokens".
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#fable-history`)
@@ -206,9 +213,10 @@ code bigger than a one-liner.
     `tests/web_unit/*.test.mjs` register every matching file. Leave live guard
     execution as a manual reviewer step; let a human judge deliberate manual-only tools.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#evidence-guard-incidents`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#runner-registration-gaps`)
-- **Adviser**: consult BOTH by default — primary codex via `codex exec`, standing
-  second Fable via `.claude/agents/adviser.md`. Keep one Fable conversation per
-  session; resume with SendMessage, never respawn. Consult on every found issue,
+- **Adviser**: consult BOTH by default — Fable via `.claude/agents/adviser.md`
+  and Astra (invocation not yet wired; see Models above). Keep one Fable
+  conversation per session; resume with SendMessage, never respawn. Consult on
+  every found issue,
   plan and numeric claim BEFORE acting and BEFORE reporting. Consult both before
   accepting/rejecting review verdicts or returning branches; owner-facing numbers,
   measurements or facts; plans, ordering or scheduling; infrastructure/cost
