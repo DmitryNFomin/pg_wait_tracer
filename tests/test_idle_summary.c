@@ -57,6 +57,9 @@
  *      summary directory, a writer that wrote nothing, an unreadable file, a
  *      truncated header, a window with no overlap, and the case where the
  *      pacing event is absent rather than mis-accounted.
+ *  15. v9 session measurements on disk: distinct fields round-trip, a short
+ *      session is refused, v8 keeps its unsplit answer, and the observation
+ *      counter saturates through the real writer and survives the format.
  *
  * TIMING. Every timestamp is a literal and every flush takes an explicit
  * now_mono_ns, so nothing here depends on wall time. The only real clock read
@@ -1475,22 +1478,24 @@ static void test_idle_children_sum_exactly(void)
  * mistake as the Timeout:* idle-children helper: a test measuring something
  * other than what it asserted.
  *
- * So this builds an ACTUAL round-2-layout payload -- v4 bytes with the 8 bytes
- * of per-query idle_ns and the 12-byte record trailer removed -- and feeds it
- * to pgwt_summary_deserialize as if it were v4. No file, no compression, no
- * block header: just the two layouts and the parser.
+ * So this builds an ACTUAL round-2-layout payload -- current bytes with the
+ * 8 bytes of per-query idle_ns, both record trailers, and the v9 session
+ * additions removed -- and feeds it to pgwt_summary_deserialize as if it
+ * were v4. No file, no compression, no block header: just the two layouts
+ * and the parser.
  */
 static size_t strip_v4_additions(const uint8_t *in, size_t in_size,
                                  const struct pgwt_summary_accum *src,
                                  uint8_t *out)
 {
-    /* Walk the v4 layout and copy everything except the v4-only fields.
+    /* Walk the current layout and remove fields absent before round 2.
      *   class_ns                      PGWT_NUM_CLASSES * 8
      *   events    (non-empty slots)   28 + HISTOGRAM_BUCKETS*8 each
-     *   sessions  (non-empty slots)   32 each
+     *   sessions  (non-empty slots)   44 each
      *   queries                       36 + NUM_CLASSES*8 + 1 + nte*20 + [8]
      *   trailer                       [12]
-     * The bracketed parts are what round 2 added. */
+     * The bracketed parts are what round 2 added; v7's trailer and v9's
+     * 12 session bytes must also come off to recover the historical layout. */
     const uint8_t *p = in;
     uint8_t *o = out;
     size_t n;
@@ -1505,7 +1510,9 @@ static size_t strip_v4_additions(const uint8_t *in, size_t in_size,
     for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++) {
         const struct pgwt_summary_session *ss = &src->sessions[i];
         if (ss->pid == 0 && ss->db_time_ns == 0) continue;
-        n = 32;                          memcpy(o, p, n); p += n; o += n;
+        /* v9 session entry: 4+8+8+4+8 + v9's 8+4. */
+        n = 44;                          memcpy(o, p, n - 12);
+        p += n; o += n - 12;              /* DROP the v9 session fields */
     }
     for (int i = 0; i < SUMMARY_MAX_QUERIES; i++) {
         const struct pgwt_summary_query *q = &src->queries[i];
@@ -1560,25 +1567,29 @@ static void test_old_layout_is_incompatible(void)
     CHECK(acc->idle_ns > 0, "the record has idle time (%llu ns)",
           (unsigned long long)acc->idle_ns);
 
-    uint8_t *v4 = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
+    uint8_t *current = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
     uint8_t *old = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
-    CHECK(v4 && old, "alloc buffers");
-    if (!v4 || !old) { free(acc); free(v4); free(old); return; }
+    CHECK(current && old, "alloc buffers");
+    if (!current || !old) { free(acc); free(current); free(old); return; }
 
-    size_t v4_size = pgwt_summary_serialize(acc, v4, PGWT_SUMMARY_SERIALIZE_MAX);
-    CHECK(v4_size > 0, "v4 serialize produced %zu bytes", v4_size);
-    size_t old_size = strip_v4_additions(v4, v4_size, acc, old);
+    size_t current_size = pgwt_summary_serialize(acc, current,
+                                                PGWT_SUMMARY_SERIALIZE_MAX);
+    CHECK(current_size > 0, "current serialize produced %zu bytes", current_size);
+    size_t old_size = strip_v4_additions(current, current_size, acc, old);
 
-    /* The layouts differ by exactly (8 per query + 12 + v7's 40). */
-    int nq = 0;
+    /* Later additions must also come off to recover the actual old layout:
+     * 12 per v9 session + 8 per query + 12 + v7's 40. */
+    int nq = 0, ns = 0;
+    for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
+        if (!(acc->sessions[i].pid == 0 && acc->sessions[i].db_time_ns == 0)) ns++;
     for (int i = 0; i < SUMMARY_MAX_QUERIES; i++)
         if (!(acc->queries[i].query_id == 0 && acc->queries[i].count == 0)) nq++;
     CHECK(nq > 0, "the record has %d query entries", nq);
-    CHECK(v4_size - old_size == (size_t)nq * 8 + 12 + 40,
-          "the round-2 payload is %zu bytes shorter = %d queries x 8 + 12 "
-          "(+ 40 for v7's measured-CPU trailer)", v4_size - old_size, nq);
+    CHECK(current_size - old_size == (size_t)ns * 12 + (size_t)nq * 8 + 12 + 40,
+          "the round-2 payload is %zu bytes shorter = %d sessions x 12 + "
+          "%d queries x 8 + 12 + 40", current_size - old_size, ns, nq);
 
-    /* 9a. v4 bytes round-trip exactly -- the control, without which a
+    /* 9a. Current bytes round-trip exactly -- the control, without which a
      * mismatch below could just mean the parser is broken for everything. */
     {
         struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
@@ -1588,8 +1599,9 @@ static void test_old_layout_is_incompatible(void)
             back->num_events = acc->num_events;
             back->num_sessions = acc->num_sessions;
             back->num_queries = acc->num_queries;
-            CHECK(pgwt_summary_deserialize(v4, v4_size, back, 4) == 0,
-                  "v4 payload deserializes as v4");
+            CHECK(pgwt_summary_deserialize(current, current_size, back,
+                                           PGWT_SUMMARY_VERSION) == 0,
+                  "current payload deserializes at the current version");
             CHECK(back->idle_ns == acc->idle_ns,
                   "...and the record idle_ns round-trips (%llu == %llu)",
                   (unsigned long long)back->idle_ns,
@@ -1639,7 +1651,7 @@ static void test_old_layout_is_incompatible(void)
         }
     }
 
-    free(acc); free(v4); free(old);
+    free(acc); free(current); free(old);
 }
 
 
@@ -2883,7 +2895,8 @@ static void test_sessions_overflow_is_reported(void)
     {
         const int OVER = 8;
         const int NSESS = SUMMARY_MAX_SESSIONS + OVER;
-        size_t sz = (size_t)PGWT_NUM_CLASSES * 8 + (size_t)NSESS * 32 + 12 + 40;
+        /* v9 session entry: 4+8+8+4+8 + v9's 8+4. */
+        size_t sz = (size_t)PGWT_NUM_CLASSES * 8 + (size_t)NSESS * 44 + 12 + 40;
         uint8_t *buf = calloc(1, sz);
         struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
         CHECK(buf != NULL && back != NULL, "alloc the forged payload");
@@ -2900,6 +2913,8 @@ static void test_sessions_overflow_is_reported(void)
                 p += 8;                        /* cpu_ns     0 */
                 p += 4;                        /* top_wait_id  */
                 p += 8;                        /* top_wait_ns  */
+                p += 8;                        /* v9 cpu_offcpu_ns 0 */
+                p += 4;                        /* v9 cpu_measured_records 0 */
             }
             p += 12;   /* v4 trailer: idle_ns + events_overflow, both 0 */
             p += 40;   /* v7 measured-CPU trailer, all 0                */
@@ -3080,6 +3095,180 @@ static void test_sessions_overflow_is_reported(void)
     }
 }
 
+/* ── 15. v9 session measurements survive the format ───────────────────── */
+static void test_v9_session_fields(void)
+{
+    printf("--- 15. v9 session fields: round-trip, refusal, v8, saturation ---\n");
+
+    struct pgwt_summary_accum *acc = malloc(sizeof(*acc));
+    struct pgwt_summary_accum *back = malloc(sizeof(*back));
+    uint8_t *v9 = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
+    uint8_t *v8 = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
+    CHECK(acc && back && v9 && v8, "15: alloc accumulators and buffers");
+    if (!acc || !back || !v9 || !v8) {
+        free(acc); free(back); free(v9); free(v8); return;
+    }
+    memset(acc, 0, sizeof(*acc));
+    acc->second_wall_ns = 1700000000ULL * ONE_SEC;
+    acc->sessions[0].pid = 301;
+    acc->sessions[0].db_time_ns = 15 * MS;
+    acc->sessions[0].cpu_ns = 10 * MS;
+    acc->sessions[0].top_wait_id = EV_LOCK;
+    acc->sessions[0].top_wait_ns = 5 * MS;
+    acc->sessions[0].cpu_offcpu_ns = 6 * MS;
+    acc->sessions[0].cpu_measured_records = 7;
+    acc->num_sessions = 1;
+    /* Non-zero trailer canaries: a v8 reader that wrongly consumes a v9
+     * session extension would copy these into the new fields, not zeros. */
+    acc->idle_ns = 23 * MS;
+    acc->events_overflow = 11;
+
+    /* 15a. Distinct non-zero values prevent a wrong-offset copy from
+     * passing as a successful round trip of both fields. */
+    CHECK(acc->sessions[0].cpu_offcpu_ns != 0 &&
+          acc->sessions[0].cpu_measured_records != 0 &&
+          acc->sessions[0].cpu_offcpu_ns != acc->sessions[0].cpu_measured_records &&
+          acc->sessions[0].cpu_offcpu_ns != acc->sessions[0].cpu_ns &&
+          acc->sessions[0].cpu_measured_records != acc->sessions[0].cpu_ns,
+          "15a non-vacuity: both new fields are non-zero and distinct "
+          "from each other and cpu_ns");
+    size_t size = pgwt_summary_serialize(acc, v9, PGWT_SUMMARY_SERIALIZE_MAX);
+    const size_t prefix = (size_t)PGWT_NUM_CLASSES * 8;
+    CHECK(size == prefix + 44 + 12 + 40,
+          "15a: one v9 session and both trailers serialize (%zu bytes)", size);
+    if (size != prefix + 44 + 12 + 40) {
+        free(acc); free(back); free(v9); free(v8); return;
+    }
+    memset(back, 0, sizeof(*back));
+    back->second_wall_ns = acc->second_wall_ns;
+    back->num_sessions = 1;
+    int rc = pgwt_summary_deserialize(v9, size, back, 9);
+    CHECK(rc == 0, "15a: v9 session deserializes (rc=%d)", rc);
+    const struct pgwt_summary_session *ss = NULL;
+    for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
+        if (back->sessions[i].pid == 301) { ss = &back->sessions[i]; break; }
+    CHECK(ss != NULL, "15a: the decoded session exists");
+    if (ss) {
+        CHECK(ss->cpu_offcpu_ns == acc->sessions[0].cpu_offcpu_ns,
+              "15a: cpu_offcpu_ns round-trips EXACTLY (%llu)",
+              (unsigned long long)ss->cpu_offcpu_ns);
+        CHECK(ss->cpu_measured_records == acc->sessions[0].cpu_measured_records,
+              "15a: cpu_measured_records round-trips EXACTLY (%u)",
+              ss->cpu_measured_records);
+    }
+
+    /* 15b. End INSIDE the 44-byte session entry, not inside a trailer.
+     * Zero-filling this short record would invent an unmeasured window. */
+    memset(back, 0, sizeof(*back));
+    back->second_wall_ns = acc->second_wall_ns;
+    back->num_sessions = 1;
+    rc = pgwt_summary_deserialize(v9, prefix + 40, back, 9);
+    CHECK(rc != 0, "15b: a truncated v9 session is REFUSED (rc=%d)", rc);
+
+    /* 15c. Reconstruct the actual v8 payload: keep the 32-byte session,
+     * drop its 12 v9 bytes, and retain both record trailers. */
+    memcpy(v8, v9, prefix + 32);
+    memcpy(v8 + prefix + 32, v9 + prefix + 44, size - prefix - 44);
+    memset(back, 0, sizeof(*back));
+    back->second_wall_ns = acc->second_wall_ns;
+    back->num_sessions = 1;
+    rc = pgwt_summary_deserialize(v8, size - 12, back, 8);
+    CHECK(rc == 0, "15c: the actual v8 payload parses as v8 (rc=%d)", rc);
+    ss = NULL;
+    for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
+        if (back->sessions[i].pid == 301) { ss = &back->sessions[i]; break; }
+    CHECK(ss != NULL, "15c: the v8 session exists");
+    if (ss) {
+        CHECK(ss->db_time_ns == acc->sessions[0].db_time_ns,
+              "15c: v8 DB Time came back (%llu)",
+              (unsigned long long)ss->db_time_ns);
+        CHECK(ss->cpu_ns == acc->sessions[0].cpu_ns,
+              "15c: v8 CPU wall came back (%llu)",
+              (unsigned long long)ss->cpu_ns);
+        /* These zeros are meaningful beside 15a's distinct non-zero
+         * round trip: reading v9 bytes at v8 offsets must not invent CPU. */
+        CHECK(ss->cpu_offcpu_ns == 0,
+              "15c: v8 retains zero off-CPU, refusing to split");
+        CHECK(ss->cpu_measured_records == 0,
+              "15c: v8 retains zero observations, refusing a measurement");
+    }
+
+    /* 15d. Reach the saturation arm through the public push path: seed a
+     * real session, set its counter to UINT32_MAX, then add another measured
+     * gap in the SAME second. The time increments witness that it ran. */
+    struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+    CHECK(w != NULL, "15d: alloc writer");
+    if (w) {
+        int init_rc = pgwt_summary_writer_init(w, fresh_dir("v9_saturation"),
+                                                24, NULL);
+        CHECK(init_rc == 0, "15d: writer initializes (rc=%d)", init_rc);
+        if (init_rc == 0) {
+            struct pgwt_trace_event e;
+            memset(&e, 0, sizeof(e));
+            e.timestamp_ns = mono_origin() + 500 * MS;
+            e.pid = 301;
+            e.old_event = 0;
+            e.new_event = EV_LOCK;
+            e.duration_ns = 10 * MS;
+            e.cpu_ns = 4 * MS;
+            int push_rc = pgwt_summary_push_event(w, &e, 0, e.old_event);
+            CHECK(push_rc == 0, "15d: first measured gap accepted (%d)", push_rc);
+            struct pgwt_summary_session *live = NULL;
+            for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
+                if (w->accum.sessions[i].pid == e.pid) {
+                    live = &w->accum.sessions[i]; break;
+                }
+            CHECK(live != NULL, "15d: the real writer created the session");
+            if (live) {
+                CHECK(live->cpu_measured_records == 1,
+                      "15d: first gap counted one measurement (%u)",
+                      live->cpu_measured_records);
+                CHECK(live->cpu_offcpu_ns == 6 * MS,
+                      "15d: first gap contributed 6 ms off-CPU (%llu)",
+                      (unsigned long long)live->cpu_offcpu_ns);
+                live->cpu_measured_records = UINT32_MAX;
+                e.timestamp_ns += 20 * MS;
+                push_rc = pgwt_summary_push_event(w, &e, 0, e.old_event);
+                CHECK(push_rc == 0, "15d: next measured gap accepted (%d)", push_rc);
+                CHECK(live->cpu_ns == 20 * MS,
+                      "15d: both gaps contributed wall time (%llu)",
+                      (unsigned long long)live->cpu_ns);
+                CHECK(live->cpu_offcpu_ns == 12 * MS,
+                      "15d: the next measurement contributed its remainder (%llu)",
+                      (unsigned long long)live->cpu_offcpu_ns);
+                CHECK(live->cpu_measured_records == UINT32_MAX,
+                      "15d: the real writer SATURATES instead of wrapping (%u)",
+                      live->cpu_measured_records);
+
+                size = pgwt_summary_serialize(&w->accum, v9,
+                                              PGWT_SUMMARY_SERIALIZE_MAX);
+                CHECK(size > 0, "15d: serialize the saturated session (%zu)", size);
+                memset(back, 0, sizeof(*back));
+                back->second_wall_ns = w->accum.second_wall_ns;
+                back->num_events = w->accum.num_events;
+                back->num_sessions = w->accum.num_sessions;
+                back->num_queries = w->accum.num_queries;
+                rc = pgwt_summary_deserialize(v9, size, back, 9);
+                CHECK(rc == 0, "15d: saturated v9 session parses (%d)", rc);
+                ss = NULL;
+                for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
+                    if (back->sessions[i].pid == e.pid) {
+                        ss = &back->sessions[i]; break;
+                    }
+                CHECK(ss != NULL, "15d: the saturated session exists on readback");
+                if (ss)
+                    CHECK(ss->cpu_measured_records == UINT32_MAX,
+                          "15d: UINT32_MAX survives the format as UINT32_MAX (%u)",
+                          ss->cpu_measured_records);
+            }
+            pgwt_summary_close(w);
+            pgwt_summary_destroy(w);
+        }
+        free(w);
+    }
+    free(acc); free(back); free(v9); free(v8);
+}
+
 int main(void)
 {
     printf("=== test_idle_summary ===\n");
@@ -3115,6 +3304,7 @@ int main(void)
     test_archived_file_is_timezone_independent();
     test_unplaceable_archive_is_refused();
     test_sessions_overflow_is_reported();
+    test_v9_session_fields();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);
     if (system(cmd) != 0) { /* ignore */ }

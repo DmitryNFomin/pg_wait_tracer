@@ -157,8 +157,9 @@
  *  N5. top_sessions under a class / event / query filter — the per-second
  *      record has NO per-session breakdown by any of them
  *      (struct pgwt_summary_session is {pid, db_time_ns, cpu_ns,
- *      top_wait_id, top_wait_ns}), so the summary path cannot answer such a
- *      request at all. FIXED (#318) in the only two places it can be:
+ *      top_wait_id, top_wait_ns, cpu_offcpu_ns, cpu_measured_records}), so
+ *      the summary path cannot answer such a request at all. FIXED (#318)
+ *      in the only two places it can be:
  *      handle_top_sessions now forces the RAW path for a class- or
  *      event-filtered request as well as a query-filtered one, and
  *      ts_summary_visitor REFUSES the filter (no rows) instead of returning
@@ -498,10 +499,10 @@ static int build_stream(struct pgwt_trace_event *out, uint64_t base_mono)
             e.new_event    = EV_IO_A;  /* never EXIT, never a marker */
             e.duration_ns  = spec_dur_ns(i, s);
             e.query_id     = slice[i].qid;
-            /* PGWT_CPU_NS_UNKNOWN throughout: the measured-CPU decomposition
-             * is raw-path-only (N1), so leaving it unmeasured keeps the two
-             * time-model ROW SETS comparable (no Off-CPU* row on either
-             * side) instead of forcing a whole-row exclusion. */
+            /* PGWT_CPU_NS_UNKNOWN throughout: leaving it unmeasured keeps
+             * the time-model ROW SETS comparable (no Off-CPU* row on either
+             * side). Measured Top Events and Sessions have their own
+             * fixtures in sections 6f and 6g. */
             e.cpu_ns       = PGWT_CPU_NS_UNKNOWN;
             out[n++] = e;
         }
@@ -1296,7 +1297,8 @@ static const struct pair PAIRS[] = {
       F_NONE,
       "N5: the per-second record has no per-session breakdown by query, "
       "class or event at all (struct pgwt_summary_session is {pid, "
-      "db_time_ns, cpu_ns, top_wait_id, top_wait_ns}), so no filter but pid "
+      "db_time_ns, cpu_ns, top_wait_id, top_wait_ns, cpu_offcpu_ns, "
+      "cpu_measured_records}), so no filter but pid "
       "is answerable from summaries and pid is already forced raw. #318: "
       "ts_summary_visitor used to read f->pid ONLY and silently return "
       "UNFILTERED numbers for the other three, and handle_top_sessions "
@@ -2414,7 +2416,8 @@ static void div317_query_cpu(const struct fixture *fx)
  * the visitor instead, on the stated grounds that "the summary record does
  * carry per-event totals per session" -- it does NOT:
  * struct pgwt_summary_session is {pid, db_time_ns, cpu_ns, top_wait_id,
- * top_wait_ns} and has no per-event field at all. So the fix is two-part:
+ * top_wait_ns, cpu_offcpu_ns, cpu_measured_records} and has no per-event
+ * field at all. So the fix is two-part:
  * handle_top_sessions forces the RAW path for a class- or event-filtered
  * request (the precedent handle_top_queries already sets), and
  * ts_summary_visitor REFUSES such a filter -- no rows -- as the fail-safe
@@ -2849,6 +2852,104 @@ static void div553_measured_cpu_identity(uint64_t origin)
     mini_free(&m);
 }
 
+/* ── 6g. #562: measured Top Sessions, each term on both paths ───────────
+ *
+ * The main stream carries only PGWT_CPU_NS_UNKNOWN, so its exact cpu_pct
+ * comparison also passes when both paths report wall. This single-pid,
+ * unfiltered fixture distinguishes 520 ms measured CPU from 1300 ms wall.
+ * A pid filter would force RAW in handle_top_sessions and miss this route.
+ */
+static void div562_measured_cpu_sessions(uint64_t origin)
+{
+    printf("  6g. #562: Top Sessions reports measured CPU and off-CPU "
+           "on both paths\n");
+
+    enum { NREC = 130 };                 /* > 120 s: a real summary window */
+    const uint64_t DUR = 10 * MS, CPU_NS = 4 * MS;
+    const double DB_MS_EXP   = 1300.0;    /* NREC * DUR / 1e6 */
+    const double CPU_MS_EXP  =  520.0;    /* NREC * CPU_NS / 1e6 */
+    const double OFF_MS_EXP  =  780.0;    /* NREC * (DUR - CPU_NS) / 1e6 */
+    const double CPU_PCT_EXP = CPU_MS_EXP / DB_MS_EXP * 100.0; /* 40.0 */
+
+    struct pgwt_trace_event ev[NREC];
+    memset(ev, 0, sizeof(ev));
+    for (int i = 0; i < NREC; i++) {
+        ev[i].timestamp_ns = origin + (uint64_t)i * ONE_SEC + 500 * MS;
+        ev[i].duration_ns  = DUR;
+        ev[i].cpu_ns       = CPU_NS;
+        ev[i].old_event    = EV_CPU;
+        ev[i].new_event    = EV_LOCK_A;
+        ev[i].pid          = 301;
+        ev[i].query_id     = QID_A;
+    }
+
+    struct mini m;
+    if (mini_build(&m, "fixture_562_measured_sessions", origin, ev, NREC) != 0)
+        return;                 /* mini_build already counted the failure */
+    CHECK(m.records == NREC && m.block_events == (uint64_t)NREC &&
+          m.overflow == 0,
+          "6g: all %d measured records committed, no overflow (%d records, "
+          "%llu block events, overflow %u)", NREC, m.records,
+          (unsigned long long)m.block_events, m.overflow);
+    CHECK(m.to_ns - m.from_ns >= 120 * ONE_SEC,
+          "6g: the window is %.0f s -- wide enough for summary routing",
+          (double)(m.to_ns - m.from_ns) / 1e9);
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));             /* unfiltered, including no pid */
+    struct pgwt_sessions_result raw, sum;
+    pgwt_compute_top_sessions(m.wall, m.n, &f, m.from_ns, m.to_ns,
+                               m.wall_ms, &raw);
+    pgwt_compute_top_sessions_from_summaries(m.dir, m.from_ns, m.to_ns, &f,
+                                              m.wall_ms, &sum);
+    const struct pgwt_session_row *a = se_find(&raw, 301);
+    const struct pgwt_session_row *b = se_find(&sum, 301);
+
+    /* NON-VACUITY before the literals or identities: both rows must exist,
+     * and raw must distinguish the measurement from the 100% gap wall. */
+    CHECK(a != NULL && b != NULL,
+          "6g: both paths return pid 301 (raw %s, summary %s)",
+          a ? "yes" : "NO", b ? "yes" : "NO");
+    if (!a || !b) { free_se(&raw); free_se(&sum); mini_free(&m); return; }
+    CHECK(a->cpu_pct != 100.0,
+          "6g: raw measured CPU %.6f%% differs from 100%% gap wall",
+          a->cpu_pct);
+
+    CHECK(a->db_time_ms == DB_MS_EXP,
+          "6g: raw DB Time %.6f ms == %.0f ms", a->db_time_ms, DB_MS_EXP);
+    CHECK(a->cpu_pct == CPU_PCT_EXP,
+          "6g: raw CPU %.6f%% == %.0f%%", a->cpu_pct, CPU_PCT_EXP);
+    CHECK(a->offcpu_ms == OFF_MS_EXP,
+          "6g: raw off-CPU %.6f ms == %.0f ms", a->offcpu_ms, OFF_MS_EXP);
+    CHECK(raw.has_measured_cpu == 1,
+          "6g: raw DECLARES its measurement (%d)", raw.has_measured_cpu);
+
+    /* Each summary term has its own literal: a conserved sum alone would
+     * still pass if the summary reported all 1300 ms as CPU wall. */
+    CHECK(sum.has_measured_cpu == 1,
+          "6g: summary DECLARES its measurement (%d)", sum.has_measured_cpu);
+    CHECK(b->db_time_ms == DB_MS_EXP,
+          "6g: summary DB Time %.6f ms == %.0f ms", b->db_time_ms, DB_MS_EXP);
+    CHECK(b->cpu_pct == CPU_PCT_EXP,
+          "6g: summary CPU %.6f%% == %.0f%%", b->cpu_pct, CPU_PCT_EXP);
+    CHECK(b->offcpu_ms == OFF_MS_EXP,
+          "6g: summary off-CPU %.6f ms == %.0f ms", b->offcpu_ms, OFF_MS_EXP);
+
+    /* Exact cross-path equalities, as in diff_top_sessions: the integer
+     * totals are identical by construction, so no tolerance is needed. */
+    CHECK(a->cpu_pct == b->cpu_pct,
+          "6g: raw CPU %.6f%% == summary CPU %.6f%%", a->cpu_pct, b->cpu_pct);
+    CHECK(a->offcpu_ms == b->offcpu_ms,
+          "6g: raw off-CPU %.6f ms == summary off-CPU %.6f ms",
+          a->offcpu_ms, b->offcpu_ms);
+    CHECK(a->db_time_ms == b->db_time_ms,
+          "6g: raw DB Time %.6f ms == summary DB Time %.6f ms",
+          a->db_time_ms, b->db_time_ms);
+
+    free_se(&raw); free_se(&sum);
+    mini_free(&m);
+}
+
 static void test_divergences(const struct fixture *fx, uint64_t origin)
 {
     printf("--- 6. the five named divergences (#315-#319) + #553 ---\n");
@@ -2857,6 +2958,7 @@ static void test_divergences(const struct fixture *fx, uint64_t origin)
     div318_session_filters(fx);
     div319_top_wait(origin);
     div553_measured_cpu_identity(origin);
+    div562_measured_cpu_sessions(origin);
 }
 
 /* ── main ─────────────────────────────────────────────────────────────── */
