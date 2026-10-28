@@ -589,6 +589,64 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         d->running = false;
 }
 
+static void start_sampler_sched(struct pgwt_daemon *d)
+{
+    const char *override = getenv("PGWT_SAMPLER_NICE");
+    int want;
+    int valid = pgwt_sampler_parse_nice(override, -20, &want);
+    if (valid) {
+        pgwt_sampler_apply_sched(want, &d->sampler_sched);
+    } else {
+        /* Refuse the override without changing scheduling. Read back the
+         * current nice for diagnostics, but never claim this is success. */
+        pgwt_sampler_apply_sched(0, &d->sampler_sched);
+        d->sampler_sched.ok = 0;
+        d->sampler_sched.err = EINVAL;
+    }
+
+    if (d->sampler_sched.ok)
+        fprintf(stderr, "INFO: sampler scheduling: applied nice %d\n",
+                d->sampler_sched.applied);
+    else {
+        if (valid)
+            fprintf(stderr, "WARNING: sampler scheduling: nice not verified "
+                    "(requested nice %d, ", d->sampler_sched.requested);
+        else
+            fprintf(stderr, "WARNING: sampler scheduling: PGWT_SAMPLER_NICE "
+                    "\"%s\" refused (expected integer -20..19; ", override);
+        fprintf(stderr,
+                "readback %d): %s; continuing; the sampled tier's CPU figure "
+                "is a LOWER BOUND under CPU contention because the daemon's "
+                "observation instants are selected by the scheduler.\n",
+                d->sampler_sched.applied,
+                strerror(d->sampler_sched.err));
+    }
+}
+
+static void log_sampler_cpu_confidence(const struct pgwt_daemon *d)
+{
+    unsigned pct;
+    enum pgwt_sampler_cpu_confidence verdict = pgwt_sampler_cpu_confidence(
+        d->counters.sampler_ticks_rated_total,
+        d->counters.sampler_tick_late_ns_total,
+        d->sampler->sample_period_ns, &pct);
+
+    if (verdict == PGWT_SAMPLER_CPU_CONF_UNKNOWN)
+        fprintf(stderr, "WARNING: sampled CPU confidence: unknown; timer "
+                "evidence is unavailable or invalid; refusing to rate "
+                "the CPU figure.\n");
+    else
+        fprintf(stderr,
+                "%s: sampled CPU confidence: %s; timer mean lateness "
+                "%u.%02u%% of nominal period%s\n",
+                verdict == PGWT_SAMPLER_CPU_CONF_DEGRADED ? "WARNING" : "INFO",
+                verdict == PGWT_SAMPLER_CPU_CONF_DEGRADED ? "degraded" : "ok",
+                pct / 100, pct % 100,
+                verdict == PGWT_SAMPLER_CPU_CONF_DEGRADED
+                    ? "; the sampled tier's CPU figure is a lower bound."
+                    : ".");
+}
+
 /* SMP-5: arm the sampler timer ONE-SHOT with a +/-10% jittered period.
  * Fixed-phase sampling aliases with periodic workloads (a job that wakes
  * every 100 ms could hide from — or monopolize — a 10 Hz sampler forever);
@@ -633,6 +691,8 @@ static void handle_sample_timer(struct pgwt_daemon *d)
         uint64_t late = pgwt_sampler_tick_lateness(d->sample_armed_ns,
                                                    d->sample_armed_at_ns, now);
         d->counters.sampler_ticks_total++;
+        if (d->sample_armed_at_ns != 0)
+            d->counters.sampler_ticks_rated_total++;
         d->counters.sampler_tick_late_ns_total += late;
     }
     /* Re-arm FIRST so a slow poll delays the next tick (measured-elapsed
@@ -1423,6 +1483,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             perror("timerfd_create (sampler)");
             goto fail;
         }
+        start_sampler_sched(d);
         srand((unsigned)(time(NULL) ^ getpid()));
         arm_sample_timer_jittered(d);
     }
@@ -1856,6 +1917,8 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
     pgwt_flush_open_intervals(d);
 
     /* Stop the active capture provider (detach/free its state). */
+    if (d->sampler)
+        log_sampler_cpu_confidence(d);
     if (d->provider && d->provider->stop)
         d->provider->stop(d);
 

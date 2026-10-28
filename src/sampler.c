@@ -31,9 +31,86 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <ctype.h>
+#include <limits.h>
+#include <sys/resource.h>
 #include <sys/uio.h>
 
 /* ── BPF-free core (testable without a daemon) ────────────────────────── */
+
+int pgwt_sampler_parse_nice(const char *env, int default_nice, int *out)
+{
+    if (!env || !*env) {
+        *out = default_nice;
+        return 1;
+    }
+
+    /* Bound the accumulator before multiplication, so even an arbitrarily
+     * long override cannot overflow. No strtol/errno side effects. */
+    const unsigned char *p = (const unsigned char *)env;
+    while (isspace(*p))
+        p++;
+    int negative = (*p == '-');
+    if (*p == '-' || *p == '+')
+        p++;
+    if (*p < '0' || *p > '9')
+        return 0;
+    int value = 0;
+    while (*p >= '0' && *p <= '9') {
+        value = value * 10 + (*p++ - '0');
+        if (value > 20)
+            return 0;
+    }
+    while (isspace(*p))
+        p++;
+    if (negative)
+        value = -value;
+    if (*p || value < -20 || value > 19)
+        return 0;
+    *out = value;
+    return 1;
+}
+
+int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out)
+{
+    *out = (struct pgwt_sampler_sched){
+        .requested = want_nice,
+        .applied = 20, /* outside the nice range: no verified value yet */
+    };
+    if (want_nice < -20 || want_nice > 19)
+        out->err = EINVAL;
+    else if (want_nice != 0 && setpriority(PRIO_PROCESS, 0, want_nice) != 0)
+        out->err = errno;
+
+    /* getpriority may return -1 as a legitimate nice value. Preserve a
+     * setpriority failure even if this best-effort readback succeeds. */
+    errno = 0;
+    int applied = getpriority(PRIO_PROCESS, 0);
+    int read_err = errno;
+    if (!read_err)
+        out->applied = applied;
+    if (!out->err)
+        out->err = read_err ? read_err : (applied == want_nice ? 0 : EIO);
+    out->ok = (out->err == 0);
+    return out->ok;
+}
+
+enum pgwt_sampler_cpu_confidence
+pgwt_sampler_cpu_confidence(uint64_t ticks, uint64_t late_ns_total,
+                            uint64_t period_ns, unsigned *out_late_pct_x100)
+{
+    *out_late_pct_x100 = 0;
+    if (!ticks || !period_ns || late_ns_total / ticks > 60000000000ULL)
+        return PGWT_SAMPLER_CPU_CONF_UNKNOWN;
+
+    /* Divide once, keeping sub-nanosecond mean lateness and avoiding
+     * overflow for every uint64_t input, including ticks * period_ns. */
+    __uint128_t pct = (__uint128_t)late_ns_total * 10000
+                    / ((__uint128_t)ticks * period_ns);
+    *out_late_pct_x100 = pct > UINT_MAX ? UINT_MAX : (unsigned)pct;
+    return pct >= 2000 ? PGWT_SAMPLER_CPU_CONF_DEGRADED
+                       : PGWT_SAMPLER_CPU_CONF_OK;
+}
 
 /* Read one target's value against its OWN pid via /proc/<pid>/mem.
  * Returns 1 on success (val written), 0 on failure (errno preserved). */
