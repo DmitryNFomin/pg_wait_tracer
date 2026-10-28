@@ -238,8 +238,7 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
 
         /* Same bounded per-pid resolver as live, with replay's clipped
          * time and independently selected occurrence statistics. */
-        uint32_t cat = evt->flags & (PGWT_EVENT_FLAG_IO_WORKER |
-            PGWT_EVENT_FLAG_MAINT | PGWT_EVENT_FLAG_BACKGROUND);
+        uint32_t cat = evt->flags & ~PGWT_REPLAY_NONCAT_FLAGS;
         if (cat & PGWT_EVENT_FLAG_IO_WORKER)
             continue; /* structurally query-less, as on the live path */
         bool idle = pgwt_is_session_idle_event(we);
@@ -256,7 +255,26 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                     if (row_occ > qe->max_ns) qe->max_ns = row_occ;
                 }
             }
-        } else if (cat == 0 && pa) {
+        /* #665/#596: background and maintenance work has no query to resolve
+         * to. Its non-idle load goes STRAIGHT to the unattributed bucket
+         * (qid 0 row plus acc->qattr_unattributed_ns), never into pa->qattr:
+         * a later nonzero id on the same pid would back-fill it. The reader
+         * path in src/compute.c does the same with PGWT_EVENT_FLAG_QUERY_UNATTRIB. */
+        } else if (cat & (PGWT_EVENT_FLAG_MAINT | PGWT_EVENT_FLAG_BACKGROUND)) {
+            if (!pgwt_is_idle_event(we)) {
+                struct pgwt_qattr_pending p = {
+                    .count = closed_in_window ? 1 : 0, .total_ns = row_add,
+                    .min_ns = exact && closed_in_window ? row_occ : UINT64_MAX,
+                    .max_ns = exact && closed_in_window ? row_occ : 0,
+                };
+                replay_qattr_emit(acc, 0, we, &p, false);
+            }
+        } else if (cat != 0) {
+            /* An unknown CATEGORY is under-counted here. The static assertion
+             * in event_reader.h requires known bits to be classified, so a
+             * known non-category bit cannot quietly reach this refusal; the
+             * companion header-scan test catches bits missing from that list. */
+        } else if (pa) {
             if (idle) {
                 if (!sampled || !(evt->flags & PGWT_EVENT_FLAG_CMD_OPEN))
                     pgwt_qattr_boundary(&pa->qattr, false, replay_qattr_emit, acc);
