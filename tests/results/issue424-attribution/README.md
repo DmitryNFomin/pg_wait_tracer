@@ -29,7 +29,7 @@ FAIL: ... the observation reached the writer and the CREDIT PATH placed
 That counter (`src/summary_writer.c`, `pgwt_summary_push_event`, the "#379
 residual" block) adds the WHOLE duration of a closed CPU record longer than
 one second when `already == 0`. A zero does not prove that no such interval
-closed: a record with prior credit need not increment it. See [#713](https://github.com/DmitryNFomin/pg_wait_tracer/issues/713)
+closed: a record with prior credit need not increment it. See [#709](https://github.com/DmitryNFomin/pg_wait_tracer/issues/709)
 for the counter's double-counting defect; it is not an independent oracle
 for whether a stimulus held an interval open.
 
@@ -177,11 +177,10 @@ observation. The mismatch count is capture-wide; it does not identify two
 of the three stimulus intervals. Nor do the earlier ~9 s readings establish
 one mismatch each. Those explanations remain hypotheses.
 
-[#713](https://github.com/DmitryNFomin/pg_wait_tracer/issues/713) tracks the
-underlying defect: the uncredited aggregate charges the whole duration of
-identity-mismatched records that were in fact credited, telling the same
-CPU twice. The defect pre-exists on master; this branch wires the producer
-and makes it observable. It is not fixed here.
+[#709](https://github.com/DmitryNFomin/pg_wait_tracer/issues/709) tracks both
+the `cpu_open_uncredited` double-tell and the unexplained close-time
+identity-check refusals. The defect pre-exists on master; this branch wires
+the producer and makes it observable. It is not fixed here.
 
 The previous proposed mechanism (a mismatch falls back to a watermark
 "normally 0") is not established: the add requires `already == 0`, which
