@@ -76,10 +76,11 @@ Logs: `tests/results/box-check-*.log` (`box-check-ephemeral-*.log` for `EPHEMERA
 `tests/results/ui_gallery/`, `tests/results/ui_live/summary.json`.
 
 `make hetzner-sweep` deletes `pgwt=ephemeral` VMs older than 6h (automatic at
-every `box-check` start). Never sweep `pgwt-gate` or `pgwt-gate-2`, regardless of
-label. Cutoffs below 1h require `FORCE_ALL=1`; never sweep VMs younger than a few
-minutes or with unknown age (missing/unparseable `created=`), regardless of cutoff.
-Never treat unknown age as infinitely old. Remove your own VM by id:
+every `box-check` start). The script never touches `pgwt-gate` or `pgwt-gate-2`
+by name, regardless of label. It refuses cutoffs below 1h unless `FORCE_ALL=1`;
+regardless of cutoff, it never sweeps VMs younger than a few minutes or with
+unknown age (missing/unparseable `created=`), which it never treats as infinitely
+old (issue #162). Remove your own VM by id:
 `tests/hetzner-vm.sh delete <id>`, never by sweep cutoff.
 (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#vm-cleanup`)
 
@@ -98,8 +99,8 @@ Declare a PR ready only with ALL evidence in its body:
    rounds touching no live-tier test may skip re-runs; name each round and why in
    the PR body. Never exempt `src/`, `web/`, `tests/run_all.sh`,
    `tests/unit_tests.list`, or any live-tier test; if unsure, run `box-check`.
-   `.github/workflows/ci.yml` narrows tiers by changed files; keep full CI on
-   every PR and merge gates unchanged.
+   `.github/workflows/ci.yml` narrows tiers by changed files; CI still runs in
+   full on every PR, and merge gates are unchanged.
 3. If `web/static/` or `tests/web_snapshots/` changed, run `make ui-gallery`;
    list `summary.json` counts and every `changed`/`added`/`removed` cell with
    a one-line justification each.
@@ -148,7 +149,8 @@ code bigger than a one-liner.
   `gh pr update-branch` for `BEHIND`. Answer AND fill idle capacity in the SAME
   turn. Do not count blocked work as idle. Determine blocking by shared FILES,
   not phase number: modules run in
-  parallel, wiring serially. Use gate-2 to reproduce the issue excluding it from gating.
+  parallel, wiring serially. A box excluded from general gating remains available
+  to reproduce the very issue that excludes it.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#idle-capacity`)
 - **Reports to the owner: FIVE LINES at most** — merged / in flight / blocked /
   needs you. Use long form only for owner decisions or plan-changing findings.
@@ -157,8 +159,8 @@ code bigger than a one-liner.
 - **Splitting**: one roadmap item = one issue = one branch = one implementer.
   Split only disjoint files AND disjoint tests; never split a shared file.
   Cap actively implementing tasks at **three** (writing/running code); exclude
-  agents idling during CI, `box-check` or review. Serialize Mac `make check`
-  with `scripts/check-lock.sh` (`check:` target). Apply no Mac-derived gate-phase
+  agents idling during CI, `box-check` or review. `scripts/check-lock.sh` (`check:`
+  target) serializes Mac `make check` machine-wide. Apply no Mac-derived gate-phase
   cap (waiting on/running `make check`); do not invent a "two in gate phase" limit.
   Before spawning, list touched files, compare every in-flight branch and refuse
   overlap up front.
@@ -174,7 +176,7 @@ code bigger than a one-liner.
   watching the stream. For a contract written to a file, pass only its path;
   do not paste its text too.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#spawn-contracts`)
-- **Review chain**: (1) treat script evidence from `make check`/`box-check`/`ui-gallery` as binding;
+- **Review chain**: (1) `make check`/`box-check`/`ui-gallery` produce binding evidence files;
   (2) a fresh `reviewer` (+ `ui-reviewer` for `web/`) reads code/evidence and writes
   the PR body; return blockers via SendMessage; (3) the main agent reads the
   report, not the diff, and decides ready/back/ask owner. Send only "Design
@@ -182,8 +184,9 @@ code bigger than a one-liner.
   turn; do not watch CI or merge manually. Do not push after READY.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#auto-merge-and-ready`)
 - **Three evidence guards a reviewer runs before declaring READY**:
-  - Run `scripts/check-test-registration.sh`: preserve every merge-base entry in
-    `tests/unit_tests.list` and `tests/Makefile`'s `TESTS` list; append, never drop.
+  - Run `scripts/check-test-registration.sh`: it fails and names any merge-base
+    entry missing from `tests/unit_tests.list` or `tests/Makefile`'s `TESTS` list
+    in the current tree (append-only invariant).
     Mac-side, seconds, no box. Self-tests: `tests/test_check_test_registration.sh`.
   - Match `scripts/box-check.sh` log-header `commit=<git rev-parse HEAD>` and
     `tree-hash=<scripts/tree-hash.sh>` against the PR head before trusting the log;
@@ -191,12 +194,14 @@ code bigger than a one-liner.
   - Run `scripts/check-runner-registration.sh` (issue #433) against THIS repo
     manually, like `check-test-registration.sh`; `make check` runs only its
     synthetic self-test (`tests/test_check_runner_registration.sh`). Mac-side,
-    seconds, no box. Require every test invoked by `tests/ci_smoke.sh` in
-    `tests/run_all.sh` too. Register every on-disk `tests/test_*.py`/`tests/test_*.sh`
-    in `tests/run_all.sh` (directly, `LIVE_TESTS`, or line-by-line
+    seconds, no box. The script fails if a test actually invoked by
+    `tests/ci_smoke.sh` is not also invoked by `tests/run_all.sh`. Its orphan scan
+    fails if an on-disk `tests/test_*.py`/`tests/test_*.sh` is invoked by none of
+    `tests/run_all.sh` (directly, `LIVE_TESTS`, or line-by-line
     `tests/unit_tests.list`), `tests/ci_smoke.sh`, `scripts/check.sh`, or root
-    `Makefile`, or give a reason in `tests/runner_registration_exemptions.list`.
-    Count actual invocations, not comments/mentions; runner globs such as
+    `Makefile`, unless already named with a reason in
+    `tests/runner_registration_exemptions.list`.
+    Both checks count actual invocations, not comments/mentions; runner globs such as
     `tests/web_unit/*.test.mjs` register every matching file. Leave live guard
     execution as a manual reviewer step; let a human judge deliberate manual-only tools.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#evidence-guard-incidents`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#runner-registration-gaps`)
@@ -226,28 +231,30 @@ code bigger than a one-liner.
   `tests/hetzner-vm.sh delete <id>` (API-confirmed deletion); never use
   `MAX_AGE_HOURS=0 make hetzner-sweep` or any cutoff to remove a specific VM.
   `tests/hetzner-sweep.sh` refuses cutoffs below 1h (`--force-all` overrides);
-  even then, never sweep VMs younger than a few minutes or of unknown age.
+  even then, the script never deletes VMs younger than a few minutes or of unknown
+  age. The sweep is a janitor for stale VMs, not a tool for removing one specific machine.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#vm-cleanup`)
 - Never harden tests against runner noise with retries, wider tolerances or
   confirmation loops. If a test is red only on shared runners, say so in the
   PR; it belongs on the dedicated gate box.
 - Use `tests/run_all.sh`'s `KNOWN_FAILING` (test name → tracking issue number)
   only for real, filed product bugs being fixed in `src/`, never timing/runner
-  noise; move or investigate noise instead. Run listed tests every time; count
-  expected failures and unexpected passes (`UNEXPECTED PASS`) as `known-failing` without failing
-  the gate; also count passes as `xpass`. Review every `xpass` against its issue,
-  never assume staleness. Exit 126 (not executable) or 127 (command/file not found)
-  must fail the gate even for listed tests.
+  noise; move or investigate noise instead. The runner executes listed tests every
+  time; expected failures and unexpected passes (`UNEXPECTED PASS`) both count as
+  `known-failing` without failing the gate; passes also count as `xpass`. Review
+  every `xpass` against its issue, never assume staleness. Exit 126 (not executable)
+  or 127 (command/file not found) fails the gate even for listed tests.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#known-failing-invocations`)
-- Never commit locally generated PNGs to `tests/web_snapshots/`; regenerate
-  baselines only with CI's `snapshots` job.
+- Never commit locally generated PNGs to `tests/web_snapshots/`; baselines are
+  regenerated only by CI's `snapshots` job.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#snapshot-provenance`)
 - Add C unit tests to `tests/unit_tests.list` (single source of truth); put UI
   logic in pure builders with a `tests/web_unit/*.test.mjs` case.
 - Use `[skip ci]` only for docs-only commits.
-- Push only with a passing `make check` stamp; never bypass the guard
-  (`PGWT_SKIP_PUSH_GUARD` is for humans). Queue `make check` through
-  `scripts/check-lock.sh`; never bypass it (`PGWT_SKIP_CHECK_LOCK=1` is for humans).
+- Push only with a passing `make check` stamp; the hook blocks pushes without one.
+  Never bypass the guard (`PGWT_SKIP_PUSH_GUARD` is for humans). `make check`
+  itself queues for a machine-wide lock through `scripts/check-lock.sh`; never
+  bypass it (`PGWT_SKIP_CHECK_LOCK=1` is for humans).
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#check-serialization`)
 
 ## Local setup (one-time)
@@ -268,8 +275,8 @@ python3 -m playwright install chromium
 export PGWT_BOX=root@<gate-box-ip>        # optional: PGWT_BOX_EL8, PGWT_BOX_EL9
 ```
 
-Use pyenv's global default or explicit `PYENV_VERSION` in new worktrees; never
-check out `.python-version` (untracked via `.git/info/exclude`).
+`.python-version` is untracked via `.git/info/exclude`; new worktrees get the
+pyenv pin only from the global default or explicit `PYENV_VERSION`, never checkout.
 
 ## Layout
 
