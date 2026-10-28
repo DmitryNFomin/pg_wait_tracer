@@ -119,12 +119,13 @@ code bigger than a one-liner.
 - **Models** are pinned in `.claude/agents/*.md`, overridden at spawn time.
   Use the cheapest model that does good work; **spend on review, economise on implementation**.
   Owner rule 2026-10-28, four operative instructions:
-  1. `codex` writes the code. Every PR gets a NEW `codex` agent with fresh
+  1. `codex` writes the code, invoked as `codex exec` with no `-m` flag
+     (`~/.codex/config.toml` already pins `model = "gpt-6.1-sol"`, so the
+     default IS sol 6.1). Every PR gets a NEW `codex` agent with fresh
      context — never a resumed or reused one.
   2. Claude agents review and challenge that code. Never the agent that wrote it.
-  3. Astra writes designs. Fable challenges design decisions. (Astra's concrete
-     invocation is not yet wired — no model id, CLI or `.claude/agents/` file
-     exists for it; the name is a placeholder until the owner maps it.)
+  3. Astra writes designs, invoked as `codex exec -m gpt-6-astra`. Fable
+     challenges design decisions.
   4. Any doubt, uncertainty or weird result — the lead's or a coder's — MUST go
      to both Fable and Astra as advisers/tech leads, not only when it seems
      worth it.
@@ -214,9 +215,9 @@ code bigger than a one-liner.
     execution as a manual reviewer step; let a human judge deliberate manual-only tools.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#evidence-guard-incidents`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#runner-registration-gaps`)
 - **Adviser**: consult BOTH by default — Fable via `.claude/agents/adviser.md`
-  and Astra (invocation not yet wired; see Models above). Keep one Fable
-  conversation per session; resume with SendMessage, never respawn. Consult on
-  every found issue,
+  and Astra (`codex exec -m gpt-6-astra`, see Models above). Keep one Fable
+  conversation per session; resume with SendMessage, never
+  respawn. Consult on every found issue,
   plan and numeric claim BEFORE acting and BEFORE reporting. Consult both before
   accepting/rejecting review verdicts or returning branches; owner-facing numbers,
   measurements or facts; plans, ordering or scheduling; infrastructure/cost
