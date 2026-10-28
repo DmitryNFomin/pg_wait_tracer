@@ -377,6 +377,13 @@ static int accum_event(struct pgwt_summary_accum *acc,
     if (ev_idle)
         acc->idle_ns += tns;
 
+    /* v9 (#424, #562): this record's measured on-CPU ns and whether it HAD a
+     * measurement, carried to the per-session block below. A measured ZERO
+     * is a signal and must be distinguishable from absence, so the flag is
+     * separate from the value. */
+    uint64_t sess_measured_ns = 0;
+    bool     sess_measured = false;
+
     /* v7 (#408): the measured-CPU split, accumulated with the SAME arithmetic
      * pgwt_compute_time_model applies per record, so the reader can reproduce
      * its two CPU rows from these scalars instead of reporting
@@ -440,6 +447,8 @@ static int accum_event(struct pgwt_summary_accum *acc,
                 m = m > cc->already_cpu_ns ? m - cc->already_cpu_ns : 0;
                 acc->cpu_measured_ns += m;
                 acc->cpu_measured_records++;
+                sess_measured_ns = m;
+                sess_measured = true;
             } else if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
                 uint64_t m = evt->cpu_ns;
                 if (m > tns) {
@@ -448,6 +457,8 @@ static int accum_event(struct pgwt_summary_accum *acc,
                 }
                 acc->cpu_measured_ns += m;
                 acc->cpu_measured_records++;
+                sess_measured_ns = m;
+                sess_measured = true;
             } else {
                 /* UNKNOWN (sampled / v2 / no CPU capability): gap-inference,
                  * the whole gap is CPU* and there is no runqueue residual for
@@ -557,6 +568,17 @@ static int accum_event(struct pgwt_summary_accum *acc,
             ss->db_time_ns += tns;
         if (old_ev == 0)
             ss->cpu_ns += tns;
+        if (old_ev == 0 && sess_measured) {
+            /* tns, not dur: cpu_ns above uses this second's share, and the
+             * remainder must be the share's remainder or the two disagree.
+             * Where credits already covered part of the interval, m can
+             * exceed tns; the > guard floors the remainder at 0 rather
+             * than underflowing. */
+            ss->cpu_offcpu_ns += tns > sess_measured_ns
+                               ? tns - sess_measured_ns : 0;
+            if (ss->cpu_measured_records != UINT32_MAX)
+                ss->cpu_measured_records++;
+        }
         /* Track top wait per session. v3: never an IDLE event -- "this
          * session's top wait is Timeout:CheckpointWriteDelay" names the thing
          * that is explicitly NOT load, which is the opposite of what the
@@ -741,7 +763,9 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
         memcpy(p, &s->cpu_ns, 8);        p += 8;
         memcpy(p, &s->top_wait_id, 4);   p += 4;
         memcpy(p, &s->top_wait_ns, 8);   p += 8;
-        /* 4 + 8 + 8 + 4 + 8 = 32 bytes per session */
+        memcpy(p, &s->cpu_offcpu_ns, 8);        p += 8;
+        memcpy(p, &s->cpu_measured_records, 4); p += 4;
+        /* 4 + 8 + 8 + 4 + 8 = 32 bytes, + v9: 8 + 4 = 44 */
     }
 
     /* Per-query entries (v2): base 36 + class_ns 88 + 1 + top_events n×20 */
@@ -832,7 +856,10 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
 
     /* Per-session entries */
     for (int i = 0; i < n_sessions; i++) {
-        if (p + 32 > end) return -1;
+        /* v9 (#424, #562): REFUSE a short record. Zero observations would
+         * hide the split, which is the bug these fields exist to fix. */
+        size_t session_size = version >= 9 ? 44 : 32;
+        if (p > end || (size_t)(end - p) < session_size) return -1;
 
         uint32_t pid;
         memcpy(&pid, p, 4);  p += 4;
@@ -873,7 +900,7 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
                         "corrupt or was written by a build with a larger "
                         "bound\n", SUMMARY_MAX_SESSIONS);
             }
-            p += 28;
+            p += version >= 9 ? 40 : 28;
             continue;
         }
 
@@ -881,6 +908,10 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
         memcpy(&s->cpu_ns, p, 8);        p += 8;
         memcpy(&s->top_wait_id, p, 4);   p += 4;
         memcpy(&s->top_wait_ns, p, 8);   p += 8;
+        if (version >= 9) {
+            memcpy(&s->cpu_offcpu_ns, p, 8);        p += 8;
+            memcpy(&s->cpu_measured_records, p, 4); p += 4;
+        }
     }
 
     /* Per-query entries */
@@ -1476,10 +1507,12 @@ static struct pgwt_summary_open *open_slot(struct pgwt_summary_writer *w,
  * FROZEN effective id -- 0 (CPU) or PGWT_WEI_NONCMD_CPU (idle). The two CPU
  * SCALARS are not touched here: they need the per-interval measurement
  * bookkeeping and are handled by the caller, which is the only place that
- * has it. The one addition is sessions[].cpu_ns, which accum_event also
- * fills for a we == 0 record and which the Sessions view reads. */
+ * has it. sessions[] receives the gap wall and the measured split for the
+ * Sessions view (#562); the caller supplies the per-second measurement so
+ * this function does not duplicate that bookkeeping. */
 static void accum_open_credit(struct pgwt_summary_accum *acc, uint32_t pid,
-                              uint32_t we, uint64_t ns)
+                              uint32_t we, uint64_t ns,
+                              uint64_t measured_ns, bool measured)
 {
     if (ns == 0)
         return;
@@ -1500,8 +1533,15 @@ static void accum_open_credit(struct pgwt_summary_accum *acc, uint32_t pid,
         struct pgwt_summary_session *ss = find_or_insert_session(acc, pid);
         if (ss) {
             ss->db_time_ns += ns;
-            if (we == 0)
+            if (we == 0) {
                 ss->cpu_ns += ns;
+                if (measured) {
+                    ss->cpu_offcpu_ns += ns > measured_ns
+                                       ? ns - measured_ns : 0;
+                    if (ss->cpu_measured_records != UINT32_MAX)
+                        ss->cpu_measured_records++;
+                }
+            }
         } else {
             /* #555: the open-interval credit drops this pid's share of the
              * second exactly as accum_event drops a closing record's, and it
@@ -1648,7 +1688,13 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec,
                 o->cpu_tier_known =
                     (o->cpu_prefix_ns != PGWT_CPU_NS_UNKNOWN) ? 1 : 0;
             }
-            accum_open_credit(&w->accum, o->pid, o->cpu_eff_we, slice);
+            uint64_t m = 0;
+            bool measured = o->cpu_tier_known &&
+                            !pgwt_is_idle_event(o->cpu_eff_we);
+            if (measured)
+                m = credit_open_cpu_measured(&w->accum, o, slice);
+            accum_open_credit(&w->accum, o->pid, o->cpu_eff_we, slice,
+                              m, measured);
             w->open_cpu_credited_ns_total += slice;
             /* An idle-classified gap (PGWT_WEI_NONCMD_CPU) contributes to
              * NEITHER CPU scalar, exactly as accum_event's `ev_idle` guard
@@ -1656,8 +1702,6 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec,
              * time as Idle, not as CPU. */
             if (!pgwt_is_idle_event(o->cpu_eff_we)) {
                 if (o->cpu_tier_known) {
-                    uint64_t m = credit_open_cpu_measured(&w->accum, o,
-                                                          slice);
                     w->open_cpu_measured_ns_total += m;
                     /* A CPU OBSERVATION, which is what this counter means
                      * since v9: without it a window whose only CPU time is
@@ -1670,7 +1714,7 @@ static void credit_open_second(struct pgwt_summary_writer *w, uint64_t sec,
                 }
             }
         } else {
-            accum_open_credit(&w->accum, o->pid, o->we, slice);
+            accum_open_credit(&w->accum, o->pid, o->we, slice, 0, false);
         }
         w->open_credited_ns_total += slice;
         o->credited_ns += slice;

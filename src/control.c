@@ -448,9 +448,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * unlike events_overflow the per-record field is not yet serialized, so a
      * capture analysed later carries no record of its dropped pids and only
      * the daemon's own WARN lines do. That gap is sequenced, not declined --
-     * the PGWT_SUMMARY_VERSION 8 -> 9 bump that puts the field on disk is
-     * approved and is being landed with the other pending format change so
-     * the two cost one recompute of retained traces instead of two. */
+     * the PGWT_SUMMARY_VERSION 8 -> 9 bump is landing with the open-CPU
+     * producer and per-session measured-CPU split. The trailer follows in a
+     * later commit on this branch within this version epoch, so these
+     * changes cost one recompute of retained traces instead of another. */
     cjson_add_uint64(root, "summary_sessions_overflow_total",
                      d->summary_writer ? d->summary_writer->sessions_overflow_total : 0);
     /* #277: events that arrived after their second had already been written
@@ -553,13 +554,12 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * asserts all seven keys by name unconditionally. A live
      * conditional over a version constant is how the producer got
      * hidden the first time. */
-    /* v9 (#424). THE CAPABILITY IS DORMANT: no producer feeds the writer an
-     * open-CPU observation, deliberately (see the note at the v8
-     * pgwt_summary_note_open call in src/map_reader.c). These counters are
-     * published anyway, because they are what MADE that visible — on a
-     * gate-2 capture with watchpoints attached and cpu_ns_total moving
-     * 0 -> 23.7 s, credited, refused AND uncredited all read zero, which
-     * says the writer was never asked rather than that it declined.
+    /* v9 (#424): the producer is wired in src/map_reader.c's
+     * pgwt_read_state_map. These counters are how a live capture proves the
+     * call was REACHED: with watchpoints attached and cpu_ns_total moving,
+     * a zero summary_open_cpu_credited_ns means unwired, not declined,
+     * provided seconds are actually being sealed (see the fourth outcome
+     * below). tests/test_v9_open_cpu_wired.sh is the live acceptance test.
      *
      * THE FOURTH OUTCOME, found by reading the writer rather than by
      * reasoning from the counters: a note can be ACCEPTED and then credited
@@ -591,11 +591,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * same capture.
      *   zero too  -> nothing sealed at all; the seal trigger is the bug and
      *                re-wiring the producer will not move a single counter;
-     *   non-zero  -> seconds were sealed, so the CPU path really was asked
-     *                and declined somewhere, and THEN the producer is worth
-     *                looking at.
-     * Neither is distinguishable without a live capture, which is why the
-     * wiring was reverted rather than guessed at.
+     *   non-zero  -> seconds were sealed; if CPU credit is still zero with
+     *                watchpoints attached and cpu_ns_total moving, inspect
+     *                whether the producer's observation reached the writer.
+     * A live capture distinguishes those outcomes.
      *
      * The rest are the writer's own self-checks: eff_rejected_total should
      * read 0 in any build (the producer passes a classification the writer
@@ -604,13 +603,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * counts a measurement tier that changed mid-interval, and overcredit_ns
      * counts credit the per-second cap had to refuse.
      *
-     * TEMPORARY GUARD, not a supported configuration. These fields arrive
-     * with the v9 writer, which is on another branch; the conditional exists
-     * only so this branch builds and box-checks on its own, and the
-     * integration agent DELETES it when v9 folds in. At that moment add these
-     * seven keys to tests/test_control.sh's required-key list, by name
-     * (they report a dormant capability honestly — zeros that mean "nobody
-     * asked", not "nothing happened"):
+     * All seven keys are published unconditionally and named in
+     * tests/test_control.sh's required-key list:
      *
      *     summary_open_cpu_credited_ns
      *     summary_open_cpu_measured_ns
@@ -618,12 +612,7 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      *     summary_open_cpu_eff_rejected_total
      *     summary_open_cpu_class_divergent_ns
      *     summary_open_cpu_tier_mismatch_total
-     *     summary_open_cpu_overcredit_ns
-     *
-     * (that file is a live-tier test shared with other branches, which is why
-     * this branch does not edit it). Until then the keys are absent and the
-     * daemon reports the v8 refusal in summary_open_cpu_refused_total /
-     * summary_cpu_open_uncredited_ns_total above — visible, never silent. */
+     *     summary_open_cpu_overcredit_ns */
     cjson_add_uint64(root, "summary_open_cpu_credited_ns",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_credited_ns_total : 0);
