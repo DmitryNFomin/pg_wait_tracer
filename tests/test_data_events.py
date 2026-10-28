@@ -201,12 +201,9 @@ def build_exact_300s_scenario():
 
 
 def check_query_filtered_summary_gating(t):
-    """#103 review BLOCKER: the summary path's per-QUERY records carry no
-    histogram and no max (struct pgwt_summary_query_event = event_id, count,
-    total_ns). Answering a percentile from that all-zero histogram made every
-    row of a query-drilled Events table read ">= 16.4ms" with Max 0us — a
-    fabricated bound. A row with no distribution must gate p50/p95/p99 AND
-    max to null (count/total/avg stay, they are real)."""
+    """#526: query-filtered latency matches the unfiltered answer; #103:
+    distribution columns have a consistent shape and never fabricate bounds.
+    A sampled-only row exercises null latency serialization separately."""
     scenario, lo, hi = build_exact_300s_scenario()
     trace_dir = generate_traces(scenario)
     try:
@@ -231,7 +228,7 @@ def check_query_filtered_summary_gating(t):
             t.check_eq(io.get("p50_overflow"), False,
                        "unfiltered: IO p50_overflow = false")
 
-            print("--- #103 summary path, QUERY-FILTERED (no histogram) ---")
+            print("--- #526 QUERY-FILTERED parity and #103 latency shape ---")
             qresp = srv.query("top_events", from_=frm, to_=to,
                               filters={"query_id": 100})
             qrows = {r["name"]: r for r in qresp.get("rows", [])}
@@ -242,12 +239,83 @@ def check_query_filtered_summary_gating(t):
                         f"{name}: count survives the drill ({row.get('count')})")
                 t.check(row.get("avg_us") is not None,
                         f"{name}: avg_us stays (count and total are real)")
-                for col in ("p50_us", "p95_us", "p99_us", "max_us"):
-                    t.check(row.get(col, "missing") is None,
-                            f"{name}: {col} is null (no histogram behind it)")
-                for col in ("p50_overflow", "p95_overflow", "p99_overflow"):
-                    t.check_eq(row.get(col), False,
-                               f"{name}: {col} = false (never a fabricated bound)")
+
+            for label, response in (("unfiltered", resp), ("filtered", qresp)):
+                for row in response.get("rows", []):
+                    name = row["name"]
+                    values = [row.get(col, "missing") for col in
+                              ("p50_us", "p95_us", "p99_us", "max_us")]
+                    t.check(all(v is None for v in values) or
+                            all(type(v) in (int, float) for v in values),
+                            f"{label} {name}: latency columns all null or all numeric")
+                    if all(v is None for v in values[:3]):
+                        for pctl in ("p50", "p95", "p99"):
+                            t.check(row.get(pctl + "_overflow") is False,
+                                    f"{label} {name}: null {pctl} has no overflow")
+
+            for name, p50, overflow, max_us in (
+                    ("Lock:relation", 16384.0, True, 100000.0),
+                    ("IO:DataFileRead", 1024.0, False, 1000.0)):
+                row = qrows.get(name, {})
+                t.check_approx(row.get("p50_us") or -1, p50, 0.01,
+                               f"filtered {name}: p50 matches known histogram bucket")
+                t.check(row.get("p50_overflow") is overflow,
+                        f"filtered {name}: p50_overflow = {overflow}")
+                t.check_approx(row.get("max_us") or -1, max_us, 0.01,
+                               f"filtered {name}: max matches known duration")
+                for col in ("p50_us", "p50_overflow", "max_us"):
+                    t.check_eq(row.get(col, "missing"), rows.get(name, {}).get(col),
+                               f"{name}: filtered {col} equals unfiltered {col}")
+
+            # Both routes use the same fidelity label; this checks data
+            # fidelity, not routing. The load-limit oracle below proves raw.
+            t.check_eq(qresp.get("fidelity"), "exact",
+                       "query-filtered all-exact data has exact fidelity")
+
+        # Same mechanism as test_summary_raw_parity.py's classify_route:
+        # raw must refuse at this limit, while a summary answer would succeed.
+        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+            oracle = srv.query("top_events", from_=frm, to_=to,
+                               filters={"query_id": 100})
+            t.check_eq(oracle.get("code"), "window_too_large",
+                       "query-filtered request reaches raw (load-limit refusal)")
+            t.check_eq(oracle.get("max_events"), 1,
+                       "raw oracle applied the one-event load limit")
+    finally:
+        cleanup_traces(trace_dir)
+
+    # The wire no longer reaches exact_count > 0 / has_latency_dist == 0
+    # through per-query summaries. That compute invariant is covered in
+    # tests/test_agg_raw_crosscheck.c:2392-2404, which carries a lat_raw > 0
+    # positive control so the gate cannot pass on absent latency everywhere.
+    # A sampled-only row reaches the serializer's null/false branch here,
+    # with exact_count == 0 and has_latency_dist == 0, not the former case.
+    sampled_scenario = {
+        "backends": scenario["backends"],
+        "queries": scenario["queries"],
+        "sample_period_ns": 100_000_000,
+        "samples": [{"pid": 1000, "ts": BASE_TS + i * 100_000_000,
+                     "event": IO_DATA_FILE_READ, "qid": 100}
+                    for i in (1, 2)],
+    }
+    trace_dir = generate_traces(sampled_scenario)
+    try:
+        with ServerHarness(trace_dir) as srv:
+            print("--- #103 sampled-only null latency serialization ---")
+            sampled = srv.query("top_events", filters={"query_id": 100})
+            t.check_eq(sampled.get("fidelity"), "sampled",
+                       "null serialization fixture is sampled-only")
+            row = next((r for r in sampled.get("rows", [])
+                        if r["name"] == "IO:DataFileRead"), {})
+            t.check_eq(row.get("count"), 2, "sampled IO row has two observations")
+            t.check(row.get("avg_us", "missing") is None,
+                    "sampled-only IO has no exact latency average")
+            for col in ("p50_us", "p95_us", "p99_us", "max_us"):
+                t.check(row.get(col, "missing") is None,
+                        f"sampled-only IO: {col} serializes as null")
+            for pctl in ("p50", "p95", "p99"):
+                t.check(row.get(pctl + "_overflow") is False,
+                        f"sampled-only IO: {pctl}_overflow serializes as false")
     finally:
         cleanup_traces(trace_dir)
 

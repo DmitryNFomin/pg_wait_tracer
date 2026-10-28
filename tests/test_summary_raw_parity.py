@@ -206,7 +206,7 @@ def ask(trace_dir, frm, to, stderr_path):
         for cmd in CMDS:
             answers[cmd] = srv.query(cmd, from_=frm, to_=to, buckets=10,
                                      limit=100)
-    # Route oracle: same binary, same dir, same window, one event allowed.
+    # Time Model-only route oracle for this dir/window; one event allowed.
     oracle_err = stderr_path + ".oracle"
     with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1},
                        stderr_path=oracle_err) as srv:
@@ -232,8 +232,8 @@ def ask(trace_dir, frm, to, stderr_path):
 #          it to the window. No pin should point here any more.
 #   #324 — v8's deliberate residual of the above: only the DURATION is
 #          spread, so queries[] still carries a straddling record's full
-#          duration at its closing second. OPEN; this is what the eight
-#          straddle queries/* pins belong to.
+#          duration at its closing second. OPEN; its queries/* pins are gone
+#          because handle_top_queries now computes from raw. No pin points here.
 #   #319 — `top_wait` means "largest total" on raw and "longest single wait"
 #          on the summary path.
 #   #410 — the four divergences THIS gate found on its first run: max_aas
@@ -273,15 +273,20 @@ def load_expected():
 #   * aas/max_aas — the summary path's peak is the max over SECONDS, the raw
 #     path's is the max over the requested buckets. The same
 #     two-meanings-one-field shape as #319.
-#   * queries/backfilled_ms, queries/unattributed_available — the summary
-#     path has no unattributed/backfilled accounting to offer.
 #   * time_model/io_worker_busy_pct — absent from the summary response.
 # Listed here rather than falling through to the per-window rules so that a
 # NEW divergence in one of these endpoints cannot inherit #410 by accident.
+#
+# queries/backfilled_ms and queries/unattributed_available WERE here and are
+# gone: #598 fixed them, this gate reported them `xpass ... delete this
+# entry`, and removing the pins was the last step of landing that fix. They
+# are deliberately NOT left behind "just in case": a field with no rule falls
+# through to UNEXPLAINED, which refuses, whereas a stale entry would let a
+# brand-new divergence in those two endpoints inherit a closed item of #410 —
+# the exact accident the sentence above exists to prevent. #410 itself stays
+# OPEN for the two below.
 FOUND_BY_THIS_GATE = {
     "aas/max_aas": 410,
-    "queries/backfilled_ms": 410,
-    "queries/unattributed_available": 410,
     "time_model/io_worker_busy_pct": 410,
 }
 
@@ -327,29 +332,15 @@ def issue_for(field, window):
     if "CPU" in field or field in CPU_SCALARS:
         return 408                      # has_measured_cpu=false on summaries
     if SESSIONS_MEASURED_CPU_562.match(field):
-        # BEFORE the straddle_130s branch on purpose: these eight fields also
-        # occur in that window, and falling through would label them #324 --
-        # inheriting an issue by sitting next to one.
         return 562                      # Top Sessions raw measures, summary walls
-    if window == "straddle_130s":
-        # The quiet zones guarantee the ONLY record straddling this window's
-        # edges is the deliberate 100 s Client:ClientRead, so every remaining
-        # divergence here is the whole-record-into-closing-second mechanism.
-        #
-        # #324, NOT #379 -- and the distinction is load-bearing. #379 (the
-        # writer charging a long record's whole duration to its closing
-        # second) IS FIXED and CLOSED: v8 spreads the duration across the
-        # seconds it covers, which is why this window's time_model/* rows now
-        # AGREE where 21 #379 pins used to sit. What remains is v8's
-        # DOCUMENTED carve-out: only the duration is spread, while queries[]
-        # stays once-at-close with the full duration because an open
-        # interval's query attribution is unresolved at credit time
-        # (src/summary_writer.c "queries[] (never credited open; see the v8
-        # note)"; dd93d523; the Queries tab raw-loads, #324 -- which is OPEN).
-        # Pointing these pins at closed #379 would arm a trap: this gate's own
-        # rule is "delete an entry the moment its issue is fixed", so the next
-        # reader would delete eight live pins and silently blind this window.
-        return 324
+    # No straddle_130s catch-all for #324: handle_top_queries always uses raw
+    # (server.c:5579). The remaining production readers of the full-duration
+    # per-query table are tm_summary_visitor (compute.c:2886, gate :2892)
+    # and aas_summary_visitor (:2717, gate :2731); both require query_id != 0
+    # (AAS sets has_query_filter from that predicate at :2825). All four CMDS
+    # above are requested UNFILTERED, so #324 cannot cause a divergence here.
+    # An unmatched field must remain UNEXPLAINED for unexplained()/--record
+    # to refuse it, rather than laundering a new regression into "known".
     return "UNEXPLAINED"
 
 
@@ -501,7 +492,7 @@ def main():
                 # Both sides raw: every field must agree exactly, and the
                 # route check is inverted (same route is REQUIRED here).
                 w_ok, w_lines, findings = True, ["--- window %s ---" % name], []
-                w_lines.append("  routes: raw-side=%s summary-side=%s"
+                w_lines.append("  Time Model dir routes: raw-side=%s summary-side=%s"
                                % (routes["raw"], routes["summary"]))
                 if routes["raw"] != P.ROUTE_RAW or routes["summary"] != P.ROUTE_RAW:
                     w_lines.append("  FAIL premise control: a 59 s window must "

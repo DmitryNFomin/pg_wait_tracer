@@ -466,9 +466,11 @@ def main():
           "§13 a CPU row field is attributed to #408")
     check(G.issue_for("sessions/row/1001/top_wait", "interior_160s") == 319,
           "§13 a top_wait field is attributed to #319")
-    check(G.issue_for("time_model/row/Client/ms", "straddle_130s") == 324,
-          "§13 a straddle-window divergence is attributed to OPEN #324, "
-          "not CLOSED #379 (v8's queries[] carve-out, not a regression)")
+    check(G.issue_for("time_model/row/Client/ms", "straddle_130s")
+          == "UNEXPLAINED",
+          "§13 #324 cannot produce a divergence in this unfiltered window; "
+          "an unexplained one must REFUSE via unexplained()/--record, "
+          "not inherit #324's inapplicable mechanism")
     check(G.issue_for("aas/max_aas", "interior_160s") == 410,
           "§13 a divergence this gate found is attributed to #410")
     check(G.issue_for("time_model/row/Client/ms", "interior_160s")

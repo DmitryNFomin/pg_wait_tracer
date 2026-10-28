@@ -219,16 +219,45 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * Events tab drilled into one query over a >= 120 s window came back
      * missing the whole CPU* row and its db_time_ms was short by that
      * query's entire CPU time: measured raw 7002.426 ms vs summary 2949.426
-     * ms, -57.9%, on the cross-check fixture. REACHABLE -- handle_top_events
-     * adds no query guard, unlike handle_top_sessions and handle_heatmap.
+     * ms, -57.9%, on the cross-check fixture.
      *
-     * Filing it, rather than guarding the handler into the raw path, because
-     * the Events tab is the one users drill and this is the content the
-     * summary is for; and because nothing else needed changing to read it:
-     * the slot sentinel is not event_id but num_top_events (the lookup loop
-     * and the serializer both bound themselves by it), and te_summary_visitor
-     * probes its hash table on `count > 0`, so an occupied slot holding
-     * event_id 0 is unambiguous on the wire and in the reader.
+     * NO LONGER REACHABLE -- CLOSED BY A HANDLER GUARD (#526). This note used
+     * to read "REACHABLE -- handle_top_events adds no query guard, unlike
+     * handle_top_sessions and handle_heatmap", and that hole was real: a
+     * query-filtered Events request over a >= 120 s window took the summary
+     * path and read THIS list, whose time is the record's FULL duration
+     * (accum_query_add is called with `dur`, :600 -- correct for a
+     * per-occurrence table, which is deliberately never credited open),
+     * while the unfiltered read takes events[], filled with the in-second
+     * slice `tns`. Over a window whose edge an interval crosses the two
+     * answered the same question differently: 719,200.346 ms filtered
+     * against 716,200.203 ms unfiltered on one Lock:relation row.
+     *
+     * handle_top_events now shares its query guard with handle_top_sessions
+     * (server.c:5193/:5166) and handle_heatmap (:5929): TWO siblings.
+     * handle_top_queries computes raw unconditionally (:5579); no summary route.
+     * tq_summary_visitor (compute.c:3584) has no production caller.
+     * The remaining production readers of queries[] are tm_summary_visitor
+     * (compute.c:2886; per-query read only under a query filter, :2892)
+     * and aas_summary_visitor (:2717; same gate, :2731). `dur` still matters
+     * for query-filtered Time Model and AAS; their full-duration-at-close
+     * window-edge limitation remains.
+     *
+     * WHAT WAS CONSIDERED AND DROPPED, so it is not re-derived: switching
+     * this call to `tns` alone makes things WORSE, not better. Because
+     * queries[] is never credited open, `dur` is the only way it totals an
+     * interval at all -- `tns` would drop everything the open path already
+     * credited, turning a window-edge over-report into an under-report of
+     * the whole credited part. Crediting queries[] open instead is blocked
+     * ACROSS SEALED SECONDS specifically (#277: a written second is
+     * immutable) and by #128 (the id can arrive after the wait ends) -- NOT
+     * universally: an attribution resolved before its second sealed could in
+     * principle credit buffered slices. Nobody is proposing that; it is
+     * recorded so the next reader does not infer the stronger prohibition.
+     *
+     * Keeping top_events[] for query-filtered Time Model's named event rows.
+     * The slot sentinel is num_top_events, not event_id; the lookup and
+     * serializer use that bound, so event_id 0 is unambiguous on the wire.
      *
      * It does consume one of the 8 slots. CPU is normally among a query's
      * largest consumers, so that is the right slot to spend; the bounded-list
