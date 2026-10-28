@@ -1611,16 +1611,24 @@ static void test_query_attr_lock_before_report(void)
     CHECK(qrow(acc, 0x47, IO_WALSYNC) == MS(5),
           "exit with the command's id known: pending → that id (rule 2)");
 
-    /* Background pids never attribute; io_workers never attribute. */
+    /* #641: maintenance load has a final unattributed label, never pending. */
     struct pgwt_live_interval bg = {
         .pid = 45, .we = LOCK_RELATION, .wall_ns = MS(3), .cpu_ns = MS(3),
         .cat_flag = PGWT_EVENT_FLAG_MAINT, .cmd_gate_active = true,
         .cmd_open = true, .closed = true,
     };
     uint64_t un_before = acc->qattr_unattributed_ns;
+    uint64_t bg_lock_before = qrow(acc, 0, LOCK_RELATION);
     pgwt_accum_add_interval(acc, &bg);
-    CHECK(acc->qattr_unattributed_ns == un_before,
-          "an autovacuum wait is neither pending nor unattributed");
+    struct pgwt_pid_accum *bgpa = pgwt_find_pid_accum(acc, bg.pid);
+    CHECK(acc->qattr_unattributed_ns == un_before + MS(3) &&
+          qrow(acc, 0, LOCK_RELATION) == bg_lock_before + MS(3) &&
+          bgpa && bgpa->qattr.npending == 0,
+          "autovacuum adds 3 ms to unattributed counter/row, never pending "
+          "(deltas %.1f/%.1f ms, pending %d)",
+          (acc->qattr_unattributed_ns - un_before) / 1e6,
+          (qrow(acc, 0, LOCK_RELATION) - bg_lock_before) / 1e6,
+          bgpa ? bgpa->qattr.npending : -1);
 
     /* The open stretch at tick time cannot wait: rule 2 now (the display
      * copy resolves against the pid's cmd_qid), else no query row YET — not
@@ -2320,6 +2328,255 @@ static void test_query_attr_pacing_not_a_boundary(void)
     }
 }
 
+/* #641's pacing guard must see a LOAD-idle Timeout, not a session boundary.
+ * Resolve by name: an arbitrary id (or an uninitialised pacing mask) would
+ * silently delete the leg that kills a missing !pgwt_is_idle_event guard. */
+static uint32_t pacing_timeout_wei(const char *name)
+{
+    for (uint32_t id = 0; id < 32; id++) {
+        uint32_t we = WEI(PG_WAIT_TIMEOUT, id);
+        const char *n = pgwt_event_name(we);
+        if (!n || strcmp(n, name) != 0)
+            continue;
+        CHECK(pgwt_is_idle_event(we) && !pgwt_is_session_idle_event(we),
+              "%s must be load-idle but not session-idle (id %u, load %d, session %d)",
+              name, id, pgwt_is_idle_event(we), pgwt_is_session_idle_event(we));
+        return we;
+    }
+    CHECK(0, "no Timeout id named %s among %d ids; refusing the pacing fixture",
+          name, 32);
+    return 0;
+}
+
+/* No producer emits this bit. If it becomes a category, the precondition
+ * below must fail instead of quietly testing a recognised category. */
+#define LIVE_FUTURE_CAT 0x1000U
+
+static void query_attr_background_control(uint32_t category, const char *name)
+{
+    uint32_t pacing = pacing_timeout_wei("CheckpointWriteDelay");
+    if (!pacing)
+        return;   /* missing fixture already failed loudly; never use id 0 */
+    uint32_t known = PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_MAINT |
+                     PGWT_EVENT_FLAG_BACKGROUND;
+    CHECK((LIVE_FUTURE_CAT & known) == 0,
+          "%s: future category shares no known bits (overlap %#x)",
+          name, LIVE_FUTURE_CAT & known);
+
+    struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+    pgwt_accum_init(acc);
+    /* Direct intervals: stream_record() hardcodes foreground. These are
+     * also the exact inputs to the independent server tagging pass below. */
+    struct pgwt_live_interval records[] = {
+        { .pid = 10, .we = LOCK_RELATION, .wall_ns = MS(500), .cat_flag = category },
+        { .pid = 30, .we = LOCK_RELATION, .wall_ns = MS(700),
+          .cat_flag = PGWT_EVENT_FLAG_IO_WORKER },
+        { .pid = 40, .we = pacing, .wall_ns = MS(900), .cat_flag = category },
+        { .pid = 50, .we = LOCK_RELATION, .wall_ns = MS(200), .cat_flag = category },
+        { .pid = 50, .we = LOCK_RELATION, .wall_ns = MS(50),
+          .query_id = 77, .cat_flag = category },
+        { .pid = 50, .we = LOCK_RELATION, .wall_ns = MS(30), .cat_flag = category },
+        { .pid = 60, .we = LOCK_RELATION, .wall_ns = MS(200), .cat_flag = LIVE_FUTURE_CAT },
+        { .pid = 60, .we = LOCK_RELATION, .wall_ns = MS(50),
+          .query_id = 77, .cat_flag = LIVE_FUTURE_CAT },
+        { .pid = 60, .we = LOCK_RELATION, .wall_ns = MS(30), .cat_flag = LIVE_FUTURE_CAT },
+        { .pid = 70, .we = LOCK_RELATION, .wall_ns = MS(300),
+          .cat_flag = PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_BACKGROUND },
+        { .pid = 20, .we = LOCK_RELATION, .wall_ns = MS(100), .query_id = 42 },
+        { .pid = 10, .we = 0, .wall_ns = MS(120), .cpu_ns = MS(120),
+          .cat_flag = category },
+    };
+    enum { NRECORDS = sizeof(records) / sizeof(records[0]) };
+    for (int i = 0; i < NRECORDS; i++)
+        records[i].closed = true;
+
+    /* a. A closed query-less wait has its final label immediately: no
+     * pending list and no backfill metric, even before a command boundary. */
+    uint64_t backfilled = acc->qattr_backfilled_ns;
+    pgwt_accum_add_interval(acc, &records[0]);
+    struct pgwt_pid_accum *pa = pgwt_find_pid_accum(acc, 10);
+    CHECK(qrow(acc, 0, LOCK_RELATION) == MS(500) &&
+          acc->qattr_unattributed_ns == MS(500) && pa->qattr.npending == 0 &&
+          acc->qattr_backfilled_ns == backfilled,
+          "%s: closed load is unattributed, never deferred/backfilled "
+          "(row %.1f, counter %.1f, backfilled %.1f ms, pending %d)", name,
+          qrow(acc, 0, LOCK_RELATION) / 1e6, acc->qattr_unattributed_ns / 1e6,
+          acc->qattr_backfilled_ns / 1e6, pa->qattr.npending);
+
+    /* b. IO workers stay outside the query model entirely. */
+    int rows_before = acc->num_query_events;
+    uint64_t un_before = acc->qattr_unattributed_ns;
+    pgwt_accum_add_interval(acc, &records[1]);
+    CHECK(acc->num_query_events == rows_before &&
+          qrow(acc, 0, LOCK_RELATION) == MS(500) &&
+          acc->qattr_unattributed_ns == un_before,
+          "%s: IO_WORKER adds no query row or time (rows %d, row %.1f, counter %.1f ms)",
+          name, acc->num_query_events, qrow(acc, 0, LOCK_RELATION) / 1e6,
+          acc->qattr_unattributed_ns / 1e6);
+
+    /* c. A checkpointer spreading its writes is pacing, not load. Checking
+     * row presence as well as time catches even a spurious empty row. */
+    pgwt_accum_add_interval(acc, &records[2]);
+    CHECK(acc->num_query_events == rows_before && qrow(acc, 0, pacing) == 0 &&
+          acc->qattr_unattributed_ns == un_before,
+          "%s: pacing adds neither row nor counter (rows %d, pacing %.1f, counter %.1f ms)",
+          name, acc->num_query_events, qrow(acc, 0, pacing) / 1e6,
+          acc->qattr_unattributed_ns / 1e6);
+
+    /* d. BOTH borrow directions on ONE pid: an id reported later cannot
+     * claim the first wait; the remembered cmd_qid cannot claim the third. */
+    uint64_t lock_before = qrow(acc, 0, LOCK_RELATION);
+    for (int i = 3; i <= 5; i++)
+        pgwt_accum_add_interval(acc, &records[i]);
+    pa = pgwt_find_pid_accum(acc, 50);
+    CHECK(qrow(acc, 0, LOCK_RELATION) == lock_before + MS(230) &&
+          qrow(acc, 77, LOCK_RELATION) == MS(50) &&
+          acc->qattr_unattributed_ns == un_before + MS(230) &&
+          pa->qattr.npending == 0 && pa->qattr.cmd_qid == 77 &&
+          acc->qattr_backfilled_ns == backfilled,
+          "%s: never borrow earlier/later id (unattributed delta %.1f, "
+          "77 row %.1f, counter delta %.1f, backfilled %.1f ms, pending %d, cmd_qid %llu)",
+          name, (qrow(acc, 0, LOCK_RELATION) - lock_before) / 1e6,
+          qrow(acc, 77, LOCK_RELATION) / 1e6,
+          (acc->qattr_unattributed_ns - un_before) / 1e6,
+          acc->qattr_backfilled_ns / 1e6, pa->qattr.npending,
+          (unsigned long long)pa->qattr.cmd_qid);
+
+    /* e. Keep the TOTAL category refusal below the known-category arm.
+     * A future category must under-count, never borrow a confident wrong id. */
+    lock_before = qrow(acc, 0, LOCK_RELATION);
+    un_before = acc->qattr_unattributed_ns;
+    uint64_t q77_before = qrow(acc, 77, LOCK_RELATION);
+    for (int i = 6; i <= 8; i++)
+        pgwt_accum_add_interval(acc, &records[i]);
+    struct pgwt_pid_accum *future = pgwt_find_pid_accum(acc, 60);
+    CHECK(qrow(acc, 0, LOCK_RELATION) == lock_before &&
+          acc->qattr_unattributed_ns == un_before &&
+          qrow(acc, 77, LOCK_RELATION) == q77_before + MS(50) &&
+          future->qattr.npending == 0 && acc->qattr_backfilled_ns == backfilled,
+          "%s: unknown category drops query-less time instead of borrowing "
+          "(row delta %.1f, counter delta %.1f, 77 delta %.1f, backfilled %.1f ms, pending %d)",
+          name, (qrow(acc, 0, LOCK_RELATION) - lock_before) / 1e6,
+          (acc->qattr_unattributed_ns - un_before) / 1e6,
+          (qrow(acc, 77, LOCK_RELATION) - q77_before) / 1e6,
+          acc->qattr_backfilled_ns / 1e6, future->qattr.npending);
+
+    /* f. A lone IO_WORKER also passes via the TOTAL refusal: both bits are
+     * needed to make deleting its FIRST return a detectable mutant. */
+    rows_before = acc->num_query_events;
+    pgwt_accum_add_interval(acc, &records[9]);
+    CHECK(acc->num_query_events == rows_before &&
+          qrow(acc, 0, LOCK_RELATION) == lock_before &&
+          acc->qattr_unattributed_ns == un_before,
+          "%s: IO_WORKER outranks BACKGROUND (rows %d, row %.1f, counter %.1f ms)",
+          name, acc->num_query_events, qrow(acc, 0, LOCK_RELATION) / 1e6,
+          acc->qattr_unattributed_ns / 1e6);
+
+    pgwt_accum_add_interval(acc, &records[10]);
+    CHECK(qrow(acc, 42, LOCK_RELATION) == MS(100),
+          "%s: parity stream includes attributed foreground load (42 row %.1f ms)",
+          name, qrow(acc, 42, LOCK_RELATION) / 1e6);
+
+    /* On-CPU load also gets its final label immediately. Match measured
+     * CPU to wall so the live row and reader duration sum agree exactly. */
+    pgwt_accum_add_interval(acc, &records[11]);
+    struct pgwt_pid_accum *cpu_pa = pgwt_find_pid_accum(acc, 10);
+    CHECK(qrow(acc, 0, 0) == MS(120) &&
+          acc->qattr_unattributed_ns == MS(850) && cpu_pa->qattr.npending == 0 &&
+          acc->qattr_backfilled_ns == backfilled,
+          "%s: on-CPU load is immediately unattributed (row %.1f, counter %.1f, "
+          "backfilled %.1f ms, pending %d)", name, qrow(acc, 0, 0) / 1e6,
+          acc->qattr_unattributed_ns / 1e6, acc->qattr_backfilled_ns / 1e6,
+          cpu_pa->qattr.npending);
+    un_before = acc->qattr_unattributed_ns;
+
+    /* i. Compare the SAME closed records before adding open/sample time.
+     * This covers the live accumulator and raw/reader tag pass only.
+     * Offline replay (event_reader.c pgwt_replay_events) still drops all
+     * query_id-0 time, including the #128 foreground bucket. The summary
+     * writer (summary_writer.c summary_qattr_step) defers query-less
+     * background/maintenance with no category arm or load-rule exclusion:
+     * pacing is over-counted into summary_query_unattributed_ns_total when
+     * resolved without an id, and a later observed id or cmd_qid at a
+     * boundary can still backfill this time onto a real statement.
+     * End stamps increase in array order, preserving both borrow directions.
+     * No pid has CMD markers, so the CPU record stays we==0 in the tag pass.
+     * Neither a refused tag pass nor two empty answers count as agreement. */
+    struct pgwt_trace_event events[NRECORDS];
+    uint64_t end_ns = MS(1000);
+    for (int i = 0; i < NRECORDS; i++) {
+        end_ns += records[i].wall_ns;
+        events[i] = (struct pgwt_trace_event) {
+            .timestamp_ns = end_ns, .duration_ns = records[i].wall_ns,
+            .pid = records[i].pid, .old_event = records[i].we,
+            .query_id = records[i].query_id,
+            .cpu_ns = records[i].we == 0 ? records[i].cpu_ns : PGWT_CPU_NS_UNKNOWN,
+        };
+    }
+    const struct pgwt_pid_cat cats[] = {
+        { .pid = 10, .flag = category },
+        { .pid = 20, .flag = 0 },
+        { .pid = 30, .flag = PGWT_EVENT_FLAG_IO_WORKER },
+        { .pid = 40, .flag = category },
+        { .pid = 50, .flag = category },
+        { .pid = 60, .flag = LIVE_FUTURE_CAT },
+        { .pid = 70, .flag = PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_BACKGROUND },
+    };
+    int tagged = pgwt_tag_events_window(events, NRECORDS, cats,
+                                         sizeof(cats) / sizeof(cats[0]), end_ns);
+    CHECK(tagged == 1, "%s: server parity pass must complete (return %d)", name, tagged);
+    if (tagged) {
+        uint64_t server_unattributed_ns = 0;
+        for (int i = 0; i < NRECORDS; i++)
+            if (events[i].flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB)
+                server_unattributed_ns += events[i].duration_ns;
+        CHECK(server_unattributed_ns == acc->qattr_unattributed_ns,
+              "%s: live accumulator vs reader pgwt_tag_events_window unattributed parity on this fixture (live %.1f, reader %.1f ms)",
+              name, acc->qattr_unattributed_ns / 1e6, server_unattributed_ns / 1e6);
+        CHECK(server_unattributed_ns > 0,
+              "%s: parity cannot be vacuous (server %.1f ms)",
+              name, server_unattributed_ns / 1e6);
+    }
+
+    /* g. The label is final even with defer=false. Reuse the pid that knows
+     * cmd_qid 77 so falling through to foreground rule 2 also goes red. */
+    struct pgwt_live_interval open = {
+        .pid = 50, .we = LOCK_RELATION, .wall_ns = MS(40),
+        .cat_flag = category, .closed = false, .pa = pa,
+    };
+    pgwt_accum_add_interval(acc, &open);
+    CHECK(qrow(acc, 0, LOCK_RELATION) == lock_before + MS(40) &&
+          acc->qattr_unattributed_ns == un_before + MS(40) &&
+          qrow(acc, 77, LOCK_RELATION) == q77_before + MS(50) && pa->qattr.npending == 0,
+          "%s: open stretch is immediately unattributed despite known cmd_qid "
+          "(row delta %.1f, counter delta %.1f, 77 row %.1f ms, pending %d)",
+          name, (qrow(acc, 0, LOCK_RELATION) - lock_before) / 1e6,
+          (acc->qattr_unattributed_ns - un_before) / 1e6,
+          qrow(acc, 77, LOCK_RELATION) / 1e6, pa->qattr.npending);
+
+    /* h. Exercise the entry point sampler.c actually calls: no command
+     * boundary is needed to publish a background sample's final label. */
+    lock_before = qrow(acc, 0, LOCK_RELATION);
+    un_before = acc->qattr_unattributed_ns;
+    const uint64_t period = MS(100);
+    bool withheld = pgwt_live_qattr_sample(acc, pa, 0, LOCK_RELATION, period,
+                                           category, /*cmd_open=*/true);
+    CHECK(!withheld && qrow(acc, 0, LOCK_RELATION) == lock_before + period &&
+          acc->qattr_unattributed_ns == un_before + period && pa->qattr.npending == 0,
+          "%s: sample is immediately unattributed (row delta %.1f, "
+          "counter delta %.1f ms, pending %d, withheld %d)", name,
+          (qrow(acc, 0, LOCK_RELATION) - lock_before) / 1e6,
+          (acc->qattr_unattributed_ns - un_before) / 1e6, pa->qattr.npending, withheld);
+    free(acc);
+}
+
+static void test_query_attr_background_unattributed(void)
+{
+    printf("--- #641: LIVE background/maintenance unattributed time and server parity ---\n");
+    query_attr_background_control(PGWT_EVENT_FLAG_BACKGROUND, "BACKGROUND");
+    query_attr_background_control(PGWT_EVENT_FLAG_MAINT, "MAINT");
+}
+
 int main(void)
 {
     /* This file's fixtures use PG18 wait-event ids, and since 2026-10-07 the
@@ -2347,6 +2604,7 @@ int main(void)
     test_query_attr_sampled_idle_skew();
     test_query_attr_sampled_exit_flush();
     test_query_attr_pacing_not_a_boundary();
+    test_query_attr_background_unattributed();
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

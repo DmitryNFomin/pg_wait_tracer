@@ -156,7 +156,8 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'uptime_s',
           # T4 capture-hardening counters (CAP-1/2/5/6, SMP-1/3)
           'state_map_full_total', 'seen_query_ids_full_total',
-          'invalid_wait_reads_total', 'sampler_ticks_missed_total',
+          'invalid_wait_reads_total', 'sampler_ticks_total',
+          'sampler_tick_late_ns_total',
           'state_reseeds_total',
           # Stage 2 sampled-attribution source/shadow observability.
           'sampled_attr_tick_read_failures_total',
@@ -258,6 +259,61 @@ BYTES=$(echo "$METRICS2" | python3 -c \
     "import json,sys; print(json.load(sys.stdin)['trace_bytes_written_total'])")
 [[ "$BYTES" -gt 0 ]]
 check $? "trace_bytes_written_total > 0 ($BYTES)"
+
+# ── sampler timer lateness under induced starvation ────────────
+SAMPLER_METRICS_PRESENT=1
+for KEY in sampler_ticks_total sampler_tick_late_ns_total; do
+    echo "$METRICS2" | python3 -c \
+        "import json,sys; assert '$KEY' in json.load(sys.stdin), 'missing $KEY'"
+    RC=$?
+    check "$RC" "metrics: $KEY present"
+    [[ "$RC" -eq 0 ]] || SAMPLER_METRICS_PRESENT=0
+done
+
+if [[ "$SAMPLER_METRICS_PRESENT" -eq 1 ]]; then
+    LATE_BEFORE=$(echo "$METRICS2" | jget "['sampler_tick_late_ns_total']")
+    TICKS_BEFORE=$(echo "$METRICS2" | jget "['sampler_ticks_total']")
+    [[ "$TICKS_BEFORE" -gt 0 ]]
+    check $? "sampler_ticks_total > 0 (otherwise the sampler timer is not ticking at all)"
+
+    # Verify the stop before timing the stall; no product-code test hook.
+    if kill -STOP "$TRACER_PID"; then
+        STOP_STATE=$(ps -o state= -p "$TRACER_PID")
+        if [[ "$STOP_STATE" =~ ^[[:space:]]*[Tt] ]]; then
+            check 0 "sampler starvation: SIGSTOP confirmed (state $STOP_STATE)"
+            sleep 2
+        else
+            check 1 "sampler stall could not be induced: SIGSTOP returned zero but expected T/t state, got '$STOP_STATE'"
+        fi
+    else
+        check 1 "sampler stall could not be induced: SIGSTOP returned non-zero"
+    fi
+    if kill -CONT "$TRACER_PID"; then
+        check 0 "sampler starvation: SIGCONT succeeded"
+    else
+        check 1 "sampler starvation: SIGCONT returned non-zero"
+    fi
+    sleep 1   # consume and publish the post-stall tick
+
+    METRICS3=$(ctl '{"cmd":"metrics"}')
+    echo "$METRICS3" | python3 -c \
+        "import json,sys; r=json.load(sys.stdin); assert 'sampler_ticks_total' in r and 'sampler_tick_late_ns_total' in r"
+    RC=$?
+    check "$RC" "post-stall metrics readable (failure: daemon did not answer metrics after SIGCONT / response unreadable)"
+    if [[ "$RC" -eq 0 ]]; then
+        LATE_AFTER=$(echo "$METRICS3" | jget "['sampler_tick_late_ns_total']")
+        TICKS_AFTER=$(echo "$METRICS3" | jget "['sampler_ticks_total']")
+        echo "  sampler_tick_late_ns_total: $LATE_BEFORE -> $LATE_AFTER"
+        echo "  sampler_ticks_total: $TICKS_BEFORE -> $TICKS_AFTER"
+        [[ $((LATE_AFTER - LATE_BEFORE)) -ge 1000000000 ]]
+        check $? "sampler_tick_late_ns_total increased by >= 1s during the 2s stop"
+        [[ "$TICKS_AFTER" -gt "$TICKS_BEFORE" ]]
+        check $? "sampler_ticks_total increased after starvation ($TICKS_BEFORE -> $TICKS_AFTER)"
+    else
+        check 1 "sampler_tick_late_ns_total delta failed: unreadable post-stall metrics response"
+        check 1 "sampler_ticks_total delta failed: unreadable post-stall metrics response"
+    fi
+fi
 
 # ── unknown command ───────────────────────────────────────────
 RESP=$(ctl '{"cmd":"bogus"}')

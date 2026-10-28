@@ -58,6 +58,8 @@
 #include "../src/server.c"
 #undef main
 
+#include "map_reader.h"
+
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -722,6 +724,60 @@ static void test_unbounded_untouched(struct pgwt_server *srv)
     win_free(&w);
 }
 
+/* Derive the seed with the REAL server loader and compare the same file
+ * window with replay. No hand-supplied seed value participates in this test. */
+static void test_replay_loader_seed(struct pgwt_server *srv, uint64_t w0)
+{
+    struct win w;
+    win_load(srv, &w, w0 + WIN_FROM, w0 + WIN_TO);
+    CHECK(w.events && w.info.left_seeds_resolved > 0,
+          "loader derives a nonzero left-edge seed from trace markers");
+    struct pgwt_trace_event target = {0};
+    int found = 0;
+    for (int i = 0; i < w.count; i++) {
+        if (w.events[i].pid == STRADDLE_PID && w.events[i].old_event == EV_LOCK) {
+            target = w.events[i]; found++;
+        }
+    }
+    CHECK(found == 1 && target.query_id == QID_A,
+          "real loader tags the left-edge wait with the derived query id");
+    struct pgwt_trace_event unseeded = target;
+    unseeded.query_id = 0;
+    CHECK(pgwt_tag_events_window(&unseeded, 1, NULL, 0, w.to) && !unseeded.query_id,
+          "without loader-derived evidence the independent tag pass leaves id zero");
+    struct pgwt_accumulator *a = malloc(sizeof(*a));
+    struct pgwt_trace_event *buf = malloc(PGWT_BLOCK_EVENTS * sizeof(*buf));
+    CHECK(a && buf, "loader/replay differential buffers allocated");
+    if (!a || !buf) { free(a); free(buf); win_free(&w); return; }
+    pgwt_accum_init(a);
+    int lookahead = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
+    for (int i = 0; i < srv->num_files; i++) {
+        struct pgwt_event_reader r;
+        if (pgwt_reader_open(&r, srv->files[i].path)) {
+            CHECK(0, "replay opens loader fixture"); continue;
+        }
+        CHECK(pgwt_replay_file(&r, a, pgwt_reader_wall_to_mono(&r, w.from),
+              pgwt_reader_wall_to_mono(&r, w.to), buf, PGWT_BLOCK_EVENTS,
+              &lookahead, NULL, NULL) == 0, "replay reads the loader's exact window");
+        pgwt_reader_close(&r);
+    }
+    pgwt_replay_finish(a);
+    CHECK(pgwt_replay_check_finished(a) == 0, "loader/replay differential completes");
+    uint64_t ns = 0, count = 0;
+    for (int i = 0; i < a->num_query_events; i++) {
+        const struct pgwt_query_event_stats *q = &a->query_events[i];
+        if (q->query_id == target.query_id && q->wait_event == EV_LOCK) {
+            ns += q->total_ns; count += q->count;
+        }
+    }
+    uint64_t start = target.timestamp_ns - target.duration_ns;
+    if (start < w.from) start = w.from;
+    uint64_t end = target.timestamp_ns < w.to ? target.timestamp_ns : w.to;
+    CHECK(found == 1 && ns == end - start && count == 1,
+          "replay agrees with loader-derived id, clipped duration and occurrence");
+    free(a); free(buf); win_free(&w);
+}
+
 int main(void)
 {
     char dir_main[256], dir_nostraddle[256], dir_noid[256], dir_stale[256];
@@ -754,6 +810,7 @@ int main(void)
     uint64_t w0 = srv->earliest_wall_ns - 10 * MS;
 
     test_premises(srv, w0);
+    test_replay_loader_seed(srv, w0);
     test_sum_equals_unfiltered(srv, w0);
     test_no_double_admission(srv, w0);
     test_no_widening(srv, w0);

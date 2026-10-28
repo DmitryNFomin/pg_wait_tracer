@@ -134,6 +134,36 @@ uint64_t pgwt_reader_wall_to_mono(const struct pgwt_event_reader *r, uint64_t wa
 /* Convert monotonic nanoseconds to wall-clock for this file. */
 uint64_t pgwt_reader_mono_to_wall(const struct pgwt_event_reader *r, uint64_t mono_ns);
 
+/* A trace file's extent in both clocks (see pgwt_reader_file_span). */
+struct pgwt_trace_file_span {
+    uint64_t wall_start, wall_end;
+    uint64_t mono_start, mono_end;
+};
+
+/* Fill `span` from an ALREADY-OPEN reader: no extra open, no extra pass over
+ * record data -- block headers only. Returns 0, or -1 if any block header
+ * could not be read (the caller must then refuse, never approve on a partial
+ * span). */
+int pgwt_reader_file_span(struct pgwt_event_reader *r,
+                          struct pgwt_trace_file_span *span);
+
+/* True iff two trace files overlap in BOTH clocks -- the only shape a single
+ * daemon cannot produce (duplicate / copied archive / two writers), as
+ * opposed to a rotation across an NTP step (wall only) or a reboot (mono
+ * only), which are both legitimate. Symmetric; endpoints inclusive. Used by
+ * pgwt_run_replay, which refuses such a set rather than interleave it. */
+bool pgwt_trace_spans_collide(const struct pgwt_trace_file_span *a,
+                              const struct pgwt_trace_file_span *b);
+
+/* Index of the first span in accepted[0..n) that `s` collides with, else -1.
+ * ALL pairs, not consecutive ones: a duplicate with another file sorted
+ * between it and its original overlaps that middle file in WALL only, which
+ * is legitimate, so a consecutive check cannot see it. n == 0 is -1 (no pair
+ * exists yet), never an approval of an unchecked file. */
+int pgwt_trace_span_collision(const struct pgwt_trace_file_span *accepted,
+                              int n, const struct pgwt_trace_file_span *s);
+
+
 /* ── Multi-file scanning ───────────────────────────────── */
 
 struct pgwt_trace_file_entry {
@@ -153,7 +183,9 @@ int pgwt_scan_trace_files(const char *trace_dir,
                            struct pgwt_trace_file_entry *entries,
                            int max_entries);
 
-/* True if, given `entries` sorted ascending by start_wall_ns (as
+/* Test-only legacy time-coverage predicate; production replay does not
+ * call this (older files may contain required left-edge marker seeds).
+ * True if, given `entries` sorted ascending by start_wall_ns (as
  * pgwt_scan_trace_files returns them), the file at `idx` can be skipped by a
  * replay bounded below by `from_wall_ns` (0 = no lower bound): the file
  * immediately after it already starts at or after `from_wall_ns`, so nothing
@@ -161,9 +193,10 @@ int pgwt_scan_trace_files(const char *trace_dir,
  *
  * An unknown placement — on EITHER the entry at `idx` or its successor —
  * never causes a skip: unknown coverage counts against skipping, never for
- * it, same rule pgwt_summaries_window_current uses for summaries. This is
- * the exact predicate src/replay.c's file loop applies; factored out here so
- * it can be pinned without linking the daemon (tests/test_replay_window.c). */
+ * it, same rule pgwt_summaries_window_current uses for summaries.
+ * This is a TIME-only optimization: #586 marker seeds can still live in
+ * an older file. Replay therefore scans those files for seeds before it
+ * can discard their time. Pinned by tests/test_replay_window.c. */
 bool pgwt_trace_file_quick_skip(const struct pgwt_trace_file_entry *entries,
                                 int n, int idx, uint64_t from_wall_ns);
 
@@ -219,10 +252,43 @@ struct pgwt_replay_stats {
  * carries no bound on how long a single wait can be. */
 #define PGWT_REPLAY_LOOKAHEAD_BLOCKS 1024
 
-/* Replay one decoded block into an accumulator, filtering by time range.
- * `bi` is the block's header info (required):
+/* pgwt_replay_events() treats flags & ~PGWT_REPLAY_NONCAT_FLAGS as the
+ * record's category, so every defined bit must be on exactly one of the
+ * category and non-category lists below. An unclassified CATEGORY bit is
+ * under-counted -- the safe direction. An unclassified NON-category bit is
+ * NOT safe: it reads as an unknown category and silently strips foreground
+ * query attribution from every record carrying it, with no counter and no
+ * message.
+ *
+ * Issue #642 narrowed exactly this guard to three named bits and turned a
+ * visible under-count into a silently borrowed query id.
+ *
+ * The assertion makes adding a known flag without classifying it a COMPILE
+ * error rather than a runtime surprise. Its runtime companion in
+ * tests/test_replay_fidelity.c scans pg_wait_tracer.h to catch a flag added
+ * there but never mentioned in PGWT_REPLAY_KNOWN_FLAGS at all. */
+#define PGWT_REPLAY_CAT_FLAGS (PGWT_EVENT_FLAG_IO_WORKER | \
+    PGWT_EVENT_FLAG_MAINT | PGWT_EVENT_FLAG_BACKGROUND)
+#define PGWT_REPLAY_NONCAT_FLAGS (PGWT_EVENT_FLAG_SAMPLE | \
+    PGWT_EVENT_FLAG_CMD_OPEN | PGWT_EVENT_FLAG_PLAN | \
+    PGWT_EVENT_FLAG_EXEC | PGWT_EVENT_FLAG_QUERY_SYNTH | \
+    PGWT_EVENT_FLAG_SAMPLE_CONT | PGWT_EVENT_FLAG_QUERY_BACKFILL | \
+    PGWT_EVENT_FLAG_QUERY_UNATTRIB | PGWT_EVENT_FLAG_RIGHT_OPEN)
+#define PGWT_REPLAY_KNOWN_FLAGS (PGWT_EVENT_FLAG_SAMPLE | \
+    PGWT_EVENT_FLAG_CMD_OPEN | PGWT_EVENT_FLAG_IO_WORKER | \
+    PGWT_EVENT_FLAG_MAINT | PGWT_EVENT_FLAG_BACKGROUND | \
+    PGWT_EVENT_FLAG_PLAN | PGWT_EVENT_FLAG_EXEC | PGWT_EVENT_FLAG_QUERY_SYNTH | \
+    PGWT_EVENT_FLAG_SAMPLE_CONT | PGWT_EVENT_FLAG_QUERY_BACKFILL | \
+    PGWT_EVENT_FLAG_QUERY_UNATTRIB | PGWT_EVENT_FLAG_RIGHT_OPEN)
+_Static_assert((PGWT_REPLAY_KNOWN_FLAGS & ~PGWT_REPLAY_NONCAT_FLAGS) ==
+                   PGWT_REPLAY_CAT_FLAGS,
+               "every known replay flag must be classified exactly once: "
+               "update the category or non-category list in event_reader.h");
+
+/* Replay timestamp-ordered decoded records, filtering by time range.
+ * `bi` is the block's header info for direct decoded-block callers:
  *   - TRANSITIONS records accumulate exactly (durations, histograms);
- *     markers (exec/plan/escalation) are structural and skipped.
+ *     markers drive query attribution but contribute no wait data.
  *   - SAMPLES records are point observations: each is worth one
  *     sample_period_ns of time (ASH estimate) for counts/time-model/query
  *     totals, but contributes NOTHING to min/max/histograms — those are
@@ -235,27 +301,42 @@ struct pgwt_replay_stats {
  *   - per-OCCURRENCE statistics (count, histogram, min/max) are selected by
  *     the record's own close timestamp and use the whole duration, so a
  *     straddler is never counted twice across adjacent windows.
- * from_mono_ns == 0 / to_mono_ns == 0 mean unbounded on that side. */
+ * from_mono_ns == 0 / to_mono_ns == 0 mean unbounded on that side.
+ * Calls must follow per-pid timestamp order. pgwt_replay_file supplies this
+ * order across blocks; callers visit files in ascending wall-clock order.
+ * bi == NULL is the file merge's private representation: sample records
+ * carry their block's sample_period_ns in duration_ns. */
 void pgwt_replay_events(struct pgwt_accumulator *acc,
                          const struct pgwt_trace_event *events, int count,
                          uint64_t from_mono_ns, uint64_t to_mono_ns,
                          const struct pgwt_block_info *bi,
                          struct pgwt_replay_stats *st);
 
+/* Flush the bounded per-pid resolver after ALL files, before reading query
+ * totals. Idempotent; there is no retained event storage to release. */
+void pgwt_replay_finish(struct pgwt_accumulator *acc);
+
+/* Returns -1 with a diagnostic if per-pid aggregates remain unflushed. */
+int pgwt_replay_check_finished(const struct pgwt_accumulator *acc)
+    __attribute__((warn_unused_result));
+
 /* Replay one open trace file into `acc`, decoding blocks through `buf`
  * (capacity `max_events`, normally PGWT_BLOCK_EVENTS).
  *
- * Holds the block-level half of the window rule above: the scan starts at
- * the block containing `from_mono_ns` and, crucially, does NOT stop at the
- * last block before `to_mono_ns` — a wait still running at `to` closes in a
- * later block (or a later file), and stopping made the record-level overlap
+ * Holds the block-level half of the window rule above: all transition
+ * blocks before `from` are decoded for #586 marker seeds; the scan does NOT
+ * stop at the last block before `to_mono_ns` — a wait still running at `to`
+ * closes in a later block (or a later file), and stopping made the record-level overlap
  * rule unreachable. That forward scan is budgeted: `lookahead_budget`
  * (optional, normally PGWT_REPLAY_LOOKAHEAD_BLOCKS, shared across all files
  * of one replay) counts TRANSITIONS blocks decoded past `to`; when it runs
  * out, or a block header cannot be read, st->right_edge_truncated is set.
  *
- * Returns 0, or -1 on bad arguments. `out_decoded` (optional) receives the
- * number of records decoded. */
+ * Decoded candidate records are stable-sorted once per file, then consumed
+ * in a single pass. Only this file's records and per-pid resolver state are
+ * retained; memory does not grow with the replay window or retention.
+ * Returns 0, or -1 on bad arguments or buffer/sort failure. `out_decoded`
+ * (optional) receives the number of records decoded. */
 int pgwt_replay_file(struct pgwt_event_reader *r,
                      struct pgwt_accumulator *acc,
                      uint64_t from_mono_ns, uint64_t to_mono_ns,

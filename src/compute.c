@@ -13,46 +13,11 @@
 #include "pid_index.h"
 #include "qid_index.h"
 #include "triple_map.h"
+#include "window_clip.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-
-/* ── Window clipping ──────────────────────────────────────────────────────
- *
- * The raw loader (server_load_events_fi) selects events by their END
- * timestamp, so a wait already running when the window opened arrives whole.
- * pgwt_compute_aas has always clipped such a straddler to its in-window part;
- * the Overview/Top-N summers did not, and counted it in full. On a 60 s
- * window of an uncontended rehearsal that was +1.28% on DB Time (Timeout
- * 931.110 ms + Lock 894.018 ms of 142,059.216 ms) — unbounded in a lock
- * pileup, where one 10 s Lock:relation ending 1 s into the window adds 9 s.
- *
- * `from_ns == 0` / `to_ns == 0` mean "unbounded on that side". The server
- * forwards req->from_ns / req->to_ns verbatim, and both are 0 on a
- * whole-capture request, so those results are bit-identical to pre-fix.
- * Returns 0 for an event wholly outside the window (never a wrapped
- * uint64 difference), and 0 for a record pgwt_filter_matches would refuse
- * as impossible (duration > timestamp).
- */
-static inline uint64_t event_window_ns(const struct pgwt_trace_event *ev,
-                                       uint64_t from_ns, uint64_t to_ns)
-{
-    /* Defence in depth for the impossible record pgwt_filter_matches already
-     * refuses (duration > its own absolute timestamp): return 0 rather than
-     * clamp the start to 0. Clamping would have made the UNBOUNDED path
-     * return timestamp_ns instead of duration_ns — the one exception to
-     * "a whole-capture request is bit-identical to pre-fix". Refusing keeps
-     * that claim exact and keeps this helper agreeing with the filter for
-     * any future caller that reaches it without one. */
-    if (ev->duration_ns > ev->timestamp_ns)
-        return 0;
-    uint64_t start = ev->timestamp_ns - ev->duration_ns;
-    uint64_t end   = ev->timestamp_ns;
-    if (from_ns != 0 && start < from_ns) start = from_ns;
-    if (to_ns   != 0 && end   > to_ns)   end   = to_ns;
-    return end > start ? end - start : 0;
-}
 
 /* Fraction of an event that lies inside the window, for quantities measured
  * per-event rather than in wall time (cpu_ns). Matches the ov/dur split
@@ -838,8 +803,28 @@ int pgwt_tag_events_window_seeded(struct pgwt_trace_event *events, int count,
                 st->next_qid = 0;
                 continue;
             }
+            if (st->cat_flag & PGWT_EVENT_FLAG_IO_WORKER)
+                continue;   /* structurally query-less; outside DB Time */
+            if (st->cat_flag & (PGWT_EVENT_FLAG_BACKGROUND |
+                                PGWT_EVENT_FLAG_MAINT)) {
+                /* #596: this work has no query to backfill. Keep its load
+                 * visible as unattributed without borrowing a command id. */
+                if (!pgwt_is_idle_event(we))
+                    ev->flags |= PGWT_EVENT_FLAG_QUERY_UNATTRIB;
+                continue;
+            }
+            /* FAIL-SAFE, and the reason this is a `!= 0` and not an else:
+             * the arm it replaced was TOTAL over every category. Listing
+             * three bits above would let a category added later fall
+             * through to the backfill below and BORROW another statement's
+             * id -- turning a visible under-count into a confident wrong
+             * answer, the opposite of the direction src/idle_rule.h sets.
+             * Unreachable today (bm_type_to_cat_flag and
+             * pgwt_backend_type_flag are both total over io_worker /
+             * maint / background / foreground), so this is about the next
+             * category, not this one. */
             if (st->cat_flag != 0)
-                continue;   /* background / maintenance / io_worker: query-less */
+                continue;
             uint64_t q = st->next_qid ? st->next_qid : fwd[i];
             if (q != 0) {
                 ev->query_id = q;
@@ -2407,8 +2392,8 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
          * latency, not a share of the window. */
         uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
         if (ev->query_id == 0) {
-            /* #128: foreground non-idle time whose command never reported
-             * an id is reported, not dropped. */
+            /* #128/#596: non-idle time without a query (foreground,
+             * background or maintenance) is reported, not dropped. */
             if (ev->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) {
                 unattributed_ns += clip_u;        /* INTERVAL */
                 /* INSTANT (#424), both bounds */

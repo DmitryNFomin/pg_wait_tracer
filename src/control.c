@@ -133,8 +133,7 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cJSON_AddBoolToObject(root, "escalation_supported", d->escalation.enabled);
     cjson_add_uint64(root, "exact_probe_generation",
                      d->escalation.generation);
-    cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
-                            d->exact_probes.core.attached_mask);
+    pgwt_exact_probe_add_attach_status(root, &d->exact_probes.core);
     cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
                           d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
@@ -283,6 +282,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                          (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_ACTIVITY));
     cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
                             d->exact_probes.core.attached_mask);
+    cJSON_AddNumberToObject(root, "exact_probe_exec_attach_errno",
+                            d->exact_probes.core.attach_errno[PGWT_EXACT_PROBE_EXEC]);
+    cJSON_AddNumberToObject(root, "exact_probe_plan_attach_errno",
+                            d->exact_probes.core.attach_errno[PGWT_EXACT_PROBE_PLAN]);
     cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
                           d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
@@ -304,8 +307,23 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                                 ? 100.0 * (double)pm.sample_read_valid
                                   / (double)pm.sample_read_targets
                                 : 0.0);
-    cjson_add_uint64(root, "sampler_ticks_missed_total",
-                     ctr->sampler_ticks_missed_total);
+    /* The operator-facing quantity is mean lateness per tick, in nanoseconds:
+     * sampler_tick_late_ns_total / sampler_ticks_total; both terms are
+     * exported here. Dividing this mean by the sampling period configured
+     * with --sample-rate (1e9/Hz) gives the fraction of sampling time lost to
+     * lateness; the period is deliberately not exported.
+     * BOTH terms come from the timer alone, so it cannot be reconstructed
+     * from samples_total, backends_tracked, uptime_s or any read outcome.
+     * A derived "shortfall" substitute used for #115 shared a numerator with
+     * the quantity it was being correlated against and was withdrawn; do
+     * not reintroduce one.
+     * uptime_s is NOT the denominator: it runs from daemon start and counts
+     * seconds before any workload existed, one of the three faults that
+     * invalidated that withdrawn shortfall. */
+    cjson_add_uint64(root, "sampler_ticks_total",
+                     ctr->sampler_ticks_total);
+    cjson_add_uint64(root, "sampler_tick_late_ns_total",
+                     ctr->sampler_tick_late_ns_total);
 
     /* Capture hardening (T4): any non-zero here is a loudly-logged problem.
      * state_map_full_total = BPF-side insert failures + userspace
