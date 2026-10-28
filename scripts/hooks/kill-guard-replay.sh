@@ -1,7 +1,8 @@
 #!/bin/bash
 # Replay historical Bash inputs through the sibling guard; NEVER execute them.
 # Optional argument overrides the transcript directory (also useful for fixtures).
-# Denials are reported in full for review; only replay/protocol errors fail.
+# Denials are reported in full for review; malformed lines warn and skip.
+# Guard execution/protocol errors still fail the replay.
 set -uo pipefail
 guard_dir=$(cd -- "$(dirname -- "$0")" && pwd) || exit 1
 command python3 -I -u - "$guard_dir/kill-guard.sh" "${1:-$HOME/.claude/projects/-Users-dmitryfomin-work-git-pg-wait-tracer}" <<'PY'
@@ -18,21 +19,37 @@ if not directory.is_dir():
     sys.exit(0)
 
 
+skipped = 0
+
+
 def commands():
+    global skipped
     for path in sorted(directory.glob('*.jsonl')):
         with path.open(encoding='utf-8') as stream:
             for number, line in enumerate(stream, 1):
-                record = json.loads(line)
-                # Hook envelopes and Claude session tool_use records carry the
-                # same tool_input.command under different container keys.
-                if record.get('tool_name') == 'Bash':
-                    yield str(path), number, record['tool_input']['command']
-                message = record.get('message')
-                content = message.get('content') if isinstance(message, dict) else None
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name') == 'Bash':
-                            yield str(path), number, block['input']['command']
+                try:
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        raise ValueError('transcript record must be an object')
+                    # Hook envelopes and Claude tool_use records use different
+                    # container keys for the same Bash input command.
+                    extracted = []
+                    if record.get('tool_name') == 'Bash':
+                        extracted.append(record['tool_input']['command'])
+                    message = record.get('message')
+                    content = message.get('content') if isinstance(message, dict) else None
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name') == 'Bash':
+                                extracted.append(block['input']['command'])
+                    if any(not isinstance(command, str) for command in extracted):
+                        raise ValueError('Bash command must be a string')
+                except (ValueError, KeyError, TypeError) as exc:
+                    skipped += 1
+                    print(f'WARNING kill-guard replay: skipping malformed transcript line {path}:{number}: {exc}', file=sys.stderr)
+                    continue
+                for command in extracted:
+                    yield str(path), number, command
 
 
 def replay(item):
@@ -65,6 +82,8 @@ try:
 except Exception as exc:
     print(f"ERROR kill-guard replay: {exc}", file=sys.stderr)
     sys.exit(1)
+if skipped:
+    print(f"Replay warnings: {skipped} malformed transcript lines skipped.", file=sys.stderr)
 print(f"Replay totals: {total} commands replayed; {denied} DENIED; {total - denied} ALLOWED.")
 if not total:
     print(f"SKIP kill-guard replay: no historical Bash commands in {directory}")

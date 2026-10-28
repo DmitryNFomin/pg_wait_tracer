@@ -445,19 +445,25 @@ class Shell:
 def numeric_kill(args):
     # Unknown expansions may be individual PIDs. Treating them as nonnumeric
     # caused false denials of PID-file cleanup and numeric for loops in replay.
-    # Keep direct pgrep substitutions: those really select processes by pattern.
+    # Only direct pgrep substitution operands are matched; PID-variable and
+    # general data-flow selection are out of scope per #708.
     values = [None if arg.dynamic else arg.text for arg in args]
     if values and values[0] in {"-l", "-L", "--list", "--table"}:
         return  # Signal listing sends no signal.
+    signal = None
     if values and values[0] in {"-s", "-n", "--signal"}:
         if len(values) < 2 or (values[1] is not None and not re.fullmatch(r"(?:SIG)?[A-Za-z0-9]+", values[1])):
             raise PatternKill("unresolved kill signal")
+        signal = values[1]
         values = values[2:]
         args = args[2:]
     elif values and values[0] is not None and (re.fullmatch(r"-(?:SIG)?[A-Za-z0-9]+", values[0])
                      or re.fullmatch(r"--signal=(?:SIG)?[A-Za-z0-9]+", values[0])):
+        signal = values[0].split("=", 1)[-1].lstrip("-")
         values = values[1:]
         args = args[1:]
+    if signal == "0":
+        return  # Signal zero only probes liveness; it sends no signal.
     if values and values[0] == "--":
         values = values[1:]
         args = args[1:]
@@ -500,9 +506,11 @@ def wrapper_command(name, args, bindings, appended):
     while index < len(args):
         arg = args[index]
         value = arg.text
-        if not arg.dynamic and value == "--":
+        if not arg.dynamic and value in {"--", "-"}:
             index += 1
-            break
+            if value == "--":
+                break
+            continue
         # env assignments precede its utility, including after options.
         if name == "env" and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", value):
             key, val = value.split("=", 1)
@@ -510,10 +518,7 @@ def wrapper_command(name, args, bindings, appended):
             index += 1
             continue
         # su accepts options both before and after the login name.
-        if name == "su" and value == "-":
-            index += 1
-            continue
-        if not value.startswith("-") or value == "-":
+        if not value.startswith("-"):
             if name == "su" and not su_user:
                 su_user = True
                 index += 1
@@ -593,8 +598,13 @@ def wrapper_command(name, args, bindings, appended):
                 return
             wrapper_command("env", parts + args[index:], bindings, appended)
         return
-    if name in {"flock", "ssh", "timeout", "chrt", "taskset"}:
-        # lock file/fd, remote host, duration, priority, or CPU set respectively.
+    if name in {"flock", "ssh", "timeout", "chrt", "taskset"} or (name == "su" and not su_user):
+        # lock file/fd, host, duration, priority, CPU set, or login name.
+        index += 1
+    # Shared command handoff for every wrapper: markers can follow its own
+    # positional operand too (notably the flock lock file). Neither marker is
+    # an executable name; inspect the command that follows them.
+    while index < len(args) and not args[index].dynamic and args[index].text in {"--", "-"}:
         index += 1
     trailing = args[index:]
     if name == "flock" and trailing and trailing[0].text in {"-c", "--command"}:
@@ -602,7 +612,10 @@ def wrapper_command(name, args, bindings, appended):
             inspect(trailing[1].text, bindings=bindings)
         return
     if name == "su":
-        return  # Without -c the remaining operands are shell/script arguments.
+        # After -- and the login name, su forwards arguments to the shell.
+        # Inspect an explicit -c there just as we do before the marker.
+        invocation([Word("sh")] + trailing, bindings=bindings)
+        return
     if name == "ssh":
         # ssh joins its remote argv into one shell command. Quoted remote
         # scripts therefore contain command positions, unlike ordinary argv.

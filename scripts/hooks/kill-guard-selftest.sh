@@ -95,6 +95,13 @@ allowed = ["xargs sh -c 'kill 12345'",
  'kill -n 15 12345',
  'kill -- 12345 12346',
  'kill -0 12345',
+ 'kill -0 $(pgrep -f check-lock)',
+ 'kill -0 "$(pgrep -f check-lock)"',
+ 'kill -0 `pgrep -f check-lock`',
+ 'kill -s 0 $(pgrep -f check-lock)',
+ 'kill -n 0 $(pgrep -f check-lock)',
+ 'kill --signal 0 $(pgrep -f check-lock)',
+ 'kill --signal=0 $(pgrep -f check-lock)',
  'kill -l',
  'kill -l TERM',
  '/bin/kill -TERM 12345',
@@ -234,7 +241,8 @@ allowed = ["xargs sh -c 'kill 12345'",
 for index, command in enumerate(allowed, 1):
     check(f"allow {index}: {command!r}", command)
 
-denied = ['env -S \'k=pkill sh -c "$k -f check-lock"\'',
+denied = ['kill -0 $(pkill -f check-lock)',
+ 'env -S \'k=pkill sh -c "$k -f check-lock"\'',
  'ssh root@box "\'pkill\' -f check-lock"',
  'pkill',
  'killall',
@@ -354,6 +362,40 @@ denied = ['env -S \'k=pkill sh -c "$k -f check-lock"\'',
 for index, command in enumerate(denied, 1):
     check(f"deny {index}: {command!r}", command, deny=True)
 
+# Exercise the command handoff for EVERY bounded wrapper, including markers
+# after required wrapper operands. These are strings; none is ever executed.
+wrapper_forms = {
+    'flock': 'flock /tmp/l {marker}{command}',
+    'ssh': 'ssh box {marker}{command}',
+    'su': 'su {marker}root -c "{command}"',
+    'sudo': 'sudo {marker}{command}',
+    'doas': 'doas {marker}{command}',
+    'env': 'env {marker}{command}',
+    'nice': 'nice {marker}{command}',
+    'ionice': 'ionice {marker}{command}',
+    'stdbuf': 'stdbuf {marker}{command}',
+    'timeout': 'timeout 2 {marker}{command}',
+    'watch': 'watch {marker}{command}',
+    'nohup': 'nohup {marker}{command}',
+    'setsid': 'setsid {marker}{command}',
+    'chrt': 'chrt 1 {marker}{command}',
+    'taskset': 'taskset 0 {marker}{command}',
+    'xargs': 'xargs {marker}{command}',
+}
+for name, form in wrapper_forms.items():
+    for marker in ('', '-- ', '- '):
+        for command, deny in [('pkill -f check-lock', True), ('echo pkill', False)]:
+            wrapped = form.format(marker=marker, command=command)
+            check(f'wrapper {name} marker {marker!r}: {wrapped}', wrapped, deny=deny)
+
+# End-of-options may also precede the wrapper's required positional operand.
+for name, operand in [('flock', '/tmp/l'), ('ssh', 'box'), ('timeout', '2'),
+                      ('chrt', '1'), ('taskset', '0')]:
+    for marker in ('--', '-'):
+        for command, deny in [('pkill -f check-lock', True), ('echo pkill', False)]:
+            wrapped = f'{name} {marker} {operand} {command}'
+            check(f'wrapper leading marker: {wrapped}', wrapped, deny=deny)
+
 # Real parse errors stay closed and must not suggest pattern remediation.
 syntax_errors = ['echo "unterminated',
  "cat <<'EOF'\nunterminated\n",
@@ -402,6 +444,22 @@ with tempfile.TemporaryDirectory(prefix='kill-guard-replay-selftest-') as direct
     else:
         failed += 1
         print(f"FAIL replay fixture: {result!r}")
+    lines = [json.dumps(records[0]), '{bad JSON', '[]',
+             json.dumps({'tool_name': 'Bash'}),
+             json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 42}}),
+             json.dumps(records[1])]
+    fixture = Path(directory) / 'fixture.jsonl'
+    fixture.write_text('\n'.join(lines) + '\n')
+    result = subprocess.run([replay, directory], capture_output=True, text=True, timeout=30)
+    if (result.returncode == 0 and '2 commands replayed; 1 DENIED; 1 ALLOWED' in result.stdout
+            and result.stderr.count('WARNING kill-guard replay:') == 4
+            and f'{fixture}:2:' in result.stderr
+            and 'Replay warnings: 4 malformed transcript lines skipped.' in result.stderr
+            and kill_command in result.stdout and not marker.exists()):
+        passed += 1
+    else:
+        failed += 1
+        print(f"FAIL replay malformed lines: {result!r}")
 
 print(f"{passed} passed, {failed} failed")
 if failed:
