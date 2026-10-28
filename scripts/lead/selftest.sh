@@ -1,24 +1,41 @@
 #!/usr/bin/env bash
 # selftest.sh -- regression test for the Stop/SubagentStop blocking gate in
-# sweep-hook.sh. Runs the COMMITTED script (git show HEAD:scripts/lead/sweep-hook.sh)
-# against a synthetic, isolated cache -- never the live scripts/lead cache this
-# repo's own agents are using -- so it never touches gh, ssh, codex, or this
-# worktree's real .sweep-latest.txt / .dispositions.
+# sweep-hook.sh. Exercises the ON-DISK working copy (the exact bytes Claude
+# Code actually executes as the hook) against a synthetic, isolated cache --
+# never the live scripts/lead cache this repo's own agents are using -- so it
+# never touches gh, ssh, codex, or this worktree's real .sweep-latest.txt /
+# .dispositions.
+#
+# Testing `git show HEAD:...` instead of the on-disk file was the vacuity a
+# review caught directly: with the gate disabled by an UNCOMMITTED edit (the
+# file that is actually wired in and executing), that version reported a
+# clean pass, because it was grading the old, good, committed copy -- a
+# dangerous edit never reaches a fresh clone, but Claude Code runs it RIGHT
+# NOW. So this script tests on-disk bytes, and separately refuses (distinct
+# exit code) when on-disk differs from HEAD at all: a clean pass against a
+# dirty tree is not evidence that what ships (HEAD) is sound, whether the
+# dirty edit happens to be better, worse, or merely different.
 #
 # Usage: scripts/lead/selftest.sh   (exits non-zero on any failed case)
+#   exit 3: scripts/lead/sweep-hook.sh is not committed at HEAD at all
+#   exit 4: on-disk differs from HEAD (cases below still ran, for diagnosis,
+#           but this verdict cannot stand in for "HEAD is sound")
 set -u
-cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null || echo "$(dirname "$0")/../..")" || exit 1
+ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$ROOT" ] || { echo "SELFTEST SETUP FAILED: not inside a git repository." >&2; exit 5; }
+cd "$ROOT" || exit 5
+REL="scripts/lead/sweep-hook.sh"
+
+if ! git ls-files --error-unmatch "$REL" >/dev/null 2>&1; then
+  echo "SELFTEST REFUSED: $REL is not committed at HEAD." >&2
+  echo "This means there is no shipped version to vouch for at all -- selftest" >&2
+  echo "refuses to grade an on-disk-only script as if it were the product." >&2
+  exit 3
+fi
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 HOOK="$TMP/sweep-hook.sh"
-git show HEAD:"scripts/lead/sweep-hook.sh" > "$HOOK" 2>/dev/null
-if [ ! -s "$HOOK" ]; then
-  echo "SELFTEST SETUP FAILED: 'git show HEAD:scripts/lead/sweep-hook.sh' returned nothing." >&2
-  echo "This means the script is not committed at HEAD -- selftest refuses to fall" >&2
-  echo "back to the working-tree copy, since that is exactly the vacuity this" >&2
-  echo "project has been burned by before. Commit it, then re-run." >&2
-  exit 3
-fi
+cp "$REL" "$HOOK"
 chmod +x "$HOOK"
 
 CACHE="$TMP/.sweep-latest.txt"
@@ -130,4 +147,14 @@ check "reorder: first invocation passes on fresh dispositions" 0 '{"stop_hook_ac
 check "reorder: second invocation, same findings, no new dispositions -> BLOCK" 2 '{"stop_hook_active": false}'
 
 echo "== $pass passed, $fail failed =="
+
+if ! git diff --quiet HEAD -- "$REL"; then
+  echo "SELFTEST REFUSED: $REL on disk differs from HEAD." >&2
+  echo "The cases above ran against the ON-DISK copy (the one actually" >&2
+  echo "executing right now), but that is not evidence about HEAD -- what" >&2
+  echo "ships, what a reviewer reads, what a fresh clone gets. Commit or" >&2
+  echo "revert so the tree is clean, then re-run." >&2
+  exit 4
+fi
+
 [ "$fail" -eq 0 ]
