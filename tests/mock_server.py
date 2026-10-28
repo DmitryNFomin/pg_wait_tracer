@@ -795,9 +795,22 @@ class DaemonState:
         self.reason = "manual" if self.tier == "escalated" else "none"
         self.windows_total = 1 if self.tier == "escalated" else 0
         self.denied_total = 0
+        self.phase_attempted = self.tier == "escalated"
+
+    def probe_attach_status(self):
+        # #592: latest attempt survives de-escalation; only the mask clears.
+        outcome = "attached" if self.phase_attempted else "not_attempted"
+        return {
+            "exact_probe_attached_mask": 15 if self.tier == "escalated" else 0,
+            "exact_probe_exec_attach_outcome": outcome,
+            "exact_probe_exec_attach_errno": 0,
+            "exact_probe_plan_attach_outcome": outcome,
+            "exact_probe_plan_attach_errno": 0,
+        }
 
     def status(self):
         return {
+            **self.probe_attach_status(),
             "ok": True,
             "mode": "tiered",
             "uptime_s": 123.4,
@@ -826,6 +839,8 @@ class DaemonState:
 
     def metrics(self):
         return {
+            **{k: v for k, v in self.probe_attach_status().items()
+               if not k.endswith("_attach_outcome")},
             "ok": True,
             "uptime_s": 123.4,
             "events_total": 1_250_000,
@@ -845,7 +860,6 @@ class DaemonState:
             "sampled_attr_shadow_query_id_mismatch_total": 0,
             # Capture hardening counters (T4): non-zero = loudly-logged
             # degradation (CAP-1/2/5/6, SMP-1/3).
-            "sampler_ticks_missed_total": 0,
             "state_map_full_total": 0,
             "seen_query_ids_full_total": 0,
             "sampled_text_pending": 0,
@@ -856,6 +870,10 @@ class DaemonState:
             "sampled_text_retry_exhausted_total": 0,
             "invalid_wait_reads_total": 0,
             "state_reseeds_total": 0,
+            # One-shot sampler ticks and cumulative lateness against the
+            # armed period.
+            "sampler_ticks_total": 0,
+            "sampler_tick_late_ns_total": 0,
             "sampler_healthy": True,
             "ringbuf_drops_total": 3,
             "trace_events_written_total": 1_250_000,
@@ -907,6 +925,7 @@ class DaemonState:
         if self.tier != "escalated":
             self.windows_total += 1
         self.tier = "escalated"
+        self.phase_attempted = True
         self.reason = reason or "manual"
         self.seconds_remaining = max(self.seconds_remaining, duration_s)
         self.budget_remaining_s = max(0.0, self.budget_remaining_s - duration_s)

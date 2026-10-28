@@ -80,9 +80,9 @@ static inline void pgwt_qattr_flush(struct pgwt_qattr_pid *q, uint64_t qid,
 /* Defer one closed foreground non-idle interval that carries no id.
  * Returns 1 if the pid's pending list was full and spilled to the
  * unattributed bucket first (the caller counts it). */
-static inline int pgwt_qattr_defer(struct pgwt_qattr_pid *q, uint32_t we,
-                                   uint64_t ns, pgwt_qattr_emit_fn emit,
-                                   void *ctx)
+static inline int pgwt_qattr_defer_stats(struct pgwt_qattr_pid *q, uint32_t we,
+                                         const struct pgwt_qattr_pending *p,
+                                         pgwt_qattr_emit_fn emit, void *ctx)
 {
     int spilled = 0;
     struct pgwt_qattr_pending *slot = NULL;
@@ -108,11 +108,23 @@ static inline int pgwt_qattr_defer(struct pgwt_qattr_pid *q, uint32_t we,
         slot->min_ns = UINT64_MAX;
         slot->max_ns = 0;
     }
-    slot->count++;
-    slot->total_ns += ns;
-    if (ns < slot->min_ns) slot->min_ns = ns;
-    if (ns > slot->max_ns) slot->max_ns = ns;
+    slot->count += p->count;
+    slot->total_ns += p->total_ns;
+    if (p->min_ns < slot->min_ns) slot->min_ns = p->min_ns;
+    if (p->max_ns > slot->max_ns) slot->max_ns = p->max_ns;
     return spilled;
+}
+
+/* Replay supplies clipped time and independently selected occurrence stats.
+ * Keep slot identity, overflow and aggregation inside the resolver API. */
+static inline int pgwt_qattr_defer(struct pgwt_qattr_pid *q, uint32_t we,
+                                   uint64_t ns, pgwt_qattr_emit_fn emit,
+                                   void *ctx)
+{
+    const struct pgwt_qattr_pending p = {
+        .count = 1, .total_ns = ns, .min_ns = ns, .max_ns = ns,
+    };
+    return pgwt_qattr_defer_stats(q, we, &p, emit, ctx);
 }
 
 /* A nonzero query id was observed for the pid inside the current command

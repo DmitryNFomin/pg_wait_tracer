@@ -171,6 +171,94 @@ SYSROWS
 }
 check_replay_cpu
 
+# #612: a DUPLICATED trace file -- a recovered archive, a hand copy, or two
+# writers in one directory -- makes one pid's records interleave out of order,
+# and the query_attr resolver then attributes a parse wait to the WRONG
+# command: silently, and reported as a successful back-fill. pgwt_run_replay
+# refuses such a directory rather than pick an order that does not exist.
+#
+# This is the ONLY test that exercises that refusal at its call site. The
+# predicate itself (pgwt_trace_spans_collide, with four negative controls for
+# duplicate / byte copy / reboot / rotation-plus-NTP-step) is unit-tested in
+# tests/test_replay_window.c, but nothing links pgwt_run_replay -- so without
+# this case the gate could be entirely unreachable and every unit control
+# would still pass.
+check_replay_duplicate_refusal() {
+    local generator="$SCRIPT_DIR/gen_test_traces"
+    local dir output rc archive copy
+    if [[ ! -x "$generator" ]]; then
+        echo "  FAIL: duplicate-trace refusal requires executable $generator"
+        failed=$((failed + 1))
+        return
+    fi
+    if [[ ! -x "$TRACER" ]]; then
+        echo "  FAIL: duplicate-trace refusal requires executable $TRACER"
+        failed=$((failed + 1))
+        return
+    fi
+    if ! dir=$(mktemp -d); then
+        echo "  FAIL: duplicate-trace fixture could not create a directory"
+        failed=$((failed + 1))
+        return
+    fi
+    archive="$dir/2025-01-01_10.trace.lz4"
+    copy="$dir/2025-01-01_11.trace.lz4"
+    output=$("$generator" -o "$dir" --inline '{
+        "backends": [{"pid": 1000, "type": "client", "user": "postgres", "db": "testdb"}],
+        "events": [
+            {"pid": 1000, "ts": 1010000000, "dur": 10000000,
+             "old": 0, "new": 167772181},
+            {"pid": 1000, "ts": 1020000000, "dur": 10000000,
+             "old": 167772181, "new": 0}
+        ]
+    }' --rotate 2025-01-01_10 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 || ! -f "$archive" ]]; then
+        echo "  FAIL: duplicate-trace fixture generator failed (rc=$rc): $output"
+        failed=$((failed + 1))
+        rm -rf -- "$dir"
+        return
+    fi
+
+    # POSITIVE CONTROL, and it runs FIRST: one legitimate archive must replay.
+    # A refusal that fired on every directory would otherwise make the
+    # assertion below pass while replay was broken for everyone.
+    output=$("$TRACER" --replay -T "$dir" --view time_model 2>&1)
+    rc=$?
+    if [[ $rc -eq 0 && "$output" != *"overlapping trace files"* ]]; then
+        echo "  PASS: --replay accepts a single archive (no false overlap)"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL: --replay refused a legitimate single archive (rc=$rc): $output"
+        failed=$((failed + 1))
+    fi
+
+    # The same file byte-copied under another hourly name: identical header,
+    # so it overlaps itself in BOTH clocks -- the one shape a single daemon
+    # cannot produce. A rotation across an NTP step (wall only) and a reboot
+    # (monotonic only) must still be accepted; those are the unit controls.
+    if ! cp "$archive" "$copy"; then
+        echo "  FAIL: duplicate-trace fixture could not copy the archive"
+        failed=$((failed + 1))
+        rm -rf -- "$dir"
+        return
+    fi
+    output=$("$TRACER" --replay -T "$dir" --view time_model 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 && "$output" == *"overlapping trace files"* &&
+          "$output" == *"2025-01-01_10.trace.lz4"* &&
+          "$output" == *"2025-01-01_11.trace.lz4"* ]]; then
+        echo "  PASS: --replay refuses a duplicated trace file, naming both"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL: --replay did not refuse a duplicated trace file (rc=$rc): $output"
+        failed=$((failed + 1))
+    fi
+
+    rm -rf -- "$dir"
+}
+check_replay_duplicate_refusal
+
 if [[ -z "$PM_PID" ]]; then
     PM_PID=$(find_postmaster)
 fi

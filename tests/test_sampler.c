@@ -882,6 +882,31 @@ static void test_effective_period(void)
           "stall clamped to 60s");
 }
 
+/* ── Sampler tick lateness against the armed period ──────────────────── */
+
+static void test_tick_lateness(void)
+{
+    printf("--- sampler tick lateness (armed period) ---\n");
+
+    const uint64_t ARMED = 100000000ULL;   /* 100ms armed period */
+
+    CHECK(pgwt_sampler_tick_lateness(ARMED, 0, 5000) == 0,
+          "no armed tick has zero lateness");
+    CHECK(pgwt_sampler_tick_lateness(ARMED, 1000, 1000 + ARMED) == 0,
+          "on-time tick has zero lateness");
+    CHECK(pgwt_sampler_tick_lateness(ARMED, 1000, 1000 + ARMED / 2) == 0,
+          "elapsed shorter than armed period has zero lateness (no unsigned underflow)");
+    CHECK(pgwt_sampler_tick_lateness(ARMED, 5000, 1000) == 0,
+          "backwards clock has zero lateness");
+    CHECK(pgwt_sampler_tick_lateness(ARMED, 1000, 1000) == 0,
+          "same-instant clock has zero lateness");
+    CHECK(pgwt_sampler_tick_lateness(ARMED, 1000, 1000 + ARMED + 12345) == 12345,
+          "late tick reports exact lateness");
+    CHECK(pgwt_sampler_tick_lateness(ARMED, 1000, 1000 + 2000000000ULL)
+              == 1900000000ULL,
+          "2-second stall against 100ms armed period has 1.9s lateness (no upper clamp)");
+}
+
 /* ── Test 8 (SMP-4): pid -> query_id join index ───────────────────────── */
 
 static void test_qid_index(void)
@@ -1070,6 +1095,7 @@ int main(void)
     test_local_addr_not_batched();
     test_health();
     test_effective_period();
+    test_tick_lateness();
     test_qid_index();
     test_sampled_attr_source_gate();
 

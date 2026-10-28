@@ -291,6 +291,7 @@ static void test_time_range_replay(void)
     struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, decoded, count, from_mono, to_mono, &binfo, NULL);
+    pgwt_replay_finish(acc);
 
     /* Should have accumulated ~101 events (50..150 inclusive) */
     CHECK(acc->num_system_events > 0, "system events accumulated");
@@ -307,6 +308,7 @@ static void test_time_range_replay(void)
     /* Replay all events (no bounds) */
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, decoded, count, 0, 0, &binfo, NULL);
+    pgwt_replay_finish(acc);
     se = pgwt_find_system_event(acc, 0x0A000001);
     CHECK(se != NULL, "system event found (full)");
     if (se) {
@@ -818,6 +820,7 @@ static void test_replay_time_model(void)
     struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, decoded, count, 0, 0, &binfo, NULL);
+    pgwt_replay_finish(acc);
 
     /* Verify time model */
     CHECK(acc->tm.cpu_time_ns == 20 * 1000ULL,
