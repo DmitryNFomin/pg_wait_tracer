@@ -20,6 +20,10 @@
 #   exit 3: scripts/lead/sweep-hook.sh is not committed at HEAD at all
 #   exit 4: on-disk differs from HEAD (cases below still ran, for diagnosis,
 #           but this verdict cannot stand in for "HEAD is sound")
+#   exit 6: scripts/lead/sweep-hook.sh is not executable on disk -- a mode
+#           that cannot be the hook that ever runs, committed or not; refused
+#           before copying rather than silently chmod +x'd into something
+#           that would run in this sandbox but never in production.
 set -u
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$ROOT" ] || { echo "SELFTEST SETUP FAILED: not inside a git repository." >&2; exit 5; }
@@ -31,6 +35,15 @@ if ! git ls-files --error-unmatch "$REL" >/dev/null 2>&1; then
   echo "This means there is no shipped version to vouch for at all -- selftest" >&2
   echo "refuses to grade an on-disk-only script as if it were the product." >&2
   exit 3
+fi
+
+if [ ! -x "$REL" ]; then
+  echo "SELFTEST REFUSED: $REL is not executable on disk." >&2
+  echo "A non-executable mode -- whether dirty or committed to HEAD -- is a" >&2
+  echo "hook that cannot run at all. Blindly chmod +x'ing a sandbox copy would" >&2
+  echo "report a clean pass over a hook that never executes in production:" >&2
+  echo "the same shape of bug this script exists to catch, in itself." >&2
+  exit 6
 fi
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
