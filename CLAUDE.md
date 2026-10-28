@@ -34,6 +34,9 @@ Fable (`.claude/agents/adviser.md`) and Astra, in parallel. Ask the owner only i
 the advisers disagree and the lead cannot adjudicate on evidence; the lead disagrees with both;
 or the decision is the owner's (money, machines, release timing, RULE 2 exclusions).
 Tell the owner what both advisers said and where the lead disagrees.
+A sol 6.1 coder may consult an Astra adviser directly, but the adviser MUST be
+a separate agent session: a session never advises itself, and no session
+reviews or advises on code it wrote.
 (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#advisers-before-owner`)
 
 Try first; on failure, tell both advisers what was attempted and what happened.
