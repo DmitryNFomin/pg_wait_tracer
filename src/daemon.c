@@ -593,31 +593,44 @@ static void start_sampler_sched(struct pgwt_daemon *d)
 {
     const char *override = getenv("PGWT_SAMPLER_NICE");
     int want;
-    int valid = pgwt_sampler_parse_nice(override, -20, &want);
-    if (valid) {
+    switch (pgwt_sampler_sched_request(override, &want)) {
+    case PGWT_SAMPLER_SCHED_LEAVE_ALONE:
+        fprintf(stderr, "INFO: sampler scheduling: left unchanged (default); "
+                "the sampled tier CPU figure is a lower bound under CPU "
+                "contention because the daemon observes only when the "
+                "scheduler runs it. Measured on Ubuntu 6.8, 4 vCPU, "
+                "8 clients: S/G 0.81 at SCHED_OTHER vs 0.88 under SCHED_FIFO; "
+                "PGWT_SAMPLER_NICE does NOT close that gap "
+                "(nice is a CFS weight, not a scheduling class).\n");
+        return;
+    case PGWT_SAMPLER_SCHED_APPLY:
         pgwt_sampler_apply_sched(want, &d->sampler_sched);
-    } else {
-        /* Refuse the override without changing scheduling. Read back the
-         * current nice for diagnostics, but never claim this is success. */
-        pgwt_sampler_apply_sched(0, &d->sampler_sched);
-        d->sampler_sched.ok = 0;
-        d->sampler_sched.err = EINVAL;
+        break;
+    case PGWT_SAMPLER_SCHED_REFUSED:
+        d->sampler_sched = (struct pgwt_sampler_sched){
+            .applied = 20, /* no readback */
+            .err = EINVAL,
+        };
+        fprintf(stderr, "WARNING: sampler scheduling: PGWT_SAMPLER_NICE "
+                "\"%s\" refused (expected integer -20..19); scheduling left "
+                "unchanged; the sampled tier CPU figure is a lower bound "
+                "under CPU contention because the daemon observes only "
+                "when the scheduler runs it.\n", override);
+        return;
     }
 
     if (d->sampler_sched.ok)
-        fprintf(stderr, "INFO: sampler scheduling: applied nice %d\n",
+        fprintf(stderr, "INFO: sampler scheduling: applied nice %d as "
+                "requested; measured NOT to move S/G on CFS "
+                "(nice is a CFS weight, not a scheduling class).\n",
                 d->sampler_sched.applied);
     else {
-        if (valid)
-            fprintf(stderr, "WARNING: sampler scheduling: nice not verified "
-                    "(requested nice %d, ", d->sampler_sched.requested);
-        else
-            fprintf(stderr, "WARNING: sampler scheduling: PGWT_SAMPLER_NICE "
-                    "\"%s\" refused (expected integer -20..19; ", override);
-        fprintf(stderr,
+        fprintf(stderr, "WARNING: sampler scheduling: nice not verified "
+                "(requested nice %d, "
                 "readback %d): %s; continuing; the sampled tier's CPU figure "
                 "is a LOWER BOUND under CPU contention because the daemon's "
                 "observation instants are selected by the scheduler.\n",
+                d->sampler_sched.requested,
                 d->sampler_sched.applied,
                 strerror(d->sampler_sched.err));
     }

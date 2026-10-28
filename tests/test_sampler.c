@@ -1122,6 +1122,56 @@ static void test_parse_nice(void)
     }
 }
 
+static void test_sched_request_unset(void)
+{
+    printf("--- sched_request: unset leaves scheduling alone ---\n");
+    const char *cases[] = { NULL, "" };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int out = 123;
+        CHECK(pgwt_sampler_sched_request(cases[i], &out) ==
+              PGWT_SAMPLER_SCHED_LEAVE_ALONE,
+              "unset override case %u must leave scheduling alone", i);
+        CHECK(out == 123, "unset override must leave output untouched");
+    }
+}
+
+static void test_sched_request_explicit(void)
+{
+    printf("--- sched_request: explicit override applies ---\n");
+    const struct {
+        const char *env;
+        int expected;
+    } cases[] = {
+        { "-20", -20 },
+        { "0", 0 },
+        { "19", 19 },
+        { "  -5  ", -5 },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int out = 123;
+        CHECK(pgwt_sampler_sched_request(cases[i].env, &out) ==
+              PGWT_SAMPLER_SCHED_APPLY,
+              "explicit override \"%s\" must apply", cases[i].env);
+        CHECK(out == cases[i].expected, "override \"%s\": got %d, expected %d",
+              cases[i].env, out, cases[i].expected);
+    }
+}
+
+static void test_sched_request_malformed(void)
+{
+    printf("--- sched_request: malformed override is refused, not defaulted ---\n");
+    CHECK(PGWT_SAMPLER_SCHED_REFUSED != PGWT_SAMPLER_SCHED_LEAVE_ALONE,
+          "refusal must be distinct from the unset default");
+    const char *cases[] = { "20", "-21", "abc", "-5x", "-", "   " };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int out = 123;
+        CHECK(pgwt_sampler_sched_request(cases[i], &out) ==
+              PGWT_SAMPLER_SCHED_REFUSED,
+              "malformed override \"%s\" must be refused", cases[i]);
+        CHECK(out == 123, "refused override must leave output untouched");
+    }
+}
+
 static void test_apply_sched(void)
 {
     printf("--- apply_sched: want 0 no-op; want -20 verified or explicit failure ---\n");
@@ -1341,6 +1391,9 @@ int main(void)
     test_qid_index();
     test_sampled_attr_source_gate();
     test_parse_nice();
+    test_sched_request_unset();
+    test_sched_request_explicit();
+    test_sched_request_malformed();
     test_apply_sched();
     test_cpu_confidence();
     test_cpu_confidence_unrated_ticks();

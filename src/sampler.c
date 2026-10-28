@@ -71,6 +71,15 @@ int pgwt_sampler_parse_nice(const char *env, int default_nice, int *out)
     return 1;
 }
 
+enum pgwt_sampler_sched_request
+pgwt_sampler_sched_request(const char *env, int *out_nice)
+{
+    if (!env || !*env)
+        return PGWT_SAMPLER_SCHED_LEAVE_ALONE;
+    return pgwt_sampler_parse_nice(env, 0, out_nice)
+        ? PGWT_SAMPLER_SCHED_APPLY : PGWT_SAMPLER_SCHED_REFUSED;
+}
+
 int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out)
 {
     *out = (struct pgwt_sampler_sched){
