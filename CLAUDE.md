@@ -128,8 +128,8 @@ code bigger than a one-liner.
   Keep agent reports at most ~15 lines.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#models-and-review`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#polling-cost`)
 - **Fable**: use as standing adviser, not implementer; leave implementation
-  unused except explicit escalation for a `src/` problem after an Opus
-  implementer failed a round. If escalation is not worthwhile, park and report
+  unused except explicit escalation for a `src/` problem after codex
+  failed a round. If escalation is not worthwhile, park and report
   the task to the owner; never silently retry or downgrade. Record it in memory
   `fable-parked-tasks`. Check the budget before repeating "out of Fable tokens".
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#fable-history`)
@@ -229,8 +229,8 @@ code bigger than a one-liner.
   even then, never sweep VMs younger than a few minutes or of unknown age.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#vm-cleanup`)
 - Never harden tests against runner noise with retries, wider tolerances or
-  confirmation loops. Report shared-runner-only failures in the PR and move
-  those tests to the dedicated gate box.
+  confirmation loops. If a test is red only on shared runners, say so in the
+  PR; it belongs on the dedicated gate box.
 - Use `tests/run_all.sh`'s `KNOWN_FAILING` (test name → tracking issue number)
   only for real, filed product bugs being fixed in `src/`, never timing/runner
   noise; move or investigate noise instead. Run listed tests every time; count
