@@ -29,6 +29,9 @@ What this CANNOT see: a call site that exists but never executes at runtime
 (for example a branch not taken), a reached section whose
 assertions were gutted, or a suite whose headers match no supported label form
 at all (N. or N-M., with optional lowercase suffixes, including 6b-h.).
+The first local call in a window may be a helper, not the dispatcher.
+Scope is append-only against the merge-base: a suite with supported headers
+at base must retain at least one supported header on this tree.
 This is a small house-style C scanner, not a C compiler or a runtime coverage check; it
 follows direct calls, not function pointers or macro expansion, and does
 not evaluate general preprocessor conditions. Definitions start at column 0.
@@ -43,6 +46,8 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 
 
@@ -155,13 +160,8 @@ def functions(code, line_at):
     return found
 
 
-def check_file(raw, display):
-    code, strings = lex(raw)
-    newlines = [pos for pos, c in enumerate(raw) if c == '\n']
-
-    def line_at(pos):
-        return bisect.bisect_left(newlines, pos) + 1
-
+def extract_markers(code, strings):
+    """The same scope definition for working-tree files and base blobs."""
     markers = []
     for call in CALL.finditer(code):
         if call[1] != 'printf':
@@ -169,12 +169,23 @@ def check_file(raw, display):
         first = call.end()
         # Whitespace (including newlines) and masked comments are allowed
         # between '(' and the first literal.
-        while first < len(raw) and code[first].isspace() and first not in strings:
+        while first < len(code) and code[first].isspace() and first not in strings:
             first += 1
         if first in strings:
             label = LABEL.match(strings[first].split('\n', 1)[0])
             if label:
-                markers.append((label[1], line_at(first)))
+                markers.append((label[1], first))
+    return markers
+
+
+def check_file(raw, display):
+    code, strings = lex(raw)
+    newlines = [pos for pos, c in enumerate(raw) if c == '\n']
+
+    def line_at(pos):
+        return bisect.bisect_left(newlines, pos) + 1
+
+    markers = [(label, line_at(pos)) for label, pos in extract_markers(code, strings)]
     if not markers:
         print(f'OUT OF SCOPE: {display} (0 markers; not verified)')
         return 0, 0, False
@@ -211,14 +222,10 @@ def check_file(raw, display):
         node = queue.popleft()
         if node in reached:
             continue
-        if node in owners and node not in definitions:
-            raise Refusal(f'owner {node} has no definition in this file')
         reached.add(node)
         queue.extend(graph[node] - reached)
     failed = False
     for owner, sections in owners.items():
-        if owner not in definitions:
-            raise Refusal(f'owner {owner} has no definition in this file')
         if owner not in reached:
             labels = ', '.join(f'{label} (line {line})' for label, line in sections)
             print(f'FAIL: {display}: unreachable owner {owner}: sections {labels}', file=sys.stderr)
@@ -243,12 +250,60 @@ def check_file(raw, display):
     return len(owners), len(markers), failed
 
 
+def check_scope_ratchet(repo, current_scope):
+    if not (repo / '.git').exists():
+        print('SCOPE RATCHET: skipped (not a git repository)')
+        return
+    if shutil.which('git') is None:
+        raise Refusal("SCOPE RATCHET: missing required tool 'git'; refusing to approve blind")
+
+    def git(*args):
+        try:
+            return subprocess.run(['git', *args], cwd=repo, check=True,
+                                  capture_output=True, encoding='utf-8').stdout
+        except (OSError, UnicodeError, subprocess.CalledProcessError) as exc:
+            raise Refusal(f'SCOPE RATCHET: git {" ".join(args)}: {exc}') from exc
+
+    # Match check-test-registration.sh: never substitute HEAD for a missing base.
+    base = None
+    for ref in ('origin/master', 'master'):
+        try:
+            git('rev-parse', '--verify', '-q', ref)
+            base = git('merge-base', 'HEAD', ref).strip()
+            break
+        except Refusal:
+            continue
+    if not base:
+        raise Refusal('SCOPE RATCHET: no comparable base ref (origin/master or master) '
+                      'resolvable from HEAD; refusing to approve blind')
+    base_files = [name for name in git('ls-tree', '-r', '--name-only', '-z', base,
+                                     '--', 'tests/').split('\0')
+                  if Path(name).parent == Path('tests') and Path(name).match('test_*.c')]
+    base_scope = set()
+    for name in base_files:
+        try:
+            if extract_markers(*lex(git('show', f'{base}:{name}'))):
+                base_scope.add(name)
+        except Refusal as exc:
+            raise Refusal(f'SCOPE RATCHET: {name} at base {base}: {exc}') from exc
+    if base_files and not base_scope:
+        raise Refusal(f'SCOPE RATCHET: found tests/test_*.c at base {base} but zero '
+                      'files in scope; parser self-check failed; refusing to approve blind')
+    missing = base_scope - current_scope
+    if missing:
+        raise Refusal(f'SCOPE RATCHET: {", ".join(sorted(missing))} left scope '
+                      f'(in scope at base {base}; headers removed/reworded or file deleted)')
+    print(f'SCOPE RATCHET: base {base}: {len(base_scope)} files in scope at base, '
+          'all still in scope')
+
+
 def main():
     if len(sys.argv) > 2:
         print('usage: check-section-registration.py [repo-dir]', file=sys.stderr)
         return 1
     repo = Path(sys.argv[1]) if len(sys.argv) == 2 else Path(__file__).resolve().parent.parent
     file_count = owner_count = marker_count = 0
+    current_scope = set()
     failed = False
     try:
         # iterdir, unlike a glob that can suppress directory errors, refuses
@@ -256,17 +311,19 @@ def main():
         list(repo.iterdir())
         files = sorted(p for p in (repo / 'tests').iterdir()
                        if p.match('test_*.c'))
-        if not files:
-            raise Refusal('tests/test_*.c matched no files')
     except (OSError, Refusal) as exc:
         print(f'REFUSING: {repo}: {exc}', file=sys.stderr)
         return 1
+    if not files:
+        print('REFUSING: tests/test_*.c matched no files', file=sys.stderr)
+        failed = True
     for path in files:
         display = f'tests/{path.name}'
         try:
             raw = path.read_text(encoding='utf-8')
             owners, markers, bad = check_file(raw, display)
             if markers:
+                current_scope.add(display)
                 file_count += 1
                 owner_count += owners
                 marker_count += markers
@@ -274,9 +331,16 @@ def main():
         except (OSError, UnicodeError, Refusal) as exc:
             print(f'REFUSING: {display}: {exc}', file=sys.stderr)
             failed = True
+    try:
+        check_scope_ratchet(repo, current_scope)
+    except Refusal as exc:
+        print(f'REFUSING: {exc}', file=sys.stderr)
+        failed = True
     if failed:
         return 1
-    print(f'OK: {file_count} files, {owner_count} owners, {marker_count} markers; '
+    print(f'OK: {file_count} of {len(files)} tests/test_*.c in scope '
+          f'({len(files) - file_count} carry no section header), '
+          f'{owner_count} owners, {marker_count} markers; '
           'every section owner reachable from main')
     return 0
 

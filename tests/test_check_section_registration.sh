@@ -80,7 +80,8 @@ red() {
 repo="$tmpdir/direct"
 write_suite "$repo" '    section();'
 green "$repo" 'direct dispatcher control passes'
-if [[ "$out" == *'2 markers, 1 owners'* && "$out" == *'1 files, 1 owners, 2 markers'* ]]; then
+if [[ "$out" == *'2 markers, 1 owners'* &&
+      "$out" == *'OK: 1 of 1 tests/test_*.c in scope (0 carry no section header), 1 owners, 2 markers;'* ]]; then
     report true 'both label forms, continued literal, multiple labels per owner; fake markers ignored'
 else
     report false 'marker and owner counts must be exact'
@@ -182,7 +183,8 @@ int main(void)
 EOF
 green "$tmpdir/no-markers" 'unsectioned suite may be outside scope'
 if [[ "$out" == *'OUT OF SCOPE: tests/test_unsectioned.c (0 markers; not verified)'* &&
-      "$out" == *'OK: 0 files, 0 owners, 0 markers;'* && "$out" != *'IN SCOPE:'* ]]; then
+      "$out" == *'OK: 0 of 1 tests/test_*.c in scope (1 carry no section header), 0 owners, 0 markers;'* &&
+      "$out" != *'IN SCOPE:'* ]]; then
     report true 'the-thing-is-absent is named OUT OF SCOPE and never counted as verified'
 else
     report false 'zero-marker suite must be explicitly outside verified scope'
@@ -215,7 +217,7 @@ for shape in leading-escape dash-wrapper range next-line-literal; do
     write_header_suite "$repo" "$header" '    section();'
     green "$repo" "$shape header control passes"
     if [[ "$out" == *'IN SCOPE: tests/test_fixture.c: 1 markers, 1 owners'* &&
-          "$out" == *'OK: 1 files, 1 owners, 1 markers;'* ]]; then
+          "$out" == *'OK: 1 of 1 tests/test_*.c in scope (0 carry no section header), 1 owners, 1 markers;'* ]]; then
         report true "$shape header is IN SCOPE with exactly one marker"
     else
         report false "$shape header must register exactly one owner and marker"
@@ -246,7 +248,8 @@ for prose in rows decimal done sub-assertion; do
         report false "prose negative control must stay OUT OF SCOPE: $prose"
     fi
 done
-if [[ "$out" == *'OK: 0 files, 0 owners, 0 markers;'* && "$out" != *'IN SCOPE:'* ]]; then
+if [[ "$out" == *'OK: 0 of 4 tests/test_*.c in scope (4 carry no section header), 0 owners, 0 markers;'* &&
+      "$out" != *'IN SCOPE:'* ]]; then
     report true 'prose-only fixture has 0 files, 0 owners, 0 markers'
 else
     report false 'prose-only fixture must produce no markers'
@@ -313,6 +316,11 @@ for command in scripts/check-section-registration.sh tests/test_check_section_re
 done
 
 green "$REPO_DIR" 'real repository passes'
+if [[ "$out" == 'SCOPE RATCHET: base '* || "$out" == *$'\nSCOPE RATCHET: base '* ]]; then
+    report true 'real repository runs the scope ratchet against a base'
+else
+    report false 'real repository must print SCOPE RATCHET: base '
+fi
 for suite in test_idle_summary.c test_agg_raw_crosscheck.c test_cpu_split_parity.c \
              test_pid_cap.c test_probe_bounds.c test_straddler_accounting.c; do
     if [[ "$out" == *"IN SCOPE: tests/$suite:"* ]]; then
@@ -352,6 +360,114 @@ test_cpu_split_parity.c|        test_windows(&fx);|test_windows
 test_straddler_accounting.c|    test_tick_close_order();|test_tick_close_order|section 4 header at line 636 has an empty body -- its dispatch site is missing
 test_straddler_accounting.c|    test_placement_and_conservation(1);|test_placement_and_conservation|section 1-3 header at line 630 has an empty body -- its dispatch site is missing
 EOF
+
+# Commit actual baselines so a working-tree scope loss cannot silently turn
+# a previously verified suite into an unverified one. No global git config.
+init_repo() {
+    git -C "$1" init -q || exit 1
+}
+commit_base() {
+    git -C "$1" add . || exit 1
+    git -C "$1" -c user.email=scope@example.test -c user.name='Scope self-test' \
+        -c core.hooksPath=/dev/null commit -qm 'scope baseline' || exit 1
+    git -C "$1" branch -M master || exit 1
+}
+
+repo="$tmpdir/scope-real-cpu"
+mkdir -p "$repo/tests" || exit 1
+copy="$repo/tests/test_cpu_split_parity.c"
+cp "$REPO_DIR/tests/test_cpu_split_parity.c" "$copy" || exit 1
+init_repo "$repo"
+commit_base "$repo"
+green "$repo" 'scope ratchet real cpu-split committed control passes'
+sed -E 's/(--- )[0-9]+\. /\1/g' "$copy" > "$tmpdir/stripped.c" || exit 1
+if cmp -s "$copy" "$tmpdir/stripped.c"; then
+    out='REFUSING: cpu-split numeric-prefix mutation did not match any header'
+    report false 'scope ratchet header-prefix mutation must match the real cpu-split source'
+else
+    report true 'scope ratchet header-prefix mutation matched the real cpu-split source'
+    mv "$tmpdir/stripped.c" "$copy" || exit 1
+    red "$repo" 'real cpu-split headers losing numeric prefixes goes RED' \
+        'tests/test_cpu_split_parity.c left scope'
+    sed 's|^        test_windows(&fx);$||' "$copy" > "$tmpdir/mutated.c" || exit 1
+    if cmp -s "$copy" "$tmpdir/mutated.c"; then
+        out='REFUSING: cpu-split test_windows dispatcher mutation did not match'
+        report false 'scope ratchet dispatcher mutation must match the real cpu-split source'
+    else
+        report true 'scope ratchet dispatcher mutation matched the real cpu-split source'
+        mv "$tmpdir/mutated.c" "$copy" || exit 1
+        red "$repo" 'real cpu-split prefix loss plus deleted test_windows stays RED' \
+            'tests/test_cpu_split_parity.c left scope'
+    fi
+fi
+
+repo="$tmpdir/scope-growth"
+write_suite "$repo" '    section();'
+cp "$tmpdir/no-markers/tests/test_unsectioned.c" "$repo/tests/test_unsectioned.c" || exit 1
+init_repo "$repo"
+commit_base "$repo"
+write_header_suite "$tmpdir/scope-new-header" '    printf("1. newly sectioned\n");' '    section();'
+cp "$tmpdir/scope-new-header/tests/test_fixture.c" "$repo/tests/test_unsectioned.c" || exit 1
+green "$repo" 'scope ratchet permits out-of-scope at base to become in-scope'
+cp "$tmpdir/scope-new-header/tests/test_fixture.c" "$repo/tests/test_new.c" || exit 1
+green "$repo" 'scope ratchet permits a brand-new sectioned file absent at base'
+rm "$repo/tests/test_fixture.c" || exit 1
+red "$repo" 'scope ratchet rejects deletion of a file in scope at base' \
+    'tests/test_fixture.c left scope'
+
+# Deleting the only suite must still name the scope loss, not just the empty glob.
+repo="$tmpdir/scope-delete-only"
+write_suite "$repo" '    section();'
+init_repo "$repo"
+commit_base "$repo"
+rm "$repo/tests/test_fixture.c" || exit 1
+red "$repo" 'scope ratchet names deletion even when no current suites remain' \
+    'tests/test_fixture.c left scope'
+
+repo="$tmpdir/scope-no-base"
+write_suite "$repo" '    section();'
+init_repo "$repo"
+red "$repo" 'scope ratchet refuses a git repo without a resolvable base' 'no comparable base ref'
+
+repo="$tmpdir/scope-no-git"
+write_suite "$repo" '    section();'
+init_repo "$repo"
+commit_base "$repo"
+mkdir -p "$tmpdir/shim-no-git" || exit 1
+ln -s /bin/bash "$tmpdir/shim-no-git/bash" || exit 1
+ln -s /usr/bin/dirname "$tmpdir/shim-no-git/dirname" || exit 1
+ln -s "$(python3 -c 'import sys; print(sys.executable)')" "$tmpdir/shim-no-git/python3" || exit 1
+PATH="$tmpdir/shim-no-git" red "$repo" 'scope ratchet refuses git absent from PATH in a git repo' \
+    "missing required tool 'git'"
+
+repo="$tmpdir/scope-empty-base-parser"
+mkdir -p "$repo/tests" || exit 1
+cp "$tmpdir/no-markers/tests/test_unsectioned.c" "$repo/tests/test_unsectioned.c" || exit 1
+init_repo "$repo"
+commit_base "$repo"
+write_suite "$repo" '    section();'
+red "$repo" 'scope ratchet refuses base suites with zero parsed in-scope files' 'parser self-check failed'
+
+# Base blobs must be readable and decodable even if current sources are fine.
+repo="$tmpdir/scope-bad-base-encoding"
+write_suite "$repo" '    section();'
+printf '\377\n' > "$repo/tests/test_bad.c"
+init_repo "$repo"
+commit_base "$repo"
+cp "$tmpdir/no-markers/tests/test_unsectioned.c" "$repo/tests/test_bad.c" || exit 1
+red "$repo" 'scope ratchet refuses an undecodable base blob and names the file' \
+    'tests/test_bad.c at base'
+
+repo="$tmpdir/scope-no-git"
+mkdir -p "$tmpdir/shim-base-show" || exit 1
+real_git="$(command -v git)"
+{
+    printf '#!/bin/bash\nif [[ "$1" == show ]]; then exit 1; fi\n'
+    printf 'exec "%s" "$@"\n' "$real_git"
+} > "$tmpdir/shim-base-show/git"
+chmod +x "$tmpdir/shim-base-show/git" || exit 1
+PATH="$tmpdir/shim-base-show:$PATH" red "$repo" 'scope ratchet refuses an unreadable base blob and names the file' \
+    'tests/test_fixture.c at base'
 
 echo
 echo "$tests_run checks, $tests_failed failed"
