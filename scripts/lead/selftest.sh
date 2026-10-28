@@ -298,6 +298,21 @@ EOSTUB
 chmod +x "$CBEBIN/git"
 cat > "$CBEBIN/gh" <<'EOSTUB'
 #!/usr/bin/env bash
+if [ "$1 $2" = "issue view" ]; then
+  N="$3"
+  state=""
+  IFS=',' read -r -a pairs <<< "${STUB_ISSUE_STATES:-}"
+  for p in "${pairs[@]}"; do
+    k="${p%%:*}"; v="${p#*:}"
+    [ "$k" = "$N" ] && { state="$v"; break; }
+  done
+  if [ -z "$state" ]; then
+    echo "stub gh: issue view failure for #$N (no fixture state)" >&2
+    exit 1
+  fi
+  echo "$state"
+  exit 0
+fi
 case "$STUB_GH_MODE" in
   fail) echo "stub gh: simulated API failure" >&2; exit 1 ;;
   json) cat "$STUB_GH_JSON" ;;
@@ -319,11 +334,15 @@ branch refs/heads/agent/42-demo-fixture
 worktree $CBE_FIXTURE
 HEAD 1111111111111111111111111111111111111111
 branch refs/heads/agent/lead-stuff
+
+worktree $CBE_FIXTURE
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/agent/55-66-vX
 EOF
 
 run_cbe() {
-  local mode="$1" json="$2"
-  PATH="$CBEBIN:$PATH" STUB_GH_MODE="$mode" STUB_GH_JSON="$json" \
+  local mode="$1" json="$2" states="${3:-}"
+  PATH="$CBEBIN:$PATH" STUB_GH_MODE="$mode" STUB_GH_JSON="$json" STUB_ISSUE_STATES="$states" \
     STUB_WT_PORCELAIN="$TMP/cbe-wt.porcelain" bash "$CBE" 123
 }
 
@@ -387,25 +406,64 @@ cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<'EOF'
 box-check: commit=1111111111111111111111111111111111111111 tree-hash=abc
 EOF
 
-# case 19: NO-CLOSING-REF fires when the branch names an issue but
-# closingIssuesReferences is empty.
+# case 19: NO-CLOSING-REF-CANDIDATE fires when the branch names an OPEN
+# issue but closingIssuesReferences is empty.
 json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "")
-out=$(run_cbe json "$json"); rc=$?
-if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^NO-CLOSING-REF #123 -> issue #42$'; then
-  pass=$((pass+1)); echo "ok   check-box-evidence: NO-CLOSING-REF fires on an empty ref list (exit $rc)"
+out=$(run_cbe json "$json" "42:OPEN"); rc=$?
+if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^NO-CLOSING-REF-CANDIDATE #123 -> issue #42 '; then
+  pass=$((pass+1)); echo "ok   check-box-evidence: candidate fires on an empty ref list for an OPEN issue (exit $rc)"
 else
-  fail=$((fail+1)); echo "FAIL check-box-evidence NO-CLOSING-REF-fires case (rc=$rc)"
+  fail=$((fail+1)); echo "FAIL check-box-evidence candidate-fires case (rc=$rc)"
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
 # case 20 (negative control for 19): the SAME branch name, but the issue IS
-# in closingIssuesReferences -- the check must not flag a PR that has one.
+# in closingIssuesReferences -- the check must not flag a PR that has one,
+# and must not even need to query the issue's state to know that (no entry
+# in STUB_ISSUE_STATES for 42 here).
 json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "42")
-out=$(run_cbe json "$json"); rc=$?
+out=$(run_cbe json "$json" ""); rc=$?
 if [ "$rc" = 0 ] && ! printf '%s' "$out" | /usr/bin/grep -q 'NO-CLOSING-REF'; then
   pass=$((pass+1)); echo "ok   check-box-evidence: a real closing ref is not flagged (exit $rc)"
 else
   fail=$((fail+1)); echo "FAIL check-box-evidence should not have flagged a PR with a real ref (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# case 20b (the real bug this round fixes): the branch names an issue with
+# an empty ref list, but that issue is already CLOSED -- nothing to close,
+# so this must NOT be flagged. Live data before this fix: 2 of 4 flagged
+# issues (#390, #230) were exactly this case.
+json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "")
+out=$(run_cbe json "$json" "42:CLOSED"); rc=$?
+if [ "$rc" = 0 ] && ! printf '%s' "$out" | /usr/bin/grep -q 'NO-CLOSING-REF'; then
+  pass=$((pass+1)); echo "ok   check-box-evidence: a closed issue with no ref is not flagged (exit $rc)"
+else
+  fail=$((fail+1)); echo "FAIL check-box-evidence flagged an already-closed issue (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# case 20c: a multi-issue branch (agent/507-490-v2 shape) must check EVERY
+# leading numeric token, not just the first -- and only the OPEN one with no
+# ref is a candidate; the CLOSED one must be silent.
+json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/55-66-vX "")
+out=$(run_cbe json "$json" "55:OPEN,66:CLOSED"); rc=$?
+if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q 'issue #55' \
+   && ! printf '%s' "$out" | /usr/bin/grep -q 'issue #66'; then
+  pass=$((pass+1)); echo "ok   check-box-evidence: multi-issue branch flags only the open, uncovered one (exit $rc)"
+else
+  fail=$((fail+1)); echo "FAIL check-box-evidence multi-issue case (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# case 20d: the issue-state lookup itself fails (gh error / unknown issue)
+# -> UNKNOWN, exit non-zero, never silently treated as open or closed.
+json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "")
+out=$(run_cbe json "$json" ""); rc=$?
+if [ "$rc" != 0 ] && [ "$rc" != 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^UNKNOWN:'; then
+  pass=$((pass+1)); echo "ok   check-box-evidence: issue-state lookup failure reports UNKNOWN (exit $rc)"
+else
+  fail=$((fail+1)); echo "FAIL check-box-evidence issue-state-failure case (rc=$rc)"
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
