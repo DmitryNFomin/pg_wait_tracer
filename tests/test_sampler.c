@@ -27,7 +27,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <errno.h>
+#include <limits.h>
+#include <grp.h>
+#include <linux/capability.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <signal.h>
 
@@ -1082,6 +1088,292 @@ static void test_sampled_attr_source_gate(void)
           "active st_query_id disagreement fails the load-bearing proof");
 }
 
+static void test_parse_nice(void)
+{
+    const struct {
+        const char *name;
+        const char *env;
+        int accepted;
+        int expected;
+    } cases[] = {
+        { "NULL -> default", NULL, 1, -7 },
+        { "empty -> default", "", 1, -7 },
+        { "-20", "-20", 1, -20 },
+        { "0", "0", 1, 0 },
+        { "19", "19", 1, 19 },
+        { "20 refused", "20", 0, 123 },
+        { "-21 refused", "-21", 0, 123 },
+        { "abc refused", "abc", 0, 123 },
+        { "-5x refused", "-5x", 0, 123 },
+        { "surrounding whitespace accepted", "  -5  ", 1, -5 },
+        { "whitespace only refused", "   ", 0, 123 },
+        { "bare sign refused", "-", 0, 123 },
+        { "overflow refused", "999999999999999999999999", 0, 123 },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("--- parse_nice: %s ---\n", cases[i].name);
+        int out = 123;
+        int accepted = pgwt_sampler_parse_nice(cases[i].env, -7, &out);
+        CHECK(accepted == cases[i].accepted,
+              "parse_nice returned %d, expected %d", accepted, cases[i].accepted);
+        CHECK(out == cases[i].expected,
+              "parse_nice output %d, expected %d (refusal must leave it untouched)",
+              out, cases[i].expected);
+    }
+}
+
+static void test_sched_request_unset(void)
+{
+    printf("--- sched_request: unset leaves scheduling alone ---\n");
+    const char *cases[] = { NULL, "" };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int out = 123;
+        CHECK(pgwt_sampler_sched_request(cases[i], &out) ==
+              PGWT_SAMPLER_SCHED_LEAVE_ALONE,
+              "unset override case %u must leave scheduling alone", i);
+        CHECK(out == 123, "unset override must leave output untouched");
+    }
+}
+
+static void test_sched_request_explicit(void)
+{
+    printf("--- sched_request: explicit override applies ---\n");
+    const struct {
+        const char *env;
+        int expected;
+    } cases[] = {
+        { "-20", -20 },
+        { "0", 0 },
+        { "19", 19 },
+        { "  -5  ", -5 },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int out = 123;
+        CHECK(pgwt_sampler_sched_request(cases[i].env, &out) ==
+              PGWT_SAMPLER_SCHED_APPLY,
+              "explicit override \"%s\" must apply", cases[i].env);
+        CHECK(out == cases[i].expected, "override \"%s\": got %d, expected %d",
+              cases[i].env, out, cases[i].expected);
+    }
+}
+
+static void test_sched_request_malformed(void)
+{
+    printf("--- sched_request: malformed override is refused, not defaulted ---\n");
+    CHECK(PGWT_SAMPLER_SCHED_REFUSED != PGWT_SAMPLER_SCHED_LEAVE_ALONE,
+          "refusal must be distinct from the unset default");
+    const char *cases[] = { "20", "-21", "abc", "-5x", "-", "   " };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int out = 123;
+        CHECK(pgwt_sampler_sched_request(cases[i], &out) ==
+              PGWT_SAMPLER_SCHED_REFUSED,
+              "malformed override \"%s\" must be refused", cases[i]);
+        CHECK(out == 123, "refused override must leave output untouched");
+    }
+}
+
+static void test_apply_sched(void)
+{
+    printf("--- apply_sched: want 0 no-op; want -20 verified or explicit failure ---\n");
+    /* A successful boost may be irreversible without privilege. Keep it in
+     * a child so the runner's scheduling and later tests are unaffected. */
+    fflush(stdout);
+    pid_t child = fork();
+    CHECK(child >= 0, "fork for apply_sched must succeed");
+    if (child == 0) {
+        tests_run = tests_passed = 0;
+        struct pgwt_sampler_sched sched;
+        errno = 0;
+        int before = getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0 && before == 0, "test starts at nice 0, got %d", before);
+        errno = EDOM; /* stale errno must not invalidate a successful read */
+        int ok = pgwt_sampler_apply_sched(0, &sched);
+        CHECK(ok == 1 && sched.ok == 1 && sched.requested == 0 &&
+              sched.applied == 0 && sched.err == 0,
+              "want 0 must report verified nice 0 without changing scheduling");
+        errno = 0;
+        int after = getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0 && after == before, "want 0 preserves actual nice");
+
+        ok = pgwt_sampler_apply_sched(-20, &sched);
+        CHECK(sched.requested == -20 && ok == sched.ok,
+              "want -20 records the request and returns out->ok");
+        errno = 0;
+        after = getpriority(PRIO_PROCESS, 0);
+        int read_err = errno;
+        CHECK(read_err == 0 && sched.applied == after,
+              "reported nice %d must equal independent readback %d (errno %d)",
+              sched.applied, after, read_err);
+        CHECK((ok == 1 && sched.ok == 1 && sched.err == 0 && after == -20) ||
+              (ok == 0 && sched.ok == 0 && sched.err != 0),
+              "boost must be verified -20 or explicit failure (ok %d, nice %d, err %d)",
+              ok, after, sched.err);
+        printf("apply_sched child: %d/%d checks passed\n", tests_passed, tests_run);
+        fflush(stdout);
+        _exit(tests_passed == tests_run ? 0 : 1);
+    }
+    if (child > 0) {
+        int status = 0;
+        pid_t waited = waitpid(child, &status, 0);
+        CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "apply_sched child assertions must pass (status %d)", status);
+    }
+
+    printf("--- apply_sched: unprivileged boost must report failure, never unverified success ---\n");
+    fflush(stdout);
+    child = fork();
+    CHECK(child >= 0, "fork for unprivileged apply_sched must succeed");
+    if (child == 0) {
+        tests_run = tests_passed = 0;
+        struct pgwt_sampler_sched sched;
+        if (geteuid() == 0) {
+            CHECK(setgroups(0, NULL) == 0, "clear supplementary groups");
+            CHECK(setgid(65534) == 0, "drop gid to nobody/nogroup");
+            CHECK(setuid(65534) == 0, "drop uid to nobody");
+        }
+        CHECK(geteuid() != 0, "refusal test must run unprivileged");
+        if (tests_passed != tests_run)
+            goto unprivileged_done;
+
+        errno = 0;
+        int before = getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0 && before == 0,
+              "unprivileged test starts at nice 0, got %d", before);
+        if (tests_passed != tests_run)
+            goto unprivileged_done;
+
+        int ok = pgwt_sampler_apply_sched(-20, &sched);
+        errno = 0;
+        int after = getpriority(PRIO_PROCESS, 0);
+        int read_err = errno;
+        /* Branch on the kernel's readback, never the function's claimed
+         * success: an unconditional out->ok = 1 must take the refusal checks. */
+        if (read_err == 0 && after == -20) {
+            CHECK(ok == 1 && sched.ok == 1 && sched.err == 0 &&
+                  sched.applied == -20 && after == -20,
+                  "an allowed unprivileged boost must be verified");
+            /* A generous RLIMIT_NICE or CAP_SYS_NICE can allow the first
+             * boost. Remove both, and restore nice 0 before retrying:
+             * requesting -20 while already at -20 would be a no-op. */
+            struct rlimit limit = { 0, 0 };
+            CHECK(setrlimit(RLIMIT_NICE, &limit) == 0, "disable nice boosts");
+            CHECK(setpriority(PRIO_PROCESS, 0, 0) == 0, "restore nice 0");
+            struct __user_cap_header_struct header = {
+                .version = _LINUX_CAPABILITY_VERSION_3, .pid = 0,
+            };
+            struct __user_cap_data_struct caps[2] = {{0}, {0}};
+            CHECK(syscall(SYS_capset, &header, caps) == 0,
+                  "clear capabilities so CAP_SYS_NICE cannot bypass RLIMIT_NICE");
+            if (tests_passed != tests_run)
+                goto unprivileged_done;
+            ok = pgwt_sampler_apply_sched(-20, &sched);
+            errno = 0;
+            after = getpriority(PRIO_PROCESS, 0);
+            read_err = errno;
+        }
+        CHECK(ok == 0, "unprivileged boost must return failure, got %d", ok);
+        CHECK(sched.ok == 0, "unprivileged boost must set sched.ok to 0");
+        CHECK(sched.err != 0, "unprivileged boost must report an error");
+        CHECK(sched.err == EPERM || sched.err == EACCES,
+              "unprivileged boost must be denied, got errno %d", sched.err);
+        CHECK(read_err == 0 && after == 0,
+              "refused boost must leave actual nice at 0, got %d (errno %d)",
+              after, read_err);
+unprivileged_done:
+        printf("apply_sched unprivileged child: %d/%d checks passed\n",
+               tests_passed, tests_run);
+        fflush(stdout);
+        _exit(tests_passed == tests_run ? 0 : 1);
+    }
+    if (child > 0) {
+        int status = 0;
+        pid_t waited = waitpid(child, &status, 0);
+        CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "unprivileged apply_sched child assertions must pass (status %d)",
+              status);
+    }
+}
+
+static void test_cpu_confidence(void)
+{
+    const struct {
+        const char *name;
+        uint64_t ticks, late, period;
+        enum pgwt_sampler_cpu_confidence verdict;
+        unsigned pct;
+    } cases[] = {
+        { "ticks==0 unknown", 0, 0, 10000,
+          PGWT_SAMPLER_CPU_CONF_UNKNOWN, 0 },
+        { "period==0 unknown", 1, 0, 0,
+          PGWT_SAMPLER_CPU_CONF_UNKNOWN, 0 },
+        { "absurd lateness unknown", 2, 120000000002ULL, 10000,
+          PGWT_SAMPLER_CPU_CONF_UNKNOWN, 0 },
+        { "mean lateness 0", 1, 0, 10000,
+          PGWT_SAMPLER_CPU_CONF_OK, 0 },
+        { "exactly 20 percent degraded", 100, 200000, 10000,
+          PGWT_SAMPLER_CPU_CONF_DEGRADED, 2000 },
+        { "19.99 percent ok", 100, 199900, 10000,
+          PGWT_SAMPLER_CPU_CONF_OK, 1999 },
+        { "ticks>0 late_ns_total==0", 200, 0, 10000,
+          PGWT_SAMPLER_CPU_CONF_OK, 0 },
+        { "fractional mean preserves 20 percent", 10, 2, 1,
+          PGWT_SAMPLER_CPU_CONF_DEGRADED, 2000 },
+        { "60 second boundary valid", 1, 60000000000ULL, 60000000000ULL,
+          PGWT_SAMPLER_CPU_CONF_DEGRADED, 10000 },
+        { "percentage saturates", 1, 60000000000ULL, 1,
+          PGWT_SAMPLER_CPU_CONF_DEGRADED, UINT_MAX },
+        { "large numerator avoids overflow", 1000000000ULL,
+          10000000000000000000ULL, 50000000000ULL,
+          PGWT_SAMPLER_CPU_CONF_DEGRADED, 2000 },
+        { "large denominator avoids overflow", UINT64_MAX, UINT64_MAX,
+          UINT64_MAX, PGWT_SAMPLER_CPU_CONF_OK, 0 },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("--- cpu_confidence: %s ---\n", cases[i].name);
+        unsigned pct = 123;
+        enum pgwt_sampler_cpu_confidence verdict = pgwt_sampler_cpu_confidence(
+            cases[i].ticks, cases[i].late, cases[i].period, &pct);
+        CHECK(verdict == cases[i].verdict, "verdict %d, expected %d",
+              verdict, cases[i].verdict);
+        CHECK(pct == cases[i].pct, "lateness pct %u, expected %u",
+              pct, cases[i].pct);
+    }
+}
+
+static void test_cpu_confidence_unrated_ticks(void)
+{
+    printf("--- cpu_confidence: unrated ticks refuse ---\n");
+    const uint64_t sampler_ticks_total = 1000000;
+    const uint64_t sampler_ticks_rated_total = 0;
+    /* The denominator must be the rated subset: a large sampler_ticks_total
+     * cannot supply lateness evidence when no arm instant was recorded. */
+    CHECK(sampler_ticks_total > sampler_ticks_rated_total,
+          "consumed ticks can exist without any rated ticks");
+    unsigned pct = 123;
+    enum pgwt_sampler_cpu_confidence verdict = pgwt_sampler_cpu_confidence(
+        sampler_ticks_rated_total, 0, 10000, &pct);
+    CHECK(verdict == PGWT_SAMPLER_CPU_CONF_UNKNOWN,
+          "unrated ticks must refuse a confidence verdict");
+    CHECK(pct == 0, "unrated ticks must clear pct, got %u", pct);
+}
+
+static void test_cpu_confidence_rated_denominator(void)
+{
+    printf("--- confidence denominator is the rated subset ---\n");
+    const uint64_t period = 10000;
+    const uint64_t late_ns_total = 5 * period;
+    unsigned rated_pct = 123, total_pct = 123;
+    enum pgwt_sampler_cpu_confidence rated = pgwt_sampler_cpu_confidence(
+        10, late_ns_total, period, &rated_pct);
+    enum pgwt_sampler_cpu_confidence total = pgwt_sampler_cpu_confidence(
+        100, late_ns_total, period, &total_pct);
+    CHECK(rated == PGWT_SAMPLER_CPU_CONF_DEGRADED && rated_pct == 5000,
+          "10 rated ticks must be degraded at 50%%, got %d / %u", rated, rated_pct);
+    CHECK(total == PGWT_SAMPLER_CPU_CONF_OK && total_pct == 500,
+          "100 total ticks would falsely approve at 5%%, got %d / %u", total, total_pct);
+    CHECK(rated != total, "the denominator choice must change the verdict");
+}
+
 int main(void)
 {
     test_self_read();
@@ -1098,6 +1390,14 @@ int main(void)
     test_tick_lateness();
     test_qid_index();
     test_sampled_attr_source_gate();
+    test_parse_nice();
+    test_sched_request_unset();
+    test_sched_request_explicit();
+    test_sched_request_malformed();
+    test_apply_sched();
+    test_cpu_confidence();
+    test_cpu_confidence_unrated_ticks();
+    test_cpu_confidence_rated_denominator();
 
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

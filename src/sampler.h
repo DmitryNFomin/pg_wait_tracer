@@ -42,6 +42,47 @@
 struct pgwt_daemon;
 struct pgwt_metrics;
 
+struct pgwt_sampler_sched {
+    int requested;      /* nice value asked for */
+    int applied;        /* nice value read back; 20 if readback failed */
+    int ok;             /* 1 only when readback == requested */
+    int err;            /* failing call's errno, or EIO for a mismatch */
+};
+
+/* NULL/empty selects default_nice. Surrounding whitespace is accepted.
+ * Refuse malformed/out-of-range overrides without writing *out. Pure. */
+int pgwt_sampler_parse_nice(const char *env, int default_nice, int *out);
+
+enum pgwt_sampler_sched_request {
+    PGWT_SAMPLER_SCHED_LEAVE_ALONE = 0, /* no override given: the DEFAULT */
+    PGWT_SAMPLER_SCHED_APPLY,           /* explicit, well-formed override */
+    PGWT_SAMPLER_SCHED_REFUSED,         /* override present but malformed */
+};
+
+/* env == NULL or empty -> LEAVE_ALONE, *out_nice untouched.
+ * Well-formed integer in [-20,19] -> APPLY, *out_nice written.
+ * Anything else -> REFUSED, *out_nice untouched. Pure. */
+enum pgwt_sampler_sched_request
+pgwt_sampler_sched_request(const char *env, int *out_nice);
+
+/* Change only the calling thread's nice, never its scheduling policy.
+ * Zero opts out of changes: read back only, failing if it is not zero.
+ * Returns 1 iff the requested value was verified; always fills *out. */
+int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out);
+
+enum pgwt_sampler_cpu_confidence {
+    PGWT_SAMPLER_CPU_CONF_UNKNOWN = 0, /* cannot tell: refuse to rate */
+    PGWT_SAMPLER_CPU_CONF_OK,
+    PGWT_SAMPLER_CPU_CONF_DEGRADED,
+};
+
+/* Timer-only verdict: mean lateness >= 20% of the nominal period degrades.
+ * Zero ticks/period or late_ns_total / ticks > 60s yields UNKNOWN and pct 0.
+ * Percentage x100 is truncated, saturating at UINT_MAX. Pure, no I/O. */
+enum pgwt_sampler_cpu_confidence
+pgwt_sampler_cpu_confidence(uint64_t ticks, uint64_t late_ns_total,
+                            uint64_t period_ns, unsigned *out_late_pct_x100);
+
 /* A registry snapshot the sampler reads each tick. Decouples the sampler's
  * core logic (testable without the daemon) from the live backend table:
  * the daemon fills this from d->backends, but the unit test fills it from a
@@ -213,7 +254,7 @@ struct pgwt_sampler_recheck_stats {
 };
 
 /* Fresh command-gate read for ONE target. Must return 1 only on a successful
- * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+ * read (writing *cmd_open, and *query_id / *query_id_valid when it has them) and
  * 0 on any failure, writing nothing — a failed read may never be turned into
  * "in a command". idx is the target index, passed so a test can prove exactly
  * which targets the recheck consulted. */
