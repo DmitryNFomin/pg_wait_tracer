@@ -621,11 +621,10 @@ struct pgwt_queries_result {
      * never reported an id, plus background/maintenance work) — reported
      * here instead of being dropped — and how much row time was
      * attributed to an id reported after the interval closed
-     * (PGWT_EVENT_FLAG_QUERY_BACKFILL). The per-query summary table has no
-     * unattributed bucket, but handle_top_queries copies all three scalars
-     * from the raw pass it already runs on the summary route, so both routes
-     * populate them. unattributed_available: false means only that the raw
-     * pass failed. */
+     * (PGWT_EVENT_FLAG_QUERY_BACKFILL). handle_top_queries has one route:
+     * raw compute always populates all three scalars. A compute failure is
+     * terminal, so successful responses always report
+     * unattributed_available: true. */
     double   unattributed_ms;
     uint64_t unattributed_count;
     double   backfilled_ms;
@@ -679,6 +678,11 @@ void pgwt_compute_top_sessions_from_summaries(
     const struct pgwt_filter *f, double wall_ms,
     struct pgwt_sessions_result *out);
 
+/* No production caller since handle_top_queries was changed to force raw.
+ * Retained because test_probe_bounds, test_idle_summary,
+ * test_agg_raw_crosscheck, test_semantics_wire and test_top_wait_backfill pin
+ * its bounds and filter holes. A future summary-side caller must re-read the
+ * N10/N11 class/event-filter holes in test_agg_raw_crosscheck first. */
 void pgwt_compute_top_queries_from_summaries(
     const char *trace_dir, uint64_t from_ns, uint64_t to_ns,
     const struct pgwt_filter *f, double wall_ms,
