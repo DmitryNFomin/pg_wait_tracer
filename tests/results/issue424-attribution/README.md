@@ -116,11 +116,46 @@ run, kept as history).
 | S6 | unplaced counted at the NOTE → both sides of the reading come from one event | 10b |
 | S7 | the §10 dispatcher line removed from `main()` | nothing: exit stays 0, 101 → 95 checks and the `-- 10:` banner disappears (#686). The banner is printed from inside the section so its absence is the witness. |
 
-## What is NOT established here
+## THE LIVE ANSWER (`live-fixture-gate3-20261028.log`)
 
-Whether the v9 credit path places seconds **on a live capture**. Everything
-above is the Mac tier: the real writer driven by a synthetic producer, and
-the fixture's decision logic driven by a fake control socket. The live
-answer needs `make box-check` with the new stimulus — that run's
-`summary_open_cpu_credited_ns` and `summary_open_cpu_measured_ns` are the
-first measurement of v9 against a gap that was actually held open.
+The fixture, run against the real PG18 cluster on `pgwt-gate-3` with the
+clock-sized stimulus. This is the first measurement of v9 against an on-CPU
+gap that was actually held open:
+
+```
+ok: 3 of 3 CPU statements completed, spanning 9s of ticks
+ok: stimulus PROVEN -- cpu_ns_total moved 10591 -> 26431536953
+ok: the writer WAS asked -- summary_open_cpu_notes_total = 27
+summary_open_cpu_credited_ns   = 23465838422
+summary_open_cpu_measured_ns   = 22853487355
+summary_cpu_open_uncredited_ns_total = 18194860320
+summary_open_cpu_io_worker_refused_total = 0  (the on-CPU subset)
+summary_open_cpu_unplaced_total      = 0
+ok: the v9 open-CPU producer IS wired and the credit is coherent
+    (measured/stimulus = 86%, floor 25%)
+=== test_v9_open_cpu_wired: PASS ===
+```
+
+Three things that reading establishes, none of which was established before:
+
+1. **The v9 credit path places seconds live.** 23.47 s of wall and 22.85 s of
+   measured CPU, 86% of the daemon's own schedstat delta — not the token
+   first second that `credited > 0` would have approved.
+2. **The earlier verdict was wrong about which file was at fault.** The same
+   writer, same producer, same box; only the stimulus changed.
+3. **The diagnosis is confirmed by an independent counter.**
+   `summary_cpu_open_uncredited_ns_total` reads **18.19 s here and 0 on the
+   2026-10-28 capture**. It can only move when an on-CPU interval longer than
+   one second CLOSES, so its zero there was not an artefact of the reading —
+   that capture contained no such interval, and 0 credit was the correct
+   answer.
+
+The two new counters read 0 on this healthy capture and non-zero in the two
+unhealthy shapes (`writer-shape-repro.log`), so they discriminate rather than
+restate.
+
+Also worth recording because the guard earned it: the FIRST version of the
+plpgsql stimulus used a fixed `FOR i IN 1..40000000`, which that box runs in
+2 s, and the fixture REFUSED on its own `>= 3 s` floor instead of approving a
+zero (`box-check-ubuntu-20261028-171149.log`). The loop is now sized by a
+wall-clock deadline, which is right on any machine.

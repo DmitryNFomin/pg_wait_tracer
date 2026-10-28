@@ -43,5 +43,31 @@ fixture under test: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees
   |           thing as one that holds an on-CPU interval open across
   |           a tick boundary (a FunctionScan over generate_series
   |           spills a tuplestore and changes wait event thousands of
+  |           times a second; a plpgsql loop does not).
+  | === test_v9_open_cpu_wired: REFUSE ===
 
-[exited with code 0]
+  --- scenario J, verbatim (the token credit that 'credited > 0' approves) ---
+  | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
+  |   ok: watchpoints attached (mask=15, tier=escalated) -- producer reachable
+  |   ok: all seven v9 control keys present and numeric
+  |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
+  |   ok: stimulus PROVEN -- cpu_ns_total moved 1000000000 -> 31000000000
+  |   ok: the writer WAS asked -- summary_open_cpu_notes_total = 4210
+  |   summary_open_cpu_credited_ns   = 3000000000
+  |   summary_open_cpu_measured_ns   = 2000000000
+  |   summary_open_cpu_refused_total = 0
+  |   summary_cpu_open_uncredited_ns_total = 0
+  |   summary_open_io_worker_refused_total = 5  (WAIT notes included)
+  |   summary_open_cpu_io_worker_refused_total = 0  (the on-CPU subset)
+  |   summary_open_cpu_unplaced_total      = 0
+  |   summary_open_table_full_total        = 0
+  |   summary_open_notes_expired_total     = 0
+  |   summary_open_credited_ns_total = 75854656030  (WAIT credit, same seal)
+  |   offered to the credit path     = 4210  (notes 4210 - io_worker 0)
+  |   FAIL: measured 2000000000 ns is under a quarter of the
+  |         stimulus' own 30000000000 ns of schedstat CPU. The credit
+  |         path placed a token amount, not the gap -- which is
+  |         what 'credited > 0' alone would have approved.
+  | === test_v9_open_cpu_wired: FAIL ===
+
+=== fixture-discrimination: PASS (13 scenarios) ===
