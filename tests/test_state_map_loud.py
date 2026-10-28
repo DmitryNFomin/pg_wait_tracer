@@ -164,7 +164,8 @@ def main():
         # T4 observability fields must exist on the daemon side (the mock
         # mirrors them; protocol drift between the two is caught here).
         for key in ("state_map_full_total", "seen_query_ids_full_total",
-                    "invalid_wait_reads_total", "sampler_ticks_missed_total",
+                    "invalid_wait_reads_total", "sampler_ticks_total",
+                    "sampler_tick_late_ns_total",
                     "sampled_attr_tick_read_failures_total",
                     "sampled_attr_shadow_total",
                     "sampled_attr_shadow_mismatch_total",

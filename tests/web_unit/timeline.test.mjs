@@ -342,6 +342,69 @@ test('waits clamped to the window edge do not fake density on a small chart', ()
     // separate fact from how many are drawn), and still has a PID row.
     assert.equal(m.count, 8);
     assert.deepEqual(m.option.yAxis.data, ['PID 1001']);
+    assert.equal(m.bannerNote, '8 events returned, none overlap this window.');
+
+    const truncated = buildTimelineOption(
+        { truncated: true, total_count: 20, pids: [1001], events },
+        { from, to, width: 1240 });
+    assert.equal(truncated.bannerNote,
+        '8 of 20 events returned, none overlap this window' +
+        ' — drag to zoom in for the rest of the window.');
+});
+
+test('banner: event noun agrees with the last displayed count in every branch', () => {
+    assert.equal(timelineBannerNote(1, 12, true, 0, 0),
+        '1 of 12 events returned, none overlap this window' +
+        ' — drag to zoom in for the rest of the window.');
+
+    const cases = [
+        [[8, 8, false, 0, 0],
+            '8 events returned, none overlap this window.'],
+        [[1, 1, false, 0, 0],
+            '1 event returned, none overlap this window.'],
+        [[8, 12, true, 0, 0],
+            '8 of 12 events returned, none overlap this window' +
+            ' — drag to zoom in for the rest of the window.'],
+        [[1, 1, true, 0, 0],
+            '1 event returned, none overlap this window' +
+            ' — drag to zoom in for the rest of the window.'],
+        [[1, 12, true, 5],
+            'Showing 1 of 12 events, aggregated at 5 per px into per-pixel class shares' +
+            ' — individual waits and their queries appear when you drag to zoom in.'],
+        [[1, 1, true, 5],
+            'Showing 1 event, aggregated at 5 per px into per-pixel class shares' +
+            ' — individual waits and their queries appear when you drag to zoom in.'],
+        [[1, 1, false, 5],
+            'Showing 1 event, aggregated at 5 per px into per-pixel class shares' +
+            ' — individual waits and their queries appear when you drag to zoom in.'],
+        [[1, 12, true, 0],
+            'Showing 1 of 12 events — drag to zoom in for the rest of the window.'],
+        [[1, 1, true, 0],
+            'Showing 1 event — drag to zoom in for the rest of the window.'],
+    ];
+    for (const [args, expected] of cases) {
+        assert.equal(timelineBannerNote(...args), expected, JSON.stringify(args));
+    }
+});
+
+test('eight drawable waits do not gain the no-overlap disclosure (#609 control)', () => {
+    const from = 2_000_000_000, to = 2_900_000_000;
+    const events = Array.from({ length: 8 }, (_, i) => ({
+        s: from + i * 10_000_000, d: 50_000_000,
+        p: 1001, n: 'CPU*', c: 0, q: '42',
+    }));
+    const m = buildTimelineOption(
+        { truncated: false, total_count: 8, pids: [1001], events },
+        { from, to, width: 1240 });
+    assert.equal(m.count, 8);
+    assert.equal(m.option.series[0].data.length, 8);
+    assert.equal(m.bannerNote, null, 'all eight overlap; the ordinary banner stays unchanged');
+
+    const truncated = buildTimelineOption(
+        { truncated: true, total_count: 20, pids: [1001], events },
+        { from, to, width: 1240 });
+    assert.equal(truncated.bannerNote,
+        'Showing 8 of 20 events — drag to zoom in for the rest of the window.');
 });
 
 // ── #121: waits with no overlap with the view window ────────────────────────
