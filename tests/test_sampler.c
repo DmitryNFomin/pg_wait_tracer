@@ -29,8 +29,11 @@
 #include <stdint.h>
 #include <errno.h>
 #include <limits.h>
+#include <grp.h>
+#include <linux/capability.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <signal.h>
 
@@ -1164,6 +1167,80 @@ static void test_apply_sched(void)
         pid_t waited = waitpid(child, &status, 0);
         CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
               "apply_sched child assertions must pass (status %d)", status);
+    }
+
+    printf("--- apply_sched: unprivileged boost must report failure, never unverified success ---\n");
+    fflush(stdout);
+    child = fork();
+    CHECK(child >= 0, "fork for unprivileged apply_sched must succeed");
+    if (child == 0) {
+        tests_run = tests_passed = 0;
+        struct pgwt_sampler_sched sched;
+        if (geteuid() == 0) {
+            CHECK(setgroups(0, NULL) == 0, "clear supplementary groups");
+            CHECK(setgid(65534) == 0, "drop gid to nobody/nogroup");
+            CHECK(setuid(65534) == 0, "drop uid to nobody");
+        }
+        CHECK(geteuid() != 0, "refusal test must run unprivileged");
+        if (tests_passed != tests_run)
+            goto unprivileged_done;
+
+        errno = 0;
+        int before = getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0 && before == 0,
+              "unprivileged test starts at nice 0, got %d", before);
+        if (tests_passed != tests_run)
+            goto unprivileged_done;
+
+        int ok = pgwt_sampler_apply_sched(-20, &sched);
+        errno = 0;
+        int after = getpriority(PRIO_PROCESS, 0);
+        int read_err = errno;
+        /* Branch on the kernel's readback, never the function's claimed
+         * success: an unconditional out->ok = 1 must take the refusal checks. */
+        if (read_err == 0 && after == -20) {
+            CHECK(ok == 1 && sched.ok == 1 && sched.err == 0 &&
+                  sched.applied == -20 && after == -20,
+                  "an allowed unprivileged boost must be verified");
+            /* A generous RLIMIT_NICE or CAP_SYS_NICE can allow the first
+             * boost. Remove both, and restore nice 0 before retrying:
+             * requesting -20 while already at -20 would be a no-op. */
+            struct rlimit limit = { 0, 0 };
+            CHECK(setrlimit(RLIMIT_NICE, &limit) == 0, "disable nice boosts");
+            CHECK(setpriority(PRIO_PROCESS, 0, 0) == 0, "restore nice 0");
+            struct __user_cap_header_struct header = {
+                .version = _LINUX_CAPABILITY_VERSION_3, .pid = 0,
+            };
+            struct __user_cap_data_struct caps[2] = {{0}, {0}};
+            CHECK(syscall(SYS_capset, &header, caps) == 0,
+                  "clear capabilities so CAP_SYS_NICE cannot bypass RLIMIT_NICE");
+            if (tests_passed != tests_run)
+                goto unprivileged_done;
+            ok = pgwt_sampler_apply_sched(-20, &sched);
+            errno = 0;
+            after = getpriority(PRIO_PROCESS, 0);
+            read_err = errno;
+        }
+        CHECK(ok == 0, "unprivileged boost must return failure, got %d", ok);
+        CHECK(sched.ok == 0, "unprivileged boost must set sched.ok to 0");
+        CHECK(sched.err != 0, "unprivileged boost must report an error");
+        CHECK(sched.err == EPERM || sched.err == EACCES,
+              "unprivileged boost must be denied, got errno %d", sched.err);
+        CHECK(read_err == 0 && after == 0,
+              "refused boost must leave actual nice at 0, got %d (errno %d)",
+              after, read_err);
+unprivileged_done:
+        printf("apply_sched unprivileged child: %d/%d checks passed\n",
+               tests_passed, tests_run);
+        fflush(stdout);
+        _exit(tests_passed == tests_run ? 0 : 1);
+    }
+    if (child > 0) {
+        int status = 0;
+        pid_t waited = waitpid(child, &status, 0);
+        CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "unprivileged apply_sched child assertions must pass (status %d)",
+              status);
     }
 }
 
