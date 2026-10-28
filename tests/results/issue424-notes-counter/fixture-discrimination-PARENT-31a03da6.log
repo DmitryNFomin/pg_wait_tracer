@@ -29,6 +29,16 @@ fixture under test: /private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-
         |         accounting falls back to v8. refused_total=0
         |         uncredited_ns=0 is what it cost.
         | === test_v9_open_cpu_wired: FAIL ===
+  FAIL F: got (no verdict banner) exit=2, want REFUSE exit=2   the daemon never came up -> refuse inside its own bound, never hang
+        | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
+        | REFUSE: daemon exited during startup:
+        | fake daemon: refusing to start (scenario F)
+  FAIL G: got (no verdict banner) exit=2, want REFUSE exit=2   psql exits 127 -> a missing dependency is a refusal, not a pass
+        | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
+        |   ok: watchpoints attached (mask=15, tier=escalated) -- producer reachable
+        |   ok: all seven v9 control keys present and numeric
+        | REFUSE: no CPU statement completed (0 of 3; psql missing, refused
+        |         a connection, or timed out). Nothing was measured.
 
   --- scenario C, verbatim (the one the parent fixture gets wrong) ---
   | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
@@ -49,4 +59,4 @@ fixture under test: /private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-
   |         uncredited_ns=0 is what it cost.
   | === test_v9_open_cpu_wired: FAIL ===
 
-=== fixture-discrimination: FAIL (2 of 5) ===
+=== fixture-discrimination: FAIL (4 of 7) ===
