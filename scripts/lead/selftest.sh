@@ -381,9 +381,10 @@ fi
 
 # case 17 (the real bug this script exists for): EVIDENCE-STALE when the log's
 # commit= does not match HEAD -- e.g. a gh pr update-branch merge commit ran
-# after the last box-check.
+# after the last box-check. Issue #42 is fixtured CLOSED so section [2]
+# contributes nothing here -- this case isolates the evidence check alone.
 json=$(mk_gh_json 2222222222222222222222222222222222222222 agent/42-demo-fixture "")
-out=$(run_cbe json "$json"); rc=$?
+out=$(run_cbe json "$json" "42:CLOSED"); rc=$?
 if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^EVIDENCE-STALE 1111.*!= 2222'; then
   pass=$((pass+1)); echo "ok   check-box-evidence: EVIDENCE-STALE on a mismatched commit= header (exit $rc)"
 else
