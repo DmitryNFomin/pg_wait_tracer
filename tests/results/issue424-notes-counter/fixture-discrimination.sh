@@ -25,9 +25,14 @@
 # THIS SCRIPT IS THE NEGATIVE CONTROL for that precondition. It drives the
 # real fixture against a FAKE daemon whose control socket answers exactly
 # the JSON each scenario needs, so the decision logic is exercised with no
-# PostgreSQL, no BPF and no box. Four scenarios, and the one that matters is
+# PostgreSQL, no BPF and no box. Seven scenarios, and the one that matters is
 # C: the PARENT fixture calls it FAIL ("the producer is not wired") where the
 # new one REFUSES ("the writer was never asked").
+#
+# Scenarios F and G are the gate-cannot-see cases: a daemon that never
+# comes up, and a stimulus tool exiting 127. Both must REFUSE inside the
+# fixture's own bounds -- a check that stalls or passes there is the failure
+# mode this project keeps finding, not a true positive that never fired.
 #
 # Usage: tests/results/issue424-notes-counter/fixture-discrimination.sh
 #        [path-to-fixture]        (default: the branch's own)
@@ -128,6 +133,12 @@ while [[ $# -gt 0 ]]; do
         *) shift ;;
     esac
 done
+# NOSOCKET=1 -- scenario F: a daemon that dies during startup. The fixture
+# has to notice and refuse, not wait for a socket that will never appear.
+if [[ -n "${NOSOCKET:-}" ]]; then
+    echo "fake daemon: refusing to start (scenario F)" >&2
+    exit 1
+fi
 exec python3 "$(dirname "$0")/bin/fakeyd.py" "$dir/pgwt.sock" "${SCEN:?}"
 TREOF
 chmod +x "$WORK/pg_wait_tracer"
@@ -138,33 +149,59 @@ chmod +x "$WORK/pg_wait_tracer"
 printf '#!/bin/sh\nsleep 4\nexit 0\n' > "$WORK/bin/psql"
 printf '#!/bin/sh\nshift\nexec "$@"\n' > "$WORK/bin/timeout"
 chmod +x "$WORK/bin/psql" "$WORK/bin/timeout"
+# Scenario G's psql: the "command not found" exit status, which is the one
+# way a missing dependency can look like a workload that produced nothing.
+printf '#!/bin/sh\nexit 127\n' > "$WORK/bin/psql127"
+chmod +x "$WORK/bin/psql127"
 
 echo "fixture under test: $FIXTURE"
 echo ""
 rc_of() {
     local scen="$1"
-    SCEN="$scen" PATH="$WORK/bin:$PATH" \
+    local daemon_scen="$scen" extra=""
+    case "$scen" in
+        # F: the daemon never comes up at all. The fixture must REFUSE
+        #    within its own bound, never hang and never pass.
+        F) daemon_scen="A"; extra="nosocket" ;;
+        # G: the stimulus tool is missing (exit 127). "No CPU statement
+        #    completed" must be a refusal, not an unmeasured pass.
+        G) daemon_scen="A"; extra="psql127" ;;
+    esac
+    if [[ "$extra" == "psql127" ]]; then
+        cp "$WORK/bin/psql127" "$WORK/bin/psql"
+    else
+        printf '#!/bin/sh\nsleep 4\nexit 0\n' > "$WORK/bin/psql"
+        chmod +x "$WORK/bin/psql"
+    fi
+    SCEN="$daemon_scen" NOSOCKET="$([[ "$extra" == nosocket ]] && echo 1)" \
+        PATH="$WORK/bin:$PATH" \
         "$WORK/tests/test_v9_open_cpu_wired.sh" --pid 1 \
         > "$WORK/out.$scen" 2>&1
     echo "$?"
 }
 
-declare -A WANT=( [A]="PASS 0" [B]="REFUSE 2" [C]="REFUSE 2" \
-                  [D]="FAIL 1" [E]="REFUSE 2" )
+# verdict:exit-code. Every refusal MUST carry the REFUSE banner, including
+# the ones that give up before a verdict (F, G): run_all.sh cannot tell exit
+# 2 from exit 1, so the banner is the only thing that does.
+declare -A WANT=( [A]="PASS:0" [B]="REFUSE:2" [C]="REFUSE:2" \
+                  [D]="FAIL:1" [E]="REFUSE:2" [F]="REFUSE:2" \
+                  [G]="REFUSE:2" )
 declare -A WHY=(
   [A]="asked 4210x and crediting -> the producer IS wired"
   [B]="nothing sealed (v8 credit 0 too) -> says nothing either way"
   [C]="THE 2026-10-28 CAPTURE: sealed, but the writer was NEVER ASKED"
   [D]="asked 4210x and credited nothing -> the CREDIT PATH dropped it"
   [E]="notes key absent (older daemon) -> cannot localise, must refuse"
+  [F]="the daemon never came up -> refuse inside its own bound, never hang"
+  [G]="psql exits 127 -> a missing dependency is a refusal, not a pass"
 )
 fails=0
-for scen in A B C D E; do
+for scen in A B C D E F G; do
     rc=$(rc_of "$scen")
     verdict=$(/usr/bin/grep -oE 'test_v9_open_cpu_wired: (PASS|FAIL|REFUSE)' \
               "$WORK/out.$scen" | tail -1 | sed 's/.*: //')
     [[ -n "$verdict" ]] || verdict="(no verdict banner)"
-    want_v=${WANT[$scen]% *}; want_rc=${WANT[$scen]#* }
+    want_v=${WANT[$scen]%%:*}; want_rc=${WANT[$scen]##*:}
     if [[ "$verdict" == "$want_v" && "$rc" == "$want_rc" ]]; then
         printf '  ok   %s: %-7s exit=%s   %s\n' "$scen" "$verdict" "$rc" "${WHY[$scen]}"
     else
@@ -179,8 +216,8 @@ echo "  --- scenario C, verbatim (the one the parent fixture gets wrong) ---"
 sed 's/^/  | /' "$WORK/out.C"
 echo ""
 if [[ "$fails" -eq 0 ]]; then
-    echo "=== fixture-discrimination: PASS (5 scenarios) ==="
+    echo "=== fixture-discrimination: PASS (7 scenarios) ==="
     exit 0
 fi
-echo "=== fixture-discrimination: FAIL ($fails of 5) ==="
+echo "=== fixture-discrimination: FAIL ($fails of 7) ==="
 exit 1

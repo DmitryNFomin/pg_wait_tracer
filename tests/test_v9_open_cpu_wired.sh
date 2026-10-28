@@ -50,12 +50,16 @@ PM_PID=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid) PM_PID="$2"; shift 2 ;;
-        *) echo "Usage: $0 [--pid POSTMASTER_PID]"; exit 2 ;;
+        *) echo "Usage: $0 [--pid POSTMASTER_PID]"
+           echo "=== test_v9_open_cpu_wired: REFUSE ==="; exit 2 ;;
     esac
 done
 [[ -n "$PM_PID" ]] || PM_PID=$(find_postmaster)
 if [[ -z "$PM_PID" ]]; then
     echo "REFUSE: cannot find postmaster PID"
+    # Explicit, not via the trap below: this exit happens before the trap is
+    # installed, because cleanup() needs TRACE_DIR to exist.
+    echo "=== test_v9_open_cpu_wired: REFUSE ==="
     exit 2
 fi
 
@@ -67,11 +71,24 @@ SOCK="$TRACE_DIR/pgwt.sock"
 TRACER_PID=""
 
 cleanup() {
+    local rc=$?
     if [[ -n "$TRACER_PID" ]] && kill -0 "$TRACER_PID" 2>/dev/null; then
         kill -TERM "$TRACER_PID" 2>/dev/null
         wait "$TRACER_PID" 2>/dev/null
     fi
     rm -rf "$TRACE_DIR" "$DAEMON_LOG"
+    # EVERY refusal gets the banner, including the ones that exit before
+    # reaching a verdict (no daemon, no socket, no probes, no stimulus).
+    # tests/run_all.sh counts exit 2 as a failure exactly like exit 1, so
+    # this banner is the ONLY thing in the gate log that says "this was a
+    # refusal, not a product defect" -- and six of the refusal sites below
+    # printed their reason and then exited silently, which is how a red
+    # refusal gets read as a red product. Emitted from the trap rather than
+    # repeated at each site so a refusal added later cannot forget it.
+    if [[ "$rc" -eq 2 ]]; then
+        echo "=== test_v9_open_cpu_wired: REFUSE ==="
+    fi
+    return "$rc"
 }
 trap cleanup EXIT
 
@@ -258,7 +275,6 @@ if [[ -z "$NOTES" ]]; then
     echo "          offered an observation' and 'it did and nothing was"
     echo "          credited'. This daemon predates the counter, so this"
     echo "          check cannot name a defect and will not guess one."
-    echo "=== test_v9_open_cpu_wired: REFUSE ==="
     exit 2
 fi
 if [[ "$NOTES" -le 0 ]]; then
@@ -268,7 +284,6 @@ if [[ "$NOTES" -le 0 ]]; then
     echo "          The defect is upstream, at the producer call site in"
     echo "          pgwt_read_state_map (src/map_reader.c) or in what the"
     echo "          state-map scan sees -- not in the writer."
-    echo "=== test_v9_open_cpu_wired: REFUSE ==="
     exit 2
 fi
 echo "  ok: the writer WAS asked -- summary_open_cpu_notes_total = $NOTES"
@@ -318,7 +333,6 @@ if [[ -n "$V8CRED" ]] && [[ "$V8CRED" -eq 0 ]]; then
     echo "          seal trigger (writer_seal_through is only called from"
     echo "          push_event and flush_completed, and returns immediately"
     echo "          while w->fp is NULL) before reading this check again."
-    echo "=== test_v9_open_cpu_wired: REFUSE ==="
     exit 2
 fi
 
