@@ -72,7 +72,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_open_ckpt \
             trace_closure_probe \
             open_ckpt_stub \
-            test_restart_second_identity
+            test_restart_second_identity \
+            test_background_unattributed
 
 .PHONY: all clean check
 
@@ -136,7 +137,7 @@ test_trace_perms: test_trace_perms.c $(BUILD)/event_writer.o \
 # summary_writer.o since #379: the daemon build of map_reader.c calls
 # pgwt_summary_note_open from pgwt_read_state_map (that loop is the daemon's
 # only open-interval source), so every target linking map_reader.o needs it.
-test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
+test_event_reader: test_event_reader.c $(BUILD)/event_reader.o replay_accum.o $(BUILD)/event_writer.o \
                    $(BUILD)/map_reader.o $(BUILD)/summary_writer.o \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
                    $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
@@ -166,8 +167,9 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
 # test_live_accum: compute.c compiled directly with -DPGWT_SERVER, its only
 # foreign symbol (pgwt_visit_summaries) stubbed in the test. Runs anywhere.
 test_window_clip: test_window_clip.c ../src/compute.c \
-                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
-	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+                  ../src/window_clip.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(filter-out %.h,$^) -lm
 
 # #387: out-of-window / zero-duration CPU records cannot supply a measured
 # signal. Same BPF-free build and summary visitor stub as test_window_clip.
@@ -438,15 +440,21 @@ test_coop: test_coop.c ../src/provider_coop.c
 
 # test_replay_fidelity: fidelity-aware --replay accumulation (T1/FID-5) —
 # samples contribute ASH-estimated time (never fabricated histograms),
-# markers are skipped. Links the daemon-flavor event_reader.c (which holds
-# pgwt_replay_events) against the BPF-free accumulator core: map_reader.c
+# markers are skipped. Links event_reader.c and replay_accum.c against the
+# BPF-free accumulator core: map_reader.c
 # compiled with -DPGWT_SERVER strips its libbpf/skeleton half (same pattern
 # as sampler.c/anomaly.c), so no bpftool is needed.
-map_reader_core.o: ../src/map_reader.c ../src/map_reader.h
+map_reader_core.o: ../src/map_reader.c ../src/map_reader.h ../src/query_attr.h
 	$(CC) $(CFLAGS) -DPGWT_SERVER -c -o $@ $<
 
-test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c \
-                      map_reader_core.o $(BUILD)/server_event_writer.o \
+replay_compute_core.o: ../src/compute.c ../src/compute.h ../src/window_clip.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -c -o $@ $<
+
+replay_accum.o: ../src/replay_accum.c ../src/event_reader.h ../src/event_sort.h ../src/map_reader.h ../src/query_attr.h ../src/window_clip.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c replay_accum.o \
+                      replay_compute_core.o map_reader_core.o $(BUILD)/server_event_writer.o \
                       $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o \
                       $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 -lz
@@ -919,8 +927,10 @@ test_window_overlap: test_window_overlap.c ../src/server.c $(TRANSITIONS_LOADER_
 # server.c-included recipe (the real writer, the real loader, the real
 # compute), because the defect is a property of what the loader hands the
 # tag pass.
-test_left_edge_attrib: test_left_edge_attrib.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
-	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+test_left_edge_attrib: test_left_edge_attrib.c ../src/server.c $(TRANSITIONS_LOADER_OBJS) \
+                      replay_accum.o map_reader_core.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) \
+	    replay_accum.o map_reader_core.o -lz -llz4 -lm
 
 # test_semantics_wire: #435/#436/#441 -- four contracts that live in the JSON
 # the client receives, not in a compute result. A compute-level assertion
@@ -1022,16 +1032,16 @@ test_open_overlay: test_open_overlay.c ../src/open_overlay.c ../src/cJSON.c
 # and the block scan in pgwt_replay_file, which must look PAST --to or the
 # record rule is unreachable), plus a bypass suite for the lookahead budget,
 # an unreadable block header and a SAMPLES tail. Same build shape as
-# test_replay_fidelity: the daemon-flavour event_reader.c against the BPF-free
+# test_replay_fidelity: the reader and replay accumulator against the BPF-free
 # accumulator core, so no bpftool is needed.
-test_replay_window: test_replay_window.c ../src/event_reader.c \
+test_replay_window: test_replay_window.c ../src/event_reader.c replay_accum.o \
                     map_reader_core.o $(BUILD)/server_event_writer.o \
                     $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
                     $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 -lz
 
 clean:
-	rm -f $(TESTS) test_exec_index map_reader_core.o
+	rm -f $(TESTS) test_exec_index map_reader_core.o replay_compute_core.o replay_accum.o
 
 # test_restart_second_identity: #284 -- a daemon restart INSIDE a second
 # writes that second twice (the outgoing daemon's pgwt_summary_close
@@ -1069,3 +1079,17 @@ test_restart_second_identity: test_restart_second_identity.c \
                    $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
                    $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_background_unattributed: #596 -- query-less background/maintenance work
+# must be VISIBLE as unattributed time instead of being dropped from
+# top_queries, with an IO_WORKER control that must stay outside the query
+# model and a PACING-TIMEOUT leg that must stay out of both. Registered in
+# the TESTS variable above, not by a `TESTS +=` down here: the += form is
+# invisible to tests/test_unit_list_coverage.py, whose parser only reads the
+# `TESTS =` assignment, so deleting this test's unit_tests.list line would
+# have made it built-but-never-run with the coverage gate still green.
+# Server build, no BPF, no live PG; ~0.0 s.
+test_background_unattributed: test_background_unattributed.c ../src/compute.c \
+                             $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                             $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm

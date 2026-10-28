@@ -19,22 +19,39 @@
  *   - the replay stats report what was accumulated (for the loud notice).
  *
  * Links the BPF-free accumulator core (map_reader.c with -DPGWT_SERVER)
- * plus the daemon-flavor event_reader.c — no bpftool needed.
+ * plus the reader and replay_accum.c — no bpftool needed.
  */
 #include "event_reader.h"
 #include "event_writer.h"
 #include "map_reader.h"
+#include "compute.h"
+#include "summary_reader.h"
 #include "wait_event.h"
 #include "pg_wait_tracer.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
+/* compute.c's summary-stream entry point is unused by this raw comparison. */
+int pgwt_visit_summaries(const char *dir, uint64_t from, uint64_t to,
+                         pgwt_summary_visitor visitor, void *ctx)
+{
+    (void)dir; (void)from; (void)to; (void)visitor; (void)ctx;
+    return -1;
+}
+
 #define IO_READ  0x0A000015u   /* IO:DataFileRead */
 #define LOCK_REL 0x03000000u   /* Lock:relation */
+
+/* An unclassified flag bit standing in for a category a future build adds.
+ * The inverse mask in replay_accum.c must route it to the total refusal
+ * rather than the back-fill. */
+#define FUTURE_CAT_FLAG 0x2000u
 
 static int failures = 0;
 /* #531 bypass suite: EXPECT_RED runs a probe that MUST register a failure,
@@ -106,14 +123,22 @@ find_pid_ev(struct pgwt_accumulator *acc, uint32_t pid, uint32_t we)
 }
 
 static const struct pgwt_query_event_stats *
-find_query_ev(struct pgwt_accumulator *acc, uint64_t qid, uint32_t we)
+find_query_row(struct pgwt_accumulator *acc, uint64_t qid, uint32_t we)
 {
     for (int i = 0; i < acc->num_query_events; i++)
         if (acc->query_events[i].query_id == qid &&
-            acc->query_events[i].wait_event == we &&
-            acc->query_events[i].count > 0)
+            acc->query_events[i].wait_event == we)
             return &acc->query_events[i];
     return NULL;
+}
+
+/* The rendering finder must reject invisible rows (#531). Clipped-time
+ * assertions use the raw row lookup explicitly when count == 0 is intended. */
+static const struct pgwt_query_event_stats *
+find_query_ev(struct pgwt_accumulator *acc, uint64_t qid, uint32_t we)
+{
+    const struct pgwt_query_event_stats *q = find_query_row(acc, qid, we);
+    return q && q->count > 0 ? q : NULL;
 }
 
 #define FIX_QID 700ULL
@@ -185,6 +210,7 @@ static void check_cpu_replay(const struct pgwt_trace_event *e,
     if (!acc) { perror("malloc"); exit(1); }
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, e, 1, from, to, bi, NULL);
+    pgwt_replay_finish(acc);
     CHECK_EQ_U64(acc->tm.cpu_time_ns, cpu, "time model CPU (ns)");
     CHECK_EQ_U64(acc->tm.offcpu_time_ns, offcpu, "time model off-CPU (ns)");
     CHECK_EQ_U64(acc->tm.db_time_ns, db, "time model DB wall (ns)");
@@ -259,6 +285,7 @@ static void test_cpu_row_bypass(const struct pgwt_trace_event *measured,
     printf("CASE #531 bypass: the CPU* row is ABSENT, not wrong\n");
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, wait_labelled, 1, 0, 0, bi, NULL);
+    pgwt_replay_finish(acc);
     EXPECT_RED("an absent CPU* row refuses, never approves",
                check_cpu_rows(acc, wait_labelled->pid, 4 * MS, 4 * MS));
 
@@ -270,6 +297,7 @@ static void test_cpu_row_bypass(const struct pgwt_trace_event *measured,
     printf("CASE #531 bypass: per-event rows carry WALL (the defect itself)\n");
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, measured, 1, 0, 0, bi, NULL);
+    pgwt_replay_finish(acc);
     stamp_cpu_rows(acc, measured->pid, 10 * MS, 10 * MS, 1);
     EXPECT_RED("wall in the per-event CPU* rows goes red",
                check_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS));
@@ -277,6 +305,7 @@ static void test_cpu_row_bypass(const struct pgwt_trace_event *measured,
     printf("CASE #531 bypass: total_ns corrected, occurrence left on wall\n");
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, measured, 1, 0, 0, bi, NULL);
+    pgwt_replay_finish(acc);
     stamp_cpu_rows(acc, measured->pid, 4 * MS, 10 * MS, 1);
     EXPECT_RED("min/max left on wall goes red",
                check_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS));
@@ -284,7 +313,12 @@ static void test_cpu_row_bypass(const struct pgwt_trace_event *measured,
     printf("CASE #531 bypass: the row exists but is invisible (count == 0)\n");
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, measured, 1, 0, 0, bi, NULL);
+    pgwt_replay_finish(acc);
     stamp_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS, 0);
+    CHECK(find_query_row(acc, FIX_QID, 0) != NULL,
+          "invisible query row physically exists");
+    CHECK(find_query_ev(acc, FIX_QID, 0) == NULL,
+          "query finder itself rejects count-zero rows");
     EXPECT_RED("a CPU* row the finder cannot resolve refuses",
                check_cpu_rows(acc, measured->pid, 4 * MS, 4 * MS));
 
@@ -293,6 +327,7 @@ static void test_cpu_row_bypass(const struct pgwt_trace_event *measured,
     unknown.cpu_ns = PGWT_CPU_NS_UNKNOWN;
     pgwt_accum_init(acc);
     pgwt_replay_events(acc, &unknown, 1, 0, 0, bi, NULL);
+    pgwt_replay_finish(acc);
     EXPECT_RED("an UNKNOWN cpu column cannot satisfy the measured assertion",
                check_cpu_rows(acc, unknown.pid, 4 * MS, 4 * MS));
     /* ...and the legacy whole-gap row is still asserted, positively. */
@@ -410,6 +445,7 @@ static void test_cpu_replay(bool measured)
                              PERIOD, OCC_UNSET);
         }
     }
+    pgwt_replay_finish(mixed);
     CHECK_EQ_U64(intervals_seen, count, "interval checks were reached");
     CHECK_EQ_U64(samples_seen, measured ? 1 : 0, "sample checks were reached");
     if (measured) {
@@ -440,6 +476,674 @@ static void test_cpu_replay(bool measured)
     pgwt_reader_close(&r);
     free(buf);
     free(mixed);
+    char cmd[700];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+static uint64_t query_total(const struct pgwt_accumulator *acc)
+{
+    uint64_t ns = 0;
+    for (int i = 0; i < acc->num_query_events; i++)
+        ns += acc->query_events[i].total_ns;  /* includes UNATTRIBUTED */
+    return ns;
+}
+
+/* #612: exercise the actual zero-id branch, through the trace codec, and
+ * compare query accounting with the live interval/marker contract. */
+static void test_parse_phase_replay(void)
+{
+    const uint64_t MS = 1000000ULL, BASE = 10000000000000ULL;
+    char dir[] = "/tmp/pgwt_replay_parse_XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); failures++; return; }
+    struct pgwt_trace_event trace[] = {
+        /* CMD_START's stale id must never resolve this command's wait. */
+        ev(123, BASE, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 999),
+        ev(123, BASE + 10 * MS, 10 * MS, LOCK_REL, 0, 0),
+        ev(123, BASE + 12 * MS, 0, PGWT_MARKER_EXEC_START,
+           PGWT_MARKER_EXEC_START, 700),
+        ev(123, BASE + 16 * MS, 4 * MS, IO_READ, 0, 700),
+        /* A trailing zero-id record falls back to this command's id. */
+        ev(123, BASE + 19 * MS, 3 * MS, LOCK_REL, 0, 0),
+        ev(123, BASE + 20 * MS, 0, PGWT_MARKER_CMD_END,
+           PGWT_MARKER_CMD_END, 0),
+        ev(123, BASE + 21 * MS, 0, PGWT_MARKER_CMD_START,
+           PGWT_MARKER_CMD_START, 700),
+        /* No resolving marker or exit: replay completion must flush it. */
+        ev(123, BASE + 26 * MS, 5 * MS, LOCK_REL, 0, 0),
+    };
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0) {
+        failures++; return;
+    }
+    for (size_t i = 0; i < sizeof(trace) / sizeof(trace[0]); i++) {
+        CHECK_EQ_U64(pgwt_writer_push_event(&w, &trace[i]), 0,
+                     "parse fixture record written");
+        if (i == 1 || i == 2)
+            CHECK_EQ_U64(pgwt_writer_publish(&w), 0,
+                         "parse wait and resolving marker in separate blocks");
+    }
+    pgwt_writer_close(&w);
+    pgwt_writer_destroy(&w);
+
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, path) != 0) { failures++; return; }
+    CHECK(r.num_blocks >= 2, "parse fixture crosses a block boundary");
+    struct pgwt_trace_event *buf = malloc(PGWT_BLOCK_EVENTS * sizeof(*buf));
+    struct pgwt_accumulator *live = malloc(sizeof(*live));
+    struct pgwt_accumulator *replay = malloc(sizeof(*replay));
+    struct pgwt_accumulator *bounded = malloc(sizeof(*bounded));
+    struct pgwt_accumulator *clipped = malloc(sizeof(*clipped));
+    if (!buf || !live || !replay || !bounded || !clipped) {
+        perror("malloc");
+        free(buf); free(live); free(replay); free(bounded); free(clipped);
+        pgwt_reader_close(&r);
+        failures++;
+        return;
+    }
+    pgwt_accum_init(live);
+    pgwt_accum_init(replay);
+    pgwt_accum_init(bounded);
+    pgwt_accum_init(clipped);
+    int zero_waits = 0;
+    for (int b = 0; b < r.num_blocks; b++) {
+        struct pgwt_block_info bi;
+        int n = pgwt_reader_decode_block_info(&r, b, buf, PGWT_BLOCK_EVENTS, &bi);
+        CHECK(n > 0, "parse fixture block decoded");
+        if (n <= 0) continue;
+        pgwt_replay_events(replay, buf, n, 0, 0, &bi, NULL);
+        pgwt_replay_events(clipped, buf, n, BASE + 3 * MS,
+                           BASE + 7 * MS, &bi, NULL);
+        for (int i = 0; i < n; i++) {
+            const struct pgwt_trace_event *e = &buf[i];
+            struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(live, e->pid);
+            if (PGWT_IS_MARKER(e->old_event)) {
+                pgwt_live_qattr_marker(live, pa, e->old_event, e->query_id);
+            } else {
+                if (e->old_event == LOCK_REL && e->query_id == 0)
+                    zero_waits++;
+                struct pgwt_live_interval iv = {
+                    .pid = e->pid, .we = e->old_event,
+                    .wall_ns = e->duration_ns, .cpu_ns = e->duration_ns,
+                    .query_id = e->query_id, .closed = true, .pa = pa,
+                };
+                pgwt_accum_add_interval(live, &iv);
+            }
+        }
+    }
+    /* #586: marker is in an older, non-overlapping block. The only
+     * admitted wait has qid 0; no in-window id can mask a missing seed. */
+    CHECK(pgwt_replay_file(&r, bounded, BASE + 17 * MS, BASE + 19 * MS,
+          buf, PGWT_BLOCK_EVENTS, NULL, NULL, NULL) == 0, "seeded replay scans older blocks");
+    CHECK_EQ_U64(zero_waits, 3, "codec preserves actual zero-id parse waits");
+    pgwt_live_qattr_pid_exit(live, 123);
+    struct pgwt_pid_accum *pending = pgwt_find_pid_accum(replay, 123);
+    CHECK(pending && pending->qattr.npending == 1,
+          "only the unresolved end-of-stream wait remains pending");
+    if (pending) CHECK_EQ_U64(pending->qattr.pending[0].total_ns, 5 * MS,
+                             "earlier waits were resolved during the streaming pass");
+    CHECK(pgwt_replay_check_finished(replay) == -1,
+          "forgotten finalization loudly refuses query output");
+    pgwt_replay_finish(replay);
+    CHECK(pgwt_replay_check_finished(replay) == 0, "finalized replay passes completeness check");
+    pgwt_replay_finish(bounded);
+    pgwt_replay_finish(clipped);
+    const struct pgwt_query_event_stats *lq = find_query_ev(live, 700, LOCK_REL);
+    const struct pgwt_query_event_stats *rq = find_query_ev(replay, 700, LOCK_REL);
+    const struct pgwt_query_event_stats *uq = find_query_ev(replay, 0, LOCK_REL);
+    const struct pgwt_query_event_stats *bq = find_query_ev(bounded, 700, LOCK_REL);
+    CHECK(lq && rq, "live and replay both resolve zero-id waits to query 700");
+    if (lq && rq) {
+        CHECK_EQ_U64(lq->total_ns, 13 * MS, "live resolves parse and trailing waits");
+        CHECK_EQ_U64(rq->total_ns, lq->total_ns, "replay resolves to the live query");
+        CHECK_EQ_U64(rq->count, 2, "deferred wait occurrences preserved");
+        CHECK_EQ_U64(rq->min_ns, 3 * MS, "deferred wait minimum preserved");
+        CHECK_EQ_U64(rq->max_ns, 10 * MS, "deferred wait maximum preserved");
+    }
+    CHECK(uq != NULL, "unresolved end-of-stream wait is visible");
+    if (uq) CHECK_EQ_U64(uq->total_ns, 5 * MS, "unresolved time is UNATTRIBUTED");
+    /* Compare the same raw window with the REAL server seeded tag pass,
+     * #586. The pre-window EXEC_START supplies rule 2, with no in-window
+     * resolving id after the zero-id wait to make the seed test vacuous. */
+    struct pgwt_trace_event server[] = { trace[4] };
+    struct pgwt_trace_event unseeded = trace[4];
+    CHECK(pgwt_tag_events_window(&unseeded, 1, NULL, 0, BASE + 19 * MS),
+          "unseeded control tag pass succeeds");
+    CHECK_EQ_U64(unseeded.query_id, 0, "left-edge comparison requires the seed to pass");
+    struct pgwt_qid_seed seed = { .pid = 123, .query_id = 700 };
+    CHECK(pgwt_tag_events_window_seeded(server, 1, NULL, 0,
+          BASE + 19 * MS, &seed, 1), "server seeded tag pass succeeds");
+    CHECK_EQ_U64(server[0].query_id, 700, "server attributes left-edge wait to 700");
+    CHECK(bq != NULL, "replay seeds left-edge attribution from pre-window markers (#586)");
+    if (bq) {
+        CHECK_EQ_U64(bq->query_id, server[0].query_id, "replay and server agree on query");
+        CHECK_EQ_U64(bq->total_ns, server[0].timestamp_ns - (BASE + 17 * MS), "replay and server agree on wait time");
+        CHECK_EQ_U64(bq->total_ns, 2 * MS, "left-edge wait has the expected duration");
+    }
+    CHECK(find_query_ev(bounded, 0, LOCK_REL) == NULL,
+          "seeded wait does not leak into UNATTRIBUTED");
+    CHECK(find_query_ev(replay, 999, LOCK_REL) == NULL,
+          "CMD_START's stale id never receives parse time");
+    CHECK_EQ_U64(query_total(live), 22 * MS, "live fixture accounts for every wait");
+    CHECK_EQ_U64(query_total(replay), query_total(live),
+                 "conservation: replay query plus unattributed time equals live total");
+    CHECK_EQ_U64(query_total(bounded), 2 * MS,
+                 "bounded conservation: all selected parse time remains accounted");
+    const struct pgwt_query_event_stats *cq =
+        find_query_row(clipped, 0, LOCK_REL);
+    CHECK(cq != NULL, "clipped parse wait has an unattributed row");
+    if (cq) {
+        CHECK_EQ_U64(cq->total_ns, 4 * MS, "deferred time respects both window edges");
+        CHECK_EQ_U64(cq->count, 0, "close outside window adds no occurrence");
+        CHECK_EQ_U64(cq->min_ns, UINT64_MAX, "close outside window adds no minimum");
+        CHECK_EQ_U64(cq->max_ns, 0, "close outside window adds no maximum");
+    }
+    CHECK_EQ_U64(query_total(clipped), 4 * MS,
+                 "clipped conservation includes time without an occurrence");
+    pgwt_replay_finish(replay);
+    CHECK_EQ_U64(query_total(replay), query_total(live), "finish is idempotent");
+    pgwt_reader_close(&r);
+    free(buf);
+    free(live);
+    free(replay);
+    free(bounded);
+    free(clipped);
+    char cmd[700];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* Commit order: A's CMD_START, B's command, then A's lagging wait/end.
+ * Sorting only each block (or each replay call) assigns A's wait to 900. */
+static void test_replay_commit_order(void)
+{
+    const uint64_t MS = 1000000ULL, BASE = 10000000000000ULL;
+    char dir[] = "/tmp/pgwt_replay_order_XXXXXX";
+    if (!mkdtemp(dir)) { failures++; return; }
+    struct pgwt_trace_event command_b[] = {
+        ev(123, BASE + 200 * MS, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 0),
+        ev(123, BASE + 200 * MS, 0, PGWT_MARKER_EXEC_START, PGWT_MARKER_EXEC_START, 900),
+    };
+    struct pgwt_trace_event command_a[] = {
+        ev(123, BASE + 90 * MS, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 0),
+        ev(123, BASE + 100 * MS, 10 * MS, LOCK_REL, 0, 0),
+        ev(123, BASE + 110 * MS, 0, PGWT_MARKER_CMD_END, PGWT_MARKER_CMD_END, 0),
+    };
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0) { failures++; return; }
+    CHECK(pgwt_writer_push_event(&w, &command_a[0]) == 0, "A's start written first");
+    CHECK(pgwt_writer_publish(&w) == 0, "commit A's start before the overlapping block");
+    for (int i = 0; i < 2; i++)
+        CHECK(pgwt_writer_push_event(&w, &command_b[i]) == 0, "early-committed B written");
+    CHECK(pgwt_writer_publish(&w) == 0, "commit B before lagging A");
+    /* Samples interleave both commands and carry different block weights.
+     * B's zero-id sample also makes its equal-timestamp marker order matter. */
+    struct pgwt_trace_event sample_a = ev(123, BASE + 105 * MS, 0, 0, IO_READ, 0);
+    struct pgwt_trace_event sample_b = ev(123, BASE + 205 * MS, 0, 0, IO_READ, 0);
+    CHECK(pgwt_writer_push_samples(&w, &sample_a, 1, 2 * MS) == 0,
+          "A's sample block has a 2 ms period");
+    CHECK(pgwt_writer_push_samples(&w, &sample_b, 1, 3 * MS) == 0,
+          "B's sample block has a 3 ms period");
+    for (int i = 1; i < 3; i++)
+        CHECK(pgwt_writer_push_event(&w, &command_a[i]) == 0, "late-committed A written");
+    pgwt_writer_close(&w);
+    pgwt_writer_destroy(&w);
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, path) != 0) { failures++; return; }
+    CHECK(!r.block_index_sorted, "fixture really has reversed commit order");
+    struct pgwt_trace_event *buf = malloc(PGWT_BLOCK_EVENTS * sizeof(*buf));
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    if (!buf || !a) { failures++; free(buf); free(a); pgwt_reader_close(&r); return; }
+    CHECK(pgwt_replay_file(&r, a, 0, 0, buf, PGWT_BLOCK_EVENTS, NULL, NULL, NULL) == 0,
+          "replay unordered blocks through the actual file scanner");
+    pgwt_replay_finish(a);
+    const struct pgwt_query_event_stats *uq = find_query_ev(a, 0, LOCK_REL);
+    CHECK(uq && uq->total_ns == 10 * MS, "A's 10 ms stays UNATTRIBUTED");
+    CHECK(find_query_ev(a, 900, LOCK_REL) == NULL, "B never inherits A's wait");
+    const struct pgwt_query_event_stats *sa = find_query_ev(a, 0, IO_READ);
+    const struct pgwt_query_event_stats *sb = find_query_ev(a, 900, IO_READ);
+    CHECK(sa && sa->count == 1 && sa->total_ns == 2 * MS &&
+          sa->min_ns == UINT64_MAX && sa->max_ns == 0,
+          "file merge keeps A's sample period and no occurrence latencies");
+    CHECK(sb && sb->count == 1 && sb->total_ns == 3 * MS &&
+          sb->min_ns == UINT64_MAX && sb->max_ns == 0,
+          "file merge keeps B's sample period and stable tied marker order");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 3 * MS, "only B's own sample backfills to B");
+    CHECK_EQ_U64(query_total(a), 15 * MS, "unordered mixed replay conserves every contribution");
+    pgwt_reader_close(&r);
+    free(buf);
+    free(a);
+    char cmd[700];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* Refuse unreadable input and definitions outside the single-bit hex-literal
+ * format. Only publish the result after the entire file was read successfully. */
+static int scan_defined_event_flags(const char *path, uint32_t *mask,
+                                    int *count)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+    char *line = NULL;
+    size_t capacity = 0;
+    uint32_t found = 0;
+    int n = 0, rc = -1;
+    while (getline(&line, &capacity, fp) != -1) {
+        char *p = line;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "#define", 7) != 0 ||
+            !isspace((unsigned char)p[7]))
+            continue;
+        p += 7;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "PGWT_EVENT_FLAG_", 16) != 0) continue;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "0x", 2) != 0 ||
+            !isxdigit((unsigned char)p[2]))
+            goto out;
+        errno = 0;
+        char *end;
+        unsigned long value = strtoul(p, &end, 16);
+        if (errno || value > UINT32_MAX || *end != 'U') goto out;
+        p = end + 1;
+        /* Only whitespace and comments may follow the literal, not an
+         * expression that happens to begin with a valid hex bit. */
+        for (;;) {
+            while (isspace((unsigned char)*p)) p++;
+            if (strncmp(p, "/*", 2) != 0) break;
+            char *close = strstr(p + 2, "*/");
+            if (!close) goto out;
+            p = close + 2;
+        }
+        if (*p && strncmp(p, "//", 2) != 0) goto out;
+        uint32_t bit = (uint32_t)value;
+        if (!bit || (bit & (bit - 1)) || (found & bit)) goto out;
+        found |= bit;
+        n++;
+    }
+    if (!feof(fp) || ferror(fp) || n == 0) goto out;
+    rc = 0;
+out:
+    free(line);
+    if (fclose(fp) != 0) rc = -1;
+    if (rc == 0) {
+        *mask = found;
+        *count = n;
+    }
+    return rc;
+}
+
+static void test_replay_flag_mask_closure(void)
+{
+    uint32_t mask = 0;
+    int count = 0;
+    CHECK(scan_defined_event_flags("../src/pg_wait_tracer.h", &mask, &count) == 0,
+          "event flag header can be scanned completely");
+    CHECK_EQ_U64(mask, PGWT_REPLAY_KNOWN_FLAGS,
+                 "every header flag is listed in replay's known flags");
+    CHECK(count >= 12, "header contains at least twelve event flag defines");
+    CHECK((PGWT_REPLAY_KNOWN_FLAGS & ~PGWT_REPLAY_NONCAT_FLAGS) ==
+              PGWT_REPLAY_CAT_FLAGS,
+          "known flags are classified as category or non-category");
+    CHECK((PGWT_REPLAY_CAT_FLAGS & PGWT_REPLAY_NONCAT_FLAGS) == 0,
+          "category and non-category flag lists do not overlap");
+
+    char dir[] = "/tmp/pgwt_replay_flags_XXXXXX";
+    if (!mkdtemp(dir)) {
+        CHECK(0, "create flag scanner bypass directory");
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/flags.h", dir);
+    CHECK(scan_defined_event_flags(path, &mask, &count) == -1,
+          "flag scanner refuses a nonexistent path");
+    /* Except for the no-event-flags case, each fixture needs a valid define;
+     * otherwise the zero-defines rule masks the rule it is meant to test. */
+    const struct {
+        const char *text;
+        const char *message;
+    } bypasses[] = {
+        { "#define SOMETHING_ELSE 0x1U\n",
+          "flag scanner refuses a file with no event flag defines" },
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n#define PGWT_EVENT_FLAG_WEIRD (1u << 13)\n",
+          "flag scanner refuses an unparseable flag value" },
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n"
+          "#define PGWT_EVENT_FLAG_DUPLICATE 0x1U\n",
+          "flag scanner refuses a duplicate bit" },
+        { "#define PGWT_EVENT_FLAG_FIRST 0x1U\n"
+          "#define PGWT_EVENT_FLAG_MULTIBIT 0x30U\n",
+          "flag scanner refuses a multi-bit value" },
+    };
+    for (size_t i = 0; i < sizeof(bypasses) / sizeof(bypasses[0]); i++) {
+        FILE *fp = fopen(path, "w");
+        if (!fp) {
+            CHECK(0, "open flag scanner bypass fixture for writing");
+            break;
+        }
+        int written = fputs(bypasses[i].text, fp) >= 0;
+        if (fclose(fp) != 0) written = 0;
+        CHECK(written, "write flag scanner bypass fixture completely");
+        if (!written) break;
+        CHECK(scan_defined_event_flags(path, &mask, &count) == -1,
+              bypasses[i].message);
+    }
+    /* If the first open failed, no fixture exists to remove. */
+    CHECK(unlink(path) == 0 || errno == ENOENT, "remove flag scanner fixture");
+    CHECK(rmdir(dir) == 0, "remove flag scanner bypass directory");
+}
+
+static void test_replay_unattributed_categories(void)
+{
+    const struct pgwt_block_info bi = { .block_type = PGWT_BLOCK_TRANSITIONS };
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    if (!a) { failures++; return; }
+    /* Activity-class events are idle without any version/name registry. */
+    const uint32_t idle = WEI(PG_WAIT_ACTIVITY, 0);
+    struct pgwt_trace_event arr[] = {
+        ev(101, 1000, 11, LOCK_REL, 0, 0),
+        ev(102, 2000, 23, IO_READ, 0, 0),
+        ev(102, 3000, 41, IO_READ, 0, 4242),
+        ev(103, 4000, 37, LOCK_REL, 0, 0),
+        ev(104, 5000, 53, LOCK_REL, 0, 0),
+        ev(104, 6000, 67, LOCK_REL, 0, 4242),
+        ev(105, 7000, 71, IO_READ, 0, 0),
+        ev(106, 8000, 83, idle, 0, 0),
+    };
+    arr[1].flags = arr[2].flags = PGWT_EVENT_FLAG_BACKGROUND;
+    arr[3].flags = PGWT_EVENT_FLAG_MAINT;
+    /* Deliberately under-count an unknown category: its 53 ns must never
+     * borrow the later statement's id, even on this same foreground-like pid. */
+    arr[4].flags = FUTURE_CAT_FLAG;
+    arr[6].flags = PGWT_EVENT_FLAG_IO_WORKER;
+    arr[7].flags = PGWT_EVENT_FLAG_BACKGROUND;
+
+    printf("CASE #665: replay zero-id categories and total refusal\n");
+    pgwt_replay_events(a, arr, 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    const struct pgwt_query_event_stats *q = find_query_ev(a, 0, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 11 &&
+          q->min_ns == 11 && q->max_ns == 11,
+          "foreground without a later id retains its exact 11 ns in qid 0 (#128)");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 11, "foreground contributes 11 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "foreground without an id never backfills");
+    EXPECT_RED("missing foreground qid-0 row goes red", {
+        a->num_query_events = 0;
+        CHECK(find_query_ev(a, 0, LOCK_REL) != NULL, "foreground qid-0 row present");
+        a->num_query_events = 1;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[1], 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    q = find_query_ev(a, 0, IO_READ);
+    CHECK(q && q->count == 1 && q->total_ns == 23 &&
+          q->min_ns == 23 && q->max_ns == 23,
+          "background retains its exact 23 ns in qid 0 despite a later real id");
+    q = find_query_ev(a, 4242, IO_READ);
+    CHECK(q && q->count == 1 && q->total_ns == 41 &&
+          q->min_ns == 41 && q->max_ns == 41,
+          "same background pid's query 4242 contains only its own 41 ns");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 23, "background contributes 23 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "background zero-id work never backfills");
+    EXPECT_RED("lost background time goes red", {
+        a->query_events[0].total_ns = 0;
+        q = find_query_ev(a, 0, IO_READ);
+        CHECK(q && q->total_ns == 23, "background qid 0 retains 23 ns");
+        a->query_events[0].total_ns = 23;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[3], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    q = find_query_ev(a, 0, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 37 &&
+          q->min_ns == 37 && q->max_ns == 37,
+          "maintenance retains its exact 37 ns and one occurrence in qid 0");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 37, "maintenance contributes 37 unattributed ns");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "maintenance zero-id work never backfills");
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[4], 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, LOCK_REL) == NULL, "unknown category creates no qid-0 row");
+    q = find_query_ev(a, 4242, LOCK_REL);
+    CHECK(q && q->count == 1 && q->total_ns == 67 &&
+          q->min_ns == 67 && q->max_ns == 67,
+          "unknown category never adds its 53 ns to the later query's 67 ns");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "unknown category moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "unknown category moves no backfilled counter");
+    EXPECT_RED("borrowing an unknown category's time goes red", {
+        a->query_events[0].total_ns = 53 + 67;
+        q = find_query_ev(a, 4242, LOCK_REL);
+        CHECK(q && q->total_ns == 67, "query 4242 contains only its own 67 ns");
+        a->query_events[0].total_ns = 67;
+    });
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, &arr[6], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, IO_READ) == NULL, "IO worker creates no qid-0 IO row");
+    CHECK_EQ_U64(a->num_query_events, 0, "IO worker creates no query rows at all");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "IO worker moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "IO worker moves no backfilled counter");
+
+    pgwt_accum_init(a);
+    CHECK(pgwt_is_idle_event(idle), "Activity fixture is idle under the load rule");
+    pgwt_replay_events(a, &arr[7], 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_row(a, 0, idle) == NULL, "idle background creates no qid-0 row");
+    CHECK_EQ_U64(a->num_query_events, 0, "idle background creates no query rows");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 0, "idle background moves no unattributed counter");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "idle background moves no backfilled counter");
+
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, arr, sizeof(arr) / sizeof(arr[0]), 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    /* Independent literal budget: unknown 53, IO-worker 71 and idle 83 ns
+     * are intentionally excluded from query accounting. */
+    CHECK_EQ_U64(query_total(a), 11 + 23 + 41 + 37 + 67,
+                 "query totals conserve the independent per-record ns budget");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, 11 + 23 + 37,
+                 "only foreground, background and maintenance zero-id ns are unattributed");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "combined fixture never borrows a query id");
+    free(a);
+}
+
+static void test_replay_resolver_edges(void)
+{
+    const uint64_t MS = 1000000ULL, BASE = 10000000000000ULL;
+    const struct pgwt_block_info bi = { .block_type = PGWT_BLOCK_TRANSITIONS };
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    if (!a) { failures++; return; }
+    /* Same timestamp: captured CMD_START precedes EXEC_START. An unstable
+     * sort can leave a false reset between the id and the zero-id wait. */
+    struct pgwt_trace_event ties[] = {
+        ev(123, BASE, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 999),
+        ev(123, BASE, 0, PGWT_MARKER_EXEC_START, PGWT_MARKER_EXEC_START, 700),
+        ev(123, BASE + 10 * MS, 10 * MS, LOCK_REL, 0, 0),
+    };
+    /* Direct calls consume the ordered stream supplied by the file sort. */
+    pgwt_replay_events(a, ties, 3, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    const struct pgwt_query_event_stats *q = find_query_ev(a, 700, LOCK_REL);
+    CHECK(q && q->total_ns == 10 * MS, "ordered stream preserves tied marker order");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 10 * MS, "stable marker order supplies rule 2");
+
+    pgwt_accum_init(a);
+    struct pgwt_trace_event io[] = {
+        ev(123, BASE + MS, MS, LOCK_REL, 0, 900),
+        ev(123, BASE + 2 * MS, MS, LOCK_REL, 0, 0),
+    };
+    io[0].flags = PGWT_EVENT_FLAG_IO_WORKER;
+    pgwt_replay_events(a, io, 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK(find_query_ev(a, 900, LOCK_REL) == NULL, "io-worker nonzero id is structurally query-less");
+    q = find_query_ev(a, 0, LOCK_REL);
+    CHECK(q && q->total_ns == MS, "io-worker id never seeds a foreground wait");
+    CHECK_EQ_U64(a->qattr_backfilled_ns, 0, "io-worker id cannot trigger a backfill");
+
+    pgwt_accum_init(a);
+    for (uint32_t pid = 1; pid <= MAX_BACKENDS; pid++)
+        pgwt_get_or_create_pid(a, pid);
+    CHECK_EQ_U64(a->num_pids, MAX_BACKENDS, "fixture fills the pid table");
+    struct pgwt_trace_event dropped = ev(MAX_BACKENDS + 1, BASE + MS, MS, LOCK_REL, 0, 0);
+    pgwt_replay_events(a, &dropped, 1, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(query_total(a), 0, "full pid table matches live's drop of zero-id time");
+    CHECK_EQ_U64(a->tm.db_time_ns, MS, "full pid table still retains system time");
+
+    pgwt_accum_init(a);
+    struct pgwt_trace_event overflow[PGWT_QATTR_PENDING_MAX + 2];
+    for (int i = 0; i < PGWT_QATTR_PENDING_MAX + 1; i++)
+        overflow[i] = ev(123, BASE + (i + 1) * MS, MS, LOCK_REL + i, 0, 0);
+    overflow[PGWT_QATTR_PENDING_MAX + 1] = ev(123, BASE + 100 * MS, 0,
+        PGWT_MARKER_EXEC_START, PGWT_MARKER_EXEC_START, 700);
+    pgwt_replay_events(a, overflow, PGWT_QATTR_PENDING_MAX + 2, 0, 0, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(a->qattr_pending_overflow, 1, "resolver API owns the pending overflow policy");
+    CHECK_EQ_U64(a->qattr_unattributed_ns, PGWT_QATTR_PENDING_MAX * MS,
+                 "overflow spills all full-list time exactly once");
+    q = find_query_ev(a, 700, LOCK_REL + PGWT_QATTR_PENDING_MAX);
+    CHECK(q && q->count == 1 && q->min_ns == MS && q->max_ns == MS && q->total_ns == MS,
+          "first post-overflow slot has only its own occurrence stats");
+    CHECK_EQ_U64(query_total(a), (PGWT_QATTR_PENDING_MAX + 1) * MS,
+                 "overflow conserves every deferred interval");
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, ties, 2, BASE + MS, BASE + 2 * MS, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(a->num_pids, 1, "seed markers use the bounded per-pid resolver");
+    CHECK_EQ_U64(a->pids[0].num_events, 0, "seed-only markers create no event statistics");
+    CHECK_EQ_U64(a->num_query_events, 0, "seed-only markers never fabricate query rows");
+
+    pgwt_accum_init(a);
+    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(a, 123);
+    pgwt_live_qattr_record(a, pa, 0, LOCK_REL, MS, 0, true);
+    CHECK(pgwt_replay_check_finished(a) == -1,
+          "residual resolver aggregates also loudly refuse unfinished output");
+    pgwt_replay_finish(a);
+    CHECK(pgwt_replay_check_finished(a) == 0, "finish clears residual resolver aggregates");
+
+    free(a);
+}
+
+/* Cross-file timestamps reverse across a reboot. Read REAL patched file
+ * headers so the test covers per-file clocks in wall-ordered replay. */
+static void test_replay_wall_clocks(void)
+{
+    const uint64_t S = 1000000000ULL, WALL = 1700000000ULL * S;
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    struct pgwt_trace_event *buf = malloc(PGWT_BLOCK_EVENTS * sizeof(*buf));
+    if (!a || !buf) { failures++; free(a); free(buf); return; }
+    /* Reboot reversal, then a clock-anchor step with overlapping mono
+     * ranges. The latter would interleave two commands under raw sorting. */
+    for (int scenario = 0; scenario < 2; scenario++) {
+        pgwt_accum_init(a);
+        for (int f = 0; f < 2; f++) {
+            char dir[] = "/tmp/pgwt_replay_clock_XXXXXX";
+            if (!mkdtemp(dir)) { failures++; break; }
+            uint64_t mono = (f ? (scenario ? 3601 : 5) : 3600) * S;
+            struct pgwt_trace_event records[] = {
+                ev(123, mono, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 0),
+                ev(123, mono + S, 0, PGWT_MARKER_EXEC_START,
+                   PGWT_MARKER_EXEC_START, f ? 900 : 700),
+                ev(123, mono + 2 * S, S, LOCK_REL, 0, 0),
+            };
+            struct pgwt_event_writer w;
+            CHECK(pgwt_writer_init(&w, dir, 18, 24, NULL) == 0, "clock fixture writer opened");
+            for (int i = 0; i < 3; i++)
+                CHECK(pgwt_writer_push_event(&w, &records[i]) == 0, "clock fixture record written");
+            pgwt_writer_close(&w);
+            pgwt_writer_destroy(&w);
+            char path[600];
+            snprintf(path, sizeof(path), "%s/current.trace", dir);
+            FILE *fp = fopen(path, "r+b");
+            struct pgwt_trace_file_header h;
+            CHECK(fp && fread(&h, sizeof(h), 1, fp) == 1, "clock fixture header read");
+            if (fp) {
+                h.start_time_ns = WALL + f * 10 * S;
+                h.clock_offset_ns = mono;
+                rewind(fp);
+                CHECK(fwrite(&h, sizeof(h), 1, fp) == 1, "per-file clock anchor written");
+                fclose(fp);
+            }
+            struct pgwt_event_reader r;
+            CHECK(pgwt_reader_open(&r, path) == 0, "clock fixture reader opened");
+            CHECK(pgwt_replay_file(&r, a, 0, 0, buf, PGWT_BLOCK_EVENTS, NULL, NULL, NULL) == 0,
+                  "different clock domains admitted through file scanner");
+            pgwt_reader_close(&r);
+            char cmd[700];
+            snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+            if (system(cmd) != 0) { /* best effort */ }
+        }
+        pgwt_replay_finish(a);
+        CHECK(pgwt_replay_check_finished(a) == 0, "cross-clock replay is complete");
+        const struct pgwt_query_event_stats *q = find_query_ev(a, 700, LOCK_REL);
+        CHECK(q && q->total_ns == S, "pre-reboot wait retains pre-reboot query");
+        q = find_query_ev(a, 900, LOCK_REL);
+        CHECK(q && q->total_ns == S, "post-reboot recycled pid retains its own query");
+        CHECK_EQ_U64(a->qattr_backfilled_ns, 2 * S, "cross-clock attribution counts only correct backfills");
+    }
+    free(a); free(buf);
+}
+
+/* The documented two-hour window at 100 statements/s: 2.88M markers.
+ * It must succeed without any window-sized attribution queue or spool. */
+static void test_replay_two_hours(void)
+{
+    const uint64_t S = 1000000000ULL, BASE = 10000000000000ULL;
+    const int commands = 2 * 60 * 60 * 100;
+    char dir[] = "/tmp/pgwt_replay_two_hours_XXXXXX";
+    if (!mkdtemp(dir)) { failures++; return; }
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 18, 24, NULL) != 0) { failures++; return; }
+    int written = 0;
+    for (int i = 0; i < commands; i++) {
+        uint64_t t = BASE + (uint64_t)i * (S / 100);
+        struct pgwt_trace_event records[] = {
+            ev(123, t, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 999),
+            ev(123, t + 1, 0, PGWT_MARKER_PLAN_START, PGWT_MARKER_PLAN_START, 700),
+            ev(123, t + 2, 0, PGWT_MARKER_EXEC_START, PGWT_MARKER_EXEC_START, 700),
+            ev(123, t + 3, 1, LOCK_REL, 0, 0),
+            ev(123, t + 4, 0, PGWT_MARKER_CMD_END, PGWT_MARKER_CMD_END, 0),
+        };
+        int rc = 0;
+        for (int j = 0; j < 5; j++) rc |= pgwt_writer_push_event(&w, &records[j]);
+        if (rc) { failures++; break; }
+        written++;
+    }
+    pgwt_writer_close(&w);
+    pgwt_writer_destroy(&w);
+    CHECK_EQ_U64(written, commands, "two-hour 100 TPS fixture written through real codec");
+    struct pgwt_trace_event *buf = malloc(PGWT_BLOCK_EVENTS * sizeof(*buf));
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_event_reader r;
+    if (!buf || !a || pgwt_reader_open(&r, path) != 0) {
+        failures++; free(buf); free(a); return;
+    }
+    struct pgwt_replay_stats st = {0};
+    uint64_t decoded = 0;
+    CHECK(pgwt_replay_file(&r, a, BASE, BASE + 2 * 60 * 60 * S,
+          buf, PGWT_BLOCK_EVENTS, NULL, &st, &decoded) == 0,
+          "documented two-hour window succeeds beyond the former marker cap");
+    pgwt_reader_close(&r);
+    pgwt_replay_finish(a);
+    CHECK(pgwt_replay_check_finished(a) == 0, "two-hour streaming replay completes");
+    CHECK_EQ_U64(decoded, (uint64_t)commands * 5, "all two-hour records decoded");
+    CHECK_EQ_U64(st.markers_skipped, (uint64_t)commands * 4, "all 2.88M markers processed");
+    const struct pgwt_query_event_stats *q = find_query_ev(a, 700, LOCK_REL);
+    CHECK(q && q->count == (uint64_t)commands && q->total_ns == (uint64_t)commands,
+          "all 720000 zero-id waits backfill with exact time and occurrences");
+    CHECK_EQ_U64(a->num_pids, 1, "entire window needs one resolver");
+    CHECK_EQ_U64(a->pids[0].qattr.npending, 0, "no pending aggregates survive completion");
+    free(a); free(buf);
     char cmd[700];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0) { /* best effort */ }
@@ -512,6 +1216,7 @@ int main(void)
         if (n <= 0) continue;
         pgwt_replay_events(acc, buf, n, 0, 0, &bi, &st);
     }
+    pgwt_replay_finish(acc);
     pgwt_reader_close(&r);
 
     /* ── Assertions ──────────────────────────────────────── */
@@ -594,6 +1299,13 @@ int main(void)
 
     test_cpu_replay(true);
     test_cpu_replay(false);
+    test_parse_phase_replay();
+    test_replay_commit_order();
+    test_replay_flag_mask_closure();
+    test_replay_unattributed_categories();
+    test_replay_resolver_edges();
+    test_replay_wall_clocks();
+    test_replay_two_hours();
 
     printf("%s\n", failures == 0 ? "ALL PASSED" : "FAILURES");
     return failures == 0 ? 0 : 1;

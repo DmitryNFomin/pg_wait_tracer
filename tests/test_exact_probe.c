@@ -1,7 +1,9 @@
 /* Stage 3 exact-probe bundle: policy, atomic attach, generations, refcount. */
 #include "exact_probe.h"
 #include "backend_meta.h"
+#include "cJSON.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,14 +22,20 @@ struct fake_ops {
     int detach_order[32];
     int detach_count;
     int fail_at;
+    int fail_errno;
+    int failures_injected;
 };
 
 static void *fake_attach(void *ctx, enum pgwt_exact_probe_index index)
 {
     struct fake_ops *f = ctx;
     f->attach_calls[index]++;
-    if (f->fail_at == (int)index)
+    if (f->fail_at == (int)index) {
+        f->failures_injected++;
+        if (f->fail_errno)
+            errno = f->fail_errno;
         return NULL;
+    }
     return (void *)(uintptr_t)(index + 1);
 }
 
@@ -38,6 +46,7 @@ static void fake_detach(void *ctx, enum pgwt_exact_probe_index index,
     (void)link;
     f->detach_calls[index]++;
     f->detach_order[f->detach_count++] = index;
+    errno = EBUSY;  /* Cleanup must not replace an attach failure's errno. */
 }
 
 static const struct pgwt_exact_probe_ops ops = {
@@ -344,6 +353,186 @@ static void test_acquire_refuses_without_ops(void)
           "#108: acquire refuses when it cannot attach at all");
 }
 
+/* #592: drive failures through the real attach path, not a presence-only
+ * assertion. Like test_tag_refusal's ledger, the injection is counted and
+ * must be reached. Both startup and escalation must disclose the SAME reason.
+ * ENOTSUP is still an attempt error: support was not independently measured. */
+static void test_optional_attach_outcomes(void)
+{
+    const int errors[] = { EACCES, EIO, ENOTSUP, 0 };
+    int failures_seen = 0, successes_seen = 0;
+    for (int startup = 0; startup < 2; startup++) {
+        for (int which = PGWT_EXACT_PROBE_EXEC;
+             which <= PGWT_EXACT_PROBE_PLAN; which++) {
+            for (unsigned e = 0; e < sizeof(errors) / sizeof(errors[0]); e++) {
+                struct pgwt_exact_probe_core core = {0};
+                struct fake_ops f = {.fail_at = which, .fail_errno = errors[e]};
+                int other = which == PGWT_EXACT_PROBE_EXEC
+                            ? PGWT_EXACT_PROBE_PLAN : PGWT_EXACT_PROBE_EXEC;
+                errno = ERANGE;
+                if (startup)
+                    pgwt_exact_probe_core_pin_best_effort(
+                        &core, PGWT_EXACT_PROBE_ALL_MASK, 1, &ops, &f);
+                else
+                    CHECK(pgwt_exact_probe_core_acquire(
+                              &core, PGWT_EXACT_PROBE_ALL_MASK, 1, &ops, &f) == 0,
+                          "#592: optional failure grants the exact window");
+                CHECK(f.failures_injected == 1 && f.attach_calls[which] == 1,
+                      "#592: exactly one named attach failure was injected");
+                failures_seen += f.failures_injected;
+                CHECK(core.attach_outcome[which] == PGWT_EXACT_ATTACH_FAILED &&
+                      core.attach_errno[which] == errors[e],
+                      "#592: recorded reason matches injected errno, including unknown");
+                CHECK(core.attach_outcome[other] == PGWT_EXACT_ATTACH_ATTACHED &&
+                      core.attach_errno[other] == 0 && f.attach_calls[other] == 1,
+                      "#592: independently successful optional probe records attached");
+                successes_seen += f.attach_calls[other];
+
+                cJSON *root = cJSON_CreateObject();
+                pgwt_exact_probe_add_attach_status(root, &core);
+                const char *name = which == PGWT_EXACT_PROBE_EXEC ? "exec" : "plan";
+                char key[64];
+                snprintf(key, sizeof(key), "exact_probe_%s_attach_outcome", name);
+                cJSON *outcome = cJSON_GetObjectItem(root, key);
+                CHECK(cJSON_IsString(outcome) &&
+                      strcmp(outcome->valuestring, "attach_failed") == 0,
+                      "#592: published outcome reflects the actual injected failure");
+                snprintf(key, sizeof(key), "exact_probe_%s_attach_errno", name);
+                cJSON *reason = cJSON_GetObjectItem(root, key);
+                CHECK(cJSON_IsNumber(reason) && reason->valueint == errors[e],
+                      "#592: published errno matches the failure, not a constant");
+                cJSON_Delete(root);
+
+                if (!startup)
+                    pgwt_exact_probe_core_release(&core, &ops, &f);
+                CHECK(core.attach_outcome[which] == PGWT_EXACT_ATTACH_FAILED &&
+                      core.attach_errno[which] == errors[e],
+                      "#592: failure reason survives de-escalation");
+                f.fail_at = -1;
+                if (startup)
+                    pgwt_exact_probe_core_pin_best_effort(
+                        &core, PGWT_EXACT_PROBE_ALL_MASK, 2, &ops, &f);
+                else
+                    CHECK(pgwt_exact_probe_core_acquire(
+                              &core, PGWT_EXACT_PROBE_ALL_MASK, 2, &ops, &f) == 0,
+                          "#592: retry succeeds after injected failure is removed");
+                root = cJSON_CreateObject();
+                pgwt_exact_probe_add_attach_status(root, &core);
+                CHECK(strcmp(cJSON_GetObjectItem(root,
+                          "exact_probe_exec_attach_outcome")->valuestring,
+                          "attached") == 0 &&
+                      strcmp(cJSON_GetObjectItem(root,
+                          "exact_probe_plan_attach_outcome")->valuestring,
+                          "attached") == 0 &&
+                      core.attach_errno[which] == 0 &&
+                      cJSON_GetObjectItem(root, key)->valueint == 0,
+                      "#592: successful retry publishes attached and clears old errno");
+                cJSON_Delete(root);
+                pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+            }
+        }
+    }
+    CHECK(failures_seen == 16 && successes_seen == 16,
+          "#592: counted ledger reached every failure and success case");
+
+    struct pgwt_exact_probe_core core = {0};
+    struct fake_ops f = {.fail_at = PGWT_EXACT_PROBE_EXEC, .fail_errno = EIO};
+    CHECK(core.attach_outcome[PGWT_EXACT_PROBE_EXEC] ==
+              PGWT_EXACT_ATTACH_NOT_ATTEMPTED,
+          "#592: a baseline without an attempt does not claim unsupported");
+    cJSON *root = cJSON_CreateObject();
+    pgwt_exact_probe_add_attach_status(root, &core);
+    const char *keys[] = {"exact_probe_exec_attach_outcome",
+                          "exact_probe_plan_attach_outcome"};
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        cJSON *outcome = cJSON_GetObjectItem(root, keys[i]);
+        CHECK(cJSON_IsString(outcome) &&
+              strcmp(outcome->valuestring, "not_attempted") == 0,
+              "#592: baseline renders not_attempted for both optional probes");
+    }
+    cJSON_Delete(root);
+    /* Startup policy seeding is daemon-only; this unit tier sets it by hand. */
+    core.attach_outcome[PGWT_EXACT_PROBE_EXEC] = PGWT_EXACT_ATTACH_DISABLED;
+    core.attach_outcome[PGWT_EXACT_PROBE_PLAN] = PGWT_EXACT_ATTACH_DISABLED;
+    root = cJSON_CreateObject();
+    pgwt_exact_probe_add_attach_status(root, &core);
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        cJSON *outcome = cJSON_GetObjectItem(root, keys[i]);
+        CHECK(cJSON_IsString(outcome) &&
+              strcmp(outcome->valuestring, "disabled") == 0,
+              "#592: explicit policy refusal renders disabled for both probes");
+    }
+    cJSON_Delete(root);
+    CHECK(pgwt_exact_probe_core_pin_best_effort(
+              &core, PGWT_EXACT_PROBE_ATTR_MASK, 1, &ops, &f) ==
+              PGWT_EXACT_PROBE_ATTR_MASK &&
+          f.attach_calls[PGWT_EXACT_PROBE_EXEC] == 0 &&
+          f.attach_calls[PGWT_EXACT_PROBE_PLAN] == 0 &&
+          core.attach_outcome[PGWT_EXACT_PROBE_EXEC] == PGWT_EXACT_ATTACH_DISABLED &&
+          core.attach_outcome[PGWT_EXACT_PROBE_PLAN] == PGWT_EXACT_ATTACH_DISABLED,
+          "#592: excluding optional probes from the mask preserves disabled");
+    CHECK(pgwt_exact_probe_core_acquire(&core, PGWT_EXACT_PROBE_ALL_MASK,
+                                        1, &ops, &f) == 0 &&
+          f.attach_calls[PGWT_EXACT_PROBE_EXEC] == 1 && f.failures_injected == 1 &&
+          core.attach_outcome[PGWT_EXACT_PROBE_EXEC] == PGWT_EXACT_ATTACH_FAILED &&
+          core.attach_errno[PGWT_EXACT_PROBE_EXEC] == EIO &&
+          f.attach_calls[PGWT_EXACT_PROBE_PLAN] == 1 &&
+          core.attach_outcome[PGWT_EXACT_PROBE_PLAN] == PGWT_EXACT_ATTACH_ATTACHED,
+          "#592: disabled diagnostics cannot suppress a requested attach");
+    pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+}
+
+static void test_escalation_preserves_disabled_policy(void)
+{
+    CHECK(pgwt_exact_probe_acquire_mask(false, false) ==
+              PGWT_EXACT_PROBE_ALL_MASK,
+          "#592: unflagged escalation still requests every probe in every mode");
+    /* Each flag independently, and their combination, must gate attempts. */
+    for (unsigned flags = 1; flags <= 3; flags++) {
+        struct pgwt_exact_probe_core core = {0};
+        struct fake_ops f = {
+            .fail_at = PGWT_EXACT_PROBE_EXEC, .fail_errno = ENOTSUP,
+        };
+        for (int i = PGWT_EXACT_PROBE_EXEC; i <= PGWT_EXACT_PROBE_PLAN; i++)
+            core.attach_outcome[i] = PGWT_EXACT_ATTACH_DISABLED;
+        uint32_t mask = pgwt_exact_probe_acquire_mask(
+            (flags & 1) != 0, (flags & 2) != 0);
+        CHECK(mask == PGWT_EXACT_PROBE_ATTR_MASK,
+              "#592: skip-usdt/lightweight exclude only phase probes");
+        for (uint64_t generation = 1; generation <= 2; generation++) {
+            CHECK(pgwt_exact_probe_core_acquire(
+                      &core, mask, generation, &ops, &f) == 0 &&
+                  core.attached_mask == PGWT_EXACT_PROBE_ATTR_MASK &&
+                  core.consumers == 1,
+                  "#592: flagged escalation still acquires exact attribution");
+            CHECK(f.attach_calls[PGWT_EXACT_PROBE_EXEC] == 0 &&
+                  f.attach_calls[PGWT_EXACT_PROBE_PLAN] == 0 &&
+                  f.failures_injected == 0,
+                  "#592: flagged escalation never attempts optional probes");
+            cJSON *root = cJSON_CreateObject();
+            pgwt_exact_probe_add_attach_status(root, &core);
+            const char *names[] = {"exec", "plan"};
+            for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+                char key[64];
+                snprintf(key, sizeof(key), "exact_probe_%s_attach_outcome",
+                         names[i]);
+                cJSON *outcome = cJSON_GetObjectItem(root, key);
+                CHECK(cJSON_IsString(outcome) &&
+                      strcmp(outcome->valuestring, "disabled") == 0,
+                      "#592: escalation preserves disabled, never attach_failed");
+                snprintf(key, sizeof(key), "exact_probe_%s_attach_errno",
+                         names[i]);
+                cJSON *reason = cJSON_GetObjectItem(root, key);
+                CHECK(cJSON_IsNumber(reason) && reason->valueint == 0,
+                      "#592: policy refusal publishes zero errno, never ENOTSUP");
+            }
+            cJSON_Delete(root);
+            pgwt_exact_probe_core_release(&core, &ops, &f);
+        }
+        pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+    }
+}
+
 /* #108 follow-up: a daemon-mode RE-ATTACH (PostgreSQL restarted) gets a
  * fresh, EMPTY exec_site_allow map. If exec_sites_published survived the
  * teardown the publish would be skipped, every address would be refused by
@@ -372,6 +561,7 @@ struct fake_pair_ops {
     int detach_order[8];
     int detach_count;
     int fail_at;          /* -1 = never */
+    int fail_errno;
 };
 
 static void *fake_pair_attach(void *ctx, int which)
@@ -380,8 +570,10 @@ static void *fake_pair_attach(void *ctx, int which)
     if (which < 0 || which > 1)
         return NULL;
     f->attach_calls[which]++;
-    if (f->fail_at == which)
+    if (f->fail_at == which) {
+        errno = f->fail_errno;
         return NULL;
+    }
     return (void *)(uintptr_t)(which + 0x10);
 }
 
@@ -394,6 +586,7 @@ static void fake_pair_detach(void *ctx, int which, void *link)
     f->detach_calls[which]++;
     if (f->detach_count < 8)
         f->detach_order[f->detach_count++] = which;
+    errno = EBUSY;
 }
 
 static void test_pair_both_or_neither(void)
@@ -451,9 +644,12 @@ static void test_pair_both_or_neither(void)
     memset(&pair, 0, sizeof(pair));
     memset(&f, 0, sizeof(f));
     f.fail_at = PGWT_EXACT_PAIR_DONE;
+    f.fail_errno = EACCES;
     CHECK(pgwt_exact_probe_pair_attach(&pair, fake_pair_attach,
                                        fake_pair_detach, &f) != 0,
           "#580: a failed DONE denies the pair");
+    CHECK(errno == EACCES,
+          "#592: pair rollback preserves DONE's errno across START cleanup");
     CHECK(f.attach_calls[PGWT_EXACT_PAIR_START] == 1 &&
           f.attach_calls[PGWT_EXACT_PAIR_DONE] == 1,
           "#580: both were attempted -- the case is not vacuous");
@@ -620,6 +816,8 @@ int main(void)
     test_sampled_tier_never_pins_phase_probes();
     test_phase_probe_failure_degrades_but_never_denies();
     test_acquire_refuses_without_ops();
+    test_optional_attach_outcomes();
+    test_escalation_preserves_disabled_policy();
     test_pair_both_or_neither();
     test_bundle_forget_skeleton();
     test_generation_merge();

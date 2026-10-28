@@ -898,8 +898,8 @@ void pgwt_print_histogram(struct pgwt_daemon *d)
 /* ── Query Event View ────────────────────────────────────── */
 
 /* query_id column: the id, or "unattributed" for the query_id 0 bucket
- * (issue #128: foreground non-idle time whose command never reported an
- * id — shown, never dropped). */
+ * (#128/#641: foreground time whose command never reported an id, plus
+ * non-idle background/maintenance time without an id — shown, never dropped). */
 static const char *pgwt_query_id_label(uint64_t query_id, char *buf, size_t sz)
 {
     if (query_id == 0)

@@ -10,6 +10,21 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix: replace the unreachable sampler missed-tick counter (#620).**
+  `sampler_ticks_missed_total` could only ever read 0 and is removed from the
+  control socket: the sampler timerfd is armed one-shot with +/-10% phase
+  jitter for anti-aliasing (SMP-5) and re-armed only after the read, making
+  expirations > 1 structurally unreachable. Switching to `it_interval` would
+  restore the fixed-phase aliasing that jitter exists to break. A stalled
+  daemon re-arms late rather than coalescing ticks, losing resolution while
+  SMP-3 weighting preserves total weight; that loss was exported nowhere.
+  New counters `sampler_ticks_total` / `sampler_tick_late_ns_total` on the
+  control socket replace it, measuring lateness against the armed (jittered)
+  period rather than the nominal period so deliberate jitter is not counted
+  as lateness. **UPGRADE NOTE:** any scraper or dashboard reading
+  `sampler_ticks_missed_total` must switch to the new pair, since the old key
+  is gone from the metrics response rather than pinned at 0.
+
 - **fix + ON-DISK FORMAT BUMP: summary records exclude io_worker time
   (summary v5 -> v6, #315/#376).** The raw paths put io_worker time outside
   DB Time and outside Idle (`docs/AAS_SEMANTICS_DECISION.md`: the requesting
