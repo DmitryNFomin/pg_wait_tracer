@@ -14,6 +14,16 @@
 #    returns all PRs in ~1.7s. Speed here is not an optimisation; it is what lets
 #    the hook run this synchronously and removes the whole class of problem.
 export GH_PAGER=cat; set -u
+# OUTDIR is where side-effect files (currently just .dispatch-queue) are
+# written. It defaults to this script's own directory so a manual run from
+# any worktree does something sane, but the hook ALWAYS passes its own $D
+# explicitly: git worktrees share one .git, so the hardcoded `cd` below is
+# fine for the git/gh queries, but each worktree's hook keeps its own
+# .sweep-latest.txt cache (via stdout redirect in sweep-hook.sh) and the
+# dispatch queue must land next to THAT cache, not next to whichever
+# worktree happened to be $0's directory.
+OUTDIR="${1:-$(cd "$(dirname "$0")" && pwd)}"
+SELFDIR="$(cd "$(dirname "$0")" && pwd)"
 cd /Users/dmitryfomin/work/git/pg_wait_tracer
 RUN="sweep-$(date -u +%Y%m%dT%H%M%SZ)"
 git fetch origin -q 2>/dev/null || { echo "$RUN UNKNOWN: git fetch failed"; exit 3; }
@@ -186,6 +196,211 @@ else
   else
     echo "   CODEX: idle"
   fi
+fi
+
+# ---- [9] dispatch queue: the escalating-obligation gate reads this file ----
+# Ready == open tag-blocker issue, no open PR, no live worktree -- the exact
+# quantity in [6], but written WITHOUT the "show top 5" cap that section uses
+# for the lead's own reading, because the escalation gate must be able to see
+# an item even when it isn't in the top 5 by issue number.
+#
+# STATUS OK / STATUS UNKNOWN on line 2 are the whole contract: an empty ready
+# list and a failed join must never produce the same file shape. The consumer
+# (sweep-hook.sh) refuses to read anything else as "confirmed empty".
+#
+# Counts persist only across a run whose PREVIOUS file was STATUS OK; a gap
+# (missing file, or the prior run was itself UNKNOWN) resets the streak to 1
+# rather than guessing continuity through a period this script could not see.
+#
+# `running`: a ledger of actual SubagentStart/SubagentStop pairs (see
+# agent-ledger.py), NOT a count of live agent/* worktrees -- that proxy read
+# 227 against a cap of 3 on this repo (a worktree is kept until its PR opens,
+# so hundreds of historical ones survive), which made `running >= cap`
+# permanently true and permanently paused escalation. Before trusting it,
+# SANITY_MAX below refuses an implausible count outright (STATUS UNKNOWN,
+# not a quiet pass) rather than writing a running/cap pair nobody could act
+# on: an absurd answer is not a clear answer, the same rule this project
+# already applies to every other probe in this file.
+DQ="$OUTDIR/.dispatch-queue"
+echo "-- [9] dispatch queue -> $DQ"
+LEDGER="/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead/.active-agents"
+SANITY_MAX=20   # generous over the 3-agent cap (reviewers/advisers share the ledger too)
+RUNNING_N=$(/usr/bin/python3 "$SELFDIR/agent-ledger.py" count "$LEDGER" 2>/dev/null)
+
+# ---- independent corroboration for a LOW running count ---------------------
+# SANITY_MAX above catches "too high" (227 against a cap of 3). This is the
+# mirror and the more dangerous direction: "too low against evidence to the
+# contrary" fires escalation hardest exactly when the ledger knows least --
+# cold start, before any already-running agent has ever lived through a
+# fresh SubagentStart/Stop pair to populate it. Checked only when the ledger
+# says running==0, against THREE independent signals, ORed together:
+#   - a `make check` actually holding the machine-wide lock RIGHT NOW
+#     (scripts/check-lock.py processes -- pgrep, no portability concern)
+#   - a worktree's own git ADMIN dir touched recently
+#     (.git/worktrees/<name>/HEAD -- moves on commit/checkout)
+#   - a worktree's own checkout directory touched recently
+#     (.claude/worktrees/agent-*, top-level mtime)
+# An earlier version used HEAD-mtime only, on the claim "directory-mtime read
+# zero" -- that claim was never actually measured: the first attempt used
+# `find -newermt '-2 hours'`, which this host's `find` (bfs) rejects outright
+# (it requires an absolute timestamp), so the command silently produced no
+# output under `2>/dev/null` and looked like a zero count. Measured properly
+# (absolute cutoff) on this repo: directory-mtime reads 9, not 0 -- a real,
+# nonzero, independent signal, the opposite of the retracted claim. Worse,
+# review found the soundness case live: HEAD only moves on commit/checkout,
+# so a long build-and-test stretch with no commits lets it go stale while the
+# agent is plainly alive -- one check-lock-holding agent's directory mtime
+# was 90 minutes fresher than its HEAD mtime. So both are ORed in, not just
+# HEAD: the costs here are asymmetric by design -- a false UNKNOWN delays
+# escalation by one scan (>=10 min), while a false "confirmed running=0" is
+# the over-cap-start catastrophe this guard exists to prevent, so the guard
+# errs toward refusing whenever ANY corroborating signal disagrees with 0.
+CHECK_PROCS=$(pgrep -f 'scripts/check-lock.py' 2>/dev/null | wc -l | tr -d ' ')
+WT_CUTOFF=$(date -v-2H +"%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+if [ -n "$WT_CUTOFF" ]; then
+  RECENT_WT_HEAD=$(find .git/worktrees -maxdepth 2 -name 'HEAD' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
+  RECENT_WT_DIR=$(find .claude/worktrees -maxdepth 1 -type d -name 'agent-*' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
+else
+  RECENT_WT_HEAD=""   # `date -v` unsupported on this host -- unknown, not zero
+  RECENT_WT_DIR=""
+fi
+
+/usr/bin/python3 - "$TMP" "$DQ" "$RUNNING_N" "$SANITY_MAX" "$CHECK_PROCS" "$RECENT_WT_HEAD" "$RECENT_WT_DIR" <<'PY'
+import json, os, re, sys
+t, dq, running_raw, sanity_max = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+check_procs_raw, recent_wt_head_raw, recent_wt_dir_raw = sys.argv[5], sys.argv[6], sys.argv[7]
+
+def write_unknown(reason):
+    tmp = dq + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("# dispatch-queue v1\n")
+        f.write(f"STATUS UNKNOWN {reason}\n")
+    os.replace(tmp, dq)
+    print(f"   UNKNOWN: dispatch queue not updated ({reason})")
+
+try:
+    running = int(running_raw)
+    if running < 0:
+        raise ValueError("negative")
+except (ValueError, TypeError):
+    write_unknown(f"running-agent count unreadable ({running_raw!r})"); raise SystemExit
+if running > sanity_max:
+    write_unknown(
+        f"running-agent count {running} is implausible for a 3-agent-cap "
+        f"project (> SANITY_MAX={sanity_max}) -- refusing to trust the proxy "
+        f"rather than writing a running/cap pair nobody could act on"
+    ); raise SystemExit
+
+def _int_or_none(s):
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+check_procs = _int_or_none(check_procs_raw) or 0
+recent_wt_head = _int_or_none(recent_wt_head_raw)  # None if `date -v` unavailable
+recent_wt_dir = _int_or_none(recent_wt_dir_raw)    # None if `date -v` unavailable
+if running == 0 and (
+    check_procs > 0 or (recent_wt_head or 0) > 0 or (recent_wt_dir or 0) > 0
+):
+    write_unknown(
+        f"running-agent ledger reports 0 but independent evidence disagrees "
+        f"(check-lock processes={check_procs}, worktrees with HEAD touched "
+        f"<2h={'n/a' if recent_wt_head is None else recent_wt_head}, worktree "
+        f"dirs touched <2h={'n/a' if recent_wt_dir is None else recent_wt_dir}) "
+        f"-- a cold-start ledger against contrary evidence is a disagreement, "
+        f"not an answer"
+    ); raise SystemExit
+
+try:
+    issues = json.load(open(t + "/blockers.json"))
+except Exception as e:
+    write_unknown(f"cannot read tag-blocker issues: {e}"); raise SystemExit
+try:
+    prs = json.load(open(t + "/open_full.json"))
+except Exception as e:
+    write_unknown(f"open-PR detail query failed: {e}"); raise SystemExit
+try:
+    live = [l.strip() for l in open(t + "/live_wt.txt") if l.strip()]
+except Exception:
+    live = []
+
+def pr_covers(n):
+    ns = str(n)
+    for p in prs:
+        refs = {str(r.get("number")) for r in (p.get("closingIssuesReferences") or [])}
+        if ns in refs:
+            return True
+        blob = (p.get("title") or "") + " " + (p.get("body") or "")
+        if re.search(r'#' + ns + r'\b', blob):
+            return True
+    return False
+
+def wt_covers(n):
+    ns = str(n)
+    pat = re.compile(r'(?<!\d)' + ns + r'(?!\d)')
+    return any(pat.search(b) for b in live)
+
+ready = []
+for i in issues:
+    n = i["number"]
+    if pr_covers(n) or wt_covers(n):
+        continue
+    ready.append((n, (i.get("title") or "").replace("\n", " ")[:70]))
+
+old_counts = {}
+try:
+    with open(dq) as f:
+        old_lines = f.read().splitlines()
+    if len(old_lines) >= 2 and old_lines[1].strip() == "STATUS OK":
+        for ln in old_lines[2:]:
+            if not ln.startswith("issue-"):
+                continue
+            parts = ln.split(" ", 3)
+            if len(parts) < 3:
+                continue
+            try:
+                old_counts[parts[0]] = int(parts[2])
+            except ValueError:
+                continue
+except FileNotFoundError:
+    pass
+
+tmp = dq + ".tmp"
+with open(tmp, "w") as f:
+    f.write("# dispatch-queue v1  (id issue# consecutive-ready-scans title...)\n")
+    f.write("STATUS OK\n")
+    f.write(f"CAP running={running} cap=3\n")  # 3 == CLAUDE.md's actively-implementing cap
+    for n, title in sorted(ready, key=lambda x: -x[0]):
+        rid = f"issue-{n}"
+        count = old_counts.get(rid, 0) + 1
+        f.write(f"{rid} {n} {count} {title}\n")
+os.replace(tmp, dq)
+print(f"   OK: {len(ready)} ready, running={running}")
+PY
+
+# ---- [10] box evidence + closing-ref leak across every open agent/* PR -----
+# check-box-evidence.sh is the per-PR CLI a human runs on one PR; wiring it
+# in here by shelling out to it once per open PR would reintroduce the exact
+# N-calls-over-ssh/API mistake this file's own header warns about (302 x
+# 0.52s). box-evidence-bulk.py does the same two checks (box-check log vs
+# HEAD, closing-ref leak) over data fetched in ONE extra bulk `gh pr list`
+# call plus files this script already has lying around ($TMP/issues.json
+# from the three-bulk-calls section, and a fresh worktree porcelain dump) --
+# no per-PR gh/git call at all. A failed `git worktree list` writes the
+# sentinel "WORKTREE-LIST-FAILED" rather than an empty file, so the python
+# side can tell "the command failed" from "there happen to be zero linked
+# worktrees" -- the same empty-result-vs-failed-query distinction as every
+# other section in this file.
+echo "-- [10] box evidence + closing-ref leak (open agent/* PRs, bulk)"
+gh pr list --state open --limit 100 --json number,headRefOid,headRefName,closingIssuesReferences \
+  > "$TMP/open_refs.json" 2>/dev/null || echo "   UNKNOWN: open-PR ref query failed"
+git worktree list --porcelain > "$TMP/wt_porcelain.txt" 2>/dev/null \
+  || echo "WORKTREE-LIST-FAILED" > "$TMP/wt_porcelain.txt"
+if [ -s "$TMP/open_refs.json" ]; then
+  /usr/bin/python3 "$SELFDIR/box-evidence-bulk.py" "$TMP/open_refs.json" "$TMP/issues.json" "$TMP/wt_porcelain.txt"
+else
+  echo "   UNKNOWN: open-PR ref query produced no data -- box-evidence check skipped"
 fi
 
 echo "== end $RUN =="
