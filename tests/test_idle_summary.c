@@ -3158,7 +3158,21 @@ static void test_v9_session_fields(void)
     }
 
     /* 15b. End INSIDE the 44-byte session entry, not inside a trailer.
-     * Zero-filling this short record would invent an unmeasured window. */
+     * Zero-filling this short record would invent an unmeasured window.
+     *
+     * WHAT THIS LEG DOES NOT PROVE, stated because the opposite is the
+     * natural reading: it does NOT isolate the per-entry bounds test in
+     * pgwt_summary_deserialize's session loop. That test cannot change this
+     * function's RETURN VALUE for any truncation, and that was measured, not
+     * assumed -- with the session test replaced by a bare `p > end` the
+     * parser over-reads the entry and is then caught by the v4 trailer's own
+     * `p + 12 > end` check, so rc is -1 either way and this CHECK stays
+     * green. The session test is a MEMORY-SAFETY guard (it stops a 4-byte
+     * read past the buffer), and demonstrating it needs a sanitizer build,
+     * which tests/Makefile cannot currently produce for this binary. What
+     * this leg does prove is the end-to-end contract that matters to a
+     * reader: a truncated v9 record is REFUSED rather than decoding to an
+     * unmeasured window. */
     memset(back, 0, sizeof(*back));
     back->second_wall_ns = acc->second_wall_ns;
     back->num_sessions = 1;
