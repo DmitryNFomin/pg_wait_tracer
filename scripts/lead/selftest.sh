@@ -99,5 +99,35 @@ MY-CHOICE fixture reason B [$IDB]
 EOF
 check "malformed vocabulary line does not satisfy its finding" 2 '{"stop_hook_active": false}'
 
+# ---- case 7: stop_hook_active=true must NOT consume dispositions -- a
+# response the lead just wrote in reply to the block has not been evaluated
+# yet and must survive to the next real (stop_hook_active=false) Stop.
+write_cache
+cat > "$DISP" <<EOF
+MY-CHOICE fixture reason A [$IDA]
+MY-CHOICE fixture reason B [$IDB]
+EOF
+check "stop_hook_active=true (bypass)" 0 '{"stop_hook_active": true}'
+if [ -s "$DISP" ]; then
+  pass=$((pass+1)); echo "ok   stop_hook_active=true did not consume the dispositions file"
+else
+  fail=$((fail+1)); echo "FAIL stop_hook_active=true ate the dispositions file before it was ever evaluated"
+fi
+
+# ---- case 8 (the reorder regression): dispositions present -> PASS -> file
+# consumed -> a SECOND invocation against the SAME findings with no new
+# dispositions written must BLOCK. Under the old bottom-of-function truncate
+# this also passed (no crash in between two sequential calls), so this case
+# does not by itself prove the crash window is closed -- it proves the
+# observable half of the contract: the file can never be read twice for two
+# different turns' worth of credit.
+write_cache
+cat > "$DISP" <<EOF
+MY-CHOICE fixture reason A [$IDA]
+MY-CHOICE fixture reason B [$IDB]
+EOF
+check "reorder: first invocation passes on fresh dispositions" 0 '{"stop_hook_active": false}'
+check "reorder: second invocation, same findings, no new dispositions -> BLOCK" 2 '{"stop_hook_active": false}'
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

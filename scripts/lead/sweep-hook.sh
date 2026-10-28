@@ -24,7 +24,17 @@
 # blocks and then forces the stop anyway, but that is a crash rail, not a
 # design). One block per genuine stop is the contract: it blocks once, the
 # lead writes a disposition, and the next Stop (stop_hook_active=true) goes
-# through regardless of whether that disposition covers everything.
+# through regardless of whether that disposition covers everything -- and
+# does NOT consume the dispositions file, so that unevaluated response gets
+# exactly one real evaluation, at the next stop_hook_active=false Stop.
+#
+# .dispositions is read into memory and truncated BEFORE it is evaluated
+# (never evaluated by re-reading the file). That closes the crash window by
+# construction: once the truncate has run, no later crash or interruption can
+# leave a stale on-disk entry that satisfies a DIFFERENT, later turn's
+# evaluation of the same recurring finding (a BEHIND PR, a stranded branch and
+# a ready-not-started blocker are all exactly the kind of finding that stays
+# byte-identical, hence same sha256 id, turn after turn until someone acts).
 set -u
 D="$(cd "$(dirname "$0")" && pwd)"
 CACHE="$D/.sweep-latest.txt"; LOG="$D/.sweep.log"; MAXAGE=600   # 10 min
@@ -73,18 +83,31 @@ printf '=== %d open items. Act on them or say why not. ===\n' "$n"
 # ---- the blocking gate ------------------------------------------------------
 # Loop protection first, per the docs cited above: never re-evaluate once
 # Claude Code is already continuing because of an earlier block this turn.
+# Deliberately NO truncate here: a disposition the lead just wrote in response
+# to the block that produced this continuation must survive, unevaluated, to
+# the next real (stop_hook_active=false) Stop -- that is the one and only
+# evaluation it gets. Consuming it here would silently discard it instead.
 if [ "$stop_active" = "true" ]; then
-  : > "$DISP" 2>/dev/null || true   # consumed: this chain already had its one block
   exit 0
 fi
 
 findings=$(/usr/bin/grep -aE '^ *FINDING: ' "$CACHE" 2>/dev/null || true)
 if [ -z "$findings" ]; then
-  : > "$DISP" 2>/dev/null || true
+  : > "$DISP" 2>/dev/null || true   # nothing to evaluate; safe to reset
   exit 0
 fi
 
+# Read-then-truncate-then-evaluate, in that order and nothing between the
+# first two: once the file is empty on disk, no crash point from here on can
+# leave a stale entry that satisfies a LATER, different turn's evaluation of
+# the same (possibly byte-identical, commonly-recurring) finding. The decision
+# below is made entirely from $disp_content in memory, never by re-reading
+# $DISP, so consuming it first changes nothing about what gets evaluated or
+# what the lead is told it is missing.
 touch "$DISP" 2>/dev/null || true
+disp_content=$(cat "$DISP" 2>/dev/null || true)
+: > "$DISP" 2>/dev/null || true
+
 missing=""
 nmissing=0
 while IFS= read -r line; do
@@ -94,7 +117,7 @@ while IFS= read -r line; do
   # A disposition counts only when it has the right vocabulary AND names this
   # finding's id -- quantity alone (e.g. one MY-CHOICE line for N findings)
   # must not satisfy N findings.
-  if /usr/bin/grep -aqE "^(ACTED|MY-CHOICE|UNKNOWN)[[:space:]].*\[$id\]" "$DISP" 2>/dev/null; then
+  if printf '%s\n' "$disp_content" | /usr/bin/grep -aqE "^(ACTED|MY-CHOICE|UNKNOWN)[[:space:]].*\[$id\]"; then
     continue
   fi
   nmissing=$((nmissing+1))
@@ -117,5 +140,4 @@ if [ "$nmissing" -gt 0 ]; then
   exit 2
 fi
 
-: > "$DISP" 2>/dev/null || true   # consumed: fresh dispositions required next turn
 exit 0
