@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hash of the working tree content (tracked + untracked, ignoring .gitignore'd
-# files). Same input -> same hash; used by check.sh / push-guard.sh.
+# files). Same input -> same hash; used by check.sh / scripts/git-hooks/pre-push.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp)
