@@ -154,6 +154,47 @@ The two new counters read 0 on this healthy capture and non-zero in the two
 unhealthy shapes (`writer-shape-repro.log`), so they discriminate rather than
 restate.
 
+## WHAT THE SPREAD IN `uncredited` TURNED OUT TO BE (measured, n = 4)
+
+A review asked why `summary_cpu_open_uncredited_ns_total` read 9.02 s on one
+run and 18.19 s on another while `credited` agreed within 0.534 s. Answer,
+and it is a **pre-existing defect in that counter's semantics, visible for
+the first time here**:
+
+| run | tree | credited | uncredited | mismatch | measured/stimulus |
+|---|---|---|---|---|---|
+| hand-run, gate-3 | af5e9130 | 23.466 s | 18.195 s | not published | 86% |
+| box-check, gate-3 | af5e9130 | 24.000 s | 9.019 s | not published | 61% |
+| box-check, VM | eecbdfe3 | 25.805 s | 9.068 s | not published | 60% |
+| box-check, VM | c2e05b45 | 24.648 s | 18.042 s | **2** | 64% |
+
+`uncredited` adds a closed CPU record's **whole** duration whenever
+`already == 0` (`src/summary_writer.c`, `pgwt_summary_push_event`), and
+`already` is the note's credit only while the close-time identity check holds
+(same pid, same wait id, same start). When it refuses, `already` falls back
+to the pid's watermark — normally 0 — so an interval that **was** credited
+second by second is counted whole into `uncredited` as well.
+
+The last row is the measurement: `mismatch = 2` beside `uncredited =
+18.042 s`, which is 2 x one ~9 s stimulus interval, while `credited =
+24.648 s` is all three intervals' worth. So **yes — the uncredited figure
+does include stimulus-pid records over one second**, not as never-credited
+gaps but as credited gaps double-told. The 9 s rows are the same thing with
+one refusal instead of two.
+
+Two consequences, stated rather than fixed here:
+
+1. `summary_cpu_open_uncredited_ns_total` is **not comparable across
+   captures** without `summary_open_note_mismatch_total` beside it. That key
+   is now published (`src/control.c`) and the fixture prints it, which is
+   what makes the table above possible at all.
+2. WHY the identity check refuses on 2 of 3 stimulus intervals is **not
+   established** and is out of this branch's scope. It needs its own issue:
+   the candidate is the note's `start_ns` versus the closing record's
+   `timestamp_ns - duration_ns`, which BPF is supposed to make identical.
+   Nothing in the shipped gate depends on `uncredited`, so no gate is weaker
+   for this being open — but the counter over-reports until it is fixed.
+
 Also worth recording because the guard earned it: the FIRST version of the
 plpgsql stimulus used a fixed `FOR i IN 1..40000000`, which that box runs in
 2 s, and the fixture REFUSED on its own `>= 3 s` floor instead of approving a
