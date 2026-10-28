@@ -1,4 +1,4 @@
-fixture under test: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a2261899b0331b0bf/tests/test_v9_open_cpu_wired.sh
+fixture under test: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-ab97da5bee399485a/tests/test_v9_open_cpu_wired.sh
 
   ok   A: PASS    exit=0   asked 4210x and crediting -> the producer IS wired
   ok   B: REFUSE  exit=2   nothing sealed (v8 credit 0 too) -> says nothing either way
@@ -7,19 +7,41 @@ fixture under test: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees
   ok   E: REFUSE  exit=2   notes key absent (older daemon) -> cannot localise, must refuse
   ok   F: REFUSE  exit=2   the daemon never came up -> refuse inside its own bound, never hang
   ok   G: REFUSE  exit=2   psql exits 127 -> a missing dependency is a refusal, not a pass
+  ok   H: FAIL    exit=1   wall placed, measured 0 -> v7's split destroyed, worse than refusing
+  ok   I: FAIL    exit=1   measured > wall -> incoherent; the reader's residual goes negative
+  ok   J: FAIL    exit=1   2 s measured of a 30 s stimulus -> the token credit 'credited > 0' approves
+  ok   K: REFUSE  exit=2   the two attribution keys absent -> a zero is three states; refuse
+  ok   L: REFUSE  exit=2   every observation was an io_worker's -> offered nothing; the stimulus failed
+  ok   M: REFUSE  exit=2   THE 2026-10-28 CAPTURE: 34 accepted, 34 retired unplaced -> no gap to spread
 
-  --- scenario C, verbatim (the one the parent fixture gets wrong) ---
+  --- scenario M, verbatim (the one the parent fixture gets wrong) ---
   | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
   |   ok: watchpoints attached (mask=15, tier=escalated) -- producer reachable
   |   ok: all seven v9 control keys present and numeric
   |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
-  |   ok: stimulus PROVEN -- cpu_ns_total moved 795480753 -> 1590961506
-  |   REFUSE: summary_open_cpu_notes_total = 0. The writer was never
-  |           ASKED about an on-CPU gap, so credited_ns == 0 is the
-  |           CORRECT answer and the credit path was never exercised.
-  |           The defect is upstream, at the producer call site in
-  |           pgwt_read_state_map (src/map_reader.c) or in what the
-  |           state-map scan sees -- not in the writer.
-  | === test_v9_open_cpu_wired: REFUSE ===
+  |   ok: stimulus PROVEN -- cpu_ns_total moved 1000000000 -> 35000000000
+  |   ok: the writer WAS asked -- summary_open_cpu_notes_total = 34
+  |   summary_open_cpu_credited_ns   = 0
+  |   summary_open_cpu_measured_ns   = 0
+  |   summary_open_cpu_refused_total = 0
+  |   summary_cpu_open_uncredited_ns_total = 0
+  |   summary_open_io_worker_refused_total = 5  (WAIT notes included)
+  |   summary_open_cpu_io_worker_refused_total = 0  (the on-CPU subset)
+  |   summary_open_cpu_unplaced_total      = 34
+  |   summary_open_table_full_total        = 0
+  |   summary_open_notes_expired_total     = 0
+  |   summary_open_credited_ns_total = 45822328957  (WAIT credit, same seal)
+  |   offered to the credit path     = 34  (notes 34 - io_worker 0)
+  |   REFUSE: the credit path was offered 34 observations and
+  |           retired 34 intervals without writing a single
+  |           second of any of them -- every on-CPU gap in this
+  |           capture ended INSIDE the second it was noted in. v9
+  |           spreads an interval across the seconds it occupies, so
+  |           there was nothing to spread and a zero is the CORRECT
+  |           answer. The STIMULUS is what has to change, not the
+  |           writer: a statement that burns CPU is not the same
+  |           thing as one that holds an on-CPU interval open across
+  |           a tick boundary (a FunctionScan over generate_series
+  |           spills a tuplestore and changes wait event thousands of
 
-=== fixture-discrimination: PASS (7 scenarios) ===
+[exited with code 0]

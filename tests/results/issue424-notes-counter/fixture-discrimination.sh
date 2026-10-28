@@ -64,28 +64,86 @@ s.listen(16)
 STATUS = {"ok": True, "mode": "full", "tier": "escalated",
           "exact_probe_attached_mask": 15, "uptime_s": 12.0}
 
-# notes / credited / present-ness of the notes key, per scenario.
+# Per scenario: what the v9 counters say, and which keys exist at all.
+#   notes      summary_open_cpu_notes_total
+#   credited   summary_open_cpu_credited_ns          (WALL placed)
+#   measured   summary_open_cpu_measured_ns          (the v7 split placed)
+#   delta      how much cpu_ns_total moves across the stimulus
+#   iow_cpu    summary_open_cpu_io_worker_refused_total
+#   unplaced   summary_open_cpu_unplaced_total
+#   key        is summary_open_cpu_notes_total on the wire at all
+#   key2       are the two ATTRIBUTION keys on the wire at all
 SCEN = {
-    # A: wired and crediting -> PASS
-    "A": dict(notes=4210, credited=9123456789, v8=75854656030, key=True),
+    # A: wired, crediting, and the credit is COHERENT -> PASS. measured is
+    #    non-zero and is 2/3 of the stimulus CPU, so it clears the 25% floor
+    #    on merit. Before 2026-10-28 this scenario carried measured = 0 and
+    #    still passed, which is the assertion this fixture used to make.
+    "A": dict(notes=4210, credited=24000000000, measured=20000000000,
+              delta=30000000000, iow_cpu=0, unplaced=0,
+              v8=75854656030, key=True, key2=True),
     # B: nothing sealed at all -> REFUSE (the pre-existing fourth outcome)
-    "B": dict(notes=0, credited=0, v8=0, key=True),
-    # C: THE 2026-10-28 CAPTURE. Seconds sealed, the writer never asked.
-    "C": dict(notes=0, credited=0, v8=75854656030, key=True),
-    # D: asked 4210 times and credited nothing -> FAIL, and only here.
-    "D": dict(notes=4210, credited=0, v8=75854656030, key=True),
-    # E: a daemon that predates the counter -> REFUSE, never a verdict.
-    "E": dict(notes=0, credited=0, v8=75854656030, key=False),
+    "B": dict(notes=0, credited=0, measured=0, delta=30000000000,
+              iow_cpu=0, unplaced=0, v8=0, key=True, key2=True),
+    # C: sealed, and the writer never asked -> REFUSE naming the producer.
+    "C": dict(notes=0, credited=0, measured=0, delta=30000000000,
+              iow_cpu=0, unplaced=0, v8=75854656030, key=True, key2=True),
+    # D: asked 4210 times, nothing refused, nothing retired early, and
+    #    nothing placed -> FAIL, and ONLY here. This is the credit-path
+    #    defect the fixture exists to find.
+    "D": dict(notes=4210, credited=0, measured=0, delta=30000000000,
+              iow_cpu=0, unplaced=0, v8=75854656030, key=True, key2=True),
+    # E: a daemon that predates the notes counter -> REFUSE, never a verdict.
+    "E": dict(notes=0, credited=0, measured=0, delta=30000000000,
+              iow_cpu=0, unplaced=0, v8=75854656030, key=False, key2=True),
+    # H: wall placed, measurement destroyed. v8 refused to spread on-CPU
+    #    gaps precisely to protect v7's split; placing wall with measured 0
+    #    is worse than refusing, and "credited > 0" approved it.
+    "H": dict(notes=4210, credited=9000000000, measured=0,
+              delta=30000000000, iow_cpu=0, unplaced=0,
+              v8=75854656030, key=True, key2=True),
+    # I: measured > wall. Incoherent: it makes the reader's
+    #    DB - CPU* - Sigma residual negative for those seconds.
+    "I": dict(notes=4210, credited=9000000000, measured=10000000000,
+              delta=30000000000, iow_cpu=0, unplaced=0,
+              v8=75854656030, key=True, key2=True),
+    # J: THE WEAKEST-ASSERTION SCENARIO. A credit path that places the first
+    #    second of each gap and then stops: 2 s of measured CPU against a
+    #    30 s stimulus. "credited > 0" passes this; the 25% floor does not.
+    "J": dict(notes=4210, credited=3000000000, measured=2000000000,
+              delta=30000000000, iow_cpu=0, unplaced=0,
+              v8=75854656030, key=True, key2=True),
+    # K: a daemon that has the notes counter but NOT the two attribution
+    #    keys -> REFUSE. Without them a zero is three states, not one.
+    "K": dict(notes=4210, credited=0, measured=0, delta=30000000000,
+              iow_cpu=0, unplaced=0, v8=75854656030, key=True, key2=False),
+    # L: every observation carried the io_worker flag. Declining them is the
+    #    v6 rule, so the credit path was offered nothing -> REFUSE, and the
+    #    stimulus is what failed.
+    "L": dict(notes=34, credited=0, measured=0, delta=34000000000,
+              iow_cpu=34, unplaced=0, v8=45822328957, key=True, key2=True),
+    # M: THE 2026-10-28 CAPTURE, as the new counters read it: 34 notes
+    #    accepted, 34 intervals retired without a second written -> every
+    #    on-CPU gap ended inside the second it was noted in, so a zero is
+    #    CORRECT and the stimulus has to change. The parent fixture called
+    #    this FAIL and named src/summary_writer.c.
+    "M": dict(notes=34, credited=0, measured=0, delta=34000000000,
+              iow_cpu=0, unplaced=34, v8=45822328957, key=True, key2=True),
 }[scen]
 
 calls = 0
 def metrics():
     global calls
     calls += 1
+    base = 1000000000
     m = {"ok": True, "uptime_s": 12.0 + calls,
-         "events_total": 1231776, "cpu_ns_total": 795480753 * calls,
+         "events_total": 1231776,
+         # The fixture reads cpu_ns_total twice: once before the stimulus and
+         # once after, and the DIFFERENCE is the denominator of the 25% floor.
+         # Pinned per scenario rather than growing per call so the floor is
+         # tested against a known number.
+         "cpu_ns_total": base + (SCEN["delta"] if calls > 1 else 0),
          "summary_open_cpu_credited_ns": SCEN["credited"],
-         "summary_open_cpu_measured_ns": 0,
+         "summary_open_cpu_measured_ns": SCEN["measured"],
          "summary_open_cpu_unknown_ns": 0,
          "summary_open_cpu_eff_rejected_total": 0,
          "summary_open_cpu_class_divergent_ns": 0,
@@ -94,12 +152,18 @@ def metrics():
          "summary_open_cpu_refused_total": 0,
          "summary_cpu_open_uncredited_ns_total": 0,
          "summary_open_credited_ns_total": SCEN["v8"],
-         "summary_open_io_worker_refused_total": 0,
+         # The pre-existing counter deliberately reads HIGHER than the on-CPU
+         # subset (it counts WAIT notes too) -- the overlap that made the gate
+         # capture unreadable, reproduced here rather than smoothed away.
+         "summary_open_io_worker_refused_total": SCEN["iow_cpu"] + 5,
          "summary_open_table_full_total": 0,
          "summary_open_notes_expired_total": 0,
          "tier": "escalated"}
     if SCEN["key"]:
         m["summary_open_cpu_notes_total"] = SCEN["notes"]
+    if SCEN["key2"]:
+        m["summary_open_cpu_io_worker_refused_total"] = SCEN["iow_cpu"]
+        m["summary_open_cpu_unplaced_total"] = SCEN["unplaced"]
     return m
 
 while True:
@@ -185,7 +249,8 @@ rc_of() {
 # 2 from exit 1, so the banner is the only thing that does.
 declare -A WANT=( [A]="PASS:0" [B]="REFUSE:2" [C]="REFUSE:2" \
                   [D]="FAIL:1" [E]="REFUSE:2" [F]="REFUSE:2" \
-                  [G]="REFUSE:2" )
+                  [G]="REFUSE:2" [H]="FAIL:1" [I]="FAIL:1" [J]="FAIL:1" \
+                  [K]="REFUSE:2" [L]="REFUSE:2" [M]="REFUSE:2" )
 declare -A WHY=(
   [A]="asked 4210x and crediting -> the producer IS wired"
   [B]="nothing sealed (v8 credit 0 too) -> says nothing either way"
@@ -194,9 +259,15 @@ declare -A WHY=(
   [E]="notes key absent (older daemon) -> cannot localise, must refuse"
   [F]="the daemon never came up -> refuse inside its own bound, never hang"
   [G]="psql exits 127 -> a missing dependency is a refusal, not a pass"
+  [H]="wall placed, measured 0 -> v7's split destroyed, worse than refusing"
+  [I]="measured > wall -> incoherent; the reader's residual goes negative"
+  [J]="2 s measured of a 30 s stimulus -> the token credit 'credited > 0' approves"
+  [K]="the two attribution keys absent -> a zero is three states; refuse"
+  [L]="every observation was an io_worker's -> offered nothing; the stimulus failed"
+  [M]="THE 2026-10-28 CAPTURE: 34 accepted, 34 retired unplaced -> no gap to spread"
 )
 fails=0
-for scen in A B C D E F G; do
+for scen in A B C D E F G H I J K L M; do
     rc=$(rc_of "$scen")
     verdict=$(/usr/bin/grep -oE 'test_v9_open_cpu_wired: (PASS|FAIL|REFUSE)' \
               "$WORK/out.$scen" | tail -1 | sed 's/.*: //')
@@ -212,12 +283,15 @@ for scen in A B C D E F G; do
     fi
 done
 echo ""
-echo "  --- scenario C, verbatim (the one the parent fixture gets wrong) ---"
-sed 's/^/  | /' "$WORK/out.C"
+echo "  --- scenario M, verbatim (the one the parent fixture gets wrong) ---"
+sed 's/^/  | /' "$WORK/out.M"
+echo ""
+echo "  --- scenario J, verbatim (the token credit that 'credited > 0' approves) ---"
+sed 's/^/  | /' "$WORK/out.J"
 echo ""
 if [[ "$fails" -eq 0 ]]; then
-    echo "=== fixture-discrimination: PASS (7 scenarios) ==="
+    echo "=== fixture-discrimination: PASS (13 scenarios) ==="
     exit 0
 fi
-echo "=== fixture-discrimination: FAIL ($fails of 7) ==="
+echo "=== fixture-discrimination: FAIL ($fails of 13) ==="
 exit 1
