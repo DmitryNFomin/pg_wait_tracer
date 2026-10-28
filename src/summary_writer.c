@@ -1955,6 +1955,18 @@ void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
 {
     if (!w->enabled || !w->open || pid == 0)
         return;
+    /* ONE classification of "this note is an on-CPU gap", asked once here and
+     * reused by the branch below, so the counter and the behaviour cannot
+     * drift apart. Incremented BEFORE every refusal in this function: it
+     * answers "was the writer asked", never "did it accept". A WAIT note
+     * leaves it at 0 by construction — that is what separates "the producer
+     * never offered an observation" from "it offered one and nothing was
+     * credited", which no other counter can do (see the field's comment in
+     * summary_writer.h). */
+    bool on_cpu_note = (we == 0 ||
+                        summary_wait_class_index(we) == PGWT_CLASS_CPU);
+    if (on_cpu_note && cpu)
+        w->open_cpu_notes_total++;
     /* v6's rule, on the open path: io_worker time is outside the model, so
      * there is nothing to spread. Refused at the note rather than at the
      * credit so the refusal is attributable to a pid. */
@@ -1970,7 +1982,7 @@ void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
         return;            /* table full, already counted */
     o->noted_ns = now_mono_ns;
     o->cat_flag = cat_flag;
-    if (we == 0 || summary_wait_class_index(we) == PGWT_CLASS_CPU) {
+    if (on_cpu_note) {
         /* AN ON-CPU GAP.
          *
          * WITHOUT an observation this is v8 exactly: not spread, because

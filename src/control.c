@@ -508,6 +508,42 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_open_cpu_refused_total",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_refused_total : 0);
+    /* WAS THE WRITER ASKED AT ALL? Published because without it every
+     * reading of a zero summary_open_cpu_credited_ns is a guess between two
+     * defects in two different files:
+     *
+     *   notes_total == 0  -> the PRODUCER never offered an on-CPU
+     *                        observation. Nothing in the writer ran, so no
+     *                        refusal counter can be non-zero either, and
+     *                        re-wiring the credit path moves nothing.
+     *   notes_total >  0  -> the writer was asked notes_total times and
+     *                        credited nothing. The three keys below say
+     *                        which refusal ate it; all three zero with
+     *                        notes_total non-zero narrows it to the seal.
+     *
+     * Measured on the gate box 2026-10-28 (box-check-ubuntu-20261028-121033,
+     * commit 31a03da6): credited / refused / uncredited were ALL 0 on a
+     * capture with 1.23 M events and 75.8 s of WAIT credit through the same
+     * seal, and nothing published could tell the two apart — the fixture
+     * reported "the producer is not wired" without that being established.
+     *
+     * open_io_worker_refused_total, open_table_full_total and
+     * open_notes_expired_total already existed and were counted INTERNALLY
+     * only: each is a silent early exit on the way from the note to the
+     * credit, so a producer that is wired and an observation that is thrown
+     * away were indistinguishable from outside the daemon. */
+    cjson_add_uint64(root, "summary_open_cpu_notes_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_cpu_notes_total : 0);
+    cjson_add_uint64(root, "summary_open_io_worker_refused_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_io_worker_refused_total : 0);
+    cjson_add_uint64(root, "summary_open_table_full_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_table_full_total : 0);
+    cjson_add_uint64(root, "summary_open_notes_expired_total",
+                     d->summary_writer
+                         ? d->summary_writer->open_notes_expired_total : 0);
     cjson_add_uint64(root, "summary_cpu_open_uncredited_ns_total",
                      d->summary_writer
                          ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
@@ -555,11 +591,15 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * conditional over a version constant is how the producer got
      * hidden the first time. */
     /* v9 (#424): the producer is wired in src/map_reader.c's
-     * pgwt_read_state_map. These counters are how a live capture proves the
-     * call was REACHED: with watchpoints attached and cpu_ns_total moving,
-     * a zero summary_open_cpu_credited_ns means unwired, not declined,
-     * provided seconds are actually being sealed (see the fourth outcome
-     * below). tests/test_v9_open_cpu_wired.sh is the live acceptance test.
+     * pgwt_read_state_map. CORRECTED 2026-10-28, because this paragraph said
+     * the opposite and a live capture refuted it: a zero
+     * summary_open_cpu_credited_ns with watchpoints attached, cpu_ns_total
+     * moving and seconds sealing does NOT by itself mean unwired. It is
+     * equally the signature of an observation that was offered and then
+     * dropped on one of the writer's silent early exits. Only
+     * summary_open_cpu_notes_total above separates the two, which is why it
+     * exists. tests/test_v9_open_cpu_wired.sh is the live acceptance test
+     * and reads notes_total before it reads a verdict out of a zero.
      *
      * THE FOURTH OUTCOME, found by reading the writer rather than by
      * reasoning from the counters: a note can be ACCEPTED and then credited

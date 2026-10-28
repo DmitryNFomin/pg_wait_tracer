@@ -1062,6 +1062,21 @@ struct pgwt_summary_writer {
     uint64_t      open_notes_expired_total;
     uint64_t      open_table_full_total;
     uint64_t      open_io_worker_refused_total;
+    /* "Was the writer EVER ASKED to credit an on-CPU gap?" — the one reading
+     * none of the counters below can give. All of credited / refused /
+     * uncredited read 0 both when the producer never offered an observation
+     * (the call site is unreachable; the writer declined nothing) and when it
+     * offered one for every tick and the credit path placed nothing. Those
+     * are different defects in different files, and
+     * tests/test_v9_open_cpu_wired.sh read the first as the second on the
+     * 2026-10-28 gate capture: 1.23 M events, 75.8 s of WAIT credit through
+     * the same seal, 0 CPU credit, and every refusal counter 0 too.
+     *
+     * Counted at the note, BEFORE the io_worker and table-full refusals, so
+     * it means "asked" and never "accepted" — and only for an ON-CPU note
+     * carrying an observation, so a WAIT note must leave it alone (a bump
+     * above the class test would make every live daemon look asked). */
+    uint64_t      open_cpu_notes_total;
     uint64_t      open_cpu_refused_total;
     uint64_t      cpu_open_uncredited_ns_total;
     uint64_t      open_fill_capped_total;

@@ -12,16 +12,32 @@
 # unwired producer was unobservable, not merely unobserved.
 #
 # PRECONDITIONS, each checked and each a REFUSAL (exit 2) rather than a pass:
-#   - watchpoints available and the daemon reaches tier=exact. The producer
-#     lives in pgwt_read_state_map, which only runs when the mode maintains
-#     watchpoint intervals; in sampled/lightweight a zero is CORRECT, so
-#     asserting non-zero there would fail a healthy daemon.
+#   - WATCHPOINT PROBES ARE ATTACHED (exact_probe_attached_mask > 0). Note
+#     that this is NOT "tier == exact", which is what this header claimed
+#     until 2026-10-28 while the code below checked the mask -- see the
+#     comment at the check itself for why the mask is the fact and the tier
+#     label is not. The producer lives in pgwt_read_state_map, which only
+#     runs when the mode maintains watchpoint intervals; without them a zero
+#     is CORRECT, so asserting non-zero there would fail a healthy daemon.
 #   - the control socket answers `metrics`.
 #   - the seven v9 keys are present.
 #   - the stimulus is PROVEN: a CPU-only statement must actually have been
 #     on-CPU across at least two ticks, evidenced by cpu_ns_total moving.
 #     Without that the assertion would be about the workload, not the wiring.
-# Only once all four hold does a zero count as a FAILURE (exit 1).
+#   - seconds really were SEALED (summary_open_credited_ns_total > 0), else
+#     nothing could have been credited by anyone.
+#   - THE WRITER WAS ASKED (summary_open_cpu_notes_total > 0). Added
+#     2026-10-28 after this script printed "the producer is not wired" on a
+#     capture where that was not established: a zero credited_ns is BOTH
+#     "the producer never offered an observation" and "it offered one every
+#     tick and the credit path dropped it", and until this counter existed
+#     nothing on the wire separated them.
+# Only once ALL of those hold does a zero count as a FAILURE (exit 1).
+#
+# NOTE ON EXIT 2, because the distinction is only in this script's output:
+# tests/run_all.sh counts any non-zero exit as a failure, so a REFUSE turns
+# the gate red exactly like a FAIL. The banner line (REFUSE vs FAIL) is the
+# only place the two are told apart; read it, do not read the pass counts.
 #
 # Usage: sudo tests/test_v9_open_cpu_wired.sh [--pid POSTMASTER_PID]
 set -uo pipefail
@@ -215,12 +231,62 @@ if [[ -z "$CPU1" ]] || [[ "$CPU1" -le "$CPU0" ]]; then
 fi
 echo "  ok: stimulus PROVEN -- cpu_ns_total moved $CPU0 -> $CPU1"
 
+# ── THE FIFTH PRECONDITION: was the writer ASKED? ───────────────────────
+# Read from the SAME metrics object as the counter below, because the two
+# have to describe one instant. summary_open_cpu_notes_total counts on-CPU
+# notes that arrived carrying an observation, before any refusal inside the
+# writer -- so:
+#
+#   key absent  -> this daemon predates the counter. This script cannot tell
+#                  "never asked" from "asked and dropped", which is exactly
+#                  the verdict it would otherwise print. REFUSE.
+#   0           -> the PRODUCER never offered an observation. credited == 0
+#                  is then the correct answer and says nothing about the
+#                  credit path; the defect is the call site. REFUSE.
+#   > 0         -> the writer was asked. Only now does a zero credited_ns
+#                  mean the credit path placed nothing. FAIL.
+#
+# This is why the run of 2026-10-28 (box-check-ubuntu-20261028-121033,
+# commit 31a03da6) was misread: all four preconditions above held and were
+# printed, yet credited / refused / uncredited were ALL zero, which is both
+# states at once. No sleep and no retry is added -- the number either is on
+# the wire at the instant the counter is read or it is not.
+NOTES=$(num "$M1" summary_open_cpu_notes_total)
+if [[ -z "$NOTES" ]]; then
+    echo "  REFUSE: metrics has no numeric 'summary_open_cpu_notes_total'."
+    echo "          Without it a zero credited_ns is BOTH 'the producer never"
+    echo "          offered an observation' and 'it did and nothing was"
+    echo "          credited'. This daemon predates the counter, so this"
+    echo "          check cannot name a defect and will not guess one."
+    echo "=== test_v9_open_cpu_wired: REFUSE ==="
+    exit 2
+fi
+if [[ "$NOTES" -le 0 ]]; then
+    echo "  REFUSE: summary_open_cpu_notes_total = 0. The writer was never"
+    echo "          ASKED about an on-CPU gap, so credited_ns == 0 is the"
+    echo "          CORRECT answer and the credit path was never exercised."
+    echo "          The defect is upstream, at the producer call site in"
+    echo "          pgwt_read_state_map (src/map_reader.c) or in what the"
+    echo "          state-map scan sees -- not in the writer."
+    echo "=== test_v9_open_cpu_wired: REFUSE ==="
+    exit 2
+fi
+echo "  ok: the writer WAS asked -- summary_open_cpu_notes_total = $NOTES"
+
 CRED=$(num "$M1" summary_open_cpu_credited_ns)
 REFUSED=$(num "$M1" summary_open_cpu_refused_total)
 UNCRED=$(num "$M1" summary_cpu_open_uncredited_ns_total)
+IOREF=$(num "$M1" summary_open_io_worker_refused_total)
+TBLFULL=$(num "$M1" summary_open_table_full_total)
+EXPIRED=$(num "$M1" summary_open_notes_expired_total)
 echo "  summary_open_cpu_credited_ns   = $CRED"
 echo "  summary_open_cpu_refused_total = ${REFUSED:-n/a}"
 echo "  summary_cpu_open_uncredited_ns_total = ${UNCRED:-n/a}"
+# The three silent early exits between the note and the credit, so a FAIL
+# names which one ate the observation instead of leaving it to be inferred.
+echo "  summary_open_io_worker_refused_total = ${IOREF:-n/a}"
+echo "  summary_open_table_full_total        = ${TBLFULL:-n/a}"
+echo "  summary_open_notes_expired_total     = ${EXPIRED:-n/a}"
 
 # THREE ZEROS HAVE TWO MEANINGS, and this script originally reported only
 # one of them. agent/424-daemon (dc23287) found the fourth outcome by
@@ -257,11 +323,17 @@ if [[ -n "$V8CRED" ]] && [[ "$V8CRED" -eq 0 ]]; then
 fi
 
 echo "  FAIL: summary_open_cpu_credited_ns is 0 on a capture whose CPU"
-echo "        statement is proven, with the v9 keys present, AND with"
+echo "        statement is proven, with the v9 keys present, with"
 echo "        summary_open_credited_ns_total = ${V8CRED:-n/a} proving seconds"
-echo "        really were sealed. So the open-CPU path was reached and"
-echo "        credited nothing: the producer is not wired, and the"
-echo "        accounting falls back to v8. refused_total=${REFUSED:-n/a}"
+echo "        really were sealed, AND with the writer ASKED $NOTES times"
+echo "        (summary_open_cpu_notes_total). So the observation reached the"
+echo "        writer and the CREDIT PATH placed none of it -- which is a"
+echo "        different defect from an unwired producer, and the counter"
+echo "        above is what distinguishes them. Which early exit took it:"
+echo "        io_worker=${IOREF:-n/a} table_full=${TBLFULL:-n/a}"
+echo "        notes_expired=${EXPIRED:-n/a} eff_rejected/overcredit above."
+echo "        All of those zero narrows it to the seal placing no second."
+echo "        refused_total=${REFUSED:-n/a}"
 echo "        uncredited_ns=${UNCRED:-n/a} is what it cost."
 echo "=== test_v9_open_cpu_wired: FAIL ==="
 exit 1

@@ -214,7 +214,20 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'summary_open_cpu_eff_rejected_total',
           'summary_open_cpu_class_divergent_ns',
           'summary_open_cpu_tier_mismatch_total',
-          'summary_open_cpu_overcredit_ns'):
+          'summary_open_cpu_overcredit_ns',
+          # #424 follow-up: summary_open_cpu_credited_ns == 0 is TWO states
+          # -- the writer was never asked, or it was asked and the credit
+          # path dropped it -- and the 2026-10-28 gate capture was read as
+          # the second when nothing established which. notes_total is the
+          # only reading that separates them; the other three are silent
+          # early exits between the note and the credit that src/control.c
+          # did not publish, so an observation thrown away looked exactly
+          # like a producer that never ran. Named here so a refactor cannot
+          # drop them back out of the response in silence.
+          'summary_open_cpu_notes_total',
+          'summary_open_io_worker_refused_total',
+          'summary_open_table_full_total',
+          'summary_open_notes_expired_total'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.

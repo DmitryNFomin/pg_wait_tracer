@@ -493,11 +493,17 @@ LIVE_TESTS=(
     # constant is 9 -- this line is what the previous note asked for, and
     # without it the one check that can tell "wired" from "merely compiled"
     # runs nowhere. It REFUSES (exit 2) rather than passing when its
-    # preconditions do not hold: no watchpoints / not tier=exact, no control
-    # socket, the seven v9 keys absent, or a stimulus it cannot prove was
-    # on-CPU across two ticks. Only once all four hold does a zero count as
-    # a failure -- so a tier where the zero is CORRECT cannot make it red,
-    # and a tier that cannot see cannot make it green either.
+    # preconditions do not hold: no watchpoint probes attached, no control
+    # socket, the seven v9 keys absent, a stimulus it cannot prove was
+    # on-CPU across two ticks, no second actually sealed, or the writer never
+    # ASKED for an on-CPU credit (summary_open_cpu_notes_total == 0). A tier
+    # that cannot see cannot make it green.
+    # CORRECTED 2026-10-28: this note used to add "so a tier where the zero
+    # is CORRECT cannot make it red", which is false. run_one above counts
+    # EVERY non-zero exit as a failure, exit 2 included, so a refusal reddens
+    # the gate exactly like a failure and only the script's own REFUSE/FAIL
+    # banner tells them apart. Keeping the claim would have let a reviewer
+    # read a red refusal as a product defect, which is what happened.
     "test_v9_open_cpu_wired|bash|test_v9_open_cpu_wired.sh"
     "test_escalation|bash|test_escalation.sh"
     # Tiered-capture live tests (were built for A4/A5 but wired into
