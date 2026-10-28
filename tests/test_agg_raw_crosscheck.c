@@ -502,7 +502,7 @@ static int build_stream(struct pgwt_trace_event *out, uint64_t base_mono)
             /* PGWT_CPU_NS_UNKNOWN throughout: leaving it unmeasured keeps
              * the time-model ROW SETS comparable (no Off-CPU* row on either
              * side). Measured Top Events and Sessions have their own
-             * fixtures in sections 6f and 6g. */
+             * fixtures in sections 6f and 6h. */
             e.cpu_ns       = PGWT_CPU_NS_UNKNOWN;
             out[n++] = e;
         }

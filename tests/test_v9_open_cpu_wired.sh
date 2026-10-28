@@ -431,8 +431,8 @@ if [[ "$CRED" -gt 0 ]]; then
     #     "headroom" assumes its sign without measuring it, and on an idle
     #     box versus a loaded one it is exactly what moves the ratio.
     # So the floor is what it is: a number set BELOW every value measured so
-    # far, whose job is to reject a token credit. MEASURED on pgwt-gate-3 and
-    # one ephemeral VM, same stimulus, n = 3: 86%, 61%, 60% (min 60, spread
+    # far, whose job is to reject a token credit. REPORTED on pgwt-gate-3 and
+    # one ephemeral VM, same stimulus, n = 4: 86%, 61%, 60%, 64% (min 60, spread
     # 26 pp; the 86% is a hand-run on an otherwise idle box, which is the
     # smaller denominator). 25% is 2.4x below the minimum observed and 2.5x
     # above the ~10% a first-second-only credit produces (harness scenario
@@ -495,18 +495,18 @@ if [[ "$OFFERED" -le 0 ]]; then
 fi
 
 if [[ "$UNPLACED" -gt 0 ]]; then
-    echo "  REFUSE: the credit path was offered $OFFERED observations and"
-    echo "          retired $UNPLACED intervals without writing a single"
-    echo "          second of any of them -- every on-CPU gap in this"
-    echo "          capture ended INSIDE the second it was noted in. v9"
-    echo "          spreads an interval across the seconds it occupies, so"
-    echo "          there was nothing to spread and a zero is the CORRECT"
-    echo "          answer. The STIMULUS is what has to change, not the"
-    echo "          writer: a statement that burns CPU is not the same"
-    echo "          thing as one that holds an on-CPU interval open across"
-    echo "          a tick boundary (a FunctionScan over generate_series"
-    echo "          spills a tuplestore and changes wait event thousands of"
-    echo "          times a second; a plpgsql loop does not)."
+    echo "  REFUSE: summary_open_cpu_credited_ns = $CRED, with $OFFERED"
+    echo "          observations offered after the io_worker rule and"
+    echo "          summary_open_cpu_unplaced_total = $UNPLACED intervals"
+    echo "          retired without open-CPU credit. These are aggregate"
+    echo "          counts of observations and intervals, not a per-interval"
+    echo "          trace. They do not establish interval lengths, that every"
+    echo "          offered interval was retired unplaced, or why credit is 0."
+    echo "          Unplaced is also non-zero on passing captures (11 and 13"
+    echo "          in the committed MERGE and FINAL box logs). This reading"
+    echo "          establishes neither a failed stimulus nor a correct writer."
+    echo "          Correlate note, seal and close timing for the stimulus pids"
+    echo "          before assigning a cause; this verdict remains REFUSE."
     exit 2
 fi
 

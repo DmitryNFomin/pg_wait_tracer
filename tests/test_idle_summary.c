@@ -57,7 +57,7 @@
  *      summary directory, a writer that wrote nothing, an unreadable file, a
  *      truncated header, a window with no overlap, and the case where the
  *      pacing event is absent rather than mis-accounted.
- *  15. v9 session measurements on disk: distinct fields round-trip, a short
+ *  16. v9 session measurements on disk: distinct fields round-trip, a short
  *      session is refused, v8 keeps its unsplit answer, and the observation
  *      counter saturates through the real writer and survives the format.
  *

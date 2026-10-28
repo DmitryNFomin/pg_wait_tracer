@@ -523,7 +523,7 @@ accounting rule and not about the byte layout:
   never the nanoseconds, so a measured zero still counts as a measurement.
   The sessions routing now reports measured CPU with its off-CPU remainder,
   pinned by `tests/test_window_clip.c` 13d and
-  `tests/test_agg_raw_crosscheck.c` 6g. The per-EVENT and per-QUERY tables
+  `tests/test_agg_raw_crosscheck.c` 6h. The per-EVENT and per-QUERY tables
   still carry wall; that half of the epoch is not in this change. These
   session layout changes accompany the open-CPU accounting rule under v9.
 
