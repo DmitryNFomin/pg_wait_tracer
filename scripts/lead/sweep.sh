@@ -232,31 +232,43 @@ RUNNING_N=$(/usr/bin/python3 "$SELFDIR/agent-ledger.py" count "$LEDGER" 2>/dev/n
 # mirror and the more dangerous direction: "too low against evidence to the
 # contrary" fires escalation hardest exactly when the ledger knows least --
 # cold start, before any already-running agent has ever lived through a
-# fresh SubagentStart/Stop pair to populate it. Two independent signals,
-# checked only when the ledger says running==0:
+# fresh SubagentStart/Stop pair to populate it. Checked only when the ledger
+# says running==0, against THREE independent signals, ORed together:
 #   - a `make check` actually holding the machine-wide lock RIGHT NOW
 #     (scripts/check-lock.py processes -- pgrep, no portability concern)
-#   - a worktree's own git ADMIN dir touched recently. Deliberately
-#     .git/worktrees/<name>/HEAD, not the worktree's checked-out file tree
-#     (which can sit unmodified for a long session with no commits) and not
-#     the worktree directory's own mtime (which only changes when entries
-#     are added/removed inside it, never when HEAD moves -- confirmed by
-#     hand: 14 worktrees had a HEAD touched in the last 2h while the
-#     directory-mtime version of this same check read zero).
-# Either signal nonzero while running==0 is a disagreement, not an answer:
-# refuse, the same discipline SANITY_MAX already applies at the other end.
+#   - a worktree's own git ADMIN dir touched recently
+#     (.git/worktrees/<name>/HEAD -- moves on commit/checkout)
+#   - a worktree's own checkout directory touched recently
+#     (.claude/worktrees/agent-*, top-level mtime)
+# An earlier version used HEAD-mtime only, on the claim "directory-mtime read
+# zero" -- that claim was never actually measured: the first attempt used
+# `find -newermt '-2 hours'`, which this host's `find` (bfs) rejects outright
+# (it requires an absolute timestamp), so the command silently produced no
+# output under `2>/dev/null` and looked like a zero count. Measured properly
+# (absolute cutoff) on this repo: directory-mtime reads 9, not 0 -- a real,
+# nonzero, independent signal, the opposite of the retracted claim. Worse,
+# review found the soundness case live: HEAD only moves on commit/checkout,
+# so a long build-and-test stretch with no commits lets it go stale while the
+# agent is plainly alive -- one check-lock-holding agent's directory mtime
+# was 90 minutes fresher than its HEAD mtime. So both are ORed in, not just
+# HEAD: the costs here are asymmetric by design -- a false UNKNOWN delays
+# escalation by one scan (>=10 min), while a false "confirmed running=0" is
+# the over-cap-start catastrophe this guard exists to prevent, so the guard
+# errs toward refusing whenever ANY corroborating signal disagrees with 0.
 CHECK_PROCS=$(pgrep -f 'scripts/check-lock.py' 2>/dev/null | wc -l | tr -d ' ')
 WT_CUTOFF=$(date -v-2H +"%Y-%m-%dT%H:%M:%S" 2>/dev/null)
 if [ -n "$WT_CUTOFF" ]; then
-  RECENT_WT=$(find .git/worktrees -maxdepth 2 -name 'HEAD' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
+  RECENT_WT_HEAD=$(find .git/worktrees -maxdepth 2 -name 'HEAD' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
+  RECENT_WT_DIR=$(find .claude/worktrees -maxdepth 1 -type d -name 'agent-*' -newermt "$WT_CUTOFF" 2>/dev/null | wc -l | tr -d ' ')
 else
-  RECENT_WT=""   # `date -v` unsupported on this host -- unknown, not zero
+  RECENT_WT_HEAD=""   # `date -v` unsupported on this host -- unknown, not zero
+  RECENT_WT_DIR=""
 fi
 
-/usr/bin/python3 - "$TMP" "$DQ" "$RUNNING_N" "$SANITY_MAX" "$CHECK_PROCS" "$RECENT_WT" <<'PY'
+/usr/bin/python3 - "$TMP" "$DQ" "$RUNNING_N" "$SANITY_MAX" "$CHECK_PROCS" "$RECENT_WT_HEAD" "$RECENT_WT_DIR" <<'PY'
 import json, os, re, sys
 t, dq, running_raw, sanity_max = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-check_procs_raw, recent_wt_raw = sys.argv[5], sys.argv[6]
+check_procs_raw, recent_wt_head_raw, recent_wt_dir_raw = sys.argv[5], sys.argv[6], sys.argv[7]
 
 def write_unknown(reason):
     tmp = dq + ".tmp"
@@ -286,13 +298,18 @@ def _int_or_none(s):
         return None
 
 check_procs = _int_or_none(check_procs_raw) or 0
-recent_wt = _int_or_none(recent_wt_raw)  # None if `date -v` was unavailable
-if running == 0 and (check_procs > 0 or (recent_wt or 0) > 0):
+recent_wt_head = _int_or_none(recent_wt_head_raw)  # None if `date -v` unavailable
+recent_wt_dir = _int_or_none(recent_wt_dir_raw)    # None if `date -v` unavailable
+if running == 0 and (
+    check_procs > 0 or (recent_wt_head or 0) > 0 or (recent_wt_dir or 0) > 0
+):
     write_unknown(
         f"running-agent ledger reports 0 but independent evidence disagrees "
         f"(check-lock processes={check_procs}, worktrees with HEAD touched "
-        f"<2h={'n/a' if recent_wt is None else recent_wt}) -- a cold-start "
-        f"ledger against contrary evidence is a disagreement, not an answer"
+        f"<2h={'n/a' if recent_wt_head is None else recent_wt_head}, worktree "
+        f"dirs touched <2h={'n/a' if recent_wt_dir is None else recent_wt_dir}) "
+        f"-- a cold-start ledger against contrary evidence is a disagreement, "
+        f"not an answer"
     ); raise SystemExit
 
 try:
