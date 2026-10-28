@@ -185,27 +185,27 @@ check "reorder: second invocation, same findings, no new dispositions -> BLOCK" 
 # =============================================================================
 PP="scripts/lead/absence-prepass.py"
 
+LAST_PP_OUT=""
 check_pp() {
   local desc="$1" want_rc="$2" content="$3"
-  local f out rc
+  local f rc
   f="$TMP/pp-$$-$RANDOM.md"
   printf '%s\n' "$content" > "$f"
-  out=$(/usr/bin/python3 "$PP" "$f" 2>&1)
+  LAST_PP_OUT=$(/usr/bin/python3 "$PP" "$f" 2>&1)
   rc=$?
   if [ "$rc" = "$want_rc" ]; then
     pass=$((pass+1)); echo "ok   $desc (exit $rc)"
   else
     fail=$((fail+1)); echo "FAIL $desc (want exit $want_rc, got $rc)"
-    printf '%s\n' "$out" | sed 's/^/       /'
+    printf '%s\n' "$LAST_PP_OUT" | sed 's/^/       /'
   fi
-  printf '%s' "$out"
 }
 
 # case 9: an absence claim with nothing pasted nearby -> BLOCK (exit 1), and
 # the blocking line must actually be quoted, not just a bare verdict.
-out=$(check_pp "unevidenced absence claim blocks" 1 \
-  'There is no mechanical check for this today.')
-if printf '%s' "$out" | /usr/bin/grep -q 'no mechanical check'; then
+check_pp "unevidenced absence claim blocks" 1 \
+  'There is no mechanical check for this today.'
+if printf '%s' "$LAST_PP_OUT" | /usr/bin/grep -q 'no mechanical check'; then
   pass=$((pass+1)); echo "ok   block output quotes the offending phrase"
 else
   fail=$((fail+1)); echo "FAIL block output did not quote the offending line"
@@ -315,6 +315,10 @@ branch refs/heads/agent/decoy-branch
 worktree $CBE_FIXTURE
 HEAD 1111111111111111111111111111111111111111
 branch refs/heads/agent/42-demo-fixture
+
+worktree $CBE_FIXTURE
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/agent/lead-stuff
 EOF
 
 run_cbe() {
