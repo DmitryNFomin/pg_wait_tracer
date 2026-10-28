@@ -1,0 +1,23 @@
+fixture under test: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a2261899b0331b0bf/tests/test_v9_open_cpu_wired.sh
+
+  ok   A: PASS    exit=0   asked 4210x and crediting -> the producer IS wired
+  ok   B: REFUSE  exit=2   nothing sealed (v8 credit 0 too) -> says nothing either way
+  ok   C: REFUSE  exit=2   THE 2026-10-28 CAPTURE: sealed, but the writer was NEVER ASKED
+  ok   D: FAIL    exit=1   asked 4210x and credited nothing -> the CREDIT PATH dropped it
+  ok   E: REFUSE  exit=2   notes key absent (older daemon) -> cannot localise, must refuse
+
+  --- scenario C, verbatim (the one the parent fixture gets wrong) ---
+  | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
+  |   ok: watchpoints attached (mask=15, tier=escalated) -- producer reachable
+  |   ok: all seven v9 control keys present and numeric
+  |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
+  |   ok: stimulus PROVEN -- cpu_ns_total moved 795480753 -> 1590961506
+  |   REFUSE: summary_open_cpu_notes_total = 0. The writer was never
+  |           ASKED about an on-CPU gap, so credited_ns == 0 is the
+  |           CORRECT answer and the credit path was never exercised.
+  |           The defect is upstream, at the producer call site in
+  |           pgwt_read_state_map (src/map_reader.c) or in what the
+  |           state-map scan sees -- not in the writer.
+  | === test_v9_open_cpu_wired: REFUSE ===
+
+=== fixture-discrimination: PASS (5 scenarios) ===

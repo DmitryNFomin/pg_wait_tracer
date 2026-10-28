@@ -142,6 +142,7 @@ tests/results/*/
 !tests/results/issue424-fix/
 !tests/results/issue424-index/
 !tests/results/issue424-integration/
+!tests/results/issue424-notes-counter/
 !tests/results/issue486-measurement/
 !tests/results/overhead-envelope/
 !tests/results/probe-bounds/

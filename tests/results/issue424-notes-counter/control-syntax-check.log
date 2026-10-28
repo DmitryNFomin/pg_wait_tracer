@@ -1,0 +1,7 @@
+  OK    src/control.c compiles
+  OK    src/map_reader.c compiles
+  OK    src/summary_writer.c compiles
+  OK    positive control: a renamed field is rejected, so the new keys
+        really are being compiled
+=== control-syntax-check: PASS (syntax only — never a substitute for
+    make box-check, which links and runs) ===
