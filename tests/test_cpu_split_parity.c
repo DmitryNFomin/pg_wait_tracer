@@ -1152,7 +1152,8 @@ static void test_measured_cpu_inside_visible_idle(void)
               p.sum.idle_time_ms - control.idle_time_ms, ms);
         CHECK(row_ms(&control, "CPU (running)") -
               row_ms(&p.sum, "CPU (running)") == ms,
-              "C2: CPU running +%.6f ms", ms);
+              "C2: CPU running +%.6f ms (want %.6f)",
+              row_ms(&control, "CPU (running)") - row_ms(&p.sum, "CPU (running)"), ms);
         printf("  C3: raw-only credit %.6f ms = %.6f pp of DB Time\n",
                ms, (control.db_time_ms - p.sum.db_time_ms) /
                    p.sum.db_time_ms * 100.0);
