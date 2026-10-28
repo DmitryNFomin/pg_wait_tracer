@@ -159,6 +159,113 @@ EOF
 check "reorder: first invocation passes on fresh dispositions" 0 '{"stop_hook_active": false}'
 check "reorder: second invocation, same findings, no new dispositions -> BLOCK" 2 '{"stop_hook_active": false}'
 
+# =============================================================================
+# The dispatch-queue escalation gate (sweep-hook.sh's ESC_N section). These
+# use an EMPTY main cache throughout (write_empty_cache) specifically because
+# an earlier draft's "if no findings, exit 0 immediately" short-circuit would
+# have skipped escalation entirely whenever the top-5-capped FINDING list in
+# the main cache happened to be empty -- case 9 below is the regression test
+# for exactly that bug, not just a happy-path check.
+DQ="$TMP/.dispatch-queue"
+write_empty_cache() { printf '== sweep-TEST ==\n== end sweep-TEST ==\n' > "$CACHE"; }
+write_dq() { printf '%s' "$1" > "$DQ"; }
+
+DQ_READY='# dispatch-queue v1
+STATUS OK
+CAP running=0 cap=3
+issue-612 612 4 Fix the thing
+issue-650 650 1 Another thing'
+
+DQ_AT_CAP='# dispatch-queue v1
+STATUS OK
+CAP running=3 cap=3
+issue-612 612 4 Fix the thing'
+
+DQ_UNKNOWN='# dispatch-queue v1
+STATUS UNKNOWN gh issue query failed'
+
+DQ_BELOW_N='# dispatch-queue v1
+STATUS OK
+CAP running=0 cap=3
+issue-612 612 2 Fix the thing'
+
+# ---- case 9 (THE regression test): escalated item, zero plain findings, ----
+# MY-CHOICE only -> still BLOCKS. This is "item ready for N+1 scans with a
+# MY-CHOICE disposition -> hook exits 2" from the brief.
+write_empty_cache; write_dq "$DQ_READY"
+printf 'MY-CHOICE not now [issue-612]\n' > "$DISP"
+check "escalated item (count=4 >= N=3) with only MY-CHOICE blocks even with zero plain findings" 2 '{"stop_hook_active": false}'
+
+# ---- case 10: same item, RUNNING disposition -> passes ---------------------
+write_empty_cache; write_dq "$DQ_READY"
+printf 'RUNNING agent/fix-612 [issue-612]\n' > "$DISP"
+check "escalated item with RUNNING passes" 0 '{"stop_hook_active": false}'
+
+# ---- case 11: BLOCKED-BY naming a REAL other queue id -> passes ------------
+write_empty_cache; write_dq "$DQ_READY"
+printf 'BLOCKED-BY issue-650 [issue-612]\n' > "$DISP"
+check "escalated item with BLOCKED-BY naming a real queue id passes" 0 '{"stop_hook_active": false}'
+
+# ---- case 12: BLOCKED-BY naming a NONEXISTENT id -> still blocks -----------
+write_empty_cache; write_dq "$DQ_READY"
+printf 'BLOCKED-BY issue-999999 [issue-612]\n' > "$DISP"
+check "BLOCKED-BY naming an id absent from the queue does not satisfy it" 2 '{"stop_hook_active": false}'
+
+# ---- case 13 (THE negative control for UNKNOWN != empty): the queue query --
+# failed (STATUS UNKNOWN). The hook must say so, and must NOT silently pass
+# as though the ready list were confirmed empty.
+write_empty_cache; write_dq "$DQ_UNKNOWN"
+rm -f "$DISP"
+out=$(printf '%s' '{"stop_hook_active": false}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | /usr/bin/grep -q "DISPATCH QUEUE: STATUS UNKNOWN"; then
+  pass=$((pass+1)); echo "ok   failed queue query reads UNKNOWN visibly, not silently empty"
+else
+  fail=$((fail+1)); echo "FAIL failed queue query did not surface UNKNOWN (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# ---- case 14: no .dispatch-queue file at all -> visibly missing/stale, ----
+# never read as empty. A missing file has no mtime, so it hits the dq_age
+# staleness guard (age defaults to 999999) before the python parser even
+# runs -- a different code path from case 13's STATUS UNKNOWN content, and
+# both must be distinguishable from a silent "0 escalated".
+write_empty_cache; rm -f "$DQ" "$DISP"
+out=$(printf '%s' '{"stop_hook_active": false}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | /usr/bin/grep -q "DISPATCH QUEUE: STALE or missing"; then
+  pass=$((pass+1)); echo "ok   missing dispatch-queue file reads STALE-or-missing, not empty"
+else
+  fail=$((fail+1)); echo "FAIL missing dispatch-queue file did not surface STALE-or-missing (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# ---- case 15 (THE cap control): running == cap -> escalation PAUSES, a ----
+# bare MY-CHOICE (no RUNNING/BLOCKED-BY) passes, and the pause is visible.
+write_empty_cache; write_dq "$DQ_AT_CAP"
+printf 'MY-CHOICE no headroom [issue-612]\n' > "$DISP"
+out=$(printf '%s' '{"stop_hook_active": false}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | /usr/bin/grep -q "DISPATCH ESCALATION PAUSED"; then
+  pass=$((pass+1)); echo "ok   at cap (running=cap), escalation pauses instead of forcing an over-cap start"
+else
+  fail=$((fail+1)); echo "FAIL at-cap case did not pause (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# ---- case 16: below the N threshold -> MY-CHOICE still satisfies -----------
+write_empty_cache; write_dq "$DQ_BELOW_N"
+printf 'MY-CHOICE not yet [issue-612]\n' > "$DISP"
+check "ready item below N=3 scans still accepts MY-CHOICE" 0 '{"stop_hook_active": false}'
+
+# ---- case 17 (ordering control): a disposition from an earlier turn does ---
+# not satisfy a later one -- the same queue, no new disposition, must block
+# again after the previous pass consumed $DISP.
+write_empty_cache; write_dq "$DQ_READY"
+printf 'RUNNING agent/fix-612 [issue-612]\n' > "$DISP"
+check "escalation: first turn's RUNNING passes" 0 '{"stop_hook_active": false}'
+check "escalation: same queue, no new disposition this turn, blocks again" 2 '{"stop_hook_active": false}'
+
 echo "== $pass passed, $fail failed =="
 
 if ! git diff --quiet HEAD -- "$REL"; then

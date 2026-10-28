@@ -14,6 +14,16 @@
 #    returns all PRs in ~1.7s. Speed here is not an optimisation; it is what lets
 #    the hook run this synchronously and removes the whole class of problem.
 export GH_PAGER=cat; set -u
+# OUTDIR is where side-effect files (currently just .dispatch-queue) are
+# written. It defaults to this script's own directory so a manual run from
+# any worktree does something sane, but the hook ALWAYS passes its own $D
+# explicitly: git worktrees share one .git, so the hardcoded `cd` below is
+# fine for the git/gh queries, but each worktree's hook keeps its own
+# .sweep-latest.txt cache (via stdout redirect in sweep-hook.sh) and the
+# dispatch queue must land next to THAT cache, not next to whichever
+# worktree happened to be $0's directory.
+OUTDIR="${1:-$(cd "$(dirname "$0")" && pwd)}"
+SELFDIR="$(cd "$(dirname "$0")" && pwd)"
 cd /Users/dmitryfomin/work/git/pg_wait_tracer
 RUN="sweep-$(date -u +%Y%m%dT%H%M%SZ)"
 git fetch origin -q 2>/dev/null || { echo "$RUN UNKNOWN: git fetch failed"; exit 3; }
@@ -187,5 +197,125 @@ else
     echo "   CODEX: idle"
   fi
 fi
+
+# ---- [9] dispatch queue: the escalating-obligation gate reads this file ----
+# Ready == open tag-blocker issue, no open PR, no live worktree -- the exact
+# quantity in [6], but written WITHOUT the "show top 5" cap that section uses
+# for the lead's own reading, because the escalation gate must be able to see
+# an item even when it isn't in the top 5 by issue number.
+#
+# STATUS OK / STATUS UNKNOWN on line 2 are the whole contract: an empty ready
+# list and a failed join must never produce the same file shape. The consumer
+# (sweep-hook.sh) refuses to read anything else as "confirmed empty".
+#
+# Counts persist only across a run whose PREVIOUS file was STATUS OK; a gap
+# (missing file, or the prior run was itself UNKNOWN) resets the streak to 1
+# rather than guessing continuity through a period this script could not see.
+#
+# `running`: a ledger of actual SubagentStart/SubagentStop pairs (see
+# agent-ledger.py), NOT a count of live agent/* worktrees -- that proxy read
+# 227 against a cap of 3 on this repo (a worktree is kept until its PR opens,
+# so hundreds of historical ones survive), which made `running >= cap`
+# permanently true and permanently paused escalation. Before trusting it,
+# SANITY_MAX below refuses an implausible count outright (STATUS UNKNOWN,
+# not a quiet pass) rather than writing a running/cap pair nobody could act
+# on: an absurd answer is not a clear answer, the same rule this project
+# already applies to every other probe in this file.
+DQ="$OUTDIR/.dispatch-queue"
+echo "-- [9] dispatch queue -> $DQ"
+LEDGER="/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead/.active-agents"
+SANITY_MAX=20   # generous over the 3-agent cap (reviewers/advisers share the ledger too)
+RUNNING_N=$(/usr/bin/python3 "$SELFDIR/agent-ledger.py" count "$LEDGER" 2>/dev/null)
+/usr/bin/python3 - "$TMP" "$DQ" "$RUNNING_N" "$SANITY_MAX" <<'PY'
+import json, os, re, sys
+t, dq, running_raw, sanity_max = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+
+def write_unknown(reason):
+    tmp = dq + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("# dispatch-queue v1\n")
+        f.write(f"STATUS UNKNOWN {reason}\n")
+    os.replace(tmp, dq)
+    print(f"   UNKNOWN: dispatch queue not updated ({reason})")
+
+try:
+    running = int(running_raw)
+    if running < 0:
+        raise ValueError("negative")
+except (ValueError, TypeError):
+    write_unknown(f"running-agent count unreadable ({running_raw!r})"); raise SystemExit
+if running > sanity_max:
+    write_unknown(
+        f"running-agent count {running} is implausible for a 3-agent-cap "
+        f"project (> SANITY_MAX={sanity_max}) -- refusing to trust the proxy "
+        f"rather than writing a running/cap pair nobody could act on"
+    ); raise SystemExit
+
+try:
+    issues = json.load(open(t + "/blockers.json"))
+except Exception as e:
+    write_unknown(f"cannot read tag-blocker issues: {e}"); raise SystemExit
+try:
+    prs = json.load(open(t + "/open_full.json"))
+except Exception as e:
+    write_unknown(f"open-PR detail query failed: {e}"); raise SystemExit
+try:
+    live = [l.strip() for l in open(t + "/live_wt.txt") if l.strip()]
+except Exception:
+    live = []
+
+def pr_covers(n):
+    ns = str(n)
+    for p in prs:
+        refs = {str(r.get("number")) for r in (p.get("closingIssuesReferences") or [])}
+        if ns in refs:
+            return True
+        blob = (p.get("title") or "") + " " + (p.get("body") or "")
+        if re.search(r'#' + ns + r'\b', blob):
+            return True
+    return False
+
+def wt_covers(n):
+    ns = str(n)
+    pat = re.compile(r'(?<!\d)' + ns + r'(?!\d)')
+    return any(pat.search(b) for b in live)
+
+ready = []
+for i in issues:
+    n = i["number"]
+    if pr_covers(n) or wt_covers(n):
+        continue
+    ready.append((n, (i.get("title") or "").replace("\n", " ")[:70]))
+
+old_counts = {}
+try:
+    with open(dq) as f:
+        old_lines = f.read().splitlines()
+    if len(old_lines) >= 2 and old_lines[1].strip() == "STATUS OK":
+        for ln in old_lines[2:]:
+            if not ln.startswith("issue-"):
+                continue
+            parts = ln.split(" ", 3)
+            if len(parts) < 3:
+                continue
+            try:
+                old_counts[parts[0]] = int(parts[2])
+            except ValueError:
+                continue
+except FileNotFoundError:
+    pass
+
+tmp = dq + ".tmp"
+with open(tmp, "w") as f:
+    f.write("# dispatch-queue v1  (id issue# consecutive-ready-scans title...)\n")
+    f.write("STATUS OK\n")
+    f.write(f"CAP running={running} cap=3\n")  # 3 == CLAUDE.md's actively-implementing cap
+    for n, title in sorted(ready, key=lambda x: -x[0]):
+        rid = f"issue-{n}"
+        count = old_counts.get(rid, 0) + 1
+        f.write(f"{rid} {n} {count} {title}\n")
+os.replace(tmp, dq)
+print(f"   OK: {len(ready)} ready, running={running}")
+PY
 
 echo "== end $RUN =="
