@@ -11,7 +11,7 @@ scripts/lead/audit-report.sh <draft-file>     # codex re-derives every claim; re
 
 Fix **BLOCK** drafts before sending. Paste the verdict line with the report.
 For held claims, run `scripts/lead/held.sh <path>...` (prints `HELD <path> by #N`
-or `FREE <path> (last holder #N merged <t>)`); use only:
+or `FREE <path>`); use only:
 
 - `RUNNING <item> <PR/agent> since <t>`
 - `HELD <item> by #N on <files>` — paste **this turn's** `held.sh` output
