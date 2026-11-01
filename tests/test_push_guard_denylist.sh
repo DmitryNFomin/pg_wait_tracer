@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# All five rules examine invocation operands. Feed JSON only: these commands
-# never execute. Data mentioning a forbidden invocation must remain discussable.
+# All five rules examine invocation operands. Lexical cases feed JSON only;
+# the integration section runs pushes against an isolated local bare fixture.
+# Data mentioning a forbidden invocation must remain discussable.
 # PGWT_TEST_PUSH_GUARD_DENYLIST can supply an alternate hook script, to
 # show these checks go red against a regressed one (same convention as
 # tests/test_pre_push_hook.sh's PGWT_TEST_PRE_PUSH_HOOK).
@@ -110,6 +111,7 @@ allowed() {
 
 # ── Each of the five rules denies ────────────────────────────────────────
 denied 'PGWT_SKIP_PUSH_GUARD=1 git push origin main' "PGWT_SKIP_PUSH_GUARD=1"
+denied 'git config core.hooksPath /tmp/somewhere' "core.hooksPath"
 denied 'git -c core.hooksPath=/tmp/somewhere push' "core.hooksPath"
 denied 'chmod -x scripts/git-hooks/pre-push' "chmod + git-hooks together"
 denied 'git push --no-verify origin main' "--no-verify"
@@ -256,6 +258,7 @@ control plumbing-allowed 0 'gh issue comment 719 --body "Explain git send-pack"'
 # Every term must be safe across each data context, without exemptions.
 for term in 'PGWT_SKIP_PUSH_GUARD=1' 'core.hooksPath=/dev/null' '--no-verify' 'git send-pack'; do
     allowed "rg -n -- '$term' evidence.md" "rg pattern is data: $term"
+    allowed "printf '%s' '$term'" "quoted string is data: $term"
     allowed "git commit -m 'Explain $term'" "commit body is data: $term"
     allowed "gh issue comment 719 --body 'Explain $term'" "inline body is data: $term"
     printf '%s\n' "$term" > "$body_file"
@@ -281,7 +284,8 @@ allowed 'export PGWT_SKIP_PUSH_GUARD=1; unset PGWT_SKIP_PUSH_GUARD; git push' "u
 allowed 'export PGWT_SKIP_PUSH_GUARD=1; env -u PGWT_SKIP_PUSH_GUARD git push' "env unsets skip assignment"
 allowed 'printf "%s" PGWT_SKIP_PUSH_GUARD=1' "assignment spelling outside command prefix is data"
 allowed 'git config --get core.hooksPath' "config query is not a git -c override"
-allowed 'git config core.hooksPath /tmp/fixture' "config operand is not a git -c override"
+# Correct the unsafe round-2 expectation: this write permanently disarms hooks.
+denied 'git config core.hooksPath /tmp/fixture' "config write can disarm later pushes"
 denied 'git -C /tmp -c "core.hooksPath=/dev/null" push' "quoted git config after global option"
 denied 'git -ccore.hookspath=/dev/null push' "attached git config with case-insensitive key"
 denied 'git -c core.hooksPath= status' "empty hook directory override"
@@ -321,6 +325,105 @@ denied 'PGWT_SKIP_PUSH_GUARD=""1 git push' "split quoted skip value"
 allowed 'bash script.sh --comment "git send-pack"' "shell script arguments are data"
 allowed 'bash --norc -c "echo git send-pack"' "long shell option is not a command-string flag"
 denied 'bash --norc -c "git send-pack"' "shell command-string flag after long option"
+
+# #719 round 3: preserve queries and config values while refusing key writes.
+for command in \
+    'git -C /tmp config --local core.hooksPath /dev/null' \
+    'git config --global --add core.hookspath /dev/null' \
+    'git config --replace-all core.hooksPath /dev/null' \
+    'git config --unset core.hooksPath' \
+    'git config set core.hooksPath /dev/null' \
+    'git config unset core.hooksPath' \
+    'K=core.hooksPath; git config $K /dev/null'; do
+    denied "$command" "hooksPath config write: $command"
+done
+for command in \
+    'git config core.hooksPath' \
+    'git config --get-all core.hooksPath' \
+    'git config get core.hooksPath' \
+    'git config --get-regexp core.hooksPath' \
+    'git config --file core.hooksPath user.name example' \
+    'git config user.name core.hooksPath' \
+    'git config --get user.name core.hooksPath'; do
+    allowed "$command" "config read or data operand: $command"
+done
+for wrapper in 'timeout 30' 'timeout -k 1 30' 'nohup' 'nice -n 5' 'stdbuf -o L' 'setsid'; do
+    denied "$wrapper git push --no-verify" "wrapped bypass: $wrapper"
+    denied "$wrapper git config core.hooksPath /dev/null" "wrapped config write: $wrapper"
+    allowed "$wrapper grep -- '--no-verify' evidence.md" "wrapped grep pattern: $wrapper"
+done
+for command in \
+    'V=--no-verify; git push $V' \
+    'V=--no-verify; git push "$V"' \
+    'K=core.hooksPath; git -c $K=/dev/null push' \
+    'K=core.hooksPath; git -c "$K=/dev/null" push' \
+    'K=core.hooksPath; git -c$K=/dev/null push' \
+    'K=core.hooksPath; git --config-env=$K=VALUE push' \
+    'K=core.hooksPath; git --config-env $K=VALUE push'; do
+    denied "$command" "ambiguous executable expansion: $command"
+done
+allowed 'V=--no-verify; git push -o "$V"' "expanded push-option payload remains data"
+allowed 'V=--no-verify; git push -- origin "$V"' "expanded operand after -- remains data"
+for flag in --no-v --no-ve --no-ver --no-veri --no-verif; do
+    denied "git push $flag" "git unique-prefix bypass: $flag"
+    allowed "git push -o $flag" "abbreviation in push-option payload: $flag"
+done
+
+# Exercise an actual pre-push executable in an isolated repository, with a
+# local bare destination. Denied commands never execute. The following plain
+# push must run the hook, including after every attempted persistent write.
+python3 - "$HOOK" <<'PYPROOF'
+import json, os, pathlib, subprocess, sys, tempfile
+
+hook = str(pathlib.Path(sys.argv[1]).resolve())
+with tempfile.TemporaryDirectory(prefix="push-guard-proof-") as temporary:
+    root = pathlib.Path(temporary)
+    repo, remote, marker = root / "repo", root / "remote.git", root / "hook-ran"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_TERMINAL_PROMPT="0", HOOK_MARKER=str(marker))
+    def git(*args, cwd=repo):
+        return subprocess.run(["git", *args], cwd=cwd, env=env, text=True, capture_output=True)
+    def setup(*args, cwd=repo):
+        result = git(*args, cwd=cwd)
+        assert result.returncode == 0, result.stderr
+    setup("init", "--bare", "-q", str(remote), cwd=root)
+    setup("init", "-q", str(repo), cwd=root)
+    setup("-c", "user.name=Guard test", "-c", "user.email=guard@example.invalid",
+          "commit", "--allow-empty", "-qm", "fixture")
+    setup("remote", "add", "origin", str(remote))
+    pre_push = repo / ".git/hooks/pre-push"
+    pre_push.write_text('#!/bin/sh\necho HOOK_RAN >> "$HOOK_MARKER"\necho HOOK_RAN >&2\nexit 1\n')
+    pre_push.chmod(0o755)
+    def probe():
+        marker.unlink(missing_ok=True)
+        result = git("push", "origin", "HEAD:refs/heads/proof")
+        assert result.returncode != 0 and marker.read_text() == "HOOK_RAN\n", result.stderr
+    probe()
+    # Negative control: prove Git really skips this same hook with the flag.
+    marker.unlink()
+    bypass = git("push", "--no-verify", "origin", "HEAD:refs/heads/negative-control")
+    assert bypass.returncode == 0 and not marker.exists(), bypass.stderr
+    print("PROOF baseline: plain push HOOK_RAN; unguarded --no-verify hook SKIPPED")
+    commands = [
+        "git config core.hooksPath /tmp/somewhere",
+        "git -C . config --local core.hooksPath /dev/null",
+        "git -c core.hooksPath=/dev/null push",
+        *[f"{wrapper} git push --no-verify" for wrapper in
+          ("timeout 30", "nohup", "nice -n 5", "stdbuf -o L", "setsid")],
+        "V=--no-verify; git push $V",
+        "K=core.hooksPath; git -c $K=/dev/null push",
+        *[f"git push {flag}" for flag in ("--no-v", "--no-ve", "--no-ver", "--no-veri", "--no-verif")],
+    ]
+    for command in commands:
+        result = subprocess.run(["bash", hook], cwd=repo, env=env, text=True, capture_output=True,
+                                input=json.dumps({"tool_input": {"command": command}}))
+        assert result.returncode == 2, (command, result.returncode, result.stderr)
+        probe()
+        print(f"PROOF {command} => DENY(2); following plain push HOOK_RAN (executable marker, exit 1)")
+PYPROOF
+proof_rc=$?
+check "$([[ $proof_rc -eq 0 ]] && echo true || echo false)" "all reviewer bypasses preserve the executable pre-push hook"
 
 echo
 echo "test_push_guard_denylist: $tests_passed/$tests_run passed"

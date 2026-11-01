@@ -33,7 +33,7 @@ class Ambiguous(Exception):
 class Forbidden(Exception):
     pass
 
-TERMS = ("PGWT_SKIP_PUSH_GUARD", "core.hookspath", "--no-verify", "send-pack", "git-hooks")
+TERMS = ("PGWT_SKIP_PUSH_GUARD", "core.hookspath", "--no-v", "send-pack", "git-hooks")
 
 def relevant(text):
     # This only avoids parsing unrelated, possibly oddly quoted commands.
@@ -173,6 +173,36 @@ def skip_assignment(word):
         return value == "1" or "$" in value or "`" in value
     return None
 
+def git_config(operands):
+    # Parse the key position, keeping query patterns, file paths and values as
+    # data. A bare key reads; a key plus value writes. Both legacy flags and
+    # the newer config subcommands can select a write explicitly.
+    reads = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
+    writes = {"--add", "--replace-all", "--unset", "--unset-all"}
+    read, write, positional, index, options = False, False, [], 0, True
+    if operands and operands[0] in ("get", "list", "set", "unset"):
+        read = operands[0] in ("get", "list")
+        write = not read
+        operands = operands[1:]
+    while index < len(operands):
+        arg = operands[index]
+        if options and arg == "--":
+            options = False
+        elif options and arg.startswith("-"):
+            read = read or arg in reads
+            write = write or arg in writes
+            if arg in ("-f", "--file", "--blob", "-t", "--type", "--default", "--value", "--comment"):
+                index += 1
+        else:
+            positional.append(arg)
+        index += 1
+    if positional and not read and (write or len(positional) > 1):
+        key = positional[0]
+        if "$" in key:
+            raise Ambiguous("expanded git config write key")
+        if key.lower() == "core.hookspath":
+            raise Forbidden("core.hooksPath: config write can permanently disable the real hook")
+
 def git_invocation(args, skip):
     if skip:
         raise Forbidden("PGWT_SKIP_PUSH_GUARD=1: assignment enables the humans-only escape hatch")
@@ -192,16 +222,20 @@ def git_invocation(args, skip):
                 if not separator:
                     raise Ambiguous("git hooksPath override without a value")
                 raise Forbidden("core.hooksPath: git -c overrides the real hook directory")
-            if "$" in key and relevant(" ".join(args)):
+            if "$" in key:
                 raise Ambiguous("expanded git config key")
         elif arg in ("-C", "--git-dir", "--work-tree", "--namespace", "--config-env"):
             index += 1
             if index == len(args):
                 raise Ambiguous("missing git global option value")
-            if arg == "--config-env" and args[index].split("=", 1)[0].lower() == "core.hookspath":
+            if arg == "--config-env":
+                key = args[index].split("=", 1)[0]
+                if key.lower() == "core.hookspath" or "$" in key:
+                    raise Ambiguous("environment-supplied hook directory")
+        elif arg.startswith("--config-env="):
+            key = arg.split("=", 2)[1]
+            if key.lower() == "core.hookspath" or "$" in key:
                 raise Ambiguous("environment-supplied hook directory")
-        elif arg.startswith("--config-env=core.hooksPath="):
-            raise Ambiguous("environment-supplied hook directory")
         elif arg == "--":
             index += 1
             break
@@ -215,6 +249,8 @@ def git_invocation(args, skip):
         raise Ambiguous("expanded git subcommand")
     if subcommand == "send-pack":
         raise Forbidden("git send-pack: plumbing bypasses the pre-push hook entirely (#687)")
+    if subcommand == "config":
+        return git_config(operands)
     if subcommand != "push":
         return False
     index = 0
@@ -222,7 +258,9 @@ def git_invocation(args, skip):
         arg = operands[index]
         if arg == "--":
             break
-        if arg == "--no-verify":
+        if "$" in arg:
+            raise Ambiguous("expanded git push flag or operand")
+        if len(arg) >= len("--no-v") and "--no-verify".startswith(arg):
             raise Forbidden("--no-verify: git push flag bypasses the pre-push hook")
         # These push options take data operands, even if those spell a flag.
         if arg in ("--repo", "--receive-pack", "--exec", "-o", "--push-option", "--recurse-submodules"):
@@ -240,7 +278,10 @@ def invocation(words, heredocs=(), state=None):
             skip = assignment
         if re.match(r"[A-Za-z_][A-Za-z_0-9]*=", words[0]) or words[0] in ("!", "{", "}", "then", "do", "else", "elif", "if", "while", "until"):
             words = words[1:]
-        elif words[0].rsplit("/", 1)[-1] in ("command", "builtin", "exec", "env", "sudo", "time"):
+        # These programs execute an argv after their own options. Retain an
+        # explicit grammar: scanning arbitrary leading words for git would
+        # mistake echo/grep/body operands for executable commands.
+        elif words[0].rsplit("/", 1)[-1] in ("command", "builtin", "exec", "env", "sudo", "time", "timeout", "nohup", "nice", "stdbuf", "setsid"):
             wrapper = words[0].rsplit("/", 1)[-1]
             wrapped = True
             words = words[1:]
@@ -250,7 +291,10 @@ def invocation(words, heredocs=(), state=None):
                     raise Ambiguous("env executes a split command string")
                 if wrapper == "env" and option in ("--unset=PGWT_SKIP_PUSH_GUARD", "-i", "--ignore-environment"):
                     skip = False
-                if option in ("-u", "-g", "-C", "--user", "--group", "--chdir", "--unset"):
+                if (option in ("-u", "-g", "-C", "--user", "--group", "--chdir", "--unset")
+                    or wrapper == "timeout" and option in ("-k", "--kill-after", "-s", "--signal")
+                    or wrapper == "nice" and option in ("-n", "--adjustment")
+                    or wrapper == "stdbuf" and option in ("-i", "-o", "-e", "--input", "--output", "--error")):
                     if len(words) < 2:
                         raise Ambiguous("missing wrapper option value")
                     if wrapper == "env" and option in ("-u", "--unset") and words[1] == "PGWT_SKIP_PUSH_GUARD":
@@ -258,6 +302,8 @@ def invocation(words, heredocs=(), state=None):
                     words = words[2:]
                 else:
                     words = words[1:]
+            if wrapper == "timeout" and words:
+                words = words[1:]  # Required duration precedes the command.
         else:
             break
     if not words:
