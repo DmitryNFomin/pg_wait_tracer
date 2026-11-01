@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Rule 3 examines invocation operands; the other four rules deliberately
-# remain raw substring tests. Feed JSON only: these commands never execute.
+# All five rules examine invocation operands. Feed JSON only: these commands
+# never execute. Data mentioning a forbidden invocation must remain discussable.
 # PGWT_TEST_PUSH_GUARD_DENYLIST can supply an alternate hook script, to
 # show these checks go red against a regressed one (same convention as
 # tests/test_pre_push_hook.sh's PGWT_TEST_PRE_PUSH_HOOK).
@@ -110,7 +110,7 @@ allowed() {
 
 # ── Each of the five rules denies ────────────────────────────────────────
 denied 'PGWT_SKIP_PUSH_GUARD=1 git push origin main' "PGWT_SKIP_PUSH_GUARD=1"
-denied 'git config core.hooksPath /tmp/somewhere' "core.hooksPath"
+denied 'git -c core.hooksPath=/tmp/somewhere push' "core.hooksPath"
 denied 'chmod -x scripts/git-hooks/pre-push' "chmod + git-hooks together"
 denied 'git push --no-verify origin main' "--no-verify"
 denied 'git send-pack origin HEAD' "git send-pack bypasses pre-push entirely (#687)"
@@ -153,9 +153,15 @@ INNER
 allowed "$odd_apostrophe_heredoc" \
     "odd-apostrophe heredoc, no push, no denylist term: passes (the shape the retired parser rejected)"
 
-# ── The one accepted false positive: a MENTION, not a push ───────────────
-denied 'git commit -m "doc: explain core.hooksPath in README"' \
-    "a commit message merely mentioning core.hooksPath: denied too (the accepted tradeoff -- one blocked command, never a silent gap)"
+# The former accepted false positive is now a regression: prose is data.
+quiet_allowed() {
+    local out rc
+    out=$(run_hook "$1"); rc=$?
+    check "$([[ $rc -eq 0 ]] && echo true || echo false)" "$2: allowed (exit 0)"
+    check "$([[ -z "$out" ]] && echo true || echo false)" "$2: no refusal message"
+}
+quiet_allowed 'git commit -m "doc: explain core.hooksPath in README"' \
+    "commit message merely mentioning core.hooksPath"
 
 # Required #719 controls: paste both the exact command and actual hook output.
 control() {
@@ -236,6 +242,85 @@ rm scripts/git-hooks/pre-push
 EOF
 INNER
 denied "$shell_heredoc" "shell interpreter executes its heredoc"
+
+# #719 part 2: matched forbidden-invocation / harmless-mention pairs.
+control skip-denied 2 'env PGWT_SKIP_PUSH_GUARD=1 git push'
+control skip-allowed 0 'grep -n "PGWT_SKIP_PUSH_GUARD=1" evidence.md'
+control config-denied 2 'git -c core.hooksPath=/dev/null push'
+control config-allowed 0 'gh issue comment 719 --body "Explain core.hooksPath=/dev/null"'
+control verify-denied 2 'git push --no-verify origin main'
+control verify-allowed 0 'grep -n -- "--no-verify" evidence.md'
+control plumbing-denied 2 'git send-pack origin HEAD'
+control plumbing-allowed 0 'gh issue comment 719 --body "Explain git send-pack"'
+
+# Every term must be safe across each data context, without exemptions.
+for term in 'PGWT_SKIP_PUSH_GUARD=1' 'core.hooksPath=/dev/null' '--no-verify' 'git send-pack'; do
+    allowed "rg -n -- '$term' evidence.md" "rg pattern is data: $term"
+    allowed "git commit -m 'Explain $term'" "commit body is data: $term"
+    allowed "gh issue comment 719 --body 'Explain $term'" "inline body is data: $term"
+    printf '%s\n' "$term" > "$body_file"
+    allowed "gh issue comment 719 --body-file $body_file" "body file is data: $term"
+    allowed "cat <<'EOF'
+$term
+EOF" "quoted heredoc is data: $term"
+    allowed "cat <<EOF
+$term
+EOF" "unquoted literal heredoc is data: $term"
+    allowed "echo ok # $term" "shell comment is data: $term"
+done
+
+# Recognize actual assignments, global options, wrappers and executable contexts.
+denied 'export PGWT_SKIP_PUSH_GUARD=1; git push' "export before git invocation"
+denied 'export PGWT_SKIP_PUSH_GUARD="1" && command git push' "quoted export before wrapped git"
+denied 'PGWT_SKIP_PUSH_GUARD="1" /usr/bin/git push' "quoted assignment before absolute git"
+denied 'env X=1 PGWT_SKIP_PUSH_GUARD=1 command git push' "skip assignment among env operands"
+denied 'export PGWT_SKIP_PUSH_GUARD=1; bash -c "git push"' "export inherited by explicit shell"
+denied 'PGWT_SKIP_PUSH_GUARD=$value git push' "ambiguous executable assignment value"
+allowed 'env PGWT_SKIP_PUSH_GUARD=0 git push' "known inert skip assignment"
+allowed 'export PGWT_SKIP_PUSH_GUARD=1; unset PGWT_SKIP_PUSH_GUARD; git push' "unset before git invocation"
+allowed 'export PGWT_SKIP_PUSH_GUARD=1; env -u PGWT_SKIP_PUSH_GUARD git push' "env unsets skip assignment"
+allowed 'printf "%s" PGWT_SKIP_PUSH_GUARD=1' "assignment spelling outside command prefix is data"
+allowed 'git config --get core.hooksPath' "config query is not a git -c override"
+allowed 'git config core.hooksPath /tmp/fixture' "config operand is not a git -c override"
+denied 'git -C /tmp -c "core.hooksPath=/dev/null" push' "quoted git config after global option"
+denied 'git -ccore.hookspath=/dev/null push' "attached git config with case-insensitive key"
+denied 'git -c core.hooksPath= status' "empty hook directory override"
+allowed 'echo git -c core.hooksPath=/dev/null push' "git override outside command position"
+denied 'git -C /tmp push origin --no-verify' "push flag after global option and remote"
+allowed 'git commit -m "--no-verify"' "bypass spelling in commit message"
+allowed 'git push -o --no-verify origin main' "push option payload is data"
+allowed 'git push -- origin --no-verify' "push operands after end of options are data"
+denied 'command /usr/bin/git --git-dir /tmp/repo send-pack origin HEAD' "wrapped plumbing after global option"
+allowed 'printf "%s" "git send-pack"' "plumbing spelling outside command position"
+for command in 'env PGWT_SKIP_PUSH_GUARD=1 git push' 'git -c core.hooksPath=/dev/null push' 'git push --no-verify' 'git send-pack'; do
+    denied "bash -c '$command'" "explicit shell executes: $command"
+    denied "echo \"\$( $command )\"" "command substitution executes: $command"
+    denied "cat <<'EOF'
+$command
+EOF
+$command" "command following data heredoc executes: $command"
+done
+allowed 'cat <<EOF
+Explain --no-verify and $(printf %s core.hooksPath)
+EOF' "heredoc substitution that only prints prose is data"
+denied 'cat <<EOF
+$(git push --no-verify)
+EOF' "heredoc executable substitution is checked"
+denied 'eval "git push --no-verify"' "ambiguous executable bypass payload"
+denied 'git "$subcommand" --no-verify' "ambiguous expanded git subcommand"
+
+allowed '(export PGWT_SKIP_PUSH_GUARD=1); git push' "subshell export does not affect parent git"
+allowed 'export PGWT_SKIP_PUSH_GUARD=1 | cat; git push' "pipeline export does not affect later git"
+allowed 'env PGWT_SKIP_PUSH_GUARD=1; git push' "env without command only prints environment"
+allowed 'export PGWT_SKIP_PUSH_GUARD=1; env -i git push' "env clears exported skip variable"
+denied 'export PGWT_SKIP_PUSH_GUARD=1; env --unset=PGWT_SKIP_PUSH_GUARD_OTHER git push' "unsetting another variable leaves skip enabled"
+denied 'export PGWT_SKIP_PUSH_GUARD=1; (git push)' "subshell inherits exported skip variable"
+denied 'env -S "PGWT_SKIP_PUSH_GUARD=1 git push"' "ambiguous env split-string executes"
+denied 'git -c core.hooks"Path"=/dev/null push' "split quoted config key"
+denied 'PGWT_SKIP_PUSH_GUARD=""1 git push' "split quoted skip value"
+allowed 'bash script.sh --comment "git send-pack"' "shell script arguments are data"
+allowed 'bash --norc -c "echo git send-pack"' "long shell option is not a command-string flag"
+denied 'bash --norc -c "git send-pack"' "shell command-string flag after long option"
 
 echo
 echo "test_push_guard_denylist: $tests_passed/$tests_run passed"
