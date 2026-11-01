@@ -3,6 +3,8 @@
 # main in every sectioned C test suite (#686). See the Python docstring for
 # rationale, measured losses, scope and limits. Self-tests:
 # tests/test_check_section_registration.sh. Both run in scripts/check.sh.
+# Every candidate is listed, including OUT OF SCOPE with a reason. Zero
+# recognised markers is not evidence that a suite has no sections (#710).
 #
 # Usage: scripts/check-section-registration.sh [repo-dir]
 set -uo pipefail
