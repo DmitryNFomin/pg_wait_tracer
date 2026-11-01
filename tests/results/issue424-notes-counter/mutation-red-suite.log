@@ -1,0 +1,47 @@
+### BASELINE (unmutated) — all of §9 must be green ###
+  exit=0
+    ok:   9a: nine on-CPU notes are counted as nine (open_cpu_notes_total = 9) and credit was placed (9000 ms)
+    ok:   9b: ASKED-AND-DROPPED is visible — open_cpu_notes_total = 9 with credited = 0. Counted at the note, before the refusal.
+    ok:   9c: a WAIT-only daemon was never ASKED (open_cpu_notes_total = 0) even though wait credit flowed (9000 ms) — so the counter is not a restatement of 'the seal ran'
+    ok:   9d: the v8 no-observation path is NOT 'asked' (open_cpu_notes_total = 0) and is still counted where it always was (open_cpu_refused_total = 9)
+    ok:   9e: a disabled writer is never asked and credits nothing (notes = 0, credited = 0), so the reading is REFUSE and not a verdict about the credit path
+  95 checks, 0 failures
+
+=== MUTANT: M1: counted for EVERY note (class test bypassed)
+    must turn red: 9c, 9d
+    FAIL: 9c: a WAIT-only daemon was never ASKED (open_cpu_notes_total = 9) even though wait credit flowed (9000 ms) — so the counter is not a restatement of 'the seal ran'
+    FAIL: 9d: the v8 no-observation path is NOT 'asked' (open_cpu_notes_total = 9) and is still counted where it always was (open_cpu_refused_total = 9)
+  95 checks, 2 failures
+  exit=1
+
+=== MUTANT: M2: the observation-carrying test dropped
+    must turn red: 9d
+    FAIL: 9d: the v8 no-observation path is NOT 'asked' (open_cpu_notes_total = 9) and is still counted where it always was (open_cpu_refused_total = 9)
+  95 checks, 1 failures
+  exit=1
+
+=== MUTANT: M3: increment deleted (counter permanently 0)
+    must turn red: 9a, 9b
+    FAIL: 9a: nine on-CPU notes are counted as nine (open_cpu_notes_total = 0) and credit was placed (9000 ms)
+    FAIL: 9b: ASKED-AND-DROPPED is visible — open_cpu_notes_total = 0 with credited = 0. Counted at the note, before the refusal.
+  95 checks, 2 failures
+  exit=1
+
+=== MUTANT: M4: counted at the CREDIT instead of at the note
+    must turn red: 9b
+    FAIL: 9b: ASKED-AND-DROPPED is visible — open_cpu_notes_total = 0 with credited = 0. Counted at the note, before the refusal.
+  95 checks, 1 failures
+  exit=1
+
+=== MUTANT: M5: counted after the refusals it exists to expose
+    must turn red: 9b
+    FAIL: 9b: ASKED-AND-DROPPED is visible — open_cpu_notes_total = 0 with credited = 0. Counted at the note, before the refusal.
+  95 checks, 1 failures
+  exit=1
+
+=== MUTANT: M6: the §9 dispatcher line removed from main()
+    must turn red: the banner disappears and the check count drops
+  exit=0  (#686: a missing section does NOT change the exit status)
+  '-- 9:' banner lines: 0 (baseline: 1)
+  mutant:   90 checks, 0 failures
+  baseline: 95 checks, 0 failures

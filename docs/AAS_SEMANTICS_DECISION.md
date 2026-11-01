@@ -496,47 +496,63 @@ accounting rule and not about the byte layout:
   attribution at an interval boundary, and a second that completed before the
   pid had a note) are listed and COUNTED in `src/summary_writer.h`.
 
-- **v9** (#424) — **DESIGNED AND WRITTEN, NOT SHIPPED.** `PGWT_SUMMARY_VERSION` is **8**; v9 is what the next bump will mean. It makes an OPEN on-CPU interval creditable per second. v8
+- **v9** (#424, #562/#573's sessions half) — **SHIPPED.**
+  `PGWT_SUMMARY_VERSION` is **9**. This epoch carries two changes:
+
+  An OPEN on-CPU interval is credited per second (#424). v8
   deliberately refused that case: a per-second credit has no `cpu_ns` of its
   own, so spreading a CPU gap's wall while its measurement stayed whole at
   close would have put everything into `cpu_clamped_ns` and nothing into
   `cpu_measured_ns`, destroying v7's split. v9 credits it only when the
-  PRODUCER supplies the measurement, and widens `cpu_measured_records` from
+  PRODUCER supplies the measurement: `pgwt_read_state_map` in
+  `src/map_reader.c` supplies its clamped schedstat delta through
+  `pgwt_summary_note_open_ex`. It supplies `PGWT_CPU_NS_UNKNOWN` whenever
+  `cpu_accounting` is off or the delta is unusable, so a tier with no
+  measurement keeps the v8 refusal instead of claiming an inferred one.
+  v9 also widens the per-second `cpu_measured_records` from
   "records" to "CPU observations" so that a window whose only CPU time is
   one still-open gap still reports `has_measured_cpu` — without that widening
   the reader would ignore the split it had just been given and emit one
-  combined CPU* row, which is the v8 symptom one layer up. Layout is
-  byte-identical to v8; the bump exists for the rule.
+  combined CPU* row, which is the v8 symptom one layer up.
 
-  **WHY THE CONSTANT IS 8 AND NOT 9.** With no producer, v9 credits
-  nothing, so its only semantic difference from v8 (the widened
-  `cpu_measured_records`) never materialises: a build shipping 9 today
-  would write a v8 file wearing a 9. The version exists to stop a window
-  blending two accounting rules, and `pgwt_summaries_window_current`
-  compares only the number — so shipping 9 now and wiring the producer
-  later without a further bump makes **9 name two different rules**, with
-  no reader able to tell those files apart. Two resolutions were sound:
-  ship 9 and require the re-wiring commit to bump to 10, or hold at 8 and
-  let that commit set 9. **We hold at 8**, because merging 9 permanently
-  forecloses the other option and leaves correctness depending on a future
-  author reading this paragraph. The producer was reverted; the constant
-  follows it back. The commit that wires the producer sets this to 9 —
-  `tests/test_v9_open_cpu_wired.sh` is its acceptance test and
-  `tests/test_docs_summary_version.sh` will drag these docs along.
+  The PER-SESSION measured-CPU split (#562/#573's sessions half) adds
+  `cpu_offcpu_ns` and a saturating `cpu_measured_records` to
+  `struct pgwt_summary_session`. The on-disk session entry grows from
+  32 to 44 bytes. `cpu_ns` KEEPS its meaning: the total gap wall, which
+  `wait_pct` is derived from. `has_measured_cpu` follows the RECORD COUNT,
+  never the nanoseconds, so a measured zero still counts as a measurement.
+  The sessions routing now reports measured CPU with its off-CPU remainder,
+  pinned by `tests/test_window_clip.c` 13d and
+  `tests/test_agg_raw_crosscheck.c` 6h. The per-EVENT and per-QUERY tables
+  still carry wall; that half of the epoch is not in this change. These
+  session layout changes accompany the open-CPU accounting rule under v9.
 
-  **Claimed is not wired.** `summary_open_cpu_credited_ns` on the control
-  socket is the check: on a capture with an in-flight CPU statement it must
-  be non-zero. Measured on gate-2 at integration HEAD, watchpoints attached,
+  **WHY THE PRODUCER-WIRING COMMIT SETS THE VERSION.** The producer was
+  reverted once because its counters showed it had never been reached;
+  the constant followed it back to 8. With no producer, the open-CPU rule
+  credited nothing, so shipping 9 then would have written a v8 file wearing
+  a 9. The version exists to stop a window blending two accounting rules,
+  and `pgwt_summaries_window_current` compares only the number. Shipping 9
+  before wiring the producer would have made **9 name two different rules**,
+  unless the wiring commit bumped again. The rule is therefore that the
+  commit wiring the producer is the commit that sets the version. The
+  producer is now wired in `pgwt_read_state_map`, and that commit sets the
+  constant to 9. `tests/test_v9_open_cpu_wired.sh` is its live acceptance
+  test; `tests/test_docs_summary_version.sh` keeps these docs in step.
+
+  **Historical evidence for the revert.** The control-socket counter
+  `summary_open_cpu_credited_ns` is the check: on a capture with an in-flight
+  CPU statement it must be non-zero. Measured on gate-2 at the then-current
+  integration HEAD, watchpoints attached,
   three CPU statements spanning 10 s of ticks and `cpu_ns_total` moving
   0 → 23,715,122,379, all three of `summary_open_cpu_credited_ns`,
   `summary_open_cpu_refused_total` and `summary_cpu_open_uncredited_ns_total`
-  read **0** — a writer that is never asked, so the accounting silently falls
-  back to v8. `tests/test_v9_open_cpu_wired.sh` is that check, in the live
-  tier, and it is RED until the producer is wired.
+  read **0** — a writer that was never asked, so the accounting silently fell
+  back to v8. `tests/test_v9_open_cpu_wired.sh` checks that the now-wired
+  producer is reached in the live tier.
 
 This list is kept in step with `PGWT_SUMMARY_VERSION` in
-`src/summary_writer.h`, which is **8** as of 2026-10-16 — the v9 entry above
-describes the next bump, not this build. It stopped at v6 for
+`src/summary_writer.h`, which is **9** as of 2026-10-28. It stopped at v6 for
 two bumps; a version list that trails the constant is worse than no list,
 because it reads as "nothing has changed since" — and it misled once more
 after that, when the v7/v8 entries were added against a tree that had since

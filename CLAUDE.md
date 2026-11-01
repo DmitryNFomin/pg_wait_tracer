@@ -64,7 +64,7 @@ ECharts/uPlot UI. Plan/status: `docs/ROADMAP_AND_STATUS.md`. Run nothing eBPF-re
 |---|---|---|
 | `make check` (`check-fast` = seconds) | Mac: Node builders, Go bridge, py_compile, Playwright UI/chaos vs `tests/mock_server.py` | Before every push; push guard enforces it |
 | `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux over ssh (`$PGWT_BOX`, `$PGWT_BOX_EL8`…): build, C units, synthetic data, protocol drift, real-PG capture (`tests/run_all.sh --require-live`, `tests/ui_live_smoke.sh`, `tests/results/ui_live/summary.json`) | Before every PR; use `OS=el8` with `$PGWT_BOX_EL8` for kernel/libbpf/layout changes |
-| `make box-check EPHEMERAL=1 [PG=…] [KEEP=1]` | Private Hetzner VM from `pgwt=gate-snapshot`, same live tier; automatic deletion unless `KEEP=1` prints the delete command | Every agent Ubuntu run, including final pre-PR; reserve persistent boxes for CI self-hosted jobs; `EPHEMERAL=1` supports `OS=ubuntu` only (`scripts/box-check.sh` refuses others) |
+| `make box-check EPHEMERAL=1 [PG=…] [KEEP=1]` | Private Hetzner VM from `pgwt=gate-snapshot`, same live tier; automatic deletion unless `KEEP=1` prints the delete command | Same Hetzner machine class as the gate box, so the same Ubuntu-tier evidence; `EPHEMERAL=1` supports `OS=ubuntu` only (`scripts/box-check.sh` refuses others), so kernel/libbpf/layout work still runs `OS=el8` against `$PGWT_BOX_EL8`; see the **Persistent boxes FIRST** paragraph below for when to use this mode |
 | `make ui-gallery [BASE=ref]` | Mac: all UI snapshot cells → `tests/results/ui_gallery/index.html` + `summary.json` | Before every PR touching `web/` |
 
 (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#ubuntu-vm-evidence`)
