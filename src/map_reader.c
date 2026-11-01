@@ -646,6 +646,71 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                 pa_cur->current_wait_ns = open_ns;
             }
 
+            /* T8 symptom #3: for an on-CPU (we==0) in-progress interval,
+             * the CPU quantity is the MEASURED schedstat delta since the
+             * seeded base, not the full wall gap — a backend preempted or
+             * runqueue-stalled shows only the CPU it actually burned, and
+             * DB Time carries the wall gap (the off-CPU remainder is the
+             * DB-Time-minus-CPU unaccounted time). Display-time only: no
+             * interim trace record is written. Legacy (cpu_accounting off)
+             * keeps the full gap as CPU, byte-identical to before. */
+            uint64_t cpu_open = open_ns;
+            uint64_t cpu_measured_open_ns = PGWT_CPU_NS_UNKNOWN;
+            if (we == 0 && d->cpu_accounting) {
+                /* S3: exact on-CPU ns for the open interval = cpu_ns_total +
+                 * current stretch (on_cpu_ts != 0 iff running), minus the
+                 * seeded base. `now` is CLOCK_MONOTONIC == bpf_ktime. */
+                uint64_t exact = sval.cpu_ns_total;
+                if (sval.on_cpu_ts && now >= sval.on_cpu_ts)
+                    exact += now - sval.on_cpu_ts;
+                if (exact >= sval.last_cpu_ns) {
+                    uint64_t m = exact - sval.last_cpu_ns;
+                    cpu_open = m < open_ns ? m : open_ns;   /* clamp to wall */
+                    cpu_measured_open_ns = cpu_open;
+                }
+                /* PGWT_DEBUG_DUMP_STATE tick-time companion of the
+                 * shutdown STATEDUMP (fourth-mode investigation): the
+                 * 2026-08-04 CI hit proved the SHUTDOWN state healthy and
+                 * countable while every tick printed CPU* = 0 — the
+                 * discriminator is what THIS computation saw per tick.
+                 * DEBUG ONLY; env checked once. */
+                static int dbg_tick = -1;
+                if (dbg_tick < 0)
+                    dbg_tick = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
+                if (dbg_tick)
+                    fprintf(stderr, "STATEDUMP-TICK: pid=%u open_ns=%llu "
+                            "cpu_ns_total=%llu on_cpu_age=%lld exact=%llu "
+                            "last_cpu_ns=%llu cpu_open=%llu\n",
+                            snext,
+                            (unsigned long long)open_ns,
+                            (unsigned long long)sval.cpu_ns_total,
+                            sval.on_cpu_ts
+                                ? (long long)(now - sval.on_cpu_ts) : -1,
+                            (unsigned long long)exact,
+                            (unsigned long long)sval.last_cpu_ns,
+                            (unsigned long long)cpu_open);
+            }
+
+            /* Fold the open stretch through the SAME function and
+             * classification as the closed record it will become
+             * (issue #97): a client backend's on-CPU stretch outside a
+             * command is idle non-command time, not CPU* / DB Time;
+             * io_worker time stays out of the time model. The CPU* row
+             * carries the MEASURED on-CPU ns of the stretch, DB Time its
+             * wall. In-command is the marker majority rule over
+             * [last_ts, now) (#98) — peeked from the pid's gate as the
+             * closed-record sweep left it (copied into d->accum by
+             * pgwt_accum_copy_used), NOT state_map's instantaneous
+             * cmd_open: at the ClientRead that ends a waitless
+             * statement the gate is already clear while the whole run
+             * was in-command. An unmarked pid / full accumulator falls
+             * back like the closed path (in-command / emission gate). */
+            bool in_cmd = false;
+            bool by_markers = pgwt_live_cmd_gate_classify(
+                pa_cur ? &pa_cur->cmd_gate : NULL, false,
+                sval.last_ts, now, sval.cmd_open != 0, &in_cmd);
+            uint32_t cat = pgwt_live_pid_cat_flag(d, pa_cur, snext);
+
             /* #379: tell the SUMMARY WRITER what this pid has open, so each
              * second the interval spans is credited as that second completes
              * instead of the whole duration landing in the second it closes
@@ -660,26 +725,21 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * the per-second credits and the at-close remainder partition
              * the interval with no gap and no overlap.
              *
-             * v9's open-CPU OBSERVATION was wired here and is deliberately
-             * NOT here now (#424). On a gate-2 capture with watchpoints
-             * attached and cpu_ns_total moving 0 -> 23.7 s, all three
-             * open-CPU counters read zero — credited, refused AND
-             * uncredited — which means the writer was never asked about an
-             * on-CPU open interval at all, not that it declined. Without a
-             * box this agent could not tell the remaining causes apart, and
-             * a producer whose only evidence is "it compiles" is not a
-             * wired producer. So v9's writer capability stays DORMANT and
-             * unclaimed rather than claimed and silently falling back; the
-             * v8 behaviour below is exactly what shipped before, and the
-             * refusal it produces for an on-CPU gap is counted
-             * (open_cpu_refused_total, cpu_open_uncredited_ns_total, both
-             * published by src/control.c). See the handover note in that
-             * file for the one measurement that tells the causes apart. */
+             * The open-CPU observation is supplied here. cpu_prefix_ns is
+             * UNKNOWN whenever cpu_accounting is off or the schedstat delta
+             * is unusable, so a tier with no measurement keeps the v8 refusal
+             * rather than claiming an inferred one.
+             * tests/test_v9_open_cpu_wired.sh is the acceptance test that this
+             * call is actually REACHED on a live capture. */
+            struct pgwt_summary_open_cpu ocpu = {
+                .eff_we = pgwt_live_effective_event(we, cat, d->cmd_gate_active,
+                                                    in_cmd),
+                .cpu_prefix_ns = cpu_measured_open_ns,
+            };
             if (d->summary_writer)
-                pgwt_summary_note_open(d->summary_writer, snext, we,
-                                       sval.last_ts,
-                                       pgwt_live_pid_cat_flag(d, pa_cur, snext),
-                                       now);
+                pgwt_summary_note_open_ex(d->summary_writer, snext, we,
+                                          sval.last_ts, cat, now,
+                                          we == 0 ? &ocpu : NULL);
 
             /* #393: the open interval is accounted whatever else this (PID,
              * event) did in this interval — pgwt_live_account_open_stretch()
@@ -707,67 +767,6 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * we==0 is always accounted. The analogous ongoing-repeated-WAIT
              * under-count (ROADMAP future list) is #393, fixed here. */
             if (pgwt_live_account_open_stretch(pa_cur, we, open_ns)) {
-                /* T8 symptom #3: for an on-CPU (we==0) in-progress interval,
-                 * the CPU quantity is the MEASURED schedstat delta since the
-                 * seeded base, not the full wall gap — a backend preempted or
-                 * runqueue-stalled shows only the CPU it actually burned, and
-                 * DB Time carries the wall gap (the off-CPU remainder is the
-                 * DB-Time-minus-CPU unaccounted time). Display-time only: no
-                 * interim trace record is written. Legacy (cpu_accounting off)
-                 * keeps the full gap as CPU, byte-identical to before. */
-                uint64_t cpu_open = open_ns;
-                if (we == 0 && d->cpu_accounting) {
-                    /* S3: exact on-CPU ns for the open interval = cpu_ns_total +
-                     * current stretch (on_cpu_ts != 0 iff running), minus the
-                     * seeded base. `now` is CLOCK_MONOTONIC == bpf_ktime. */
-                    uint64_t exact = sval.cpu_ns_total;
-                    if (sval.on_cpu_ts && now >= sval.on_cpu_ts)
-                        exact += now - sval.on_cpu_ts;
-                    if (exact >= sval.last_cpu_ns) {
-                        uint64_t m = exact - sval.last_cpu_ns;
-                        cpu_open = m < open_ns ? m : open_ns;   /* clamp to wall */
-                    }
-                    /* PGWT_DEBUG_DUMP_STATE tick-time companion of the
-                     * shutdown STATEDUMP (fourth-mode investigation): the
-                     * 2026-08-04 CI hit proved the SHUTDOWN state healthy and
-                     * countable while every tick printed CPU* = 0 — the
-                     * discriminator is what THIS computation saw per tick.
-                     * DEBUG ONLY; env checked once. */
-                    static int dbg_tick = -1;
-                    if (dbg_tick < 0)
-                        dbg_tick = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
-                    if (dbg_tick)
-                        fprintf(stderr, "STATEDUMP-TICK: pid=%u open_ns=%llu "
-                                "cpu_ns_total=%llu on_cpu_age=%lld exact=%llu "
-                                "last_cpu_ns=%llu cpu_open=%llu\n",
-                                snext,
-                                (unsigned long long)open_ns,
-                                (unsigned long long)sval.cpu_ns_total,
-                                sval.on_cpu_ts
-                                    ? (long long)(now - sval.on_cpu_ts) : -1,
-                                (unsigned long long)exact,
-                                (unsigned long long)sval.last_cpu_ns,
-                                (unsigned long long)cpu_open);
-                }
-
-                /* Fold the open stretch through the SAME function and
-                 * classification as the closed record it will become
-                 * (issue #97): a client backend's on-CPU stretch outside a
-                 * command is idle non-command time, not CPU* / DB Time;
-                 * io_worker time stays out of the time model. The CPU* row
-                 * carries the MEASURED on-CPU ns of the stretch, DB Time its
-                 * wall. In-command is the marker majority rule over
-                 * [last_ts, now) (#98) — peeked from the pid's gate as the
-                 * closed-record sweep left it (copied into d->accum by
-                 * pgwt_accum_copy_used), NOT state_map's instantaneous
-                 * cmd_open: at the ClientRead that ends a waitless
-                 * statement the gate is already clear while the whole run
-                 * was in-command. An unmarked pid / full accumulator falls
-                 * back like the closed path (in-command / emission gate). */
-                bool in_cmd = false;
-                bool by_markers = pgwt_live_cmd_gate_classify(
-                    pa_cur ? &pa_cur->cmd_gate : NULL, false,
-                    sval.last_ts, now, sval.cmd_open != 0, &in_cmd);
                 /* Never silent: a full accumulator (no per-pid sweep state)
                  * fell back to the emission-time gate — count it like the
                  * closed path does. (An unmarked pid is counted there only,
@@ -781,7 +780,7 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                     .wall_ns         = open_ns,
                     .cpu_ns          = cpu_open,
                     .query_id        = sval.last_query_id,
-                    .cat_flag        = pgwt_live_pid_cat_flag(d, pa_cur, snext),
+                    .cat_flag        = cat,
                     .cmd_gate_active = d->cmd_gate_active,
                     .cmd_open        = in_cmd,
                     .closed          = false,

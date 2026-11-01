@@ -4,3 +4,6 @@
 .sweep.lock
 .sweep.lock.d
 .dispositions
+.dispatch-queue
+.dispatch-queue.tmp
+.active-agents
