@@ -71,6 +71,9 @@ fi
 step "bash: .gitignore covers every tests/ build product (tree-hash integrity)"
 run bash tests/test_gitignore_build_products.sh
 
+step "bash: push-guard denylist and executable pre-push proofs (#719)"
+run bash tests/test_push_guard_denylist.sh
+
 step "bash: pr-ready ordering and refusal self-test (#701)"
 run bash tests/test_pr_ready.sh
 

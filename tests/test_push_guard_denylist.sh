@@ -369,10 +369,32 @@ for flag in --no-v --no-ve --no-ver --no-veri --no-verif; do
     allowed "git push -o $flag" "abbreviation in push-option payload: $flag"
 done
 
+allowed 'gh issue create --title "git send-pack bypasses the pre-push hook" --body "Explain the guard"' \
+    "issue title mentioning git is data"
+allowed 'timeout 900 codex exec "Explain git config core.hooksPath and git push --no-verify"' \
+    "embedded prose does not create a git command token"
+
+# #719 round 4: unknown launchers fail closed without enumerating them in
+# the guard. Include an invented name so adding known names cannot satisfy it.
+for wrapper in 'flock /tmp/lock' 'xargs' 'script -q /dev/null' 'taskset -c 0' \
+    'ionice -c 3' 'strace' 'su -c' 'chroot /tmp/root' 'busybox timeout 30' \
+    'arbitrary-launcher'; do
+    denied "$wrapper git push --no-verify" "unknown launcher bypass: $wrapper"
+    denied "$wrapper git config core.hooksPath /dev/null" "unknown launcher config: $wrapper"
+done
+denied 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git push' \
+    "environment-config hook override"
+denied 'PGWT_SKIP_PUSH_GUARD=1 flock /tmp/l git push' "skip assignment through unknown launcher"
+denied "su -c 'git push --no-verify'" "quoted su command bypass"
+denied "su -c 'git config core.hooksPath /dev/null'" "quoted su config write"
+for reader in echo printf cat head tail grep rg sed awk less; do
+    allowed "$reader git -c core.hooksPath=/dev/null push" "reader arguments are data: $reader"
+done
+
 # Exercise an actual pre-push executable in an isolated repository, with a
 # local bare destination. Denied commands never execute. The following plain
 # push must run the hook, including after every attempted persistent write.
-python3 - "$HOOK" <<'PYPROOF'
+python3 - "$HOOK" "$REPO_ROOT/scripts/git-hooks/pre-push" <<'PYPROOF'
 import json, os, pathlib, subprocess, sys, tempfile
 
 hook = str(pathlib.Path(sys.argv[1]).resolve())
@@ -393,12 +415,16 @@ with tempfile.TemporaryDirectory(prefix="push-guard-proof-") as temporary:
           "commit", "--allow-empty", "-qm", "fixture")
     setup("remote", "add", "origin", str(remote))
     pre_push = repo / ".git/hooks/pre-push"
-    pre_push.write_text('#!/bin/sh\necho HOOK_RAN >> "$HOOK_MARKER"\necho HOOK_RAN >&2\nexit 1\n')
+    # Trace entry, then execute the repository's real, unmodified pre-push.
+    real_pre_push = pre_push.with_name("real-pre-push")
+    real_pre_push.write_bytes(pathlib.Path(sys.argv[2]).read_bytes())
+    pre_push.write_text('#!/bin/sh\necho HOOK_RAN >> "$HOOK_MARKER"\nexec bash "$(dirname "$0")/real-pre-push" "$@"\n')
     pre_push.chmod(0o755)
     def probe():
         marker.unlink(missing_ok=True)
         result = git("push", "origin", "HEAD:refs/heads/proof")
         assert result.returncode != 0 and marker.read_text() == "HOOK_RAN\n", result.stderr
+        assert "push blocked: no .pgwt-check.stamp" in result.stderr, result.stderr
     probe()
     # Negative control: prove Git really skips this same hook with the flag.
     marker.unlink()
@@ -415,12 +441,21 @@ with tempfile.TemporaryDirectory(prefix="push-guard-proof-") as temporary:
         "K=core.hooksPath; git -c $K=/dev/null push",
         *[f"git push {flag}" for flag in ("--no-v", "--no-ve", "--no-ver", "--no-veri", "--no-verif")],
     ]
-    for command in commands:
+    # 20 launcher cases plus the two environment regressions: 22 proofs.
+    round4 = [f"{wrapper} {command}" for wrapper in
+              ("flock /tmp/lock", "xargs", "script -q /dev/null", "taskset -c 0",
+               "ionice -c 3", "strace", "su -c", "chroot /tmp/root", "busybox timeout 30",
+               "arbitrary-launcher")
+              for command in ("git push --no-verify", "git config core.hooksPath /dev/null")]
+    round4 += ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git push",
+               "PGWT_SKIP_PUSH_GUARD=1 flock /tmp/l git push"]
+    quoted_su = ["su -c 'git push --no-verify'", "su -c 'git config core.hooksPath /dev/null'"]
+    for command in commands + round4 + quoted_su:
         result = subprocess.run(["bash", hook], cwd=repo, env=env, text=True, capture_output=True,
                                 input=json.dumps({"tool_input": {"command": command}}))
         assert result.returncode == 2, (command, result.returncode, result.stderr)
         probe()
-        print(f"PROOF {command} => DENY(2); following plain push HOOK_RAN (executable marker, exit 1)")
+        print(f"PROOF {command} => DENY(2); following plain push HOOK_RAN (real pre-push: missing-stamp refusal)")
 PYPROOF
 proof_rc=$?
 check "$([[ $proof_rc -eq 0 ]] && echo true || echo false)" "all reviewer bypasses preserve the executable pre-push hook"

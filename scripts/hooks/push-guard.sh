@@ -164,6 +164,7 @@ def protected(word):
     return "git-hooks" in word
 
 MUTATORS = {"rm", "unlink", "mv", "cp", "install", "truncate", "tee", "chmod", "ln", "touch", "dd"}
+READERS = {"echo", "printf", "cat", "head", "tail", "grep", "rg", "sed", "awk", "less"}
 REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<>", "<", "<&", "<<", "<<-", "<<<"}
 
 def skip_assignment(word):
@@ -271,17 +272,19 @@ def git_invocation(args, skip):
 def invocation(words, heredocs=(), state=None):
     state = {} if state is None else state
     skip = state.get("skip", False)
+    hook_config = state.get("hook_config", False)
     wrapped = False
     while words:
+        if re.match(r"GIT_CONFIG_KEY_[0-9]+=(?i:core\.hookspath)$", words[0]):
+            hook_config = True
         assignment = skip_assignment(words[0])
         if assignment is not None:
             skip = assignment
         if re.match(r"[A-Za-z_][A-Za-z_0-9]*=", words[0]) or words[0] in ("!", "{", "}", "then", "do", "else", "elif", "if", "while", "until"):
             words = words[1:]
-        # These programs execute an argv after their own options. Retain an
-        # explicit grammar: scanning arbitrary leading words for git would
-        # mistake echo/grep/body operands for executable commands.
-        elif words[0].rsplit("/", 1)[-1] in ("command", "builtin", "exec", "env", "sudo", "time", "timeout", "nohup", "nice", "stdbuf", "setsid"):
+        # Normalize shell/env prefixes for assignment scope and non-git
+        # mutations too. Launcher coverage below does not depend on this list.
+        elif words[0].rsplit("/", 1)[-1] in ("command", "builtin", "exec", "env", "sudo", "time"):
             wrapper = words[0].rsplit("/", 1)[-1]
             wrapped = True
             words = words[1:]
@@ -291,10 +294,9 @@ def invocation(words, heredocs=(), state=None):
                     raise Ambiguous("env executes a split command string")
                 if wrapper == "env" and option in ("--unset=PGWT_SKIP_PUSH_GUARD", "-i", "--ignore-environment"):
                     skip = False
-                if (option in ("-u", "-g", "-C", "--user", "--group", "--chdir", "--unset")
-                    or wrapper == "timeout" and option in ("-k", "--kill-after", "-s", "--signal")
-                    or wrapper == "nice" and option in ("-n", "--adjustment")
-                    or wrapper == "stdbuf" and option in ("-i", "-o", "-e", "--input", "--output", "--error")):
+                if wrapper == "env" and option in ("-i", "--ignore-environment"):
+                    hook_config = False
+                if option in ("-u", "-g", "-C", "--user", "--group", "--chdir", "--unset"):
                     if len(words) < 2:
                         raise Ambiguous("missing wrapper option value")
                     if wrapper == "env" and option in ("-u", "--unset") and words[1] == "PGWT_SKIP_PUSH_GUARD":
@@ -302,13 +304,12 @@ def invocation(words, heredocs=(), state=None):
                     words = words[2:]
                 else:
                     words = words[1:]
-            if wrapper == "timeout" and words:
-                words = words[1:]  # Required duration precedes the command.
         else:
             break
     if not words:
         if not wrapped:
             state["skip"] = skip
+            state["hook_config"] = hook_config
         return False
     verb, args = words[0].rsplit("/", 1)[-1], words[1:]
     if "$" in verb and any(relevant(w) for w in args):
@@ -317,6 +318,8 @@ def invocation(words, heredocs=(), state=None):
         raise Ambiguous("indirect executable payload")
     if verb == "export":
         for arg in args:
+            if re.match(r"GIT_CONFIG_KEY_[0-9]+=(?i:core\.hookspath)$", arg):
+                state["hook_config"] = True
             assignment = skip_assignment(arg)
             if assignment is not None:
                 state["skip"] = assignment
@@ -325,6 +328,8 @@ def invocation(words, heredocs=(), state=None):
         state["skip"] = False
         return False
     if verb == "git":
+        if hook_config:
+            raise Forbidden("core.hooksPath: GIT_CONFIG_KEY environment overrides the real hook directory")
         return git_invocation(args, skip)
     if verb == "git-send-pack":
         raise Forbidden("git send-pack: plumbing bypasses the pre-push hook entirely (#687)")
@@ -341,7 +346,7 @@ def invocation(words, heredocs=(), state=None):
             if arg.startswith("-") and not arg.startswith("--") and "c" in arg:
                 if index+1 >= len(args):
                     raise Ambiguous("missing shell command")
-                return mutates(args[index+1], {"skip": skip})
+                return mutates(args[index+1], {"skip": skip, "hook_config": hook_config})
             if arg in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
                 index += 1
             if arg.startswith("-") and not arg.startswith("--") and "s" in arg:
@@ -349,8 +354,30 @@ def invocation(words, heredocs=(), state=None):
             index += 1
         if stdin_script:
             for body in heredocs:
-                if mutates(body, {"skip": skip}):
+                if mutates(body, {"skip": skip, "hook_config": hook_config}):
                     return True
+    # Shell command strings/heredocs above are executable; script arguments
+    # are data, just as gh body/comment payloads are data. Preserve those
+    # established boundaries before applying the unknown-launcher fallback.
+    if verb in ("sh", "bash", "zsh", "dash", "ksh"):
+        return False
+    scan = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if verb == "gh" and arg in ("--body", "--body-file", "--comment", "--title", "-b", "-t"):
+            index += 2
+            continue
+        if not (verb == "gh" and arg.startswith(("--body=", "--body-file=", "--comment=", "--title="))):
+            scan.append(arg)
+        index += 1
+    # Invert launcher recognition: a reader cannot run what it prints, so
+    # exempting its data is safe; an unknown verb might execute its arguments,
+    # so deny it when git and a denylist term occur together. A small reader
+    # allowlist is bounded in a way a launcher allowlist can never be.
+    git_token = any(re.match(r"(?:[^\s]+/)?git(?:\s|$)", arg) for arg in scan)
+    if verb not in READERS and git_token and (skip or hook_config or any(relevant(arg) for arg in scan)):
+        raise Forbidden("unknown executable context contains git and a push-guard denylist term")
     if verb not in MUTATORS:
         return False
     if verb in ("cp", "install", "ln"):
