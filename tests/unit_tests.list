@@ -310,7 +310,25 @@ test_demo_workload_coverage.py
 test_timeline_window_probe.py
 test_hetzner_sweep.sh
 test_unit_import_guard.py
-test_push_guard.py
+# #230: scripts/hooks/push-guard.sh's old command-text PARSER (and its
+# tests/test_push_guard.py) are retired -- parsing shell grammar to guess
+# whether a push is happening is unsound by construction (#219: five
+# rounds, still wrong; #241: two more after that, including refusing an
+# unrelated command for a quoted mention of the word). Enforcement for an
+# actual push now happens only at the real git invocation via
+# scripts/git-hooks/pre-push (#332), which needs no parsing because it
+# runs with the actual refs, remote and worktree cwd. This drives real
+# `git push` against disposable repos/worktrees/remotes.
+test_pre_push_hook.sh
+# #230 (same change): scripts/hooks/push-guard.sh itself is NOT gone --
+# it is now a four-term substring denylist with no grammar at all (a git
+# hook structurally cannot see its own disarming, so this PreToolUse layer
+# exists only to catch PGWT_SKIP_PUSH_GUARD=1, core.hooksPath, chmod with
+# git-hooks, and --no-verify). Checks each term alone denies, an unrelated
+# command passes, and -- the control that matters -- a heredoc with an odd
+# number of apostrophes and none of the four terms passes untouched, which
+# is the exact shape the retired parser rejected outright.
+test_push_guard_denylist.sh
 # #277: the summary writer's daemon-tick flush wrote the second still in
 # progress and did not reset the accumulator, so the rest of that second was
 # written again as a superset and the reader summed both. One logical second
