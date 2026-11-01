@@ -2,7 +2,8 @@
 # Self-test and bypass suite for the per-section registration guard (#686).
 # Pure bash fixtures + the checker; no compiler, binaries, network or Linux.
 # Every mutation lives under mktemp, never in the three acceptance suites.
-# Usage: tests/test_check_section_registration.sh (run from anywhere)
+# Usage: tests/test_check_section_registration.sh [--mutants] (run from anywhere)
+# --mutants runs the exhaustive legacy-scope dispatcher sweep instead of fixtures.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
@@ -24,6 +25,74 @@ report() {
 
 tmpdir="$(mktemp -d)" || exit 1
 trap 'rm -rf "$tmpdir"' EXIT
+
+if [[ "${1:-}" == --mutants ]]; then
+    python3 - "$REPO_DIR" <<'PY'
+import bisect
+from collections import Counter
+import contextlib
+import importlib.util
+import io
+from pathlib import Path
+import sys
+
+repo = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('guard', repo / 'scripts/check-section-registration.py')
+guard = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = guard
+spec.loader.exec_module(guard)
+total = false_greens = suites = multi_site = 0
+for path in sorted((repo / 'tests').glob('test_*.c')):
+    raw = path.read_text()
+    code, strings = guard.lex(raw)
+    # Freeze #700's label grammar, not the widened scope. New banner forms
+    # must not make a legacy dispatcher deletion equivalent to the control.
+    legacy = [(pos, guard.LABEL.match(literal))
+              for pos, literal, _, _ in guard.printf_literals(code, strings)]
+    legacy = [pos for pos, match in legacy if match]
+    if not legacy:
+        continue
+    suites += 1
+    newlines = [i for i, c in enumerate(raw) if c == '\n']
+    line_at = lambda pos: bisect.bisect_left(newlines, pos) + 1
+    definitions = guard.functions(code, line_at)
+    owners = {name for pos in legacy for name, fn in definitions.items()
+              if fn.body_start <= pos < fn.body_end} - {'main'}
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert not guard.check_file(raw, path.name)[2], f'control is not green: {path.name}'
+    counts = Counter()
+    for owner in sorted(owners):
+        sites = {line_at(call.start()) for fn in definitions.values()
+                 for call in guard.CALL.finditer(code, fn.body_start, fn.body_end)
+                 if call[1] == owner}
+        assert sites, f'no dispatcher for {path.name}:{owner}'
+        lines = raw.splitlines(keepends=True)
+        for line in sites:
+            lines[line - 1] = guard.mask(lines[line - 1])
+        mutant = ''.join(lines)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            _, markers, failed = guard.check_file(mutant, path.name)
+        # Require the intended unreachable-owner finding, not a parse error,
+        # lost marker, or an unrelated failure. Multiple incoming sites are
+        # all removed to disconnect a shared owner, as reachability requires.
+        red = markers > 0 and failed and f'unreachable owner {owner}:' in err.getvalue()
+        total += 1
+        multi_site += len(sites) > 1
+        false_greens += not red
+        counts['red' if red else 'FALSE GREEN'] += 1
+        print(f'{"RED" if red else "FALSE GREEN"}: {path.name}: {owner}; deleted lines {sorted(sites)}')
+        if not red:
+            print(out.getvalue() + err.getvalue())
+    print(f'SUITE: {path.name}: {dict(counts)}')
+print(f'LEGACY DISPATCHER MUTANTS: {total} across {suites} suites; '
+      f'{total - multi_site} single-site, {multi_site} shared-owner disconnect; '
+      f'{false_greens} false greens')
+assert suites >= 22 and total >= 172, 'legacy-scope mutation census unexpectedly shrank'
+sys.exit(bool(false_greens))
+PY
+    exit $?
+fi
 
 # Two differently shaped headers in one owner, with a continued first
 # literal. Escaped quotes, character braces and multiline comments must
@@ -211,11 +280,16 @@ repo="$tmpdir/comment-regions"
 mkdir -p "$repo/tests" || exit 1
 cat > "$repo/tests/test_comment_regions.c" <<'EOF'
 /* ── Section 1: an example in a design note, not a runtime section ── */
-/* printf("--- 2. commented-out example ---\n"); */
+/* printf("--- 2. commented-out example ---\n");
+   printf("--- named example ---\n"); printf("[A1] example\n"); */
 // printf("-- 3: another example --\n");
 int main(void)
 {
     const char *example = "printf(\"=== §4 example ===\");";
+#if 0
+    printf("-- 5/6: disabled example --\n");
+    printf("\n§7 disabled example\n");
+#endif
     return 0;
 }
 EOF
@@ -237,14 +311,39 @@ else
     report false 'unrecognised runtime header must not look sectionless'
 fi
 
-for shape in leading-escape dash-wrapper range next-line-literal; do
+# This inventory was surveyed on master before widening (#710): 22 suites
+# used the old dot labels; 30 more have runtime banners in the forms below;
+# 8 have only decorated comment regions (helpers, phases or sections), one
+# has unlabelled === banners, and 9 have no formal headings. Comments remain hints,
+# not markers. Named banners must have BOTH wrappers; suite titles (===
+# without a numeric/§ label) and formatted diagnostic output are excluded.
+header_shapes=(leading-escape dash-wrapper range next-line-literal colon
+               colon-pair colon-list colon-range equals-dot section-sign
+               section-pair bracket bracket-alpha bracket-alnum named named-split)
+header_shape() {
+    local shape="$1"
     label=1
     case "$shape" in
         leading-escape) header='    printf("\n\t  1. leading whitespace\n");' ;;
         dash-wrapper) header='    printf("-- 1. dash wrapper --\n");' ;;
         range) header='    printf("1-3. three sections\n");'; label=1-3 ;;
         next-line-literal) header=$'    printf(\n        "--- 1. next source line ---\\n");' ;;
+        colon) header='    printf("-- 1: colon banner --\n");' ;;
+        colon-pair) header='    printf("-- 1/2: paired sections --\n");'; label=1/2 ;;
+        colon-list) header='    printf("-- 8h,i,l: listed sections --\n");'; label=8h,i,l ;;
+        colon-range) header='    printf("-- 8b-d: ranged sections --\n");'; label=8b-d ;;
+        equals-dot) header='    printf("=== 1. equals banner ===\n");' ;;
+        section-sign) header='    printf("=== §1 section sign ===\n");' ;;
+        section-pair) header='    printf("\n§1/§2 paired sections\n");'; label=1/2 ;;
+        bracket) header='    printf("\n[1] bracketed section\n");' ;;
+        bracket-alpha) header='    printf("\n[A] alphabetic section\n");'; label=A ;;
+        bracket-alnum) header='    printf("\n[A1] alphanumeric section\n");'; label=A1 ;;
+        named) header='    printf("--- named section ---\n");'; label='named section' ;;
+        named-split) header=$'    printf("--- named " /* masked */\n           "section ---\\n");'; label='named section' ;;
     esac
+}
+for shape in "${header_shapes[@]}"; do
+    header_shape "$shape"
     repo="$tmpdir/header-$shape"
     write_header_suite "$repo" "$header" '    section();'
     green "$repo" "$shape header control passes"
@@ -262,25 +361,35 @@ done
 # Each prose form is its own file so every one must be explicitly OUT OF
 # SCOPE, and their combined fixture must have no registered owners/markers.
 repo="$tmpdir/prose-controls"
-for prose in rows decimal done sub-assertion; do
+prose_forms=(rows decimal done sub-assertion suite-title result-title bare-colon
+             missing-wrapper format-title quoted-comment bracket-prose wrong-printf-argument)
+for prose in "${prose_forms[@]}"; do
     case "$prose" in
         rows) header='    printf("3 rows\n");' ;;
         decimal) header='    printf("1.5 seconds elapsed\n");' ;;
         done) header='    printf("\n  done.\n");' ;;
         sub-assertion) header='    printf("ok: 5h. a sub-assertion message\n");' ;;
+        suite-title) header='    printf("=== test_fixture ===\n");' ;;
+        result-title) header='    printf("=== %d/%d checks passed ===\n", 1, 1);' ;;
+        bare-colon) header='    printf("534: an assertion message\n");' ;;
+        missing-wrapper) header='    printf("--- ordinary prose without a closing delimiter\n");' ;;
+        format-title) header='    printf("--- %s ---\n", "fixture data");' ;;
+        quoted-comment) header='    printf("/* ── Section 1: quoted design note ── */\n");' ;;
+        bracket-prose) header='    printf("[index] an array index\n");' ;;
+        wrong-printf-argument) header='    printf("%s", "--- named section ---\n");' ;;
     esac
     write_header_suite "$repo" "$header" '    section();'
     mv "$repo/tests/test_fixture.c" "$repo/tests/test_$prose.c" || exit 1
 done
 green "$repo" 'prose negative controls pass'
-for prose in rows decimal done sub-assertion; do
-    if [[ "$out" == *"OUT OF SCOPE: tests/test_$prose.c (0 markers; no supported printf section banner; no section-like heading detected; not verified)"* ]]; then
+for prose in "${prose_forms[@]}"; do
+    if [[ "$out" == *"OUT OF SCOPE: tests/test_$prose.c (0 markers; "* ]]; then
         report true "prose negative control stays OUT OF SCOPE: $prose"
     else
         report false "prose negative control must stay OUT OF SCOPE: $prose"
     fi
 done
-if [[ "$out" == *'OK: 0 of 4 tests/test_*.c in scope (4 out of scope), 0 owners, 0 markers;'* &&
+if [[ "$out" == *'OK: 0 of 12 tests/test_*.c in scope (12 out of scope), 0 owners, 0 markers;'* &&
       "$out" != *'IN SCOPE:'* ]]; then
     report true 'prose-only fixture has 0 files, 0 owners, 0 markers'
 else
@@ -305,6 +414,17 @@ EOF
     # code so deleting its only call really produces a whitespace-only body.
     printf '}\n' >> "$repo/tests/test_fixture.c"
 }
+
+# Every added form must also preserve dispatch windows in main. Deleting
+# one site must not borrow the next section's call to the same delegate.
+for shape in "${header_shapes[@]}"; do
+    header_shape "$shape"
+    repo="$tmpdir/window-$shape"
+    write_dispatch_site_suite "$repo" "$header"$'\n    test_tick_close_order();\n    printf("99. next window\\n");\n    test_tick_close_order();'
+    green "$repo" "$shape dispatch-window control passes"
+    write_dispatch_site_suite "$repo" "$header"$'\n    printf("99. next window\\n");\n    test_tick_close_order();'
+    red "$repo" "$shape deleted dispatch window goes RED" "section $label header at line "
+done
 
 repo="$tmpdir/dispatch-site"
 write_dispatch_site_suite "$repo" $'    printf("\\n-- 4. tick and close --\\n");\n    test_tick_close_order();'
@@ -335,6 +455,39 @@ red "$repo" 'dead delegate site cannot borrow reachability from another window' 
 repo="$tmpdir/inline-section"
 write_dispatch_site_suite "$repo" $'    printf("4. inline assertions\\n");\n    assert(1);'
 green "$repo" 'inline assertions in main need no local delegate'
+
+# Widening brings alloc_tune's mutually exclusive mains into scope. Prove
+# each branch independently; the other main must not lend it a call edge.
+repo="$tmpdir/conditional-main"
+mkdir -p "$repo/tests" || exit 1
+cat > "$repo/tests/test_fixture.c" <<'EOF'
+static void section(void)
+{
+    printf("--- conditional section ---\n");
+    assert(1);
+}
+#ifdef PLATFORM
+int main(void)
+{
+    section(); /* first arm */
+}
+#else
+int main(void)
+{
+    section(); /* second arm */
+}
+#endif
+EOF
+cp "$repo/tests/test_fixture.c" "$tmpdir/conditional-control.c" || exit 1
+green "$repo" 'mutually exclusive mains are checked independently'
+for arm in first second; do
+    sed "/section(); .* $arm arm/d" "$tmpdir/conditional-control.c" > "$repo/tests/test_fixture.c" || exit 1
+    red "$repo" "conditional $arm arm cannot borrow the other main's dispatcher" \
+        'unreachable owner section: sections conditional section'
+done
+sed '/^#ifdef PLATFORM$/d; /^#else$/d; /^#endif$/d' "$tmpdir/conditional-control.c" > "$repo/tests/test_fixture.c" || exit 1
+red "$repo" 'duplicate mains without mutually exclusive branches still refuse' \
+    'duplicate function definition: main'
 
 # Registration of this registration check. Match actual invocation lines,
 # not comments/mentions; resolve from this test's location, never from PWD.
@@ -391,6 +544,8 @@ test_agg_raw_crosscheck.c|    div553_measured_cpu_identity(origin);|div553_measu
 test_cpu_split_parity.c|        test_windows(&fx);|test_windows
 test_straddler_accounting.c|    test_tick_close_order();|test_tick_close_order|section 4 header at line 636 has an empty body -- its dispatch site is missing
 test_straddler_accounting.c|    test_placement_and_conservation(1);|test_placement_and_conservation|section 1-3 header at line 630 has an empty body -- its dispatch site is missing
+test_open_cpu_accounting.c|    test_notes_counter();   /\* prints its own banner -- see #686 there \*/|test_notes_counter
+test_open_cpu_accounting.c|    test_placement_split_conservation();|test_placement_split_conservation|section 1/2 header at line
 EOF
 
 # Commit actual baselines so a working-tree scope loss cannot silently turn
@@ -419,8 +574,7 @@ if cmp -s "$copy" "$tmpdir/stripped.c"; then
 else
     report true 'scope ratchet header-prefix mutation matched the real cpu-split source'
     mv "$tmpdir/stripped.c" "$copy" || exit 1
-    red "$repo" 'real cpu-split headers losing numeric prefixes goes RED' \
-        'tests/test_cpu_split_parity.c left scope'
+    green "$repo" 'real cpu-split losing numeric prefixes retains named-banner coverage'
     sed 's|^        test_windows(&fx);$||' "$copy" > "$tmpdir/mutated.c" || exit 1
     if cmp -s "$copy" "$tmpdir/mutated.c"; then
         out='REFUSING: cpu-split test_windows dispatcher mutation did not match'
@@ -429,8 +583,15 @@ else
         report true 'scope ratchet dispatcher mutation matched the real cpu-split source'
         mv "$tmpdir/mutated.c" "$copy" || exit 1
         red "$repo" 'real cpu-split prefix loss plus deleted test_windows stays RED' \
-            'tests/test_cpu_split_parity.c left scope'
+            'unreachable owner test_windows: sections '
     fi
+    # With named banners now supported, stripping only numbers is an
+    # equivalent style change. Remove the wrappers too to exercise an
+    # ACTUAL loss of scope, rather than weakening or deleting the ratchet.
+    sed -E 's/--- //g; s/ ---//g' "$copy" > "$tmpdir/unheaded.c" || exit 1
+    mv "$tmpdir/unheaded.c" "$copy" || exit 1
+    red "$repo" 'real cpu-split losing every supported banner goes RED' \
+        'tests/test_cpu_split_parity.c left scope'
 fi
 
 repo="$tmpdir/scope-growth"

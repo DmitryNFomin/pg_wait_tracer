@@ -9,9 +9,9 @@ ONE dispatcher line left these PR #689 suites green (0 failed, exit 0):
   test_agg_raw_crosscheck             251               211
   test_cpu_split_parity              107                66
 
-Static call-graph reachability makes every function owning a numbered printf
+Static call-graph reachability makes every function owning a section printf
 header reachable from main(), through actual call sites in the same file.
-Each header's window runs from the following line to the next header in the
+Each header's window runs from the end of its printf statement to the next header in the
 same function (excluded), or to the end of its body. The first local function
 call in that window is its delegate; both owner and delegate must be reachable,
 and the delegate's call must supply an active edge in that particular window.
@@ -27,8 +27,12 @@ real failure: check-runner-registration.py, instance 3).
 
 What this CANNOT see: a call site that exists but never executes at runtime
 (for example a branch not taken), a reached section whose
-assertions were gutted, or a suite whose headers match no supported label form
-at all (N. or N-M., with optional lowercase suffixes, including 6b-h.).
+assertions were gutted, or a suite whose headers match no supported label form.
+Supported runtime banners: N. (suffixes, ranges and lists), -- N: title --,
+=== N. title ===, §N (optionally wrapped), [N]/[A]/[A1], and --- title ---.
+Only active printf first arguments supply markers; comments never do. Every
+out-of-scope file is listed with a reason, distinguishing comment-organised
+suites from files with no detected heading. Neither is claimed as verified.
 The first local call in a window may be a helper, not the dispatcher.
 Scope is append-only against the merge-base: a suite with supported headers
 at base must retain at least one supported header on this tree.
@@ -62,6 +66,17 @@ TOKEN = re.compile(
     r'|(?P<broken>/\*|["\'])', re.M,
 )
 LABEL = re.compile(r'^(?:\s|\\[nt])*(?:--+[ \t]+)?([0-9]+[a-z]*(?:-(?:[0-9]+[a-z]*|[a-z]+))?)\. +')
+# Preserve LABEL's existing forms. New forms have explicit delimiters, not
+# a loose search for numbers or prose that could match arbitrary comments.
+NUMBER = r'[0-9]+[a-z]*(?:[-/,](?:[0-9]+[a-z]*|[a-z]+))*'
+DOT_LABEL = re.compile(rf'^(?:(?:--+|===) +)?({NUMBER})\. +')
+COLON_LABEL = re.compile(rf'^(?P<wrap>--+) +(?P<label>{NUMBER}): +'
+                         r'[^\n]+? +(?P=wrap)(?:\\[nt]|\s)*$')
+SECTION_LABEL = re.compile(r'^(?:(?:===|---) +)?§('
+                           r'[0-9]+[a-z]*(?:[-/,]§?(?:[0-9]+[a-z]*|[a-z]+))*)[:.]? +')
+BRACKET_LABEL = re.compile(r'^\[([0-9]+|[A-Z][0-9]*)\] +')
+NAMED_LABEL = re.compile(r'^(?P<wrap>---+) +(?P<label>[A-Za-z#][^\n]+?) +'
+                         r'(?P=wrap)(?:\\[nt]|\s)*$')
 CALL = re.compile(r'\b([A-Za-z_]\w*)\s*\(')
 # No leading indentation: definitions in these suites start at column zero.
 # A separate return-type line (int\nmain(...)) is allowed too.
@@ -72,6 +87,10 @@ DEAD_LINE = re.compile(r'\bif\s*\(\s*0\s*\)')
 
 
 class Refusal(Exception):
+    pass
+
+
+class DuplicateDefinition(Refusal):
     pass
 
 
@@ -148,7 +167,7 @@ def functions(code, line_at):
             continue  # Declaration/prototype, not a definition.
         end = matching(code, body, '{', '}')
         if name in found:
-            raise Refusal(f'duplicate function definition: {name}')
+            raise DuplicateDefinition(f'duplicate function definition: {name}')
         # Inline helper bodies exist too; balanced braces identify their end.
         signature = code[candidate.start():paren]
         if signature.strip() == name:
@@ -171,16 +190,51 @@ def printf_literals(code, strings):
         while first < len(code) and code[first].isspace() and first not in strings:
             first += 1
         if first in strings:
-            yield first, strings[first]
+            literal, pos = strings[first], first
+            # A banner can continue across adjacent C string literals. Stop
+            # at any code (comma, ')', macro, etc.), never another argument.
+            while True:
+                pos += len(strings[pos]) + 2
+                while pos < len(code) and code[pos].isspace() and pos not in strings:
+                    pos += 1
+                if pos not in strings:
+                    break
+                literal += strings[pos]
+            end = matching(code, call.end() - 1, '(', ')') + 1
+            while end < len(code) and code[end].isspace():
+                end += 1
+            if end < len(code) and code[end] == ';':
+                end += 1
+            yield first, literal, call.start(), end
+
+
+def section_label(literal):
+    old = LABEL.match(literal.split('\n', 1)[0])
+    if old:
+        return old[1]
+    text = re.sub(r'^(?:\s|\\[nt])*', '', literal)
+    for pattern in (DOT_LABEL, SECTION_LABEL, BRACKET_LABEL):
+        match = pattern.match(text)
+        if match:
+            return match[1].replace('§', '')
+    for pattern in (COLON_LABEL, NAMED_LABEL):
+        match = pattern.fullmatch(text)
+        if match:
+            return match['label']
+    return None
 
 
 def extract_markers(code, strings):
     """The same scope definition for working-tree files and base blobs."""
+    return [(label, first) for label, first, _, _ in marker_spans(code, strings)]
+
+
+def marker_spans(code, strings):
     markers = []
-    for first, literal in printf_literals(code, strings):
-        label = LABEL.match(literal.split('\n', 1)[0])
+    for first, literal, start, end in printf_literals(code, strings):
+        label = section_label(literal)
         if label:
-            markers.append((label[1], first))
+            markers.append((label, first, start, end))
     return markers
 
 
@@ -195,30 +249,90 @@ def out_of_scope_reason(raw, code, strings):
     for token in TOKEN.finditer(raw):
         if token.lastgroup != 'block':
             continue
-        if re.match(r'/\* [─═-]{2,}[ \t]+(?:§|(?:[Ss]ection|SECTION|Test) +)?'
-                    r'(?:[0-9]+[a-z]*|[A-Z][0-9]*)(?:[.:/ \t])', token.group()):
+        if re.match(r'/\* [─═-]{2,}[ \t]+\S', token.group()):
             headings.append(str(raw.count('\n', 0, token.start()) + 1))
     hints = []
     if headings:
         hints.append('section-like comments at lines ' + ', '.join(headings))
     banners = [str(raw.count('\n', 0, pos) + 1)
-               for pos, literal in printf_literals(code, strings)
+               for pos, literal, _, _ in printf_literals(code, strings)
                if re.match(r'^(?:\s|\\[nt])*(?:--+ |=== [0-9]|§|'
                            r'\[[A-Z0-9]|[Ss]ection [0-9])', literal)]
     if banners:
         hints.append('unrecognised section-like printf text at lines ' + ', '.join(banners))
+    unlabelled = [str(raw.count('\n', 0, pos) + 1)
+                  for pos, literal, _, _ in printf_literals(code, strings)
+                  if re.match(r'^(?:\s|\\[nt])*=== [^0-9§]', literal)]
+    if unlabelled:
+        hints.append('unlabelled === printf banners at lines ' + ', '.join(unlabelled) +
+                     ' (suite/result or unsupported section title)')
     return ('no supported printf section banner; ' +
             ('; '.join(hints) if hints else 'no section-like heading detected'))
 
 
-def check_file(raw, display):
+def conditional_alternatives(raw):
+    """Split a top-level #if/else, preserving all source offsets.
+
+    Only needed for mutually exclusive definitions (alloc_tune's two mains).
+    Check both arms rather than choosing the host platform or merging their
+    call edges. Nested alternatives are split on the next recursive pass.
+    This is deliberately not a general preprocessor expression evaluator.
+    """
+    depth, start, middle = 0, None, None
+    for token in TOKEN.finditer(raw):
+        if token.lastgroup != 'directive':
+            continue
+        directive = re.sub(r'/\*.*?\*/|//.*', '', token.group()).lstrip(' \t#').strip()
+        if re.match(r'if(?:def|ndef)?\b', directive):
+            if depth == 0:
+                start, middle = token, None
+            depth += 1
+        elif re.match(r'else\b', directive) and depth == 1:
+            middle = token
+        elif re.match(r'elif\b', directive) and depth == 1:
+            # Refuse unsupported ambiguous duplicate definitions, never
+            # silently discard an arm in a chain of conditions.
+            start = None
+        elif re.match(r'endif\b', directive):
+            depth -= 1
+            if depth == 0 and start is not None and middle is not None:
+                first, second = (start.end(), middle.start()), (middle.end(), token.start())
+                # Split only a conditional containing definitions in BOTH
+                # arms, skipping include-only conditionals before the mains.
+                if all(DEFINITION.search(lex(raw[a:b])[0]) for a, b in (first, second)):
+                    prefix = raw[:start.start()] + mask(raw[start.start():start.end()])
+                    suffix = mask(raw[token.start():token.end()]) + raw[token.end():]
+                    return [prefix + raw[first[0]:first[1]] +
+                            mask(raw[middle.start():second[1]]) + suffix,
+                            prefix + mask(raw[first[0]:middle.end()]) +
+                            raw[second[0]:second[1]] + suffix]
+    return None
+
+
+def check_file(raw, display, *, alternatives=0):
+    try:
+        return check_variant(raw, display)
+    except DuplicateDefinition:
+        branches = conditional_alternatives(raw) if alternatives < 8 else None
+        if branches is None:
+            raise
+        print(f'CONDITIONAL SCOPE: {display}: checking both #if/else alternatives')
+        results = [check_file(branch, f'{display} [alternative {index}]',
+                              alternatives=alternatives + 1)
+                   for index, branch in enumerate(branches, 1)]
+        return (sum(r[0] for r in results), sum(r[1] for r in results),
+                any(r[2] for r in results))
+
+
+def check_variant(raw, display):
     code, strings = lex(raw)
     newlines = [pos for pos, c in enumerate(raw) if c == '\n']
 
     def line_at(pos):
         return bisect.bisect_left(newlines, pos) + 1
 
-    markers = [(label, line_at(pos)) for label, pos in extract_markers(code, strings)]
+    markers = [(label, line_at(pos), start, end)
+               for label, pos, start, end in marker_spans(code, strings)]
     if not markers:
         print(f'OUT OF SCOPE: {display} (0 markers; '
               f'{out_of_scope_reason(raw, code, strings)}; not verified)')
@@ -228,12 +342,12 @@ def check_file(raw, display):
     if 'main' not in definitions or not definitions['main'].returns_int:
         raise Refusal('section markers found but no findable int main definition')
     owners = {}
-    for label, line in markers:
+    for label, line, start, end in markers:
         matches = [name for name, fn in definitions.items()
                    if fn.start_line <= line <= fn.end_line]
         if len(matches) != 1:
             raise Refusal(f'section {label} at line {line}: cannot determine owner definition')
-        owners.setdefault(matches[0], []).append((label, line))
+        owners.setdefault(matches[0], []).append((label, line, start, end))
 
     print(f'IN SCOPE: {display}: {len(markers)} markers, {len(owners)} owners')
     graph = {name: set() for name in definitions}
@@ -261,14 +375,12 @@ def check_file(raw, display):
     failed = False
     for owner, sections in owners.items():
         if owner not in reached:
-            labels = ', '.join(f'{label} (line {line})' for label, line in sections)
+            labels = ', '.join(f'{label} (line {line})' for label, line, _, _ in sections)
             print(f'FAIL: {display}: unreachable owner {owner}: sections {labels}', file=sys.stderr)
             failed = True
         fn = definitions[owner]
-        for index, (label, line) in enumerate(sections):
-            start = newlines[line - 1] + 1 if line <= len(newlines) else fn.body_end
-            end = (newlines[sections[index + 1][1] - 2] + 1
-                   if index + 1 < len(sections) else fn.body_end)
+        for index, (label, line, _, start) in enumerate(sections):
+            end = sections[index + 1][2] if index + 1 < len(sections) else fn.body_end
             delegate = next(((callee, active) for pos, callee, active in local_calls[owner]
                              if start <= pos < end), None)
             if delegate is not None:
