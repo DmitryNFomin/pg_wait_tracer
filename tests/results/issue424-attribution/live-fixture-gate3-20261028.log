@@ -1,0 +1,25 @@
+PM=953 PGPORT=5418
+=== test_v9_open_cpu_wired (#424, summary v9 producer) ===
+  ok: watchpoints attached (mask=15, tier=escalated) -- producer reachable
+  ok: all seven v9 control keys present and numeric
+  ok: 3 of 3 CPU statements completed, spanning 9s of ticks
+  ok: stimulus PROVEN -- cpu_ns_total moved 10591 -> 26431536953
+  ok: the writer WAS asked -- summary_open_cpu_notes_total = 27
+  summary_open_cpu_credited_ns   = 23465838422
+  summary_open_cpu_measured_ns   = 22853487355
+  summary_open_cpu_refused_total = 0
+  summary_cpu_open_uncredited_ns_total = 18194860320
+  summary_open_io_worker_refused_total = 36  (WAIT notes included)
+  summary_open_cpu_io_worker_refused_total = 0  (the on-CPU subset)
+  summary_open_cpu_unplaced_total      = 0
+  summary_open_table_full_total        = 0
+  summary_open_notes_expired_total     = 0
+  summary_open_credited_ns_total = 75374110208  (WAIT credit, same seal)
+  offered to the credit path     = 27  (notes 27 - io_worker 0)
+  ok: the v9 open-CPU producer IS wired and the credit is coherent
+      wall 23465838422 ns, measured 22853487355 ns, stimulus CPU 26431526362 ns
+      (measured/stimulus = 86%, floor 25%)
+=== test_v9_open_cpu_wired: PASS ===
+FIXTURE_EXIT=0
+
+[exited with code 0]

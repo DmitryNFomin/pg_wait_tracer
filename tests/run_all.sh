@@ -488,14 +488,23 @@ LIVE_TESTS=(
     # directory to -T. Carries its own negative control (a root:root 0640 file
     # in the same directory the same reader must still be refused).
     "test_trace_sidecar_perms|bash|test_trace_sidecar_perms.sh"
-    # NOT registered: test_v9_open_cpu_wired.sh. The v9 open-CPU producer
-    # was REVERTED (agent/424-daemon fc7d7f5) once its counters showed it
-    # was never wired, so the check would be permanently red against a
-    # capability nobody invokes -- which is neither a product bug being
-    # fixed in src/ (the only thing KNOWN_FAILING is for) nor a gate worth
-    # 40 minutes a run. The script stays in tests/ as the ACCEPTANCE test
-    # for whoever re-wires it: run it by hand, and re-add this line in the
-    # same commit that makes it pass.
+    # #424: the v9 open-CPU producer's ACCEPTANCE test, registered now that
+    # the producer IS wired (pgwt_read_state_map, src/map_reader.c) and the
+    # constant is 9 -- this line is what the previous note asked for, and
+    # without it the one check that can tell "wired" from "merely compiled"
+    # runs nowhere. It REFUSES (exit 2) rather than passing when its
+    # preconditions do not hold: no watchpoint probes attached, no control
+    # socket, the seven v9 keys absent, a stimulus it cannot prove was
+    # on-CPU across two ticks, no second actually sealed, or the writer never
+    # ASKED for an on-CPU credit (summary_open_cpu_notes_total == 0). A tier
+    # that cannot see cannot make it green.
+    # CORRECTED 2026-10-28: this note used to add "so a tier where the zero
+    # is CORRECT cannot make it red", which is false. run_one above counts
+    # EVERY non-zero exit as a failure, exit 2 included, so a refusal reddens
+    # the gate exactly like a failure and only the script's own REFUSE/FAIL
+    # banner tells them apart. Keeping the claim would have let a reviewer
+    # read a red refusal as a product defect, which is what happened.
+    "test_v9_open_cpu_wired|bash|test_v9_open_cpu_wired.sh"
     "test_escalation|bash|test_escalation.sh"
     # Tiered-capture live tests (were built for A4/A5 but wired into
     # nothing — TST-7). test_cross_validate_tiered is the test that

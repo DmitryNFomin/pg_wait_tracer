@@ -1,0 +1,135 @@
+fixture under test: /private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-tracer/258d73f0-4867-4c95-9aca-9a7966648e2b/scratchpad/parent_fixture.sh
+
+  ok   A: PASS    exit=0   asked 4210x and crediting -> the producer IS wired
+  ok   B: REFUSE  exit=2   nothing sealed (v8 credit 0 too) -> says nothing either way
+  ok   C: REFUSE  exit=2   THE 2026-10-28 CAPTURE: sealed, but the writer was NEVER ASKED
+  ok   D: FAIL    exit=1   asked 4210x and credited nothing -> the CREDIT PATH dropped it
+  ok   E: REFUSE  exit=2   notes key absent (older daemon) -> cannot localise, must refuse
+  ok   F: REFUSE  exit=2   the daemon never came up -> refuse inside its own bound, never hang
+  ok   G: REFUSE  exit=2   psql exits 127 -> a missing dependency is a refusal, not a pass
+  FAIL H: got PASS exit=0, want FAIL exit=1   wall placed, measured 0 -> v7's split destroyed, worse than refusing
+        |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
+        |   ok: stimulus PROVEN -- cpu_ns_total moved 1000000000 -> 31000000000
+        |   ok: the writer WAS asked -- summary_open_cpu_notes_total = 4210
+        |   summary_open_cpu_credited_ns   = 9000000000
+        |   summary_open_cpu_refused_total = 0
+        |   summary_cpu_open_uncredited_ns_total = 0
+        |   summary_open_io_worker_refused_total = 5
+        |   summary_open_table_full_total        = 0
+        |   summary_open_notes_expired_total     = 0
+        |   summary_open_credited_ns_total = 75854656030  (the discriminator)
+        |   ok: the v9 open-CPU producer IS wired (credited 9000000000 ns)
+        | === test_v9_open_cpu_wired: PASS ===
+  FAIL I: got PASS exit=0, want FAIL exit=1   measured > wall -> incoherent; the reader's residual goes negative
+        |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
+        |   ok: stimulus PROVEN -- cpu_ns_total moved 1000000000 -> 31000000000
+        |   ok: the writer WAS asked -- summary_open_cpu_notes_total = 4210
+        |   summary_open_cpu_credited_ns   = 9000000000
+        |   summary_open_cpu_refused_total = 0
+        |   summary_cpu_open_uncredited_ns_total = 0
+        |   summary_open_io_worker_refused_total = 5
+        |   summary_open_table_full_total        = 0
+        |   summary_open_notes_expired_total     = 0
+        |   summary_open_credited_ns_total = 75854656030  (the discriminator)
+        |   ok: the v9 open-CPU producer IS wired (credited 9000000000 ns)
+        | === test_v9_open_cpu_wired: PASS ===
+  FAIL J: got PASS exit=0, want FAIL exit=1   2 s measured of a 30 s stimulus -> the token credit 'credited > 0' approves
+        |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
+        |   ok: stimulus PROVEN -- cpu_ns_total moved 1000000000 -> 31000000000
+        |   ok: the writer WAS asked -- summary_open_cpu_notes_total = 4210
+        |   summary_open_cpu_credited_ns   = 3000000000
+        |   summary_open_cpu_refused_total = 0
+        |   summary_cpu_open_uncredited_ns_total = 0
+        |   summary_open_io_worker_refused_total = 5
+        |   summary_open_table_full_total        = 0
+        |   summary_open_notes_expired_total     = 0
+        |   summary_open_credited_ns_total = 75854656030  (the discriminator)
+        |   ok: the v9 open-CPU producer IS wired (credited 3000000000 ns)
+        | === test_v9_open_cpu_wired: PASS ===
+  FAIL K: got FAIL exit=1, want REFUSE exit=2   the two attribution keys absent -> a zero is three states; refuse
+        |         summary_open_credited_ns_total = 75854656030 proving seconds
+        |         really were sealed, AND with the writer ASKED 4210 times
+        |         (summary_open_cpu_notes_total). So the observation reached the
+        |         writer and the CREDIT PATH placed none of it -- which is a
+        |         different defect from an unwired producer, and the counter
+        |         above is what distinguishes them. Which early exit took it:
+        |         io_worker=5 table_full=0
+        |         notes_expired=0 eff_rejected/overcredit above.
+        |         All of those zero narrows it to the seal placing no second.
+        |         refused_total=0
+        |         uncredited_ns=0 is what it cost.
+        | === test_v9_open_cpu_wired: FAIL ===
+  FAIL L: got FAIL exit=1, want REFUSE exit=2   every observation was an io_worker's -> offered nothing; the stimulus failed
+        |         summary_open_credited_ns_total = 45822328957 proving seconds
+        |         really were sealed, AND with the writer ASKED 34 times
+        |         (summary_open_cpu_notes_total). So the observation reached the
+        |         writer and the CREDIT PATH placed none of it -- which is a
+        |         different defect from an unwired producer, and the counter
+        |         above is what distinguishes them. Which early exit took it:
+        |         io_worker=39 table_full=0
+        |         notes_expired=0 eff_rejected/overcredit above.
+        |         All of those zero narrows it to the seal placing no second.
+        |         refused_total=0
+        |         uncredited_ns=0 is what it cost.
+        | === test_v9_open_cpu_wired: FAIL ===
+  FAIL M: got FAIL exit=1, want REFUSE exit=2   THE 2026-10-28 CAPTURE: 34 accepted, 34 retired unplaced -> no gap to spread
+        |         summary_open_credited_ns_total = 45822328957 proving seconds
+        |         really were sealed, AND with the writer ASKED 34 times
+        |         (summary_open_cpu_notes_total). So the observation reached the
+        |         writer and the CREDIT PATH placed none of it -- which is a
+        |         different defect from an unwired producer, and the counter
+        |         above is what distinguishes them. Which early exit took it:
+        |         io_worker=5 table_full=0
+        |         notes_expired=0 eff_rejected/overcredit above.
+        |         All of those zero narrows it to the seal placing no second.
+        |         refused_total=0
+        |         uncredited_ns=0 is what it cost.
+        | === test_v9_open_cpu_wired: FAIL ===
+
+  --- scenario M, verbatim (the one the parent fixture gets wrong) ---
+  | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
+  |   ok: watchpoints attached (mask=15, tier=escalated) -- producer reachable
+  |   ok: all seven v9 control keys present and numeric
+  |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
+  |   ok: stimulus PROVEN -- cpu_ns_total moved 1000000000 -> 35000000000
+  |   ok: the writer WAS asked -- summary_open_cpu_notes_total = 34
+  |   summary_open_cpu_credited_ns   = 0
+  |   summary_open_cpu_refused_total = 0
+  |   summary_cpu_open_uncredited_ns_total = 0
+  |   summary_open_io_worker_refused_total = 5
+  |   summary_open_table_full_total        = 0
+  |   summary_open_notes_expired_total     = 0
+  |   summary_open_credited_ns_total = 45822328957  (the discriminator)
+  |   FAIL: summary_open_cpu_credited_ns is 0 on a capture whose CPU
+  |         statement is proven, with the v9 keys present, with
+  |         summary_open_credited_ns_total = 45822328957 proving seconds
+  |         really were sealed, AND with the writer ASKED 34 times
+  |         (summary_open_cpu_notes_total). So the observation reached the
+  |         writer and the CREDIT PATH placed none of it -- which is a
+  |         different defect from an unwired producer, and the counter
+  |         above is what distinguishes them. Which early exit took it:
+  |         io_worker=5 table_full=0
+  |         notes_expired=0 eff_rejected/overcredit above.
+  |         All of those zero narrows it to the seal placing no second.
+  |         refused_total=0
+  |         uncredited_ns=0 is what it cost.
+  | === test_v9_open_cpu_wired: FAIL ===
+
+  --- scenario J, verbatim (the token credit that 'credited > 0' approves) ---
+  | === test_v9_open_cpu_wired (#424, summary v9 producer) ===
+  |   ok: watchpoints attached (mask=15, tier=escalated) -- producer reachable
+  |   ok: all seven v9 control keys present and numeric
+  |   ok: 3 of 3 CPU statements completed, spanning 4s of ticks
+  |   ok: stimulus PROVEN -- cpu_ns_total moved 1000000000 -> 31000000000
+  |   ok: the writer WAS asked -- summary_open_cpu_notes_total = 4210
+  |   summary_open_cpu_credited_ns   = 3000000000
+  |   summary_open_cpu_refused_total = 0
+  |   summary_cpu_open_uncredited_ns_total = 0
+  |   summary_open_io_worker_refused_total = 5
+  |   summary_open_table_full_total        = 0
+  |   summary_open_notes_expired_total     = 0
+  |   summary_open_credited_ns_total = 75854656030  (the discriminator)
+  |   ok: the v9 open-CPU producer IS wired (credited 3000000000 ns)
+  | === test_v9_open_cpu_wired: PASS ===
+
+=== fixture-discrimination: FAIL (6 of 13) ===
