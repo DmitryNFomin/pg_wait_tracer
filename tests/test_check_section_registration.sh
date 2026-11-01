@@ -81,7 +81,7 @@ repo="$tmpdir/direct"
 write_suite "$repo" '    section();'
 green "$repo" 'direct dispatcher control passes'
 if [[ "$out" == *'2 markers, 1 owners'* &&
-      "$out" == *'OK: 1 of 1 tests/test_*.c in scope (0 carry no section header), 1 owners, 2 markers;'* ]]; then
+      "$out" == *'OK: 1 of 1 tests/test_*.c in scope (0 out of scope), 1 owners, 2 markers;'* ]]; then
     report true 'both label forms, continued literal, multiple labels per owner; fake markers ignored'
 else
     report false 'marker and owner counts must be exact'
@@ -182,8 +182,8 @@ int main(void)
 }
 EOF
 green "$tmpdir/no-markers" 'unsectioned suite may be outside scope'
-if [[ "$out" == *'OUT OF SCOPE: tests/test_unsectioned.c (0 markers; not verified)'* &&
-      "$out" == *'OK: 0 of 1 tests/test_*.c in scope (1 carry no section header), 0 owners, 0 markers;'* &&
+if [[ "$out" == *'OUT OF SCOPE: tests/test_unsectioned.c (0 markers; no supported printf section banner; no section-like heading detected; not verified)'* &&
+      "$out" == *'OK: 0 of 1 tests/test_*.c in scope (1 out of scope), 0 owners, 0 markers;'* &&
       "$out" != *'IN SCOPE:'* ]]; then
     report true 'the-thing-is-absent is named OUT OF SCOPE and never counted as verified'
 else
@@ -205,6 +205,38 @@ write_header_suite() {
     } > "$repo/tests/test_fixture.c"
 }
 
+# Comments can describe regions spanning helpers and data. List the evidence
+# without pretending that such a region identifies a dispatched section.
+repo="$tmpdir/comment-regions"
+mkdir -p "$repo/tests" || exit 1
+cat > "$repo/tests/test_comment_regions.c" <<'EOF'
+/* ── Section 1: an example in a design note, not a runtime section ── */
+/* printf("--- 2. commented-out example ---\n"); */
+// printf("-- 3: another example --\n");
+int main(void)
+{
+    const char *example = "printf(\"=== §4 example ===\");";
+    return 0;
+}
+EOF
+green "$repo" 'header-like comments and quoted examples do not create scope'
+if [[ "$out" == *'OUT OF SCOPE: tests/test_comment_regions.c (0 markers; no supported printf section banner; section-like comments at lines 1; not verified)'* &&
+      "$out" != *'IN SCOPE:'* ]]; then
+    report true 'comment-only organisation is explicitly listed with its source line'
+else
+    report false 'comment-only organisation needs a distinct out-of-scope reason'
+fi
+
+repo="$tmpdir/unknown-header"
+write_header_suite "$repo" '    printf("Section 1 > unsupported banner\n");' '    section();'
+green "$repo" 'unfamiliar runtime header is visibly unverified'
+if [[ "$out" == *'unrecognised section-like printf text at lines 3; not verified)'* &&
+      "$out" != *'IN SCOPE:'* ]]; then
+    report true 'unrecognised runtime header has a distinct out-of-scope reason'
+else
+    report false 'unrecognised runtime header must not look sectionless'
+fi
+
 for shape in leading-escape dash-wrapper range next-line-literal; do
     label=1
     case "$shape" in
@@ -217,7 +249,7 @@ for shape in leading-escape dash-wrapper range next-line-literal; do
     write_header_suite "$repo" "$header" '    section();'
     green "$repo" "$shape header control passes"
     if [[ "$out" == *'IN SCOPE: tests/test_fixture.c: 1 markers, 1 owners'* &&
-          "$out" == *'OK: 1 of 1 tests/test_*.c in scope (0 carry no section header), 1 owners, 1 markers;'* ]]; then
+          "$out" == *'OK: 1 of 1 tests/test_*.c in scope (0 out of scope), 1 owners, 1 markers;'* ]]; then
         report true "$shape header is IN SCOPE with exactly one marker"
     else
         report false "$shape header must register exactly one owner and marker"
@@ -242,13 +274,13 @@ for prose in rows decimal done sub-assertion; do
 done
 green "$repo" 'prose negative controls pass'
 for prose in rows decimal done sub-assertion; do
-    if [[ "$out" == *"OUT OF SCOPE: tests/test_$prose.c (0 markers; not verified)"* ]]; then
+    if [[ "$out" == *"OUT OF SCOPE: tests/test_$prose.c (0 markers; no supported printf section banner; no section-like heading detected; not verified)"* ]]; then
         report true "prose negative control stays OUT OF SCOPE: $prose"
     else
         report false "prose negative control must stay OUT OF SCOPE: $prose"
     fi
 done
-if [[ "$out" == *'OK: 0 of 4 tests/test_*.c in scope (4 carry no section header), 0 owners, 0 markers;'* &&
+if [[ "$out" == *'OK: 0 of 4 tests/test_*.c in scope (4 out of scope), 0 owners, 0 markers;'* &&
       "$out" != *'IN SCOPE:'* ]]; then
     report true 'prose-only fixture has 0 files, 0 owners, 0 markers'
 else

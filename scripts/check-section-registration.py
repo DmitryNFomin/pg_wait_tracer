@@ -160,9 +160,8 @@ def functions(code, line_at):
     return found
 
 
-def extract_markers(code, strings):
-    """The same scope definition for working-tree files and base blobs."""
-    markers = []
+def printf_literals(code, strings):
+    """Yield first-argument literals at active printf sites."""
     for call in CALL.finditer(code):
         if call[1] != 'printf':
             continue
@@ -172,10 +171,44 @@ def extract_markers(code, strings):
         while first < len(code) and code[first].isspace() and first not in strings:
             first += 1
         if first in strings:
-            label = LABEL.match(strings[first].split('\n', 1)[0])
-            if label:
-                markers.append((label[1], first))
+            yield first, strings[first]
+
+
+def extract_markers(code, strings):
+    """The same scope definition for working-tree files and base blobs."""
+    markers = []
+    for first, literal in printf_literals(code, strings):
+        label = LABEL.match(literal.split('\n', 1)[0])
+        if label:
+            markers.append((label[1], first))
     return markers
+
+
+def out_of_scope_reason(raw, code, strings):
+    """Report evidence of unsupported organisation, without making it scope.
+
+    Comments are hints only: a region heading can cover helpers, data and
+    several tests, so it cannot identify a section owner or dispatch window.
+    Never claim that zero recognised markers proves a file has no sections.
+    """
+    headings = []
+    for token in TOKEN.finditer(raw):
+        if token.lastgroup != 'block':
+            continue
+        if re.match(r'/\* [─═-]{2,}[ \t]+(?:§|(?:[Ss]ection|SECTION|Test) +)?'
+                    r'(?:[0-9]+[a-z]*|[A-Z][0-9]*)(?:[.:/ \t])', token.group()):
+            headings.append(str(raw.count('\n', 0, token.start()) + 1))
+    hints = []
+    if headings:
+        hints.append('section-like comments at lines ' + ', '.join(headings))
+    banners = [str(raw.count('\n', 0, pos) + 1)
+               for pos, literal in printf_literals(code, strings)
+               if re.match(r'^(?:\s|\\[nt])*(?:--+ |=== [0-9]|§|'
+                           r'\[[A-Z0-9]|[Ss]ection [0-9])', literal)]
+    if banners:
+        hints.append('unrecognised section-like printf text at lines ' + ', '.join(banners))
+    return ('no supported printf section banner; ' +
+            ('; '.join(hints) if hints else 'no section-like heading detected'))
 
 
 def check_file(raw, display):
@@ -187,7 +220,8 @@ def check_file(raw, display):
 
     markers = [(label, line_at(pos)) for label, pos in extract_markers(code, strings)]
     if not markers:
-        print(f'OUT OF SCOPE: {display} (0 markers; not verified)')
+        print(f'OUT OF SCOPE: {display} (0 markers; '
+              f'{out_of_scope_reason(raw, code, strings)}; not verified)')
         return 0, 0, False
 
     definitions = functions(code, line_at)
@@ -339,7 +373,7 @@ def main():
     if failed:
         return 1
     print(f'OK: {file_count} of {len(files)} tests/test_*.c in scope '
-          f'({len(files) - file_count} carry no section header), '
+          f'({len(files) - file_count} out of scope), '
           f'{owner_count} owners, {marker_count} markers; '
           'every section owner reachable from main')
     return 0
