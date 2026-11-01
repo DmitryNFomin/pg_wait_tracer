@@ -15,9 +15,17 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "scripts/lead/agent-start-hook.sh" }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [
+          { "type": "command", "command": "scripts/lead/agent-stop-hook.sh" },
           { "type": "command", "command": "scripts/lead/sweep-hook.sh" }
         ]
       }
