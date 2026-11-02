@@ -12,6 +12,13 @@
 
 struct pgwt_daemon;
 
+enum pgwt_phase_force {
+    PGWT_PHASE_FORCE_OFF = 0,
+    PGWT_PHASE_FORCE_ON,
+    PGWT_PHASE_FORCE_INVALID_ON, /* set, unparseable: force ON and warn */
+};
+enum pgwt_phase_force pgwt_exact_probe_parse_no_sema_refcnt(const char *raw);
+
 enum pgwt_exact_probe_index {
     PGWT_EXACT_PROBE_QUERY_ID = 0,
     PGWT_EXACT_PROBE_ACTIVITY,

@@ -18,6 +18,7 @@ test_sampler
 test_anomaly
 test_escalation_budget
 test_wp_attr
+# #622: includes pgwt_exact_probe_parse_no_sema_refcnt in the pure exact core.
 test_exact_probe
 test_effective_cores
 test_backend_status_layout

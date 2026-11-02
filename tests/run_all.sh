@@ -504,6 +504,9 @@ LIVE_TESTS=(
     # make box-check runs run_all.sh, NOT ci_smoke.sh: a ci_smoke-only gate
     # never runs in an agent's pre-PR check (#433, three times over).
     "test_execution_span_live|python3|test_execution_span_live.py"
+    # #622: owns its forced/control declarations; refusal is an assertion,
+    # never exit 78, so this stays outside phase_dependent_test().
+    "test_phase_absent|python3|test_phase_absent_live.py"
     "test_cross_pg_wait_sampling|python3|test_cross_pg_wait_sampling.py"
     "test_event_classes|python3|test_event_classes.py"
     "test_multi_window|python3|test_multi_window.py"
