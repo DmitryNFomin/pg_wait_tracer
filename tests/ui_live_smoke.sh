@@ -131,6 +131,21 @@ if [[ -z "$DIAG_TABS" && -n "$DIAG_TICKS" ]]; then
     exit 1
 fi
 
+# #622: require PGWT_EXPECT_PHASE_PROBES before starting any live work.
+PHASE_EXPECT=$(python3 "$SCRIPT_DIR/testutil.py" phase-expectation) || exit $?
+# #622: --skip-usdt is a faithful EL8 proxy only in TIERED escalation:
+# src/exact_probe.c:421,446 returns ENOTSUP for EXEC/PLAN while the plain
+# QUERY_ID/ACTIVITY uprobes attach (mask 0x3). This walk uses FULL mode, where
+# pgwt_exact_probe_startup_mask() (src/exact_probe.c:92-97) returns 0 for the
+# flag, declining even that attribution pair: mask 0x0, not 0x3. The contract
+# fails on "required attribution pair incomplete"; this does not rehearse the
+# declared-0 REFUSAL path, which remains pending a real EL8 run. On EL8 FULL
+# mode skip_usdt is false: startup pins best-effort (src/exact_probe.c:536),
+# drops the phase bits with the "optional full-mode ... USDT phase markers
+# unavailable" warning, and retains mask 0x3.
+PHASE_ARGS=()
+[[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]] && PHASE_ARGS+=(--skip-usdt)
+
 PORT="${PGWT_UI_LIVE_PORT:-8384}"
 # Refuse before PG discovery, sysctl changes, workloads, or capture.
 bridge_port_state "$PORT" || exit 1
@@ -358,7 +373,7 @@ fi
 # tick -- no escalate call, no budget, no warm-up window needed.
 echo "ui_live_smoke: starting daemon (--mode full, trace dir $TRACE_DIR)"
 "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" \
-    --mode full -v \
+    --mode full -v ${PHASE_ARGS[@]+"${PHASE_ARGS[@]}"} \
     >/dev/null 2>"$DAEMON_LOG" &
 TRACER_PID=$!
 
@@ -421,7 +436,7 @@ if [[ -n "$DIAG_TABS" ]]; then
     exit "$DIAG_RC"
 fi
 
-python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" --control-socket "$SOCK" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" &
 WALK_PID=$!
 # Bash defers traps during a foreground command; wait is interruptible.
@@ -456,6 +471,9 @@ if [[ "$SELF_TEST_RC" -ne 0 ]]; then
     echo "ui_live_smoke: SELF-TEST FAILED (rc=$SELF_TEST_RC) -- the gate could not prove it still catches an injected blink; see results/ui_live_self_test/summary.json"
 fi
 
+if [[ "$SELF_TEST_RC" -ne 0 ]]; then
+    exit "$SELF_TEST_RC"
+fi
 if [[ "$SMOKE_RC" -ne 0 ]]; then
     exit "$SMOKE_RC"
 fi
