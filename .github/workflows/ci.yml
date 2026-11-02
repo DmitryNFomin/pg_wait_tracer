@@ -126,6 +126,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Run on every PR, even docs-only changes or pushes that bypass local
+      # checks. No build, live-tier runner, or external dependencies required.
+      - name: Kill guard self-test
+        run: scripts/hooks/kill-guard-selftest.sh
+
       - name: Classify the change (src/ vs web+tests+tooling vs docs-only)
         id: filter
         run: |
