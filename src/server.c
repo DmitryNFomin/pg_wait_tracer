@@ -4734,16 +4734,35 @@ static int reject_overload(struct pgwt_server *srv,
         cJSON_AddStringToObject(root, "code", "window_too_large");
         cJSON_AddNumberToObject(root, "max_events", load_max_events());
         /* #526: only explain a query-forced raw load where that is true.
-         * TRUE: handle_top_events (:5044, query_id == 0 guard),
-         * handle_top_sessions (:5193/:5166, sessions_filter_needs_raw),
-         * handle_heatmap (:5929, query_id == 0 guard): reject_overload is
-         * reached only from their raw else branches.
-         * FALSE: handle_top_queries computes raw unconditionally (:5579),
-         * with pid pushdown disabled (:5576); handle_aas (:4827)
-         * guards only !detail_events; handle_time_model (:4920) has no query
-         * guard. A query filter does not force raw at those sites, so they
-         * and all other commands keep the original hint. */
-        if (req->filter.query_id != 0 &&
+         * TRUE: handle_top_events (query_id == 0 guard), handle_top_sessions
+         * (sessions_filter_needs_raw, which includes query_id != 0) and
+         * handle_heatmap (the same query_id == 0 conjunct): reject_overload
+         * is reached only from their raw else branches, so there a filter
+         * really is what forced the exact path.
+         *
+         * handle_top_queries gets its OWN arm, chosen WITHOUT looking at the
+         * filter, because for it no filter can help: it calls
+         * server_load_events_fi with pid 0, and server_load_events_fi_mode
+         * has no query pushdown at all, so unfiltered, pid-filtered,
+         * query-filtered and both-filtered requests hand the loader
+         * identical arguments. max_events is enforced during the load, and
+         * this refusal precedes the only call that receives req->filter, so
+         * "add a pid/query filter" there is advice that cannot work -- and
+         * web/static/app.js renders the hint verbatim to the user. The
+         * earlier note here claimed Queries "keeps the original hint"
+         * because it loads raw regardless; that was the reason the hint was
+         * WRONG, not a reason to keep it. (#728: the same false advice still
+         * sits on the pid == 0 loader path, deliberately out of scope here.)
+         *
+         * handle_aas guards only !detail_events and handle_time_model has no
+         * query guard, so they and every other command keep the generic
+         * hint, where adding a filter genuinely can route around the load. */
+        if (strcmp(req->cmd, "top_queries") == 0)
+            cJSON_AddStringToObject(root, "hint",
+                "narrow the time range; Queries always reads raw events for "
+                "every pid, because execution statistics need every "
+                "backend's markers, so no filter reduces this load");
+        else if (req->filter.query_id != 0 &&
             (strcmp(req->cmd, "top_events") == 0 ||
              strcmp(req->cmd, "top_sessions") == 0 ||
              strcmp(req->cmd, "heatmap") == 0))

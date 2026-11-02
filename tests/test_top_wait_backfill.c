@@ -5,7 +5,9 @@
  * IO:WalSync has one 40 ms wait; Lock:relation has ten 10 ms waits.
  *
  * Sections 1 and 2 pin the Sessions backfill and overload degradation.
- * Section 2b pins the existing Events/Queries overload hints.
+ * Section 2b requires each overload hint to offer only what can help:
+ * Events says a query filter forced raw; Queries, which no filter can
+ * narrow, offers the time range alone, for all four filter shapes.
  * Section 3 pins Queries' raw top_wait against the summary-only IO answer.
  * Section 3b requires an unfiltered >=120 s request that would qualify for
  * summaries to match direct raw computation, including clipped row totals
@@ -450,13 +452,26 @@ static void test_overload_reports_absence(const char *dir)
           WIFEXITED(status) ? WEXITSTATUS(status) : -1, !WIFEXITED(status));
 }
 
-/* ── Section 2b: query-filter overload hints describe the actual route ── */
+/* ── Section 2b: overload hints offer only what can actually help ─────── */
 /* Like section 2, fork BEFORE the parent's first load_max_events() call so
  * each child's tiny budget reaches an unset cache. Positively require a
  * window_too_large refusal BEFORE inspecting the hint: an absent refusal
- * must fail, never make this gate pass vacuously. Events forces raw for a
- * query filter; Queries loads raw regardless, so keeps the original hint. */
-static int child_query_filter_overload_hint(const char *dir, int queries)
+ * must fail, never make this gate pass vacuously.
+ *
+ * Events forces raw for a QUERY filter, so its hint says so. Queries is
+ * different, and that difference is why the matrix below varies the filter
+ * instead of fixing it: handle_top_queries loads with pid 0 and
+ * server_load_events_fi_mode has no query pushdown, so NO filter changes
+ * the loader's arguments and none can avoid the refusal. Its hint must
+ * therefore offer only a narrower time range, identically for all four
+ * filter shapes.
+ *
+ * The `strstr(... "pid/query filter") == NULL` assertion is the load-bearing
+ * one: an earlier version of this test asserted that exact string for
+ * Queries, which made impossible advice the pinned, intended behaviour. The
+ * absence check is what stops it creeping back. */
+static int child_query_filter_overload_hint(const char *dir, int queries,
+                                            int use_pid, int use_qid)
 {
     setenv("PGWT_LOAD_MAX_EVENTS", "3", 1);
     struct pgwt_server *srv = calloc(1, sizeof(*srv));
@@ -464,7 +479,8 @@ static int child_query_filter_overload_hint(const char *dir, int queries)
     struct pgwt_request req = {0};
     snprintf(req.cmd, sizeof(req.cmd), "%s",
              queries ? "top_queries" : "top_events");
-    req.filter.query_id = TARGET_QID;
+    if (use_qid) req.filter.query_id = TARGET_QID;
+    if (use_pid) req.filter.pid = TARGET_PID;
     cJSON *out = queries ? call_top_queries(srv, &req)
                          : call_top_events(srv, &req);
     cJSON *code = cJSON_GetObjectItem(out, "code");
@@ -478,12 +494,42 @@ static int child_query_filter_overload_hint(const char *dir, int queries)
     cJSON *hint = cJSON_GetObjectItem(out, "hint");
     int ok = cJSON_IsString(hint) && (queries
         ? strcmp(hint->valuestring,
-                 "narrow the time range or add a pid/query filter") == 0 &&
+                 "narrow the time range; Queries always reads raw events "
+                 "for every pid, because execution statistics need every "
+                 "backend's markers, so no filter reduces this load") == 0 &&
+          /* The two impossible/irrelevant instructions must both be absent. */
+          strstr(hint->valuestring, "pid/query filter") == NULL &&
           strstr(hint->valuestring, "forces the exact path") == NULL
         : strstr(hint->valuestring, "forces the exact path") != NULL);
     if (!ok)
-        fprintf(stderr, "child: %s has the wrong overload hint: %s\n",
-                req.cmd, cJSON_IsString(hint) ? hint->valuestring : "(missing)");
+        fprintf(stderr, "child: %s (pid=%d qid=%d) has the wrong overload "
+                "hint: %s\n", req.cmd, use_pid, use_qid,
+                cJSON_IsString(hint) ? hint->valuestring : "(missing)");
+    cJSON_Delete(out);
+    free(srv);
+    return ok ? 0 : 3;
+}
+
+/* The control in the other direction: with a budget the window fits inside,
+ * the same request must NOT refuse. Without this, every assertion above
+ * could be satisfied by a guard that refuses unconditionally. */
+static int child_queries_overload_absent(const char *dir)
+{
+    setenv("PGWT_LOAD_MAX_EVENTS", "1000000", 1);
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    if (!srv || server_init(srv, dir) != 0) return 1;
+    struct pgwt_request req = {0};
+    snprintf(req.cmd, sizeof(req.cmd), "top_queries");
+    req.filter.query_id = TARGET_QID;
+    cJSON *out = call_top_queries(srv, &req);
+    cJSON *code = cJSON_GetObjectItem(out, "code");
+    int refused = cJSON_IsString(code) &&
+                  strcmp(code->valuestring, "window_too_large") == 0;
+    cJSON *rows = cJSON_GetObjectItem(out, "rows");
+    int ok = !refused && cJSON_IsArray(rows);
+    if (!ok)
+        fprintf(stderr, "child: a request inside the budget must not refuse "
+                "(refused=%d rows=%d)\n", refused, cJSON_IsArray(rows));
     cJSON_Delete(out);
     free(srv);
     return ok ? 0 : 3;
@@ -491,21 +537,43 @@ static int child_query_filter_overload_hint(const char *dir, int queries)
 
 static void test_query_filter_overload_hints(const char *dir)
 {
-    printf("--- 2b. query-filter overload hints match Events and Queries "
-           "routing ---\n");
-    for (int queries = 0; queries <= 1; queries++) {
+    printf("--- 2b. overload hints offer only what can actually help ---\n");
+    /* Queries: all four filter shapes, same hint. Events: the query-filtered
+     * case, which is the one its own guard routes to raw. */
+    const struct { int queries, use_pid, use_qid; const char *what; } cases[] = {
+        { 1, 0, 0, "top_queries unfiltered" },
+        { 1, 1, 0, "top_queries pid-only" },
+        { 1, 0, 1, "top_queries query-only" },
+        { 1, 1, 1, "top_queries pid+query" },
+        { 0, 0, 1, "top_events query-filtered" },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         fflush(stdout);
         pid_t pid = fork();
-        if (pid == 0) _exit(child_query_filter_overload_hint(dir, queries));
+        if (pid == 0)
+            _exit(child_query_filter_overload_hint(dir, cases[i].queries,
+                                                   cases[i].use_pid,
+                                                   cases[i].use_qid));
         int status = 0;
         int waited = pid > 0 ? waitpid(pid, &status, 0) : -1;
         CHECK(waited == pid && pid > 0 && WIFEXITED(status) &&
               WEXITSTATUS(status) == 0,
-              "%s child must reach window_too_large and report the %s "
-              "hint (exit %d)", queries ? "top_queries" : "top_events",
-              queries ? "original" : "query-forces-raw",
+              "%s must reach window_too_large and report the %s hint "
+              "(exit %d)", cases[i].what,
+              cases[i].queries ? "narrow-the-range-only"
+                               : "query-forces-raw",
               WIFEXITED(status) ? WEXITSTATUS(status) : -1);
     }
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) _exit(child_queries_overload_absent(dir));
+    int status = 0;
+    int waited = pid > 0 ? waitpid(pid, &status, 0) : -1;
+    CHECK(waited == pid && pid > 0 && WIFEXITED(status) &&
+          WEXITSTATUS(status) == 0,
+          "top_queries inside the event budget must NOT refuse -- the "
+          "refusal arm has to be reachable in both directions (exit %d)",
+          WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 }
 
 static void compute_raw_queries(struct pgwt_server *srv,
@@ -1115,7 +1183,7 @@ int main(void)
 
     /* Require the observed assertion total: a truncated run must fail
      * even when all assertions it did execute passed. */
-    if (tests_run < 151) {
+    if (tests_run < 155) {
         printf("FAIL: only %d assertions executed -- a truncated run must "
                "not read as a pass\n", tests_run);
         tests_failed++;
