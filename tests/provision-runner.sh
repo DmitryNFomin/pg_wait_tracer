@@ -403,6 +403,21 @@ EOF
             # Trust local auth: tests connect as "psql -U postgres" from root.
             sed -i -E 's/(ident|peer|scram-sha-256|md5)$/trust/' "$DATA/pg_hba.conf"
 
+            # Real corruption found running this live (not a shell-scripting
+            # bug: $DATA/$PORT above are always set from the fixed `for V in
+            # 13 16 17 18` loop, never empty) -- a Hetzner snapshot taken of
+            # this box WITHOUT first `sync`ing the disk captured NUL bytes
+            # (0x00) in place of the just-appended config lines on a fresh
+            # boot from that image, so postgres refused to start with
+            # "syntax error ... near token """ pointing at the NUL run.
+            # `postgresql.conf -> restart` on a snapshot-sourced box must
+            # fail loudly and name the file, not hand systemd a corrupt
+            # config and let it report an opaque "control process exited".
+            if LC_ALL=C grep -qP '\x00' "$DATA/postgresql.conf"; then
+                echo "FATAL: $DATA/postgresql.conf contains NUL bytes -- this gate-snapshot image was taken without syncing the disk first (PGDATA writes were still dirty in the page cache). Rebuild the snapshot: stop postgresql-$V, run 'sync; sleep 2; sync' on the box, THEN take the Hetzner snapshot." >&2
+                exit 1
+            fi
+
             # Restart even on a re-run so port/preload/hba changes take
             # effect. Like pg_ctlcluster above, this is cheap and not on
             # a hot path; a new/inactive service must also be boot-enabled.
