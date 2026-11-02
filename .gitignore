@@ -3,6 +3,12 @@
 
 # Local agent notes must not enter commits or invalidate the check stamp.
 scratchpad/
+# Agent-run scratch must be tracked-ignored in every clone/worktree, not
+# only locally excluded: otherwise it changes box-evidence trees (#714/#726).
+.python-version
+.claude/worktrees/
+.agent-contract-*.md
+CODEX_BRIEF*.md
 
 # Build artifacts
 build/
