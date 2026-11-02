@@ -528,6 +528,29 @@ EOF
     log "PG $V: $(sudo -u postgres "$PSQL" -p "$PORT" -tAc 'SELECT version()')"
 done
 
+# Real bug found running the live tier on el8: Debian's postgresql-common
+# package provides a version-agnostic `pg_wrapper` so bare `psql`/`pgbench`/
+# etc. resolve on PATH and pick the right cluster via -p/PGPORT; PGDG's EL
+# RPMs install straight to /usr/pgsql-$V/bin with NOTHING symlinked onto the
+# default PATH. Every live test that shells out to a bare `pgbench`/`psql`/
+# `pg_isready`/`createdb`/`dropdb` (tests/ui_live_smoke.sh's workload
+# generator, and a dozen tests/*.py files) failed with
+# FileNotFoundError/"command not found" on el8 — not a test bug, a missing
+# provisioning step. Symlink PG18's client binaries (matching the ambient
+# PGPORT=5418 default just below) into /usr/local/bin, which this script's
+# own `export PATH` and the sudoers secure_path fix above already put first
+# on PATH for both interactive and `sudo` sessions. Any supported server
+# version works fine against PG18's client binaries for plain querying
+# (libpq's wire protocol is compatible across these majors); callers that
+# need a SPECIFIC cluster already pass -p/-U explicitly, same as on ubuntu.
+if [[ "$OS" == "el8" ]]; then
+    log "symlinking PG18 client binaries onto PATH (el8 has no pg_wrapper)"
+    for bin in psql pgbench pg_isready createdb dropdb; do
+        ln -sf "/usr/pgsql-18/bin/$bin" "/usr/local/bin/$bin"
+    done
+    command -v pgbench >/dev/null || { echo "FATAL: pgbench still not on PATH after symlinking" >&2; exit 1; }
+fi
+
 # Ambient PGPORT=5418 (PG18's port) in /etc/environment, inherited by every
 # ssh session including non-interactive ones. 2026-10-07: found missing on
 # a second gate box (gate-2) while this script's own PG18 cluster worked
