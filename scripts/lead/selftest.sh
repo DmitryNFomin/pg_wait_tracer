@@ -266,6 +266,141 @@ printf 'RUNNING agent/fix-612 [issue-612]\n' > "$DISP"
 check "escalation: first turn's RUNNING passes" 0 '{"stop_hook_active": false}'
 check "escalation: same queue, no new disposition this turn, blocks again" 2 '{"stop_hook_active": false}'
 
+# ---- case 18: SubagentStop must leave dispositions byte-for-byte intact ---
+# The marker cannot satisfy either finding, so exit 0 proves the gate was
+# skipped rather than accidentally satisfied. Real payloads omit stop_active.
+rm -f "$DQ"
+write_cache
+printf 'untouched marker content\n' > "$TMP/expected-dispositions"
+cp "$TMP/expected-dispositions" "$DISP"
+out=$(printf '%s' '{"hook_event_name": "SubagentStop"}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && cmp -s "$TMP/expected-dispositions" "$DISP"; then
+  pass=$((pass+1)); echo "ok   SubagentStop passes and preserves dispositions byte-for-byte"
+else
+  fail=$((fail+1)); echo "FAIL SubagentStop consumed or changed dispositions (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+  cat "$DISP" 2>&1 | sed 's/^/       /'
+fi
+
+# No bare touch either: an absent file must stay absent.
+rm -f "$DISP"
+out=$(printf '%s' '{"hook_event_name": "SubagentStop"}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && [ ! -e "$DISP" ]; then
+  pass=$((pass+1)); echo "ok   SubagentStop does not create a dispositions file"
+else
+  fail=$((fail+1)); echo "FAIL SubagentStop touched dispositions (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# ---- case 19: an explicitly named real Stop still consumes dispositions ---
+write_cache
+cat > "$DISP" <<EOF
+MY-CHOICE fixture reason A [$IDA]
+MY-CHOICE fixture reason B [$IDB]
+EOF
+out=$(printf '%s' '{"stop_hook_active": false, "hook_event_name": "Stop"}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && [ -f "$DISP" ] && [ ! -s "$DISP" ]; then
+  pass=$((pass+1)); echo "ok   explicit Stop passes and consumes its dispositions"
+else
+  fail=$((fail+1)); echo "FAIL explicit Stop did not pass and consume dispositions (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+  cat "$DISP" 2>&1 | sed 's/^/       /'
+fi
+
+# ---- case 20 (cross-event ordering): after case 19 consumed the file, -----
+# an intervening SubagentStop cannot grant another turn credit for it.
+check "reorder: intervening SubagentStop passes with no new dispositions" 0 '{"hook_event_name": "SubagentStop"}'
+check "reorder: next real Stop still blocks without new dispositions" 2 '{"stop_hook_active": false, "hook_event_name": "Stop"}'
+
+# Explicit Stop continuations must still preserve the lead's response.
+cp "$TMP/expected-dispositions" "$DISP"
+out=$(printf '%s' '{"stop_hook_active": true, "hook_event_name": "Stop"}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && cmp -s "$TMP/expected-dispositions" "$DISP"; then
+  pass=$((pass+1)); echo "ok   explicit Stop continuation preserves dispositions byte-for-byte"
+else
+  fail=$((fail+1)); echo "FAIL explicit Stop continuation consumed dispositions (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+  cat "$DISP" 2>&1 | sed 's/^/       /'
+fi
+
+# ---- case 21: HELD-BY needs independent evidence from the hook's sibling ---
+# held.sh. The stub verifies the exact argument and records every call; no
+# real gh calls occur, and unrelated dispositions must not invoke it.
+cat > "$TMP/held.sh" <<'HELD_EOF'
+#!/usr/bin/env bash
+D="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$@" >> "$D/held-calls"
+[ "$#" = 1 ] && [ "$1" = "some/file.c" ] || exit 3
+cat "$D/held-output"
+if [ -f "$D/held-fail" ]; then
+  echo 'REFUSED: fixture gh failure' >&2
+  exit 3
+fi
+HELD_EOF
+chmod +x "$TMP/held.sh"
+write_empty_cache; write_dq "$DQ_READY"
+printf 'HELD some/file.c by #694\n' > "$TMP/held-output"
+printf 'HELD-BY 694 some/file.c [issue-612]\n' > "$DISP"
+check "escalated item with independently verified HELD-BY passes" 0 '{"stop_hook_active": false}'
+
+# ---- case 22: FREE, the wrong PR, and REFUSED never satisfy HELD-BY --------
+# Check both exit 2 and the missing item's message: another error must not
+# make a negative control look like a correctly enforced escalation.
+for held_case in free wrong-pr refused wrong-path pr-prefix malformed; do
+  write_empty_cache; write_dq "$DQ_READY"
+  printf 'HELD-BY 694 some/file.c [issue-612]\n' > "$DISP"
+  rm -f "$TMP/held-fail"
+  case "$held_case" in
+    free) printf 'FREE some/file.c\n' > "$TMP/held-output" ;;
+    wrong-pr) printf 'HELD some/file.c by #111\n' > "$TMP/held-output" ;;
+    refused)
+      # Even plausible stdout cannot override held.sh's non-zero exit.
+      printf 'HELD some/file.c by #694\n' > "$TMP/held-output"
+      touch "$TMP/held-fail" ;;
+    wrong-path) printf 'HELD some/fileXc by #694\n' > "$TMP/held-output" ;;
+    pr-prefix) printf 'HELD some/file.c by #6940\n' > "$TMP/held-output" ;;
+    malformed)
+      printf 'HELD-BY #694 some/file.c [issue-612]\n' > "$DISP"
+      printf 'HELD some/file.c by #694\n' > "$TMP/held-output" ;;
+  esac
+  out=$(printf '%s' '{"stop_hook_active": false}' | "$HOOK" 2>&1)
+  rc=$?
+  if [ "$rc" = 2 ] && printf '%s' "$out" | /usr/bin/grep -q 'issue-612 issue#612.*needs RUNNING.*HELD-BY'; then
+    pass=$((pass+1)); echo "ok   HELD-BY $held_case still blocks and names the missing item"
+  else
+    fail=$((fail+1)); echo "FAIL HELD-BY $held_case did not block the right item (rc=$rc)"
+    printf '%s\n' "$out" | sed 's/^/       /'
+  fi
+done
+rm -f "$TMP/held-fail" "$TMP/held-calls"
+
+# ---- case 23: verify only relevant HELD-BY lines cause held.sh calls -------
+write_empty_cache; write_dq "$DQ_READY"
+printf 'HELD-BY 694 some/file.c [issue-650]\n' > "$DISP"
+out=$(printf '%s' '{"stop_hook_active": false}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 2 ] && [ ! -e "$TMP/held-calls" ] && printf '%s' "$out" | /usr/bin/grep -q 'issue-612 issue#612.*needs RUNNING'; then
+  pass=$((pass+1)); echo "ok   unrelated HELD-BY does not invoke held.sh or satisfy the escalated item"
+else
+  fail=$((fail+1)); echo "FAIL unrelated HELD-BY invoked held.sh or satisfied escalation (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+fi
+printf 'HELD-BY 694 some/file.c [issue-612]\n' > "$DISP"
+cp "$DISP" "$TMP/expected-dispositions"
+out=$(printf '%s' '{"hook_event_name": "SubagentStop"}' | "$HOOK" 2>&1)
+rc=$?
+if [ "$rc" = 0 ] && [ ! -e "$TMP/held-calls" ] && cmp -s "$TMP/expected-dispositions" "$DISP"; then
+  pass=$((pass+1)); echo "ok   SubagentStop skips escalation and held.sh, preserving dispositions"
+else
+  fail=$((fail+1)); echo "FAIL SubagentStop evaluated escalation or consumed dispositions (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/       /'
+  cat "$DISP" 2>&1 | sed 's/^/       /'
+fi
+
 # =============================================================================
 # absence-prepass.py -- the deterministic pre-pass audit-report.sh runs
 # before any codex call. Tested directly (fast, no codex) and once through
