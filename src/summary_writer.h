@@ -493,34 +493,32 @@
  *     per-interval measured identity in piece 2 can fail to hold exactly;
  *     the WALL identity never can.
  *
- * WHY THE VERSION WILL HAVE TO MOVE, AND WHY IT HAS NOT YET. The rule above
- * is an ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
+ * WHY THE VERSION MOVES WITH THE PRODUCER. The rule above is an
+ * ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
  * gap's whole wall and measurement, a v9 second holds one second of each, and
  * a window holding both double-counts the overlap.
  *
- * But NO PRODUCER CALLS pgwt_summary_note_open_ex. The live wiring was
- * reverted (agent/424-daemon fc7d7f5) once its counters showed it had never
- * been reached, so nothing credits an open on-CPU interval and v9's only
- * difference from v8 -- the widened cpu_measured_records -- never
- * materialises. A build shipping this constant at 9 writes a v8 file wearing
- * a 9.
+ * The producer IS wired: src/map_reader.c's pgwt_read_state_map supplies
+ * pgwt_summary_note_open_ex with the open-CPU observation, and the constant
+ * is 9. tests/test_v9_open_cpu_wired.sh is the live acceptance test that the
+ * call is reached; tests/test_open_cpu_accounting.c covers the writer.
+ * Earlier wiring was reverted (agent/424-daemon fc7d7f5) when its counters
+ * showed it had never been reached, so stamping that build 9 would have
+ * written a v8 file wearing a 9. pgwt_summaries_window_current compares the
+ * NUMBER: shipping 9 before wiring the producer would have let 9 name two
+ * accounting rules that readers could not distinguish, violating the rule
+ * that a version must ship only when its contract is true.
  *
- * That is worse than merely untidy. pgwt_summaries_window_current compares
- * the NUMBER, so if 9 ships now and the producer is wired later without
- * another bump, 9 names two different accounting rules and no reader can
- * tell the resulting files apart -- the exact mixing the version exists to
- * prevent. The project's rule is never to ship a version whose contract is
- * not yet true, so the constant stays at 8 and the commit that WIRES the
- * producer is the one that sets it to 9. The writer-side capability below
- * is dormant, not absent: it is implemented and unit-tested
- * (tests/test_open_cpu_accounting.c), and tests/test_v9_open_cpu_wired.sh
- * is its acceptance test, deliberately registered nowhere until then.
+ * The SECOND content change in this version is the per-session measured-CPU
+ * split (#562): cpu_offcpu_ns and cpu_measured_records add 8 + 4 bytes,
+ * widening each serialized session entry from 32 to 44 bytes. The reader
+ * reads that layout only for version >= 9, so the writer must stamp it 9.
  *
  * The machinery for files already on disk is unchanged either way:
  * pgwt_summary_reader_open refuses any version that is not
  * PGWT_SUMMARY_VERSION and the server preflights the window, so a refusal
  * becomes a RAW RECOMPUTE, never a plausible partial answer. */
-#define PGWT_SUMMARY_VERSION  8
+#define PGWT_SUMMARY_VERSION  9
 
 /* `eff_event` sentinel: the producer resolved no effective wait id, so the
  * writer uses evt->old_event and counts the push. Not 0 -- 0 is a valid id
@@ -573,6 +571,7 @@
  *   class_ns   PGWT_NUM_CLASSES * 8
  *   events     SUMMARY_MAX_EVENTS   * (4+8+8+8 + HISTOGRAM_BUCKETS*8)
  *   sessions   SUMMARY_MAX_SESSIONS * (4+8+8+4+8)
+ *              + v9 (#424): 8 + 4 per session (off-CPU and observations)
  *   queries    SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES*8 + 1
  *                                      + SUMMARY_QUERY_TOP_EVENTS*20 + 8)
  *   trailer    8 (idle_ns) + 4 (events_overflow)
@@ -581,7 +580,7 @@
 #define PGWT_SUMMARY_SERIALIZE_MAX                                            \
     ((size_t)(PGWT_NUM_CLASSES * 8)                                           \
      + (size_t)SUMMARY_MAX_EVENTS   * (28 + HISTOGRAM_BUCKETS * 8)            \
-     + (size_t)SUMMARY_MAX_SESSIONS * 32                                      \
+     + (size_t)SUMMARY_MAX_SESSIONS * 44                                      \
      + (size_t)SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES * 8 + 1          \
                                        + SUMMARY_QUERY_TOP_EVENTS * 20 + 8)   \
      + 12 + 40)
@@ -599,9 +598,15 @@ struct pgwt_summary_event {
 struct pgwt_summary_session {
     uint32_t pid;              /* 0 = unused slot */
     uint64_t db_time_ns;
-    uint64_t cpu_ns;
+    uint64_t cpu_ns;           /* total on-CPU gap wall, including off-CPU */
     uint32_t top_wait_id;      /* event_id of highest-duration wait */
     uint64_t top_wait_ns;
+    /* v9 (#424, #562): keep the gap wall for wait_pct while exposing the
+     * measured split. UNKNOWN gaps have no off-CPU remainder. */
+    uint64_t cpu_offcpu_ns;    /* Sigma (wall - measured) over this session's
+                               * MEASURED on-CPU gaps only */
+    uint32_t cpu_measured_records; /* CPU observations for this pid;
+                                   * saturating so presence cannot wrap to 0 */
 };
 
 #define SUMMARY_QUERY_TOP_EVENTS 8
@@ -727,11 +732,12 @@ struct pgwt_summary_accum {
      * events_overflow is in the on-disk record trailer; putting this field
      * there is a FORMAT change, i.e. a PGWT_SUMMARY_VERSION bump and a raw
      * recompute of every retained capture (see the version notes above).
-     * The owner APPROVED that bump on 2026-10-25; it is deliberately NOT in
-     * this change, because it is being landed as ONE consolidated 8 -> 9 bump
-     * together with the measured-CPU split for queries[].top_events, so that
-     * two format changes cost one recompute instead of two. Do not read the
-     * paragraph below as "captures will never carry this".
+     * The owner approved that bump on 2026-10-25; the trailer is landing in
+     * THIS version epoch, in a later commit on this branch. The 8 -> 9 bump
+     * now accompanies the open-CPU producer and per-session measured-CPU
+     * split; consolidating the trailer in this epoch costs one recompute of
+     * retained captures instead of another. Do not read the paragraph below
+     * as "captures will never carry this".
      *
      * UNTIL THAT LANDS: A CAPTURE ON DISK CARRIES NO RECORD OF ITS DROPPED
      * PIDS AT ALL. Not "cannot attribute them to individual seconds" -- none,
@@ -742,12 +748,12 @@ struct pgwt_summary_accum {
      * WARN lines in the daemon's stderr are the only evidence. That is why
      * both drop sites emit one.
      *
-     * THE SEAM, so the 8 -> 9 bump is a small diff. This field is already
-     * shaped exactly like events_overflow: same name pattern, zeroed by
+     * THE SEAM for the later trailer commit in this version epoch. This field
+     * is shaped exactly like events_overflow: same name pattern, zeroed by
      * accum_reset with the rest of the accumulator, rolled up at the one
      * place in flush_accum that sits after every early return. What that
      * change has to add is only:
-     *   - PGWT_SUMMARY_VERSION 8 -> 9 and its version note;
+     *   - the trailer's addition to the v9 version note;
      *   - 4 bytes in pgwt_summary_serialize's trailer, after
      *     acc->events_overflow;
      *   - the matching read in pgwt_summary_deserialize under
@@ -855,10 +861,11 @@ struct pgwt_summary_open {
  *
  * `cpu_prefix_ns` is the measured on-CPU ns of [start_mono_ns, now_mono_ns),
  * CUMULATIVE and already clamped by the producer to that prefix's wall --
- * i.e. exactly the `cpu_open` that src/map_reader.c already computes for the
- * live view. PGWT_CPU_NS_UNKNOWN means the tier has no measurement at all
- * (cpu_accounting off, no CPU capability): the credit then goes to
- * cpu_unknown_ns, which is what the raw path does with an UNKNOWN record. */
+ * i.e. the measured value computed alongside `cpu_open` in src/map_reader.c,
+ * without its live-view wall fallback. PGWT_CPU_NS_UNKNOWN means the tier
+ * has no measurement at all (cpu_accounting off, no CPU capability, unusable
+ * schedstat delta): the credit then goes to cpu_unknown_ns, which is what
+ * the raw path does with an UNKNOWN record. */
 struct pgwt_summary_open_cpu {
     uint32_t eff_we;
     uint64_t cpu_prefix_ns;
@@ -971,7 +978,7 @@ struct pgwt_summary_writer {
      * is never written to the trace directory and never logged at exit, so it
      * is reachable only by a `metrics` query to the control socket of a
      * daemon that is still running. A capture analysed later carries nothing
-     * from it -- until the approved PGWT_SUMMARY_VERSION 8 -> 9 bump puts the
+     * from it -- until the later trailer commit in this v9 epoch puts the
      * per-record field on disk (see pgwt_summary_accum::sessions_overflow for
      * the seam and the one trap in it). This total stays useful after that:
      * it is what spares a reader summing every block. */
@@ -1055,6 +1062,56 @@ struct pgwt_summary_writer {
     uint64_t      open_notes_expired_total;
     uint64_t      open_table_full_total;
     uint64_t      open_io_worker_refused_total;
+    /* "Was the writer EVER ASKED to credit an on-CPU gap?" — the one reading
+     * none of the counters below can give. All of credited / refused /
+     * uncredited read 0 both when the producer never offered an observation
+     * (the call site is unreachable; the writer declined nothing) and when it
+     * offered one for every tick and the credit path placed nothing. Those
+     * are different defects in different files, and
+     * tests/test_v9_open_cpu_wired.sh read the first as the second on the
+     * 2026-10-28 gate capture: 1.23 M events, 75.8 s of WAIT credit through
+     * the same seal, 0 CPU credit, and every refusal counter 0 too.
+     *
+     * Counted at the note, BEFORE the io_worker and table-full refusals, so
+     * it means "asked" and never "accepted" — and only for an ON-CPU note
+     * carrying an observation, so a WAIT note must leave it alone (a bump
+     * above the class test would make every live daemon look asked). */
+    uint64_t      open_cpu_notes_total;
+    /* The SUBSET of open_cpu_notes_total the io_worker rule declined.
+     *
+     * open_io_worker_refused_total above counts EVERY note carrying the flag,
+     * WAIT notes included, and the notes counter is bumped one line earlier —
+     * so the two overlap by construction and neither says by how much. On the
+     * 2026-10-28 gate capture that was 34 notes next to 39 io_worker
+     * refusals, two numbers of the same magnitude from which "the io_worker
+     * rule ate every observation" and "it ate none of them" are equally
+     * readable. This one is disjoint from every other refusal and is a subset
+     * of notes_total by construction (same `on_cpu_note && cpu` test, one
+     * branch later), so the question is answered by subtraction instead of
+     * by inference. */
+    uint64_t      open_cpu_io_worker_refused_total;
+    /* An ACCEPTED on-CPU observation whose interval ended before ANY second
+     * of it was written — counted once per interval, at the single site that
+     * retires one (open_stop_crediting).
+     *
+     * This is the OUTCOME the refusal counters cannot express. They say why
+     * an observation was declined at the note; this says the note was taken,
+     * the slot was armed, and the interval was over before the seal reached
+     * the second it lived in. That is the CORRECT answer for a backend that
+     * alternates CPU and waits thousands of times a second — a 45 us on-CPU
+     * stretch has no second to spread and its time rides its own closing
+     * record — and it is indistinguishable, in every other counter, from a
+     * seal that drops observations it should have placed. Both read
+     * credited = 0 with every refusal at 0, which is how the 2026-10-28
+     * capture was read as a credit-path defect.
+     *
+     * Deliberately NOT disjoint from open_notes_expired_total: expiry is a
+     * REASON an interval was retired, this is the OUTCOME that nothing was
+     * placed, and an expired note is both. cpu_frozen is the test, not
+     * cpu_slot: an interval that contributed even one second is placed, and
+     * its remainder riding the closing record is v7's arithmetic, not a
+     * loss. */
+    uint64_t      open_cpu_unplaced_total;
     uint64_t      open_cpu_refused_total;
     uint64_t      cpu_open_uncredited_ns_total;
     uint64_t      open_fill_capped_total;
@@ -1227,12 +1284,12 @@ void pgwt_summary_note_open(struct pgwt_summary_writer *w,
  * is what makes "a producer that has no measurement" a documented
  * degradation rather than a silent mis-split.
  *
- * The live call site (src/map_reader.c) already computes both members for
- * the live view, a few lines below where it notes the interval: `cpu_open`
- * (the clamped schedstat delta over the open stretch) and
+ * The live call site (src/map_reader.c) computes the clamped schedstat delta
+ * alongside the live view's `cpu_open` before noting the interval, keeping
+ * cpu_prefix_ns UNKNOWN whenever cpu_open uses its wall fallback. It uses
  * pgwt_live_effective_event(we, cat_flag, d->cmd_gate_active, in_cmd) with
- * in_cmd from pgwt_live_cmd_gate_classify over [last_ts, now). Pass those,
- * not a second copy of either rule. */
+ * in_cmd from pgwt_live_cmd_gate_classify over [last_ts, now). Reuse those
+ * computations rather than a second copy of either rule. */
 void pgwt_summary_note_open_ex(struct pgwt_summary_writer *w,
                                 uint32_t pid, uint32_t we,
                                 uint64_t start_mono_ns, uint32_t cat_flag,

@@ -150,8 +150,10 @@ void pgwt_exact_probe_pair_detach(struct pgwt_exact_probe_pair *pair,
  *
  * Kept: query_offset / activity_offset, which are FILE offsets into the
  * postgres binary and do not move when a process restarts. (They do move
- * if the restart is onto a DIFFERENT binary; that is pre-existing and not
- * addressed here.) */
+ * if the restart is onto a DIFFERENT binary; pgwt_discover() addresses
+ * that hazard by clearing both offsets on every call (#584; see #664 for
+ * the sibling wrong-symbol case). forget_skeleton itself deliberately
+ * does not clear them.) */
 void pgwt_exact_probe_bundle_forget_skeleton(
     struct pgwt_exact_probe_bundle *bundle);
 

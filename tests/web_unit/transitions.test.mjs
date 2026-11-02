@@ -18,6 +18,13 @@ import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
 import { states as galleryStates } from '../../web/static/dev/fixtures/transitions.mjs';
 
+for (const state of ['dense-dfg', 'threshold-simplified']) {
+    test('#507 fixture ' + state + ': VacuumDelay is pacing idle', () => {
+        const node = galleryStates[state].data.nodes.find(n => n.name === 'Timeout:VacuumDelay');
+        assert.equal(node.idle, true);
+    });
+}
+
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 for (const rank of [findOmittedDominantNode, findDominantSourceDwellNode]) {

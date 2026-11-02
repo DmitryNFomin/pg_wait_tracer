@@ -71,6 +71,18 @@ fi
 step "bash: .gitignore covers every tests/ build product (tree-hash integrity)"
 run bash tests/test_gitignore_build_products.sh
 
+step "bash: push-guard denylist and executable pre-push proofs (#719)"
+run bash tests/test_push_guard_denylist.sh
+
+step "POSIX shell: Codex task wrapper self-test"
+run scripts/lead/codex-task-selftest.sh
+
+step "bash: pr-ready ordering and refusal self-test (#701)"
+run bash tests/test_pr_ready.sh
+
+step "PR state drift sweep and disposition self-test (#717)"
+run python3 scripts/lead/selftest-pr-state.py
+
 # The summary format version is the one number in the docs with an
 # OPERATIONAL consequence: DEMO_RUNBOOK.md tells the operator which trace
 # directories to move aside, and a stale N leaves a directory the server
@@ -119,6 +131,20 @@ run scripts/check-link-closure.sh
 # test-assertion change) into a permanent red for every unrelated branch.
 step "runner-registration guard self-test"
 run tests/test_check_runner_registration.sh
+
+# Section-registration guard (#686): binary registration stays green when
+# one section's dispatcher line disappears. Measured on PR #689 (wired ->
+# unwired checks, all still 0 failed / exit 0): test_idle_summary 397 -> 367,
+# test_agg_raw_crosscheck 251 -> 211, test_cpu_split_parity 107 -> 66.
+# Static reachability from main through same-file call sites catches the
+# missing section without built binaries or a Linux box. Discover every
+# sectioned C suite automatically; refuse unparseable inputs, and exercise
+# the guard's own blind spots here so it cannot silently approve nothing.
+step "section-registration guard self-test (bypass suite, #686)"
+run tests/test_check_section_registration.sh
+
+step "section-registration guard (every sectioned C suite, #686)"
+run scripts/check-section-registration.sh
 
 # #591 bypass suite: tests/test_uprobe_fired.py's exact-window mask gate is a
 # LIVE test (ci_smoke.sh only -- see the #433 gap above), so its own logic
