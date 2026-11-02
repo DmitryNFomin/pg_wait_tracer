@@ -93,12 +93,12 @@ struct pgwt_counters {
 
     /* Sampler timer is one-shot by design (anti-aliasing jitter, SMP-5), so
      * expirations never coalesce. Lateness against the ARMED period is the
-     * signal; late_ns_total/(ticks_rated_total*nominal_ns) is the fraction
-     * of measurable sampling time lost. The confidence verdict uses rated
-     * ticks so unmeasurable arms yield UNKNOWN when none can be rated,
-     * rather than a confident 'ok'. */
+     * signal: sampler_tick_late_ns_total / sampler_ticks_total is mean
+     * lateness per tick in nanoseconds; both terms come from the timer alone.
+     * Dividing this mean by the nominal period (1e9 / --sample-rate) gives
+     * the fraction of sampling time lost to lateness. The timer health check
+     * measures scheduling delay, not the accuracy of the CPU figure. */
     uint64_t sampler_ticks_total;         /* sampler timerfd ticks consumed */
-    uint64_t sampler_ticks_rated_total;   /* subset whose lateness is measurable */
     uint64_t sampler_tick_late_ns_total;  /* cumulative ns late vs ARMED period */
 
     /* #416 per-tick event-ring drain (live-display conservation). The tick
@@ -303,7 +303,6 @@ struct pgwt_daemon {
     int         escalation_budget_s;     /* tiered: full-fidelity s / rolling hour */
     const struct pgwt_capture_provider *provider; /* active provider vtable */
     struct pgwt_sampler *sampler;        /* sampled-tier state, NULL if unused */
-    struct pgwt_sampler_sched sampler_sched; /* verified sampling-thread nice */
     struct pgwt_escalation escalation;   /* tiered escalation engine (D5/A4) */
     struct pgwt_exact_probe_bundle exact_probes; /* Stage 3 exact-only links */
     struct pgwt_anomaly anomaly;         /* anomaly-trigger rules engine (D5/A5) */

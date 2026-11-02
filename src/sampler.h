@@ -70,18 +70,19 @@ pgwt_sampler_sched_request(const char *env, int *out_nice);
  * Returns 1 iff the requested value was verified; always fills *out. */
 int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out);
 
-enum pgwt_sampler_cpu_confidence {
-    PGWT_SAMPLER_CPU_CONF_UNKNOWN = 0, /* cannot tell: refuse to rate */
-    PGWT_SAMPLER_CPU_CONF_OK,
-    PGWT_SAMPLER_CPU_CONF_DEGRADED,
+enum pgwt_sampler_timer_health {
+    PGWT_SAMPLER_TIMER_UNKNOWN = 0, /* timer evidence unavailable or invalid */
+    PGWT_SAMPLER_TIMER_OK,
+    PGWT_SAMPLER_TIMER_DEGRADED,
 };
 
-/* Timer-only verdict: mean lateness >= 20% of the nominal period degrades.
+/* Timer scheduling-delay health: mean lateness >= 20% of the nominal period
+ * degrades; this does not rate the accuracy of the sampled CPU figure.
  * Zero ticks/period or late_ns_total / ticks > 60s yields UNKNOWN and pct 0.
  * Percentage x100 is truncated, saturating at UINT_MAX. Pure, no I/O. */
-enum pgwt_sampler_cpu_confidence
-pgwt_sampler_cpu_confidence(uint64_t ticks, uint64_t late_ns_total,
-                            uint64_t period_ns, unsigned *out_late_pct_x100);
+enum pgwt_sampler_timer_health
+pgwt_sampler_timer_health(uint64_t ticks, uint64_t late_ns_total,
+                          uint64_t period_ns, unsigned *out_late_pct_x100);
 
 /* A registry snapshot the sampler reads each tick. Decouples the sampler's
  * core logic (testable without the daemon) from the live backend table:

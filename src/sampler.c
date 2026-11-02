@@ -104,21 +104,21 @@ int pgwt_sampler_apply_sched(int want_nice, struct pgwt_sampler_sched *out)
     return out->ok;
 }
 
-enum pgwt_sampler_cpu_confidence
-pgwt_sampler_cpu_confidence(uint64_t ticks, uint64_t late_ns_total,
-                            uint64_t period_ns, unsigned *out_late_pct_x100)
+enum pgwt_sampler_timer_health
+pgwt_sampler_timer_health(uint64_t ticks, uint64_t late_ns_total,
+                          uint64_t period_ns, unsigned *out_late_pct_x100)
 {
     *out_late_pct_x100 = 0;
     if (!ticks || !period_ns || late_ns_total / ticks > 60000000000ULL)
-        return PGWT_SAMPLER_CPU_CONF_UNKNOWN;
+        return PGWT_SAMPLER_TIMER_UNKNOWN;
 
     /* Divide once, keeping sub-nanosecond mean lateness and avoiding
      * overflow for every uint64_t input, including ticks * period_ns. */
     __uint128_t pct = (__uint128_t)late_ns_total * 10000
                     / ((__uint128_t)ticks * period_ns);
     *out_late_pct_x100 = pct > UINT_MAX ? UINT_MAX : (unsigned)pct;
-    return pct >= 2000 ? PGWT_SAMPLER_CPU_CONF_DEGRADED
-                       : PGWT_SAMPLER_CPU_CONF_OK;
+    return pct >= 2000 ? PGWT_SAMPLER_TIMER_DEGRADED
+                       : PGWT_SAMPLER_TIMER_OK;
 }
 
 /* Read one target's value against its OWN pid via /proc/<pid>/mem.
