@@ -3580,6 +3580,33 @@ static int window_fidelity_ranges(const struct pgwt_server *srv,
 
 /* ── Event loading ────────────────────────────────────────── */
 
+/* The raw-load refusal line, in ONE place because two loaders can hit the
+ * bound (the fidelity merge below and the retained-index prefix further
+ * down) and #728 exists because those two copies drifted from the
+ * handler-level hint.
+ *
+ * It names only a narrower time range, and that is the whole point of #728:
+ * both copies used to append " or add a pid/query filter" on the pid == 0
+ * arm. These loaders take NO filter argument -- only `pid` -- so a query
+ * filter is never pushed into the load and cannot change the event count
+ * this message is reporting. A pid scope is not promised either: three
+ * callers (handle_top_queries, handle_variants, dump_summary) pass pid 0
+ * unconditionally and drop the request's pid filter, so for them that advice
+ * fails too. A narrower range is the one reduction that holds for every
+ * caller, because the count is monotone in the range. #694 settled the same
+ * question for the handler-level hint in reject_overload(): name the real
+ * reduction, never a filter the load never sees.
+ *
+ * `pid` still appears, as scope rather than advice -- "for this pid" when
+ * the load was pid-scoped, "across all pids" when it was not -- so the
+ * operator can tell which of the two overflowed. */
+static void report_load_overload(int max_events, uint32_t pid)
+{
+    fprintf(stderr, "ERROR: window too large: the requested range holds "
+            "more than %d events%s — narrow the time range\n",
+            max_events, pid ? " for this pid" : " across all pids");
+}
+
 /*
  * Load events in [from_wall_ns, to_wall_ns] from trace files.
  * Immutable .trace.lz4: from cache (read once per session).
@@ -4151,10 +4178,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * load, and the operator asking for stats wants to see it. */
     straddle_report(&ss);
     if (overloaded)
-        fprintf(stderr, "ERROR: window too large: the requested range holds "
-                "more than %d events%s — narrow the time range%s\n",
-                max_events, pid ? " for this pid" : "",
-                pid ? "" : " or add a pid/query filter");
+        report_load_overload(max_events, pid);
     if (allocation_failed)
         fprintf(stderr, "ERROR: memory allocation failed while loading or "
                 "merging the requested event window\n");
@@ -4366,10 +4390,7 @@ server_load_prefix_from_index(struct pgwt_server *srv, uint64_t to_wall_ns,
         info->allocation_failed = allocation_failed;
     }
     if (overloaded)
-        fprintf(stderr, "ERROR: window too large: the requested range holds "
-                "more than %d events%s — narrow the time range%s\n",
-                max_events, pid ? " for this pid" : "",
-                pid ? "" : " or add a pid/query filter");
+        report_load_overload(max_events, pid);
     if (allocation_failed)
         fprintf(stderr, "ERROR: memory allocation failed while loading or "
                 "merging the requested event window\n");

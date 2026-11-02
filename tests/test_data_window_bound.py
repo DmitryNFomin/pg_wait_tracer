@@ -21,7 +21,9 @@ must answer non-empty on both cold and warm requests, with zero aggregate
 provenance and identical links and nodes.
 """
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
@@ -33,6 +35,167 @@ BASE_TS = 10_000_000_000_000
 NUM_PIDS = 10
 EVENTS_PER_PID = 2_000
 DUR_NS = 1_000_000  # 1 ms per event
+
+# ── #728 ───────────────────────────────────────────────────────────────────
+# The refusal pgwt-server prints to its OWN stderr when a raw load hits the
+# bound. Both loaders that can hit it (the fidelity merge and the
+# retained-marker prefix) used to append " or add a pid/query filter" on the
+# pid == 0 arm. Neither loader takes a filter argument at all, so a query
+# filter is never pushed into the load and cannot change the count being
+# reported; the line now names only a narrower time range.
+REFUSAL_PREFIX = "ERROR: window too large:"
+REFUSAL_TAIL = "— narrow the time range"
+S = 1_000_000_000
+MS = 1_000_000
+MARKER_EXEC_START = 0xFFFFFFF0
+MARKER_EXEC_END = 0xFFFFFFF1
+# 2 * PFX_PAIRS markers before the window vs PFX_BOUND: the prefix pass
+# overflows while the in-window load (5 events) stays far under the same
+# bound, so the refusal under test comes from the PREFIX loader and not from
+# the window loader the case above already covers.
+PFX_PAIRS = 1_200
+PFX_BOUND = 1_500
+PFX_WIN_FROM = BASE_TS + 60 * S
+PFX_WIN_TO = PFX_WIN_FROM + 1 * S
+
+
+def build_prefix_scenario():
+    """Markers before the window, a handful of events inside it."""
+    ev = []
+    for i in range(PFX_PAIRS):
+        pid = 3000 + (i % 20)
+        qid = 700 + (i % 5)
+        ts = BASE_TS + i * 10 * MS          # 12 s of prefix, all before the window
+        ev.append({"pid": pid, "ts": ts, "dur": 0,
+                   "old": MARKER_EXEC_START, "new": MARKER_EXEC_START,
+                   "qid": qid})
+        ev.append({"pid": pid, "ts": ts + 5 * MS, "dur": 0,
+                   "old": MARKER_EXEC_END, "new": MARKER_EXEC_END,
+                   "qid": qid})
+    for j in range(5):
+        ev.append({"pid": 3000, "ts": PFX_WIN_FROM + (j + 1) * 10 * MS,
+                   "dur": MS, "old": IO_DATA_FILE_READ, "new": CPU,
+                   "qid": 700})
+    ev.sort(key=lambda e: e["ts"])
+    return {
+        "backends": [{"pid": 3000 + p, "type": "client", "user": "u",
+                      "db": "d"} for p in range(20)],
+        "queries": [{"id": 700 + q, "text": "SELECT %d" % q}
+                    for q in range(5)],
+        "events": ev,
+    }
+
+
+def read_stderr(path):
+    """Everything pgwt-server has written to stderr so far.
+
+    No sleep and no retry: stderr is unbuffered in C and the server prints
+    the refusal inside the loader, BEFORE the JSON response the caller has
+    already read, so the line is on disk by the time this runs. A missing
+    file returns "" — and then the POSITIVE assertion below fails, which is
+    the refusal we want from a check that cannot see its input.
+    """
+    if not os.path.exists(path):
+        return ""
+    with open(path, errors="replace") as f:
+        return f.read()
+
+
+def check_refusal(t, label, err, scope, forbidden_scope):
+    """Grade every "window too large:" line pgwt-server printed.
+
+    Three assertions, and all three are needed:
+      * at least one line exists. Without it the two below are vacuous on an
+        empty stderr — the exact false negative that lets a deleted or
+        unreached message pass as "no bad advice found";
+      * every such line ENDS at "narrow the time range". This is the
+        discriminating one: the pre-#728 line also contained that phrase, in
+        the middle, followed by " or add a pid/query filter", so only the
+        line's END separates the two texts;
+      * no such line mentions a filter in ANY phrasing, so the advice cannot
+        return reworded.
+    """
+    lines = [ln.rstrip() for ln in err.splitlines()
+             if ln.startswith(REFUSAL_PREFIX)]
+    t.check(len(lines) >= 1,
+            f"{label}: pgwt-server printed its own refusal line "
+            f"(stderr holds {len(err)} bytes)")
+    t.check(all(ln.endswith(REFUSAL_TAIL) for ln in lines),
+            f"{label}: every refusal line ends at '{REFUSAL_TAIL}' "
+            f"(got {lines})")
+    t.check(all("filter" not in ln for ln in lines),
+            f"{label}: no refusal line advises a filter the load never "
+            f"receives (got {lines})")
+    t.check(all(scope in ln for ln in lines),
+            f"{label}: every refusal line names the scope that overflowed "
+            f"('{scope}') (got {lines})")
+    t.check(all(forbidden_scope not in ln for ln in lines),
+            f"{label}: no refusal line claims the other scope "
+            f"('{forbidden_scope}') (got {lines})")
+
+
+def check_loader_refusal_lines(t):
+    """#728: the two loader-level refusals, on both pid arms."""
+    trace_dir = generate_traces(build_scenario())
+    err_dir = tempfile.mkdtemp(prefix="pgwt_stderr_")
+    try:
+        # pid == 0: the arm that used to carry the impossible advice.
+        err = os.path.join(err_dir, "unfiltered.err")
+        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 5_000},
+                           stderr_path=err) as srv:
+            resp = srv.query("time_model")
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "stderr/pid==0: the load really did refuse, so the "
+                   "assertions below are not vacuous")
+        check_refusal(t, "stderr/pid==0", read_stderr(err),
+                      "across all pids", "for this pid")
+
+        # pid != 0: one pid's 2,000 events over a 1,000 bound. The pid arm
+        # never carried the advice; it is here so a fix that collapsed both
+        # arms into one sentence cannot pass.
+        err = os.path.join(err_dir, "pid.err")
+        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1_000},
+                           stderr_path=err) as srv:
+            resp = srv.query("time_model", filters={"pid": 1001})
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "stderr/pid!=0: the pid-scoped load really did refuse")
+        check_refusal(t, "stderr/pid!=0", read_stderr(err),
+                      "for this pid", "across all pids")
+    finally:
+        cleanup_traces(trace_dir)
+        shutil.rmtree(err_dir, ignore_errors=True)
+
+    # The retained-marker prefix is a SECOND loader with its own copy of this
+    # line (src/server.c server_load_prefix_from_index). Reached through
+    # `executions` with an explicit window that starts after the trace does.
+    trace_dir = generate_traces(build_prefix_scenario())
+    err_dir = tempfile.mkdtemp(prefix="pgwt_stderr_")
+    try:
+        err = os.path.join(err_dir, "prefix.err")
+        with ServerHarness(trace_dir,
+                           env={"PGWT_LOAD_MAX_EVENTS": PFX_BOUND,
+                                "PGWT_EXEC_PREFIX_DEBUG": "1"},
+                           stderr_path=err) as srv:
+            resp = srv.query("executions", from_=PFX_WIN_FROM,
+                             to_=PFX_WIN_TO)
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "stderr/prefix: the prefix pass really did refuse")
+        raw = read_stderr(err)
+        # Which of the two prefix implementations ran is pgwt-server's own
+        # choice, so READ it instead of assuming: if this fell back to the
+        # legacy decode, the index copy of the message was never printed and
+        # this case proves nothing about it.
+        paths = [ln for ln in raw.splitlines()
+                 if ln.startswith("pgwt-prefix: path=")]
+        t.check(any("path=index" in ln for ln in paths),
+                "stderr/prefix: the retained-index prefix is the pass that "
+                f"refused, so its own copy of the line is what was graded "
+                f"(got {paths})")
+        check_refusal(t, "stderr/prefix", raw, "across all pids",
+                      "for this pid")
+    finally:
+        cleanup_traces(trace_dir)
+        shutil.rmtree(err_dir, ignore_errors=True)
 
 
 def build_scenario():
@@ -189,6 +352,8 @@ def main():
                     "allocation failure is neither a range refusal nor partial data")
     finally:
         cleanup_traces(trace_dir)
+
+    check_loader_refusal_lines(t)
 
     return 0 if t.summary() else 1
 
