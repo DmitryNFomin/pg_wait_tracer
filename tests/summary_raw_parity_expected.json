@@ -5,46 +5,6 @@
    "raw": 2.96975,
    "summary": 4.501
   },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 20100,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.583333333333332,
-   "summary": 32.6388888888889
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 18800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
-  },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
@@ -56,46 +16,6 @@
    "issue": 410,
    "raw": 3.001,
    "summary": 4.3135
-  },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 20100,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.583333333333332,
-   "summary": 32.6388888888889
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 18800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
@@ -109,46 +29,6 @@
    "raw": 2.9385,
    "summary": 4.501
   },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 20100,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.583333333333332,
-   "summary": 32.6388888888889
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 18800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
-  },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
@@ -156,96 +36,6 @@
   }
  },
  "straddle_130s": {
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 70000,
-   "summary": 0
-  },
-  "queries/db_time_ms": {
-   "issue": 324,
-   "raw": 252114,
-   "summary": 312114
-  },
-  "queries/order": {
-   "issue": 324,
-   "raw": "100 | 102 | 104 | 103 | 101",
-   "summary": "104 | 100 | 102 | 103 | 101"
-  },
-  "queries/row/100/pct": {
-   "issue": 324,
-   "raw": 30.145093092807222,
-   "summary": 24.350077215376434
-  },
-  "queries/row/101/pct": {
-   "issue": 324,
-   "raw": 15.072546546403611,
-   "summary": 12.175038607688217
-  },
-  "queries/row/102/pct": {
-   "issue": 324,
-   "raw": 22.654037459244627,
-   "summary": 18.29908302735539
-  },
-  "queries/row/103/pct": {
-   "issue": 324,
-   "raw": 15.865838469898538,
-   "summary": 12.815830113356016
-  },
-  "queries/row/104/pct": {
-   "issue": 324,
-   "raw": 16.262484431646,
-   "summary": 32.359971036223946
-  },
-  "queries/row/104/total_ms": {
-   "issue": 324,
-   "raw": 41000,
-   "summary": 101000
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 16300,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.473684210526315,
-   "summary": 32.4561403508772
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 14800,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1000,
-   "summary": 0
-  },
-  "sessions/row/1003/cpu_pct": {
-   "issue": 562,
-   "raw": 1.2195121951219512,
-   "summary": 2.4390243902439024
-  },
-  "sessions/row/1003/offcpu_ms": {
-   "issue": 562,
-   "raw": 500,
-   "summary": 0
-  },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
@@ -257,46 +47,6 @@
    "issue": 410,
    "raw": 2.813859649122807,
    "summary": 4.123801169590643
-  },
-  "queries/backfilled_ms": {
-   "issue": 410,
-   "raw": 39000,
-   "summary": 0
-  },
-  "queries/unattributed_available": {
-   "issue": 410,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/has_measured_cpu": {
-   "issue": 562,
-   "raw": true,
-   "summary": false
-  },
-  "sessions/offcpu_ms": {
-   "issue": 562,
-   "raw": 21700,
-   "summary": 0
-  },
-  "sessions/row/1000/cpu_pct": {
-   "issue": 562,
-   "raw": 19.615384615384617,
-   "summary": 32.6923076923077
-  },
-  "sessions/row/1000/offcpu_ms": {
-   "issue": 562,
-   "raw": 20400,
-   "summary": 0
-  },
-  "sessions/row/1002/cpu_pct": {
-   "issue": 562,
-   "raw": 22.5,
-   "summary": 25
-  },
-  "sessions/row/1002/offcpu_ms": {
-   "issue": 562,
-   "raw": 1300,
-   "summary": 0
   },
   "time_model/io_worker_busy_pct": {
    "issue": 410,

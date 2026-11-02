@@ -2721,6 +2721,48 @@ def test_waterfall_view(page):
           f"bar click opened compact readout ('{readout[:90]}')")
 
 
+def test_waterfall_raw_dur_ns_disclosure(page):
+    """#618: raw_dur_ns reaches the click readout over the wire, with
+    clipped duration disclosed only when the two durations differ."""
+    print("--- Test #618: Waterfall raw_dur_ns disclosure ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='waterfall']")
+    page.locator("#executions-table tbody tr.clickable").filter(
+        has=page.get_by_text("1002", exact=True)).click()
+    page.wait_for_selector("#waterfall-chart canvas", timeout=5000)
+    page.wait_for_function("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
+        const data = c && c.getOption().series[0].data;
+        return data && ['IO:WalSync', 'CPU*'].every(
+            name => data.some(d => d[3] === name && d[8] === 1002 && d[9] === 'event'));
+    }""", timeout=5000)
+
+    # Use the real bars only to locate the click targets. Expected durations
+    # come from the pinned PID 1002 wire fixture, never from chart tuples.
+    for name, duration in [("IO:WalSync", "24.0ms (20.0ms in window)"),
+                           ("CPU*", "30.0ms")]:
+        point = page.evaluate("""name => {
+            const el = document.getElementById('waterfall-chart');
+            const c = echarts.getInstanceByDom(el);
+            const d = c.getOption().series[0].data.find(
+                d => d[3] === name && d[8] === 1002 && d[9] === 'event');
+            const px = c.convertToPixel({gridIndex: 0}, [(d[0] + d[1]) / 2, d[2]]);
+            const r = el.querySelector('canvas').getBoundingClientRect();
+            return {x: r.left + px[0], y: r.top + px[1]};
+        }""", name)
+        page.mouse.click(point["x"], point["y"])
+        page.wait_for_function("""name =>
+            document.getElementById('waterfall-readout').textContent.includes(name)
+        """, arg=name, timeout=5000)
+        readout = page.text_content("#waterfall-readout") or ""
+        check(f"Duration {duration}" in readout,
+              f"{name} readout shows Duration {duration} ({readout!r})")
+        if name == "CPU*":
+            check("in window" not in readout,
+                  f"CPU* equal durations have no disclosure suffix ({readout!r})")
+
+
 def _waterfall_fold_margin(p):
     """innerHeight minus the bottom of the real last content element
     (#table-container). NOT document.documentElement.scrollHeight: this
@@ -4505,6 +4547,7 @@ def main():
                 test_url_state_roundtrip,
                 # U3 Stage 2: the three B6 analysis views.
                 test_waterfall_view,
+                test_waterfall_raw_dur_ns_disclosure,
                 test_waterfall_drilled_view_keeps_a_fold_reserve,
                 test_query_to_waterfall_pivot,
                 test_scatter_view,

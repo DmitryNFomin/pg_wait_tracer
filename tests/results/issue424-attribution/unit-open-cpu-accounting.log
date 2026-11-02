@@ -1,0 +1,120 @@
+=== test_open_cpu_accounting (#424 / summary v9) ===
+-- 1/2: placement, the measured split, conservation --
+  ok:   placed: records read back (11)
+  ok:   PLACEMENT: the 10 s on-CPU gap appears in 10 distinct seconds (the ten it occupied), not 1
+  ok:   PLACEMENT: second 1 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 2 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 3 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 4 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 5 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 6 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 7 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 8 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 9 carries 1000 ms of CPU wall (1000 ms)
+  ok:   PLACEMENT: second 10 carries 1000 ms of CPU wall (1000 ms)
+  ok:   SPLIT: cpu_measured_ns = 6000 ms (the closing record's whole 6000 ms measurement, placed across the seconds it was burned in)
+  ok:   SPLIT: cpu_clamped_ns = 0 ms — crediting the wall and leaving the measurement to the close clamps all 6000 ms away, and clamping the remainder against the remaining wall loses the 480 ms tail
+  ok:   SPLIT: cpu_unknown_ns = 0 ms (this tier HAS a measurement)
+  ok:   SPLIT: 11 seconds carry a CPU OBSERVATION (the ten open-credit ones plus the closing record), so a window made only of still-open seconds reports has_measured_cpu = 1 instead of discarding the split it was handed
+  ok:   CONSERVATION(wall): sum over records = 10000 ms == the gap's 10000 ms, exactly once
+  ok:   CONSERVATION(measured): sum(cpu_measured) + sum(cpu_clamped) = 6000 ms == the closing record's cpu_ns
+  ok:   CONSERVATION(events): events[CPU].total_ns = 10000 ms
+  ok:   CONSERVATION(sessions): cpu_ns 10000 ms, db_time 11000 ms (10 s gap + the 1 s Lock seed)
+  ok:   ONCE: events[CPU].count = 1 over the whole file, not ten one-second observations
+  ok:   ONCE: exactly 1 histogram observation, in the top (10 s) bucket (15) — not ten one-second ones
+  ok:   ONCE: events[CPU].max_ns = 10000 ms — the longest SINGLE gap
+  ok:   COUNTED: open_cpu_credited_ns_total = 10000 ms
+  ok:   COUNTED: open_cpu_measured_ns_total = 5520 ms (the measurement placed while OPEN; the 480 ms tail rides the closing record)
+  ok:   COUNTED: no refusal (0), no over-credit (0 ms), no classification divergence (0 ms), no tier flip (0), no uncredited residual (0 ms)
+-- 2b: coherent per-second CPU observations --
+  ok:   coherent: records read back (11)
+  ok:   COHERENT: 0 open-credit seconds claim more measured CPU than their own wall — a 100% CPU gap is where an uncapped credit puts 1200 ms of CPU in a 1000 ms second, which makes the reader's DB - CPU* - waits residual negative
+  ok:   COHERENT: and the total is still exact — measured 10000 ms + clamped 0 ms == the 10000 ms measurement
+  ok:   COHERENT: wall 10000 ms across 10 seconds
+-- 3: either order of (tick, close) --
+  ok:   order_a: records read back (4)
+  ok:   ORDER(one tick, late close): 3000 ms of wall over 3 seconds
+  ok:   ORDER(one tick, late close): measured 1800 ms + clamped 0 ms == the 1800 ms measurement
+  ok:   order_b: records read back (7)
+  ok:   ORDER(tick past close): the pid's whole timeline is conserved — CPU 4000 ms + Lock 3000 ms = 7000 ms, no nanosecond counted twice or lost
+  ok:   ORDER(tick past close): attribution moved by ONE tick — the CPU label holds 4000 ms of the 3000 ms gap, the overlap staying filed under the interval the tick believed was open (v8 residual 2, unchanged)
+  ok:   ORDER(tick past close): the measurement credited beyond the closing record's own cpu_ns is COUNTED — open_cpu_overcredit_ns_total = 720 ms
+-- 3c: rotation while the gap is open --
+  ok:   ROTATION: the file rotated mid-gap
+  ok:   rotation: records read back (11)
+  ok:   ROTATION: the gap's wall is 10000 ms across the two files — at most the 10000 ms it lasted, and at least the 9000 ms the rotation could not have discarded. Re-crediting from the interval's start in the new file would read ~14000
+  ok:   ROTATION: the frozen label survived the file change (0 ms under the other id, 10000 ms under CPU)
+  ok:   ROTATION: measured 6000 ms + clamped 0 ms never exceeds the 6000 ms the record measured
+  ok:   ROTATION: every open-credit second is still coherent (0 are not)
+  ok:   ROTATION: COUNTED — open_cpu_credited_ns_total = 10000 ms
+-- 4: classification changes before close --
+  ok:   classflip: records read back (11)
+  ok:   FREEZE: the whole 10 s sits under ONE event id — NonCmdCPU 10000 ms, CPU 0 ms. Persisting each tick's answer would split one interval across both, leaving immutable seconds that disagree with each other and with the record
+  ok:   FREEZE: the single occurrence is counted on the SAME row as the time (NonCmdCPU count 1, CPU count 0) — a row with time and no count is what splitting them produces
+  ok:   FREEZE: an idle-classified gap is Idle for its whole length (10000 ms) and contributes NOTHING to the CPU class (0 ms), exactly as the raw paths file post/between-command time
+  ok:   FREEZE: an idle gap touches NEITHER CPU scalar (measured 0, unknown 0, clamped 0)
+  ok:   FREEZE: the cost of freezing is MEASURED, not assumed — open_cpu_class_divergent_ns_total = 10000 ms (the producer's answer at close was CPU, the frozen one was idle)
+-- 5/6: the unknown tier and a tier flip --
+  ok:   unknown tier: records read back (11)
+  ok:   TIER(unknown): the whole 10 s wall is CPU* via the UNKNOWN tier (10000 ms) and the measured tier stays empty (0 ms)
+  ok:   TIER(unknown): no CPU OBSERVATION is claimed (0), so the reader reports has_measured_cpu = 0 — an ABSENT measurement must not read as a measured zero
+  ok:   TIER(unknown): still placed across 10 seconds
+  ok:   TIER(unknown): COUNTED — open_cpu_unknown_ns_total = 10000 ms
+  ok:   tier flip: records read back (11)
+  ok:   TIER(flip): CPU* = measured 0 ms + unknown 10000 ms = 10000 ms, at most the gap's own 10000 ms of wall — not 16000
+  ok:   TIER(flip): COUNTED — open_cpu_tier_mismatch_total = 1
+-- 7: non-vacuity (no open CPU => bit-identical) --
+  ok:   non-vacuity: records read back (11 / 11)
+  ok:   NON-VACUITY: a fixture with NO open on-CPU interval is BIT-IDENTICAL through the v9 entry point — all 11 record payloads hash equal
+  ok:   NON-VACUITY: and the v8 answer itself is still right (11000 ms = 1 s seed + 10 s wait)
+  ok:   NON-VACUITY: every v9 on-CPU counter is zero (0) — a wait's note cannot reach the CPU path even with an observation attached
+-- 8a: bypass — the observation withheld --
+  ok:   no observation: records read back (2)
+  ok:   BYPASS a (no CPU observation): the whole 10000 ms lands in ONE second (the v8 rule) — 1 seconds carry it
+  ok:   BYPASS a: v7's split is untouched — measured 6000 ms, clamped 0 ms
+  ok:   BYPASS a: the refusal is COUNTED (open_cpu_refused_total = 9) and nothing was credited (0 ms)
+  ok:   BYPASS a: the residual is MEASURED — cpu_open_uncredited_ns_total = 10000 ms
+-- 8b-d: bypass — lifecycle --
+  ok:   BYPASS b (stale observation): crediting stopped at 4000 ms, within the 3 s staleness bound — a dead backend cannot accrue CPU forever
+  ok:   BYPASS b: the expiry is COUNTED (open_notes_expired_total = 1)
+  ok:   BYPASS c (exit): nothing credited after forget_open (1000 ms before, 1000 ms after)
+  ok:   mismatch: records read back (8)
+  ok:   BYPASS d (mismatched observation): the wall is accounted exactly ONCE (7000 ms = 6 s credited + the 1 s of the record the watermark had not already placed), never twice
+  ok:   BYPASS d: the disagreement is COUNTED (open_note_mismatch_total = 1)
+-- 8e-g: bypass — refusals --
+  ok:   BYPASS e (io_worker): nothing credited (0 ms), refusal counted (9)
+  ok:   bad eff_we: records read back (11)
+  ok:   BYPASS f (illegal eff_we): the gap stayed in the CPU class (10000 ms) and NOTHING was refiled into Lock beyond the 1 s seed (1000 ms)
+  ok:   BYPASS f: every illegal note is COUNTED (open_cpu_eff_rejected_total = 9 over 9 ticks)
+  ok:   BYPASS g (table full): the refusal is COUNTED (open_table_full_total = 8)
+WARN: summary /tmp/pgwt_opencpu_oldver_58976/current.summary is version 8, this build computes only from version 9 (older files use the pre-2026-10-06 idle accounting) -- recomputing from raw events instead
+-- 8h,i,l: bypass — the reader must refuse --
+  ok:   BYPASS h (no such trace dir): the read-back REFUSES rather than returning an empty, agreeing answer
+  ok:   BYPASS h (empty trace dir): the read-back REFUSES
+  ok:   wrong version: the v9 file reads back first (6 records), so the refusal below is about the VERSION and not about an unreadable fixture
+  ok:   BYPASS i (v8 file): the reader REFUSES a file written under the previous accounting rule instead of summing it as if it were v9
+  ok:   BYPASS l (writer disabled): no records and nothing credited, and the read-back REFUSES rather than agreeing over an empty file
+-- 8j,k: bypass — sub-second gap, and the round trip --
+  ok:   short gap: records read back (1)
+  ok:   BYPASS j (sub-second gap): nothing credited (0), the v8 answer exactly — wall 200 ms, measured 120 ms, clamped 0 ms
+  ok:   round trip: records read back (10)
+  ok:   ROUND TRIP: 9 seconds were materialised as open-credit-only records (nothing closed in them, a gap was open)
+  ok:   ROUND TRIP: confirmed CPU prefix [1 s, 10.2 s) is exactly 9200 ms wall, 5520 ms measured (60%), including close
+  ok:   ROUND TRIP: every one of the 10 records written decoded (10 read) — a desynchronised block header would lose whole seconds here, not a field
+  ok:   ROUND TRIP: 10 seconds carry CPU time with NO count, and events[CPU].total_ns survived the round trip in every one of them
+-- 9: open_cpu_notes_total — was the writer ASKED? --
+  ok:   9a: nine on-CPU notes are counted as nine (open_cpu_notes_total = 9) and credit was placed (9000 ms)
+  ok:   9b: ASKED-AND-DROPPED is visible — open_cpu_notes_total = 9 with credited = 0. Counted at the note, before the refusal.
+  ok:   9c: a WAIT-only daemon was never ASKED (open_cpu_notes_total = 0) even though wait credit flowed (9000 ms) — so the counter is not a restatement of 'the seal ran'
+  ok:   9d: the v8 no-observation path is NOT 'asked' (open_cpu_notes_total = 0) and is still counted where it always was (open_cpu_refused_total = 9)
+  ok:   9e: a disabled writer is never asked and credits nothing (notes = 0, credited = 0), so the reading is REFUSE and not a verdict about the credit path
+-- 10: which exit took the observation --
+  ok:   10a: nine gaps that end inside their own second are ACCEPTED and retired unplaced (notes 9, unplaced 9, credited 0) with every refusal counter 0 (io_worker 0, refused 0, expired 0, uncredited 0) — the 2026-10-28 reading, now attributable
+  ok:   10b: a credited multi-second gap is NOT unplaced (credited 10000 ms, unplaced 0, notes 9) — the counter is the OUTCOME 'nothing was written', not 'an interval ended'
+  ok:   10c: the io_worker refusal is 18 notes but only 9 of them carried an observation (notes 9, all 18) — the subset is disjoint from the WAIT notes and bounded by notes_total
+  ok:   10d: a WAIT-only io_worker daemon refuses nine notes and asks nothing about CPU (notes 0, all 9, cpu subset 0)
+  ok:   10e: a stale note is counted BOTH as expired (1, the reason) and as unplaced (1, the outcome) — deliberately not a partition
+  ok:   10f: a disabled writer attributes nothing (io_worker subset 0, unplaced 0) — the reading stays REFUSE
+
+101 checks, 0 failures
+=== test_open_cpu_accounting: PASS ===
