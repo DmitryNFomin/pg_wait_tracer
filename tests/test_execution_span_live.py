@@ -39,7 +39,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server_harness import SERVER_BIN, ServerHarness
-from testutil import find_postmaster
+from testutil import (find_postmaster, resolve_declared_phase_mask,
+                      phase_contract_apply)
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
@@ -164,11 +165,23 @@ def start_daemon(pm_pid, trace_dir):
     # Full mode is essential: tiered records the long ClientRead as SAMPLED.
     # Samples cannot be straddlers or satisfy execution_detail's exact-fidelity
     # requirement, so a tiered capture would prove nothing about #479.
+    # #622: --skip-usdt faithfully proxies EL8 only in TIERED escalation:
+    # src/exact_probe.c:421,446 returns ENOTSUP for EXEC/PLAN while the plain
+    # QUERY_ID/ACTIVITY uprobes attach (mask 0x3). This test needs FULL mode,
+    # where pgwt_exact_probe_startup_mask() (src/exact_probe.c:92-97) returns 0
+    # for the flag, declining even the attribution pair: mask 0x0, not 0x3.
+    # The contract fails on "required attribution pair incomplete", so this
+    # does not rehearse declared-0 REFUSAL; that path awaits a real EL8 run.
+    # On EL8 FULL mode skip_usdt is false: startup pins best-effort
+    # (src/exact_probe.c:536), drops phase bits with the "optional full-mode
+    # ... USDT phase markers unavailable" warning, and retains mask 0x3.
+    phase_args = (["--skip-usdt"]
+                  if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1" else [])
     try:
         proc = subprocess.Popen(
             [TRACER, "--mode", "full", "--pid", str(pm_pid),
              "--trace-dir", trace_dir, "--duration", str(CAPTURE_DURATION_S),
-             "--interval", "1", "--quiet"],
+             "--interval", "1", "--quiet"] + phase_args,
             stdout=subprocess.DEVNULL, stderr=err, env=env)
     except OSError:
         err.close()
@@ -180,7 +193,9 @@ def start_daemon(pm_pid, trace_dir):
         if os.path.exists(os.path.join(trace_dir, "pgwt.sock")):
             try:
                 if ctl(trace_dir, {"cmd": "status"}).get("ok") is True:
-                    return proc, err
+                    masks = [ctl(trace_dir, {"cmd": "status"}).get(
+                        "exact_probe_attached_mask")]
+                    return proc, err, masks
             except (OSError, ValueError, IndexError):
                 pass
         time.sleep(0.1)
@@ -223,7 +238,8 @@ def stop_psql(proc, pid):
              f"WHERE pid = {pid} AND state = 'idle in transaction'")
 
 
-def assert_spans(trace_dir, pid_a, t_before, t_after, b_parked_ns, b_release_ns):
+def assert_spans(trace_dir, pid_a, t_before, t_after, b_parked_ns, b_release_ns,
+                 expected_phase, masks):
     stats_path = os.path.join(trace_dir, "server.err")
     with ServerHarness(trace_dir, env={"PGWT_STRADDLE_STATS": "1"},
                        stderr_path=stats_path) as srv:
@@ -244,12 +260,20 @@ def assert_spans(trace_dir, pid_a, t_before, t_after, b_parked_ns, b_release_ns)
         print(f"  capture [{frm}, {to}] extends past A's batch "
               f"[{t_before}, {t_after}]")
 
+        unavailable = (execs.get("code") == "full_fidelity_required"
+                       and execs.get("fidelity") in ("sampled", "none")
+                       and "rows" not in execs)
+        if not isinstance(execs.get("rows"), list) and not unavailable:
+            fatal("executions did not return rows or an explicit exact-data refusal")
         rows = [row for row in execs.get("rows", [])
                 if row.get("pid") == pid_a and row.get("end_ns") is not None
                 and row.get("in_progress") is False
                 and row.get("started_before_window") is False]
         print(f"  found {len(rows)} complete marker-identified executions for A "
               f"(pid={pid_a}); need at least {CLICK_N}")
+        count = None if unavailable else len(rows)
+        phase_contract_apply(expected_phase, masks, {"complete_executions": count},
+                             "execution spans", fail=fatal)
         if len(rows) < CLICK_N:
             fatal(f"only {len(rows)} complete marker-identified executions; "
                   "a missing/mis-attached capture is not agreement")
@@ -335,7 +359,7 @@ def assert_spans(trace_dir, pid_a, t_before, t_after, b_parked_ns, b_release_ns)
         print(f"  containing spans present: {present}/{CLICK_N}")
 
 
-def run(pm_pid):
+def run(pm_pid, expected_phase):
     trace_dir = tempfile.mkdtemp(prefix="pgwt_exec_span_")
     os.chmod(trace_dir, 0o755)
     proc = err = session_b = pid_b = None
@@ -356,7 +380,7 @@ def run(pm_pid):
         b_parked_ns = time.time_ns()
         print(f"  B pid={pid_b} parked in Client:ClientRead at {b_parked_ns}")
 
-        proc, err = start_daemon(pm_pid, trace_dir)
+        proc, err, masks = start_daemon(pm_pid, trace_dir)
         time.sleep(CAPTURE_SETTLE_S)
         t_before = time.time_ns()
         pid_a, _ = psql_batch(["SELECT pg_sleep(0.02);"] * N, "session A")
@@ -371,12 +395,18 @@ def run(pm_pid):
         time.sleep(CAPTURE_DRAIN_S)
         if proc.poll() is not None:
             fatal(f"daemon exited before capture drained (rc={proc.returncode})")
+        try:
+            masks.append(ctl(trace_dir, {"cmd": "status"}).get(
+                "exact_probe_attached_mask"))
+        except (OSError, ValueError, IndexError) as exc:
+            print(f"  post-capture mask could not be read: {exc}")
+        print("  mid-window mask samples: %r" % masks)
         stop_daemon(proc, err)
         proc = err = None
         stop_psql(session_b, pid_b)
         session_b = pid_b = None
         assert_spans(trace_dir, pid_a, t_before, t_after,
-                     b_parked_ns, b_release_ns)
+                     b_parked_ns, b_release_ns, expected_phase, masks)
     finally:
         try:
             if proc is not None:
@@ -398,6 +428,10 @@ def main():
     ap.add_argument("--pid", type=int, default=0)
     ap.add_argument("--pg-version", type=int, help="accepted for runner compatibility; ignored")
     args = ap.parse_args()
+    try:
+        expected_phase = resolve_declared_phase_mask()
+    except ValueError as exc:
+        fatal(str(exc))
     print("test_execution_span_live: #479 containing spans with a real straddler")
     if os.geteuid() != 0:
         fatal("requires root (eBPF capture)")
@@ -411,7 +445,7 @@ def main():
         if not pm_pid:
             fatal("no PostgreSQL postmaster found")
         print(f"  postmaster pid {pm_pid}, PGPORT={os.environ.get('PGPORT')}")
-        run(pm_pid)
+        run(pm_pid, expected_phase)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, TimeoutError) as exc:
         fatal(f"live test could not complete: {exc}")
     if tests_failed:
