@@ -3923,6 +3923,67 @@ COMPARE_PORT = MOCK_PORT + 20
 COMPARE_URL = app_url(COMPARE_PORT)
 NEARTIE_PORT = MOCK_PORT + 30
 NEARTIE_URL = app_url(NEARTIE_PORT)
+MIXED_PORT = MOCK_PORT + 40
+MIXED_URL = app_url(MIXED_PORT)
+
+
+def test_fidelity_mixed_sub_range_banding(page):
+    """#605: mixed fidelity shades only the sampled half of the wire window."""
+    print("--- Test #605: Mixed fidelity sub-range banding ---")
+    # Pin the mock's _FROM_NS/_TO_NS independently of its response so changes
+    # to the fixture cannot silently move the expected band boundary.
+    to_ns = 1_774_000_000_000_000_000
+    from_ns = to_ns - 3600_000_000_000
+    mid_ms = (from_ns + (to_ns - from_ns) // 2) / 1e6
+    tolerance_ms = 5
+
+    page.goto(MIXED_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_function("""() => {
+        const d = window.__pgwt && window.__pgwt.aasDebug();
+        return d && d.mounted && d.hasData && d.overlays;
+    }""", timeout=10000)
+    # The default 15m camera starts AFTER the pinned midpoint. Show the full
+    # hour so a whole-window fallback cannot masquerade as sub-range shading.
+    page.click("#time-range")
+    page.click(".tp-quick button[data-range='0']")
+    page.wait_for_function("""bounds => {
+        const d = window.__pgwt && window.__pgwt.aasDebug();
+        return d && d.mounted && d.hasData && d.overlays && d.xScale &&
+            Math.abs(d.xScale.min - bounds[0]) <= 5 &&
+            Math.abs(d.xScale.max - bounds[1]) <= 5;
+    }""", arg=[from_ns / 1e6, to_ns / 1e6], timeout=10000)
+    dbg = page.evaluate("window.__pgwt.aasDebug()")
+    bands = [r for r in dbg["overlays"]["rects"]
+             if r["kind"] in ("sampled", "mixed")]
+    check(len(bands) == 1 and bands[0]["kind"] == "sampled",
+          f"mixed ranges emit exactly one sampled fidelity rect (got {bands})")
+    if len(bands) != 1:
+        return
+    band = bands[0]
+    check(abs(band["x0"] - mid_ms) <= tolerance_ms,
+          f"sampled rect starts at pinned midpoint {mid_ms}ms (x0={band['x0']})")
+    check(abs(band["x0"] - dbg["xScale"]["min"]) > tolerance_ms,
+          f"sampled rect starts inside the window, away from its start "
+          f"(x0={band['x0']}, window start={dbg['xScale']['min']})")
+    check(abs(band["x1"] - to_ns / 1e6) <= tolerance_ms,
+          f"sampled rect ends at pinned window end (x1={band['x1']})")
+
+
+def test_fidelity_exact_shows_no_sub_range_banding(page):
+    """#605: the default exact mock has no sampled/mixed fidelity rects."""
+    print("--- Test #605: Exact fidelity has no sub-range banding ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_function("""() => {
+        const d = window.__pgwt && window.__pgwt.aasDebug();
+        return d && d.mounted && d.hasData && d.overlays;
+    }""", timeout=10000)
+    dbg = page.evaluate("window.__pgwt.aasDebug()")
+    bands = [r for r in dbg["overlays"]["rects"]
+             if r["kind"] in ("sampled", "mixed")]
+    check(len(bands) == 0,
+          f"exact fidelity has no sampled/mixed rects (got {bands})")
 
 
 def test_b5_sampled_shading(page):
@@ -4507,6 +4568,7 @@ def main():
                 test_zoom_out,
                 test_auto_refresh,
                 test_chart_rendering,
+                test_fidelity_exact_shows_no_sub_range_banding,
                 test_concurrency_tab,
                 test_legend_hover_survives_tick,
                 # Track U Phase U2b: uPlot default renderer
@@ -4647,6 +4709,23 @@ def main():
             finally:
                 set_failure_capture(page, guard)
                 stop_mock_server(neartie_proc)
+
+            # #605: mixed ranges need a dedicated mock and browser context.
+            mixed_proc = start_mock_server(
+                extra_env={"PGWT_MOCK_FIDELITY": "mixed"}, port=MIXED_PORT)
+            try:
+                mixed_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+                mixed_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+                mixed_page = mixed_ctx.new_page()
+                mixed_guard = ConsoleErrorGuard(mixed_page)
+                set_failure_capture(mixed_page, mixed_guard)
+                test_fidelity_mixed_sub_range_banding(mixed_page)
+                assert_no_console_errors(
+                    mixed_page, mixed_guard, "test_fidelity_mixed_sub_range_banding")
+                mixed_ctx.close()
+            finally:
+                set_failure_capture(page, guard)
+                stop_mock_server(mixed_proc)
 
             # Reconnection test (kills/restarts mock server) — connection
             # failures during the outage are expected, everything else fails.
