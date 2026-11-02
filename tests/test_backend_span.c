@@ -1432,13 +1432,19 @@ static struct pgwt_trace_event *straddle_concat(struct pgwt_server *srv,
     uint64_t context_from = req->start_ns > EXEC_PLAN_LOOKBACK_NS
                           ? req->start_ns - EXEC_PLAN_LOOKBACK_NS : 0;
     struct pgwt_trace_event *chunks[3];
+    /* PGWT_LOAD_CONTEXT and the _context window wrapper, because that is
+     * what handle_execution_detail passes (#728): all three of these loads
+     * are bounded by the selected execution or a fixed look-back, not by the
+     * request's range, and this helper exists to be the SAME seam. */
     chunks[0] = server_load_markers_fi(srv, context_from, req->start_ns - 1,
-                                      PID_SORD, &counts[0], &info[0]);
-    chunks[1] = server_load_events_fi(srv, req->start_ns, req->end_ns, 0,
-                                     &counts[1], &info[1]);
+                                      PID_SORD, PGWT_LOAD_CONTEXT,
+                                      &counts[0], &info[0]);
+    chunks[1] = server_load_events_fi_context(srv, req->start_ns, req->end_ns,
+                                     0, &counts[1], &info[1]);
     chunks[2] = server_load_markers_fi(srv, req->end_ns + 1,
                                       req->end_ns + EXEC_PLAN_LOOKBACK_NS,
-                                      PID_SORD, &counts[2], &info[2]);
+                                      PID_SORD, PGWT_LOAD_CONTEXT,
+                                      &counts[2], &info[2]);
     *count = counts[0] + counts[1] + counts[2];
     struct pgwt_trace_event *events =
         malloc((size_t)(*count > 0 ? *count : 1) * sizeof(*events));
@@ -1476,7 +1482,7 @@ static void test_straddler_order(struct pgwt_server *srv_s)
      * straddler's own late closing timestamp in the execution window. */
     int wn = 0;
     struct pgwt_load_info wi = {0};
-    struct pgwt_trace_event *we = server_load_events_fi(
+    struct pgwt_trace_event *we = server_load_events_fi_context(
         srv_s, req.start_ns, req.end_ns, 0, &wn, &wi);
     CHECK(we != NULL && wn > 0,
           "9a: the real window load has records -- an empty fixture would "
@@ -1589,7 +1595,8 @@ static void test_straddler_order(struct pgwt_server *srv_s)
     setenv("PGWT_STRADDLE_LOOKAHEAD_NS", "0", 1);
     wn = 0;
     memset(&wi, 0, sizeof(wi));
-    we = server_load_events_fi(srv_s, req.start_ns, req.end_ns, 0, &wn, &wi);
+    we = server_load_events_fi_context(srv_s, req.start_ns, req.end_ns, 0,
+                                       &wn, &wi);
     late = 0;
     for (int i = 0; we && i < wn; i++)
         if (we[i].timestamp_ns > req.end_ns) late++;
@@ -1618,7 +1625,8 @@ static void test_straddler_order(struct pgwt_server *srv_s)
     unsetenv("PGWT_STRADDLE_LOOKAHEAD_NS");
     wn = 0;
     memset(&wi, 0, sizeof(wi));
-    we = server_load_events_fi(srv_s, req.start_ns, req.end_ns, 0, &wn, &wi);
+    we = server_load_events_fi_context(srv_s, req.start_ns, req.end_ns, 0,
+                                       &wn, &wi);
     CHECK(wi.straddlers_admitted >= 1,
           "9d: restoring lookahead admits the straddler again -- a leaked "
           "environment variable must not silently disable the later hazard");

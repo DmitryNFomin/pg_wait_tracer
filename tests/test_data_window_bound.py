@@ -38,13 +38,22 @@ DUR_NS = 1_000_000  # 1 ms per event
 
 # ── #728 ───────────────────────────────────────────────────────────────────
 # The refusal pgwt-server prints to its OWN stderr when a raw load hits the
-# bound. Both loaders that can hit it (the fidelity merge and the
-# retained-marker prefix) used to append " or add a pid/query filter" on the
-# pid == 0 arm. Neither loader takes a filter argument at all, so a query
-# filter is never pushed into the load and cannot change the count being
-# reported; the line now names only a narrower time range.
+# bound (src/server.c report_load_overload). Every arm used to append " or
+# add a pid/query filter" when pid == 0; no loader there takes a filter
+# argument at all, so a query filter is never pushed into any of them.
+#
+# The arms are NOT interchangeable, which is the point of round 2: each names
+# the reduction that is true for ITS load, and the test asserts per arm.
+#   WINDOW  [req.from, req.to] -- narrowing the range reduces it.
+#   PREFIX  [trace start, window left edge - 1]: takes only an upper bound
+#           and both callers pass `from - 1`, so the count IGNORES `to` and
+#           GROWS as `from` rises. Narrowing is inert or counterproductive;
+#           an earlier start and (when still unscoped) a pid filter are the
+#           reductions that work, and the fixture below measures both.
+#   CONTEXT bounds derived from a selected execution or a fixed look-back, so
+#           the requested range does not set them at all.
 REFUSAL_PREFIX = "ERROR: window too large:"
-REFUSAL_TAIL = "— narrow the time range"
+WINDOW_TAIL = "— narrow the time range"
 S = 1_000_000_000
 MS = 1_000_000
 MARKER_EXEC_START = 0xFFFFFFF0
@@ -52,11 +61,21 @@ MARKER_EXEC_END = 0xFFFFFFF1
 # 2 * PFX_PAIRS markers before the window vs PFX_BOUND: the prefix pass
 # overflows while the in-window load (5 events) stays far under the same
 # bound, so the refusal under test comes from the PREFIX loader and not from
-# the window loader the case above already covers.
+# the window loader the case above already covers. PFX_PID_BOUND sits between
+# ONE pid's prefix (2 * PFX_PAIRS / PFX_NPIDS = 120 markers) and the whole
+# fixture's, which is what makes the pid-scoped prefix refusal reachable
+# without the window load refusing first.
 PFX_PAIRS = 1_200
+PFX_NPIDS = 20
 PFX_BOUND = 1_500
+PFX_PID_BOUND = 100
 PFX_WIN_FROM = BASE_TS + 60 * S
 PFX_WIN_TO = PFX_WIN_FROM + 1 * S
+# An earlier start for the SAME trace: the prefix is then only the markers
+# before BASE_TS + 2 s, and the window stays small enough that its own
+# separate bound is not the thing being measured.
+PFX_EARLY_FROM = BASE_TS + 2 * S
+PFX_EARLY_TO = BASE_TS + 3 * S
 
 
 def build_prefix_scenario():
@@ -101,100 +120,227 @@ def read_stderr(path):
         return f.read()
 
 
-def check_refusal(t, label, err, scope, forbidden_scope):
+def grade_refusal(t, label, err, must_have, must_not_have, ends_with=None):
     """Grade every "window too large:" line pgwt-server printed.
 
-    Three assertions, and all three are needed:
-      * at least one line exists. Without it the two below are vacuous on an
-        empty stderr — the exact false negative that lets a deleted or
-        unreached message pass as "no bad advice found";
-      * every such line ENDS at "narrow the time range". This is the
-        discriminating one: the pre-#728 line also contained that phrase, in
-        the middle, followed by " or add a pid/query filter", so only the
-        line's END separates the two texts;
-      * no such line mentions a filter in ANY phrasing, so the advice cannot
-        return reworded.
+    The FIRST assertion is the one that keeps the rest honest: at least one
+    such line must exist. Without it every `all(...)` below is true of an
+    empty list, which is how a deleted, unreached or silent message passes as
+    "no bad advice found" — the false negative, not the true positive, is the
+    failure mode this file has to survive.
+
+    There is deliberately no blanket "the word filter never appears": the
+    PREFIX arm's correct wording NAMES a pid filter, because that is the
+    reduction that works there. Expectations are per arm, passed in.
     """
     lines = [ln.rstrip() for ln in err.splitlines()
              if ln.startswith(REFUSAL_PREFIX)]
     t.check(len(lines) >= 1,
             f"{label}: pgwt-server printed its own refusal line "
             f"(stderr holds {len(err)} bytes)")
-    t.check(all(ln.endswith(REFUSAL_TAIL) for ln in lines),
-            f"{label}: every refusal line ends at '{REFUSAL_TAIL}' "
-            f"(got {lines})")
-    t.check(all("filter" not in ln for ln in lines),
-            f"{label}: no refusal line advises a filter the load never "
-            f"receives (got {lines})")
-    t.check(all(scope in ln for ln in lines),
-            f"{label}: every refusal line names the scope that overflowed "
-            f"('{scope}') (got {lines})")
-    t.check(all(forbidden_scope not in ln for ln in lines),
-            f"{label}: no refusal line claims the other scope "
-            f"('{forbidden_scope}') (got {lines})")
+    for s in must_have:
+        t.check(all(s in ln for ln in lines),
+                f"{label}: every refusal line says '{s}' (got {lines})")
+    for s in must_not_have:
+        t.check(all(s not in ln for ln in lines),
+                f"{label}: no refusal line says '{s}' (got {lines})")
+    if ends_with is not None:
+        t.check(all(ln.endswith(ends_with) for ln in lines),
+                f"{label}: every refusal line ends at '{ends_with}' "
+                f"(got {lines})")
+
+
+def prefix_passes(err):
+    """(path, markers) for each prefix pass pgwt-server reported.
+
+    PGWT_EXEC_PREFIX_DEBUG=1 makes the server name the implementation it
+    chose and the marker count it produced. Read it rather than assuming:
+    the two implementations are selected at run time, and a case that
+    silently exercised the other one proves nothing about the one it claims.
+    """
+    out = []
+    for ln in err.splitlines():
+        if not ln.startswith("pgwt-prefix: path="):
+            continue
+        path = ln.split("path=", 1)[1].split()[0]
+        markers = int(ln.split("markers=", 1)[1].split()[0])
+        out.append((path, markers))
+    return out
+
+
+def ask(trace_dir, env, err_path, cmd, **kwargs):
+    """One request to a fresh server, returning (response, stderr text)."""
+    with ServerHarness(trace_dir, env=env, stderr_path=err_path) as srv:
+        resp = srv.query(cmd, **kwargs)
+    return resp, read_stderr(err_path)
+
+
+def check_window_arm(t, err_dir):
+    """The request's own range: narrowing it IS the reduction."""
+    trace_dir = generate_traces(build_scenario())
+    try:
+        # pid == 0: the arm that carried the impossible pid/query advice.
+        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
+                        os.path.join(err_dir, "window-unfiltered.err"),
+                        "time_model")
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "window/pid==0: the load really did refuse, so the "
+                   "assertions below are not vacuous")
+        grade_refusal(t, "window/pid==0", err,
+                      must_have=["the requested range holds",
+                                 "across all pids"],
+                      # No filter of any kind is named on this arm: five
+                      # callers hardcode pid 0 and drop the request's pid
+                      # filter, and no loader here sees a query filter at all.
+                      must_not_have=["filter", "for this pid",
+                                     "prefix", "context load"],
+                      ends_with=WINDOW_TAIL)
+
+        # pid != 0: one pid's 2,000 events over a 1,000 bound. This arm never
+        # carried the advice; it is here so a change that collapses the arms
+        # into one sentence cannot pass.
+        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 1_000},
+                        os.path.join(err_dir, "window-pid.err"),
+                        "time_model", filters={"pid": 1001})
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "window/pid!=0: the pid-scoped load really did refuse")
+        grade_refusal(t, "window/pid!=0", err,
+                      must_have=["the requested range holds", "for this pid"],
+                      must_not_have=["filter", "across all pids", "prefix"],
+                      ends_with=WINDOW_TAIL)
+
+        # CONTEXT: handle_execution_detail's load is bounded by the SELECTED
+        # EXECUTION (req.start_ns/end_ns), not req.from/to, and it passes
+        # pid 0 on purpose so worker lanes stay visible. So neither narrowing
+        # the range nor a pid filter reduces it, and the refusal must say so
+        # instead of repeating the window arm's advice.
+        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 1_000},
+                        os.path.join(err_dir, "context.err"),
+                        "execution_detail", filters={"pid": 1001},
+                        start_ns=str(BASE_TS), end_ns=str(BASE_TS + 2 * S))
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "context: the execution-bounded load really did refuse")
+        grade_refusal(t, "context", err,
+                      must_have=["a bounded context load",
+                                 "narrowing the range does not reduce it",
+                                 "PGWT_LOAD_MAX_EVENTS"],
+                      must_not_have=[WINDOW_TAIL, "start the window earlier",
+                                     "add a pid filter"])
+    finally:
+        cleanup_traces(trace_dir)
+
+
+def check_prefix_arm(t, err_dir):
+    """The execution-marker prefix: narrowing the window does NOT reduce it.
+
+    `server_load_exec_prefix` takes only an upper bound and both callers pass
+    `from - 1`, so the count ignores `to` and grows as `from` rises. Each
+    case below reads the `pgwt-prefix: path=` line to pin WHICH
+    implementation refused, because the two have separate copies of the
+    message and a case that silently ran the other one would prove nothing.
+    """
+    trace_dir = generate_traces(build_prefix_scenario())
+    try:
+        prefix_must_have = ["the execution-marker prefix",
+                            "start the window earlier"]
+        prefix_must_not = [WINDOW_TAIL, "a bounded context load"]
+
+        for label, extra_env, want_path in (
+                ("prefix/index", {}, "index"),
+                # The legacy full decode goes through the GENERAL loader
+                # (server_load_markers_fi), so this case is what proves the
+                # prefix purpose survives that fallback instead of the
+                # general loader's window wording leaking back in.
+                ("prefix/legacy", {"PGWT_EXEC_PREFIX_INDEX": "0"}, "legacy")):
+            env = {"PGWT_LOAD_MAX_EVENTS": PFX_BOUND,
+                   "PGWT_EXEC_PREFIX_DEBUG": "1"}
+            env.update(extra_env)
+            resp, err = ask(trace_dir, env,
+                            os.path.join(err_dir, label.replace("/", "-")
+                                         + ".err"),
+                            "executions", from_=PFX_WIN_FROM, to_=PFX_WIN_TO)
+            t.check_eq(resp.get("code"), "window_too_large",
+                       f"{label}: the prefix pass really did refuse")
+            passes = prefix_passes(err)
+            t.check(any(p == want_path for p, _ in passes),
+                    f"{label}: the refusing pass is the {want_path} "
+                    f"implementation, so its own copy of the line is what "
+                    f"was graded (got {passes})")
+            grade_refusal(t, label, err,
+                          must_have=prefix_must_have + ["across all pids",
+                                                        "add a pid filter"],
+                          must_not_have=prefix_must_not + ["for this pid"])
+
+        # Already pid-scoped: the earlier start is still available, a pid
+        # filter is not, so the line must not suggest one. Bound sits between
+        # one pid's prefix and the window load's 5 events.
+        resp, err = ask(trace_dir,
+                        {"PGWT_LOAD_MAX_EVENTS": PFX_PID_BOUND,
+                         "PGWT_EXEC_PREFIX_DEBUG": "1"},
+                        os.path.join(err_dir, "prefix-pid.err"),
+                        "executions", from_=PFX_WIN_FROM, to_=PFX_WIN_TO,
+                        filters={"pid": 3000})
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "prefix/pid!=0: the pid-scoped prefix really did refuse")
+        grade_refusal(t, "prefix/pid!=0", err,
+                      must_have=prefix_must_have + ["for this pid"],
+                      must_not_have=prefix_must_not + ["add a pid filter",
+                                                       "across all pids"])
+
+        # ── The advice, MEASURED rather than asserted ──────────────────────
+        # Same trace, same bound. The prefix marker count the server itself
+        # reports must fall when the window starts earlier and when the
+        # request is pid-scoped — otherwise the new text names reductions
+        # that do not reduce, which is the defect this issue is about.
+        env = {"PGWT_LOAD_MAX_EVENTS": PFX_BOUND,
+               "PGWT_EXEC_PREFIX_DEBUG": "1"}
+        _, err_late = ask(trace_dir, env,
+                          os.path.join(err_dir, "reduce-late.err"),
+                          "executions", from_=PFX_WIN_FROM, to_=PFX_WIN_TO)
+        resp_early, err_early = ask(trace_dir, env,
+                                    os.path.join(err_dir, "reduce-early.err"),
+                                    "executions", from_=PFX_EARLY_FROM,
+                                    to_=PFX_EARLY_TO)
+        resp_pid, err_pid = ask(trace_dir, env,
+                                os.path.join(err_dir, "reduce-pid.err"),
+                                "executions", from_=PFX_WIN_FROM,
+                                to_=PFX_WIN_TO, filters={"pid": 3000})
+        late = prefix_passes(err_late)
+        early = prefix_passes(err_early)
+        scoped = prefix_passes(err_pid)
+        t.check(len(late) == 1 and len(early) == 1 and len(scoped) == 1,
+                "reduction: one prefix pass per request, so the counts "
+                f"compared below are the right ones (late={late} "
+                f"early={early} scoped={scoped})")
+        n_late = late[0][1] if late else -1
+        n_early = early[0][1] if early else -1
+        n_scoped = scoped[0][1] if scoped else -1
+        t.check(n_late >= PFX_BOUND,
+                "reduction: the late unscoped prefix is the one that hit the "
+                f"bound ({n_late} >= {PFX_BOUND})")
+        t.check(0 < n_early < n_late,
+                "reduction: starting the window earlier really does shrink "
+                f"the prefix load ({n_early} < {n_late}, and non-empty)")
+        t.check(0 < n_scoped < n_late,
+                "reduction: a pid filter really does shrink the prefix load "
+                f"({n_scoped} < {n_late}, and non-empty)")
+        t.check(resp_early.get("code") != "window_too_large",
+                "reduction: the earlier start clears the prefix refusal "
+                f"(code={resp_early.get('code')})")
+        t.check(resp_pid.get("code") != "window_too_large",
+                "reduction: the pid scope clears the prefix refusal "
+                f"(code={resp_pid.get('code')})")
+    finally:
+        cleanup_traces(trace_dir)
 
 
 def check_loader_refusal_lines(t):
-    """#728: the two loader-level refusals, on both pid arms."""
-    trace_dir = generate_traces(build_scenario())
+    """#728: one arm per load purpose, each naming a reduction that works."""
     err_dir = tempfile.mkdtemp(prefix="pgwt_stderr_")
     try:
-        # pid == 0: the arm that used to carry the impossible advice.
-        err = os.path.join(err_dir, "unfiltered.err")
-        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 5_000},
-                           stderr_path=err) as srv:
-            resp = srv.query("time_model")
-        t.check_eq(resp.get("code"), "window_too_large",
-                   "stderr/pid==0: the load really did refuse, so the "
-                   "assertions below are not vacuous")
-        check_refusal(t, "stderr/pid==0", read_stderr(err),
-                      "across all pids", "for this pid")
-
-        # pid != 0: one pid's 2,000 events over a 1,000 bound. The pid arm
-        # never carried the advice; it is here so a fix that collapsed both
-        # arms into one sentence cannot pass.
-        err = os.path.join(err_dir, "pid.err")
-        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1_000},
-                           stderr_path=err) as srv:
-            resp = srv.query("time_model", filters={"pid": 1001})
-        t.check_eq(resp.get("code"), "window_too_large",
-                   "stderr/pid!=0: the pid-scoped load really did refuse")
-        check_refusal(t, "stderr/pid!=0", read_stderr(err),
-                      "for this pid", "across all pids")
+        check_window_arm(t, err_dir)
+        check_prefix_arm(t, err_dir)
     finally:
-        cleanup_traces(trace_dir)
-        shutil.rmtree(err_dir, ignore_errors=True)
-
-    # The retained-marker prefix is a SECOND loader with its own copy of this
-    # line (src/server.c server_load_prefix_from_index). Reached through
-    # `executions` with an explicit window that starts after the trace does.
-    trace_dir = generate_traces(build_prefix_scenario())
-    err_dir = tempfile.mkdtemp(prefix="pgwt_stderr_")
-    try:
-        err = os.path.join(err_dir, "prefix.err")
-        with ServerHarness(trace_dir,
-                           env={"PGWT_LOAD_MAX_EVENTS": PFX_BOUND,
-                                "PGWT_EXEC_PREFIX_DEBUG": "1"},
-                           stderr_path=err) as srv:
-            resp = srv.query("executions", from_=PFX_WIN_FROM,
-                             to_=PFX_WIN_TO)
-        t.check_eq(resp.get("code"), "window_too_large",
-                   "stderr/prefix: the prefix pass really did refuse")
-        raw = read_stderr(err)
-        # Which of the two prefix implementations ran is pgwt-server's own
-        # choice, so READ it instead of assuming: if this fell back to the
-        # legacy decode, the index copy of the message was never printed and
-        # this case proves nothing about it.
-        paths = [ln for ln in raw.splitlines()
-                 if ln.startswith("pgwt-prefix: path=")]
-        t.check(any("path=index" in ln for ln in paths),
-                "stderr/prefix: the retained-index prefix is the pass that "
-                f"refused, so its own copy of the line is what was graded "
-                f"(got {paths})")
-        check_refusal(t, "stderr/prefix", raw, "across all pids",
-                      "for this pid")
-    finally:
-        cleanup_traces(trace_dir)
         shutil.rmtree(err_dir, ignore_errors=True)
 
 
