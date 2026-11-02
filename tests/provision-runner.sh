@@ -593,6 +593,25 @@ case "$OS" in
         ln -sf "$(command -v python3.11)" /usr/local/bin/python3
         python3 --version
 
+        # Real bug found running this live: RHEL/Rocky's default sudoers
+        # `secure_path` is `/sbin:/bin:/usr/sbin:/usr/bin` -- unlike
+        # Ubuntu's, it does NOT include /usr/local/bin. scripts/box-check.sh
+        # invokes the live tests as `sudo env ... tests/run_all.sh`, so
+        # without this, sudo's secure_path silently overrides the symlink
+        # above and every test subprocess gets EL8's stock python3.6
+        # (TypeError: __init__() got an unexpected keyword argument 'text'
+        # / 'capture_output', both 3.7+-only). Same write-validate-install
+        # pattern as the runner sudoers entry below: validate a private
+        # temp copy before installing it, never edit /etc/sudoers directly.
+        log "adding /usr/local/bin to sudo's secure_path (python3.11, bpftool)"
+        SECURE_PATH_TMP=$(mktemp)
+        cat > "$SECURE_PATH_TMP" <<'EOF'
+Defaults secure_path = "/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+EOF
+        visudo -cf "$SECURE_PATH_TMP"
+        install -m 0440 -o root -g root "$SECURE_PATH_TMP" /etc/sudoers.d/91-secure-path
+        rm -f "$SECURE_PATH_TMP"
+
         log "installing Playwright + websockets + Pillow + numpy for root's python3"
         python3.11 -m pip install -q playwright==1.60.0 websockets pillow numpy
 
