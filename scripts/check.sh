@@ -71,8 +71,14 @@ fi
 step "bash: .gitignore covers every tests/ build product (tree-hash integrity)"
 run bash tests/test_gitignore_build_products.sh
 
+step "POSIX shell: Codex task wrapper self-test"
+run scripts/lead/codex-task-selftest.sh
+
 step "bash: pr-ready ordering and refusal self-test (#701)"
 run bash tests/test_pr_ready.sh
+
+step "PR state drift sweep and disposition self-test (#717)"
+run python3 scripts/lead/selftest-pr-state.py
 
 # The summary format version is the one number in the docs with an
 # OPERATIONAL consequence: DEMO_RUNBOOK.md tells the operator which trace

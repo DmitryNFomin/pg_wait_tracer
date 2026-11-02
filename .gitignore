@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# Local agent notes must not enter commits or invalidate the check stamp.
+scratchpad/
+
 # Build artifacts
 build/
 pg_wait_tracer
