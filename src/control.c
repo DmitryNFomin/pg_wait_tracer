@@ -627,11 +627,11 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                          ? d->summary_writer->file_start_widen_failures_total
                          : 0);
     /* The `#if PGWT_SUMMARY_VERSION >= 9` agent/424-daemon wrapped
-     * these in is deliberately NOT taken: the constant is 9, so it
-     * is true today and buys nothing, while tests/test_control.sh
-     * asserts all seven keys by name unconditionally. A live
-     * conditional over a version constant is how the producer got
-     * hidden the first time. */
+     * these in is deliberately NOT taken: PGWT_SUMMARY_VERSION
+     * (src/summary_writer.h) is >= 9 today, so the guard is true and buys
+     * nothing, while tests/test_control.sh asserts all seven keys by name
+     * unconditionally. A live conditional over a version constant is how
+     * the producer got hidden the first time. */
     /* v9 (#424): the producer is wired in src/map_reader.c's
      * pgwt_read_state_map. CORRECTED 2026-10-28, because this paragraph said
      * the opposite and a live capture refuted it: a zero

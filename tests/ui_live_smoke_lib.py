@@ -20,6 +20,8 @@ import shutil
 import numpy as np
 from PIL import Image
 
+from testutil import phase_contract_verdict
+
 # The 11 tabs in the order they appear in web/static/index.html.
 TABS = [
     "overview", "events", "sessions", "queries", "histogram", "timeline",
@@ -1818,6 +1820,17 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
     return _apply_known_failing(result)
 
 
+def phase_tab_expectation(expected_phase, observed_masks, tab_results):
+    """#622: the two marker-dependent tabs must measure their rows/points.
+    Missing measurements stay unreadable; they can never become empty data.
+    """
+    artifacts = {}
+    for tab in ("waterfall", "scatter"):
+        result = next((r for r in tab_results if r.get("tab") == tab), {})
+        artifacts[tab] = result.get("marker_count", "not measured")
+    return phase_contract_verdict(expected_phase, observed_masks, artifacts)
+
+
 def build_summary(tab_results):
     """Assembles the top-level tests/results/ui_live/summary.json payload.
     `ok` reflects only unlisted tabs (or listed tabs that happened to pass):
@@ -1827,12 +1840,14 @@ def build_summary(tab_results):
     visible instead of silent."""
     excused = [t["tab"] for t in tab_results if t.get("known_failing")]
     failed_tabs = [t["tab"] for t in tab_results
-                   if not t["ok"] and not t.get("known_failing")]
+                   if not t["ok"] and not t.get("known_failing")
+                   and not t.get("refused")]
     ok = len(tab_results) > 0 and len(failed_tabs) == 0
     return {
         "ok": ok,
         "tabs": {t["tab"]: t for t in tab_results},
         "failed_tabs": failed_tabs,
+        "refused_tabs": [t["tab"] for t in tab_results if t.get("refused")],
         "known_failing_tabs": excused,
         "xpass_tabs": [t["tab"] for t in tab_results if t.get("xpass")],
     }

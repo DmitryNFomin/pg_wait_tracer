@@ -2633,6 +2633,38 @@ def test_bypass_guard_with_no_resolvable_base_refuses():
     check(not ok3, "an empty gating dir refuses")
 
 
+def test_phase_tab_expectation():
+    """#622: the UI's pure gate checks both declarations and cannot be blind."""
+    present = [{"tab": "waterfall", "marker_count": 4},
+               {"tab": "scatter", "marker_count": 7}]
+    absent = [{"tab": "waterfall", "marker_count": 0},
+              {"tab": "scatter", "marker_count": None}]
+    for expected, masks, tabs, want, label in (
+            (0xC, [3, 7, 15], present, "pass", "phase tabs present as declared"),
+            (0, [3, 3], absent, "refuse", "phase tabs absent as declared"),
+            (0, [15], present, "fail", "present while declared absent"),
+            (0, [3], present, "fail", "rows contradict declared absence"),
+            (0xC, [3], absent, "fail", "absent while declared present"),
+            (0xC, [15], absent, "fail", "attached but empty still fails"),
+            (0, [], absent, "fail", "no mask sampled cannot approve"),
+            (0, [3], [], "fail", "no tab response cannot become absent")):
+        verdict, reason = lib.phase_tab_expectation(expected, masks, tabs)
+        check(verdict == want, "%s: %s (%s)" % (label, verdict, reason))
+
+    summary = lib.build_summary([
+        {"tab": "overview", "ok": True},
+        {"tab": "waterfall", "ok": False, "refused": True},
+        {"tab": "scatter", "ok": False, "refused": True}])
+    check(summary["ok"] and not summary["failed_tabs"]
+          and summary["refused_tabs"] == ["waterfall", "scatter"],
+          "refused tabs are reported separately from passed/failed tabs")
+    summary = lib.build_summary([
+        {"tab": "overview", "ok": False},
+        {"tab": "waterfall", "ok": False, "refused": True}])
+    check(not summary["ok"] and summary["failed_tabs"] == ["overview"],
+          "a phase refusal cannot hide an unrelated UI failure")
+
+
 def _discover_tests():
     """Every callable named test_* defined at module level, in declaration
     order (by source line). Replaces a hand-maintained TESTS list (issue #93
