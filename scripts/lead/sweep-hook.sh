@@ -27,6 +27,8 @@
 # through regardless of whether that disposition covers everything -- and
 # does NOT consume the dispositions file, so that unevaluated response gets
 # exactly one real evaluation, at the next stop_hook_active=false Stop.
+# SubagentStop only refreshes/displays the cache: it must never consume the
+# lead's dispositions or run either blocking gate.
 #
 # .dispositions is read into memory and truncated BEFORE it is evaluated
 # (never evaluated by re-reading the file). That closes the crash window by
@@ -45,13 +47,14 @@ CACHE="$D/.sweep-latest.txt"; LOG="$D/.sweep.log"; MAXAGE=600   # 10 min
 DISP="$D/.dispositions"
 
 input="$(cat)"
-stop_active=$(printf '%s' "$input" | /usr/bin/python3 -c '
+read -r stop_active hook_event_name < <(printf '%s' "$input" | /usr/bin/python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     d = {}
-print("true" if d.get("stop_hook_active") is True else "false")
+print("true" if d.get("stop_hook_active") is True else "false",
+      "SubagentStop" if d.get("hook_event_name") == "SubagentStop" else "other")
 ' 2>/dev/null)
 [ "$stop_active" = "true" ] || stop_active=false
 
@@ -92,6 +95,12 @@ n=$(/usr/bin/grep -acE 'FINDING|CANDIDATE|UNKNOWN' "$CACHE" 2>/dev/null || true)
 c=$(/usr/bin/grep -acE 'CANDIDATE' "$CACHE" 2>/dev/null || true)
 [ -n "$c" ] && [ "$c" -gt 0 ] && printf '   (+%d CANDIDATE lines -- a mention is not a fix; verify content on master)\n' "$c"
 printf '=== %s open items. Act on them or say why not. ===\n' "${n:-UNKNOWN}"
+
+# A subagent stopping is not the lead's turn boundary. Keep its cache refresh
+# above, but never touch $DISP or evaluate either gate for this event.
+if [ "$hook_event_name" = "SubagentStop" ]; then
+  exit 0
+fi
 
 # ---- the blocking gate ------------------------------------------------------
 # Loop protection first, per the docs cited above: never re-evaluate once
@@ -144,7 +153,8 @@ fi
 # ---- the escalating-obligation gate ----------------------------------------
 # A ready-not-started item (see sweep.sh section [9]) that survives ESC_N
 # consecutive successful scans stops accepting MY-CHOICE/ACTED/UNKNOWN: only
-# RUNNING or BLOCKED-BY satisfies it from here. ESC_N counts actual sweep.sh
+# RUNNING, BLOCKED-BY or independently verified HELD-BY satisfies it from
+# here. ESC_N counts actual sweep.sh
 # executions, not Stop events -- sweep-hook.sh above only reruns sweep.sh
 # once the cache is >= MAXAGE (600s) old, so consecutive scans are already
 # at least 10 minutes apart in wall-clock time regardless of how many turns
@@ -169,9 +179,9 @@ dq_age=999999
 if [ "$dq_age" -ge "$MAXAGE" ]; then
   echo "DISPATCH QUEUE: STALE or missing (>= ${MAXAGE}s old) -- escalation suspended until a fresh sweep succeeds"
 else
-  esc_out=$(ESC_DISP_CONTENT="$disp_content" /usr/bin/python3 - "$DQ" "$ESC_N" <<'PY'
-import os, re, sys
-dq, N = sys.argv[1], int(sys.argv[2])
+  esc_out=$(ESC_DISP_CONTENT="$disp_content" /usr/bin/python3 - "$DQ" "$ESC_N" "$D/held.sh" <<'PY'
+import os, re, subprocess, sys
+dq, N, held_script = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 disp = os.environ.get("ESC_DISP_CONTENT", "")
 try:
     with open(dq) as f:
@@ -236,8 +246,25 @@ for rid, num, count, title in forced:
     bm = pat_blocked.search(disp)
     if bm and bm.group(1) in all_ids:
         continue
+    pat_held = re.compile(r'^HELD-BY[ \t]+([0-9]+)[ \t]+(\S+)[ \t]+\['
+                          + re.escape(rid) + r'\][ \t]*$', re.M)
+    held = False
+    for hm in pat_held.finditer(disp):
+        pr, path = hm.groups()
+        try:
+            result = subprocess.run([held_script, path], capture_output=True, text=True)
+        except (OSError, UnicodeError):
+            continue
+        if result.returncode == 0 and re.search(
+                r'^HELD ' + re.escape(path) + r' by .*#' + re.escape(pr) + r'\b',
+                result.stdout, re.M):
+            held = True
+            break
+    if held:
+        continue
     print(f'MISSING {rid} issue#{num} ready {count} consecutive scans ("{title}") -- '
-          f'needs RUNNING <agent-or-PR> [{rid}] or BLOCKED-BY <id> [{rid}] naming another queue item')
+          f'needs RUNNING <agent-or-PR> [{rid}], BLOCKED-BY <id> [{rid}] naming another queue item, '
+          f'or HELD-BY <pr> <file> [{rid}] verified by held.sh')
 PY
 )
   printf '%s\n' "$esc_out" | /usr/bin/grep '^BANNER ' | sed 's/^BANNER //'
@@ -265,6 +292,7 @@ if [ "$nmissing" -gt 0 ]; then
     printf 'do not satisfy it; only:\n'
     printf '  RUNNING <agent-or-PR> [issue-N]\n'
     printf '  BLOCKED-BY <other-queue-id> [issue-N]\n'
+    printf '  HELD-BY <pr> <file> [issue-N] (verified by held.sh)\n'
     printf -- '-- items lacking a disposition --\n'
     printf '%s' "$missing"
   } >&2

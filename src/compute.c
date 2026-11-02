@@ -3698,6 +3698,11 @@ static int tq_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
     return 0;
 }
 
+/* No production caller since handle_top_queries was changed to force raw.
+ * Retained because test_probe_bounds, test_idle_summary,
+ * test_agg_raw_crosscheck, test_semantics_wire and test_top_wait_backfill pin
+ * its bounds and filter holes. A future summary-side caller must re-read the
+ * N10/N11 class/event-filter holes in test_agg_raw_crosscheck first. */
 void pgwt_compute_top_queries_from_summaries(
     const char *trace_dir, uint64_t from_ns, uint64_t to_ns,
     const struct pgwt_filter *f, double wall_ms,
