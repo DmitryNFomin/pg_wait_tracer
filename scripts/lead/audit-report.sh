@@ -92,20 +92,31 @@ tail -25 "$OUT"
 # not a verdict. Remember the last line and detect conflicting distinct values.
 STATS=$(/usr/bin/awk '
   /^VERDICT: (SEND|BLOCK)[[:space:]]*$/ {
-    verdict=$2; line=NR; seen[verdict]=1
+    pvn++; pverd[pvn] = $2; p_last_line = NR
   }
   /^(VERIFIED|WRONG|UNVERIFIABLE)([[:space:]]|$)/ ||
   / -> (VERIFIED|WRONG|UNVERIFIABLE)([[:space:]]|$)/ {
     match($0, /(^| -> )(VERIFIED|WRONG|UNVERIFIABLE)([[:space:]]|$)/)
-    status=substr($0, RSTART, RLENGTH)
-    sub(/^ -> /, "", status)
-    sub(/[[:space:]].*$/, "", status)
-    count[status]++
+    status = substr($0, RSTART, RLENGTH)
+    sub(/^ -> /, "", status); sub(/[[:space:]].*$/, "", status)
+    pcount[status]++
   }
+  /^codex[[:space:]]*\r?$/ {
+    if (prev == "") { pvn = 0; p_last_line = 0; delete pverd; delete pcount }
+  }
+  { prev = $0 }
   END {
-    printf "%d %d %d %s %d %d\n", count["VERIFIED"], count["WRONG"],
-      count["UNVERIFIABLE"], verdict ? verdict : "NONE", line,
-      (seen["SEND"] + seen["BLOCK"])
+    if (pvn == 0) {
+      printf "%d %d %d NONE 0 0\n", pcount["VERIFIED"]+0, pcount["WRONG"]+0,
+        pcount["UNVERIFIABLE"]+0
+      exit
+    }
+    last_val = pverd[pvn]
+    distinct_seen[last_val] = 1; distinct = 1
+    for (i = 1; i <= pvn; i++)
+      if (!(pverd[i] in distinct_seen)) { distinct_seen[pverd[i]] = 1; distinct++ }
+    printf "%d %d %d %s %d %d\n", pcount["VERIFIED"]+0, pcount["WRONG"]+0,
+      pcount["UNVERIFIABLE"]+0, last_val, p_last_line, distinct
   }
 ' "$OUT") || {
   printf '\nAUDIT MALFORMED (cannot parse output) -- treat as BLOCK. draft=%s\n' "$H"

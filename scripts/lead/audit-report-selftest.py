@@ -3,9 +3,9 @@
 
 Run directly, or pass --output-dir DIR to keep drafts, raw auditor output, and
 console transcripts for review. No GitHub/Hetzner credentials or packages needed.
-Control 1 uses echoed prompt choices for its early BLOCK: two standalone
-conflicting verdicts are control 2 and must fail closed. The task's literal
-control 1 contradicts that requirement.
+Only the final turn, delimited by a blank line followed by a codex role header,
+contributes verdicts and tallies. Same-turn conflicting verdicts must fail
+closed; cross-turn convergence must not. Without boundaries, use the whole file.
 """
 import argparse
 import hashlib
@@ -122,7 +122,15 @@ def exercise(root):
     _, _, prompt = run("15-absence-prepass", "", 1, "VERDICT BLOCK",
                        draft_text="The feature does not exist.\n")
     assert not prompt.exists(), "absence pre-pass must block before codex"
-    print("PASS: prompt-choice control 1, controls 2-8, and regression controls 9-15.")
+    _, console, _ = run("16-cross-turn-convergence",
+                        "A -> WRONG early finding, later corrected\nVERDICT: BLOCK\n"
+                        "\ncodex\n"
+                        "B -> VERIFIED checked again\nVERDICT: SEND\n", 0,
+                        "VERDICT SEND", "1 verified, 0 wrong, 0 unverifiable")
+    assert "1 wrong" not in console, ("stale WRONG survived turn boundary", console)
+    run("17-codex-without-blank-line", "A -> WRONG x\ncodex\nVERDICT: SEND\n", 1,
+        "VERDICT BLOCK", "0 verified, 1 wrong, 0 unverifiable")
+    print("PASS: prompt-choice control 1, controls 2-8, and regression controls 9-17.")
 
 
 def main():
