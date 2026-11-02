@@ -45,6 +45,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
             test_io_worker_summary test_io_worker_parity \
+            test_summary_qattr_background \
             test_cpu_split_parity \
             test_straddler_accounting \
             test_open_cpu_accounting \
@@ -685,6 +686,17 @@ test_agg_raw_crosscheck: test_agg_raw_crosscheck.c ../src/compute.c \
 # daemon needs libbpf and a BPF skeleton, so its two summary producers cannot
 # be linked here), which is why the recipe needs no daemon objects.
 test_io_worker_summary: test_io_worker_summary.c ../src/compute.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# #667: summary-writer background attribution, pacing exclusion and the
+# total unknown-category refusal. Real writer, in-memory assertions;
+# no compute.c calls, no BPF, no live PG.
+test_summary_qattr_background: test_summary_qattr_background.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \
