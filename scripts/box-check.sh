@@ -27,9 +27,8 @@
 #                     tests/run_all.sh and tests/ui_live_smoke.sh for what
 #                     each one overrides
 #   EPHEMERAL=1       use a throwaway Hetzner VM instead of $PGWT_BOX* (see
-#                     above); OS must be ubuntu (the only OS with a
-#                     pgwt=gate-snapshot image so far). Needs the Hetzner
-#                     token from HCLOUD_TOKEN or the macOS Keychain
+#                     above); needs a pgwt=gate-snapshot image for OS.
+#                     Needs the Hetzner token from HCLOUD_TOKEN or the macOS Keychain
 #                     (`security add-generic-password -s hcloud -a claude_token -w <token>`).
 #   KEEP=1            (EPHEMERAL=1 only) do not delete the VM at the end;
 #                     print the delete command instead.
@@ -175,10 +174,22 @@ ephemeral_cleanup() {
 }
 
 if [[ "$EPHEMERAL" == "1" ]]; then
-    [[ "$OS" == "ubuntu" ]] || { echo "EPHEMERAL=1 only supports OS=ubuntu (the only OS with a pgwt=gate-snapshot image so far)" >&2; exit 2; }
-
     token="$(hcloud_token || true)"
     [[ -n "$token" ]] || { echo "no Hetzner token in the Keychain: security add-generic-password -s hcloud -a claude_token -w <token>" >&2; exit 2; }
+
+    # Availability is a property of the snapshot inventory, not an OS
+    # allow-list. Ubuntu alone accepts the legacy, pre-os-label snapshot.
+    snapshot_os_encoded=$(printf '%s' "$OS" | jq -sRr @uri)
+    snapshot_id=$(curl -s "https://api.hetzner.cloud/v1/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot,os%3D$snapshot_os_encoded&sort=created:desc&per_page=1" \
+        -H "Authorization: Bearer $token" | jq -r '.images[0].id // empty')
+    if [[ -z "$snapshot_id" && "$OS" == "ubuntu" ]]; then
+        snapshot_id=$(curl -s "https://api.hetzner.cloud/v1/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot&sort=created:desc&per_page=1" \
+            -H "Authorization: Bearer $token" | jq -r '.images[0].id // empty')
+    fi
+    if [[ -z "$snapshot_id" ]]; then
+        echo "EPHEMERAL=1: no pgwt=gate-snapshot image exists for OS=$OS (selector pgwt=gate-snapshot,os=$OS). Build one with tests/hetzner-vm.sh create and tests/provision-runner.sh $OS, then snapshot it." >&2
+        exit 2
+    fi
 
     nonce="$(date +%s)-$RANDOM"
     server_name="pgwt-dev-$nonce"
@@ -209,7 +220,7 @@ if [[ "$EPHEMERAL" == "1" ]]; then
     trap 'ephemeral_cleanup; exit 129' HUP
 
     create_out=$(HCLOUD_TOKEN="$token" tests/hetzner-vm.sh create \
-        --type cx33 --image-snapshot latest --name "$server_name" --labels "$labels" \
+        --type cx33 --image-snapshot latest --snapshot-os "$OS" --name "$server_name" --labels "$labels" \
         2> >(tee -a "$log" >&2))
     create_rc=$?
     if [[ $create_rc -ne 0 || -z "$create_out" ]]; then
@@ -229,22 +240,22 @@ if [[ "$EPHEMERAL" == "1" ]]; then
 
     target="root@$server_ip"
 
-    # tests/provision-runner.sh ubuntu is idempotent (comment at its top):
+    # tests/provision-runner.sh $OS is idempotent (comment at its top):
     # a second run against an already-provisioned box (the snapshot IS a
-    # provisioned gate box) is a fast no-op modulo apt/PGDG metadata
+    # provisioned gate box) is a fast no-op modulo apt/dnf/PGDG metadata
     # refresh — its real job here is refreshing bpftool for whatever
     # kernel this VM actually booted (may differ from the snapshot's own
-    # kernel after an Ubuntu security auto-update between snapshot and
+    # kernel after a security auto-update between snapshot and
     # boot) and healing the pgbench dataset if it was ever shrunk. Needs
     # the repo on the box first, hence the early minimal rsync (full rsync
     # + build/test happens below like every other box-check run).
-    echo "box-check: staging repo + running tests/provision-runner.sh ubuntu on $target (refreshes bpftool for this VM's kernel)" | tee -a "$log"
+    echo "box-check: staging repo + running tests/provision-runner.sh $OS on $target (refreshes bpftool for this VM's kernel)" | tee -a "$log"
     ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" "mkdir -p pgwt-provision" 2>>"$log"
     rsync -az -e "ssh -o StrictHostKeyChecking=no" ./tests/provision-runner.sh "$target:pgwt-provision/tests-provision-runner.sh" 2>>"$log"
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" "sudo bash pgwt-provision/tests-provision-runner.sh ubuntu" 2>&1 | tee -a "$log"
+    ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" "sudo bash pgwt-provision/tests-provision-runner.sh $OS" 2>&1 | tee -a "$log"
     provision_rc=${PIPESTATUS[0]}
     if [[ $provision_rc -ne 0 ]]; then
-        echo "box-check: tests/provision-runner.sh ubuntu failed (rc=$provision_rc) on the fresh ephemeral VM" | tee -a "$log" >&2
+        echo "box-check: tests/provision-runner.sh $OS failed (rc=$provision_rc) on the fresh ephemeral VM" | tee -a "$log" >&2
         exit 1
     fi
 else
@@ -404,7 +415,7 @@ sudo_env="$sudo_env PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES"
 # is unavailable, so that package's mere absence does not mean anything is
 # actually broken.
 preflight="if ! bpftool version >/dev/null 2>&1 || [ ! -r /sys/kernel/btf/vmlinux ]"
-preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel change: run tests/provision-runner.sh ubuntu on the box\"; exit 2; fi;"
+preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel change: run tests/provision-runner.sh $OS on the box\"; exit 2; fi;"
 # shellcheck disable=SC2029
 # Lock file self-heal (reviewer round 2): a root-created 0644
 # /tmp/pgwt-box-check.lock (e.g. from a bare `provision-runner.sh` run

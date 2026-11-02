@@ -3,7 +3,7 @@
 # box. Runs ON the box, as root.
 #
 #   tests/provision-runner.sh ubuntu
-#   tests/provision-runner.sh el8    # stub — step 4 of docs/DEV_LOOP_PLAN.md
+#   tests/provision-runner.sh el8
 #   tests/provision-runner.sh el9    # stub — step 4 of docs/DEV_LOOP_PLAN.md
 #
 #   tests/provision-runner.sh ubuntu --runner-token TOKEN
@@ -24,10 +24,10 @@
 #     the exact same `self-hosted,linux,x64,gate-box` set so CI never has to
 #     know how many boxes are in the pool.
 #
-# ubuntu installs everything `make box-check` needs for the LIVE tier
+# ubuntu/el8 install everything `make box-check` needs for the LIVE tier
 # (tests/run_all.sh --require-live): build deps for the daemon + pgwt-server
 # (same recipe as .github/workflows/ci.yml / nightly.yml — the known-good
-# apt + bpftool-fallback steps), the PGDG repo, PostgreSQL 13/16/17/18 (one
+# apt/dnf + bpftool-fallback steps), the PGDG repo, PostgreSQL 13/16/17/18 (one
 # cluster each, on ports 5413/5416/5417/5418, pg_stat_statements preloaded,
 # compute_query_id on for 14+), Go (to build web/pgwt), and Playwright +
 # Chromium + Pillow + numpy for root's python3 (issue #93's live UI smoke,
@@ -42,7 +42,7 @@
 # box for every run.
 #
 # Idempotent: every step is guarded so a second run is a fast no-op modulo
-# apt/PGDG metadata refresh. MUST be re-run after any kernel change (a
+# apt/dnf/PGDG metadata refresh. MUST be re-run after any kernel change (a
 # reboot onto a new kernel, an apt/unattended upgrade that pulls one in,
 # etc.): bpftool's package (and its BTF-dependent vmlinux.h generation
 # step) is tied to the exact running `uname -r`, and a stale
@@ -59,16 +59,15 @@
 # self-trust blocks below.
 #
 # Takes the same lock scripts/box-check.sh uses (see the flock block below):
-# every run unconditionally restarts all four clusters (pg_ctlcluster ...
-# restart), which would otherwise race with an in-flight box-check's live
-# tests from another agent's invocation.
+# every run unconditionally restarts all four clusters, which would otherwise
+# race with an in-flight box-check's live tests from another agent's invocation.
 set -euo pipefail
 
 OS="${1:-}"
 shift || true
 
 # --runner-token / PGWT_RUNNER_TOKEN: optional, only consumed by the "GitHub
-# Actions runner" block near the bottom of this script (OS=ubuntu only).
+# Actions runner" block near the bottom of this script.
 RUNNER_TOKEN="${PGWT_RUNNER_TOKEN:-}"
 # --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" (the
 # original box's name) below — see the "GitHub Actions runner" block.
@@ -110,17 +109,12 @@ if [[ $(id -u) -ne 0 ]]; then
 fi
 
 case "$OS" in
-    el8)
-        echo "STUB: el8 provisioning is not implemented yet — it is step 4" >&2
-        echo "of docs/DEV_LOOP_PLAN.md (ephemeral VMs + real OS matrix)." >&2
-        exit 1
-        ;;
     el9)
         echo "STUB: el9 provisioning is not implemented yet — it is step 4" >&2
         echo "of docs/DEV_LOOP_PLAN.md (ephemeral VMs + real OS matrix)." >&2
         exit 1
         ;;
-    ubuntu)
+    ubuntu|el8)
         ;;
     *)
         echo "Unknown OS: $OS (expected ubuntu|el8|el9)" >&2
@@ -131,6 +125,9 @@ esac
 log() { echo "[provision-runner] $*"; }
 
 export DEBIAN_FRONTEND=noninteractive
+# Source-built bpftool and EL8's python3.11 shim must win over distro
+# dispatchers/defaults, even on an image whose root PATH omits /usr/local/bin.
+export PATH="/usr/local/bin:$PATH"
 
 # The lock file must be writable by the gate-box GitHub Actions runner's
 # unprivileged 'runner' user too (ci.yml's gate-box jobs each wrap their own
@@ -177,6 +174,11 @@ log "disabling + masking unattended-upgrade timers/service"
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
 systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
 
+# Same rule on EL8: dnf-automatic/PackageKit must never bump the kernel
+# mid-test. Missing units on either OS are harmless, just like the apt ones.
+log "disabling automatic dnf/PackageKit upgrades"
+systemctl disable --now dnf-automatic.timer dnf-automatic-install.timer packagekit.service || true
+
 log "setting needrestart to list-only mode (never auto-restart services)"
 mkdir -p /etc/needrestart/conf.d
 cat > /etc/needrestart/conf.d/99-pgwt-gate-box.conf <<'EOF'
@@ -190,25 +192,45 @@ EOF
 # 1. Build dependencies for the daemon + pgwt-server (ci.yml "Install build
 #    dependencies"), plus rsync/git/python3/procps for box-check + run_all.sh.
 # ---------------------------------------------------------------------------
-log "apt-get update"
-apt-get update -qq
+case "$OS" in
+    ubuntu)
+        log "apt-get update"
+        apt-get update -qq
 
-log "installing build + runtime dependencies"
-apt-get install -y -qq \
-    clang llvm libbpf-dev libelf-dev zlib1g-dev liblz4-dev \
-    linux-tools-common gcc make git \
-    rsync python3 procps findutils diffutils util-linux jq \
-    sudo curl gnupg lsb-release ca-certificates \
-    postgresql-common >/dev/null
+        log "installing build + runtime dependencies"
+        apt-get install -y -qq \
+            clang llvm libbpf-dev libelf-dev zlib1g-dev liblz4-dev \
+            linux-tools-common gcc make git \
+            rsync python3 procps findutils diffutils util-linux jq \
+            sudo curl gnupg lsb-release ca-certificates \
+            postgresql-common >/dev/null
 
-# perf: try the exact-kernel package first (perf's ABI is kernel-version
-# pinned), fall back to -generic. Neither failing is fatal — capture-smoke's
-# hardware-watchpoint probe degrades loudly without perf; the gate box is
-# expected to have it, so a missing perf is reported, not silently ignored.
-log "installing perf (linux-tools for $(uname -r))"
-apt-get install -y -qq "linux-tools-$(uname -r)" 2>/dev/null \
-    || apt-get install -y -qq linux-tools-generic 2>/dev/null \
-    || log "WARNING: no linux-tools package matched — perf may be unavailable"
+        # perf: try the exact-kernel package first (perf's ABI is kernel-version
+        # pinned), fall back to -generic. Neither failing is fatal — capture-smoke's
+        # hardware-watchpoint probe degrades loudly without perf; the gate box is
+        # expected to have it, so a missing perf is reported, not silently ignored.
+        log "installing perf (linux-tools for $(uname -r))"
+        apt-get install -y -qq "linux-tools-$(uname -r)" 2>/dev/null \
+            || apt-get install -y -qq linux-tools-generic 2>/dev/null \
+            || log "WARNING: no linux-tools package matched — perf may be unavailable"
+        ;;
+    el8)
+        log "enabling PowerTools for EL8 build dependencies"
+        dnf install -y dnf-plugins-core
+        dnf config-manager --set-enabled powertools
+
+        log "installing build + runtime dependencies"
+        dnf install -y gcc clang llvm make tar git rsync python3 procps-ng \
+            findutils diffutils util-linux jq sudo curl which \
+            elfutils-libelf-devel zlib-devel lz4-devel bpftool libbpf-devel
+
+        # EL's perf package is not kernel-exact like Ubuntu's linux-tools.
+        # Keep it best-effort, but report missing watchpoint tooling loudly.
+        log "installing perf"
+        dnf install -y perf \
+            || log "WARNING: no perf package available — perf may be unavailable"
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 2. bpftool: use it if a working one is already on PATH (same probe ci.yml
@@ -237,92 +259,167 @@ test -r /sys/kernel/btf/vmlinux || {
 }
 
 # ---------------------------------------------------------------------------
-# 3. PGDG apt repo.
+# 3. PGDG repo.
 # ---------------------------------------------------------------------------
-# The installed apt.postgresql.org.sh (Ubuntu 24.04 / Debian's postgresql-
-# common) writes the deb822-format /etc/apt/sources.list.d/pgdg.sources, not
-# the legacy pgdg.list it actively deletes -- checking for pgdg.list here
-# (found while proving idempotence this round) always missed, so this
-# "idempotent" step actually re-ran the script's apt-get update + repo
-# rewrite on EVERY provisioning run rather than skipping when already done.
-# Harmless in effect, but not what the comment/idempotence design claimed.
-if [[ ! -f /etc/apt/sources.list.d/pgdg.sources ]]; then
-    log "adding PGDG apt repo"
-    apt-get install -y -qq postgresql-common >/dev/null
-    # `-y` already makes the upstream script non-interactive; `yes` feeding
-    # its stdin is belt-and-suspenders, but under pipefail (added this
-    # round) that pipe's `yes` side gets a real SIGPIPE (rc 141) the moment
-    # the script stops reading stdin, which made pipefail fail this whole
-    # line even though the script itself succeeded. `|| true` swallows
-    # that, then the actual result is checked explicitly below, same
-    # idempotent-verification style as every other step in this script --
-    # a genuine failure (repo file never appears) is still caught, loudly.
-    yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null || true
-    [[ -f /etc/apt/sources.list.d/pgdg.sources ]] || {
-        echo "FATAL: PGDG apt repo setup did not produce /etc/apt/sources.list.d/pgdg.sources" >&2
-        exit 1
-    }
-else
-    log "PGDG apt repo already present"
-fi
-apt-get update -qq
+case "$OS" in
+    ubuntu)
+        # The installed apt.postgresql.org.sh (Ubuntu 24.04 / Debian's postgresql-
+        # common) writes the deb822-format /etc/apt/sources.list.d/pgdg.sources, not
+        # the legacy pgdg.list it actively deletes -- checking for pgdg.list here
+        # (found while proving idempotence this round) always missed, so this
+        # "idempotent" step actually re-ran the script's apt-get update + repo
+        # rewrite on EVERY provisioning run rather than skipping when already done.
+        # Harmless in effect, but not what the comment/idempotence design claimed.
+        if [[ ! -f /etc/apt/sources.list.d/pgdg.sources ]]; then
+            log "adding PGDG apt repo"
+            apt-get install -y -qq postgresql-common >/dev/null
+            # `-y` already makes the upstream script non-interactive; `yes` feeding
+            # its stdin is belt-and-suspenders, but under pipefail (added this
+            # round) that pipe's `yes` side gets a real SIGPIPE (rc 141) the moment
+            # the script stops reading stdin, which made pipefail fail this whole
+            # line even though the script itself succeeded. `|| true` swallows
+            # that, then the actual result is checked explicitly below, same
+            # idempotent-verification style as every other step in this script --
+            # a genuine failure (repo file never appears) is still caught, loudly.
+            yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null || true
+            [[ -f /etc/apt/sources.list.d/pgdg.sources ]] || {
+                echo "FATAL: PGDG apt repo setup did not produce /etc/apt/sources.list.d/pgdg.sources" >&2
+                exit 1
+            }
+        else
+            log "PGDG apt repo already present"
+        fi
+        apt-get update -qq
+        ;;
+    el8)
+        # The RPM is our marker: do not reinstall the repo on every run.
+        if ! rpm -q pgdg-redhat-repo >/dev/null 2>&1; then
+            log "adding PGDG EL8 repo"
+            dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+        else
+            log "PGDG EL8 repo already present"
+        fi
+        # AppStream's postgresql module masks PGDG's postgresqlNN packages.
+        dnf -qy module disable postgresql || true
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 4. PostgreSQL 13/16/17/18, one cluster each, on port 54<major>.
 #    pg_stat_statements preloaded everywhere (PG13 query attribution has no
 #    in-core query_id; PG14+ also gets compute_query_id=on for st_query_id).
-#    PG13 is EOL and may have left the live PGDG repo — same apt-archive
+#    PG13 is EOL and may have left the live PGDG repo — same archive
 #    fallback ci.yml/nightly.yml use.
 # ---------------------------------------------------------------------------
 for V in 13 16 17 18; do
     PORT=$((5400 + V))
     log "=== PostgreSQL $V (port $PORT) ==="
 
-    if ! dpkg -s "postgresql-$V" >/dev/null 2>&1; then
-        if ! apt-cache show "postgresql-$V" >/dev/null 2>&1; then
-            log "postgresql-$V not in the live PGDG repo — adding apt-archive"
-            echo "deb https://apt-archive.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-                > /etc/apt/sources.list.d/pgdg-archive.list
-            apt-get update -qq
-        fi
-        log "installing postgresql-$V postgresql-contrib-$V"
-        apt-get install -y -qq "postgresql-$V" "postgresql-contrib-$V" >/dev/null
-    else
-        log "postgresql-$V already installed"
-    fi
+    case "$OS" in
+        ubuntu)
+            PSQL=psql
+            PGBENCH=pgbench
+            PG_ISREADY=pg_isready
+            if ! dpkg -s "postgresql-$V" >/dev/null 2>&1; then
+                if ! apt-cache show "postgresql-$V" >/dev/null 2>&1; then
+                    log "postgresql-$V not in the live PGDG repo — adding apt-archive"
+                    echo "deb https://apt-archive.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+                        > /etc/apt/sources.list.d/pgdg-archive.list
+                    apt-get update -qq
+                fi
+                log "installing postgresql-$V postgresql-contrib-$V"
+                apt-get install -y -qq "postgresql-$V" "postgresql-contrib-$V" >/dev/null
+            else
+                log "postgresql-$V already installed"
+            fi
 
-    CLUSTER_LINE=$(pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main"' || true)
-    if [[ -z "$CLUSTER_LINE" ]]; then
-        log "creating cluster $V/main"
-        pg_createcluster "$V" main
-    fi
+            CLUSTER_LINE=$(pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main"' || true)
+            if [[ -z "$CLUSTER_LINE" ]]; then
+                log "creating cluster $V/main"
+                pg_createcluster "$V" main
+            fi
 
-    pg_conftool "$V" main set port "$PORT"
-    pg_conftool "$V" main set shared_preload_libraries pg_stat_statements
-    if [[ "$V" -ge 14 ]]; then
-        pg_conftool "$V" main set compute_query_id on
-    fi
-    # Trust local auth: tests connect as "psql -U postgres" from root.
-    sed -i -E 's/(ident|peer|scram-sha-256|md5)$/trust/' \
-        "/etc/postgresql/$V/main/pg_hba.conf"
+            pg_conftool "$V" main set port "$PORT"
+            pg_conftool "$V" main set shared_preload_libraries pg_stat_statements
+            if [[ "$V" -ge 14 ]]; then
+                pg_conftool "$V" main set compute_query_id on
+            fi
+            # Trust local auth: tests connect as "psql -U postgres" from root.
+            sed -i -E 's/(ident|peer|scram-sha-256|md5)$/trust/' \
+                "/etc/postgresql/$V/main/pg_hba.conf"
 
-    # (Re)start so port/preload/hba changes take effect. pg_ctlcluster start
-    # on an already-running cluster is a no-op with the OLD config, so
-    # restart unconditionally — cheap, and this script is not on any hot
-    # path.
-    CLUSTER_ONLINE=$(pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main" && $4 == "online"' || true)
-    if [[ -n "$CLUSTER_ONLINE" ]]; then
-        pg_ctlcluster "$V" main restart
-    else
-        pg_ctlcluster "$V" main start
-    fi
+            # (Re)start so port/preload/hba changes take effect. pg_ctlcluster start
+            # on an already-running cluster is a no-op with the OLD config, so
+            # restart unconditionally — cheap, and this script is not on any hot
+            # path.
+            CLUSTER_ONLINE=$(pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main" && $4 == "online"' || true)
+            if [[ -n "$CLUSTER_ONLINE" ]]; then
+                pg_ctlcluster "$V" main restart
+            else
+                pg_ctlcluster "$V" main start
+            fi
+            ;;
+        el8)
+            # PGDG puts each major's clients outside PATH; Debian's
+            # pg_wrapper is absent, so use that major's binaries explicitly.
+            PSQL="/usr/pgsql-$V/bin/psql"
+            PGBENCH="/usr/pgsql-$V/bin/pgbench"
+            PG_ISREADY="/usr/pgsql-$V/bin/pg_isready"
+            if ! rpm -q "postgresql$V-server" >/dev/null 2>&1; then
+                if ! dnf list "postgresql$V-server" >/dev/null 2>&1; then
+                    log "postgresql$V-server not in the live PGDG repo — adding PGDG archive"
+                    cat > "/etc/yum.repos.d/pgdg$V-archive.repo" <<EOF
+[pgdg$V-archive]
+name=PostgreSQL $V (PGDG archive)
+baseurl=https://yum-archive.postgresql.org/$V/redhat/rhel-8-x86_64/
+enabled=1
+gpgcheck=0
+EOF
+                fi
+                log "installing postgresql$V-server postgresql$V-contrib"
+                dnf install -y "postgresql$V-server" "postgresql$V-contrib"
+            else
+                log "postgresql$V-server already installed"
+            fi
+
+            DATA="/var/lib/pgsql/$V/data"
+            # EL8 has one fixed data directory per major. PG_VERSION is
+            # initdb's marker; never initialize over an existing cluster.
+            if [[ ! -f "$DATA/PG_VERSION" ]]; then
+                log "creating PostgreSQL $V cluster"
+                PGSETUP_INITDB_OPTIONS='' /usr/pgsql-"$V"/bin/postgresql-"$V"-setup initdb
+            fi
+
+            # Replace all previous active values with one canonical block.
+            # Removing them first also repairs duplicates; a second run
+            # leaves exactly one port/preload/query-id line, not another copy.
+            sed -i -E '/^[[:space:]]*(port|shared_preload_libraries|compute_query_id)[[:space:]]*=/d' \
+                "$DATA/postgresql.conf"
+            echo "port = $PORT" >> "$DATA/postgresql.conf"
+            echo "shared_preload_libraries = 'pg_stat_statements'" >> "$DATA/postgresql.conf"
+            if [[ "$V" -ge 14 ]]; then
+                echo "compute_query_id = on" >> "$DATA/postgresql.conf"
+            fi
+            # Trust local auth: tests connect as "psql -U postgres" from root.
+            sed -i -E 's/(ident|peer|scram-sha-256|md5)$/trust/' "$DATA/pg_hba.conf"
+
+            # Restart even on a re-run so port/preload/hba changes take
+            # effect. Like pg_ctlcluster above, this is cheap and not on
+            # a hot path; a new/inactive service must also be boot-enabled.
+            if systemctl is-active --quiet "postgresql-$V"; then
+                systemctl restart "postgresql-$V"
+            else
+                systemctl enable --now "postgresql-$V"
+            fi
+            ;;
+    esac
 
     for _ in $(seq 1 30); do
-        pg_isready -p "$PORT" -h /var/run/postgresql >/dev/null 2>&1 && break
+        "$PG_ISREADY" -p "$PORT" -h /var/run/postgresql >/dev/null 2>&1 && break
         sleep 1
     done
 
-    sudo -u postgres psql -p "$PORT" -d postgres -c \
+    sudo -u postgres "$PSQL" -p "$PORT" -d postgres -c \
         "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null
 
     # Several live tests (test_accuracy.py, test_query_event.py,
@@ -339,13 +436,13 @@ for V in 13 16 17 18; do
     # box on the next provisioning run instead of requiring a manual fix.
     SCALE=10
     EXPECTED_ROWS=$((SCALE * 100000))
-    ROWS=$(sudo -u postgres psql -p "$PORT" -tAc \
+    ROWS=$(sudo -u postgres "$PSQL" -p "$PORT" -tAc \
         "SELECT count(*) FROM pgbench_accounts" 2>/dev/null || echo 0)
     if [[ "${ROWS:-0}" -lt "$EXPECTED_ROWS" ]]; then
         log "pgbench tables missing/at a smaller scale on port $PORT" \
             "(found ${ROWS:-0} rows, want $EXPECTED_ROWS) --" \
             "(re)initializing at scale $SCALE"
-        sudo -u postgres pgbench -p "$PORT" -i -s "$SCALE" -q postgres >/dev/null
+        sudo -u postgres "$PGBENCH" -p "$PORT" -i -s "$SCALE" -q postgres >/dev/null
     else
         log "pgbench tables already present on port $PORT ($ROWS rows)"
     fi
@@ -362,7 +459,7 @@ for V in 13 16 17 18; do
     # pgbench check above: only (re)builds when missing or short.
     IO_LOAD_TABLE="_smoke_io_load"
     IO_LOAD_ROWS=3000000
-    IO_LOAD_FOUND=$(sudo -u postgres psql -p "$PORT" -tAc \
+    IO_LOAD_FOUND=$(sudo -u postgres "$PSQL" -p "$PORT" -tAc \
         "SELECT count(*) FROM $IO_LOAD_TABLE" 2>/dev/null || echo 0)
     if [[ "${IO_LOAD_FOUND:-0}" -lt "$IO_LOAD_ROWS" ]]; then
         log "$IO_LOAD_TABLE missing/short on port $PORT" \
@@ -370,7 +467,7 @@ for V in 13 16 17 18; do
             "building (measured on a gate-box cx33 and reported in the" \
             "owning branch's PR body: build time + pg_total_relation_size)"
         IO_LOAD_START=$(date +%s)
-        sudo -u postgres psql -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -c "
+        sudo -u postgres "$PSQL" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -c "
             DROP TABLE IF EXISTS $IO_LOAD_TABLE;
             CREATE TABLE $IO_LOAD_TABLE (
                 id bigint PRIMARY KEY, filler text, ctr int NOT NULL DEFAULT 0);
@@ -379,7 +476,7 @@ for V in 13 16 17 18; do
                 FROM generate_series(1, $IO_LOAD_ROWS) g;
         " >/dev/null
         IO_LOAD_ELAPSED=$(( $(date +%s) - IO_LOAD_START ))
-        IO_LOAD_SIZE=$(sudo -u postgres psql -p "$PORT" -tAc \
+        IO_LOAD_SIZE=$(sudo -u postgres "$PSQL" -p "$PORT" -tAc \
             "SELECT pg_size_pretty(pg_total_relation_size('$IO_LOAD_TABLE'))")
         log "$IO_LOAD_TABLE built on port $PORT in ${IO_LOAD_ELAPSED}s," \
             "on-disk size $IO_LOAD_SIZE"
@@ -397,7 +494,7 @@ for V in 13 16 17 18; do
     # re-provision of an already-built box is a cheap no-op.
     LOCKMGR_TABLE="_smoke_lockmgr_fanout"
     LOCKMGR_PARTITIONS=200
-    sudo -u postgres psql -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -c "
+    sudo -u postgres "$PSQL" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -c "
         CREATE TABLE IF NOT EXISTS $LOCKMGR_TABLE (id bigint, val int)
             PARTITION BY RANGE (id);
         DO \$\$
@@ -413,7 +510,7 @@ for V in 13 16 17 18; do
     " >/dev/null
     log "$LOCKMGR_TABLE: $LOCKMGR_PARTITIONS partitions present on port $PORT"
 
-    log "PG $V: $(sudo -u postgres psql -p "$PORT" -tAc 'SELECT version()')"
+    log "PG $V: $(sudo -u postgres "$PSQL" -p "$PORT" -tAc 'SELECT version()')"
 done
 
 # Ambient PGPORT=5418 (PG18's port) in /etc/environment, inherited by every
@@ -438,7 +535,12 @@ else
 fi
 
 log "clusters:"
-pg_lsclusters
+if [[ "$OS" == "ubuntu" ]]; then
+    pg_lsclusters
+else
+    # pg_lsclusters is Debian-only; systemd owns EL8's fixed-path clusters.
+    systemctl --no-pager status postgresql-{13,16,17,18}
+fi
 
 # ---------------------------------------------------------------------------
 # 5. issue #93 (live UI smoke): Go (to build web/pgwt, the LIVE tier's ONLY
@@ -451,29 +553,57 @@ pg_lsclusters
 #    REFUSES rather than prompts on an unknown host key or missing key auth
 #    -- both must already be in place before tests/ui_live_smoke.sh runs).
 # ---------------------------------------------------------------------------
-if ! command -v go >/dev/null 2>&1; then
-    log "installing Go (golang-go, needs go.mod's 1.21+)"
-    apt-get install -y -qq golang-go >/dev/null
-fi
-log "go: $(go version)"
+case "$OS" in
+    ubuntu)
+        if ! command -v go >/dev/null 2>&1; then
+            log "installing Go (golang-go, needs go.mod's 1.21+)"
+            apt-get install -y -qq golang-go >/dev/null
+        fi
+        log "go: $(go version)"
 
-log "installing python3-pip"
-apt-get install -y -qq python3-pip >/dev/null
+        log "installing python3-pip"
+        apt-get install -y -qq python3-pip >/dev/null
 
-log "installing Playwright + websockets + Pillow + numpy for root's python3"
-# --break-system-packages: Ubuntu 24.04's python3 is PEP-668
-# externally-managed; root installing system-wide for its own test runs
-# (never --user -- LIVE_TESTS run under sudo, i.e. as root) is the
-# equivalent of the Mac setup's `pip install --user` for a single-user box.
-# pillow + numpy: tests/ui_live_smoke_lib.py decodes/diffs the tick
-# screenshots with them (same pair CLAUDE.md's Mac "Local setup" lists).
-python3 -m pip install --break-system-packages -q \
-    playwright==1.60.0 websockets pillow numpy
+        log "installing Playwright + websockets + Pillow + numpy for root's python3"
+        # --break-system-packages: Ubuntu 24.04's python3 is PEP-668
+        # externally-managed; root installing system-wide for its own test runs
+        # (never --user -- LIVE_TESTS run under sudo, i.e. as root) is the
+        # equivalent of the Mac setup's `pip install --user` for a single-user box.
+        # pillow + numpy: tests/ui_live_smoke_lib.py decodes/diffs the tick
+        # screenshots with them (same pair CLAUDE.md's Mac "Local setup" lists).
+        python3 -m pip install --break-system-packages -q \
+            playwright==1.60.0 websockets pillow numpy
 
-log "installing Chromium + its OS dependencies"
-# --with-deps: also apt-get installs the shared libraries (fonts, libnss,
-# etc.) headless Chromium needs, which a minimal server image lacks.
-python3 -m playwright install --with-deps chromium >/dev/null
+        log "installing Chromium + its OS dependencies"
+        # --with-deps: also apt-get installs the shared libraries (fonts, libnss,
+        # etc.) headless Chromium needs, which a minimal server image lacks.
+        python3 -m playwright install --with-deps chromium >/dev/null
+        ;;
+    el8)
+        if ! command -v go >/dev/null 2>&1; then
+            log "installing Go (golang, needs go.mod's 1.21+)"
+            dnf install -y golang
+        fi
+        log "go: $(go version)"
+
+        # EL8's stock python3 is 3.6 (no subprocess capture_output support).
+        # Match nightly.yml: install 3.11 and let /usr/local/bin win on PATH.
+        log "installing Python 3.11 + pip"
+        dnf install -y python3.11 python3.11-pip
+        ln -sf "$(command -v python3.11)" /usr/local/bin/python3
+        python3 --version
+
+        log "installing Playwright + websockets + Pillow + numpy for root's python3"
+        python3.11 -m pip install -q playwright==1.60.0 websockets pillow numpy
+
+        # Playwright's --with-deps distro detection does not reliably cover
+        # EL8. Install INSTALL.md's native Chromium libraries ourselves.
+        log "installing Chromium + its OS dependencies"
+        dnf install -y atk at-spi2-atk cups-libs libXcomposite libXdamage \
+            libXrandr libgbm pango alsa-lib nss libxkbcommon
+        python3 -m playwright install chromium >/dev/null
+        ;;
+esac
 
 log "setting up root's localhost ssh self-trust loop"
 SSH_KEY="$HOME/.ssh/id_ed25519"
@@ -545,7 +675,7 @@ fi
 #    13/16/17/18 on ports 5413/5416/5417/5418 already present), so they can
 #    skip their apt/PGDG/PG-install steps and use the existing cluster
 #    directly (PGPORT=54<major>) instead of reinstalling on every run.
-#    Written unconditionally at the end of a successful ubuntu provisioning
+#    Written unconditionally at the end of a successful provisioning
 #    run, independent of whether this particular invocation also registered
 #    a runner (section 7) — a box can be (re)provisioned without touching an
 #    already-registered runner.
@@ -558,7 +688,7 @@ cat > /etc/pgwt-gate-box <<EOF
 # 5413/5416/5417/5418. .github/workflows/ci.yml checks only for this file's
 # presence, not its content.
 provisioned_at=$(date -u +%FT%TZ)
-os=ubuntu
+os=$OS
 EOF
 
 # ---------------------------------------------------------------------------
@@ -594,7 +724,7 @@ EOF
 #      re-registering is a deliberate, separate step, not something a bare
 #      re-run of this script does.
 # ---------------------------------------------------------------------------
-if [[ "$OS" == "ubuntu" && -n "$RUNNER_TOKEN" ]]; then
+if [[ -n "$RUNNER_TOKEN" ]]; then
     RUNNER_HOME=/opt/actions-runner
     RUNNER_VERSION=2.337.0
     RUNNER_TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
@@ -687,4 +817,4 @@ else
     log "no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration"
 fi
 
-log "provisioning complete (ubuntu)"
+log "provisioning complete ($OS)"
