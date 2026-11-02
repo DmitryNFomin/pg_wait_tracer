@@ -13,9 +13,10 @@ already has lying around (issues.json from the "three bulk calls" section,
 the worktree porcelain dump, and ONE extra `gh pr list` call with the fields
 this check needs that the existing open-PR queries do not carry).
 
-Inputs (all pre-fetched by the CALLER -- this script makes no gh/git calls
-of its own, so it needs no stubbing to test and cannot itself suffer a
-gh/git dependency failure):
+Inputs (pre-fetched by the CALLER; no gh calls here). Evidence comparisons
+also use local, read-only git rev-parse, cat-file and diff-tree calls in the
+same fixed repository as check-box-evidence.sh. Query failures degrade to
+UNKNOWN for the affected PR without stopping the remaining checks.
   open-prs-json       gh pr list --state open --json
                        number,headRefOid,headRefName,closingIssuesReferences
   open-issues-json     gh issue list --state open --json number
@@ -29,13 +30,17 @@ gh/git dependency failure):
 Same vocabulary as check-box-evidence.sh, with the same reasoning: an empty
 result and a failed lookup must never look alike.
   CANDIDATE: PR #N (branch) EVIDENCE-MISSING -- no box-check log reachable
-  CANDIDATE: PR #N (branch) EVIDENCE-STALE <log-sha> != <head-sha>
+  CANDIDATE: PR #N (branch) EVIDENCE-TREE-DRIFT tip=<tree> logged=<tree>
+    FINDING(src/tests) or NOTE(other); run the single-PR tool for file details
+  CANDIDATE: PR #N (branch) EVIDENCE-UNIDENTIFIED logged tree <tree> unresolvable
   CANDIDATE: PR #N -> issue #M NO-CLOSING-REF (open; verify body ...)
   UNKNOWN: <reason>                      -- per-PR when only that PR's data
                                               is bad; once, globally, when an
                                               entire INPUT file is bad
 
-Exit codes: 0 nothing to report, 1 only CANDIDATE findings, 3 at least one
+Matching tree hashes are OK and print nothing, regardless of commit=.
+Exit codes: 0 no findings (NOTE drift may be printed), 1 CANDIDATE findings
+(src/tests drift, unidentified/missing evidence, closing refs), 3 at least one
 UNKNOWN was printed (same "a finding and 'we could not tell' are not the
 same code" reasoning as check-box-evidence.sh and held.sh).
 """
@@ -43,7 +48,19 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
+
+
+REPO_ROOT = "/Users/dmitryfomin/work/git/pg_wait_tracer"
+
+
+def git_read(*args):
+    """Run local git plumbing; callers handle per-PR query failures."""
+    return subprocess.run(
+        ["git", "-C", REPO_ROOT, *args], check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    ).stdout.strip()
 
 
 def parse_porcelain(text):
@@ -80,34 +97,61 @@ def branch_issue_nums(branch):
 
 
 def evidence_for(pr, wt_map):
-    """Returns (kind, detail) where kind is one of OK, MISSING, STALE, UNKNOWN."""
+    """Return (kind, detail, finding); UNKNOWN takes precedence over findings."""
     branch = pr.get("headRefName") or ""
     head = pr.get("headRefOid") or ""
     wt = wt_map.get(branch)
     if not wt:
-        return ("MISSING", None)
+        return ("MISSING", None, True)
     results_dir = os.path.join(wt, "tests", "results")
     if not os.path.isdir(results_dir):
-        return ("MISSING", None)
+        return ("MISSING", None, True)
     logs = sorted(glob.glob(os.path.join(results_dir, "box-check-*.log")))
     if not logs:
-        return ("MISSING", None)
-    commits = []
+        return ("MISSING", None, True)
+    try:
+        tip_tree = git_read("rev-parse", f"{head}^{{tree}}")
+    except (OSError, subprocess.CalledProcessError) as e:
+        return ("UNKNOWN", f"cannot resolve tip tree for {head} ({e})", False)
+    if not tip_tree:
+        return ("UNKNOWN", f"empty tip tree for {head}", False)
+    trees = []
     for log in logs:
         try:
             with open(log, "r", encoding="utf-8", errors="replace") as f:
                 lines = [l for l in f if l.startswith("box-check: commit=")]
         except OSError as e:
-            return ("UNKNOWN", f"{log} unreadable ({e})")
+            return ("UNKNOWN", f"{log} unreadable ({e})", False)
         if not lines:
-            return ("UNKNOWN", f"{log} has no commit= header")
-        m = re.search(r"commit=([0-9a-f]+)", lines[-1])
+            return ("UNKNOWN", f"{log} has no commit= header", False)
+        m = re.match(r"box-check: commit=([0-9a-f]+)(?:\s|$)", lines[-1])
         if not m:
-            return ("UNKNOWN", f"{log} has no parseable commit=")
-        commits.append(m.group(1))
-    if head in commits:
-        return ("OK", None)
-    return ("STALE", commits[-1])
+            return ("UNKNOWN", f"{log} has no parseable commit=", False)
+        t = re.match(r"box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)(?:\s|$)", lines[-1])
+        if not t:
+            return ("UNKNOWN", f"{log} has no parseable tree-hash=", False)
+        trees.append(t.group(1))
+    if tip_tree in trees:
+        return ("OK", None, False)
+    logged_tree = trees[-1]  # filename order, same newest-log rule as the CLI
+    try:
+        git_read("cat-file", "-e", logged_tree)
+    except subprocess.CalledProcessError:
+        return ("UNIDENTIFIED", f"logged tree {logged_tree} unresolvable", True)
+    except OSError as e:
+        return ("UNKNOWN", f"cannot query logged tree {logged_tree} ({e})", False)
+    try:
+        diff = git_read("diff-tree", "-r", "--name-status", tip_tree, logged_tree)
+    except (OSError, subprocess.CalledProcessError) as e:
+        return ("UNKNOWN", f"cannot compare tip/logged trees ({e})", False)
+    touches_tests_or_src = any(
+        path.lstrip('"').startswith(("src/", "tests/"))
+        for line in diff.splitlines() for path in line.split("\t")[1:]
+    )
+    label = "FINDING(src/tests)" if touches_tests_or_src else "NOTE(other)"
+    return ("TREE-DRIFT", f"tip={tip_tree} logged={logged_tree} {label} "
+            f"(diff: tip -> logged) -- run check-box-evidence.sh {pr.get('number')} for the file list",
+            touches_tests_or_src)
 
 
 def main(argv):
@@ -159,17 +203,16 @@ def main(argv):
         num = pr.get("number")
 
         if wt_map is not None:
-            kind, detail = evidence_for(pr, wt_map)
+            kind, detail, evidence_finding = evidence_for(pr, wt_map)
             if kind == "MISSING":
                 print(f"   CANDIDATE: PR #{num} ({branch}) EVIDENCE-MISSING -- no box-check log reachable")
-                finding += 1
-            elif kind == "STALE":
-                print(f"   CANDIDATE: PR #{num} ({branch}) EVIDENCE-STALE {detail} != {pr.get('headRefOid')}")
-                finding += 1
+            elif kind in ("TREE-DRIFT", "UNIDENTIFIED"):
+                print(f"   CANDIDATE: PR #{num} ({branch}) EVIDENCE-{kind} {detail}")
             elif kind == "UNKNOWN":
-                print(f"   UNKNOWN: PR #{num} ({branch}) box-check log {detail}")
+                print(f"   UNKNOWN: PR #{num} ({branch}) {detail}")
                 unknown += 1
             # OK: nothing to print
+            finding += int(evidence_finding)
 
         nums = branch_issue_nums(branch)
         if not nums:

@@ -2,11 +2,11 @@
 # check-box-evidence.sh <pr-number>
 #
 # scripts/git-hooks/pre-push binds LOCAL `make check` evidence to a tree
-# hash. There is no equivalent for box-check evidence, and the gap has been
-# hit repeatedly: `gh pr update-branch` creates a merge commit with no
-# box-check run of its own, so a PR can carry a tests/results/box-check-*.log
-# whose commit= header names a different commit than the PR's current tip.
-# This script makes that comparison mechanical instead of a manual read.
+# hash. Box-check evidence likewise identifies tested bytes by tree-hash=:
+# a reconciliation commit can move the PR tip without changing its tree,
+# and a log's commit= alone cannot identify the tree actually tested.
+# This script compares every reachable box-check log's tree to the PR tip's
+# tree and reports the newest log's divergence when none matches.
 #
 # It also checks a second, unrelated-looking but same-family leak: a PR
 # whose branch is named agent/<N>-<slug> (asserting it addresses issue #N,
@@ -34,19 +34,21 @@
 # confusion produced a false "free" once and a false "not registered" today.
 #
 # Output, one or more lines per invocation:
-#   EVIDENCE-OK <sha>                         -- a log's commit= matches HEAD
-#   EVIDENCE-STALE <log-sha> != <head-sha>    -- no log matches HEAD
+#   EVIDENCE-OK <log-commit> (tree <tree>)     -- a log's tree matches the tip
+#   EVIDENCE-TREE-DRIFT tip=<tree> logged=<tree> -- no matching tree; file diff
+#      FINDING if src/ or tests/ changed, otherwise NOTE (does not fail)
+#   EVIDENCE-UNIDENTIFIED logged tree <tree> unresolvable -- finding
 #   EVIDENCE-MISSING                          -- no box-check-*.log found at all
 #   NO-CLOSING-REF-CANDIDATE #<pr> -> issue #<N> (open; ...)
 #                                              -- branch names open #N with no
 #                                                 closing ref; verify the PR
 #                                                 body before treating as a bug
-#   UNKNOWN: <reason>                         -- query/parse failure; nothing else printed
+#   UNKNOWN: <reason>                         -- query/parse failure
 #
 # Exit codes:
-#   0  everything checked is clean (EVIDENCE-OK and no candidate)
-#   1  a real finding (EVIDENCE-STALE, EVIDENCE-MISSING, or a candidate)
-#   3  UNKNOWN: gh error, unreadable log, or an unparseable header/field --
+#   0  no findings (EVIDENCE-OK or NOTE drift, and no closing-ref candidate)
+#   1  FINDING drift, EVIDENCE-UNIDENTIFIED, EVIDENCE-MISSING, or a candidate
+#   3  UNKNOWN: gh/git query error, unreadable log, unparseable header/field --
 #      this is deliberately a different code than 1, same reasoning as
 #      held.sh's REFUSED: a finding and "we could not tell" must stay
 #      distinguishable by more than prose.
@@ -117,32 +119,58 @@ else
     echo "EVIDENCE-MISSING"
     finding=1
   else
+    if ! TIP_TREE=$(git rev-parse "$HEAD_SHA^{tree}" 2>"$TMP/tree.err") || [ -z "$TIP_TREE" ]; then
+      echo "UNKNOWN: cannot resolve tip tree for $HEAD_SHA: $(cat "$TMP/tree.err")"
+      exit 3
+    fi
     commits=()
+    trees=()
     for log in "${LOGS[@]}"; do
       if [ ! -r "$log" ]; then
         echo "UNKNOWN: $log is not readable"
         exit 3
       fi
       line=$(/usr/bin/grep -h '^box-check: commit=' "$log" | tail -1)
-      c=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=([0-9a-f]+) .*/\1/p')
+      c=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=([0-9a-f]+)( .*)?$/\1/p')
       if [ -z "$c" ]; then
         echo "UNKNOWN: $log has no parseable commit= header"
         exit 3
       fi
+      t=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)([[:space:]].*)?$/\1/p')
+      if [ -z "$t" ]; then
+        echo "UNKNOWN: $log has no parseable tree-hash= header"
+        exit 3
+      fi
       commits+=("$c")
+      trees+=("$t")
     done
     match=""
-    for c in "${commits[@]}"; do
-      [ "$c" = "$HEAD_SHA" ] && { match="$c"; break; }
+    for i in "${!trees[@]}"; do
+      [ "${trees[$i]}" = "$TIP_TREE" ] && { match="${commits[$i]}"; break; }
     done
     if [ -n "$match" ]; then
-      echo "EVIDENCE-OK $match"
+      echo "EVIDENCE-OK $match (tree $TIP_TREE)"
     else
-      # Report the most recent log's commit (logs sorted by filename, which
+      # Compare the most recent log's tree (logs sorted by filename, which
       # embeds a zero-padded timestamp, so the last element is the newest).
-      stale="${commits[${#commits[@]}-1]}"
-      echo "EVIDENCE-STALE $stale != $HEAD_SHA"
-      finding=1
+      LOGGED_TREE="${trees[${#trees[@]}-1]}"
+      if ! git cat-file -e "$LOGGED_TREE" 2>/dev/null; then
+        echo "EVIDENCE-UNIDENTIFIED logged tree $LOGGED_TREE unresolvable (FINDING)"
+        finding=1
+      else
+        if ! git diff-tree -r --name-status "$TIP_TREE" "$LOGGED_TREE" > "$TMP/tree.diff" 2>"$TMP/diff.err"; then
+          echo "UNKNOWN: cannot compare tip tree $TIP_TREE to logged tree $LOGGED_TREE: $(cat "$TMP/diff.err")"
+          exit 3
+        fi
+        echo "EVIDENCE-TREE-DRIFT tip=$TIP_TREE logged=$LOGGED_TREE (diff: tip -> logged)"
+        if /usr/bin/awk -F'\t' '{ for (i=2; i<=NF; i++) if ($i ~ /^"?(src|tests)\//) found=1 } END { exit !found }' "$TMP/tree.diff"; then
+          echo "FINDING: src/ or tests/ changed"
+          finding=1
+        else
+          echo "NOTE: only paths outside src/ and tests/ changed"
+        fi
+        cat "$TMP/tree.diff"
+      fi
     fi
   fi
 fi
