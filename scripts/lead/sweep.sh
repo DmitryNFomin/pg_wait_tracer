@@ -14,7 +14,7 @@
 #    returns all PRs in ~1.7s. Speed here is not an optimisation; it is what lets
 #    the hook run this synchronously and removes the whole class of problem.
 export GH_PAGER=cat; set -u
-# OUTDIR is where side-effect files (currently just .dispatch-queue) are
+# OUTDIR is where side-effect files (.dispatch-queue and PR baseline) are
 # written. It defaults to this script's own directory so a manual run from
 # any worktree does something sane, but the hook ALWAYS passes its own $D
 # explicitly: git worktrees share one .git, so the hardcoded `cd` below is
@@ -393,8 +393,15 @@ PY
 # worktrees" -- the same empty-result-vs-failed-query distinction as every
 # other section in this file.
 echo "-- [10] box evidence + closing-ref leak (open agent/* PRs, bulk)"
-gh pr list --state open --limit 100 --json number,headRefOid,headRefName,closingIssuesReferences \
-  > "$TMP/open_refs.json" 2>/dev/null || echo "   UNKNOWN: open-PR ref query failed"
+# autoMergeRequest is the only added bulk field: capture arming and HEAD in
+# the SAME snapshot, rather than joining against the earlier open.json scan.
+# State is OPEN by construction (--state open); no extra field/call needed.
+if ! gh pr list --state open --limit 100 --json number,headRefOid,headRefName,closingIssuesReferences,autoMergeRequest \
+  > "$TMP/open_refs.json" 2>/dev/null; then
+  echo "   UNKNOWN: open-PR ref query failed"
+  # Even valid-looking partial stdout from a failed query is not a snapshot.
+  rm -f "$TMP/open_refs.json"
+fi
 git worktree list --porcelain > "$TMP/wt_porcelain.txt" 2>/dev/null \
   || echo "WORKTREE-LIST-FAILED" > "$TMP/wt_porcelain.txt"
 if [ -s "$TMP/open_refs.json" ]; then
@@ -402,5 +409,93 @@ if [ -s "$TMP/open_refs.json" ]; then
 else
   echo "   UNKNOWN: open-PR ref query produced no data -- box-evidence check skipped"
 fi
+
+# ---- [11] PR state changes since the previous successful scan --------------
+# This is an observation baseline, not a disposition ledger: every delta is
+# an ordinary FINDING, so the existing hook requires ACTED/MY-CHOICE/UNKNOWN.
+# Keep the last good baseline through query/parse failures. Treat a full page
+# as potentially truncated: missing entries must never invent CLOSED events.
+echo "-- [11] PR state changes"
+/usr/bin/python3 - "$TMP/open_refs.json" "$OUTDIR/.sweep-pr-baseline.json" <<'PY'
+import json, os, re, sys
+source, baseline = sys.argv[1:]
+
+def validate(rows, saved=False):
+    if not isinstance(rows, list):
+        raise ValueError("PR set is not a list")
+    if len(rows) >= 100:
+        raise ValueError("open-PR query reached limit 100; snapshot may be incomplete")
+    result = {}
+    for p in rows:
+        n = p["number"]
+        if type(n) is not int or n <= 0 or n in result:
+            raise ValueError("invalid or duplicate PR number")
+        head, branch = p["headRefOid"], p["headRefName"]
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise ValueError(f"invalid HEAD for #{n}")
+        if not isinstance(branch, str) or not branch or any(c.isspace() for c in branch):
+            raise ValueError(f"invalid branch for #{n}")
+        if saved:
+            armed = p["armed"]
+            if type(armed) is not bool or p["state"] != "OPEN":
+                raise ValueError(f"invalid saved state for #{n}")
+        else:
+            auto = p["autoMergeRequest"]  # missing is UNKNOWN, never disarmed
+            if auto is not None and not isinstance(auto, dict):
+                raise ValueError(f"invalid auto-merge state for #{n}")
+            armed = auto is not None
+        result[n] = dict(number=n, headRefOid=head, headRefName=branch,
+                         armed=armed, state="OPEN")
+    return result
+
+try:
+    with open(source) as f:
+        current = validate(json.load(f))
+except (OSError, ValueError, KeyError, TypeError) as e:
+    print(f"   UNKNOWN: PR state changes unavailable ({e}); baseline not advanced")
+    raise SystemExit
+
+try:
+    with open(baseline) as f:
+        saved = json.load(f)
+    if saved["version"] != 1:
+        raise ValueError("unsupported baseline version")
+    previous = validate(saved["prs"], saved=True)
+except FileNotFoundError:
+    previous = None
+except (OSError, ValueError, KeyError, TypeError) as e:
+    print(f"   UNKNOWN: PR state baseline unreadable ({e}); baseline not advanced")
+    raise SystemExit
+
+findings = []
+if previous is not None:
+    for n, p in sorted(current.items()):
+        old = previous.get(n)
+        if old is None:
+            findings.append(f"NEW-PR #{n} {p['headRefName']}")
+        if p["armed"] and (old is None or not old["armed"]):
+            findings.append(f"NEWLY-ARMED #{n} -- auto-merge enabled; this PR can merge "
+                            "without further action -- confirm the lead authorized arming")
+        if old is not None:
+            if old["armed"] and not p["armed"]:
+                findings.append(f"DISARMED #{n}")
+            if old["headRefOid"] != p["headRefOid"]:
+                findings.append(f"TIP-MOVED #{n} {old['headRefOid']} -> {p['headRefOid']}")
+    for n in sorted(previous.keys() - current.keys()):
+        findings.append(f"CLOSED #{n} {previous[n]['headRefName']} -- left the open-PR set "
+                        "(closed or merged)")
+
+try:
+    with open(baseline + ".tmp", "w") as f:
+        json.dump(dict(version=1, prs=list(current.values())), f, sort_keys=True)
+        f.write("\n")
+    os.replace(baseline + ".tmp", baseline)
+except OSError as e:
+    print(f"   UNKNOWN: PR state baseline could not be recorded ({e}); baseline not advanced")
+for finding in findings:
+    print(f"   FINDING: {finding}")
+if previous is None and os.path.isfile(baseline):
+    print(f"   OK: PR state baseline recorded ({len(current)} open PRs); first scan, no changes reported")
+PY
 
 echo "== end $RUN =="
