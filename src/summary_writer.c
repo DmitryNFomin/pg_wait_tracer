@@ -2140,6 +2140,13 @@ void pgwt_summary_forget_open(struct pgwt_summary_writer *w, uint32_t pid)
      * by the same pid and reclaimed when the writer is destroyed. */
     open_stop_crediting(w, o);
     o->start_ns = 0;
+    /* #709: a late trace record can drain after the lifecycle path forgot
+     * this pid. Preserve the proof we are about to destroy, monotonically:
+     * a second forget with a zero watermark must not make a credited span
+     * look never-credited again. This records uncertainty, not usable credit
+     * for a reused pid; the live watermark still has to be zeroed. */
+    if (o->credited_until_ns > o->credit_dropped_until_ns)
+        o->credit_dropped_until_ns = o->credited_until_ns;
     o->credited_until_ns = 0;
     o->credited_ns = 0;
     o->noted_ns = 0;
@@ -2447,10 +2454,29 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
          * much gap time has this capture failed to credit so far", never
          * "how much is missing from the window a client just queried" --
          * that would need a separate, window-scoped deficit of measured
-         * CPU, which this is not (#428). */
+         * CPU, which this is not (#428).
+         *
+         * #709: already == 0 is proof only while the watermark survives.
+         * forget_open is driven by the lifecycle ringbuf, independently of
+         * the trace-event ringbuf; it can destroy that proof before this
+         * record drains. start < credit_dropped_until_ns is the EXACT test
+         * the watermark would have performed had it survived, so the split
+         * moves nothing that the watermark could still prove. Below the
+         * dropped mark we REFUSE to claim either credited or uncredited and
+         * name the whole wall credit_unprovable instead. The measured red
+         * input was 6000 ms in uncredited for a fully credited 6000 ms gap;
+         * CPU-class wall on disk was 12000 ms. The pre-existing disk
+         * over-count is not repaired by naming its at-risk wall here.
+         * o == NULL (a pid never noted at all) stays uncredited: no evidence
+         * ever existed to lose. That is the original #379 residual and must
+         * not migrate, nor may a noted interval that received no credit. */
         if (already == 0 && evt->duration_ns > PGWT_NS_PER_SEC &&
-            summary_wait_class_index(evt->old_event) == PGWT_CLASS_CPU)
-            w->cpu_open_uncredited_ns_total += evt->duration_ns;
+            summary_wait_class_index(evt->old_event) == PGWT_CLASS_CPU) {
+            if (o && start < o->credit_dropped_until_ns)
+                w->cpu_open_credit_unprovable_ns_total += evt->duration_ns;
+            else
+                w->cpu_open_uncredited_ns_total += evt->duration_ns;
+        }
     }
     if (evt->new_event == PGWT_EVENT_EXIT || evt->old_event == PGWT_EVENT_EXIT)
         pgwt_summary_forget_open(w, evt->pid);

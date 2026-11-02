@@ -525,6 +525,38 @@ test_straddler_accounting
 # events[] row with time and no count must survive, or the block header
 # desynchronises and whole seconds fail to decode).
 test_open_cpu_accounting
+# #709: forget_open can arrive from the lifecycle ringbuf before the pid's
+# last trace-event records drain. It zeros the only proof that their wall
+# was already credited, making a fully credited interval read as uncredited.
+# The invariant is uncredited == gap wall minus open_cpu_credited_ns_total,
+# with credit accumulated in a DIFFERENT code path from the close-time add.
+# REACHABILITY actually credits the six seconds, then forgets, then closes.
+# The control fails when credited and uncredited overlap: the parent tree
+# reports cpu_open_uncredited_ns_total = 6000 ms where the never-credited
+# part of the gap is 0 ms. credit_unprovable must MOVE by the whole 6000 ms,
+# and the pair charges exactly ONCE. Its value must equal CPU-class wall
+# read off DISK minus gap wall: the same evidence loss's pre-existing
+# double count (12000 ms for a 6000 ms gap), which this change only names.
+# NON-VACUITY passes on BOTH trees: no notes means 0 credited, 6000 ms
+# uncredited, 0 unprovable. It kills deleting the residual or over-broadly
+# routing everything to the new counter and leaving uncredited dead.
+# THE BYPASS SUITE -- each leg names the implementation it kills:
+# a. forget with a zero watermark: destroyed nothing, so no unprovable wall
+#    (kills a bool watermark_dropped flag laundering genuine uncredited);
+# b. a reused pid's [8 s, 14 s) gap above the dropped 7 s mark: uncredited
+#    (kills the same flag and pins start < rather than any historical drop);
+# c. matching start, no forget: both counters zero, disk CPU exactly 6 s
+#    (kills stopping the subtraction of the interval's own credit);
+# d. 500 ms CPU gap below the dropped mark: neither counter moves
+#    (kills an unconditional add that loses the over-one-second test);
+# e. 6 s Lock below the dropped mark: neither CPU counter moves
+#    (kills losing the class test while adding the evidence-loss branch);
+# f. PID_B never noted, no slot: uncredited 6 s, unprovable 0
+#    (kills treating o == NULL as lost evidence; #379 must not migrate);
+# g. missing directory and a writer disabled through a refused first open:
+#    read_back returns -1, so a zero-record sum cannot green any disk gate.
+# Every timestamp is pinned; every credit uses an explicit completed flush.
+test_open_credit_unprovable
 # #430: an hourly ROTATION must not PAUSE open-interval crediting.
 # pgwt_summary_check_rotation archives the file and leaves w->fp NULL for a
 # lazy reopen on the next PUSHED record, and writer_seal_through refused

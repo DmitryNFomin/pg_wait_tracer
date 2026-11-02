@@ -49,6 +49,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_cpu_split_parity \
             test_straddler_accounting \
             test_open_cpu_accounting \
+            test_open_credit_unprovable \
             test_rotation_open_credit \
             test_exec_index \
             test_interval_index \
@@ -800,6 +801,34 @@ test_straddler_accounting: test_straddler_accounting.c \
 # disabled writer, a sub-second gap, and the open-credit-only round trip.
 # Server build, no BPF, no live PG; ~0.3 s.
 test_open_cpu_accounting: test_open_cpu_accounting.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                   $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_open_credit_unprovable: #709 -- uncredited must not double-tell a
+# credited interval when lifecycle forget_open destroys the pid's watermark
+# before its last trace records drain. Asserted: uncredited == gap wall minus
+# open_cpu_credited_ns_total (a DIFFERENT code path from the close-time add).
+# The reachability probe really credits all six seconds; the control goes RED
+# with cpu_open_uncredited_ns_total = 6000 ms on the parent tree where the
+# never-credited part of the gap is 0 ms. The new credit_unprovable counter
+# must MOVE, the pair must charge exactly once, and unprovable must equal
+# CPU-class wall off DISK minus gap wall, naming the pre-existing disk risk.
+# NON-VACUITY: no notes must still move uncredited by 6000 ms on BOTH trees;
+# routing every gap to the new counter is not a fix. Bypass suite:
+# a. forget with nothing credited (kills a bool watermark_dropped flag);
+# b. reused pid's record above the dropped mark (pins the start comparison);
+# c. matching note, no forget (both counters zero, disk CPU exactly 6000 ms);
+# d. sub-second gap after drop (kills an unconditional add);
+# e. Lock after drop (kills losing the CPU-class test);
+# f. PID_B never noted, no slot (o == NULL stays the original #379 residual);
+# g. missing directory and disabled writer (read-back must REFUSE, never
+# approve an empty sum). Pinned timestamps, explicit flushes, no live PG/BPF.
+test_open_credit_unprovable: test_open_credit_unprovable.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \

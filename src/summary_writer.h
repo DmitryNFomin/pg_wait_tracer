@@ -824,6 +824,17 @@ struct pgwt_summary_open {
     uint64_t start_ns;            /* monotonic start of the open interval */
     uint64_t credited_until_ns;   /* monotone per-PID watermark */
     uint64_t credited_ns;         /* credited for the CURRENT interval only */
+    /* #709: credited_until_ns is the ONLY proof that a span was already
+     * credited. forget_open must zero it because the pid is gone and a
+     * reused pid must not inherit a dead one's credit. Preserve the value
+     * destroyed there as the high-water mark of "credit was placed below
+     * this instant, and the proof is gone": a late closing record starting
+     * below it cannot honestly be called never-credited. Monotone, only
+     * ever raised, so two successive forgets cannot lower it. NEVER cleared:
+     * under a monotonic clock a reused pid's records all start after the
+     * dead pid's last credited second, so their comparison is false without
+     * clearing away the evidence loss the old records still need to see. */
+    uint64_t credit_dropped_until_ns;
     uint64_t noted_ns;            /* when the producer last refreshed it */
 
     /* v9 (#424): the open ON-CPU gap. `we` is 0 for such an interval, which
@@ -1053,7 +1064,13 @@ struct pgwt_summary_writer {
      *                   later-queried window, and it is the gap's WALL time
      *                   recorded once, AT CLOSE -- not a measured-CPU
      *                   quantity and not what is currently missing from an
-     *                   in-flight window. See the increment site
+     *                   in-flight window. Only genuinely NEVER-CREDITED
+     *                   gaps remain here: no note at all for the pid, or a
+     *                   noted interval that received no credit. If a forget
+     *                   destroyed the proof, the whole record instead goes
+     *                   to cpu_open_credit_unprovable_ns_total below (#709),
+     *                   never silently treating unknown as never-credited.
+     *                   See the increment site
      *                   (pgwt_summary_push_event, "#379 residual") for the
      *                   exact condition. */
     uint64_t      open_credited_ns_total;
@@ -1114,6 +1131,27 @@ struct pgwt_summary_writer {
     uint64_t      open_cpu_unplaced_total;
     uint64_t      open_cpu_refused_total;
     uint64_t      cpu_open_uncredited_ns_total;
+    /* #709: WALL of a closed CPU record over one second, charged WHOLE at
+     * close, whose span starts below credit_dropped_until_ns. The writer
+     * cannot say whether those seconds were credited: forget_open destroyed
+     * the evidence before the record arrived. This is NOT folded into
+     * cpu_open_uncredited_ns_total, whose name asserts that the seconds were
+     * never placed. Here they may have been placed and merely mis-attributed;
+     * a counter whose value has two causes cannot be read (#709).
+     *
+     * uncredited keeps its exact meaning and keeps MOVING for every genuine
+     * #379 residual: no note at all for the pid, or a note whose interval
+     * received no credit. Deleting those is not the fix. This new counter
+     * is NOT a claim that the time was credited; it is a REFUSAL to claim
+     * either way. A writer that cannot see must refuse, never approve.
+     *
+     * The measured red input: six seconds credited, then forgotten, then
+     * closed gave 12000 ms of CPU-class wall ON DISK for a 6000 ms gap.
+     * This counter also measures the wall at risk of being double counted
+     * on disk by the same evidence loss. That over-count is pre-existing
+     * and NOT fixed here; it is why this quantity needs a name rather than
+     * reading as healthy uncredited time or vanishing from the counters. */
+    uint64_t      cpu_open_credit_unprovable_ns_total;
     uint64_t      open_fill_capped_total;
     /* #430: the SEAL's own file lifecycle. pgwt_summary_check_rotation closes
      * the file and leaves w->fp NULL for a LAZY reopen, so the seal has to be

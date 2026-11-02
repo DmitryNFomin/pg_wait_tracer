@@ -575,8 +575,16 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * nowhere -- which is why the 2026-10-28 runs showed uncredited at
      * 9.02 s, 9.07 s and 18.19 s with nothing able to say whether the
      * spread was a different background population or the identity check
-     * refusing. A reader comparing uncredited across captures needs this
-     * number in the same response or the comparison is not interpretable. */
+     * refusing. #709 now splits the double-tell out rather than only
+     * documenting it: when forget_open destroyed the watermark before a
+     * closing record arrived, summary_cpu_open_credit_unprovable_ns_total
+     * carries that record's whole wall instead of calling it uncredited.
+     * The writer cannot prove whether those seconds were placed; the
+     * measured red input was 6000 ms called uncredited for a fully credited
+     * 6000 ms gap, with 12000 ms of CPU-class wall on disk. That disk
+     * over-count remains separate. A reader comparing uncredited across
+     * captures must read BOTH uncredited and credit_unprovable, beside this
+     * mismatch count, or the comparison is not interpretable. */
     cjson_add_uint64(root, "summary_open_note_mismatch_total",
                      d->summary_writer
                          ? d->summary_writer->open_note_mismatch_total : 0);
@@ -589,6 +597,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_cpu_open_uncredited_ns_total",
                      d->summary_writer
                          ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
+    cjson_add_uint64(root, "summary_cpu_open_credit_unprovable_ns_total",
+                     d->summary_writer
+                         ? d->summary_writer->cpu_open_credit_unprovable_ns_total
+                         : 0);
     /* #430: the seal's own file lifecycle, published because the fix is
      * otherwise unobservable in production. reopens_total > 0 says the
      * rotation window really was sealed by the ticks rather than waiting for
