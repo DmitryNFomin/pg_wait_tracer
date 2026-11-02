@@ -1,5 +1,7 @@
 .sweep-latest.txt
 .sweep-latest.txt.tmp
+.sweep-pr-baseline.json
+.sweep-pr-baseline.json.tmp
 .sweep.log
 .sweep.lock
 .sweep.lock.d
