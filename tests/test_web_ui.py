@@ -355,6 +355,57 @@ def test_overview_table(page):
     check("Lock" in table_text, "Table has Lock row")
 
 
+# #566: Overview's #table-container renders NO caption text at all in its
+# default (non-compare, non-sampled, exact-fidelity, fully-captured) state --
+# confirmed empirically (dumped innerHTML shows only the table, no caption
+# div of any kind). The one Overview-adjacent string that actually drifted
+# in the issue's demonstrated example (the AAS chart's "N CPUs" reference-line
+# label, lib/builders/aas.js) is an ECharts graphic drawn to a <canvas>
+# element with the default renderer (views/active.js's ctx.echarts.init(el,
+# 'dark') passes no `renderer` option) -- text_content() cannot see canvas
+# pixels, so the DOM-text route in this file cannot close that half of the
+# gap; only a gallery cell (pixel tier) can, and that is the queued web/
+# route per this issue's own framing, not this one.
+#
+# The one genuine Overview-only, client-rendered caption is buildSummary's
+# "AAS ... captured Xs of Ys" disclosure (views/overview.js): it is NOT the
+# demonstrated #475 regression, but it IS DOM text, Overview-exclusive
+# (#summary-bar is cleared by every other view), and conditional on the
+# requested window out-running capture -- exactly like a real disclosure
+# note, not an always-on label. The deep-link hash (#from=&to=, ns-exact,
+# wired by lib/state.js) deterministically forces that condition against
+# mock_server.py's fixed clock (read, not modified, here) without touching
+# web/static or mock_server.py.
+def test_overview_capture_coverage_caption(page):
+    """#566: Overview's capture-coverage disclosure is DOM text, not pixels."""
+    print("--- Test #566: Overview Capture-Coverage Caption ---")
+
+    # mock_server.py's _TO_NS (its fixed "now"); the capture window is the
+    # 3600s before it (_FROM_NS = _TO_NS - 3600e9). Requesting a window
+    # TWICE that wide (7200s) makes capturedSpan/windowSpan = 0.5 < 0.9,
+    # the exact threshold buildSummary checks -- deterministic given the
+    # mock's fixed clock, no sleep/timing dependency.
+    to_ns = 1_774_000_000_000_000_000
+    from_ns = to_ns - 7200_000_000_000
+    page.goto(MOCK_URL + f"#tab=overview&from={from_ns}&to={to_ns}")
+    page.reload()  # full boot hydration, same pattern test_url_state_roundtrip uses
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1500)
+
+    summary_text = page.text_content("#summary-bar") or ""
+    check(" · captured " in summary_text,
+          f"Overview summary states capture coverage when the window "
+          f"out-runs capture ('{summary_text}')")
+    m = re.search(r'captured (\d+)s of (\d+)s', summary_text)
+    check(m is not None,
+          f"Capture-coverage note has an 'captured Ns of Ms' shape ('{summary_text}')")
+    if m:
+        captured_s, window_s = int(m.group(1)), int(m.group(2))
+        check(0 < captured_s < window_s,
+              f"Captured span ({captured_s}s) is a real partial fraction "
+              f"of the window ({window_s}s)")
+
+
 def test_events_table(page):
     """5. Events tab shows event rows with all columns."""
     print("--- Test 5: Events Table ---")
@@ -549,6 +600,61 @@ def test_queries_table(page):
     # Stacked bars should exist
     bars = page.query_selector_all(".stacked-bar")
     check(len(bars) > 0, f"Stacked wait profile bars rendered ({len(bars)})")
+
+
+# #566: table_queries.png has no gallery twin, so its caption text is gated
+# only by the pane snapshot tier (28px / 2% budget), which is documented as
+# sized for area/colour regressions and explicitly NOT for text -- #475-2's
+# "Backend span: 0.4 s" -> "Backend span: 420.0ms" rewrite passed every
+# snapshots job at 0.045% diff. These are plain DOM-text checks (no pixels),
+# in the same shape as test_sessions_table's panel-caption check above:
+# assert the caption EXISTS first (an absent/empty caption is the
+# regression trap #1 wording would miss), then pin its content.
+def test_queries_caption_coverage(page):
+    """#566: Queries pane captions are gated by DOM text, not just pixels."""
+    print("--- Test #566: Queries Caption Coverage ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='queries']")
+    page.wait_for_timeout(1000)
+
+    # (a) The static exec-scope-note (table-configs.js's queriesScopeNoteHtml):
+    # entirely static wording, no interpolated numbers, so -- like Sessions'
+    # panel-caption -- the invariant phrases are pinned directly. Existence
+    # is asserted separately from content, per trap #1: a selector miss here
+    # must fail this check, not be silently skipped by an "if present" guard.
+    caption = page.query_selector("#table-container .exec-scope-note.queries-scope")
+    check(caption is not None, "Queries pane has its exec-scope-note caption")
+    caption_text = caption.text_content() if caption else ""
+    check(bool(caption_text.strip()), "Queries caption is non-empty")
+    check("Completed executor phase only" in caption_text,
+          f"Queries caption states the executor-phase scope ('{caption_text[:60]}')")
+    check("Backend spans: backend activity, not statement latency" in caption_text,
+          "Queries caption states the backend-span disclosure")
+    check("DB Time includes waits acquired before execution starts" in caption_text,
+          "Queries caption states the DB-Time-includes-pre-exec-waits scope")
+
+    # (b) The per-row backend-span line (backend-span.js's queryBackendSpanLine),
+    # embedded in the first row's Query Text cell. #475-2 is exactly this text:
+    # the pre-fix format put a SPACE between the number and its unit ("0.4 s",
+    # local fmtSpanSeconds), the fixed format never does ("420.0ms", shared
+    # fmtMs) -- so the invariant this pins is "no space before the unit",
+    # which catches the whole #475-2 regression class, not just the one
+    # historical value. The duration's digits themselves are shape-checked
+    # (data-dependent in principle), not pinned as a literal.
+    span_el = page.query_selector("#table-container .query-backend-span")
+    check(span_el is not None, "Queries row has a backend-span line")
+    span_text = span_el.text_content() if span_el else ""
+    check("Longest measured closed backend span:" in span_text,
+          f"Backend-span line states closed/measured ('{span_text}')")
+    m = re.search(r'backend span:\s*(\d+(?:\.\d+)?)\s*(ms|s|µs)', span_text)
+    check(m is not None, f"Backend-span duration has a number+unit shape ('{span_text}')")
+    if m:
+        no_space_form = m.group(1) + m.group(2)
+        check(no_space_form in span_text,
+              f"Backend-span duration has no space before its unit "
+              f"(pre-#475 regression wrote '{m.group(1)} {m.group(2)}'; got '{span_text}')")
 
 
 def test_histogram_tab(page):
@@ -4451,12 +4557,14 @@ def main():
                 test_tabs,
                 test_summary_bar,
                 test_overview_table,
+                test_overview_capture_coverage_caption,
                 test_events_table,
                 test_column_sorting,
                 test_drill_down,
                 test_breadcrumb_navigation,
                 test_sessions_table,
                 test_queries_table,
+                test_queries_caption_coverage,
                 test_histogram_tab,
                 test_timeline_tab,
                 test_transitions_tab,
