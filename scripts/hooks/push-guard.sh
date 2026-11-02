@@ -33,7 +33,7 @@ class Ambiguous(Exception):
 class Forbidden(Exception):
     pass
 
-TERMS = ("PGWT_SKIP_PUSH_GUARD", "core.hookspath", "--no-v", "send-pack", "git-hooks")
+TERMS = ("PGWT_SKIP_PUSH_GUARD", "core.hookspath", "--no-v", "send-pack", "git-hooks", "git-push", "git-receive-pack")
 
 def relevant(text):
     # This only avoids parsing unrelated, possibly oddly quoted commands.
@@ -165,7 +165,15 @@ def protected(word):
 
 MUTATORS = {"rm", "unlink", "mv", "cp", "install", "truncate", "tee", "chmod", "ln", "touch", "dd"}
 READERS = {"echo", "printf", "cat", "head", "tail", "grep", "rg", "sed", "awk", "less"}
+GIT_PLUMBING = {"git-send-pack", "git-push", "git-receive-pack"}
 REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<>", "<", "<&", "<<", "<<-", "<<<"}
+
+def plumbing_name(word):
+    # Exact binary name only (any path prefix), never a substring or pattern —
+    # a general git-* pattern also matches the git-hooks path operand and
+    # reintroduces the #719 false positive. git-push and git-receive-pack are
+    # the obvious symmetry with the proven git-send-pack case (#687).
+    return word.rsplit("/", 1)[-1] in GIT_PLUMBING
 
 def skip_assignment(word):
     if word.startswith("PGWT_SKIP_PUSH_GUARD="):
@@ -331,8 +339,8 @@ def invocation(words, heredocs=(), state=None):
         if hook_config:
             raise Forbidden("core.hooksPath: GIT_CONFIG_KEY environment overrides the real hook directory")
         return git_invocation(args, skip)
-    if verb == "git-send-pack":
-        raise Forbidden("git send-pack: plumbing bypasses the pre-push hook entirely (#687)")
+    if plumbing_name(verb):
+        raise Forbidden(f"{verb}: plumbing bypasses the pre-push hook entirely (#687)")
     if verb in ("sh", "bash", "zsh", "dash", "ksh"):
         index, stdin_script = 0, True
         while index < len(args):
@@ -371,13 +379,21 @@ def invocation(words, heredocs=(), state=None):
         if not (verb == "gh" and arg.startswith(("--body=", "--body-file=", "--comment=", "--title="))):
             scan.append(arg)
         index += 1
-    # Invert launcher recognition: a reader cannot run what it prints, so
-    # exempting its data is safe; an unknown verb might execute its arguments,
-    # so deny it when git and a denylist term occur together. A small reader
-    # allowlist is bounded in a way a launcher allowlist can never be.
+    # Invert launcher recognition over operands: a reader argv is data to this
+    # check. Unknown verbs are denied when git and a denylist term occur together,
+    # or when an operand names a known plumbing binary.
+    # Interpreters evaluating program-string arguments (awk, GNU sed e, perl -e,
+    # python3 -c, and the like) are outside this check entirely. READERS membership
+    # does not change that limit: the gap is string evaluation, not launcher names.
+    # Like #688 and #708, this is a lexical tripwire over Claude Code command text,
+    # not a boundary against an interpreter, wrapper script or binary executing
+    # its own code; wrapper file contents are never inspected. See #688, #708.
     git_token = any(re.match(r"(?:[^\s]+/)?git(?:\s|$)", arg) for arg in scan)
     if verb not in READERS and git_token and (skip or hook_config or any(relevant(arg) for arg in scan)):
         raise Forbidden("unknown executable context contains git and a push-guard denylist term")
+    plumbing_hit = any(plumbing_name(arg) for arg in scan)
+    if verb not in READERS and plumbing_hit:
+        raise Forbidden("plumbing binary reached through an unrecognized launcher: bypasses the pre-push hook entirely (#687)")
     if verb not in MUTATORS:
         return False
     if verb in ("cp", "install", "ln"):

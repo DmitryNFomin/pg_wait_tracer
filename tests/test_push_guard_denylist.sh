@@ -391,6 +391,20 @@ for reader in echo printf cat head tail grep rg sed awk less; do
     allowed "$reader git -c core.hooksPath=/dev/null push" "reader arguments are data: $reader"
 done
 
+# #687: exact plumbing names deny even without git or another denylist operand.
+for name in git-send-pack git-push git-receive-pack; do
+    denied "$name origin HEAD" "direct plumbing binary: $name"
+    denied "command $name origin HEAD" "recognized wrapper plumbing binary: $name"
+    denied "env /usr/libexec/git-core/$name origin HEAD" "recognized wrapper absolute plumbing binary: $name"
+    denied "nohup $name origin HEAD" "nohup plumbing binary: $name"
+    denied "timeout 30 $name origin HEAD" "timeout plumbing binary: $name"
+    denied "xargs $name origin HEAD" "xargs plumbing binary: $name"
+    denied "nohup /usr/libexec/git-core/$name" "absolute plumbing binary: $name"
+    for reader in echo printf cat head tail grep rg sed awk less; do
+        allowed "$reader $name origin HEAD" "reader plumbing name is data: $reader $name"
+    done
+done
+
 # Exercise an actual pre-push executable in an isolated repository, with a
 # local bare destination. Denied commands never execute. The following plain
 # push must run the hook, including after every attempted persistent write.
