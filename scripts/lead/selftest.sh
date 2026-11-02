@@ -17,6 +17,8 @@
 # dirty edit happens to be better, worse, or merely different.
 #
 # Usage: scripts/lead/selftest.sh   (exits non-zero on any failed case)
+#   BOX_EVIDENCE_CONTROL=1 also grades origin/master checkers with the new
+#   tree-evidence cases and requires both moved-commit controls to fail.
 #   exit 3: scripts/lead/sweep-hook.sh is not committed at HEAD at all
 #   exit 4: on-disk differs from HEAD (cases below still ran, for diagnosis,
 #           but this verdict cannot stand in for "HEAD is sound")
@@ -375,13 +377,41 @@ fi
 CBE="scripts/lead/check-box-evidence.sh"
 CBEBIN="$TMP/cbebin"; mkdir -p "$CBEBIN"
 REALGIT="$(command -v git)"
+# Real objects in an isolated bare repository, made with plumbing only:
+# no staging/committing in the working repository (or even a scratch index).
+TREE_REPO="$TMP/evidence.git"
+"$REALGIT" init --bare -q "$TREE_REPO" || exit 5
+tree_git() { "$REALGIT" -C "$TREE_REPO" "$@"; }
+blob_a=$(printf 'original\n' | tree_git hash-object -w --stdin)
+blob_b=$(printf 'changed\n' | tree_git hash-object -w --stdin)
+sub_a=$(printf '100644 blob %s\tfile.txt\n' "$blob_a" | tree_git mktree)
+sub_b=$(printf '100644 blob %s\tfile.txt\n' "$blob_b" | tree_git mktree)
+TREE_BASE=$(printf '040000 tree %s\tdocs\n040000 tree %s\tsrc\n' "$sub_a" "$sub_a" | tree_git mktree)
+TREE_SRC=$(printf '040000 tree %s\tdocs\n040000 tree %s\tsrc\n' "$sub_a" "$sub_b" | tree_git mktree)
+TREE_DOCS=$(printf '040000 tree %s\tdocs\n040000 tree %s\tsrc\n' "$sub_b" "$sub_a" | tree_git mktree)
+tree_commit() {
+  GIT_AUTHOR_NAME=Selftest GIT_AUTHOR_EMAIL=selftest@example.invalid \
+    GIT_COMMITTER_NAME=Selftest GIT_COMMITTER_EMAIL=selftest@example.invalid \
+    tree_git commit-tree "$@"
+}
+TREE_BASE_SHA=$(printf 'base\n' | tree_commit "$TREE_BASE")
+TREE_SAME_SHA=$(printf 'same tree, new commit\n' | tree_commit "$TREE_BASE" -p "$TREE_BASE_SHA")
+TREE_SRC_SHA=$(printf 'src changed\n' | tree_commit "$TREE_SRC" -p "$TREE_BASE_SHA")
+TREE_MISSING=ffffffffffffffffffffffffffffffffffffffff
+if tree_git cat-file -e "$TREE_MISSING" 2>/dev/null; then
+  echo "SELFTEST SETUP FAILED: supposedly missing object exists" >&2; exit 5
+fi
 cat > "$CBEBIN/git" <<EOSTUB
 #!/usr/bin/env bash
+# Both checkers use the production root; redirect only their git calls to
+# the real scratch object database. The worktree listing stays synthetic.
+if [ "\${1:-}" = "-C" ]; then shift 2; fi
 if [ "\$1" = "worktree" ] && [ "\$2" = "list" ]; then
   cat "\$STUB_WT_PORCELAIN"
   exit 0
 fi
-exec "$REALGIT" "\$@"
+if [ "\${STUB_DIFF_FAIL:-0}" = 1 ] && [ "\$1" = diff-tree ]; then exit 128; fi
+exec "$REALGIT" -C "$TREE_REPO" "\$@"
 EOSTUB
 chmod +x "$CBEBIN/git"
 cat > "$CBEBIN/gh" <<'EOSTUB'
@@ -455,35 +485,33 @@ mk_gh_json() {
 
 # case 16: EVIDENCE-OK, no NO-CLOSING-REF (branch does not match agent/N-) -> exit 0
 rm -f "$CBE_FIXTURE"/tests/results/*.log
-cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<'EOF'
-box-check: commit=1111111111111111111111111111111111111111 tree-hash=abc
+cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<EOF
+box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE
 EOF
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/lead-stuff "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/lead-stuff "")
 out=$(run_cbe json "$json"); rc=$?
-if [ "$rc" = 0 ] && printf '%s' "$out" | /usr/bin/grep -q '^EVIDENCE-OK 1111'; then
+if [ "$rc" = 0 ] && printf '%s' "$out" | /usr/bin/grep -q "^EVIDENCE-OK $TREE_BASE_SHA (tree $TREE_BASE)"; then
   pass=$((pass+1)); echo "ok   check-box-evidence: EVIDENCE-OK, no closing-ref check for non-numbered branch (exit $rc)"
 else
   fail=$((fail+1)); echo "FAIL check-box-evidence EVIDENCE-OK case (rc=$rc)"
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
-# case 17 (the real bug this script exists for): EVIDENCE-STALE when the log's
-# commit= does not match HEAD -- e.g. a gh pr update-branch merge commit ran
-# after the last box-check. Issue #42 is fixtured CLOSED so section [2]
-# contributes nothing here -- this case isolates the evidence check alone.
-json=$(mk_gh_json 2222222222222222222222222222222222222222 agent/42-demo-fixture "")
+# case 17: a src tree divergence is a finding. Issue #42 is CLOSED so
+# section [2] contributes nothing: this isolates the evidence check alone.
+json=$(mk_gh_json "$TREE_SRC_SHA" agent/42-demo-fixture "")
 out=$(run_cbe json "$json" "42:CLOSED"); rc=$?
-if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^EVIDENCE-STALE 1111.*!= 2222'; then
-  pass=$((pass+1)); echo "ok   check-box-evidence: EVIDENCE-STALE on a mismatched commit= header (exit $rc)"
+if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^EVIDENCE-TREE-DRIFT '; then
+  pass=$((pass+1)); echo "ok   check-box-evidence: EVIDENCE-TREE-DRIFT on a src divergence (exit $rc)"
 else
-  fail=$((fail+1)); echo "FAIL check-box-evidence EVIDENCE-STALE case (rc=$rc)"
+  fail=$((fail+1)); echo "FAIL check-box-evidence EVIDENCE-TREE-DRIFT case (rc=$rc)"
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
 # case 18: EVIDENCE-MISSING -- the thing being checked is ABSENT, not wrong.
 # Must not be confused with EVIDENCE-OK or silence.
 rm -f "$CBE_FIXTURE"/tests/results/*.log
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/lead-stuff "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/lead-stuff "")
 out=$(run_cbe json "$json"); rc=$?
 if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^EVIDENCE-MISSING$'; then
   pass=$((pass+1)); echo "ok   check-box-evidence: EVIDENCE-MISSING when no log exists (exit $rc)"
@@ -491,13 +519,13 @@ else
   fail=$((fail+1)); echo "FAIL check-box-evidence EVIDENCE-MISSING case (rc=$rc)"
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
-cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<'EOF'
-box-check: commit=1111111111111111111111111111111111111111 tree-hash=abc
+cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<EOF
+box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE
 EOF
 
 # case 19: NO-CLOSING-REF-CANDIDATE fires when the branch names an OPEN
 # issue but closingIssuesReferences is empty.
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/42-demo-fixture "")
 out=$(run_cbe json "$json" "42:OPEN"); rc=$?
 if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^NO-CLOSING-REF-CANDIDATE #123 -> issue #42 '; then
   pass=$((pass+1)); echo "ok   check-box-evidence: candidate fires on an empty ref list for an OPEN issue (exit $rc)"
@@ -510,7 +538,7 @@ fi
 # in closingIssuesReferences -- the check must not flag a PR that has one,
 # and must not even need to query the issue's state to know that (no entry
 # in STUB_ISSUE_STATES for 42 here).
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "42")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/42-demo-fixture "42")
 out=$(run_cbe json "$json" ""); rc=$?
 if [ "$rc" = 0 ] && ! printf '%s' "$out" | /usr/bin/grep -q 'NO-CLOSING-REF'; then
   pass=$((pass+1)); echo "ok   check-box-evidence: a real closing ref is not flagged (exit $rc)"
@@ -523,7 +551,7 @@ fi
 # an empty ref list, but that issue is already CLOSED -- nothing to close,
 # so this must NOT be flagged. Live data before this fix: 2 of 4 flagged
 # issues (#390, #230) were exactly this case.
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/42-demo-fixture "")
 out=$(run_cbe json "$json" "42:CLOSED"); rc=$?
 if [ "$rc" = 0 ] && ! printf '%s' "$out" | /usr/bin/grep -q 'NO-CLOSING-REF'; then
   pass=$((pass+1)); echo "ok   check-box-evidence: a closed issue with no ref is not flagged (exit $rc)"
@@ -535,7 +563,7 @@ fi
 # case 20c: a multi-issue branch (agent/507-490-v2 shape) must check EVERY
 # leading numeric token, not just the first -- and only the OPEN one with no
 # ref is a candidate; the CLOSED one must be silent.
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/55-66-vX "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/55-66-vX "")
 out=$(run_cbe json "$json" "55:OPEN,66:CLOSED"); rc=$?
 if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q 'issue #55' \
    && ! printf '%s' "$out" | /usr/bin/grep -q 'issue #66'; then
@@ -547,7 +575,7 @@ fi
 
 # case 20d: the issue-state lookup itself fails (gh error / unknown issue)
 # -> UNKNOWN, exit non-zero, never silently treated as open or closed.
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/42-demo-fixture "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/42-demo-fixture "")
 out=$(run_cbe json "$json" ""); rc=$?
 if [ "$rc" != 0 ] && [ "$rc" != 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^UNKNOWN:'; then
   pass=$((pass+1)); echo "ok   check-box-evidence: issue-state lookup failure reports UNKNOWN (exit $rc)"
@@ -590,11 +618,11 @@ fi
 
 # case 24: an unreadable log file -> UNKNOWN, not silently skipped as if it
 # did not exist (that would collapse "unreadable" into "absent").
-cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<'EOF'
-box-check: commit=1111111111111111111111111111111111111111 tree-hash=abc
+cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<EOF
+box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE
 EOF
 chmod 000 "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log"
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/lead-stuff "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/lead-stuff "")
 if [ "$(id -u)" = "0" ]; then
   echo "skip check-box-evidence unreadable-log case: running as root, chmod 000 has no effect"
 else
@@ -610,10 +638,10 @@ chmod 644 "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" 2>/d
 
 # case 25: a log with no parseable commit= header -> UNKNOWN, not silently
 # treated as a mismatch or a pass.
-cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<'EOF'
+cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<EOF
 some unrelated log line
 EOF
-json=$(mk_gh_json 1111111111111111111111111111111111111111 agent/lead-stuff "")
+json=$(mk_gh_json "$TREE_BASE_SHA" agent/lead-stuff "")
 out=$(run_cbe json "$json"); rc=$?
 if [ "$rc" != 0 ] && [ "$rc" != 1 ] && printf '%s' "$out" | /usr/bin/grep -q '^UNKNOWN:'; then
   pass=$((pass+1)); echo "ok   check-box-evidence: unparseable commit= header reports UNKNOWN (exit $rc)"
@@ -632,16 +660,130 @@ else
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
+# The same new cases run against each on-disk checker, and optionally the
+# origin/master copies below (BOX_EVIDENCE_CONTROL=1). No duplicate control
+# assertions: a control that passes the moved-commit case is an error.
+tree_pass=0; tree_fail=0; tree_match_failed=0
+tree_run() {
+  local head="${1:-$TREE_SAME_SHA}"
+  if [ "$tree_tool" = cbe ]; then
+    local json
+    json=$(mk_gh_json "$head" agent/lead-stuff "")
+    out=$(run_cbe json "$json" 2>&1); rc=$?
+  else
+    beb_prs "[{\"number\":123,\"headRefOid\":\"$head\",\"headRefName\":\"agent/lead-stuff\",\"closingIssuesReferences\":[]}]"
+    beb_issues ''; beb_wt_ok agent/lead-stuff "$BEB_FIX/wtA"
+    out=$(run_beb); rc=$?
+  fi
+}
+tree_log() {
+  printf 'box-check: commit=%s tree-hash=%s\n' "$1" "$2" > "$tree_logs/box-check-1.log"
+}
+tree_assert() {
+  local desc="$1" want_rc="$2" pattern ok=1
+  shift 2
+  [ "$rc" = "$want_rc" ] || ok=0
+  for pattern in "$@"; do
+    if [ -n "$pattern" ]; then
+      printf '%s' "$out" | /usr/bin/grep -Fq -- "$pattern" || ok=0
+    else
+      [ -z "$out" ] || ok=0
+    fi
+  done
+  if [ "$ok" = 1 ]; then
+    pass=$((pass+1)); tree_pass=$((tree_pass+1))
+    echo "${TREE_CONTROL:+control }ok   $tree_tool tree evidence: $desc (exit $rc)"
+  else
+    fail=$((fail+1)); tree_fail=$((tree_fail+1))
+    [ "$desc" != 'tree-identical moved commit' ] || tree_match_failed=$((tree_match_failed+1))
+    echo "${TREE_CONTROL:+control }FAIL $tree_tool tree evidence: $desc (rc=$rc, want $want_rc)"
+    printf '%s\n' "$out" | sed 's/^/       /'
+  fi
+}
+run_tree_evidence_cases() {
+  local tree_tool="$1" tree_logs match_pattern diff_detail
+  if [ "$tree_tool" = cbe ]; then
+    tree_logs="$CBE_FIXTURE/tests/results"
+    match_pattern="EVIDENCE-OK $TREE_BASE_SHA (tree $TREE_BASE)"
+    diff_detail='src/file.txt'
+  else
+    tree_logs="$BEB_FIX/wtA/tests/results"
+    match_pattern=''  # bulk OK stays silent
+    diff_detail='check-box-evidence.sh 123 for the file list'
+  fi
+  mkdir -p "$tree_logs"
+  rm -f "$tree_logs"/box-check-*.log
+
+  tree_log "$TREE_BASE_SHA" "$TREE_BASE"
+  tree_run
+  tree_assert 'tree-identical moved commit' 0 "$match_pattern"
+
+  # Same commit= as the tip, but a different tested tree: sha equality must
+  # neither override a src finding nor suppress a docs-only note (#714).
+  tree_log "$TREE_SAME_SHA" "$TREE_SRC"
+  tree_run
+  tree_assert 'src drift despite identical commit header' 1 EVIDENCE-TREE-DRIFT FINDING \
+    "$diff_detail" "tip=$TREE_BASE logged=$TREE_SRC"
+
+  tree_log "$TREE_SAME_SHA" "$TREE_DOCS"
+  tree_run
+  tree_assert 'docs-only drift is a note' 0 EVIDENCE-TREE-DRIFT NOTE
+
+  tree_log "$TREE_SAME_SHA" "$TREE_MISSING"
+  tree_run
+  tree_assert 'unresolvable logged tree is a finding' 1 EVIDENCE-UNIDENTIFIED "$TREE_MISSING"
+
+  rm -f "$tree_logs"/box-check-*.log
+  tree_run
+  tree_assert 'missing log stays a finding' 1 EVIDENCE-MISSING
+
+  tree_log "$TREE_BASE_SHA" "$TREE_BASE"
+  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" > "$tree_logs/box-check-2.log"
+  tree_run
+  tree_assert 'any older matching tree wins over newer drift' 0 "$match_pattern"
+
+  tree_log "$TREE_SAME_SHA" "$TREE_SRC"
+  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_DOCS" > "$tree_logs/box-check-2.log"
+  tree_run
+  tree_assert 'newest filename selects the drift severity' 0 EVIDENCE-TREE-DRIFT "logged=$TREE_DOCS"
+  rm -f "$tree_logs/box-check-2.log"
+
+  printf 'box-check: commit=%s\n' "$TREE_SAME_SHA" > "$tree_logs/box-check-1.log"
+  tree_run
+  tree_assert 'missing tree header is UNKNOWN' 3 UNKNOWN: tree-hash=
+
+  tree_log "$TREE_SAME_SHA" not-a-tree
+  tree_run
+  tree_assert 'malformed tree header is UNKNOWN' 3 UNKNOWN: tree-hash=
+
+  tree_log "$TREE_MISSING" "$TREE_BASE"
+  tree_run "$TREE_MISSING"
+  tree_assert 'unresolvable tip is UNKNOWN even when commit matches' 3 UNKNOWN: 'tip tree'
+
+  tree_log "$TREE_SAME_SHA" not-a-tree
+  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" > "$tree_logs/box-check-2.log"
+  tree_run
+  tree_assert 'malformed older header is not hidden by a matching log' 3 UNKNOWN: tree-hash=
+  rm -f "$tree_logs/box-check-2.log"
+
+  tree_log "$TREE_SAME_SHA" "$TREE_SRC"
+  export STUB_DIFF_FAIL=1
+  tree_run
+  unset STUB_DIFF_FAIL
+  tree_assert 'failed diff query is UNKNOWN' 3 UNKNOWN: compare
+
+  printf 'box-check: commit=not-hex tree-hash=%s\n' "$TREE_BASE" > "$tree_logs/box-check-1.log"
+  tree_run
+  tree_assert 'unparseable commit header remains UNKNOWN' 3 UNKNOWN: commit=
+}
+run_tree_evidence_cases cbe
+
 rm -rf "$CBE_FIXTURE" "$TMP/cbe-decoy"
 
 # =============================================================================
-# box-evidence-bulk.py -- sweep.sh's bulk equivalent of check-box-evidence.sh
-# (section [10]). Pure: it makes no gh/git calls of its own, so these tests
-# feed it fixture files directly -- no process stubbing needed, and no path
-# by which a stubbed dependency exiting 126/127 could hide inside THIS
-# script (that risk lives in sweep.sh's own `gh pr list` / `git worktree
-# list` calls, which already degrade via the same `|| echo UNKNOWN` pattern
-# every other bulk call in sweep.sh uses).
+# box-evidence-bulk.py -- sweep.sh's bulk equivalent of check-box-evidence.sh.
+# Inputs are fixture files; local read-only git calls use the scratch repo
+# through the same stub as the single-PR tests above.
 # =============================================================================
 BEB="scripts/lead/box-evidence-bulk.py"
 BEB_FIX="$TMP/beb-fixtures"; mkdir -p "$BEB_FIX/wtA/tests/results" "$BEB_FIX/wtB/tests/results"
@@ -675,7 +817,7 @@ beb_wt_ok() {  # writes a real porcelain dump: $1 branch -> $2 path, repeated pa
     shift 2
   done
 }
-run_beb() { /usr/bin/python3 "$BEB" "$TMP/beb-prs.json" "$TMP/beb-issues.json" "$TMP/beb-wt.txt" 2>&1; }
+run_beb() { PATH="$CBEBIN:$PATH" /usr/bin/python3 "$BEB" "$TMP/beb-prs.json" "$TMP/beb-issues.json" "$TMP/beb-wt.txt" 2>&1; }
 
 # case 27 (empty input is absence, not a crash): zero open PRs -> exit 0,
 # no output at all. The "thing being checked is absent" case this project's
@@ -690,10 +832,10 @@ else
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
-# case 28: EVIDENCE-OK (log commit matches HEAD) produces NO output -- a
+# case 28: EVIDENCE-OK (log tree matches the tip tree) produces NO output -- a
 # clean pass must not read the same as "nothing was checked".
-printf 'box-check: commit=aaaa0000 tree-hash=x\n' > "$BEB_FIX/wtA/tests/results/box-check-ubuntu-1.log"
-beb_prs '[{"number":1,"headRefOid":"aaaa0000","headRefName":"agent/lead-stuff","closingIssuesReferences":[]}]'
+printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" > "$BEB_FIX/wtA/tests/results/box-check-ubuntu-1.log"
+beb_prs "[{\"number\":1,\"headRefOid\":\"$TREE_BASE_SHA\",\"headRefName\":\"agent/lead-stuff\",\"closingIssuesReferences\":[]}]"
 beb_issues ''; beb_wt_ok agent/lead-stuff "$BEB_FIX/wtA"
 out=$(run_beb); rc=$?
 if [ "$rc" = 0 ] && [ -z "$out" ]; then
@@ -703,20 +845,18 @@ else
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
-# case 29 (the real bug class): EVIDENCE-STALE when the log's commit does
-# not match headRefOid (e.g. a gh pr update-branch merge commit ran after
-# the last box-check).
-beb_prs '[{"number":2,"headRefOid":"bbbb9999","headRefName":"agent/lead-stuff","closingIssuesReferences":[]}]'
+# case 29: a real src tree divergence is a finding.
+beb_prs "[{\"number\":2,\"headRefOid\":\"$TREE_SRC_SHA\",\"headRefName\":\"agent/lead-stuff\",\"closingIssuesReferences\":[]}]"
 out=$(run_beb); rc=$?
-if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q 'EVIDENCE-STALE aaaa0000 != bbbb9999'; then
-  pass=$((pass+1)); echo "ok   box-evidence-bulk: EVIDENCE-STALE on a mismatched commit (exit $rc)"
+if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q 'EVIDENCE-TREE-DRIFT.*FINDING(src/tests)'; then
+  pass=$((pass+1)); echo "ok   box-evidence-bulk: EVIDENCE-TREE-DRIFT on a src divergence (exit $rc)"
 else
-  fail=$((fail+1)); echo "FAIL box-evidence-bulk EVIDENCE-STALE case (rc=$rc)"
+  fail=$((fail+1)); echo "FAIL box-evidence-bulk EVIDENCE-TREE-DRIFT case (rc=$rc)"
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 
 # case 30: EVIDENCE-MISSING -- the branch has no worktree at all (absent,
-# not wrong). Must not be confused with EVIDENCE-OK (silent) or STALE.
+# not wrong). Must not be confused with EVIDENCE-OK (silent) or TREE-DRIFT.
 beb_prs '[{"number":3,"headRefOid":"cccc1111","headRefName":"agent/no-worktree","closingIssuesReferences":[]}]'
 out=$(run_beb); rc=$?
 if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q 'EVIDENCE-MISSING'; then
@@ -756,7 +896,7 @@ fi
 beb_prs '[{"number":5,"headRefOid":"dddd2222","headRefName":"agent/42-demo","closingIssuesReferences":[]}]'
 beb_issues '42'
 printf 'WORKTREE-LIST-FAILED\n' > "$TMP/beb-wt.txt"
-out=$(/usr/bin/python3 "$BEB" "$TMP/beb-prs.json" "$TMP/beb-issues.json" "$TMP/beb-wt.txt" 2>&1); rc=$?
+out=$(PATH="$CBEBIN:$PATH" /usr/bin/python3 "$BEB" "$TMP/beb-prs.json" "$TMP/beb-issues.json" "$TMP/beb-wt.txt" 2>&1); rc=$?
 if printf '%s' "$out" | /usr/bin/grep -q '^UNKNOWN: git worktree list failed' \
    && printf '%s' "$out" | /usr/bin/grep -q 'NO-CLOSING-REF'; then
   pass=$((pass+1)); echo "ok   box-evidence-bulk: worktree-list failure degrades evidence only, closing-ref check still runs (exit $rc)"
@@ -769,11 +909,11 @@ fi
 # checking for OTHER PRs still runs (a partial failure must not silence
 # everything else this run could have told the lead).
 rm -f "$TMP/beb-issues-missing.json"
-beb_prs '[{"number":6,"headRefOid":"bbbb9999","headRefName":"agent/lead-stuff","closingIssuesReferences":[]}]'
+beb_prs "[{\"number\":6,\"headRefOid\":\"$TREE_SRC_SHA\",\"headRefName\":\"agent/lead-stuff\",\"closingIssuesReferences\":[]}]"
 beb_wt_ok agent/lead-stuff "$BEB_FIX/wtA"
-out=$(/usr/bin/python3 "$BEB" "$TMP/beb-prs.json" "$TMP/beb-issues-missing.json" "$TMP/beb-wt.txt" 2>&1); rc=$?
+out=$(PATH="$CBEBIN:$PATH" /usr/bin/python3 "$BEB" "$TMP/beb-prs.json" "$TMP/beb-issues-missing.json" "$TMP/beb-wt.txt" 2>&1); rc=$?
 if printf '%s' "$out" | /usr/bin/grep -q '^UNKNOWN: cannot read open-issue data' \
-   && printf '%s' "$out" | /usr/bin/grep -q 'EVIDENCE-STALE'; then
+   && printf '%s' "$out" | /usr/bin/grep -q 'EVIDENCE-TREE-DRIFT'; then
   pass=$((pass+1)); echo "ok   box-evidence-bulk: missing open-issues file degrades closing-ref only, evidence check still runs (exit $rc)"
 else
   fail=$((fail+1)); echo "FAIL box-evidence-bulk missing-issues-file case (rc=$rc)"
@@ -782,7 +922,7 @@ fi
 
 # case 35 (negative control for the closing-ref check): a branch naming an
 # OPEN issue that IS in closingIssuesReferences must not be flagged.
-beb_prs '[{"number":7,"headRefOid":"aaaa0000","headRefName":"agent/lead-stuff","closingIssuesReferences":[{"number":99}]}]'
+beb_prs "[{\"number\":7,\"headRefOid\":\"$TREE_BASE_SHA\",\"headRefName\":\"agent/lead-stuff\",\"closingIssuesReferences\":[{\"number\":99}]}]"
 beb_issues '99'; beb_wt_ok agent/lead-stuff "$BEB_FIX/wtA"
 out=$(run_beb); rc=$?
 if [ "$rc" = 0 ] && [ -z "$out" ]; then
@@ -796,7 +936,7 @@ fi
 # closing ref must NOT be flagged -- nothing is left to close. Live data
 # before check-box-evidence.sh drew this distinction: 2 of 4 flagged issues
 # were exactly this case (#390, #230).
-beb_prs '[{"number":8,"headRefOid":"aaaa0000","headRefName":"agent/55-demo","closingIssuesReferences":[]}]'
+beb_prs "[{\"number\":8,\"headRefOid\":\"$TREE_BASE_SHA\",\"headRefName\":\"agent/55-demo\",\"closingIssuesReferences\":[]}]"
 beb_issues ''; beb_wt_ok agent/55-demo "$BEB_FIX/wtA"
 out=$(run_beb); rc=$?
 if [ "$rc" = 0 ] && ! printf '%s' "$out" | /usr/bin/grep -q 'NO-CLOSING-REF'; then
@@ -808,7 +948,7 @@ fi
 
 # case 37: a multi-issue branch (agent/55-66-vX shape) flags only the OPEN,
 # uncovered one -- every leading numeric token is parsed, not just the first.
-beb_prs '[{"number":9,"headRefOid":"aaaa0000","headRefName":"agent/55-66-vX","closingIssuesReferences":[]}]'
+beb_prs "[{\"number\":9,\"headRefOid\":\"$TREE_BASE_SHA\",\"headRefName\":\"agent/55-66-vX\",\"closingIssuesReferences\":[]}]"
 beb_issues '55'; beb_wt_ok agent/55-66-vX "$BEB_FIX/wtA"
 out=$(run_beb); rc=$?
 if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q 'issue #55' \
@@ -817,6 +957,40 @@ if [ "$rc" = 1 ] && printf '%s' "$out" | /usr/bin/grep -q 'issue #55' \
 else
   fail=$((fail+1)); echo "FAIL box-evidence-bulk multi-issue case (rc=$rc)"
   printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+run_tree_evidence_cases beb
+
+# One bad local tip must not abort the other PRs in the bulk run; UNKNOWN
+# still wins over any subsequent finding in the overall exit status.
+run_beb_bad_tip_case() {
+  local tree_tool=beb
+  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" > "$BEB_FIX/wtA/tests/results/box-check-1.log"
+  beb_prs "[{\"number\":1,\"headRefOid\":\"$TREE_MISSING\",\"headRefName\":\"agent/bad-tip\",\"closingIssuesReferences\":[]},{\"number\":2,\"headRefOid\":\"$TREE_SAME_SHA\",\"headRefName\":\"agent/good-tip\",\"closingIssuesReferences\":[]}]"
+  beb_issues ''; beb_wt_ok agent/bad-tip "$BEB_FIX/wtA" agent/good-tip "$BEB_FIX/wtA"
+  out=$(run_beb); rc=$?
+  tree_assert 'bad tip degrades only its own PR' 3 'UNKNOWN: PR #1' 'CANDIDATE: PR #2 (agent/good-tip) EVIDENCE-TREE-DRIFT'
+}
+run_beb_bad_tip_case
+
+echo "== new tree-evidence cases (fixed): $tree_pass passed, $tree_fail failed =="
+if [ "${BOX_EVIDENCE_CONTROL:-0}" = 1 ]; then
+  if git show origin/master:scripts/lead/check-box-evidence.sh > "$TMP/master-check-box-evidence.sh" \
+     && git show origin/master:scripts/lead/box-evidence-bulk.py > "$TMP/master-box-evidence-bulk.py"; then
+    (
+      CBE="$TMP/master-check-box-evidence.sh"
+      BEB="$TMP/master-box-evidence-bulk.py"
+      pass=0; fail=0; tree_pass=0; tree_fail=0; tree_match_failed=0
+      TREE_CONTROL=1
+      run_tree_evidence_cases cbe
+      run_tree_evidence_cases beb
+      run_beb_bad_tip_case
+      echo "== new tree-evidence cases (origin/master control): $tree_pass passed, $tree_fail failed =="
+      [ "$tree_match_failed" = 2 ]
+    ) || { fail=$((fail+1)); echo 'FAIL control must reject the tree-identical moved-commit case in BOTH unfixed checkers'; }
+  else
+    fail=$((fail+1)); echo 'FAIL cannot load origin/master checkers for control'
+  fi
 fi
 
 rm -rf "$BEB_FIX"
