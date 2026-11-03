@@ -195,8 +195,16 @@ if [[ "$EPHEMERAL" == "1" ]]; then
         snapshot_os_encoded=$(printf '%s' "$OS" | jq -sRr @uri)
         snapshot_id=$(curl -s "https://api.hetzner.cloud/v1/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot,os%3D$snapshot_os_encoded&sort=created:desc&per_page=1" \
             -H "Authorization: Bearer $token" | jq -r '.images[0].id // empty')
+        # Real bug found on review (#749): Hetzner label selectors match on
+        # SUBSETS, so a bare `pgwt=gate-snapshot` selector ALSO matches an
+        # image that additionally carries os=el8 (or any other os) -- it is
+        # not scoped to "no os label", it is scoped to "has this one label,
+        # don't care what else it has". Sorted created:desc, a newer el8
+        # image would silently outrank the legacy unlabeled ubuntu snapshot
+        # here. `!os` (label key os ABSENT) is the actual legacy-only
+        # selector; it can never match an os=<anything>-labelled image.
         if [[ -z "$snapshot_id" && "$OS" == "ubuntu" ]]; then
-            snapshot_id=$(curl -s "https://api.hetzner.cloud/v1/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot&sort=created:desc&per_page=1" \
+            snapshot_id=$(curl -s "https://api.hetzner.cloud/v1/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot,%21os&sort=created:desc&per_page=1" \
                 -H "Authorization: Bearer $token" | jq -r '.images[0].id // empty')
         fi
         if [[ -z "$snapshot_id" ]]; then

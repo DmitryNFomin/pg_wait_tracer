@@ -127,21 +127,34 @@ cmd_create() {
 
     if [[ -n "$image_snapshot" ]]; then
         if [[ "$image_snapshot" == "latest" ]]; then
-            local selector="pgwt=gate-snapshot"
-            local selector_encoded="pgwt%3Dgate-snapshot"
+            # Real bug found on review (#749): Hetzner label selectors match
+            # on SUBSETS, not on "exactly these labels and no others" -- a
+            # bare `pgwt=gate-snapshot` selector ALSO matches an image that
+            # additionally carries os=el8 (or any other os), and sorted
+            # created:desc a newer el8 image would silently outrank the
+            # legacy, pre-os-label ubuntu snapshot. `!os` (label key os
+            # ABSENT) is the actual legacy-only selector, and it is used
+            # directly whenever no --snapshot-os was given at all -- a
+            # caller that does not ask for an OS must never be handed
+            # whichever OS's image happens to be newest.
+            local selector selector_encoded
             if [[ -n "$snapshot_os" ]]; then
-                selector+=",os=$snapshot_os"
-                selector_encoded+=",os%3D$(printf '%s' "$snapshot_os" | jq -sRr @uri)"
+                selector="pgwt=gate-snapshot,os=$snapshot_os"
+                selector_encoded="pgwt%3Dgate-snapshot,os%3D$(printf '%s' "$snapshot_os" | jq -sRr @uri)"
+            else
+                selector="pgwt=gate-snapshot,!os"
+                selector_encoded="pgwt%3Dgate-snapshot,%21os"
             fi
             echo "  Resolving --image-snapshot latest (label $selector) ..." >&2
             image=$(curl -s "$API/images?type=snapshot&label_selector=$selector_encoded&sort=created:desc&per_page=1" \
                 -H "Authorization: Bearer $HCLOUD_TOKEN" \
                 | jq -r '.images[0].id // empty')
-            # Ubuntu snapshots predate the os label. Preserve that upgrade
-            # path without letting another OS silently boot the legacy box.
+            # Ubuntu snapshots predate the os label; fall back to the same
+            # legacy (no os label) selector if the scoped lookup found
+            # nothing for it.
             if [[ -z "$image" && "$snapshot_os" == "ubuntu" ]]; then
-                echo "  No image with label $selector — falling back to legacy label pgwt=gate-snapshot ..." >&2
-                image=$(curl -s "$API/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot&sort=created:desc&per_page=1" \
+                echo "  No image with label $selector — falling back to the legacy (no os label) selector ..." >&2
+                image=$(curl -s "$API/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot,%21os&sort=created:desc&per_page=1" \
                     -H "Authorization: Bearer $HCLOUD_TOKEN" \
                     | jq -r '.images[0].id // empty')
             fi

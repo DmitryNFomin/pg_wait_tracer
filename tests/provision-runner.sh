@@ -67,7 +67,7 @@ OS="${1:-}"
 shift || true
 
 # --runner-token / PGWT_RUNNER_TOKEN: optional, only consumed by the "GitHub
-# Actions runner" block near the bottom of this script.
+# Actions runner" block near the bottom of this script (OS=ubuntu only).
 RUNNER_TOKEN="${PGWT_RUNNER_TOKEN:-}"
 # --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" (the
 # original box's name) below — see the "GitHub Actions runner" block.
@@ -781,7 +781,14 @@ EOF
 #      re-registering is a deliberate, separate step, not something a bare
 #      re-run of this script does.
 # ---------------------------------------------------------------------------
-if [[ -n "$RUNNER_TOKEN" ]]; then
+# Restored on review (#749 nit 9): a bare `-n "$RUNNER_TOKEN"` check would
+# register an el8 4.18 box into the SAME `self-hosted,linux,x64,gate-box`
+# pool as the ubuntu gate boxes, with identical labels -- CI treats every
+# box in that pool as interchangeable, and ci.yml has no el8 job at all
+# today (only a comment), so an el8 runner in that pool is pure risk with
+# no corresponding benefit yet. Re-add el8 (its own label set) only
+# alongside real el8 CI job support.
+if [[ "$OS" == "ubuntu" && -n "$RUNNER_TOKEN" ]]; then
     RUNNER_HOME=/opt/actions-runner
     RUNNER_VERSION=2.337.0
     RUNNER_TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
@@ -871,7 +878,11 @@ EOF
     fi
     systemctl --no-pager status 'actions.runner.*.service' 2>/dev/null || true
 else
-    log "no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration"
+    if [[ -n "$RUNNER_TOKEN" ]]; then
+        log "skipping GitHub Actions runner install/registration: OS=$OS, not ubuntu (see the OS guard above)"
+    else
+        log "no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration"
+    fi
 fi
 
 log "provisioning complete ($OS)"
