@@ -1,0 +1,12 @@
+# #683 mutation evidence against commit 17c251017a55d620c1d7309e1daf0dffbbd56645
+BASELINE PASS: test_bridge_data_ready: checks=31 failures=0
+MUTANT deadline CAUGHT: suite FAIL; failing cases: test_boolean_id_does_not_equal_request_id, test_bridge_reconnecting_error, test_cause_http200_and_open_ws_with_silent_info_refuses, test_error_field_even_when_null_and_cpus_present, test_info_bad_json, test_info_mismatched_id, test_info_missing_id, test_info_non_object, test_info_without_num_cpus, test_nothing_listening, test_session_stalls, test_shell_gate_refusal_tails_log, test_ws_closes_immediately, test_ws_refuses_upgrade
+MUTANT num_cpus CAUGHT: suite FAIL; failing cases: test_info_without_num_cpus
+MUTANT error_envelope CAUGHT: suite FAIL; failing cases: test_bridge_reconnecting_error, test_error_field_even_when_null_and_cpus_present
+MUTANT reply_id CAUGHT: suite FAIL; failing cases: test_boolean_id_does_not_equal_request_id, test_info_mismatched_id, test_info_missing_id
+MUTANT missing_websockets CAUGHT: suite FAIL; failing cases: test_missing_websockets
+MUTANT invalid_timeout CAUGHT: suite FAIL; failing cases: test_bad_arguments, test_negative_deadline, test_zero_deadline
+MUTANT probe_status CAUGHT: suite FAIL; failing cases: test_shell_gate_refusal_tails_log
+MUTANT dead_bridge CAUGHT: suite FAIL; failing cases: test_shell_dead_bridge_before_wait
+MUTANT call_site_exit CAUGHT: suite FAIL; failing cases: test_call_site_aborts_before_the_walk
+RESULT: 9 mutants, 0 survivors
