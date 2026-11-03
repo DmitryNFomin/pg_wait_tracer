@@ -885,4 +885,10 @@ else
     fi
 fi
 
-log "provisioning complete ($OS)"
+# Real finding from review (#749 nit 6): `provision-runner.sh el8
+# --runner-token` exits 0 having only logged the skip above, mid-output --
+# a reader scanning just the final summary line would see a plain success
+# with no sign the runner was never touched. Repeat it here.
+runner_summary=""
+[[ "$OS" != "ubuntu" && -n "$RUNNER_TOKEN" ]] && runner_summary=" (runner registration skipped: OS=$OS, not ubuntu)"
+log "provisioning complete ($OS)$runner_summary"

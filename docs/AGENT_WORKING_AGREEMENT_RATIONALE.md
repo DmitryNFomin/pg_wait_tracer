@@ -34,7 +34,7 @@ Editorial test: "a rule without a script is a wish; prose goes in the issue trac
 
 > the same live tier as above, on a private one-run VM — no `$PGWT_BOX`, no flock contention with other agents | **every agent run on Ubuntu, including the final pre-PR one** — the throwaway VM is the same Hetzner machine class as the gate box (103b1a0 matched cpx42→cx33), so for the Ubuntu tier it is the same evidence. The two persistent boxes are reserved for CI's self-hosted jobs: an agent running there queues behind CI on the same `flock`, which is most of the 29–117 min CI spread (n=9 runs).
 
-> because no `pgwt=gate-snapshot` image exists for el8/el9. So kernel/libbpf/layout work still runs `OS=el8` against `$PGWT_BOX_EL8`: 103b1a0 matched the machine class, never the kernel, and el8 is exactly the tier where that difference is the point
+> (retired by #739) `EPHEMERAL=1` is no longer OS=ubuntu-only: it resolves `pgwt=gate-snapshot,os=$OS` (ubuntu alone also accepts the legacy, pre-os-label snapshot via a label-ABSENCE fallback, `pgwt=gate-snapshot,!os` — never the bare label, which label selectors would match as a SUBSET against any OS's image). Kernel/libbpf/layout work can run `OS=el8 EPHEMERAL=1` once an el8 image has been built (`tests/build-snapshots.sh`) and promoted to that label; until promotion, `$PGWT_BOX_EL8` remains the only target, and 103b1a0 matched the machine class, never the kernel — el8 is exactly the tier where that difference is the point
 
 ## Persistent boxes first
 

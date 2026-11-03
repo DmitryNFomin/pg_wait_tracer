@@ -99,12 +99,35 @@ api_get()    { curl -s "$API/$1" -H "Authorization: Bearer $HCLOUD_TOKEN"; }
 api_post()   { curl -s -X POST "$API/$1" -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d "$2"; }
 server_status() { api_get "servers/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["server"]["status"])'; }
 action_status() { api_get "actions/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action",{}).get("status",""))'; }
+# Orphan-window guard (same pattern as scripts/box-check.sh's
+# ephemeral_cleanup, "orphan window point 2"): find a server by its NAME
+# when its id isn't known yet -- the gap this closes is a Ctrl-C or crash
+# during `create`'s own 1-11 minute ssh/cloud-init wait, after the VM
+# already exists server-side but before this script's own variable holding
+# its id has been assigned.
+find_server_by_name() {
+    api_get "servers?name=$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["servers"][0]["id"] if d.get("servers") else "")'
+}
 
 # -----------------------------------------------------------------------
 # 1. create the build VM
 # -----------------------------------------------------------------------
 epoch=$(date +%s)
 build_name="pgwt-${OS}-snapbuild-$epoch"
+build_id=""
+cleanup_build_vm() {
+    local id="$build_id"
+    [[ -z "$id" ]] && id="$(find_server_by_name "$build_name")"
+    [[ -z "$id" ]] && return
+    [[ "$KEEP" == "1" ]] && { log "KEEP=1 -- leaving build VM $id up: tests/hetzner-vm.sh delete $id"; return; }
+    log "deleting build VM $id"
+    tests/hetzner-vm.sh delete "$id"
+}
+# Registered BEFORE create, not after: real bug found on review (#749) --
+# both delete traps in this script registered after their create call,
+# reopening the exact orphan window scripts/box-check.sh already closed.
+trap cleanup_build_vm EXIT
+
 log "creating $build_name ($BASE_IMAGE, cx33)"
 create_out=$(tests/hetzner-vm.sh create --type cx33 --image "$BASE_IMAGE" --name "$build_name" \
     --labels "pgwt=ephemeral,created=$epoch,owner=build-snapshots,purpose=${OS}-snapshot-build")
@@ -116,13 +139,6 @@ build_ip=$(awk '{print $2}' <<<"$last_line")
 [[ -n "$build_id" && -n "$build_ip" ]] || { echo "FATAL: could not parse server id/ip from: $create_out" >&2; exit 1; }
 log "build VM: id=$build_id ip=$build_ip"
 target="root@$build_ip"
-
-cleanup_build_vm() {
-    [[ "$KEEP" == "1" ]] && { log "KEEP=1 -- leaving build VM $build_id up: tests/hetzner-vm.sh delete $build_id"; return; }
-    log "deleting build VM $build_id"
-    tests/hetzner-vm.sh delete "$build_id"
-}
-trap cleanup_build_vm EXIT
 
 # -----------------------------------------------------------------------
 # 2. provision
@@ -182,6 +198,16 @@ snap_out=$(api_post "servers/$build_id/actions/create_image" \
 action_id=$(echo "$snap_out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action",{}).get("id",""))')
 image_id=$(echo "$snap_out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("image",{}).get("id",""))')
 [[ -n "$action_id" ]] || { echo "FATAL: create_image did not return an action id: $snap_out" >&2; exit 1; }
+# Real bug found on review (#749): only $action_id was checked. An empty
+# $image_id silently reaches step 7's `--image-snapshot "$image_id"` as
+# `--image-snapshot ""`, which tests/hetzner-vm.sh's `[[ -n ... ]]` reads
+# as "no snapshot requested" -- the snapshot branch is skipped entirely and
+# the validation VM boots DEFAULT_IMAGE (a stock rocky-9 public image) with
+# the rocky9 cloud-init instead. Boot-validation then fails against a box
+# that was never the candidate at all, pointing the diagnosis at the wrong
+# thing (it still fails closed -- never mis-promotes -- but for the wrong
+# reason).
+[[ -n "$image_id" ]] || { echo "FATAL: create_image did not return an image id: $snap_out" >&2; exit 1; }
 for _ in $(seq 1 90); do
     s=$(action_status "$action_id")
     [[ "$s" == "success" ]] && break
@@ -202,6 +228,16 @@ trap - EXIT
 # -----------------------------------------------------------------------
 vepoch=$(date +%s)
 vname="pgwt-${OS}-snapvalidate-$vepoch"
+vid=""
+cleanup_validate_vm() {
+    local id="$vid"
+    [[ -z "$id" ]] && id="$(find_server_by_name "$vname")"
+    [[ -z "$id" ]] && return
+    tests/hetzner-vm.sh delete "$id"
+}
+# Registered BEFORE create -- see the build-VM trap's comment above.
+trap cleanup_validate_vm EXIT
+
 log "boot-validating: creating $vname from image $image_id"
 vcreate_out=$(tests/hetzner-vm.sh create --type cx33 --image-snapshot "$image_id" --snapshot-os "$OS" --name "$vname" \
     --labels "pgwt=ephemeral,created=$vepoch,owner=build-snapshots,purpose=${OS}-snapshot-validate")
@@ -210,8 +246,6 @@ vid=$(awk '{print $1}' <<<"$vlast")
 vip=$(awk '{print $2}' <<<"$vlast")
 [[ -n "$vid" && -n "$vip" ]] || { echo "FATAL: could not parse validation VM id/ip from: $vcreate_out" >&2; exit 1; }
 vtarget="root@$vip"
-cleanup_validate_vm() { tests/hetzner-vm.sh delete "$vid"; }
-trap cleanup_validate_vm EXIT
 
 sleep 15
 pass=1

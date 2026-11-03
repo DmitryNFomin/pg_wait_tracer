@@ -158,7 +158,7 @@ cmd_create() {
                     -H "Authorization: Bearer $HCLOUD_TOKEN" \
                     | jq -r '.images[0].id // empty')
             fi
-            [[ -n "$image" ]] || die "no image found with label $selector"
+            [[ -n "$image" ]] || die "no image found with label $selector -- if you expected the legacy (no os label) ubuntu snapshot, pass --snapshot-os <os> explicitly rather than relying on this call's default"
             echo "  Resolved image id: $image" >&2
         else
             image="$image_snapshot"
