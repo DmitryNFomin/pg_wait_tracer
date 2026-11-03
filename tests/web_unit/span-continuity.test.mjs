@@ -167,6 +167,57 @@ test('#587 control: one drawable row among many still selects normally and the d
     assert.equal(model.waterfall.hasData, true);
 });
 
+for (const preferPid of [true, false]) {
+    test('#537 undrawable disclosure uses ' + (preferPid ? 'the preferred PID pool' : 'the full page without a preferred PID'), async () => {
+        const previous = globalThis.document;
+        try {
+            const elements = new Map();
+            const element = id => {
+                if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', className: '',
+                    style: {}, classList: { remove() {}, toggle() {} } });
+                return elements.get(id);
+            };
+            globalThis.document = { getElementById: element, querySelector: element };
+            const preferredPid = 1002;
+            const rows = [
+                { ...UNDRAWABLE_ROWS[0], pid: preferredPid, query_id: '42' },
+                { ...UNDRAWABLE_ROWS[1], pid: 1000, query_id: '42', n_events: 2 },
+            ];
+            const view = createWaterfallView();
+            if (preferPid) view.selectQuery({ pid: preferredPid });
+            const data = await view.requests({
+                timeRange: { from: 1e9, to: 2e9 },
+                filters: { snapshot: () => ({ query_id: '42' }) }, channel: x => x,
+                transport: { request: async (_ch, cmd, params) => {
+                    if (cmd === 'executions') return { rows };
+                    return { ...EMPTY_LEADER_DETAIL, leader: { pid: params.filters.pid, events: [] } };
+                } },
+            });
+            assert.equal(data.selected?.pid ?? null, preferPid ? preferredPid : 1000);
+            const model = view.build(data);
+            assert.equal(model.waterfall.hasData, false);
+            assert.equal(model.allUndrawable, preferPid);
+            if (preferPid) {
+                assert.notEqual(model.undrawableText, null);
+                assert.match(model.undrawableText, /^1 execution, none with captured events at this sort/);
+            } else {
+                assert.equal(model.undrawableText, null);
+            }
+            view.mount({}, model, { mountTable() {} });
+            const chart = element('waterfall-chart').innerHTML;
+            if (preferPid) {
+                assert.ok(chart.includes(model.undrawableText));
+                assert.doesNotMatch(chart, /No execution events captured/);
+            } else {
+                assert.match(chart, /No execution events captured/);
+                assert.doesNotMatch(chart, /none with captured events at this sort/);
+            }
+        } finally {
+            globalThis.document = previous;
+        }
+    });
+}
+
 const detail = { backend_activity_span: span, leader: { pid: 661380,
     events: [{ name: 'CPU*', we: 0, start_ns: execution.start_ns, dur_ns: '100000000' }] }, workers: [] };
 const timeline = { fidelity: 'exact', truncated: false,

@@ -790,8 +790,15 @@ if [[ "$MODE" == "launch" ]]; then
         labels="pgwt=ephemeral,created=$created_epoch,owner=$owner,task=demo-rehearsal"
 
         echo "demo-rehearsal: creating $server_name from the pgwt=gate-snapshot image (labels: $labels)" | tee -a "$log"
+        # --snapshot-os ubuntu: this launcher always provisions ubuntu
+        # below (tests/provision-runner.sh ubuntu, hardcoded). Without this,
+        # `--image-snapshot latest` resolves the bare pgwt=gate-snapshot
+        # label, which (issue #749) also matches a newer os=el8-labelled
+        # image -- Hetzner label selectors match on subsets, not on "no
+        # other labels" -- and this launcher would boot Rocky 8 then die in
+        # provision-runner.sh ubuntu's apt-get calls.
         create_out=$(HCLOUD_TOKEN="$token" tests/hetzner-vm.sh create \
-            --type cx33 --image-snapshot latest --name "$server_name" --labels "$labels" \
+            --type cx33 --image-snapshot latest --snapshot-os ubuntu --name "$server_name" --labels "$labels" \
             2> >(tee -a "$log" >&2))
         create_rc=$?
         if [[ $create_rc -ne 0 || -z "$create_out" ]]; then

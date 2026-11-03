@@ -16,6 +16,33 @@ static int passed, total;
     if (cond) { passed++; } else { fprintf(stderr, "FAIL: %s\n", msg); } \
 } while (0)
 
+static void test_phase_force_parse(void)
+{
+    CHECK(PGWT_PHASE_FORCE_OFF == 0, "#622: OFF has bool-compatible value zero");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt(NULL) == PGWT_PHASE_FORCE_OFF,
+          "#622: unset leaves normal operation");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("0") == PGWT_PHASE_FORCE_OFF,
+          "#622: exactly 0 leaves normal operation");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("1") == PGWT_PHASE_FORCE_ON,
+          "#622: exactly 1 forces absence");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: empty forces absence and warns");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("yes") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: yes forces absence and warns");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("true") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: true forces absence and warns");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt(" 1") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: leading whitespace forces absence and warns");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("1 ") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: trailing whitespace forces absence and warns");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("01") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: 01 forces absence and warns");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("2") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: 2 forces absence and warns");
+    CHECK(pgwt_exact_probe_parse_no_sema_refcnt("-1") == PGWT_PHASE_FORCE_INVALID_ON,
+          "#622: -1 forces absence and warns");
+}
+
 struct fake_ops {
     int attach_calls[PGWT_EXACT_PROBE_COUNT];
     int detach_calls[PGWT_EXACT_PROBE_COUNT];
@@ -808,6 +835,7 @@ static void test_straddler_context_persistence(void)
 
 int main(void)
 {
+    test_phase_force_parse();
     test_policy();
     test_idempotent_pin_and_partial_rollback();
     test_best_effort_startup_keeps_available_probe();

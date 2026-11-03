@@ -336,11 +336,216 @@ for file, helper in (("test_escalation.sh", "phase_contract_verdict("),
     report(helper in source and ("resolve_declared_phase_mask" in source
                                 or tu.EXPECT_PHASE_ENV in source),
            "%s calls the declared phase contract" % file)
+print("\n-- #622 forced-absent seam wiring --")
+exact_source = io.open(os.path.join(PROJECT_DIR, "src", "exact_probe.c"),
+                       encoding="utf-8").read()
+# Extract the daemon's actual getenv argument feeding the pure parser, then
+# compare every client assignment against it. Two unrelated literal searches
+# would approve a one-sided rename (or a name left only in a comment).
+seam_match = re.search(
+    r'const char \*raw = getenv\("([^"\n]+)"\);\s*'
+    r'enum pgwt_phase_force force = pgwt_exact_probe_parse_no_sema_refcnt\(raw\);',
+    exact_source)
+seam_env = seam_match.group(1) if seam_match else None
+report(seam_env == "PGWT_TEST_NO_USDT_SEMA_REFCNT",
+       "daemon reads the named #622 seam into its pure parser")
+
+
+def phase_env_assignment(node, seam):
+    return (isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "env"
+            and isinstance(node.targets[0].slice, ast.Constant)
+            and node.targets[0].slice.value == seam
+            and isinstance(node.value, ast.Constant) and node.value.value == "1")
+
+
+def python_forces_absence(tree, seam):
+    if seam is None:
+        return False
+    switch = ast.parse('env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1"',
+                       mode="eval").body
+    guarded = any(isinstance(node, ast.If)
+                  and ast.dump(node.test) == ast.dump(switch)
+                  and any(phase_env_assignment(child, seam)
+                          for statement in node.body for child in ast.walk(statement))
+                  for node in ast.walk(tree))
+    daemon_env = any(is_helper_call(node, "Popen")
+                     and any(kw.arg == "env" and isinstance(kw.value, ast.Name)
+                             and kw.value.id == "env" for kw in node.keywords)
+                     for node in ast.walk(tree))
+    return guarded and daemon_env
+
+
+class UnwirePhaseEnv(ast.NodeTransformer):
+    """Like UnwireHelper: preserve imports/comments/literals elsewhere."""
+
+    def __init__(self, seam, rename):
+        self.seam = seam
+        self.rename = rename
+
+    def visit_Assign(self, node):
+        if not phase_env_assignment(node, self.seam):
+            return self.generic_visit(node)
+        if not self.rename:
+            return ast.copy_location(ast.Pass(), node)
+        node.targets[0].slice = ast.Constant(value="RENAMED_" + self.seam)
+        return node
+
+
+def shell_forces_absence(source, seam):
+    if seam is None:
+        return False
+    return re.search(
+        r'^if \[\[ "\$\{PGWT_TEST_FORCE_NO_PHASE_PROBES:-\}" == "1" \]\]; then\n'
+        r'    export ' + re.escape(seam) + r'=1\nfi$', source, re.MULTILINE) is not None
+
+
 for file in ("test_execution_cardinality.py", "test_execution_span_live.py",
              "test_escalation.sh", "ui_live_smoke.sh"):
     source = io.open(os.path.join(SCRIPT_DIR, file), encoding="utf-8").read()
-    report("PGWT_TEST_FORCE_NO_PHASE_PROBES" in source and "--skip-usdt" in source,
-           "%s passes --skip-usdt when requested" % file)
+    report("--skip-usdt" not in source,
+           "%s no longer passes the policy-level proxy" % file)
+    if file.endswith(".py"):
+        report(python_forces_absence(ast.parse(source), seam_env),
+               "%s explicitly sets daemon's %s when switch is 1" % (file, seam_env))
+        for rename in (False, True):
+            mutated = UnwirePhaseEnv(seam_env, rename).visit(ast.parse(source))
+            report(not python_forces_absence(mutated, seam_env),
+                   "%s rejects env assignment %s" %
+                   (file, "renamed" if rename else "removed"))
+        wrong_switch = source.replace('env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1"',
+                                      'env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "0"')
+        report(not python_forces_absence(ast.parse(wrong_switch), seam_env),
+               "%s rejects inverted forcing switch" % file)
+    else:
+        report(shell_forces_absence(source, seam_env),
+               "%s exports daemon's %s when switch is 1" % (file, seam_env))
+        for rename in (False, True):
+            mutated = re.sub(r'(?m)^    export ' + re.escape(seam_env or "") + r'=1$',
+                             "    export RENAMED_%s=1" % seam_env if rename else "    :",
+                             source)
+            report(not shell_forces_absence(mutated, seam_env),
+                   "%s rejects env assignment %s" %
+                   (file, "renamed" if rename else "removed"))
+        report(not shell_forces_absence(source.replace(':-}" == "1"', ':-}" == "0"'),
+                                       seam_env),
+               "%s rejects inverted forcing switch" % file)
+
+# The markers-absent rehearsal is only reachable through `make box-check` if
+# the launcher forwards the switch past sudo's env_reset. Without this the
+# capability exists but no documented path reaches it, and a declared-0 run
+# would silently execute markers-PRESENT and go red for the wrong reason.
+box_check = io.open(os.path.join(PROJECT_DIR, "scripts", "box-check.sh"),
+                    encoding="utf-8").read()
+report(re.search(r'sudo_env="\$sudo_env PGWT_TEST_FORCE_NO_PHASE_PROBES='
+                 r'\$PGWT_TEST_FORCE_NO_PHASE_PROBES"', box_check) is not None
+       and re.search(r'sudo_env="\$sudo_env PGWT_EXPECT_PHASE_PROBES='
+                     r'\$PGWT_EXPECT_PHASE_PROBES"', box_check) is not None,
+       "box-check.sh forwards both phase env vars past sudo env_reset")
+
+absent_path = os.path.join(SCRIPT_DIR, "test_phase_absent_live.py")
+report(os.path.isfile(absent_path), "new A/B live test exists")
+if os.path.isfile(absent_path):
+    absent_tree = ast.parse(io.open(absent_path, encoding="utf-8").read())
+    for expected in (0, "PHASE_MASK"):
+        report(any(is_helper_call(node, "phase_contract_verdict") and node.args
+                   and ((isinstance(node.args[0], ast.Constant)
+                         and node.args[0].value == expected)
+                        if expected == 0 else
+                        (isinstance(node.args[0], ast.Name)
+                         and node.args[0].id == expected))
+                   for node in ast.walk(absent_tree)),
+               "A/B test calls phase_contract_verdict with %s" % expected)
+live_array = re.search(r'(?ms)^LIVE_TESTS=\(.*?^\)', runner)
+report(live_array is not None and re.search(
+    r'^\s*"test_phase_absent\|python3\|test_phase_absent_live\.py"$',
+    live_array.group(0), re.MULTILINE) is not None,
+    "A/B test is registered in LIVE_TESTS as test_phase_absent")
+unit_list = io.open(os.path.join(SCRIPT_DIR, "unit_tests.list"), encoding="utf-8").read()
+exact_test = io.open(os.path.join(SCRIPT_DIR, "test_exact_probe.c"), encoding="utf-8").read()
+report("test_exact_probe" in [line.split("#", 1)[0].strip()
+                             for line in unit_list.splitlines()]
+       and re.search(r'(?s)int main\(void\).*?test_phase_force_parse\(\);', exact_test)
+       is not None and "pgwt_exact_probe_parse_no_sema_refcnt(" in exact_test,
+       "pure parser assertions run in the registered test_exact_probe unit")
+
+# Drive the live test's actual assertions with hostile telemetry. These are
+# offline refusal probes, not a substitute for the real Ubuntu A/B capture.
+print("\n-- #622 A/B assertion refusal probes --")
+import errno
+# A bare `import test_phase_absent_live` raises on a missing or syntactically
+# broken module, which aborts the file: this suite would still exit non-zero,
+# but the ~60 runner-classification checks BELOW would silently stop running
+# and the "N/M checks passed" line would never print. A guard that loses
+# coverage without saying so is the shape of a false negative, so the import
+# failure is reported BY NAME as a failed check and the dependent probes are
+# the only thing skipped.
+try:
+    import test_phase_absent_live as absent
+except Exception as exc:  # ImportError, SyntaxError, anything at import time
+    absent = None
+    report(False, "A/B live test module imports: %s: %s"
+           % (type(exc).__name__, exc))
+else:
+    report(True, "A/B live test module imports")
+
+if absent is not None:
+    forced_status = {"ok": True, "exact_probe_attached_mask": 3}
+    forced_status.update({f: "attach_failed" for f in absent.OUTCOME_FIELDS})
+    forced_status.update({f: errno.ENOTSUP for f in absent.ERRNO_FIELDS})
+    forced_status.update({f: 1 for f in absent.FIRE_FIELDS})
+
+    def live_assertions(forced, masks, artifacts, status=None):
+        output = io.StringIO()
+        absent.tests_run = absent.tests_failed = 0
+        with redirect_stdout(output):
+            if forced:
+                absent.assert_forced(masks, status or forced_status, artifacts)
+            else:
+                absent.assert_control(masks, artifacts)
+        return output.getvalue(), absent.tests_failed
+
+    for forced, masks, artifacts, checks in (
+            (True, [0, 1, 3, 3], {"executions": 0}, 5),
+            (False, [3, 7, 15], {"executions": 1}, 2)):
+        output, failures = live_assertions(forced, masks, artifacts)
+        report(failures == 0 and output.count("  PASS:") == checks,
+               "live %s accepts its measured fixture, including torn masks" %
+               ("FORCED" if forced else "CONTROL"))
+    for forced, masks, artifacts, number, label in (
+            (True, [15], {"executions": 0}, 1, "inert seam (0xF)"),
+            (True, [0], {"executions": 0}, 2, "too-broad seam (0x0)"),
+            (True, [3], {"executions": 1}, 5, "forced markers produced artifacts"),
+            (False, [3], {"executions": 1}, 6, "control markers absent"),
+            (False, [15], {"executions": 0}, 7, "control artifacts empty")):
+        output, failures = live_assertions(forced, masks, artifacts)
+        report(failures > 0 and "  FAIL: %s " % number in output,
+               "live check %s goes red: %s" % (number, label))
+    for field in absent.OUTCOME_FIELDS + absent.ERRNO_FIELDS + absent.FIRE_FIELDS:
+        bad = dict(forced_status)
+        bad[field] = "disabled" if field in absent.OUTCOME_FIELDS else 0
+        number = 4 if field in absent.FIRE_FIELDS else 3
+        output, failures = live_assertions(True, [3], {"executions": 0}, bad)
+        report(failures > 0 and "  FAIL: %s " % number in output,
+               "live check %s goes red: %s=%r" % (number, field, bad[field]))
+    for field in (("exact_probe_attached_mask",) + absent.OUTCOME_FIELDS
+                  + absent.ERRNO_FIELDS + absent.FIRE_FIELDS):
+        for raw in (None, "unreadable"):
+            bad = dict(forced_status)
+            if raw is None:
+                del bad[field]
+            else:
+                # Outcome fields are strings; a non-string is their read failure.
+                bad[field] = 99 if field in absent.OUTCOME_FIELDS else raw
+            try:
+                absent.validate_status(bad)
+            except ValueError as exc:
+                report(field in str(exc), "live status rejects %s %s by name" %
+                       (field, "absent" if raw is None else "unreadable"))
+            else:
+                report(False, "live status accepted %s %s" % (field, raw))
 
 # Exercise the real runner functions without its build/live preconditions.
 # Text wiring alone cannot prove a stray 78 stays red, or that KNOWN_FAILING
@@ -408,6 +613,13 @@ for declared, name, rc, want in (
     elif rc == 78 and name == "unrelated":
         diagnostic = "test is not phase-dependent"
     runner_case(declared, name, rc, want, diagnostic=diagnostic)
+
+runner_case("0", "test_phase_absent", 78, "0 1 0 0 0",
+            diagnostic="test is not phase-dependent")
+# Also test the filename stem so a future classifier/registration rename cannot
+# accidentally grant this internally asserted refusal an exit-78 exemption.
+runner_case("0", "test_phase_absent_live", 78, "0 1 0 0 0",
+            diagnostic="test is not phase-dependent")
 
 runner_case("0", "test_execution_cardinality", 78, "0 1 0 0 0", output="",
             diagnostic="refusal marker absent")

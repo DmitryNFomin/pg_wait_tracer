@@ -40,9 +40,14 @@ done
 if [[ $SELF_TEST_ONLY -eq 0 ]]; then
     python3 "$SCRIPT_DIR/testutil.py" phase-expectation >/dev/null || exit $?
 fi
-# #622: --skip-usdt is the EL8 proxy; it removes only the phase probes.
-PHASE_ARGS=()
-[[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]] && PHASE_ARGS+=(--skip-usdt)
+# #622: Ubuntu now rehearses requested mask 0xF: plain uprobes attach and
+# fire, both USDT pairs fail ENOTSUP, leaving mask 0x3, attach_failed outcomes
+# and declared-0 verdict refuse. Real EL8 must still prove that missing
+# ref_ctr_offset causes the failure; the seam asserts the consequence,
+# never the cause.
+if [[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]]; then
+    export PGWT_TEST_NO_USDT_SEMA_REFCNT=1
+fi
 
 if [[ -z "$PM_PID" && $SELF_TEST_ONLY -eq 0 ]]; then
     PM_PID=$(find_postmaster)
@@ -222,7 +227,6 @@ jget() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
 # ── Start daemon in tiered mode ───────────────────────────────
 "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" \
     --mode tiered --sample-rate 50 --escalation-budget "$BUDGET" -v \
-    ${PHASE_ARGS[@]+"${PHASE_ARGS[@]}"} \
     >/dev/null 2>"$DAEMON_LOG" &
 TRACER_PID=$!
 
@@ -469,7 +473,6 @@ run_tiered_capture() {
         --mode tiered --sample-rate 50 --escalation-budget 120 -v \
         --anomaly-aas-factor 1000000 --anomaly-cpu-cusum-disable \
         --anomaly-lock-fraction 1 --anomaly-lock-min-aas 1000000 \
-        ${PHASE_ARGS[@]+"${PHASE_ARGS[@]}"} \
         >/dev/null 2>"$log" &
     TRACER_PID=$!
     local up=0

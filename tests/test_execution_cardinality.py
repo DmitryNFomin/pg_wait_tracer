@@ -254,23 +254,17 @@ def start_daemon(pm_pid, admit_all):
         env.pop("PGWT_TEST_EXEC_SITE_ADMIT_ALL", None)
     err_path = os.path.join(trace_dir, "daemon.err")
     err = open(err_path, "w")
-    # #622: --skip-usdt faithfully proxies EL8 only in TIERED escalation:
-    # src/exact_probe.c:421,446 returns ENOTSUP for EXEC/PLAN while the plain
-    # QUERY_ID/ACTIVITY uprobes attach (mask 0x3). This capture uses FULL mode;
-    # pgwt_exact_probe_startup_mask() (src/exact_probe.c:92-97) returns 0 for
-    # the flag, declining the attribution pair too: mask 0x0, not 0x3. The
-    # contract would fail on "required attribution pair incomplete", but the
-    # capture's own preconditions fail first. This does not rehearse declared-0
-    # REFUSAL; that path remains pending a real EL8 run. On EL8 FULL mode
-    # skip_usdt is false: startup pins best-effort (src/exact_probe.c:536),
-    # drops phase bits with the "optional full-mode ... USDT phase markers
-    # unavailable" warning, and retains mask 0x3.
-    phase_args = (["--skip-usdt"]
-                  if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1" else [])
+    # #622: Ubuntu now rehearses requested mask 0xF: plain uprobes attach and
+    # fire, both USDT pairs fail ENOTSUP, leaving mask 0x3, attach_failed outcomes
+    # and declared-0 verdict refuse. Real EL8 must still prove that missing
+    # ref_ctr_offset causes the failure; the seam asserts the consequence,
+    # never the cause.
+    if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1":
+        env["PGWT_TEST_NO_USDT_SEMA_REFCNT"] = "1"
     proc = subprocess.Popen(
         [TRACER, "--mode", "full", "--pid", str(pm_pid),
          "--trace-dir", trace_dir, "--duration", str(CAPTURE_DURATION_S),
-         "--interval", "1", "--quiet"] + phase_args,
+         "--interval", "1", "--quiet"],
         stdout=subprocess.DEVNULL, stderr=err, env=env)
     # Readiness is the control socket ANSWERING, not a sleep: a daemon that
     # never comes up must fail HERE with its stderr attached, not stall

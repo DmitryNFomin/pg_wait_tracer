@@ -736,7 +736,7 @@ commit PNGs` dance disappears.
 
 ---
 
-## Step 4 — Ephemeral VMs + real OS matrix  `[PARTIALLY DONE — item 4 (agents' inner loop) landed 2026-09-19, issue #141; items 1-3/5 (nightly OS matrix, EL8/EL9 snapshots) still OPEN]`
+## Step 4 — Ephemeral VMs + real OS matrix  `[PARTIALLY DONE — item 4 (agents' inner loop) landed 2026-09-19, issue #141; item 2 (snapshot builder, el8 only so far) landed, issue #739; items 1/3/5 (el8/el9 provisioning reuse in nightly.yml's own steps, the nightly.yml rewrite, el9 snapshots) still OPEN]`
 
 **Goal:** EL8 (kernel 4.18) and EL9 (5.14) are tested on their real kernels
 nightly and on demand, on throwaway VMs; agents can verify kernel/libbpf/
@@ -748,7 +748,10 @@ runner tokens.
 
 **Work:**
 1. `tests/provision-runner.sh <el8|el9|ubuntu> [--runner-token T] [--labels …]`
-   — idempotent, runs on the VM as root. Installs build deps (EL8 path:
+   — idempotent, runs on the VM as root. `[PARTIALLY DONE, issue #739: the
+   el8 arm is implemented and gated; el9 is still a stub; --ephemeral
+   runner-registration mode for the nightly matrix below is not built]`
+   Installs build deps (EL8 path:
    static libbpf/bpftool bundling is handled by the Makefile already), PGDG
    repo, PG 13/16/17/18 with one cluster each on ports 5413–5418
    (`pg_stat_statements` in `shared_preload_libraries`, `track_activity_query_size`
@@ -756,10 +759,18 @@ runner tokens.
    runner as a systemd service in `--ephemeral` mode with the given labels.
    Reuse the install steps in `.github/workflows/nightly.yml` and
    `tests/cloud-init-rocky9-pg18.yaml`; they are the known-good recipes.
-2. Snapshot builder `tests/build-snapshots.sh`: for each OS, create a CX22
-   via `tests/hetzner-vm.sh`, run `provision-runner.sh` without a token,
-   `hcloud` snapshot it as `pgwt-<os>-<date>`, delete the VM. Rerun
-   monthly / when PG minors move.
+2. `[DONE, issue #739]` Snapshot builder `tests/build-snapshots.sh`: for an
+   OS, creates a cx33 via `tests/hetzner-vm.sh`, runs `provision-runner.sh`
+   without a token, stops PostgreSQL + `sync`s, powers the server off via
+   the Hetzner API (polling for `status=off` — THE GUARD: refuses
+   `create_image` otherwise, no override — a crash-inconsistent el8
+   snapshot built by hand on 2026-11-02 without this step booted with NUL
+   bytes baked into `postgresql.conf`, see #739), `create_image`s under a
+   `pgwt=<os>-snapshot-wip` label, boot-validates a throwaway VM from the
+   result (every `postgresql-NN` unit active, zero NUL bytes), and only
+   then relabels the image `pgwt=gate-snapshot,os=<os>` — a failed
+   validation leaves it at the `wip` label, never promoted. Rerun manually
+   when PG minors move or a kernel/OS image changes.
 3. `nightly.yml` rewrite:
    ```
    provision (ubuntu-latest, matrix os): create CX22 from snapshot pgwt-<os>-latest,
@@ -773,15 +784,20 @@ runner tokens.
    for watchpoints. Delete the container-based matrix (it never tested the
    kernels it claimed to). Optional cell: `cax11` arm64 Rocky 9 to make the
    README's aarch64 claim true.
-4. `[DONE 2026-09-19, issue #141, OS=ubuntu only]` `scripts/box-check.sh`
-   `EPHEMERAL=1`: creates `pgwt-dev-<nonce>` (cx33, EU, labels
-   `pgwt=ephemeral,created=<epoch>,owner=<hostname>`) from the newest
-   Hetzner image labelled `pgwt=gate-snapshot` (`tests/hetzner-vm.sh
-   create --image-snapshot latest`, a snapshot of the already-provisioned
-   persistent gate box, taken by the lead under the box lock — not the
-   from-scratch `tests/build-snapshots.sh` step 2 above, which is still
-   open and would be needed for an EL8/EL9 snapshot), waits for ssh, runs
-   `tests/provision-runner.sh ubuntu` once (fast no-op path: refreshes
+4. `[DONE 2026-09-19 for ubuntu, issue #141; extended to any OS, issue
+   #739]` `scripts/box-check.sh` `EPHEMERAL=1`: creates `pgwt-dev-<nonce>`
+   (cx33, EU, labels `pgwt=ephemeral,created=<epoch>,owner=<hostname>`)
+   from the newest Hetzner image matching `pgwt=gate-snapshot,os=$OS`
+   (`tests/hetzner-vm.sh create --image-snapshot latest --snapshot-os
+   $OS` — label selectors match on SUBSETS, so the plain `pgwt=
+   gate-snapshot` rule this paragraph used to describe would let a newer
+   OTHER-os image silently outrank an older one; the fallback for the
+   legacy, pre-os-label ubuntu snapshot is the label-ABSENCE selector
+   `pgwt=gate-snapshot,!os`, never the bare label), built by
+   `tests/build-snapshots.sh` (item 2 above) or, for the original ubuntu
+   image, taken by hand from the already-provisioned persistent gate box
+   under the box lock. Waits for ssh, runs
+   `tests/provision-runner.sh $OS` once (fast no-op path: refreshes
    bpftool for whatever kernel this VM actually booted and heals the
    pgbench dataset if the snapshot's was ever shrunk), runs exactly what
    box-check runs today against `root@<ip>`, rsyncs results back to

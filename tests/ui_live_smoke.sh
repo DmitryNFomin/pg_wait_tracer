@@ -133,18 +133,14 @@ fi
 
 # #622: require PGWT_EXPECT_PHASE_PROBES before starting any live work.
 PHASE_EXPECT=$(python3 "$SCRIPT_DIR/testutil.py" phase-expectation) || exit $?
-# #622: --skip-usdt is a faithful EL8 proxy only in TIERED escalation:
-# src/exact_probe.c:421,446 returns ENOTSUP for EXEC/PLAN while the plain
-# QUERY_ID/ACTIVITY uprobes attach (mask 0x3). This walk uses FULL mode, where
-# pgwt_exact_probe_startup_mask() (src/exact_probe.c:92-97) returns 0 for the
-# flag, declining even that attribution pair: mask 0x0, not 0x3. The contract
-# fails on "required attribution pair incomplete"; this does not rehearse the
-# declared-0 REFUSAL path, which remains pending a real EL8 run. On EL8 FULL
-# mode skip_usdt is false: startup pins best-effort (src/exact_probe.c:536),
-# drops the phase bits with the "optional full-mode ... USDT phase markers
-# unavailable" warning, and retains mask 0x3.
-PHASE_ARGS=()
-[[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]] && PHASE_ARGS+=(--skip-usdt)
+# #622: Ubuntu now rehearses requested mask 0xF: plain uprobes attach and
+# fire, both USDT pairs fail ENOTSUP, leaving mask 0x3, attach_failed outcomes
+# and declared-0 verdict refuse. Real EL8 must still prove that missing
+# ref_ctr_offset causes the failure; the seam asserts the consequence,
+# never the cause.
+if [[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]]; then
+    export PGWT_TEST_NO_USDT_SEMA_REFCNT=1
+fi
 
 PORT="${PGWT_UI_LIVE_PORT:-8384}"
 # Refuse before PG discovery, sysctl changes, workloads, or capture.
@@ -373,7 +369,7 @@ fi
 # tick -- no escalate call, no budget, no warm-up window needed.
 echo "ui_live_smoke: starting daemon (--mode full, trace dir $TRACE_DIR)"
 "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" \
-    --mode full -v ${PHASE_ARGS[@]+"${PHASE_ARGS[@]}"} \
+    --mode full -v \
     >/dev/null 2>"$DAEMON_LOG" &
 TRACER_PID=$!
 

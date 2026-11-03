@@ -8,6 +8,22 @@
 #include "synthetic_query.h"
 #include "cJSON.h"
 
+enum pgwt_phase_force pgwt_exact_probe_parse_no_sema_refcnt(const char *raw)
+{
+    /* #622: unset and exactly "0" mean normal operation; exactly "1"
+     * forces absence. Empty/other values force ON and the caller warns:
+     * a seam that cannot parse its instruction must not silently behave as
+     * if it was never asked. Both directions are loud: absent artifacts FAIL
+     * a PGWT_EXPECT_PHASE_PROBES=1 tier and refuse a declared-0 tier, just
+     * like "1". Treating a typo as OFF would leave markers present in a
+     * declared-0 run, failing only after a full live capture. */
+    if (!raw || strcmp(raw, "0") == 0)
+        return PGWT_PHASE_FORCE_OFF;
+    if (strcmp(raw, "1") == 0)
+        return PGWT_PHASE_FORCE_ON;
+    return PGWT_PHASE_FORCE_INVALID_ON;
+}
+
 void pgwt_exact_probe_add_attach_status(cJSON *root,
                                         const struct pgwt_exact_probe_core *core)
 {
@@ -331,6 +347,7 @@ struct usdt_pair_ctx {
     struct bpf_program *prog[2];
     struct bpf_link **slot[2];
     const char *note[2];
+    bool no_sema_refcnt;
 };
 
 static void *usdt_pair_attach_one(void *ctx, int which)
@@ -338,6 +355,25 @@ static void *usdt_pair_attach_one(void *ctx, int which)
     struct usdt_pair_ctx *c = ctx;
     if (which < 0 || which > 1)
         return NULL;
+    /* #622: force at the USDT primitive, leaving startup/acquire policy
+     * untouched (requested mask 0xF), and QUERY_ID/ACTIVITY plain uprobes
+     * free to attach AND fire. EXEC reaches this AFTER publish_exec_sites
+     * (#465: the static canonical-site scan works on EL8). Staying inside
+     * the real pair_attach both-or-neither path preserves pair rollback;
+     * attach_missing records attach_failed + ENOTSUP, never disabled.
+     * ENOTSUP is libbpf's code for a kernel without USDT semaphore
+     * refcounting; the forced value matches it, but the capability-to-ENOTSUP
+     * link itself is unverified here and needs real EL8. */
+    if (c->no_sema_refcnt) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "WARN: PGWT_TEST_NO_USDT_SEMA_REFCNT -- forcing "
+                    "USDT pair attach failure with ENOTSUP (TEST ONLY)\n");
+        }
+        errno = ENOTSUP;
+        return NULL;
+    }
     errno = 0;
     struct bpf_link *l = bpf_program__attach_usdt(
         c->prog[which], -1, c->bin, "postgresql", c->note[which], NULL);
@@ -369,11 +405,17 @@ static void *attach_usdt_pair(struct pgwt_daemon *d,
                               struct bpf_link **slot_done,
                               const char *note_start, const char *note_done)
 {
+    const char *raw = getenv("PGWT_TEST_NO_USDT_SEMA_REFCNT");
+    enum pgwt_phase_force force = pgwt_exact_probe_parse_no_sema_refcnt(raw);
+    if (force == PGWT_PHASE_FORCE_INVALID_ON)
+        fprintf(stderr, "WARN: PGWT_TEST_NO_USDT_SEMA_REFCNT='%s' -- invalid "
+                "value; forcing USDT pair attach failure (TEST ONLY)\n", raw);
     struct usdt_pair_ctx c = {
         .bin = d->pg_binary_saved,
         .prog = { prog_start, prog_done },
         .slot = { slot_start, slot_done },
         .note = { note_start, note_done },
+        .no_sema_refcnt = force != PGWT_PHASE_FORCE_OFF,
     };
     if (pgwt_exact_probe_pair_attach(pair, usdt_pair_attach_one,
                                      usdt_pair_detach_one, &c) != 0) {
