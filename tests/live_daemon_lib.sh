@@ -99,11 +99,24 @@ wait_bridge_ready() {
 # #683, measured on the Mac: sh -c 'cat >/dev/null' as upstream lets
 # Bridge.Start return nil, /session answer 200 and the WS upgrade succeed,
 # but info has NO answer in 3 s. /session is static; b.up means spawned,
-# not answering. The UI's first failed info is terminal (no retry from
-# onConnected), so the first tab spends all 60 s at ticks=0 while later
-# tabs pass after upstream warms up over the same socket.
+# not answering. So HTTP readiness is not DATA readiness, and the walk used
+# to begin on the wrong signal -- that is what is proved here.
+#
+# The UI's first failed info is then terminal: onConnected runs only from
+# ws.onopen, its catch is a lone setStatus, and the bridge holds a silent
+# upstream's socket OPEN, so neither scheduleReconnect nor the degraded
+# recovery probe arms. A first tab in that state spends its whole 60 s at
+# ticks=0 and no longer wait could change it.
+#
+# WHAT MADE UPSTREAM SLOW ON A GIVEN BOX IS UNDETERMINED. Start-up cost and
+# contention for the same cores produce an identical signature, and the
+# fixture above (a deliberately silent upstream) distinguishes neither. Do
+# not read a cause into this comment: the gate was waiting on the wrong
+# signal, and waiting on the right one covers both triggers.
+#
 # This is a PRECONDITION gate, not a retry of an assertion and not a widened
-# timeout: move cold start OUT of the per-tab 60 s budget, never enlarge it.
+# timeout: it moves the wait for an ANSWERABLE upstream out of the per-tab
+# 60 s budget, never enlarges that budget.
 # Only our info answer with num_cpus can go GREEN; timeout, uninspectable
 # session/tooling and a bridge that dies while waiting all go RED.
 #

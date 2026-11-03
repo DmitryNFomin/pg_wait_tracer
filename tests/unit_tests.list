@@ -528,11 +528,17 @@ test_straddler_accounting
 test_open_cpu_accounting
 # #683: measured with sh -c 'cat >/dev/null' upstream: Start returned nil,
 # /session returned HTTP 200 and the WS upgrade succeeded, but info had NO
-# answer in 3 s. The old walk began in exactly that state; the UI's first
-# failed info is terminal, leaving its first tab at ticks=0 for all 60 s.
-# A DATA-PATH PRECONDITION now requires our info reply with num_cpus before
-# the walk. This moves cold start OUT of the per-tab budget; it is NOT an
-# assertion retry or a widened timeout. Local HTTP/WS controls make the
+# answer in 3 s -- so HTTP readiness is not DATA readiness, and the old walk
+# began on the wrong signal. The UI's first failed info is then terminal
+# (onConnected runs only from ws.onopen, its catch is a lone setStatus, and
+# the bridge keeps a silent upstream's socket open), leaving its first tab at
+# ticks=0 for all 60 s however long that budget were made. What made upstream
+# slow on a given box is UNDETERMINED: start-up cost and contention share one
+# signature and the silent fixture distinguishes neither, so no cause is
+# claimed here. A DATA-PATH PRECONDITION now requires our info reply with
+# num_cpus before the walk, which covers both triggers. It moves the wait for
+# an ANSWERABLE upstream out of the per-tab budget; it is NOT an assertion
+# retry or a widened timeout. Local HTTP/WS controls make the
 # silent-upstream cause RED, a real answer GREEN, and silence for ~2 s then
 # an answer GREEN within a longer deadline (polling, not a one-shot sample).
 # Bypass suite -- each must REFUSE within a bounded wall time: /session
