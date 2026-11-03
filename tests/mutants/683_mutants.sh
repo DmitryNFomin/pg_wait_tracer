@@ -23,8 +23,19 @@ new_checkout() {
 remove_checkout() {
     git -C "$REPO" worktree remove --force "$CHECKOUT"
 }
+# RESOLVE THE INTERPRETER IN THE REAL REPO, use its ABSOLUTE path in the
+# checkout. `.python-version` is untracked (it lives in .git/info/exclude), so
+# a freshly added worktree does NOT inherit the pyenv pin and its bare
+# `python3` is a system interpreter without `websockets`. The first run of
+# this script hit exactly that and the baseline refused -- correctly, but for
+# an environment reason rather than a mutation one. A pyenv SHIM path would
+# not help either: executed inside the checkout it re-reads the directory's
+# (absent) pin. sys.executable is the real binary and bypasses both.
+PYTHON=$(cd "$REPO" && python3 -c 'import sys; print(sys.executable)')
+[[ -x "$PYTHON" ]] || { echo "REFUSE: cannot resolve a python3 in $REPO"; exit 1; }
+
 run_suite() {
-    (cd "$CHECKOUT" && python3 tests/test_bridge_data_ready.py) >"$SCRATCH/suite.log" 2>&1
+    (cd "$CHECKOUT" && "$PYTHON" tests/test_bridge_data_ready.py) >"$SCRATCH/suite.log" 2>&1
 }
 
 printf '# #683 mutation evidence against commit %s\n' "$REVISION"
