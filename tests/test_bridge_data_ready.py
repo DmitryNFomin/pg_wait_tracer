@@ -135,7 +135,13 @@ class Stub:
             pass
 
 
-class Controls(unittest.IsolatedAsyncioTestCase):
+class GateRunner:
+    """Bounded subprocess runner shared by Controls and CallSite.
+
+    A mixin rather than a base test case so inheriting it cannot silently
+    re-run another class's cases under a second name.
+    """
+
     async def command(self, argv, bound):
         started = time.monotonic()
         process = await asyncio.create_subprocess_exec(
@@ -155,6 +161,8 @@ class Controls(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, bound, "refusal must have a bounded wall time")
         return process.returncode, out.decode(), elapsed
 
+
+class Controls(GateRunner, unittest.IsolatedAsyncioTestCase):
     async def run_probe(self, base, timeout=0.35, extra=()):
         bound = max(2, timeout + 1.5) if isinstance(timeout, (int, float)) else 2
         return await self.command(
@@ -354,9 +362,96 @@ class Controls(unittest.IsolatedAsyncioTestCase):
                 await bridge.wait()
 
 
+class CallSite(GateRunner, unittest.IsolatedAsyncioTestCase):
+    """The WIRING, which the controls above do not reach.
+
+    Every case in Controls exercises the probe or wait_bridge_data_ready.
+    None of them executes the `if ! wait_bridge_data_ready …; then exit 1; fi`
+    in tests/ui_live_smoke.sh, so deleting that `exit 1` leaves the
+    precondition INERT with nothing going red -- found in review, and the
+    reason this class exists. The block is EXTRACTED FROM THE REAL SCRIPT at
+    run time rather than copied here, so neutering it in the script neuters
+    it here too.
+    """
+
+    SCRIPT = HERE / "ui_live_smoke.sh"
+    ACCEPT = 'echo "ui_live_smoke: bridge data path ready (info answered)"'
+
+    def gate_block(self):
+        """The real call site, or a FAILURE. Never a skip.
+
+        A control that cannot find what it guards must refuse: deleting or
+        renaming the block outright is the same defect as removing its exit.
+        """
+        lines = self.SCRIPT.read_text().splitlines()
+        starts = [i for i, l in enumerate(lines)
+                  if l.startswith("if ! wait_bridge_data_ready ")]
+        self.assertEqual(
+            len(starts), 1,
+            "expected exactly one `if ! wait_bridge_data_ready` call site in "
+            "%s, found %d -- the precondition's wiring is missing or "
+            "duplicated" % (self.SCRIPT.name, len(starts)))
+        start = starts[0]
+        ends = [i for i in range(start, len(lines)) if lines[i] == "fi"]
+        self.assertTrue(ends, "call site has no closing `fi`")
+        block = lines[start:ends[0] + 1]
+        after = lines[ends[0] + 1:ends[0] + 2]
+        self.assertEqual(
+            after, [self.ACCEPT],
+            "the acceptance line must follow the gate: a box-check log is "
+            "read for it, so renaming it must not pass silently")
+        return "\n".join(block + after)
+
+    async def run_block(self, base, pid, bound):
+        """Run the extracted block, then the walk's stand-in."""
+        with tempfile.TemporaryDirectory(prefix="bridge-call-site-") as temp:
+            log = Path(temp) / "bridge.log"
+            log.write_text("call-site-sentinel-683\n")
+            script = "\n".join([
+                'set -u',
+                'source "$1"',
+                'BASE_URL="$2"', 'BRIDGE_PID="$3"', 'BRIDGE_LOG="$4"',
+                self.gate_block(),
+                # Stands in for the tab walk that follows in the real script.
+                'echo WALK_STARTED',
+            ])
+            return await self.command(
+                ["bash", "-c", script, "bridge-data-ready-call-site",
+                 HERE / "live_daemon_lib.sh", base, pid, log], bound)
+
+    async def test_call_site_aborts_before_the_walk(self):
+        # A bridge PID that is already gone makes the gate refuse at once, so
+        # this stays fast without touching the 60 s default. RED INPUT:
+        # delete the `exit 1` and WALK_STARTED appears below.
+        dead = await asyncio.create_subprocess_exec(sys.executable, "-c", "pass")
+        await dead.wait()
+        async with Stub() as stub:
+            rc, out, _ = await self.run_block(stub.base, dead.pid, 10)
+            self.assertNotEqual(rc, 0, out)
+            self.assertNotIn(
+                "WALK_STARTED", out,
+                "the walk ran despite a refused data-path precondition -- the "
+                "gate is inert")
+            self.assertIn("REFUSE bridge data path:", out)
+
+    async def test_call_site_proceeds_and_prints_the_accepted_line(self):
+        # The complement, so "refuse everything" cannot pass this class: a
+        # ready bridge must let the walk start AND emit the literal line the
+        # finished box-check log is graded on.
+        async with Stub() as stub:
+            rc, out, _ = await self.run_block(stub.base, os.getpid(), 10)
+            self.assertEqual(rc, 0, out)
+            self.assertIn("WALK_STARTED", out)
+            self.assertIn(
+                "ui_live_smoke: bridge data path ready (info answered)", out)
+            self.assertEqual(stub.infos, 1)
+
+
 if __name__ == "__main__":
-    result = unittest.TextTestRunner(verbosity=2).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(Controls))
+    loader = unittest.defaultTestLoader
+    suite = unittest.TestSuite([loader.loadTestsFromTestCase(Controls),
+                               loader.loadTestsFromTestCase(CallSite)])
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
     failures = len(result.failures) + len(result.errors)
     print("test_bridge_data_ready: checks=%s failures=%s" % (result.testsRun, failures))
     sys.exit(0 if result.wasSuccessful() and result.testsRun > 0 else 1)

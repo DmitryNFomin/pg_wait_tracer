@@ -20,3 +20,4 @@
 # fixing them means wiring them into tests/run_all.sh's LIVE_TESTS, which is
 # a live-tier test-assertion change out of scope for the guard-building
 # commit that added this file.
+683_mutants.sh|Manual #683 mutation evidence tool; mutates disposable detached checkouts and must not run in the unit-test runner.
