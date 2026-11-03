@@ -258,6 +258,14 @@ int pgwt_pgbs_read_cmd_gate(
     const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_cmd_gate *out);
 
+/* A coherent, identity-confirmed snapshot of a backend that has no database
+ * context (st_databaseid or st_userid InvalidOid). NOT a failed read: every
+ * auxiliary process (checkpointer, bgwriter, walwriter, the launchers, the io
+ * workers) looks exactly like this on every tick, by design. It carries no
+ * attribution, so it is still not success: 0 remains the only success value
+ * and every caller already tests `== 0`. */
+#define PGWT_PGBS_ATTR_UNCONNECTED 1
+
 int pgwt_pgbs_derive_sampled_attr(
     const struct PgBackendStatusLayout *layout,
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,

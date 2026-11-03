@@ -161,6 +161,7 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'state_reseeds_total',
           # Stage 2 sampled-attribution source/shadow observability.
           'sampled_attr_tick_read_failures_total',
+          'sampled_attr_tick_unconnected_total',
           'sampled_attr_shadow_total',
           'sampled_attr_shadow_mismatch_total',
           'sampled_attr_shadow_active_total',

@@ -418,6 +418,75 @@ static void test_sampled_attr(void)
           "#128: the raw st_query_id (the finished statement's) is still "
           "exposed as last_query_id while idle");
 
+    /* #693: database-less auxiliary rows are a structural population, but
+     * only a coherent, identity-confirmed read can be classified that way. */
+    struct pgwt_pgbs_snapshot connected = snapshot;
+    snapshot.databaseid = 0;
+    snapshot.userid = 0;
+    memset(&attr, 0xff, sizeof(attr));
+    unsigned char zero_attr[sizeof(attr)] = {0};
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) ==
+              PGWT_PGBS_ATTR_UNCONNECTED &&
+          !attr.cmd_open && attr.query_id == 0 && attr.last_query_id == 0 &&
+          attr.databaseid == 0 && attr.userid == 0 &&
+          memcmp(&attr, zero_attr, sizeof(attr)) == 0,
+          "coherent database-less idle backend clears all stale attribution");
+
+    struct pgwt_pgbs_cmd_gate gate = {
+        .state = 3, .cmd_open = true, .query_id_valid = true,
+        .query_id = UINT64_MAX,
+    };
+    CHECK(pgwt_pgbs_derive_cmd_gate(&layout, &snapshot, getpid(),
+                                    &gate) != 0 &&
+          !gate.cmd_open && !gate.query_id_valid && gate.query_id == 0 &&
+          gate.state == 0,
+          "#294 gate still fails closed and clears a database-less row");
+
+    snapshot.userid = 10;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) ==
+              PGWT_PGBS_ATTR_UNCONNECTED,
+          "logical replication launcher with dbid 0 and userid 10 is benign");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.read_mask = connected.read_mask;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) < 0,
+          "a wrong address reading zeros must stay a hard failure");
+
+    snapshot = connected;
+    snapshot.databaseid = 0;
+    snapshot.procpid = (uint32_t)(getpid() + 1);
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) < 0,
+          "foreign pid beats unconnected classification");
+    snapshot.procpid = (uint32_t)getpid();
+
+    snapshot.changecount_after += 2;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) < 0,
+          "torn database-less snapshot is a hard failure");
+    snapshot.changecount_after = snapshot.changecount_before;
+
+    snapshot.changecount_before++;
+    snapshot.changecount_after++;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) < 0,
+          "odd database-less snapshot is a hard failure");
+    snapshot.changecount_before = connected.changecount_before;
+    snapshot.changecount_after = connected.changecount_after;
+
+    snapshot.read_mask &= ~PGWT_PGBS_READ_QUERY_ID;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) < 0,
+          "short database-less snapshot is a hard failure");
+
+    snapshot = connected;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) == 0,
+          "connected coherent snapshot still returns exactly zero");
+
     /* A failed derivation starts by clearing the destination.  Seed it with
      * stale command state to prove an incoherent tick cannot reuse it. */
     attr.cmd_open = true;
@@ -463,6 +532,17 @@ static void test_sampled_attr(void)
                                       &layout, &attr) == 0 &&
           attr.cmd_open && attr.state == 5 && attr.query_id == query_id,
           "live reader dereferences MyBEEntry and reuses coherent helper");
+
+    uint32_t invalid_oid = 0;
+    memcpy(row + layout.st_databaseid.offset, &invalid_oid,
+           sizeof(invalid_oid));
+    memcpy(row + layout.st_userid.offset, &invalid_oid,
+           sizeof(invalid_oid));
+    CHECK(pgwt_pgbs_read_sampled_attr(getpid(),
+                                      (uint64_t)(uintptr_t)&my_be_entry,
+                                      &layout, &attr) ==
+              PGWT_PGBS_ATTR_UNCONNECTED,
+          "live MyBEEntry wrapper propagates the positive unconnected rc");
 
     layout.validation = PGWT_PGBS_VALIDATION_DEGRADED;
     CHECK(!pgwt_pgbs_sampled_attr_enabled(&layout),

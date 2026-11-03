@@ -232,6 +232,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->pgbackend_layout_fallbacks_total);
     cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",
                      ctr->sampled_attr_tick_read_failures_total);
+    cjson_add_uint64(root, "sampled_attr_tick_unconnected_total",
+                     ctr->sampled_attr_tick_unconnected_total);
     /* SCOPE (#294), repeated here because a metrics scrape sees these keys and
      * not daemon.h: every sampled_attr_shadow_* key compares the TARGET-LOOP
      * status read against the uprobe map, i.e. the read taken BEFORE the
@@ -731,9 +733,14 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * nonzero read_failed is lost CPU samples, not zero of them.
      * at_risk == recovered + confirmed_closed + read_failed, and the two the
      * recheck did not rescue (confirmed_closed + read_failed) are what
-     * noncmd_cpu_samples_total then counts, so read_failed is a SUBSET of
-     * noncmd, not a separate term. What remains in noncmd is the genuine
-     * between-command on-CPU churn the gate exists to exclude. */
+     * noncmd_cpu_samples_total then counts. cmd_gate_order_read_failed_total
+     * is a SUBSET of noncmd_cpu_samples_total, not a separate term. What
+     * remains in noncmd is the genuine between-command on-CPU churn the gate
+     * exists to exclude.
+     * #693: in the #675 gate-3 arms, cmd_gate_order_read_failed_total had
+     * delta 0 vs noncmd 892. sampled_attr_tick_* is a different, unrelated
+     * quantity over a different population: target-ticks, not at-risk on-CPU
+     * samples. Comparing the two is meaningless. */
     cjson_add_uint64(root, "cmd_gate_order_at_risk_total",
                      ctr->cmd_gate_order_at_risk_total);
     cjson_add_uint64(root, "cmd_gate_order_recovered_total",

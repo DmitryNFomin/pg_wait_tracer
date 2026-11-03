@@ -167,6 +167,7 @@ def main():
                     "invalid_wait_reads_total", "sampler_ticks_total",
                     "sampler_tick_late_ns_total",
                     "sampled_attr_tick_read_failures_total",
+                    "sampled_attr_tick_unconnected_total",
                     "sampled_attr_shadow_total",
                     "sampled_attr_shadow_mismatch_total",
                     "sampled_attr_shadow_active_total",

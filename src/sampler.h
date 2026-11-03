@@ -32,6 +32,7 @@
 #define PGWT_SAMPLER_H
 
 #include "pg_wait_tracer.h"
+#include "backend_status_layout.h"
 
 #include <stdbool.h>
 #include "cmdline.h"   /* enum pgwt_backend_type — drives the we==0 policy */
@@ -116,6 +117,25 @@ struct pgwt_sample_target {
      * the post-read command-gate recheck (#294). */
     uint64_t status_addr;
 };
+
+enum pgwt_sampled_attr_tick_outcome {
+    PGWT_TICK_ATTR_OK = 0,
+    PGWT_TICK_ATTR_UNCONNECTED,
+    PGWT_TICK_ATTR_READ_FAILED,
+};
+
+/* rc 0 -> OK; rc < 0 -> READ_FAILED; rc == PGWT_PGBS_ATTR_UNCONNECTED ->
+ * UNCONNECTED; any other positive rc -> READ_FAILED. An unrecognised code
+ * is never treated as success or as a benign auxiliary read. */
+static inline enum pgwt_sampled_attr_tick_outcome
+pgwt_sampler_tick_attr_outcome(int rc)
+{
+    if (rc == 0)
+        return PGWT_TICK_ATTR_OK;
+    if (rc == PGWT_PGBS_ATTR_UNCONNECTED)
+        return PGWT_TICK_ATTR_UNCONNECTED;
+    return PGWT_TICK_ATTR_READ_FAILED;
+}
 
 /* The two sampled-attribution sources use the same normalized shape.  The
  * tick source supplies query_id=0 while its command gate is closed. */

@@ -956,6 +956,19 @@ static void test_qid_index(void)
 static void test_sampled_attr_source_gate(void)
 {
     printf("--- Stage 2 sampled-attribution source gate + shadow compare ---\n");
+    CHECK(pgwt_sampler_tick_attr_outcome(0) == PGWT_TICK_ATTR_OK,
+          "zero rc is a successful at-tick attribution read");
+    CHECK(pgwt_sampler_tick_attr_outcome(-1) == PGWT_TICK_ATTR_READ_FAILED,
+          "negative rc is a failed at-tick attribution read");
+    CHECK(pgwt_sampler_tick_attr_outcome(PGWT_PGBS_ATTR_UNCONNECTED) ==
+              PGWT_TICK_ATTR_UNCONNECTED,
+          "database-less backend is unconnected, not a failed read");
+    CHECK(pgwt_sampler_tick_attr_outcome(2) == PGWT_TICK_ATTR_READ_FAILED,
+          "unrecognised positive rc is neither success nor benign");
+    CHECK(pgwt_sampler_tick_attr_outcome(INT_MAX) ==
+              PGWT_TICK_ATTR_READ_FAILED,
+          "INT_MAX rc is neither success nor benign");
+
     struct pgwt_sampled_attr_value uprobe = {
         .query_id = 111, .cmd_open = 1,
     };
