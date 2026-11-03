@@ -319,6 +319,7 @@ class UnwireHelper(ast.NodeTransformer):
 
 for file, helper in (("test_execution_cardinality.py", "phase_contract_apply"),
                      ("test_execution_span_live.py", "phase_contract_apply"),
+                     ("test_phase_absent_live.py", "phase_contract_apply"),
                      ("ui_live_smoke.py", "phase_tab_expectation")):
     source = io.open(os.path.join(SCRIPT_DIR, file), encoding="utf-8").read()
     report(python_calls_helper(source, helper)
@@ -498,14 +499,33 @@ if absent is not None:
     forced_status.update({f: 1 for f in absent.FIRE_FIELDS})
 
     def live_assertions(forced, masks, artifacts, status=None):
+        # Every existing CONTROL fixture below predates #760 and exercises
+        # the declared-present (Ubuntu) contract, so this helper keeps
+        # defaulting to PHASE_MASK; control_assert() below exercises the
+        # declared-absent (el8) leg explicitly.
         output = io.StringIO()
         absent.tests_run = absent.tests_failed = 0
         with redirect_stdout(output):
             if forced:
                 absent.assert_forced(masks, status or forced_status, artifacts)
             else:
-                absent.assert_control(masks, artifacts)
+                absent.assert_control(absent.PHASE_MASK, masks, artifacts)
         return output.getvalue(), absent.tests_failed
+
+    def control_assert(expected_phase, masks, artifacts):
+        """#760: drive CONTROL directly with an explicit declaration,
+        catching the exit-78 refusal a declared-absent tier raises instead
+        of asserting (phase_contract_apply raises SystemExit, which a plain
+        live_assertions() call would let escape uncaught)."""
+        output = io.StringIO()
+        absent.tests_run = absent.tests_failed = 0
+        code = None
+        with redirect_stdout(output):
+            try:
+                absent.assert_control(expected_phase, masks, artifacts)
+            except SystemExit as exc:
+                code = exc.code
+        return output.getvalue(), absent.tests_failed, code
 
     for forced, masks, artifacts, checks in (
             (True, [0, 1, 3, 3], {"executions": 0}, 5),
@@ -523,6 +543,28 @@ if absent is not None:
         output, failures = live_assertions(forced, masks, artifacts)
         report(failures > 0 and "  FAIL: %s " % number in output,
                "live check %s goes red: %s" % (number, label))
+
+    # #760: CONTROL's expectation now comes from the tier's own declaration.
+    # Same masks/artifacts, different declaration -> different correct
+    # outcome: this is the pair that proves the dependency is real, not a
+    # dead branch (a hard-coded PHASE_MASK would FAIL the first case below
+    # instead of refusing it, and a hard-coded 0 would REFUSE the third case
+    # below instead of failing it).
+    output, failures, code = control_assert(0, [3, 3, 3], {"executions": 0})
+    report(code == 78 and failures == 0 and tu.PHASE_REFUSED_MARKER in output,
+           "live CONTROL refuses (exit 78) when the tier declares markers "
+           "absent and none attached (el8's real, undisturbed outcome)")
+    output, failures, code = control_assert(0, [3, 7], {"executions": 1})
+    report(code is None and failures > 0,
+           "live CONTROL still FAILS (never silently refuses) if markers "
+           "attach despite a declared-absent tier -- a real regression")
+    output, failures, code = control_assert(absent.PHASE_MASK, [3, 3, 3],
+                                            {"executions": 0})
+    report(code is None and failures > 0,
+           "live CONTROL on a declared-present (Ubuntu) tier still FAILS on "
+           "the exact masks/artifacts that REFUSE when declared absent -- "
+           "unchanged by #760")
+
     for field in absent.OUTCOME_FIELDS + absent.ERRNO_FIELDS + absent.FIRE_FIELDS:
         bad = dict(forced_status)
         bad[field] = "disabled" if field in absent.OUTCOME_FIELDS else 0
@@ -598,6 +640,9 @@ for declared, name, rc, want in (
         ("0", "test_execution_span_live", 78, "0 0 1 0 0"),
         ("0", "test_escalation", 78, "0 0 1 0 0"),
         ("0", "test_ui_live_smoke", 78, "0 0 1 0 0"),
+        # #760: test_phase_absent's CONTROL leg joined phase_dependent_test,
+        # so its exit 78 is now classified exactly like the other four.
+        ("0", "test_phase_absent", 78, "0 0 1 0 0"),
         ("1", "test_escalation", 78, "0 1 0 0 0"),
         ("", "test_escalation", 78, "0 1 0 0 0"),
         ("0", "unrelated", 78, "0 1 0 0 0"),
@@ -614,10 +659,11 @@ for declared, name, rc, want in (
         diagnostic = "test is not phase-dependent"
     runner_case(declared, name, rc, want, diagnostic=diagnostic)
 
-runner_case("0", "test_phase_absent", 78, "0 1 0 0 0",
-            diagnostic="test is not phase-dependent")
-# Also test the filename stem so a future classifier/registration rename cannot
-# accidentally grant this internally asserted refusal an exit-78 exemption.
+# #760: the filename STEM "test_phase_absent_live" (never the registered
+# runner name, which is "test_phase_absent") must still NOT be granted the
+# exit-78 exemption -- guards against a future classifier/registration
+# rename accidentally matching on a substring/prefix instead of the exact
+# registered name.
 runner_case("0", "test_phase_absent_live", 78, "0 1 0 0 0",
             diagnostic="test is not phase-dependent")
 

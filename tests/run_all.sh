@@ -262,10 +262,14 @@ skip_live_test() {
     fi
 }
 
-# #622: only these four tests may report an executed phase refusal (78).
+# #622/#760: only these five tests may report an executed phase refusal
+# (78). test_phase_absent's CONTROL leg joined this list in #760: it
+# exercises the real, undisturbed capability, so on a tier that declares
+# markers absent it refuses like the others instead of asserting FAIL
+# (test_phase_absent's own FORCED leg stays a plain check(), never 78).
 phase_dependent_test() {
     case "$1" in
-        test_execution_cardinality|test_execution_span_live|test_escalation|test_ui_live_smoke) return 0 ;;
+        test_execution_cardinality|test_execution_span_live|test_escalation|test_ui_live_smoke|test_phase_absent) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -504,8 +508,11 @@ LIVE_TESTS=(
     # make box-check runs run_all.sh, NOT ci_smoke.sh: a ci_smoke-only gate
     # never runs in an agent's pre-PR check (#433, three times over).
     "test_execution_span_live|python3|test_execution_span_live.py"
-    # #622: owns its forced/control declarations; refusal is an assertion,
-    # never exit 78, so this stays outside phase_dependent_test().
+    # #622: FORCED simulates absence on any tier and owns that refusal as a
+    # plain assertion, never exit 78. #760: CONTROL exercises the tier's REAL
+    # capability, so on a tier that declares markers absent it refuses via
+    # exit 78 like the other phase-dependent tests below -- hence this is now
+    # IN phase_dependent_test(), not outside it.
     "test_phase_absent|python3|test_phase_absent_live.py"
     "test_cross_pg_wait_sampling|python3|test_cross_pg_wait_sampling.py"
     "test_event_classes|python3|test_event_classes.py"

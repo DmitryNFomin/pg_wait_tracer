@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""#622: forced USDT absence and its own FULL-mode positive control.
+"""#622/#760: forced USDT absence and its own FULL-mode positive control.
 
-Run both legs against the same postmaster on a phase-capable Ubuntu tier.
-The seam rehearses EL8's consequence, not the missing-ref_ctr_offset cause.
-This test owns both declarations: refusal is a successful assertion, never 78.
+Run both legs against the same postmaster. FORCED simulates absence on ANY
+tier and owns its own declaration: its refusal is an in-test assertion, never
+exit 78. CONTROL exercises the REAL, undisturbed capability, so #760 makes it
+defer to the tier's OWN declaration (PGWT_EXPECT_PHASE_PROBES) instead of a
+hard-coded "markers present": a tier that declares markers absent (el8:
+libbpf 0.5.0 predates USDT) cannot pass CONTROL by design and must REFUSE
+(exit 78) like the other phase-dependent tests; a tier that declares markers
+present (Ubuntu) keeps the original pass/fail contract -- CONTROL must still
+fail if markers are genuinely missing there.
 """
 import argparse
 import errno
@@ -17,7 +23,9 @@ import tempfile
 import time
 
 from server_harness import SERVER_BIN, ServerHarness
-from testutil import ATTR_MASK, PHASE_MASK, find_postmaster, phase_contract_verdict
+from testutil import (ATTR_MASK, PHASE_MASK, find_postmaster,
+                      phase_contract_apply, phase_contract_verdict,
+                      resolve_declared_phase_mask)
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
@@ -182,7 +190,19 @@ def assert_forced(masks, status, artifacts):
     check(verdict == "refuse", f"5 FORCED declared-0 verdict refuse: {verdict}: {reason}")
 
 
-def assert_control(masks, artifacts):
+def assert_control(expected_phase, masks, artifacts):
+    # #760: CONTROL is the REAL, undisturbed leg (never forced), so its
+    # expectation must come from the tier's own declaration. A tier that
+    # declares markers absent cannot pass this leg by design -- it refuses
+    # exactly like the other phase-dependent tests (exit 78), via the shared
+    # helper, instead of being asserted FAIL here. A declared-but-missing
+    # capability on THAT tier (a real regression) still goes red: that is
+    # phase_contract_verdict's "fail" branch, routed to check() below rather
+    # than swallowed.
+    if expected_phase == 0:
+        phase_contract_apply(0, masks, artifacts, "CONTROL",
+                             fail=lambda reason: check(False, f"CONTROL: {reason}"))
+        return
     # Union inside the existing contract tolerates a legitimate 0x7 sample
     # while attached_mask is assembled; no individual sample must equal 0xF.
     verdict, reason = phase_contract_verdict(PHASE_MASK, masks, artifacts)
@@ -204,6 +224,12 @@ def main():
     if not pm_pid or not all(os.path.isfile(path) for path in (TRACER, SERVER_BIN)):
         check(False, "requires a running postmaster and built tracer/server")
         return 1
+    try:
+        expected_phase = resolve_declared_phase_mask()
+    except ValueError as exc:
+        check(False, str(exc))
+        print(f"\n{tests_run - tests_failed}/{tests_run} checks passed")
+        return 1
     for forced, label in ((True, "FORCED"), (False, "CONTROL")):
         trace_dir = tempfile.mkdtemp(prefix=f"pgwt_phase_{label.lower()}_")
         os.chmod(trace_dir, 0o755)
@@ -213,7 +239,7 @@ def main():
             if forced:
                 assert_forced(masks, status, artifacts)
             else:
-                assert_control(masks, artifacts)
+                assert_control(expected_phase, masks, artifacts)
         except (OSError, ValueError, RuntimeError, IndexError,
                 subprocess.SubprocessError) as exc:
             check(False, f"{label}: {exc}")
