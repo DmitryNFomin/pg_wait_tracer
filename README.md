@@ -1436,6 +1436,16 @@ clients, 60 s windows). See [Cross-validation: sampling vs
 exact](#cross-validation-sampling-vs-exact) below for the full per-rate
 table and what still drives the gap.
 
+`PGWT_SAMPLER_NICE` accepts an integer from -20 through 19 (the standard
+`nice` range) to request the daemon's own process niceness. Unset or empty
+leaves niceness unchanged; `0` only verifies the current value is zero,
+without changing it. Malformed or out-of-range values are refused with a
+warning and niceness left unchanged. The sampled tier's CPU figure remains
+a lower bound under CPU contention: measurements recorded in
+[ffd3f648 (#675)](https://github.com/DmitryNFomin/pg_wait_tracer/commit/ffd3f648)
+found that nice does not remove this bias, because nice is a CFS weight,
+not a scheduling class.
+
 **Full tier (exact, during escalation).** A **CPU hardware debug register**
 (watchpoint) traps every write to `wait_event_info` in each backend. PostgreSQL
 updates this field on every wait event transition (entering a wait, leaving a

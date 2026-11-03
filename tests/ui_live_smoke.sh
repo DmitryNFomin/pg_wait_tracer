@@ -131,6 +131,17 @@ if [[ -z "$DIAG_TABS" && -n "$DIAG_TICKS" ]]; then
     exit 1
 fi
 
+# #622: require PGWT_EXPECT_PHASE_PROBES before starting any live work.
+PHASE_EXPECT=$(python3 "$SCRIPT_DIR/testutil.py" phase-expectation) || exit $?
+# #622: Ubuntu now rehearses requested mask 0xF: plain uprobes attach and
+# fire, both USDT pairs fail ENOTSUP, leaving mask 0x3, attach_failed outcomes
+# and declared-0 verdict refuse. Real EL8 must still prove that missing
+# ref_ctr_offset causes the failure; the seam asserts the consequence,
+# never the cause.
+if [[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]]; then
+    export PGWT_TEST_NO_USDT_SEMA_REFCNT=1
+fi
+
 PORT="${PGWT_UI_LIVE_PORT:-8384}"
 # Refuse before PG discovery, sysctl changes, workloads, or capture.
 bridge_port_state "$PORT" || exit 1
@@ -421,7 +432,7 @@ if [[ -n "$DIAG_TABS" ]]; then
     exit "$DIAG_RC"
 fi
 
-python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" --control-socket "$SOCK" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" &
 WALK_PID=$!
 # Bash defers traps during a foreground command; wait is interruptible.
@@ -456,6 +467,9 @@ if [[ "$SELF_TEST_RC" -ne 0 ]]; then
     echo "ui_live_smoke: SELF-TEST FAILED (rc=$SELF_TEST_RC) -- the gate could not prove it still catches an injected blink; see results/ui_live_self_test/summary.json"
 fi
 
+if [[ "$SELF_TEST_RC" -ne 0 ]]; then
+    exit "$SELF_TEST_RC"
+fi
 if [[ "$SMOKE_RC" -ne 0 ]]; then
     exit "$SMOKE_RC"
 fi

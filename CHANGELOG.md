@@ -10,6 +10,20 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix: sampler timer health and scheduling disclosure (#675/#697).**
+  New runtime env var `PGWT_SAMPLER_NICE` accepts integers -20..19 for the
+  daemon's own niceness (unset/empty leaves it unchanged; `0` verifies
+  without changing it); malformed or out-of-range values are refused with a
+  warning. Nice does not remove the sampled CPU figure's lower-bound bias
+  under CPU contention. Rename the shutdown label from "sampled CPU
+  confidence" to "sampler timer health": it measures timer scheduling delay,
+  and every verdict now states that the sampled CPU figure is a lower bound.
+  This is stderr-only wording; the control-socket fields and wire format are
+  unchanged. Remove the internal-only `sampler_ticks_rated_total` counter,
+  which always equaled `sampler_ticks_total` and was never exported; timer
+  health now uses the same total-tick denominator as the control metrics.
+  Scheduling warnings distinguish failed readback from a value mismatch.
+
 - **test: guard per-section registration in C suites (#686).** `make check`
   now verifies that every numbered section's owning function is reachable
   from `main()` through same-file call sites, with a fail-closed bypass suite.

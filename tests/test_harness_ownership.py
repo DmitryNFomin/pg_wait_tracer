@@ -84,7 +84,8 @@ class HarnessTests(unittest.TestCase):
         for directory in ('tests', 'scripts', 'web/static', 'bin'):
             (self.repo / directory).mkdir(parents=True, exist_ok=True)
         for name in ('demo_rehearsal.sh', 'ui_live_smoke.sh', 'live_daemon_lib.sh',
-                     'bridge_owner.py', 'demo_rehearsal_lib.py', 'ui_live_smoke_lib.py'):
+                     'bridge_owner.py', 'demo_rehearsal_lib.py', 'ui_live_smoke_lib.py',
+                     'testutil.py'):
             if (TREE / 'tests' / name).exists():
                 shutil.copy(TREE / 'tests' / name, self.repo / 'tests' / name)
         for name in ('demo-rehearsal.sh', 'demo-rehearsal-remote-run.sh'):
@@ -172,6 +173,8 @@ else:
             HTTP_SCRIPT=str(self.http), STATIC_ROOT=str(self.repo / 'web/static'),
             WALK_ARGV=str(self.base / 'walk.argv'), DURATION_MIN='35', FIXTURE_TMP=str(self.base))
         self.env.pop('DIAG_DATA', None)
+        # #622: the harness stands in for the provisioner and declares probes.
+        self.env['PGWT_EXPECT_PHASE_PROBES'] = '1'
 
     def foreign(self, late=False):
         proc = subprocess.Popen([PYTHON, str(self.http), str(self.port),
