@@ -14,6 +14,12 @@
  * above the dropped watermark, (c) no forget and a matching note, (d) a
  * sub-second record, (e) a non-CPU record, (f) no slot for the pid, and (g)
  * missing/disabled output which the reader must REFUSE, never sum as zero.
+ * §4 separates this counter from the disk over-count it only BOUNDS. §1's
+ * record lies wholly below the dropped mark, where the two are equal, so §1
+ * alone would let "an upper bound" be read as "a measurement" -- which is
+ * the claim the header made until review caught it. §4 straddles the mark
+ * (13500 ms charged whole against a 500 ms real over-count) and asserts the
+ * bound both HOLDS and is STRICT.
  *
  * Server build, no BPF, no live PG. Every timestamp is a literal offset
  * from the pinned BASE_MONO; every credit is driven by an explicit flush,
@@ -250,16 +256,100 @@ static void test_invariant(void)
     CHECK(n > 0, "invariant: records read back (%d)", n);
     if (n > 0) {
         uint64_t disk_cpu_wall = rb_sum_class(&rb, PGWT_CLASS_CPU);
-        /* This counter measures exactly the wall the SAME evidence loss
-         * double counts on disk: 12000 ms for a 6000 ms gap here. This
-         * identity also holds on a tree that later fixes that over-count:
-         * there already > 0, so both sides become 0. It pins the relation
-         * without pinning the defect's current value. A counter unrelated
-         * to the wall at risk, or a broken disk read, makes it go red. */
+        /* WHAT THIS DOES AND DOES NOT PROVE, stated honestly because the
+         * first version of this comment overclaimed. The record here spans
+         * exactly the credited gap, so the pid's TRUE wall is gap_wall and
+         * the disk over-count is disk - gap_wall = 6000 ms. With one
+         * whole-charged record and credited == gap_wall this reduces to
+         * "unprovable == the record's wall", which the UNPROVABLE MOVES
+         * leg above already asserts -- so it does NOT detect the counter
+         * drifting from the at-risk wall. What it still catches is the
+         * record ceasing to be charged WHOLE, and a broken disk read.
+         * §4 is the leg that pins the relation: it straddles the mark,
+         * where the two quantities differ by 27x. */
         CHECK(unprov == disk_cpu_wall - gap_wall,
-              "DISK RISK: unprovable %llu ms = disk CPU %llu ms - gap 6000 ms",
+              "WHOLE CHARGE: unprovable %llu ms = disk CPU %llu ms - true "
+              "wall 6000 ms (tight only because the record spans the gap)",
               (unsigned long long)(unprov / MS),
               (unsigned long long)(disk_cpu_wall / MS));
+    }
+    wr_free(&x);
+}
+
+/* ── §4: the counter is an UPPER BOUND on the disk over-count ──────────
+ *
+ * The header used to claim this counter "measures the wall at risk of being
+ * double counted on disk". It does not: it is charged the record's WHOLE
+ * duration, while only the part below the dropped mark can be placed twice.
+ * A record straddling the mark separates the two quantities, and §1 cannot
+ * because its record lies wholly below it.
+ *
+ * Credit [1 s, 7 s) (mark -> 7 s), forget, then close [6.5 s, 20 s):
+ *   unprovable      = 13500 ms  (the whole record)
+ *   disk CPU wall   = 19500 ms  (6000 credited + 13500 charged)
+ *   TRUE wall       = 19000 ms  ([1 s, 20 s))
+ *   over-count      =   500 ms  (only [6.5 s, 7 s) was placed twice)
+ * So the bound is 27x loose here and the equality reading is refuted. Both
+ * directions are asserted: the bound HOLDS, and it is STRICT -- a fix that
+ * silently made the counter equal the over-count would go red on the second,
+ * and one that under-counted below the real risk would go red on the first. */
+
+static void test_upper_bound_not_equality(void)
+{
+    struct wr x;
+    if (wr_open(&x, "upperbound") != 0) {
+        printf("  FAIL: setup\n"); failures++; return;
+    }
+    credit_gap(&x);
+    uint64_t credited = x.w->open_cpu_credited_ns_total;
+    pgwt_summary_forget_open(x.w, PID_A);
+    /* [6.5 s, 20 s): dips 500 ms below the dropped 7 s mark. */
+    struct pgwt_trace_event straddle =
+        mkev(PID_A, BASE_MONO + 20 * S, 13500 * MS, 0, EV_LOCK_REL,
+             0, 8100 * MS);
+    pgwt_summary_push_event(x.w, &straddle, 0, straddle.old_event);
+    uint64_t unprov = x.w->cpu_open_credit_unprovable_ns_total;
+    uint64_t uncred = x.w->cpu_open_uncredited_ns_total;
+
+    /* REACHABILITY: the straddle must actually have been credited first,
+     * or the 500 ms overlap does not exist and this leg measures nothing. */
+    CHECK(credited == 6 * S,
+          "§4 REACHABILITY: the gap was credited before the forget (%llu ms)",
+          (unsigned long long)(credited / MS));
+    /* Charged WHOLE, which is what makes the bound loose. */
+    CHECK(unprov == 13500 * MS && uncred == 0,
+          "§4 WHOLE: the straddling record charges %llu ms to unprovable, "
+          "0 to uncredited", (unsigned long long)(unprov / MS));
+    wr_close(&x);
+    struct readback rb = { 0 };
+    int n = read_back(x.dir, &rb);
+    CHECK(n > 0, "§4: records read back (%d)", n);
+    if (n > 0) {
+        uint64_t disk = rb_sum_class(&rb, PGWT_CLASS_CPU);
+        /* TRUE wall of the pid's timeline, [1 s, 20 s). Derived from the
+         * fixture's literal offsets, not from any writer counter, so the
+         * two sides of the comparison have different provenance. */
+        const uint64_t true_wall = 19 * S;
+        const uint64_t overlap   = 500 * MS;
+        CHECK(disk == 19500 * MS,
+              "§4: disk CPU wall is %llu ms (6000 credited + 13500 charged)",
+              (unsigned long long)(disk / MS));
+        CHECK(disk - true_wall == overlap,
+              "§4: the REAL over-count is %llu ms -- only [6.5 s, 7 s) was "
+              "placed twice", (unsigned long long)((disk - true_wall) / MS));
+        /* The bound HOLDS. Red input: a counter that under-reports the wall
+         * genuinely at risk. */
+        CHECK(unprov >= disk - true_wall,
+              "§4 BOUND HOLDS: unprovable %llu ms >= over-count %llu ms",
+              (unsigned long long)(unprov / MS),
+              (unsigned long long)((disk - true_wall) / MS));
+        /* The bound is STRICT here. Red input: reading this counter AS the
+         * over-count -- the claim the header used to make. */
+        CHECK(unprov > disk - true_wall,
+              "§4 BOUND IS LOOSE, NOT AN EQUALITY: %llu ms vs %llu ms (%llux)",
+              (unsigned long long)(unprov / MS),
+              (unsigned long long)((disk - true_wall) / MS),
+              (unsigned long long)(unprov / (disk - true_wall)));
     }
     wr_free(&x);
 }
@@ -500,6 +590,8 @@ int main(void)
     test_bypass();
     printf("-- #709 3g: bypass — the reader must refuse --\n");
     test_bypass_reader();
+    printf("-- #709 4: upper bound on the disk over-count, not an equality --\n");
+    test_upper_bound_not_equality();
 
     printf("\nchecks=%d failures=%d\n", checks, failures);
     printf("=== test_open_credit_unprovable: %s ===\n",

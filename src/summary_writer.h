@@ -1145,12 +1145,34 @@ struct pgwt_summary_writer {
      * is NOT a claim that the time was credited; it is a REFUSAL to claim
      * either way. A writer that cannot see must refuse, never approve.
      *
-     * The measured red input: six seconds credited, then forgotten, then
-     * closed gave 12000 ms of CPU-class wall ON DISK for a 6000 ms gap.
-     * This counter also measures the wall at risk of being double counted
-     * on disk by the same evidence loss. That over-count is pre-existing
-     * and NOT fixed here; it is why this quantity needs a name rather than
-     * reading as healthy uncredited time or vanishing from the counters. */
+     * NEVER cleared, and that rests on a dependency outside this file: the
+     * lifecycle path deletes the pid's state_map entry in the same
+     * pgwt_handle_exit that calls forget_open (src/backend.c), so
+     * pgwt_read_state_map can never note this pid again and every later
+     * record for it belongs to the dead interval. If that deletion were
+     * ever dropped, a reused pid could be noted afresh while this mark
+     * still stood, and genuinely never-credited time starting below it
+     * would be filed here instead of in uncredited -- removing it from the
+     * one counter that is meant to show it. That is the exact invisibility
+     * this counter exists to prevent, so the dependency is named rather
+     * than assumed.
+     *
+     * AN UPPER BOUND ON THE DISK OVER-COUNT, NOT A MEASUREMENT OF IT.
+     * The same evidence loss also double counts wall on disk, and this
+     * counter bounds that from above because it is charged the record's
+     * WHOLE duration while only the part overlapping the dropped mark can
+     * be double counted. Both measured on the fixtures in
+     * tests/test_open_credit_unprovable.c:
+     *   record wholly below the mark -- credit [1 s, 7 s), then [1 s, 7 s):
+     *     unprovable 6000 ms, disk 12000 ms for a 6000 ms true wall, so the
+     *     over-count is 6000 ms and the bound is TIGHT;
+     *   record straddling the mark -- then [6.5 s, 20 s):
+     *     unprovable 13500 ms while the over-count is 500 ms (only
+     *     [6.5 s, 7 s) was placed twice) -- the bound is 27x loose.
+     * So read it as "no more than this much wall is at risk", never as the
+     * over-count itself. That over-count is pre-existing, is NOT fixed here
+     * and is tracked in #745; this counter is why the quantity has a name
+     * at all rather than reading as healthy uncredited time. */
     uint64_t      cpu_open_credit_unprovable_ns_total;
     uint64_t      open_fill_capped_total;
     /* #430: the SEAL's own file lifecycle. pgwt_summary_check_rotation closes

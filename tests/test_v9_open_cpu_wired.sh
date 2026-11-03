@@ -188,7 +188,8 @@ fi
 for k in summary_open_cpu_credited_ns summary_open_cpu_measured_ns \
          summary_open_cpu_unknown_ns summary_open_cpu_eff_rejected_total \
          summary_open_cpu_class_divergent_ns \
-         summary_open_cpu_tier_mismatch_total summary_open_cpu_overcredit_ns; do
+         summary_open_cpu_tier_mismatch_total summary_open_cpu_overcredit_ns \
+         summary_cpu_open_credit_unprovable_ns_total; do
     if [[ -z "$(num "$M0" "$k")" ]]; then
         echo "REFUSE: control socket has no numeric '$k'."
         echo "        The v9 keys are missing, so this test cannot tell a"
@@ -196,7 +197,11 @@ for k in summary_open_cpu_credited_ns summary_open_cpu_measured_ns \
         exit 2
     fi
 done
-echo "  ok: all seven v9 control keys present and numeric"
+# The eighth is #709's: this script's own verdict prints uncredited, and
+# uncredited understates the cost by exactly the unprovable wall. Absent, the
+# verdict would read "n/a" beside three figures that all understate -- so a
+# missing key REFUSES here rather than degrading the verdict in silence.
+echo "  ok: all eight v9/#709 control keys present and numeric"
 
 # ── the stimulus: ONE on-CPU interval per backend, held open across
 #    several 1 s ticks, because that is the only thing v9 can spread. ─────
@@ -212,13 +217,19 @@ echo "  ok: all seven v9 control keys present and numeric"
 #
 # The gate capture of 2026-10-28 (box-check-ubuntu-20261028-154345.log) says
 # so in its own numbers: 34 on-CPU notes, 0 credited, every refusal counter
-# 0, and -- the one that settles it -- summary_cpu_open_uncredited_ns_total
-# also 0. That counter adds the WHOLE duration of every closed record whose
-# class is CPU and whose duration exceeds one second that no second had
-# credited. Zero, on a capture that burned 34 s of measured CPU, means not
-# one on-CPU interval longer than a second CLOSED in it. The statement was
-# proven to burn CPU; it was never proven to hold a gap, and those are
-# different facts.
+# 0, and summary_cpu_open_uncredited_ns_total also 0. That counter adds the
+# WHOLE duration of every closed record whose class is CPU and whose
+# duration exceeds one second that no second had credited. Zero, on a
+# capture that burned 34 s of measured CPU, means not one on-CPU interval
+# longer than a second CLOSED in it. The statement was proven to burn CPU;
+# it was never proven to hold a gap, and those are different facts.
+#
+# #709 narrowed what a zero uncredited settles, so this is no longer "the
+# one that settles it" on its own. A record whose watermark the lifecycle
+# forget destroyed is now charged to
+# summary_cpu_open_credit_unprovable_ns_total instead, so uncredited can
+# read 0 while such intervals DID close. The pair has to be read together,
+# which is why both are printed below.
 #
 # A plpgsql FOR loop over a scalar assignment has no rows, no tuplestore, no
 # temp file and no wait event: one interval, open from the first iteration to
@@ -344,6 +355,7 @@ CRED=$(num "$M1" summary_open_cpu_credited_ns)
 MEAS=$(num "$M1" summary_open_cpu_measured_ns)
 REFUSED=$(num "$M1" summary_open_cpu_refused_total)
 UNCRED=$(num "$M1" summary_cpu_open_uncredited_ns_total)
+UNPROV=$(num "$M1" summary_cpu_open_credit_unprovable_ns_total)
 IOREF=$(num "$M1" summary_open_io_worker_refused_total)
 IOREF_CPU=$(num "$M1" summary_open_cpu_io_worker_refused_total)
 UNPLACED=$(num "$M1" summary_open_cpu_unplaced_total)
@@ -355,19 +367,32 @@ echo "  summary_open_cpu_credited_ns   = $CRED"
 echo "  summary_open_cpu_measured_ns   = ${MEAS:-n/a}"
 echo "  summary_open_cpu_refused_total = ${REFUSED:-n/a}"
 echo "  summary_cpu_open_uncredited_ns_total = ${UNCRED:-n/a}"
+# #709: uncredited is NOT readable on its own. When the lifecycle path's
+# forget_open destroyed the pid's watermark before a closing record drained,
+# that record's whole wall goes HERE, not into uncredited -- so uncredited
+# can read 0 while multi-second CPU gaps went unaccounted. Printed next to
+# it because a verdict that shows only uncredited understates the cost by
+# exactly this much, with nothing on screen saying where the wall went.
+# An UPPER BOUND on the matching disk over-count, never that over-count
+# itself: the record is charged WHOLE while only the part below the dropped
+# mark can be placed twice (13500 ms vs 500 ms on the straddling fixture in
+# tests/test_open_credit_unprovable.c §4). See #745.
+echo "  summary_cpu_open_credit_unprovable_ns_total = ${UNPROV:-n/a}  (uncredited is not readable without it)"
 # Every exit between the note and the credit, so a verdict NAMES the one
 # that took the observation instead of leaving it to be inferred.
 echo "  summary_open_io_worker_refused_total = ${IOREF:-n/a}  (WAIT notes included)"
 echo "  summary_open_cpu_io_worker_refused_total = ${IOREF_CPU:-n/a}  (the on-CPU subset)"
 echo "  summary_open_cpu_unplaced_total      = ${UNPLACED:-n/a}"
-# Printed next to uncredited because it is the only thing that makes
-# uncredited COMPARABLE across captures. uncredited adds a closed CPU
-# record's WHOLE duration whenever `already == 0`, and `already` is the
-# note's credit only while the close-time identity check holds; when it does
-# not, an interval that WAS credited is still counted whole. Non-zero here
-# means a reading of uncredited is partly that, not a population of
-# never-credited gaps. See the comment at this key in src/control.c.
-echo "  summary_open_note_mismatch_total     = ${MISMATCH:-n/a}  (makes uncredited comparable)"
+# A close-time identity disagreement, and NOT the discriminator this line
+# used to claim it was. The reading it was added for -- "uncredited is partly
+# double-told credit" -- was measured on #709's fixtures and this counter
+# increments ZERO times on that path: forget_open clears both `we` and
+# `cpu_slot`, so the mismatch branch's `o->we != 0 || o->cpu_slot` test is
+# false and nothing is counted. summary_cpu_open_credit_unprovable_ns_total
+# above is what separates double-told credit from never-credited time; this
+# one says only that the producer's open-interval view and the record stream
+# disagreed, which is expected to be 0 from the daemon.
+echo "  summary_open_note_mismatch_total     = ${MISMATCH:-n/a}  (producer/record disagreement; NOT the uncredited discriminator)"
 echo "  summary_open_table_full_total        = ${TBLFULL:-n/a}"
 echo "  summary_open_notes_expired_total     = ${EXPIRED:-n/a}"
 echo "  summary_open_credited_ns_total = ${V8CRED:-n/a}  (WAIT credit, same seal)"
@@ -520,6 +545,11 @@ echo "        retired early either. They were accepted and the SEAL placed"
 echo "        none of them: src/summary_writer.c credit_open_second /"
 echo "        writer_seal_through. refused_total=${REFUSED:-n/a}"
 echo "        table_full=${TBLFULL:-n/a} notes_expired=${EXPIRED:-n/a}"
-echo "        uncredited_ns=${UNCRED:-n/a} is what it cost."
+# #709: uncredited alone is NOT the cost. A record whose watermark the
+# lifecycle forget destroyed is charged to credit_unprovable instead, so the
+# cost is the PAIR; printing only the first understates it silently.
+echo "        uncredited_ns=${UNCRED:-n/a} +"
+echo "        credit_unprovable_ns=${UNPROV:-n/a} is what it cost (both: a"
+echo "        destroyed watermark moves wall from the first to the second)."
 echo "=== test_v9_open_cpu_wired: FAIL ==="
 exit 1
