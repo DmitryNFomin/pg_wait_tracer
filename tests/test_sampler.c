@@ -960,14 +960,30 @@ static void test_sampled_attr_source_gate(void)
           "zero rc is a successful at-tick attribution read");
     CHECK(pgwt_sampler_tick_attr_outcome(-1) == PGWT_TICK_ATTR_READ_FAILED,
           "negative rc is a failed at-tick attribution read");
-    CHECK(pgwt_sampler_tick_attr_outcome(PGWT_PGBS_ATTR_UNCONNECTED) ==
-              PGWT_TICK_ATTR_UNCONNECTED,
-          "database-less backend is unconnected, not a failed read");
+    CHECK(pgwt_sampler_tick_attr_outcome(PGWT_PGBS_ATTR_NO_CONTEXT) ==
+              PGWT_TICK_ATTR_NO_CONTEXT,
+          "a context-less row is NO_CONTEXT, not a failed read");
     CHECK(pgwt_sampler_tick_attr_outcome(2) == PGWT_TICK_ATTR_READ_FAILED,
           "unrecognised positive rc is neither success nor benign");
     CHECK(pgwt_sampler_tick_attr_outcome(INT_MAX) ==
               PGWT_TICK_ATTR_READ_FAILED,
           "INT_MAX rc is neither success nor benign");
+
+    /* #693 round 2: the SMP-1 "0 of N backends readable" refusal must never
+     * print "last error: Success". A NO_CONTEXT outcome sets no errno, so the
+     * fallback is ENODATA -- but a real error always wins over it. */
+    CHECK(pgwt_sampler_tick_read_errno(0, 0, 1) == ENODATA,
+          "an all-context-less tick reports ENODATA, never 0 (Success)");
+    CHECK(pgwt_sampler_tick_read_errno(0, EIO, 1) == EIO,
+          "a real attribution-read error wins over the no-context fallback");
+    CHECK(pgwt_sampler_tick_read_errno(EACCES, 0, 1) == EACCES,
+          "a real batch-read error wins over the no-context fallback");
+    CHECK(pgwt_sampler_tick_read_errno(EACCES, EIO, 1) == EIO,
+          "attribution errno still beats the batch errno, as before #693");
+    CHECK(pgwt_sampler_tick_read_errno(0, 0, 0) == 0,
+          "nothing failed and nothing was context-less: errno stays 0");
+    CHECK(pgwt_sampler_tick_read_errno(EACCES, 0, 0) == EACCES,
+          "no-context absent: the pre-#693 batch/attr precedence is unchanged");
 
     struct pgwt_sampled_attr_value uprobe = {
         .query_id = 111, .cmd_open = 1,

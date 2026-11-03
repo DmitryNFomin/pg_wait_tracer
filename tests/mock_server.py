@@ -852,7 +852,7 @@ class DaemonState:
             "samples_per_sec": 60.0,
             "sample_read_faults_total": 0,
             "sampled_attr_tick_read_failures_total": 0,
-            "sampled_attr_tick_unconnected_total": 0,
+            "sampled_attr_tick_no_context_total": 0,
             "sampled_attr_shadow_total": 0,
             "sampled_attr_shadow_mismatch_total": 0,
             "sampled_attr_shadow_active_total": 0,

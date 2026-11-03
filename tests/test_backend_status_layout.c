@@ -427,7 +427,7 @@ static void test_sampled_attr(void)
     unsigned char zero_attr[sizeof(attr)] = {0};
     CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
                                         &attr) ==
-              PGWT_PGBS_ATTR_UNCONNECTED &&
+              PGWT_PGBS_ATTR_NO_CONTEXT &&
           !attr.cmd_open && attr.query_id == 0 && attr.last_query_id == 0 &&
           attr.databaseid == 0 && attr.userid == 0 &&
           memcmp(&attr, zero_attr, sizeof(attr)) == 0,
@@ -446,8 +446,25 @@ static void test_sampled_attr(void)
     snapshot.userid = 10;
     CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
                                         &attr) ==
-              PGWT_PGBS_ATTR_UNCONNECTED,
+              PGWT_PGBS_ATTR_NO_CONTEXT,
           "logical replication launcher with dbid 0 and userid 10 is benign");
+
+    /* The other direction, and the reason this is "no context" rather than
+     * "unconnected": PostgreSQL fills st_userid only for client backends,
+     * walsenders and connected background workers, so an AUTOVACUUM WORKER
+     * carries a real st_databaseid with st_userid InvalidOid. It is connected
+     * and still has no usable attribution context. */
+    snapshot.databaseid = 16384;
+    snapshot.userid = 0;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) ==
+              PGWT_PGBS_ATTR_NO_CONTEXT,
+          "autovacuum-worker shape (dbid set, userid 0) is no-context too");
+    CHECK(pgwt_pgbs_derive_cmd_gate(&layout, &snapshot, getpid(),
+                                    &gate) != 0 && !gate.cmd_open,
+          "#294 gate still refuses the autovacuum-worker shape");
+    snapshot.databaseid = 0;
+    snapshot.userid = 0;
 
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.read_mask = connected.read_mask;
@@ -460,7 +477,7 @@ static void test_sampled_attr(void)
     snapshot.procpid = (uint32_t)(getpid() + 1);
     CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
                                         &attr) < 0,
-          "foreign pid beats unconnected classification");
+          "foreign pid beats the no-context classification");
     snapshot.procpid = (uint32_t)getpid();
 
     snapshot.changecount_after += 2;
@@ -541,8 +558,8 @@ static void test_sampled_attr(void)
     CHECK(pgwt_pgbs_read_sampled_attr(getpid(),
                                       (uint64_t)(uintptr_t)&my_be_entry,
                                       &layout, &attr) ==
-              PGWT_PGBS_ATTR_UNCONNECTED,
-          "live MyBEEntry wrapper propagates the positive unconnected rc");
+              PGWT_PGBS_ATTR_NO_CONTEXT,
+          "live MyBEEntry wrapper propagates the positive no-context rc");
 
     layout.validation = PGWT_PGBS_VALIDATION_DEGRADED;
     CHECK(!pgwt_pgbs_sampled_attr_enabled(&layout),

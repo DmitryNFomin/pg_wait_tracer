@@ -50,10 +50,14 @@ struct pgwt_counters {
      * short, foreign pid, out-of-range state). Not the command gate and not
      * comparable with noncmd_cpu_samples_total (#693). */
     uint64_t sampled_attr_tick_read_failures_total;
-    /* Coherent, identity-confirmed reads with no database/user context.
-     * Expected to equal (database-less backends) x (ticks): a steady nonzero
-     * is normal, not a fault (#693). */
-    uint64_t sampled_attr_tick_unconnected_total;
+    /* Coherent, identity-confirmed at-tick reads whose attribution context is
+     * absent (st_databaseid OR st_userid InvalidOid — see
+     * PGWT_PGBS_ATTR_NO_CONTEXT). Expected to equal (backends without a full
+     * db+user context) x (ticks), so a steady nonzero is normal, not a fault:
+     * on PG18 that is the eight aux processes, and an autovacuum worker joins
+     * them while it runs (database set, st_userid InvalidOid). 0 on PG13,
+     * whose activity source never targets those backends (#693). */
+    uint64_t sampled_attr_tick_no_context_total;
     /* SCOPE (#294): every sampled_attr_shadow_* counter below compares the
      * TARGET-LOOP status read against the uprobe map — the read taken BEFORE
      * the batched wait_event_info read, and therefore BEFORE the #294

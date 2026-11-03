@@ -1027,6 +1027,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     static uint8_t attr_valid[MAX_BACKENDS];
     int n = 0;
     int attr_errno = 0;
+    int attr_no_context = 0;
     for (int i = 0; i < d->backends.count && n < MAX_BACKENDS; i++) {
         struct pgwt_backend *be = &d->backends.entries[i];
         if (!be->is_alive || be->pid <= 0)
@@ -1271,16 +1272,23 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                 switch (pgwt_sampler_tick_attr_outcome(tick_rc)) {
                 case PGWT_TICK_ATTR_OK:
                     break;
-                case PGWT_TICK_ATTR_UNCONNECTED:
-                    d->counters.sampled_attr_tick_unconnected_total++;
+                case PGWT_TICK_ATTR_NO_CONTEXT:
+                    d->counters.sampled_attr_tick_no_context_total++;
+                    /* No errno: this read SUCCEEDED, it just found no
+                     * attribution context. attr_no_context keeps the SMP-1
+                     * refusal diagnosable anyway (see
+                     * pgwt_sampler_tick_read_errno) instead of reporting
+                     * "last error: Success". */
+                    attr_no_context = 1;
                     /* Named separately from TICK-INVALID so the per-pid
                      * evidence says which backends make up the count: on
-                     * PG18 these are the eight database-less aux processes
-                     * (3 io workers, checkpointer, bgwriter, walwriter and
-                     * the two launchers), every tick, by design (#693). */
+                     * PG18 these are the eight aux processes (3 io workers,
+                     * checkpointer, bgwriter, walwriter and the two
+                     * launchers), plus any autovacuum worker while it runs,
+                     * every tick, by design (#693). */
                     if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
                         fprintf(stderr,
-                                "SAMPLED-ATTR-TICK-UNCONNECTED: pid=%d\n",
+                                "SAMPLED-ATTR-TICK-NO-CONTEXT: pid=%d\n",
                                 be->pid);
                     break;
                 case PGWT_TICK_ATTR_READ_FAILED:
@@ -1326,8 +1334,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             got--;
         }
     }
-    if (got == 0 && attr_errno)
-        read_errno = attr_errno;
+    if (got == 0)
+        read_errno = pgwt_sampler_tick_read_errno(read_errno, attr_errno,
+                                                  attr_no_context);
     pgwt_sampler_note_coverage(s, n, got);
 
     /* Debug-only evidence for the anomaly CPU-coverage gate. Keep each failed

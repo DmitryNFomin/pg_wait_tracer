@@ -232,8 +232,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->pgbackend_layout_fallbacks_total);
     cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",
                      ctr->sampled_attr_tick_read_failures_total);
-    cjson_add_uint64(root, "sampled_attr_tick_unconnected_total",
-                     ctr->sampled_attr_tick_unconnected_total);
+    cjson_add_uint64(root, "sampled_attr_tick_no_context_total",
+                     ctr->sampled_attr_tick_no_context_total);
     /* SCOPE (#294), repeated here because a metrics scrape sees these keys and
      * not daemon.h: every sampled_attr_shadow_* key compares the TARGET-LOOP
      * status read against the uprobe map, i.e. the read taken BEFORE the

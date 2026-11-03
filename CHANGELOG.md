@@ -10,6 +10,25 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix: a context-less backend is not a failed sampler read (#693).**
+  `sampled_attr_tick_read_failures_total` counted every at-tick
+  PgBackendStatus read whose `st_databaseid` or `st_userid` was InvalidOid as
+  a failure, which is every auxiliary process on every tick, by design — 8.00
+  per tick of 16 targets on PG18, i.e. the counter read as a >50% failure rate
+  while nothing had failed and no sample was lost. New scrapeable metrics key
+  `sampled_attr_tick_no_context_total` now carries those reads, and
+  `sampled_attr_tick_read_failures_total` is left to genuine failures (torn,
+  short, foreign pid, out-of-range state). The identity check (`st_procpid`,
+  coherent change counter, complete read mask) is applied BEFORE the context
+  clause, so a wrong address reading an all-zero page stays a hard failure.
+  No accounting figure moves: `samples_total`, `noncmd_cpu_samples_total` and
+  the `cmd_gate_order_*` counters are unchanged, and the documented
+  `cmd_gate_order_read_failed_total` ⊂ `noncmd_cpu_samples_total` relation —
+  which #693 was filed against, and which was never violated — is restated in
+  `daemon.h` with the counter named in full. The SMP-1 "0 of N backends
+  readable" refusal now reports `ENODATA` rather than "last error: Success"
+  when every target of a tick was context-less.
+
 - **fix: sampler timer health and scheduling disclosure (#675/#697).**
   New runtime env var `PGWT_SAMPLER_NICE` accepts integers -20..19 for the
   daemon's own niceness (unset/empty leaves it unchanged; `0` verifies

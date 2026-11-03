@@ -1246,7 +1246,7 @@ int pgwt_pgbs_derive_sampled_attr(
          * address reading an all-zero page remains a hard failure. */
         if (snapshot_coherent_identity(layout, snapshot, expected_pid,
                                         required))
-            return PGWT_PGBS_ATTR_UNCONNECTED;
+            return PGWT_PGBS_ATTR_NO_CONTEXT;
         return -1;
     }
 

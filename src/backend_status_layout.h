@@ -258,13 +258,20 @@ int pgwt_pgbs_read_cmd_gate(
     const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_cmd_gate *out);
 
-/* A coherent, identity-confirmed snapshot of a backend that has no database
- * context (st_databaseid or st_userid InvalidOid). NOT a failed read: every
- * auxiliary process (checkpointer, bgwriter, walwriter, the launchers, the io
- * workers) looks exactly like this on every tick, by design. It carries no
- * attribution, so it is still not success: 0 remains the only success value
- * and every caller already tests `== 0`. */
-#define PGWT_PGBS_ATTR_UNCONNECTED 1
+/* A coherent, identity-confirmed snapshot whose ATTRIBUTION CONTEXT is absent:
+ * st_databaseid OR st_userid is InvalidOid. NOT a failed read — two populations
+ * look exactly like this on every tick, by design:
+ *   - no database at all: every auxiliary process (checkpointer, bgwriter,
+ *     walwriter, the launchers, the io workers) reports datid AND usesysid
+ *     NULL, measured on PG18 (#693);
+ *   - database set, user absent: PostgreSQL fills st_userid only for client
+ *     backends, walsenders and connected background workers, so an autovacuum
+ *     worker carries a real st_databaseid with st_userid InvalidOid.
+ * Hence the name is "no context", not "unconnected": the second population IS
+ * connected. Either way the row carries no usable attribution, so this is
+ * still not success — 0 remains the only success value and every caller
+ * already tests `== 0`. */
+#define PGWT_PGBS_ATTR_NO_CONTEXT 1
 
 int pgwt_pgbs_derive_sampled_attr(
     const struct PgBackendStatusLayout *layout,
