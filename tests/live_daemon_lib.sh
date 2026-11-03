@@ -95,6 +95,59 @@ wait_bridge_ready() {
     return 1
 }
 
+# wait_bridge_data_ready BASE_URL PID LOG [TIMEOUT]
+# #683, measured on the Mac: sh -c 'cat >/dev/null' as upstream lets
+# Bridge.Start return nil, /session answer 200 and the WS upgrade succeed,
+# but info has NO answer in 3 s. /session is static; b.up means spawned,
+# not answering. The UI's first failed info is terminal (no retry from
+# onConnected), so the first tab spends all 60 s at ticks=0 while later
+# tabs pass after upstream warms up over the same socket.
+# This is a PRECONDITION gate, not a retry of an assertion and not a widened
+# timeout: move cold start OUT of the per-tab 60 s budget, never enlarge it.
+# Only our info answer with num_cpus can go GREEN; timeout, uninspectable
+# session/tooling and a bridge that dies while waiting all go RED.
+#
+# THE DEFAULT HAS A FLOOR, it is not a taste: this waits for the SAME info
+# round-trip the UI awaits, and the UI's own transport gives that request
+# 30 s (web/static/lib/transport.js `timeoutMs = 30000`). A budget at or
+# below 30 s could therefore refuse a bridge the browser would still have
+# connected to -- turning a real startup into a false refusal. 60 s is twice
+# that floor and matches ui_live_smoke_lib.FIRST_DATA_TIMEOUT_S. It does not
+# slow a healthy run: a warm bridge answers on the first poll, and a broken
+# one now refuses ONCE here instead of burning 60 s on each of eleven tabs.
+wait_bridge_data_ready() {
+    local base="$1" pid="$2" log="$3" timeout="${4:-60}" probe_pid rc
+    if ! kill -0 "$pid" 2>/dev/null; then
+        # A dead bridge cannot answer; do not spend the deadline polling it.
+        echo "REFUSE bridge data path: PID=$pid exited before info probe" >&2
+        tail -n 40 "$log" >&2
+        return 1
+    fi
+    python3 "$(dirname "${BASH_SOURCE[0]}")/bridge_data_ready.py" \
+        --base-url "$base" --timeout "$timeout" &
+    probe_pid=$!
+    while kill -0 "$probe_pid" 2>/dev/null; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            # HTTP readiness was earlier: death DURING a pending info must
+            # refuse immediately too, not wait out the probe's deadline.
+            stop_pid "$probe_pid" 1
+            echo "REFUSE bridge data path: PID=$pid exited while waiting for info" >&2
+            tail -n 40 "$log" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+    wait "$probe_pid"; rc=$?
+    if [[ "$rc" != 0 ]] || ! kill -0 "$pid" 2>/dev/null; then
+        # Exit 1 (no signal), exit 2 (cannot see), missing python and death
+        # after the answer are all refusals, never an approved precondition.
+        echo "REFUSE bridge data path: PID=$pid info probe failed (exit=$rc) or bridge exited" >&2
+        tail -n 40 "$log" >&2
+        return 1
+    fi
+    return 0
+}
+
 # exec preserves $! as the bridge PID and gives its local descendants a
 # dedicated process group. Unlike pkill -f, teardown cannot match another
 # worktree. Even a bridge that exits on bind failure can leave children;

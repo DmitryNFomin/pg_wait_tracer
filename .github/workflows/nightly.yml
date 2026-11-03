@@ -119,7 +119,9 @@ jobs:
           # job gets these via actions/setup-python + pip, but this container
           # has no such step, so `make -C tests check` was failing loudly with
           # ModuleNotFoundError on numpy (issue #139).
-          python3.11 -m pip install pillow numpy
+          # #683: the registered local data-readiness controls also need
+          # websockets. Missing tooling refuses; it cannot skip into GREEN.
+          python3.11 -m pip install pillow numpy websockets
           # PGDG repo.
           dnf install -y "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$EL-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
           # The EL AppStream 'postgresql' module masks the PGDG postgresqlNN
@@ -184,7 +186,9 @@ jobs:
           # issue #112) decodes/diffs PNGs with them (issue #139).
           # --break-system-packages: Ubuntu 24.04's python3 is PEP-668
           # externally-managed; same reason tests/provision-runner.sh uses it.
-          python3 -m pip install --break-system-packages pillow numpy
+          # #683: the registered local data-readiness controls also need
+          # websockets. Missing tooling refuses; it cannot skip into GREEN.
+          python3 -m pip install --break-system-packages pillow numpy websockets
           # PGDG apt.
           yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y || true
           if ! apt-cache show "postgresql-$V" >/dev/null 2>&1; then

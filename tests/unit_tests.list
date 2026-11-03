@@ -526,6 +526,26 @@ test_straddler_accounting
 # events[] row with time and no count must survive, or the block header
 # desynchronises and whole seconds fail to decode).
 test_open_cpu_accounting
+# #683: measured with sh -c 'cat >/dev/null' upstream: Start returned nil,
+# /session returned HTTP 200 and the WS upgrade succeeded, but info had NO
+# answer in 3 s. The old walk began in exactly that state; the UI's first
+# failed info is terminal, leaving its first tab at ticks=0 for all 60 s.
+# A DATA-PATH PRECONDITION now requires our info reply with num_cpus before
+# the walk. This moves cold start OUT of the per-tab budget; it is NOT an
+# assertion retry or a widened timeout. Local HTTP/WS controls make the
+# silent-upstream cause RED, a real answer GREEN, and silence for ~2 s then
+# an answer GREEN within a longer deadline (polling, not a one-shot sample).
+# Bypass suite -- each must REFUSE within a bounded wall time: /session
+# HTTP 500, unparseable JSON, no token (also empty token/wrong shape); WS
+# upgrade refused or accepted then closed; the bridge's exact reconnecting
+# error envelope (also error:null with num_cpus); matching JSON lacking
+# num_cpus; mismatched/missing/boolean id; malformed/non-object info JSON;
+# no listener; zero/negative/non-finite/malformed deadlines; bad arguments;
+# missing websockets; and a stalled /session. Shell controls require the
+# refusal line AND bridge log tail, plus immediate refusal if the bridge
+# dies before or during waiting. Happy controls check the exact wire
+# request and escaped token/base path, so refusing everything cannot pass.
+test_bridge_data_ready.py
 # #430: an hourly ROTATION must not PAUSE open-interval crediting.
 # pgwt_summary_check_rotation archives the file and leaves w->fp NULL for a
 # lazy reopen on the next PUSHED record, and writer_seal_through refused

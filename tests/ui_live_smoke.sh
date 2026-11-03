@@ -400,6 +400,15 @@ if ! wait_bridge_ready "${BASE_URL}session" "$PORT" "$BRIDGE_PID" "$BRIDGE_LOG";
     exit 1
 fi
 echo "ui_live_smoke: bridge ready at $BASE_URL"
+# #683: HTTP 200 can precede an answerable upstream. Refuse before walking
+# if info cannot answer; the per-tab 60 s assertion budget stays unchanged.
+# Printed AFTER the HTTP line so the log reads in the order the two gates
+# actually fire -- an out-of-order pair invites the reader to conclude the
+# data gate is what "bridge ready" already meant, which is the whole bug.
+if ! wait_bridge_data_ready "$BASE_URL" "$BRIDGE_PID" "$BRIDGE_LOG"; then
+    exit 1
+fi
+echo "ui_live_smoke: bridge data path ready (info answered)"
 
 # Same guard as tests/demo_rehearsal.sh, same reason: web/main.go embeds
 # web/static into the bridge binary (`//go:embed static`), so a stale web/pgwt

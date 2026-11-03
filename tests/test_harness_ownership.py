@@ -50,28 +50,39 @@ def await_file(path, proc=None):
 # The same asset bytes as the tree: even the production served-asset guard
 # cannot distinguish this foreign listener. /session returns a real HTTP 200.
 HTTP = r"""
-import http.server, json, os, pathlib, sys, time
+import asyncio, json, os, pathlib, sys, time
+from websockets.asyncio.server import serve
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 port, root, ready, trigger = sys.argv[1:]
 if trigger:
     while not pathlib.Path(trigger).exists(): time.sleep(.01)
 root = pathlib.Path(root)
-class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *args): pass
-    def do_GET(self):
-        if self.path == '/session': body = b'{}'
-        elif self.path == '/embedded-assets':
-            paths = sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())
-            body = json.dumps(dict(paths=paths, count=len(paths))).encode()
-        else:
-            path = root / self.path.lstrip('/')
-            if not path.is_file(): self.send_error(404); return
-            body = path.read_bytes()
-        self.send_response(200); self.end_headers(); self.wfile.write(body)
-server = http.server.HTTPServer(('127.0.0.1', int(port)), Handler)
-pathlib.Path(ready).write_text(str(os.getpid()))
-server.timeout = .1
-end = time.monotonic() + 30
-while time.monotonic() < end: server.handle_request()
+async def http(connection, request):
+    if request.path == '/ws?token=ownership-fixture': return None
+    status = 200
+    if request.path == '/session': body = b'{"token":"ownership-fixture"}'
+    elif request.path == '/embedded-assets':
+        paths = sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())
+        body = json.dumps(dict(paths=paths, count=len(paths))).encode()
+    else:
+        path = root / request.path.lstrip('/')
+        if not path.is_file(): status, body = 404, b'not found'
+        else: body = path.read_bytes()
+    return Response(status, 'OK' if status == 200 else 'Not Found',
+                    Headers({'Content-Length': str(len(body)), 'Connection': 'close'}), body)
+async def info(ws):
+    # #683 adds a data-path PRECONDITION before the walk. A healthy ownership
+    # fixture must really answer info; HTTP-only readiness now goes RED.
+    request = json.loads(await ws.recv())
+    assert request == {'id': 1, 'cmd': 'info'}, request
+    await ws.send(json.dumps({'id': request['id'], 'num_cpus': 4}))
+    await ws.wait_closed()
+async def main():
+    async with serve(info, '127.0.0.1', int(port), process_request=http):
+        pathlib.Path(ready).write_text(str(os.getpid()))
+        await asyncio.sleep(30)
+asyncio.run(main())
 """
 
 
@@ -84,7 +95,8 @@ class HarnessTests(unittest.TestCase):
         for directory in ('tests', 'scripts', 'web/static', 'bin'):
             (self.repo / directory).mkdir(parents=True, exist_ok=True)
         for name in ('demo_rehearsal.sh', 'ui_live_smoke.sh', 'live_daemon_lib.sh',
-                     'bridge_owner.py', 'demo_rehearsal_lib.py', 'ui_live_smoke_lib.py',
+                     'bridge_owner.py', 'bridge_data_ready.py',
+                     'demo_rehearsal_lib.py', 'ui_live_smoke_lib.py',
                      'testutil.py'):
             if (TREE / 'tests' / name).exists():
                 shutil.copy(TREE / 'tests' / name, self.repo / 'tests' / name)
