@@ -34,8 +34,15 @@ remove_checkout() {
 PYTHON=$(cd "$REPO" && python3 -c 'import sys; print(sys.executable)')
 [[ -x "$PYTHON" ]] || { echo "REFUSE: cannot resolve a python3 in $REPO"; exit 1; }
 
+# The shell-gate cases run live_daemon_lib.sh, which invokes a BARE `python3`
+# -- correct in production, where the gate box (provision-runner.sh) and CI
+# both put websockets on that interpreter. Inside a bare checkout it resolves
+# to a system python3 without it, so the runner supplies the ENVIRONMENT
+# rather than changing the library: put the resolved interpreter's directory
+# first on PATH for the checkout only.
 run_suite() {
-    (cd "$CHECKOUT" && "$PYTHON" tests/test_bridge_data_ready.py) >"$SCRATCH/suite.log" 2>&1
+    (cd "$CHECKOUT" && PATH="$(dirname "$PYTHON"):$PATH" \
+        "$PYTHON" tests/test_bridge_data_ready.py) >"$SCRATCH/suite.log" 2>&1
 }
 
 printf '# #683 mutation evidence against commit %s\n' "$REVISION"
