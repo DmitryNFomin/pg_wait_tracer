@@ -18,6 +18,7 @@ test_sampler
 test_anomaly
 test_escalation_budget
 test_wp_attr
+# #622: includes pgwt_exact_probe_parse_no_sema_refcnt in the pure exact core.
 test_exact_probe
 test_effective_cores
 test_backend_status_layout
@@ -1026,3 +1027,9 @@ test_restart_second_identity
 # answer #596 exists to prevent) and the fail-safe direction for a
 # category nobody has added yet: dropped, never borrowed.
 test_background_unattributed
+
+# #667: summary-writer background/maintenance unattributed load, pacing
+# exclusion, IO_WORKER precedence and total unknown-category refusal.
+# Separate from test_background_unattributed.c, which exercises the raw
+# src/compute.c path; this inspects the real writer's in-memory counters.
+test_summary_qattr_background

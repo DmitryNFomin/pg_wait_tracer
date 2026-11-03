@@ -423,6 +423,15 @@ pgarg=""; [[ -n "$PG" ]] && pgarg="--pg-version $PG"
 # itself, not the shell inheriting an already-reset environment).
 sudo_env=""
 sudo_env="$sudo_env PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES"
+# #622: the markers-ABSENT rehearsal on an Ubuntu tier is
+#   PGWT_EXPECT_PHASE_PROBES=0 PGWT_TEST_FORCE_NO_PHASE_PROBES=1 make box-check
+# which makes the four phase-dependent tests REFUSE (exit 78) with the
+# required QUERY_ID/ACTIVITY pair still attached and firing. Without this
+# line the switch dies in sudo's env_reset exactly like PGWT_PGPORT did, the
+# four tests run markers-PRESENT against a declared-0 tier, and the run goes
+# red for the wrong reason -- so the forwarding is part of the seam, not a
+# convenience. Only forwarded when set, so a normal run is unchanged.
+[[ -n "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" ]] && sudo_env="$sudo_env PGWT_TEST_FORCE_NO_PHASE_PROBES=$PGWT_TEST_FORCE_NO_PHASE_PROBES"
 [[ -n "${PGWT_PGPORT:-}" ]] && sudo_env="$sudo_env PGWT_PGPORT=$PGWT_PGPORT"
 [[ -n "${PGWT_PG_PORT_BASE:-}" ]] && sudo_env="$sudo_env PGWT_PG_PORT_BASE=$PGWT_PG_PORT_BASE"
 # Preflight (runs on the box, inside the same flock, before `make`): a

@@ -442,6 +442,20 @@ export function executionHasDetail(row) {
         row.plan_ms != null;
 }
 
+/* Which already-filtered rows the default execution pick may draw from.
+ *
+ * A query's longest backend span need not own an execution of that query.
+ * Prefer its PID only when it has matching rows; otherwise keep the full
+ * set so query fallback still works. Share this pool with the undrawable
+ * disclosure (#537): another PID's drawable row cannot explain the pick
+ * when the preferred PID has narrowed the candidates away from it.
+ */
+export function executionSelectionPool(rows, preferredPid) {
+    const preferred = preferredPid == null ? [] :
+        rows.filter(r => Number(r.pid) === Number(preferredPid));
+    return preferred.length ? preferred : rows;
+}
+
 /* Which execution the waterfall opens on when the user has not picked one.
  *
  * NOT simply rows[0]. Measured on a real `--mode full` capture (issue #101,

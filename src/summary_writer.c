@@ -708,7 +708,8 @@ static void summary_qattr_emit(void *ctx, uint64_t query_id, uint32_t we,
  * deferred on the pid). A record whose new_event is PGWT_EVENT_EXIT closes
  * the pid: pending resolves by rule 2/3 and the slot is reclaimed. */
 static uint64_t summary_qattr_step(struct pgwt_summary_writer *w,
-                                   const struct pgwt_trace_event *evt)
+                                   const struct pgwt_trace_event *evt,
+                                   uint32_t cat_flag)
 {
     uint32_t we = evt->old_event;
     uint64_t qid = 0;
@@ -727,6 +728,21 @@ static uint64_t summary_qattr_step(struct pgwt_summary_writer *w,
     } else if (evt->query_id != 0) {
         pgwt_qattr_observe(&s->q, evt->query_id, summary_qattr_emit, w);
         qid = evt->query_id;
+    } else if (cat_flag & (PGWT_EVENT_FLAG_BACKGROUND | PGWT_EVENT_FLAG_MAINT)) {
+        /* #667: mirror #596 (src/compute.c) and #641 (src/map_reader.c).
+         * This work has no query to backfill: count busy work as visible
+         * unattributed time, never defer it onto the pid. This decides DB
+         * LOAD, so use pgwt_is_idle_event, not pgwt_is_session_idle_event:
+         * a checkpointer in Timeout:CheckpointWriteDelay is pacing, not
+         * load, even though it is still inside a running command. */
+        if (!pgwt_is_idle_event(we))
+            w->qattr_unattributed_ns_total += evt->duration_ns;
+    } else if (cat_flag != 0) {
+        /* #642 FAIL-SAFE: this refusal must stay TOTAL over every nonzero
+         * category. Naming specific bits would let a category added later
+         * fall through and BORROW another statement's query id. A visible
+         * under-count is safer: drop it without deferral or unattributed
+         * accounting, never make it eligible for backfill. */
     } else if (pgwt_is_session_idle_event(we)) {
         /* COMMAND BOUNDARY, so deliberately the NARROW predicate (Activity /
          * Client:ClientRead) and not the load rule. A Timeout pacing sleep is
@@ -2297,7 +2313,7 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
      * other is how a partial fix relocates a divergence. */
     uint64_t qid = evt->query_id;
     if (w->qattr && !io_worker) {
-        qid = summary_qattr_step(w, evt);
+        qid = summary_qattr_step(w, evt, cat_flag);
     } else if (w->qattr && io_worker && evt->new_event == PGWT_EVENT_EXIT) {
         /* LIFECYCLE, not accounting. Skipping summary_qattr_step also skips
          * its EXIT-time qattr_slot_free, so a slot this pid created BEFORE

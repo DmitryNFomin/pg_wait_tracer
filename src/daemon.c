@@ -589,6 +589,76 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         d->running = false;
 }
 
+static void start_sampler_sched(void)
+{
+    struct pgwt_sampler_sched sched;
+    const char *override = getenv("PGWT_SAMPLER_NICE");
+    int want;
+    switch (pgwt_sampler_sched_request(override, &want)) {
+    case PGWT_SAMPLER_SCHED_LEAVE_ALONE:
+        fprintf(stderr, "INFO: sampler scheduling: left unchanged (default); "
+                "the sampled tier CPU figure is a lower bound under CPU "
+                "contention because the daemon observes only when the "
+                "scheduler runs it. PGWT_SAMPLER_NICE does not remove "
+                "that bias, because nice is a CFS weight and not a "
+                "scheduling class.\n");
+        return;
+    case PGWT_SAMPLER_SCHED_APPLY:
+        pgwt_sampler_apply_sched(want, &sched);
+        break;
+    case PGWT_SAMPLER_SCHED_REFUSED:
+        fprintf(stderr, "WARNING: sampler scheduling: PGWT_SAMPLER_NICE "
+                "\"%s\" refused (expected integer -20..19); scheduling left "
+                "unchanged; the sampled tier CPU figure is a lower bound "
+                "under CPU contention because the daemon observes only "
+                "when the scheduler runs it.\n", override);
+        return;
+    }
+
+    if (sched.ok)
+        fprintf(stderr, "INFO: sampler scheduling: applied nice %d as "
+                "requested; measured NOT to move S/G on CFS "
+                "(nice is a CFS weight, not a scheduling class).\n",
+                sched.applied);
+    else {
+        fprintf(stderr, "WARNING: sampler scheduling: nice not verified "
+                "(requested nice %d, ", sched.requested);
+        if (sched.applied == 20)
+            fprintf(stderr, "readback failed): %s", strerror(sched.err));
+        else if (sched.err == EIO)
+            fprintf(stderr, "readback %d): current nice differs from "
+                    "requested nice", sched.applied);
+        else
+            fprintf(stderr, "readback %d): %s", sched.applied,
+                    strerror(sched.err));
+        fprintf(stderr, "; continuing; the sampled tier's CPU figure "
+                "is a LOWER BOUND under CPU contention because the daemon's "
+                "observation instants are selected by the scheduler.\n");
+    }
+}
+
+static void log_sampler_timer_health(const struct pgwt_daemon *d)
+{
+    unsigned pct;
+    enum pgwt_sampler_timer_health verdict = pgwt_sampler_timer_health(
+        d->counters.sampler_ticks_total,
+        d->counters.sampler_tick_late_ns_total,
+        d->sampler->sample_period_ns, &pct);
+
+    if (verdict == PGWT_SAMPLER_TIMER_UNKNOWN)
+        fprintf(stderr, "WARNING: sampler timer health: unknown; timer "
+                "evidence is unavailable or invalid; the sampled tier's "
+                "CPU figure is a lower bound.\n");
+    else
+        fprintf(stderr,
+                "%s: sampler timer health: %s; timer mean lateness "
+                "%u.%02u%% of nominal period; the sampled tier's CPU "
+                "figure is a lower bound.\n",
+                verdict == PGWT_SAMPLER_TIMER_DEGRADED ? "WARNING" : "INFO",
+                verdict == PGWT_SAMPLER_TIMER_DEGRADED ? "degraded" : "ok",
+                pct / 100, pct % 100);
+}
+
 /* SMP-5: arm the sampler timer ONE-SHOT with a +/-10% jittered period.
  * Fixed-phase sampling aliases with periodic workloads (a job that wakes
  * every 100 ms could hide from — or monopolize — a 10 Hz sampler forever);
@@ -633,6 +703,8 @@ static void handle_sample_timer(struct pgwt_daemon *d)
         uint64_t late = pgwt_sampler_tick_lateness(d->sample_armed_ns,
                                                    d->sample_armed_at_ns, now);
         d->counters.sampler_ticks_total++;
+        /* Arming always precedes epoll registration, so a separate guarded
+         * counter could never differ from sampler_ticks_total. */
         d->counters.sampler_tick_late_ns_total += late;
     }
     /* Re-arm FIRST so a slow poll delays the next tick (measured-elapsed
@@ -1423,6 +1495,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             perror("timerfd_create (sampler)");
             goto fail;
         }
+        start_sampler_sched();
         srand((unsigned)(time(NULL) ^ getpid()));
         arm_sample_timer_jittered(d);
     }
@@ -1855,6 +1928,9 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
      * window already flushed+detached, so this is a no-op. */
     pgwt_flush_open_intervals(d);
 
+    /* Log the sampler timer health verdict before stopping the provider. */
+    if (d->sampler)
+        log_sampler_timer_health(d);
     /* Stop the active capture provider (detach/free its state). */
     if (d->provider && d->provider->stop)
         d->provider->stop(d);
