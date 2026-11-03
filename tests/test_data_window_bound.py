@@ -22,13 +22,14 @@ provenance and identical links and nodes.
 """
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
-    CPU, IO_DATA_FILE_READ,
+    CPU, IO_DATA_FILE_READ, SERVER_BIN,
 )
 
 BASE_TS = 10_000_000_000_000
@@ -52,8 +53,18 @@ DUR_NS = 1_000_000  # 1 ms per event
 #           reductions that work, and the fixture below measures both.
 #   CONTEXT bounds derived from a selected execution or a fixed look-back, so
 #           the requested range does not set them at all.
+#   CAPTURE the whole trace, loaded by `--dump`, which has no range flag at
+#           all, so there is nothing to narrow.
+#
+# Round 3 adds the other half: the JSON `hint`, which web/static/app.js
+# renders verbatim. src/server.c composes both the stderr line and the hint
+# from ONE table (pgwt_overload_arms), and the cases below assert the hint IS
+# the tail of the stderr line for every kind — so a change to one consumer and
+# not the other is red, and an operator quoting the log can never be
+# contradicted by the user's screen.
 REFUSAL_PREFIX = "ERROR: window too large:"
 WINDOW_TAIL = "— narrow the time range"
+SEP = "— "
 S = 1_000_000_000
 MS = 1_000_000
 MARKER_EXEC_START = 0xFFFFFFF0
@@ -61,12 +72,15 @@ MARKER_EXEC_END = 0xFFFFFFF1
 # 2 * PFX_PAIRS markers before the window vs PFX_BOUND: the prefix pass
 # overflows while the in-window load (5 events) stays far under the same
 # bound, so the refusal under test comes from the PREFIX loader and not from
-# the window loader the case above already covers. PFX_PID_BOUND sits between
-# ONE pid's prefix (2 * PFX_PAIRS / PFX_NPIDS = 120 markers) and the whole
-# fixture's, which is what makes the pid-scoped prefix refusal reachable
-# without the window load refusing first.
+# the window loader the case above already covers.
+#
+# PFX_PID_BOUND is for the pid-SCOPED prefix refusal, so it sits between the
+# pid-scoped window load (PFX_WIN_EVENTS = 5 events, which must NOT refuse
+# first) and ONE pid's prefix (2 * PFX_PAIRS / PFX_NPIDS = 120 markers, which
+# must). 5 < 100 < 120.
 PFX_PAIRS = 1_200
 PFX_NPIDS = 20
+PFX_WIN_EVENTS = 5
 PFX_BOUND = 1_500
 PFX_PID_BOUND = 100
 PFX_WIN_FROM = BASE_TS + 60 * S
@@ -82,7 +96,7 @@ def build_prefix_scenario():
     """Markers before the window, a handful of events inside it."""
     ev = []
     for i in range(PFX_PAIRS):
-        pid = 3000 + (i % 20)
+        pid = 3000 + (i % PFX_NPIDS)
         qid = 700 + (i % 5)
         ts = BASE_TS + i * 10 * MS          # 12 s of prefix, all before the window
         ev.append({"pid": pid, "ts": ts, "dur": 0,
@@ -91,14 +105,14 @@ def build_prefix_scenario():
         ev.append({"pid": pid, "ts": ts + 5 * MS, "dur": 0,
                    "old": MARKER_EXEC_END, "new": MARKER_EXEC_END,
                    "qid": qid})
-    for j in range(5):
+    for j in range(PFX_WIN_EVENTS):
         ev.append({"pid": 3000, "ts": PFX_WIN_FROM + (j + 1) * 10 * MS,
                    "dur": MS, "old": IO_DATA_FILE_READ, "new": CPU,
                    "qid": 700})
     ev.sort(key=lambda e: e["ts"])
     return {
         "backends": [{"pid": 3000 + p, "type": "client", "user": "u",
-                      "db": "d"} for p in range(20)],
+                      "db": "d"} for p in range(PFX_NPIDS)],
         "queries": [{"id": 700 + q, "text": "SELECT %d" % q}
                     for q in range(5)],
         "events": ev,
@@ -150,6 +164,40 @@ def grade_refusal(t, label, err, must_have, must_not_have, ends_with=None):
                 f"(got {lines})")
 
 
+def grade_agreement(t, label, err, resp):
+    """The JSON hint must BE the tail of the stderr refusal line.
+
+    This is the round-3 assertion and the reason the sentences live in one
+    table: on master both views were wrong together; a fix that corrected only
+    the operator's log would leave the user's screen contradicting it, and an
+    operator would quote one at someone reading the other. Pinning equality
+    rather than two separate texts is what makes "change one consumer and not
+    the other" detectable.
+
+    Vacuity guards first, as everywhere in this file: a missing stderr line or
+    an absent/empty hint FAILS instead of satisfying an `endswith` nobody can
+    evaluate.
+    """
+    lines = [ln.rstrip() for ln in err.splitlines()
+             if ln.startswith(REFUSAL_PREFIX)]
+    hint = resp.get("hint")
+    # EXACTLY one, not "at least one": with two refusal lines in the stream an
+    # `any()` match approves while the other line still contradicts the hint,
+    # and nothing says which load the response belongs to. Each case here
+    # drives one refusing load, so two lines means the premise changed and a
+    # human should look — a gate that cannot tell must refuse.
+    t.check(len(lines) == 1,
+            f"{label}/agree: exactly ONE refusal line to compare against, so "
+            f"which load the hint belongs to is unambiguous (got {lines})")
+    t.check(isinstance(hint, str) and hint.strip() != "",
+            f"{label}/agree: the refusal response carries a hint "
+            f"({hint!r})")
+    t.check(bool(hint) and len(lines) == 1 and
+            lines[0].endswith(SEP + str(hint)),
+            f"{label}/agree: the JSON hint IS the tail of the stderr line "
+            f"(hint={hint!r}, lines={lines})")
+
+
 def prefix_passes(err):
     """(path, markers) for each prefix pass pgwt-server reported.
 
@@ -195,6 +243,25 @@ def check_window_arm(t, err_dir):
                       must_not_have=["filter", "for this pid",
                                      "prefix", "context load"],
                       ends_with=WINDOW_TAIL)
+        # The JSON hint for a WINDOW refusal: asserted by PROPERTY, not by
+        # equality. reject_overload still has three command-keyed window arms
+        # (#694's top_queries sentence, the query-filter-forces-raw sentence,
+        # and the generic one), and the generic one's " or add a pid/query
+        # filter" clause belongs to #742, which serialises after this. Pinning
+        # that string here would make the advice #742 has to delete look
+        # intended, exactly as a test on #694 once did — so this asserts only
+        # that the hint explains a WINDOW refusal and borrows no other arm's
+        # explanation.
+        hint = resp.get("hint")
+        t.check(isinstance(hint, str) and "narrow the time range" in hint,
+                f"window/pid==0: the JSON hint names the range reduction "
+                f"({hint!r})")
+        t.check(isinstance(hint, str) and
+                "the prefix is read from" not in hint and
+                "its bounds come from the selected execution" not in hint and
+                "whole capture" not in hint,
+                f"window/pid==0: the JSON hint borrows no other arm's "
+                f"explanation ({hint!r})")
 
         # pid != 0: one pid's 2,000 events over a 1,000 bound. This arm never
         # carried the advice; it is here so a change that collapses the arms
@@ -226,6 +293,57 @@ def check_window_arm(t, err_dir):
                                  "PGWT_LOAD_MAX_EVENTS"],
                       must_not_have=[WINDOW_TAIL, "start the window earlier",
                                      "add a pid filter"])
+        # …and the user's screen says what the log says.
+        grade_agreement(t, "context", err, resp)
+    finally:
+        cleanup_traces(trace_dir)
+
+
+def check_capture_arm(t, err_dir):
+    """`--dump` loads the whole capture and takes no range flag.
+
+    There is no request here and no JSON, so the third consumer of the shared
+    table is the text report itself: `pgwt-server --dump` must name the route
+    it already pointed at (the JSON interface) rather than a range nobody can
+    narrow from this entry point, and its stdout line must agree with the
+    stderr line the loader printed.
+    """
+    trace_dir = generate_traces(build_scenario())
+    err_path = os.path.join(err_dir, "capture.err")
+    try:
+        env = dict(os.environ)
+        env["PGWT_LOAD_MAX_EVENTS"] = "1000"
+        with open(err_path, "w") as errf:
+            proc = subprocess.run([SERVER_BIN, "--dump", trace_dir],
+                                  stdout=subprocess.PIPE, stderr=errf,
+                                  text=True, env=env, timeout=120)
+        out = proc.stdout
+        err = read_stderr(err_path)
+        # Non-vacuity: the dump must really have refused, or the text checks
+        # below are satisfied by a report that never hit the bound.
+        t.check("ERROR: window too large" in out,
+                f"capture: --dump really did refuse (stdout holds "
+                f"{len(out)} bytes)")
+        for s in ("the whole capture holds",
+                  "the text report takes no time range",
+                  "use the JSON interface with a narrower range"):
+            t.check(s in out,
+                    f"capture: --dump's own report says '{s}' (out={out[:200]!r})")
+        t.check("narrow the time range" not in out.split("ERROR:")[-1],
+                f"capture: --dump does not tell the operator to narrow a "
+                f"range this entry point has no flag for "
+                f"(out={out[:200]!r})")
+        grade_refusal(t, "capture", err,
+                      must_have=["the whole capture holds",
+                                 "use the JSON interface with a narrower range"],
+                      must_not_have=[WINDOW_TAIL, "start the window earlier",
+                                     "a bounded context load"])
+        # The stdout report and the stderr line are two consumers of one
+        # table row: both must carry the identical sentence.
+        sentence = err.split(SEP, 1)[1].strip() if SEP in err else ""
+        t.check(sentence != "" and sentence in out,
+                f"capture: the text report and the stderr line carry the "
+                f"same sentence ({sentence!r})")
     finally:
         cleanup_traces(trace_dir)
 
@@ -245,47 +363,69 @@ def check_prefix_arm(t, err_dir):
                             "start the window earlier"]
         prefix_must_not = [WINDOW_TAIL, "a bounded context load"]
 
-        for label, extra_env, want_path in (
-                ("prefix/index", {}, "index"),
+        # The full 2x2: both prefix implementations x both scopes.
+        #
+        # Why all four and not three: the two implementations stamp the
+        # refusing load's kind and scope in DIFFERENT places --
+        # server_load_prefix_from_index does it itself, while the legacy
+        # fallback inherits it from the general loader
+        # (server_load_events_fi_mode). A matrix missing the legacy x
+        # pid-scoped cell leaves the general loader's scope assignment
+        # untested, and the M12 mutant (load_pid_scoped forced to 0 there)
+        # passed the whole suite until this cell existed. Found by the
+        # mutant run, not by reading the code.
+        for path_label, extra_env, want_path in (
+                ("index", {}, "index"),
                 # The legacy full decode goes through the GENERAL loader
-                # (server_load_markers_fi), so this case is what proves the
+                # (server_load_markers_fi), so these cells are what prove the
                 # prefix purpose survives that fallback instead of the
                 # general loader's window wording leaking back in.
-                ("prefix/legacy", {"PGWT_EXEC_PREFIX_INDEX": "0"}, "legacy")):
-            env = {"PGWT_LOAD_MAX_EVENTS": PFX_BOUND,
-                   "PGWT_EXEC_PREFIX_DEBUG": "1"}
-            env.update(extra_env)
-            resp, err = ask(trace_dir, env,
-                            os.path.join(err_dir, label.replace("/", "-")
-                                         + ".err"),
-                            "executions", from_=PFX_WIN_FROM, to_=PFX_WIN_TO)
-            t.check_eq(resp.get("code"), "window_too_large",
-                       f"{label}: the prefix pass really did refuse")
-            passes = prefix_passes(err)
-            t.check(any(p == want_path for p, _ in passes),
-                    f"{label}: the refusing pass is the {want_path} "
-                    f"implementation, so its own copy of the line is what "
-                    f"was graded (got {passes})")
-            grade_refusal(t, label, err,
-                          must_have=prefix_must_have + ["across all pids",
-                                                        "add a pid filter"],
-                          must_not_have=prefix_must_not + ["for this pid"])
-
-        # Already pid-scoped: the earlier start is still available, a pid
-        # filter is not, so the line must not suggest one. Bound sits between
-        # one pid's prefix and the window load's 5 events.
-        resp, err = ask(trace_dir,
-                        {"PGWT_LOAD_MAX_EVENTS": PFX_PID_BOUND,
-                         "PGWT_EXEC_PREFIX_DEBUG": "1"},
-                        os.path.join(err_dir, "prefix-pid.err"),
-                        "executions", from_=PFX_WIN_FROM, to_=PFX_WIN_TO,
-                        filters={"pid": 3000})
-        t.check_eq(resp.get("code"), "window_too_large",
-                   "prefix/pid!=0: the pid-scoped prefix really did refuse")
-        grade_refusal(t, "prefix/pid!=0", err,
-                      must_have=prefix_must_have + ["for this pid"],
-                      must_not_have=prefix_must_not + ["add a pid filter",
-                                                       "across all pids"])
+                ("legacy", {"PGWT_EXEC_PREFIX_INDEX": "0"}, "legacy")):
+            for scope_label, filters, bound in (
+                    ("unscoped", None, PFX_BOUND),
+                    # Already pid-scoped: the earlier start is still
+                    # available, a pid filter is not, so the sentence must
+                    # not suggest one. The bound sits between one pid's
+                    # prefix (120) and the pid-scoped window load (5).
+                    ("scoped", {"pid": 3000}, PFX_PID_BOUND)):
+                label = f"prefix/{path_label}/{scope_label}"
+                env = {"PGWT_LOAD_MAX_EVENTS": bound,
+                       "PGWT_EXEC_PREFIX_DEBUG": "1"}
+                env.update(extra_env)
+                kwargs = {"from_": PFX_WIN_FROM, "to_": PFX_WIN_TO}
+                if filters:
+                    kwargs["filters"] = filters
+                resp, err = ask(trace_dir, env,
+                                os.path.join(err_dir,
+                                             label.replace("/", "-") + ".err"),
+                                "executions", **kwargs)
+                t.check_eq(resp.get("code"), "window_too_large",
+                           f"{label}: the prefix pass really did refuse")
+                passes = prefix_passes(err)
+                t.check(any(p == want_path for p, _ in passes),
+                        f"{label}: the refusing pass is the {want_path} "
+                        f"implementation, so its own copy of the line is what "
+                        f"was graded (got {passes})")
+                scoped = scope_label == "scoped"
+                grade_refusal(
+                    t, label, err,
+                    must_have=prefix_must_have +
+                    (["for this pid"] if scoped
+                     else ["across all pids", "add a pid filter"]),
+                    must_not_have=prefix_must_not +
+                    (["add a pid filter", "across all pids"] if scoped
+                     else ["for this pid"]))
+                # The JSON too: this is the leg whose hint used to say
+                # "narrow the time range or add a pid/query filter" while
+                # stderr said narrowing cannot help.
+                grade_agreement(t, label, err, resp)
+                if scoped:
+                    # Scope follows the LOAD, not the request: a pid-scoped
+                    # prefix must not be told to add the filter it has.
+                    t.check("add a pid filter" not in (resp.get("hint") or ""),
+                            f"{label}: the JSON hint does not suggest the "
+                            f"filter this request already carries "
+                            f"({resp.get('hint')!r})")
 
         # ── The advice, MEASURED rather than asserted ──────────────────────
         # Same trace, same bound. The prefix marker count the server itself
@@ -340,6 +480,7 @@ def check_loader_refusal_lines(t):
     try:
         check_window_arm(t, err_dir)
         check_prefix_arm(t, err_dir)
+        check_capture_arm(t, err_dir)
     finally:
         shutil.rmtree(err_dir, ignore_errors=True)
 
