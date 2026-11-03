@@ -2132,9 +2132,14 @@ static void test_tag_table_scale(void)
  *       gap next to such a wait, time_model labelled an UNMEASURED wall
  *       "CPU (running)" and printed a 0.0 ms runqueue sibling beside it.
  *       Different cause, different line, so: a second bug. The summary
- *       twin's flag was already the narrow one (cpu_measured_records > 0),
- *       which is also the evidence for which of the two predicates is
- *       intended.
+ *       twin's PREDICATE is the narrow one (cpu_measured_records > 0),
+ *       which is the evidence for which of the two is intended -- but
+ *       #763 found the WRITER feeding it was not: src/summary_writer.c's
+ *       wait branch incremented that counter too, so the summary route
+ *       kept this defect until #763 dropped the increment. 12c below
+ *       drives the reader with a hand-built record and so is unaffected
+ *       either way; the writer side is pinned by section 7 of
+ *       tests/test_cpu_split_parity.c.
  *
  * Nothing here is timed or ordered: in-memory arrays and, for 12c, one
  * synthetic summary record fed through the stub above.

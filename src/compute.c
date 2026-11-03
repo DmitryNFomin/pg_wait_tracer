@@ -1572,9 +1572,20 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
                  *
                  * The number is not lost — it is wait_gap_cpu_ns, which is
                  * what it always was and what the response still reports.
-                 * The summary twin's flag was already this narrow
+                 *
+                 * #763 corrects what this comment used to claim next: that
+                 * "the summary twin's flag was already this narrow
                  * (cpu_measured_records counts CPU observations only), so
-                 * this also makes the two routings agree. */
+                 * this also makes the two routings agree". It did not and it
+                 * was not. src/summary_writer.c's wait branch incremented
+                 * cpu_measured_records alongside wait_gap_cpu_ns, so the
+                 * summary route kept the pre-#575 answer on exactly this
+                 * input — and since should_use_summaries routes any
+                 * unfiltered window of 120 s or more to summaries, the
+                 * default Overview view was the one still showing it. The
+                 * two routings agree from #763 on, where that increment was
+                 * dropped; the narrow predicate is pinned on BOTH sides by
+                 * section 7 of tests/test_cpu_split_parity.c. */
             }
         }
     }

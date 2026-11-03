@@ -1215,6 +1215,439 @@ static void test_measured_cpu_inside_visible_idle(void)
 }
 #undef IDLE_CPU_REFUSAL
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * 7. A MEASURED WAIT SPIN BESIDE AN UNKNOWN CPU GAP (#763, the #575 pair)
+ * ══════════════════════════════════════════════════════════════════════════
+ * #575 established, on the RAW route, that a wait's measured on-CPU spin is
+ * NOT evidence that this window's CPU row is a measurement: with an UNKNOWN
+ * gap beside such a wait, raising has_measured_cpu labels the gap's
+ * unmeasured wall "CPU (running)" and prints a 0.0 ms runqueue sibling next
+ * to it -- an inference presented as a measurement. #763 is the same defect
+ * surviving on the SUMMARY route: src/summary_writer.c's wait branch also
+ * incremented cpu_measured_records, whose single consumer is
+ * `> 0 => has_measured_cpu` (src/compute.c), and should_use_summaries sends
+ * every unfiltered window of 120 s or more here -- i.e. the default Overview.
+ *
+ * NO FIXTURE ABOVE CAN SEE THIS. Sections 1-5 measure their CPU gaps (30 of
+ * 50 ms) and section 6 measures everything it has, so cpu_measured_records is
+ * legitimately non-zero in all of them and every assertion they make holds
+ * whether or not the wait branch counts too. This section needs the one shape
+ * that separates the two: EVERY CPU gap UNKNOWN, and a wait that carries a
+ * measurement.
+ *
+ * Each of SECS seconds, in-command and contiguous through the REAL
+ * classifier: a 50 ms we==0 gap with cpu_ns UNKNOWN, then a 10 ms Lock wait
+ * carrying 2 ms of measured spin. So on disk: cpu_unknown_ns = 50 ms/s,
+ * cpu_measured_ns = 0, wait_gap_cpu_ns = 2 ms/s. Pre-#763 the same file also
+ * carried cpu_measured_records = 1/s, and the summary route answered
+ * "CPU (running) 6500.000 ms" + "CPU (waiting for a core) 0.000 ms" where raw
+ * answered "CPU* 6500.000 ms" -- two views of one quantity disagreeing.
+ *
+ * THE THREE ADVERSARIAL QUESTIONS, for this section specifically
+ * ─────────────────────────────────────────────────────────────────────────
+ *  - What input makes it pass while the product is broken? One where the wait
+ *    spin is UNKNOWN too: nothing increments the counter by either rule, both
+ *    flags read 0 and B2 is satisfied having tested nothing. D1 drives exactly
+ *    that, requires a REFUSAL, and asserts that B2's predicate WOULD have
+ *    held -- the false negative made visible. The mirror shape (a MEASURED
+ *    gap) would make B2 a false RED on a correct product: D2.
+ *  - What single component failing makes this skip rather than fail? The
+ *    summary reader. No directory, a refused version, or a window it finds no
+ *    record in all yield zero records, has_measured_cpu = 0 for free, and B2
+ *    green. D4/D5/D6 drive those three and require a refusal; the gate reads
+ *    the file's own scalars and runs the production preflight before any
+ *    assertion.
+ *  - What depends on timing or ordering? One CLOCK_MONOTONIC read for the
+ *    whole stream, every window derived from the COMMITTED records (never a
+ *    second clock read), and the stream emitted in strict timestamp order
+ *    (asserted) so the writer's late-arrival fold (#277) cannot move time
+ *    between seconds. Nothing sleeps, retries or loops.
+ */
+
+#define SPIN_REFUSAL(a) (1U << ((a) - 1))
+
+/* Per-second wall/CPU of the section-7 stream. */
+#define SPIN_GAP_WALL  (50 * MS)
+#define SPIN_WAIT_WALL (10 * MS)
+#define SPIN_WAIT_CPU  (2 * MS)
+
+struct spin_recs {
+    int records;
+    uint64_t min_sec, max_sec;
+    uint64_t cpu_measured_ns, cpu_unknown_ns, cpu_measured_records;
+    uint64_t wait_gap_cpu_ns, events_overflow;
+};
+
+static int spin_visitor(const struct pgwt_summary_accum *rec, void *vctx)
+{
+    struct spin_recs *c = vctx;
+    c->records++;
+    if (c->min_sec == 0 || rec->second_wall_ns < c->min_sec)
+        c->min_sec = rec->second_wall_ns;
+    if (rec->second_wall_ns > c->max_sec) c->max_sec = rec->second_wall_ns;
+    c->cpu_measured_ns      += rec->cpu_measured_ns;
+    c->cpu_unknown_ns       += rec->cpu_unknown_ns;
+    c->cpu_measured_records += rec->cpu_measured_records;
+    c->wait_gap_cpu_ns      += rec->wait_gap_cpu_ns;
+    c->events_overflow      += rec->events_overflow;
+    return 0;
+}
+
+struct spin_probe {
+    struct pgwt_tm_result raw, sum;
+    struct spin_recs file;
+    int gap_recs, gap_measured, spin_recs;
+    uint64_t spin_ns;
+};
+
+static void spin_probe_free(struct spin_probe *p)
+{
+    free(p->raw.rows);
+    free(p->sum.rows);
+}
+
+/* Build this section's stream. `spin` 0 makes the wait's cpu_ns UNKNOWN (D1),
+ * `gap_measured` 1 measures the CPU gap (D2), `gap` 0 drops the gap entirely
+ * (D3). Each removes one premise the assertions below read. */
+static int spin_build(struct pgwt_trace_event *out, uint64_t base, int spin,
+                      int gap_measured, int gap)
+{
+    int n = 0;
+    for (int s = 0; s < SECS; s++) {
+        uint64_t sec = base + (uint64_t)s * ONE_SEC;
+        /* CMD_START..CMD_END around contiguous intervals [100,150),[150,160):
+         * the majority rule's denominator is the record's own duration, so
+         * both close fully inside the command and the gap keeps we == 0
+         * rather than being relabelled PGWT_WEI_NONCMD_CPU. */
+        push_marker(out, &n, sec + 100 * MS, PGWT_MARKER_CMD_START);
+        if (gap)
+            push_ev(out, &n, sec + 150 * MS, EV_CPU, SPIN_GAP_WALL,
+                    gap_measured ? 30 * MS : PGWT_CPU_NS_UNKNOWN, QID_A);
+        push_ev(out, &n, sec + 160 * MS, EV_LOCK_A, SPIN_WAIT_WALL,
+                spin ? SPIN_WAIT_CPU : PGWT_CPU_NS_UNKNOWN, QID_A);
+        push_marker(out, &n, sec + 161 * MS, PGWT_MARKER_CMD_END);
+    }
+    return n;
+}
+
+/* The gate. Every premise the B assertions read, checked against the raw
+ * window AND the file's own scalars, before anything is compared. `bypass`
+ * silences the CHECK lines (a D leg's refusal is the expected result) and the
+ * reasons come back as a bitmask. A gate that cannot see must refuse. */
+static unsigned spin_gate(const char *label, const struct idle_cpu_fixture *fx,
+                          uint64_t from, uint64_t to, int bypass,
+                          struct spin_probe *p)
+{
+    memset(p, 0, sizeof(*p));
+    int read = pgwt_visit_summaries(fx->dir, from, to, spin_visitor, &p->file);
+    uint64_t span = to > from ? to - from : 0;
+    uint64_t raw_from = fx->origin + (from - fx->from);
+    uint64_t raw_to = raw_from + span;
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    pgwt_compute_time_model(fx->raw, fx->n, &f, raw_from, raw_to,
+                            (double)span / 1e6, &p->raw);
+    pgwt_compute_time_model_from_summaries(fx->dir, from, to, &f,
+                                           (double)span / 1e6, &p->sum);
+
+    for (int i = 0; i < fx->n; i++) {
+        const struct pgwt_trace_event *e = &fx->raw[i];
+        if (PGWT_IS_MARKER(e->old_event)) continue;
+        if (!overlap_ns(e, raw_from, raw_to)) continue;
+        if (e->old_event == 0) {                  /* an on-CPU GAP */
+            p->gap_recs++;
+            if (e->cpu_ns != PGWT_CPU_NS_UNKNOWN) p->gap_measured++;
+        } else if (!pgwt_is_idle_event(e->old_event)
+                   && e->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+            p->spin_recs++;                       /* a WAIT that spun */
+            p->spin_ns += e->cpu_ns;
+        }
+    }
+    unsigned refused = 0;
+
+#define SPIN_REQUIRE(a, cond, fmt, ...) do {                               \
+    int ok = (cond);                                                       \
+    if (!bypass) CHECK(ok, "%s A%d: " fmt, label, a, ##__VA_ARGS__);        \
+    if (!ok) {                                                             \
+        refused |= SPIN_REFUSAL(a);                                        \
+        printf("  %s REFUSED A%d: " fmt "\n", label, a, ##__VA_ARGS__);     \
+    }                                                                      \
+} while (0)
+
+    /* A1 counts records in THIS window (D7 asks for 60 of SECS on purpose);
+     * the full fixture's count is B0 below. */
+    SPIN_REQUIRE(1, fx->accepted == fx->n && fx->n > 0 && read > 0 &&
+                    p->file.records > 0 && p->file.events_overflow == 0,
+                 "pushes %d/%d, reader %d, records %d (of %d committed), "
+                 "overflow %llu",
+                 fx->accepted, fx->n, read, p->file.records, SECS,
+                 (unsigned long long)p->file.events_overflow);
+    SPIN_REQUIRE(2, span >= 120ULL * ONE_SEC,
+                 "window %.6f s (>= 120, the summary-routing width)",
+                 (double)span / 1e9);
+    SPIN_REQUIRE(3, p->gap_recs > 0,
+                 "%d on-CPU gap records in the window", p->gap_recs);
+    SPIN_REQUIRE(4, p->gap_measured == 0 && p->file.cpu_measured_ns == 0,
+                 "%d/%d gaps measured, file cpu_measured_ns %llu (both must "
+                 "be 0: the mislabelled row is an UNMEASURED gap)",
+                 p->gap_measured, p->gap_recs,
+                 (unsigned long long)p->file.cpu_measured_ns);
+    SPIN_REQUIRE(5, p->file.cpu_unknown_ns > 0,
+                 "file cpu_unknown_ns %.6f ms -- the gap wall is on disk in "
+                 "the UNKNOWN tier, which is the wall that gets mislabelled",
+                 (double)p->file.cpu_unknown_ns / 1e6);
+    SPIN_REQUIRE(6, p->spin_recs > 0 && p->spin_ns > 0 &&
+                    p->file.wait_gap_cpu_ns > 0,
+                 "%d wait records carry %.6f ms of measured spin, file "
+                 "wait_gap_cpu_ns %.6f ms -- without it nothing could raise "
+                 "the flag and the assertion is vacuous",
+                 p->spin_recs, (double)p->spin_ns / 1e6,
+                 (double)p->file.wait_gap_cpu_ns / 1e6);
+    SPIN_REQUIRE(7, p->raw.db_time_ms > 0 && p->sum.db_time_ms > 0,
+                 "DB Time raw %.6f / summary %.6f ms", p->raw.db_time_ms,
+                 p->sum.db_time_ms);
+    int considered = 0, unusable = 0;
+    int verdict = pgwt_summaries_window_current(fx->dir, from, to,
+                                                &considered, &unusable);
+    SPIN_REQUIRE(8, verdict == 1 && considered > 0 && unusable == 0,
+                 "production preflight %d, considered %d, unusable %d",
+                 verdict, considered, unusable);
+#undef SPIN_REQUIRE
+    return refused;
+}
+
+static void spin_assert(const struct spin_probe *p)
+{
+    double raw_star = row_ms(&p->raw, "CPU*");
+    double sum_star = row_ms(&p->sum, "CPU*");
+    double raw_run  = row_ms(&p->raw, "CPU (running)");
+    double sum_run  = row_ms(&p->sum, "CPU (running)");
+    double raw_rq   = row_ms(&p->raw, "CPU (waiting for a core)");
+    double sum_rq   = row_ms(&p->sum, "CPU (waiting for a core)");
+
+    printf("    raw  CPU* %12.3f run %12.3f rq %12.3f measured %d\n",
+           raw_star, raw_run, raw_rq, p->raw.has_measured_cpu);
+    printf("    sum  CPU* %12.3f run %12.3f rq %12.3f measured %d\n",
+           sum_star, sum_run, sum_rq, p->sum.has_measured_cpu);
+
+    CHECK(p->file.records == SECS,
+          "B0: the writer committed one record per second (%d/%d) over the "
+          "full span, so the window below is the whole fixture",
+          p->file.records, SECS);
+    CHECK(p->raw.has_measured_cpu == 0,
+          "B1: RAW holds has_measured_cpu at 0 (the #575 oracle: spin inside "
+          "a wait is not a measurement of THIS window's CPU row)");
+    CHECK(p->sum.has_measured_cpu == 0,
+          "B2 (#763): and so does the SUMMARY route (%d) -- a measured wait "
+          "spin is not a CPU-gap observation",
+          p->sum.has_measured_cpu);
+    CHECK(raw_star > 0 && sum_star > 0,
+          "B3: both routes emit the un-split \"CPU*\" row (raw %.6f, summary "
+          "%.6f ms)", raw_star, sum_star);
+    CHECK(sum_run < 0 && raw_run < 0,
+          "B4: neither labels the unmeasured gap wall \"CPU (running)\" "
+          "(raw %.3f, summary %.3f; < 0 means the row is ABSENT)",
+          raw_run, sum_run);
+    CHECK(sum_rq < 0 && raw_rq < 0,
+          "B5: and neither prints a 0.0 ms runqueue sibling (raw %.3f, "
+          "summary %.3f) -- off-CPU time here is UNAVAILABLE, not zero",
+          raw_rq, sum_rq);
+    CHECK(raw_star == sum_star,
+          "B6: the CPU* totals agree exactly (%.6f ms)", raw_star);
+    CHECK(p->raw.db_time_ms == p->sum.db_time_ms &&
+          p->raw.idle_time_ms == p->sum.idle_time_ms,
+          "B7: DB Time (%.6f / %.6f) and Idle (%.6f / %.6f) agree exactly",
+          p->raw.db_time_ms, p->sum.db_time_ms,
+          p->raw.idle_time_ms, p->sum.idle_time_ms);
+    CHECK(p->raw.wait_gap_cpu_ms > 0 &&
+          p->raw.wait_gap_cpu_ms == p->sum.wait_gap_cpu_ms,
+          "B8: and the spin is NOT lost -- wait_gap_cpu_ms is %.6f on both "
+          "routes, which is the number that branch legitimately contributes",
+          p->raw.wait_gap_cpu_ms);
+    CHECK(p->file.cpu_measured_records == 0 && p->file.wait_gap_cpu_ns > 0,
+          "B9: on disk the writer recorded %llu CPU-gap observations and "
+          "%.6f ms of wait spin -- the counter means gaps only",
+          (unsigned long long)p->file.cpu_measured_records,
+          (double)p->file.wait_gap_cpu_ns / 1e6);
+}
+
+static void test_wait_spin_is_not_a_cpu_observation(void)
+{
+    printf("--- 7. measured wait spin + UNKNOWN CPU gap (#763, #575) ---\n");
+    struct pgwt_trace_event ev[MAX_EV];
+    uint64_t origin = mono_origin();
+    int n = spin_build(ev, origin, 1, 0, 1);
+    int ordered = 1, precooked = 0;
+    for (int i = 0; i < n; i++) {
+        if (i && ev[i - 1].timestamp_ns >= ev[i].timestamp_ns) ordered = 0;
+        if (ev[i].flags || ev[i].old_event == PGWT_WEI_NONCMD_CPU) precooked++;
+    }
+    CHECK(ordered && precooked == 0,
+          "7: the stream is in strict timestamp order (%d) and carries no "
+          "pre-set category bit or pre-relabelled id (%d)",
+          ordered, precooked);
+    if (!ordered || precooked) return;
+
+    struct idle_cpu_fixture fx;
+    idle_cpu_roundtrip(&fx, "wait_spin_unknown_gap", ev, n, origin);
+    struct spin_probe p;
+    unsigned refused = spin_gate("7", &fx, fx.from, fx.to, 0, &p);
+    if (refused) {
+        printf("  7 REFUSED (reasons 0x%x): the premises are not in the "
+               "fixture, so nothing is asserted\n", refused);
+        spin_probe_free(&p);
+        return;                        /* a blind gate never approves */
+    }
+    spin_assert(&p);
+    spin_probe_free(&p);
+
+    /* ── D. BYPASS SUITE: every way THIS gate can stop seeing ──
+     * D1/D2 are the two that matter most, because they are the shapes in
+     * which B2 is wrong rather than merely blind: with no measurement
+     * anywhere B2 is satisfied by absence (false negative), and with a
+     * MEASURED gap B2 would go red on a correct product (false positive).
+     * Both are asserted explicitly, not just refused. */
+    {
+        printf("  D1: the wait's spin is UNKNOWN too -- nothing can raise "
+               "the flag by either rule\n");
+        struct pgwt_trace_event d[MAX_EV];
+        int dn = spin_build(d, origin, 0, 0, 1);
+        struct idle_cpu_fixture df;
+        idle_cpu_roundtrip(&df, "wait_spin_d1_no_spin", d, dn, origin);
+        struct spin_probe dp;
+        unsigned r = spin_gate("D1", &df, df.from, df.to, 1, &dp);
+        CHECK(r == SPIN_REFUSAL(6),
+              "D1 REFUSED by A6 alone (0x%x): no measured spin anywhere", r);
+        CHECK(dp.raw.has_measured_cpu == 0 && dp.sum.has_measured_cpu == 0 &&
+              dp.file.cpu_measured_records == 0,
+              "D1: and B2's predicate IS satisfied here (raw %d, summary %d, "
+              "file count %llu) -- satisfied by ABSENCE, which is why the "
+              "gate must refuse before asserting it",
+              dp.raw.has_measured_cpu, dp.sum.has_measured_cpu,
+              (unsigned long long)dp.file.cpu_measured_records);
+        spin_probe_free(&dp);
+    }
+    {
+        printf("  D2: the CPU gap IS measured -- has_measured_cpu is then "
+               "CORRECT at 1 and B2 would be a false red\n");
+        struct pgwt_trace_event d[MAX_EV];
+        int dn = spin_build(d, origin, 1, 1, 1);
+        struct idle_cpu_fixture df;
+        idle_cpu_roundtrip(&df, "wait_spin_d2_measured_gap", d, dn, origin);
+        struct spin_probe dp;
+        unsigned r = spin_gate("D2", &df, df.from, df.to, 1, &dp);
+        CHECK((r & (SPIN_REFUSAL(4) | SPIN_REFUSAL(5))) ==
+              (SPIN_REFUSAL(4) | SPIN_REFUSAL(5)),
+              "D2 REFUSED by A4+A5 (0x%x): the gaps ARE measured, so the "
+              "UNKNOWN-gap premise is absent", r);
+        CHECK(dp.raw.has_measured_cpu == 1 && dp.sum.has_measured_cpu == 1,
+              "D2: and BOTH routes correctly report a measured CPU row "
+              "(raw %d, summary %d) -- the fix narrows the counter, it does "
+              "not switch the split off",
+              dp.raw.has_measured_cpu, dp.sum.has_measured_cpu);
+        CHECK(row_ms(&dp.raw, "CPU (running)") ==
+              row_ms(&dp.sum, "CPU (running)") &&
+              row_ms(&dp.raw, "CPU (waiting for a core)") ==
+              row_ms(&dp.sum, "CPU (waiting for a core)"),
+              "D2: with both CPU rows still agreeing exactly (%.6f / %.6f ms)",
+              row_ms(&dp.sum, "CPU (running)"),
+              row_ms(&dp.sum, "CPU (waiting for a core)"));
+        spin_probe_free(&dp);
+    }
+    {
+        printf("  D3: no on-CPU gap at all -- there is no row to mislabel\n");
+        struct pgwt_trace_event d[MAX_EV];
+        int dn = spin_build(d, origin, 1, 0, 0);
+        struct idle_cpu_fixture df;
+        idle_cpu_roundtrip(&df, "wait_spin_d3_no_gap", d, dn, origin);
+        struct spin_probe dp;
+        unsigned r = spin_gate("D3", &df, df.from, df.to, 1, &dp);
+        CHECK(r == (SPIN_REFUSAL(3) | SPIN_REFUSAL(5)),
+              "D3 REFUSED by A3+A5 (0x%x): no gap record and no UNKNOWN gap "
+              "wall on disk", r);
+        spin_probe_free(&dp);
+    }
+    {
+        printf("  D4: a window the reader finds no record in -- every "
+               "summary scalar reads 0 and the flag is 0 for free\n");
+        struct pgwt_trace_event d[MAX_EV];
+        int dn = spin_build(d, origin, 1, 0, 1);
+        struct idle_cpu_fixture df;
+        idle_cpu_roundtrip(&df, "wait_spin_d4_empty", d, dn, origin);
+        struct spin_probe dp;
+        uint64_t far = df.to + 3600ULL * ONE_SEC;
+        unsigned r = spin_gate("D4", &df, far, far + (df.to - df.from), 1,
+                               &dp);
+        CHECK((r & (SPIN_REFUSAL(1) | SPIN_REFUSAL(8))) ==
+              (SPIN_REFUSAL(1) | SPIN_REFUSAL(8)),
+              "D4 REFUSED by A1+A8 (0x%x): no records and the preflight says "
+              "so", r);
+        CHECK(dp.sum.has_measured_cpu == 0,
+              "D4: and B2's predicate is satisfied by the empty read "
+              "(summary flag %d) -- the skip-instead-of-fail shape",
+              dp.sum.has_measured_cpu);
+        spin_probe_free(&dp);
+
+        printf("  D6: the only file in the window is an older-rule v%d\n",
+               PGWT_SUMMARY_VERSION - 1);
+        char path[800];
+        snprintf(path, sizeof(path), "%s/current.summary", df.dir);
+        FILE *fp = fopen(path, "r+b");
+        int patched = 0;
+        if (fp) {
+            struct pgwt_trace_file_header hdr;
+            if (fread(&hdr, sizeof(hdr), 1, fp) == 1
+                && hdr.magic == PGWT_SUMMARY_MAGIC) {
+                hdr.version = PGWT_SUMMARY_VERSION - 1;
+                if (fseek(fp, 0, SEEK_SET) == 0
+                    && fwrite(&hdr, sizeof(hdr), 1, fp) == 1)
+                    patched = 1;
+            }
+            fclose(fp);
+        }
+        CHECK(patched, "D6: the file was rewritten as v%d",
+              PGWT_SUMMARY_VERSION - 1);
+        if (patched) {
+            r = spin_gate("D6", &df, df.from, df.to, 1, &dp);
+            CHECK((r & (SPIN_REFUSAL(1) | SPIN_REFUSAL(8))) ==
+                  (SPIN_REFUSAL(1) | SPIN_REFUSAL(8)),
+                  "D6 REFUSED by A1+A8 (0x%x): an older-rule file is never "
+                  "reinterpreted, so this window has no evidence at all", r);
+            spin_probe_free(&dp);
+        }
+
+        printf("  D5: the summary directory is gone\n");
+        char cmd[900];
+        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", df.dir);
+        int removed = system(cmd);
+        struct stat st;
+        CHECK(removed == 0 && stat(df.dir, &st) != 0,
+              "D5: directory removed (status %d)", removed);
+        r = spin_gate("D5", &df, df.from, df.to, 1, &dp);
+        CHECK((r & (SPIN_REFUSAL(1) | SPIN_REFUSAL(8))) ==
+              (SPIN_REFUSAL(1) | SPIN_REFUSAL(8)),
+              "D5 REFUSED by A1+A8 (0x%x)", r);
+        spin_probe_free(&dp);
+    }
+    {
+        printf("  D7: a window narrower than the 120 s summary-routing "
+               "width -- this defect's whole reach is that threshold\n");
+        struct pgwt_trace_event d[MAX_EV];
+        int dn = spin_build(d, origin, 1, 0, 1);
+        struct idle_cpu_fixture df;
+        idle_cpu_roundtrip(&df, "wait_spin_d7_narrow", d, dn, origin);
+        struct spin_probe dp;
+        unsigned r = spin_gate("D7", &df, df.from, df.from + 60 * ONE_SEC, 1,
+                               &dp);
+        CHECK(r == SPIN_REFUSAL(2) && dp.file.records == 60,
+              "D7 REFUSED by A2 alone (0x%x) on %d records -- a 60 s window "
+              "is served from RAW, so it is not this defect's route",
+              r, dp.file.records);
+        spin_probe_free(&dp);
+    }
+}
+#undef SPIN_REFUSAL
+
 int main(void)
 {
     printf("=== CPU-split raw-vs-summary parity (#408) ===\n\n");
@@ -1235,6 +1668,7 @@ int main(void)
 
     bypass_suite();
     test_measured_cpu_inside_visible_idle();
+    test_wait_spin_is_not_a_cpu_observation();
 
     /* The PROVOKE lines are red BY DESIGN -- they print what the naive
      * comparison would have said about an input this gate refuses. They are
