@@ -58,13 +58,34 @@ DUR_NS = 1_000_000  # 1 ms per event
 #
 # Round 3 adds the other half: the JSON `hint`, which web/static/app.js
 # renders verbatim. src/server.c composes both the stderr line and the hint
-# from ONE table (pgwt_overload_arms), and the cases below assert the hint IS
-# the tail of the stderr line for every kind — so a change to one consumer and
-# not the other is red, and an operator quoting the log can never be
-# contradicted by the user's screen.
+# from ONE table (pgwt_overload_arms). The cases below assert the hint IS the
+# tail of the stderr line — byte for byte — for every kind INCLUDING WINDOW,
+# with exactly two documented exceptions, each pinned by its own exact string
+# and asserted not to contradict the log:
+#   * top_queries keeps #694's sentence, which BEGINS with the table's
+#     "narrow the time range" and then explains why no filter helps;
+#   * a query-filtered top_events/top_sessions/heatmap keeps #526's
+#     "a query filter forces the exact path".
+# Everything else, on every kind, must match exactly, so a change to one
+# consumer and not the other is red and an operator quoting the log can never
+# be contradicted by the user's screen.
+#
+# Round 4 also makes WINDOW scope-aware, because 12 of its 15 call sites
+# forward req->filter.pid and the loader honours it — for those a pid filter
+# IS a real reduction and the line says so — while three (top_queries,
+# load_execution_rows' window load, variants) pass 0 unconditionally and must
+# not be offered it.
 REFUSAL_PREFIX = "ERROR: window too large:"
 WINDOW_TAIL = "— narrow the time range"
 SEP = "— "
+PID_CLAUSE = "add a pid filter"
+# #694 and #526, verbatim: the two WINDOW hints that elaborate instead of
+# repeating the table sentence.
+TOP_QUERIES_HINT = ("narrow the time range; Queries always reads raw events "
+                    "for every pid, because execution statistics need every "
+                    "backend's markers, so no filter reduces this load")
+QUERY_FILTER_HINT = ("a query filter forces the exact path, which loads raw "
+                     "events; narrow the time range")
 S = 1_000_000_000
 MS = 1_000_000
 MARKER_EXEC_START = 0xFFFFFFF0
@@ -227,54 +248,87 @@ def check_window_arm(t, err_dir):
     """The request's own range: narrowing it IS the reduction."""
     trace_dir = generate_traces(build_scenario())
     try:
-        # pid == 0: the arm that carried the impossible pid/query advice.
+        # A window load that FORWARDS the request's pid, with none set: the
+        # pid clause is TRUE here (the loader discards other pids before
+        # counting against the bound) and round 2 wrongly dropped it. 12 of
+        # the 15 window call sites are this shape.
         resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
-                        os.path.join(err_dir, "window-unfiltered.err"),
+                        os.path.join(err_dir, "window-pushdown.err"),
                         "time_model")
         t.check_eq(resp.get("code"), "window_too_large",
-                   "window/pid==0: the load really did refuse, so the "
-                   "assertions below are not vacuous")
-        grade_refusal(t, "window/pid==0", err,
+                   "window/pushdown/unscoped: the load really did refuse, so "
+                   "the assertions below are not vacuous")
+        grade_refusal(t, "window/pushdown/unscoped", err,
+                      must_have=["the requested range holds",
+                                 "across all pids", "narrow the time range",
+                                 PID_CLAUSE],
+                      # The pid half is offered; the QUERY half never is, on
+                      # any arm — no loader here takes a filter argument.
+                      must_not_have=["pid/query filter", "for this pid",
+                                     "prefix", "context load"])
+        grade_agreement(t, "window/pushdown/unscoped", err, resp)
+
+        # Same command with a pid already set: the clause must disappear,
+        # because there is nothing left to scope.
+        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 1_000},
+                        os.path.join(err_dir, "window-scoped.err"),
+                        "time_model", filters={"pid": 1001})
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "window/pushdown/scoped: the pid-scoped load really did "
+                   "refuse")
+        grade_refusal(t, "window/pushdown/scoped", err,
+                      must_have=["the requested range holds", "for this pid"],
+                      must_not_have=[PID_CLAUSE, "across all pids", "prefix"],
+                      ends_with=WINDOW_TAIL)
+        grade_agreement(t, "window/pushdown/scoped", err, resp)
+
+        # A window load that DROPS the request's pid by design (variants
+        # reads every pid's exec/plan markers). Unscoped like the first case,
+        # but the clause must NOT appear: the filter never reaches this load.
+        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
+                        os.path.join(err_dir, "window-allpids.err"),
+                        "variants")
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "window/all-pids: the all-pids load really did refuse")
+        grade_refusal(t, "window/all-pids", err,
                       must_have=["the requested range holds",
                                  "across all pids"],
-                      # No filter of any kind is named on this arm: five
-                      # callers hardcode pid 0 and drop the request's pid
-                      # filter, and no loader here sees a query filter at all.
-                      must_not_have=["filter", "for this pid",
-                                     "prefix", "context load"],
+                      must_not_have=[PID_CLAUSE, "pid/query filter",
+                                     "for this pid", "prefix"],
                       ends_with=WINDOW_TAIL)
-        # The JSON hint for a WINDOW refusal: asserted by PROPERTY, not by
-        # equality. reject_overload still has three command-keyed window arms
-        # (#694's top_queries sentence, the query-filter-forces-raw sentence,
-        # and the generic one), and the generic one's " or add a pid/query
-        # filter" clause belongs to #742, which serialises after this. Pinning
-        # that string here would make the advice #742 has to delete look
-        # intended, exactly as a test on #694 once did — so this asserts only
-        # that the hint explains a WINDOW refusal and borrows no other arm's
-        # explanation.
-        hint = resp.get("hint")
-        t.check(isinstance(hint, str) and "narrow the time range" in hint,
-                f"window/pid==0: the JSON hint names the range reduction "
-                f"({hint!r})")
-        t.check(isinstance(hint, str) and
+        grade_agreement(t, "window/all-pids", err, resp)
+
+        # The two documented elaborations, each pinned to its own merged
+        # string AND asserted not to contradict the log: #694's must BEGIN
+        # with the stderr sentence; #526's must still name the range
+        # reduction and borrow no other kind's explanation.
+        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
+                        os.path.join(err_dir, "window-topqueries.err"),
+                        "top_queries")
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "window/top_queries: refused")
+        t.check_eq(resp.get("hint"), TOP_QUERIES_HINT,
+                   "window/top_queries: keeps #694's hint verbatim")
+        tail = err.split(SEP, 1)[1].strip() if SEP in err else ""
+        t.check(tail != "" and (resp.get("hint") or "").startswith(tail),
+                f"window/top_queries: #694's hint ELABORATES the stderr "
+                f"sentence instead of contradicting it (tail={tail!r})")
+
+        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
+                        os.path.join(err_dir, "window-queryfilter.err"),
+                        "top_events", filters={"query_id": 42})
+        t.check_eq(resp.get("code"), "window_too_large",
+                   "window/query-filter: refused")
+        t.check_eq(resp.get("hint"), QUERY_FILTER_HINT,
+                   "window/query-filter: keeps #526's hint verbatim")
+        hint = resp.get("hint") or ""
+        t.check("narrow the time range" in hint and
                 "the prefix is read from" not in hint and
                 "its bounds come from the selected execution" not in hint and
                 "whole capture" not in hint,
-                f"window/pid==0: the JSON hint borrows no other arm's "
-                f"explanation ({hint!r})")
-
-        # pid != 0: one pid's 2,000 events over a 1,000 bound. This arm never
-        # carried the advice; it is here so a change that collapses the arms
-        # into one sentence cannot pass.
-        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 1_000},
-                        os.path.join(err_dir, "window-pid.err"),
-                        "time_model", filters={"pid": 1001})
-        t.check_eq(resp.get("code"), "window_too_large",
-                   "window/pid!=0: the pid-scoped load really did refuse")
-        grade_refusal(t, "window/pid!=0", err,
-                      must_have=["the requested range holds", "for this pid"],
-                      must_not_have=["filter", "across all pids", "prefix"],
-                      ends_with=WINDOW_TAIL)
+                f"window/query-filter: #526's hint still names the range "
+                f"reduction and borrows no other kind's explanation "
+                f"({hint!r})")
 
         # CONTEXT: handle_execution_detail's load is bounded by the SELECTED
         # EXECUTION (req.start_ns/end_ns), not req.from/to, and it passes

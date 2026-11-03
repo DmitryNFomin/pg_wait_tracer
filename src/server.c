@@ -424,6 +424,16 @@ struct pgwt_load_info {
      * that actually hit the bound rather than the command's name. */
     enum pgwt_load_purpose load_purpose;
     int      load_pid_scoped;   /* the load's own pid != 0 */
+    /* Whether a pid filter on the REQUEST would have reached this load at
+     * all. 12 of the 15 window call sites pass req->filter.pid through and
+     * the loader discards other pids before counting, so for them a pid
+     * scope is a real reduction and the refusal says so. Three pass 0
+     * unconditionally -- handle_top_queries, load_execution_rows' window
+     * load and handle_variants, all of which need every backend's markers --
+     * and for those the same advice would be unhonourable. The flag is what
+     * separates "unscoped, and scoping would work" from "unscoped, and
+     * scoping is not available here"; load_pid_scoped alone cannot. */
+    int      load_pid_pushdown;
     int      allocation_failed; /* working/merge allocation failed — never
                                    misreport this as a range-size refusal */
     /* #333: a present trace file could not be read, so this window's
@@ -3627,13 +3637,24 @@ static int window_fidelity_ranges(const struct pgwt_server *srv,
 
 /* ── #728: ONE table of refusal sentences, two consumers ──────────────────
  *
- * `subject` is what overflowed; `unscoped`/`scoped` is the SENTENCE that
- * explains the refusal and names the reduction that works, chosen by whether
- * the refusing load was pid-scoped. report_load_overload() prints
+ * `subject` is what overflowed; `with_pid_advice`/`without_pid_advice` is the
+ * SENTENCE that explains the refusal and names the reduction that works. The
+ * pid clause is offered only when a pid filter would BOTH reach this load
+ * (load_pid_pushdown) and not already be set (!load_pid_scoped) -- see
+ * overload_sentence(). report_load_overload() prints
  * "ERROR: window too large: <subject> more than N events <scope> — <sentence>"
  * on stderr; reject_overload() puts the SAME <sentence> in the JSON `hint`
  * that web/static/app.js renders verbatim; dump_summary()'s text report uses
  * both fields too.
+ *
+ * Two WINDOW refusals deliberately carry a MORE SPECIFIC hint instead of the
+ * table's: handle_top_queries (#694's sentence, which begins with the table's
+ * own "narrow the time range" and then explains why no filter can help) and a
+ * query-filtered top_events/top_sessions/heatmap (#526's "a query filter
+ * forces the exact path"). Both are merged, separately tested behaviour; they
+ * elaborate, they do not contradict, and the test file asserts exactly that.
+ * Every other refusal, of every kind, gets the table sentence verbatim in
+ * both places.
  *
  * A table rather than three switch statements because the defect #728 exists
  * to end is two copies of one sentence drifting apart. Fixing a divergence
@@ -3662,15 +3683,24 @@ static int window_fidelity_ranges(const struct pgwt_server *srv,
  * operator can tell which of the two overflowed. */
 struct pgwt_overload_arm {
     const char *subject;
-    const char *unscoped;
-    const char *scoped;
+    const char *with_pid_advice;
+    const char *without_pid_advice;
 };
 
 static const struct pgwt_overload_arm pgwt_overload_arms[] = {
     [PGWT_LOAD_WINDOW] = {
-        .subject  = "the requested range holds",
-        .unscoped = "narrow the time range",
-        .scoped   = "narrow the time range",
+        .subject = "the requested range holds",
+        /* The pid clause is TRUE here for the 12 call sites that forward
+         * req->filter.pid: the loader discards other pids before counting
+         * against the bound, so scoping the request really does shrink this
+         * load. Round 2 dropped it for all of them, which removed advice the
+         * product can honour -- master's line offered it. The three callers
+         * that pass 0 unconditionally take the second string instead, via
+         * server_load_events_fi_all_pids(). */
+        .with_pid_advice = "narrow the time range, or add a pid filter: this "
+                           "load reads every pid and applies the request's "
+                           "pid filter while loading",
+        .without_pid_advice = "narrow the time range",
     },
     [PGWT_LOAD_PREFIX] = {
         .subject  = "the execution-marker prefix before this window holds",
@@ -3681,24 +3711,24 @@ static const struct pgwt_overload_arm pgwt_overload_arms[] = {
          * unhonourable advice #728 is about. The parenthetical is there so
          * nothing can be read as a promise that the widened window will pass
          * its own, separate bound. */
-        .unscoped = "the prefix is read from the trace start to the window's "
+        .with_pid_advice = "the prefix is read from the trace start to the window's "
                     "left edge, so narrowing the window does not reduce it; "
                     "start the window earlier, or add a pid filter, to reduce "
                     "this prefix load (the window's own load is bounded "
                     "separately)",
-        .scoped   = "the prefix is read from the trace start to the window's "
+        .without_pid_advice = "the prefix is read from the trace start to the window's "
                     "left edge, so narrowing the window does not reduce it; "
                     "start the window earlier to reduce this prefix load "
                     "(the window's own load is bounded separately)",
     },
     [PGWT_LOAD_CONTEXT] = {
         .subject  = "a bounded context load for this request holds",
-        .unscoped = "its bounds come from the selected execution or a fixed "
+        .with_pid_advice = "its bounds come from the selected execution or a fixed "
                     "look-back, not the requested time range, so narrowing "
                     "the range does not reduce it; this load is bounded by "
                     "PGWT_LOAD_MAX_EVENTS (default: 25% of RAM, capped at "
                     "2 GB)",
-        .scoped   = "its bounds come from the selected execution or a fixed "
+        .without_pid_advice = "its bounds come from the selected execution or a fixed "
                     "look-back, not the requested time range, so narrowing "
                     "the range does not reduce it; this load is bounded by "
                     "PGWT_LOAD_MAX_EVENTS (default: 25% of RAM, capped at "
@@ -3709,44 +3739,70 @@ static const struct pgwt_overload_arm pgwt_overload_arms[] = {
         /* `pgwt-server [--dump] <trace-dir>` takes no range, so there is
          * nothing here to narrow. Name the route the text report itself
          * already points at rather than the memory bound alone. */
-        .unscoped = "this is the whole capture and the text report takes no "
+        .with_pid_advice = "this is the whole capture and the text report takes no "
                     "time range, so there is nothing here to narrow: use the "
                     "JSON interface with a narrower range",
-        .scoped   = "this is the whole capture and the text report takes no "
+        .without_pid_advice = "this is the whole capture and the text report takes no "
                     "time range, so there is nothing here to narrow: use the "
                     "JSON interface with a narrower range",
     },
 };
 
+/* A kind with no row: REFUSE to explain rather than substituting another
+ * kind's explanation. Silently falling back to WINDOW would report a fifth
+ * load kind's refusal as a range-size problem -- the precise failure #728 is
+ * about -- and the operator would have no way to know. The row below says so
+ * instead, and it names the kind so the gap is findable. Unreachable in this
+ * tree (every kind the loaders pass has a row, asserted per kind by
+ * tests/test_data_window_bound.py); the mutant suite drives it deliberately. */
+static const struct pgwt_overload_arm pgwt_overload_unknown = {
+    .subject = "an unrecognised load kind holds",
+    .with_pid_advice = "this load's kind has no entry in the refusal table, "
+                       "so what would reduce it is UNKNOWN: this is not a "
+                       "range-size problem and narrowing may do nothing. "
+                       "Report it with the kind number on stderr",
+    .without_pid_advice = "this load's kind has no entry in the refusal "
+                          "table, so what would reduce it is UNKNOWN: this "
+                          "is not a range-size problem and narrowing may do "
+                          "nothing. Report it with the kind number on stderr",
+};
+
 static const struct pgwt_overload_arm *overload_arm(enum pgwt_load_purpose p)
 {
-    /* An out-of-range kind means a new purpose reached here without a row.
-     * Fall back to WINDOW rather than indexing past the table: the test
-     * matrix covers every kind the tree emits, and a wrong-but-safe sentence
-     * beats reading past the array. */
     if ((unsigned)p >=
-        sizeof(pgwt_overload_arms) / sizeof(pgwt_overload_arms[0]))
-        p = PGWT_LOAD_WINDOW;
+        sizeof(pgwt_overload_arms) / sizeof(pgwt_overload_arms[0])) {
+        fprintf(stderr, "ERROR: internal: load kind %d has no row in the "
+                "refusal table (src/server.c pgwt_overload_arms) -- the "
+                "refusal below cannot say what would reduce this load\n",
+                (int)p);
+        return &pgwt_overload_unknown;
+    }
     return &pgwt_overload_arms[p];
 }
 
-/* The one sentence both consumers use. `pid_scoped` is the refusing LOAD's
- * own scope, not the request's: a request carrying a pid filter can still sit
- * behind an unscoped load (five callers drop it), and the advice has to
- * follow the load that overflowed. */
-static const char *overload_sentence(enum pgwt_load_purpose p, int pid_scoped)
+/* The one sentence all three consumers use.
+ *
+ * `pid_scoped` and `pid_pushdown` are the refusing LOAD's, not the request's.
+ * The pid clause is offered only when it is BOTH available and not already
+ * taken: a load that already has a pid cannot be scoped further, and a load
+ * whose caller passes 0 unconditionally would ignore the filter the user
+ * added. Either way the advice must not be printed. */
+static const char *overload_sentence(enum pgwt_load_purpose p, int pid_scoped,
+                                     int pid_pushdown)
 {
     const struct pgwt_overload_arm *arm = overload_arm(p);
-    return pid_scoped ? arm->scoped : arm->unscoped;
+    return (pid_pushdown && !pid_scoped) ? arm->with_pid_advice
+                                         : arm->without_pid_advice;
 }
 
 static void report_load_overload(int max_events, uint32_t pid,
-                                 enum pgwt_load_purpose purpose)
+                                 enum pgwt_load_purpose purpose,
+                                 int pid_pushdown)
 {
     fprintf(stderr, "ERROR: window too large: %s more than %d events%s — %s\n",
             overload_arm(purpose)->subject, max_events,
             pid ? " for this pid" : " across all pids",
-            overload_sentence(purpose, pid != 0));
+            overload_sentence(purpose, pid != 0, pid_pushdown));
 }
 
 /*
@@ -3785,7 +3841,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                            uint64_t from_wall_ns, uint64_t to_wall_ns,
                            uint32_t pid, int markers_only,
                            int no_straddle_scan,
-                           enum pgwt_load_purpose purpose,
+                           enum pgwt_load_purpose purpose, int pid_pushdown,
                            int *out_count, struct pgwt_load_info *info)
 {
     *out_count = 0;
@@ -3796,6 +3852,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
          * return below leaves through a different door. */
         info->load_purpose = purpose;
         info->load_pid_scoped = pid != 0;
+        info->load_pid_pushdown = pid_pushdown;
     }
     int overloaded = 0;
     int allocation_failed = 0;
@@ -4328,7 +4385,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * load, and the operator asking for stats wants to see it. */
     straddle_report(&ss);
     if (overloaded)
-        report_load_overload(max_events, pid, purpose);
+        report_load_overload(max_events, pid, purpose, pid_pushdown);
     if (allocation_failed)
         fprintf(stderr, "ERROR: memory allocation failed while loading or "
                 "merging the requested event window\n");
@@ -4343,10 +4400,12 @@ server_load_events_fi_mode(struct pgwt_server *srv,
 }
 
 /* The request's own window: [req->from_ns, req->to_ns] as the operator asked
- * for it. A load whose bounds are DERIVED (a selected execution, a fixed
- * look-back) must use server_load_events_fi_context instead -- the refusal
- * message tells the operator what to change, and "narrow the time range" is
- * only true of the range the request actually carries. */
+ * for it, WITH the request's pid filter forwarded. A load whose bounds are
+ * DERIVED (a selected execution, a fixed look-back) must use
+ * server_load_events_fi_context instead, and one that deliberately ignores
+ * the request's pid must use server_load_events_fi_all_pids -- the refusal
+ * message tells the operator what to change, and both "narrow the time
+ * range" and "add a pid filter" are only true of a load that honours them. */
 static struct pgwt_trace_event *
 server_load_events_fi(struct pgwt_server *srv,
                       uint64_t from_wall_ns, uint64_t to_wall_ns,
@@ -4354,11 +4413,28 @@ server_load_events_fi(struct pgwt_server *srv,
                       int *out_count, struct pgwt_load_info *info)
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 0,
-                                      0, PGWT_LOAD_WINDOW, out_count, info);
+                                      0, PGWT_LOAD_WINDOW, 1, out_count,
+                                      info);
 }
 
-/* The whole capture, for the `--dump` text report: no request, no range flag.
- * Identical behaviour, different refusal (#728). */
+/* The request's own window, but read across EVERY pid on purpose: the three
+ * callers that pass 0 unconditionally (handle_top_queries,
+ * load_execution_rows' window load, handle_variants) need every backend's
+ * markers, so a pid filter the user adds never reaches this load. Same
+ * behaviour as server_load_events_fi; the refusal just must not offer the
+ * one reduction that would be ignored here (#728 round 4). */
+static struct pgwt_trace_event *
+server_load_events_fi_all_pids(struct pgwt_server *srv,
+                               uint64_t from_wall_ns, uint64_t to_wall_ns,
+                               int *out_count, struct pgwt_load_info *info)
+{
+    return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, 0, 0,
+                                      0, PGWT_LOAD_WINDOW, 0, out_count,
+                                      info);
+}
+
+/* The whole capture, for the `--dump` text report: no request, no range flag,
+ * no pid. Identical behaviour, different refusal (#728). */
 static struct pgwt_trace_event *
 server_load_events_fi_capture(struct pgwt_server *srv,
                               uint64_t from_wall_ns, uint64_t to_wall_ns,
@@ -4366,11 +4442,13 @@ server_load_events_fi_capture(struct pgwt_server *srv,
                               int *out_count, struct pgwt_load_info *info)
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 0,
-                                      0, PGWT_LOAD_CAPTURE, out_count, info);
+                                      0, PGWT_LOAD_CAPTURE, 0, out_count,
+                                      info);
 }
 
 /* Same load, bounds NOT the request's range. Identical behaviour; the only
- * difference is which reduction its refusal names (#728). */
+ * difference is which reduction its refusal names (#728). pid_pushdown 0:
+ * its one caller passes 0 so parallel-worker lanes stay visible. */
 static struct pgwt_trace_event *
 server_load_events_fi_context(struct pgwt_server *srv,
                               uint64_t from_wall_ns, uint64_t to_wall_ns,
@@ -4378,7 +4456,8 @@ server_load_events_fi_context(struct pgwt_server *srv,
                               int *out_count, struct pgwt_load_info *info)
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 0,
-                                      0, PGWT_LOAD_CONTEXT, out_count, info);
+                                      0, PGWT_LOAD_CONTEXT, 0, out_count,
+                                      info);
 }
 
 /* Lifecycle context is sparse but can span a long capture. Retain only
@@ -4396,8 +4475,11 @@ server_load_markers_fi(struct pgwt_server *srv,
                        uint32_t pid, enum pgwt_load_purpose purpose,
                        int *out_count, struct pgwt_load_info *info)
 {
+    /* pid_pushdown 1: every caller of this wrapper forwards the request's
+     * pid (server_load_exec_prefix's fallback and handle_execution_detail's
+     * pre/post scans all pass req->filter.pid through). */
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
-                                      0, purpose, out_count, info);
+                                      0, purpose, 1, out_count, info);
 }
 
 /* #586: the left-edge seed scan's marker load. Markers only, and with the
@@ -4422,7 +4504,8 @@ server_load_seed_markers(struct pgwt_server *srv,
      * the window's left edge, so narrowing the request's range does not
      * shrink it (#728). */
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
-                                      1, PGWT_LOAD_CONTEXT, out_count, info);
+                                      1, PGWT_LOAD_CONTEXT, 1, out_count,
+                                      info);
 }
 
 /* ── #274: the executions/exec_scatter pre-window prefix ──────────────────
@@ -4502,6 +4585,9 @@ server_load_prefix_from_index(struct pgwt_server *srv, uint64_t to_wall_ns,
          * same kind into the legacy fallback. */
         info->load_purpose = PGWT_LOAD_PREFIX;
         info->load_pid_scoped = pid != 0;
+        /* Both prefix callers forward req->filter.pid, and the loop below
+         * discards other pids before counting against the bound. */
+        info->load_pid_pushdown = 1;
     }
     int overloaded = 0, allocation_failed = 0, has_transitions = 0;
     int max_events = load_max_events();
@@ -4586,7 +4672,7 @@ server_load_prefix_from_index(struct pgwt_server *srv, uint64_t to_wall_ns,
         info->allocation_failed = allocation_failed;
     }
     if (overloaded)
-        report_load_overload(max_events, pid, PGWT_LOAD_PREFIX);
+        report_load_overload(max_events, pid, PGWT_LOAD_PREFIX, 1);
     if (allocation_failed)
         fprintf(stderr, "ERROR: memory allocation failed while loading or "
                 "merging the requested event window\n");
@@ -4973,40 +5059,44 @@ static int reject_overload(struct pgwt_server *srv,
          * because it loads raw regardless; that was the reason the hint was
          * WRONG, not a reason to keep it.
          *
-         * handle_aas guards only !detail_events and handle_time_model has no
-         * query guard, so they and every other command keep the generic
-         * hint, where adding a filter genuinely can route around the load.
+         * #728: EVERY hint below comes from the shared table
+         * (pgwt_overload_arms) except the two command-specific arms, which
+         * are chosen FIRST because they explain more than the kind can: a
+         * query-filtered top_events/top_sessions/heatmap (#526) and
+         * top_queries (#694, whose sentence begins with the table's own
+         * "narrow the time range" and then says why no filter helps). Both
+         * are merged, separately tested behaviour, and both elaborate rather
+         * than contradict -- tests/test_data_window_bound.py asserts exactly
+         * that, and asserts byte equality with the stderr line everywhere
+         * else.
          *
-         * #728: the arms below are reached ONLY for a refusing load whose
-         * bounds are the request's own window. When the load that hit the
-         * bound was the execution-marker prefix or a derived-bounds context
-         * load, the hint comes from the same table report_load_overload()
-         * printed on stderr -- the operator's log and the user's screen
-         * describing one refusal two ways is the defect #728 exists to end,
-         * and web/static/app.js renders this string verbatim.
+         * Round 4 removed the old generic fallback,
+         * "narrow the time range or add a pid/query filter". It was the last
+         * copy of the advice this issue is about, and leaving it made the
+         * commonest path -- a plain window refusal -- say one thing in the
+         * operator's log and another on the user's screen.
          *
          * Keyed on the LOAD, never on the command name: executions,
          * exec_scatter, execution_detail and span_detail each perform a
          * window load AND a prefix or context load, with a separate
          * pgwt_load_info for each, and they refuse on either. A
          * command-keyed prefix hint would be wrong exactly where it looked
-         * right. The scope comes from the load too (info->load_pid_scoped),
-         * because a request carrying a pid filter can still sit behind a
-         * load that dropped it.
+         * right. Scope and pushdown come from the load too
+         * (info->load_pid_scoped, info->load_pid_pushdown): a request
+         * carrying a pid filter can sit behind a load that dropped it, and
+         * three window callers drop it by design.
          *
          * This sits INSIDE the window_too_large else-branch, so the #333
          * unreadable-file and allocation-failure refusals above keep their
          * precedence: neither is ever reported as a range-size problem. */
-        if (info->load_purpose != PGWT_LOAD_WINDOW)
-            cJSON_AddStringToObject(root, "hint",
-                overload_sentence(info->load_purpose,
-                                  info->load_pid_scoped));
-        else if (strcmp(req->cmd, "top_queries") == 0)
+        if (info->load_purpose == PGWT_LOAD_WINDOW &&
+            strcmp(req->cmd, "top_queries") == 0)
             cJSON_AddStringToObject(root, "hint",
                 "narrow the time range; Queries always reads raw events for "
                 "every pid, because execution statistics need every "
                 "backend's markers, so no filter reduces this load");
-        else if (req->filter.query_id != 0 &&
+        else if (info->load_purpose == PGWT_LOAD_WINDOW &&
+            req->filter.query_id != 0 &&
             (strcmp(req->cmd, "top_events") == 0 ||
              strcmp(req->cmd, "top_sessions") == 0 ||
              strcmp(req->cmd, "heatmap") == 0))
@@ -5015,7 +5105,8 @@ static int reject_overload(struct pgwt_server *srv,
                 "events; narrow the time range");
         else
             cJSON_AddStringToObject(root, "hint",
-                "narrow the time range or add a pid/query filter");
+                overload_sentence(info->load_purpose, info->load_pid_scoped,
+                                  info->load_pid_pushdown));
     }
     uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
     uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
@@ -5841,8 +5932,8 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * by cache_max_events(). Reuse this load for lifecycle and context stats.
      * No pid pushdown: lifecycle stats read exec/plan markers across ALL
      * pids (markers never pass the uniform filter). */
-    all_events = server_load_events_fi(srv, req->from_ns, req->to_ns, 0,
-                                       &ecount, &linfo);
+    all_events = server_load_events_fi_all_pids(srv, req->from_ns, req->to_ns,
+                                                &ecount, &linfo);
     if (reject_overload(srv, req, all_events, &linfo)) return;
     pgwt_compute_top_queries(all_events, ecount, &req->filter,
                              req->from_ns, req->to_ns, wall_ms, &res);
@@ -6616,8 +6707,11 @@ static int load_execution_rows(struct pgwt_server *srv,
     }
 
     int window_count;
-    struct pgwt_trace_event *window_events = server_load_events_fi(
-        srv, from, to, 0, &window_count, linfo);
+    /* _all_pids: this window load passes 0 on purpose -- lifecycle rows need
+     * every backend's markers -- so a pid filter the user adds never reaches
+     * it and its refusal must not offer one (#728). */
+    struct pgwt_trace_event *window_events = server_load_events_fi_all_pids(
+        srv, from, to, &window_count, linfo);
     if (reject_overload(srv, req, window_events, linfo))
         return -1;
 
@@ -8457,11 +8551,11 @@ static void handle_variants(struct pgwt_server *srv, struct pgwt_request *req)
     int count;
     struct pgwt_load_info linfo = {0};
     struct pgwt_trace_event *events =
-        server_load_events_fi(srv, req->from_ns, req->to_ns,
-                              /* no pid pushdown: variants read every pid's
-                               * exec/plan markers, which never pass the
-                               * uniform per-event filter */ 0,
-                              &count, &linfo);
+        /* no pid pushdown: variants read every pid's exec/plan markers,
+         * which never pass the uniform per-event filter -- hence _all_pids,
+         * so the refusal does not offer a pid filter this load drops. */
+        server_load_events_fi_all_pids(srv, req->from_ns, req->to_ns,
+                                       &count, &linfo);
     if (reject_overload(srv, req, events, &linfo)) return;
 
     /* Variants are built from marker-delimited transition sequences, which
@@ -8810,7 +8904,8 @@ static void dump_summary(struct pgwt_server *srv)
          * so this report cannot be the copy that drifts (#728). */
         printf("ERROR: window too large: %s more than %d events — %s\n",
                overload_arm(linfo.load_purpose)->subject, load_max_events(),
-               overload_sentence(linfo.load_purpose, linfo.load_pid_scoped));
+               overload_sentence(linfo.load_purpose, linfo.load_pid_scoped,
+                                 linfo.load_pid_pushdown));
         free(events);
         return;
     }
