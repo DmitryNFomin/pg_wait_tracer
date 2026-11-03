@@ -11,6 +11,7 @@
 #include "map_reader.h"
 #include "snapshot.h"
 #include "provider.h"
+#include "sampler.h"
 #include "escalation.h"
 #include "anomaly.h"
 #include "effective_cores.h"
@@ -92,8 +93,11 @@ struct pgwt_counters {
 
     /* Sampler timer is one-shot by design (anti-aliasing jitter, SMP-5), so
      * expirations never coalesce. Lateness against the ARMED period is the
-     * signal; late_ns_total/(ticks_total*nominal_ns) is the fraction of
-     * sampling time lost. */
+     * signal: sampler_tick_late_ns_total / sampler_ticks_total is mean
+     * lateness per tick in nanoseconds; both terms come from the timer alone.
+     * Dividing this mean by the nominal period (1e9 / --sample-rate) gives
+     * the fraction of sampling time lost to lateness. The timer health check
+     * measures scheduling delay, not the accuracy of the CPU figure. */
     uint64_t sampler_ticks_total;         /* sampler timerfd ticks consumed */
     uint64_t sampler_tick_late_ns_total;  /* cumulative ns late vs ARMED period */
 
