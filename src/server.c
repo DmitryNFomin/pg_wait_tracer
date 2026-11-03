@@ -425,14 +425,20 @@ struct pgwt_load_info {
     enum pgwt_load_purpose load_purpose;
     int      load_pid_scoped;   /* the load's own pid != 0 */
     /* Whether a pid filter on the REQUEST would have reached this load at
-     * all. 12 of the 15 window call sites pass req->filter.pid through and
+     * all. 13 of the 16 window call sites pass req->filter.pid through and
      * the loader discards other pids before counting, so for them a pid
      * scope is a real reduction and the refusal says so. Three pass 0
      * unconditionally -- handle_top_queries, load_execution_rows' window
      * load and handle_variants, all of which need every backend's markers --
      * and for those the same advice would be unhonourable. The flag is what
      * separates "unscoped, and scoping would work" from "unscoped, and
-     * scoping is not available here"; load_pid_scoped alone cannot. */
+     * scoping is not available here"; load_pid_scoped alone cannot.
+     *
+     * The counts are grep-checkable rather than trusted: the forwarding
+     * sites are calls to server_load_events_fi(), the three droppers are
+     * calls to server_load_events_fi_all_pids(). (Round 4's comment said
+     * "12 of 15"; that counted the wrapper's own definition line and missed
+     * a call site.) */
     int      load_pid_pushdown;
     int      allocation_failed; /* working/merge allocation failed — never
                                    misreport this as a range-size refusal */
@@ -5048,27 +5054,28 @@ static int reject_overload(struct pgwt_server *srv,
          *
          * handle_top_queries gets its OWN arm, chosen WITHOUT looking at the
          * filter, because for it no filter can help: it calls
-         * server_load_events_fi with pid 0, and server_load_events_fi_mode
-         * has no query pushdown at all, so unfiltered, pid-filtered,
-         * query-filtered and both-filtered requests hand the loader
-         * identical arguments. max_events is enforced during the load, and
-         * this refusal precedes the only call that receives req->filter, so
-         * "add a pid/query filter" there is advice that cannot work -- and
-         * web/static/app.js renders the hint verbatim to the user. The
-         * earlier note here claimed Queries "keeps the original hint"
-         * because it loads raw regardless; that was the reason the hint was
-         * WRONG, not a reason to keep it.
+         * server_load_events_fi_all_pids (pid 0 unconditionally), and
+         * server_load_events_fi_mode has no query pushdown at all, so
+         * unfiltered, pid-filtered, query-filtered and both-filtered
+         * requests hand the loader identical arguments. max_events is
+         * enforced during the load, and this refusal precedes the only call
+         * that receives req->filter, so "add a pid/query filter" there is
+         * advice that cannot work -- and web/static/app.js renders the hint
+         * verbatim to the user. The earlier note here claimed Queries "keeps
+         * the original hint" because it loads raw regardless; that was the
+         * reason the hint was WRONG, not a reason to keep it.
          *
-         * #728: EVERY hint below comes from the shared table
-         * (pgwt_overload_arms) except the two command-specific arms, which
-         * are chosen FIRST because they explain more than the kind can: a
-         * query-filtered top_events/top_sessions/heatmap (#526) and
-         * top_queries (#694, whose sentence begins with the table's own
-         * "narrow the time range" and then says why no filter helps). Both
-         * are merged, separately tested behaviour, and both elaborate rather
-         * than contradict -- tests/test_data_window_bound.py asserts exactly
-         * that, and asserts byte equality with the stderr line everywhere
-         * else.
+         * #728: EVERY hint below contains the shared table's sentence
+         * (pgwt_overload_arms) VERBATIM. Two command arms add an explanation
+         * the kind cannot know -- a query-filtered top_events/top_sessions/
+         * heatmap (#526) and top_queries (#694) -- but they COMPOSE it
+         * around the table's sentence rather than restating it, so no arm
+         * can say something the stderr line does not. Round 5 changed that:
+         * #526's arm used to be a literal ending "; narrow the time range",
+         * which both diverged from the log and withheld the pid reduction
+         * that is real for those three commands.
+         * tests/test_data_window_bound.py asserts the containment on every
+         * leg, and byte equality wherever no arm composes.
          *
          * Round 4 removed the old generic fallback,
          * "narrow the time range or add a pid/query filter". It was the last
@@ -5089,24 +5096,48 @@ static int reject_overload(struct pgwt_server *srv,
          * This sits INSIDE the window_too_large else-branch, so the #333
          * unreadable-file and allocation-failure refusals above keep their
          * precedence: neither is ever reported as a range-size problem. */
+        const char *sentence =
+            overload_sentence(info->load_purpose, info->load_pid_scoped,
+                              info->load_pid_pushdown);
         if (info->load_purpose == PGWT_LOAD_WINDOW &&
-            strcmp(req->cmd, "top_queries") == 0)
-            cJSON_AddStringToObject(root, "hint",
-                "narrow the time range; Queries always reads raw events for "
-                "every pid, because execution statistics need every "
-                "backend's markers, so no filter reduces this load");
-        else if (info->load_purpose == PGWT_LOAD_WINDOW &&
+            strcmp(req->cmd, "top_queries") == 0) {
+            /* #694's sentence, COMPOSED: the table's own sentence, then why
+             * no filter helps. Not a literal, so the two cannot drift -- and
+             * handle_top_queries loads all pids, so the table gives exactly
+             * "narrow the time range" and this reproduces #694's merged
+             * string byte for byte (tests/test_top_wait_backfill.c pins it).
+             * If that caller ever started forwarding pid, the sentence would
+             * change here and that C test would go red, which is the correct
+             * alarm rather than a stale explanation. */
+            char hint[512];
+            snprintf(hint, sizeof(hint),
+                     "%s; Queries always reads raw events for every pid, "
+                     "because execution statistics need every backend's "
+                     "markers, so no filter reduces this load", sentence);
+            cJSON_AddStringToObject(root, "hint", hint);
+        } else if (info->load_purpose == PGWT_LOAD_WINDOW &&
             req->filter.query_id != 0 &&
             (strcmp(req->cmd, "top_events") == 0 ||
              strcmp(req->cmd, "top_sessions") == 0 ||
-             strcmp(req->cmd, "heatmap") == 0))
-            cJSON_AddStringToObject(root, "hint",
-                "a query filter forces the exact path, which loads raw "
-                "events; narrow the time range");
-        else
-            cJSON_AddStringToObject(root, "hint",
-                overload_sentence(info->load_purpose, info->load_pid_scoped,
-                                  info->load_pid_pushdown));
+             strcmp(req->cmd, "heatmap") == 0)) {
+            /* #526's explanation, then the table's sentence VERBATIM.
+             *
+             * Round 4 left this arm as a literal ending "; narrow the time
+             * range", which made it the one leg where the screen and the log
+             * disagreed -- and the hint withheld the pid reduction, which is
+             * real here: all three of these commands forward req->filter.pid
+             * into a load that discards other pids before counting. Saying
+             * "a query filter forced this" is extra information, not a
+             * reason to drop the reduction that works. Composing means the
+             * log's whole sentence is always present in the hint. */
+            char hint[512];
+            snprintf(hint, sizeof(hint),
+                     "a query filter forces the exact path, which loads raw "
+                     "events; %s", sentence);
+            cJSON_AddStringToObject(root, "hint", hint);
+        } else {
+            cJSON_AddStringToObject(root, "hint", sentence);
+        }
     }
     uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
     uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;

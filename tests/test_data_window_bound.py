@@ -84,8 +84,14 @@ PID_CLAUSE = "add a pid filter"
 TOP_QUERIES_HINT = ("narrow the time range; Queries always reads raw events "
                     "for every pid, because execution statistics need every "
                     "backend's markers, so no filter reduces this load")
+# #526's explanation followed by the table's WINDOW sentence verbatim. The
+# three commands on this arm forward req->filter.pid, so the sentence is the
+# pid-advice one; round 4's literal ended at "narrow the time range" and so
+# both diverged from the log and withheld a reduction that works.
 QUERY_FILTER_HINT = ("a query filter forces the exact path, which loads raw "
-                     "events; narrow the time range")
+                     "events; narrow the time range, or add a pid filter: "
+                     "this load reads every pid and applies the request's "
+                     "pid filter while loading")
 S = 1_000_000_000
 MS = 1_000_000
 MARKER_EXEC_START = 0xFFFFFFF0
@@ -183,6 +189,38 @@ def grade_refusal(t, label, err, must_have, must_not_have, ends_with=None):
         t.check(all(ln.endswith(ends_with) for ln in lines),
                 f"{label}: every refusal line ends at '{ends_with}' "
                 f"(got {lines})")
+
+
+def grade_contains_sentence(t, label, err, resp):
+    """The stderr sentence must appear in the JSON hint VERBATIM.
+
+    Weaker than grade_agreement (which demands equality) and used only where
+    an arm legitimately adds an explanation the load kind cannot know: #694's
+    top_queries sentence and #526's query-filter sentence. Both COMPOSE the
+    table's sentence, so the log's words are always present on the screen —
+    the relation this checks. Round 4 left #526 as a literal that merely
+    ended with "narrow the time range", which is how the one surviving
+    screen/log divergence hid behind a non-contradiction check.
+
+    Vacuity guards first: a missing stderr line, a missing hint, or an empty
+    sentence FAILS rather than satisfying a containment nobody can evaluate.
+    """
+    lines = [ln.rstrip() for ln in err.splitlines()
+             if ln.startswith(REFUSAL_PREFIX)]
+    hint = resp.get("hint")
+    t.check(len(lines) == 1,
+            f"{label}/contains: exactly ONE refusal line to compare against "
+            f"(got {lines})")
+    sentence = lines[0].split(SEP, 1)[1].strip() if lines and SEP in lines[0] \
+        else ""
+    t.check(sentence != "",
+            f"{label}/contains: the stderr line carries a sentence after "
+            f"'{SEP}' (line={lines[0] if lines else None!r})")
+    t.check(isinstance(hint, str) and hint.strip() != "",
+            f"{label}/contains: the response carries a hint ({hint!r})")
+    t.check(bool(sentence) and isinstance(hint, str) and sentence in hint,
+            f"{label}/contains: the JSON hint contains the stderr sentence "
+            f"VERBATIM (sentence={sentence!r}, hint={hint!r})")
 
 
 def grade_agreement(t, label, err, resp):
@@ -298,6 +336,46 @@ def check_window_arm(t, err_dir):
                       ends_with=WINDOW_TAIL)
         grade_agreement(t, "window/all-pids", err, resp)
 
+        # ── The WINDOW pid clause, MEASURED rather than asserted ───────────
+        # The PREFIX arm has had a measured control since round 2 (its marker
+        # count falls when the advice is followed); the WINDOW clause had
+        # none, so it could have become inert without a test reddening. Same
+        # trace, same bound, one variable: whether the request carries a pid.
+        #
+        # Where the clause IS printed (time_model forwards pid), following it
+        # must turn the refusal into an answer with correct numbers — proof
+        # the filter is applied DURING the load, not after. Where it is NOT
+        # printed (variants drops pid), following it must change nothing —
+        # proof the omission is right rather than timid.
+        env5k = {"PGWT_LOAD_MAX_EVENTS": 5_000}
+        resp_unscoped, _ = ask(trace_dir, env5k,
+                               os.path.join(err_dir, "reduce-win-none.err"),
+                               "time_model")
+        resp_scoped, _ = ask(trace_dir, env5k,
+                             os.path.join(err_dir, "reduce-win-pid.err"),
+                             "time_model", filters={"pid": 1001})
+        t.check_eq(resp_unscoped.get("code"), "window_too_large",
+                   "reduction/window: the unscoped load is the one that "
+                   "refuses, so the comparison below has two sides")
+        t.check(resp_scoped.get("code") != "window_too_large",
+                f"reduction/window: adding the pid filter the clause names "
+                f"really does clear the refusal "
+                f"(code={resp_scoped.get('code')})")
+        rows = {r["name"]: r for r in resp_scoped.get("rows", [])}
+        t.check_approx(rows.get("IO", {}).get("ms", -1),
+                       EVENTS_PER_PID * DUR_NS / 1e6, 0.01,
+                       "reduction/window: and answers with ONE pid's exact "
+                       "IO time, so the filter was applied during the load")
+        # The negative half: the all-pids caller must NOT be helped, which is
+        # why its refusal withholds the clause. If someone made variants
+        # forward pid, this flips and M14 catches the text at the same time.
+        resp_av, _ = ask(trace_dir, env5k,
+                         os.path.join(err_dir, "reduce-win-allpids.err"),
+                         "variants", filters={"pid": 1001})
+        t.check_eq(resp_av.get("code"), "window_too_large",
+                   "reduction/window: the all-pids caller still refuses WITH "
+                   "a pid filter, so withholding the clause there is correct")
+
         # The two documented elaborations, each pinned to its own merged
         # string AND asserted not to contradict the log: #694's must BEGIN
         # with the stderr sentence; #526's must still name the range
@@ -308,26 +386,32 @@ def check_window_arm(t, err_dir):
         t.check_eq(resp.get("code"), "window_too_large",
                    "window/top_queries: refused")
         t.check_eq(resp.get("hint"), TOP_QUERIES_HINT,
-                   "window/top_queries: keeps #694's hint verbatim")
-        tail = err.split(SEP, 1)[1].strip() if SEP in err else ""
-        t.check(tail != "" and (resp.get("hint") or "").startswith(tail),
-                f"window/top_queries: #694's hint ELABORATES the stderr "
-                f"sentence instead of contradicting it (tail={tail!r})")
+                   "window/top_queries: reproduces #694's merged hint byte "
+                   "for byte, composed from the table rather than literal")
+        grade_contains_sentence(t, "window/top_queries", err, resp)
 
+        # #526: the one leg where round 4 let the screen and the log differ.
+        # Its hint now COMPOSES the table sentence, so the pid reduction —
+        # real here, because top_events forwards req->filter.pid — is no
+        # longer withheld, and the containment check below is an agreement
+        # check rather than the weak non-contradiction one it replaced.
         resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
                         os.path.join(err_dir, "window-queryfilter.err"),
                         "top_events", filters={"query_id": 42})
         t.check_eq(resp.get("code"), "window_too_large",
                    "window/query-filter: refused")
         t.check_eq(resp.get("hint"), QUERY_FILTER_HINT,
-                   "window/query-filter: keeps #526's hint verbatim")
+                   "window/query-filter: #526's explanation followed by the "
+                   "table's sentence verbatim")
+        grade_contains_sentence(t, "window/query-filter", err, resp)
         hint = resp.get("hint") or ""
-        t.check("narrow the time range" in hint and
-                "the prefix is read from" not in hint and
+        t.check(PID_CLAUSE in hint,
+                f"window/query-filter: the hint no longer withholds the pid "
+                f"reduction that works for this command ({hint!r})")
+        t.check("the prefix is read from" not in hint and
                 "its bounds come from the selected execution" not in hint and
                 "whole capture" not in hint,
-                f"window/query-filter: #526's hint still names the range "
-                f"reduction and borrows no other kind's explanation "
+                f"window/query-filter: borrows no other kind's explanation "
                 f"({hint!r})")
 
         # CONTEXT: handle_execution_detail's load is bounded by the SELECTED
