@@ -673,5 +673,54 @@ runner_case("0", "test_execution_cardinality", 78, "0 0 1 0 0", stream="stderr")
 runner_case("0", "test_execution_cardinality", 78, "0 0 0 1 0", known=True,
             diagnostic="KNOWN-FAILING (issue #622)")
 
+print("\n-- #760 KNOWN_FAILING gained an OS field (name|issue|os) --")
+# Exercise the real known_failing_issue()/run_test() text directly, not a
+# copy -- same rationale as the phase-classification harness above: text
+# wiring alone cannot prove an os-scoped entry stays red on the OTHER os.
+kf_functions = []
+for kf_name in ("known_failing_issue", "run_test"):
+    kf_match = re.search(r"(?ms)^" + kf_name + r"\(\) \{.*?^\}", runner)
+    report(kf_match is not None, "runner function %s is reachable (OS-scoping)" % kf_name)
+    if kf_match:
+        kf_functions.append(kf_match.group(0))
+kf_harness = "\n".join(kf_functions) + """
+set -o pipefail
+passed=0; failed=0; refused=0; known_failing=0; xpass=0
+phase_expectation=""
+RUNNER_OS="$1"
+KNOWN_FAILING=("$2")
+run_test "$3" bash -c 'exit "$1"' unused "$4"
+printf 'COUNTS %s %s %s %s %s\n' "$passed" "$failed" "$refused" "$known_failing" "$xpass"
+"""
+
+
+def kf_case(runner_os, entry, name, rc, want):
+    result = subprocess.run(["bash", "-uc", kf_harness, "kf-test",
+                             runner_os, entry, name, str(rc)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True)
+    report(result.returncode == 0 and "COUNTS " + want in result.stdout,
+           "RUNNER_OS=%s KNOWN_FAILING=%r %s exit %s: %s" %
+           (runner_os, entry, name, rc,
+            result.stdout.strip().split("\n")[-1] if result.stdout
+            else result.stderr.strip()))
+
+
+# A pre-#760, two-field entry (os omitted) still means "all OS" -- unaffected
+# by RUNNER_OS, keeping every existing KNOWN_FAILING entry backward compatible.
+kf_case("ubuntu", "flaky|100", "flaky", 1, "0 0 0 1 0")
+kf_case("el8", "flaky|100", "flaky", 1, "0 0 0 1 0")
+# The scoping itself: the SAME three-field entry, the SAME failing test, two
+# different tiers. On el8 it is the tracked bug (known-failing); on ubuntu it
+# is a real, unmasked failure -- this pair is what a mutation that drops or
+# ignores the os field collapses into "always known-failing", which would
+# silently disarm the Ubuntu run exactly as #760 describes.
+kf_case("el8", "xval|675|el8", "xval", 1, "0 0 0 1 0")
+kf_case("ubuntu", "xval|675|el8", "xval", 1, "0 1 0 0 0")
+# An unresolvable/unrecognised tier identity (unreadable or unparseable
+# /etc/os-release -> detect_runner_os's "unknown") must not accidentally
+# match a scoped entry either -- absence of an identity is not a wildcard.
+kf_case("unknown", "xval|675|el8", "xval", 1, "0 1 0 0 0")
+
 print(f"\n{run - failed}/{run} checks passed")
 sys.exit(0 if failed == 0 else 1)

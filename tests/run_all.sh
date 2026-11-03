@@ -127,10 +127,10 @@ excluded=0
 known_failing=0
 xpass=0
 
-# KNOWN_FAILING: test name -> tracking issue number. ONLY for a test that
-# reproduces a real, filed product bug (e.g. #97, #98) — never for timing or
-# runner noise; a noisy test gets moved to a different tier or investigated,
-# it is never silenced here (see also CLAUDE.md's Rules).
+# KNOWN_FAILING: name|issue|os. ONLY for a test that reproduces a real,
+# filed product bug (e.g. #97, #98) — never for timing or runner noise; a
+# noisy test gets moved to a different tier or investigated, it is never
+# silenced here (see also CLAUDE.md's Rules).
 #
 # A listed test still runs in full, every time, and NEITHER outcome fails
 # the gate: an expected failure is printed loudly as "KNOWN-FAILING
@@ -144,14 +144,21 @@ xpass=0
 # test that could not even run (exit 126/127: not executable, or the file
 # is missing) is a broken test, not the tracked bug — that always counts as
 # a real failure regardless of KNOWN_FAILING membership.
-# Empty = nothing is expected to fail. test_partition|99 was removed with the
-# #202 fix: #99 was "conservation miss of 0.11% (CPU+Waits vs DB Time)", the
-# under-attribution half of the same identity, and the residual is now
-# STRUCTURALLY zero rather than merely small — with cpu_accounting off both
-# live paths charge the gap and there is no Off-CPU* term at all, with it on
-# both charge measured and the remainder has its own row, so the legacy/PG13
-# tier is exact too. Leaving the entry in would have disarmed the only
-# live-PG test that can catch a regression of that contract.
+#
+# #760: the third field (os) scopes an entry to one tier, matched against
+# RUNNER_OS below. A bare name|issue (os omitted/empty) means "all OS" —
+# every pre-#760 two-field entry keeps working unchanged. Without this an
+# el8-only entry would ALSO disarm the Ubuntu run, where the same test
+# passes today, masking exactly the regression this table exists to surface.
+#
+# test_partition|99 was removed with the #202 fix: #99 was "conservation
+# miss of 0.11% (CPU+Waits vs DB Time)", the under-attribution half of the
+# same identity, and the residual is now STRUCTURALLY zero rather than
+# merely small — with cpu_accounting off both live paths charge the gap and
+# there is no Off-CPU* term at all, with it on both charge measured and the
+# remainder has its own row, so the legacy/PG13 tier is exact too. Leaving
+# the entry in would have disarmed the only live-PG test that can catch a
+# regression of that contract.
 # test_io_worker_parity|376 was removed by the summary-v6 writer fix (#315,
 # #376), in the same branch that added the entry: io_worker records are now
 # excluded at the writer, both paths are invariant to them, and the test is
@@ -161,21 +168,59 @@ xpass=0
 # neither outcome, so keeping it would have disarmed the very gate the fix
 # exists to satisfy — and CI's build-and-unit job (make -C tests check)
 # ignores this table entirely, so it was never the thing keeping CI green.
-KNOWN_FAILING=()
+#
+# test_cross_validate_tiered|675|el8: issue #760 scopes this to el8 because
+# issue #675 (open, filed, a real src/ bug: the sampled tier reporting
+# roughly half the kernel's on-CPU time on el8's 4.18 kernel) measured the
+# sampled/exact share disagreement at 10.1-11.9pp across 10/50/100/200 Hz
+# against a derived tolerance of +-8.8pp there. Ubuntu passes this test
+# today, so an unscoped entry would have masked a real Ubuntu regression.
+KNOWN_FAILING=(
+    "test_cross_validate_tiered|675|el8"
+)
+
+# detect_runner_os — this tier's OS tag (ubuntu|el8|el9|<raw ID>|unknown),
+# derived from a SINGLE read of /etc/os-release. Parsed field-by-field
+# rather than sourced, so this script's own environment is never polluted by
+# (or made to depend on) whatever other variables that file happens to
+# define. Used only to scope KNOWN_FAILING entries above -- never to infer a
+# product behavior/expectation (that stays PGWT_EXPECT_PHASE_PROBES's job,
+# which is explicitly NOT inferred from the OS; see testutil.py).
+detect_runner_os() {
+    local id="" version_id="" major=""
+    if [[ -r /etc/os-release ]]; then
+        id=$(/usr/bin/awk -F= '$1=="ID"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null)
+        version_id=$(/usr/bin/awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null)
+    fi
+    major="${version_id%%.*}"
+    case "$id" in
+        ubuntu) echo "ubuntu" ;;
+        rocky|rhel|centos|almalinux|ol)
+            case "$major" in
+                8) echo "el8" ;;
+                9) echo "el9" ;;
+                *) echo "el${major}" ;;
+            esac ;;
+        "") echo "unknown" ;;
+        *) echo "$id" ;;
+    esac
+}
+RUNNER_OS="$(detect_runner_os)"
 
 # known_failing_issue NAME — prints the tracking issue number and returns 0
-# if NAME is listed in KNOWN_FAILING, else returns 1 with no output.
+# if NAME is listed in KNOWN_FAILING AND (its os field is empty, meaning
+# all-OS, or equals $RUNNER_OS), else returns 1 with no output.
 known_failing_issue() {
     local target="$1"
-    local entry name issue
+    local entry name issue os
     # The ${a[@]+...} form, not a bare "${a[@]}": under `set -u` an EMPTY
     # array expands to an unbound variable on bash < 4.4 (EL8's /bin/bash is
     # 4.4, but the gate must not depend on that), which would abort run_all
     # the first time any test finished — with the list now empty, that is
     # every run.
     for entry in ${KNOWN_FAILING[@]+"${KNOWN_FAILING[@]}"}; do
-        IFS='|' read -r name issue <<< "$entry"
-        if [[ "$name" == "$target" ]]; then
+        IFS='|' read -r name issue os <<< "$entry"
+        if [[ "$name" == "$target" ]] && { [[ -z "$os" ]] || [[ "$os" == "$RUNNER_OS" ]]; }; then
             echo "$issue"
             return 0
         fi
