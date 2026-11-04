@@ -10,6 +10,15 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix: Events tab compare mode now includes the off-CPU row (#757).**
+  Comparing two windows in the Events tab now shows the synthetic
+  `CPU (waiting for a core)` row the same way the non-compare Events table
+  and Overview's Time Model already do, including when that row exists on
+  only one side of the comparison. Previously an off-CPU change between the
+  two windows was invisible in Events compare while Overview showed it. The
+  Events AAS column still does not carry a value for this row (tracked
+  separately in #757); this change is the compare-join fix only.
+
 - **fix: sampler timer health and scheduling disclosure (#675/#697).**
   New runtime env var `PGWT_SAMPLER_NICE` accepts integers -20..19 for the
   daemon's own niceness (unset/empty leaves it unchanged; `0` verifies
