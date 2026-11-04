@@ -320,7 +320,19 @@ jobs:
     # runs on a hosted runner, so it needs no group either.
     name: sampled-overhead (PG 17)
     needs: changed_files
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('["self-hosted","gate-box"]') }}
+    # Job-level runner selection mirrors "Determine whether sampled-overhead
+    # is needed" below byte-for-byte (src_changed only) -- duplicated here on
+    # purpose: GitHub assigns a runner to a job BEFORE any of its steps run,
+    # so a step-level skip (which the job keeps, to report the required
+    # check name) cannot stop an unneeded run from occupying a
+    # self-hosted,gate-box runner SLOT while it waits to be scheduled. A
+    # docs/settings-only PR queued this job on the gate box for 10+ minutes
+    # with zero steps ever starting (job 126860766523, PR #768) -- not the
+    # /tmp/pgwt-box-check.lock wait this file also instruments, but a second,
+    # independent contributor to the same symptom. Keeping the job NAME
+    # identical (required check: "sampled-overhead (PG 17)") while routing it
+    # to a cheap hosted runner when unneeded needs no branch-protection change.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || (needs.changed_files.outputs.src_changed == 'true') && fromJSON('["self-hosted","gate-box"]') || 'ubuntu-24.04' }}
     env:
       PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-sampled-overhead
     # timeout-minutes: the gate itself takes ~9 min on the box; the rest is
@@ -490,50 +502,36 @@ jobs:
           psql -U postgres -d postgres -tAc "SELECT version()"
           echo "SO_PGPORT=5432" >> "$GITHUB_ENV"
 
-      # Gate box already has PG17 on port 5417 (provision-runner.sh); no
-      # install/config step ran above, so resolve BPFTOOL and the port here.
-      # Locked: provision-runner.sh restarts clusters inside this same lock,
-      # so probing psql without it could hit a cluster mid-restart.
-      - name: Resolve gate-box PostgreSQL port + bpftool
+      # Issue #770 (part 5): these four steps used to each take and release
+      # /tmp/pgwt-box-check.lock separately -- see the equivalent comment on
+      # capture-smoke's merged step for the race this closes (an agent's
+      # blocking, no-timeout box-check flock slipping into the gap between
+      # two of this job's steps and holding the lock for most of an hour).
+      # One lock hold across resolve+build+unit-gates+overhead-gate below.
+      - name: Resolve gate-box PostgreSQL port + bpftool, build, and gate sampled overhead (single lock hold)
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           echo "lock-wait: $((SECONDS-_lock_t0))s"
+
+          # ── Resolve gate-box PostgreSQL port + bpftool ──
           command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
-          echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
-          echo "SO_PGPORT=5417" >> "$GITHUB_ENV"
+          BPFTOOL=$(command -v bpftool)
+          SO_PGPORT=5417
           psql -U postgres -h /var/run/postgresql -p 5417 -d postgres -tAc "SELECT version()"
 
-      - name: Build tracer
-        if: steps.needed_filter.outputs.needed == 'true'
-        run: |
-          exec 9>/tmp/pgwt-box-check.lock
-          _lock_t0=$SECONDS
-          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
-          echo "lock-wait: $((SECONDS-_lock_t0))s"
+          # ── Build tracer ──
           make
 
-      - name: Run sampled-overhead structural unit gates
-        if: steps.needed_filter.outputs.needed == 'true'
-        run: |
-          exec 9>/tmp/pgwt-box-check.lock
-          _lock_t0=$SECONDS
-          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
-          echo "lock-wait: $((SECONDS-_lock_t0))s"
+          # ── Run sampled-overhead structural unit gates ──
           make -C tests test_exact_probe test_pgss_resolver test_query_text
           tests/test_exact_probe
           tests/test_pgss_resolver
           tests/test_query_text
 
-      - name: Gate paired sampled overhead
-        if: steps.needed_filter.outputs.needed == 'true'
-        run: |
-          exec 9>/tmp/pgwt-box-check.lock
-          _lock_t0=$SECONDS
-          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
-          echo "lock-wait: $((SECONDS-_lock_t0))s"
+          # ── Gate paired sampled overhead ──
           PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
           sudo env "PGWT_CI_CELL=$PGWT_CI_CELL" "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
@@ -636,6 +634,22 @@ jobs:
     # them is the design (a 15-min bound turned master red on 2026-09-18).
     name: capture-smoke (PG ${{ matrix.pg }})
     needs: changed_files
+    # NOTE: unlike sampled-overhead below, this job's runs-on deliberately
+    # keeps the ORIGINAL fork-PR-only ternary (no needs.changed_files
+    # indirection) rather than also gating on job-level "needed", even
+    # though the same gate-box-runner-slot-occupied-while-unneeded problem
+    # applies here too (see "Determine whether this capture cell is needed"
+    # below, and PR #768 / job 126860766523 for the measured cost: a cell
+    # queued 10+ minutes with zero steps started). The PG18 reduced-tier
+    # rule needs `matrix.pg` in the condition, and
+    # scripts/check-runner-pin.sh refuses ANY runs-on expression that
+    # references matrix/env/vars/inputs/secrets (it cannot statically verify
+    # no ubuntu-latest hides inside a value it can't resolve) -- confirmed by
+    # running it here. Fixing this job the same way sampled-overhead was
+    # fixed needs de-matrixing into 4 separately-named jobs (one per PG
+    # version, each with a static runs-on with no matrix reference) so each
+    # job's own PG18-ness is a fact, not a matrix lookup -- a bigger,
+    # separate change than this PR's scope; left as a follow-up.
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('["self-hosted","gate-box"]') }}
     env:
       PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-capture-${{ matrix.pg }}
@@ -824,41 +838,41 @@ jobs:
           psql -U postgres -d postgres -tAc "SELECT version()"
           echo "CS_PGPORT=5432" >> "$GITHUB_ENV"
 
-      # Gate box already has PG${{ matrix.pg }} on port 54${{ matrix.pg }}
-      # (tests/provision-runner.sh); no install/config step ran above, so
-      # resolve BPFTOOL and the port here instead. Locked: provision-runner.sh
-      # restarts clusters inside this same lock, so probing psql without it
-      # could hit a cluster mid-restart.
-      - name: Resolve gate-box PostgreSQL port + bpftool
+      # Issue #770 (part 5): these three steps used to each take and release
+      # /tmp/pgwt-box-check.lock separately. scripts/box-check.sh's remote
+      # command falls back to a BLOCKING `flock 9` with no timeout after its
+      # non-blocking attempt, and a `run_all.sh --require-live` run holds the
+      # lock 45-80 minutes -- an agent's box-check could acquire the lock in
+      # the GAP between this job's old "Build" and "Run capture smoke" steps
+      # and then hold it for most of an hour mid-job (measured on #759 run
+      # 41905201284: PG17's "Run capture smoke" step alone took 3678s, ~46min
+      # of which was this exact race). One `exec 9>`/`flock` held for the
+      # resolve+build+run sequence below closes that gap: once this cell has
+      # the lock, nothing can interleave until it releases it at the end.
+      - name: Resolve gate-box PostgreSQL port + bpftool, build, and run capture smoke (single lock hold)
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           echo "lock-wait: $((SECONDS-_lock_t0))s"
+
+          # ── Resolve gate-box PostgreSQL port + bpftool ──
+          # Gate box already has PG${{ matrix.pg }} on port 54${{ matrix.pg }}
+          # (tests/provision-runner.sh); no install/config step ran, so
+          # resolve BPFTOOL and the port here instead. Locked: provision-
+          # runner.sh restarts clusters inside this same lock, so probing
+          # psql without it could hit a cluster mid-restart.
           V=${{ matrix.pg }}
           command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
-          echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
-          echo "CS_PGPORT=54${V}" >> "$GITHUB_ENV"
-          psql -U postgres -h /var/run/postgresql -p "54${V}" -d postgres -tAc "SELECT version()"
+          BPFTOOL=$(command -v bpftool)
+          CS_PGPORT="54${V}"
+          psql -U postgres -h /var/run/postgresql -p "$CS_PGPORT" -d postgres -tAc "SELECT version()"
 
-      - name: Build (BPF tracer + pgwt-server)
-        if: steps.needed_filter.outputs.needed == 'true'
-        run: |
-          exec 9>/tmp/pgwt-box-check.lock
-          _lock_t0=$SECONDS
-          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
-          echo "lock-wait: $((SECONDS-_lock_t0))s"
+          # ── Build (BPF tracer + pgwt-server) ──
           make
 
-      - name: Run capture smoke (tiered hard; full if watchpoints available)
-        if: steps.needed_filter.outputs.needed == 'true'
-        run: |
-          exec 9>/tmp/pgwt-box-check.lock
-          _lock_t0=$SECONDS
-          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
-          echo "lock-wait: $((SECONDS-_lock_t0))s"
-          V=${{ matrix.pg }}
+          # ── Run capture smoke (tiered hard; full if watchpoints available) ──
           # PG16 = unsupported version: assert the loud-refusal contract.
           FLAGS=""
           [ "$V" = "16" ] && FLAGS="--expect-unsupported"
