@@ -1,49 +1,39 @@
 # pg_wait_tracer — working agreement for agents
 
-## RULE 0 — no status report reaches the owner unaudited. No exceptions.
+## RULE 0 — report merged work, with links. Never a number you did not compute.
 
-Verify the lead's claims before the owner sees them. Before **any** status report,
-progress summary or answer about why work is or is not happening, run:
+The owner reads the board, not status prose. Send him **five lines**: what merged,
+what is in flight, what needs him. Link the PR or the gate artifact; let him click.
 
-```
-scripts/lead/audit-report.sh <draft-file>     # codex re-derives every claim; returns SEND or BLOCK
-```
+**Put no number in prose that you did not compute this turn**, and no claim of
+**absence** ("exists nowhere", "not merged", "no evidence") without the command and
+its output. Absence is the claim we get wrong most: a `PROVEN RED` block sat in a
+commit message while we called it unproven, a guard was reported "failing on master"
+when the file was simply missing, and `ls-remote` returning empty on a network
+failure read as "branch deleted". One denied operation proves one attempt failed.
+Without evidence write `UNVERIFIED:`, never a cause.
 
-Fix **BLOCK** drafts before sending. Paste the verdict line with the report.
-For held claims, run `scripts/lead/held.sh <path>...` (prints `HELD <path> by #N`
-or `FREE <path>`); use only:
+Say **READY-NOT-STARTED — my choice** when nothing external stops you. "Blocked"
+means a named PR holds a file, or a box run is in progress. A scheduling decision
+reported as a block converts your choice into the owner's problem.
 
-- `RUNNING <item> <PR/agent> since <t>`
-- `HELD <item> by #N on <files>` — paste **this turn's** `held.sh` output
-- `READY-NOT-STARTED <item>: my choice — I ran <X> instead`
+## RULE 1 — one adviser, three triggers. Decide the rest yourself.
 
-If `held.sh` says FREE and the item is not running, report **READY-NOT-STARTED
-by my choice**, never "blocked". Every report must name the **top ledger item
-not running**, with `held.sh` output or "my choice".
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#held-claims`)
+Consult an adviser (Fable `.claude/agents/adviser.md`, or Astra via `codex exec`)
+for exactly three things: **a number going to the owner**, **a RULE 2 exclusion
+request**, and **a `src/` accounting or format design**. Use both only when the
+first answer is load-bearing and you cannot verify it yourself.
 
-Paste a command and its output for every **count**, **absence** ("exists nowhere",
-"not merged", "unreachable"), **permissions** claim ("I can't"), and **running** claim.
-Treat one denied operation as one failed attempt only. Without evidence, write
-`UNVERIFIED:`, never a cause.
+Everything else — sequencing, which branch next, whether a review finding is a
+blocker — is the lead's call. Make it and move.
 
-## RULE 1 — advisers first, the owner last. Never ask the owner what an adviser can answer.
+An adviser reviews reasoning, not code, and never edits, commits or creates cloud
+resources. It must be a separate session: none advises itself, and none reviews
+code it wrote. Its verdict is advice; overrule it and say so in the report.
 
-Send design, scope, sequencing, approach and option questions to **both advisers first**:
-Fable (`.claude/agents/adviser.md`) and Astra, in parallel. Ask the owner only if
-the advisers disagree and the lead cannot adjudicate on evidence; the lead disagrees with both;
-or the decision is the owner's (money, machines, release timing, RULE 2 exclusions).
-Tell the owner what both advisers said and where the lead disagrees.
-A sol 6.1 coder may consult an Astra adviser directly, but the adviser MUST be
-a separate agent session: a session never advises itself, and no session
-reviews or advises on code it wrote.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#advisers-before-owner`)
-
-Try first; on failure, tell both advisers what was attempted and what happened.
-Report failures to the owner only afterwards, with attempts, outcomes, options and
-a recommendation; never a bare "this does not work, FYI". Solve it first otherwise.
-If both advisers find no way, report what X, Y and Z they considered and each cost.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#failure-reports`)
+**Verify an adviser's load-bearing claim in the code before acting on it.** A
+proposed fix for #675 rested on a comment that the code six lines below contradicted;
+reading the comment and calling it verified cost a day's planning.
 
 ## RULE 2 — never ship a known defect. "Good enough" is not a state.
 
@@ -113,6 +103,37 @@ Declare a PR ready only with ALL evidence in its body:
    Give the owner only those questions to resolve.
 
 Use `/pr-ready` to run this sequence.
+
+## How work flows
+
+- **WIP = 1 through merge.** Finish one change — gated, reviewed, merged — before
+  starting the next. Batch tightly-coupled fixes that share acceptance criteria
+  into one branch rather than splitting them across branches that then contend.
+  Running three in parallel does not merge faster; it produces three unfinished
+  things. 210 pushed-but-unmerged branches accumulated under the opposite rule.
+- **A pushed branch with no PR is not work.** Open a draft PR as the first act
+  after the first push (`gh pr create --draft --fill`). The pre-push hook enforces
+  this from the second push onward. Work nobody can see cannot be reviewed,
+  merged, or recovered when a session dies.
+- **File an issue only for a reproducible contract violation** — something the
+  owner would see as a wrong number or broken interaction in the 11-tab walk.
+  Everything else is a line in the PR body, or nothing. Instrument defects are
+  fixed in the PR that found them or dropped; they are not release blockers.
+  We filed 16 issues in one day while closing none.
+- **Review by risk, not uniformly.** Every change to accounting, attribution,
+  format or refusal logic gets a full independent review; sample the rest. A
+  reviewer's first job on a correctness fix is to **watch the new test fail** —
+  mutate the fix, see red, restore, see green, paste both.
+- **Gate once per candidate.** `make check` locally; the authoritative full run
+  happens once on the tree that will merge. Do not re-run a green box-check that
+  is still bound to the tip under review.
+- **Exit codes lie in both directions.** `make check` has reported success while
+  exiting non-zero; `make box-check | tee` returns tee's status. The artifact is
+  the verdict: the stamp versus the tree hash, and the `Executed:` line with a
+  `commit=`/`tree-hash=` header bound to the tip. Never quote an exit code as
+  evidence.
+- **End an agent session at ~100K tokens** and hand off with a one-page summary
+  rather than extending it. One run reached 866K tokens over 3,403 tool calls.
 
 ## Who does what (main session → subagents)
 
@@ -277,21 +298,31 @@ Registered in `.claude/settings.json` (`*` means no matcher):
 | Event | Matcher | Command |
 |---|---|---|
 | `PreToolUse` | `Bash` | `scripts/hooks/push-guard.sh` |
-| `Stop` | `*` | `scripts/lead/sweep-hook.sh` |
 | `SubagentStart` | `*` | `scripts/lead/agent-start-hook.sh` |
 | `SubagentStop` | `*` | `scripts/lead/agent-stop-hook.sh` |
-| `SubagentStop` | `*` | `scripts/lead/sweep-hook.sh` |
 
 - `PreToolUse`: screens Bash command text; can refuse a push or other command
-  matching the push-guard bypass/tampering denylist.
-- `Stop`: refreshes stale sweep data; can refuse to end a turn until every
-  finding carries this turn's disposition.
+  matching the push-guard bypass/tampering denylist. It is a substring denylist
+  with no parsing, so it also refuses innocent commands that merely *mention* the
+  hooks path or the bypass variable — use the file tools rather than shell
+  redirects when that happens, and never obfuscate a path to get past it.
 - `SubagentStart`: records the agent ID in the shared active-agent ledger;
   always exits 0 and cannot refuse agent creation.
-- `SubagentStop` ledger hook: removes the agent ID from that ledger;
-  always exits 0 and never refuses a stop.
-- `SubagentStop` sweep hook: refreshes stale sweep data; can refuse to end a
-  turn until every finding carries this turn's disposition.
+- `SubagentStop`: removes the agent ID from that ledger; always exits 0 and
+  never refuses a stop.
+
+The per-turn `Stop`/`SubagentStop` sweep hooks were **removed** (owner, 2026-11-04):
+they fired on every turn, including turns where nothing could change, and each one
+cost a full-context Opus turn to answer — 59 in a single day, spent restating that
+two issues were waiting on a merge.
+
+**`scripts/git-hooks/pre-push` is the real stamp enforcement**, and it is armed via
+the repo-wide hooks path. On 2026-11-04 that file was found **absent from the main
+checkout's working tree** (staged-added, deleted on disk) alongside 561 other
+tracked files, so no pre-push hook ran at all for an unknown period: every push
+bypassed the stamp check while appearing to pass it. If a guard is ever reported as
+"failing on master", check first that it exists — `git status --porcelain | grep '^AD'`
+lists tracked files missing from the working tree.
 
 Both sweep registrations allow `stop_hook_active=true` continuations;
 escalated dispatch findings require `RUNNING` or `BLOCKED-BY` dispositions.
