@@ -18,7 +18,7 @@ def derive(commits):
         )
         for trailer in trailers.splitlines():
             key, _, value = trailer.partition(":")
-            key, value = key.strip().lower(), value.strip().lower()
+            key, value = key.strip().lower(), value.split("<", 1)[0].strip().lower()
             if key not in {"co-authored-by", "generated-with", "claude-session", "signed-off-by"}:
                 continue
             if re.search(r"\bcodex\b|\bgpt-", value):

@@ -73,6 +73,9 @@ class BoardAuthorTests(unittest.TestCase):
     def test_ordinary_signoff_is_unknown(self):
         self.assertEqual(derive("Signed-off-by: A Person <person@example.invalid>"), "by:unknown")
 
+    def test_human_name_with_codex_email_is_unknown(self):
+        self.assertEqual(derive("Co-Authored-By: Someone <codex@example.com>"), "by:unknown")
+
     def test_empty_commits_are_unknown(self):
         self.assertEqual(derive(), "by:unknown")
 
