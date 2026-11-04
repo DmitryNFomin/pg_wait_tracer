@@ -238,17 +238,19 @@ code bigger than a one-liner.
     `tests/web_unit/*.test.mjs` register every matching file. Leave live guard
     execution as a manual reviewer step; let a human judge deliberate manual-only tools.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#evidence-guard-incidents`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#runner-registration-gaps`)
-- **Adviser**: consult BOTH by default — Fable via `.claude/agents/adviser.md`
-  and Astra (`codex exec -m gpt-6-astra`, see Models above). Keep one Fable
-  conversation per session; resume with SendMessage, never
-  respawn. Consult on every found issue,
-  plan and numeric claim BEFORE acting and BEFORE reporting. Consult both before
-  accepting/rejecting review verdicts or returning branches; owner-facing numbers,
-  measurements or facts; plans, ordering or scheduling; infrastructure/cost
-  recommendations; retractions/corrections. Do not skip for cost: dispatch in
-  parallel, do independent work meanwhile, block only dependent work. Advisers
-  review reasoning, not code; never edit, commit or create cloud resources.
-  The lead may overrule advice but must say so in the report.
+- **Adviser**: one adviser, on RULE 1's three triggers only — a number going to
+  the owner, a RULE 2 exclusion request, a `src/` accounting or format design.
+  Fable via `.claude/agents/adviser.md`, or Astra (`codex exec`, see Models
+  above). Keep one Fable conversation per session; resume with SendMessage,
+  never respawn. Use **both** only when the first answer is load-bearing and you
+  cannot verify it yourself — that is worth the cost when it is the difference
+  between a day's implementation and a refuted premise, and wasteful otherwise.
+  Sequencing, which branch is next, and whether a review finding is a blocker
+  are the lead's calls: make them. Advisers review reasoning, not code, and
+  never edit, commit or create cloud resources. The lead may overrule advice but
+  says so in the report. **Verify an adviser's load-bearing claim in the code
+  before acting on it** — a proposed #675 fix rested on a comment the code six
+  lines below contradicted.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#adviser-incidents`)
 
 ## Rules
