@@ -504,11 +504,25 @@ static int accum_event(struct pgwt_summary_accum *acc,
             }
         } else if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
             /* A wait's measured on-CPU spin keeps its WAIT label (the label
-             * is the diagnostic); raw counts it only as an observability sum
-             * and as evidence that this window CAN split CPU. Both of those
-             * are reproduced here. */
+             * is the diagnostic), and it contributes exactly ONE thing here:
+             * the observability sum. It is NOT a CPU-gap observation.
+             *
+             * #763: this used to also increment cpu_measured_records, which
+             * mirrored raw's PRE-#575 behaviour ("evidence that this window
+             * CAN split CPU"). #575 removed that belief on the raw side
+             * (src/compute.c's wait branch keeps wait_gap_cpu_ns and
+             * deliberately does not raise has_measured_cpu), because measured
+             * spin inside a wait says nothing about the on-CPU GAPS. The
+             * counter's single consumer is `rec->cpu_measured_records > 0 =>
+             * has_measured_cpu` (src/compute.c), so while the increment stood
+             * here, a window with a measured wait spin and UNKNOWN CPU gaps
+             * labelled the gaps' unmeasured wall "CPU (running)" with a 0.0 ms
+             * runqueue sibling -- the exact outcome #575 was filed to stop,
+             * on the DEFAULT Overview view (any unfiltered window of 120 s or
+             * more routes here), while the raw route said "CPU*" for the same
+             * window. The number is not lost: it is wait_gap_cpu_ns, which is
+             * what the response still reports. */
             acc->wait_gap_cpu_ns += evt->cpu_ns;
-            acc->cpu_measured_records++;
         }
     }
 

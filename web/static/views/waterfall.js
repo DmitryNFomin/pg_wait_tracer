@@ -4,7 +4,7 @@
 import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
     executionListMaxHeight, waterfallChartFitHeight, containingActivityWindow, waterfallContextHtml,
-    executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
+    executionsConfig, executionSelectionPool, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     executionsStatusLabel, execScopeNoteHtml, zoomLabelText,
     allExecutionsUndrawable, undrawablePageText,
@@ -112,28 +112,24 @@ export function createWaterfallView() {
         const matches = r => (filters.pid == null || Number(r.pid) === Number(filters.pid)) &&
             (filters.query_id == null || String(r.query_id) === String(filters.query_id));
         rows = rows.filter(matches);
+        const candidatePool = executionSelectionPool(rows, preferredPid);
         if (pendingSelection && !matches(pendingSelection)) pendingSelection = null;
         if (selected && !matches(selected)) selected = null;
         if (pendingSelection) {
             const authoritative = rows.find(r => sameExecution(r, pendingSelection));
             selected = authoritative || pendingSelection;
             pendingSelection = null;
-            return selected;
+            return { selected, candidatePool };
         }
         if (selected) {
             const stillThere = rows.find(r => sameExecution(r, selected));
-            if (stillThere) { selected = stillThere; return selected; }
+            if (stillThere) { selected = stillThere; return { selected, candidatePool }; }
         }
         /* Not rows[0]: the newest execution on a real workload usually has
          * no events, no workers and no plan, and an empty detail leaves the
          * panel with no chart at all (issue #101). */
-        // A query's longest backend span need not own an execution of that
-        // query. Prefer its PID only within the already-filtered executions;
-        // keep explicit session filters authoritative and allow query fallback.
-        const preferred = preferredPid == null ? [] :
-            rows.filter(r => Number(r.pid) === Number(preferredPid));
-        selected = pickDefaultExecution(preferred.length ? preferred : rows);
-        return selected;
+        selected = pickDefaultExecution(candidatePool);
+        return { selected, candidatePool };
     }
 
     function setReadout(tuple) {
@@ -288,9 +284,9 @@ export function createWaterfallView() {
                     sort: sortMode, filters: ctx.filters.snapshot(),
                 });
             if (isUnavailable(executions))
-                return { executions, detail: null, selected: null, windowTo, sortMode };
-            const chosen = chooseExecution(executions.rows || [], ctx.filters.snapshot());
-            if (!chosen) return { executions, detail: null, selected: null, windowTo, sortMode };
+                return { executions, detail: null, selected: null, candidatePool: [], windowTo, sortMode };
+            const { selected: chosen, candidatePool } = chooseExecution(executions.rows || [], ctx.filters.snapshot());
+            if (!chosen) return { executions, detail: null, selected: null, candidatePool, windowTo, sortMode };
             const detailEnd = chosen.end_ns != null
                 ? String(chosen.end_ns) : String(Math.round(ctx.timeRange.to));
             const detailFilters = { pid: chosen.pid, query_id: chosen.query_id };
@@ -311,7 +307,7 @@ export function createWaterfallView() {
                     // The visible context refuses to claim pre-execution timing.
                 }
             }
-            return { executions, detail, activityTimeline, selected: chosen, detailEnd, windowTo, sortMode };
+            return { executions, detail, activityTimeline, selected: chosen, candidatePool, detailEnd, windowTo, sortMode };
         },
 
         build(data) {
@@ -322,18 +318,19 @@ export function createWaterfallView() {
                 executionStart: data.selected.start_ns,
                 executionEnd: data.detailEnd,
             }) : null;
-            // #587: is the page the user is looking at the REASON the
-            // selected execution has no chart, rather than that execution
-            // alone? Computed from the same rows the executions table
-            // renders, so the count in the message always matches what is
-            // on screen above it.
-            const pageRows = (data.executions && data.executions.rows) || [];
-            const undrawable = allExecutionsUndrawable(pageRows);
+            // #587 / #537: explain an empty chart using the pool the
+            // default pick actually drew from. A preferred PID can narrow
+            // it to undrawable rows even when another PID on the page has
+            // data. Keep the captured pool across detail requests rather
+            // than reading possibly-changed preferredPid state again.
+            const candidatePool = data.candidatePool ??
+                executionSelectionPool((data.executions && data.executions.rows) || [], null);
+            const undrawable = allExecutionsUndrawable(candidatePool);
             return { table, waterfall: wf, detail: data.detail,
                 selected: data.selected, detailEnd: data.detailEnd,
                 allUndrawable: undrawable,
                 undrawableText: undrawable
-                    ? undrawablePageText(pageRows.length, data.sortMode) : null,
+                    ? undrawablePageText(candidatePool.length, data.sortMode) : null,
                 context: waterfallContextHtml(data.detail, data.selected, data.activityTimeline),
                 // Keep only detailed metadata collapsed; identity, wait, span and
                 // scope live in the always-visible context inside the pane.
@@ -392,7 +389,7 @@ export function createWaterfallView() {
                         : 'No execution matches the selected query/session filters and time range.') + '</div>';
                 return;
             }
-            // #587: every execution on this page is undrawable (not just
+            // #587 / #537: every candidate is undrawable (not just
             // the one pickDefaultExecution() had to settle for) -- say so
             // instead of the generic "No execution events captured", which
             // reads as "nothing was captured" when 100 executions were.

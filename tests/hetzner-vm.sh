@@ -4,7 +4,8 @@
 # Usage:
 #   tests/hetzner-vm.sh create [--type cpx42] [--image rocky-9] [--name NAME] \
 #                               [--location LOC] [--cloud-init FILE] \
-#                               [--image-snapshot latest] [--labels k=v,k2=v2]
+#                               [--image-snapshot latest] [--snapshot-os OS] \
+#                               [--labels k=v,k2=v2]
 #   tests/hetzner-vm.sh delete <SERVER_ID>
 #   tests/hetzner-vm.sh ssh <IP>
 #   tests/hetzner-vm.sh list
@@ -21,6 +22,12 @@
 # the lead under the box lock from a fully-provisioned gate box) instead of a
 # named public image. A bare numeric/string value is used as the image
 # id/name verbatim (only "latest" triggers the label lookup).
+#
+# --snapshot-os OS: scope the "latest" lookup to the additional `os=OS`
+# label. Ubuntu also accepts legacy snapshots without that label. Without
+# this flag the lookup stays unscoped; literal image ids/names skip lookup.
+# For snapshot cloud-init defaults, el8 selects the Rocky 8 minimal recipe;
+# all other values keep the Ubuntu minimal recipe.
 #
 # --labels k=v,k2=v2: attached to the created server (e.g.
 # `pgwt=ephemeral,created=<epoch>,owner=<hostname>` — scripts/box-check.sh's
@@ -101,6 +108,7 @@ cmd_create() {
     local name="$DEFAULT_NAME"
     local location=""
     local image_snapshot=""
+    local snapshot_os=""
     local labels_arg=""
 
     while [[ $# -gt 0 ]]; do
@@ -109,6 +117,7 @@ cmd_create() {
             --cloud-init)     cloud_init="$2"; cloud_init_explicit=1; shift 2 ;;
             --image)          image="$2"; shift 2 ;;
             --image-snapshot) image_snapshot="$2"; shift 2 ;;
+            --snapshot-os)    snapshot_os="$2"; shift 2 ;;
             --name)           name="$2"; shift 2 ;;
             --location)       location="$2"; shift 2 ;;
             --labels)         labels_arg="$2"; shift 2 ;;
@@ -118,11 +127,38 @@ cmd_create() {
 
     if [[ -n "$image_snapshot" ]]; then
         if [[ "$image_snapshot" == "latest" ]]; then
-            echo "  Resolving --image-snapshot latest (label pgwt=gate-snapshot) ..." >&2
-            image=$(curl -s "$API/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot&sort=created:desc&per_page=1" \
+            # Real bug found on review (#749): Hetzner label selectors match
+            # on SUBSETS, not on "exactly these labels and no others" -- a
+            # bare `pgwt=gate-snapshot` selector ALSO matches an image that
+            # additionally carries os=el8 (or any other os), and sorted
+            # created:desc a newer el8 image would silently outrank the
+            # legacy, pre-os-label ubuntu snapshot. `!os` (label key os
+            # ABSENT) is the actual legacy-only selector, and it is used
+            # directly whenever no --snapshot-os was given at all -- a
+            # caller that does not ask for an OS must never be handed
+            # whichever OS's image happens to be newest.
+            local selector selector_encoded
+            if [[ -n "$snapshot_os" ]]; then
+                selector="pgwt=gate-snapshot,os=$snapshot_os"
+                selector_encoded="pgwt%3Dgate-snapshot,os%3D$(printf '%s' "$snapshot_os" | jq -sRr @uri)"
+            else
+                selector="pgwt=gate-snapshot,!os"
+                selector_encoded="pgwt%3Dgate-snapshot,%21os"
+            fi
+            echo "  Resolving --image-snapshot latest (label $selector) ..." >&2
+            image=$(curl -s "$API/images?type=snapshot&label_selector=$selector_encoded&sort=created:desc&per_page=1" \
                 -H "Authorization: Bearer $HCLOUD_TOKEN" \
                 | jq -r '.images[0].id // empty')
-            [[ -n "$image" ]] || die "no image found with label pgwt=gate-snapshot"
+            # Ubuntu snapshots predate the os label; fall back to the same
+            # legacy (no os label) selector if the scoped lookup found
+            # nothing for it.
+            if [[ -z "$image" && "$snapshot_os" == "ubuntu" ]]; then
+                echo "  No image with label $selector — falling back to the legacy (no os label) selector ..." >&2
+                image=$(curl -s "$API/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot,%21os&sort=created:desc&per_page=1" \
+                    -H "Authorization: Bearer $HCLOUD_TOKEN" \
+                    | jq -r '.images[0].id // empty')
+            fi
+            [[ -n "$image" ]] || die "no image found with label $selector -- if you expected the legacy (no os label) ubuntu snapshot, pass --snapshot-os <os> explicitly rather than relying on this call's default"
             echo "  Resolved image id: $image" >&2
         else
             image="$image_snapshot"
@@ -131,12 +167,14 @@ cmd_create() {
 
     if [[ "$cloud_init_explicit" -eq 0 ]]; then
         if [[ -n "$image_snapshot" ]]; then
-            # Snapshots taken under this project are always of the Ubuntu
-            # gate box (the only OS provisioned so far — see
-            # tests/provision-runner.sh); the resolved image is a numeric
-            # id/description, not a name starting with "ubuntu"/"rocky", so
-            # it cannot go through the name-sniffing case below.
-            cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml"
+            # Resolved snapshots are ids/descriptions, so image-name
+            # sniffing cannot choose their OS. Keep Ubuntu as the default
+            # for callers that predate --snapshot-os.
+            if [[ "$snapshot_os" == "el8" ]]; then
+                cloud_init="$SCRIPT_DIR/cloud-init-el8-minimal.yaml"
+            else
+                cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml"
+            fi
         else
             # Each recipe's user-data is OS-specific (package manager,
             # cloud-init modules) — --image ubuntu-24.04 without an explicit
@@ -144,6 +182,7 @@ cmd_create() {
             # (or vice versa).
             case "$image" in
                 ubuntu*) cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml" ;;
+                rocky-8*) cloud_init="$SCRIPT_DIR/cloud-init-el8-minimal.yaml" ;;
                 rocky*)  cloud_init="$SCRIPT_DIR/cloud-init-rocky9-pg18.yaml" ;;
                 *) die "No default cloud-init for image '$image' — pass --cloud-init explicitly" ;;
             esac
@@ -374,7 +413,7 @@ case "${1:-help}" in
         echo "" >&2
         echo "  create [--type cpx42] [--image rocky-9] [--name NAME]" >&2
         echo "         [--location fsn1|nbg1|hel1] [--cloud-init FILE]" >&2
-        echo "         [--image-snapshot latest] [--labels k=v,k2=v2]" >&2
+        echo "         [--image-snapshot latest] [--snapshot-os OS] [--labels k=v,k2=v2]" >&2
         echo "  delete <SERVER_ID>" >&2
         echo "  ssh <IP> [command...]" >&2
         echo "  list" >&2

@@ -29,6 +29,26 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   readable" refusal now reports `ENODATA` rather than "last error: Success"
   when every target of a tick was context-less.
 
+- **fix: a measured wait spin no longer marks a window's CPU figure "measured" on the summary route (Refs #763).**
+  On the summary routing (the default Overview view for any unfiltered window
+  >= 120 s), a window whose CPU gaps were never measured no longer shows
+  `CPU (running)` with a 0.0 ms runqueue sibling — it now shows the unsplit
+  `CPU*` row, matching what the raw routing already showed. A measured
+  on-CPU spin inside a *wait* is no longer treated as evidence that the
+  window's CPU figure is a measurement. **Residual:** summaries already on
+  disk when this ships keep the old behaviour until they age out of
+  retention (default 24 h); only freshly written captures get the corrected
+  figure immediately. #763 stays open for that historical half.
+
+- **fix: Events tab compare mode now includes the off-CPU row (#757).**
+  Comparing two windows in the Events tab now shows the synthetic
+  `CPU (waiting for a core)` row the same way the non-compare Events table
+  and Overview's Time Model already do, including when that row exists on
+  only one side of the comparison. Previously an off-CPU change between the
+  two windows was invisible in Events compare while Overview showed it. The
+  Events AAS column still does not carry a value for this row (tracked
+  separately in #757); this change is the compare-join fix only.
+
 - **fix: sampler timer health and scheduling disclosure (#675/#697).**
   New runtime env var `PGWT_SAMPLER_NICE` accepts integers -20..19 for the
   daemon's own niceness (unset/empty leaves it unchanged; `0` verifies

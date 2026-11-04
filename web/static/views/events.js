@@ -62,7 +62,19 @@ export function buildEventsModel(data, sort, orderTracker) {
         };
     }
     if (data && data.compare) {
-        const delta = buildDeltaComparison('events', data.a, data.b,
+        // #757: the synthetic off-CPU remainder (addCpuWaitingRow) is added
+        // to the PAYLOAD rows on both sides before the join, so it is an
+        // ordinary entity to buildDeltaComparison -- A-only, B-only and
+        // both-sides cases fall out of the existing join/floor logic rather
+        // than a special case here. addCpuWaitingRow does not mutate its
+        // input (it returns rows.concat([...])), so data.a/data.b themselves
+        // are untouched; only the { ...row-set-for-the-join } copies carry
+        // the extra row. Scoped to 'events': this file is the only caller
+        // passing augmented inputs into buildDeltaComparison, so 'overview'
+        // and 'queries' compares (sessions has none) are unaffected.
+        const a = Object.assign({}, data.a, { rows: addCpuWaitingRow(data.a) });
+        const b = Object.assign({}, data.b, { rows: addCpuWaitingRow(data.b) });
+        const delta = buildDeltaComparison('events', a, b,
             { baselineUnavailable: data.baselinePredates });
         const appliedSort = defaultDeltaSort(sort);
         return {
