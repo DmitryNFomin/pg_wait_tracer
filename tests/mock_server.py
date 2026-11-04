@@ -13,6 +13,11 @@ Usage:
     python3 tests/mock_server.py              # HTTP :18765, WS :18766
     python3 tests/mock_server.py --port 9000  # HTTP :9000,  WS :9001
 
+Silent warm-up (#758, normal mode only): PGWT_MOCK_INFO_DELAY_MS=35000
+withholds the first info reply on each socket while keeping it open, then
+answers queued requests. PGWT_MOCK_INFO_DELAY_COUNT selects how many info
+replies to delay (default 1; -1 delays all).
+
 Chaos mode (Phase B2)
 ─────────────────────
 By default the mock answers every request synchronously with zero latency,
@@ -1574,9 +1579,19 @@ async def ws_handler(websocket, chaos=None):
         chaos = ChaosConfig()
 
     if not chaos.enabled:
+        # #758: keep the socket alive while upstream warm-up outlasts the
+        # browser's info timeout. Later requests queue, then answer normally.
+        info_count = 0
+        info_delay_ms = _env_int("PGWT_MOCK_INFO_DELAY_MS", 0)
+        info_delay_count = _env_int("PGWT_MOCK_INFO_DELAY_COUNT", 1)
         async for raw in websocket:
             try:
                 msg = json.loads(raw)
+                if msg.get("cmd") == "info":
+                    info_count += 1
+                    if info_delay_ms > 0 and (info_delay_count < 0 or
+                                              info_count <= info_delay_count):
+                        await asyncio.sleep(info_delay_ms / 1000.0)
                 resp = handle_request(msg)
                 await websocket.send(json.dumps(resp))
             except Exception as e:
