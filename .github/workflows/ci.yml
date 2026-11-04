@@ -434,7 +434,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -454,7 +456,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           set -x
           sudo systemctl stop postgresql || true
           sudo apt-get install -y postgresql-common
@@ -468,7 +472,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           set -ex
           if ! pg_lsclusters -h | awk '$1 == 17 && $2 == "main"' | grep -q .; then
             sudo pg_createcluster 17 main
@@ -492,7 +498,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
           echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
           echo "SO_PGPORT=5417" >> "$GITHUB_ENV"
@@ -502,14 +510,18 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           make
 
       - name: Run sampled-overhead structural unit gates
         if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           make -C tests test_exact_probe test_pgss_resolver test_query_text
           tests/test_exact_probe
           tests/test_pgss_resolver
@@ -519,7 +531,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
           sudo env "PGWT_CI_CELL=$PGWT_CI_CELL" "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
@@ -733,7 +747,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -755,7 +771,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           set -x
           V=${{ matrix.pg }}
           # Stop and drop any preinstalled clusters so ours owns port 5432.
@@ -779,7 +797,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           set -ex
           V=${{ matrix.pg }}
           # The postgresql-$V package auto-creates cluster "main" unless one
@@ -813,7 +833,9 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           V=${{ matrix.pg }}
           command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
           echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
@@ -824,14 +846,18 @@ jobs:
         if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           make
 
       - name: Run capture smoke (tiered hard; full if watchpoints available)
         if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
+          _lock_t0=$SECONDS
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
+          echo "lock-wait: $((SECONDS-_lock_t0))s"
           V=${{ matrix.pg }}
           # PG16 = unsupported version: assert the loud-refusal contract.
           FLAGS=""
