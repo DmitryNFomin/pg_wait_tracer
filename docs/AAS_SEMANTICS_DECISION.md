@@ -514,6 +514,15 @@ accounting rule and not about the byte layout:
   one still-open gap still reports `has_measured_cpu` — without that widening
   the reader would ignore the split it had just been given and emit one
   combined CPU* row, which is the v8 symptom one layer up.
+  Those observations are **on-CPU GAPS only** (#763). A WAIT record's measured
+  spin contributes `wait_gap_cpu_ns` and nothing else: it says nothing about
+  the gaps, so counting it raised `has_measured_cpu` on a window whose gaps
+  were all UNKNOWN and labelled that unmeasured wall `CPU (running)` with a
+  0.0 ms runqueue sibling — what #575 fixed on the raw route, still live on
+  the summary route (i.e. the default Overview) until #763. Pinned on both
+  routes by section 7 of `tests/test_cpu_split_parity.c`. The version was
+  deliberately NOT bumped, so v9 files written before that fix carry the
+  wider count and a reader cannot tell them apart.
 
   The PER-SESSION measured-CPU split (#562/#573's sessions half) adds
   `cpu_offcpu_ns` and a saturating `cpu_measured_records` to
