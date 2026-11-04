@@ -26,3 +26,50 @@ if [[ "$now" != "$stamp" ]]; then
     echo "push blocked: tree changed since the last passing 'make check' (stamp $stamp, tree $now). Re-run 'make check'." >&2
     exit 2
 fi
+
+# ---- agent branch flow: every agent/* branch becomes a visible PR -----------
+# Work that lives only on a pushed branch is invisible: 210 such branches
+# accumulated before anyone noticed, and a finished fix sat stranded in a dead
+# agent's worktree because no PR pointed at it. An agent cannot gate, review or
+# merge without pushing, and it always pushes more than once -- so requiring a
+# PR by the SECOND push makes the issue -> PR -> done flow mechanical rather
+# than a rule an agent has to remember.
+#
+# This check FAILS OPEN on every uncertainty. A transient GitHub outage, a
+# missing gh, or an auth problem must never wedge a push; only a definite,
+# locally-determined "this branch is on origin and has no PR" blocks.
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+if [[ "$branch" == agent/* ]]; then
+    on_origin=no
+    if timeout 8 git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+        on_origin=yes
+    fi
+
+    # New agent branches must name an open issue, so the board can link them.
+    # Branches already on origin are grandfathered: enforcing the name on them
+    # would break every branch that predates this rule, including in-flight work.
+    if [[ "$on_origin" == no && ! "$branch" =~ ^agent/[0-9]+- ]]; then
+        echo "push blocked: a new agent branch must be named agent/<issue>-<slug>." >&2
+        echo "  e.g. agent/763-cpu-measured-records" >&2
+        echo "  got: $branch" >&2
+        exit 2
+    fi
+
+    # Once the branch exists on origin, a PR must exist before any further push.
+    # The first push is allowed so the branch can be created for the PR to
+    # point at.
+    if [[ "$on_origin" == yes ]] && command -v gh >/dev/null 2>&1; then
+        pr_out=$(timeout 8 gh pr view "$branch" --json number 2>&1) || true
+        case "$pr_out" in
+            *"no pull requests found"*|*"no open pull requests"*)
+                echo "push blocked: $branch is on origin but has no pull request." >&2
+                echo "  open one first:  gh pr create --draft --fill" >&2
+                echo "  (a pushed branch with no PR is work nobody can see)" >&2
+                exit 2
+                ;;
+        esac
+        # Any other gh outcome -- success, auth failure, 5xx, timeout -- falls
+        # through and allows the push. Blocking on those would wedge the repo.
+    fi
+fi

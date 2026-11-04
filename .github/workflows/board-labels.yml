@@ -1,0 +1,146 @@
+name: board-labels
+
+# Derives two label families on every PR, so the project board shows what phase
+# work is in and which agent is doing it -- without anyone typing either.
+#
+#   phase:coding | phase:ci | phase:red | phase:review | phase:ready
+#   by:claude-opus | by:claude-sonnet | by:codex | by:human
+#
+# Both families are COMPUTED and the stale members REMOVED on every run, so a
+# label cannot go stale and nobody -- including the lead agent -- can assert a
+# phase by hand and have it stick. The next event overwrites it.
+#
+# Runs on GitHub-hosted hardware, NOT on the self-hosted gate boxes: those are
+# pgwt-gate/gate-2/gate-3, the same machines CI and box-check queue for, and a
+# bookkeeping job must never compete with the work it is reporting on.
+# Event-driven rather than scheduled: it runs when state actually changes.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, closed]
+  check_suite:
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  # One run per PR; a newer event supersedes an in-flight one.
+  group: board-labels-${{ github.event.pull_request.number || github.event.check_suite.id || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    # PINNED, matching ci.yml's policy -- do not "modernise" to ubuntu-latest.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Derive phase and author labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+          SUITE_PRS: ${{ toJSON(github.event.check_suite.pull_requests) }}
+        run: |
+          set -uo pipefail
+
+          # ---- which PRs does this event concern? ---------------------------
+          prs=""
+          if [ -n "${EVENT_PR:-}" ]; then
+            prs="$EVENT_PR"
+          else
+            prs=$(printf '%s' "$SUITE_PRS" | jq -r '.[]?.number // empty' 2>/dev/null)
+          fi
+          if [ -z "$prs" ]; then
+            echo "no PR in this event; nothing to label"
+            exit 0
+          fi
+
+          PHASES="phase:coding phase:ci phase:red phase:review phase:ready"
+          AUTHORS="by:claude-opus by:claude-sonnet by:codex by:human"
+
+          # Labels must exist before they can be applied. --force makes this
+          # idempotent; failures here are non-fatal.
+          ensure_label() {
+            gh label create "$1" --repo "$REPO" --color "$2" --description "$3" --force >/dev/null 2>&1 || true
+          }
+          ensure_label "phase:coding" "0e8a16" "branch pushed, draft PR, not yet gated"
+          ensure_label "phase:ci"     "fbca04" "checks running"
+          ensure_label "phase:red"    "b60205" "checks failing"
+          ensure_label "phase:review" "1d76db" "checks green, awaiting review"
+          ensure_label "phase:ready"  "5319e7" "mergeable and clean"
+          ensure_label "by:claude-opus"   "c5def5" "authored with Claude Opus"
+          ensure_label "by:claude-sonnet" "c5def5" "authored with Claude Sonnet"
+          ensure_label "by:codex"         "d4c5f9" "authored with codex"
+          ensure_label "by:human"         "ededed" "no agent trailer found"
+
+          for pr in $prs; do
+            echo "::group::PR #$pr"
+
+            info=$(gh pr view "$pr" --repo "$REPO" \
+                     --json isDraft,state,mergeable,mergeStateStatus,statusCheckRollup,labels 2>/dev/null) || {
+              echo "could not read PR #$pr; skipping"; echo "::endgroup::"; continue; }
+
+            state=$(printf '%s' "$info"   | jq -r '.state')
+            draft=$(printf '%s' "$info"   | jq -r '.isDraft')
+            mstate=$(printf '%s' "$info"  | jq -r '.mergeStateStatus // "UNKNOWN"')
+
+            # Check rollup: any failure beats any in-progress beats all-good.
+            failing=$(printf '%s' "$info" | jq '[.statusCheckRollup[]?
+                        | select((.conclusion // "") | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED"))] | length')
+            pending=$(printf '%s' "$info" | jq '[.statusCheckRollup[]?
+                        | select((.status // "") | test("IN_PROGRESS|QUEUED|PENDING|WAITING"))] | length')
+            total=$(printf '%s' "$info"   | jq '[.statusCheckRollup[]?] | length')
+
+            # ---- phase -----------------------------------------------------
+            want_phase=""
+            if [ "$state" != "OPEN" ]; then
+              want_phase=""                       # merged or closed: board shows Done
+            elif [ "${failing:-0}" -gt 0 ]; then
+              want_phase="phase:red"
+            elif [ "${pending:-0}" -gt 0 ]; then
+              want_phase="phase:ci"
+            elif [ "$draft" = "true" ]; then
+              want_phase="phase:coding"
+            elif [ "${total:-0}" -eq 0 ]; then
+              want_phase="phase:coding"           # no checks yet
+            elif [ "$mstate" = "CLEAN" ]; then
+              want_phase="phase:ready"
+            else
+              want_phase="phase:review"
+            fi
+
+            # ---- who: read the commit trailers -----------------------------
+            trailers=$(gh pr view "$pr" --repo "$REPO" --json commits \
+                         --jq '.commits[].messageBody' 2>/dev/null | tr 'A-Z' 'a-z')
+            want_author="by:human"
+            case "$trailers" in
+              *"claude opus"*)   want_author="by:claude-opus" ;;
+              *"claude sonnet"*) want_author="by:claude-sonnet" ;;
+              *codex*|*"gpt-"*)  want_author="by:codex" ;;
+            esac
+            # codex alongside Claude: the branch is joint work; prefer codex so
+            # it is visible, since Claude trailers are near-universal here.
+            case "$trailers" in *codex*|*"gpt-"*) want_author="by:codex" ;; esac
+
+            have=$(printf '%s' "$info" | jq -r '.labels[]?.name')
+
+            # ---- apply: add what is wanted, remove the rest of each family --
+            for l in $PHASES $AUTHORS; do
+              keep=no
+              [ "$l" = "$want_phase" ]  && keep=yes
+              [ "$l" = "$want_author" ] && keep=yes
+              if [ "$keep" = yes ]; then
+                printf '%s\n' "$have" | grep -qx -- "$l" || \
+                  gh pr edit "$pr" --repo "$REPO" --add-label "$l" >/dev/null 2>&1 || true
+              else
+                printf '%s\n' "$have" | grep -qx -- "$l" && \
+                  gh pr edit "$pr" --repo "$REPO" --remove-label "$l" >/dev/null 2>&1 || true
+              fi
+            done
+
+            echo "phase=${want_phase:-none} author=$want_author (failing=$failing pending=$pending total=$total draft=$draft mstate=$mstate)"
+            echo "::endgroup::"
+          done
