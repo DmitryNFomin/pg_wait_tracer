@@ -326,9 +326,6 @@ bypassed the stamp check while appearing to pass it. If a guard is ever reported
 "failing on master", check first that it exists — `git status --porcelain | grep '^AD'`
 lists tracked files missing from the working tree.
 
-Both sweep registrations allow `stop_hook_active=true` continuations;
-escalated dispatch findings require `RUNNING` or `BLOCKED-BY` dispositions.
-
 ## Local setup (one-time)
 
 Activate the pre-push stamp guard per clone (covers linked worktrees;
