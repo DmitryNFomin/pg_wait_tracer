@@ -787,14 +787,23 @@ def test_run_coverage_window_too_large_is_could_not_evaluate_not_plain_fail():
     window_too_large response shape (src/server.c reject_overload), on a
     demo-length capture. Before this fix, run_coverage recorded it
     identically to an empty tab; a human reading the verdict could not
-    tell the difference."""
+    tell the difference.
+
+    The `hint` below is a fixture INPUT, not an assertion about the server --
+    run_coverage keys on `code`, never on the hint text. It is kept current
+    anyway (#728 round 5): the old string, "narrow the time range or add a
+    pid/query filter", is one the server can no longer emit, and a fixture
+    quoting a deleted message is how a later reader concludes the message
+    still exists."""
     responses = {}
     for tab in cov.TAB_ORDER:
         cmd, _extra, _fn = cov.TAB_QUERIES[tab]
         responses[cmd] = (
             {"error": "window too large", "code": "window_too_large",
-             "max_events": 100000, "hint": "narrow the time range or add a "
-             "pid/query filter"}
+             "max_events": 100000,
+             "hint": "narrow the time range, or add a pid filter: this load "
+                     "reads every pid and applies the request's pid filter "
+                     "while loading"}
             if tab == "waterfall" else None)
     srv = _FakeServer(responses)
     results = cov.run_coverage(srv, 0, 1)
