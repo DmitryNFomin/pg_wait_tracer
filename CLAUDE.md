@@ -98,9 +98,13 @@ Declare a PR ready only with ALL evidence in its body:
    list `summary.json` counts and every `changed`/`added`/`removed` cell with
    a one-line justification each.
    (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#ui-branch-scope`)
-4. Get fresh reviewer approval (`.claude/agents/reviewer.md`; `ui-reviewer.md`
-   for UI), or list open questions under "Design questions for the owner".
-   Give the owner only those questions to resolve.
+4. Review **by risk**, per "How work flows": a change touching accounting,
+   attribution, format or refusal logic gets a fresh independent reviewer
+   (`.claude/agents/reviewer.md`; `ui-reviewer.md` when a gallery cell moved);
+   sample the rest. On a correctness fix the reviewer's first job is to **watch
+   the new test fail** — mutate the fix, see red, restore, see green, paste both.
+   Either way, list anything unresolved under "Design questions for the owner",
+   and give the owner only those.
 
 Use `/pr-ready` to run this sequence.
 
@@ -189,14 +193,18 @@ code bigger than a one-liner.
   needs you. Use long form only for owner decisions or plan-changing findings.
   Put bug narratives in the issue tracker; link them.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#owner-report-limit`)
-- **Splitting**: one roadmap item = one issue = one branch = one implementer.
-  Split only disjoint files AND disjoint tests; never split a shared file.
-  Cap actively implementing tasks at **three** (writing/running code); exclude
-  agents idling during CI, `box-check` or review. `scripts/check-lock.sh` (`check:`
-  target) serializes Mac `make check` machine-wide. Apply no Mac-derived gate-phase
-  cap (waiting on/running `make check`); do not invent a "two in gate phase" limit.
-  Before spawning, list touched files, compare every in-flight branch and refuse
-  overlap up front.
+- **Splitting**: batch by shared acceptance criteria, not one-issue-one-branch.
+  A defect family that is verified by the same test belongs in one branch: the
+  CPU-split chain shipped as four PRs with four gates, four reviews and four CI
+  runs for one family. Split only on disjoint files AND disjoint tests; never
+  split a shared file.
+  **WIP = 1 through merge** (see "How work flows") governs how many run at once;
+  an agent idling on CI, `box-check` or review is not implementing. Where more
+  than one does run, list touched files before spawning, compare every in-flight
+  branch, and refuse overlap up front — strict protection means each merge
+  re-BEHINDs every other PR, so parallelism costs an update plus a re-gate each
+  time. `scripts/check-lock.sh` (`check:` target) serializes Mac `make check`
+  machine-wide; the Mac is not the constraint, the boxes and CI are.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#splitting-and-gate-capacity`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#shared-file-collision`)
   Allow at most **ONE** branch touching `web/static/` or `tests/web_snapshots/`
   at a time; Go-only `web/` changes are exempt. Send work over ~a day to a `Plan`
