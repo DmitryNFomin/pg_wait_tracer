@@ -349,14 +349,14 @@ fi
 # Step 2.5: Synthetic data correctness tests (no root needed, needs pgwt-server)
 #
 # issue #528: how many tests this tier contains. A literal on purpose -- the
-# membership below is 26 separate `run_test ... python3 "$SCRIPT_DIR/x.py"`
+# membership below is 27 separate `run_test ... python3 "$SCRIPT_DIR/x.py"`
 # lines because scripts/check-runner-registration.py's orphan scan reads
 # exactly that form to decide a test file has a runner; collapsing them into a
 # loop over an array would make all 26 look like tests nobody runs. The
 # literal is pinned against what actually ran by the tier_size_check() in the
 # `fi` branch, so it cannot drift below the real membership and quietly shrink
 # the number a skip reports.
-SYNTHETIC_TIER_SIZE=26
+SYNTHETIC_TIER_SIZE=27
 if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]; then
     synthetic_before=$((passed + failed + known_failing))
     run_test "test_data_time_model" python3 "$SCRIPT_DIR/test_data_time_model.py"
@@ -395,6 +395,16 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     # guard against a half fix that widens admission without making
     # occurrences select on the record's own close timestamp.
     run_test "test_window_additivity" python3 "$SCRIPT_DIR/test_window_additivity.py"
+    # #684: one window must have ONE accounting basis under a QUERY FILTER.
+    # Time Model and AAS read the per-query summary table, which carries a
+    # record's full duration at the second it closes in, while Events and
+    # Queries read raw events clipped to [from, to) -- so a query drill over
+    # a >= 120 s window showed two totals of one quantity. The parity gate
+    # above cannot see it: it compares UNFILTERED windows. This one pins the
+    # four tabs' agreement and MEASURES the route, so the guard that produces
+    # the agreement cannot silently come undone.
+    run_test "test_data_query_window_agreement" \
+        python3 "$SCRIPT_DIR/test_data_query_window_agreement.py"
     run_test "test_data_markers" python3 "$SCRIPT_DIR/test_data_markers.py"
     # #274: executions/exec_scatter read the pre-window marker prefix from
     # the retained index; this is the differential proving it is the SAME
@@ -421,7 +431,7 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
         "$synthetic_before" "$((passed + failed + known_failing))"
 else
     # NOT skip_test: this is the issue #528 case. pgwt-server or
-    # gen_test_traces absent means the build broke in a way that REMOVED 26
+    # gen_test_traces absent means the build broke in a way that REMOVED 27
     # tests, which is precisely when a green verdict is worth least.
     skip_required_tier "test_data_* (synthetic-data tier)" "$SYNTHETIC_TIER_SIZE" \
         "pgwt-server or tests/gen_test_traces missing or not executable — the build did not produce them (make && make -C tests)"
