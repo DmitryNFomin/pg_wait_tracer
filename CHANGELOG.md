@@ -10,6 +10,17 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix: a measured wait spin no longer marks a window's CPU figure "measured" on the summary route (Refs #763).**
+  On the summary routing (the default Overview view for any unfiltered window
+  >= 120 s), a window whose CPU gaps were never measured no longer shows
+  `CPU (running)` with a 0.0 ms runqueue sibling — it now shows the unsplit
+  `CPU*` row, matching what the raw routing already showed. A measured
+  on-CPU spin inside a *wait* is no longer treated as evidence that the
+  window's CPU figure is a measurement. **Residual:** summaries already on
+  disk when this ships keep the old behaviour until they age out of
+  retention (default 24 h); only freshly written captures get the corrected
+  figure immediately. #763 stays open for that historical half.
+
 - **fix: Events tab compare mode now includes the off-CPU row (#757).**
   Comparing two windows in the Events tab now shows the synthetic
   `CPU (waiting for a core)` row the same way the non-compare Events table
