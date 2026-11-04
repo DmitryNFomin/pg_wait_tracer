@@ -421,9 +421,31 @@ function scheduleReconnect() {
 // N reconnects leak zero chart instances and zero listeners.
 
 async function onConnected() {
+    const ws = transport.ws;
+    const isCurrent = () => transport.ws === ws && transport.isOpen();
     setStatus('Loading...', 'connecting');
     try {
-        const info = await transport.send('info');
+        let info;
+        // A timeout removes only the request; the socket can still recover
+        // after upstream warm-up. Three attempts cap silence at 93s (30s
+        // each, with 1s/2s backoffs) instead of leaving a permanent error.
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                info = await transport.send('info');
+                break;
+            } catch (e) {
+                // A closed/replaced socket belongs to the reconnect path.
+                if (!isCurrent()) return;
+                if (!(e instanceof TransportError) || !e.transport || attempt === 3) throw e;
+                const delay = 1000 * 2 ** (attempt - 1);
+                setStatus('Retrying info in ' + (delay / 1000) + 's: ' + e.message,
+                    'connecting');
+                await new Promise(resolve => setTimeout(resolve, delay));
+                if (!isCurrent()) return;
+                setStatus('Retrying info (attempt ' + (attempt + 1) + '/3)...', 'connecting');
+            }
+        }
+        if (!isCurrent()) return;
         server.update(info);
         renderVersionSkew();
 
@@ -469,7 +491,7 @@ async function onConnected() {
         startDaemonPoll();
         await refresh();
     } catch (e) {
-        setStatus('Error: ' + e.message, 'error');
+        if (isCurrent()) setStatus('Error: ' + e.message, 'error');
     }
 }
 
