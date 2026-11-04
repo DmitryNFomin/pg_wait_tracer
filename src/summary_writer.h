@@ -678,23 +678,37 @@ struct pgwt_summary_accum {
      * ran") while an absent measurement is not, and the raw path distinguishes
      * them by counting records, not nanoseconds.
      *
-     * v9 (#424) WIDENS cpu_measured_records from "records" to CPU
-     * OBSERVATIONS: a closed record with a cpu_ns, OR a per-second credit of
-     * an open on-CPU gap whose producer supplied a measurement. It had to
-     * widen. Its single consumer is `rec->cpu_measured_records > 0 =>
-     * has_measured_cpu` (src/compute.c), and a window whose only CPU time is
-     * one still-open gap would otherwise carry cpu_measured_ns while
-     * reporting has_measured_cpu = 0 -- the reader would then ignore the
-     * split it was just given and emit one combined CPU* row, which is the
-     * v8 symptom reintroduced one layer up. Nothing compares it to a record
-     * count. */
+     * v9 (#424) WIDENS cpu_measured_records from "records" to CPU GAP
+     * OBSERVATIONS: a closed we==0 record with a cpu_ns, OR a per-second
+     * credit of an open on-CPU gap whose producer supplied a measurement. It
+     * had to widen that far. Its single consumer is
+     * `rec->cpu_measured_records > 0 => has_measured_cpu` (src/compute.c),
+     * and a window whose only CPU time is one still-open gap would otherwise
+     * carry cpu_measured_ns while reporting has_measured_cpu = 0 -- the
+     * reader would then ignore the split it was just given and emit one
+     * combined CPU* row, which is the v8 symptom reintroduced one layer up.
+     * Nothing compares it to a record count.
+     *
+     * #763 bounds the OTHER edge: it counts on-CPU GAPS only, never a WAIT
+     * record's measured spin. Spin inside a wait says nothing about the gaps
+     * (it is wait_gap_cpu_ns, an observability sum, and nothing else), and
+     * the raw path has refused to raise has_measured_cpu for it since #575.
+     * While the writer's wait branch also incremented this counter, the
+     * summary route labelled UNKNOWN gaps "CPU (running)" with a 0.0 ms
+     * runqueue sibling whenever a wait in the same window happened to carry
+     * a measurement, and disagreed with raw about the same window. NOTE for
+     * anyone reading an OLD file: v9 files written before that fix carry the
+     * wider count, and the version was deliberately NOT bumped, so a reader
+     * cannot tell the two apart -- see the #763 discussion before relying on
+     * this counter over historical summaries. */
     uint64_t cpu_measured_ns;       /* Sigma clamped cpu_ns over we==0 gaps
                                      * + v9 per-second open-gap credits      */
     uint64_t cpu_unknown_ns;        /* Sigma wall over UNKNOWN we==0 gaps     */
     uint64_t cpu_clamped_ns;        /* Sigma (cpu_ns - wall) clamped away     */
     uint64_t wait_gap_cpu_ns;       /* Sigma cpu_ns on WAIT records (obs.)    */
-    uint64_t cpu_measured_records;  /* CPU observations: records with
-                                     * cpu_ns != UNKNOWN, plus v9 credits     */
+    uint64_t cpu_measured_records;  /* CPU GAP observations: we==0 records
+                                     * with cpu_ns != UNKNOWN, plus v9
+                                     * credits. Never a wait's spin (#763)    */
 
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];

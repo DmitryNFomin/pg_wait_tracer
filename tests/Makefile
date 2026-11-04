@@ -748,7 +748,18 @@ test_io_worker_parity: test_io_worker_parity.c ../src/compute.c \
 # dead code), a window holding no records, a deleted summary dir, a v6 file in
 # the window, a truncated v7 record (the scalars are the LAST bytes, so a
 # short block is exactly what would silently restore the v6 behaviour) and an
-# illegal eff_event. Server build, no BPF, no live PG; ~0.2 s.
+# illegal eff_event.
+# Section 7 (#763) adds the shape none of the above can see: EVERY CPU gap
+# UNKNOWN beside a WAIT that carries measured spin. The writer's wait branch
+# also incremented cpu_measured_records, whose only consumer is
+# "> 0 => has_measured_cpu", so the summary route labelled the gaps'
+# unmeasured wall "CPU (running)" with a 0.0 ms runqueue sibling while raw
+# said "CPU*" -- #575 surviving on the route that serves the default
+# Overview. Bypass suite: an UNKNOWN spin (the flag then reads 0 by absence,
+# the false negative), a MEASURED gap (the flag is then correctly 1, so the
+# assertion would be a false red), no gap at all, an empty window, a removed
+# directory, an older-rule file, and a sub-120 s window.
+# Server build, no BPF, no live PG; ~0.2 s.
 test_cpu_split_parity: test_cpu_split_parity.c ../src/compute.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
