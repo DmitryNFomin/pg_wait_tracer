@@ -77,6 +77,9 @@ run bash tests/test_push_guard_denylist.sh
 step "POSIX shell: Codex task wrapper self-test"
 run scripts/lead/codex-task-selftest.sh
 
+step "board-labels trailer authorship regression tests (#771)"
+run python3 tests/test_board_author.py
+
 step "bash: pr-ready ordering and refusal self-test (#701)"
 run bash tests/test_pr_ready.sh
 
