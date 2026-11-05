@@ -192,6 +192,34 @@ control 11b 2 'git -c core.hooksPath=/dev/null push'
 control 11c 2 'git push --no-verify'
 control 11d 2 'git send-pack'
 
+# Hook registrations must survive Bash writes and reverts, while reads and
+# discussion remain usable. These commands are JSON data, never executed.
+control settings-checkout 2 'git checkout -- .claude/settings.json'
+control settings-sed 2 "sed -i '' 's/Stop/Disabled/g' .claude/settings.json"
+control settings-redirect 2 'printf "%s" "{}" > .claude/settings.json'
+control settings-read 0 'cat .claude/settings.json'
+denied 'git -C . restore --source=HEAD -- .claude/settings.json' "restore settings registrations"
+allowed 'git reset HEAD -- .claude/settings.json' "index-only reset preserves working hook registrations"
+denied 'sed -i.bak -e "s/Stop/Disabled/g" .claude/settings.json' "GNU sed in-place settings write"
+denied 'sed --in-place=.bak -e "s/Stop/Disabled/g" .claude/settings.json' "long sed in-place settings write"
+denied ': >>".claude/settings.json"' "append settings redirect"
+denied 'cp /tmp/settings.json .claude/settings.json' "overwrite settings by copy"
+denied 'rm .claude/settings.json' "remove settings registrations"
+denied 'tee .claude/settings.json' "overwrite settings through tee"
+allowed 'grep -n Stop .claude/settings.json' "grep settings is a read"
+allowed "jq '.hooks' .claude/settings.json" "jq settings is a read"
+allowed 'sed -n "1,20p" .claude/settings.json' "sed without in-place only reads settings"
+allowed 'git show HEAD:.claude/settings.json' "git show settings is a read"
+allowed 'cp .claude/settings.json /tmp/settings-backup.json' "copy settings out only reads it"
+allowed 'cat .claude/settings.json; rm /tmp/other' "settings read and unrelated mutation"
+allowed 'echo "Do not git checkout -- .claude/settings.json or sed -i on it"' "settings prose is data"
+allowed 'gh issue comment 719 --body "Do not redirect > .claude/settings.json"' "settings inline body is data"
+printf '%s\n' 'Do not git checkout -- .claude/settings.json' > "$body_file"
+allowed "gh issue comment 719 --body-file $body_file" "settings body file is data"
+allowed "cat <<'EOF'
+Do not git checkout -- .claude/settings.json or redirect > .claude/settings.json
+EOF" "settings heredoc prose is data"
+
 # Payloads and invocation boundaries, including commands following data.
 allowed 'echo "rm scripts/git-hooks/pre-push"' "quoted mutation is data"
 allowed "gh issue comment 719 --body 'chmod -x scripts/git-hooks/pre-push'" "inline body is data"
