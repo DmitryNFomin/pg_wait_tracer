@@ -5614,7 +5614,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
             struct pgwt_trace_event *revents =
                 server_load_events_fi(srv, req->from_ns, req->to_ns,
                                       req->filter.pid, &rcount, &rinfo);
-            if (rinfo.overloaded || rinfo.allocation_failed) {
+            if (rinfo.trace_unreadable || rinfo.allocation_failed ||
+                rinfo.overloaded) {
                 /* Absence with a reason, never the summary path's
                  * single-longest-wait value passed off as the raw answer
                  * (that IS the #319 defect) and never a silent blank. The
@@ -5622,7 +5623,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
                  * cheap summary answer -- only top_wait degrades. */
                 free(revents);
                 top_wait_unavailable = 1;
-                top_wait_unavailable_reason = rinfo.allocation_failed
+                top_wait_unavailable_reason = rinfo.trace_unreadable
+                    ? "trace_unreadable" : rinfo.allocation_failed
                     ? "allocation_failed" : "window_too_large";
             } else {
                 struct pgwt_sessions_result raw_res;
@@ -7040,7 +7042,8 @@ static void handle_execution_detail(struct pgwt_server *srv,
     struct pgwt_trace_event *post = server_load_markers_fi(
         srv, req->end_ns + 1, post_to, req->filter.pid, PGWT_LOAD_CONTEXT,
         &post_count, &post_info);
-    if (post_info.overloaded || post_info.allocation_failed) {
+    if (post_info.trace_unreadable || post_info.allocation_failed ||
+        post_info.overloaded) {
         /* The span context is additive: a refusal here must not fail the
          * execution detail itself. Drop the post pass and let the span
          * report its unobserved end with the reason. */
@@ -7241,7 +7244,7 @@ static void handle_span_detail(struct pgwt_server *srv,
     struct pgwt_load_info winfo = {0};
     struct pgwt_trace_event *wev =
         server_load_events_fi(srv, from, to, req->filter.pid, &wcount, &winfo);
-    if (winfo.overloaded || winfo.allocation_failed) {
+    if (winfo.trace_unreadable || winfo.allocation_failed || winfo.overloaded) {
         free(prefix);
         reject_overload(srv, req, wev, &winfo);
         return;
