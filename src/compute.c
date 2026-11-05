@@ -138,7 +138,7 @@ static inline int event_occurrence_in_window(const struct pgwt_trace_event *ev,
 {
     if (from_ns != 0 && ev->timestamp_ns < from_ns)
         return 0;
-    if (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
+    if (event_right_open(ev, to_ns))
         return 0;
     return to_ns == 0 || ev->timestamp_ns < to_ns;
 }
