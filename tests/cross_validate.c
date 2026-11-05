@@ -67,7 +67,7 @@ struct evt_acc {
     uint32_t event_id;
     double   sampled_ns;   /* ASH estimate */
     double   exact_ns;     /* sum of durations */
-    uint64_t c_measured_ns, c_nominal_ns; /* --abc only */
+    uint64_t a_joined_ns, c_measured_ns, c_nominal_ns; /* --abc only */
     int      used;
 };
 
@@ -136,7 +136,7 @@ struct abc_interval {
 };
 struct abc_sample {
     uint64_t ts, weight;
-    uint32_t pid;
+    uint32_t pid, event;
 };
 struct abc_state {
     struct abc_interval *intervals;
@@ -161,17 +161,39 @@ static int abc_interval_cmp(const void *va, const void *vb)
     return a->end < b->end ? -1 : a->end > b->end;
 }
 
-static void abc_row(const char *name, double a_ns, double b_ns,
-                    uint64_t cm_ns, uint64_t cn_ns, double at, double bt,
-                    uint64_t cmt, uint64_t cnt)
+struct abc_shares {
+    double a, aj, b, cm, cn;
+    double coverage, reading, selection, weighting;
+};
+
+static struct abc_shares abc_shares(const struct evt_acc *e,
+                                    const struct evt_acc *total)
 {
-    double a = at ? 100 * a_ns / at : 0;
-    double b = bt ? 100 * b_ns / bt : 0;
-    double cm = cmt ? 100.0 * cm_ns / cmt : 0;
-    double cn = cnt ? 100.0 * cn_ns / cnt : 0;
-    printf("ABC_ROW %-28s %.6f %.6f %.6f %.6f %.6f %.6f "
-           "%.0f %.0f %llu %llu\n", name, a, b, cm, cn, a - cm, cm - b,
-           a_ns, b_ns, (unsigned long long)cm_ns, (unsigned long long)cn_ns);
+    struct abc_shares v = {
+        .a = total->sampled_ns ? 100 * e->sampled_ns / total->sampled_ns : 0,
+        .aj = total->a_joined_ns ? 100.0 * e->a_joined_ns / total->a_joined_ns : 0,
+        .b = total->exact_ns ? 100 * e->exact_ns / total->exact_ns : 0,
+        .cm = total->c_measured_ns ? 100.0 * e->c_measured_ns / total->c_measured_ns : 0,
+        .cn = total->c_nominal_ns ? 100.0 * e->c_nominal_ns / total->c_nominal_ns : 0,
+    };
+    v.coverage = v.a - v.aj;
+    v.reading = v.aj - v.cm;
+    v.selection = v.cm - v.b;
+    v.weighting = v.cm - v.cn;
+    return v;
+}
+
+static void abc_row(const char *name, const struct evt_acc *e,
+                    const struct evt_acc *total)
+{
+    struct abc_shares v = abc_shares(e, total);
+    printf("ABC_ROW %-28s %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f "
+           "%.0f %llu %.0f %llu %llu\n", name,
+           v.a, v.aj, v.b, v.cm, v.cn,
+           v.coverage, v.reading, v.selection, v.weighting,
+           e->sampled_ns, (unsigned long long)e->a_joined_ns, e->exact_ns,
+           (unsigned long long)e->c_measured_ns,
+           (unsigned long long)e->c_nominal_ns);
 }
 
 static int abc_report(struct abc_state *s, struct evt_acc *table,
@@ -179,6 +201,7 @@ static int abc_report(struct abc_state *s, struct evt_acc *table,
                       uint64_t nominal)
 {
     uint64_t unjoined_ns = 0, excluded = 0, excluded_nominal = 0;
+    uint64_t aj_total = 0, aj_excluded = 0;
     uint64_t cm_total = 0, cn_total = 0, interval_ns = 0;
     size_t unjoined = 0, known = 0, unknown = 0, ik = 0, iu = 0;
     qsort(s->intervals, s->ni, sizeof(*s->intervals), abc_interval_cmp);
@@ -210,6 +233,12 @@ static int abc_report(struct abc_state *s, struct evt_acc *table,
             continue;
         }
         if (v->cpu_known) known++; else unknown++;
+        /* Keep A's recorded classification and measured weight; only the
+         * population changes. C then reclassifies this SAME joined set. */
+        if (pgwt_is_idle_event(sample->event))
+            aj_excluded += sample->weight;
+        else
+            acc_find(table, sample->event)->a_joined_ns += sample->weight;
         if (v->excluded) {
             excluded += sample->weight;
             excluded_nominal += nominal;
@@ -222,14 +251,18 @@ static int abc_report(struct abc_state *s, struct evt_acc *table,
     /* Sum independently from the event buckets, not a counter incremented
      * beside the input sum: losing a deposit must make this check go red. */
     for (int i = 0; i < MAX_DISTINCT; i++) {
+        aj_total += table[i].a_joined_ns;
         cm_total += table[i].c_measured_ns;
         cn_total += table[i].c_nominal_ns;
     }
     /* Use A's actual accumulators, not an input-weight counter rebuilt by
      * this join. Idle must reconcile separately because A and C can disagree
-     * about whether an instant is DB Time (precisely the A-C question). */
+     * about whether an instant is DB Time (the A_joined-C question). */
     long double residual = (long double)cm_total + excluded -
                            ((long double)at + a_idle - unjoined_ns);
+    long double aj_residual = (long double)aj_total + aj_excluded -
+                              ((long double)at + a_idle - unjoined_ns);
+    int join_closes = residual == 0 && aj_residual == 0;
     printf("\n=== ABC ===\n");
     printf("ABC_NOMINAL_PERIOD_NS %llu (input; default 100000000; "
            "not retained in trace)\n",
@@ -248,31 +281,59 @@ static int abc_report(struct abc_state *s, struct evt_acc *table,
     printf("ABC_JOINED_CPU_NS_PRESENT %zu %zu\n", known, unknown);
     printf("CPU_NS_PRESENT %zu %zu\n", ik, iu);
     printf("ABC_A_EXCLUDED_NS %.0f\n", a_idle);
+    printf("ABC_A_JOINED_EXCLUDED_NS %llu\n", (unsigned long long)aj_excluded);
     printf("ABC_C_EXCLUDED_NS %llu %llu\n", (unsigned long long)excluded,
            (unsigned long long)excluded_nominal);
     printf("ABC_JOIN_IDENTITY C_measured_DB + C_excluded = "
            "A_DB + A_excluded - UNJOINED_ns\n");
-    printf("JOIN_CLOSES %s %.0Lf\n", residual == 0 ? "yes" : "no", residual);
-    if (residual != 0) {
-        printf("JOIN_RESIDUAL_UNEXPLAINED %.0Lf\n", residual);
+    printf("ABC_A_JOINED_IDENTITY A_joined_DB + A_joined_excluded = "
+           "A_DB + A_excluded - UNJOINED_ns\n");
+    printf("JOIN_CLOSES %s %.0Lf\n", join_closes ? "yes" : "no",
+           residual != 0 ? residual : aj_residual);
+    if (!join_closes) {
+        printf("JOIN_RESIDUAL_A_JOINED %.0Lf\n", aj_residual);
+        printf("JOIN_RESIDUAL_UNEXPLAINED %.0Lf\n",
+               residual != 0 ? residual : aj_residual);
         return 5;
     }
     if (!cm_total || !cn_total) {
         printf("ABC_UNAVAILABLE no joined DB Time samples\n");
         return 5;
     }
-    printf("ABC_COLUMNS event A B C_measured C_nominal A-C C-B "
-           "A_ns B_ns C_measured_ns C_nominal_ns (shares/deltas in pp; "
-           "deltas use C_measured)\n");
+    struct evt_acc total = {
+        .sampled_ns = at, .a_joined_ns = aj_total, .exact_ns = bt,
+        .c_measured_ns = cm_total, .c_nominal_ns = cn_total,
+    };
+    /* Check every event, including those hidden by --min-share, and TOTAL.
+     * Allow only floating-point roundoff, far below printed pp precision. */
+    for (int i = 0; i <= MAX_DISTINCT; i++) {
+        struct evt_acc *e = i == MAX_DISTINCT ? &total : &table[i];
+        if (i != MAX_DISTINCT && !e->used) continue;
+        struct abc_shares v = abc_shares(e, &total);
+        double error = (v.a - v.b) - (v.coverage + v.reading + v.selection);
+        if (!(error >= -1e-9 && error <= 1e-9)) {
+            printf("ABC_DECOMPOSITION_CLOSES no %s %.12g\n",
+                   i == MAX_DISTINCT ? "TOTAL" : pgwt_event_name(e->event_id), error);
+            return 5;
+        }
+    }
+    printf("ABC_DECOMPOSITION_IDENTITY A-B = "
+           "(A-A_joined)+(A_joined-C_measured)+(C_measured-B)\n");
+    printf("ABC_DECOMPOSITION_CLOSES yes\n");
+    printf("ABC_COLUMNS event A A_joined B C_measured C_nominal "
+           "A-A_joined A_joined-C_measured C_measured-B C_measured-C_nominal "
+           "A_ns A_joined_ns B_ns C_measured_ns C_nominal_ns (shares/deltas in pp)\n");
+    printf("ABC_DELTAS A-A_joined: coverage gap (exact-tier); "
+           "A_joined-C_measured: reading and classification; "
+           "C_measured-B: selection/weighting; C_measured-C_nominal: weighting\n");
     /* Same eligibility as max_delta: exact share >= --min-share. Totals
      * include ALL events, including those below that display threshold. */
     for (int i = 0; i < MAX_DISTINCT; i++) {
         struct evt_acc *e = &table[i];
         if (e->used && 100 * e->exact_ns / bt >= min_share)
-            abc_row(pgwt_event_name(e->event_id), e->sampled_ns, e->exact_ns,
-                    e->c_measured_ns, e->c_nominal_ns, at, bt, cm_total, cn_total);
+            abc_row(pgwt_event_name(e->event_id), e, &total);
     }
-    abc_row("TOTAL", at, bt, cm_total, cn_total, at, bt, cm_total, cn_total);
+    abc_row("TOTAL", &total, &total);
     printf("=== END ABC ===\n");
     return 0;
 }
@@ -490,7 +551,7 @@ int main(int argc, char **argv)
                             abc_data.samples = abc_grow(abc_data.samples,
                                 &abc_data.cs, sizeof(*abc_data.samples));
                         abc_data.samples[abc_data.ns++] = (struct abc_sample){
-                            w, info.sample_period_ns, e->pid};
+                            w, info.sample_period_ns, e->pid, ev};
                     }
                     /* T2: we==0 samples are first-class CPU (the capture
                      * side already applied the command gate). */
