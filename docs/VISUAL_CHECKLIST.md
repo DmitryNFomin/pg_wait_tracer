@@ -208,6 +208,13 @@ hostile strings must render inert as text.
 `window_too_large`); silent table truncation (P10); the fidelity chip
 describing shading that is no longer on screen (P2).
 
+**Caption text (#566):** `tests/test_web_ui.py::test_pane_caption_text` gates
+Overview's captured-span summary and Queries' scope, backend-span wording,
+and unattributed-time disclosure with literal DOM-text equality. Its wire
+fixtures cover zero, large, unavailable, and missing-denominator disclosures
+with both populated and empty query lists. These string assertions complement
+the area/colour pane snapshots; they need no gallery cells or PNG baselines.
+
 ---
 
 ## First catch: stacked AAS layers were not painted at all — FIXED by U2a

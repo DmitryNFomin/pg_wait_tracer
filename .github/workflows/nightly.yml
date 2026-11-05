@@ -1,23 +1,24 @@
 # Nightly containerized platform matrix (Trust Milestone T7: TST-9, TST-12).
 #
-# The gating CI (ci.yml) runs entirely on ubuntu-latest — one cell of a ~24-cell
+# The gating CI (ci.yml) runs entirely on ubuntu-24.04 — one cell of a ~24-cell
 # support matrix (PG13/17/18 × EL8/EL9/Ubuntu × PIE/non-PIE). Every field escape
 # to date (#8, #24, #30, #31) lived in the capture/discovery slice, and the EL8
-# non-PIE + static-libbpf build path (the one that shipped the #24 platform) is
-# NEVER built in gating CI. This workflow exercises the real distro cells
-# nightly, inside privileged containers that share the host runner's kernel — so
-# BPF (BTF at /sys/kernel/btf/vmlinux) and, where the hypervisor allows it,
-# hardware watchpoints work exactly as in the ci.yml capture-smoke job.
+# non-PIE + static-libbpf build path is NEVER built in gating CI. This workflow
+# exercises distro userspace nightly in privileged containers sharing the hosted
+# ubuntu-24.04 kernel, with BPF using the host's /sys/kernel/btf/vmlinux.
+# EL8 coverage includes gcc 8.5, the bundled libbpf 1.4.7 build path, non-PIE
+# PGDG binaries and SDT notes; it does not cover EL8 kernel behaviour (4.18,
+# no ref_ctr_offset; #622), which only `make box-check OS=el8` on a 4.18 box does.
+# The --core smoke skips ci.yml's watchpoint-fidelity assertions (see below).
 #
 # Per cell (rockylinux:8 / rockylinux:9 / ubuntu:24.04):
 #   1. full build from source — EL8 has libbpf 0.5.0 (pre-USDT), so its build
 #      exercises the Makefile's static libbpf + bpftool bundling path (TST-12),
 #      which gating CI never compiles.
-#   2. the shared C unit suite (make -C tests check → unit_tests.list).
-#   3. the real-PG capture smoke (tests/ci_smoke.sh): tiered/sampled is the hard
-#      gate; full-mode watchpoint assertions run when the probe finds hardware
-#      breakpoints and are skipped LOUDLY (job summary) when it does not — the
-#      established degrade-loudly pattern.
+#   2. the shared C unit suite (make check-tests → unit_tests.list).
+#   3. the real-PG capture smoke (tests/ci_smoke.sh --core): tiered/sampled is
+#      the hard gate; watchpoint-fidelity and CPU-storm sections are skipped
+#      LOUDLY (job summary) — the established degrade-loudly pattern.
 #
 # Failure surfacing: this workflow is simply RED in the Actions tab (no external
 # alerting this phase). Kick it manually from the Actions tab (workflow_dispatch)
@@ -46,10 +47,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # EL8: non-PIE PGDG postgres + the static libbpf/bpftool bundling
-          # path (libbpf 0.5.0 predates USDT). PG13 from the PGDG archive repo
-          # is the #24 platform — the one automated coverage has exercised
-          # exactly once ever.
+          # EL8 userspace: gcc 8.5, the bundled libbpf 1.4.7 build path
+          # (distro libbpf 0.5.0 predates USDT), non-PIE PGDG PG13 binaries
+          # from the archive repo and SDT notes are covered on the hosted
+          # ubuntu-24.04 kernel; EL8 kernel behaviour (4.18, no ref_ctr_offset;
+          # #622) is covered only by `make box-check OS=el8` on a 4.18 box.
           - name: rocky8-pg13
             container: rockylinux:8
             family: el
@@ -73,7 +75,9 @@ jobs:
       # the capture path attaches uprobes/USDT and (where available) perf
       # hardware breakpoints. The container shares the runner's kernel, so
       # /sys/kernel/btf/vmlinux is the host's.
-      options: --privileged
+      # The ownership tests kill orphaned bridge children. tail as PID 1
+      # cannot reap them, so kill -0 would keep seeing dead process groups.
+      options: --privileged --init
       volumes:
         - /sys/kernel/btf:/sys/kernel/btf:ro
         # tracefs + debugfs: the daemon attaches sched tracepoints (on_fork
@@ -104,8 +108,11 @@ jobs:
           # Core build tools + BPF toolchain + ELF/compression libs. git is
           # required on EL8 (the Makefile clones pinned libbpf/bpftool). sudo &
           # procps-ng (pgrep) & python3 for the tests; findutils for the runner.
+          # ss, rsync and Node are also used by unit_tests.list's harness tests
+          # (ci.yml gets them from the hosted runner, not its apt install).
+          dnf -qy module enable nodejs:22
           dnf install -y gcc clang llvm make tar git python3 sudo procps-ng \
-            findutils diffutils which \
+            findutils diffutils which iproute rsync nodejs \
             elfutils-libelf-devel zlib-devel lz4-devel bpftool libbpf-devel
           # EL8's default python3 is 3.6, which lacks
           # subprocess.run(capture_output=) (3.7+) the smoke tests use. Install
@@ -117,11 +124,18 @@ jobs:
           # pillow + numpy: tests/test_ui_live_smoke_lib.py (unit_tests.list,
           # issue #112) decodes/diffs PNGs with them; ci.yml's build-and-unit
           # job gets these via actions/setup-python + pip, but this container
-          # has no such step, so `make -C tests check` was failing loudly with
+          # has no such step, so `make check-tests` was failing loudly with
           # ModuleNotFoundError on numpy (issue #139).
           python3.11 -m pip install pillow numpy
           # PGDG repo.
           dnf install -y "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$EL-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+          # PGDG retires old minor URLs (the EL9 image reports 9.3). Use its
+          # rolling major URLs without upgrading the whole container: the
+          # full upgrade replaced PAM/account packages before sudo failed.
+          # EL8 uses $releasever; EL9 uses $releasever_major.$releasever_minor.
+          # shellcheck disable=SC2016
+          sed -i -E '/^baseurl=/s/\$releasever(_major\.\$releasever_minor)?/'"$EL"'/g' \
+            /etc/yum.repos.d/pgdg*.repo
           # The EL AppStream 'postgresql' module masks the PGDG postgresqlNN
           # packages — disable it or the install finds no match.
           dnf -qy module disable postgresql || true
@@ -168,8 +182,9 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           V=${{ matrix.pg }}
           apt-get update
+          # Ubuntu uses distro nodejs 18.x; EL cells use the nodejs:22 module.
           apt-get install -y gcc clang llvm make git python3 python3-pip sudo curl gnupg \
-            lsb-release ca-certificates procps \
+            lsb-release ca-certificates procps iproute2 rsync nodejs \
             libbpf-dev libelf-dev zlib1g-dev liblz4-dev linux-tools-common \
             postgresql-common
           # bpftool: the container has no matching linux-tools-$(uname -r); build
@@ -216,17 +231,21 @@ jobs:
 
       # ── Build (EL8 exercises the static libbpf/bpftool bundling path) ─────
       - name: Verify BTF is visible from the container
-        run: test -r /sys/kernel/btf/vmlinux
+        run: |
+          uname -r
+          test -r /sys/kernel/btf/vmlinux
 
       - name: Build (BPF tracer + pgwt-server)
         run: make
 
       - name: Build C unit tests
-        run: make -C tests
+        # EL8 needs the same bundled libbpf library AND headers as the daemon.
+        run: make build-tests
 
       # ── Shared C unit suite (unit_tests.list) ─────────────────────────────
       - name: Run C unit tests (incl. golden-fixture decode — TST-10)
-        run: make -C tests check
+        # check depends on all: preserve the bundled flags even on a relink.
+        run: make check-tests
 
       # ── Real-PG capture smoke (--core: portable capture proof) ────────────
       # --core asserts the daemon attaches, records real attributed events
@@ -235,13 +254,22 @@ jobs:
       # a nested privileged container can open a hardware breakpoint that never
       # actually traps, so exact escalation and CPU-storm scheduling do not hold
       # here — those run on the T0 hosted runner + live EL8/EL9 boxes.
+      # This supplements the PR PG13 cell; --core is not equivalent coverage
+      # and cannot replace that cell under #770 part 3.
       - name: Run capture smoke (PG ${{ matrix.pg }}, --core)
+        env:
+          # True here because every container uses the ubuntu-24.04 host's
+          # kernel with semaphore refcounting, and PGDG binaries have SDT notes.
+          # box-check still declares 0 for el8: its 4.18 kernel lacks
+          # ref_ctr_offset (#622); nightly does not validate that contract.
+          PGWT_EXPECT_PHASE_PROBES: "1"
         run: |
           V=${{ matrix.pg }}
           # sudo strips the env: pass PATH (psql/pgbench), the job-summary sink,
           # and BPFTOOL (the uprobe run_cnt assertion needs a working bpftool).
           sudo env "PATH=$PATH" \
             "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
+            "PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES" \
             ${BPFTOOL:+BPFTOOL=$BPFTOOL} \
             tests/ci_smoke.sh --pg-version "$V" --core
 

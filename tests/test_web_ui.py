@@ -551,6 +551,130 @@ def test_queries_table(page):
     check(len(bars) > 0, f"Stacked wait profile bars rendered ({len(bars)})")
 
 
+def check_caption_text(page, selector, expected, name):
+    """#566: literal DOM text, independent of the pane's pixel tolerance.
+
+    None means deliberately absent (zero unattributed time), not an empty
+    string that could also hide a missing disclosure. Expected prose must be
+    literal test data, never obtained from the production text builders.
+    """
+    caption = page.locator(selector)
+    if expected is None:
+        check(caption.count() == 0, f"{name}: no caption")
+        return
+    caption.wait_for(state="visible")
+    actual = caption.text_content()
+    check(actual == expected,
+          f"{name}: expected {expected!r}, got {actual!r}")
+
+
+def test_pane_caption_text(page):
+    """#566: served Overview/Queries prose, including disclosure branches.
+
+    Override only wire data, so requests -> build -> mount -> DOM all run.
+    Both populated and empty Queries panes must retain the disclosure.
+    """
+    print("--- Test #566: Pane caption text ---")
+    p = page.context.new_page()
+    guard = ConsoleErrorGuard(p)
+    previous_capture = (_capture['page'], _capture['guard'])
+    set_failure_capture(p, guard)
+    fixture = {}
+    bounds = {}
+
+    def route(ws):
+        upstream = ws.connect_to_server()
+        commands = {}
+
+        def send(message):
+            request = json.loads(message)
+            commands[request['id']] = request.get('cmd')
+            upstream.send(message)
+
+        def receive(message):
+            data = json.loads(message)
+            command = commands.pop(data.get('id'), None)
+            if command == 'info':
+                bounds['to'] = data['to_ns']
+                data['from_ns'] = data['to_ns'] - 30 * 10**9
+            elif command == 'top_queries':
+                data.update(fixture)
+                if fixture.get('db_time_ms') is None:
+                    data.pop('db_time_ms', None)
+            ws.send(json.dumps(data))
+
+        ws.on_message(send)
+        upstream.on_message(receive)
+
+    p.route_web_socket('**/ws', route)
+    try:
+        p.goto(MOCK_URL)
+        p.wait_for_selector('#status.connected')
+        p.wait_for_selector('#summary-bar .metric-value')
+        end = bounds['to']
+
+        def open_window(tab, seconds):
+            # Hash-only navigation can leave the preceding summary visible;
+            # every wire fixture starts with a fresh document and connection.
+            p.goto('about:blank')
+            p.goto(MOCK_URL + f"#tab={tab}&from={end - seconds * 10**9}&to={end}")
+
+        open_window('overview', 60)
+        check_caption_text(p, '#summary-bar .metric:nth-child(3) .metric-value',
+                           '3.54 · captured 30s of 60s', 'Overview captured span')
+        # A fully captured window intentionally suppresses the extra line.
+        open_window('overview', 30)
+        check_caption_text(p, '#summary-bar .metric:nth-child(3) .metric-value',
+                           '3.54', 'Overview fully captured span')
+
+        scope = (
+            'Execution statistics: Completed executor phase only. '
+            'Planning statistics: completed planner phase only.'
+            'Backend spans: backend activity, not statement latency; '
+            'longest observed in-flight span takes precedence over longest measured closed span. '
+            'DB Time sums attributed wait/CPU time across executions.'
+            'DB Time includes waits acquired before execution starts (e.g. a '
+            'relation lock taken during parse analysis); Avg/p95/p99 Exec and '
+            'Plan measure executor/planner time only and do not include it.'
+        )
+        states = [
+            ('zero', dict(unattributed_ms=0, unattributed_count=0, db_time_ms=15000), None),
+            ('large', dict(unattributed_ms=5000, unattributed_count=1200, db_time_ms=15000),
+             '5.0s (25.0% of foreground DB Time) of foreground DB Time is not '
+             'attributed to any query (query_id 0), 1.2K occurrences.'),
+            ('refusal', dict(unattributed_available=False),
+             'Unattributed foreground time is not available for this window '
+             '(per-second summary tier has no unattributed bucket).'),
+            ('missing denominator', dict(unattributed_ms=5000, unattributed_count=1,
+                                         db_time_ms=None),
+             '5.0s of foreground DB Time is not attributed to any query '
+             '(query_id 0), 1 occurrence.'),
+        ]
+        for empty in (False, True):
+            for name, fields, expected in states:
+                fixture.clear()
+                fixture.update(unattributed_available=True)
+                fixture.update(fields)
+                if empty:
+                    fixture['rows'] = []
+                open_window('queries', 30)
+                p.wait_for_selector('#table-container .loading' if empty
+                                    else '#table-container table')
+                check_caption_text(p, '#table-container .unattributed-note', expected,
+                                   f"Queries {name}, empty={empty}")
+                if not empty:
+                    check_caption_text(p, '#table-container .queries-scope', scope,
+                                       'Queries scope')
+                    check_caption_text(p,
+                                       '#table-container .query-backend-span > span:first-child >> nth=0',
+                                       'Longest measured closed backend span: 420.0ms',
+                                       'Queries backend span')
+        assert_no_console_errors(p, guard, 'pane caption text')
+    finally:
+        set_failure_capture(*previous_capture)
+        p.close()
+
+
 def test_histogram_tab(page):
     """11. Histogram tab shows class/event selectors and heatmap."""
     print("--- Test 11: Histogram Tab ---")
@@ -4560,6 +4684,7 @@ def main():
                 test_breadcrumb_navigation,
                 test_sessions_table,
                 test_queries_table,
+                test_pane_caption_text,
                 test_histogram_tab,
                 test_timeline_tab,
                 test_transitions_tab,

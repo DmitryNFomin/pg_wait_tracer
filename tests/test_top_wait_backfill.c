@@ -452,6 +452,66 @@ static void test_overload_reports_absence(const char *dir)
           WIFEXITED(status) ? WEXITSTATUS(status) : -1, !WIFEXITED(status));
 }
 
+/* The summary answer survives damage to raw blocks, but its top_wait must
+ * not masquerade as the raw answer. Isolate unreadability from both budget
+ * refusal flags so neither can accidentally carry this regression. */
+static void test_unreadable_reports_absence(uint64_t base_mono)
+{
+    printf("--- 2a. unreadable raw backfill preserves summaries with a reason ---\n");
+    char dir[] = "/tmp/pgwt_top_wait_unreadable_XXXXXX";
+    if (!mkdtemp(dir)) { printf("FATAL: mkdtemp unreadable\n"); exit(2); }
+    build_fixture(dir, base_mono, 1, FIXTURE_MIXED);
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    if (!srv || server_init(srv, dir) != 0) exit(2);
+    struct pgwt_request req = {0};
+
+    /* Preserve the block bounds and committed count, and all summaries.
+     * Only decoding the raw payload now fails. */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    FILE *fp = fopen(path, "r+b");
+    if (!fp) exit(2);
+    if (fseek(fp, sizeof(struct pgwt_trace_file_header) +
+              offsetof(struct pgwt_trace_block_header, block_type), SEEK_SET)
+        != 0 || fputc(255, fp) == EOF || fclose(fp) != 0) exit(2);
+    cur_cache_drop(&srv->cur);
+
+    CHECK(summaries_would_be_used(srv, &req),
+          "unreadable raw fixture still selects the summary route");
+    int count = 0;
+    struct pgwt_load_info info = {0};
+    struct pgwt_trace_event *events = server_load_events_fi(
+        srv, req.from_ns, req.to_ns, req.filter.pid, &count, &info);
+    CHECK(info.trace_unreadable && !info.overloaded && !info.allocation_failed,
+          "real backfill load flags unreadable=1 overloaded=0 allocation_failed=0");
+    free(events);
+
+    cJSON *out = call_top_sessions(srv, &req);
+    CHECK(out && cJSON_GetObjectItem(out, "error") == NULL,
+          "unreadable backfill yields a degraded Sessions response");
+    cJSON *unavail = cJSON_GetObjectItem(out, "top_wait_unavailable");
+    CHECK(cJSON_IsTrue(unavail), "unreadable backfill sets top_wait_unavailable");
+    cJSON *reason = cJSON_GetObjectItem(out, "top_wait_unavailable_reason");
+    CHECK(cJSON_IsString(reason) &&
+          strcmp(reason->valuestring, "trace_unreadable") == 0,
+          "unreadable-only backfill reason is trace_unreadable");
+    cJSON *fidelity = cJSON_GetObjectItem(out, "fidelity");
+    CHECK(cJSON_IsString(fidelity) && strcmp(fidelity->valuestring, "exact") == 0,
+          "summary fidelity survives unreadable raw backfill");
+    cJSON *row = find_row(cJSON_GetObjectItem(out, "rows"), TARGET_PID);
+    CHECK(row && cJSON_IsNull(cJSON_GetObjectItem(row, "top_wait")),
+          "target summary row survives with a null top_wait");
+    cJSON *dbt = cJSON_GetObjectItem(row, "db_time_ms");
+    CHECK(cJSON_IsNumber(dbt) && dbt->valuedouble > 0,
+          "summary DB time survives unreadable raw backfill");
+    cJSON_Delete(out);
+    server_destroy(srv);
+    free(srv);
+    char cleanup[600];
+    snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
+    if (system(cleanup) != 0) exit(2);
+}
+
 /* ── Section 2b: overload hints offer only what can actually help ─────── */
 /* Like section 2, fork BEFORE the parent's first load_max_events() call so
  * each child's tiny budget reaches an unset cache. Positively require a
@@ -1168,6 +1228,7 @@ int main(void)
     test_overload_reports_absence(dir);
     test_query_filter_overload_hints(dir);
     test_backfill_matches_raw(dir, base_mono);
+    test_unreadable_reports_absence(base_mono);
     test_queries_top_wait_matches_raw(dir);
     test_queries_force_raw(dir_straddle);
     test_route_predicate_discriminates(dir_nosum);
@@ -1183,7 +1244,7 @@ int main(void)
 
     /* Require the observed assertion total: a truncated run must fail
      * even when all assertions it did execute passed. */
-    if (tests_run < 155) {
+    if (tests_run < 163) {
         printf("FAIL: only %d assertions executed -- a truncated run must "
                "not read as a pass\n", tests_run);
         tests_failed++;
