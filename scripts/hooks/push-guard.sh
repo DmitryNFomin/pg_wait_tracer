@@ -9,6 +9,8 @@
 # executable contexts (shell -c, shell heredocs and substitutions) are checked.
 # This is a bounded lexical check, not a general shell parser or a security
 # boundary against hidden wrapper scripts. No payload files are opened.
+# Edit and Write are not screened by the Bash-only registration; this is an
+# accidental-bypass guard, not an unbypassable one.
 #
 # Under-denying can let someone disable the real pre-push hook, the dangerous
 # direction. Over-denying makes the guard undiscussable, which happened with
@@ -33,7 +35,7 @@ class Ambiguous(Exception):
 class Forbidden(Exception):
     pass
 
-TERMS = ("PGWT_SKIP_PUSH_GUARD", "core.hookspath", "--no-v", "send-pack", "git-hooks", "git-push", "git-receive-pack")
+TERMS = ("PGWT_SKIP_PUSH_GUARD", "core.hookspath", "--no-v", "send-pack", "git-hooks", "git-push", "git-receive-pack", ".claude/settings.json")
 
 def relevant(text):
     # This only avoids parsing unrelated, possibly oddly quoted commands.
@@ -161,7 +163,7 @@ def tokens(text, i=0, closing=None):
 def protected(word):
     # A path operand, not prose or a blob of source code. Keep the historical
     # git-hooks spelling coverage, including absolute paths and descendants.
-    return "git-hooks" in word
+    return "git-hooks" in word or word == ".claude/settings.json" or word.endswith("/.claude/settings.json")
 
 MUTATORS = {"rm", "unlink", "mv", "cp", "install", "truncate", "tee", "chmod", "ln", "touch", "dd"}
 READERS = {"echo", "printf", "cat", "head", "tail", "grep", "rg", "sed", "awk", "less"}
@@ -260,6 +262,8 @@ def git_invocation(args, skip):
         raise Forbidden("git send-pack: plumbing bypasses the pre-push hook entirely (#687)")
     if subcommand == "config":
         return git_config(operands)
+    if subcommand in ("checkout", "restore"):
+        return any(protected(arg) for arg in operands)
     if subcommand != "push":
         return False
     index = 0
@@ -394,6 +398,10 @@ def invocation(words, heredocs=(), state=None):
     plumbing_hit = any(plumbing_name(arg) for arg in scan)
     if verb not in READERS and plumbing_hit:
         raise Forbidden("plumbing binary reached through an unrecognized launcher: bypasses the pre-push hook entirely (#687)")
+    # sed is normally a reader; -i (including BSD/GNU suffixes and grouped
+    # short flags) or --in-place makes its file operands write targets.
+    if verb == "sed" and any(re.match(r"^-[^-]*i", arg) or arg == "--in-place" or arg.startswith("--in-place=") for arg in args):
+        return any(protected(arg) for arg in args)
     if verb not in MUTATORS:
         return False
     if verb in ("cp", "install", "ln"):
@@ -473,7 +481,7 @@ try:
         raise Ambiguous("command is not text")
     # Keep unrelated commands untouched, including deliberately odd quoting.
     if relevant(command) and mutates(command):
-        raise Forbidden("write-shaped operation ... git-hooks: could remove, overwrite, or disable the pre-push hook")
+        raise Forbidden("write-shaped operation ... git-hooks or .claude/settings.json: could remove, overwrite, or disable registered hooks")
 except Forbidden as exc:
     print(str(exc))
     sys.exit(2)

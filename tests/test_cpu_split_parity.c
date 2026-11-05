@@ -1474,6 +1474,32 @@ static void spin_assert(const struct spin_probe *p)
 static void test_wait_spin_is_not_a_cpu_observation(void)
 {
     printf("--- 7. measured wait spin + UNKNOWN CPU gap (#763, #575) ---\n");
+    /* A frozen file from the actual pre-#766 v9 writer, not a current
+     * payload relabelled VERSION - 1. This must fail on the v9 reader. */
+    const char *legacy_dir = "fixtures/summary_v9_wait_spin";
+    if (access(legacy_dir, F_OK) != 0)
+        legacy_dir = "tests/fixtures/summary_v9_wait_spin";
+    char legacy_path[800];
+    snprintf(legacy_path, sizeof(legacy_path), "%s/current.summary", legacy_dir);
+    FILE *legacy = fopen(legacy_path, "rb");
+    struct pgwt_trace_file_header hdr = {0};
+    int loaded = legacy && fread(&hdr, sizeof(hdr), 1, legacy) == 1;
+    if (legacy) fclose(legacy);
+    CHECK(loaded && hdr.magic == PGWT_SUMMARY_MAGIC && hdr.version == 9,
+          "7 v9: real retired writer fixture has a v9 header");
+    if (loaded) {
+        uint64_t from = hdr.start_time_ns / ONE_SEC * ONE_SEC;
+        int considered = 0, unusable = 0;
+        int current = pgwt_summaries_window_current(legacy_dir, from,
+                          from + SECS * ONE_SEC, &considered, &unusable);
+        CHECK(!current && considered == 1 && unusable == 1,
+              "7 v9: real v9 is REFUSED (current %d, considered %d, unusable %d)",
+              current, considered, unusable);
+        struct pgwt_summary_reader reader;
+        int opened = pgwt_summary_reader_open(&reader, legacy_path);
+        CHECK(opened < 0, "7 v9: reader refuses the real v9 file");
+        if (opened == 0) pgwt_summary_reader_close(&reader);
+    }
     struct pgwt_trace_event ev[MAX_EV];
     uint64_t origin = mono_origin();
     int n = spin_build(ev, origin, 1, 0, 1);

@@ -163,17 +163,19 @@ SERVER_LDFLAGS = -lz -llz4 -lm
 # several translation units and therefore must never be rebuilt partially.
 -include $(USER_OBJS:.o=.d) $(SERVER_OBJS:.o=.d)
 
-.PHONY: all clean build-tests test-asan test-valgrind bench pgwt-client
+.PHONY: all clean build-tests check-tests test-asan test-valgrind bench pgwt-client
 
 all: $(TARGET) pgwt-server
 
 # Keep tests on the daemon's resolved toolchain (#615). Bundled paths are
 # relative to the repo root; adjust them for the sub-make's tests/ directory.
-# Preserve the tests' own CFLAGS and include directories.
-build-tests: all
+# Preserve the tests' own CFLAGS and include directories. check-tests must
+# forward the same flags: tests/check depends on all and can relink binaries.
+build-tests check-tests: all
 	$(MAKE) -C tests CC="$(CC)" \
 		LIBBPF_LIB="$(patsubst $(BUILD_DIR)/%,../$(BUILD_DIR)/%,$(LIBBPF_LIB))" \
-		LIBBPF_INC="$(patsubst -I$(BUILD_DIR)/%,-I../$(BUILD_DIR)/%,$(LIBBPF_INC))"
+		LIBBPF_INC="$(patsubst -I$(BUILD_DIR)/%,-I../$(BUILD_DIR)/%,$(LIBBPF_INC))" \
+		$(if $(filter check-tests,$@),check,all)
 
 # ASan build: recompile server with address sanitizer
 test-asan:
