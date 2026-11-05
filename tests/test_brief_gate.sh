@@ -25,10 +25,10 @@ chmod +x "$D/"*.sh
 NOW=$(date +%s)
 SHA=$(printf '%064d' 0)
 pass=0; fail=0; OUT=''; RC=0
-ok() { pass=$((pass+1)); echo "ok   $*"; }
-bad() { fail=$((fail+1)); echo "FAIL $*"; printf '%s\n' "$OUT"; }
+ok() { pass=$((pass+1)); printf 'ok   %s\n' "$*"; }
+bad() { fail=$((fail+1)); printf 'FAIL %s\n' "$*"; printf '%s\n' "$OUT"; }
 reset_state() {
-  rm -rf "$PGWT_LEAD_STATE_DIR/.spawns" "$PGWT_LEAD_STATE_DIR/.briefs-passed"
+  rm -rf "$PGWT_LEAD_STATE_DIR/.spawns" "$PGWT_LEAD_STATE_DIR/.briefs-passed" "$PGWT_LEAD_STATE_DIR/.spawn-payloads"
   : > "$D/.dispositions"
   printf '== sandbox: zero findings ==\n' > "$D/.sweep-latest.txt"
   printf '# dispatch-queue v1\nSTATUS OK\nCAP running=0 cap=3\n' > "$D/.dispatch-queue"
@@ -40,8 +40,11 @@ brief() { printf '%s %s %s\n' "$1" "$SHA" "$TMP/brief with spaces.md" >> "$PGWT_
 stop() {
   local event="${1-}"
   [ -n "$event" ] || event='{}'
-  OUT=$(printf '%s' "$event" | bash "$D/sweep-hook.sh" 2>&1)
+  OUT=$(printf '%s' "$event" | bash "$D/sweep-hook.sh" 2> "$TMP/stop-err")
   RC=$?
+  STOP_STDOUT=$OUT
+  OUT="$OUT
+$(cat "$TMP/stop-err")"
 }
 expect() {
   local desc="$1" want="$2" text="${3:-}"
@@ -82,9 +85,38 @@ expect 'all advisory types pass without consuming briefs' 0
 empty "$PGWT_LEAD_STATE_DIR/.spawns" 'advisory spawns dropped'
 if [ -s "$PGWT_LEAD_STATE_DIR/.briefs-passed" ]; then ok 'advisory spawns do not consume pass'; else bad 'advisory consumed pass'; fi
 
-reset_state; spawn unknown-kind unknown
+reset_state
+printf '%s' '{"agent_id":"unknown-kind","hook_event_name":"SubagentStart"}' | bash "$D/agent-start-hook.sh"
+if /usr/bin/grep -Eq '^[0-9]+ unknown-kind unknown$' "$PGWT_LEAD_STATE_DIR/.spawns"; then ok 'untyped spawn recorded as unknown'; else bad 'untyped spawn missing'; fi
 stop
-expect 'unknown type is a dispatch' 2 unknown-kind
+expect 'unknown type is advisory and reports missing payload type' 0 '1 with agent_type ABSENT'
+if [[ "$STOP_STDOUT" == *'SPAWN PAYLOAD DIAGNOSTIC: 1 spawn(s) since last stop'* &&
+      "$STOP_STDOUT" == *'keys seen: agent_id,hook_event_name'* &&
+      "$STOP_STDOUT" == *'agent_type NOT DELIVERED -- spawn gate cannot classify; check the keys above'* ]]; then
+  ok 'missing type diagnostic is loud on stdout'
+else bad 'missing stdout payload diagnostic'; fi
+empty "$PGWT_LEAD_STATE_DIR/.spawns" 'unknown spawn never persists'
+empty "$PGWT_LEAD_STATE_DIR/.spawn-payloads" 'payload diagnostics consumed at genuine stop'
+stop
+if [[ "$OUT" != *'SPAWN PAYLOAD DIAGNOSTIC:'* ]]; then ok 'diagnostic does not recur'; else bad 'diagnostic recurred'; fi
+
+reset_state
+printf '%s missing-type\n' "$NOW" > "$PGWT_LEAD_STATE_DIR/.spawns"
+stop; expect 'absent recorded type is advisory' 0
+empty "$PGWT_LEAD_STATE_DIR/.spawns" 'absent recorded type never persists'
+
+reset_state
+for value in null 42 '{}' '[]' '""' '"two words"'; do
+  printf '{"agent_id":"bad-type","agent_type":%s}' "$value" | bash "$D/agent-start-hook.sh"
+done
+stop; expect 'non-token payload types are advisory' 0 '0 with agent_type ABSENT'
+empty "$PGWT_LEAD_STATE_DIR/.spawns" 'non-token payload types never persist'
+
+reset_state
+printf '%s' '{"agent_id":"typed","agent_type":"reviewer","z":0}' | bash "$D/agent-start-hook.sh"
+printf '%s' '{"agent_id":"untyped","a":0}' | bash "$D/agent-start-hook.sh"
+stop; expect 'diagnostic counts spawns and missing types' 0 '2 spawn(s) since last stop, 1 with agent_type ABSENT'
+if [[ "$STOP_STDOUT" == *'keys seen: a,agent_id,agent_type,z;'* ]]; then ok 'diagnostic unions and sorts payload keys'; else bad 'wrong key union'; fi
 
 for event in '{"stop_hook_active":true,"hook_event_name":"Stop"}' '{"hook_event_name":"SubagentStop"}'; do
   reset_state; spawn bypass; brief "$((NOW-1))"
@@ -92,12 +124,16 @@ for event in '{"stop_hook_active":true,"hook_event_name":"Stop"}' '{"hook_event_
   cp "$D/.dispositions" "$TMP/disp-before"
   cp "$PGWT_LEAD_STATE_DIR/.spawns" "$TMP/spawns-before"
   cp "$PGWT_LEAD_STATE_DIR/.briefs-passed" "$TMP/passes-before"
+  printf '%s bypass keys=agent_id agent_type=ABSENT\n' "$NOW" > "$PGWT_LEAD_STATE_DIR/.spawn-payloads"
+  cp "$PGWT_LEAD_STATE_DIR/.spawn-payloads" "$TMP/payloads-before"
   stop "$event"
   expect "bypass event $event passes" 0
   if cmp -s "$D/.dispositions" "$TMP/disp-before" &&
      cmp -s "$PGWT_LEAD_STATE_DIR/.spawns" "$TMP/spawns-before" &&
-     cmp -s "$PGWT_LEAD_STATE_DIR/.briefs-passed" "$TMP/passes-before"; then
-    ok 'bypass preserves dispositions and both record files'
+     cmp -s "$PGWT_LEAD_STATE_DIR/.briefs-passed" "$TMP/passes-before" &&
+     cmp -s "$PGWT_LEAD_STATE_DIR/.spawn-payloads" "$TMP/payloads-before" &&
+     [[ "$OUT" != *'SPAWN PAYLOAD DIAGNOSTIC:'* ]]; then
+    ok 'bypass preserves dispositions, records and diagnostics without a banner'
   else bad 'bypass changed state'; fi
 done
 
@@ -129,12 +165,27 @@ reset_state
 OUT=$(printf '%s' '{"agent_id":"start-a","agent_type":"implementer"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
 expect 'start hook exits zero' 0
 if /usr/bin/grep -Eq '^[0-9]+ start-a implementer$' "$PGWT_LEAD_STATE_DIR/.spawns" &&
+   /usr/bin/grep -Eq '^[0-9]+ start-a keys=agent_id,agent_type agent_type=PRESENT$' "$PGWT_LEAD_STATE_DIR/.spawn-payloads" &&
    /usr/bin/grep -Fq '["start", "/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead/.active-agents", "start-a"]' "$GATE_LEDGER_CALLS"; then
   ok 'start records spawn and preserves canonical ledger operation'
 else bad 'start record or ledger call missing'; fi
 OUT=$(printf '%s' '{"agent_id":"start-unknown"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
 expect 'start without type exits zero' 0
-if /usr/bin/grep -Eq '^[0-9]+ start-unknown unknown$' "$PGWT_LEAD_STATE_DIR/.spawns"; then ok 'absent type recorded as unknown'; else bad 'absent type lost'; fi
+if /usr/bin/grep -Eq '^[0-9]+ start-unknown unknown$' "$PGWT_LEAD_STATE_DIR/.spawns" &&
+   /usr/bin/grep -Eq '^[0-9]+ start-unknown keys=agent_id agent_type=ABSENT$' "$PGWT_LEAD_STATE_DIR/.spawn-payloads"; then ok 'absent type recorded as unknown with diagnostic'; else bad 'absent type lost'; fi
+OUT=$(printf '%s' 'not json' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
+expect 'unparseable start payload exits zero' 0
+if /usr/bin/grep -Eq '^[0-9]+ unknown keys=UNPARSEABLE agent_type=ABSENT$' "$PGWT_LEAD_STATE_DIR/.spawn-payloads"; then ok 'unparseable payload diagnostic recorded'; else bad 'unparseable diagnostic missing'; fi
+reset_state
+mkdir "$PGWT_LEAD_STATE_DIR/.spawn-payloads"
+OUT=$(printf '%s' '{"agent_id":"diag-unwritable","agent_type":"implementer"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
+expect 'start exits zero when diagnostic file cannot be written' 0
+if /usr/bin/grep -Eq '^[0-9]+ diag-unwritable implementer$' "$PGWT_LEAD_STATE_DIR/.spawns"; then ok 'diagnostic failure preserves spawn recording'; else bad 'diagnostic failure prevented spawn record'; fi
+reset_state
+rm "$PGWT_LEAD_STATE_DIR/.spawns"; mkdir "$PGWT_LEAD_STATE_DIR/.spawns"
+OUT=$(printf '%s' '{"agent_id":"spawn-unwritable"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
+expect 'start exits zero when spawn file cannot be written' 0
+if /usr/bin/grep -Eq '^[0-9]+ spawn-unwritable keys=agent_id agent_type=ABSENT$' "$PGWT_LEAD_STATE_DIR/.spawn-payloads"; then ok 'spawn failure preserves payload diagnostic'; else bad 'spawn failure prevented diagnostic'; fi
 mkdir "$TMP/unwritable"; chmod 500 "$TMP/unwritable"
 OUT=$(printf '%s' '{"agent_id":"unwritable","agent_type":"implementer"}' | PGWT_LEAD_STATE_DIR="$TMP/unwritable" bash "$D/agent-start-hook.sh" 2>&1); RC=$?
 expect 'start always exits zero for unwritable state' 0
@@ -171,5 +222,5 @@ stop; expect 'real checker and start records satisfy real Stop gate' 0
 empty "$PGWT_LEAD_STATE_DIR/.briefs-passed" 'real pass consumed'
 empty "$PGWT_LEAD_STATE_DIR/.spawns" 'real spawn consumed'
 
-echo "$pass passed, $fail failed"
+printf '%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

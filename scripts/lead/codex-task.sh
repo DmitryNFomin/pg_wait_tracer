@@ -5,7 +5,8 @@
 # .git; Codex runs only in the external clone. Never push from this wrapper.
 # Slashes become %2F and literal percent signs become %25 (no name collisions).
 # Exits: 2 usage, 10 BRIEF_MISSING, 11 INVALID_BRANCH, 12 UNSAFE_CLONE_PATH,
-# 13 SETUP_FAILED, 14 CLONE_BUSY, 20 BRANCH_MISSING, 21 BRANCH_UNCHANGED,
+# 13 SETUP_FAILED, 14 CLONE_BUSY, 15 BRIEF_UNCHECKED,
+# 20 BRANCH_MISSING, 21 BRANCH_UNCHANGED,
 # 22 FETCH_FAILED, 23 COMMIT_UNREACHABLE, 24 CODEX_FAILED, 25 DIFF_FAILED.
 set -u
 
@@ -14,6 +15,15 @@ die() { code=$1; shift; printf '%s\n' "$*" >&2; exit "$code"; }
 brief=$1
 branch=$2
 [ -f "$brief" ] && [ -r "$brief" ] || die 10 "BRIEF_MISSING: brief file does not exist or is unreadable: $brief"
+unchecked='BRIEF_UNCHECKED: run scripts/lead/check-brief.sh <brief> first (no passing record for this exact brief content)'
+brief_sha=$(shasum -a 256 < "$brief" 2>/dev/null) || die 15 "$unchecked"
+brief_sha=${brief_sha%% *}
+now=$(date +%s) || die 15 "$unchecked"
+passes="${PGWT_LEAD_STATE_DIR:-/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead}/.briefs-passed"
+[ -r "$passes" ] && awk -v sha="$brief_sha" -v now="$now" '
+    $1 ~ /^[0-9]+$/ && $2 == sha && NF >= 3 && $1 >= now - 86400 && $1 <= now { found = 1 }
+    END { exit !found }
+' "$passes" 2>/dev/null || die 15 "$unchecked"
 git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || die 11 "INVALID_BRANCH: $branch"
 git check-ref-format --branch "$branch" >/dev/null 2>&1 || die 11 "INVALID_BRANCH: $branch"
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null) || die 13 'SETUP_FAILED: script must live inside the real repository'

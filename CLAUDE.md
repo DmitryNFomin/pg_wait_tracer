@@ -36,7 +36,8 @@ and a `NOT SEARCHED: <what could hold it and was not probed>` line; `none`, empt
 (`scripts/lead/absence-prepass.py`). A brief dispatching issue N must paste the live
 `gh api repos/{owner}/{repo}/issues/N/comments --paginate` output in a fence and add
 `CONTROLLING SCOPE DECISION: #N comment <id> "<quote>"` (`scripts/lead/check-brief.sh`,
-recorded on pass and checked by the `Stop` hook against `SubagentStart` spawns).
+recorded on pass; `scripts/lead/codex-task.sh` refuses (exit 15) a brief with no passing record for its exact
+content, and the `Stop` hook checks `SubagentStart` spawns against the records).
 
 A Bash call may contain probes **or** conclusions, never both. Where a verdict is
 wanted, derive it in the shell from the data (`out=$(...); if [ -z "$out" ]; then
@@ -317,7 +318,9 @@ Registered in `.claude/settings.json` (`*` means no matcher):
   finding carries this turn's disposition, and until every non-advisory agent
   spawned this turn has an earlier passing `scripts/lead/check-brief.sh` record.
 - `SubagentStart`: records the agent ID in the shared active-agent ledger and in
-  `.spawns` (id, type, time); always exits 0 and cannot refuse agent creation.
+  `.spawns` (id, type, time) and the raw payload keys in `.spawn-payloads`; always
+  exits 0 and cannot refuse agent creation. A spawn with no `agent_type` is
+  advisory, and the next `Stop` prints a diagnostic saying so.
 - `SubagentStop` ledger hook: removes the agent ID from that ledger;
   always exits 0 and never refuses a stop.
 - `SubagentStop` sweep hook: refreshes stale sweep data; can refuse to end a

@@ -22,18 +22,27 @@ import fcntl, json, os, sys, time
 try:
     d = json.load(sys.stdin)
     if not isinstance(d, dict):
-        d = {}
+        raise ValueError("payload must be an object")
+    keys = ",".join(sorted(d))
 except Exception:
     d = {}
+    keys = "UNPARSEABLE"
 print(d.get("agent_id") or "")
 def token(value):
     return value if isinstance(value, str) and value and not any(c.isspace() for c in value) else "unknown"
 try:
     with open(os.path.join(sys.argv[1], ".brief-gate.lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        with open(os.path.join(sys.argv[1], ".spawns"), "a") as spawns:
-            aid, kind = token(d.get("agent_id")), token(d.get("agent_type"))
-            spawns.write(f"{int(time.time())} {aid} {kind}\n")
+        epoch = int(time.time())
+        aid, kind = token(d.get("agent_id")), token(d.get("agent_type"))
+        presence = "PRESENT" if "agent_type" in d else "ABSENT"
+        for name, line in ((".spawns", f"{epoch} {aid} {kind}\n"),
+                           (".spawn-payloads", f"{epoch} {aid} keys={keys} agent_type={presence}\n")):
+            try:
+                with open(os.path.join(sys.argv[1], name), "a", encoding="utf-8") as records:
+                    records.write(line)
+            except OSError:
+                pass
 except OSError:
     pass
 ' "$STATE" 2>/dev/null)

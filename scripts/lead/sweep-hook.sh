@@ -159,6 +159,22 @@ def write_lines(stream, lines):
 try:
     with open(os.path.join(state, ".brief-gate.lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(os.path.join(state, ".spawn-payloads"), "a+", encoding="utf-8") as payloads:
+            payloads.seek(0)
+            diagnostics = payloads.read().splitlines()
+            write_lines(payloads, [])
+        if diagnostics:
+            absent = 0
+            keys = set()
+            for line in diagnostics:
+                match = re.fullmatch(r"[0-9]+ \S+ keys=(.*) agent_type=(PRESENT|ABSENT)", line)
+                if match:
+                    keys.update(key for key in match[1].split(",") if key)
+                    absent += match[2] == "ABSENT"
+            warning = ("; agent_type NOT DELIVERED -- spawn gate cannot classify; check the keys above"
+                       if absent else "")
+            print(f"BANNER SPAWN PAYLOAD DIAGNOSTIC: {len(diagnostics)} spawn(s) since last stop, "
+                  f"{absent} with agent_type ABSENT; keys seen: {','.join(sorted(keys))}{warning}")
         with contextlib.ExitStack() as stack:
             files = [stack.enter_context(open(os.path.join(state, name), "a+", encoding="utf-8"))
                      for name in (".spawns", ".briefs-passed")]
@@ -183,14 +199,16 @@ try:
 
             spawns, kept = [], []
             for line in snapshots[0]:
-                match = re.fullmatch(r"([0-9]{1,12}) (\S+) (\S+)", line)
+                match = re.fullmatch(r"([0-9]{1,12}) (\S+)(?: (\S+))?", line)
                 if not match:
                     print("UNKNOWN: malformed .spawns record; verify dispatch state")
                     kept.append(line)
                     continue
                 spawns.append((int(match[1]), match[2], match[3], line))
             for epoch, aid, kind, line in sorted(spawns, key=lambda item: item[0]):
-                if kind in advisory:
+                # Missing/unclassifiable types are advisory. Only a real,
+                # explicitly non-advisory token establishes a dispatch.
+                if kind is None or kind == "unknown" or kind in advisory:
                     continue
                 if passes and passes[0][0] <= epoch:
                     passes.pop(0)
@@ -214,6 +232,9 @@ if [ "$brief_rc" -ne 0 ] && [ -z "$brief_out" ]; then
 fi
 while IFS= read -r bline; do
   [ -n "$bline" ] || continue
+  case "$bline" in
+    BANNER\ *) printf '%s\n' "${bline#BANNER }"; continue ;;
+  esac
   nmissing=$((nmissing+1))
   missing="${missing}${bline}
 "
