@@ -96,10 +96,6 @@ jobs:
           set -ex
           V=${{ matrix.pg }}
           EL=${{ matrix.el }}
-          # The image can carry an old Rocky minor (e.g. 9.3). PGDG follows
-          # the installed OS minor and retires old repos; update the distro
-          # BEFORE adding PGDG, keeping its packages and repository ABI aligned.
-          dnf upgrade -y --refresh
           dnf install -y dnf-plugins-core glibc-langpack-en || dnf install -y dnf-plugins-core
           # CRB (EL9) / PowerTools (EL8): libbpf-devel + build tooling live here.
           if [ "$EL" = "8" ]; then
@@ -131,6 +127,13 @@ jobs:
           python3.11 -m pip install pillow numpy
           # PGDG repo.
           dnf install -y "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$EL-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+          # PGDG retires old minor URLs (the EL9 image reports 9.3). Use its
+          # rolling major URLs without upgrading the whole container: the
+          # full upgrade replaced PAM/account packages before sudo failed.
+          # EL8 uses $releasever; EL9 uses $releasever_major.$releasever_minor.
+          # shellcheck disable=SC2016
+          sed -i -E '/^baseurl=/s/\$releasever(_major\.\$releasever_minor)?/'"$EL"'/g' \
+            /etc/yum.repos.d/pgdg*.repo
           # The EL AppStream 'postgresql' module masks the PGDG postgresqlNN
           # packages — disable it or the install finds no match.
           dnf -qy module disable postgresql || true
