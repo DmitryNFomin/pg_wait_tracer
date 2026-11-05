@@ -507,7 +507,7 @@ per interval, no screen clearing).
 |------|-------|---------|-------------|
 | `--trace-dir <DIR>` | `-T` | disabled | Directory for trace files (enables recording) |
 | `--trace-retention <H>` | `-R` | 24 | Keep trace files for H hours |
-| `--retention-gb <G>` | — | off | Also cap total trace-dir size at G GiB (fractional allowed); oldest archives deleted first, the live current files never |
+| `--retention-gb <G>` | — | off | Target total trace-dir size of G GiB (fractional allowed); oldest eligible archives deleted first. Live files and `.jsonl` sidecars are protected; pending summaries or cleanup failures can leave usage over cap |
 | `--trace-group <GROUP>` | — | `dba` if that group exists, else the group PostgreSQL runs under | Unix group allowed to read trace files. The default is resolved against this host, so traces are readable by the PostgreSQL service account rather than root-only when no `dba` group was created. A group named explicitly is never substituted: if it does not exist the daemon warns and the traces stay root-only |
 
 ### Replay
@@ -1091,8 +1091,14 @@ the durability guarantees — lives in
   an OS crash / power loss can lose it). See docs/TRACE_FORMAT.md for the
   measured trade-off.
 - **Retention**: archives older than `--trace-retention` hours are deleted,
-  and `--retention-gb` additionally caps total directory size (oldest
-  archives deleted first). Cleanup runs every 60 ticks.
+  and `--retention-gb` adds a best-effort target for total directory size.
+  Cleanup runs every 60 ticks, evicting oldest hours first and same-hour
+  summaries before raw. Live files and `.jsonl` sidecars are protected;
+  pending summaries retain their hour's raw until publication, normally
+  within an hour, even while usage exceeds the cap. Failed unlinks do not
+  block other hours; a failed summary unlink preserves that hour's raw
+  pieces for the pass. Removal or scan failures can also leave usage over
+  cap. A WARN reports the actual remaining excess and limiting reason.
 - **Block size**: 4096 events per block; SAMPLES ticks are batched into
   ~1 s blocks. Blocks are flushed when full, on batch timeout, and on
   rotation.

@@ -203,6 +203,70 @@ static void test_warnings_and_failed_unlink(void)
           "live-files-over-cap WARN stays reachable and true");
 }
 
+static void test_failed_unlink_other_hours(void)
+{
+    char warn[1024];
+    reset_dir();
+    put("2025-01-01_09.trace.lz4", 100);
+    put("2025-01-01_10.2.summary.lz4", 100);
+    put("2025-01-01_10.summary.lz4", 100);
+    put("2025-01-01_10.trace.lz4", 100);
+    put("2025-01-01_10.1.trace.lz4", 100);
+    put("2025-01-01_11.summary.lz4", 100);
+    put("2025-01-01_11.trace.lz4", 100);
+    put("2025-01-01_12.trace.lz4", 100);
+    put("current.trace", 10);
+    /* The failure is neither oldest nor adjacent to its raw pieces in the
+     * sorted array: the other hour-10 summary sorts between them. */
+    refuse_unlink = "2025-01-01_10.2.summary.lz4";
+    CHECK(dir_bytes() == 810, "failed-summary fixture really exceeds cap");
+    cleanup(0, 110, warn, sizeof(warn));
+    CHECK(!exists("2025-01-01_09.trace.lz4"),
+          "oldest archive evicts before the later summary unlink failure");
+    CHECK(exists("2025-01-01_10.2.summary.lz4") &&
+          exists("2025-01-01_10.trace.lz4") &&
+          exists("2025-01-01_10.1.trace.lz4"),
+          "failed summary preserves every same-ftime raw piece");
+    CHECK(!exists("2025-01-01_10.summary.lz4"),
+          "summary failure still permits another summary of that hour to evict");
+    CHECK(!exists("2025-01-01_11.summary.lz4") &&
+          !exists("2025-01-01_11.trace.lz4") &&
+          !exists("2025-01-01_12.trace.lz4"),
+          "summary unlink failure does not block eviction from later hours");
+    CHECK(dir_bytes() == 310 && strstr(warn, "200 bytes over") &&
+          strstr(warn, "could not remove"),
+          "failed-summary WARN reports excess after all other hours evict");
+    put("2025-01-01_13.trace.lz4", 100);
+    cleanup(0, 110, warn, sizeof(warn));
+    CHECK(!exists("2025-01-01_13.trace.lz4") && dir_bytes() == 310 &&
+          exists("2025-01-01_10.trace.lz4") &&
+          exists("2025-01-01_10.1.trace.lz4") &&
+          strstr(warn, "200 bytes over"),
+          "persistent summary failure still permits later-hour eviction next pass");
+
+    reset_dir();
+    put("2025-01-01_09.trace.lz4", 100);
+    put("2025-01-01_10.summary.lz4", 100);
+    put("2025-01-01_10.trace.lz4", 100);
+    put("2025-01-01_11.summary.lz4", 100);
+    put("2025-01-01_11.trace.lz4", 100);
+    put("2025-01-01_12.trace.lz4", 100);
+    put("current.trace", 10);
+    refuse_unlink = "2025-01-01_10.trace.lz4";
+    cleanup(0, 110, warn, sizeof(warn));
+    CHECK(!exists("2025-01-01_09.trace.lz4") &&
+          !exists("2025-01-01_10.summary.lz4") &&
+          exists("2025-01-01_10.trace.lz4"),
+          "raw unlink failure leaves a valid raw-only hour after older eviction");
+    CHECK(!exists("2025-01-01_11.summary.lz4") &&
+          !exists("2025-01-01_11.trace.lz4") &&
+          !exists("2025-01-01_12.trace.lz4"),
+          "raw unlink failure does not block eviction from later hours");
+    CHECK(dir_bytes() == 110 && strstr(warn, "could not remove") &&
+          !strstr(warn, "trace dir still"),
+          "raw failure can still reach cap without an excess WARN");
+}
+
 static void test_sidecar_accounting(void)
 {
     char warn[1024];
@@ -261,6 +325,7 @@ int main(void)
     test_raw_only_control();
     test_hours_and_default_off();
     test_warnings_and_failed_unlink();
+    test_failed_unlink_other_hours();
     test_sidecar_accounting();
     test_pending_summary_rotation();
     reset_dir();

@@ -1747,9 +1747,21 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
         if (n_kept > 0)
             qsort(kept, (size_t)n_kept, sizeof(*kept), retn_cmp_oldest);
         /* An incomplete scan might have missed a summary. Do not risk
-         * deleting its raw fallback. Likewise stop on any failed unlink. */
+         * deleting its raw fallback. */
+        int failed_summary = 0;
+        time_t failed_summary_hour = 0;
         for (int i = 0; scan_complete && i < n_kept &&
                         total_bytes > w->retention_bytes; i++) {
+            /* A failed summary unlink protects ALL later raw entries with
+             * equal ftime for this pass, including recovered .N pieces,
+             * even with intervening entries. Only raw is skipped: other
+             * summaries and other hours remain eligible. Since ftime is
+             * the primary sort key, one failed-hour key suffices. A failed
+             * raw unlink adds no protection. No unlink failure stops the
+             * loop; the final directory recount reports the real excess. */
+            if (failed_summary && kept[i].kind == RETN_TRACE_ARCHIVE &&
+                kept[i].ftime == failed_summary_hour)
+                continue;
             /* A live summary may be archived AFTER this pass, including
              * when raw hit its block cap before the hourly boundary. */
             if (kept[i].kind == RETN_TRACE_ARCHIVE &&
@@ -1770,9 +1782,12 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
             } else {
                 fprintf(stderr, "WARN: size cap: could not remove %s: %s\n",
                         kept[i].name, strerror(errno));
-                cap_reason = "could not remove an archive; eviction stopped "
-                             "to preserve raw fallback";
-                break;
+                cap_reason = "could not remove an archive";
+                if (kept[i].kind == RETN_SUMMARY_ARCHIVE) {
+                    failed_summary = 1;
+                    failed_summary_hour = kept[i].ftime;
+                }
+                continue;
             }
         }
         total_bytes = retn_dir_bytes(dir, w->trace_dir);
