@@ -69,16 +69,29 @@ def main():
         temporary = Path(name)
         with os.fdopen(fd, "wb") as copy:
             copy.write(original)
-        label = derive(trailers(temporary))
+        original_trailers = trailers(temporary).splitlines()
+        label = derive("\n".join(original_trailers))
         if label is None:
             return
-        suffix = ("\n\nGenerated-with: " + label + "\n").encode("utf-8")
-        with temporary.open("ab") as copy:
-            copy.write(suffix)
+        subprocess.check_call(
+            ["git", "interpret-trailers", "--in-place", "--if-exists", "doNothing",
+             "--trailer", "Generated-with: " + label, str(temporary)],
+            stderr=subprocess.DEVNULL,
+        )
         result = temporary.read_bytes()
-        if not result.startswith(original) or result != original + suffix:
+        # Git may insert separators or terminate the last line, but every
+        # original line must survive byte-for-byte and in the same order.
+        original_lines = original.splitlines(keepends=True)
+        if not original.endswith((b"\n", b"\r")):
+            original_lines[-1] += b"\n"
+        remaining = iter(result.splitlines(keepends=True))
+        if not all(line in remaining for line in original_lines):
             return
-        if "Generated-with: " + label not in trailers(temporary).splitlines():
+        parsed = trailers(temporary).splitlines()
+        if "Generated-with: " + label not in parsed:
+            return
+        remaining = iter(parsed)
+        if not all(line in remaining for line in original_trailers):
             return
         os.chmod(temporary, stat.S_IMODE(info.st_mode))
         # Do not overwrite another writer's changes while deriving attribution.
