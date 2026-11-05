@@ -208,6 +208,10 @@ denied 'rm .claude/settings.json' "remove settings registrations"
 denied 'tee .claude/settings.json' "overwrite settings through tee"
 allowed 'grep -n Stop .claude/settings.json' "grep settings is a read"
 allowed "jq '.hooks' .claude/settings.json" "jq settings is a read"
+# Accepted over-blocks, introduced by this branch and deliberate (#790, PR #791).
+# Pinned as denied so narrowing them later is a visible change, not a silent one.
+denied "jq --arg tool git '.hooks[\$tool]' .claude/settings.json" "accepted over-block: jq with a git argument next to settings"
+denied 'git restore --staged .claude/settings.json' "accepted over-block: index-only restore of settings"
 allowed 'sed -n "1,20p" .claude/settings.json' "sed without in-place only reads settings"
 allowed 'git show HEAD:.claude/settings.json' "git show settings is a read"
 allowed 'cp .claude/settings.json /tmp/settings-backup.json' "copy settings out only reads it"

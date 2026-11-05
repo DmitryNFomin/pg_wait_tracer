@@ -1,5 +1,8 @@
 # pg_wait_tracer — working agreement for agents
 
+PostgreSQL eBPF tracer: C/BPF daemon, `pgwt-server`, Go WebSocket bridge,
+ECharts/uPlot UI. Plan/status: `docs/ROADMAP_AND_STATUS.md`. Run nothing eBPF-related on macOS.
+
 ## RULE 0 — no status report reaches the owner unaudited. No exceptions.
 
 Verify the lead's claims before the owner sees them. Before **any** status report,
@@ -69,9 +72,6 @@ quantity must agree; fix the disagreement instead of asking which wrong number t
 
 **Not** a tag-blocker: our own process tooling and dashboards; test coverage for a defect
 that has not shipped; anything whose fix is a documentation change.
-
-PostgreSQL eBPF tracer: C/BPF daemon, `pgwt-server`, Go WebSocket bridge,
-ECharts/uPlot UI. Plan/status: `docs/ROADMAP_AND_STATUS.md`. Run nothing eBPF-related on macOS.
 
 ## The three commands
 
