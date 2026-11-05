@@ -4,7 +4,8 @@ name: board-labels
 # work is in and which agent is doing it -- without anyone typing either.
 #
 #   phase:coding | phase:ci | phase:red | phase:review | phase:ready
-#   by:claude-opus | by:claude-sonnet | by:codex | by:human
+#   by:claude-opus | by:claude-sonnet | by:codex | by:human | by:unknown
+# Human requires Generated-with: human; missing attribution is unknown.
 #
 # Both families are COMPUTED and the stale members REMOVED on every run, so a
 # label cannot go stale and nobody -- including the lead agent -- can assert a
@@ -21,6 +22,11 @@ on:
   check_suite:
     types: [completed]
   workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to recompute
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -37,11 +43,17 @@ jobs:
     # PINNED, matching ci.yml's policy -- do not "modernise" to ubuntu-latest.
     runs-on: ubuntu-24.04
     steps:
+      # Execute trusted workflow code, never a pull_request_target PR head.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Derive phase and author labels
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           EVENT_PR: ${{ github.event.pull_request.number }}
+          DISPATCH_PR: ${{ inputs.pr }}
           SUITE_PRS: ${{ toJSON(github.event.check_suite.pull_requests) }}
         run: |
           set -uo pipefail
@@ -50,6 +62,11 @@ jobs:
           prs=""
           if [ -n "${EVENT_PR:-}" ]; then
             prs="$EVENT_PR"
+          elif [ -n "${DISPATCH_PR:-}" ]; then
+            case "$DISPATCH_PR" in
+              *[!0-9]*) echo "pr must be a PR number"; exit 1 ;;
+            esac
+            prs="$DISPATCH_PR"
           else
             prs=$(printf '%s' "$SUITE_PRS" | jq -r '.[]?.number // empty' 2>/dev/null)
           fi
@@ -59,7 +76,7 @@ jobs:
           fi
 
           PHASES="phase:coding phase:ci phase:red phase:review phase:ready"
-          AUTHORS="by:claude-opus by:claude-sonnet by:codex by:human"
+          AUTHORS="by:claude-opus by:claude-sonnet by:codex by:human by:unknown"
 
           # Labels must exist before they can be applied. --force makes this
           # idempotent; failures here are non-fatal.
@@ -74,7 +91,8 @@ jobs:
           ensure_label "by:claude-opus"   "c5def5" "authored with Claude Opus"
           ensure_label "by:claude-sonnet" "c5def5" "authored with Claude Sonnet"
           ensure_label "by:codex"         "d4c5f9" "authored with codex"
-          ensure_label "by:human"         "ededed" "no agent trailer found"
+          ensure_label "by:human"         "ededed" "explicit human authorship trailer"
+          ensure_label "by:unknown"       "ededed" "no identifying authorship trailer found"
 
           for pr in $prs; do
             echo "::group::PR #$pr"
@@ -113,17 +131,8 @@ jobs:
             fi
 
             # ---- who: read the commit trailers -----------------------------
-            trailers=$(gh pr view "$pr" --repo "$REPO" --json commits \
-                         --jq '.commits[].messageBody' 2>/dev/null | tr 'A-Z' 'a-z')
-            want_author="by:human"
-            case "$trailers" in
-              *"claude opus"*)   want_author="by:claude-opus" ;;
-              *"claude sonnet"*) want_author="by:claude-sonnet" ;;
-              *codex*|*"gpt-"*)  want_author="by:codex" ;;
-            esac
-            # codex alongside Claude: the branch is joint work; prefer codex so
-            # it is visible, since Claude trailers are near-universal here.
-            case "$trailers" in *codex*|*"gpt-"*) want_author="by:codex" ;; esac
+            commits=$(gh pr view "$pr" --repo "$REPO" --json commits) || exit 1
+            want_author=$(printf '%s' "$commits" | python3 scripts/board-author.py) || exit 1
 
             have=$(printf '%s' "$info" | jq -r '.labels[]?.name')
 
