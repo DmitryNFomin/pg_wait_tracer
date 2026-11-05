@@ -16,7 +16,14 @@
  * Built with -DPGWT_SERVER (no BPF) so it runs anywhere the server builds.
  *
  * Usage: cross_validate <trace_dir> [--tolerance PCT] [--min-share PCT]
- *                       [--raw-ns] [--show-idle]
+ *                       [--raw-ns] [--show-idle] [--abc]
+ *                       [--nominal-period-ns NS]
+ *
+ * --abc appends the offline A/B/C decomposition and join/conservation checks.
+ * --nominal-period-ns supplies the configured sampler period (default 100 ms,
+ * the shipped 10 Hz configuration). The trace stores measured weights only;
+ * the configured nominal period cannot be recovered from those weights.
+ * A failed join check exits 5 and suppresses the ABC share rows.
  *
  * --raw-ns adds a RAW block after the share table: the nanosecond totals
  * behind every share, the per-side AAS they imply, the CPU/non-CPU split of
@@ -51,6 +58,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
 #define MAX_EVENTS 65536
 #define MAX_DISTINCT 1024
@@ -59,6 +67,7 @@ struct evt_acc {
     uint32_t event_id;
     double   sampled_ns;   /* ASH estimate */
     double   exact_ns;     /* sum of durations */
+    uint64_t c_measured_ns, c_nominal_ns; /* --abc only */
     int      used;
 };
 
@@ -115,6 +124,159 @@ static int cmd_interval_open(struct cmd_state *st, uint64_t t1, uint64_t dur)
     return open_ns * 2 >= dur;
 }
 
+/* --abc retains only window-clipped intervals and window samples. Classification
+ * is supplied by the EXISTING command sweep, including its majority rule; CPU
+ * means we==0 wall time, not cpu_ns. Sort by (pid,start) once, then binary-search
+ * each instant: O(I log I + S log I), independent of trace block interleaving.
+ * Intervals are half-open [start,end), including at a transition boundary. */
+struct abc_interval {
+    uint64_t start, end;
+    uint32_t pid, event;
+    int excluded, cpu_known;
+};
+struct abc_sample {
+    uint64_t ts, weight;
+    uint32_t pid;
+};
+struct abc_state {
+    struct abc_interval *intervals;
+    struct abc_sample *samples;
+    size_t ni, ci, ns, cs;
+};
+
+static void *abc_grow(void *p, size_t *capacity, size_t size)
+{
+    size_t next = *capacity ? *capacity * 2 : 1024;
+    void *q = realloc(p, next * size);
+    if (!q) { perror("ABC realloc"); exit(1); }
+    *capacity = next;
+    return q;
+}
+
+static int abc_interval_cmp(const void *va, const void *vb)
+{
+    const struct abc_interval *a = va, *b = vb;
+    if (a->pid != b->pid) return a->pid < b->pid ? -1 : 1;
+    if (a->start != b->start) return a->start < b->start ? -1 : 1;
+    return a->end < b->end ? -1 : a->end > b->end;
+}
+
+static void abc_row(const char *name, double a_ns, double b_ns,
+                    uint64_t cm_ns, uint64_t cn_ns, double at, double bt,
+                    uint64_t cmt, uint64_t cnt)
+{
+    double a = at ? 100 * a_ns / at : 0;
+    double b = bt ? 100 * b_ns / bt : 0;
+    double cm = cmt ? 100.0 * cm_ns / cmt : 0;
+    double cn = cnt ? 100.0 * cn_ns / cnt : 0;
+    printf("ABC_ROW %-28s %.6f %.6f %.6f %.6f %.6f %.6f "
+           "%.0f %.0f %llu %llu\n", name, a, b, cm, cn, a - cm, cm - b,
+           a_ns, b_ns, (unsigned long long)cm_ns, (unsigned long long)cn_ns);
+}
+
+static int abc_report(struct abc_state *s, struct evt_acc *table,
+                      double at, double a_idle, double bt, double min_share,
+                      uint64_t nominal)
+{
+    uint64_t unjoined_ns = 0, excluded = 0, excluded_nominal = 0;
+    uint64_t cm_total = 0, cn_total = 0, interval_ns = 0;
+    size_t unjoined = 0, known = 0, unknown = 0, ik = 0, iu = 0;
+    qsort(s->intervals, s->ni, sizeof(*s->intervals), abc_interval_cmp);
+    for (size_t i = 0; i < s->ni; i++) {
+        interval_ns += s->intervals[i].end - s->intervals[i].start;
+        if (s->intervals[i].cpu_known) ik++; else iu++;
+        /* An ambiguous timeline cannot support a point join. */
+        if (i && s->intervals[i-1].pid == s->intervals[i].pid &&
+            s->intervals[i-1].end > s->intervals[i].start) {
+            printf("\n=== ABC ===\nABC_UNAVAILABLE overlapping exact intervals\n");
+            return 5;
+        }
+    }
+    for (size_t i = 0; i < s->ns; i++) {
+        struct abc_sample *sample = &s->samples[i];
+        size_t lo = 0, hi = s->ni;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            struct abc_interval *v = &s->intervals[mid];
+            if (v->pid < sample->pid ||
+                (v->pid == sample->pid && v->start <= sample->ts))
+                lo = mid + 1;
+            else hi = mid;
+        }
+        struct abc_interval *v = lo ? &s->intervals[lo - 1] : NULL;
+        if (!v || v->pid != sample->pid || sample->ts >= v->end) {
+            unjoined++;
+            unjoined_ns += sample->weight;
+            continue;
+        }
+        if (v->cpu_known) known++; else unknown++;
+        if (v->excluded) {
+            excluded += sample->weight;
+            excluded_nominal += nominal;
+        } else {
+            struct evt_acc *c = acc_find(table, v->event);
+            c->c_measured_ns += sample->weight;
+            c->c_nominal_ns += nominal;
+        }
+    }
+    /* Sum independently from the event buckets, not a counter incremented
+     * beside the input sum: losing a deposit must make this check go red. */
+    for (int i = 0; i < MAX_DISTINCT; i++) {
+        cm_total += table[i].c_measured_ns;
+        cn_total += table[i].c_nominal_ns;
+    }
+    /* Use A's actual accumulators, not an input-weight counter rebuilt by
+     * this join. Idle must reconcile separately because A and C can disagree
+     * about whether an instant is DB Time (precisely the A-C question). */
+    long double residual = (long double)cm_total + excluded -
+                           ((long double)at + a_idle - unjoined_ns);
+    printf("\n=== ABC ===\n");
+    printf("ABC_NOMINAL_PERIOD_NS %llu (input; default 100000000; "
+           "not retained in trace)\n",
+           (unsigned long long)nominal);
+    printf("ABC_POPULATION all window samples; shares exclude idle/command-gated "
+           "time independently on each estimator\n");
+    printf("ABC_SAMPLES %zu\n", s->ns);
+    printf("ABC_SAMPLED_MEASURED_NS %.0f\n", at + a_idle);
+    printf("ABC_SAMPLES_NOMINAL_NS %llu\n", (unsigned long long)(s->ns * nominal));
+    printf("ABC_EXACT_WINDOW_NS %.0f\n", bt);
+    printf("ABC_EXACT_INTERVAL_NS %llu (includes idle/command-gated time)\n",
+           (unsigned long long)interval_ns);
+    printf("ABC_MEASURED_NOMINAL_RATIO %.9f\n",
+           s->ns ? (at + a_idle) / ((double)s->ns * nominal) : 0);
+    printf("UNJOINED %zu %llu\n", unjoined, (unsigned long long)unjoined_ns);
+    printf("ABC_JOINED_CPU_NS_PRESENT %zu %zu\n", known, unknown);
+    printf("CPU_NS_PRESENT %zu %zu\n", ik, iu);
+    printf("ABC_A_EXCLUDED_NS %.0f\n", a_idle);
+    printf("ABC_C_EXCLUDED_NS %llu %llu\n", (unsigned long long)excluded,
+           (unsigned long long)excluded_nominal);
+    printf("ABC_JOIN_IDENTITY C_measured_DB + C_excluded = "
+           "A_DB + A_excluded - UNJOINED_ns\n");
+    printf("JOIN_CLOSES %s %.0Lf\n", residual == 0 ? "yes" : "no", residual);
+    if (residual != 0) {
+        printf("JOIN_RESIDUAL_UNEXPLAINED %.0Lf\n", residual);
+        return 5;
+    }
+    if (!cm_total || !cn_total) {
+        printf("ABC_UNAVAILABLE no joined DB Time samples\n");
+        return 5;
+    }
+    printf("ABC_COLUMNS event A B C_measured C_nominal A-C C-B "
+           "A_ns B_ns C_measured_ns C_nominal_ns (shares/deltas in pp; "
+           "deltas use C_measured)\n");
+    /* Same eligibility as max_delta: exact share >= --min-share. Totals
+     * include ALL events, including those below that display threshold. */
+    for (int i = 0; i < MAX_DISTINCT; i++) {
+        struct evt_acc *e = &table[i];
+        if (e->used && 100 * e->exact_ns / bt >= min_share)
+            abc_row(pgwt_event_name(e->event_id), e->sampled_ns, e->exact_ns,
+                    e->c_measured_ns, e->c_nominal_ns, at, bt, cm_total, cn_total);
+    }
+    abc_row("TOTAL", at, bt, cm_total, cn_total, at, bt, cm_total, cn_total);
+    printf("=== END ABC ===\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -127,6 +289,8 @@ int main(int argc, char **argv)
     double min_share = 2.0;    /* ignore events below this exact share */
     int raw_ns = 0;
     int show_idle = 0;
+    int abc = 0;
+    uint64_t nominal_period_ns = 100000000ULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--tolerance") && i + 1 < argc)
             tolerance = atof(argv[++i]);
@@ -136,6 +300,22 @@ int main(int argc, char **argv)
             raw_ns = 1;
         else if (!strcmp(argv[i], "--show-idle"))
             show_idle = 1;
+        else if (!strcmp(argv[i], "--abc"))
+            abc = 1;
+        else if (!strcmp(argv[i], "--nominal-period-ns")) {
+            if (i + 1 == argc) {
+                fprintf(stderr, "ERROR: --nominal-period-ns requires positive ns\n");
+                return 2;
+            }
+            char *end;
+            const char *value = argv[++i];
+            errno = 0;
+            nominal_period_ns = strtoull(value, &end, 10);
+            if (errno || *end || *value < '0' || *value > '9' || !nominal_period_ns) {
+                fprintf(stderr, "ERROR: --nominal-period-ns requires positive ns\n");
+                return 2;
+            }
+        }
     }
 
     /* Decode this trace with the names it was WRITTEN with.
@@ -283,6 +463,7 @@ int main(int argc, char **argv)
     long   n_samples_cpu = 0;        /* we==0 samples counted in the window */
     long   n_samples_noncpu = 0;
     uint64_t sample_period_seen = 0; /* last SAMPLES block period, for arithmetic */
+    struct abc_state abc_data = {0};
 
     for (int fi = 0; fi < nfiles; fi++) {
         struct pgwt_event_reader r;
@@ -304,6 +485,13 @@ int main(int argc, char **argv)
                      * only in-range samples are idle still has a period, and
                      * the idle section converts ns back to samples with it. */
                     sample_period_seen = info.sample_period_ns;
+                    if (abc) {
+                        if (abc_data.ns == abc_data.cs)
+                            abc_data.samples = abc_grow(abc_data.samples,
+                                &abc_data.cs, sizeof(*abc_data.samples));
+                        abc_data.samples[abc_data.ns++] = (struct abc_sample){
+                            w, info.sample_period_ns, e->pid};
+                    }
                     /* T2: we==0 samples are first-class CPU (the capture
                      * side already applied the command gate). */
                     if (ev != 0 && pgwt_is_idle_event(ev)) {
@@ -344,6 +532,21 @@ int main(int argc, char **argv)
                     int in_cmd = cmd_interval_open(cmd_get(cmd_ht, e->pid),
                                                    e->timestamp_ns,
                                                    e->duration_ns);
+                    if (abc) {
+                        uint64_t end = pgwt_reader_mono_to_wall(&r, e->timestamp_ns);
+                        uint64_t start = end > e->duration_ns ? end - e->duration_ns : 0;
+                        uint64_t cs = start > win_from ? start : win_from;
+                        uint64_t ce = end < win_to ? end : win_to;
+                        if (ce > cs) {
+                            if (abc_data.ni == abc_data.ci)
+                                abc_data.intervals = abc_grow(abc_data.intervals,
+                                    &abc_data.ci, sizeof(*abc_data.intervals));
+                            abc_data.intervals[abc_data.ni++] = (struct abc_interval){
+                                cs, ce, e->pid, ev,
+                                pgwt_is_idle_event(ev) || (ev == 0 && !in_cmd),
+                                e->cpu_ns != PGWT_CPU_NS_UNKNOWN};
+                        }
+                    }
                     if (pgwt_is_idle_event(ev)) {
                         /* NOT DB Time. Clipped to the SAME overlap window the
                          * accepted path clips to below, so the idle totals are
@@ -618,6 +821,12 @@ int main(int argc, char **argv)
 
     printf("\nRESULT: %s\n", ok ? "PASS" : "FAIL");
 
+    int abc_status = abc ? abc_report(&abc_data, table, total_sampled_ns,
+                                    idle_sampled_ns, total_exact_ns, min_share,
+                                    nominal_period_ns) : 0;
+    free(abc_data.intervals);
+    free(abc_data.samples);
+
     free(table);
     free(evs);
     free(cmd_ht);
@@ -625,6 +834,8 @@ int main(int argc, char **argv)
     /* Exit 4 = --show-idle was asked for and could not be answered. Only
      * reachable when --show-idle is passed, so the share table's 0/1
      * PASS/FAIL contract is untouched for every existing caller. */
+    if (abc_status)
+        return abc_status;
     if (idle_unavailable)
         return 4;
     return ok ? 0 : 1;
