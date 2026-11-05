@@ -15,6 +15,32 @@ const captureLists = [...snapshots.matchAll(/^GALLERY_(?:STATIC|TICK)_CELLS = \[
 assert.equal(captureLists.length, 2, 'must parse both snapshot capture lists');
 const captured = new Set(captureLists.flatMap(([, body]) =>
     [...body.matchAll(/["'](gallery-[a-z0-9-]+)["']/g)].map(m => m[1])));
+const staticList = snapshots.match(/^GALLERY_STATIC_CELLS = \[([\s\S]*?)^\]/m);
+const staticCaptured = new Set([...staticList[1].matchAll(/"(gallery-[a-z0-9-]+)"/g)]
+    .map(m => m[1]));
+// The Python declaration uses JSON string literals and ("text", regex)
+// tuples. Convert only those tuples, preserving parentheses inside strings.
+const evidenceBlock = snapshots.match(/^GALLERY_EVIDENCE = (\{[\s\S]*?^\})/m);
+assert.ok(evidenceBlock, 'must parse the evidence declaration');
+const evidence = JSON.parse(evidenceBlock[1]
+    .replace(/\("text", ("(?:\\.|[^"\\])*")\)/g, '["text", $1]')
+    .replace(/,\s*\}$/, '}'));
+
+test('#279: every static capture declares non-empty, valid evidence and vice versa', () => {
+    assert.deepEqual(Object.keys(evidence).sort(), [...staticCaptured].sort());
+    for (const [id, items] of Object.entries(evidence)) {
+        assert.ok(Array.isArray(items) && items.length > 0, `${id}: evidence required`);
+        for (const item of items) {
+            if (typeof item === 'string') {
+                assert.ok(item.trim(), `${id}: empty selector`);
+            } else {
+                assert.ok(Array.isArray(item) && item.length === 2 && item[0] === 'text' &&
+                    typeof item[1] === 'string' && item[1].trim(), `${id}: invalid text evidence`);
+                assert.doesNotThrow(() => new RegExp(item[1]), `${id}: invalid regex`);
+            }
+        }
+    }
+});
 
 function coverageErrors(doc, captures, manifest = MANIFEST) {
     const ids = new Set(manifest.map(entry => entry.cellId));
@@ -40,10 +66,14 @@ test('#279: every checklist gallery citation exists and is captured (including g
 });
 
 test('#279: coverage guard detects a missing cited capture (negative control)', () => {
-    const missing = 'gallery-transitions-variants-html';
-    const incomplete = new Set(captured);
+    const missing = 'gallery-synthetic-removed';
+    const kept = 'gallery-synthetic-kept';
+    const doc = `Check ${missing} and ${kept}.`;
+    const manifest = [missing, kept].map(cellId => ({ cellId }));
+    const incomplete = new Set([missing, kept]);
+    assert.deepEqual(coverageErrors(doc, incomplete, manifest), []);
     assert.ok(incomplete.delete(missing));
-    assert.deepEqual(coverageErrors(checklist, incomplete), [
+    assert.deepEqual(coverageErrors(doc, incomplete, manifest), [
         `${missing}: not captured by snapshot suite`,
     ]);
 });

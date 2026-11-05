@@ -150,7 +150,9 @@ is hiding the distribution — and its rainbow stops currently reuse class hues
 as intensity); `gallery-aas-dense-events` and `gallery-aas-unicode-names`
 (event tints must read as their class); `gallery-timeline-micro-vs-macro`
 (a 5 µs and a 5 ms wait both render ≥1 px — the floor must not make µs read as
-ms); `gallery-transitions-variants-html` and
+ms); `gallery-transitions-variants-html` (execution variants include a loop,
+a sub-1% step clamped to minimum width, hostile query text, and both truncated
+and complete p95 samples) and
 `gallery-table-configs-queries-hostile-sql` (stacked segment widths: min-width
 clamps silently renormalize proportions, and sub-1% segments must not lie);
 `gallery-table-configs-events-overflow-pctl` (a percentile that landed in the
@@ -201,10 +203,15 @@ window is NOT the same state as no data. `gallery-fidelity-unavailable-*`
 no fabricated band — UI-10); `gallery-timeline-dense-50pids` (truncation
 stated: 400 of 1200); `gallery-table-configs-events-null-latency` (null pct /
 null percentiles render "—", never 0). The `injection`-tagged cells
-(`gallery-aas-hostile-names`, `gallery-timeline-hostile-sql`,
-`gallery-transitions-hostile-names`, `gallery-concurrency-hostile-event-names`,
+(`gallery-transitions-hostile-names`, `gallery-concurrency-hostile-event-names`,
 `gallery-table-configs-queries-hostile-sql`) are FEEDBACK's security twin:
 hostile strings must render inert as text.
+The AAS hostile event names and timeline hostile SQL appear only in tooltips,
+so their escaping is pixel-invisible by construction. Timeline escaping is
+covered by `tests/web_unit/timeline.test.mjs`, “tooltip escapes query text
+(HTML injection from SQL)”. No AAS-builder hostile-name escaping assertion
+currently exists in `aas.test.mjs` or `uplot-aas.test.mjs`; the generic `esc`
+test in `format.test.mjs` does not prove that builder calls it.
 
 **Historical instances:** all of P1 (silent swallow sites, unrendered
 `window_too_large`); silent table truncation (P10); the fidelity chip

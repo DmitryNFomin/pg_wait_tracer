@@ -165,11 +165,72 @@ GALLERY_STATIC_CELLS = [
     "gallery-fidelity-unavailable-no-daemon",   # #279: FEEDBACK refusal without action
     "gallery-fidelity-annotation-mid-escalation",  # #279: FEEDBACK unknown start
     "gallery-table-configs-events-null-latency",  # #279: FEEDBACK null values
-    "gallery-aas-hostile-names",                # #279: FEEDBACK inert event names
-    "gallery-timeline-hostile-sql",             # #279: FEEDBACK inert SQL
     "gallery-transitions-hostile-names",        # #279: FEEDBACK inert node names
     "gallery-concurrency-hostile-event-names",  # #279: FEEDBACK inert burst names
 ]
+# Evidence must be painted inside the fixed cell-body fold before capture.
+# Existing chart cells conservatively gate their chart surface; new feedback
+# cells gate the specific disclosure/empty-state text cited by the checklist.
+GALLERY_EVIDENCE = {
+    "gallery-aas-dense": [".chart"],
+    "gallery-aas-dense-events": [".chart"],
+    "gallery-aas-sampled": [".chart"],
+    "gallery-aas-cpu-running-waiting": [".chart"],
+    "gallery-aas-mixed-escalation": [".chart"],
+    "gallery-aas-escalated-live-edge": [".chart"],
+    "gallery-aas-unicode-names": [".chart"],
+    "gallery-aas-empty": [("text", "^No data in selected range$")],
+    "gallery-uplot-aas-dense": [".chart"],
+    "gallery-uplot-aas-dense-events": [".chart"],
+    "gallery-uplot-aas-sampled": [".chart"],
+    "gallery-uplot-aas-mixed-escalation": [".chart"],
+    "gallery-uplot-aas-escalated-live-edge": [".chart"],
+    "gallery-uplot-aas-compare-ghostdiff": [".chart"],
+    "gallery-fidelity-compare-mismatch": [".cell-body"],
+    "gallery-fidelity-compare-predates": [".cell-body"],
+    "gallery-timeline-dense-50pids": [".cell-body"],
+    "gallery-timeline-dense-one-row": [".chart"],
+    "gallery-timeline-single-point": [".chart"],
+    "gallery-histogram-dense": [".chart"],
+    "gallery-concurrency-dense-bursts": [".chart"],
+    "gallery-waterfall-dense-plan-3lanes": [".chart"],
+    "gallery-exec-scatter-dense-downsampled": [".chart"],
+    "gallery-matrix-dense-top20": [".chart"],
+    "gallery-transitions-idle-loop-dominant": [".chart"],
+    "gallery-transitions-idle-loop-hidden": [".chart"],
+    "gallery-table-configs-queries-hostile-sql": [("text", "<script>document.title=\"pwned\"</script>")],
+    "gallery-table-configs-events-overflow-pctl": [".cell-body"],
+    "gallery-table-configs-compare-delta": [".cell-body"],
+    "gallery-transitions-variants-html": [
+        ("text", "\\(first 10,000\\)"), ("text", "21\\.0ms"), ("text", "×N"),
+        ("text", "<script>document.title=\"pwned\"</script>"),
+        ".variants [title=\"CPU* 5μs\"]"],
+    "gallery-concurrency-truncated-bursts": [
+        ("text", "Showing the largest burst"), ("text", "\\(64 of 120\\)"),
+        ".conc-tables table:last-child tbody tr:last-child"],
+    "gallery-concurrency-burst-final-bucket": [".chart", ".conc-tables table:last-child tbody tr"],
+    "gallery-timeline-pre-window-start": [".chart"],
+    "gallery-fidelity-annotation-observed-anomaly": [".band-esc", ".band-edge"],
+    "gallery-transitions-dense-dfg": [".chart"],
+    "gallery-histogram-one-hot-cell": [".chart"],
+    "gallery-timeline-micro-vs-macro": [".chart"],
+    "gallery-aas-one-huge-value": [".chart"],
+    "gallery-concurrency-one-huge-peak": [".chart"],
+    "gallery-transitions-threshold-simplified": [".chart"],
+    "gallery-fidelity-metrics-escalated": [".metrics tr.warn"],
+    "gallery-timeline-empty": [("text", "^No timeline events in window$")],
+    "gallery-histogram-empty": [("text", "^No data for selected event/range$")],
+    "gallery-transitions-empty": [("text", "^No transitions above threshold$")],
+    "gallery-concurrency-empty": [("text", "^No concurrency data$")],
+    "gallery-aas-all-zero": [".chart"],
+    "gallery-fidelity-unavailable-escalatable": [".panel-title", ".panel-msg", ".panel-hint", ".panel-card button:enabled"],
+    "gallery-fidelity-unavailable-no-daemon": [".panel-title", ".panel-msg", ".panel-hint", ".panel-card button:disabled"],
+    "gallery-fidelity-annotation-mid-escalation": [".band-edge"],
+    "gallery-table-configs-events-null-latency": [("text", "—")],
+    "gallery-transitions-hostile-names": [("text", "<script>document.title=\"pwned\"</script>"), ("text", "\"><img src=x onerror=alert")],
+    "gallery-concurrency-hostile-event-names": [("text", "Lock:<script>document.title=\"pwned\"</script>"), ("text", "IO:\"><img src=x onerror=alert")],
+}
+
 # The recorded live-replay cells, captured at ONE fixed tick each (stepped
 # there via the deterministic ⏭ button — never the ▶ 1 s timer). The uplot
 # twin rebuilds its instance per tick — the app's real series-set-change
@@ -643,6 +704,51 @@ def assert_gallery_query_span_parity(page):
         app.close()
 
 
+def gallery_evidence_problems(page, cell_id, evidence):
+    """Return all missing/clipped evidence, without mutating suite results.
+
+    Text is measured with DOM Ranges, including SVG labels. Checking every
+    matching node prevents an above-fold duplicate from masking a clipped one.
+    """
+    return page.evaluate(r"""({cellId, evidence}) => {
+        const cell = document.getElementById(cellId);
+        const body = cell?.querySelector('.cell-body');
+        if (!body) return [`${cellId}: missing .cell-body; overshoot=0px`];
+        const fold = body.getBoundingClientRect();
+        const problems = [];
+        for (const item of evidence) {
+            const label = JSON.stringify(item);
+            const rects = [];
+            if (Array.isArray(item)) {
+                const re = new RegExp(item[1]);
+                const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+                while (walker.nextNode()) {
+                    const node = walker.currentNode;
+                    if (!re.test(node.textContent)) continue;
+                    const range = document.createRange();
+                    range.selectNodeContents(node);
+                    rects.push(range.getBoundingClientRect());
+                }
+            } else {
+                const matches = item === '.cell-body' ? [body] : body.querySelectorAll(item);
+                for (const el of matches) rects.push(el.getBoundingClientRect());
+            }
+            if (!rects.length) problems.push(`${cellId}: ${label}: no matches; overshoot=0px`);
+            rects.forEach((r, i) => {
+                const above = Math.max(0, fold.top - r.top);
+                const below = Math.max(0, r.bottom - fold.bottom);
+                if (above > 1 || below > 1 || r.width <= 0 || r.height <= 0) {
+                    problems.push(`${cellId}: ${label} match ${i + 1}: ` +
+                        `top=${r.top.toFixed(2)} bottom=${r.bottom.toFixed(2)} ` +
+                        `body=${fold.top.toFixed(2)}..${fold.bottom.toFixed(2)}; ` +
+                        `overshoot=${Math.max(above, below).toFixed(2)}px`);
+                }
+            });
+        }
+        return problems;
+    }""", {"cellId": cell_id, "evidence": evidence})
+
+
 def snap_gallery_suite(page):
     """U1 gallery-cell snapshots (docs/VISUALIZATION_REVIEW.md §6 item 8).
 
@@ -695,6 +801,18 @@ def snap_gallery_suite(page):
         # deterministic on its own.
         page.wait_for_selector("body[data-gallery-ready='1']", timeout=15000)
 
+    # A real below-fold table proves the checker can fire without turning
+    # the expected violation into a suite failure.
+    load_isolated("gallery-concurrency-dense-bursts")
+    control = gallery_evidence_problems(
+        page, "gallery-concurrency-dense-bursts", [("text", "Burst Events")])
+    control_ok = any("Burst Events" in problem and
+                     float(problem.rsplit("overshoot=", 1)[1][:-2]) > 1
+                     for problem in control)
+    detail = "; ".join(control) if control_ok else "checker missed the below-fold Burst Events table"
+    results.append(("gallery/evidence-control", control_ok, detail))
+    print(f"  {'PASS' if control_ok else 'FAIL'}: gallery evidence control: {detail}")
+
     for cell_id in GALLERY_STATIC_CELLS:
         name = _gallery_name(cell_id)
         if not selected(name):
@@ -702,6 +820,10 @@ def snap_gallery_suite(page):
         load_isolated(cell_id)
         if cell_id == "gallery-table-configs-queries-hostile-sql":
             assert_gallery_query_span_parity(page)
+        problems = gallery_evidence_problems(page, cell_id, GALLERY_EVIDENCE[cell_id])
+        for detail in problems:
+            results.append((name, False, detail))
+            print(f"  FAIL: {detail}")
         snapshot(page, name, f"#{cell_id}",
                  pixel_threshold=GALLERY_PIXEL_THRESHOLD,
                  max_diff_ratio=GALLERY_MAX_DIFF_RATIO)

@@ -71,6 +71,7 @@ export const states = {
         data: denseData(),
     },
     'truncated-bursts': {
+        chartHeight: 180,
         description: 'Largest burst per bucket out of 12 onsets; 64 of 120 PIDs sampled in one row, complete list in the other.',
         tags: ['FEEDBACK', 'SEMANTICS'],
         data: {
@@ -90,6 +91,7 @@ export const states = {
         },
     },
     'burst-final-bucket': {
+        chartHeight: 170,
         description: 'Minimal P6 pin: 5 buckets, the only burst inside the last one. Marker belongs at the far RIGHT.',
         tags: ['ALIGNMENT'],
         data: {
@@ -125,6 +127,7 @@ export const states = {
         },
     },
     'hostile-event-names': {
+        chartHeight: 200,
         description: 'Peak/burst event names with <script>/unicode payloads — chart tooltip and both tables must escape (UI-6).',
         tags: ['FEEDBACK', 'injection'],
         data: {
