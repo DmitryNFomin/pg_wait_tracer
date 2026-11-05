@@ -105,11 +105,33 @@
 #       measured-period weights AND nominal/equal weights.
 #   C-B = observation-time selection and weighting.
 #   A-C = reading and classification.
-# PROGRAM-LEVEL FALSIFIER: if C-B <= 0.5 pp AND A-C <= 0.5 pp while measured
-# D stays at 6-11 pp, the decomposition does not close and the defect is the
-# comparator's own definitions -- exact `we == 0` wall time (contains
-# runqueue time) vs a sampled instant. That outcome closes none of
-# #115/#306/#675 and must be reported as such.
+#   A_joined = A restricted to samples that found an exact interval, so that
+#       A-A_joined = exact-tier coverage gap (UNJOINED samples) and
+#       A_joined-C = reading and classification.
+#
+# AMENDED 2026-11-05, still BEFORE any real-workload measurement: the text
+# originally written here said the decomposition "does not close" if
+# C-B <= 0.5 pp and A-C <= 0.5 pp while D stays 6-11 pp. A review showed that
+# cannot fire: per event A-B = (A-C)+(C-B) is an identity and D is the largest
+# |A-B|, so both terms <= 0.5 pp forces D <= 1.0 pp on the same trace. A
+# criterion that cannot fail is withdrawn, not kept. Replacement, to be applied
+# as written to whatever measurement lands:
+#   1. D is attributed to the term(s) carrying at least half of the maximising
+#      event's |A-B|: C-B (observation-time selection and weighting),
+#      A_joined-C (reading and classification) or A-A_joined (coverage). The
+#      three sum to A-B exactly, so some term always carries it.
+#   2. If A-A_joined carries it, the defect is exact-tier coverage in the
+#      comparator, not the sampler.
+#   3. If NO real trace shows any term >= 0.5 pp at the maximising event while
+#      D is 6-11 pp, the reconstruction is wrong (a join that cannot explain
+#      its own comparator's D), and nothing from it is reported as a result.
+#   4. The comparator-definition hypothesis (exact `we == 0` WALL time, which
+#      contains runqueue time, vs a sampled instant) is NOT testable by this
+#      decomposition: B and C both use the wall definition. It needs a B
+#      variant built from measured per-interval cpu_ns, which exists only if
+#      CPU_NS_PRESENT reports known intervals on the trace. Until then that
+#      hypothesis is untested, not refuted.
+# Any outcome closes none of #115/#306/#675 and must be reported as such.
 #
 # How this differs from the 8 pp sketch the task started from
 # ===========================================================
