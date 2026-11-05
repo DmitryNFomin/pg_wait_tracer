@@ -570,8 +570,9 @@ accounting rule and not about the byte layout:
   files. A window overlapping any of them recomputes the whole request from
   raw, under the same `-R` retention. #779 preserves raw fallback under
   `--retention-gb` by evicting same-hour summaries before raw archives.
-  Overview's Time Model corrects the false measured label; AAS, Top Events,
-  Top Sessions and histogram/heatmap change route for this counter fix.
+  Overview's Time Model and Top Sessions (both derive `has_measured_cpu`
+  from the count) correct the false measured label; AAS, Top Events and
+  histogram/heatmap only change route for this counter fix.
   Queries already always reads raw. The v9 byte layout is unchanged.
 
 This list is kept in step with `PGWT_SUMMARY_VERSION` in
