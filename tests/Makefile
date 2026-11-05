@@ -30,7 +30,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_exec_sites_pie test_exec_sites_nopie \
-            test_replay_fidelity test_durability test_query_text \
+            test_replay_fidelity test_durability test_retention_order test_query_text \
             test_golden_fixture test_live_accum test_window_clip test_time_model_absence \
             test_executions_attribution \
             test_top_queries_percentile \
@@ -105,12 +105,13 @@ test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 # #416: drive the REAL pgwt_handle_timer (the defect was the ORDER of the
-# steps inside it), replacing only the ring buffer. Same object set as
+# steps inside it), replacing the ring buffer. #779 also observes real writer
+# rotation/retention calls with pass-through wrappers. Same object set as
 # test_backend_lifecycle; the calloc'd skeleton makes every bpf_map__fd()
 # return -EINVAL, so the map reads inside the handler are empty rather than
 # faked and no bpf_* wrap is needed.
 test_tick_drain: test_tick_drain.c $(LIFECYCLE_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=ring_buffer__consume $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
+	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=ring_buffer__consume -Wl,--wrap=pgwt_writer_check_rotation -Wl,--wrap=pgwt_summary_check_rotation -Wl,--wrap=pgwt_writer_cleanup_old_files $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
 	$(CC) $(CFLAGS) -o $@ $^
@@ -468,6 +469,9 @@ test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c replay_accum.
 # close vs rotation vs crash recovery vs legacy, plus the bypass suite (a
 # gate that cannot read the file must refuse, never approve). Server build.
 test_trace_closure: test_trace_closure.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+test_retention_order: test_retention_order.c $(BUILD)/server_event_writer.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 # test_open_ckpt: #424 deliverable 2 — open-interval checkpoints as one
