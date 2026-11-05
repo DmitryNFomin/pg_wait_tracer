@@ -147,8 +147,9 @@ function idleDominantDfg() {
 }
 const IDLE_DOMINANT = idleDominantDfg();
 
-/* Mirrors tests/mock_server.py's canned variants payload, plus a hostile
- * query_text (it lands in a title attribute — same escape class as UI-6). */
+/* Compact execution-only gallery payload; mock_server's payload is separate.
+ * Keep the loop, a sub-1% step, hostile SQL preview and both p95 sample cases
+ * together above the cell's fixed fold. */
 const VARIANTS = {
     exec: {
         total: 45000,
@@ -175,23 +176,10 @@ const VARIANTS = {
               avg_ms: 7.5, p95_ms: 21.0, p95_sample_n: 120, avg_loop_n: 1,
               top_query_id: 6660000000000000666,
               steps: [
-                  { name: 'CPU*', avg_ms: 0.5, class: 'cpu' },
-                  { name: 'Lock:relation', avg_ms: 7.0, class: 'Lock' },
+                  { name: 'CPU*', avg_ms: 0.005, class: 'cpu' },
+                  { name: 'Lock:relation', avg_ms: 7.495, class: 'Lock' },
               ],
               query_text: 'SELECT \'<script>document.title="pwned"</script>\' FROM "users" WHERE note = \'a&b<c>\' -- 日本語' },
-        ],
-    },
-    plan: {
-        total: 45000,
-        num_variants: 1,
-        variants: [
-            { exec_count: 45000, num_queries: 2, total_ms: 495.0,
-              avg_ms: 0.011, p95_ms: 0.04, p95_sample_n: 10000, avg_loop_n: 1,
-              top_query_id: 3886912043147135675,
-              steps: [
-                  { name: 'CPU*', avg_ms: 0.011, class: 'cpu' },
-              ],
-              query_text: 'UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2' },
         ],
     },
 };
@@ -275,6 +263,8 @@ export const states = {
         opts: { threshold: 0, dims: DIMS },
     },
     'hostile-names': {
+        // SVG exposes the painted node labels as measurable text evidence.
+        renderer: 'svg',
         description: 'Node names carrying <script>/quote payloads and unicode — labels and tooltips must render inert (UI-6).',
         tags: ['FEEDBACK', 'injection'],
         data: {
@@ -295,7 +285,7 @@ export const states = {
         opts: { threshold: 0, dims: DIMS },
     },
     'variants-html': {
-        description: 'Flow-variant cards (exec + plan) incl. a loop variant, sub-1% steps (min-width clamp, P11) and a hostile query_text.',
+        description: 'Execution flow-variant cards incl. a loop variant, sub-1% step (min-width clamp, P11), hostile query_text and truncated/complete p95 samples.',
         tags: ['SEMANTICS', 'injection'],
         variants: VARIANTS,
     },
