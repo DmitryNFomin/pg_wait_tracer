@@ -5047,10 +5047,12 @@ static int reject_overload(struct pgwt_server *srv,
         cJSON_AddNumberToObject(root, "max_events", load_max_events());
         /* #526: only explain a query-forced raw load where that is true.
          * TRUE: handle_top_events (query_id == 0 guard), handle_top_sessions
-         * (sessions_filter_needs_raw, which includes query_id != 0) and
-         * handle_heatmap (the same query_id == 0 conjunct): reject_overload
-         * is reached only from their raw else branches, so there a filter
-         * really is what forced the exact path.
+         * (sessions_filter_needs_raw, which includes query_id != 0),
+         * handle_heatmap and -- #684 -- handle_aas and handle_time_model
+         * (the same query_id == 0 conjunct): reject_overload is reached only
+         * from their raw else branches, so there a filter really is what
+         * forced the exact path. All five forward req->filter.pid into the
+         * load, so the table's pid reduction is real on every one of them.
          *
          * handle_top_queries gets its OWN arm, chosen WITHOUT looking at the
          * filter, because for it no filter can help: it calls
@@ -5068,7 +5070,8 @@ static int reject_overload(struct pgwt_server *srv,
          * #728: EVERY hint below contains the shared table's sentence
          * (pgwt_overload_arms) VERBATIM. Two command arms add an explanation
          * the kind cannot know -- a query-filtered top_events/top_sessions/
-         * heatmap (#526) and top_queries (#694) -- but they COMPOSE it
+         * heatmap/aas/time_model (#526, #684) and top_queries (#694) -- but
+         * they COMPOSE it
          * around the table's sentence rather than restating it, so no arm
          * can say something the stderr line does not. Round 5 changed that:
          * #526's arm used to be a literal ending "; narrow the time range",
@@ -5119,7 +5122,9 @@ static int reject_overload(struct pgwt_server *srv,
             req->filter.query_id != 0 &&
             (strcmp(req->cmd, "top_events") == 0 ||
              strcmp(req->cmd, "top_sessions") == 0 ||
-             strcmp(req->cmd, "heatmap") == 0)) {
+             strcmp(req->cmd, "heatmap") == 0 ||
+             strcmp(req->cmd, "aas") == 0 ||
+             strcmp(req->cmd, "time_model") == 0)) {
             /* #526's explanation, then the table's sentence VERBATIM.
              *
              * Round 4 left this arm as a literal ending "; narrow the time
@@ -5129,7 +5134,12 @@ static int reject_overload(struct pgwt_server *srv,
              * into a load that discards other pids before counting. Saying
              * "a query filter forced this" is extra information, not a
              * reason to drop the reduction that works. Composing means the
-             * log's whole sentence is always present in the hint. */
+             * log's whole sentence is always present in the hint.
+             *
+             * #684 added `aas` and `time_model` to this arm: both now take
+             * the same query guard, so for them too it really is the filter
+             * that forced the exact path, and both forward req->filter.pid
+             * into their window load. */
             char hint[512];
             snprintf(hint, sizeof(hint),
                      "a query filter forces the exact path, which loads raw "
@@ -5208,8 +5218,19 @@ static void handle_aas(struct pgwt_server *srv, struct pgwt_request *req)
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
 
-    /* Event-detail mode always uses raw events (no summary path yet) */
-    if (!detail_events && should_use_summaries(srv, req, &wfid)) {
+    /* Event-detail mode always uses raw events (no summary path yet).
+     *
+     * #684: a QUERY-FILTERED AAS request also goes to raw, the same guard
+     * handle_top_events (:5429), handle_heatmap and handle_top_sessions
+     * already carry. aas_summary_visitor's query arm (compute.c:2731) reads
+     * queries[].class_ns, which the writer fills with the record's FULL
+     * duration at the second it closes in (accum_query_add(..., dur, dur),
+     * summary_writer.c:636) -- so a wait crossing `from` was counted whole
+     * here while Events and Queries, both raw, clipped it to [from, to).
+     * One window, two totals of one quantity, on the drill-down a presenter
+     * walks. See the full note at handle_top_events. */
+    if (!detail_events && should_use_summaries(srv, req, &wfid) &&
+        req->filter.query_id == 0) {
         pgwt_compute_aas_from_summaries(srv->trace_dir, from, to,
                                          &req->filter, num_buckets, &aas);
         from_summaries = 1;
@@ -5302,7 +5323,13 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
 
-    if (should_use_summaries(srv, req, &wfid)) {
+    /* #684: same query guard as handle_top_events (:5429), handle_aas,
+     * handle_heatmap and handle_top_sessions. tm_summary_visitor's query arm
+     * (compute.c:2903) reads the same full-duration-at-close queries[] table
+     * as the AAS one, so a query-filtered Time Model disagreed with
+     * query-filtered Events and Queries over any window an interval crosses.
+     * See the full note at handle_top_events. */
+    if (should_use_summaries(srv, req, &wfid) && req->filter.query_id == 0) {
         pgwt_compute_time_model_from_summaries(srv->trace_dir, from, to,
                                                 &req->filter, wall_ms, &tm);
         from_summaries = 1;
@@ -5405,9 +5432,10 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
      * Events is the third handler that needs this guard and lacked it.
      * handle_top_queries takes NO summary route: it computes from raw
      * unconditionally (:5579) and therefore needs no query guard.
-     * handle_aas (:4827, !detail_events) and handle_time_model (:4920, no
-     * additional guard) also permit query-filtered summaries, each answered
-     * by its own compute.
+     * handle_aas (!detail_events) and handle_time_model carried no guard
+     * until #684, which closed the last two: with those four and
+     * handle_top_queries, EVERY view a query drill shows at once now reads
+     * one basis for one window.
      *
      * WHY, because the asymmetry was reachable from the UI's default range:
      * the filtered summary read takes its time from queries[].top_events[],
