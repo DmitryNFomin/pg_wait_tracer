@@ -1,5 +1,8 @@
 # pg_wait_tracer — working agreement for agents
 
+PostgreSQL eBPF tracer: C/BPF daemon, `pgwt-server`, Go WebSocket bridge,
+ECharts/uPlot UI. Plan/status: `docs/ROADMAP_AND_STATUS.md`. Run nothing eBPF-related on macOS.
+
 ## RULE 0 — no status report reaches the owner unaudited. No exceptions.
 
 Verify the lead's claims before the owner sees them. Before **any** status report,
@@ -55,8 +58,20 @@ Treat inability to report matching numbers as a product defect. Two views of one
 quantity must agree; fix the disagreement instead of asking which wrong number to display.
 (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#matching-numbers`)
 
-PostgreSQL eBPF tracer: C/BPF daemon, `pgwt-server`, Go WebSocket bridge,
-ECharts/uPlot UI. Plan/status: `docs/ROADMAP_AND_STATUS.md`. Run nothing eBPF-related on macOS.
+### Release tag criteria
+
+**`tag-blocker`** — an open defect that makes the release tag wrong. Any one of:
+
+- (a) the product reports a number a user would act on that is wrong, or two views of one
+  quantity disagree;
+- (b) a **UX defect** — the interface is wrong, misleading, or unusable on a path a user
+  takes: a control that does nothing, a value rendered as a raw internal token or
+  `null`, a view that never recovers from an error, a label that contradicts the data;
+- (c) a documented guarantee is false;
+- (d) a gate we rely on for (a)–(c) cannot detect its own failure case.
+
+**Not** a tag-blocker: our own process tooling and dashboards; test coverage for a defect
+that has not shipped; anything whose fix is a documentation change.
 
 ## The three commands
 
