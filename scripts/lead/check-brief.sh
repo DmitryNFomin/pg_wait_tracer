@@ -47,11 +47,47 @@ def dispatched_numbers(text, blocks):
     for block, start, end in blocks:
         if COMMENTS_COMMAND.search(block):
             for index in range(start, end):
-                lines[index] = ""
+                # Pasted output is evidence, but a command's shell comment can
+                # still assign work. Respect quotes around literal #s.
+                line = lines[index]
+                comment = ""
+                command = COMMENTS_COMMAND.search(line)
+                if command and re.match(r"^\s*(?:\$\s*)?gh\s+api\b", line):
+                    # Find the first unquoted shell comment, preserving text.
+                    quote = None
+                    escaped = False
+                    for offset, char in enumerate(line):
+                        if escaped:
+                            escaped = False
+                        elif char == "\\" and quote != "'":
+                            escaped = True
+                        elif quote:
+                            if char == quote:
+                                quote = None
+                        elif char in "\"'":
+                            quote = char
+                        elif char == "#" and offset and line[offset - 1].isspace():
+                            comment = line[offset + 1:]
+                            break
+                    # The endpoint itself is a reference even if the brief
+                    # consists only of a fetch (with no scope decision yet).
+                    comment = f"issues/{command.group(1)} {comment}"
+                lines[index] = comment
     dispatch_text = re.sub(
         r"^([ \t]*CONTROLLING SCOPE DECISION:[ \t]*#[0-9]+)[^\n]*",
         r"\1", "\n".join(lines), flags=re.MULTILINE)
-    return sorted({int(n) for n in re.findall(r"#([0-9]+)", dispatch_text)})
+    numbers = set()
+    non_issue = re.compile(
+        r"\b(?:build|run|step|line|job|attempt|case|item|test|rank|number|no\.|version|v)\s*$",
+        re.IGNORECASE)
+    for match in re.finditer(r"#([0-9]+)\b", dispatch_text):
+        if not non_issue.search(dispatch_text[:match.start()].split("\n")[-1]):
+            numbers.add(int(match.group(1)))
+    references = re.compile(
+        r"\b(?:issues?/|pull/|issues?\s+|pull\s+request\s+|PR\s+|GH-)(?:#)?([0-9]+)\b",
+        re.IGNORECASE)
+    numbers.update(int(match.group(1)) for match in references.finditer(dispatch_text))
+    return sorted(numbers)
 
 
 def live_comments(number):
@@ -90,9 +126,17 @@ def coverage_errors(number, comments, blocks, text):
     if not fetches:
         errors.append("fenced comments fetch command/output missing")
     elif comments:
-        if not any(all(re.search(r"\b" + str(cid) + r"\b", block)
-                       for cid in comments) for block in fetches):
-            errors.append("fetch block does not contain every live comment id: " +
+        def pasted(block, cid, body):
+            first_line = body.split("\n", 1)[0][:30]
+            escaped = json.dumps(first_line, ensure_ascii=False)[1:-1]
+            ascii_escaped = json.dumps(first_line)[1:-1]
+            return (re.search(r"\b" + str(cid) + r"\b", block)
+                    and (not first_line or any(part in block for part in
+                                              (first_line, escaped, ascii_escaped))))
+
+        if not any(all(pasted(block, cid, body) for cid, body in comments.items())
+                   for block in fetches):
+            errors.append("fetch block does not contain every live comment id and body prefix: " +
                           ", ".join(map(str, comments)))
     elif not any("[]" in block or "(no output)" in block for block in fetches):
         errors.append("zero-comment fetch block needs [] or (no output)")

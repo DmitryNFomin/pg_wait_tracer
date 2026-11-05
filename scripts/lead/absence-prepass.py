@@ -44,30 +44,36 @@ import unicodedata
 WINDOW = 8  # lines of context searched on each side of a hit
 
 PATTERNS = [
-    r"no mechanical check",
-    r"nothing checks",
-    r"not implemented",
-    r"implemented nowhere",
-    r"exists nowhere",
-    r"has no\b",
+    r"\bno mechanical check\b",
+    r"\bnothing (?:checks|references)\b",
+    r"\bnot implemented\b",
+    r"\bnowhere\b",
+    r"\bhas no\b",
     r"\bnever\b",
     r"\bzero\b",
     r"\babsent\b",
     r"\bmissing\b",
     r"\bunreachable\b",
-    r"not on master",
-    r"no path\b",
-    r"does not exist",
-    r"is not present",
+    r"\bnot on (?:master|(?:the )?remote)\b",
+    r"\bno path\b",
+    r"\bdoes(?: not|n't) exist\b",
+    r"\bis not present\b",
     r"\bno\b[^.\n]{0,60}\banywhere\b",
-    r"do(?:es)? not work",
-    r"\bnowhere\b",
-    r"not found\b",
-    r"not on (?:the )?remote",
-    r"no such\b",
-    r"none exist",
-    r"isn't there",
-    r"not there\b",
+    r"\bdo(?:es)? not work\b",
+    r"\bnot found\b",
+    r"\bno such\b",
+    r"\bnone exist\b",
+    r"\bisn't there\b",
+    r"\bnot there\b",
+    r"\bnot (?:been )?merged\b",
+    r"\b(?:I can't|cannot|I could not)\b",
+    r"\bno caller\b",
+    r"\b(?:contains|there (?:is|are)) no\b",
+    r"\b(?:isn't|not) (?:wired|called)\b",
+    r"\blacks\b",
+    r"\bnobody has\b",
+    r"\bno guard\b",
+    r"\b(?:grep|rg) returned (?:0|no) matches\b",
 ]
 COMPILED = [re.compile(p, re.IGNORECASE) for p in PATTERNS]
 
@@ -78,7 +84,7 @@ SCOPE_RES = {
     for label in ("SEARCHED", "NOT SEARCHED")
 }
 UNVERIFIED_RE = re.compile(r"^\s*(?:[-*]\s*)?UNVERIFIED:", re.IGNORECASE)
-VACUOUS_RE = re.compile(r"^(?:none|nothing|n/a|na|nil|no|all|everything|nowhere)", re.IGNORECASE)
+VACUOUS_RE = re.compile(r"^(?:none|nothing|n/a|na|nil|no|all|everything|nowhere)\b", re.IGNORECASE)
 
 
 def classify_lines(lines):

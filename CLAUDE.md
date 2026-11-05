@@ -30,6 +30,14 @@ Paste a command and its output for every **count**, **absence** ("exists nowhere
 Treat one denied operation as one failed attempt only. Without evidence, write
 `UNVERIFIED:`, never a cause.
 
+Every absence claim also needs, within 8 lines, a `SEARCHED: <what was probed>` line
+and a `NOT SEARCHED: <what could hold it and was not probed>` line; `none`, empty or
+`n/a` is refused, and `UNVERIFIED:` does not stand in for it
+(`scripts/lead/absence-prepass.py`). A brief dispatching issue N must paste the live
+`gh api repos/{owner}/{repo}/issues/N/comments --paginate` output in a fence and add
+`CONTROLLING SCOPE DECISION: #N comment <id> "<quote>"` (`scripts/lead/check-brief.sh`,
+enforced by the dispatch-guard hook).
+
 A Bash call may contain probes **or** conclusions, never both. Where a verdict is
 wanted, derive it in the shell from the data (`out=$(...); if [ -z "$out" ]; then
 echo "VERDICT: ..."`), never in an `echo` written alongside the probe. Never pipe
@@ -298,6 +306,7 @@ Registered in `.claude/settings.json` (`*` means no matcher):
 | Event | Matcher | Command |
 |---|---|---|
 | `PreToolUse` | `Bash` | `scripts/hooks/push-guard.sh` |
+| `PreToolUse` | `Agent\|Bash` | `scripts/lead/dispatch-guard.sh` |
 | `Stop` | `*` | `scripts/lead/sweep-hook.sh` |
 | `SubagentStart` | `*` | `scripts/lead/agent-start-hook.sh` |
 | `SubagentStop` | `*` | `scripts/lead/agent-stop-hook.sh` |
@@ -305,6 +314,11 @@ Registered in `.claude/settings.json` (`*` means no matcher):
 
 - `PreToolUse`: screens Bash command text; can refuse a push or other command
   matching the push-guard bypass/tampering denylist.
+- `PreToolUse` dispatch guard: refuses (exit 2) an `Agent` spawn or a
+  `codex-task.sh` run whose brief names an issue/PR without the live
+  `gh api .../issues/N/comments` output and a `CONTROLLING SCOPE DECISION:` line
+  (`scripts/lead/check-brief.sh`). It refuses before the dispatch happens,
+  which `SubagentStart` cannot do.
 - `Stop`: refreshes stale sweep data; can refuse to end a turn until every
   finding carries this turn's disposition.
 - `SubagentStart`: records the agent ID in the shared active-agent ledger;

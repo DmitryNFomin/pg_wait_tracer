@@ -80,6 +80,12 @@ run python3 scripts/lead/audit-report-selftest.py
 step "bash: brief live-comment evidence and scope decisions"
 run bash tests/test_check_brief.sh
 
+step "bash: dispatch hook refuses incomplete briefs"
+run bash tests/test_dispatch_guard.sh
+
+step "python: RULE 0 absence vocabulary and evidence scopes"
+run python3 tests/test_absence_vocab.py
+
 step "POSIX shell: Codex task wrapper self-test"
 run scripts/lead/codex-task-selftest.sh
 

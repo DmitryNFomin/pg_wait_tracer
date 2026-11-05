@@ -29,6 +29,9 @@ JSON
   'repos/{owner}/{repo}/issues/303/comments') ;;
   'repos/{owner}/{repo}/issues/404/comments') echo 'query failed' >&2; exit 7 ;;
   'repos/{owner}/{repo}/issues/505/comments') printf '%s\n' '{broken json' ;;
+  'repos/{owner}/{repo}/issues/115/comments'|'repos/{owner}/{repo}/issues/799/comments'|'repos/{owner}/{repo}/issues/797/comments') ;;
+  'repos/{owner}/{repo}/issues/606/comments')
+    printf '%s\n' '{"id":6601,"body":"Keep \"quoted\" paths intact.\nRun the tests."}' '{"id":6602,"body":""}' ;;
   *) echo "unexpected endpoint: $2" >&2; exit 9 ;;
 esac
 STUB
@@ -81,6 +84,7 @@ $ gh api repos/:owner/:repo/issues/101/comments --paginate
 ```
 CONTROLLING SCOPE DECISION: #101 comment 4101 "Keep the implementation limited to the parser and its tests."'
 check "correct fetch without scope decision fails" 1 "$FETCH"
+check "fetch-only brief still needs a scope decision" 1 "${FETCH#*$'\n'}"
 check "invented scope quote fails" 1 "$FETCH
 CONTROLLING SCOPE DECISION: #101 comment 4101 \"Rewrite the entire application and remove every existing test.\""
 check "none scope with live comments fails" 1 "$FETCH
@@ -162,6 +166,108 @@ check "repeated references fetch one distinct issue once" 0 "$FETCH
 $SCOPE
 Dispatch #101."
 assert_one_101_fetch
+
+check "ids-only paste fails even with a valid scope quote" 1 '#101
+```
+gh api repos/example/project/issues/101/comments --paginate
+4101 4102
+```
+CONTROLLING SCOPE DECISION: #101 comment 4101 "Keep the implementation limited to the parser and its tests."'
+check "every id also needs its body prefix" 1 '#101
+```
+gh api repos/example/project/issues/101/comments --paginate
+{"id":4101,"body":"Keep the implementation limited to the parser and its tests."}
+{"id":4102}
+```
+CONTROLLING SCOPE DECISION: #101 comment 4101 "Keep the implementation limited to the parser and its tests."'
+check "JSON-escaped body prefixes and empty bodies pass" 0 '#606
+```
+gh api repos/example/project/issues/606/comments --paginate
+{"id":6601,"body":"Keep \"quoted\" paths intact.\nRun the tests."}
+{"id":6602,"body":""}
+```
+CONTROLLING SCOPE DECISION: #606 comment 6601 "Keep "quoted" paths intact."'
+check "raw body prefixes pass" 0 '#606
+```
+gh api repos/example/project/issues/606/comments --paginate
+6601: Keep "quoted" paths intact.
+6602:
+```
+CONTROLLING SCOPE DECISION: #606 comment 6601 "Keep "quoted" paths intact."'
+
+QUOTE='Keep the implementation limited to the parser and its tests.'
+check "real 19-character scope substring fails" 1 "$FETCH
+CONTROLLING SCOPE DECISION: #101 comment 4101 \"${QUOTE:0:19}\""
+check "real 20-character scope substring passes" 0 "$FETCH
+CONTROLLING SCOPE DECISION: #101 comment 4101 \"${QUOTE:0:20}\""
+
+for reference in 'issue 115' 'https://github.com/owner/repo/issues/115' 'GH-115' '#115' \
+                 'pull request 799' 'https://github.com/owner/repo/pull/799' 'PR 799' 'PR #799'; do
+  : > "$BRIEF_GH_CALLS"
+  check "dispatch recognises $reference" 1 "Fix $reference."
+  case "$reference" in *115*) number=115 ;; *) number=799 ;; esac
+  if /usr/bin/grep -qx "repos/{owner}/{repo}/issues/$number/comments" "$BRIEF_GH_CALLS"; then
+    pass=$((pass+1)); echo "ok   live fetch requested for $number"
+  else
+    fail=$((fail+1)); echo "FAIL live fetch not requested for $number"
+  fi
+done
+
+for word in build run step line job attempt case item test rank number no. version v; do
+  for separator in '' ' '; do
+    : > "$BRIEF_GH_CALLS"
+    check "$word${separator}#42 is not an issue" 1 "Fix issue 115 after $word${separator}#42."
+    if /usr/bin/grep -qx 'repos/{owner}/{repo}/issues/115/comments' "$BRIEF_GH_CALLS" &&
+       ! /usr/bin/grep -q '/issues/42/comments$' "$BRIEF_GH_CALLS"; then
+      pass=$((pass+1)); echo 'ok   #115 asked for; #42 excluded'
+    else
+      fail=$((fail+1)); echo 'FAIL wrong dispatch numbers for non-issue #42'
+    fi
+  done
+done
+: > "$BRIEF_GH_CALLS"
+check "non-issue exclusions are case-insensitive" 0 'BUILD #42 RUN#42 STEP #42 LINE#42 JOB #42 ATTEMPT#42 CASE #42 ITEM#42 TEST #42 RANK#42 NUMBER #42 NO.#42 VERSION #42 V#42'
+if [ ! -s "$BRIEF_GH_CALLS" ]; then
+  pass=$((pass+1)); echo 'ok   non-issue numbers never query gh'
+else
+  fail=$((fail+1)); echo 'FAIL non-issue numbers queried gh'
+fi
+
+FETCH115='```console
+gh api repos/example/project/issues/115/comments --paginate
+[]
+```'
+SCOPE115='CONTROLLING SCOPE DECISION: #115 none (0 comments)'
+check "fetch command shell comment still dispatches #797" 1 '#115
+```console
+gh api repos/example/project/issues/115/comments --paginate  # then fix #797
+[]
+```
+CONTROLLING SCOPE DECISION: #115 none (0 comments)'
+if [[ "$LAST_OUT" == *'#797'* ]]; then
+  pass=$((pass+1)); echo 'ok   refusal names #797 from command comment'
+else
+  fail=$((fail+1)); echo 'FAIL command comment dispatch was hidden'
+fi
+check "command comment dispatch passes with its own evidence" 0 '#115
+```console
+gh api repos/example/project/issues/115/comments --paginate  # then fix #797
+[]
+```
+CONTROLLING SCOPE DECISION: #115 none (0 comments)
+```
+gh api repos/example/project/issues/797/comments --paginate
+[]
+```
+CONTROLLING SCOPE DECISION: #797 none (0 comments)'
+check "quoted shell # is not a command comment" 0 '#115
+```console
+gh api repos/example/project/issues/115/comments --paginate --jq " #797"
+[]
+```
+CONTROLLING SCOPE DECISION: #115 none (0 comments)'
+check "non-reference command comments do not create issues" 0 "$FETCH115
+$SCOPE115"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

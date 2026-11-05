@@ -6,6 +6,12 @@
         "hooks": [
           { "type": "command", "command": "scripts/hooks/push-guard.sh" }
         ]
+      },
+      {
+        "matcher": "Agent|Bash",
+        "hooks": [
+          { "type": "command", "command": "scripts/lead/dispatch-guard.sh" }
+        ]
       }
     ],
     "Stop": [
