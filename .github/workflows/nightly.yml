@@ -73,7 +73,9 @@ jobs:
       # the capture path attaches uprobes/USDT and (where available) perf
       # hardware breakpoints. The container shares the runner's kernel, so
       # /sys/kernel/btf/vmlinux is the host's.
-      options: --privileged
+      # The ownership tests kill orphaned bridge children. tail as PID 1
+      # cannot reap them, so kill -0 would keep seeing dead process groups.
+      options: --privileged --init
       volumes:
         - /sys/kernel/btf:/sys/kernel/btf:ro
         # tracefs + debugfs: the daemon attaches sched tracepoints (on_fork
@@ -94,6 +96,10 @@ jobs:
           set -ex
           V=${{ matrix.pg }}
           EL=${{ matrix.el }}
+          # The image can carry an old Rocky minor (e.g. 9.3). PGDG follows
+          # the installed OS minor and retires old repos; update the distro
+          # BEFORE adding PGDG, keeping its packages and repository ABI aligned.
+          dnf upgrade -y --refresh
           dnf install -y dnf-plugins-core glibc-langpack-en || dnf install -y dnf-plugins-core
           # CRB (EL9) / PowerTools (EL8): libbpf-devel + build tooling live here.
           if [ "$EL" = "8" ]; then
@@ -104,8 +110,11 @@ jobs:
           # Core build tools + BPF toolchain + ELF/compression libs. git is
           # required on EL8 (the Makefile clones pinned libbpf/bpftool). sudo &
           # procps-ng (pgrep) & python3 for the tests; findutils for the runner.
+          # ss, rsync and Node are also used by unit_tests.list's harness tests
+          # (ci.yml gets them from the hosted runner, not its apt install).
+          dnf -qy module enable nodejs:22
           dnf install -y gcc clang llvm make tar git python3 sudo procps-ng \
-            findutils diffutils which \
+            findutils diffutils which iproute rsync nodejs \
             elfutils-libelf-devel zlib-devel lz4-devel bpftool libbpf-devel
           # EL8's default python3 is 3.6, which lacks
           # subprocess.run(capture_output=) (3.7+) the smoke tests use. Install
@@ -169,7 +178,7 @@ jobs:
           V=${{ matrix.pg }}
           apt-get update
           apt-get install -y gcc clang llvm make git python3 python3-pip sudo curl gnupg \
-            lsb-release ca-certificates procps \
+            lsb-release ca-certificates procps iproute2 rsync nodejs \
             libbpf-dev libelf-dev zlib1g-dev liblz4-dev linux-tools-common \
             postgresql-common
           # bpftool: the container has no matching linux-tools-$(uname -r); build
@@ -222,11 +231,13 @@ jobs:
         run: make
 
       - name: Build C unit tests
-        run: make -C tests
+        # EL8 needs the same bundled libbpf library AND headers as the daemon.
+        run: make build-tests
 
       # ── Shared C unit suite (unit_tests.list) ─────────────────────────────
       - name: Run C unit tests (incl. golden-fixture decode — TST-10)
-        run: make -C tests check
+        # check depends on all: preserve the bundled flags even on a relink.
+        run: make check-tests
 
       # ── Real-PG capture smoke (--core: portable capture proof) ────────────
       # --core asserts the daemon attaches, records real attributed events
@@ -235,13 +246,21 @@ jobs:
       # a nested privileged container can open a hardware breakpoint that never
       # actually traps, so exact escalation and CPU-storm scheduling do not hold
       # here — those run on the T0 hosted runner + live EL8/EL9 boxes.
+      # This supplements the PR PG13 cell; --core is not equivalent coverage
+      # and cannot replace that cell under #770 part 3.
       - name: Run capture smoke (PG ${{ matrix.pg }}, --core)
+        env:
+          # Every container shares the ubuntu-24.04 host kernel, including
+          # EL8: this is NOT box-check's EL8/4.18 kernel contract of 0.
+          # PGDG binaries have SDT notes; semaphore refcounting is available.
+          PGWT_EXPECT_PHASE_PROBES: "1"
         run: |
           V=${{ matrix.pg }}
           # sudo strips the env: pass PATH (psql/pgbench), the job-summary sink,
           # and BPFTOOL (the uprobe run_cnt assertion needs a working bpftool).
           sudo env "PATH=$PATH" \
             "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
+            "PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES" \
             ${BPFTOOL:+BPFTOOL=$BPFTOOL} \
             tests/ci_smoke.sh --pg-version "$V" --core
 
