@@ -1778,14 +1778,8 @@ static void test_unreadable_window(void)
 
     int count = 0;
     struct pgwt_load_info info = {0};
-    struct pgwt_trace_event *events = server_load_exec_prefix(
-        srv, req.from_ns - 1, req.filter.pid, &count, &info);
-    CHECK(count > 0 && !info.trace_unreadable && !info.overloaded &&
-          !info.allocation_failed,
-          "762: prefix succeeds before unreadability is first seen in window");
-    free(events);
-    events = server_load_events_fi(srv, req.from_ns, req.to_ns,
-                                  req.filter.pid, &count, &info);
+    struct pgwt_trace_event *events = server_load_events_fi(
+        srv, req.from_ns, req.to_ns, req.filter.pid, &count, &info);
     CHECK(info.trace_unreadable && !info.overloaded && !info.allocation_failed,
           "762: window flags unreadable=1 overloaded=0 allocation_failed=0");
     free(events);
@@ -1795,6 +1789,122 @@ static void test_unreadable_window(void)
           jstr(resp, "error") && !cJSON_GetObjectItem(resp, "spans"),
           "762: unreadable-only window refuses with code trace_unreadable, "
           "without rendering spans");
+    cJSON_Delete(resp);
+    server_destroy(srv);
+    free(srv);
+    char cleanup[600];
+    snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
+    if (system(cleanup) != 0) exit(2);
+}
+
+/* Three separately published blocks: a readable command/execution window,
+ * a readable CMD_END just outside it, and damage ten minutes later. The
+ * last block is beyond the ordinary five-minute straddler lookahead of
+ * BOTH the window and pre-context loads, but inside the fifteen-minute
+ * post pass. Its partial result still contains CMD_END, so consuming that
+ * result without checking trace_unreadable would incorrectly close the span. */
+static void test_unreadable_post(void)
+{
+    char dir[] = "/tmp/pgwt_span_unreadable_post_XXXXXX";
+    if (!mkdtemp(dir)) { printf("FATAL: mkdtemp unreadable post\n"); exit(2); }
+    struct pgwt_event_writer w;
+    if (pgwt_writer_init(&w, dir, 180000, 0, NULL) != 0) exit(2);
+    uint64_t t0 = fx_base;
+    wmark(&w, t0, PID_SORD, PGWT_MARKER_CMD_START, 0);
+    wmark(&w, t0 + MS, PID_SORD, PGWT_MARKER_EXEC_START, QID_SORD);
+    wpush(&w, t0 + 5 * MS, PID_SORD, EV_IO, 0, 2 * MS, QID_SORD);
+    wmark(&w, t0 + 9 * MS, PID_SORD, PGWT_MARKER_EXEC_END, QID_SORD);
+    if (pgwt_writer_publish(&w) != 0) exit(2);
+    wmark(&w, t0 + 10 * MS, PID_SORD, PGWT_MARKER_CMD_END, QID_SORD);
+    if (pgwt_writer_publish(&w) != 0) exit(2);
+    wmark(&w, t0 + 600 * ONE_SEC, PID_SIDLE, PGWT_MARKER_CMD_START, 0);
+    if (pgwt_writer_publish(&w) != 0 || w.num_blocks != 3) exit(2);
+    uint64_t damaged_offset = w.block_index[2].file_offset;
+    pgwt_writer_close(&w);
+
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    if (!srv || server_init(srv, dir) != 0) exit(2);
+    uint64_t wall_base = srv->earliest_wall_ns;
+    struct pgwt_request req = {0};
+    req.id = 762;
+    req.filter.pid = PID_SORD;
+    req.start_ns = wall_base + MS;
+    req.end_ns = wall_base + 9 * MS;
+    char want_end[32];
+    snprintf(want_end, sizeof(want_end), "%llu",
+             (unsigned long long)(wall_base + 10 * MS));
+    cJSON *resp = call_handler(handle_execution_detail, srv, &req);
+    cJSON *span = cJSON_GetObjectItem(resp, "backend_activity_span");
+    CHECK(resp && !jstr(resp, "error") && cJSON_IsObject(span),
+          "762 post: healthy execution detail has a containing span");
+    CHECK(streq(jstr(span, "completion"), "closed") &&
+          streq(jstr(span, "end_ns"), want_end) &&
+          jnum(span, "completed_duration_ms") == 10.0,
+          "762 post: healthy post pass closes the command at its real CMD_END");
+    cJSON_Delete(resp);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    FILE *fp = fopen(path, "r+b");
+    if (!fp) exit(2);
+    if (fseek(fp, (long)(damaged_offset +
+              offsetof(struct pgwt_trace_block_header, block_type)), SEEK_SET)
+        != 0 || fputc(255, fp) == EOF || fclose(fp) != 0) exit(2);
+    /* The healthy handler cached this block. Force all preconditions and
+     * the next handler invocation to consult the damaged file instead. */
+    cur_cache_drop(&srv->cur);
+
+    int count = 0;
+    struct pgwt_load_info info = {0};
+    struct pgwt_trace_event *events = server_load_events_fi_context(
+        srv, req.start_ns, req.end_ns, 0, &count, &info);
+    CHECK(count > 0 && !info.trace_unreadable && !info.overloaded &&
+          !info.allocation_failed,
+          "762 post: real window load remains readable after damage");
+    free(events);
+    uint64_t context_from = req.start_ns > EXEC_PLAN_LOOKBACK_NS
+                          ? req.start_ns - EXEC_PLAN_LOOKBACK_NS : 0;
+    events = server_load_markers_fi(srv, context_from, req.start_ns - 1,
+        req.filter.pid, PGWT_LOAD_CONTEXT, &count, &info);
+    CHECK(count > 0 && !info.trace_unreadable && !info.overloaded &&
+          !info.allocation_failed,
+          "762 post: real pre-context load remains readable after damage");
+    free(events);
+    events = server_load_markers_fi(srv, req.end_ns + 1,
+        req.end_ns + EXEC_PLAN_LOOKBACK_NS, req.filter.pid,
+        PGWT_LOAD_CONTEXT, &count, &info);
+    CHECK(info.trace_unreadable && !info.overloaded && !info.allocation_failed,
+          "762 post: real post load flags unreadable=1 overloaded=0 allocation_failed=0");
+    int has_cmd_end = 0;
+    for (int i = 0; events && i < count; i++)
+        if (events[i].pid == req.filter.pid &&
+            events[i].old_event == PGWT_MARKER_CMD_END &&
+            events[i].timestamp_ns == wall_base + 10 * MS)
+            has_cmd_end = 1;
+    CHECK(has_cmd_end,
+          "762 post: rejected partial load contains the closing marker; "
+          "ignoring unreadability would close the span");
+    free(events);
+
+    resp = call_handler(handle_execution_detail, srv, &req);
+    span = cJSON_GetObjectItem(resp, "backend_activity_span");
+    CHECK(resp && !jstr(resp, "error") &&
+          cJSON_IsObject(cJSON_GetObjectItem(resp, "leader")),
+          "762 post: unreadable additive context does not refuse execution detail");
+    CHECK(cJSON_IsObject(span) && (uint32_t)jnum(span, "pid") == PID_SORD,
+          "762 post: the containing leader span survives");
+    CHECK(streq(jstr(span, "completion"), "in_flight") &&
+          streq(jstr(span, "measurement"), "partial"),
+          "762 post: span remains in flight with partial measurement");
+    CHECK(is_json_null(span, "end_ns") &&
+          is_json_null(span, "completed_duration_ms"),
+          "762 post: unreadable post data supplies neither an end nor a completed duration");
+    CHECK(streq(jstr(span, "reason"),
+          "end not observed: the backend was still active at the end "
+          "of the processed stream"),
+          "762 post: span states why its end is unobserved");
+    CHECK(jnum(span, "observed_elapsed_ms") == 5.0,
+          "762 post: observed elapsed stops at the last readable wait");
     cJSON_Delete(resp);
     server_destroy(srv);
     free(srv);
@@ -1858,6 +1968,7 @@ int main(int argc, char **argv)
 
     test_bypass(dir_a);
     test_unreadable_window();
+    test_unreadable_post();
 
     char dir_s[] = "/tmp/pgwt_span_s_XXXXXX";
     if (!mkdtemp(dir_s)) { printf("FATAL: mkdtemp s\n"); return 2; }
@@ -1877,7 +1988,7 @@ int main(int argc, char **argv)
      * count, with no slack. A run that executed fewer assertions did not
      * test what it claims: a whole section stopping unnoticed is the same
      * false negative as a gate that cannot fail. */
-    if (checks < 159) {
+    if (checks < 170) {
         printf("FAIL: only %d assertions ran -- a section did not execute\n",
                checks);
         return 1;
