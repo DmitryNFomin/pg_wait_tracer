@@ -283,9 +283,11 @@ static void check_sidecar_excludes_tableless_names(const char *path)
     char line[512];
     int found = 0;
     while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "\"Extension\"") ||
+        /* Match JSON KEYS ("Class":), not bare words: the LWLock table
+         * legitimately contains a lock named "InjectionPoint". */
+        if (strstr(line, "\"Extension\":") ||
             strstr(line, "DblinkGetConnect") || strstr(line, "OtherExt") ||
-            strstr(line, "\"InjectionPoint\"") || strstr(line, "CustomPoint"))
+            strstr(line, "\"InjectionPoint\":") || strstr(line, "CustomPoint"))
             found = 1;
     }
     CHECK(!ferror(fp), "read written name sidecar");
