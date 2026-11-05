@@ -865,6 +865,20 @@ struct pgwt_summary_open {
                                    * [start_ns, its last note), or
                                    * PGWT_CPU_NS_UNKNOWN */
     uint64_t cpu_credited_ns;     /* measured CPU credited for THIS interval */
+
+    /* #709: a new note can replace this interval before its closing record
+     * arrives. Retain its frozen CPU accounting for that close; wall credit
+     * still comes from the per-PID watermark above. */
+    struct {
+        uint64_t start_ns;
+        uint64_t cpu_credited_ns;
+        uint32_t we;
+        uint32_t cpu_eff_we;
+        uint8_t cpu_slot;
+        uint8_t cpu_frozen;
+        uint8_t cpu_tier_known;
+        bool valid;
+    } prev;
 };
 
 /* v9 (#424): a producer's OBSERVATION of one open on-CPU gap at tick time.
