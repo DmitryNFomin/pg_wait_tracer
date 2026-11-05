@@ -1729,6 +1729,109 @@ static void test_bypass_short_gap_and_roundtrip(void)
     wr_free(&y);
 }
 
+/* ── §11: a record closed AFTER the pid's note moved to the next interval ──
+ *
+ * (#709) The producer's scan can note interval B before A's closing record is
+ * consumed. A then closes in the identity-MISMATCH branch. Its wall is
+ * subtracted through the pid's monotone watermark, but the measured-CPU half
+ * of the same subtraction came from the note -- which now describes B -- so
+ * the CPU the ticks had already credited under A was forgotten and the close
+ * added min(cpu_ns, tail) on top of it.
+ *
+ * The data, not a counter, is what is asserted: open_cpu_overcredit_ns_total
+ * only exists in the MATCHED branch and reads 0 for the whole defect.
+ *
+ * PARTIAL CPU is the point. At cpu_ns == duration the re-add is bounded by
+ * the tail and the total lands exact by coincidence, so a test at 100% CPU
+ * passes with or without the defect.
+ *
+ * Gap A: [1 s, 7.5 s), 6.5 s wall, cpu_ns = 3250 ms (50%). Ticks at 2.2 s ..
+ * 7.2 s credit it second by second. B (start 7.5 s, prefix 0) is then noted.
+ *   11a  B is NOT ticked past A's close: the tail [7 s, 7.5 s) is still
+ *        owed by A's close.
+ *   11b  CONTROL: B is ticked past A's close, so B's tick credits the tail
+ *        and the close's tail is 0. Same record, same cpu_ns; the variable
+ *        that differs is the one that decides whether the defect can fire. */
+static void run_mismatch_close(const char *name, int tick_b_past_close,
+                               uint64_t *measured, uint64_t *unknown,
+                               uint64_t *wall, uint64_t *overcredit,
+                               uint64_t *mism, int *rows)
+{
+    struct pgwt_trace_event seed =
+        mkev(PID_A, BASE_MONO + 1 * S, 1 * S, EV_LOCK_REL, 0, 0,
+             PGWT_CPU_NS_UNKNOWN);
+    struct wr z;
+    *rows = -1;
+    if (wr_open(&z, name) != 0) { printf("  FAIL: setup\n"); failures++; return; }
+    pgwt_summary_push_event(z.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 7; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        tick_cpu(&z, now, PID_A, BASE_MONO + 1 * S, 0, 0,
+                 (now - (BASE_MONO + 1 * S)) / 2);
+    }
+    uint64_t b_start = BASE_MONO + 7 * S + 500 * MS;
+    if (tick_b_past_close) {
+        tick_cpu(&z, BASE_MONO + 8 * S + 200 * MS, PID_A, b_start, 0, 0, 0);
+    } else {
+        struct pgwt_summary_open_cpu obs = { .eff_we = 0, .cpu_prefix_ns = 0 };
+        pgwt_summary_note_open_ex(z.w, PID_A, 0, b_start, 0,
+                                  BASE_MONO + 7 * S + 700 * MS, &obs);
+    }
+    struct pgwt_trace_event a =
+        mkev(PID_A, b_start, 6 * S + 500 * MS, 0, EV_LOCK_REL, 0, 3250 * MS);
+    pgwt_summary_push_event(z.w, &a, 0, a.old_event);
+    *overcredit = z.w->open_cpu_overcredit_ns_total;
+    *mism = z.w->open_note_mismatch_total;
+    wr_close(&z);
+    struct readback rb = { .want_pid = PID_A };
+    *rows = read_back(z.dir, &rb);
+    *measured = RB_SUM(&rb, cpu_measured_ns);
+    *unknown  = RB_SUM(&rb, cpu_unknown_ns);
+    *wall     = rb_sum_class(&rb, PGWT_CLASS_CPU);
+    wr_free(&z);
+}
+
+static void test_mismatch_close_conservation(void)
+{
+    printf("-- 11: a record closed after the note moved on (#709) --\n");
+    uint64_t m, u, w, oc, mm;
+    int n;
+
+    run_mismatch_close("mm_untickedB", 0, &m, &u, &w, &oc, &mm, &n);
+    CHECK(n > 0, "11a: records read back (%d)", n);
+    CHECK(mm == 1, "11a: the identity mismatch happened and is counted "
+          "(open_note_mismatch_total = %llu)", (unsigned long long)mm);
+    CHECK(w == 6500 * MS,
+          "11a: on-disk WALL equals the record's duration (%llu ms, true "
+          "6500 ms)", (unsigned long long)(w / MS));
+    CHECK(m <= 3250 * MS,
+          "11a: on-disk MEASURED CPU does not exceed the record's cpu_ns "
+          "(%llu ms vs 3250 ms) -- the over-credit",
+          (unsigned long long)(m / MS));
+    CHECK(m == 3250 * MS && u == 0,
+          "11a: on-disk measured CPU EQUALS cpu_ns, nothing re-added "
+          "(measured %llu ms, unknown %llu ms, cpu_ns 3250 ms; overcredit "
+          "counter %llu is not the evidence)",
+          (unsigned long long)(m / MS), (unsigned long long)(u / MS),
+          (unsigned long long)oc);
+
+    run_mismatch_close("mm_tickedB", 1, &m, &u, &w, &oc, &mm, &n);
+    CHECK(n > 0, "11b: records read back (%d)", n);
+    CHECK(mm == 1, "11b: the identity mismatch happened and is counted "
+          "(open_note_mismatch_total = %llu)", (unsigned long long)mm);
+    CHECK(w == 6500 * MS,
+          "11b (control): on-disk WALL (%llu ms) is exact too",
+          (unsigned long long)(w / MS));
+    CHECK(m <= 3250 * MS,
+          "11b (control): B's tick already placed the tail, so nothing is "
+          "re-added and measured stays within cpu_ns (%llu ms vs 3250 ms)",
+          (unsigned long long)(m / MS));
+    CHECK(m == 3250 * MS && u == 0,
+          "11b (control): measured CPU EQUALS cpu_ns (measured %llu ms, "
+          "unknown %llu ms, cpu_ns 3250 ms)",
+          (unsigned long long)(m / MS), (unsigned long long)(u / MS));
+}
+
 int main(void)
 {
     printf("=== test_open_cpu_accounting (#424 / summary v%d) ===\n",
@@ -1759,6 +1862,7 @@ int main(void)
     test_bypass_short_gap_and_roundtrip();
     test_notes_counter();   /* prints its own banner -- see #686 there */
     test_attribution_counters();   /* ditto */
+    test_mismatch_close_conservation();   /* ditto (#709) */
 
     printf("\n%d checks, %d failures\n", checks, failures);
     printf("=== test_open_cpu_accounting: %s ===\n",
