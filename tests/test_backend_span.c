@@ -1743,6 +1743,66 @@ static void bench_900s(void)
     free(ev);
 }
 
+/* #762: the retained prefix is readable, but a subsequent raw window load
+ * discovers a damaged block. Neither of the other refusal flags may carry
+ * this test: that would pass with the original two-flag guard. */
+static void test_unreadable_window(void)
+{
+    char dir[] = "/tmp/pgwt_span_unreadable_XXXXXX";
+    if (!mkdtemp(dir)) { printf("FATAL: mkdtemp unreadable\n"); exit(2); }
+    build_fixture_a(dir, fx_base);
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    if (!srv || server_init(srv, dir) != 0) exit(2);
+    struct pgwt_request req = {0};
+    req.id = 762;
+    req.from_ns = WALL(fx_block_start) + ONE_SEC;
+    req.to_ns = WALL(fx_block_end);
+    req.filter.pid = PID_BLOCKED;
+    cJSON *resp = call_handler(handle_span_detail, srv, &req);
+    CHECK(resp && !jstr(resp, "error") &&
+          cJSON_GetArraySize(cJSON_GetObjectItem(resp, "spans")) > 0,
+          "762: healthy control renders a span and retains its prefix");
+    cJSON_Delete(resp);
+
+    /* Keep the header, offsets and committed count intact. An unsupported
+     * block type cannot decode, while the already-retained prefix remains
+     * usable. Drop the raw cache so it must read the damaged bytes. */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    FILE *fp = fopen(path, "r+b");
+    if (!fp) exit(2);
+    if (fseek(fp, sizeof(struct pgwt_trace_file_header) +
+              offsetof(struct pgwt_trace_block_header, block_type), SEEK_SET)
+        != 0 || fputc(255, fp) == EOF || fclose(fp) != 0) exit(2);
+    cur_cache_drop(&srv->cur);
+
+    int count = 0;
+    struct pgwt_load_info info = {0};
+    struct pgwt_trace_event *events = server_load_exec_prefix(
+        srv, req.from_ns - 1, req.filter.pid, &count, &info);
+    CHECK(count > 0 && !info.trace_unreadable && !info.overloaded &&
+          !info.allocation_failed,
+          "762: prefix succeeds before unreadability is first seen in window");
+    free(events);
+    events = server_load_events_fi(srv, req.from_ns, req.to_ns,
+                                  req.filter.pid, &count, &info);
+    CHECK(info.trace_unreadable && !info.overloaded && !info.allocation_failed,
+          "762: window flags unreadable=1 overloaded=0 allocation_failed=0");
+    free(events);
+
+    resp = call_handler(handle_span_detail, srv, &req);
+    CHECK(resp && streq(jstr(resp, "code"), "trace_unreadable") &&
+          jstr(resp, "error") && !cJSON_GetObjectItem(resp, "spans"),
+          "762: unreadable-only window refuses with code trace_unreadable, "
+          "without rendering spans");
+    cJSON_Delete(resp);
+    server_destroy(srv);
+    free(srv);
+    char cleanup[600];
+    snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
+    if (system(cleanup) != 0) exit(2);
+}
+
 /* ── main ─────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv)
@@ -1797,6 +1857,7 @@ int main(int argc, char **argv)
     test_gap(dir_g);
 
     test_bypass(dir_a);
+    test_unreadable_window();
 
     char dir_s[] = "/tmp/pgwt_span_s_XXXXXX";
     if (!mkdtemp(dir_s)) { printf("FATAL: mkdtemp s\n"); return 2; }
@@ -1816,7 +1877,7 @@ int main(int argc, char **argv)
      * count, with no slack. A run that executed fewer assertions did not
      * test what it claims: a whole section stopping unnoticed is the same
      * false negative as a gate that cannot fail. */
-    if (checks < 155) {
+    if (checks < 159) {
         printf("FAIL: only %d assertions ran -- a section did not execute\n",
                checks);
         return 1;
