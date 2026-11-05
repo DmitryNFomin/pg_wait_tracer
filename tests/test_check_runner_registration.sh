@@ -9,8 +9,8 @@
 # tests/runner_registration_exemptions.list, then points
 # scripts/check-runner-registration.sh at it via its `[repo-dir]` argument.
 #
-# NOT wired into `make check`, CI, or any Makefile target -- same
-# reviewer-run-by-hand convention as tests/test_check_test_registration.sh.
+# Wired into scripts/check.sh (make check); the actual repository guard
+# remains a manual reviewer evidence step.
 #
 # Usage: tests/test_check_runner_registration.sh (run from anywhere)
 set -uo pipefail
@@ -453,6 +453,33 @@ if grep -q "test_commented_tail.sh" <<<"$out"; then
     report true "failure names the inline-comment-only file (test_commented_tail.sh)"
 else
     report false "failure names test_commented_tail.sh; output: $out"
+fi
+
+# #752: check.sh uses python3 -B to avoid bytecode. The flag counts only
+# after python3; an echo mentioning the same flag and path is still an orphan.
+repo16="$tmpdir/case16_python_no_bytecode"
+write_reconciled "$repo16"
+printf '# stub\n' > "$repo16/tests/test_no_bytecode.py"
+cat > "$repo16/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+run() { :; }
+run python3 -B tests/test_no_bytecode.py
+EOF
+out=$("$GUARD" "$repo16" 2>&1); rc=$?
+if [[ "$rc" == "0" ]]; then
+    report true "python3 -B invocation registers its test (exit 0)"
+else
+    report false "python3 -B invocation registers its test (wanted exit 0, got $rc; output: $out)"
+fi
+cat > "$repo16/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+echo -B tests/test_no_bytecode.py
+EOF
+out=$("$GUARD" "$repo16" 2>&1); rc=$?
+if [[ "$rc" == "1" ]] && grep -q "test_no_bytecode.py" <<<"$out"; then
+    report true "-B without python3 does not register a mentioned test (exit 1)"
+else
+    report false "-B without python3 leaves a named orphan (wanted exit 1, got $rc; output: $out)"
 fi
 
 echo
