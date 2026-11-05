@@ -518,12 +518,10 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         pgwt_debug_block_end(d, "backend_gc", 0, started_ns);
     }
 
-    /* Trace file: check hourly rotation, periodic cleanup */
+    /* Rotate both writers before retention sees the hour's archives. */
     if (d->event_writer) {
         started_ns = pgwt_debug_block_begin(d);
         pgwt_writer_check_rotation(d->event_writer);
-        if (d->tick > 0 && d->tick % 60 == 0)
-            pgwt_writer_cleanup_old_files(d->event_writer);
         pgwt_debug_block_end(d, "event_writer_maintenance", 0, started_ns);
     }
     if (d->summary_writer) {
@@ -540,9 +538,24 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         pgwt_summary_flush_completed(d->summary_writer,
                                      pgwt_debug_monotonic_ns());
         pgwt_summary_check_rotation(d->summary_writer);
-        if (d->tick > 0 && d->tick % 60 == 0)
-            pgwt_summary_cleanup_old_files(d->summary_writer);
         pgwt_debug_block_end(d, "summary_writer_maintenance", 0, started_ns);
+    }
+    if (d->event_writer && d->tick > 0 && d->tick % 60 == 0) {
+        started_ns = pgwt_debug_block_begin(d);
+        /* #779: forced raw rotation can precede summary rotation by most
+         * of an hour. Keep that hour's raw fallback while current.summary
+         * can still become an archive, even if that delays the byte cap. */
+        d->event_writer->retention_live_summary_ns =
+            d->summary_writer && (d->summary_writer->fp ||
+                access(d->summary_writer->current_path, F_OK) == 0)
+            ? d->summary_writer->clock_offset_wall_ns : 0;
+        pgwt_writer_cleanup_old_files(d->event_writer);
+        pgwt_debug_block_end(d, "event_writer_retention", 0, started_ns);
+    }
+    if (d->summary_writer && d->tick > 0 && d->tick % 60 == 0) {
+        started_ns = pgwt_debug_block_begin(d);
+        pgwt_summary_cleanup_old_files(d->summary_writer);
+        pgwt_debug_block_end(d, "summary_writer_retention", 0, started_ns);
     }
 
     /* Raw first-seen dedup is an LRU (pid,qid) map. Inserts should remain

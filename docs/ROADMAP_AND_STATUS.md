@@ -835,8 +835,14 @@ without a loud signal (log + control-socket health + metric).
   existing target).
 - **DUR-3 🟠** — retention was hours-only, no size cap; full-tier on a busy server
   could fill the disk inside the retention window; orphaned `current.trace`,
-  `query_texts.jsonl`, `backends.jsonl` were never cleaned. **→ Fixed:**
-  `--retention-gb` size cap + orphan cleanup.
+  `query_texts.jsonl`, `backends.jsonl` were never cleaned. **→ Mitigated:**
+  optional `--retention-gb` archive eviction + stale-metadata cleanup. This is
+  a best-effort target, not a hard disk-usage bound: live files and `.jsonl`
+  sidecars remain protected; pending summaries retain same-hour raw until
+  publication (normally within an hour). Failed unlinks do not stop eviction
+  from other hours; a failed summary unlink preserves same-hour raw for that
+  pass. Removal or scan failures can still leave usage over cap; WARN reports
+  the actual remaining excess and limiting reason.
 - **DUR-4 🟠** (`query_text.c:142`) — `query_texts.jsonl` truncated on every
   restart, orphaning text for all retained query_ids (server assumes append).
   **→ Fixed:** append-open + dedup-on-load.
