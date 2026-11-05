@@ -76,6 +76,41 @@
 # and 8.8 sits 2.5 pp above that by derivation, not by rounding up to clear a
 # run.
 #
+# #115 step 1a: criteria pre-registered 2026-11-05
+# ==============================================
+# This file is being committed BEFORE any measurement for this decomposition
+# is taken. No number in these criteria may be chosen from a measurement.
+# These are criteria for a FUTURE fix, not a change to today's bias or gate.
+#
+# After a fix justifies BIAS=0, the bound at XVAL_PREREG_SAMPLES=3130 and
+# XVAL_PREREG_K=5 is z(5)*SE = 2.5688 * 0.8937 = 2.296 pp (to 3 dp).
+# Verified against those constants and xval_z_family_wise 5: using unrounded
+# SE = 100*sqrt(0.25/3130) gives 2.29577 pp, also 2.296 to 3 dp. The shipped
+# BIAS=6.52 and TOLERANCE=8.8 remain unchanged; 2.296 is an after-fix criterion.
+#
+# Each rate must use its OWN N. At 200 Hz, N~60k gives SE~0.2 pp, so the
+# bound is much tighter at high rates: this makes 200 Hz harder, not easier.
+# derive_xval_tolerance_per_rate below prepares that arithmetic only; it is
+# not wired into the gate.
+#
+# The gate must use the MEDIAN of n>=3 INTERLEAVED repeats per rate per
+# kernel, not one draw: D is an order statistic over a changing event set
+# (header :26-33 above; #321 withdrawn). xval_median prepares that calculation
+# only; it is not wired into the gate and cannot verify interleaving itself.
+#
+# Decomposition definitions (same window and shares in percentage points):
+#   A = sampled estimate as recorded.
+#   B = exact timeline integrated over the window.
+#   C = exact timeline at the actual sampling instants, computed with BOTH
+#       measured-period weights AND nominal/equal weights.
+#   C-B = observation-time selection and weighting.
+#   A-C = reading and classification.
+# PROGRAM-LEVEL FALSIFIER: if C-B <= 0.5 pp AND A-C <= 0.5 pp while measured
+# D stays at 6-11 pp, the decomposition does not close and the defect is the
+# comparator's own definitions -- exact `we == 0` wall time (contains
+# runqueue time) vs a sampled instant. That outcome closes none of
+# #115/#306/#675 and must be reported as such.
+#
 # How this differs from the 8 pp sketch the task started from
 # ===========================================================
 # That sketch read: 600 samples -> SE ~2 pp, 2*SE ~4 pp, plus a 3.9 pp
@@ -133,7 +168,8 @@
 #    every rate in its sweep because the published post-#310 gate-1 medians
 #    fall with rate (6.0 / 6.4 / 5.5 / 2.5 pp at 10 / 50 / 100 / 200 Hz), so
 #    the 10 Hz bound is the loosest of the four; a per-rate bound would need
-#    its own n>=5 per rate and is not derived here. Do not read a 200 Hz pass
+#    its own N and repeats per rate (future criteria above), and is not
+#    applied here. Do not read a 200 Hz pass
 #    as "within its derived bound".
 #  - It is a bound on the metric's SPREAD AND BIAS, not a certificate of
 #    accuracy. #306's residual under-read is OPEN and is an INPUT to this
@@ -157,6 +193,7 @@
 XVAL_PREREG_BIAS_PP=6.52     # #306 arm A median, shipped SCHED_OTHER 10 Hz
 XVAL_PREREG_SAMPLES=3130     # smallest observed "Samples in window" at that point
 XVAL_PREREG_K=5              # eligible events (exact share >= 2%), 5 of 5 captures
+XVAL_REQUIRED_REPEATS=3     # future gate: median of interleaved repeats per rate/kernel
 
 # ---------------------------------------------------------------------------
 # The capture-thickness floor, re-specified 2026-10-25 (round 2).
@@ -344,6 +381,66 @@ derive_xval_tolerance() {
     _xval_is_number "$out" || {
         echo "REFUSE: awk produced no usable number (got '$out')" >&2
         return 2
+    }
+    echo "$out"
+}
+
+# derive_xval_tolerance_per_rate BIAS_PP RATE_SAMPLES K
+# Same bound (pp to 1 dp) and refusal contract as derive_xval_tolerance, but
+# RATE_SAMPLES must be that rate's OWN N, never the shared pre-registered N.
+# SE = 100*sqrt(0.25/RATE_SAMPLES): at 200 Hz N~60k means SE~0.2 pp and a
+# tighter bound, making 200 Hz harder, not easier. Not wired into the gate.
+derive_xval_tolerance_per_rate() {
+    derive_xval_tolerance "$@"
+}
+
+# xval_median [--min MIN] VALUES...
+# Echoes the numeric median (even n: mean of the middle pair), to at most
+# 10 dp with trailing zeros trimmed. MIN defaults to XVAL_REQUIRED_REPEATS;
+# an explicit override must be a positive integer. Empty/non-numeric input,
+# too few values or unusable awk REFUSE (exit 2, no stdout), never default.
+# Pure awk sorting keeps this portable without sort -n or non-POSIX asort.
+# This helper cannot establish interleaving and is not wired into the gate.
+xval_median() {
+    local min="$XVAL_REQUIRED_REPEATS" value out
+    if [[ "${1-}" == "--min" ]]; then
+        [[ $# -ge 2 ]] || { echo "REFUSE: --min needs a minimum repeat count" >&2; return 2; }
+        min="$2"
+        shift 2
+    fi
+    _xval_is_number "$min" && [[ "$min" != *.* ]] || {
+        echo "REFUSE: minimum repeat count must be a positive integer: '$min'" >&2; return 2;
+    }
+    [[ $# -gt 0 ]] || { echo "REFUSE: xval_median needs values" >&2; return 2; }
+    for value in "$@"; do
+        _xval_is_number "$value" || {
+            echo "REFUSE: median value is not a non-negative number: '$value'" >&2; return 2;
+        }
+    done
+    out=$(printf '%s\n' "$@" | awk -v min="$min" '
+        { values[NR] = $0 + 0 }
+        END {
+            if (min < 1 || NR < min) exit 2
+            for (i = 2; i <= NR; i++) {
+                v = values[i]
+                j = i - 1
+                while (j >= 1 && values[j] > v) {
+                    values[j+1] = values[j]
+                    j--
+                }
+                values[j+1] = v
+            }
+            mid = int((NR + 1) / 2)
+            median = (NR % 2 ? values[mid] : values[mid]/2 + values[mid+1]/2)
+            out = sprintf("%.10f", median)
+            sub(/0+$/, "", out)
+            sub(/\.$/, "", out)
+            print out
+        }' 2>/dev/null) || {
+        echo "REFUSE: median needs at least $min repeats (minimum >= 1) and usable awk" >&2; return 2;
+    }
+    _xval_is_number "$out" || {
+        echo "REFUSE: awk produced no usable median (got '$out')" >&2; return 2;
     }
     echo "$out"
 }
