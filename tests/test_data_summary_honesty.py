@@ -243,8 +243,9 @@ def test_retired_v9_cpu_split(t):
                     marker = ("INFO: 1 of %d summary file(s) covering this "
                               "window are not summary v10 -- recomputing "
                               "from raw events" % (2 if arm == "mixed" else 1))
-                    t.check_eq(stderr.count(marker), 2,
-                               arm + ": aas AND time_model log the v10 refusal")
+                    t.check_eq(stderr.count(marker), 3,
+                               arm + ": aas, time_model AND top_sessions "
+                               "each log the v10 refusal")
         finally:
             cleanup_traces(trace_dir)
 
