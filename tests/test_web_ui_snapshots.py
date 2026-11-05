@@ -144,6 +144,31 @@ GALLERY_STATIC_CELLS = [
     "gallery-table-configs-queries-hostile-sql",  # hostile SQL + event tints
     "gallery-table-configs-events-overflow-pctl",  # #103 ">=" overflow bounds
     "gallery-table-configs-compare-delta",        # U4: new/gone + change-floor row
+    "gallery-transitions-variants-html",        # #279: p95 prefix-sample markers
+    "gallery-concurrency-truncated-bursts",     # #279: onset selection + PID sample
+    "gallery-concurrency-burst-final-bucket",   # #279: ALIGNMENT last-bucket marker
+    "gallery-timeline-pre-window-start",        # #279: ALIGNMENT clipped waits
+    "gallery-fidelity-annotation-observed-anomaly",  # #279: ALIGNMENT band coordinates
+    "gallery-transitions-dense-dfg",            # #279: OCCLUSION dense graph
+    "gallery-histogram-one-hot-cell",           # #279: SEMANTICS intensity ramp
+    "gallery-timeline-micro-vs-macro",           # #279: SEMANTICS minimum-width waits
+    "gallery-aas-one-huge-value",               # #279: HIERARCHY spike vs reference
+    "gallery-concurrency-one-huge-peak",        # #279: HIERARCHY peak scale
+    "gallery-transitions-threshold-simplified", # #279: HIERARCHY surviving edges
+    "gallery-fidelity-metrics-escalated",       # #279: HIERARCHY warning rows
+    "gallery-timeline-empty",                   # #279: FEEDBACK empty timeline
+    "gallery-histogram-empty",                  # #279: FEEDBACK empty histogram
+    "gallery-transitions-empty",                # #279: FEEDBACK empty transitions
+    "gallery-concurrency-empty",                # #279: FEEDBACK empty concurrency
+    "gallery-aas-all-zero",                     # #279: FEEDBACK captured idle
+    "gallery-fidelity-unavailable-escalatable", # #279: FEEDBACK refusal with action
+    "gallery-fidelity-unavailable-no-daemon",   # #279: FEEDBACK refusal without action
+    "gallery-fidelity-annotation-mid-escalation",  # #279: FEEDBACK unknown start
+    "gallery-table-configs-events-null-latency",  # #279: FEEDBACK null values
+    "gallery-aas-hostile-names",                # #279: FEEDBACK inert event names
+    "gallery-timeline-hostile-sql",             # #279: FEEDBACK inert SQL
+    "gallery-transitions-hostile-names",        # #279: FEEDBACK inert node names
+    "gallery-concurrency-hostile-event-names",  # #279: FEEDBACK inert burst names
 ]
 # The recorded live-replay cells, captured at ONE fixed tick each (stepped
 # there via the deterministic ⏭ button — never the ▶ 1 s timer). The uplot
@@ -646,7 +671,7 @@ def snap_gallery_suite(page):
     though already within the gate's own tolerance). Isolating the capture
     page means every cell is always painted at the SAME small Y regardless
     of the rest of the manifest, closing the coupling completely rather than
-    chasing each new symptom of it — and is cheap: 28 small static page
+    chasing each new symptom of it — and is cheap: small static page
     loads against a local mock, not a real network.
     """
     tick_names = {cell: f"{_gallery_name(cell)}-tick{step}"

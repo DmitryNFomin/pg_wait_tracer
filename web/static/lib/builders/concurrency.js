@@ -312,7 +312,7 @@ export function burstPidSampleMarker(b) {
     if (!b || !Array.isArray(b.pids) || typeof b.sessions !== 'number') return '';
     if (b.pids.length >= b.sessions) return '';
     return ' <span style="color:#d9a441;font-size:10px" title="The server returns ' +
-        b.pids.length.toLocaleString() + ' of this burst\u2019s ' +
+        b.pids.length.toLocaleString() + ' of this burst\'s ' +
         b.sessions.toLocaleString() + ' PIDs">(' + b.pids.length.toLocaleString() +
         ' of ' + b.sessions.toLocaleString() + ')</span>';
 }

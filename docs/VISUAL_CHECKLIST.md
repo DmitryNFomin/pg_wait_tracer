@@ -189,6 +189,8 @@ zero visual weight (P1).
 labeled.** Broken must never be pixel-identical to idle; refusals must be
 worded; truncation must be announced.
 
+`gallery-concurrency-truncated-bursts` — burst-onset selection note and sampled PID count, alongside a complete PID list.
+
 **Check it:** the `empty` cell of every builder (`gallery-aas-empty`,
 `gallery-timeline-empty`, `gallery-histogram-empty`,
 `gallery-transitions-empty`, `gallery-concurrency-empty`) — each must say so

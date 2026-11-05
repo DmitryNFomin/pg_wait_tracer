@@ -70,6 +70,25 @@ export const states = {
         opts: { captureFromNs: BASE_NS + 10 * B12 },
         data: denseData(),
     },
+    'truncated-bursts': {
+        description: 'Largest burst per bucket out of 12 onsets; 64 of 120 PIDs sampled in one row, complete list in the other.',
+        tags: ['FEEDBACK', 'SEMANTICS'],
+        data: {
+            bucket_ns: B12,
+            peaks: [
+                peak(0, B12, 2, 'IO:DataFileRead'),
+                peak(1, B12, 120, 'Lock:transactionid'),
+                peak(2, B12, 4, 'LWLock:WALInsert'),
+            ],
+            bursts_total: 12,
+            bursts: [
+                burst(BASE_NS + B12 + SEC_NS, 'Lock:transactionid', 120,
+                    Array.from({ length: 64 }, (_, i) => 1001 + i)),
+                burst(BASE_NS + 2 * B12 + SEC_NS, 'LWLock:WALInsert', 4,
+                    [1001, 1002, 1003, 1004]),
+            ],
+        },
+    },
     'burst-final-bucket': {
         description: 'Minimal P6 pin: 5 buckets, the only burst inside the last one. Marker belongs at the far RIGHT.',
         tags: ['ALIGNMENT'],
