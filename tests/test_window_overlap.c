@@ -1104,7 +1104,7 @@ out:
     free(srv);
 }
 
-/* ── 14. INSTANT selection has TWO bounds ─────────────────────────────
+/* ── 14. OCCURRENCE selection is half-open [from, to) ──────────────────
  *
  * The first cut of the per-occurrence gate implemented only the upper half
  * (`!event_right_open(...)`), so a record whose close lies BEFORE `from`
@@ -1121,12 +1121,12 @@ out:
  * same way, so the two suites now assert the same contract instead of one
  * covering for the other.
  *
- * 14d is the counterweight: INCLUSIVE at `to` must survive the fix. Making
- * selection half-open at the end is the deferred #427 migration, and it
- * must not arrive as a side effect of adding a lower bound. */
+ * #427 makes the upper bound exclusive: 14d pins that edge, 14g/14h pin
+ * ownership across adjacent windows (including +/-1 ns), and 14i pins that
+ * TIME stays in the preceding window even when the OCCURRENCE moves. */
 static void test_instant_two_bounds(void)
 {
-    printf("--- 14. per-occurrence selection is [from, to], both ends ---\n");
+    printf("--- 14. per-occurrence selection is half-open [from, to) ---\n");
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
 
@@ -1184,15 +1184,14 @@ static void test_instant_two_bounds(void)
           (unsigned long long)(row ? row->count : 0));
     free(res.rows);
 
-    /* 14d. INCLUSIVE at `to`, unchanged. A record closing exactly at the
-     * right edge lies wholly inside the window and is ONE occurrence. */
+    /* 14d. A close exactly at `to` contributes time here, but its occurrence
+     * belongs to the following window: #427's half-open edge. */
     pgwt_compute_top_events(&ev, 1, &f, 10 * ONE_SEC, 15 * ONE_SEC,
                             5000.0, &res);
     row = row_for(&res, EV_LOCK);
-    CHECK(row && row->count == 1,
-          "14d. a record closing exactly AT `to` is still one occurrence "
-          "(count=%llu) -- adding the lower bound must not quietly make "
-          "selection half-open at the end (that is #427, deferred)",
+    CHECK(row && row->count == 0,
+          "14d. a record closing exactly AT `to` has zero occurrences "
+          "(count=%llu) -- pins the #427 half-open edge",
           (unsigned long long)(row ? row->count : 0));
     free(res.rows);
 
@@ -1221,6 +1220,103 @@ static void test_instant_two_bounds(void)
           "query whose only record closed before `from`)",
           (unsigned long long)qcount);
     free(qres.rows);
+
+    /* 14g. One close at the shared edge E = 15 s: [a,E) owns none,
+     * [E,b) owns one, and their sum equals the [a,b) total. Retain times
+     * and row presence for 14i; total_ms is the Events row's time field. */
+    const uint64_t from[] = {10 * ONE_SEC, 15 * ONE_SEC, 10 * ONE_SEC};
+    const uint64_t to[] = {15 * ONE_SEC, 20 * ONE_SEC, 20 * ONE_SEC};
+    const double wall_ms[] = {5000.0, 5000.0, 10000.0};
+    uint64_t counts[3] = {0}, qcounts[3] = {0}, ucounts[3] = {0};
+    double times_ms[3] = {0}, qtimes_ms[3] = {0};
+    int present[3] = {0}, qpresent[3] = {0};
+    struct pgwt_trace_event unattributed = ev;
+    unattributed.query_id = 0;
+    unattributed.flags |= PGWT_EVENT_FLAG_QUERY_UNATTRIB;
+    for (int w = 0; w < 3; w++) {
+        pgwt_compute_top_events(&ev, 1, &f, from[w], to[w], wall_ms[w], &res);
+        row = row_for(&res, EV_LOCK);
+        if (row) {
+            present[w] = 1;
+            counts[w] = row->count;
+            times_ms[w] = row->total_ms;
+        }
+        free(res.rows);
+
+        pgwt_compute_top_queries(&ev, 1, &f, from[w], to[w], wall_ms[w], &qres);
+        for (int i = 0; i < qres.num_rows; i++) {
+            if (qres.rows[i].query_id == ev.query_id) {
+                qpresent[w] = 1;
+                qcounts[w] = qres.rows[i].count;
+                qtimes_ms[w] = qres.rows[i].total_ms;
+            }
+        }
+        free(qres.rows);
+
+        /* The other Queries gate counts query-less observations. */
+        pgwt_compute_top_queries(&unattributed, 1, &f, from[w], to[w],
+                                 wall_ms[w], &qres);
+        ucounts[w] = qres.unattributed_count;
+        free(qres.rows);
+    }
+    CHECK(counts[0] == 0 && counts[1] == 1 && counts[2] == 1 &&
+          counts[0] + counts[1] == counts[2],
+          "14g. Events shared-edge counts are 0 + 1 = 1 total (got %llu/%llu/%llu)",
+          (unsigned long long)counts[0], (unsigned long long)counts[1],
+          (unsigned long long)counts[2]);
+    CHECK(qcounts[0] == 0 && qcounts[1] == 1 && qcounts[2] == 1 &&
+          qcounts[0] + qcounts[1] == qcounts[2],
+          "14g. Queries shared-edge counts are 0 + 1 = 1 total (got %llu/%llu/%llu)",
+          (unsigned long long)qcounts[0], (unsigned long long)qcounts[1],
+          (unsigned long long)qcounts[2]);
+    CHECK(ucounts[0] == 0 && ucounts[1] == 1 && ucounts[2] == 1 &&
+          ucounts[0] + ucounts[1] == ucounts[2],
+          "14g. unattributed Queries shared-edge counts are 0 + 1 = 1 total "
+          "(got %llu/%llu/%llu)",
+          (unsigned long long)ucounts[0], (unsigned long long)ucounts[1],
+          (unsigned long long)ucounts[2]);
+
+    /* 14h. Pin each of E-1 ns, E, E+1 ns individually, so an aggregate
+     * cannot hide a close assigned to the wrong window. */
+    uint64_t edge_counts[2][3] = {{0}}, edge_qcounts[2][3] = {{0}};
+    for (int n = 0; n < 3; n++) {
+        struct pgwt_trace_event near_edge = ev;
+        near_edge.timestamp_ns = ev.timestamp_ns - 1 + (uint64_t)n;
+        for (int w = 0; w < 2; w++) {
+            pgwt_compute_top_events(&near_edge, 1, &f, from[w], to[w],
+                                    wall_ms[w], &res);
+            row = row_for(&res, EV_LOCK);
+            edge_counts[w][n] = row ? row->count : 0;
+            free(res.rows);
+
+            pgwt_compute_top_queries(&near_edge, 1, &f, from[w], to[w],
+                                     wall_ms[w], &qres);
+            for (int i = 0; i < qres.num_rows; i++)
+                if (qres.rows[i].query_id == ev.query_id)
+                    edge_qcounts[w][n] = qres.rows[i].count;
+            free(qres.rows);
+        }
+    }
+    CHECK(edge_counts[0][0] == 1 && edge_counts[0][1] == 0 &&
+          edge_counts[0][2] == 0 && edge_counts[1][0] == 0 &&
+          edge_counts[1][1] == 1 && edge_counts[1][2] == 1,
+          "14h. Events E-1/E/E+1 ns ownership is left 1/0/0, right 0/1/1");
+    CHECK(edge_qcounts[0][0] == 1 && edge_qcounts[0][1] == 0 &&
+          edge_qcounts[0][2] == 0 && edge_qcounts[1][0] == 0 &&
+          edge_qcounts[1][1] == 1 && edge_qcounts[1][2] == 1,
+          "14h. Queries E-1/E/E+1 ns ownership is left 1/0/0, right 0/1/1");
+
+    /* 14i. TIME UNCHANGED: the 1 s wait ending at E supplies all its time
+     * to [a,E), while [E,b) has a real row with count 1 and time 0.
+     * Include ownership in each check so unfixed inclusive code fails. */
+    CHECK(present[0] && present[1] && counts[0] == 0 && counts[1] == 1 &&
+          times_ms[0] == 1000.0 && times_ms[1] == 0.0,
+          "14i. Events time stays 1 s / 0 s across E; counts become 0 / 1 "
+          "(time_ms=%.0f/%.0f)", times_ms[0], times_ms[1]);
+    CHECK(qpresent[0] && qpresent[1] && qcounts[0] == 0 && qcounts[1] == 1 &&
+          qtimes_ms[0] == 1000.0 && qtimes_ms[1] == 0.0,
+          "14i. Queries time stays 1 s / 0 s across E; counts become 0 / 1 "
+          "(time_ms=%.0f/%.0f)", qtimes_ms[0], qtimes_ms[1]);
 }
 
 /* ── 15. A TIERED capture: the straddler budget is for TRANSITIONS ────

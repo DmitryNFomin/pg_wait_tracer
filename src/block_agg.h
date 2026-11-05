@@ -71,8 +71,9 @@
  *     old_event occupied may well have begun in an earlier block, or before
  *     the window opened; the record is still counted whole. This is the
  *     straddle rule, and tests/test_block_agg.c §4 pins it.
- * C7. TIME is half-open; RECORD SELECTION is inclusive at both ends, and
- *     those are the same rule read from opposite ends of an interval.
+ * C7. TIME is half-open; LOADER/block selection stays inclusive at both ends
+ *     to fetch records whose time overlaps the window, while compute's
+ *     occurrence gate is half-open (#427).
  *
  *     A trace event's timestamp_ns is when the wait ENDED, so an event ending
  *     exactly at `to` has its whole interval inside the window — selecting it
