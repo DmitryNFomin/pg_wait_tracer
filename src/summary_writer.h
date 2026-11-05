@@ -491,7 +491,8 @@
  *     over-credited part cannot be taken back out of an immutable second.
  *     It is counted (open_cpu_overcredit_ns_total) and is the one way the
  *     per-interval measured identity in piece 2 can fail to hold exactly;
- *     the WALL identity never can.
+ *     the WALL TOTAL identity holds, but the per-interval wall SPLIT can
+ *     mis-attribute when a note moves on before its close (#803).
  *
  * WHY THE VERSION MOVES WITH THE PRODUCER. The rule above is an
  * ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
@@ -865,6 +866,24 @@ struct pgwt_summary_open {
                                    * [start_ns, its last note), or
                                    * PGWT_CPU_NS_UNKNOWN */
     uint64_t cpu_credited_ns;     /* measured CPU credited for THIS interval */
+
+    /* #709: a new note can replace this interval before its closing record
+     * arrives. Retain its frozen CPU accounting for that close; wall credit
+     * still comes from the per-PID watermark above. SINGLE-DEPTH: a second
+     * replacement before the close overwrites it only if that interval had
+     * frozen credits; otherwise the older snapshot stays (identity-checked
+     * at close), and a note two intervals past the close finds none and
+     * keeps the pre-#709 close. */
+    struct {
+        uint64_t start_ns;
+        uint64_t cpu_credited_ns;
+        uint32_t we;
+        uint32_t cpu_eff_we;
+        uint8_t cpu_slot;
+        uint8_t cpu_frozen;
+        uint8_t cpu_tier_known;
+        bool valid;
+    } prev;
 };
 
 /* v9 (#424): a producer's OBSERVATION of one open on-CPU gap at tick time.
@@ -1212,7 +1231,8 @@ struct pgwt_summary_writer {
      *   overcredit_ns        measured CPU credited while open that the
      *                        closing record's own cpu_ns did not cover
      *                        (schedstat jitter): the one place the measured
-     *                        identity can fail. The WALL identity cannot.
+     *                        identity can fail. The WALL total holds; its per-interval split can
+     *                        mis-attribute (#803).
      */
     uint64_t      open_cpu_credited_ns_total;
     uint64_t      open_cpu_measured_ns_total;

@@ -1645,6 +1645,19 @@ static inline bool open_creditable(const struct pgwt_summary_open *o)
 static void open_stop_crediting(struct pgwt_summary_writer *w,
                                 struct pgwt_summary_open *o)
 {
+    /* A replacement note can precede the retiring interval's close (#709).
+     * Save only accounting that reached disk, and do not overwrite it when
+     * stopping an empty or uncredited replacement. Close/forget clear it. */
+    if (o->cpu_slot && o->cpu_frozen) {
+        o->prev.start_ns = o->start_ns;
+        o->prev.we = o->we;
+        o->prev.cpu_slot = o->cpu_slot;
+        o->prev.cpu_frozen = o->cpu_frozen;
+        o->prev.cpu_eff_we = o->cpu_eff_we;
+        o->prev.cpu_tier_known = o->cpu_tier_known;
+        o->prev.cpu_credited_ns = o->cpu_credited_ns;
+        o->prev.valid = true;
+    }
     if (o->cpu_slot && !o->cpu_frozen)
         w->open_cpu_unplaced_total++;
     o->we = 0;
@@ -1654,6 +1667,35 @@ static void open_stop_crediting(struct pgwt_summary_writer *w,
     o->cpu_eff_we = 0;
     o->cpu_prefix_ns = PGWT_CPU_NS_UNKNOWN;
     o->cpu_credited_ns = 0;
+}
+
+/* Reconcile a close against the frozen CPU accounting of either the live
+ * note or the previous interval. Both must use the same remainder and
+ * diagnostics, independently of the wall watermark subtraction. */
+static void open_close_cpu(struct pgwt_summary_writer *w,
+                            const struct pgwt_trace_event *evt, uint32_t eff,
+                            uint32_t cpu_eff_we, uint8_t cpu_tier_known,
+                            uint64_t cpu_credited_ns,
+                            struct accum_close_ctx *cc)
+{
+    cc->cpu_credited = 1;
+    cc->frozen_eff = cpu_eff_we;
+    cc->tier_unknown = cpu_tier_known ? 0 : 1;
+    cc->already_cpu_ns = cpu_credited_ns;
+    /* A prefix that exceeded the closing record's CPU cannot be removed
+     * from an immutable second. Count that overcredit. */
+    if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+        uint64_t cap = evt->cpu_ns < evt->duration_ns
+                     ? evt->cpu_ns : evt->duration_ns;
+        if (cpu_credited_ns > cap)
+            w->open_cpu_overcredit_ns_total += cpu_credited_ns - cap;
+    }
+    /* The frozen classification wins; count the whole divergent interval. */
+    if (eff != cpu_eff_we)
+        w->open_cpu_class_divergent_ns_total += evt->duration_ns;
+    /* Both tier-flip directions conserve CPU*, but change attribution. */
+    if ((evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) != (cpu_tier_known != 0))
+        w->open_cpu_tier_mismatch_total++;
 }
 
 /* The measured-CPU half of one per-second credit of an open on-CPU gap.
@@ -2159,6 +2201,7 @@ void pgwt_summary_forget_open(struct pgwt_summary_writer *w, uint32_t pid)
      * Clearing `we` stops the credit, which is the point; the slot is reused
      * by the same pid and reclaimed when the writer is destroyed. */
     open_stop_crediting(w, o);
+    memset(&o->prev, 0, sizeof(o->prev));
     o->start_ns = 0;
     o->credited_until_ns = 0;
     o->credited_ns = 0;
@@ -2398,34 +2441,8 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
                  * written into has placed nothing on disk and must keep the
                  * plain v7/v8 close. */
                 if (o->cpu_slot && o->cpu_frozen) {
-                    cc.cpu_credited    = 1;
-                    cc.frozen_eff      = o->cpu_eff_we;
-                    cc.tier_unknown    = o->cpu_tier_known ? 0 : 1;
-                    cc.already_cpu_ns  = o->cpu_credited_ns;
-                    /* The measured identity's one escape hatch, counted
-                     * rather than hidden: a prefix observation that ran
-                     * past the closing record's own cpu_ns cannot be taken
-                     * back out of an immutable second. */
-                    if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
-                        uint64_t cap = evt->cpu_ns < evt->duration_ns
-                                     ? evt->cpu_ns : evt->duration_ns;
-                        if (o->cpu_credited_ns > cap)
-                            w->open_cpu_overcredit_ns_total +=
-                                o->cpu_credited_ns - cap;
-                    }
-                    /* Piece 3's measured cost: the producer's answer at
-                     * close differs from the one frozen on disk. The frozen
-                     * one wins (the written seconds cannot move), and the
-                     * whole interval's wall is counted as divergent. */
-                    if (eff != o->cpu_eff_we)
-                        w->open_cpu_class_divergent_ns_total +=
-                            evt->duration_ns;
-                    /* Piece 4: the tier flipped between the first credit
-                     * and the close. Both directions conserve CPU* (it is
-                     * measured + unknown); only the attribution moves. */
-                    if ((evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) !=
-                        (o->cpu_tier_known != 0))
-                        w->open_cpu_tier_mismatch_total++;
+                    open_close_cpu(w, evt, eff, o->cpu_eff_we,
+                                   o->cpu_tier_known, o->cpu_credited_ns, &cc);
                 }
             } else {
                 /* No matching note. Subtract only what the pid's MONOTONE
@@ -2439,6 +2456,15 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
                     if (already > evt->duration_ns)
                         already = evt->duration_ns;
                 }
+                /* #709: the note may already describe the next interval.
+                 * Recover only this record's frozen CPU state; the wall
+                 * subtraction above remains the per-PID watermark rule. */
+                if (o->prev.valid && o->prev.start_ns == start &&
+                    o->prev.we == evt->old_event &&
+                    o->prev.cpu_slot && o->prev.cpu_frozen)
+                    open_close_cpu(w, evt, eff, o->prev.cpu_eff_we,
+                                   o->prev.cpu_tier_known,
+                                   o->prev.cpu_credited_ns, &cc);
                 /* v9: `|| o->cpu_slot` -- an open on-CPU slot also has
                  * we == 0, so without it the one disagreement the new
                  * state can produce would be the only uncounted one. */
@@ -2451,6 +2477,7 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
              * placed, which is what keeps a mismatched record from eating
              * another interval's accounting. */
             open_stop_crediting(w, o);
+            memset(&o->prev, 0, sizeof(o->prev));
             o->start_ns = evt->timestamp_ns;
             o->credited_ns = 0;
         }
