@@ -17,4 +17,4 @@
 # (#752); neither needs an exemption. Capture smoke runs in both modes,
 # with full mode gated on hardware watchpoint support as in ci_smoke.sh.
 test_gesture_gate.py|Opt-in measurement harness: self-skips with exit 0 unless PGWT_RUN_GESTURE_GATE=1, and a RED verdict deliberately does not fail the run; not a pass/fail gate.
-test_startup_probe_degrade.py|Recorded runner gap: covers wait-only startup degradation and requires a PG13 postmaster without pg_stat_statements in shared_preload_libraries; tests/provision-runner.sh preloads it in every gate cluster, so no provisioned runner can run it today. Follow-up issue tracks making it runnable.
+test_startup_probe_degrade.py|Recorded runner gap: covers wait-only startup degradation and requires a PG13 postmaster without pg_stat_statements in shared_preload_libraries; tests/provision-runner.sh preloads it in every gate cluster, so no provisioned runner can run it today. Follow-up #794 tracks making it runnable.
