@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 2
 TMP=$(mktemp -d) || exit 2
 trap 'rm -rf "$TMP"' EXIT
 export BRIEF_GH_CALLS="$TMP/gh-calls"
+export PGWT_LEAD_STATE_DIR="$TMP" PGWT_GH_TIMEOUT=1
 cat > "$TMP/gh" <<'STUB'
 #!/usr/bin/env bash
 set -u
@@ -29,6 +30,7 @@ JSON
   'repos/{owner}/{repo}/issues/303/comments') ;;
   'repos/{owner}/{repo}/issues/404/comments') echo 'query failed' >&2; exit 7 ;;
   'repos/{owner}/{repo}/issues/505/comments') printf '%s\n' '{broken json' ;;
+  'repos/{owner}/{repo}/issues/707/comments') exec sleep 5 ;;
   'repos/{owner}/{repo}/issues/115/comments'|'repos/{owner}/{repo}/issues/799/comments'|'repos/{owner}/{repo}/issues/797/comments') ;;
   'repos/{owner}/{repo}/issues/606/comments')
     printf '%s\n' '{"id":6601,"body":"Keep \"quoted\" paths intact.\nRun the tests."}' '{"id":6602,"body":""}' ;;
@@ -41,8 +43,23 @@ pass=0; fail=0; LAST_OUT=''
 check() {
   local desc="$1" want_rc="$2" content="$3" rc
   printf '%s\n' "$content" > "$TMP/brief.md"
+  : > "$TMP/.briefs-passed"
   LAST_OUT=$(PGWT_GH="$TMP/gh" bash "$ROOT/scripts/lead/check-brief.sh" "$TMP/brief.md" 2>&1)
   rc=$?
+  if [ "$rc" = 0 ]; then
+    local epoch digest path expected
+    read -r epoch digest path < "$TMP/.briefs-passed"
+    expected=$(shasum -a 256 "$TMP/brief.md" | cut -d ' ' -f 1)
+    if [ "$digest" = "$expected" ] && [ "$path" = "$TMP/brief.md" ] &&
+       [[ "$epoch" =~ ^[0-9]+$ ]] &&
+       [ "$(/usr/bin/grep -c . "$TMP/.briefs-passed")" = 1 ]; then
+      pass=$((pass+1)); echo "ok   pass records exact brief bytes and absolute path"
+    else
+      fail=$((fail+1)); echo "FAIL bad or absent pass record: $desc"
+    fi
+  elif [ -s "$TMP/.briefs-passed" ]; then
+    fail=$((fail+1)); echo "FAIL unsuccessful check recorded a pass: $desc"
+  fi
   if [ "$rc" = "$want_rc" ]; then
     pass=$((pass+1)); echo "ok   $desc (exit $rc)"
   else
@@ -129,6 +146,12 @@ $ gh api repos/example/project/issues/303/comments --paginate
 CONTROLLING SCOPE DECISION: #303 none (0 comments)'
 check "gh failure is an error" 2 '#404'
 check "unparseable gh output is an error" 2 '#505'
+check "gh timeout is an error" 2 '#707'
+if [[ "$LAST_OUT" == *'timeout after 1s'* ]]; then
+  pass=$((pass+1)); echo 'ok   error names the gh timeout'
+else
+  fail=$((fail+1)); echo 'FAIL timeout error did not name the timeout'
+fi
 
 check "scope quote whitespace is normalised" 0 "$FETCH
 CONTROLLING SCOPE DECISION: #101 comment 4102 \"Preserve the existing exit codes.   Run the focused regression suite.\""
@@ -268,6 +291,25 @@ gh api repos/example/project/issues/115/comments --paginate --jq " #797"
 CONTROLLING SCOPE DECISION: #115 none (0 comments)'
 check "non-reference command comments do not create issues" 0 "$FETCH115
 $SCOPE115"
+
+for reference in '#123456' '#1234567' 'issue 123456' 'issues/123456' 'pull/123456' \
+                 'pull request 123456' 'PR 123456' 'PR #123456' 'GH-123456' \
+                 '#12345suffix' 'issue 12345suffix' 'GH-12345suffix'; do
+  : > "$BRIEF_GH_CALLS"
+  check "out-of-range or non-word reference $reference is ignored" 0 "Discuss $reference."
+  if [ ! -s "$BRIEF_GH_CALLS" ]; then
+    pass=$((pass+1)); echo 'ok   rejected reference never reaches gh'
+  else
+    fail=$((fail+1)); echo 'FAIL rejected reference reached gh'
+  fi
+done
+: > "$BRIEF_GH_CALLS"
+check "five-digit issue is still a reference" 2 '#12345'
+if /usr/bin/grep -qx 'repos/{owner}/{repo}/issues/12345/comments' "$BRIEF_GH_CALLS"; then
+  pass=$((pass+1)); echo 'ok   five-digit reference reaches gh'
+else
+  fail=$((fail+1)); echo 'FAIL five-digit reference was ignored'
+fi
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

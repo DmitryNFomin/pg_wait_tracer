@@ -9,15 +9,28 @@ fi
 command -v python3 >/dev/null 2>&1 || { echo 'CHECK BRIEF ERROR: python3 unavailable' >&2; exit 2; }
 
 python3 - "$1" <<'PY'
+import fcntl
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
+
+STATE = os.environ.get("PGWT_LEAD_STATE_DIR") or "/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead"
+
+
+def record_pass(data):
+    with open(os.path.join(STATE, ".brief-gate.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(os.path.join(STATE, ".briefs-passed"), "a") as records:
+            records.write(f"{int(time.time())} {hashlib.sha256(data).hexdigest()} "
+                          f"{os.path.abspath(sys.argv[1])}\n")
 
 
 COMMENTS_COMMAND = re.compile(
-    r"\bgh\s+api\s+repos/[^/\s]+/[^/\s]+/issues/([0-9]+)"
+    r"\bgh\s+api\s+repos/[^/\s]+/[^/\s]+/issues/([0-9]{1,5})\b"
     r"/comments(?=$|[\s\"'`])")
 
 
@@ -74,17 +87,17 @@ def dispatched_numbers(text, blocks):
                     comment = f"issues/{command.group(1)} {comment}"
                 lines[index] = comment
     dispatch_text = re.sub(
-        r"^([ \t]*CONTROLLING SCOPE DECISION:[ \t]*#[0-9]+)[^\n]*",
+        r"^([ \t]*CONTROLLING SCOPE DECISION:[ \t]*#[0-9]{1,5}\b)[^\n]*",
         r"\1", "\n".join(lines), flags=re.MULTILINE)
     numbers = set()
     non_issue = re.compile(
         r"\b(?:build|run|step|line|job|attempt|case|item|test|rank|number|no\.|version|v)\s*$",
         re.IGNORECASE)
-    for match in re.finditer(r"#([0-9]+)\b", dispatch_text):
+    for match in re.finditer(r"#([0-9]{1,5})\b", dispatch_text):
         if not non_issue.search(dispatch_text[:match.start()].split("\n")[-1]):
             numbers.add(int(match.group(1)))
     references = re.compile(
-        r"\b(?:issues?/|pull/|issues?\s+|pull\s+request\s+|PR\s+|GH-)(?:#)?([0-9]+)\b",
+        r"\b(?:issues?/|pull/|issues?\s+|pull\s+request\s+|PR\s+|GH-)(?:#)?([0-9]{1,5})\b",
         re.IGNORECASE)
     numbers.update(int(match.group(1)) for match in references.finditer(dispatch_text))
     return sorted(numbers)
@@ -92,10 +105,16 @@ def dispatched_numbers(text, blocks):
 
 def live_comments(number):
     endpoint = f"repos/{{owner}}/{{repo}}/issues/{number}/comments"
-    result = subprocess.run(
-        [os.environ.get("PGWT_GH") or "gh", "api", endpoint, "--paginate",
-         "--jq", ".[] | {id: .id, body: .body}"],
-        capture_output=True, text=True, encoding="utf-8")
+    timeout = float(os.environ.get("PGWT_GH_TIMEOUT", "30"))
+    if not 0 < timeout < float("inf"):
+        raise ValueError("PGWT_GH_TIMEOUT must be a positive finite number")
+    try:
+        result = subprocess.run(
+            [os.environ.get("PGWT_GH") or "gh", "api", endpoint, "--paginate",
+             "--jq", ".[] | {id: .id, body: .body}"],
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"gh timeout after {timeout:g}s") from None
     if result.returncode:
         raise ValueError(f"gh failed (exit {result.returncode}): {result.stderr.strip()}")
     decoder = json.JSONDecoder()
@@ -164,14 +183,18 @@ def coverage_errors(number, comments, blocks, text):
 
 def main():
     try:
-        with open(sys.argv[1], encoding="utf-8") as brief:
-            text = brief.read()
-    except (OSError, UnicodeError) as exc:
+        with open(sys.argv[1], "rb") as brief:
+            data = brief.read()
+        text = data.decode("utf-8")
+        if "\n" in os.path.abspath(sys.argv[1]) or "\r" in os.path.abspath(sys.argv[1]):
+            raise ValueError("brief path must fit on one record line")
+    except (OSError, UnicodeError, ValueError) as exc:
         print(f"CHECK BRIEF ERROR: cannot read brief: {exc}", file=sys.stderr)
         return 2
     fences = fenced_blocks(text)
     numbers = dispatched_numbers(text, fences)
     if not numbers:
+        record_pass(data)
         print("no issue referenced")
         return 0
     blocks = [block for block, _, _ in fences]
@@ -188,11 +211,16 @@ def main():
         failed |= bool(errors)
     if failed:
         return 1
+    record_pass(data)
     print("CHECK BRIEF: covered " + ", ".join(f"#{n}" for n in numbers))
     return 0
 
 
-sys.exit(main())
+try:
+    sys.exit(main())
+except OSError as exc:
+    print(f"CHECK BRIEF ERROR: cannot record pass: {exc}", file=sys.stderr)
+    sys.exit(2)
 PY
 rc=$?
 case "$rc" in

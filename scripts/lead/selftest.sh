@@ -49,6 +49,8 @@ if [ ! -x "$REL" ]; then
 fi
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+export PGWT_LEAD_STATE_DIR="$TMP"
+export AUDIT_REPORT_STATE_DIR="$TMP/audit-state"
 HOOK="$TMP/sweep-hook.sh"
 cp "$REL" "$HOOK"
 chmod +x "$HOOK"

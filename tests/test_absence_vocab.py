@@ -16,7 +16,7 @@ PREPASS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PREPASS)
 
 CORPUS_A = [
-    "exists nowhere", "not merged", "unreachable", "I can't", "cannot",
+    "exists nowhere", "not merged", "unreachable", "I can't", "we cannot",
     "The fix exists nowhere.",
     "The fix is not merged.",
     "The endpoint is unreachable.",
@@ -65,7 +65,7 @@ CORPUS_B = [
     "the node_modules directory",
     "native code compiles",
     "I know the answer",
-]
+] + (ROOT / "tests/fixtures/benign_pr_sentences.txt").read_text(encoding="utf-8").splitlines()
 VALID_SCOPES = [
     "native code in src/...", "notes/ directory",
     "node_modules and vendored trees", "allocator tests under tests/",
@@ -96,6 +96,20 @@ class AbsenceVocabulary(unittest.TestCase):
         for phrase in CORPUS_B + ["no", "No", "NO"]:
             with self.subTest(phrase=phrase):
                 self.assertEqual(exit_code(phrase), 0)
+                self.assertEqual(PREPASS.find_hits([phrase])[0], [])
+
+    def test_permission_claim_shapes(self):
+        for subject in ("I", "we"):
+            for verb in ("can't", "cannot", "could not", "couldn't"):
+                with self.subTest(subject=subject, verb=verb):
+                    self.assertEqual(exit_code(f"{subject} {verb} access the repository."), 1)
+        for verb in ("access", "find", "read", "write", "reach", "run", "open"):
+            with self.subTest(verb=verb):
+                self.assertEqual(exit_code(f"  Cannot {verb} the repository."), 1)
+        for phrase in ("An assertion that cannot fail.", "The process cannot read the file.",
+                       "cannot fail", "cannot accessibly render the page"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(exit_code(phrase), 0)
 
     def test_every_pattern_has_an_exclusive_witness(self):
         for index, pattern in enumerate(PREPASS.PATTERNS):
@@ -104,7 +118,7 @@ class AbsenceVocabulary(unittest.TestCase):
                              if compiled.search(phrase)] == [index]]
             with self.subTest(pattern=pattern):
                 self.assertTrue(witnesses, "add an exclusive Corpus-A witness")
-                self.assertTrue(pattern.startswith(r"\b"))
+                self.assertTrue(pattern.startswith((r"\b", r"^\s*")))
                 self.assertTrue(pattern.endswith(r"\b"))
                 self.assertIsNone(re.search(pattern, "no", re.IGNORECASE))
 
