@@ -254,6 +254,107 @@ static void test_dynamic_name_mapping(void)
     CHECK_NAME(WEI(PG_WAIT_LOCK, 12), "Lock:zzznewlock");
 }
 
+static void check_tableless_name_fallbacks(void)
+{
+    /* Another backend's extension wait must never borrow a custom name
+     * from the view's row order. Allocation order determines the real ids. */
+    CHECK_NAME(WEI(PG_WAIT_EXTENSION, 0), "Extension:Extension");
+    CHECK_NAME(WEI(PG_WAIT_EXTENSION, 1), "Extension:Extension");
+    CHECK(pgwt_event_name(WEI(0x0B, 0)) == NULL,
+          "table-less InjectionPoint class must retain its fallback");
+}
+
+static void check_extension_name_controls(void)
+{
+    check_tableless_name_fallbacks();
+    CHECK_NAME(WEI(PG_WAIT_LOCK, 0), "Lock:relation");
+    CHECK_NAME(WEI(PG_WAIT_LOCK, 10), "Lock:advisory");
+    CHECK_NAME(WEI(PG_WAIT_LOCK, 12), "Lock:zzznewlock");
+    CHECK_NAME(WEI(PG_WAIT_IO, 21), "IO:DataFileRead");
+    CHECK_NAME(WEI(PG_WAIT_LWLOCK, 1), "LWLock:ShmemIndex");
+}
+
+static void check_sidecar_excludes_tableless_names(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    CHECK(fp != NULL, "open written name sidecar");
+    if (!fp) return;
+
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "\"Extension\"") ||
+            strstr(line, "DblinkGetConnect") || strstr(line, "OtherExt") ||
+            strstr(line, "\"InjectionPoint\"") || strstr(line, "CustomPoint"))
+            found = 1;
+    }
+    CHECK(!ferror(fp), "read written name sidecar");
+    CHECK(fclose(fp) == 0, "close written name sidecar");
+    CHECK(!found, "sidecar must not emit table-less classes or custom names");
+}
+
+/* #801: pg_wait_events has no numeric ids for custom Extension events.
+ * Neither live rows nor old sidecars may turn their row positions into ids.
+ * Keep built-in mappings and the existing forward-compat Lock append. */
+static void test_extension_name_ids(void)
+{
+    printf("--- Extension names must not fabricate ids (#801) ---\n");
+    pgwt_init_event_names(18);
+
+    /* Skipped names still count as parsed input, even without built-in rows. */
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Extension|DblinkGetConnect\nExtension|OtherExt\n") == 0,
+          "extension-only input still loads successfully");
+    check_tableless_name_fallbacks();
+
+    const char *buf =
+        "Extension|DblinkGetConnect\n"
+        "Extension|OtherExt\n"
+        "IO|DataFileRead\n"
+        "InjectionPoint|CustomPoint\n"
+        "LWLock|ShmemIndex\n"
+        "Lock|advisory\n"
+        "Lock|relation\n"
+        "Lock|zzznewlock\n";
+    CHECK(pgwt_load_event_names_from_buffer(buf) == 0,
+          "load custom extension and built-in names");
+    check_extension_name_controls();
+
+    char dir[] = "/tmp/pgwt_ext_names_XXXXXX";
+    char *created = mkdtemp(dir);
+    CHECK(created != NULL, "create extension name sidecar directory");
+    if (created) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
+        CHECK(pgwt_write_names_json(dir) == 0, "write extension name sidecar");
+        check_sidecar_excludes_tableless_names(path);
+        CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+              "clear dynamic names before sidecar reload");
+        CHECK(pgwt_load_names_json(dir) == 0, "reload extension name sidecar");
+        check_extension_name_controls();
+
+        FILE *fp = fopen(path, "w");
+        CHECK(fp != NULL, "open old-style name sidecar");
+        if (fp) {
+            CHECK(fputs("{\"Extension\":[\"DblinkGetConnect\"],"
+                        "\"InjectionPoint\":[\"CustomPoint\"],"
+                        "\"Lock\":[\"relation\"]}\n", fp) >= 0,
+                  "write old-style sidecar with fabricated extension id 0");
+            CHECK(fclose(fp) == 0, "close old-style name sidecar");
+            CHECK(pgwt_load_names_json(dir) == 0, "load old-style name sidecar");
+            check_tableless_name_fallbacks();
+            CHECK_NAME(WEI(PG_WAIT_LOCK, 0), "Lock:relation");
+            CHECK(pgwt_write_names_json(dir) == 0, "rewrite old-style sidecar");
+            check_sidecar_excludes_tableless_names(path);
+        }
+        CHECK(remove(path) == 0, "remove extension name sidecar");
+        CHECK(rmdir(dir) == 0, "remove extension name sidecar directory");
+    }
+
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "reset dynamic names after extension name tests");
+}
+
 /* PG13 has different wait-event enum orderings than 17/18; pgwt_init_event_names(13)
  * swaps in the generated PG13 tables (src/wait_event_pg13.inc). Spot-check the
  * classes that differ most (IO, LWLock, IPC, Activity, Client, Timeout) plus
@@ -1232,6 +1333,7 @@ int main(void)
     test_pg16_sidecar_round_trip();
     test_trace_init_fallback_order();
     test_timeout_classification_coverage();
+    test_extension_name_ids();
     test_dynamic_name_mapping();  /* must run last: sets dyn_loaded */
 
     CHECK(cov515_section_ran,
