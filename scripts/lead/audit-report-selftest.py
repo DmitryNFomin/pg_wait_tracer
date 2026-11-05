@@ -41,6 +41,8 @@ if "--output-last-message" in args:
         dest.write_text(final)
 if os.environ.get("AUDIT_TEST_MUTATE"):
     (root / "draft.md").write_text("Changed while auditing.\n")
+if os.environ.get("AUDIT_TEST_REPO_MUTATE"):
+    Path(os.environ["AUDIT_TEST_REPO_MUTATE"]).write_text("Repository changed while auditing.\n")
 # A transcript repeats earlier tool findings, prompt text and earlier verdicts.
 sys.stdout.write(raw + final)
 sys.stderr.write("stub stderr retained\n")
@@ -126,6 +128,26 @@ class GateTests(unittest.TestCase):
         echo = "Use one line per claim: CLAIM -> VERIFIED <evidence>, CLAIM -> WRONG <contradicting\n"
         self.assertIn("VERDICT SEND", self.run_gate(claim("The count is 4.") + echo + "VERDICT: SEND\n"))
 
+    def test_summary_status_is_contamination(self):
+        console = self.run_gate(claim("The count is 4.") +
+                                "Summary: 1 claim checked, none WRONG.\nVERDICT: SEND\n")
+        self.assertIn("VERDICT SEND", console)
+        self.assertIn("1 contamination", console)
+        self.assertNotIn("AUDIT MALFORMED", console)
+
+    def test_current_prompt_echo_is_contamination(self):
+        console = self.run_gate(claim("The count is 4.") +
+                                "status (VERIFIED, WRONG or UNVERIFIABLE)\nVERDICT: SEND\n")
+        self.assertIn("VERDICT SEND", console)
+        self.assertIn("1 contamination", console)
+        self.assertNotIn("AUDIT MALFORMED", console)
+
+    def test_malformed_legacy_finding_refuses(self):
+        console = self.run_gate(claim("The count is 4.") +
+                                "A paraphrased count -> WRONG checked 5\nVERDICT: SEND\n")
+        self.assertIn("AUDIT MALFORMED (unbound or unstructured finding)", console)
+        self.assertNotIn("VERDICT SEND", console)
+
     def test_stale_decision_refuses(self):
         self.assertIn("VERDICT SEND", self.run_gate())
         decision = next((self.case / "state").rglob("decision.json"))
@@ -142,9 +164,36 @@ class GateTests(unittest.TestCase):
         self.assertIn("VERDICT SEND", self.run_gate())
         self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 1)
 
-    def test_failed_hash_is_not_retried(self):
+    def test_failed_auditor_can_retry_same_hash(self):
         self.assertIn("AUDIT INCONCLUSIVE", self.run_gate(AUDIT_TEST_RC="17"))
-        self.assertIn("AUDIT INCONCLUSIVE", self.run_gate())
+        self.assertIn("VERDICT SEND", self.run_gate())
+        self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 2)
+
+    def test_repository_change_can_retry_same_hash(self):
+        with tempfile.TemporaryDirectory(prefix="audit-selftest-tree-", dir=HARNESS.parents[2]) as temp:
+            console = self.run_gate(AUDIT_TEST_REPO_MUTATE=str(Path(temp) / "new-file"))
+            self.assertIn("AUDIT INCONCLUSIVE (repository changed during audit)", console)
+            self.assertIn("VERDICT SEND", self.run_gate())
+        self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 2)
+
+    def test_retry_does_not_reuse_aborted_final(self):
+        self.assertIn("AUDIT INCONCLUSIVE", self.run_gate(AUDIT_TEST_RC="17"))
+        self.assertIn("AUDIT MALFORMED (no VERDICT line; missing final answer)",
+                      self.run_gate(AUDIT_TEST_NO_FINAL="1"))
+        self.assertIn("VERDICT SEND", self.run_gate())
+        self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 3)
+
+    def test_replay_reapplies_wrong_backstop(self):
+        self.assertIn("VERDICT BLOCK", self.run_gate(
+            claim("The count is 4.", "WRONG", "checked 5") + "VERDICT: SEND\n"))
+        decision = next((self.case / "state").rglob("decision.json"))
+        record = json.loads(decision.read_text())
+        self.assertGreaterEqual(record["counts"]["WRONG"], 1)
+        record["verdict"] = "SEND"
+        decision.write_text(json.dumps(record))
+        console = self.run_gate()
+        self.assertIn("VERDICT BLOCK", console)
+        self.assertNotIn("VERDICT SEND", console)
         self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 1)
 
     def test_final_channel_only(self):
@@ -187,17 +236,51 @@ class GateTests(unittest.TestCase):
         self.assertIn("VERDICT SEND", self.run_gate(claim("The count is 5.") + "VERDICT: SEND\n"))
         self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 2)
 
-    def test_unbound_wrong_is_contamination(self):
+    def test_unbound_wrong_is_malformed(self):
         console = self.run_gate(claim("The count is 4.") +
                                 claim("Obsolete claim", "WRONG", "old transcript") + "VERDICT: SEND\n")
+        self.assertIn("AUDIT MALFORMED (structured WRONG does not quote the current draft)", console)
+        self.assertNotIn("VERDICT SEND", console)
+
+    def test_wrong_quote_normalization_blocks(self):
+        quotes = ("The count is 4. ", "  The\tcount   is 4.  ",
+                  'It\'s "four".', 'It’s “four”.')
+        drafts = ("The count is 4.\n", "The count is 4.\n",
+                  'It’s\t“four”.\n', 'It\'s "four".\n')
+        for index, (quote, draft) in enumerate(zip(quotes, drafts)):
+            with self.subTest(quote=quote):
+                self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
+                self.draft.write_text(draft)
+                console = self.run_gate(claim(draft.strip()) +
+                                        claim(quote, "WRONG", "checked 5") + "VERDICT: SEND\n")
+                self.assertIn("VERDICT BLOCK", console)
+                self.assertNotIn("VERDICT SEND", console)
+
+    def test_lowercase_wrong_quote_is_malformed(self):
+        console = self.run_gate(claim("The count is 4.") +
+                                claim("the count is 4.", "WRONG", "checked 5") + "VERDICT: SEND\n")
+        self.assertIn("AUDIT MALFORMED (structured WRONG does not quote the current draft)", console)
+        self.assertNotIn("VERDICT SEND", console)
+
+    def test_unbound_nonwrong_is_contamination(self):
+        console = self.run_gate(claim("The count is 4.") + claim("Obsolete claim") +
+                                claim("Another obsolete claim", "UNVERIFIABLE", "gh HTTP 403") +
+                                "VERDICT: SEND\n")
         self.assertIn("VERDICT SEND", console)
-        self.assertIn("1 contamination", console)
+        self.assertIn("2 contamination", console)
 
     def test_wrong_line_refuses(self):
         console = self.run_gate(claim("The count is 4.") +
-                                claim("The count is 4.", "WRONG", "checked 5", line=9) + "VERDICT: SEND\n")
+                                claim("The count is 4.", "WRONG", "checked 5", line=2) + "VERDICT: SEND\n")
         self.assertNotIn("VERDICT SEND", console)
-        self.assertIn("AUDIT MALFORMED", console)
+        self.assertIn("AUDIT MALFORMED (structured WRONG does not quote the current draft)", console)
+
+    def test_wrong_quote_on_different_line_refuses(self):
+        self.draft.write_text("The count is 4.\nAnother claim.\n")
+        console = self.run_gate(claim("The count is 4.") +
+                                claim("The count is 4.", "WRONG", "checked 5", line=2) + "VERDICT: SEND\n")
+        self.assertNotIn("VERDICT SEND", console)
+        self.assertIn("AUDIT MALFORMED (structured WRONG does not quote the current draft)", console)
 
     def test_wrong_colon_control(self):
         # Do not silently drop a real but misformatted contradiction (#743).
@@ -228,6 +311,7 @@ class GateTests(unittest.TestCase):
         output = Path(args[args.index("--output-last-message") + 1])
         self.assertNotEqual(output.parent, self.draft.parent)
         self.assertIn("Do not read prior audit", (self.case / "prompt.txt").read_text())
+        self.assertIn("No summary or narration.", (self.case / "prompt.txt").read_text())
 
 
 def main():

@@ -8,11 +8,18 @@ absence pre-pass) produces `VERDICT BLOCK`.
 
 Properties exercised by `audit-report-selftest.py`:
 
-1. **One derivation per draft hash.** A private state directory outside the repo
-   records an attempt before invoking Codex, under a process lock. Repeating a hash
-   reads only its validated decision, never its transcript or final-answer file.
-   Repeating BLOCK preserves BLOCK. Revising the text produces a new hash and pass.
-   Crashes leave an attempted hash, rather than allowing repeated tries until SEND.
+1. **One completed derivation per exact byte sequence of draft content.** A private
+   state directory outside the repo stores a decision atomically after the audit,
+   under a process lock. Only a written `decision.json` consumes that hash's pass;
+   crashes and other incomplete attempts can be retried on the same draft bytes.
+   A retry discards any incomplete attempt's final answer before invoking Codex.
+   Repeating a completed hash reads only its decision, never its transcript or
+   final-answer file. Replay validates the digest, repository tree and age, then
+   independently re-derives the verdict using the same counts-based contradiction
+   backstop as a fresh pass: any `counts.WRONG > 0` forces BLOCK even if the stored
+   verdict says SEND. Repeating BLOCK preserves BLOCK. Any byte change, including
+   appending a blank line, produces a new hash and a fresh pass; this is not a
+   one-pass-per-report guarantee.
    Decisions are scoped to the checkout and gate implementation; after ten minutes
    or any repository content change, replay withholds authorization and requests a
    revised draft. A replay explicitly identifies its original observation time;
@@ -31,12 +38,20 @@ Properties exercised by `audit-report-selftest.py`:
    provide independent backstops if irrelevant material nevertheless appears.
 3. **Contradiction, contamination, and access failure stay distinct.** Only the CLI's
    `--output-last-message` file is parsed. Prompt/tool/earlier-turn text in stdout or
-   stderr has no vote. Each final `CLAIM` JSON record identifies a line and exact
-   quote in the current snapshot, plus evidence and status. Out-of-draft records
-   and recognized prompt examples count as contamination. Draft-bound WRONG forces
-   BLOCK even alongside SEND. UNVERIFIABLE means attempted checks failed for access
+   stderr has no vote. Each final `CLAIM` JSON record identifies a line and quote
+   in the current snapshot, plus evidence and status. Matching collapses whitespace,
+   strips surrounding whitespace and folds curly quotes/apostrophes to ASCII on
+   both sides. A structured WRONG that still fails to match its stated line is
+   MALFORMED, including a quote found only on a different line. Out-of-draft
+   VERIFIED/UNVERIFIABLE records and status-word narration or prompt echoes count
+   as contamination; non-WRONG quotes found at the wrong line still withhold
+   authorization. Draft-bound WRONG forces BLOCK even alongside SEND.
+   UNVERIFIABLE means attempted checks failed for access
    reasons and alone permits SEND. Legacy exact-quote findings also work, including
-   `WRONG:`. Unstructured findings, invalid JSON, empty audits, missing verdicts,
+   `WRONG:`. Attempted legacy findings with ` -> ` and a status word still fail
+   closed when they cannot bind to the draft. The brief permits only well-formed
+   CLAIM JSON lines, blank lines and one VERDICT line, with no narration.
+   Invalid JSON, empty audits, missing verdicts,
    conflicting final verdicts and unsubstantiated BLOCK withhold authorization.
 4. **The absence pre-pass is unchanged.** It runs on the exact bytes to be audited,
    before Codex or decision replay. `never`, `does not exist`, and `exists nowhere`
