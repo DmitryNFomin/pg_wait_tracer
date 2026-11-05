@@ -119,6 +119,11 @@ struct pgwt_event_writer {
     int           pg_version;
     int           retention_hours;
     uint64_t      retention_bytes;  /* size cap for archived files (0 = off) */
+    /* #779: the daemon supplies the live summary's original wall anchor
+     * before cleanup (0 if none). Its hour's raw archives cannot be evicted
+     * while that summary could still be published, e.g. after a forced raw
+     * rotation. This is the naming anchor, not the widened reader header. */
+    uint64_t      retention_live_summary_ns;
     gid_t         trace_gid;      /* group for trace files, (gid_t)-1 = no chown */
     bool          enabled;
     bool          verbose;
@@ -320,8 +325,9 @@ int  pgwt_writer_close(struct pgwt_event_writer *w);
  * cleans orphans (stale current.*.meta / *.meta.tmp with no writer), and —
  * when retention_bytes > 0 — deletes the OLDEST archived .trace.lz4 /
  * .summary.lz4 / preserved .corrupt files until total trace-dir usage fits
- * under the cap. Never touches the live current.trace / current.summary or
- * the sidecar .jsonl files. */
+ * under the cap. Same-hour summaries precede raw; retention_live_summary_ns
+ * protects raw still needed by a pending summary archive. Never touches the
+ * live current.trace / current.summary or the sidecar .jsonl files. */
 int  pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w);
 void pgwt_writer_destroy(struct pgwt_event_writer *w);
 

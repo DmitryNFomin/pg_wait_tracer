@@ -27,6 +27,8 @@ test_pgss_resolver
 test_coop
 test_concurrent_rw
 test_durability
+# #779: byte-cap retention must never turn an hour into summary-only.
+test_retention_order
 test_query_text
 test_golden_fixture
 test_live_accum
