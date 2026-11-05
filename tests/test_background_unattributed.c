@@ -38,7 +38,7 @@ static struct pgwt_trace_event wait_event_at(uint32_t pid, uint32_t wei,
                                              uint64_t query_id)
 {
     /* Records are END-stamped and every leg closes at or before 2000 ms with
-     * its whole duration inside the [1000 ms, 2000 ms] window the asserts
+     * its whole duration inside the [1000 ms, 2000 ms) window the asserts
      * use. No clock, no sleep, no file. The ONE ordering this fixture does
      * depend on is stated where it matters: the backward pass visits the
      * array back to front, so a record that must act as "the id reported
@@ -175,7 +175,9 @@ static void control(uint32_t category, const char *name)
            (unsigned long long)queries.unattributed_count,
            queries.num_rows, queries.db_time_ms, overview.db_time_ms);
     CHECK(queries.unattributed_ms, 700.0);   /* 500 (pid 10) + 200 (pid 50) */
-    CHECK(queries.unattributed_count, 2);
+    /* #427: only pid 50's unattributed close at 1500 ms counts here;
+     * pid 10's exact close at 2000 ms belongs to the following window. */
+    CHECK(queries.unattributed_count, 1);
     CHECK(queries.num_rows, 2);              /* 42 and the pid's own 77 */
     CHECK(queries.db_time_ms, 150.0);        /* 100 + 50 */
     CHECK(overview.db_time_ms, 850.0);       /* 600 + 200 + 50 */
@@ -192,6 +194,13 @@ static void control(uint32_t category, const char *name)
     CHECK(row_total_ms(&queries, 77), 50.0);
     free(queries.rows);
     free(overview.rows);
+
+    /* Move the exclusive edge past the 2000 ms close by 1 ns: both
+     * unattributed occurrences now belong to this window. */
+    pgwt_compute_top_queries(events, 6, &filter, 1000 * MS, 2000 * MS + 1,
+                             1000.0 + 1.0 / MS, &queries);
+    CHECK(queries.unattributed_count, 2);
+    free(queries.rows);
 }
 
 /* An event-flag bit no category producer emits today: the NEXT category,

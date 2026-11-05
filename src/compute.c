@@ -107,8 +107,8 @@ static inline int event_right_open_flagged(const struct pgwt_trace_event *ev)
     return (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN) != 0;
 }
 
-/* OCCURRENCE selection, BOTH bounds: is this record's own close inside
- * [from_ns, to_ns)?
+/* OCCURRENCE selection, BOTH bounds: exact closes in [from_ns, to_ns),
+ * or sample fragments owned by loader overlap.
  *
  * The first implementation only tested the upper half —
  * `!event_right_open(...)` — so a record closing BEFORE `from` passed the
@@ -125,11 +125,17 @@ static inline int event_right_open_flagged(const struct pgwt_trace_event *ev)
  * today — but compute's documented contract is `[from, to)`, a caller is
  * entitled to rely on it, and the bound costs one comparison.
  *
- * #427: the upper bound is EXCLUSIVE. A record closing exactly at `to`
- * supplies its TIME to the preceding window via event_window_ns() and its
- * OCCURRENCE to the following one, so adjacent windows' counts sum to the
- * total. This matches src/summary_reader.c's `rec_ns >= to` skip. The
- * loader/block selection stays inclusive to fetch overlapping time (C7).
+ * #427: the upper bound is EXCLUSIVE for exact records, whose timestamp is
+ * a real close. An exact record closing exactly at `to` supplies its TIME
+ * to the preceding window via event_window_ns() and its OCCURRENCE to the
+ * following one, so adjacent windows' counts sum to the total. This matches
+ * src/summary_reader.c's `rec_ns >= to` skip. The loader/block selection
+ * stays inclusive to fetch overlapping time (C7).
+ *
+ * SAMPLE fragments keep an INCLUSIVE upper bound: merge_append_sample_part
+ * (src/server.c) clips them to `to` and stamps their timestamp at the clipped
+ * end. Sample ownership is decided by overlap in the loader, so `ts == to`
+ * is a synthetic clip point rather than a real close.
  *
  * `from_ns == 0` / `to_ns == 0` mean unbounded on that side, as everywhere
  * else in this file, so the whole-capture path is unchanged. */
@@ -140,7 +146,9 @@ static inline int event_occurrence_in_window(const struct pgwt_trace_event *ev,
         return 0;
     if (event_right_open(ev, to_ns))
         return 0;
-    return to_ns == 0 || ev->timestamp_ns < to_ns;
+    return to_ns == 0 || ((ev->flags & PGWT_EVENT_FLAG_SAMPLE)
+                          ? ev->timestamp_ns <= to_ns
+                          : ev->timestamp_ns < to_ns);
 }
 
 /* pgwt_duration_to_bucket: log2 latency bucket for heatmap.
