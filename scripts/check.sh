@@ -77,6 +77,9 @@ run bash tests/test_push_guard_denylist.sh
 step "POSIX shell: Codex task wrapper self-test"
 run scripts/lead/codex-task-selftest.sh
 
+step "board-labels trailer authorship regression tests (#771)"
+run python3 tests/test_board_author.py
+
 step "bash: pr-ready ordering and refusal self-test (#701)"
 run bash tests/test_pr_ready.sh
 
@@ -378,6 +381,8 @@ if [[ $FAST -eq 0 ]]; then
 
     step "web UI suite vs mock_server.py (Playwright)"
     run python3 tests/test_web_ui.py
+    step "first-info timeout recovery and retry bounds (#758, Playwright)"
+    run python3 tests/test_web_ui_info_retry.py
     step "web UI chaos suite (latency jitter / reconnects)"
     run python3 tests/test_web_ui_chaos.py
     step "overlay chip label alignment at DSF 1/2 (issue #213)"
