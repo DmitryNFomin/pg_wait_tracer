@@ -148,11 +148,11 @@ function div(cls, parent) {
     return el;
 }
 
-function makeChart(host, option, height) {
+function makeChart(host, option, height, renderer = 'canvas') {
     host.style.width = CHART_W + 'px';
     host.style.height = height + 'px';
     const chart = echarts.init(host, 'dark', {
-        renderer: 'canvas', devicePixelRatio: 1,
+        renderer, devicePixelRatio: 1,
         width: CHART_W, height,
     });
     // Register the completion listener BEFORE begin()/setOption so a
@@ -540,7 +540,7 @@ function renderTransitions(body, foot, state) {
         factLine(foot, 'visibleCount: 0');
         return;
     }
-    makeChart(div('chart', body), m.option, state.opts.dims.height);
+    makeChart(div('chart', body), m.option, state.opts.dims.height, state.renderer);
     // #436: the gallery footer carries the SAME disclosure text the live
     // view shows (buildTransitionsDisclosure) — idle/threshold/server-
     // truncation stay three distinct, named reasons here too.
@@ -552,7 +552,7 @@ function renderTransitions(body, foot, state) {
 function renderConcurrency(body, foot, state) {
     const m = buildConcurrencyOption(state.data, state.opts);
     if (!m.hasData) { emptyCard(body, 'No concurrency data'); return; }
-    makeChart(div('chart', body), m.option, CHART_H);
+    makeChart(div('chart', body), m.option, state.chartHeight ?? CHART_H);
     // The tables under the chart are part of the same builder surface.
     div('conc-tables', body).innerHTML = buildConcurrencyTables(m);
     factLine(foot, 'peaks: ' + state.data.peaks.length +
