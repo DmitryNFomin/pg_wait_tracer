@@ -50,8 +50,8 @@ int pgwt_summary_reader_open(struct pgwt_summary_reader *r, const char *path)
      * (src/summary_writer.c). */
     if (r->header.version != PGWT_SUMMARY_VERSION) {
         fprintf(stderr, "WARN: summary %s is version %d, this build computes "
-                "only from version %d (older files use the pre-2026-10-06 "
-                "idle accounting) -- recomputing from raw events instead\n",
+                "only from version %d (accounting version mismatch) "
+                "-- recomputing from raw events instead\n",
                 path, r->header.version, PGWT_SUMMARY_VERSION);
         fclose(r->fp); r->fp = NULL;
         return -1;

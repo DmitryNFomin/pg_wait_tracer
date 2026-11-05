@@ -409,12 +409,13 @@ the one scenario the counter exists for the one it could not see. ~270 distinct
 PostgreSQL wait events against 1024 slots is headroom, not a proof, and it is
 not a proof at all for `Extension` events.
 
-### Summary files moved to v5
+### Summary accounting versions
 
 The per-second summary records precompute DB Time at WRITE time, so v1/v2 files
 carry the OLD accounting. A directory holding both would blend two rules inside
-one window and report a DB Time that is neither. `PGWT_SUMMARY_VERSION` is now
-**5**; the reader refuses every earlier version for computation; and
+one window and report a DB Time that is neither. The current
+`PGWT_SUMMARY_VERSION` is listed below; the reader refuses every other version
+for computation; and
 `should_use_summaries()` PREFLIGHTS the window
 (`pgwt_summaries_window_current`) so a refusal becomes a raw recompute rather
 than a plausible-looking empty answer — the visitor skips files it cannot
@@ -497,7 +498,7 @@ accounting rule and not about the byte layout:
   pid had a note) are listed and COUNTED in `src/summary_writer.h`.
 
 - **v9** (#424, #562/#573's sessions half) — **SHIPPED.**
-  `PGWT_SUMMARY_VERSION` is **9**. This epoch carries two changes:
+  This epoch carried two changes:
 
   An OPEN on-CPU interval is credited per second (#424). v8
   deliberately refused that case: a per-second credit has no `cpu_ns` of its
@@ -521,8 +522,8 @@ accounting rule and not about the byte layout:
   0.0 ms runqueue sibling — what #575 fixed on the raw route, still live on
   the summary route (i.e. the default Overview) until #763. Pinned on both
   routes by section 7 of `tests/test_cpu_split_parity.c`. The version was
-  deliberately NOT bumped, so v9 files written before that fix carry the
-  wider count and a reader cannot tell them apart.
+  initially NOT bumped, so v9 files written before that fix carry the
+  wider count and a reader cannot tell them apart. v10 rejects both kinds.
 
   The PER-SESSION measured-CPU split (#562/#573's sessions half) adds
   `cpu_offcpu_ns` and a saturating `cpu_measured_records` to
@@ -560,8 +561,21 @@ accounting rule and not about the byte layout:
   back to v8. `tests/test_v9_open_cpu_wired.sh` checks that the now-wired
   producer is reached in the live tier.
 
+- **v10** (#763) — CPU-gap observations exclude measured wait spin. The
+  #766 writer fix initially kept v9, leaving older files with the wider
+  `cpu_measured_records` count. No header provenance or scalar test can
+  distinguish them from correct v9 files: a measured-zero CPU gap and an
+  open-gap credit can also have a positive count with zero measured ns.
+  Every v9 file is therefore refused, including correctly written post-#766
+  files. A window overlapping any of them recomputes the whole request from
+  raw, under the same `-R` retention. #779 preserves raw fallback under
+  `--retention-gb` by evicting same-hour summaries before raw archives.
+  Overview's Time Model corrects the false measured label; AAS, Top Events,
+  Top Sessions and histogram/heatmap change route for this counter fix.
+  Queries already always reads raw. The v9 byte layout is unchanged.
+
 This list is kept in step with `PGWT_SUMMARY_VERSION` in
-`src/summary_writer.h`, which is **9** as of 2026-10-28. It stopped at v6 for
+`src/summary_writer.h`, which is **10** as of 2026-11-05. It stopped at v6 for
 two bumps; a version list that trails the constant is worse than no list,
 because it reads as "nothing has changed since" — and it misled once more
 after that, when the v7/v8 entries were added against a tree that had since
