@@ -1802,8 +1802,8 @@ static void test_mismatch_close_conservation(void)
     CHECK(mm == 1, "11a: the identity mismatch happened and is counted "
           "(open_note_mismatch_total = %llu)", (unsigned long long)mm);
     CHECK(w == 6500 * MS,
-          "11a: on-disk WALL equals the record's duration (%llu ms, true "
-          "6500 ms)", (unsigned long long)(w / MS));
+          "11a: on-disk WALL TOTAL is 6500 ms (%llu ms; the TOTAL only -- "
+          "the per-interval wall split is not yet trusted, see #803)", (unsigned long long)(w / MS));
     CHECK(m <= 3250 * MS,
           "11a: on-disk MEASURED CPU does not exceed the record's cpu_ns "
           "(%llu ms vs 3250 ms) -- the over-credit",
@@ -1820,7 +1820,8 @@ static void test_mismatch_close_conservation(void)
     CHECK(mm == 1, "11b: the identity mismatch happened and is counted "
           "(open_note_mismatch_total = %llu)", (unsigned long long)mm);
     CHECK(w == 6500 * MS,
-          "11b (control): on-disk WALL (%llu ms) is exact too",
+          "11b (control): on-disk WALL TOTAL is 6500 ms (%llu ms; total only, "
+          "the per-interval split is not yet trusted, see #803)",
           (unsigned long long)(w / MS));
     CHECK(m <= 3250 * MS,
           "11b (control): B's tick already placed the tail, so nothing is "
@@ -1830,6 +1831,92 @@ static void test_mismatch_close_conservation(void)
           "11b (control): measured CPU EQUALS cpu_ns (measured %llu ms, "
           "unknown %llu ms, cpu_ns 3250 ms)",
           (unsigned long long)(m / MS), (unsigned long long)(u / MS));
+}
+
+/* ── §11c-e: the guards on the restored state ────────────────────────────
+ *
+ * The restore in §11a is only safe because of two things the happy path
+ * never exercises: the identity check (`prev.start_ns == start`) and the
+ * clearing of the snapshot once it is spent or the pid is forgotten. Each
+ * case below goes RED if exactly that guard is deleted (mutation-tested:
+ * the start check, the close-time memset, and the forget_open memset were
+ * each removed in turn).
+ *
+ * Common setup is §11a: A = [1 s, 7.5 s) credited by ticks (3100 ms
+ * measured), B noted at 7.5 s and NOT ticked past A's close, so `prev`
+ * holds A. */
+enum guard_mode { G_OTHER_RECORD, G_DUPLICATE_CLOSE, G_AFTER_FORGET };
+
+static uint64_t run_prev_guard(const char *name, enum guard_mode mode,
+                               uint64_t *overcredit)
+{
+    struct pgwt_trace_event seed =
+        mkev(PID_A, BASE_MONO + 1 * S, 1 * S, EV_LOCK_REL, 0, 0,
+             PGWT_CPU_NS_UNKNOWN);
+    struct wr z;
+    if (wr_open(&z, name) != 0) { printf("  FAIL: setup\n"); failures++; return 0; }
+    pgwt_summary_push_event(z.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 7; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        tick_cpu(&z, now, PID_A, BASE_MONO + 1 * S, 0, 0,
+                 (now - (BASE_MONO + 1 * S)) / 2);
+    }
+    uint64_t b_start = BASE_MONO + 7 * S + 500 * MS;
+    struct pgwt_summary_open_cpu obs = { .eff_we = 0, .cpu_prefix_ns = 0 };
+    pgwt_summary_note_open_ex(z.w, PID_A, 0, b_start, 0,
+                              BASE_MONO + 7 * S + 700 * MS, &obs);
+    struct pgwt_trace_event a =
+        mkev(PID_A, b_start, 6 * S + 500 * MS, 0, EV_LOCK_REL, 0, 3250 * MS);
+    if (mode == G_OTHER_RECORD) {
+        /* A DIFFERENT record (start 9 s) closes while `prev` still holds A.
+         * Restoring A's 3100 ms of credits onto it would read as a 2100 ms
+         * overcredit against its own 1000 ms of CPU: that counter is the
+         * restore's firing signal here, and must stay 0. */
+        struct pgwt_trace_event c =
+            mkev(PID_A, BASE_MONO + 10 * S, 1 * S, 0, EV_LOCK_REL, 0, 1 * S);
+        pgwt_summary_push_event(z.w, &c, 0, c.old_event);
+    } else if (mode == G_DUPLICATE_CLOSE) {
+        pgwt_summary_push_event(z.w, &a, 0, a.old_event);  /* spends prev */
+        pgwt_summary_push_event(z.w, &a, 0, a.old_event);  /* must not reuse */
+    } else {
+        pgwt_summary_forget_open(z.w, PID_A);              /* pid is gone */
+        pgwt_summary_push_event(z.w, &a, 0, a.old_event);  /* must not reuse */
+    }
+    *overcredit = z.w->open_cpu_overcredit_ns_total;
+    wr_close(&z);
+    struct readback rb = { .want_pid = PID_A };
+    int n = read_back(z.dir, &rb);
+    uint64_t m = n > 0 ? RB_SUM(&rb, cpu_measured_ns) : 0;
+    wr_free(&z);
+    return m;
+}
+
+static void test_prev_guards(void)
+{
+    printf("-- 11c-e: the restore's own guards (#709) --\n");
+    uint64_t m, oc;
+
+    m = run_prev_guard("pg_other", G_OTHER_RECORD, &oc);
+    CHECK(oc == 0,
+          "11c: a record with a DIFFERENT start is not charged against the "
+          "retained interval (overcredit counter %llu; the restore would "
+          "make it 2100 ms; measured %llu ms)",
+          (unsigned long long)oc, (unsigned long long)(m / MS));
+
+    m = run_prev_guard("pg_dup", G_DUPLICATE_CLOSE, &oc);
+    CHECK(m == 3750 * MS,
+          "11d: a second close with A's identity finds the snapshot SPENT "
+          "and takes the plain 500 ms tail (measured %llu ms = 3250 ms + "
+          "500 ms; a stale snapshot would restore and add 150 ms instead, "
+          "3400 ms). A duplicate close is outside the contract; what is "
+          "pinned is that it is not restored", (unsigned long long)(m / MS));
+
+    m = run_prev_guard("pg_forget", G_AFTER_FORGET, &oc);
+    CHECK(m == 6350 * MS,
+          "11e: after forget_open nothing is restored, so the close is the "
+          "plain pre-#709 one (measured %llu ms = 3100 ms of ticks + the "
+          "record's own 3250 ms; a stale snapshot would read 3250 ms)",
+          (unsigned long long)(m / MS));
 }
 
 int main(void)
@@ -1863,6 +1950,7 @@ int main(void)
     test_notes_counter();   /* prints its own banner -- see #686 there */
     test_attribution_counters();   /* ditto */
     test_mismatch_close_conservation();   /* ditto (#709) */
+    test_prev_guards();   /* ditto (#709) */
 
     printf("\n%d checks, %d failures\n", checks, failures);
     printf("=== test_open_cpu_accounting: %s ===\n",
