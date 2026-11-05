@@ -272,10 +272,18 @@ Runs every 60 daemon ticks:
   deleted. Age comes from the `YYYY-MM-DD_HH` name when parseable, else
   file mtime. `--trace-retention 0` disables the hours rule only.
 - **Size cap** (`--retention-gb`, fractional GiB, default off): if the
-  trace directory's total size exceeds the cap, the OLDEST archives are
-  deleted first until it fits. The live `current.*` files and the sidecar
-  `.jsonl` files are never deleted; if they alone exceed the cap, a WARN
-  says so.
+  trace directory's total size exceeds the cap, eligible archives are
+  deleted oldest-hour first, with each hour's summaries before its raw
+  archives. This is a best-effort target: live `current.*` files and sidecar
+  `.jsonl` files are never deleted, and a pending summary protects its hour's
+  raw archives until publication (normally at hourly rotation). Usage can
+  therefore remain over the cap for up to an hour during normal rotation,
+  even with archives present. A failed unlink does not stop eviction from
+  other hours; a failed summary unlink also protects all raw pieces with
+  the same `ftime` (parsed hour, otherwise file mtime) for that pass. Removal failures
+  or an incomplete scan can also prevent reaching the cap. Any remaining
+  excess is recounted after the pass; a WARN reports its byte count and
+  the limiting reason.
 - **Orphans**: stale `*.meta.tmp` (torn meta writes) and `current.*.meta`
   files whose current file is gone are removed once provably stale (> 1 h
   old, so a live daemon's meta cycle is never raced).
