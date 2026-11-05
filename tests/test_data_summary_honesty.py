@@ -17,8 +17,13 @@ After the fix:
     fast path and is honestly labeled "exact";
   * a window with no data at all is labeled "none" — never "exact".
 """
+import hashlib
+import json
 import os
+import shutil
+import struct
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
@@ -147,11 +152,110 @@ def test_full_mode_still_fast(t):
         cleanup_traces(trace_dir)
 
 
+LEGACY_V9_SHA256 = (
+    "23cb7e097d4a0fe2aafd74de05b44549e742718b070bfa212f7561d662443418")
+
+
+def v9_wait_spin_scenario():
+    """The frozen pre-#766 writer's input; see the fixture README."""
+    events = []
+    for sec in range(130):
+        start = BASE + sec * S
+        for offset, old, dur, cpu in (
+                (100, 0xFFFFFFF6, 0, 2**64 - 1),
+                (150, CPU, 50_000_000, 2**64 - 1),
+                (160, 0x03000000, 10_000_000, 2_000_000),
+                (161, 0xFFFFFFF7, 0, 2**64 - 1)):
+            events.append({"pid": 41001, "ts": start + offset * 1_000_000,
+                           "old": old, "new": old if not dur else IO_DATA_FILE_READ,
+                           "dur": dur, "cpu": cpu, "qid": 100})
+    return {"cpu_measured": 1, "events": events,
+            "backends": [{"pid": 41001, "type": "client"}]}
+
+
+def test_retired_v9_cpu_split(t):
+    print("\n### 3. Real v9 refuses the whole window; v10 stays on summaries ###")
+    legacy = os.path.join(os.path.dirname(__file__), "fixtures",
+                          "summary_v9_wait_spin", "current.summary")
+    # Frozen bytes from the old writer, not an invented version number.
+    with open(legacy, "rb") as f:
+        raw = f.read()
+    t.check_eq(struct.unpack("<IH", raw[:6])[1], 9,
+               "retired fixture really is v9")
+    # A version byte alone cannot tell the pre-#766 writer's output from a
+    # current-writer file patched to 9; the pinned hash (also in the fixture
+    # README) is what keeps this evidence from being silently regenerated.
+    t.check_eq(hashlib.sha256(raw).hexdigest(), LEGACY_V9_SHA256,
+               "retired fixture is the frozen pre-#766 writer's bytes")
+    for arm in ("v10", "v9", "mixed"):
+        trace_dir = generate_traces(v9_wait_spin_scenario())
+        try:
+            current = os.path.join(trace_dir, "current.summary")
+            with open(current, "rb") as f:
+                t.check_eq(struct.unpack("<IH", f.read(6))[1], 10,
+                           arm + ": fresh writer stamps v10")
+            if arm == "mixed":
+                shutil.copyfile(current, os.path.join(
+                    trace_dir, "1970-01-01_02.summary.lz4"))
+            if arm != "v10":
+                shutil.copyfile(legacy, current)
+                # The frozen file is finalized and has its own footer/index.
+                os.unlink(current + ".meta")
+            with tempfile.TemporaryDirectory(prefix="pgwt-v9-refusal-") as logs:
+                err_path = os.path.join(logs, "server.log")
+                with ServerHarness(trace_dir, stderr_path=err_path) as srv:
+                    aas = srv.query("aas", from_=BASE, to_=BASE + 130 * S,
+                                    buckets=130)
+                    tm = srv.query("time_model", from_=BASE, to_=BASE + 130 * S)
+                    ts = srv.query("top_sessions", from_=BASE,
+                                   to_=BASE + 130 * S)
+                with open(err_path) as f:
+                    stderr = f.read()
+                print(arm + " stderr:\n" + stderr)
+                print(arm + " time_model: " + json.dumps({
+                    "rows": tm.get("rows"),
+                    "has_measured_cpu": tm.get("has_measured_cpu")}))
+                rows = {row["name"]: row for row in tm["rows"]}
+                t.check("CPU*" in rows and "CPU (running)" not in rows and
+                        "CPU (waiting for a core)" not in rows,
+                        arm + ": response says CPU*, with no invented split")
+                t.check_eq(rows.get("CPU*", {}).get("ms"), 6500,
+                           arm + ": all 130 seconds of raw history survive")
+                t.check_eq(tm.get("wait_gap_cpu_ms"), 260,
+                           arm + ": measured wait spin survives")
+                t.check_eq(tm.get("has_measured_cpu"), False,
+                           arm + ": UNKNOWN CPU gaps stay unmeasured")
+                t.check_eq(ts.get("has_measured_cpu"), False,
+                           arm + ": top_sessions does not claim measured CPU")
+                t.check_eq(tm.get("db_time_ms"), 7800,
+                           arm + ": complete DB Time")
+                t.check_eq(len(aas.get("buckets", [])), 130,
+                           arm + ": aas answered the requested window")
+                # 'cat' is emitted only by handle_aas's raw branch. AAS uses
+                # class keys; CPU* is a Time Model row, checked above.
+                t.check(all(("cat" in b) == (arm != "v10")
+                            for b in aas.get("buckets", [])),
+                        arm + ": aas took the required production route")
+                if arm == "v10":
+                    t.check("recomputing from raw" not in stderr,
+                            "v10-only control still takes summaries")
+                else:
+                    marker = ("INFO: 1 of %d summary file(s) covering this "
+                              "window are not summary v10 -- recomputing "
+                              "from raw events" % (2 if arm == "mixed" else 1))
+                    t.check_eq(stderr.count(marker), 3,
+                               arm + ": aas, time_model AND top_sessions "
+                               "each log the v10 refusal")
+        finally:
+            cleanup_traces(trace_dir)
+
+
 def main():
     t = TestRunner("test_data_summary_honesty")
     print(f"=== {t.name} ===")
     test_tiered_15min(t)
     test_full_mode_still_fast(t)
+    test_retired_v9_cpu_split(t)
     sys.exit(0 if t.summary() else 1)
 
 
