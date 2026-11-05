@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""#622: forced USDT absence and its own FULL-mode positive control.
+"""#622: forced USDT absence and a declared FULL-mode control.
 
-Run both legs against the same postmaster on a phase-capable Ubuntu tier.
-The seam rehearses EL8's consequence, not the missing-ref_ctr_offset cause.
-This test owns both declarations: refusal is a successful assertion, never 78.
+Run both legs against the same postmaster. PGWT_EXPECT_PHASE_PROBES declares
+whether CONTROL must produce phase data or refuse it while attribution works.
+FORCED rehearses absence on either tier; refusal is an assertion, never 78.
 """
 import argparse
 import errno
@@ -17,7 +17,8 @@ import tempfile
 import time
 
 from server_harness import SERVER_BIN, ServerHarness
-from testutil import ATTR_MASK, PHASE_MASK, find_postmaster, phase_contract_verdict
+from testutil import (ATTR_MASK, PHASE_MASK, find_postmaster, phase_contract_verdict,
+                      resolve_declared_phase_mask)
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.join(PROJECT_DIR, "pg_wait_tracer")
@@ -137,8 +138,8 @@ def marker_artifacts(trace_dir, pids):
 
 def capture(pm_pid, trace_dir, forced):
     env = os.environ.copy()
-    # A/B isolation includes an inherited forcing instruction: CONTROL must
-    # exercise real USDT attaches even when the enclosing suite forces absence.
+    # A/B isolation includes an inherited low-level forcing instruction.
+    # The caller explicitly opts into any declared-absent rehearsal instead.
     env.pop("PGWT_TEST_NO_USDT_SEMA_REFCNT", None)
     env.pop("PGWT_TEST_EXEC_SITE_ADMIT_ALL", None)
     if forced:
@@ -192,11 +193,30 @@ def assert_control(masks, artifacts):
           f"7 CONTROL produced completed marker-derived executions: {count}")
 
 
+def assert_absent_control(masks, status, artifacts):
+    verdict, reason = phase_contract_verdict(0, masks, artifacts)
+    check(verdict == "refuse",
+          f"6 CONTROL declared-absent verdict refuse: {verdict}: {reason}")
+    # The shared contract accepts either zero rows or an explicit exact-data
+    # refusal (None); exact wait attribution can remain available without phases.
+    count = artifacts["executions"]
+    check(count is None or count == 0,
+          f"7 CONTROL declared-absent has no marker-derived executions: {count}")
+    fires = {field: numeric_field(status, field) for field in FIRE_FIELDS}
+    check(all(value > 0 for value in fires.values()),
+          f"8 CONTROL declared-absent query and activity plain uprobes still fire: {fires}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pid", type=int)
     args = parser.parse_args()
     print("=== test_phase_absent ===")
+    try:
+        expected_phase = resolve_declared_phase_mask()
+    except ValueError as exc:
+        check(False, str(exc))
+        return 1
     if sys.platform != "linux" or os.geteuid() != 0:
         check(False, "requires Linux and root for live eBPF capture")
         return 1
@@ -209,9 +229,15 @@ def main():
         os.chmod(trace_dir, 0o755)
         print(f"  {label}: postmaster={pm_pid}, trace={trace_dir}")
         try:
-            masks, status, artifacts = capture(pm_pid, trace_dir, forced)
+            # The harness also rehearses declared absence on capable kernels.
+            # Its explicit seam must never weaken a declared-present CONTROL.
+            force_absence = forced or (expected_phase == 0 and os.environ.get(
+                "PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1")
+            masks, status, artifacts = capture(pm_pid, trace_dir, force_absence)
             if forced:
                 assert_forced(masks, status, artifacts)
+            elif expected_phase == 0:
+                assert_absent_control(masks, status, artifacts)
             else:
                 assert_control(masks, artifacts)
         except (OSError, ValueError, RuntimeError, IndexError,

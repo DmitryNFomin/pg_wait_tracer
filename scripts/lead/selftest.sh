@@ -469,7 +469,15 @@ MARKER="$TMP/codex-was-called-$$"
 cat > "$STUBBIN/codex" <<EOSTUB
 #!/usr/bin/env bash
 touch "$MARKER"
-echo "VERDICT: SEND"
+# audit-report consumes only the CLI's final-answer file, not stdout.
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = --output-last-message ]; then
+    shift
+    printf '%s\n' 'Everything here is measured and pasted. -> VERIFIED fixture evidence' 'VERDICT: SEND' > "\$1"
+    break
+  fi
+  shift
+done
 EOSTUB
 chmod +x "$STUBBIN/codex"
 BLOCK_DRAFT="$TMP/block-draft-$$.md"

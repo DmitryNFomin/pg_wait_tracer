@@ -233,15 +233,21 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * answered the same question differently: 719,200.346 ms filtered
      * against 716,200.203 ms unfiltered on one Lock:relation row.
      *
-     * handle_top_events now shares its query guard with handle_top_sessions
-     * (server.c:5193/:5166) and handle_heatmap (:5929): TWO siblings.
-     * handle_top_queries computes raw unconditionally (:5579); no summary route.
+     * handle_top_events shares its query guard with handle_top_sessions
+     * (sessions_filter_needs_raw) and handle_heatmap, and -- #684 -- with
+     * handle_aas and handle_time_model: FOUR siblings.
+     * handle_top_queries computes raw unconditionally; no summary route.
      * tq_summary_visitor (compute.c:3584) has no production caller.
-     * The remaining production readers of queries[] are tm_summary_visitor
-     * (compute.c:2886; per-query read only under a query filter, :2892)
-     * and aas_summary_visitor (:2717; same gate, :2731). `dur` still matters
-     * for query-filtered Time Model and AAS; their full-duration-at-close
-     * window-edge limitation remains.
+     *
+     * #684: queries[] now has NO production reader under a query filter.
+     * tm_summary_visitor's per-query arm and aas_summary_visitor's are both
+     * behind handlers that route a query-filtered window to raw, so the
+     * full-duration-at-close over-report can no longer reach a user; the
+     * arms stay because the compute functions are still called directly by
+     * tests/test_agg_raw_crosscheck.c and friends, which measure exactly
+     * that divergence. `dur` still matters to the per-occurrence table
+     * itself (count/total_ns/max_ns on the Queries summary), not to any
+     * window-clipped total.
      *
      * WHAT WAS CONSIDERED AND DROPPED, so it is not re-derived: switching
      * this call to `tns` alone makes things WORSE, not better. Because

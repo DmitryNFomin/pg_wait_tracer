@@ -64,8 +64,8 @@ DUR_NS = 1_000_000  # 1 ms per event
 # and asserted not to contradict the log:
 #   * top_queries keeps #694's sentence, which BEGINS with the table's
 #     "narrow the time range" and then explains why no filter helps;
-#   * a query-filtered top_events/top_sessions/heatmap keeps #526's
-#     "a query filter forces the exact path".
+#   * a query-filtered top_events/top_sessions/heatmap and -- #684 -- aas and
+#     time_model keep #526's "a query filter forces the exact path".
 # Everything else, on every kind, must match exactly, so a change to one
 # consumer and not the other is red and an operator quoting the log can never
 # be contradicted by the user's screen.
@@ -413,6 +413,25 @@ def check_window_arm(t, err_dir):
                 "whole capture" not in hint,
                 f"window/query-filter: borrows no other kind's explanation "
                 f"({hint!r})")
+
+        # #684 put aas and time_model on the SAME arm, because both now take
+        # the query_id == 0 guard: a query-filtered window really is pushed
+        # onto raw for them too, and both forward req->filter.pid into that
+        # load. Asserted byte for byte against the same constant, so the five
+        # commands on this arm cannot drift apart.
+        for cmd in ("aas", "time_model"):
+            resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
+                            os.path.join(err_dir,
+                                         "window-queryfilter-%s.err" % cmd),
+                            cmd, filters={"query_id": 42})
+            t.check_eq(resp.get("code"), "window_too_large",
+                       f"window/query-filter/{cmd}: refused — #684's guard "
+                       f"put this command on the raw path")
+            t.check_eq(resp.get("hint"), QUERY_FILTER_HINT,
+                       f"window/query-filter/{cmd}: the same composed hint as "
+                       f"top_events, byte for byte")
+            grade_contains_sentence(t, "window/query-filter/" + cmd, err,
+                                    resp)
 
         # CONTEXT: handle_execution_detail's load is bounded by the SELECTED
         # EXECUTION (req.start_ns/end_ns), not req.from/to, and it passes

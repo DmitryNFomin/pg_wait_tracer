@@ -1583,11 +1583,14 @@ static enum retn_kind retn_classify(const char *dir, const char *name)
 
 /* Delete an archive's checkpoint sidecar along with the archive: the sidecar
  * is evidence ABOUT that file and means nothing without it. */
-static void retn_unlink_sidecar(const char *archive_path)
+static uint64_t retn_unlink_sidecar(const char *archive_path)
 {
     char s[700];
+    struct stat st;
     snprintf(s, sizeof(s), "%s%s", archive_path, PGWT_OPEN_CKPT_SUFFIX);
-    unlink(s);
+    if (stat(s, &st) == 0 && S_ISREG(st.st_mode) && unlink(s) == 0)
+        return (uint64_t)st.st_size;
+    return 0;
 }
 
 /* Archive age: from the YYYY-MM-DD_HH name when parseable (recovered
@@ -1613,13 +1616,41 @@ struct retn_entry {
     char     name[300];
     time_t   ftime;
     uint64_t size;
+    enum retn_kind kind;
 };
 
 static int retn_cmp_oldest(const void *a, const void *b)
 {
-    time_t ta = ((const struct retn_entry *)a)->ftime;
-    time_t tb = ((const struct retn_entry *)b)->ftime;
-    return (ta > tb) - (ta < tb);
+    const struct retn_entry *ea = a, *eb = b;
+    if (ea->ftime != eb->ftime)
+        return (ea->ftime > eb->ftime) - (ea->ftime < eb->ftime);
+    /* #779: every summary of an hour (including recovered .N names) must
+     * go before ANY raw archive of that hour. Raw-only is correct, just
+     * slower; summary-only loses the fallback when a summary is rejected.
+     * Both kinds derive ftime from the same hour in the archive name. */
+    int sa = ea->kind == RETN_SUMMARY_ARCHIVE;
+    int sb = eb->kind == RETN_SUMMARY_ARCHIVE;
+    if (sa != sb)
+        return sb - sa;
+    return strcmp(ea->name, eb->name);
+}
+
+/* Count after age/orphan cleanup, so sidecars already removed in that pass
+ * cannot inflate the cap or its warning merely because readdir saw them
+ * before the archive. Unknown regular files are protected but still count. */
+static uint64_t retn_dir_bytes(DIR *dir, const char *trace_dir)
+{
+    uint64_t bytes = 0;
+    struct dirent *ent;
+    rewinddir(dir);
+    while ((ent = readdir(dir)) != NULL) {
+        char path[600];
+        struct stat st;
+        snprintf(path, sizeof(path), "%s/%s", trace_dir, ent->d_name);
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode))
+            bytes += (uint64_t)st.st_size;
+    }
+    return bytes;
 }
 
 int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
@@ -1633,7 +1664,21 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
 
     struct retn_entry *kept = NULL;
     int n_kept = 0, cap_kept = 0;
-    uint64_t total_bytes = 0;   /* everything in the dir, live files included */
+    const char *cap_reason = "protected files alone exceed the cap";
+    int scan_complete = 1;
+    time_t live_summary_hour = 0;
+    if (w->retention_bytes > 0 && w->retention_live_summary_ns) {
+        time_t start = (time_t)(w->retention_live_summary_ns / 1000000000ULL);
+        struct tm tm;
+        if (localtime_r(&start, &tm)) {
+            tm.tm_min = tm.tm_sec = 0;
+            tm.tm_isdst = -1;  /* same interpretation as archive names */
+            live_summary_hour = mktime(&tm);
+        } else {
+            scan_complete = 0;
+            cap_reason = "could not place the live summary's hour";
+        }
+    }
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
@@ -1655,7 +1700,6 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
             continue;
         }
         if (kind == RETN_SKIP) {
-            total_bytes += (uint64_t)st.st_size;
             continue;
         }
 
@@ -1671,14 +1715,16 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
             }
         }
 
-        total_bytes += (uint64_t)st.st_size;
         if (w->retention_bytes > 0) {
             if (n_kept >= cap_kept) {
                 int newcap = cap_kept ? cap_kept * 2 : 64;
                 struct retn_entry *tmp =
                     realloc(kept, (size_t)newcap * sizeof(*tmp));
-                if (!tmp)
+                if (!tmp) {
+                    scan_complete = 0;
+                    cap_reason = "archive scan incomplete (out of memory)";
                     continue;
+                }
                 kept = tmp;
                 cap_kept = newcap;
             }
@@ -1686,35 +1732,72 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
                      ent->d_name);
             kept[n_kept].ftime = ftime;
             kept[n_kept].size = (uint64_t)st.st_size;
+            kept[n_kept].kind = kind;
             n_kept++;
         }
     }
-    closedir(dir);
+    uint64_t total_bytes = w->retention_bytes > 0
+                         ? retn_dir_bytes(dir, w->trace_dir) : 0;
 
     /* DUR-3: size cap. Total dir usage (live files included) must fit under
      * retention_bytes; delete the OLDEST archives first, never the live
-     * current files or sidecars. */
+     * current files. Same-hour summaries go first; no mandatory pair
+     * eviction is needed, and raw-only hours remain usable. */
     if (w->retention_bytes > 0 && total_bytes > w->retention_bytes) {
         if (n_kept > 0)
             qsort(kept, (size_t)n_kept, sizeof(*kept), retn_cmp_oldest);
-        for (int i = 0; i < n_kept && total_bytes > w->retention_bytes; i++) {
+        /* An incomplete scan might have missed a summary. Do not risk
+         * deleting its raw fallback. */
+        int failed_summary = 0;
+        time_t failed_summary_hour = 0;
+        for (int i = 0; scan_complete && i < n_kept &&
+                        total_bytes > w->retention_bytes; i++) {
+            /* A failed summary unlink protects ALL later raw entries with
+             * equal ftime for this pass, including recovered .N pieces,
+             * even with intervening entries. Only raw is skipped: other
+             * summaries and other hours remain eligible. Since ftime is
+             * the primary sort key, one failed-hour key suffices. A failed
+             * raw unlink adds no protection. No unlink failure stops the
+             * loop; the final directory recount reports the real excess. */
+            if (failed_summary && kept[i].kind == RETN_TRACE_ARCHIVE &&
+                kept[i].ftime == failed_summary_hour)
+                continue;
+            /* A live summary may be archived AFTER this pass, including
+             * when raw hit its block cap before the hourly boundary. */
+            if (kept[i].kind == RETN_TRACE_ARCHIVE &&
+                w->retention_live_summary_ns &&
+                kept[i].ftime == live_summary_hour) {
+                cap_reason = "live summary still needs same-hour raw archives";
+                continue;
+            }
             char path[600];
             snprintf(path, sizeof(path), "%s/%s", w->trace_dir, kept[i].name);
             if (unlink(path) == 0) {
-                retn_unlink_sidecar(path);
-                total_bytes -= kept[i].size;
+                uint64_t freed = kept[i].size + retn_unlink_sidecar(path);
+                total_bytes = freed <= total_bytes ? total_bytes - freed : 0;
                 if (w->verbose)
                     fprintf(stderr, "INFO: size cap: deleted %s (%llu bytes)\n",
                             kept[i].name,
                             (unsigned long long)kept[i].size);
+            } else {
+                fprintf(stderr, "WARN: size cap: could not remove %s: %s\n",
+                        kept[i].name, strerror(errno));
+                cap_reason = "could not remove an archive";
+                if (kept[i].kind == RETN_SUMMARY_ARCHIVE) {
+                    failed_summary = 1;
+                    failed_summary_hour = kept[i].ftime;
+                }
+                continue;
             }
         }
+        total_bytes = retn_dir_bytes(dir, w->trace_dir);
         if (total_bytes > w->retention_bytes)
             fprintf(stderr, "WARN: trace dir still %llu bytes over the "
-                    "--retention-gb cap after deleting every archive — the "
-                    "live current files alone exceed the cap\n",
-                    (unsigned long long)(total_bytes - w->retention_bytes));
+                    "--retention-gb cap after archive eviction: %s\n",
+                    (unsigned long long)(total_bytes - w->retention_bytes),
+                    cap_reason);
     }
+    closedir(dir);
     free(kept);
     return 0;
 }

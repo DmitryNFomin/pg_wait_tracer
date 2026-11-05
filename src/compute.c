@@ -2738,7 +2738,14 @@ static int aas_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
     if (ctx->has_pid_filter)
         return 0;
 
-    /* Query filter: use per-query class_ns (v2 data) */
+    /* Query filter: use per-query class_ns (v2 data).
+     *
+     * #684: NO PRODUCTION CALLER reaches here -- handle_aas routes a
+     * query-filtered window to raw, because class_ns carries the record's
+     * full duration at the second it closes in while every other view of
+     * that window clips to [from, to). Kept because
+     * tests/test_agg_raw_crosscheck.c calls this compute directly to
+     * MEASURE that divergence; do not re-enable the route to "use" it. */
     if (ctx->has_query_filter) {
         for (int q = 0; q < SUMMARY_MAX_QUERIES; q++) {
             const struct pgwt_summary_query *sq = &rec->queries[q];
@@ -2899,7 +2906,11 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
     struct tm_summary_ctx *ctx = arg;
     const struct pgwt_filter *f = ctx->f;
 
-    /* Query filter: use per-query class_ns + top_events */
+    /* Query filter: use per-query class_ns + top_events.
+     *
+     * #684: NO PRODUCTION CALLER reaches here either -- handle_time_model
+     * carries the same guard, for the same reason (see aas_summary_visitor's
+     * note above). Still exercised directly by the cross-check tests. */
     if (f->query_id != 0) {
         for (int q = 0; q < SUMMARY_MAX_QUERIES; q++) {
             const struct pgwt_summary_query *sq = &rec->queries[q];
