@@ -436,16 +436,56 @@ else
   fail=$((fail+1)); echo "FAIL block output did not quote the offending line"
 fi
 
-# case 10 (the negative control for case 9): the SAME claim, with a pasted
-# command+output fenced block nearby, passes. This is what proves the gate
-# discriminates instead of blocking (or passing) everything unconditionally.
-check_pp "same claim, with pasted evidence nearby, passes" 0 \
+# case 10: a pasted command+output alone does not describe search coverage.
+check_pp "same claim, with only pasted evidence nearby, blocks" 1 \
 'There is no mechanical check for this today.
 
 ```
 $ grep -rn "closing_issue" scripts/lead/*.sh
 (no output)
 ```'
+
+# Search coverage must name both the searched and unsearched scope.
+PP_SEARCH_DRAFT='There is no mechanical check for this today.
+SEARCHED: scripts/lead/*.sh for closing_issue
+```
+$ grep -c closing_issue scripts/lead/*.sh
+0
+```'
+check_pp "grep-c=0 without NOT SEARCHED blocks" 1 "$PP_SEARCH_DRAFT"
+if printf '%s' "$LAST_PP_OUT" | /usr/bin/grep -q 'line 1 .*NOT SEARCHED line missing'; then
+  pass=$((pass+1)); echo "ok   missing NOT SEARCHED names the claim line"
+else
+  fail=$((fail+1)); echo "FAIL missing NOT SEARCHED did not name the claim line and requirement"
+  printf '%s\n' "$LAST_PP_OUT" | sed 's/^/       /'
+fi
+check_pp "NOT SEARCHED none is vacuous" 1 "$PP_SEARCH_DRAFT
+NOT SEARCHED: none"
+check_pp "empty NOT SEARCHED is vacuous" 1 "$PP_SEARCH_DRAFT
+NOT SEARCHED:"
+check_pp "NOT SEARCHED n/a is vacuous" 1 "$PP_SEARCH_DRAFT
+NOT SEARCHED: n/a"
+check_pp "evidence with filled SEARCHED and NOT SEARCHED passes" 0 "$PP_SEARCH_DRAFT
+NOT SEARCHED: tests/ and remote branches"
+check_pp "nearby UNVERIFIED does not excuse another claim" 1 \
+'There is no mechanical check for this today.
+UNVERIFIED: The feature is not implemented.
+SEARCHED: scripts/lead/*.sh for closing_issue
+NOT SEARCHED: tests/ and remote branches'
+
+for claim in \
+  'The Generated-with trailer is absent everywhere, so the labels do not work.' \
+  'there is no Generated-with trailer anywhere; the labels do not work'; do
+  PP_TRAILER_DRAFT="$claim
+\`\`\`
+\$ git log --all --format=%B --grep=Generated-with
+(no output)
+\`\`\`"
+  check_pp "$claim: evidence without search coverage blocks" 1 "$PP_TRAILER_DRAFT"
+  check_pp "$claim: filled search coverage passes" 0 "$PP_TRAILER_DRAFT
+SEARCHED: local git history for Generated-with trailers
+NOT SEARCHED: remote branches and archived repositories"
+done
 
 # case 11: empty draft -> nothing to flag, exit 0 (not a crash, not a false
 # BLOCK on an empty report).

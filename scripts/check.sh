@@ -77,6 +77,9 @@ run bash tests/test_push_guard_denylist.sh
 step "report audit isolation and contradiction controls (#761)"
 run python3 scripts/lead/audit-report-selftest.py
 
+step "bash: brief live-comment evidence and scope decisions"
+run bash tests/test_check_brief.sh
+
 step "POSIX shell: Codex task wrapper self-test"
 run scripts/lead/codex-task-selftest.sh
 

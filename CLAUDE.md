@@ -30,6 +30,12 @@ Paste a command and its output for every **count**, **absence** ("exists nowhere
 Treat one denied operation as one failed attempt only. Without evidence, write
 `UNVERIFIED:`, never a cause.
 
+A Bash call may contain probes **or** conclusions, never both. Where a verdict is
+wanted, derive it in the shell from the data (`out=$(...); if [ -z "$out" ]; then
+echo "VERDICT: ..."`), never in an `echo` written alongside the probe. Never pipe
+an existence probe to `wc -l` or `head`. A ref, file or process existing is not
+evidence of what created it — get its date and author.
+
 ## RULE 1 — advisers first, the owner last. Never ask the owner what an adviser can answer.
 
 Send design, scope, sequencing, approach and option questions to **both advisers first**:
