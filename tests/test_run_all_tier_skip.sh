@@ -303,6 +303,30 @@ assert_case() {
     fi
 }
 
+# The synthetic tier's declared size is READ FROM tests/run_all.sh, never copied
+# here as a second literal. It was a literal 26 until #684 added a test to that
+# tier: the runner then printed 27 while B2/B3/B8 still looked for 26, so three
+# cases went red although the detection they exist for still worked (B2's "the
+# tier really did not run" and B5's pre-#528 negative control both stayed
+# green). The assertion is unchanged in strength -- still an exact count, still
+# an exact "declares N but N-1 ran" -- it simply stops being a hand-maintained
+# copy of a number that lives somewhere else.
+#
+# REFUSED, not defaulted, if it cannot be read: an empty or non-numeric size
+# would turn every needle below into " test(s) never executed", which matches
+# any count and would approve exactly the drift this derivation removes.
+SYN_SIZE="$(sed -n 's/^SYNTHETIC_TIER_SIZE=\([0-9][0-9]*\)$/\1/p' \
+            "$SCRIPT_DIR/run_all.sh" | head -1)"
+if [[ ! "$SYN_SIZE" =~ ^[0-9]+$ ]] || (( SYN_SIZE < 2 )); then
+    bad "PART B precondition: could not read a usable SYNTHETIC_TIER_SIZE from \
+tests/run_all.sh (got '${SYN_SIZE}') -- refusing to assert on a count nobody resolved"
+    echo ""
+    echo "$pass passed, $fail failed"
+    exit 1
+fi
+SYN_SIZE_SHORT=$((SYN_SIZE - 1))
+ok "PART B precondition: tests/run_all.sh declares SYNTHETIC_TIER_SIZE=$SYN_SIZE"
+
 # B1 -- THE ANTI-VACUITY CONTROL. Binaries present: the fixture must go green
 # and must actually have run the synthetic tier. Every red below is only
 # meaningful relative to this.
@@ -323,7 +347,7 @@ rc=$(run_fixture "$b2" "$FIX_ROOT/b2.log")
 assert_case "B2 RED: gen_test_traces not executable -> run FAILS, naming tier + count" \
     "$FIX_ROOT/b2.log" "$rc" nonzero \
     "REQUIRED TIER DID NOT RUN" "test_data_* (synthetic-data tier)" \
-    "26 test(s) never executed" "refusing to report success"
+    "$SYN_SIZE test(s) never executed" "refusing to report success"
 if contains "$FIX_ROOT/b2.log" "test_data_time_model"; then
     bad "B2: the tier appears to have run anyway"
 else
@@ -335,7 +359,7 @@ b3="$FIX_ROOT/b3"; build_fixture "$b3" || bad "B3 fixture build failed"
 rm -f "$b3/pgwt-server"
 rc=$(run_fixture "$b3" "$FIX_ROOT/b3.log")
 assert_case "B3 RED: pgwt-server absent -> run FAILS" "$FIX_ROOT/b3.log" "$rc" nonzero \
-    "REQUIRED TIER DID NOT RUN" "26 test(s) never executed"
+    "REQUIRED TIER DID NOT RUN" "$SYN_SIZE test(s) never executed"
 
 # B4 -- the pre-#528 arithmetic, reproduced: with the tier skipped, `failed`
 # is 0 and `executed` is far from 0, so neither of the runner's old signals
@@ -394,8 +418,9 @@ assert_case "B7 RED: comments-only unit_tests.list -> run FAILS (not 0 == 0)" \
     "$FIX_ROOT/b7.log" "$rc" nonzero "C unit tier (tests/unit_tests.list)"
 
 # B8 -- declared tier size drifts below the real membership: drop one
-# run_test line from the synthetic tier so 25 run while 26 are declared. This
-# is the check that keeps the count in B2's message honest as tests are added.
+# run_test line from the synthetic tier so SYN_SIZE - 1 run while SYN_SIZE are
+# declared. This is the check that keeps the count in B2's message honest as
+# tests are added.
 b8="$FIX_ROOT/b8"; build_fixture "$b8" || bad "B8 fixture build failed"
 python3 - "$b8/tests/run_all.sh" <<'PYEOF'
 import sys
@@ -415,9 +440,10 @@ if [[ $? -ne 0 ]]; then
     bad "B8: could not stage the tier-size drift mutant"
 else
     rc=$(run_fixture "$b8" "$FIX_ROOT/b8.log")
-    assert_case "B8 RED: tier declares 26 but 25 ran -> run FAILS" \
+    assert_case "B8 RED: tier declares $SYN_SIZE but $SYN_SIZE_SHORT ran -> run FAILS" \
         "$FIX_ROOT/b8.log" "$rc" nonzero \
-        "declares 26 test(s) but 25 actually ran" "refusing to report success"
+        "declares $SYN_SIZE test(s) but $SYN_SIZE_SHORT actually ran" \
+        "refusing to report success"
 fi
 
 # B9 -- an opt-IN whose dependencies are absent. PGWT_RUN_SNAPSHOTS=1 with no
