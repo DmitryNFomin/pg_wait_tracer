@@ -23,9 +23,8 @@ same() {
     if cmp -s "$1" "$2"; then report true "$3"; else report false "$3"; fi
 }
 
-# Do not inherit repository/worktree overrides or a developer's Git config.
-unset "${!GIT_@}" 2>/dev/null || true
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+# Check the source index before clearing overrides for the disposable repo.
+# This also permits validation of untracked files with a temporary Git index.
 if [[ ! -e "$REPO_ROOT/.git" ]]; then
     echo '  SKIP: tracked commit-msg mode (no .git; rsynced source tree)'
 else
@@ -34,6 +33,9 @@ else
     report "$([[ "$tracked_mode" == 100755 ]] && echo true || echo false)" \
         "tracked commit-msg mode is 100755 (got ${tracked_mode:-untracked})"
 fi
+# Do not inherit repository/worktree overrides or a developer's Git config.
+unset "${!GIT_@}" 2>/dev/null || true
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 # The squash template includes the author date; keep its exact text stable.
 export GIT_AUTHOR_DATE='2000-01-01T00:00:00+0000'
 export GIT_COMMITTER_DATE='2000-01-01T00:00:00+0000'
@@ -63,7 +65,7 @@ print(json.dumps({"commits": [{"messageHeadline": headline, "messageBody": body}
 check_commit() {
     local name="$1" expected_label="$2"; shift 2
     local label
-    if "$@" > "$tmproot/commit.log" 2>&1; then
+    if env -u CLAUDECODE "$@" > "$tmproot/commit.log" 2>&1; then
         report true "$name: real commit succeeds"
     else
         report false "$name: real commit succeeds"
@@ -83,11 +85,13 @@ check_commit() {
 
 commit_case() {
     local name="$1" message="$2" expected="$3" expected_label="$4"
+    local claude_env=(env -u CLAUDECODE)
+    if [[ $# -ge 5 ]]; then claude_env=(env CLAUDECODE="$5"); fi
     printf '%s' "$message" > "$tmproot/input"
     printf '%s' "$expected" > "$tmproot/expected"
     # Only the disposable repo is committed. Verbatim cleanup lets us assert
     # byte preservation, including comments and existing trailer spelling.
-    check_commit "$name" "$expected_label" git -C "$repo" commit -q --allow-empty \
+    check_commit "$name" "$expected_label" "${claude_env[@]}" git -C "$repo" commit -q --allow-empty \
         --cleanup=verbatim -F "$tmproot/input" || return 1
     git -C "$repo" interpret-trailers --parse "$tmproot/input" > "$tmproot/original-trailers"
     git -C "$repo" interpret-trailers --parse "$tmproot/result" > "$tmproot/final-trailers"
@@ -117,6 +121,38 @@ commit_case opus_precedence $'Task\n\nCo-Authored-By: Claude Sonnet 4\nCo-Author
     $'Task\n\nCo-Authored-By: Claude Sonnet 4\nCo-Authored-By: Claude Opus 5\nGenerated-with: Claude Opus\n' by:claude-opus
 commit_case human $'Task\n\nAn ordinary explanation.\n' \
     $'Task\n\nAn ordinary explanation.\n\nGenerated-with: human\n' by:human
+# Use this exact case again for the mutation control below.
+claudecode_key_case() {
+    commit_case claudecode_no_trailer $'Task\n\nAn ordinary explanation.\n' \
+        $'Task\n\nAn ordinary explanation.\n' by:unknown 1
+}
+claudecode_key_case
+commit_case claudecode_empty $'Task\n\nAn ordinary explanation.\n' \
+    $'Task\n\nAn ordinary explanation.\n\nGenerated-with: human\n' by:human ""
+for setting in unset set; do
+    claude_args=()
+    if [[ "$setting" == set ]]; then
+        claude_args=(1)
+    fi
+    for model in codex 'GPT-6' 'Claude Opus 5' 'Claude Sonnet 4'; do
+        case "$model" in
+            codex|GPT-*) generated=codex; label=by:codex ;;
+            'Claude Opus'*) generated='Claude Opus'; label=by:claude-opus ;;
+            'Claude Sonnet'*) generated='Claude Sonnet'; label=by:claude-sonnet ;;
+        esac
+        commit_case "${setting}_$model" $'Task\n\nCo-Authored-By: '"$model"$'\n' \
+            $'Task\n\nCo-Authored-By: '"$model"$'\nGenerated-with: '"$generated"$'\n' \
+            "$label" "${claude_args[@]}"
+    done
+    commit_case "${setting}_explicit_human" $'Task\n\nGenerated-with: human\n' \
+        $'Task\n\nGenerated-with: human\n' by:human "${claude_args[@]}"
+    for evidence in claude Anthropic OpenAI GPT Fable Astra Haiku claude-opus; do
+        commit_case "${setting}_unknown_$evidence" $'Task\n\nSigned-off-by: '"$evidence"$'\n' \
+            $'Task\n\nSigned-off-by: '"$evidence"$'\n' by:unknown "${claude_args[@]}"
+    done
+    commit_case "${setting}_session" $'Task\n\nClaude-Session: abc123\n' \
+        $'Task\n\nClaude-Session: abc123\n' by:unknown "${claude_args[@]}"
+done
 commit_case explicit $'Task\n\ngEnErAtEd-WiTh: Claude Sonnet\n' \
     $'Task\n\ngEnErAtEd-WiTh: Claude Sonnet\n' by:claude-sonnet
 commit_case explicit_human $'Task\n\nGenerated-with: human\n' \
@@ -201,7 +237,7 @@ check_commit verbose by:codex env GIT_EDITOR="$tmproot/verbose-editor" \
 git -C "$repo" checkout -q -b merge-source || exit 1
 printf 'merge change\n' > "$repo/merge-file"
 git -C "$repo" add merge-file || exit 1
-git -C "$repo" commit -q -m $'Merge feature\n\nCo-Authored-By: codex' || exit 1
+env -u CLAUDECODE git -C "$repo" commit -q -m $'Merge feature\n\nCo-Authored-By: codex' || exit 1
 git -C "$repo" checkout -q main || exit 1
 printf "Merge branch 'merge-source'\n\nGenerated-with: human\n" > "$tmproot/expected"
 check_commit merge_no_ff by:human env GIT_MERGE_AUTOEDIT=no \
@@ -212,7 +248,7 @@ check_commit merge_no_ff by:human env GIT_MERGE_AUTOEDIT=no \
 git -C "$repo" checkout -q -b squash-source || exit 1
 printf 'squash change\n' > "$repo/squash-file"
 git -C "$repo" add squash-file || exit 1
-git -C "$repo" commit -q -m $'Squash feature\n\nCo-Authored-By: codex' || exit 1
+env -u CLAUDECODE git -C "$repo" commit -q -m $'Squash feature\n\nCo-Authored-By: codex' || exit 1
 squash_source=$(git -C "$repo" rev-parse HEAD)
 git -C "$repo" checkout -q main || exit 1
 git -C "$repo" merge -q --squash squash-source > "$tmproot/squash.log" 2>&1 || exit 1
@@ -247,12 +283,134 @@ This reverts commit $reverted_commit.
 MSG
 check_commit revert by:unknown git -C "$repo" revert --no-edit HEAD
 
+# Repeat every cleanup path with no agent trailers under both environments.
+# Start at the same commit and reuse branch names to keep the fixtures stable.
+paths_base=$(git -C "$repo" rev-parse HEAD)
+for setting in unset set; do
+    claude_env=(env -u CLAUDECODE)
+    label=by:human
+    if [[ "$setting" == set ]]; then
+        claude_env=(env CLAUDECODE=1)
+        label=by:unknown
+    fi
+    git -C "$repo" checkout -q -B "paths-$setting" "$paths_base" || exit 1
+    expected_path() {
+        printf '%s' "$1" > "$tmproot/expected"
+        if [[ "$setting" == unset ]]; then
+            printf '\nGenerated-with: human\n' >> "$tmproot/expected"
+        fi
+    }
+    cat > "$tmproot/plain-editor" <<'SH'
+#!/bin/sh
+cat > "$1" <<'MSG'
+Editor fallback
+
+An ordinary explanation.
+# Git removes this comment after the hook.
+MSG
+SH
+    chmod +x "$tmproot/plain-editor" || exit 1
+    expected_path $'Editor fallback\n\nAn ordinary explanation.\n'
+    check_commit "${setting}_editor_no_trailer" "$label" "${claude_env[@]}" \
+        GIT_EDITOR="$tmproot/plain-editor" git -C "$repo" commit -q --allow-empty
+
+    printf 'verbose fallback\n' > "$repo/verbose-fallback"
+    git -C "$repo" add verbose-fallback || exit 1
+    cat > "$tmproot/plain-verbose-editor" <<'SH'
+#!/bin/sh
+cat > "$1" <<'MSG'
+Verbose fallback
+
+An ordinary explanation.
+
+# ------------------------ >8 ------------------------
+# Git removes the following verbose diff after the hook.
+diff --git a/verbose-fallback b/verbose-fallback
+new file mode 100644
+--- /dev/null
++++ b/verbose-fallback
+@@ -0,0 +1 @@
++verbose fallback
+MSG
+SH
+    chmod +x "$tmproot/plain-verbose-editor" || exit 1
+    expected_path $'Verbose fallback\n\nAn ordinary explanation.\n'
+    check_commit "${setting}_verbose_no_trailer" "$label" "${claude_env[@]}" \
+        GIT_EDITOR="$tmproot/plain-verbose-editor" git -C "$repo" commit -q -v
+
+    git -C "$repo" checkout -q -B paths-merge-source || exit 1
+    printf 'merge fallback\n' > "$repo/merge-fallback"
+    git -C "$repo" add merge-fallback || exit 1
+    # Source fixtures have no trailers; only the resulting merge/squash runs
+    # the hook under test, with its environment selected explicitly.
+    env -u CLAUDECODE git -C "$repo" commit -q --no-verify -m 'Merge fallback' || exit 1
+    git -C "$repo" checkout -q "paths-$setting" || exit 1
+    expected_path "Merge branch 'paths-merge-source' into paths-$setting"$'\n'
+    check_commit "${setting}_merge_no_trailer" "$label" "${claude_env[@]}" \
+        GIT_MERGE_AUTOEDIT=no git -C "$repo" merge -q --no-ff paths-merge-source
+
+    git -C "$repo" checkout -q -B paths-squash-source || exit 1
+    printf 'squash fallback\n' > "$repo/squash-fallback"
+    git -C "$repo" add squash-fallback || exit 1
+    env -u CLAUDECODE git -C "$repo" commit -q --no-verify -m 'Squash fallback' || exit 1
+    squash_source=$(git -C "$repo" rev-parse HEAD)
+    git -C "$repo" checkout -q "paths-$setting" || exit 1
+    env -u CLAUDECODE git -C "$repo" merge -q --squash paths-squash-source \
+        > "$tmproot/squash.log" 2>&1 || exit 1
+    cat > "$tmproot/expected" <<MSG
+Squashed commit of the following:
+
+commit $squash_source
+Author: Test <test@example.invalid>
+Date:   Sat Jan 1 00:00:00 2000 +0000
+
+    Squash fallback
+MSG
+    if [[ "$setting" == unset ]]; then
+        printf '\nGenerated-with: human\n' >> "$tmproot/expected"
+    fi
+    check_commit "${setting}_squash_no_trailer" "$label" "${claude_env[@]}" \
+        git -C "$repo" commit -q --no-edit
+
+    reverted_commit=$(git -C "$repo" rev-parse HEAD)
+    cat > "$tmproot/expected" <<MSG
+Revert "Squashed commit of the following:"
+
+This reverts commit $reverted_commit.
+MSG
+    # Revert bypasses commit-msg in both environments.
+    check_commit "${setting}_revert_no_trailer" by:unknown "${claude_env[@]}" \
+        git -C "$repo" revert --no-edit HEAD
+done
+
+# Removing just the environment guard must break the very same key case.
+# Isolate the expected assertion failures so they cannot mask suite failures.
+mkdir "$tmproot/mutant-hooks" || exit 1
+sed 's/agent or os.environ.get("CLAUDECODE")/agent/' "$HOOK_SRC" \
+    > "$tmproot/mutant-hooks/commit-msg" || exit 1
+chmod +x "$tmproot/mutant-hooks/commit-msg" || exit 1
+if (
+    tests_run=0
+    tests_failed=0
+    export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath
+    export GIT_CONFIG_VALUE_0="$tmproot/mutant-hooks"
+    claudecode_key_case
+    [[ $tests_run -eq 4 && $tests_failed -eq 2 ]]
+) > "$tmproot/mutant.log" 2>&1 \
+    && grep -Eq 'FAIL: claudecode_no_trailer: exact committed message' "$tmproot/mutant.log" \
+    && grep -Eq 'FAIL: claudecode_no_trailer: board label by:unknown \(got by:human\)' "$tmproot/mutant.log"; then
+    report true 'negative control: removing CLAUDECODE guard fails the key case'
+else
+    report false 'negative control: removing CLAUDECODE guard fails the key case'
+    cat "$tmproot/mutant.log"
+fi
+
 # Every direct error case must exit zero AND preserve bytes, including inputs
 # that Git itself would reject before/after invoking commit-msg.
 direct_case() {
     local name="$1" file="$2"; shift 2
     cp "$file" "$tmproot/before" || exit 1
-    if "$@" > "$tmproot/direct.log" 2>&1; then
+    if env -u CLAUDECODE "$@" > "$tmproot/direct.log" 2>&1; then
         report true "$name: exit zero"
     else
         report false "$name: exit zero"
@@ -283,7 +441,7 @@ direct_case unwritable "$tmproot/message" "$hook" "$tmproot/message"
 chmod 644 "$tmproot/message"
 cp "$tmproot/message" "$tmproot/before" || exit 1
 chmod 000 "$tmproot/message"
-if "$hook" "$tmproot/message"; then
+if env -u CLAUDECODE "$hook" "$tmproot/message"; then
     report true 'unreadable: exit zero'
 else
     report false 'unreadable: exit zero'

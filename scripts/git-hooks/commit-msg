@@ -43,7 +43,7 @@ def derive(parsed):
     ):
         if any(re.search(pattern, value) for value in values):
             return label
-    return None if agent else "human"
+    return None if agent or os.environ.get("CLAUDECODE") else "human"
 
 
 def main():
