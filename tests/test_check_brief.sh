@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 2
 TMP=$(mktemp -d) || exit 2
 trap 'rm -rf "$TMP"' EXIT
 export BRIEF_GH_CALLS="$TMP/gh-calls"
-export PGWT_LEAD_STATE_DIR="$TMP" PGWT_GH_TIMEOUT=1
+export PGWT_LEAD_STATE_DIR="$TMP"
 cat > "$TMP/gh" <<'STUB'
 #!/usr/bin/env bash
 set -u
@@ -146,7 +146,7 @@ $ gh api repos/example/project/issues/303/comments --paginate
 CONTROLLING SCOPE DECISION: #303 none (0 comments)'
 check "gh failure is an error" 2 '#404'
 check "unparseable gh output is an error" 2 '#505'
-check "gh timeout is an error" 2 '#707'
+PGWT_GH_TIMEOUT=1 check "gh timeout is an error" 2 '#707'
 if [[ "$LAST_OUT" == *'timeout after 1s'* ]]; then
   pass=$((pass+1)); echo 'ok   error names the gh timeout'
 else
