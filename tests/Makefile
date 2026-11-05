@@ -105,12 +105,13 @@ test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 # #416: drive the REAL pgwt_handle_timer (the defect was the ORDER of the
-# steps inside it), replacing only the ring buffer. Same object set as
+# steps inside it), replacing the ring buffer. #779 also observes real writer
+# rotation/retention calls with pass-through wrappers. Same object set as
 # test_backend_lifecycle; the calloc'd skeleton makes every bpf_map__fd()
 # return -EINVAL, so the map reads inside the handler are empty rather than
 # faked and no bpf_* wrap is needed.
 test_tick_drain: test_tick_drain.c $(LIFECYCLE_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=ring_buffer__consume $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
+	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=ring_buffer__consume -Wl,--wrap=pgwt_writer_check_rotation -Wl,--wrap=pgwt_summary_check_rotation -Wl,--wrap=pgwt_writer_cleanup_old_files $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
 	$(CC) $(CFLAGS) -o $@ $^
