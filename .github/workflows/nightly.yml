@@ -1,23 +1,24 @@
 # Nightly containerized platform matrix (Trust Milestone T7: TST-9, TST-12).
 #
-# The gating CI (ci.yml) runs entirely on ubuntu-latest — one cell of a ~24-cell
+# The gating CI (ci.yml) runs entirely on ubuntu-24.04 — one cell of a ~24-cell
 # support matrix (PG13/17/18 × EL8/EL9/Ubuntu × PIE/non-PIE). Every field escape
 # to date (#8, #24, #30, #31) lived in the capture/discovery slice, and the EL8
-# non-PIE + static-libbpf build path (the one that shipped the #24 platform) is
-# NEVER built in gating CI. This workflow exercises the real distro cells
-# nightly, inside privileged containers that share the host runner's kernel — so
-# BPF (BTF at /sys/kernel/btf/vmlinux) and, where the hypervisor allows it,
-# hardware watchpoints work exactly as in the ci.yml capture-smoke job.
+# non-PIE + static-libbpf build path is NEVER built in gating CI. This workflow
+# exercises distro userspace nightly in privileged containers sharing the hosted
+# ubuntu-24.04 kernel, with BPF using the host's /sys/kernel/btf/vmlinux.
+# EL8 coverage includes gcc 8.5, the bundled libbpf 1.4.7 build path, non-PIE
+# PGDG binaries and SDT notes; it does not cover EL8 kernel behaviour (4.18,
+# no ref_ctr_offset; #622), which only `make box-check OS=el8` on a 4.18 box does.
+# The --core smoke skips ci.yml's watchpoint-fidelity assertions (see below).
 #
 # Per cell (rockylinux:8 / rockylinux:9 / ubuntu:24.04):
 #   1. full build from source — EL8 has libbpf 0.5.0 (pre-USDT), so its build
 #      exercises the Makefile's static libbpf + bpftool bundling path (TST-12),
 #      which gating CI never compiles.
-#   2. the shared C unit suite (make -C tests check → unit_tests.list).
-#   3. the real-PG capture smoke (tests/ci_smoke.sh): tiered/sampled is the hard
-#      gate; full-mode watchpoint assertions run when the probe finds hardware
-#      breakpoints and are skipped LOUDLY (job summary) when it does not — the
-#      established degrade-loudly pattern.
+#   2. the shared C unit suite (make check-tests → unit_tests.list).
+#   3. the real-PG capture smoke (tests/ci_smoke.sh --core): tiered/sampled is
+#      the hard gate; watchpoint-fidelity and CPU-storm sections are skipped
+#      LOUDLY (job summary) — the established degrade-loudly pattern.
 #
 # Failure surfacing: this workflow is simply RED in the Actions tab (no external
 # alerting this phase). Kick it manually from the Actions tab (workflow_dispatch)
@@ -46,10 +47,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # EL8: non-PIE PGDG postgres + the static libbpf/bpftool bundling
-          # path (libbpf 0.5.0 predates USDT). PG13 from the PGDG archive repo
-          # is the #24 platform — the one automated coverage has exercised
-          # exactly once ever.
+          # EL8 userspace: gcc 8.5, the bundled libbpf 1.4.7 build path
+          # (distro libbpf 0.5.0 predates USDT), non-PIE PGDG PG13 binaries
+          # from the archive repo and SDT notes are covered on the hosted
+          # ubuntu-24.04 kernel; EL8 kernel behaviour (4.18, no ref_ctr_offset;
+          # #622) is covered only by `make box-check OS=el8` on a 4.18 box.
           - name: rocky8-pg13
             container: rockylinux:8
             family: el
@@ -122,7 +124,7 @@ jobs:
           # pillow + numpy: tests/test_ui_live_smoke_lib.py (unit_tests.list,
           # issue #112) decodes/diffs PNGs with them; ci.yml's build-and-unit
           # job gets these via actions/setup-python + pip, but this container
-          # has no such step, so `make -C tests check` was failing loudly with
+          # has no such step, so `make check-tests` was failing loudly with
           # ModuleNotFoundError on numpy (issue #139).
           python3.11 -m pip install pillow numpy
           # PGDG repo.
@@ -180,6 +182,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           V=${{ matrix.pg }}
           apt-get update
+          # Ubuntu uses distro nodejs 18.x; EL cells use the nodejs:22 module.
           apt-get install -y gcc clang llvm make git python3 python3-pip sudo curl gnupg \
             lsb-release ca-certificates procps iproute2 rsync nodejs \
             libbpf-dev libelf-dev zlib1g-dev liblz4-dev linux-tools-common \
@@ -228,7 +231,9 @@ jobs:
 
       # ── Build (EL8 exercises the static libbpf/bpftool bundling path) ─────
       - name: Verify BTF is visible from the container
-        run: test -r /sys/kernel/btf/vmlinux
+        run: |
+          uname -r
+          test -r /sys/kernel/btf/vmlinux
 
       - name: Build (BPF tracer + pgwt-server)
         run: make
@@ -253,9 +258,10 @@ jobs:
       # and cannot replace that cell under #770 part 3.
       - name: Run capture smoke (PG ${{ matrix.pg }}, --core)
         env:
-          # Every container shares the ubuntu-24.04 host kernel, including
-          # EL8: this is NOT box-check's EL8/4.18 kernel contract of 0.
-          # PGDG binaries have SDT notes; semaphore refcounting is available.
+          # True here because every container uses the ubuntu-24.04 host's
+          # kernel with semaphore refcounting, and PGDG binaries have SDT notes.
+          # box-check still declares 0 for el8: its 4.18 kernel lacks
+          # ref_ctr_offset (#622); nightly does not validate that contract.
           PGWT_EXPECT_PHASE_PROBES: "1"
         run: |
           V=${{ matrix.pg }}
