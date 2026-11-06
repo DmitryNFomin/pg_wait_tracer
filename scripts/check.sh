@@ -74,6 +74,9 @@ run bash tests/test_gitignore_build_products.sh
 step "bash: push-guard denylist and executable pre-push proofs (#719)"
 run bash tests/test_push_guard_denylist.sh
 
+step "bash: commit-msg attribution hook fails open and derives Generated-with (#771)"
+run bash tests/test_commit_msg_hook.sh
+
 step "report audit isolation and contradiction controls (#761)"
 run python3 scripts/lead/audit-report-selftest.py
 
