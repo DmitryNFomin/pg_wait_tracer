@@ -1897,6 +1897,69 @@ static void test_mismatch_wait_attribution(void)
     }
 }
 
+/* The wall snapshot's own guards (Refs #803). 11c-e guard only the CPU half of
+ * `prev`; the wall half would otherwise be protected solely by the shared
+ * memset. Setup is 12a: A = Lock wait [1 s, 7.5 s) credited 6000 ms by
+ * ticks, B (LWLock, start 7.5 s) noted but NOT ticked, so `prev` holds A's
+ * wall credit and nothing overwrites it.
+ *   other record: a Lock record with a DIFFERENT start (20 s, 1 s long, after
+ *     B's un-refreshed note has expired so the watermark is far below it) closes.
+ *     Lock total must be 6000 + 1000. Reusing A's snapshot would subtract
+ *     min(6000, 1000) and read 6000.
+ *   after forget: forget_open, then A's close. The close is whole (nothing
+ *     credited survives), so Lock total is 6000 + 6500. A surviving snapshot
+ *     would subtract 6000 and read 6500. */
+static uint64_t run_wall_guard(const char *name, int after_forget)
+{
+    struct wr z;
+    if (wr_open(&z, name) != 0) { printf("  FAIL: setup\n"); failures++; return 0; }
+    struct pgwt_trace_event seed =
+        mkev(PID_A, BASE_MONO + S, 0, EV_LOCK_REL, EV_LOCK_REL, 0,
+             PGWT_CPU_NS_UNKNOWN);
+    pgwt_summary_push_event(z.w, &seed, 0, seed.old_event);
+    for (int s = 2; s <= 7; s++) {
+        uint64_t now = BASE_MONO + (uint64_t)s * S + 200 * MS;
+        pgwt_summary_note_open(z.w, PID_A, EV_LOCK_REL, BASE_MONO + S, 0, now);
+        pgwt_summary_flush_completed(z.w, now);
+    }
+    uint64_t b_start = BASE_MONO + 7500 * MS;
+    pgwt_summary_note_open(z.w, PID_A, EV_LWLOCK, b_start, 0,
+                           BASE_MONO + 7700 * MS);
+    if (after_forget) {
+        struct pgwt_trace_event a =
+            mkev(PID_A, b_start, 6500 * MS, EV_LOCK_REL, EV_LWLOCK, 0,
+                 PGWT_CPU_NS_UNKNOWN);
+        pgwt_summary_forget_open(z.w, PID_A);
+        pgwt_summary_push_event(z.w, &a, 0, a.old_event);
+    } else {
+        struct pgwt_trace_event c =
+            mkev(PID_A, BASE_MONO + 21 * S, 1 * S, EV_LOCK_REL, EV_LWLOCK, 0,
+                 PGWT_CPU_NS_UNKNOWN);
+        pgwt_summary_push_event(z.w, &c, 0, c.old_event);
+    }
+    wr_close(&z);
+    struct readback rb = { .want_pid = PID_A };
+    int n = read_back(z.dir, &rb);
+    uint64_t t = n > 0 ? RB_SUM(&rb, ev_lock_rel_total_ns) : 0;
+    free(rb.blob);
+    wr_free(&z);
+    return t;
+}
+
+static void test_wall_snapshot_guards(void)
+{
+    printf("-- 12c-d: the wall snapshot's own guards (Refs #803) --\n");
+    uint64_t t = run_wall_guard("wg_other", 0);
+    CHECK(t == 7000 * MS,
+          "12c: a record with a DIFFERENT start is not charged against the "
+          "retained wall credit (Lock total %llu ms, want 7000)",
+          (unsigned long long)(t / MS));
+    t = run_wall_guard("wg_forget", 1);
+    CHECK(t == 12500 * MS,
+          "12d: after forget_open nothing is restored, the close is whole "
+          "(Lock total %llu ms, want 12500)", (unsigned long long)(t / MS));
+}
+
 /* ── §11c-e: the guards on the restored state ────────────────────────────
  *
  * The restore in §11a is only safe because of two things the happy path
@@ -2016,6 +2079,7 @@ int main(void)
     test_mismatch_close_conservation();   /* ditto (#709) */
     test_prev_guards();   /* ditto (#709) */
     test_mismatch_wait_attribution();   /* ditto (Refs #803) */
+    test_wall_snapshot_guards();   /* ditto (Refs #803) */
 
     printf("\n%d checks, %d failures\n", checks, failures);
     printf("=== test_open_cpu_accounting: %s ===\n",

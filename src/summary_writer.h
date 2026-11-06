@@ -493,8 +493,9 @@
  *     per-interval measured identity in piece 2 can fail to hold exactly;
  *     the per-interval wall split holds when the live note or the
  *     single-depth saved wall snapshot matches the close; a note two
- *     intervals past the close falls back to the per-PID watermark and can
- *     still mis-attribute by up to one tick. Refs #803.
+ *     intervals past the close falls back to the per-PID watermark, which
+ *     can LOSE up to one tick of that interval (an under-report, not a
+ *     misattribution between intervals; no counter shows it). Refs #803.
  *
  * WHY THE VERSION MOVES WITH THE PRODUCER. The rule above is an
  * ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
@@ -1239,7 +1240,8 @@ struct pgwt_summary_writer {
      *                        identity can fail. The per-interval wall split
      *                        holds when the live note or the single-depth
      *                        wall snapshot matches the close (else the
-     *                        watermark fallback applies). Refs #803.
+     *                        watermark fallback applies, which can lose up
+     *                        to one tick: an under-report). Refs #803.
      */
     uint64_t      open_cpu_credited_ns_total;
     uint64_t      open_cpu_measured_ns_total;
