@@ -60,11 +60,8 @@
  *   §4 the straddle rule (a pair whose old_event began in an earlier block)
  *   §5 plan() is a partition: exactly one of SKIP/MERGE/DECODE per block
  *   §6 the model test: merged-plus-decoded == raw, over every window
- *   §6b src/server.c's inclusive end bound, pinned in BOTH directions with
- *       the same 163 ns literal: zero divergence from the loader, and
- *       exactly one record lost under a half-open end bound. (This was a
- *       "known divergence" until c27e084 reconciled the aggregate TO the
- *       loader; it is now an agreement, and the literal is what holds it.)
+ *   §6b half-open accumulation versus inclusive fidelity admission, pinned
+ *       in BOTH directions with the same one-record / 163 ns literal
  *   §7 mutation probes: the comparator can see one count / one ns / one pair
  *   §8 bypass suite: every way this gate's detection can be made unreachable
  *   §9 on-disk, through the real writer/reader, driving the very function
@@ -495,23 +492,25 @@ static void section1_predicate_differential(void)
     e.old_event = E_IO1; e.flags = PGWT_EVENT_FLAG_SAMPLE;
     CHECK(pgwt_block_agg_node_counts(&e) == 0, "sample: no node time");
 
-    /* C7 at the two bounds and one past each. INCLUSIVE at both ends, not
-     * half-open -- see the ts == to assertion three lines down. The stale
-     * "half-open" wording that used to head this block is the exact
-     * misreading that cost this branch a wiring round and took
-     * test_data_aas's Total AAS from 4.0 to 0. */
+    /* C7: half-open accumulation, inclusive fidelity admission. Changing
+     * loader selection is what zeroed test_data_aas, not this counting gate. */
     memset(&e, 0, sizeof(e));
     e.timestamp_ns = 500;
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1, "ts == from is in");
+    CHECK(pgwt_block_agg_admitted(&e, 500, 600) == 1, "ts == from is admitted");
     CHECK(pgwt_block_agg_in_window(&e, 501, 600) == 0, "ts < from is out");
+    CHECK(pgwt_block_agg_admitted(&e, 501, 600) == 0, "ts < from is not admitted");
     e.timestamp_ns = 600;
-    CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1,
-          "ts == to is IN: timestamp_ns is when the wait ENDED, so an event "
-          "ending exactly at `to` lies wholly inside the window (C7)");
+    CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 0,
+          "ts == to is OUT for counting/accumulation (C7, #427)");
+    CHECK(pgwt_block_agg_admitted(&e, 500, 600) == 1,
+          "ts == to is still admitted for fidelity");
     e.timestamp_ns = 601;
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 0, "ts == to+1 is out");
+    CHECK(pgwt_block_agg_admitted(&e, 500, 600) == 0, "ts == to+1 is not admitted");
     e.timestamp_ns = 599;
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1, "ts == to-1 is in");
+    CHECK(pgwt_block_agg_admitted(&e, 500, 600) == 1, "ts == to-1 is admitted");
 
     /* §1b C7 at FILE granularity — the same rule one layer up, where it
      * drifted and shipped. transitions_from_block_aggs() used
@@ -1075,26 +1074,32 @@ static void section5_plan_partition(void)
                       "plan returned %d, not one of the three", (int)p);
                 if (p == PGWT_BLOCK_MERGE) {
                     merge++;
-                    /* A MERGEd block must be wholly inside under the SAME
-                     * bound the records are selected by (C7: inclusive on the
-                     * END key) — stated here independently of plan()'s code. */
+                    /* A MERGEd block must be wholly inside the half-open
+                     * accumulation window (C7), independently of plan(). */
                     CHECK(b[k].id.first_timestamp_ns >= from &&
-                          b[k].id.last_timestamp_ns <= to,
+                          b[k].id.last_timestamp_ns < to,
                           "MERGE of a block not wholly inside [%" PRIu64
                           ", %" PRIu64 ")", from, to);
                     /* ... and therefore every one of its records is in-window,
                      * which is what makes folding the whole aggregate sound. */
-                    for (int e = 0; e < b[k].n; e++)
+                    for (int e = 0; e < b[k].n; e++) {
                         CHECK(pgwt_block_agg_in_window(&b[k].ev[e], from, to),
                               "MERGEd block holds an out-of-window record");
+                        CHECK(pgwt_block_agg_admitted(&b[k].ev[e], from, to),
+                              "every MERGEd record must also be admitted");
+                    }
                 } else if (p == PGWT_BLOCK_SKIP) {
                     skip++;
-                    /* A SKIPped block must hold NO in-window record. */
-                    for (int e = 0; e < b[k].n; e++)
+                    /* Inclusive gating: a SKIPped block must hold NO admitted
+                     * record, even one that contributes only fidelity. */
+                    for (int e = 0; e < b[k].n; e++) {
                         CHECK(!pgwt_block_agg_in_window(&b[k].ev[e], from, to),
                               "SKIPped block holds an in-window record "
                               "(ts %" PRIu64 ", window [%" PRIu64 ", %" PRIu64
                               "))", b[k].ev[e].timestamp_ns, from, to);
+                        CHECK(!pgwt_block_agg_admitted(&b[k].ev[e], from, to),
+                              "SKIPped block holds a fidelity-admitted record");
+                    }
                 } else {
                     decode++;
                     /* THE CONVERSE, and the assertion M20 showed was missing:
@@ -1105,9 +1110,9 @@ static void section5_plan_partition(void)
                      * at all — correct and worthless, which no other check
                      * here can tell apart from correct and fast. */
                     CHECK(!(b[k].id.first_timestamp_ns >= from &&
-                            b[k].id.last_timestamp_ns <= to),
+                            b[k].id.last_timestamp_ns < to),
                           "DECODE of a block wholly inside [%" PRIu64
-                          ", %" PRIu64 "] that had an aggregate: the fast "
+                          ", %" PRIu64 ") that had an aggregate: the fast "
                           "path declined work it could have done", from, to);
                 }
             }
@@ -1134,6 +1139,62 @@ static void section5_plan_partition(void)
                 }
     CHECK(would_merge == merge, "have_agg sweep saw %ld, expected %ld",
           would_merge, merge);
+
+    /* A cached block whose final, contributing record closes exactly at to
+     * must DECODE. Use block 2 so the excluded record has nonzero pair AND
+     * node totals; a final marker would make a mistaken MERGE invisible. */
+    {
+        const struct fix_block *edge = &b[2];
+        uint64_t from = 3000, to = 3300;
+        struct pgwt_block_agg cached, win, folded;
+        int have = pgwt_block_agg_build(&cached, &edge->id, edge->type,
+                                        edge->committed, edge->ev, edge->n)
+                   == PGWT_BAGG_OK;
+        CHECK(have, "C7 boundary block build");
+        CHECK(pgwt_block_agg_plan(&edge->id, have, from, to) == PGWT_BLOCK_DECODE,
+              "C7 last == to must DECODE even with a cached aggregate");
+        CHECK(pgwt_block_agg_admitted(&edge->ev[edge->n - 1], from, to) &&
+              !pgwt_block_agg_in_window(&edge->ev[edge->n - 1], from, to),
+              "C7 final record is admitted for fidelity, not accumulation");
+        int nm, nd, ns;
+        CHECK(answer_window_phase1(edge, 1, &cached, &have, from, to, &win,
+                                   &nm, &nd, &ns) == PGWT_BAGG_OK,
+              "C7 boundary block answer");
+        pgwt_block_agg_init_window(&folded);
+        for (int e = 0; e < edge->n; e++)
+            if (pgwt_block_agg_in_window(&edge->ev[e], from, to))
+                CHECK(pgwt_block_agg_add_event(&folded, &edge->ev[e])
+                      == PGWT_BAGG_OK, "C7 fold boundary record");
+        CHECK(nm == 0 && nd == 1 && ns == 0 &&
+              win.total_transitions == 3 && win.pair_total_ns == 439 &&
+              win.node_total_ns == 439 &&
+              win.total_transitions == folded.total_transitions &&
+              win.pair_total_ns == folded.pair_total_ns &&
+              win.node_total_ns == folded.node_total_ns &&
+              win.n_pairs == folded.n_pairs && win.n_nodes == folded.n_nodes,
+              "C7 DECODE must equal record-by-record half-open folding: "
+              "three records, 139+149+151 ns; exclude the final 157 ns");
+        for (int e = 0; e < edge->n; e++) {
+            uint64_t wc = 0, wt = 0, fc = 0, ft = 0;
+            int wp = pgwt_block_agg_lookup(&win, edge->ev[e].old_event,
+                                           edge->ev[e].new_event, &wc, &wt);
+            int fp = pgwt_block_agg_lookup(&folded, edge->ev[e].old_event,
+                                           edge->ev[e].new_event, &fc, &ft);
+            CHECK(wp == fp && wc == fc && wt == ft &&
+                  win.total_transitions == 3,
+                  "C7 boundary pair differs from half-open folding");
+            wc = wt = fc = ft = 0;
+            wp = pgwt_block_agg_node_lookup(&win, edge->ev[e].old_event,
+                                            &wc, &wt);
+            fp = pgwt_block_agg_node_lookup(&folded, edge->ev[e].old_event,
+                                            &fc, &ft);
+            CHECK(wp == fp && wc == fc && wt == ft && win.node_total_ns == 439,
+                  "C7 boundary node differs from half-open folding");
+        }
+        pgwt_block_agg_free(&folded);
+        pgwt_block_agg_free(&win);
+        pgwt_block_agg_free(&cached);
+    }
 }
 
 /* ── §6 the model test ──────────────────────────────────────────────────── */
@@ -1171,7 +1232,7 @@ static void section6_model(void)
             CHECK(rc == PGWT_BAGG_OK, "phase1 answer refused rc=%d", rc);
 
             struct pgwt_trace_event raw[FIX_MAX_EV * FIX_MAX_BLOCKS];
-            int n = collect_window(b, nb, from, to, 1, raw,
+            int n = collect_window(b, nb, from, to, 0, raw,
                                    (int)(sizeof(raw) / sizeof(raw[0])));
             struct raw_pairs rp;
             raw_pairs_of(&rp, raw, n);
@@ -1186,6 +1247,17 @@ static void section6_model(void)
             }
             CHECK(bad == 0, "window [%" PRIu64 ", %" PRIu64 "): %d "
                   "disagreement(s) with the raw path", from, to, bad);
+            /* The independent inclusive collection remains the fidelity
+             * population, even though the pair/node oracle is half-open. */
+            int admitted = collect_window(b, nb, from, to, 1, raw,
+                                          (int)(sizeof(raw) / sizeof(raw[0])));
+            int predicate_admitted = 0;
+            for (int k = 0; k < nb; k++)
+                for (int e = 0; e < b[k].n; e++)
+                    predicate_admitted +=
+                        pgwt_block_agg_admitted(&b[k].ev[e], from, to);
+            CHECK(predicate_admitted == admitted,
+                  "model fidelity admission must remain inclusive");
 
             seen.windows_compared++;
             seen.plan_merge += nm;
@@ -1211,21 +1283,14 @@ static void section6_model(void)
 
 /* ── §6b the END-KEY bound, pinned with a literal in both directions ────── */
 
-static void section6b_inclusive_end_divergence(void)
+static void section6b_counting_and_admission(void)
 {
-    printf("=== §6b the end-key bound: agreement with the loader, and the "
-           "cost of getting it wrong ===\n");
+    printf("=== §6b half-open accumulation, inclusive fidelity admission ===\n");
 
-    /* The loader selects `ts in [from, to]` because timestamp_ns is when the
-     * wait ENDED — an event ending exactly at `to` lies wholly inside the
-     * window. This module matches that (C7). Both directions are pinned:
-     *   - against the loader's own predicate: ZERO divergence;
-     *   - against a HALF-OPEN end bound: short by exactly the records at
-     *     ts == to, which is 1 record and 163 ns on this fixture.
-     * The second half is why this section exists. An earlier draft read the
-     * plan's "half-open throughout" as applying to the END key, made the
-     * loader match, and zeroed test_data_aas (Total AAS 4.0 -> 0) and
-     * test_data_categories on the box. The number below is what that costs. */
+    /* The loader admits [from, to] for time and fidelity. Accumulation uses
+     * [from, to), matching raw's EDGE_CLOSE occurrence gate (#427). Compared
+     * with accumulating every admitted record, this excludes exactly one
+     * transition and 163 ns; changing loader selection would lose time. */
     struct fix_block b[FIX_MAX_BLOCKS];
     int nb = build_model_fixture(b, FIX_MAX_BLOCKS);
     struct pgwt_block_agg per_block[FIX_MAX_BLOCKS];
@@ -1252,11 +1317,15 @@ static void section6b_inclusive_end_divergence(void)
     struct raw_pairs rp_incl;
     raw_pairs_of(&rp_incl, raw_incl, n_incl);
 
-    /* The loader's own predicate: the merged answer must match it exactly. */
-    CHECK(rp_incl.res.total_transitions == win.total_transitions,
-          "the merged answer must match the LOADER's inclusive-end selection "
-          "exactly: raw=%" PRIu64 " merged=%" PRIu64,
+    /* This deliberately accumulates inclusive inputs WITHOUT EDGE_CLOSE,
+     * measuring the old convention rather than simulating the raw loader. */
+    CHECK(rp_incl.res.total_transitions == win.total_transitions + 1,
+          "inclusive accumulation must have one extra transition: "
+          "inclusive=%" PRIu64 " merged=%" PRIu64,
           rp_incl.res.total_transitions, win.total_transitions);
+    CHECK(pgwt_block_agg_admitted(&b[3].ev[0], from, to) &&
+          !pgwt_block_agg_in_window(&b[3].ev[0], from, to),
+          "6b the extra inclusive record is admitted, not accumulated");
 
     uint64_t c_merged = 0, t_merged = 0;
     CHECK(pgwt_block_agg_lookup(&win, E_CPU, E_IO1, &c_merged, &t_merged),
@@ -1268,21 +1337,20 @@ static void section6b_inclusive_end_divergence(void)
             c_raw = rp_incl.res.rows[i].count;
             t_raw = (uint64_t)rp_incl.res.rows[i].total_ns;
         }
-    CHECK(c_raw == c_merged && t_raw == t_merged,
-          "CPU->IO1 must match the loader exactly: raw=(%" PRIu64 ", %" PRIu64
+    CHECK(c_raw == c_merged + 1 && t_raw == t_merged + 163,
+          "inclusive CPU->IO1 has one extra record / 163 ns: "
+          "inclusive=(%" PRIu64 ", %" PRIu64
           ") merged=(%" PRIu64 ", %" PRIu64 ")", c_raw, t_raw, c_merged,
           t_merged);
 
-    /* The other direction: a HALF-OPEN end bound is short by exactly the
-     * ts == to record. This literal makes the cost of the wrong convention a
-     * number rather than an argument. */
+    /* The half-open record-by-record oracle must now match exactly. */
     struct pgwt_trace_event raw_ho[FIX_MAX_EV * FIX_MAX_BLOCKS];
     int n_ho = collect_window(b, nb, from, to, 0, raw_ho,
                               (int)(sizeof(raw_ho) / sizeof(raw_ho[0])));
     struct raw_pairs rp_ho;
     raw_pairs_of(&rp_ho, raw_ho, n_ho);
-    CHECK(rp_ho.res.total_transitions == win.total_transitions - 1,
-          "a half-open end bound must LOSE exactly one transition here: "
+    CHECK(rp_ho.res.total_transitions == win.total_transitions,
+          "a half-open end bound must match accumulation exactly: "
           "half-open=%" PRIu64 " merged=%" PRIu64,
           rp_ho.res.total_transitions, win.total_transitions);
     uint64_t c_ho = 0, t_ho = 0;
@@ -1292,10 +1360,33 @@ static void section6b_inclusive_end_divergence(void)
             c_ho = rp_ho.res.rows[i].count;
             t_ho = (uint64_t)rp_ho.res.rows[i].total_ns;
         }
-    CHECK(c_ho == c_merged - 1 && t_ho == t_merged - 163,
-          "and the loss is exactly that record's 163 ns: half-open=(%" PRIu64
+    CHECK(c_ho == c_merged && t_ho == t_merged,
+          "half-open CPU->IO1 must match: half-open=(%" PRIu64
           ", %" PRIu64 ") merged=(%" PRIu64 ", %" PRIu64 ")",
           c_ho, t_ho, c_merged, t_merged);
+
+    /* A window containing ONLY an exact edge record remains EXACT, even
+     * though it accumulates nothing. Repeat with a structural marker: the
+     * fidelity admitted-count must not depend on either counting predicate. */
+    for (int marker = 0; marker < 2; marker++) {
+        struct pgwt_trace_event edge = b[3].ev[0];
+        if (marker)
+            edge.old_event = edge.new_event = PGWT_MARKER_EXEC_START;
+        struct pgwt_block_agg only;
+        pgwt_block_agg_init_window(&only);
+        uint64_t admitted = 0;
+        CHECK(pgwt_block_agg_add_events(&only, &edge, 1, to - 1, to,
+                                        &admitted) == PGWT_BAGG_OK,
+              "6b edge-only window, marker=%d", marker);
+        CHECK(admitted == 1 && only.total_transitions == 0 &&
+              only.node_total_ns == 0,
+              "6b edge-only window must admit one exact record for fidelity "
+              "and accumulate nothing, marker=%d", marker);
+        CHECK(pgwt_block_agg_admitted(&edge, to - 1, to) &&
+              !pgwt_block_agg_in_window(&edge, to - 1, to),
+              "6b edge-only admission stays inclusive, marker=%d", marker);
+        pgwt_block_agg_free(&only);
+    }
 
     raw_pairs_free(&rp_incl);
     raw_pairs_free(&rp_ho);
@@ -1694,10 +1785,9 @@ static void section8_bypass(void)
     }
 
     /* B12 a window that selects nothing, and a nonsense block header. */
-    /* from == to is a ONE-INSTANT window, not an empty one: with selection
-     * inclusive at both ends (C7), a record whose wait ended exactly at that
-     * instant belongs to it. Only an INVERTED window selects nothing. The
-     * block here spans [1000, 1100], so the instant 1000 is inside it. */
+    /* from == to still admits records for fidelity under inclusive admission
+     * (C7), although half-open accumulation is empty. Only an INVERTED window
+     * admits nothing. This block spans [1000, 1100], including instant 1000. */
     CHECK(pgwt_block_agg_plan(&b.id, 1, 1000, 1000) == PGWT_BLOCK_DECODE,
           "B12 a one-instant window inside a block must DECODE, not SKIP it "
           "and not merge it whole");
@@ -2108,16 +2198,22 @@ static void section9_on_disk(void)
                       pass, rc);
                 if (rc != PGWT_BAGG_OK) { pgwt_block_agg_free(&win); continue; }
 
-                /* raw side: the shipping pair implementation plus the
-                 * independent node oracle, over the same window (C7:
-                 * INCLUSIVE at both ends, not half-open). */
+                /* Raw accumulation: shipping pairs plus independent nodes
+                 * on [from, to). Fidelity independently admits [from, to],
+                 * including markers and the record closing exactly at to. */
                 struct pgwt_trace_event *sel =
                     calloc((size_t)n_all, sizeof(*sel));
-                int ns = 0;
-                for (int k2 = 0; k2 < n_all; k2++)
+                int ns = 0, n_admitted = 0, predicate_admitted = 0;
+                for (int k2 = 0; k2 < n_all; k2++) {
                     if (all[k2].timestamp_ns >= from &&
                         all[k2].timestamp_ns <= to)
+                        n_admitted++;
+                    predicate_admitted +=
+                        pgwt_block_agg_admitted(&all[k2], from, to);
+                    if (all[k2].timestamp_ns >= from &&
+                        all[k2].timestamp_ns < to)
                         sel[ns++] = all[k2];
+                }
                 struct raw_pairs rp;
                 raw_pairs_of(&rp, sel, ns);
                 struct node_oracle_row nrows[64];
@@ -2131,9 +2227,11 @@ static void section9_on_disk(void)
                 }
                 CHECK(bad == 0, "§9 pass %d window [%" PRIu64 ", %" PRIu64
                       "): %d disagreement(s) with raw", pass, from, to, bad);
-                CHECK(exact == (uint64_t)ns,
+                CHECK(exact == (uint64_t)n_admitted,
                       "§9 exact-record count %" PRIu64 " != %d admitted",
-                      exact, ns);
+                      exact, n_admitted);
+                CHECK(predicate_admitted == n_admitted,
+                      "§9 inclusive admitted predicate disagrees with oracle");
 
                 windows++;
                 merges += m;
@@ -2195,6 +2293,29 @@ static void section9_on_disk(void)
         pgwt_block_agg_free(&wb);
     }
 
+    /* Warm cache, edge-only window: a cached first block cannot MERGE away
+     * the distinction between zero accumulation and one admitted record. */
+    {
+        struct pgwt_event_reader r;
+        struct pgwt_block_agg win;
+        CHECK(pgwt_reader_open(&r, path) == 0, "§9 edge-only open");
+        pgwt_block_agg_init_window(&win);
+        uint64_t exact = 0;
+        int m = 0, d = 0;
+        CHECK(pgwt_block_agg_window_from_reader(&r, first_ts - 1, first_ts,
+                  &win, sec9_lookup, NULL, NULL, &cache, &exact, &m, &d)
+              == PGWT_BAGG_OK, "§9 edge-only reader window");
+        CHECK(exact == 1 && win.total_transitions == 0 &&
+              win.node_total_ns == 0 && m == 0 && d == 1,
+              "§9 edge-only reader must DECODE, admit one for EXACT fidelity, "
+              "and accumulate nothing");
+        CHECK(pgwt_block_agg_admitted(&all[0], first_ts - 1, first_ts) &&
+              !pgwt_block_agg_in_window(&all[0], first_ts - 1, first_ts),
+              "§9 first exact record at to is admitted, not accumulated");
+        pgwt_block_agg_free(&win);
+        pgwt_reader_close(&r);
+    }
+
     sec9_cache_free(&cache);
     free(all);
     if (system(rm) != 0) { }
@@ -2238,10 +2359,28 @@ static void section9_on_disk(void)
             CHECK(rc2 == PGWT_BAGG_OK,
                   "§9 a SAMPLES block OUTSIDE the window must be skipped, "
                   "not refused (got %d)", rc2);
-            /* 65, not 64: the window end is inclusive (C7), so the record at
-             * exactly f2 + 64*1000 is admitted along with the 64 before it. */
+            /* Still 65 admitted for fidelity, but only the preceding 64
+             * records are eligible for accumulation under C7. Record 64 is
+             * an ordinary visible transition, so an inclusive accumulation
+             * regression changes both pair and node totals here. */
             CHECK(e2 == 65, "§9 expected 65 admitted records, got %" PRIu64,
                   e2);
+            struct pgwt_trace_event *records = NULL;
+            int nr = sec9_decode_all(spath, &records);
+            CHECK(nr > 64, "§9 need the first 65 decoded records");
+            if (nr > 64) {
+                CHECK(pgwt_block_agg_admitted(&records[64], f2, f2 + 64000) &&
+                      !pgwt_block_agg_in_window(&records[64], f2, f2 + 64000),
+                      "§9 record 65 is fidelity-admitted, not accumulated");
+                struct raw_pairs rp;
+                raw_pairs_of(&rp, records, 64);
+                struct node_oracle_row nodes[64];
+                int nn = raw_node_oracle(records, 64, nodes, 64);
+                CHECK(compare_agg_vs_raw(&w2, &rp.res, nodes, nn, 1) == 0,
+                      "§9 accumulation must match only the first 64 records");
+                raw_pairs_free(&rp);
+            }
+            free(records);
             pgwt_block_agg_free(&w2);
             pgwt_reader_close(&r);
         }
@@ -2338,7 +2477,7 @@ int main(void)
     section4_straddle();
     section5_plan_partition();
     section6_model();
-    section6b_inclusive_end_divergence();
+    section6b_counting_and_admission();
     section7_mutation_probes();
     section8_bypass();
     section9_on_disk();

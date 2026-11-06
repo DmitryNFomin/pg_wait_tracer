@@ -872,15 +872,25 @@ static void test_right_edge_bypass(void)
               "zero-width window: 0 occurrences");
     free(tz.rows);
 
-    /* 6e-4. A zero-duration record closing exactly at `to`: no time, but it
-     * IS an occurrence — "instant" is the whole point of the rule. */
+    /* 6e-4. #427: a zero-duration exact record closing exactly at `to`
+     * belongs to the following half-open window. Neither window gets time,
+     * and together they must count exactly one occurrence. */
     struct pgwt_trace_event instant = mk(5003, LOCK_RELATION, RA_TO, 0, 88, 0);
     struct pgwt_events_result ti;
     pgwt_compute_top_events(&instant, 1, &f, RA_FROM, RA_TO, 18000.0, &ti);
     CHECK_MS(ev_total_ms(&ti, LOCK_RELATION), 0.0,
              "zero-duration record at `to`: 0 ms of time");
+    uint64_t instant_count = ev_count(&ti, LOCK_RELATION);
+    CHECK_U64(instant_count, 0,
+              "zero-duration exact close at `to`: excluded from this window");
+    free(ti.rows);
+    pgwt_compute_top_events(&instant, 1, &f, RA_TO, RA_TO + S(2), 2000.0, &ti);
+    CHECK_MS(ev_total_ms(&ti, LOCK_RELATION), 0.0,
+             "zero-duration exact close at adjacent `from`: 0 ms of time");
     CHECK_U64(ev_count(&ti, LOCK_RELATION), 1,
-              "…but one occurrence: it closed inside the window");
+              "zero-duration exact close belongs to the adjacent window");
+    CHECK_U64(instant_count + ev_count(&ti, LOCK_RELATION), 1,
+              "adjacent windows count the zero-duration exact close once");
     free(ti.rows);
 
     /* 6e-5. A record WHOLLY past `to` (starts after the window too): neither
