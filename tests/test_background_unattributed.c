@@ -204,9 +204,9 @@ static void control(uint32_t category, const char *name)
 }
 
 /* An event-flag bit no category producer emits today: the NEXT category,
- * whatever it turns out to be. 0x1000 is the first free bit above
- * PGWT_EVENT_FLAG_RIGHT_OPEN (0x800) in src/pg_wait_tracer.h. */
-#define FUTURE_CAT 0x1000U
+ * whatever it turns out to be. 0x2000 is the first free bit above
+ * PGWT_EVENT_FLAG_EDGE_CLOSE (0x1000) in src/pg_wait_tracer.h. */
+#define FUTURE_CAT 0x2000U
 
 /* FAIL-SAFE DIRECTION over categories #596 does not name.
  *
@@ -222,7 +222,7 @@ static void control(uint32_t category, const char *name)
  * (under-counted) rather than as somebody else's query time. */
 static void unknown_category_is_dropped_not_borrowed(void)
 {
-    /* If 0x1000 ever becomes a real category this leg silently starts
+    /* If 0x2000 ever becomes a real category this leg silently starts
      * testing that category instead of an unknown one, so say so out loud. */
     CHECK(FUTURE_CAT & (PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_MAINT |
                         PGWT_EVENT_FLAG_BACKGROUND), 0);

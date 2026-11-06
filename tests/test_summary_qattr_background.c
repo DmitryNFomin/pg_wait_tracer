@@ -14,8 +14,8 @@
 
 #define MS 1000000ULL
 #define LOCK_RELATION WEI(PG_WAIT_LOCK, 0)
-/* First free bit above PGWT_EVENT_FLAG_RIGHT_OPEN (0x800). */
-#define FUTURE_CAT 0x1000U
+/* First free bit above PGWT_EVENT_FLAG_EDGE_CLOSE (0x1000). */
+#define FUTURE_CAT 0x2000U
 
 static int failures;
 static char g_base[300];

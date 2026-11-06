@@ -1501,6 +1501,218 @@ static void test_tiered_budget(const char *dir_t, uint64_t base)
     } else { CHECK(0, "15. bypass child failed"); }
 }
 
+/* ── 16. #427: exact closes at `to` belong to the next window ────────── */
+static int build_edge_fixture(const char *dir, uint64_t base)
+{
+    struct pgwt_event_writer writer;
+    if (pgwt_writer_init(&writer, dir, 180000, 0, NULL) != 0)
+        return -1;
+    push(&writer, base + 10 * MS, FILLER_PID, 0, EV_IO, MS);
+
+    struct pgwt_trace_event ev = {0};
+    ev.pid = INSIDE_PID;
+    ev.query_id = 0x427;
+    ev.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    ev.timestamp_ns = base + 12 * ONE_SEC;
+    ev.old_event = ev.new_event = PGWT_MARKER_EXEC_START;
+    int rc = pgwt_writer_push_event(&writer, &ev);
+    if (pgwt_writer_publish(&writer) != 0) rc = -1;
+
+    /* Keep the early transitions in a separate block. Legacy tiered
+     * coverage then ends at 12 s and resumes at 15 s, so the real sample
+     * [14.9,15) survives exact-wins merging instead of being erased before
+     * the SAMPLE exclusion can be tested. */
+    struct pgwt_trace_event sample = {0};
+    sample.pid = FILLER_PID;
+    sample.timestamp_ns = base + 15 * ONE_SEC;
+    sample.new_event = EV_IO;
+    sample.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+    if (pgwt_writer_push_samples(&writer, &sample, 1, 100 * MS) != 0)
+        rc = -1;
+    if (pgwt_writer_publish(&writer) != 0) rc = -1;
+
+    ev.timestamp_ns = base + 15 * ONE_SEC;
+    ev.old_event = EV_LOCK;
+    ev.new_event = EV_IO;
+    ev.duration_ns = ONE_SEC;
+    if (pgwt_writer_push_event(&writer, &ev) != 0) rc = -1;
+    ev.old_event = ev.new_event = PGWT_MARKER_EXEC_END;
+    ev.duration_ns = 0;
+    if (pgwt_writer_push_event(&writer, &ev) != 0) rc = -1;
+    if (pgwt_writer_close(&writer) != 0) rc = -1;
+    return rc;
+}
+
+static const struct pgwt_trace_event *edge_wait(const struct win *w)
+{
+    for (int i = 0; i < w->count; i++)
+        if (w->events[i].pid == INSIDE_PID &&
+            w->events[i].old_event == EV_LOCK)
+            return &w->events[i];
+    return NULL;
+}
+
+static void check_edge_windows(struct pgwt_server *srv, const char *path)
+{
+    uint64_t w0 = srv->earliest_wall_ns - 10 * MS;
+    uint64_t edge_ns = w0 + 15 * ONE_SEC;
+    struct win left, right, unbounded;
+    win_load(srv, &left, w0 + 10 * ONE_SEC, edge_ns);
+    win_load(srv, &right, edge_ns, w0 + 20 * ONE_SEC);
+    /* Do not use win_load's wall-duration subtraction for an absent edge. */
+    memset(&unbounded, 0, sizeof(unbounded));
+    unbounded.events = server_load_events_fi(srv, 0, 0, 0,
+                                            &unbounded.count,
+                                            &unbounded.info);
+    const struct pgwt_trace_event *le = edge_wait(&left);
+    const struct pgwt_trace_event *re = edge_wait(&right);
+    const struct pgwt_trace_event *ue = edge_wait(&unbounded);
+    int edge_flagged = le && le->timestamp_ns == edge_ns &&
+                       (le->flags & PGWT_EVENT_FLAG_EDGE_CLOSE);
+    CHECK(edge_flagged && !(le->flags & (PGWT_EVENT_FLAG_SAMPLE |
+                                        PGWT_EVENT_FLAG_RIGHT_OPEN)),
+          "16a (%s). exact close at `to` is EDGE_CLOSE, not RIGHT_OPEN",
+          path);
+
+    int markers = 0, samples = 0, marker_flags = 0, sample_flags = 0;
+    for (int i = 0; i < left.count; i++) {
+        const struct pgwt_trace_event *ev = &left.events[i];
+        if (ev->timestamp_ns != edge_ns) continue;
+        if (ev->old_event == PGWT_MARKER_EXEC_END) {
+            markers++;
+            marker_flags |= ev->flags & PGWT_EVENT_FLAG_EDGE_CLOSE;
+        }
+        if (ev->flags & PGWT_EVENT_FLAG_SAMPLE) {
+            samples++;
+            sample_flags |= ev->flags & PGWT_EVENT_FLAG_EDGE_CLOSE;
+        }
+    }
+    /* Pair each exclusion with the exact positive control: a loader that
+     * stamps nothing must fail these checks too. */
+    CHECK(edge_flagged && markers == 1 && marker_flags == 0,
+          "16a (%s). EXEC_END at `to` survives without EDGE_CLOSE", path);
+    CHECK(edge_flagged && samples == 1 && sample_flags == 0,
+          "16a (%s). SAMPLE at `to` survives without EDGE_CLOSE", path);
+    int unbounded_flags = 0;
+    for (int i = 0; i < unbounded.count; i++)
+        unbounded_flags |= unbounded.events[i].flags &
+                          (PGWT_EVENT_FLAG_EDGE_CLOSE |
+                           PGWT_EVENT_FLAG_RIGHT_OPEN);
+    CHECK(edge_flagged && ue && ue->timestamp_ns == edge_ns &&
+          srv->latest_wall_ns == edge_ns && unbounded_flags == 0 &&
+          !unbounded.info.overloaded && !unbounded.info.allocation_failed &&
+          !unbounded.info.trace_unreadable,
+          "16a (%s). no right edge stamps neither bit, including the "
+          "exact record at the capture end", path);
+
+    struct pgwt_filter f = {0};
+    struct pgwt_variants_result variants;
+    pgwt_compute_variants(left.events, left.count, &f, 16,
+                          PGWT_PHASE_EXEC, &variants);
+    CHECK(edge_flagged && !variants.failed &&
+          variants.total_executions == 1 && variants.num_variants == 1 &&
+          variants.variants[0].exec_count == 1,
+          "16c (%s). EXEC_END at `to` closes the execution in variants",
+          path);
+    free(variants.variants);
+
+    if (le && re) {
+        /* Use exactly the one wait handed over by each loader request,
+         * keeping markers and the independent sample out of the comparison. */
+        const struct pgwt_trace_event *records[2] = {le, re};
+        uint64_t from[2] = {w0 + 10 * ONE_SEC, edge_ns};
+        uint64_t to[2] = {edge_ns, w0 + 20 * ONE_SEC};
+        uint64_t occurrences[2] = {0}, transitions[2] = {0};
+        uint64_t fingerprints[2] = {0};
+        double event_ms[2] = {0}, model_ms[2] = {0};
+        int rows_present = 0, failed = 0;
+        for (int w = 0; w < 2; w++) {
+            struct pgwt_events_result events;
+            struct pgwt_transitions_result tr;
+            struct pgwt_fingerprint_result fp;
+            struct pgwt_tm_result tm;
+            pgwt_compute_top_events(records[w], 1, &f, from[w], to[w],
+                                    5000.0, &events);
+            const struct pgwt_event_row *row = row_for(&events, EV_LOCK);
+            if (row) {
+                rows_present++;
+                occurrences[w] = row->count;
+                event_ms[w] = row->total_ms;
+            }
+            pgwt_compute_transitions(records[w], 1, &f, 16, &tr);
+            transitions[w] = trans_count(&tr, EV_LOCK, EV_IO);
+            pgwt_compute_fingerprints(records[w], 1, &f, &fp);
+            failed |= fp.failed;
+            for (int i = 0; i < fp.num_rows; i++)
+                if (fp.rows[i].query_id == 0x427)
+                    fingerprints[w] += fp.rows[i].total_transitions;
+            pgwt_compute_time_model(records[w], 1, &f, from[w], to[w],
+                                    5000.0, &tm);
+            model_ms[w] = tm.db_time_ms;
+            free(events.rows);
+            free(tr.rows);
+            free(fp.rows);
+            free(tm.rows);
+        }
+        CHECK(edge_flagged && !(re->flags & PGWT_EVENT_FLAG_EDGE_CLOSE) &&
+              transitions[0] == occurrences[0] && occurrences[0] == 0 &&
+              transitions[1] == occurrences[1] && occurrences[1] == 1,
+              "16b (%s). Transitions and Events agree: 0 at `to`, "
+              "1 in the following window", path);
+        CHECK(!failed && fingerprints[0] == occurrences[0] &&
+              occurrences[0] == 0 && fingerprints[1] == occurrences[1] &&
+              occurrences[1] == 1,
+              "16b (%s). fingerprints agree with Events across the edge",
+              path);
+        CHECK(transitions[0] == 0 && transitions[1] == 1 &&
+              rows_present == 2 && event_ms[0] == 1000.0 &&
+              event_ms[1] == 0.0 && model_ms[0] == 1000.0 &&
+              model_ms[1] == 0.0,
+              "16d (%s). Events and time_model keep the full clipped "
+              "time at 1000 / 0 ms while the transition moves", path);
+    } else {
+        CHECK(0, "16 (%s). the exact wait must reach both windows", path);
+    }
+    win_free(&left);
+    win_free(&right);
+    win_free(&unbounded);
+}
+
+static void test_edge_close(uint64_t base)
+{
+    printf("--- 16. EDGE_CLOSE: one occurrence rule, unchanged time ---\n");
+    char dir[] = "/tmp/pgwt_wovl_edge_XXXXXX";
+    if (!mkdtemp(dir) || build_edge_fixture(dir, base) != 0) {
+        CHECK(0, "16. build the edge-close trace fixture");
+        return;
+    }
+    for (int immutable = 0; immutable < 2; immutable++) {
+        struct pgwt_server *srv = calloc(1, sizeof(*srv));
+        if (!srv || server_init(srv, dir) != 0) {
+            CHECK(0, "16. server_init on the edge-close fixture");
+            free(srv);
+            return;
+        }
+        check_edge_windows(srv, immutable ? "immutable cache" : "file");
+        /* Repeat at the same edge to catch stale per-request annotations
+         * leaking into either raw cache. */
+        check_edge_windows(srv, immutable ? "immutable cache warm" : "file warm");
+        server_destroy(srv);
+        free(srv);
+        if (!immutable) {
+            char current[512], archive[512];
+            snprintf(current, sizeof(current), "%s/current.trace", dir);
+            snprintf(archive, sizeof(archive),
+                     "%s/2026-01-01_00.trace.lz4", dir);
+            if (rename(current, archive) != 0) {
+                CHECK(0, "16. rename the closed fixture to exercise the "
+                      "immutable loader cache");
+                return;
+            }
+        }
+    }
+}
+
 int main(void)
 {
     printf("=== test_window_overlap (#424) ===\n");
@@ -1561,6 +1773,7 @@ int main(void)
     }
     build_tiered_fixture(dir_t, base);
     test_tiered_budget(dir_t, base);
+    test_edge_close(base);
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;

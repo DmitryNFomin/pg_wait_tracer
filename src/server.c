@@ -2156,6 +2156,7 @@ static void load_file_range_mono(struct pgwt_server *srv,
                                  const char *path,
                                  uint64_t from_mono, uint64_t to_mono,
                                  uint64_t sample_to_mono,
+                                 int right_bounded,
                                  uint32_t pid, int markers_only,
                                  struct straddle_scan *ss,
                                  struct pgwt_trace_event **events,
@@ -2443,6 +2444,10 @@ static void load_file_range_mono(struct pgwt_server *srv,
                 (*events)[*total].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
                 ss->admitted++;
             }
+            if (right_bounded && ts_mono == to_mono &&
+                !(rec[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
+                !PGWT_IS_MARKER(rec[i].old_event))
+                (*events)[*total].flags |= PGWT_EVENT_FLAG_EDGE_CLOSE;
             (*total)++;
         }
     }
@@ -3868,12 +3873,15 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * a bounded right edge. A whole-capture request (to_wall_ns == 0) is
      * defaulted to the last record in the capture below, past which nothing
      * can close, so disabling it there is both free and the guarantee that
-     * an unbounded request stays bit-identical to pre-#424. */
+     * an unbounded request stays bit-identical to pre-#424. Keep the original
+     * boundedness for EDGE_CLOSE too: defaulting must not turn the capture's
+     * last exact record into an edge-close occurrence. */
+    const int right_bounded = to_wall_ns != 0;
     struct straddle_scan ss = {
         /* #586: `no_straddle_scan` is only ever set by
          * server_load_seed_markers, whose records are markers -- duration 0,
          * so never a right-edge straddler. See the note there. */
-        .enabled      = to_wall_ns != 0 && !no_straddle_scan,
+        .enabled      = right_bounded && !no_straddle_scan,
         .lookahead_ns = straddle_lookahead_ns(),
         .max_blocks   = straddle_max_blocks(),
     };
@@ -3997,6 +4005,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
             load_file_range_mono(srv,
                                  cur_cache_enabled() ? &srv->cur : NULL,
                                  fc->path, from_m, to_m, sample_to_m,
+                                 right_bounded,
                                  pid, markers_only, &ss,
                                  &events, &total, &cap, &overloaded,
                                  &allocation_failed);
@@ -4008,6 +4017,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                  * declined it. */
                 load_file_range_mono(srv, NULL,
                                      fc->path, from_m, to_m, sample_to_m,
+                                     right_bounded,
                                      pid, markers_only, &ss,
                                      &events, &total, &cap, &overloaded,
                                      &allocation_failed);
@@ -4085,6 +4095,10 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                         events[total].flags |= PGWT_EVENT_FLAG_RIGHT_OPEN;
                         ss.admitted++;
                     }
+                    if (right_bounded && ts == to_m &&
+                        !(ce->events[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
+                        !PGWT_IS_MARKER(ce->events[i].old_event))
+                        events[total].flags |= PGWT_EVENT_FLAG_EDGE_CLOSE;
                     total++;
                 }
             }

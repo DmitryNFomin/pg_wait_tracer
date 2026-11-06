@@ -58,11 +58,12 @@ static inline double event_window_frac(uint64_t clip_ns, uint64_t dur_ns)
  *      and full_ns, the transition matrix, the latency heatmap, execution and
  *      plan marker pairing, fingerprints, lock chains, interference,
  *      variants, lifecycle.
- *      The Events/Queries occurrence gate selects the record's own close
- *      timestamp in [from, to) (#427). A close exactly at `to` contributes
- *      TIME to this window and its OCCURRENCE to the following window. A
- *      right-open record is EXCLUDED, and is counted once, later, by the
- *      window it actually closes in.
+ *      Exact non-marker occurrences select the record's own close timestamp
+ *      in [from, to) (#427). A close exactly at `to` contributes TIME to this
+ *      window and its OCCURRENCE to the following window. The loader stamps
+ *      it EDGE_CLOSE so window-less consumers apply the same rule; RIGHT_OPEN
+ *      excludes closes past `to`. Markers at `to` remain available for
+ *      pairing, and SAMPLE clip points retain their inclusive upper bound.
  *
  * This is not a new rule: src/summary_writer.h's v8 note states exactly this
  * split for the writer. Installing the raw path's half is what makes the two
@@ -99,12 +100,14 @@ static inline int event_right_open(const struct pgwt_trace_event *ev,
 
 /* The window-less form, for consumers whose signature carries no [from, to]
  * (transitions, fingerprints, lock chains, interference, variants,
- * lifecycle, execution detail). Every one of them is INSTANT-selected, so
- * "skip the right-open records" is the whole of their #424 change, and their
- * behaviour on an array that holds none of them is unchanged. */
+ * lifecycle, execution detail). These INSTANT consumers skip RIGHT_OPEN and
+ * EDGE_CLOSE records: an exact non-marker close at `to` is counted by the
+ * following window, while markers at `to` still reach marker pairing.
+ * Neither flag changes the record's time contribution. */
 static inline int event_right_open_flagged(const struct pgwt_trace_event *ev)
 {
-    return (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN) != 0;
+    return (ev->flags & (PGWT_EVENT_FLAG_RIGHT_OPEN |
+                         PGWT_EVENT_FLAG_EDGE_CLOSE)) != 0;
 }
 
 /* OCCURRENCE selection, BOTH bounds: exact closes in [from_ns, to_ns),
@@ -6113,8 +6116,9 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
         const struct pgwt_trace_event *ev = &events[i];
         /* #424: a variant is a pattern of COMPLETED waits between two
          * markers — INSTANT-selected. Markers themselves are instants
-         * (duration 0) and are never admitted past `to`, so this only ever
-         * skips a wait record that closes after the window. */
+         * (duration 0) and are never admitted past `to`; markers at `to`
+         * carry neither flag so pairing still closes. This skips a wait
+         * record that closes at or after the window's right edge. */
         if (event_right_open_flagged(ev))
             continue;
 
