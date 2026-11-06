@@ -161,7 +161,9 @@ def _fidelity_ranges(fidelity):
         return [{"from": _FROM_NS, "to": _TO_NS, "fidelity": "sampled"}]
     if fidelity == "exact":
         return [{"from": _FROM_NS, "to": _TO_NS, "fidelity": "exact"}]
-    return [{"from": _FROM_NS, "to": _TO_NS, "fidelity": "none"}]
+    if fidelity == "none":
+        return [{"from": _FROM_NS, "to": _TO_NS, "fidelity": "none"}]
+    return []
 
 
 def _baseline_rows(rows, value_key):
@@ -1021,13 +1023,16 @@ def handle_request(msg):
         resp["fidelity"] = response_fidelity
         if response_fidelity in ("sampled", "mixed"):
             resp["sample_period_ns"] = _FID.sample_period_ns
-    # #322/#341: the per-range breakdown, emitted by src/server.c's
-    # add_fidelity_ranges() on the aas response (the only surface whose
-    # client consumes it: builders/fidelity.js via aas.js / uplot-aas.js).
-    # tests/test_protocol_drift.py compares key sets and value types
-    # recursively, so a field added on one side only fails the gate.
-    if cmd == "aas" and "error" not in resp and "unavailable" not in resp:
-        resp["fidelity_ranges"] = _fidelity_ranges(resp.get("fidelity"))
+    # Mirror add_fidelity_ranges(): omit absent coverage and any partition
+    # whose implied token disagrees with the response's token.
+    if cmd in ("aas", "transitions") and "error" not in resp and "unavailable" not in resp:
+        ranges = _fidelity_ranges(response_fidelity)
+        kinds = {r["fidelity"] for r in ranges}
+        derived = ("mixed" if {"exact", "sampled"} <= kinds
+                   else "exact" if "exact" in kinds
+                   else "sampled" if "sampled" in kinds else "none")
+        if ranges and derived == resp.get("fidelity"):
+            resp["fidelity_ranges"] = ranges
     # FID-3 (T1): over a sampled-only window the real server gates the
     # latency columns — samples carry no real durations, so avg/percentiles
     # are null and the UI renders "—". Mirror it so the web tests exercise
@@ -1428,10 +1433,10 @@ def _handle_request_inner(cmd, req_id, msg):
                 # tests/test_protocol_drift.py compares this protocol surface;
                 # keep it in sync with emit_transitions_response() in src/server.c.
                 "idle_classification_complete": True, "nodes": [
-            {"name": "CPU*", "total_ms": 4800, "sampled_ms": 0, "class": "CPU", "event_id": 0, "idle": False},
-            {"name": "Client:ClientRead", "total_ms": 9153, "sampled_ms": 0, "class": "Client", "event_id": 0x06000000, "idle": True},
-            {"name": "IO:DataFileRead", "total_ms": 2100, "sampled_ms": 0, "class": "IO", "event_id": 0x01000015, "idle": False},
-            {"name": "LWLock:WALInsert", "total_ms": 900, "sampled_ms": 0, "class": "LWLock", "event_id": 0x04000007, "idle": False},
+            {"name": "CPU*", "total_ms": 4800, "count": 690, "sampled_ms": 0, "class": "CPU", "event_id": 0, "idle": False},
+            {"name": "Client:ClientRead", "total_ms": 9153, "count": 900, "sampled_ms": 0, "class": "Client", "event_id": 0x06000000, "idle": True},
+            {"name": "IO:DataFileRead", "total_ms": 2100, "count": 120, "sampled_ms": 0, "class": "IO", "event_id": 0x01000015, "idle": False},
+            {"name": "LWLock:WALInsert", "total_ms": 900, "count": 90, "sampled_ms": 0, "class": "LWLock", "event_id": 0x04000007, "idle": False},
         ], "links": [
             {"source": "Client:ClientRead", "target": "CPU*", "value": 900, "duration_ms": 9000.0},
             {"source": "CPU*", "target": "Client:ClientRead", "value": 560, "duration_ms": 5000.0},

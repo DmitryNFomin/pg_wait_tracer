@@ -7947,7 +7947,9 @@ static void emit_transitions_compute_failed(const struct pgwt_request *req,
  * resize the window", and it would have shown up as a spurious divergence
  * against an aggregate that is otherwise bit-exact. Links were already summed
  * as integers (struct trans_accum.total_ns is uint64) and are unchanged. */
-static void emit_transitions_response(struct pgwt_request *req,
+static void emit_transitions_response(const struct pgwt_server *srv,
+                                      uint64_t from_wall, uint64_t to_wall,
+                                      struct pgwt_request *req,
                                       enum pgwt_fidelity fid, int max_rows,
                                       const struct pgwt_transitions_result *res,
                                       int use_res,
@@ -8003,6 +8005,7 @@ static void emit_transitions_response(struct pgwt_request *req,
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_fidelity_ranges(root, srv, from_wall, to_wall);
     add_right_edge_note(root, linfo);
     cjson_add_uint64(root, "total", total);
     cJSON_AddNumberToObject(root, "link_count", shown);
@@ -8045,6 +8048,10 @@ static void emit_transitions_response(struct pgwt_request *req,
         cJSON_AddStringToObject(node, "name", name);
         cJSON_AddNumberToObject(node, "total_ms",
                                 (double)nodes_arr[i].total_ns / 1e6);
+        /* count == 0 && sampled_ms > 0 identifies sampled-only nodes.
+         * total_ms == 0 cannot: zero-duration exact records still count
+         * (test_window_clip case 6e-4, closing exactly at `to`). */
+        cjson_add_uint64(node, "count", nodes_arr[i].count);
         cJSON_AddNumberToObject(node, "sampled_ms",
                                 (double)nodes_arr[i].sampled_ns / 1e6);
         /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
@@ -8167,7 +8174,7 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
                 emit_unavailable(req->id, ag_fid);
                 return;
             }
-            emit_transitions_response(req, ag_fid, max_rows,
+            emit_transitions_response(srv, from_ns, to_ns, req, ag_fid, max_rows,
                                       NULL, 0, &win, merged, decoded,
                                       &ag_linfo);
             pgwt_block_agg_free(&win);
@@ -8277,7 +8284,7 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
         return;
     }
 
-    emit_transitions_response(req, fid, max_rows, &res, 1, &raw_nodes, 0, 0,
+    emit_transitions_response(srv, from_ns, to_ns, req, fid, max_rows, &res, 1, &raw_nodes, 0, 0,
                               &linfo);
 
     pgwt_block_agg_free(&raw_nodes);

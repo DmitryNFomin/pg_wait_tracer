@@ -725,6 +725,12 @@ static void test_graph_sampled_time(struct pgwt_server *srv)
           sampled ? sampled->valuedouble : -1.0);
     CHECK(sampled && sampled->valuedouble > 0.0,
           "6. sampled time is non-zero -- an exact-only window cannot pass");
+    /* count == 0 && sampled_ms > 0 IS the sampled-only discriminator.
+     * Round B and every future consumer must use this pair, rather than
+     * inventing a test such as total_ms == 0 (negligible exact dwell). */
+    CHECK(is_json_number(io, "count") && json_num(io, "count") == 0.0 &&
+          sampled && sampled->valuedouble > 0.0,
+          "6. IO is sampled-only: count == 0 && sampled_ms > 0");
 
     CHECK(has_node(out, "Lock:relation"), "6. exact-only Lock node exists");
     CHECK(node_ms(out, "Lock:relation") == 1300.0,
@@ -734,6 +740,9 @@ static void test_graph_sampled_time(struct pgwt_server *srv)
     CHECK(cJSON_IsNumber(sampled), "6. exact-only sampled_ms is present and numeric");
     CHECK(sampled && sampled->valuedouble == 0.0,
           "6. exact-only sampled_ms is 0, never absent");
+    CHECK(is_json_number(lock, "count") && json_num(lock, "count") > 0.0 &&
+          sampled && sampled->valuedouble == 0.0,
+          "6. Lock is exact-only: count > 0 && sampled_ms == 0");
     struct graph_sums g = graph_totals(out);
     CHECK(g.node_ms == 2600.0,
           "6. exact node total stays 2 x 130 x 10 = 2600 ms");
@@ -999,8 +1008,8 @@ int main(void)
 
     /* A suite that ran no assertions proved nothing, and a FLOOR that does
      * not move with the suite lets a whole section stop running unnoticed.
-     * 90 assertions today. */
-    if (checks < 90) {
+     * 92 assertions today. */
+    if (checks < 92) {
         printf("FAIL: only %d assertions ran -- the suite did not execute\n",
                checks);
         return 1;
