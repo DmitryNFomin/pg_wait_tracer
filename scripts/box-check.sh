@@ -292,6 +292,36 @@ else
         echo "Provisioning: tests/provision-runner.sh (step 4 of the dev-loop plan) / tests/hetzner-vm.sh" >&2
         exit 2
     fi
+
+    # BEGIN persistent provisioning
+    # Always run the idempotent provisioner: package metadata refresh and
+    # dependency checks cost time, but an "already provisioned" flag or a
+    # fixed header/package probe goes stale when the dependency set changes.
+    # That cost is preferable to a missing dependency misleading a live test.
+    # Let the provisioner take /tmp/pgwt-box-check.lock itself. An outer
+    # flock self-deadlocks against its inner lock; this separate SSH call
+    # also finishes BEFORE the build/run_all.sh lock_header below is held.
+    # Fail closed even on a shared GitHub Actions runner: CI contention can
+    # exhaust its 600s lock wait and abort an otherwise viable run, but a
+    # warning would let an unprovisioned box produce misleading test failures.
+    # rc=75 identifies lock contention and stays fatal. Only rc=3 permits
+    # using the box as-is: only the provisioner's unsupported-OS arm emits
+    # it, so implementing that OS removes the skip along with that arm.
+    echo "box-check: staging + running tests/provision-runner.sh $OS on persistent $target" | tee -a "$log"
+    ssh -o BatchMode=yes "$target" "mkdir -p pgwt-provision" 2>>"$log" || exit 1
+    rsync -az -e ssh ./tests/provision-runner.sh "$target:pgwt-provision/tests-provision-runner.sh" 2>>"$log" || exit 1
+    ssh -o BatchMode=yes "$target" "sudo bash pgwt-provision/tests-provision-runner.sh $OS" 2>&1 | tee -a "$log"
+    provision_rc=${PIPESTATUS[0]}
+    if [[ $provision_rc -eq 3 ]]; then
+        echo "box-check: WARNING: provisioner does not support OS=$OS (rc=3); provisioning skipped for that reason; using persistent $target as-is" | tee -a "$log" >&2
+    elif [[ $provision_rc -eq 75 ]]; then
+        echo "box-check: persistent $target is busy (rc=75): contention, not a provisioning defect; CI or another box-check held /tmp/pgwt-box-check.lock past the provisioner's 600 s wait; caller should retry this run later" | tee -a "$log" >&2
+        exit 1
+    elif [[ $provision_rc -ne 0 ]]; then
+        echo "box-check: tests/provision-runner.sh $OS failed (rc=$provision_rc) on persistent $target; refusing to build/test without successful provisioning" | tee -a "$log" >&2
+        exit 1
+    fi
+    # END persistent provisioning
 fi
 
 # issue #93: this invocation's start time, used below to tell a FRESH

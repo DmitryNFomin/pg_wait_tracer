@@ -61,6 +61,13 @@
 # Takes the same lock scripts/box-check.sh uses (see the flock block below):
 # every run unconditionally restarts all four clusters, which would otherwise
 # race with an in-flight box-check's live tests from another agent's invocation.
+#
+# Stable exit-status contract (callers branch on these codes):
+#   0: provisioning succeeded.
+#   1: privilege check or provisioning failed (commands may return other errors).
+#   2: invalid arguments / usage.
+#   3: OS unsupported by this provisioner (only the unsupported-OS arm emits it).
+#  75: EX_TEMPFAIL, contention: the 600s lock wait expired.
 set -euo pipefail
 
 OS="${1:-}"
@@ -103,16 +110,11 @@ if [[ -z "$OS" ]]; then
     exit 2
 fi
 
-if [[ $(id -u) -ne 0 ]]; then
-    echo "provision-runner.sh must run as root" >&2
-    exit 1
-fi
-
 case "$OS" in
     el9)
         echo "STUB: el9 provisioning is not implemented yet — it is step 4" >&2
         echo "of docs/DEV_LOOP_PLAN.md (ephemeral VMs + real OS matrix)." >&2
-        exit 1
+        exit 3
         ;;
     ubuntu|el8)
         ;;
@@ -121,6 +123,11 @@ case "$OS" in
         exit 2
         ;;
 esac
+
+if [[ $(id -u) -ne 0 ]]; then
+    echo "provision-runner.sh must run as root" >&2
+    exit 1
+fi
 
 log() { echo "[provision-runner] $*"; }
 
@@ -151,7 +158,7 @@ log "waiting for /tmp/pgwt-box-check.lock (up to 600s)"
 exec 9>/tmp/pgwt-box-check.lock
 if ! flock -w 600 9; then
     echo "FATAL: could not acquire /tmp/pgwt-box-check.lock within 600s -- another box-check or provisioning run holds it" >&2
-    exit 1
+    exit 75
 fi
 log "lock acquired"
 
