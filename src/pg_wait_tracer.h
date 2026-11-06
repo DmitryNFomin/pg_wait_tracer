@@ -358,6 +358,9 @@ struct pgwt_query_text_event {
  * (pgwt_is_idle_event) and hidden from event lists (pgwt_is_hidden_event)
  * exactly like other instrumented idle states. NEVER written to a trace —
  * assigned by the compute-side tagging pass (pgwt_tag_events) only. */
+/* Tracer-owned Timeout id, deliberately OUTSIDE PostgreSQL's active tables.
+ * Used only for the uninstrumented pre-14.3 checkpointer pacing syscall. */
+#define PGWT_WEI_CKPT_PACING (((u32)PG_WAIT_TIMEOUT << 24) | 30U)
 #define PGWT_WEI_NONCMD_CPU  (((uint32_t)PG_WAIT_ACTIVITY << 24) | 0x00FFFFFFU)
 
 /* ── wait_event_info reading classification (CAP-2/3/5) ─────────
@@ -398,7 +401,9 @@ static inline int pgwt_classify_wei(uint32_t wei)
  * permanently on degraded fallback layouts). */
 #define PGWT_UPROBE_FIRE_QUERY     0
 #define PGWT_UPROBE_FIRE_ACTIVITY  1
-#define PGWT_UPROBE_FIRE_MAX       2
+#define PGWT_UPROBE_FIRE_SELECT    2
+#define PGWT_UPROBE_FIRE_PSELECT6  3
+#define PGWT_UPROBE_FIRE_MAX       4
 
 /* ── BPF Accumulator (lightweight mode — no ringbuf) ───── */
 #define ACCUM_MAP_MAX_ENTRIES 1024

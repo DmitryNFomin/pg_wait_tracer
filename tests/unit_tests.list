@@ -1038,3 +1038,8 @@ test_background_unattributed
 # Separate from test_background_unattributed.c, which exercises the raw
 # src/compute.c path; this inspects the real writer's in-memory counters.
 test_summary_qattr_background
+
+# Refs #804: pre-14.3 pacing bridge and complete synthetic-id accounting.
+test_pacing_probe
+test_pacing_accounting
+test_pacing_summary

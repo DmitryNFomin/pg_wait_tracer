@@ -66,6 +66,7 @@ uint64_t pgwt_read_sched_cpu_ns(pid_t pid);
  * Runs "<binary> --version" and parses "postgres (PostgreSQL) XX.Y".
  * Returns major version (e.g. 14, 15, 16, 17, 18) or 0 on error. */
 int pgwt_detect_pg_version(const char *pg_binary);
+int pgwt_detect_pg_version_full(const char *pg_binary, int *minor);
 
 /* Detect st_query_id offset in PgBackendStatus.
  * Tries: 1) DWARF debug info, 2) known offset table.

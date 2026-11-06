@@ -64,6 +64,9 @@ static void test_mixed_roundtrip(void)
                         : (uint64_t)i * 100000;
     }
 
+    /* Refs #804: tracer-owned ids must survive transition AND sample codecs. */
+    trans[0].old_event = PGWT_WEI_CKPT_PACING;
+    trans[0].new_event = PGWT_WEI_CKPT_PACING;
     struct pgwt_trace_event samp[40];
     for (int i = 0; i < NS; i++) {
         /* Samples come after the transitions, sorted ascending. */
@@ -83,6 +86,8 @@ static void test_mixed_roundtrip(void)
     }
 
     /* Write: a transition block, then a sample block. */
+    samp[0].new_event = PGWT_WEI_CKPT_PACING;
+
     struct pgwt_event_writer w;
     CHECK(pgwt_writer_init(&w, TEST_DIR, 18, 24, NULL) == 0, "writer_init");
     w.cpu_measured = true;   /* keep the per-event cpu_ns (do not stamp UNKNOWN) */

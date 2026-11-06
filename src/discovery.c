@@ -915,9 +915,17 @@ int pgwt_validate_wait_addr(pid_t pid, uint64_t wait_addr)
 /* ── PG Version Detection ─────────────────────────────────── */
 
 #include "spawn.h"
+#include "pacing_probe.h"
 
 int pgwt_detect_pg_version(const char *pg_binary)
 {
+    int minor;
+    return pgwt_detect_pg_version_full(pg_binary, &minor);
+}
+
+int pgwt_detect_pg_version_full(const char *pg_binary, int *minor)
+{
+    *minor = -1;
     /* CAP-7: run the binary directly (fork/execvp, no shell) — the path
      * comes from /proc/<pid>/exe and must never touch a shell command line
      * in a root daemon. */
@@ -930,17 +938,8 @@ int pgwt_detect_pg_version(const char *pg_binary)
 
     char line[256] = "";
     int major = 0;
-    if (fgets(line, sizeof(line), proc.out)) {
-        /* Format: "postgres (PostgreSQL) 18.2" or "postgres (PostgreSQL) 14.12" */
-        char *p = strstr(line, "PostgreSQL");
-        if (p) {
-            p += strlen("PostgreSQL");
-            /* Skip ") " or just whitespace */
-            while (*p && (*p == ')' || *p == ' '))
-                p++;
-            major = atoi(p);
-        }
-    }
+    if (fgets(line, sizeof(line), proc.out))
+        pgwt_parse_pg_version(line, &major, minor);
     pgwt_proc_close(&proc);
 
     if (major < 1 || major > 99) {
@@ -1340,7 +1339,7 @@ int pgwt_discover(struct pgwt_daemon *d)
     d->pg13_qd_sourcetext_off = 0;
 
     /* Detect PostgreSQL major version */
-    d->pg_major_version = pgwt_detect_pg_version(binary);
+    d->pg_major_version = pgwt_detect_pg_version_full(binary, &d->pg_minor_version);
     if (d->pg_major_version == 0) {
         fprintf(stderr, "WARN: cannot detect PostgreSQL version, assuming PG18\n");
         d->pg_major_version = 18;

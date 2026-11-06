@@ -1,5 +1,8 @@
 # pg_wait_tracer — Roadmap &amp; Status (consolidated)
 
+- Refs #804: pre-14.3 checkpointer select/pselect6 pacing is visible idle in
+  exact and sampled capture; missing attachments and inert probes refuse capture.
+
 > **Single source of truth for what is built and what remains.**
 >
 > This file consolidates and **replaces** the previously-scattered planning

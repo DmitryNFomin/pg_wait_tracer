@@ -26,6 +26,7 @@
 #endif
 
 /* ── Constants from userspace (set before load via .rodata) ── */
+volatile const bool test_pacing_filter_never_match = false;
 volatile const u32 target_postmaster_pid = 0;
 volatile const u64 my_wait_ptr_addr = 0;
 /* PG<17 (MyProc path): my_wait_ptr_addr is the MyProc PGPROC* global, not a
@@ -106,6 +107,20 @@ struct {
     __type(key, u32);
     __type(value, struct pgwt_pid_state);
 } state_map SEC(".maps");
+
+/* Userspace publishes only classified, tracked checkpointers. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_BACKENDS);
+    __type(key, u32);
+    __type(value, u8);
+} ckpt_pacing_pids SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_BACKENDS);
+    __type(key, u32);
+    __type(value, u64);
+} pacing_sleep SEC(".maps");
 
 /* Stage 3 exact attribution is split by writer ownership. exact_attr_map is
  * BPF-only edge state; exact_seed_map is userspace-only coherent window-start
@@ -502,6 +517,148 @@ static __always_inline void accum_add(u32 event, u64 duration)
     }
 }
 
+/* One interval-transition implementation for hardware and syscall boundaries.
+ * All callers execute on the target thread. */
+static __always_inline void record_transition(u32 pid,
+    struct pgwt_pid_state *st, u32 new_event)
+{
+    u64 now = bpf_ktime_get_ns();
+    if (!exact_admission_open())
+        return;
+    u64 duration = now - st->last_ts;
+
+    /* S3: exact on-CPU ns at this fire; the CPU consumed since the last
+     * boundary is the delta. 0 when the feature is off or a base was never
+     * seeded (userspace then stamps UNKNOWN → gap-inference). */
+    u64 cpu_now = read_task_cpu_ns_for(st, now);
+    u64 cpu_delta = (cpu_now && st->last_cpu_ns && cpu_now >= st->last_cpu_ns)
+                    ? cpu_now - st->last_cpu_ns : 0;
+    if (!exact_admission_open())
+        return;
+
+    if (lightweight_mode) {
+        /* Lightweight: accumulate in BPF map, no ringbuf */
+        accum_add(st->last_event, duration);
+    } else {
+        u64 query_id = 0;
+        u16 cmd_open = 0;
+        u16 query_quality = 0;
+        resolve_exact_attr(pid, &query_id, &cmd_open, &query_quality);
+        /* Full trace: attribution comes from the generation-aware merge
+         * of BPF edges and the separate coherent window-start seed. */
+        struct pgwt_trace_event evt = {
+            .timestamp_ns = now,
+            .pid = pid,
+            .old_event = st->last_event,
+            .new_event = new_event,
+            .flags = (cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
+                (query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+                 ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
+            .duration_ns = duration,
+            .query_id = query_id,
+            .cpu_ns = cpu_delta,
+        };
+        emit_event(&evt);
+    }
+
+    /* Transition to new state */
+    st->last_event = new_event;
+    st->last_ts = now;
+    /* Advance the CPU base on every emitted transition (T8). */
+    st->last_cpu_ns = cpu_now;
+
+    /* S3 live-read fix: the backend is ON-CPU at this fire — it is executing
+     * this write. If no sched_switch-in has opened its on-CPU stretch (we
+     * attached mid-run and never saw its switch-in, or it seeded from a
+     * transient wait so on_cpu_ts started 0), on_cpu_ts is 0 here and
+     * read_task_cpu_ns_for() returns a FLAT cpu_ns_total. A backend that
+     * then runs uninterrupted (no sched_switch — common when a CPU-bound
+     * backend owns a core on a low-CPU host) keeps exact == last_cpu_ns, so
+     * the live view reads cpu_open == 0 for the whole on-CPU interval that
+     * starts here — even though the terminal flush (post-switch accumulator)
+     * records it correctly. Open the stretch now so the live read measures
+     * it. The "== 0" guard never clobbers a stretch sched_switch is already
+     * tracking; `now` is a conservative lower bound on the true start. */
+    if (st->on_cpu_ts == 0)
+        st->on_cpu_ts = now;
+}
+
+/* Same-thread syscall enter/exit and watchpoint callbacks serialize: no
+ * wait_event_info store occurs while this thread sleeps. A write just before
+ * exit may already close SYNTH; the exit guard then does nothing. A window
+ * attached mid-sleep seeds memory's 0 (wp_live==0 cannot fabricate an enter);
+ * exit is a no-op unless SYNTH is live. Residual: that first partial sleep is
+ * conservatively counted as load until the next fully observed enter. */
+/* Native 64-bit user ABI copies of __kernel_old_timeval and
+ * __kernel_timespec. User-memory reads need their layouts, not CO-RE;
+ * EL8's older kernel BTF need not expose the newer UAPI type names. */
+struct pgwt_select_timeout { long tv_sec; long tv_usec; };
+struct pgwt_pselect_timeout { s64 tv_sec; s64 tv_nsec; };
+_Static_assert(sizeof(struct pgwt_select_timeout) == 16, "native select ABI");
+_Static_assert(sizeof(struct pgwt_pselect_timeout) == 16, "pselect6 time64 ABI");
+static __always_inline int pacing_enter(u64 nfds, const void *timeout,
+                                         bool is_pselect)
+{
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (test_pacing_filter_never_match || nfds != 0 || !timeout ||
+        !bpf_map_lookup_elem(&ckpt_pacing_pids, &pid))
+        return 0;
+    if (is_pselect) {
+        struct pgwt_pselect_timeout ts = {};
+        if (bpf_probe_read_user(&ts, sizeof(ts), timeout) ||
+            ts.tv_sec != 0 || ts.tv_nsec != 100000000)
+            return 0;
+    } else {
+        struct pgwt_select_timeout tv = {};
+        if (bpf_probe_read_user(&tv, sizeof(tv), timeout) ||
+            tv.tv_sec != 0 || tv.tv_usec != 100000)
+            return 0;
+    }
+    count_uprobe_fire(is_pselect ? PGWT_UPROBE_FIRE_PSELECT6 : PGWT_UPROBE_FIRE_SELECT);
+    u64 now = bpf_ktime_get_ns();
+    /* A map insertion failure counts load; it cannot invent idle time. */
+    if (bpf_map_update_elem(&pacing_sleep, &pid, &now, BPF_ANY))
+        return 0;
+    struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
+    if (st && st->wp_live && st->last_event == 0 && exact_admission_open())
+        record_transition(pid, st, PGWT_WEI_CKPT_PACING);
+    return 0;
+}
+static __always_inline int pacing_exit(void)
+{
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    /* Only a matched enter owns a sleep, but an interrupted/restarted syscall
+     * still closes its true elapsed duration on this exit. */
+    if (!bpf_map_lookup_elem(&pacing_sleep, &pid))
+        return 0;
+    bpf_map_delete_elem(&pacing_sleep, &pid);
+    struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
+    if (st && st->wp_live && st->last_event == PGWT_WEI_CKPT_PACING &&
+        exact_admission_open())
+        record_transition(pid, st, 0);
+    return 0;
+}
+SEC("tp/syscalls/sys_enter_select")
+int on_select_enter(struct trace_event_raw_sys_enter *ctx)
+{
+    return pacing_enter(ctx->args[0], (const void *)ctx->args[4], false);
+}
+SEC("tp/syscalls/sys_exit_select")
+int on_select_exit(struct trace_event_raw_sys_exit *ctx)
+{
+    return pacing_exit();
+}
+SEC("tp/syscalls/sys_enter_pselect6")
+int on_pselect6_enter(struct trace_event_raw_sys_enter *ctx)
+{
+    return pacing_enter(ctx->args[0], (const void *)ctx->args[4], true);
+}
+SEC("tp/syscalls/sys_exit_pselect6")
+int on_pselect6_exit(struct trace_event_raw_sys_exit *ctx)
+{
+    return pacing_exit();
+}
+
 /* ── Program 1: on_watchpoint ─────────────────────────────── */
 /* Fires on every write to PGPROC->wait_event_info.
  * State machine: computes duration of PREVIOUS state, accumulates. */
@@ -552,65 +709,7 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
         if (new_event == st->last_event)
             return 0;
 
-        u64 now = bpf_ktime_get_ns();
-        if (!exact_admission_open())
-            return 0;
-        u64 duration = now - st->last_ts;
-
-        /* S3: exact on-CPU ns at this fire; the CPU consumed since the last
-         * boundary is the delta. 0 when the feature is off or a base was never
-         * seeded (userspace then stamps UNKNOWN → gap-inference). */
-        u64 cpu_now = read_task_cpu_ns_for(st, now);
-        u64 cpu_delta = (cpu_now && st->last_cpu_ns && cpu_now >= st->last_cpu_ns)
-                        ? cpu_now - st->last_cpu_ns : 0;
-        if (!exact_admission_open())
-            return 0;
-
-        if (lightweight_mode) {
-            /* Lightweight: accumulate in BPF map, no ringbuf */
-            accum_add(st->last_event, duration);
-        } else {
-            u64 query_id = 0;
-            u16 cmd_open = 0;
-            u16 query_quality = 0;
-            resolve_exact_attr(pid, &query_id, &cmd_open, &query_quality);
-            /* Full trace: attribution comes from the generation-aware merge
-             * of BPF edges and the separate coherent window-start seed. */
-            struct pgwt_trace_event evt = {
-                .timestamp_ns = now,
-                .pid = pid,
-                .old_event = st->last_event,
-                .new_event = new_event,
-                .flags = (cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
-                    (query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
-                     ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
-                .duration_ns = duration,
-                .query_id = query_id,
-                .cpu_ns = cpu_delta,
-            };
-            emit_event(&evt);
-        }
-
-        /* Transition to new state */
-        st->last_event = new_event;
-        st->last_ts = now;
-        /* Advance the CPU base on every emitted transition (T8). */
-        st->last_cpu_ns = cpu_now;
-
-        /* S3 live-read fix: the backend is ON-CPU at this fire — it is executing
-         * this write. If no sched_switch-in has opened its on-CPU stretch (we
-         * attached mid-run and never saw its switch-in, or it seeded from a
-         * transient wait so on_cpu_ts started 0), on_cpu_ts is 0 here and
-         * read_task_cpu_ns_for() returns a FLAT cpu_ns_total. A backend that
-         * then runs uninterrupted (no sched_switch — common when a CPU-bound
-         * backend owns a core on a low-CPU host) keeps exact == last_cpu_ns, so
-         * the live view reads cpu_open == 0 for the whole on-CPU interval that
-         * starts here — even though the terminal flush (post-switch accumulator)
-         * records it correctly. Open the stretch now so the live read measures
-         * it. The "== 0" guard never clobbers a stretch sched_switch is already
-         * tracking; `now` is a conservative lower bound on the true start. */
-        if (st->on_cpu_ts == 0)
-            st->on_cpu_ts = now;
+        record_transition(pid, st, new_event);
 
     } else {
         /* First event for this PID — initialize via double-deref,
@@ -715,6 +814,8 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
 {
     u32 pid = ctx->pid;
 
+    bpf_map_delete_elem(&pacing_sleep, &pid);
+    bpf_map_delete_elem(&ckpt_pacing_pids, &pid);
     struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
     if (!st)
         return 0;

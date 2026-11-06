@@ -570,7 +570,8 @@ static void test_idle_pre_init(void)
           "pre-init mask is EMPTY (got 0x%03x) -- uninitialised must not be "
           "silently treated as PG18", pgwt_idle_rule_timeout_mask());
     for (uint32_t id = 0; id < 32; id++)
-        CHECK(pgwt_timeout_id_is_classifiable(id) == 0,
+        CHECK(pgwt_timeout_id_is_classifiable(id) ==
+                  (id == WE_EVENT(PGWT_WEI_CKPT_PACING)),
               "uninitialised state: Timeout id %u coverage must agree with "
               "the empty mask", id);
     CHECK(pgwt_timeout_id_is_classifiable(32) == 0,
@@ -1219,9 +1220,12 @@ static void check_timeout_coverage(const char *state, uint32_t covered)
     uint32_t mask = pgwt_idle_rule_timeout_mask();
     for (uint32_t id = 0; id < 32; id++) {
         int classifiable = pgwt_timeout_id_is_classifiable(id);
-        CHECK((classifiable != 0) == ((covered >> id) & 1u),
+        /* Reserved tracer id 30 is universally classifiable but remains
+         * OUTSIDE the active PostgreSQL table and its coverage/mask bits. */
+        unsigned expected = id == WE_EVENT(PGWT_WEI_CKPT_PACING) || ((covered >> id) & 1u);
+        CHECK((classifiable != 0) == expected,
               "%s Timeout id %u: catalog coverage expected %u, got %d",
-              state, id, (covered >> id) & 1u, classifiable);
+              state, id, expected, classifiable);
         /* Only this implication holds: a known PgSleep is classifiable
          * without being pacing, so the converse would be wrong. */
         CHECK(!((mask >> id) & 1u) || classifiable,
@@ -1348,6 +1352,9 @@ int main(void)
     test_timeout_classification_coverage();
     test_extension_name_ids();
     test_dynamic_name_mapping();  /* must run last: sets dyn_loaded */
+    CHECK_NAME(PGWT_WEI_CKPT_PACING, "Timeout:CheckpointWriteDelay");
+    CHECK(pgwt_is_idle_event(PGWT_WEI_CKPT_PACING),
+          "tracer pacing remains idle after dynamic-name loading");
 
     CHECK(cov515_section_ran,
           "#515 coverage section must still be called from main() -- a rebase "

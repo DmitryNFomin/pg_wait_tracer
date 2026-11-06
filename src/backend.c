@@ -1,6 +1,7 @@
 /* backend.c — Backend lifecycle: scan, fork, init, exit handling */
 #include "backend.h"
 #include "daemon.h"
+#include "pacing_probe.h"
 #include "perf_event.h"
 #include "discovery.h"
 #include "cmdline.h"
@@ -487,6 +488,10 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
             be->attach_ts = now_ns();
             if (pgwt_parse_cmdline(pid, &be->meta) == 0)
                 be->meta_parsed = true;
+            if (pgwt_pacing_register_backend(d, be) != 0) {
+                closedir(proc);
+                return -2;
+            }
             if (d->backend_meta)
                 pgwt_bm_write(d->backend_meta, pid, &be->meta);
 
@@ -528,6 +533,10 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
         pgwt_debug_block_end(d, "backend_cmdline_read", pid, started_ns);
         if (cmdline_rc == 0)
             be->meta_parsed = true;
+        if (pgwt_pacing_register_backend(d, be) != 0) {
+            closedir(proc);
+            return -2;
+        }
         if (d->backend_meta) {
             started_ns = pgwt_debug_block_begin(d);
             pgwt_bm_write(d->backend_meta, pid, &be->meta);
@@ -1030,6 +1039,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
     pgwt_debug_block_end(d, "backend_cmdline_read", pid, started_ns);
     if (cmdline_rc == 0)
         be->meta_parsed = true;
+    if (pgwt_pacing_register_backend(d, be) != 0) return -1;
     if (d->backend_meta) {
         started_ns = pgwt_debug_block_begin(d);
         pgwt_bm_write(d->backend_meta, pid, &be->meta);
@@ -1061,6 +1071,8 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     int seed_fd = bpf_map__fd(d->skel->maps.exact_seed_map);
     uint32_t key = pid;
     started_ns = pgwt_debug_block_begin(d);
+    bpf_map_delete_elem(bpf_map__fd(d->skel->maps.ckpt_pacing_pids), &key);
+    bpf_map_delete_elem(bpf_map__fd(d->skel->maps.pacing_sleep), &key);
     bpf_map_delete_elem(state_fd, &key);
     bpf_map_delete_elem(attr_fd, &key);
     bpf_map_delete_elem(seed_fd, &key);
@@ -1096,6 +1108,7 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
      * a retired-before-enrollment target must have those maps cleaned. */
     if (!be) return 0;
     be->is_alive = false;
+    be->ckpt_pacing_registered = false;
 
     if (d->verbose)
         fprintf(stderr, "INFO: PID %d exited (%s)\n",

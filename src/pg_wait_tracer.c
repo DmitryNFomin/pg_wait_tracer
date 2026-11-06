@@ -749,7 +749,7 @@ int main(int argc, char **argv)
                 break;
             }
 
-            pgwt_daemon_run(d);
+            if (pgwt_daemon_run(d) != 0) rc = 1;
             pgwt_daemon_cleanup(d);
 
             if (d->exit_reason != PGWT_EXIT_PG_DEAD)
@@ -794,8 +794,8 @@ done:
         return 1;
     }
 
-    pgwt_daemon_run(d);
+    int run_rc = pgwt_daemon_run(d);
     pgwt_daemon_cleanup(d);
     free(d);
-    return 0;
+    return run_rc != 0 ? 1 : 0;
 }
