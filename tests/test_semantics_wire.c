@@ -1,4 +1,4 @@
-/* test_semantics_wire.c — the four semantics contracts that live in the
+/* test_semantics_wire.c — the semantics contracts that live in the
  * RESPONSE rather than in a compute result, driven through the real handlers
  * in src/server.c over a real trace file.
  *
@@ -21,6 +21,8 @@
  *            pgwt_block_agg_node_counts(), which takes no filter, so under a
  *            class drill the picture carried node bars for records whose
  *            edges the same response had excluded.
+ *   6. #808  Mixed-window nodes carry disjoint exact total_ms and additive
+ *            sampled_ms, with sampled_ms present even when it is zero.
  *
  * WHY THIS FILE EXISTS SEPARATELY FROM test_window_clip.c: every contract
  * above is a property of the JSON the client receives. A compute-level
@@ -689,6 +691,57 @@ static double node_ms(cJSON *out, const char *name)
     return n ? json_num(n, "total_ms") : -1.0;
 }
 
+static void test_graph_sampled_time(struct pgwt_server *srv)
+{
+    printf("--- 6. #808: mixed graph node sampled time is additive ---\n");
+    struct pgwt_request req = {0};
+    req.from_ns = srv->earliest_wall_ns;
+    req.to_ns = srv->latest_wall_ns + 1;
+    req.num_buckets = 200;
+    cJSON *out = call_handler(handle_transitions, srv, &req);
+    CHECK(out != NULL, "6. parseable JSON");
+    if (!out) return;
+    cJSON *fid = cJSON_GetObjectItem(out, "fidelity");
+    CHECK(cJSON_IsString(fid) && strcmp(fid->valuestring, "mixed") == 0,
+          "6. fixture A transitions fidelity is mixed -- the premise");
+    CHECK(cJSON_GetObjectItem(out, "error") == NULL, "6. no error");
+
+    /* Exact dwell: 130 seconds x 10 ms on ClientRead and Lock each.
+     * Sample batches flush every two observations (one second apart). Each
+     * flush writes the pending exact block through the odd second's .200;
+     * legacy per-block exact coverage therefore covers the even second's
+     * .300 IO sample. The odd second's .300 sample precedes the next exact
+     * block's .400 start and survives exact-wins: 65 x 10 = 650 ms.
+     * Before #808 IO had no node at all and contributed zero to total_ms.
+     * Pin that same exact quantity while exposing its sampled sibling. */
+    CHECK(has_node(out, "IO:DataFileRead"), "6. sample-only IO node exists");
+    CHECK(node_ms(out, "IO:DataFileRead") == 0.0,
+          "6. IO total_ms stays exact-only: 0 ms");
+    cJSON *io = row_by_name(cJSON_GetObjectItem(out, "nodes"), "IO:DataFileRead");
+    cJSON *sampled = cJSON_GetObjectItem(io, "sampled_ms");
+    CHECK(cJSON_IsNumber(sampled), "6. IO sampled_ms is present and numeric");
+    CHECK(sampled && sampled->valuedouble == 650.0,
+          "6. IO sampled_ms == 65 uncovered samples x 10 = 650 ms (got %.9f)",
+          sampled ? sampled->valuedouble : -1.0);
+    CHECK(sampled && sampled->valuedouble > 0.0,
+          "6. sampled time is non-zero -- an exact-only window cannot pass");
+
+    CHECK(has_node(out, "Lock:relation"), "6. exact-only Lock node exists");
+    CHECK(node_ms(out, "Lock:relation") == 1300.0,
+          "6. Lock total_ms stays 130 x 10 = 1300 ms");
+    cJSON *lock = row_by_name(cJSON_GetObjectItem(out, "nodes"), "Lock:relation");
+    sampled = cJSON_GetObjectItem(lock, "sampled_ms");
+    CHECK(cJSON_IsNumber(sampled), "6. exact-only sampled_ms is present and numeric");
+    CHECK(sampled && sampled->valuedouble == 0.0,
+          "6. exact-only sampled_ms is 0, never absent");
+    struct graph_sums g = graph_totals(out);
+    CHECK(g.node_ms == 2600.0,
+          "6. exact node total stays 2 x 130 x 10 = 2600 ms");
+    CHECK(g.link_count == 260.0,
+          "6. exact edge count stays 2 x 130 = 260; samples add no edges");
+    cJSON_Delete(out);
+}
+
 /* By CLASS, not by display name. The first version of section 4a asserted
  * `!has_node(out, "LWLock:BufferContent")` and was VACUOUSLY TRUE: the
  * fixture's LWLock id resolves to a different name in this build's static
@@ -925,6 +978,7 @@ int main(void)
     test_overview_idle_share_is_null(srv);
     test_queries_avg_gated(srv);
     test_exec_stats_scope(srv);
+    test_graph_sampled_time(srv);
     free(srv);
 
     char dir_c[] = "/tmp/pgwt_semwire_c_XXXXXX";
@@ -945,8 +999,8 @@ int main(void)
 
     /* A suite that ran no assertions proved nothing, and a FLOOR that does
      * not move with the suite lets a whole section stop running unnoticed.
-     * 76 assertions today. */
-    if (checks < 74) {
+     * 90 assertions today. */
+    if (checks < 90) {
         printf("FAIL: only %d assertions ran -- the suite did not execute\n",
                checks);
         return 1;

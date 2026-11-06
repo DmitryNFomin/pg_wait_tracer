@@ -410,6 +410,31 @@ def check_transitions_idle_flag(t, srv):
                 f"(got {node.get('idle')!r})")
 
 
+def check_transitions_sampled_ms(t, srv):
+    """#808: positively pin sampled_ms on EVERY real transitions node.
+
+    The schema diff is symmetric: if both real and mock omit the field it
+    passes. merge_schemas also folds null into a single other type, hiding a
+    field missing from some nodes. Check each real node independently so
+    missing, null and non-numeric values cannot pass as measured zero.
+    """
+    real = srv.query("transitions")
+    t.check("error" not in real,
+            "[transitions sampled_ms] real server answered without error"
+            + (f" (got: {real.get('error')})" if "error" in real else ""))
+    if "error" in real:
+        return
+    nodes = real.get("nodes", [])
+    t.check(len(nodes) > 0,
+            "[transitions sampled_ms] real nodes array is non-empty")
+    for node in nodes:
+        value = node.get("sampled_ms")
+        t.check(isinstance(value, (int, float)) and not isinstance(value, bool),
+                f"[transitions sampled_ms] node "
+                f"{node.get('name', '<unnamed>')!r} carries numeric sampled_ms "
+                f"(got {value!r})")
+
+
 def check_top_sessions_cpu_fields(t, srv):
     """#562: the measured-CPU contract on Top Sessions, asserted POSITIVELY.
 
@@ -816,6 +841,7 @@ def main():
                 for d in diffs:
                     print(f"    DRIFT: {d}")
             check_transitions_idle_flag(t, srv)
+            check_transitions_sampled_ms(t, srv)
             check_protocol_revision(t, srv)
             check_top_sessions_cpu_fields(t, srv)
             check_aas_fidelity_ranges(t, srv)

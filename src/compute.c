@@ -3983,15 +3983,14 @@ static int cmp_trans_desc(const void *a, const void *b)
  * that used to live inline in pgwt_compute_transitions' loop is here, in the
  * same order, so the node pass in server.c can select the identical
  * population instead of approximating it. */
-int pgwt_transition_record_counts(const struct pgwt_filter *f,
-                                  const struct pgwt_trace_event *ev)
+static int transition_record_counts_tier(const struct pgwt_filter *f,
+                                         const struct pgwt_trace_event *ev,
+                                         int sampled)
 {
     if (!ev)
         return 0;
-    /* Exact-required view: normalized sample points are not state
-     * transitions. In a mixed window they remain available to sampled
-     * views only. */
-    if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
+    /* Disjoint tiers; every other population rule is shared below. */
+    if (!!(ev->flags & PGWT_EVENT_FLAG_SAMPLE) != sampled)
         return 0;
     /* #424: a transition IS the close of one state and the start of the
      * next -- the purest INSTANT-selected quantity in the model. The caller
@@ -4010,6 +4009,18 @@ int pgwt_transition_record_counts(const struct pgwt_filter *f,
     if (PGWT_IS_MARKER(ev->old_event) || PGWT_IS_MARKER(ev->new_event))
         return 0;
     return 1;
+}
+
+int pgwt_transition_record_counts(const struct pgwt_filter *f,
+                                  const struct pgwt_trace_event *ev)
+{
+    return transition_record_counts_tier(f, ev, 0);
+}
+
+int pgwt_transition_record_counts_sampled(const struct pgwt_filter *f,
+                                          const struct pgwt_trace_event *ev)
+{
+    return transition_record_counts_tier(f, ev, 1);
 }
 
 void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,

@@ -1428,10 +1428,10 @@ def _handle_request_inner(cmd, req_id, msg):
                 # tests/test_protocol_drift.py compares this protocol surface;
                 # keep it in sync with emit_transitions_response() in src/server.c.
                 "idle_classification_complete": True, "nodes": [
-            {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0, "idle": False},
-            {"name": "Client:ClientRead", "total_ms": 9153, "class": "Client", "event_id": 0x06000000, "idle": True},
-            {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015, "idle": False},
-            {"name": "LWLock:WALInsert", "total_ms": 900, "class": "LWLock", "event_id": 0x04000007, "idle": False},
+            {"name": "CPU*", "total_ms": 4800, "sampled_ms": 0, "class": "CPU", "event_id": 0, "idle": False},
+            {"name": "Client:ClientRead", "total_ms": 9153, "sampled_ms": 0, "class": "Client", "event_id": 0x06000000, "idle": True},
+            {"name": "IO:DataFileRead", "total_ms": 2100, "sampled_ms": 0, "class": "IO", "event_id": 0x01000015, "idle": False},
+            {"name": "LWLock:WALInsert", "total_ms": 900, "sampled_ms": 0, "class": "LWLock", "event_id": 0x04000007, "idle": False},
         ], "links": [
             {"source": "Client:ClientRead", "target": "CPU*", "value": 900, "duration_ms": 9000.0},
             {"source": "CPU*", "target": "Client:ClientRead", "value": 560, "duration_ms": 5000.0},

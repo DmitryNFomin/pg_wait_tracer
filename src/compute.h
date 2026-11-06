@@ -728,7 +728,10 @@ struct pgwt_transitions_result {
  * A record is in it iff it is an exact (non-sample) record, not admitted by
  * right-edge overlap, passes the uniform filter (markers, impossible
  * durations, class/event/pid/query), and both of its states are visible and
- * real. Returns 1 for in, 0 for out.
+ * real. Returns 1 for in, 0 for out. The sampled sibling selects records
+ * rejected ONLY for carrying SAMPLE; both entry points use one file-static
+ * predicate body with a tier argument. The caller applies the same window
+ * test to both tiers. Sampled duration is additive node time, not an edge.
  *
  * Exported because the graph's NODE totals and its EDGE counts are two
  * readouts of the same population and used to be selected by two different
@@ -742,6 +745,8 @@ struct pgwt_transitions_result {
  * there is only one of it. */
 int pgwt_transition_record_counts(const struct pgwt_filter *f,
                                   const struct pgwt_trace_event *ev);
+int pgwt_transition_record_counts_sampled(const struct pgwt_filter *f,
+                                          const struct pgwt_trace_event *ev);
 
 /* Compute top state transitions (old_event → new_event).
  * Returns pairs sorted by count descending, limited to max_rows. */

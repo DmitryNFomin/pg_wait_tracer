@@ -8045,6 +8045,8 @@ static void emit_transitions_response(struct pgwt_request *req,
         cJSON_AddStringToObject(node, "name", name);
         cJSON_AddNumberToObject(node, "total_ms",
                                 (double)nodes_arr[i].total_ns / 1e6);
+        cJSON_AddNumberToObject(node, "sampled_ms",
+                                (double)nodes_arr[i].sampled_ns / 1e6);
         /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
          * emit the id the table is already keyed by (0 = CPU*). */
         cJSON_AddNumberToObject(node, "event_id", nodes_arr[i].event_id);
@@ -8249,14 +8251,20 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
      * NOT a widening: pgwt_transition_record_counts() is strictly narrower
      * than pgwt_block_agg_node_counts() on every clause they share (both drop
      * SAMPLE records, hidden old_events and markers), so this can only ever
-     * remove records from the node totals, never add one the edges lack. */
+     * remove records from exact node totals, never add one the edges lack.
+     * #808: the sampled sibling shares every other population rule and the
+     * same close-window test. Its duration is a disjoint, additive estimate
+     * in sampled_ns; it never contributes to exact totals or edge counts. */
     int node_rc = PGWT_BAGG_OK;
     for (int i = 0; i < count; i++) {
         if (!pgwt_block_agg_in_window(&events[i], node_from, node_to))
             continue;
-        if (!pgwt_transition_record_counts(&req->filter, &events[i]))
+        if (pgwt_transition_record_counts(&req->filter, &events[i]))
+            node_rc = pgwt_block_agg_add_event(&raw_nodes, &events[i]);
+        else if (pgwt_transition_record_counts_sampled(&req->filter, &events[i]))
+            node_rc = pgwt_block_agg_add_sampled_event(&raw_nodes, &events[i]);
+        else
             continue;
-        node_rc = pgwt_block_agg_add_event(&raw_nodes, &events[i]);
         if (node_rc != PGWT_BAGG_OK)
             break;
     }
