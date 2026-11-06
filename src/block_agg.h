@@ -71,28 +71,30 @@
  *     old_event occupied may well have begun in an earlier block, or before
  *     the window opened; the record is still counted whole. This is the
  *     straddle rule, and tests/test_block_agg.c §4 pins it.
- * C7. TIME is half-open; LOADER/block selection stays inclusive at both ends
- *     to fetch records whose time overlaps the window, while compute's
- *     occurrence gate is half-open (#427).
+ * C7. Counting/accumulation is half-open [from, to) on the record's END
+ *     timestamp, matching raw's occurrence gate (#427). An EXACT non-marker
+ *     record closing exactly at `to` contributes no pair or node total.
+ *     Time/clipping is unaffected (C6).
  *
  *     A trace event's timestamp_ns is when the wait ENDED, so an event ending
  *     exactly at `to` has its whole interval inside the window — selecting it
  *     is correct, and dropping it throws away a fully in-window wait. The raw
  *     loader therefore selects `ts in [from, to]` (src/server.c) and then
  *     CLIPS each interval's contribution to the window (event_window_ns,
- *     src/compute.c). This module reproduces the selection; it does not clip,
- *     because pgwt_compute_transitions() does not either (C6).
+ *     src/compute.c). LOADER and file/block gating remain inclusive, as does
+ *     pgwt_block_agg_admitted(), used only for the fidelity admitted-count,
+ *     regardless of counting predicates (including markers and edge records).
  *
- *     So: pgwt_block_agg_in_window is `ts >= from && ts <= to`, plan() SKIPs
- *     iff `first > to`, and MERGEs iff `first >= from && last <= to`.
+ *     So: pgwt_block_agg_in_window is `ts >= from && ts < to`, admitted is
+ *     `ts >= from && ts <= to`, plan() SKIPs non-overlapping block bounds
+ *     (`first > to || last < from`), and MERGEs a usable aggregate iff
+ *     `first >= from && last < to`. A block ending at `to` must DECODE.
  *
- *     THIS IS NOT #316 RETURNING, and a future reader will assume it is. #316
- *     is the same rule on the other key: the summary reader keys seconds by
- *     their START, so a second at `to` is out. An earlier draft of this module
- *     read "half-open throughout" as applying to the END key too and made the
- *     loader match; that zeroed test_data_aas and test_data_categories
- *     (Total AAS 4.0 -> 0), because their fixtures' events end exactly at the
- *     window end. Those tests encode the correct behaviour.
+ *     #316 excludes a summary second keyed by its START at `to`. An earlier
+ *     draft also changed LOADER selection to half-open; that zeroed
+ *     test_data_aas and test_data_categories (Total AAS 4.0 -> 0), whose waits
+ *     end exactly at `to`. Keeping inclusive admission under its own name
+ *     preserves those time inputs while accumulation follows #427.
  * C8. Absence is never an answer. No aggregate, a version mismatch, an
  *     identity mismatch, a filter, or an allocation failure all produce a
  *     REFUSAL (DECODE / negative status), never a zero. A caller that cannot
@@ -278,11 +280,14 @@ enum pgwt_block_plan {
 int pgwt_block_agg_record_counts(const struct pgwt_trace_event *ev);
 /* C5: does this record contribute to its old_event's node total? */
 int pgwt_block_agg_node_counts(const struct pgwt_trace_event *ev);
-/* C7: INCLUSIVE at both ends, on the record's end timestamp. NOT half-open —
- * see C7 above for why, and do not "correct" it to `<`: that reading cost a
- * wiring round and zeroed test_data_aas (Total AAS 4.0 -> 0). */
+/* C7: half-open [from, to) on the record's end timestamp, for accumulation. */
 int pgwt_block_agg_in_window(const struct pgwt_trace_event *ev,
                              uint64_t from_mono_ns, uint64_t to_mono_ns);
+/* C7: inclusive [from, to] admission for the fidelity admitted-count ONLY,
+ * regardless of counting predicates; includes markers and records at `to`.
+ * This preserves loader selection without changing time/clipping. */
+int pgwt_block_agg_admitted(const struct pgwt_trace_event *ev,
+                            uint64_t from_mono_ns, uint64_t to_mono_ns);
 /* C7 at FILE/BLOCK granularity: can bounds [mono_first, mono_last]
  * contribute to [from, to]? The same inclusive rule, shared rather than
  * hand-copied, because the hand-copied version drifted to `>=` and produced a
@@ -341,8 +346,8 @@ int pgwt_block_agg_merge(struct pgwt_block_agg *dst,
 int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
                              const struct pgwt_trace_event *ev);
 
-/* Accumulate every record of `events` whose timestamp is in [from, to] —
- * INCLUSIVE at both ends, C7 — into a window accumulator. THE one raw-side
+/* Accumulate every record of `events` whose timestamp is in [from, to) —
+ * half-open, C7 — into a window accumulator. THE one raw-side
  * accumulator: the raw `transitions` response and tests/test_block_agg.c's
  * oracle comparison both go through it, so the per-node numbers the product
  * emits cannot drift from the numbers the gate compares.
@@ -354,11 +359,12 @@ int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
  * guard here would let a reader believe this function is covered by a gate
  * that never calls it.
  *
- * Pass from = 0, to = UINT64_MAX for "every record given".
+ * Pass from = 0, to = UINT64_MAX for all representable closes below UINT64_MAX.
  *
  * `*n_in_window` (optional) receives the number of records admitted by the
- * window test REGARDLESS of the counting predicates — that is the caller's
- * "did any exact record actually land in this window" signal, which is what
+ * INCLUSIVE pgwt_block_agg_admitted() test REGARDLESS of the counting
+ * predicates — that is the caller's "did any exact record actually land in
+ * this window" signal, which is what
  * the fidelity indicator is derived from, and is NOT the same as
  * total_transitions. Returns 0 or a negative pgwt_bagg_status. */
 int pgwt_block_agg_add_events(struct pgwt_block_agg *a,
@@ -441,8 +447,8 @@ typedef int (*pgwt_bagg_decode_fn)(void *ctx, struct pgwt_event_reader *r,
                                    struct pgwt_block_info *bi);
 
 /* Fold one trace file's blocks into the window accumulator `acc`, merging the
- * blocks wholly inside [from_mono_ns, to_mono_ns] -- INCLUSIVE at both ends
- * (C7; do not "correct" the bracket) -- and decoding only the
+ * blocks wholly inside [from_mono_ns, to_mono_ns) -- half-open for
+ * counting/accumulation (C7) -- and decoding only the
  * partial ones at the edges.
  *
  * This is THE iteration both the shipped `transitions` handler and
@@ -451,14 +457,15 @@ typedef int (*pgwt_bagg_decode_fn)(void *ctx, struct pgwt_event_reader *r,
  * must exercise the same code the server runs, not a restatement of it.
  *
  * `*exact_in_window` is incremented by the number of records admitted by the
- * window test regardless of the counting predicates — the caller's fidelity
- * signal (see pgwt_block_agg_add_events). `*merged`/`*decoded` count blocks,
+ * inclusive admission test regardless of the counting predicates — the
+ * caller's fidelity signal (see pgwt_block_agg_add_events). File/block gating
+ * stays inclusive too. `*merged`/`*decoded` count blocks,
  * for callers that want to declare how an answer was produced. All three are
  * optional.
  *
  * Returns PGWT_BAGG_OK only on success. Equal or inverted endpoints are
  * REFUSED_INVALID before any accumulator or counter changes: [from, from]
- * can select records (C7), so the reader fast path must defer to raw rather
+ * can admit records for fidelity (C7), so the reader must defer to raw rather
  * than report zero. Any overlapping non-TRANSITIONS block is REFUSED_BLOCK_TYPE,
  * including one starting exactly at `to_mono_ns`.
  *
