@@ -8105,9 +8105,17 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
     /* ── fast path: merge whole blocks, decode only the edges ──────────── */
     coverage_refresh(srv);
     uint64_t from_ns = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
+    /* This default serves only bounded aggregate windows. Whole-capture
+     * requests must stay unbounded on the right, matching the loader's
+     * right_bounded in server_load_events_fi_mode() (set before defaulting)
+     * and the raw node path's UINT64_MAX below. Keep them on the raw path:
+     * half-open aggregation would drop the record at latest_wall_ns.
+     * bagg_window_eligible() returns 0 unconditionally today, so this guard
+     * loses no live fast path. */
     uint64_t to_ns   = req->to_ns   ? req->to_ns   : srv->latest_wall_ns;
 
-    if (bagg_window_eligible(srv, &req->filter, from_ns, to_ns)) {
+    if (req->to_ns != 0 &&
+        bagg_window_eligible(srv, &req->filter, from_ns, to_ns)) {
         struct pgwt_block_agg win;
         uint64_t exact_in_window = 0;
         int merged = 0, decoded = 0;
@@ -8205,10 +8213,11 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
      * so an open interval here credited the whole 30 s of a straddler to its
      * node while pgwt_compute_transitions correctly refused its edge —
      * right edges, wrong node bars, in the same response. Passing the
-     * request's own window re-applies block_agg's inclusive close test,
-     * which is exactly the INSTANT selector; for every record that is not
-     * right-open it is a no-op, because the loader applied the identical
-     * rule. A whole-capture request (0) stays unbounded. */
+     * request's own window applies block_agg's half-open [from, to) close
+     * test (#427), matching the occurrence gate. Loader selection stays
+     * inclusive for time and fidelity; pgwt_block_agg_admitted keeps that
+     * inclusive test only for the exact_in_window fidelity count.
+     * A whole-capture request (0) stays unbounded. */
     uint64_t node_from = req->from_ns;
     uint64_t node_to   = req->to_ns ? req->to_ns : UINT64_MAX;
     struct pgwt_block_agg raw_nodes;
@@ -8226,10 +8235,10 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
      * The per-record loop is written out here instead of calling
      * add_events() because the extra condition is the request's filter,
      * which add_events has no parameter for. The window test
-     * (pgwt_block_agg_in_window, C7 -- inclusive, on the record's close) and
-     * the accumulation (pgwt_block_agg_add_event) are still the aggregate
-     * module's own, so the two paths cannot drift on either. The predicate
-     * is pgwt_compute_transitions' own, exported, not a copy of it.
+     * (pgwt_block_agg_in_window, C7 -- half-open [from, to) on the record's
+     * close) and the accumulation (pgwt_block_agg_add_event) are still the
+     * aggregate module's own, so the two paths cannot drift on either. The
+     * predicate is pgwt_compute_transitions' own, exported, not a copy of it.
      *
      * NOT a widening: pgwt_transition_record_counts() is strictly narrower
      * than pgwt_block_agg_node_counts() on every clause they share (both drop
