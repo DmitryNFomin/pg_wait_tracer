@@ -1123,7 +1123,8 @@ out:
  *
  * #427 makes the upper bound exclusive: 14d pins that edge, 14g/14h pin
  * ownership across adjacent windows (including +/-1 ns), and 14i pins that
- * TIME stays in the preceding window even when the OCCURRENCE moves. */
+ * TIME stays in the preceding window even when the OCCURRENCE moves.
+ * 14j pins the SAMPLE exception: a synthetic clip point at `to` counts. */
 static void test_instant_two_bounds(void)
 {
     printf("--- 14. per-occurrence selection is half-open [from, to) ---\n");
@@ -1317,6 +1318,49 @@ static void test_instant_two_bounds(void)
           qtimes_ms[0] == 1000.0 && qtimes_ms[1] == 0.0,
           "14i. Queries time stays 1 s / 0 s across E; counts become 0 / 1 "
           "(time_ms=%.0f/%.0f)", qtimes_ms[0], qtimes_ms[1]);
+
+    /* 14j. SAMPLE fragments clipped by merge_append_sample_part have a
+     * synthetic timestamp at `to`: count the observation, not a real close.
+     * Both compute paths increment count for samples, not exact_count.
+     * Do not test an adjacent window here: compute's lower bound is
+     * inclusive; emitting no fragment in the next window is the loader's
+     * responsibility (src/server.c: merge_append_sample_part), unexercised
+     * by these direct compute calls. */
+    struct pgwt_trace_event sample = ev;
+    sample.flags |= PGWT_EVENT_FLAG_SAMPLE;
+    pgwt_compute_top_events(&sample, 1, &f, 10 * ONE_SEC, 15 * ONE_SEC,
+                            5000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    uint64_t sample_count = row ? row->count : 0;
+    free(res.rows);
+    /* counts[0] is the exact twin over [10 s, 15 s), from 14g. */
+    CHECK(sample_count == 1 && counts[0] == 0,
+          "14j-1. Events at `to` count SAMPLE 1 / exact 0 (got %llu/%llu)",
+          (unsigned long long)sample_count, (unsigned long long)counts[0]);
+
+    pgwt_compute_top_queries(&sample, 1, &f, 10 * ONE_SEC, 15 * ONE_SEC,
+                             5000.0, &qres);
+    qcount = 0;
+    for (int i = 0; i < qres.num_rows; i++)
+        if (qres.rows[i].query_id == sample.query_id)
+            qcount = qres.rows[i].count;
+    CHECK(qcount == 1,
+          "14j-2. Queries count the SAMPLE at `to` for its query_id "
+          "(count=%llu)", (unsigned long long)qcount);
+    free(qres.rows);
+
+    sample.timestamp_ns++;
+    pgwt_compute_top_events(&sample, 1, &f, 10 * ONE_SEC, 15 * ONE_SEC,
+                            5000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    uint64_t past_sample_count = row ? row->count : 0;
+    /* Include the edge count so removing the SAMPLE exception fails this
+     * check too, rather than passing merely because both counts are zero. */
+    CHECK(sample_count == 1 && past_sample_count == 0,
+          "14j-3. Events count SAMPLE at E / E+1 ns as 1 / 0 "
+          "(got %llu/%llu)", (unsigned long long)sample_count,
+          (unsigned long long)past_sample_count);
+    free(res.rows);
 }
 
 /* ── 15. A TIERED capture: the straddler budget is for TRANSITIONS ────
