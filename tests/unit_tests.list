@@ -691,6 +691,9 @@ test_top_wait_backfill
 # only must still print a row; a missing/non-executable comparator and a
 # generator too old to reach the refusal path must fail, never skip.
 test_cross_validate_idle.sh
+# #115: synthetic known-answer A/B/C join, measured vs nominal weights,
+# missing intervals/pids, classification, byte purity and a residual mutant.
+test_cross_validate_abc.sh
 # Paint-latency plan Phase 3: the EXECUTIONS INDEX (src/exec_index.c). Six
 # detail commands reload the full raw event window on every request at
 # ~0.68 s per million records; this indexes execution BOUNDARIES once per
