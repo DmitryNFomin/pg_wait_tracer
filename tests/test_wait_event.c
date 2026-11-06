@@ -259,7 +259,18 @@ static void check_tableless_name_fallbacks(void)
     /* Another backend's extension wait must never borrow a custom name
      * from the view's row order. Allocation order determines the real ids. */
     CHECK_NAME(WEI(PG_WAIT_EXTENSION, 0), "Extension:Extension");
-    CHECK_NAME(WEI(PG_WAIT_EXTENSION, 1), "Extension:Extension");
+    CHECK_NAME(WEI(PG_WAIT_EXTENSION, 1), "Extension:id=1");
+    CHECK_NAME(WEI(PG_WAIT_EXTENSION, 2), "Extension:id=2");
+    {
+        /* Two distinct unnameable extension ids must render as two distinct
+         * strings: the Transitions builder rejects duplicate node names. */
+        char na[64], nb[64];
+        pgwt_event_full_name(WEI(PG_WAIT_EXTENSION, 1), na, sizeof(na));
+        pgwt_event_full_name(WEI(PG_WAIT_EXTENSION, 2), nb, sizeof(nb));
+        CHECK(strcmp(na, nb) != 0, "distinct extension ids render distinct names");
+    }
+    CHECK(pgwt_event_name(WEI(PG_WAIT_BUFFERPIN, 0)) != NULL,
+          "BufferPin keeps its class-level name");
     CHECK(pgwt_event_name(WEI(0x0B, 0)) == NULL,
           "table-less InjectionPoint class must retain its fallback");
 }

@@ -705,7 +705,13 @@ const char *pgwt_event_name(uint32_t wei)
     case PG_WAIT_BUFFERPIN:
         return "BufferPin";
     case PG_WAIT_EXTENSION:
-        return "Extension";
+        /* Id 0 is PostgreSQL's own built-in extension event. Any other id
+         * is a custom event whose name pg_wait_events cannot map to an id
+         * (#801), so return NULL: pgwt_event_full_name then renders
+         * "Extension:id=<n>". One shared "Extension" name for every id would
+         * give two nodes the same name, which the Transitions builder
+         * rejects as a structural fault (duplicate node). */
+        return id == 0 ? "Extension" : NULL;
     default:
         return NULL;
     }
