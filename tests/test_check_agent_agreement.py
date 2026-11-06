@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Hermetic red controls for check-agent-agreement; no caller files are changed.
 
-Run directly with python3. Each case builds an independent repository-shaped
+Run by scripts/check.sh (make check), or directly with python3 -B.
+Each case builds an independent repository-shaped
 fixture and invokes the real shell entry point, including missing-python tests.
 The synthetic agreement is deliberately smaller than the real CLAUDE.md.
 """

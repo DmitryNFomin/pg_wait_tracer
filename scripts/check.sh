@@ -128,15 +128,18 @@ run scripts/check-link-closure.sh
 # it (three real incidents: test_v9_open_cpu_wired registered ci_smoke-only
 # twice over, and test_capture_smoke mentioned in run_all.sh only inside a
 # comment while ci_smoke.sh actually runs it). Only the SELF-TEST (synthetic
-# fixtures) runs here, not scripts/check-runner-registration.sh itself
-# against this real repo: that live run is a reviewer-run-by-hand evidence
-# guard, same as scripts/check-test-registration.sh -- wiring it into every
-# `make check` would turn a real, already-filed, out-of-scope registration
-# gap (test_capture_smoke.py / test_uprobe_fired.py, tracked by #433, not
-# fixed here since fixing it means editing tests/run_all.sh, a live-tier
-# test-assertion change) into a permanent red for every unrelated branch.
+# fixtures) runs here; checking this repository's actual membership remains
+# a manual reviewer evidence step, like scripts/check-test-registration.sh.
+# The capture-smoke and uprobe gaps are fixed in run_all.sh (#752), with
+# both capture modes registered and full mode gated on watchpoint support.
 step "runner-registration guard self-test"
 run tests/test_check_runner_registration.sh
+
+step "agent working agreement guard self-test"
+run python3 -B tests/test_check_agent_agreement.py
+
+step "test-registration guard self-test"
+run bash tests/test_check_test_registration.sh
 
 # Section-registration guard (#686): binary registration stays green when
 # one section's dispatcher line disappears. Measured on PR #689 (wired ->
@@ -153,7 +156,7 @@ step "section-registration guard (every sectioned C suite, #686)"
 run scripts/check-section-registration.sh
 
 # #591 bypass suite: tests/test_uprobe_fired.py's exact-window mask gate is a
-# LIVE test (ci_smoke.sh only -- see the #433 gap above), so its own logic
+# LIVE test (ci_smoke.sh and run_all.sh), so its own logic
 # would otherwise be provable only on a gate box. The resolver and the
 # three-part mask predicate are pure, and this runs them against every way the
 # gate could be made unable to SEE: an undeclared/unparseable expectation, an
