@@ -58,14 +58,14 @@ int main(void) {
     CHECK(pgwt_handle_init(d,child,0x1234)==0,"zombie INIT handled as stale");
     CHECK(opens==0,"zombie INIT never attempts a watchpoint");
     CHECK(d->counters.wp_attach_failures_total==0,"no invented attach failure without an attempt");
-    CHECK(deletions==3,"kernel-enrolled maps cleaned without a registry entry");
+    CHECK(deletions==5,"kernel-enrolled maps, including pacing PID/sleep, cleaned without a registry entry");
     release(d);
     CHECK(waitpid(child,NULL,0)==child,"child reaped");
     d=daemon_fixture();
     CHECK(pgwt_handle_fork(d,child)==0,"reaped FORK handled as stale");
     CHECK(opens==0,"reaped FORK never attempts a watchpoint");
     CHECK(d->counters.wp_attach_failures_total==0,"stale event is not a hardware failure");
-    CHECK(deletions==3,"reaped target kernel maps cleaned");
+    CHECK(deletions==5,"reaped target kernel maps, including pacing PID/sleep, cleaned");
     release(d);
     d=daemon_fixture();
     CHECK(pgwt_handle_exit(d,child)==0,"unregistered EXIT handled");

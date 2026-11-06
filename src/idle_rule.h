@@ -60,6 +60,12 @@
  */
 int pgwt_timeout_name_is_pacing(const char *name);
 
+/* PGWT_WEI_CKPT_PACING is tracer-owned Timeout id 30, outside the active
+ * PostgreSQL enum tables. It is always idle, even with an empty version mask,
+ * visible, and never session-idle. Do not insert it into the tables or mask.
+ * On pre-14.3 PostgreSQL it replaces the absent CheckpointWriteDelay row,
+ * so the six pacing names / seven visible Idle rows still bound the output.
+ */
 /* How many names pacing_timeout_names[] holds. The maximum number of VISIBLE
  * idle events is therefore this + 1 (Client:ClientRead); Activity is hidden
  * and never gets a row. src/compute.c static-asserts its Idle child-row budget

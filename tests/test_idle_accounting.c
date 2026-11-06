@@ -102,7 +102,11 @@ int pgwt_visit_summaries(const char *trace_dir, uint64_t from_wall_ns,
 #define MS 1000000ULL
 
 /* PG18 Timeout ids (asserted by name in tests/test_wait_event.c). */
-#define EV_CHECKPOINT_DELAY WEI(PG_WAIT_TIMEOUT, 1)   /* pacing */
+/* Compile the same full-path oracle against the tracer-owned event too. */
+#ifndef PGWT_TEST_CKPT_WEI
+#define PGWT_TEST_CKPT_WEI WEI(PG_WAIT_TIMEOUT, 1)
+#endif
+#define EV_CHECKPOINT_DELAY PGWT_TEST_CKPT_WEI
 #define EV_PGSLEEP          WEI(PG_WAIT_TIMEOUT, 2)   /* DB Time */
 #define EV_SPINDELAY        WEI(PG_WAIT_TIMEOUT, 6)   /* DB Time */
 #define EV_VACUUM_DELAY     WEI(PG_WAIT_TIMEOUT, 7)   /* pacing */
@@ -1087,10 +1091,13 @@ static void test_bypass_suite(void)
     uint32_t saved = pgwt_idle_rule_timeout_mask();
     pgwt_idle_rule_set_timeout_mask(0);
     pgwt_compute_time_model(ev, fn, &f, 0, 0, FIX_WALL_MS, &tm);
-    CHECK(NEAR(tm.db_time_ms, FIX_DB_TIME_MS + 950.0),
+    /* Synthetic pacing remains idle even without a PG table mask. Only the
+     * native VacuumDelay (150ms) returns to DB Time in that variant. */
+    double unclassified_ms = EV_CHECKPOINT_DELAY == PGWT_WEI_CKPT_PACING ? 150.0 : 950.0;
+    CHECK(NEAR(tm.db_time_ms, FIX_DB_TIME_MS + unclassified_ms),
           "with an EMPTY pacing mask DB Time returns to %.1f ms — this is the "
           "number a hardcoded-id implementation reports on PG13 (got %.1f)",
-          FIX_DB_TIME_MS + 950.0, tm.db_time_ms);
+          FIX_DB_TIME_MS + unclassified_ms, tm.db_time_ms);
     CHECK(!NEAR(tm.db_time_ms, FIX_DB_TIME_MS),
           "and it is DIFFERENT from the correct %.1f ms, so sections 1-5 can "
           "actually go red", FIX_DB_TIME_MS);

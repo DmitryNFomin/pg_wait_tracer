@@ -4,8 +4,9 @@
  * backend's PGPROC->wait_event_info (batched process_vm_readv for targets in
  * SHARED memory, per-pid pread for process-local ones — SMP-2), turn each
  * non-CPU reading into a SAMPLES record, and hand the batch to the trace
- * writer via pgwt_writer_push_samples(). No BPF in the per-sample hot path;
- * PostgreSQL executes zero extra instructions.
+ * writer via pgwt_writer_push_samples(). A pre-14.3 checkpointer's we==0
+ * reading additionally checks the BPF pacing_sleep map after its memory read;
+ * other sample targets need no BPF lookup for wait classification.
  *
  * Addresses come from the backend registry (pid -> resolved wait_event_info
  * address, the same field the watchpoint tier resolves). A validated PG14-18
@@ -210,6 +211,12 @@ void pgwt_sampler_metrics(struct pgwt_daemon *d, struct pgwt_metrics *m);
 int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
                               uint32_t *out_vals, uint8_t *out_valid,
                               uint64_t *read_faults);
+
+/* lookup returns 1 only for a present pacing_sleep entry; 0/miss and negative
+ * errors retain CPU. Called AFTER the validated wait_event_info read. */
+typedef int (*pgwt_pacing_lookup_fn)(void *ctx, uint32_t pid);
+uint32_t pgwt_sampler_pacing_event(enum pgwt_backend_type type, uint32_t pid,
+    uint32_t wei, pgwt_pacing_lookup_fn lookup, void *ctx);
 
 /* Build the SAMPLES batch from targets + their freshly-read values.
  *

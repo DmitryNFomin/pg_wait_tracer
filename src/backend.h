@@ -25,6 +25,7 @@ struct pgwt_backend {
      * backend_type == CLIENT (enum value 0), which is WRONG for an unparsed
      * entry — consumers must treat !meta_parsed as UNKNOWN. The sampled-tier
      * fork path parses lazily (the process title is only set after init). */
+    bool     ckpt_pacing_registered;
     bool     meta_parsed;
     struct pgwt_metadata meta;
     uint32_t databaseid;      /* PgBackendStatus context, 0 until observed */

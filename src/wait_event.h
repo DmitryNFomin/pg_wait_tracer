@@ -67,6 +67,7 @@ const char *pgwt_event_name(uint32_t wait_event_info);
  * sleep? This answers "can the catalog decide", NOT "is it pacing": a 0
  * means REFUSE, never "not pacing". Ids >= 32 are not representable in the
  * pacing mask and are always refused. */
+/* Tracer-owned id 30 is always classifiable, outside the active PG table. */
 int pgwt_timeout_id_is_classifiable(uint32_t id);
 
 /* Writes "class:event" (e.g. "IO:DataFileRead") to buf.
