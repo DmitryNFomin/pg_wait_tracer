@@ -40,7 +40,8 @@ def main():
         fixture, calls = t / "prs.json", t / "calls.jsonl"
         baseline = outdir / ".sweep-pr-baseline.json"
         env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"],
-                   PR_FIXTURE=str(fixture), PR_CALLS=str(calls))
+                   PR_FIXTURE=str(fixture), PR_CALLS=str(calls),
+                   PGWT_LEAD_STATE_DIR=str(hookdir))  # never read the machine-wide spawn/brief state
         for key in ("PGWT_BOX", "PGWT_BOX_EL8"):
             env.pop(key, None)
 

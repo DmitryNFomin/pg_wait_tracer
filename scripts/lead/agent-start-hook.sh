@@ -15,14 +15,36 @@ set -u
 # -- so, like sweep.sh's own hardcoded `cd`, it lives at one canonical
 # checkout path rather than next to whichever worktree's hook fired.
 LEDGER="/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead/.active-agents"
+STATE="${PGWT_LEAD_STATE_DIR:-/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead}"
 D="$(cd "$(dirname "$0")" && pwd)"
 agent_id=$(cat | /usr/bin/python3 -c '
-import json, sys
+import fcntl, json, os, sys, time
 try:
     d = json.load(sys.stdin)
+    if not isinstance(d, dict):
+        raise ValueError("payload must be an object")
+    keys = ",".join(sorted(d))
 except Exception:
     d = {}
+    keys = "UNPARSEABLE"
 print(d.get("agent_id") or "")
-' 2>/dev/null)
+def token(value):
+    return value if isinstance(value, str) and value and not any(c.isspace() for c in value) else "unknown"
+try:
+    with open(os.path.join(sys.argv[1], ".brief-gate.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        epoch = int(time.time())
+        aid, kind = token(d.get("agent_id")), token(d.get("agent_type"))
+        presence = "PRESENT" if "agent_type" in d else "ABSENT"
+        for name, line in ((".spawns", f"{epoch} {aid} {kind}\n"),
+                           (".spawn-payloads", f"{epoch} {aid} keys={keys} agent_type={presence}\n")):
+            try:
+                with open(os.path.join(sys.argv[1], name), "a", encoding="utf-8") as records:
+                    records.write(line)
+            except OSError:
+                pass
+except OSError:
+    pass
+' "$STATE" 2>/dev/null)
 [ -n "$agent_id" ] && /usr/bin/python3 "$D/agent-ledger.py" start "$LEDGER" "$agent_id" 2>/dev/null
 exit 0

@@ -77,6 +77,18 @@ run bash tests/test_push_guard_denylist.sh
 step "report audit isolation and contradiction controls (#761)"
 run python3 scripts/lead/audit-report-selftest.py
 
+step "bash: brief live-comment evidence and scope decisions"
+run bash tests/test_check_brief.sh
+
+step "bash: Stop gates dispatches on recorded brief passes"
+run bash tests/test_brief_gate.sh
+
+step "CLAUDE.md hook table agrees with .claude/settings.json (was orphaned from check)"
+run scripts/check-agent-agreement.sh
+
+step "python: RULE 0 absence vocabulary and evidence scopes"
+run python3 tests/test_absence_vocab.py
+
 step "POSIX shell: Codex task wrapper self-test"
 run scripts/lead/codex-task-selftest.sh
 

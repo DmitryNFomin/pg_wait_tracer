@@ -30,6 +30,21 @@ Paste a command and its output for every **count**, **absence** ("exists nowhere
 Treat one denied operation as one failed attempt only. Without evidence, write
 `UNVERIFIED:`, never a cause.
 
+Every absence claim also needs, within 8 lines, a `SEARCHED: <what was probed>` line
+and a `NOT SEARCHED: <what could hold it and was not probed>` line; `none`, empty or
+`n/a` is refused, and `UNVERIFIED:` does not stand in for it
+(`scripts/lead/absence-prepass.py`). A brief dispatching issue N must paste the live
+`gh api repos/{owner}/{repo}/issues/N/comments --paginate` output in a fence and add
+`CONTROLLING SCOPE DECISION: #N comment <id> "<quote>"` (`scripts/lead/check-brief.sh`,
+recorded on pass; `scripts/lead/codex-task.sh` refuses (exit 15) a brief with no passing record for its exact
+content, and the `Stop` hook checks `SubagentStart` spawns against the records).
+
+A Bash call may contain probes **or** conclusions, never both. Where a verdict is
+wanted, derive it in the shell from the data (`out=$(...); if [ -z "$out" ]; then
+echo "VERDICT: ..."`), never in an `echo` written alongside the probe. Never pipe
+an existence probe to `wc -l` or `head`. A ref, file or process existing is not
+evidence of what created it — get its date and author.
+
 ## RULE 1 — advisers first, the owner last. Never ask the owner what an adviser can answer.
 
 Send design, scope, sequencing, approach and option questions to **both advisers first**:
@@ -300,9 +315,12 @@ Registered in `.claude/settings.json` (`*` means no matcher):
 - `PreToolUse`: screens Bash command text; can refuse a push or other command
   matching the push-guard bypass/tampering denylist.
 - `Stop`: refreshes stale sweep data; can refuse to end a turn until every
-  finding carries this turn's disposition.
-- `SubagentStart`: records the agent ID in the shared active-agent ledger;
-  always exits 0 and cannot refuse agent creation.
+  finding carries this turn's disposition, and until every non-advisory agent
+  spawned this turn has an earlier passing `scripts/lead/check-brief.sh` record.
+- `SubagentStart`: records the agent ID in the shared active-agent ledger and in
+  `.spawns` (id, type, time) and the raw payload keys in `.spawn-payloads`; always
+  exits 0 and cannot refuse agent creation. A spawn with no `agent_type` is
+  advisory, and the next `Stop` prints a diagnostic saying so.
 - `SubagentStop` ledger hook: removes the agent ID from that ledger;
   always exits 0 and never refuses a stop.
 - `SubagentStop` sweep hook: refreshes stale sweep data; can refuse to end a

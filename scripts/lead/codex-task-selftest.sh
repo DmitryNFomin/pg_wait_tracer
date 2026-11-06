@@ -5,7 +5,7 @@
 set -eu
 here=$(CDPATH='' cd -P "$(dirname "$0")" && pwd -P)
 wrapper="$here/codex-task.sh"
-[ -x "$wrapper" ] || { echo 'FAIL: wrapper must be executable' >&2; exit 1; }
+[ -x "$wrapper" ] || { printf 'FAIL: wrapper must be executable\n' >&2; exit 1; }
 tmp=$(mktemp -d /private/tmp/pgwt-codex-selftest.XXXXXX)
 prefix=${tmp##*/}
 root=/private/tmp/pgwt-codex
@@ -100,6 +100,16 @@ chmod 755 "$tmp/bin/codex" "$tmp/bin/git"
 PATH="$tmp/bin:$PATH"
 export PATH
 printf 'BRIEF_SENTINEL\n' > "$tmp/brief"
+PGWT_LEAD_STATE_DIR="$tmp/lead-state"
+export PGWT_LEAD_STATE_DIR
+mkdir "$PGWT_LEAD_STATE_DIR"
+record_brief() {
+    digest=$(shasum -a 256 < "$tmp/brief")
+    digest=${digest%% *}
+    printf '%s %s %s\n' "${1:-$(date +%s)}" "$digest" "$tmp/brief" > "$PGWT_LEAD_STATE_DIR/.briefs-passed"
+}
+record_brief
+cp "$PGWT_LEAD_STATE_DIR/.briefs-passed" "$tmp/record-before"
 mkdir -p "$root"
 
 new_branch() {
@@ -122,6 +132,15 @@ expect_refusal() {
     [ "$rc" -eq "$1" ] || fail "expected exit $1, got $rc"
     grep -Fq "$2" "$tmp/err" || fail "missing diagnostic: $2"
     [ ! -s "$tmp/out" ] || fail 'failure printed a success block or unverified SHA'
+}
+expect_unchecked() {
+    calls_before=$(/usr/bin/grep -c . "$STUB_CALLS" || true)
+    git_before=$(/usr/bin/grep -c . "$STUB_GIT_CALLS" || true)
+    run_wrapper commit
+    expect_refusal 15 'BRIEF_UNCHECKED: run scripts/lead/check-brief.sh <brief> first (no passing record for this exact brief content)'
+    [ ! -e "$STUB_CLONE" ] && [ ! -e "$STUB_CLONE.lock" ] || fail 'unchecked brief created clone or lock'
+    [ "$(/usr/bin/grep -c . "$STUB_CALLS" || true)" = "$calls_before" ] || fail 'unchecked brief ran Codex'
+    [ "$(/usr/bin/grep -c . "$STUB_GIT_CALLS" || true)" = "$git_before" ] || fail 'unchecked brief ran clone/fetch'
 }
 verify_success() {
     [ "$rc" -eq 0 ] || fail "expected success, got exit $rc"
@@ -180,6 +199,7 @@ grep -Fq 'Reusing clone:' "$tmp/err" || fail 'reuse was not announced'
 [ "$("$REAL_GIT" -C "$STUB_CLONE" rev-list --count "$first_sha..$sha")" -eq 1 ] || fail 'reuse lost prior history'
 [ "$(cat "$STUB_CLONE/prior-work.txt")" = 'prior untracked work' ] || fail 'untracked work clobbered'
 [ "$(cat "$STUB_CLONE/base.txt")" = 'prior dirty tracked work' ] || fail 'dirty tracked work clobbered'
+cmp -s "$PGWT_LEAD_STATE_DIR/.briefs-passed" "$tmp/record-before" || fail 'passing record consumed or changed across dispatch/retry'
 printf '5 reuse: exit=0; %s; prior commit is ancestor, exactly one new commit, dirty tracked + untracked sentinels intact\n' "$(grep '^Reusing clone:' "$tmp/err")"
 
 new_branch fetch-fail
@@ -215,4 +235,44 @@ sha=$("$REAL_GIT" -C "$STUB_CLONE" rev-parse "refs/heads/$STUB_BRANCH")
 [ "$("$REAL_GIT" -C "$FIXTURE_REAL" rev-parse "refs/heads/$STUB_BRANCH")" = "$sha" ] || fail 'Codex failure lost committed work'
 [ "$("$REAL_GIT" -C "$FIXTURE_REAL" cat-file -t "$sha")" = commit ] || fail 'salvaged commit unreachable'
 printf 'extra Codex failure: exit=%s; %s; stdout empty\n' "$rc" "$(grep '^CODEX_FAILED:' "$tmp/err")"
-printf 'PASS: all six required controls and four additional refusal controls\n'
+
+new_branch unchecked-brief
+printf '%s %064d %s\n' "$(date +%s)" 0 "$tmp/brief" > "$PGWT_LEAD_STATE_DIR/.briefs-passed"
+expect_unchecked
+printf 'extra unchecked brief: exit=%s; no clone, lock, fetch or Codex invocation\n' "$rc"
+
+new_branch edited-brief
+record_brief
+printf 'edited after validation\n' >> "$tmp/brief"
+expect_unchecked
+printf 'extra edited brief: exit=%s; previous content record rejected\n' "$rc"
+printf 'BRIEF_SENTINEL\n' > "$tmp/brief"
+
+new_branch stale-brief
+record_brief "$(( $(date +%s) - 86401 ))"
+expect_unchecked
+printf 'extra stale brief: exit=%s; record older than 24h rejected\n' "$rc"
+
+new_branch missing-records
+rm "$PGWT_LEAD_STATE_DIR/.briefs-passed"
+expect_unchecked
+printf 'extra missing records: exit=%s; no state file created\n' "$rc"
+[ ! -e "$PGWT_LEAD_STATE_DIR/.briefs-passed" ] || fail 'refusal created brief records'
+
+new_branch unreadable-records
+mkdir "$PGWT_LEAD_STATE_DIR/.briefs-passed"
+expect_unchecked
+rmdir "$PGWT_LEAD_STATE_DIR/.briefs-passed"
+printf 'extra unreadable records (directory): exit=%s\n' "$rc"
+
+new_branch unavailable-hash
+record_brief
+cat > "$tmp/bin/shasum" <<'STUB'
+#!/bin/sh
+exit 127
+STUB
+chmod 755 "$tmp/bin/shasum"
+expect_unchecked
+rm "$tmp/bin/shasum"
+printf 'extra unavailable hash tool: exit=%s\n' "$rc"
+printf 'PASS: existing wrapper controls, reusable checked brief, and six brief-gate refusals\n'

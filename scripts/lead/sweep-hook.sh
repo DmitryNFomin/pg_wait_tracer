@@ -45,6 +45,7 @@ set -u
 D="$(cd "$(dirname "$0")" && pwd)"
 CACHE="$D/.sweep-latest.txt"; LOG="$D/.sweep.log"; MAXAGE=600   # 10 min
 DISP="$D/.dispositions"
+STATE="${PGWT_LEAD_STATE_DIR:-/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead}"
 
 input="$(cat)"
 read -r stop_active hook_event_name < <(printf '%s' "$input" | /usr/bin/python3 -c '
@@ -77,9 +78,7 @@ if [ ! -s "$CACHE" ]; then
   printf '!! LEAD SWEEP: NO DATA and the refresh did not produce any.\n'
   printf '!! You may NOT claim nothing is idle, stranded or unclosed. Run:\n'
   printf '!!   scripts/lead/sweep.sh\n'
-  exit 0
-fi
-
+else
 printf '=== LEAD SWEEP (%dm old) ===\n' $(( age / 60 ))
 # grep -c prints "0" on zero matches but still EXITS 1 (not an error -- "no
 # match" is success-shaped everywhere else in grep); `|| echo 0` therefore
@@ -95,6 +94,7 @@ n=$(/usr/bin/grep -acE 'FINDING|CANDIDATE|UNKNOWN' "$CACHE" 2>/dev/null || true)
 c=$(/usr/bin/grep -acE 'CANDIDATE' "$CACHE" 2>/dev/null || true)
 [ -n "$c" ] && [ "$c" -gt 0 ] && printf '   (+%d CANDIDATE lines -- a mention is not a fix; verify content on master)\n' "$c"
 printf '=== %s open items. Act on them or say why not. ===\n' "${n:-UNKNOWN}"
+fi
 
 # A subagent stopping is not the lead's turn boundary. Keep its cache refresh
 # above, but never touch $DISP or evaluate either gate for this event.
@@ -130,6 +130,117 @@ disp_content=$(cat "$DISP" 2>/dev/null || true)
 
 missing=""
 nmissing=0
+
+# ---- recorded brief / spawn gate -------------------------------------------
+# Share one flock with both producers. Snapshot and truncate before evaluating
+# in memory, just like dispositions; keep the lock through the write-back so
+# concurrent SubagentStart/check-brief records cannot be overwritten.
+brief_out=$(PGWT_DISP_CONTENT="$disp_content" /usr/bin/python3 - "$STATE" <<'PY'
+import contextlib
+import fcntl
+import os
+import re
+import sys
+import time
+
+advisory = {"adviser", "reviewer", "ui-reviewer", "Explore", "Plan",
+            "claude-code-guide", "statusline-setup"}
+state = sys.argv[1]
+disp = os.environ.get("PGWT_DISP_CONTENT", "")
+
+
+def write_lines(stream, lines):
+    stream.seek(0)
+    stream.truncate()
+    stream.writelines(line + "\n" for line in lines)
+    stream.flush()
+
+
+try:
+    with open(os.path.join(state, ".brief-gate.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(os.path.join(state, ".spawn-payloads"), "a+", encoding="utf-8") as payloads:
+            payloads.seek(0)
+            diagnostics = payloads.read().splitlines()
+            write_lines(payloads, [])
+        if diagnostics:
+            absent = 0
+            keys = set()
+            for line in diagnostics:
+                match = re.fullmatch(r"[0-9]+ \S+ keys=(.*) agent_type=(PRESENT|ABSENT)", line)
+                if match:
+                    keys.update(key for key in match[1].split(",") if key)
+                    absent += match[2] == "ABSENT"
+            warning = ("; agent_type NOT DELIVERED -- spawn gate cannot classify; check the keys above"
+                       if absent else "")
+            print(f"BANNER SPAWN PAYLOAD DIAGNOSTIC: {len(diagnostics)} spawn(s) since last stop, "
+                  f"{absent} with agent_type ABSENT; keys seen: {','.join(sorted(keys))}{warning}")
+        with contextlib.ExitStack() as stack:
+            files = [stack.enter_context(open(os.path.join(state, name), "a+", encoding="utf-8"))
+                     for name in (".spawns", ".briefs-passed")]
+            snapshots = []
+            for stream in files:
+                stream.seek(0)
+                snapshots.append(stream.read().splitlines())
+            for stream in files:
+                write_lines(stream, [])
+
+            now = int(time.time())
+            passes = []
+            for line in snapshots[1]:
+                match = re.fullmatch(r"([0-9]{1,12}) ([0-9a-f]{64}) (/[^\r\n]*)", line)
+                if not match:
+                    print("UNKNOWN: malformed .briefs-passed record; verify brief state")
+                    continue
+                epoch = int(match[1])
+                if epoch >= now - 24 * 3600:
+                    passes.append((epoch, line))
+            passes.sort()
+
+            spawns, kept = [], []
+            for line in snapshots[0]:
+                match = re.fullmatch(r"([0-9]{1,12}) (\S+)(?: (\S+))?", line)
+                if not match:
+                    print("UNKNOWN: malformed .spawns record; verify dispatch state")
+                    kept.append(line)
+                    continue
+                spawns.append((int(match[1]), match[2], match[3], line))
+            for epoch, aid, kind, line in sorted(spawns, key=lambda item: item[0]):
+                # Missing/unclassifiable types are advisory. Only a real,
+                # explicitly non-advisory token establishes a dispatch.
+                if kind is None or kind == "unknown" or kind in advisory:
+                    continue
+                if passes and passes[0][0] <= epoch:
+                    passes.pop(0)
+                    continue
+                if re.search(r"^(ACTED|MY-CHOICE|UNKNOWN)[^\S\n][^\n]*\[" + re.escape(aid) + r"\]",
+                             disp, re.MULTILINE):
+                    continue
+                kept.append(line)
+                print(f"[{aid}] dispatch {aid} ({kind}): run scripts/lead/check-brief.sh "
+                      "<brief-file> BEFORE spawning; record a disposition for this agent")
+            write_lines(files[0], kept)
+            write_lines(files[1], [line for _, line in passes])
+except (OSError, UnicodeError, ValueError) as exc:
+    print(f"UNKNOWN: cannot read/update .spawns and brief state: {exc}")
+    sys.exit(1)
+PY
+)
+brief_rc=$?
+if [ "$brief_rc" -ne 0 ] && [ -z "$brief_out" ]; then
+  brief_out="UNKNOWN: cannot evaluate .spawns and brief state (exit $brief_rc)"
+fi
+while IFS= read -r bline; do
+  [ -n "$bline" ] || continue
+  case "$bline" in
+    BANNER\ *) printf '%s\n' "${bline#BANNER }"; continue ;;
+  esac
+  nmissing=$((nmissing+1))
+  missing="${missing}${bline}
+"
+done <<BRIEF_EOF
+$brief_out
+BRIEF_EOF
 
 if [ -n "$findings" ]; then
 while IFS= read -r line; do
