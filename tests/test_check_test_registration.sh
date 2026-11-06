@@ -9,13 +9,10 @@
 # tests/Makefile files, then points scripts/check-test-registration.sh at it
 # via its `[repo-dir]` argument.
 #
-# NOT wired into `make check`, CI, or any Makefile target -- this is a
-# reviewer-run guard (see CLAUDE.md's "Two evidence guards" bullet): a
-# reviewer runs `scripts/check-test-registration.sh` by hand before
-# declaring READY. This self-test IS pure git with no Linux/BPF/PG
-# dependency and could run on the Mac tier, but is not invoked
-# automatically anywhere; run it by hand to verify the guard itself still
-# works, the same way the guard is itself run by hand.
+# Wired into scripts/check.sh (make check): this self-test uses pure git
+# with no Linux/BPF/PG dependency. The actual repository guard remains a
+# manual reviewer evidence step: run scripts/check-test-registration.sh
+# before declaring READY (see CLAUDE.md's "Three evidence guards" bullet).
 #
 # Usage: tests/test_check_test_registration.sh (run from anywhere)
 set -uo pipefail
