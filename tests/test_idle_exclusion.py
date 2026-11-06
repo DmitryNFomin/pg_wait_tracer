@@ -170,13 +170,17 @@ def test_idle_exclusion(pm_pid):
     WAIT_CLASSES = {'IO', 'LWLock', 'Lock', 'Client', 'IPC',
                     'BufferPin', 'Timeout', 'Extension'}
     wait_sum = sum(model.get(c, 0) for c in WAIT_CLASSES)
-    reconstructed = cpu_time + wait_sum
+    # The product's identity is DB Time = CPU* + Off-CPU* + sum(waits); the
+    # runqueue row is reported separately and must be counted here too.
+    offcpu_time = model.get('Off-CPU*', 0)
+    reconstructed = cpu_time + offcpu_time + wait_sum
 
     if db_time > 0:
         error_pct = abs(reconstructed - db_time) / db_time * 100
         check(error_pct < 1.0,
               f"DB Time = CPU + Waits (no Activity): "
-              f"CPU({cpu_time:.0f}) + Waits({wait_sum:.0f}) = {reconstructed:.0f} "
+              f"CPU({cpu_time:.0f}) + OffCPU({offcpu_time:.0f}) + "
+              f"Waits({wait_sum:.0f}) = {reconstructed:.0f} "
               f"vs DB Time {db_time:.0f} (error {error_pct:.1f}%)")
 
     # DB Time + Activity should be more than DB Time alone

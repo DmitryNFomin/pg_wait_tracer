@@ -48,7 +48,19 @@ void pgwt804_main(Datum arg)
     pqsignal(SIGTERM, die);
     BackgroundWorkerUnblockSignals();
     BackgroundWorkerInitializeConnection("postgres", NULL, 0);
-    if (DatumGetInt32(arg) == 1) {
+    if (DatumGetInt32(arg) == 3) {
+        /* Syscall-identical to the checkpointer's pacing sleep (pg_usleep
+         * of 100000 us is select/pselect6 with nfds 0 and a 100 ms
+         * timeout), issued by a NON-checkpointer. An over-wide probe filter
+         * would misclassify exactly this as CheckpointWriteDelay. */
+        struct timespec start, now;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        do {
+            pg_usleep(100000L);
+            CHECK_FOR_INTERRUPTS();
+            clock_gettime(CLOCK_MONOTONIC, &now);
+        } while (now.tv_sec - start.tv_sec < 30);
+    } else if (DatumGetInt32(arg) == 1) {
         struct timespec start, now;
         volatile uint64 x = 1;
         clock_gettime(CLOCK_MONOTONIC, &start);

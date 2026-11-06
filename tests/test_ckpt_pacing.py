@@ -149,6 +149,13 @@ def wait_pacing(ckpt, native):
 
 
 def quantity(pm, base, mode, ckpt, native):
+    # Refuse (never absorb) load this test did not start: a stray active
+    # client, e.g. one leaked by an earlier test, doubles total DB Time and
+    # would read as a probe miss.
+    strays = sql("SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' "
+                 "AND state='active' AND pid<>pg_backend_pid()")
+    require(strays == '0', f'{mode}: no stray active client backend before the capture '
+            f'(found {strays})')
     sql('CHECKPOINT')
     dirty()
     wait_pacing(ckpt, native)
@@ -212,6 +219,8 @@ def positive_controls(pm, base, mode, library):
                  == 'advisory', 5, 'background worker in a real Lock:advisory wait')
         cpu = int(sql(f"SELECT pgwt804_launch('{library}',1)"))
         workers.append(cpu)
+        sleeper = int(sql(f"SELECT pgwt804_launch('{library}',3)"))
+        workers.append(sleeper)
         _, ticks_before = proc_stat(cpu)
         directory = base / ('controls_' + mode)
         result = capture(pm, directory, mode)
@@ -228,6 +237,20 @@ def positive_controls(pm, base, mode, library):
         waiter_tm = report(directory, 'time_model', pid=waiter)
         require(lock_ms >= 5000 and float(waiter_tm['db_time_ms']) >= 5000,
                 f'{mode} non-pacing background resource wait stays DB Time ({lock_ms:.1f}ms)')
+        # Discrimination control: a NON-checkpointer issuing the very same
+        # 100 ms select/pselect6 sleep must NOT become CheckpointWriteDelay.
+        # (The other two controls never call the hooked syscall, so they
+        # cannot see an over-wide filter.)
+        sl_events = report(directory, 'top_events', pid=sleeper)['rows']
+        mis = sum(float(r['total_ms']) for r in sl_events
+                  if r['name'] == 'Timeout:CheckpointWriteDelay')
+        require(mis <= 200, f'{mode} non-checkpointer 100ms sleep is NOT '
+                f'Timeout:CheckpointWriteDelay ({mis:.1f}ms)')
+        if mode == 'full':
+            sl_tm = report(directory, 'time_model', pid=sleeper)
+            require(float(sl_tm['db_time_ms']) >= 5000,
+                    f'full non-checkpointer waitless sleep stays DB Time '
+                    f'({float(sl_tm["db_time_ms"]):.1f}ms)')
     finally:
         for pid in workers:
             sql(f'SELECT pg_terminate_backend({pid})')
@@ -260,7 +283,12 @@ def refusal(pm, base, ckpt, native):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pid', type=int)
+    parser.add_argument('--modes', default='full,tiered',
+                        help='capture modes to run (default both; narrowed only '
+                             'to attribute a mutant to one mode)')
     args = parser.parse_args()
+    modes = [m for m in args.modes.split(',') if m in ('full', 'tiered')]
+    require(modes, 'at least one capture mode selected')
     pm = args.pid or find_postmaster()
     require(os.geteuid() == 0 and sys.platform.startswith('linux'), 'Linux root live harness')
     version = int(sql('SHOW server_version_num'))
@@ -284,7 +312,7 @@ def main():
             sql('SELECT pg_reload_conf()')
             sql(f'CREATE TABLE {TABLE} WITH (autovacuum_enabled=false) AS '
                 'SELECT g, md5(g::text) m FROM generate_series(1,3000000) g')
-            for mode in ('full', 'tiered'):
+            for mode in modes:
                 quantity(pm, base, mode, ckpt, native)
                 positive_controls(pm, base, mode, library)
             refusal(pm, base, ckpt, native)
