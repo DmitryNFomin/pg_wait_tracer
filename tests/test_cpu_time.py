@@ -99,6 +99,13 @@ BACKGROUND_WAITS = ('Timeout:CheckpointWriteDelay', 'Timeout:VacuumDelay',
                     'Extension:Extension')
 
 
+def is_background_wait(name):
+    """BACKGROUND_WAITS, plus any custom Extension id: pg_wait_events gives no
+    id for custom extension events (#801), so the collector's wait renders
+    as Extension:id=<n> rather than a name."""
+    return name in BACKGROUND_WAITS or name.startswith('Extension:id=')
+
+
 def cleanup():
     """Terminate leftover backends and quiet the box before measuring."""
     for pat in ('%generate_series%', '%pg_sleep%', '%LOOP%'):
@@ -188,7 +195,7 @@ def test_cpu_system_event(pm_pid):
         # throttling, not work, and can run for seconds under suite load.
         competing = [e for e in events
                      if not e['name'].startswith('Activity:')
-                     and e['name'] not in BACKGROUND_WAITS]
+                     and not is_background_wait(e['name'])]
         if competing:
             top_ms = max(e['total_ms'] for e in competing)
             check(ev['total_ms'] >= top_ms * 0.8,
@@ -256,7 +263,7 @@ def test_cpu_time_model(pm_pid):
     # since they are idle throttling, not work; under suite load they can add
     # seconds of DB Time. Off-CPU* and minor IO still dilute, so require >40%.
     db_time = model.get('DB Time', 0)
-    background = sum(model.get(w, 0) for w in BACKGROUND_WAITS)
+    background = sum(v for w, v in model.items() if is_background_wait(w))
     real_db = db_time - background
     if real_db > 0:
         cpu_pct = cpu_ms / real_db * 100

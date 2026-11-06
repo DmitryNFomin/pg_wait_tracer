@@ -491,7 +491,11 @@
  *     over-credited part cannot be taken back out of an immutable second.
  *     It is counted (open_cpu_overcredit_ns_total) and is the one way the
  *     per-interval measured identity in piece 2 can fail to hold exactly;
- *     the WALL identity never can.
+ *     the per-interval wall split holds when the live note or the
+ *     single-depth saved wall snapshot matches the close; a note two
+ *     intervals past the close falls back to the per-PID watermark, which
+ *     can LOSE up to one tick of that interval (an under-report, not a
+ *     misattribution between intervals; no counter shows it). Refs #803.
  *
  * WHY THE VERSION MOVES WITH THE PRODUCER. The rule above is an
  * ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
@@ -865,6 +869,27 @@ struct pgwt_summary_open {
                                    * [start_ns, its last note), or
                                    * PGWT_CPU_NS_UNKNOWN */
     uint64_t cpu_credited_ns;     /* measured CPU credited for THIS interval */
+
+    /* A new note can replace this interval before its closing record arrives.
+     * Retain frozen CPU accounting (Refs #709) and wall credit (Refs #803)
+     * independently. SINGLE-DEPTH: each snapshot is overwritten only by an
+     * interval with its own credits; an uncredited replacement preserves it.
+     * Close checks each identity; without a wall match it uses the per-PID
+     * watermark. Close/forget clear both snapshots. */
+    struct {
+        uint64_t start_ns;
+        uint64_t cpu_credited_ns;
+        uint32_t we;
+        uint32_t cpu_eff_we;
+        uint8_t cpu_slot;
+        uint8_t cpu_frozen;
+        uint8_t cpu_tier_known;
+        bool valid;
+        uint64_t wall_start_ns;
+        uint64_t wall_credited_ns;
+        uint32_t wall_we;
+        bool wall_valid;
+    } prev;
 };
 
 /* v9 (#424): a producer's OBSERVATION of one open on-CPU gap at tick time.
@@ -1212,7 +1237,11 @@ struct pgwt_summary_writer {
      *   overcredit_ns        measured CPU credited while open that the
      *                        closing record's own cpu_ns did not cover
      *                        (schedstat jitter): the one place the measured
-     *                        identity can fail. The WALL identity cannot.
+     *                        identity can fail. The per-interval wall split
+     *                        holds when the live note or the single-depth
+     *                        wall snapshot matches the close (else the
+     *                        watermark fallback applies, which can lose up
+     *                        to one tick: an under-report). Refs #803.
      */
     uint64_t      open_cpu_credited_ns_total;
     uint64_t      open_cpu_measured_ns_total;

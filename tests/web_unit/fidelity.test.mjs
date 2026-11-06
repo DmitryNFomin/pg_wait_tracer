@@ -14,7 +14,7 @@ import {
     buildMetricsPanel, buildEscalateControl, buildEscalateResult,
     estimateOverhead, fmtRate, fmtInt, fmtSeconds,
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, ESC_ANOMALY_COLOR, ESC_MANUAL_COLOR,
-    UNAVAILABLE_MSG,
+    UNAVAILABLE_MSG, MIXED_DISCLAIMER,
 } from '../../web/static/lib/builders/fidelity.js';
 
 const WIN = { from: 1000, to: 2000 };
@@ -140,6 +140,43 @@ test('shading: producer-shaped ranges (none + exact + sampled) band ONLY the sam
     assert.equal(s.markArea.data.length, 1);
     assert.equal(s.markArea.data[0][0].xAxis, 1500);
     assert.equal(s.markArea.data[0][1].xAxis, 1800);
+    assert.equal(s.disclaimer, MIXED_DISCLAIMER);
+    assert.equal(s.disclaimer, 'totals may not fully reconcile across the switch');
+});
+
+test('shading: disclaimer is shown for SEVERAL sampled sub-ranges, not only one', () => {
+    const s = buildFidelityShading({
+        fidelity: 'mixed',
+        fidelity_ranges: [
+            { from: 1000, to: 1200, fidelity: 'sampled' },
+            { from: 1200, to: 1500, fidelity: 'exact' },
+            { from: 1500, to: 1800, fidelity: 'sampled' },
+            { from: 1800, to: 2000, fidelity: 'none' },
+        ],
+    }, WIN);
+    assert.equal(s.bands.length, 2);
+    assert.equal(s.disclaimer, MIXED_DISCLAIMER);
+});
+
+test('shading: disclaimer is absent without mixed sampled sub-ranges', () => {
+    for (const data of [
+        { fidelity: 'mixed', fidelity_ranges: [] },
+        { fidelity: 'mixed' },
+        { fidelity: 'sampled' },
+        { fidelity: 'exact' },
+        { fidelity: 'none' },
+        { fidelity: 'mixed', fidelity_ranges: [
+            { from: 1000, to: 1500, fidelity: 'exact' },
+            { from: 1500, to: 2000, fidelity: 'exact' },
+        ] },
+        { fidelity: 'mixed', fidelity_ranges: [
+            { from: 1000, to: 1500, fidelity: 'none' },
+            { from: 1500, to: 2000, fidelity: 'exact' },
+        ] },
+    ]) {
+        assert.equal(buildFidelityShading(data, WIN).disclaimer, null,
+            JSON.stringify(data));
+    }
 });
 
 // Bypass case for the same consumer: a partition with NO sampled range (a
