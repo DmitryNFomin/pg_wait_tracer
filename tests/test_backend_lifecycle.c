@@ -69,7 +69,7 @@ int main(void) {
     release(d);
     d=daemon_fixture();
     CHECK(pgwt_handle_exit(d,child)==0,"unregistered EXIT handled");
-    CHECK(deletions==3,"unregistered EXIT always clears BPF enrollment");
+    CHECK(deletions==5,"unregistered EXIT always clears BPF enrollment, including pacing PID/sleep");
     release(d);
     d=daemon_fixture();
     CHECK(pgwt_handle_fork(d,-1)==-1,"unknown eligibility refused");
