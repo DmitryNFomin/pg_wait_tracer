@@ -1462,6 +1462,7 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 {
     memset(out, 0, sizeof(*out));
     out->wall_ms = wall_ms;
+    out->io_worker_available = 1;
 
     /* Phase 1: accumulate per-class and per-(class, event) totals */
     struct class_accum classes[PGWT_NUM_CLASSES];

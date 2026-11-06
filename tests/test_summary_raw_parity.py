@@ -238,7 +238,7 @@ def ask(trace_dir, frm, to, stderr_path):
 #   #410 — the four divergences THIS gate found on its first run: max_aas
 #          (peak over seconds vs over buckets), backfilled_ms and
 #          unattributed_available (no unattributed accounting on the summary
-#          path) and io_worker_busy_pct (absent there).
+#          path) and io_worker_busy_pct (explicitly declared unavailable there).
 #
 # DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #324, #319 or #410
 # is fixed, its pinned fields start agreeing and this gate reports them as

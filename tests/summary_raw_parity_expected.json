@@ -8,7 +8,7 @@
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
-   "summary": "<absent>"
+   "summary": null
   }
  },
  "interior_160s": {
@@ -20,7 +20,7 @@
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
-   "summary": "<absent>"
+   "summary": null
   }
  },
  "shift_1s": {
@@ -32,7 +32,7 @@
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
-   "summary": "<absent>"
+   "summary": null
   }
  },
  "straddle_130s": {
@@ -79,7 +79,7 @@
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
-   "summary": "<absent>"
+   "summary": null
   }
  },
  "to_capture_close": {
@@ -91,7 +91,7 @@
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
-   "summary": "<absent>"
+   "summary": null
   }
  }
 }

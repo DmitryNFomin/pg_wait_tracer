@@ -30,6 +30,7 @@ from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
     CPU, IO_DATA_FILE_READ,
 )
+from summary_raw_parity_lib import classify_route, ROUTE_RAW, ROUTE_SUMMARY
 
 BASE = 10_000_000_000_000
 S = 1_000_000_000
@@ -152,6 +153,53 @@ def test_full_mode_still_fast(t):
         cleanup_traces(trace_dir)
 
 
+def test_io_worker_availability(t):
+    print("\n### 4. IO worker utilization declares summary unavailability ###")
+    scenario, lo, hi = build_full_300s()
+    trace_dir = generate_traces(scenario)
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgwt-io-worker-") as logs:
+            for route, frm, to in (
+                    (ROUTE_SUMMARY, lo, hi),
+                    (ROUTE_RAW, lo + S, lo + 60 * S)):
+                err_path = os.path.join(logs, route + ".log")
+                with ServerHarness(trace_dir, stderr_path=err_path) as srv:
+                    tm = srv.query("time_model", from_=frm, to_=to)
+                # Exact fidelity alone cannot distinguish raw from summaries.
+                # Reuse the parity gate's event-limit oracle and stderr proof.
+                with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1},
+                                   stderr_path=err_path + ".oracle") as srv:
+                    oracle = srv.query("time_model", from_=frm, to_=to)
+                with open(err_path) as f:
+                    stderr = f.read()
+                t.check_eq(classify_route(
+                    oracle, stderr, marker_expected=(route == ROUTE_SUMMARY)),
+                    route, route + ": production route proved")
+                key = "io_worker_busy_pct"
+                t.check(key in tm, route + ": utilization key is present")
+                if route == ROUTE_SUMMARY:
+                    t.check(tm.get(key) is None,
+                            "summary utilization is null, never measured zero")
+                    t.check(tm.get(key + "_unavailable") is True,
+                            "summary declares utilization unavailable")
+                    reason = tm.get(key + "_unavailable_reason")
+                    t.check(isinstance(reason, str) and bool(reason),
+                            "summary provides a non-empty reason token")
+                    t.check("categories" not in tm,
+                            "summary does not fabricate category rows")
+                else:
+                    value = tm.get(key)
+                    t.check(type(value) in (int, float),
+                            "raw utilization is a measured number")
+                    for suffix in ("_unavailable", "_unavailable_reason"):
+                        t.check(key + suffix not in tm,
+                                "raw omits " + key + suffix)
+                    t.check(isinstance(tm.get("categories"), list),
+                            "raw retains category rows")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 LEGACY_V9_SHA256 = (
     "23cb7e097d4a0fe2aafd74de05b44549e742718b070bfa212f7561d662443418")
 
@@ -256,6 +304,7 @@ def main():
     test_tiered_15min(t)
     test_full_mode_still_fast(t)
     test_retired_v9_cpu_split(t)
+    test_io_worker_availability(t)
     sys.exit(0 if t.summary() else 1)
 
 

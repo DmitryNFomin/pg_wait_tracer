@@ -233,7 +233,12 @@ def _rows(resp, prefix, key_field, limit=None, order_field="rowset"):
 
 
 def extract_time_model(resp):
-    out = _scalars(resp, "time_model")
+    # These keys describe the route, not a measurement. Keep
+    # io_worker_busy_pct compared so a future fabricated number still shows up.
+    out = _scalars(resp, "time_model", skip={
+        "id", "io_worker_busy_pct_unavailable",
+        "io_worker_busy_pct_unavailable_reason",
+    })
     out.update(_rows(resp, "time_model", "name"))
     # The CPU group under either row shape (#408).
     rows = resp.get("rows") if isinstance(resp, dict) else None

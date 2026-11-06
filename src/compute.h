@@ -368,6 +368,10 @@ struct pgwt_tm_result {
      * cat_ms[PGWT_CAT_IO_WORKER] is io_worker BUSY ms — outside DB Time. */
     double cat_ms[PGWT_NUM_CATS];
     double io_worker_busy_pct;  /* busy ms / (io_worker pids × wall) × 100 */
+    /* Like has_measured_cpu below, 0 means this route cannot answer and
+     * says so, NOT that the measured value is zero. Per-second summary
+     * records have no cat_ns; v6 drops io_worker records at the writer. */
+    int    io_worker_available;
     /* T8 measured CPU. When has_measured_cpu is set (v3 exact data present),
      * the CPU* row is the measured on-CPU time and offcpu_ms is its off-CPU /
      * runqueue-unaccounted sibling (both inside DB Time); when unset the CPU*

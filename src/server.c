@@ -5409,7 +5409,7 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
     /* T2 (additive): category decomposition + io_worker utilization. Raw
      * path only — summaries carry no category data. cat "io_worker" ms is
      * OUTSIDE DB Time (utilization, not load). */
-    if (!from_summaries) {
+    if (tm.io_worker_available) {
         cJSON *cats = cJSON_AddArrayToObject(root, "categories");
         for (int c = 0; c < PGWT_NUM_CATS; c++) {
             cJSON *r = cJSON_CreateObject();
@@ -5422,6 +5422,12 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
         }
         cJSON_AddNumberToObject(root, "io_worker_busy_pct",
                                 tm.io_worker_busy_pct);
+    } else {
+        /* Omit categories: all-zero rows would fabricate category data. */
+        cJSON_AddNullToObject(root, "io_worker_busy_pct");
+        cJSON_AddTrueToObject(root, "io_worker_busy_pct_unavailable");
+        cJSON_AddStringToObject(root, "io_worker_busy_pct_unavailable_reason",
+                                "summary_no_category_data");
     }
     emit_json(root);
 
