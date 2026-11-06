@@ -473,7 +473,7 @@ export function createOverviewOrder() {
 }
 
 /* #576: the Events table's %DB column summed short of 100% on a measured-CPU
- * response -- the CPU* row carries measured on-CPU time only (#553), so the
+ * response -- the CPU (running) row carries measured on-CPU time (#553), so the
  * off-CPU runqueue remainder (offcpu_ms) is inside db_time_ms but on no row
  * at all, and every row's %DB still reads "share of DB Time" against the
  * full total. src/server.c's dump_summary (server.c ~:7736) closes the
@@ -481,11 +481,10 @@ export function createOverviewOrder() {
  * ev.has_measured_cpu; this mirrors that for the browser table, same name,
  * same gate.
  *
- * has_measured_cpu is false on sampled/v2 data AND on the v7/v8 summary
- * routing (#408) -- the CPU* row there IS the unsplit on-CPU gap wall, so
- * offcpu_ms is always 0 and this never fires until a response actually
- * carries the measured split (the v9 epoch, #424, lands it on the default
- * live view). A 0 (or missing/non-finite) offcpu_ms adds no row either --
+ * has_measured_cpu is false on sampled/v2 data and direct per-query summary
+ * calls, whose CPU* row carries the unsplit gap wall. The unfiltered summary
+ * route reads the existing v7 record CPU scalars (#573) and carries the same
+ * measured split as raw. A 0 (or missing/non-finite) offcpu_ms adds no row either --
  * printing a 0.0 "CPU (waiting for a core)" row would claim a measured-zero
  * remainder when has_measured_cpu alone does not guarantee one exists this
  * window.

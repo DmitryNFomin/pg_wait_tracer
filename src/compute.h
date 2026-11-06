@@ -475,12 +475,12 @@ struct pgwt_events_result {
      *       then the unsplit gap wall by gap-inference and offcpu_ms is 0 —
      *       a refusal to split, never a claim that off-CPU time was zero.
      *
-     * pgwt_compute_top_events_from_summaries leaves both at 0: the per-second
-     * summary's events[] table carries wall for event 0 (summary_writer.c's
-     * `se->total_ns += tns`), so on that routing CPU* is the unsplit total and
-     * says so. The two paths therefore describe the SAME total split two
-     * ways, which is the identity pinned in tests/test_agg_raw_crosscheck.c
-     * section 6f: raw CPU* + raw offcpu_ms == summary CPU*.
+     * pgwt_compute_top_events_from_summaries reports the same split on the
+     * unfiltered route using the v7 record-level CPU scalars. Its query-
+     * filtered route still reports the unsplit total with has_measured_cpu
+     * = 0: the file has no per-query measurement, and production never takes
+     * that route (src/server.c:5471). Both contracts are pinned in
+     * tests/test_agg_raw_crosscheck.c section 6f.
      *
      * cpu_clamped_ms is the same self-check pgwt_compute_time_model reports
      * under that name: the measured CPU that exceeded its own clipped gap

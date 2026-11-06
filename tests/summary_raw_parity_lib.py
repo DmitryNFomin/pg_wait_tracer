@@ -291,6 +291,13 @@ def extract_sessions(resp):
     return out
 
 
+def extract_events(resp):
+    """Events: every response scalar and every row, keyed by its name."""
+    out = _scalars(resp, "events")
+    out.update(_rows(resp, "events", "name"))
+    return out
+
+
 def extract_queries(resp, limit=8):
     """Queries: the top rows INCLUDING their order (the order is the answer to
     "what do I look at first") and every scalar column."""
@@ -305,6 +312,7 @@ def extract_all(answers):
     fields.update(extract_time_model(answers.get("time_model", {})))
     fields.update(extract_aas(answers.get("aas", {})))
     fields.update(extract_sessions(answers.get("top_sessions", {})))
+    fields.update(extract_events(answers.get("top_events", {})))
     fields.update(extract_queries(answers.get("top_queries", {})))
     return fields
 

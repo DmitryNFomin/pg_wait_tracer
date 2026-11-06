@@ -195,11 +195,11 @@ WINDOWS = {
 CONTROL_WINDOW = ("control_59s_both_raw",
                   (BASE + 200 * S, BASE + 259 * S))
 
-CMDS = ("time_model", "aas", "top_sessions", "top_queries")
+CMDS = ("time_model", "aas", "top_sessions", "top_queries", "top_events")
 
 
 def ask(trace_dir, frm, to, stderr_path):
-    """Both the four answers and the route evidence for one (dir, window)."""
+    """Both the five answers and the route evidence for one (dir, window)."""
     answers = {}
     with ServerHarness(trace_dir, stderr_path=stderr_path) as srv:
         for cmd in CMDS:
@@ -310,18 +310,17 @@ def issue_for(field, window):
     # a table containing UNEXPLAINED (see unexplained()). An unattributable CPU
     # divergence therefore fails loudly and cannot be laundered into "known"
     # by regeneration. A gate that cannot attribute must refuse, never approve.
-    # CPU divergences are still possible: per-EVENT events[] and per-QUERY
-    # queries[].top_events[] tables still store WALL, so
-    # pgwt_compute_top_events_from_summaries still reports has_measured_cpu = 0
-    # (#573's events half, outside this change). A top_events/* divergence is
-    # EXPECTED and currently has no pin because this parity gate does not
-    # compare that route at all: summary_raw_parity_lib.py has no extract_events
-    # and "top_events" is not in CMDS. Its absence is not evidence of agreement.
+    # Top Events is compared too: extract_events walks its response scalars
+    # and rows. #573 reads the existing v7 record CPU totals for the
+    # unfiltered summary route, so it reports the same split as raw without
+    # a format change. The per-query table still has no measurement, but
+    # server.c:5471 routes that drill to raw. An events/* divergence has no
+    # pin or attribution rule here and must remain UNEXPLAINED.
     # No straddle_130s catch-all for #324: handle_top_queries always uses raw
     # in server.c. The remaining production readers of the full-duration
     # per-query table are tm_summary_visitor and aas_summary_visitor in
     # compute.c; both require query_id != 0 (AAS sets has_query_filter from
-    # that predicate). All four CMDS
+    # that predicate). All five CMDS
     # above are requested UNFILTERED, so #324 cannot cause a divergence here.
     # An unmatched field must remain UNEXPLAINED for unexplained()/--record
     # to refuse it, rather than laundering a new regression into "known".
