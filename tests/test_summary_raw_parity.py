@@ -300,6 +300,18 @@ def issue_for(field, window):
         return FOUND_BY_THIS_GATE[field]
     if field.endswith("/top_wait") or field.endswith("/top_wait_id"):
         return 319                      # two definitions of one column
+    # These 8 divergences are pre-existing: master's control reproduces them
+    # byte-for-byte. Adding top_events to CMDS exposed rather than caused
+    # them. At the window edge, 3000 ms is misattributed from Client:ClientWrite
+    # to Lock:relation, with the pair total conserved at 127000 ms. The ~2x
+    # avg_us discrepancy shows the count is wrong independently of that
+    # duration shift. Deleting these 8 entries is the last step of landing
+    # #818's fix, consistent with the rule above for deleting fixed pins.
+    if (window == "straddle_130s"
+            and field in {"events/row/%s/%s" % (event, column)
+                          for event in ("Client:ClientWrite", "Lock:relation")
+                          for column in ("total_ms", "avg_us", "pct", "aas")}):
+        return 818
     # No CPU rule: #408 (summaries reporting has_measured_cpu=false) and
     # #562 (Top Sessions raw measuring while summary reported wall) are both
     # CLOSED by the v9 epoch. The per-second record now carries the
@@ -314,8 +326,9 @@ def issue_for(field, window):
     # and rows. #573 reads the existing v7 record CPU totals for the
     # unfiltered summary route, so it reports the same split as raw without
     # a format change. The per-query table still has no measurement, but
-    # server.c:5471 routes that drill to raw. An events/* divergence has no
-    # pin or attribution rule here and must remain UNEXPLAINED.
+    # server.c:5471 routes that drill to raw. The eight window-scoped #818
+    # fields above are pinned; any unattributable top_events response field
+    # (extracted as events/*) must remain UNEXPLAINED and refuse recording.
     # No straddle_130s catch-all for #324: handle_top_queries always uses raw
     # in server.c. The remaining production readers of the full-duration
     # per-query table are tm_summary_visitor and aas_summary_visitor in
