@@ -7,8 +7,22 @@ The timed-checkpoint workload follows scratchpad/i804/exp.sh: 30s timeout, .9
 completion target, 3m dirty rows, one generate_series client, an 8-second window.
 
 The supplied measurements were 8.7s controls vs 17.4--19.2s broken. We require
-<=12s total and <=2s checkpointer DB Time (2s is the explicit allowance chosen
-from the control's ~.7s beyond its 8s client; it is NOT a new measured result).
+<=12s total and <=2s checkpointer DB Time.
+
+Residual checkpointer DB Time after the exclusion (measured, PG13, eight full-mode
+and eight tiered captures from the #804 branch's own runs, same workload):
+full mode 35.2--106.7ms (35.2, 46.6, 51.1, 54.5, 58.5, 66.7, 95.8, 106.7),
+tiered mode exactly 0.0ms in every run. Cause, full
+mode only: a capture window that begins inside a 100ms select/pselect6 sleep has
+no observed enter (src/bpf/pg_wait_tracer.bpf.c: wp_live==0 cannot fabricate
+one), so that first PARTIAL sleep is counted as load -- at most one 100ms sleep,
+and the observed maximum (106.7ms) is consistent with one full sleep plus slack
+(the slack part is inferred, not separately measured). It
+is the over-counting direction (idle_rule.h), once per window, not per sleep.
+The 2s bound is therefore ~19x the worst measured residual: it is a deliberately
+loose ceiling that still fails the unmitigated ~8-10s pacing leak, not a tight
+estimate of the residual. PG>=14.3 (native event) measured 1.7ms full / 0.0ms
+tiered (PG18, gate-3), where the probe is not attached at all.
 A >=3s pacing row and >=5s client prevent empty/quiet captures passing.
 
 Positive controls use a tiny dynamic background worker instead of depending on
