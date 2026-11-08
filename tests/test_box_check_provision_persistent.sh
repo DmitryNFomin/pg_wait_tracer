@@ -13,24 +13,105 @@ trap 'rm -rf "$tmpdir"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 [[ -f "$BOX_CHECK" ]] || fail "launcher missing: $BOX_CHECK"
 
-# Exercise the actual provisioner BEFORE installing any command shims. The
-# supported OS must reach the privilege check, while the unsupported OS
-# must return its reserved code even without root. Never provision this host
-# when this registered unit test is run by the live tier as root.
-if [[ $(id -u) -ne 0 ]]; then
-    "$SCRIPT_DIR/provision-runner.sh" el9 > "$tmpdir/real-el9" 2>&1
-    rc=$?
-    [[ $rc -eq 3 ]] || fail "real el9 provisioner must return 3 (got $rc): $(cat "$tmpdir/real-el9")"
-    echo 'PASS: real non-shimmed el9 provisioner exits 3 without root'
-    "$SCRIPT_DIR/provision-runner.sh" ubuntu > "$tmpdir/real-ubuntu" 2>&1
-    rc=$?
-    [[ $rc -eq 1 ]] || fail "real ubuntu provisioner must return 1, not 3 (got $rc): $(cat "$tmpdir/real-ubuntu")"
-    /usr/bin/grep -Fq 'provision-runner.sh must run as root' "$tmpdir/real-ubuntu" ||
-        fail 'real ubuntu provisioner did not reach the root check'
-    echo 'PASS: real non-shimmed ubuntu provisioner reaches root check and exits 1, not 3'
-else
-    echo 'SKIP: real provisioner privilege checks require a non-root caller'
+# Exercise the actual privilege check on every uid, including root live-tier
+# callers. Guard every early mutation so a broken root check stays hermetic.
+mkdir -p "$tmpdir/prov" "$tmpdir/guard-bin"
+chmod 755 "$tmpdir" "$tmpdir/prov" "$tmpdir/guard-bin"
+cp "$SCRIPT_DIR/provision-runner.sh" "$tmpdir/prov/provision-runner.sh"
+chmod 755 "$tmpdir/prov/provision-runner.sh"
+: > "$tmpdir/guard-log"
+chmod 666 "$tmpdir/guard-log"
+cat > "$tmpdir/guard-bin/guard" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "${0##*/}" >> "$GUARD_LOG"
+exit 99
+SHIM
+chmod 755 "$tmpdir/guard-bin/guard"
+for command in touch chmod systemctl apt-get dnf flock; do
+    ln -s guard "$tmpdir/guard-bin/$command"
+    [[ $(PATH="/usr/local/bin:$tmpdir/guard-bin:$PATH" command -v "$command") == "$tmpdir/guard-bin/$command" ]] ||
+        fail "$command guard would be bypassed by the provisioner PATH"
+done
+NONROOT_LAUNCH=()
+if [[ $(id -u) -eq 0 ]]; then
+    if command -v setpriv >/dev/null 2>&1; then
+        NONROOT_LAUNCH=(setpriv --reuid=65534 --regid=65534 --clear-groups)
+    elif command -v runuser >/dev/null 2>&1; then
+        NONROOT_LAUNCH=(runuser -u nobody --)
+    else
+        fail 'root privilege probe requires setpriv or runuser; cannot skip'
+    fi
 fi
+
+run_provisioner_as_nonroot() {
+    local script="$1" os="$2"
+    "${NONROOT_LAUNCH[@]}" env PATH="$tmpdir/guard-bin:$PATH" \
+        GUARD_LOG="$tmpdir/guard-log" bash "$script" "$os"
+}
+
+assert_privilege_dispatch() {
+    local script="$1" rc
+    : > "$tmpdir/guard-log"
+    run_provisioner_as_nonroot "$script" el9 > "$tmpdir/real-el9" 2>&1
+    rc=$?
+    [[ $rc -eq 3 ]] || {
+        echo "FAIL: non-root el9 provisioner must return 3 (got $rc): $(cat "$tmpdir/real-el9")" >&2
+        return 1
+    }
+    echo 'PASS: real non-shimmed el9 provisioner exits 3 without root'
+    run_provisioner_as_nonroot "$script" ubuntu > "$tmpdir/real-ubuntu" 2>&1
+    rc=$?
+    [[ $rc -eq 1 ]] || {
+        echo "FAIL: non-root ubuntu provisioner must return 1, not 3 (got $rc): $(cat "$tmpdir/real-ubuntu")" >&2
+        return 1
+    }
+    /usr/bin/grep -Fq 'provision-runner.sh must run as root' "$tmpdir/real-ubuntu" ||
+        { echo 'FAIL: ubuntu provisioner did not reach the root check' >&2; return 1; }
+    [[ ! -s "$tmpdir/guard-log" ]] ||
+        { echo 'FAIL: non-root provisioner reached a mutation guard' >&2; return 1; }
+    echo 'PASS: real non-shimmed ubuntu provisioner reaches root check and exits 1, not 3'
+    echo 'PASS: non-root privilege probes leave mutation guard log empty'
+}
+assert_privilege_dispatch "$tmpdir/prov/provision-runner.sh" || exit $?
+
+# Each mutant must find exactly one root check and OS dispatch. Buffer the
+# source so the root block can be moved before the earlier OS dispatch.
+for mutation in root-first root-deleted; do
+    mutant="$tmpdir/prov/$mutation.sh"
+    awk -v mutation="$mutation" '
+        { source[NR] = $0 }
+        /^if \[\[ \$\(id -u\) -ne 0 \]\]; then$/ {
+            root_count++; root_start = NR; in_root = 1
+        }
+        in_root && /^fi$/ { root_end = NR; in_root = 0 }
+        /^case "\$OS" in$/ && !root_start { dispatch_count++; dispatch = NR }
+        END {
+            if (root_count != 1 || dispatch_count != 1 || !root_end || dispatch >= root_start) exit 2
+            for (i = 1; i <= NR; i++) {
+                if (i == dispatch && mutation == "root-first")
+                    for (j = root_start; j <= root_end; j++) print source[j]
+                if (i < root_start || i > root_end) print source[i]
+            }
+        }
+    ' "$SCRIPT_DIR/provision-runner.sh" > "$mutant" || {
+        echo "FAIL: cannot construct $mutation provisioner mutant (rc=2)" >&2
+        exit 2
+    }
+    chmod 755 "$mutant"
+    assert_privilege_dispatch "$mutant" > "$tmpdir/privilege-mutant-verdict" 2>&1
+    mutant_rc=$?
+    [[ $mutant_rc -ne 0 ]] || fail "$mutation provisioner mutant escaped privilege assertions"
+    if [[ "$mutation" == root-first ]]; then
+        /usr/bin/grep -Fq 'el9 provisioner must return 3 (got 1)' "$tmpdir/privilege-mutant-verdict" ||
+            fail 'root-first mutant failed for an unexpected reason'
+        [[ ! -s "$tmpdir/guard-log" ]] || fail 'root-first mutant reached a mutation guard'
+    else
+        /usr/bin/grep -Fq 'ubuntu provisioner must return 1, not 3 (got 99)' "$tmpdir/privilege-mutant-verdict" ||
+            fail 'root-deleted mutant failed for an unexpected reason'
+        [[ -s "$tmpdir/guard-log" ]] || fail 'root-deleted mutant did not hit a mutation guard'
+    fi
+    echo "PASS: $mutation provisioner mutant rejected by the same privilege assertions"
+done
 
 mkdir -p "$tmpdir/bin" "$tmpdir/repo/scripts" "$tmpdir/repo/tests"
 
@@ -53,8 +134,8 @@ case "$name" in
             'rm -f '*) exit "${CLEANUP_RC:-0}" ;;
             'sudo bash pgwt-provision/'*-tests-provision-runner.sh\ *)
                 if [[ -n "${PROVISION_REAL:-}" ]]; then
-                    OS_ARG="${remote_command##* }"
-                    PATH="$CHILD_SHIM_BIN:$PATH" bash "$PROVISION_REAL" "$OS_ARG"
+                    read -r -a provision_args <<< "$remote_command"
+                    PATH="$CHILD_SHIM_BIN:$PATH" bash "$PROVISION_REAL" "${provision_args[@]:3}"
                     exit $?
                 fi
                 exit "${PROVISION_RC:-0}"
@@ -106,7 +187,7 @@ assert_cleanup() {
     local os="$1" command provision_path
     command=$(provision_command "$tmpdir/calls") || return $?
     provision_path=${command#sudo bash }
-    provision_path=${provision_path% *}
+    provision_path=${provision_path%% *}
     awk -F '\t' -v target="fixture-$os" -v command="$command" \
         -v cleanup_command="rm -f \"$provision_path\"" '
         $1 == "ssh" && $(NF-1) == target && $NF == command { provision = NR }
@@ -119,7 +200,7 @@ assert_cleanup() {
 assert_provisioned() {
     local os="$1" command provision_path stage_destination run_pattern
     command=$(provision_command "$tmpdir/calls") || return $?
-    run_pattern="^sudo bash (pgwt-provision/[0-9]+-[0-9]+-tests-provision-runner[.]sh) $os$"
+    run_pattern="^sudo bash (pgwt-provision/[0-9]+-[0-9]+-tests-provision-runner[.]sh) $os --lock-wait unbounded$"
     [[ "$command" =~ $run_pattern ]] || {
         echo "FAIL: persistent $os provisioner must receive OS without an outer flock: $command" >&2
         return 1
@@ -244,9 +325,17 @@ assert_stopped_before_lock "$tmpdir/child-output" 'direct provisioner with child
 [[ $rc -eq 1 ]] || fail "child rc=3 must be normalised to 1 (got $rc): $(cat "$tmpdir/child-output")"
 echo 'PASS: real provisioner normalises child rc=3 to 1'
 
-# Child rc=3 covers the bug fix. Child rc=75 is only a launcher regression guard
-# for existing correct behaviour (box-check already fails on a leaked 75),
-# not a bug fix.
+PATH="$CHILD_SHIM_BIN:$PATH" CHILD_RC=75 \
+    bash "$SCRIPT_DIR/provision-runner.sh" ubuntu > "$tmpdir/child-output" 2>&1
+rc=$?
+assert_stopped_before_lock "$tmpdir/child-output" 'direct provisioner with child rc=75'
+[[ $rc -eq 1 ]] || fail "child rc=75 must be normalised to 1 (got $rc): $(cat "$tmpdir/child-output")"
+/usr/bin/grep -Fq 'a child command exited 75; normalised to 1' "$tmpdir/child-output" ||
+    fail 'child rc=75 did not announce normalisation'
+echo 'PASS: real provisioner normalises child rc=75 to 1'
+
+# Both reserved statuses from children must fail provisioning without being
+# mistaken for the deliberate unsupported-OS or bounded-timeout paths.
 for child_rc in 3 75; do
     PROVISION_REAL="$SCRIPT_DIR/provision-runner.sh" CHILD_SHIM_BIN="$CHILD_SHIM_BIN" CHILD_RC="$child_rc" \
         run_launcher "$BOX_CHECK" ubuntu
@@ -263,11 +352,114 @@ for child_rc in 3 75; do
         fail "build ran after real provisioner child rc=$child_rc"
     fi
     if [[ $child_rc -eq 75 ]]; then
-        echo 'PASS: child rc=75 stops launcher before build: regression guard for existing correct behaviour (box-check already fails on a leaked 75), not a bug fix'
+        if /usr/bin/grep -Eiq 'busy|contention' "$tmpdir/output"; then
+            fail 'child rc=75 was misreported as lock contention'
+        fi
+        echo 'PASS: child rc=75 stops launcher before build without a contention diagnostic'
     else
         echo "PASS: child rc=$child_rc stops launcher before build"
     fi
 done
+
+# Stop at flock, before any provisioning. The lock file is a scratch path;
+# id/touch/chmod are shims and systemctl is a logged last-resort guard.
+LOCK_SHIM_BIN="$tmpdir/lock-bin"
+mkdir -p "$LOCK_SHIM_BIN"
+cp "$CHILD_SHIM_BIN/id" "$LOCK_SHIM_BIN/id"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$LOCK_SHIM_BIN/touch"
+cp "$LOCK_SHIM_BIN/touch" "$LOCK_SHIM_BIN/chmod"
+cat > "$LOCK_SHIM_BIN/flock" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FLOCK_LOG"
+exit "${FLOCK_RC:?}"
+SHIM
+cat > "$LOCK_SHIM_BIN/systemctl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+exit 98
+SHIM
+chmod +x "$LOCK_SHIM_BIN/"*
+for command in id touch chmod systemctl flock; do
+    [[ $(PATH="/usr/local/bin:$LOCK_SHIM_BIN:$PATH" command -v "$command") == "$LOCK_SHIM_BIN/$command" ]] ||
+        fail "$command lock-test shim would be bypassed by the provisioner PATH"
+done
+echo 'PASS: provisioner PATH resolves flock and provisioning guards to child shims'
+
+run_lock_probe() {
+    local flock_rc="$1"
+    shift
+    : > "$tmpdir/flock-log"
+    : > "$tmpdir/systemctl-log"
+    PATH="$LOCK_SHIM_BIN:$PATH" PROVISION_LOCK_FILE="$tmpdir/lock" \
+        FLOCK_LOG="$tmpdir/flock-log" SYSTEMCTL_LOG="$tmpdir/systemctl-log" FLOCK_RC="$flock_rc" \
+        bash "$SCRIPT_DIR/provision-runner.sh" ubuntu "$@" > "$tmpdir/lock-output" 2>&1
+    lock_rc=$?
+    [[ ! -s "$tmpdir/systemctl-log" ]] || fail 'lock probe reached real provisioning'
+}
+
+assert_flock_args() {
+    [[ $(cat "$tmpdir/flock-log") == "$1" ]] ||
+        fail "unexpected flock argv: $(cat "$tmpdir/flock-log") (expected $1)"
+}
+
+assert_plain_lock_failure() {
+    [[ $lock_rc -eq 1 ]] || fail "flock failure must return 1, not 75 (got $lock_rc)"
+    /usr/bin/grep -Fq 'not lock contention' "$tmpdir/lock-output" ||
+        fail 'flock error was not identified as a plain failure'
+    if /usr/bin/grep -Fq 'FATAL: could not acquire' "$tmpdir/lock-output"; then
+        fail 'flock error was misreported as a lock-wait timeout'
+    fi
+}
+
+run_lock_probe 75
+[[ $lock_rc -eq 75 ]] || fail "default lock timeout must return 75 (got $lock_rc)"
+assert_flock_args '-w 600 -E 75 9'
+/usr/bin/grep -Fq "waiting for $tmpdir/lock (up to 600s)" "$tmpdir/lock-output" ||
+    fail 'default bounded wait was not logged'
+/usr/bin/grep -Fq 'FATAL: could not acquire' "$tmpdir/lock-output" || fail 'lock timeout lacks contention diagnostic'
+/usr/bin/grep -Fq 'lock contention:' "$tmpdir/lock-output" || fail 'lock timeout does not identify contention'
+echo 'PASS: default lock wait uses -w 600 -E 75 and reserves rc=75 for timeout'
+
+for flock_rc in 71 75; do
+    run_lock_probe "$flock_rc" --lock-wait unbounded
+    assert_flock_args '9'
+    assert_plain_lock_failure
+    /usr/bin/grep -Fq "waiting for $tmpdir/lock (unbounded)" "$tmpdir/lock-output" ||
+        fail 'unbounded wait was not logged'
+    echo "PASS: unbounded flock rc=$flock_rc uses bare flock and returns plain failure rc=1"
+done
+
+run_lock_probe 71
+assert_flock_args '-w 600 -E 75 9'
+assert_plain_lock_failure
+echo 'PASS: bounded flock rc=71 is a plain failure, not contention'
+
+run_lock_probe 75 --lock-wait 5
+assert_flock_args '-w 5 -E 75 9'
+[[ $lock_rc -eq 75 ]] || fail "custom bounded timeout must return 75 (got $lock_rc)"
+run_lock_probe 75 --lock-wait=5
+assert_flock_args '-w 5 -E 75 9'
+[[ $lock_rc -eq 75 ]] || fail "equals-form bounded timeout must return 75 (got $lock_rc)"
+run_lock_probe 71 --lock-wait=unbounded
+assert_flock_args '9'
+assert_plain_lock_failure
+echo 'PASS: custom lock waits accept separate and equals-form arguments'
+
+for invalid_wait in bogus 0 -1 1.5 ''; do
+    for flag in separate equals; do
+        if [[ "$flag" == separate ]]; then
+            run_lock_probe 75 --lock-wait "$invalid_wait"
+        else
+            run_lock_probe 75 "--lock-wait=$invalid_wait"
+        fi
+        [[ $lock_rc -eq 2 ]] || fail "invalid lock wait '$invalid_wait' ($flag) must return 2 (got $lock_rc)"
+        [[ ! -s "$tmpdir/flock-log" ]] || fail 'invalid lock wait reached flock'
+    done
+done
+run_lock_probe 75 --lock-wait
+[[ $lock_rc -eq 2 ]] || fail "missing lock-wait value must return 2 (got $lock_rc)"
+[[ ! -s "$tmpdir/flock-log" ]] || fail 'missing lock-wait value reached flock'
+echo 'PASS: invalid or missing lock waits return usage rc=2 before flock'
 
 for stage in mkdir rsync; do
     if [[ "$stage" == mkdir ]]; then
