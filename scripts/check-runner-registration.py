@@ -179,7 +179,9 @@ def extract_bare_tests_path_registrations(clean_text):
     exec bit, e.g. `run tests/test_check_snapshot_history.sh`), or "--test"
     (node's flag, for `node --test 'tests/web_unit/*.test.mjs'`). The
     Makefile's `@bash tests/x.sh` token is `@bash`; `@` is stripped before
-    the membership check. This rejects a bare MENTION
+    the membership check. Also accepts `python3 -B tests/x.py`, checking
+    the interpreter before that flag rather than treating any -B as a runner.
+    This rejects a bare MENTION
     (`echo "tests/test_orphan.py is disabled"` -- "echo" is not an invoking
     token) that the previous, path-presence-only version of this function
     wrongly counted as a registration -- the same class of mistake a naive
@@ -217,6 +219,8 @@ def extract_bare_tests_path_registrations(clean_text):
             if i == 0:
                 continue  # a path with nothing before it invokes nothing
             prev = tokens[i - 1].lstrip("@").strip("'\"")
+            if prev == "-B" and i >= 2 and tokens[i - 2].lstrip("@").strip("'\"") == "python3":
+                prev = "python3"
             if prev not in BARE_PATH_INVOKE_PREV_TOKENS:
                 continue  # a mention, not an invocation
             token = m.group(1)

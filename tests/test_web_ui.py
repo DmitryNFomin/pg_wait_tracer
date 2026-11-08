@@ -4082,6 +4082,15 @@ def test_fidelity_mixed_sub_range_banding(page):
              if r["kind"] in ("sampled", "mixed")]
     check(len(bands) == 1 and bands[0]["kind"] == "sampled",
           f"mixed ranges emit exactly one sampled fidelity rect (got {bands})")
+    # #341: the chip must carry the owner's disclaimer for this window,
+    # because it has a genuine sampled sub-range (the rect above). Exercises
+    # renderFidelityChip in views/active.js, which no unit test reaches.
+    chip_txt = page.evaluate(
+        "() => { const c = document.getElementById('aas-fidelity-chip');"
+        " return c ? c.textContent : null; }")
+    check(chip_txt is not None and "totals may not fully reconcile across the switch" in chip_txt,
+          f"mixed window with a sampled sub-range shows the disclaimer "
+          f"in the chip (chip={chip_txt!r})")
     if len(bands) != 1:
         return
     band = bands[0]
@@ -4108,6 +4117,10 @@ def test_fidelity_exact_shows_no_sub_range_banding(page):
              if r["kind"] in ("sampled", "mixed")]
     check(len(bands) == 0,
           f"exact fidelity has no sampled/mixed rects (got {bands})")
+    # #341: no chip, and in particular no disclaimer, on an exact window.
+    body_txt = page.evaluate("document.body.textContent")
+    check("totals may not fully reconcile across the switch" not in body_txt,
+          "exact fidelity shows no mixed-window disclaimer")
 
 
 def test_b5_sampled_shading(page):
@@ -4142,6 +4155,10 @@ def test_b5_sampled_shading(page):
         txt = chip.text_content()
         check("sampled" in txt.lower(),
               f"Fidelity chip explains sampled shading: '{txt[:60]}'")
+        # #341: a wholly sampled window has no switch to reconcile across,
+        # so the mixed-window disclaimer must NOT appear.
+        check("totals may not fully reconcile across the switch" not in txt,
+              f"pure sampled chip has no mixed-window disclaimer: '{txt[:80]}'")
 
 
 def test_b5_unavailable_panel(page):

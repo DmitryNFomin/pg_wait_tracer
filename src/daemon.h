@@ -46,8 +46,18 @@ struct pgwt_counters {
     uint64_t sample_read_faults_total; /* process_vm_readv partial/EFAULT fallbacks */
     uint64_t pgbackend_layout_fallbacks_total; /* fields rejected by Stage 1
                                                  * layout validation */
-    uint64_t sampled_attr_tick_read_failures_total; /* validated-layout
-                                                      * coherent reads dropped */
+    /* At-tick attribution reads of CONNECTED backends that fail (torn,
+     * short, foreign pid, out-of-range state). Not the command gate and not
+     * comparable with noncmd_cpu_samples_total (#693). */
+    uint64_t sampled_attr_tick_read_failures_total;
+    /* Coherent, identity-confirmed at-tick reads whose attribution context is
+     * absent (st_databaseid OR st_userid InvalidOid — see
+     * PGWT_PGBS_ATTR_NO_CONTEXT). Expected to equal (backends without a full
+     * db+user context) x (ticks), so a steady nonzero is normal, not a fault:
+     * on PG18 that is the eight aux processes, and an autovacuum worker joins
+     * them while it runs (database set, st_userid InvalidOid). 0 on PG13,
+     * whose activity source never targets those backends (#693). */
+    uint64_t sampled_attr_tick_no_context_total;
     /* SCOPE (#294): every sampled_attr_shadow_* counter below compares the
      * TARGET-LOOP status read against the uprobe map — the read taken BEFORE
      * the batched wait_event_info read, and therefore BEFORE the #294
@@ -180,13 +190,20 @@ struct pgwt_counters {
      * the remainder. The samples the recheck did NOT rescue —
      * confirmed_closed AND read_failed — are what build_batch then drops into
      * noncmd_cpu_samples_total, alongside any backend type the CPU policy
-     * never admits (logger). So read_failed is a SUBSET of
-     * noncmd_cpu_samples_total, NOT a term to be added alongside it:
+     * never admits (logger). So cmd_gate_order_read_failed_total is a SUBSET
+     * of noncmd_cpu_samples_total, NOT a term to be added alongside it:
      * measured at 200 Hz on gate-2, at_risk 13955 = recovered 7575 +
      * confirmed 6379 + read_failed 1, and noncmd 6380 = 6379 + 1.
      *
-     * A read_failed rate above ~0 means fresh gate reads are failing and those
-     * samples were dropped, not counted. */
+     * #693: in the #675 gate-3 arms, cmd_gate_order_read_failed_total had
+     * delta 0 vs noncmd 892. sampled_attr_tick_* is a different, unrelated
+     * quantity over a different population: target-ticks, not at-risk on-CPU
+     * samples. Comparing the two is meaningless.
+     *
+     * A cmd_gate_order_read_failed_total rate above ~0 means fresh gate reads
+     * are failing and those samples were dropped, not counted. (That is this
+     * counter only; sampled_attr_tick_read_failures_total above is a
+     * different read of a different field.) */
     uint64_t cmd_gate_order_at_risk_total;
     uint64_t cmd_gate_order_recovered_total;
     uint64_t cmd_gate_order_read_failed_total;

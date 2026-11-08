@@ -256,6 +256,11 @@ struct pgwt_trace_event {
  * variants, lifecycle). Those take the record's own close timestamp as the
  * selector, and for them "closed after `to`" is the whole question. */
 #define PGWT_EVENT_FLAG_RIGHT_OPEN 0x800U
+/* Issue #427: loader-derived, never stored in trace files. An exact,
+ * non-marker record whose close timestamp equals the bounded request's
+ * right edge belongs to the FOLLOWING window's occurrences. Its time
+ * contribution is unchanged. */
+#define PGWT_EVENT_FLAG_EDGE_CLOSE 0x1000U
 
 #define PGWT_EVENT_EXIT  0xFFFFFFFFU  /* sentinel new_event for process exit */
 

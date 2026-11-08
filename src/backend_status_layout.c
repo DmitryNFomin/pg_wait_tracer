@@ -1160,20 +1160,38 @@ bool pgwt_pgbs_state_is_cmd_open(const struct PgBackendStatusLayout *layout,
            state == (uint32_t)layout->state_fastpath;
 }
 
-/* Shared identity/coherence gate for every snapshot-derived sampled value: a
- * torn, short or wrong-pid read must fail closed, identically on all three
- * paths. Factored out so a new derivation cannot quietly admit a weaker read. */
-static bool snapshot_usable(const struct PgBackendStatusLayout *layout,
-                            const struct pgwt_pgbs_snapshot *snapshot,
-                            pid_t expected_pid, uint32_t required)
+/* Half of the shared gate below: the read is coherent (untorn, even counter,
+ * every required field present) and it is THIS backend's row. It says nothing
+ * about whether the row carries a database context, so it is never a
+ * derivation's admission test on its own — only snapshot_usable() is. */
+static bool snapshot_coherent_identity(
+    const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_snapshot *snapshot,
+    pid_t expected_pid, uint32_t required)
 {
     return layout && snapshot && expected_pid > 0 &&
            (snapshot->read_mask & required) == required &&
            snapshot->changecount_before == snapshot->changecount_after &&
            (snapshot->changecount_after & 1u) == 0 &&
            snapshot->procpid == (uint32_t)expected_pid &&
-           snapshot->databaseid != 0 && snapshot->userid != 0 &&
            snapshot->state <= (uint32_t)layout->state_max;
+}
+
+/* Shared identity/coherence gate for every snapshot-derived sampled value: a
+ * torn, short or wrong-pid read must fail closed, identically on all three
+ * paths. Factored out so a new derivation cannot quietly admit a weaker read.
+ * The db/user clause stays part of THIS gate for all three: the #294
+ * recheck's population is connected CLIENT/UNKNOWN backends, where a
+ * database-less row means the address is wrong; and the PG13 activity path is
+ * already restricted to activity targets in the sampler, so the auxiliary
+ * population never reaches it (#693). */
+static bool snapshot_usable(const struct PgBackendStatusLayout *layout,
+                            const struct pgwt_pgbs_snapshot *snapshot,
+                            pid_t expected_pid, uint32_t required)
+{
+    return snapshot_coherent_identity(layout, snapshot, expected_pid,
+                                      required) &&
+           snapshot->databaseid != 0 && snapshot->userid != 0;
 }
 
 int pgwt_pgbs_derive_cmd_gate(
@@ -1223,8 +1241,14 @@ int pgwt_pgbs_derive_sampled_attr(
                               PGWT_PGBS_READ_USERID |
                               PGWT_PGBS_READ_STATE |
                               PGWT_PGBS_READ_QUERY_ID;
-    if (!snapshot_usable(layout, snapshot, expected_pid, required))
+    if (!snapshot_usable(layout, snapshot, expected_pid, required)) {
+        /* Identity must hold before a missing context is benign: a wrong
+         * address reading an all-zero page remains a hard failure. */
+        if (snapshot_coherent_identity(layout, snapshot, expected_pid,
+                                        required))
+            return PGWT_PGBS_ATTR_NO_CONTEXT;
         return -1;
+    }
 
     out->databaseid = snapshot->databaseid;
     out->userid = snapshot->userid;

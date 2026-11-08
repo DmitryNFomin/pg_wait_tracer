@@ -475,6 +475,50 @@ else
     skip_live_test "test_cli" "requires root"
 fi
 
+# Same perf_event_open probe as ci_smoke.sh: full capture needs hardware
+# watchpoints. Exclude that mode when support cannot be confirmed, while
+# tiered capture remains required. No probe runs outside the live tier.
+probe_watchpoints() {
+    local src bin
+    src=$(mktemp /tmp/pgwt_wp_probe_XXXXXX.c)
+    bin="${src%.c}"
+    cat > "$src" <<'EOF'
+#include <linux/perf_event.h>
+#include <linux/hw_breakpoint.h>
+#include <sys/syscall.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <errno.h>
+static volatile int target;
+int main(void) {
+    struct perf_event_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.type = PERF_TYPE_BREAKPOINT;
+    attr.size = sizeof(attr);
+    attr.bp_type = HW_BREAKPOINT_W;
+    attr.bp_addr = (unsigned long)&target;
+    attr.bp_len = HW_BREAKPOINT_LEN_4;
+    attr.sample_period = 1;
+    attr.wakeup_events = 1;
+    int fd = syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
+    if (fd < 0) { fprintf(stderr, "perf_event_open: %s\n", strerror(errno)); return 1; }
+    close(fd);
+    return 0;
+}
+EOF
+    if ! cc -o "$bin" "$src" 2>/dev/null; then
+        rm -f "$src" "$bin"
+        echo "unknown"; return
+    fi
+    if "$bin"; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+    rm -f "$src" "$bin"
+}
+
 # Fourth field (optional): minimum PostgreSQL major this test is known to
 # need. Determined empirically on the gate box (isolated re-runs against
 # each provisioned major, not just the documented "Requires: PG18"
@@ -482,8 +526,13 @@ fi
 # real constraint — see docs/DEV_LOOP_PLAN.md step 1). Under --pg-version N
 # below a test's minimum, exclude_test() takes it out of the matrix instead
 # of running (and failing) it.
+# Fifth field (optional): whitespace-separated extra arguments, split into
+# a bash array without eval; shell quoting/expansion inside it is unsupported.
 LIVE_TESTS=(
     "test_lifecycle|bash|test_lifecycle.sh"
+    "test_capture_smoke_tiered|python3|test_capture_smoke.py||--mode tiered"
+    "test_capture_smoke_full|python3|test_capture_smoke.py||--mode full"
+    "test_uprobe_fired|python3|test_uprobe_fired.py"
     "test_cross_validate|python3|test_cross_validate.py"
     # pg_stat_io (Test 3's IO cross-check) is a PG16+ view; empirically
     # fails on PG13, passes on PG17/18.
@@ -586,7 +635,9 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
     rm -f "$phase_error_file"
     export PGWT_EXPECT_PHASE_PROBES
     for entry in "${LIVE_TESTS[@]}"; do
-        IFS='|' read -r name runner file min_pg <<< "$entry"
+        IFS='|' read -r name runner file min_pg extra <<< "$entry"
+        extra_args=()
+        IFS=$' \t\n' read -r -a extra_args <<< "$extra"
         if [[ "$phase_rc" -ne 0 ]] && phase_dependent_test "$name"; then
             undeclared_phase_test "$name" "$phase_error"
             continue
@@ -595,9 +646,25 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
             exclude_test "$name" "needs PostgreSQL >= $min_pg, running PG$PG_VERSION"
             continue
         fi
+        if [[ "$name" == "test_capture_smoke_full" ]]; then
+            watchpoints=$(probe_watchpoints)
+            echo "Watchpoint probe: $watchpoints"
+            if [[ "$watchpoints" != "yes" ]]; then
+                exclude_test "$name" "requires hardware watchpoints (probe: $watchpoints), as in ci_smoke.sh"
+                continue
+            fi
+        fi
+        if [[ "$name" == "test_uprobe_fired" ]]; then
+            if [[ -z "$PG_VERSION" ]]; then
+                run_test "$name" bash -c \
+                    'echo "ERROR: test_uprobe_fired requires a detected PG_VERSION; default 0 selects the wrong expectation" >&2; exit 1'
+                continue
+            fi
+            extra_args+=(--pg-version "$PG_VERSION")
+        fi
         case "$runner" in
-            bash)           run_test "$name" bash "$SCRIPT_DIR/$file" $PID_ARG ;;
-            python3)        run_test "$name" python3 "$SCRIPT_DIR/$file" $PID_ARG ;;
+            bash)           run_test "$name" bash "$SCRIPT_DIR/$file" $PID_ARG ${extra_args[@]+"${extra_args[@]}"} ;;
+            python3)        run_test "$name" python3 "$SCRIPT_DIR/$file" $PID_ARG ${extra_args[@]+"${extra_args[@]}"} ;;
             overhead_quick) run_test "$name (--quick)" run_overhead_quick ;;
         esac
     done

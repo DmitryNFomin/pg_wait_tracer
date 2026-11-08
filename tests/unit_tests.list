@@ -627,15 +627,17 @@ test_rotation_open_credit
 # §1 caught a real divergence before this shipped: pgwt_filter_matches()
 # refuses a record whose duration exceeds its own end timestamp, and the
 # aggregate did not.
-# C7 is the clause to read first: TIME is half-open, but RECORD SELECTION is
-# inclusive at both ends, because a trace event's timestamp is when the wait
-# ENDED — an event ending exactly at `to` lies wholly inside the window, and
-# the raw loader selects it then clips the contribution. An earlier draft read
-# "half-open throughout" as applying to the END key, changed the loader to
-# match, and zeroed test_data_aas (Total AAS 4.0 -> 0) and
-# test_data_categories on the gate box. §6b now pins BOTH directions with the
-# same 163 ns literal: zero divergence from the loader, and exactly one lost
-# record under a half-open end bound.
+# C7 is the clause to read first: counting/accumulation is half-open [from, to)
+# on the record's END timestamp (pgwt_block_agg_in_window); MERGE requires
+# last < to. LOADER selection and file/block gating stay inclusive, and
+# pgwt_block_agg_admitted keeps the inclusive test for the exact_in_window
+# fidelity count. TIME is half-open/clipped. Changing LOADER selection zeroed
+# test_data_aas (Total AAS 4.0 -> 0) and test_data_categories on the gate box;
+# this accumulation change does not change LOADER selection. §6b pins one
+# extra CPU->IO1 transition / 163 ns when inclusive inputs are accumulated
+# without EDGE_CLOSE, exact agreement with half-open record-by-record
+# accumulation, and an edge-only exact record (also a structural marker)
+# admitted for fidelity while accumulating no transitions or node time.
 # §9 goes through the REAL writer and reader: a multi-block trace on disk,
 # driving the same pgwt_block_agg_window_from_reader() src/server.c's
 # handle_transitions() calls, swept twice so the cache's contract ("a merged
@@ -691,6 +693,9 @@ test_top_wait_backfill
 # only must still print a row; a missing/non-executable comparator and a
 # generator too old to reach the refusal path must fail, never skip.
 test_cross_validate_idle.sh
+# #115: synthetic known-answer A/B/C join, measured vs nominal weights,
+# missing intervals/pids, classification, byte purity and a residual mutant.
+test_cross_validate_abc.sh
 # Paint-latency plan Phase 3: the EXECUTIONS INDEX (src/exec_index.c). Six
 # detail commands reload the full raw event window on every request at
 # ~0.68 s per million records; this indexes execution BOUNDARIES once per

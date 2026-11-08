@@ -21,6 +21,7 @@ export const SAMPLED_BAND_COLOR = 'rgba(255, 193, 7, 0.10)';   // amber wash
 export const MIXED_BAND_COLOR   = 'rgba(120, 144, 255, 0.10)'; // indigo wash
 export const SAMPLED_BORDER     = 'rgba(255, 193, 7, 0.45)';
 export const MIXED_BORDER       = 'rgba(120, 144, 255, 0.45)';
+export const MIXED_DISCLAIMER = 'totals may not fully reconcile across the switch';
 
 /* Escalation annotation colors: manual vs anomaly are visually distinct. */
 export const ESC_MANUAL_COLOR  = 'rgba(79, 195, 247, 0.14)';   // cyan
@@ -95,6 +96,8 @@ export function buildCompareFidelity(dataA, dataB, opts) {
  *   markArea,            // ECharts markArea.data spec (array of [start,end] pairs)
  *                        //   with itemStyle — fed straight into a series markArea
  *   showLegend,          // whether the sampled/exact legend chip is relevant
+ *   disclaimer,          // MIXED_DISCLAIMER for mixed with sampled sub-ranges;
+ *                        // null otherwise, including the whole-window fallback
  * }
  *
  * The server gives a single fidelity per window. For a "mixed" window it can
@@ -138,6 +141,8 @@ export function buildFidelityShading(data, win) {
         bands,
         markArea,
         showLegend: fidelity === 'sampled' || fidelity === 'mixed',
+        disclaimer: fidelity === 'mixed' && bands.some(b => b.kind === 'sampled')
+            ? MIXED_DISCLAIMER : null,
     };
 }
 

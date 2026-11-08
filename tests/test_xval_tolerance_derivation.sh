@@ -123,6 +123,64 @@ eq "$(derive_xval_tolerance 6.52 3130 5)" "8.8" \
 eq "$(derive_xval_tolerance "$XVAL_PREREG_BIAS_PP" "$XVAL_PREREG_SAMPLES" "$XVAL_PREREG_K")" "8.8" \
    "the pre-registered constants in xval_tolerance.sh still derive 8.8 pp"
 
+echo ""
+echo "--- #115 step 1a: future criteria (arithmetic only, no measurement) ---"
+eq "$XVAL_PREREG_BIAS_PP" "6.52" "the pre-registered bias remains 6.52 pp"
+eq "$XVAL_PREREG_SAMPLES" "3130" "the pre-registered N remains 3130"
+eq "$XVAL_PREREG_K" "5" "the pre-registered K remains 5"
+eq "$XVAL_REQUIRED_REPEATS" "3" "future medians require at least three repeats by default"
+eq "$(xval_z_family_wise "$XVAL_PREREG_K")" "2.5688" \
+   "the future zero-bias criterion uses the existing z(5) table entry"
+eq "$(awk -v n="$XVAL_PREREG_SAMPLES" 'BEGIN { printf "%.4f", 100*sqrt(0.25/n) }')" "0.8937" \
+   "the documented SE agrees with the pre-registered N"
+eq "$(awk -v n="$XVAL_PREREG_SAMPLES" -v z="$(xval_z_family_wise "$XVAL_PREREG_K")" \
+    'BEGIN { printf "%.3f", z*100*sqrt(0.25/n) }')" "2.296" \
+   "the future BIAS=0 criterion is 2.296 pp using unrounded SE"
+eq "$(awk 'BEGIN { printf "%.3f", 2.5688*0.8937 }')" "2.296" \
+   "the rounded inputs printed in the criterion also give 2.296 pp"
+
+eq "$(derive_xval_tolerance_per_rate 6.52 3130 5)" "8.8" \
+   "per-rate derivation preserves the existing bound at N=3130"
+eq "$(derive_xval_tolerance_per_rate 6.52 60000 5)" "7.0" \
+   "per-rate derivation uses its OWN N=60000 for a tighter bound"
+eq "$(derive_xval_tolerance_per_rate 0 60000 5)" "0.5" \
+   "a future zero-bias high-rate bound contains only sampling error"
+eq "$(awk 'BEGIN { printf "%.4f", 100*sqrt(0.25/60000) }')" "0.2041" \
+   "N=60000 gives the documented approximately 0.2 pp SE"
+
+refuses "per-rate missing inputs refuse" derive_xval_tolerance_per_rate
+refuses "per-rate missing K refuses" derive_xval_tolerance_per_rate 6.52 3130
+refuses "per-rate extra input refuses" derive_xval_tolerance_per_rate 6.52 3130 5 7
+for bad in "" abc -1 1e1 ' 3' 3pp; do
+    refuses "per-rate BIAS='$bad' refuses" derive_xval_tolerance_per_rate "$bad" 3130 5
+    refuses "per-rate N='$bad' refuses" derive_xval_tolerance_per_rate 6.52 "$bad" 5
+    refuses "per-rate K='$bad' refuses" derive_xval_tolerance_per_rate 6.52 3130 "$bad"
+done
+refuses "per-rate N=0 refuses" derive_xval_tolerance_per_rate 6.52 0 5
+refuses "per-rate K=0 refuses" derive_xval_tolerance_per_rate 6.52 3130 0
+refuses "per-rate K=11 refuses extrapolation" derive_xval_tolerance_per_rate 6.52 3130 11
+
+eq "$(xval_median 10 2 3)" "3" "median sorts numerically, not lexically"
+eq "$(xval_median 10 2 8 4)" "6" "an even repeat count averages the middle pair"
+eq "$(xval_median 9 1 4 2 7)" "4" "more than three repeats are accepted"
+eq "$(xval_median 6.52 0.4 7.6)" "6.52" "median preserves decimal pp values"
+eq "$(xval_median 0 0 0)" "0" "a computed zero median is valid"
+eq "$(xval_median --min 1 6.52)" "6.52" "an explicit minimum can permit one value"
+eq "$(xval_median --min 2 1.2 1.3)" "1.25" "an explicit minimum permits an even pair"
+eq "$(xval_median --min 4 1 2 3 4)" "2.5" "an explicit higher minimum is accepted"
+refuses "median with no values refuses" xval_median
+refuses "median of one draw refuses by default" xval_median 1
+refuses "median of two draws refuses by default" xval_median 1 2
+refuses "median below an explicit higher minimum refuses" xval_median --min 4 1 2 3
+refuses "median missing --min argument refuses" xval_median --min
+refuses "median with a minimum but no values refuses" xval_median --min 1
+for bad in "" abc -1 1e1 ' 3' 3pp; do
+    refuses "median value='$bad' refuses" xval_median 1 "$bad" 3
+    refuses "median minimum='$bad' refuses" xval_median --min "$bad" 1 2 3
+done
+refuses "median zero minimum refuses" xval_median --min 0 1 2 3
+refuses "median fractional minimum refuses" xval_median --min 1.5 1 2 3
+
 # The bound must not be the achieved number. The five prior captures at this
 # operating point max out at 6.3 pp; if someone later "derives" a bound that
 # sits on or under the worst observed run, the derivation has been fitted to
@@ -296,6 +354,19 @@ for mode in 127 126; do
     else
         report false "awk unavailable (exit $mode): rc=$rc out='$out' — a missing dependency must refuse"
     fi
+    # The unwired helpers must uphold the same no-output refusal contract.
+    for helper in 'derive_xval_tolerance_per_rate 6.52 60000 5' 'xval_median 1 2 3'; do
+        out=$(PATH="$STUBDIR" bash -c "
+            source '$SCRIPT_DIR/xval_tolerance.sh'
+            $helper
+        " 2>/dev/null)
+        rc=$?
+        if [[ $rc -ne 0 && -z "$out" ]]; then
+            report true "awk unavailable (exit $mode): $helper refuses without a value"
+        else
+            report false "awk unavailable (exit $mode): $helper rc=$rc out='$out'"
+        fi
+    done
     # And the composed guard must refuse too, not silently compare "" to "".
     out=$(PATH="$STUBDIR" bash -c "
         source '$SCRIPT_DIR/xval_tolerance.sh'

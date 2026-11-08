@@ -9,8 +9,8 @@
  * Dynamic name resolution: pgwt_load_event_names_from_pg() queries the running
  * PG instance's pg_wait_events view (PG17+) and builds name tables at runtime.
  * pgwt_write_names_json() / pgwt_load_names_json() persist the mapping as a
- * sidecar file alongside trace files, so pgwt-server can resolve names for
- * any PG version without hardcoded tables.
+ * sidecar file alongside trace files. Classes without hardcoded ID tables
+ * are excluded: pg_wait_events provides names but no numeric IDs.
  */
 #include "wait_event.h"
 #include "idle_rule.h"
@@ -31,8 +31,8 @@ static int pg_version = 18;
  * classification depends on.
  *
  * 1 = OBSERVED: PostgreSQL itself reported these names (pg_wait_events, or a
- *     sidecar written by a daemon that had them). The ids are then
- *     authoritative whatever the major.
+ *     sidecar written by a daemon that had them). Known names use compiled
+ *     ids; classes without hardcoded ID tables are excluded.
  * 0 = STATIC fallback: the names are this build's own compiled-in table,
  *     merely round-tripped through a sidecar.
  *
@@ -717,7 +717,13 @@ const char *pgwt_event_name(uint32_t wei)
     case PG_WAIT_BUFFERPIN:
         return "BufferPin";
     case PG_WAIT_EXTENSION:
-        return "Extension";
+        /* Id 0 is PostgreSQL's own built-in extension event. Any other id
+         * is a custom event whose name pg_wait_events cannot map to an id
+         * (#801), so return NULL: pgwt_event_full_name then renders
+         * "Extension:id=<n>". One shared "Extension" name for every id would
+         * give two nodes the same name, which the Transitions builder
+         * rejects as a structural fault (duplicate node). */
+        return id == 0 ? "Extension" : NULL;
     default:
         return NULL;
     }
@@ -831,7 +837,9 @@ static int hardcoded_class_table(int cb, const char ***tbl, int *max)
  * recover the correct enum id for a dynamically-discovered name —
  * pg_wait_events exposes no id column, and its rows are NOT in enum
  * order for every class (e.g. the Lock class follows LockTagType, which
- * is not alphabetical), so positional id assignment is wrong. */
+ * is not alphabetical), so positional id assignment is wrong. Classes
+ * without a hardcoded table have no derivable ids (Extension ids, for
+ * example, depend on allocation order in the cluster). */
 static int hardcoded_event_id(int cb, const char *name)
 {
     const char **tbl;
@@ -845,14 +853,16 @@ static int hardcoded_event_id(int cb, const char *name)
 }
 
 /* Parse "Type|Name" lines from fp into the dynamic name table, assigning
- * each name its CORRECT enum id by reverse-lookup against the hardcoded
+ * known names their enum ids by reverse-lookup against the hardcoded
  * tables. We cannot derive the id from pg_wait_events: it has no id
  * column, and `ORDER BY name` is not enum order for every class (the
  * Lock class follows LockTagType — relation=0 … advisory=10 — which is
  * not alphabetical), so positional id assignment mislabelled Lock
- * subtypes (relation shown as advisory). Names unknown to this build (a
- * newer PG version) are appended after the class's known maximum —
- * best-effort forward-compat, since their true id is not available.
+ * subtypes (relation shown as advisory). For classes WITH a hardcoded table,
+ * names unknown to this build (a newer PG version) are appended after the
+ * class's known maximum — best-effort forward-compat, since their true id
+ * is not available. Classes WITHOUT a table are counted but not registered:
+ * their ids cannot be derived, so they must retain the class fallback.
  * Caller is responsible for dyn_clear() before and dyn_loaded after.
  * Returns the number of names parsed. */
 static int load_names_from_fp(FILE *fp)
@@ -860,6 +870,7 @@ static int load_names_from_fp(FILE *fp)
     char line[256];
     int count = 0;
     int cur_class = -1;
+    int has_table = 0;
     int next_unknown_id = 0;
 
     while (fgets(line, sizeof(line), fp)) {
@@ -880,14 +891,16 @@ static int load_names_from_fp(FILE *fp)
             const char **tbl;
             int max;
             cur_class = cb;
-            next_unknown_id = hardcoded_class_table(cb, &tbl, &max) ? max + 1 : 0;
+            has_table = hardcoded_class_table(cb, &tbl, &max);
+            next_unknown_id = has_table ? max + 1 : 0;
         }
 
         int id = hardcoded_event_id(cb, name);
-        if (id < 0)
+        if (id < 0 && has_table)
             id = next_unknown_id++;
 
-        dyn_add(cb, id, name);
+        if (id >= 0)
+            dyn_add(cb, id, name);
         count++;
     }
     return count;
@@ -999,7 +1012,7 @@ int pgwt_write_names_json(const char *trace_dir)
 
     /* The sidecar records the mapping the trace was WRITTEN with, so the
      * reader (pgwt-server) never decodes with mismatched tables. Prefer
-     * the dynamically-loaded names (PG17+, exact for this build); fall
+     * the dynamically-loaded names (PG17+, classes with known ID tables); fall
      * back to the active version-selected hardcoded tables otherwise —
      * without this, a PG13 trace had no sidecar at all and pgwt-server
      * silently decoded PG13 ids with PG18 tables (the #8 mislabeling
@@ -1119,6 +1132,13 @@ int pgwt_load_names_json(const char *trace_dir)
 
         int cb = class_name_to_byte(item->string);
         if (cb < 0) continue;
+
+        /* Old sidecars may contain fabricated ids for Extension and other
+         * table-less classes. Ignore them just as the pg_wait_events loader
+         * does, so a subsequent write cannot preserve those false mappings. */
+        const char **tbl;
+        int max;
+        if (!hardcoded_class_table(cb, &tbl, &max)) continue;
 
         int idx = 0;
         cJSON *elem;
