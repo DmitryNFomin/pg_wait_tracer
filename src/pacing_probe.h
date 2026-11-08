@@ -9,8 +9,13 @@
 #define PGWT_PACING_INERT_THRESHOLD 5U
 enum pgwt_pacing_verdict { PGWT_PACING_OK, PGWT_PACING_INERT };
 void pgwt_parse_pg_version(const char *line, int *major, int *minor);
-/* Unknown minor (-1) on 14, including beta/rc forms, is NOT applicable.
- * PG12 is outside the supported capture range; do not attach there either. */
+/* Attach only for a confidently parsed major == 13, or major == 14 with a
+ * parsed minor in [0,3). An unknown minor on PG14 (14beta/14rc/14devel), or a
+ * failed parse leaving major 0, is not applicable: no bridge is attached and
+ * the checkpointer's 100 ms pg_usleep is COUNTED as DB Time. This visible
+ * over-counting is the safe failure per idle_rule.h; silently under-counting
+ * is not. No parse failure can make this predicate exclude time that the
+ * native path would count. PG12 is outside the supported capture range. */
 int pgwt_needs_ckpt_pacing_probe(int major, int minor);
 enum pgwt_pacing_verdict pgwt_pacing_probe_verdict(uint64_t total_fires,
     uint64_t unclassified_asleep_observations, unsigned threshold);

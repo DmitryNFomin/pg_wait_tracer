@@ -23,10 +23,12 @@ int main(void)
     assert(strcmp(pgwt_event_name(PGWT_WEI_CKPT_PACING), "CheckpointWriteDelay") == 0);
     const struct { const char *version; int major, minor, needed; } cases[] = {
         {"12.22", 12, 22, 0}, {"13.0", 13, 0, 1}, {"13.23", 13, 23, 1},
+        {"13beta1", 13, -1, 1}, {"13rc2", 13, -1, 1},
         {"14.0", 14, 0, 1}, {"14.2", 14, 2, 1}, {"14.3", 14, 3, 0},
         {"14.12", 14, 12, 0}, {"15.1", 15, 1, 0}, {"16.4", 16, 4, 0},
         {"17.0", 17, 0, 0}, {"18.1", 18, 1, 0}, {"14beta1", 14, -1, 0},
         {"14rc1", 14, -1, 0}, {"14", 14, -1, 0}, {"bad", 0, -1, 0},
+        {"14devel", 14, -1, 0}, {"15beta1", 15, -1, 0},
     };
     for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
         char line[160]; int major, minor;
@@ -36,6 +38,10 @@ int main(void)
         assert(pgwt_needs_ckpt_pacing_probe(major, minor) == cases[i].needed);
     }
     assert(!pgwt_needs_ckpt_pacing_probe(14, -1));
+    assert(pgwt_needs_ckpt_pacing_probe(14, 0));
+    assert(pgwt_needs_ckpt_pacing_probe(14, 1));
+    assert(pgwt_needs_ckpt_pacing_probe(14, 2));
+    assert(!pgwt_needs_ckpt_pacing_probe(14, 3));
     assert(!pgwt_needs_ckpt_pacing_probe(0, -1));
     const struct { uint64_t fires, obs; unsigned threshold; int inert; } verdicts[] = {
         {0, 0, 5, 0}, {0, 4, 5, 0}, {0, 5, 5, 1}, {0, 6, 5, 1},

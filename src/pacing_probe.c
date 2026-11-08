@@ -19,6 +19,13 @@ void pgwt_parse_pg_version(const char *line, int *major, int *minor)
         if (n >= 0 && n <= 9999) *minor = (int)n;
     }
 }
+/* Fail safe toward visible over-counting, as required by idle_rule.h, never
+ * silent under-counting. Only a confidently parsed major == 13, or major == 14
+ * with a parsed minor in [0,3), attaches the bridge. An unknown PG14 minor
+ * (14beta/14rc/14devel), or a failed parse leaving major 0, is not applicable:
+ * the bridge is NOT attached, so the checkpointer's 100 ms pg_usleep is COUNTED
+ * as DB Time. No parse failure can make this predicate exclude time that the
+ * native path would count. */
 int pgwt_needs_ckpt_pacing_probe(int major, int minor)
 {
     return major == 13 || (major == 14 && minor >= 0 && minor < 3);

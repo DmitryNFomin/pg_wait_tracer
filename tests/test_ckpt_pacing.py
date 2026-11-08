@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import select
 import signal
 import subprocess
@@ -295,6 +296,11 @@ def main():
     major = version // 10000
     native = version >= 140003
     require(major >= 13, f'supported PostgreSQL {version}')
+    server_version = sql('SHOW server_version')
+    if major == 14 and not re.match(r'^\d+\.\d+', server_version):
+        print(f'SKIP pacing quantity/refusal: PG14 pre-release {server_version}: '
+              'daemon fails safe and counts the sleep (see src/pacing_probe.c)')
+        return
     ckpt = int(sql("SELECT pid FROM pg_stat_activity WHERE backend_type='checkpointer'"))
     # ALTER SYSTEM is restored exactly: preserve an existing auto.conf override
     # instead of converting an inherited setting into a permanent override.
