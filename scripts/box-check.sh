@@ -319,7 +319,8 @@ else
     # Deliberately not done in this change.
     # rc=75 identifies lock contention and stays fatal. Only rc=3 permits
     # using the box as-is: only the provisioner's unsupported-OS arm emits
-    # it, so implementing that OS removes the skip along with that arm.
+    # it. The provisioner guarantees this by normalising any child's 3 to 1,
+    # so implementing that OS removes the skip along with that arm.
     echo "box-check: staging + running tests/provision-runner.sh $OS on persistent $target" | tee -a "$log"
     prov_stage="pgwt-provision/$(date +%s)-$$-tests-provision-runner.sh"
     ssh -o BatchMode=yes "$target" "mkdir -p pgwt-provision" 2>>"$log" || { echo "box-check: provision directory creation failed on persistent $target (see $log)" | tee -a "$log" >&2; exit 1; }

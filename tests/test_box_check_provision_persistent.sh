@@ -237,14 +237,17 @@ assert_stopped_before_lock() {
     echo "PASS: $2 stops before the lock wait"
 }
 
-for child_rc in 3 75; do
-    PATH="$CHILD_SHIM_BIN:$PATH" CHILD_RC="$child_rc" \
-        bash "$SCRIPT_DIR/provision-runner.sh" ubuntu > "$tmpdir/child-output" 2>&1
-    rc=$?
-    assert_stopped_before_lock "$tmpdir/child-output" "direct provisioner with child rc=$child_rc"
-    [[ $rc -eq 1 ]] || fail "child rc=$child_rc must be normalised to 1 (got $rc): $(cat "$tmpdir/child-output")"
-    echo "PASS: real provisioner normalises child rc=$child_rc to 1"
+PATH="$CHILD_SHIM_BIN:$PATH" CHILD_RC=3 \
+    bash "$SCRIPT_DIR/provision-runner.sh" ubuntu > "$tmpdir/child-output" 2>&1
+rc=$?
+assert_stopped_before_lock "$tmpdir/child-output" 'direct provisioner with child rc=3'
+[[ $rc -eq 1 ]] || fail "child rc=3 must be normalised to 1 (got $rc): $(cat "$tmpdir/child-output")"
+echo 'PASS: real provisioner normalises child rc=3 to 1'
 
+# Child rc=3 covers the bug fix. Child rc=75 is only a launcher regression guard
+# for existing correct behaviour (box-check already fails on a leaked 75),
+# not a bug fix.
+for child_rc in 3 75; do
     PROVISION_REAL="$SCRIPT_DIR/provision-runner.sh" CHILD_SHIM_BIN="$CHILD_SHIM_BIN" CHILD_RC="$child_rc" \
         run_launcher "$BOX_CHECK" ubuntu
     rc=$?
@@ -259,7 +262,11 @@ for child_rc in 3 75; do
     if /usr/bin/grep -Fq 'tests/run_all.sh --require-live' "$tmpdir/calls"; then
         fail "build ran after real provisioner child rc=$child_rc"
     fi
-    echo "PASS: child rc=$child_rc stops launcher before build"
+    if [[ $child_rc -eq 75 ]]; then
+        echo 'PASS: child rc=75 stops launcher before build: regression guard for existing correct behaviour (box-check already fails on a leaked 75), not a bug fix'
+    else
+        echo "PASS: child rc=$child_rc stops launcher before build"
+    fi
 done
 
 for stage in mkdir rsync; do
