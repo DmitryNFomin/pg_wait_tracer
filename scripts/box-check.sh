@@ -298,22 +298,37 @@ else
     # dependency checks cost time, but an "already provisioned" flag or a
     # fixed header/package probe goes stale when the dependency set changes.
     # That cost is preferable to a missing dependency misleading a live test.
-    # Let the provisioner take /tmp/pgwt-box-check.lock itself. An outer
-    # flock self-deadlocks against its inner lock; this separate SSH call
-    # also finishes BEFORE the build/run_all.sh lock_header below is held.
+    # Use a per-run staging name so another tree cannot overwrite the script
+    # between staging and execution. Taking the lock first is not an option:
+    # the provisioner itself takes it inside the same SSH; an outer flock
+    # self-deadlocks against that inner lock.
     # Fail closed even on a shared GitHub Actions runner: CI contention can
     # exhaust its 600s lock wait and abort an otherwise viable run, but a
     # warning would let an unprovisioned box produce misleading test failures.
+    # Lock window: the provisioner takes /tmp/pgwt-box-check.lock inside its
+    # own SSH and releases it when that SSH exits. The build/test phase
+    # re-acquires it later via lock_header below. Between them another
+    # box-check or CI can provision the same box differently or change cluster
+    # state. Persistent box-check re-provisions on every run but does NOT
+    # guarantee unchanged box state between provisioning and the tests.
+    # Closing this window means running the provisioner inside the build-phase
+    # lock after the tree rsync, requiring a nested-lock bypass in the
+    # provisioner and a changed bounded/unbounded wait policy: provisioning
+    # waits 600 s (then rc=75), while lock_header uses bare `flock 9` and waits
+    # unbounded by design (.github/workflows/ci.yml intends queueing).
+    # Deliberately not done in this change.
     # rc=75 identifies lock contention and stays fatal. Only rc=3 permits
     # using the box as-is: only the provisioner's unsupported-OS arm emits
     # it, so implementing that OS removes the skip along with that arm.
     echo "box-check: staging + running tests/provision-runner.sh $OS on persistent $target" | tee -a "$log"
-    ssh -o BatchMode=yes "$target" "mkdir -p pgwt-provision" 2>>"$log" || exit 1
-    rsync -az -e ssh ./tests/provision-runner.sh "$target:pgwt-provision/tests-provision-runner.sh" 2>>"$log" || exit 1
-    ssh -o BatchMode=yes "$target" "sudo bash pgwt-provision/tests-provision-runner.sh $OS" 2>&1 | tee -a "$log"
+    prov_stage="pgwt-provision/$(date +%s)-$$-tests-provision-runner.sh"
+    ssh -o BatchMode=yes "$target" "mkdir -p pgwt-provision" 2>>"$log" || { echo "box-check: provision directory creation failed on persistent $target (see $log)" | tee -a "$log" >&2; exit 1; }
+    rsync -az -e ssh ./tests/provision-runner.sh "$target:$prov_stage" 2>>"$log" || { echo "box-check: provisioner rsync stage failed on persistent $target (see $log)" | tee -a "$log" >&2; exit 1; }
+    ssh -o BatchMode=yes "$target" "sudo bash $prov_stage $OS" 2>&1 | tee -a "$log"
     provision_rc=${PIPESTATUS[0]}
+    ssh -o BatchMode=yes "$target" "rm -f \"$prov_stage\"" 2>>"$log" || true
     if [[ $provision_rc -eq 3 ]]; then
-        echo "box-check: WARNING: provisioner does not support OS=$OS (rc=3); provisioning skipped for that reason; using persistent $target as-is" | tee -a "$log" >&2
+        echo "box-check: WARNING: provisioner does not support OS=$OS (unsupported, rc=3); provisioning skipped for that reason; using persistent $target as-is" | tee -a "$log" >&2
     elif [[ $provision_rc -eq 75 ]]; then
         echo "box-check: persistent $target is busy (rc=75): contention, not a provisioning defect; CI or another box-check held /tmp/pgwt-box-check.lock past the provisioner's 600 s wait; caller should retry this run later" | tee -a "$log" >&2
         exit 1

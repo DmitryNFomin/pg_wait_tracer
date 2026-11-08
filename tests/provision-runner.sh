@@ -68,7 +68,19 @@
 #   2: invalid arguments / usage.
 #   3: OS unsupported by this provisioner (only the unsupported-OS arm emits it).
 #  75: EX_TEMPFAIL, contention: the 600s lock wait expired.
+# 3/75 are reachable only from the deliberate el9 / flock-failure exit sites;
+# child commands returning either reserved status are normalised to 1.
 set -euo pipefail
+PROVISION_DELIBERATE_EXIT=0
+
+provision_exit() {
+    local rc=$?
+    if [[ $PROVISION_DELIBERATE_EXIT -eq 0 && ( $rc -eq 3 || $rc -eq 75 ) ]]; then
+        echo "provision-runner: a child command exited $rc; normalised to 1" >&2
+        exit 1
+    fi
+}
+trap provision_exit EXIT
 
 OS="${1:-}"
 shift || true
@@ -114,6 +126,7 @@ case "$OS" in
     el9)
         echo "STUB: el9 provisioning is not implemented yet — it is step 4" >&2
         echo "of docs/DEV_LOOP_PLAN.md (ephemeral VMs + real OS matrix)." >&2
+        PROVISION_DELIBERATE_EXIT=1
         exit 3
         ;;
     ubuntu|el8)
@@ -158,6 +171,7 @@ log "waiting for /tmp/pgwt-box-check.lock (up to 600s)"
 exec 9>/tmp/pgwt-box-check.lock
 if ! flock -w 600 9; then
     echo "FATAL: could not acquire /tmp/pgwt-box-check.lock within 600s -- another box-check or provisioning run holds it" >&2
+    PROVISION_DELIBERATE_EXIT=1
     exit 75
 fi
 log "lock acquired"
