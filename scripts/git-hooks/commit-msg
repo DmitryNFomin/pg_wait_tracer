@@ -1,0 +1,117 @@
+#!/bin/sh
+# Attribution is best effort: no dependency or I/O failure may block a commit.
+# Python supplies the same regex semantics as board-author.py and an atomic
+# replacement, so even a failed write cannot truncate the original message.
+python3 - "$@" 2>/dev/null <<'PY' || :
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+def trailers(path):
+    return subprocess.check_output(
+        ["git", "interpret-trailers", "--parse", str(path)],
+        stderr=subprocess.DEVNULL,
+    ).decode("utf-8")
+
+
+def derive(parsed):
+    values = []
+    agent = False
+    for line in parsed.splitlines():
+        key, separator, value = line.partition(":")
+        if not separator:
+            raise ValueError("malformed parsed trailer")
+        key = key.strip().lower()
+        if key == "generated-with":
+            return None  # An explicit declaration is never overwritten.
+        if key not in {"co-authored-by", "claude-session", "signed-off-by"}:
+            continue
+        value = value.split("<", 1)[0].strip().lower()
+        values.append(value)
+        agent |= key == "claude-session" or bool(
+            re.search(r"claude|anthropic|openai|gpt|fable|astra|haiku", value)
+        )
+    for pattern, label in (
+        (r"\bcodex\b|\bgpt-", "codex"),
+        (r"\bclaude\s+opus\b", "Claude Opus"),
+        (r"\bclaude\s+sonnet\b", "Claude Sonnet"),
+    ):
+        if any(re.search(pattern, value) for value in values):
+            return label
+    return None if agent or os.environ.get("CLAUDECODE") else "human"
+
+
+def main():
+    if len(sys.argv) != 2:
+        return
+    message = Path(sys.argv[1]).absolute()
+    info = message.lstat()
+    if (not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o222
+            or not os.access(message, os.R_OK | os.W_OK)):
+        return
+    original = message.read_bytes()
+    if not original or not original.strip():
+        return
+    # Reject binary input rather than letting Git silently discard bytes.
+    decoded = original.decode("utf-8")
+    if any(ord(char) < 32 and char not in "\t\n\r" for char in decoded):
+        return
+
+    temporary = None
+    try:
+        # A sibling can be renamed atomically over the original on Mac/Linux.
+        fd, name = tempfile.mkstemp(prefix=".pgwt-commit-msg-", dir=message.parent)
+        temporary = Path(name)
+        with os.fdopen(fd, "wb") as copy:
+            copy.write(original)
+        original_trailers = trailers(temporary).splitlines()
+        label = derive("\n".join(original_trailers))
+        if label is None:
+            return
+        subprocess.check_call(
+            ["git", "interpret-trailers", "--in-place", "--if-exists", "doNothing",
+             "--trailer", "Generated-with: " + label, str(temporary)],
+            stderr=subprocess.DEVNULL,
+        )
+        result = temporary.read_bytes()
+        # Git may insert separators or terminate the last line, but every
+        # original line must survive byte-for-byte and in the same order.
+        original_lines = original.splitlines(keepends=True)
+        if not original.endswith((b"\n", b"\r")):
+            original_lines[-1] += b"\n"
+        remaining = iter(result.splitlines(keepends=True))
+        if not all(line in remaining for line in original_lines):
+            return
+        parsed = trailers(temporary).splitlines()
+        if "Generated-with: " + label not in parsed:
+            return
+        remaining = iter(parsed)
+        if not all(line in remaining for line in original_trailers):
+            return
+        os.chmod(temporary, stat.S_IMODE(info.st_mode))
+        # Do not overwrite another writer's changes while deriving attribution.
+        current = message.lstat()
+        if (message.read_bytes() != original
+                or (current.st_dev, current.st_ino, current.st_mode,
+                    current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+                != (info.st_dev, info.st_ino, info.st_mode,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)):
+            return
+        os.replace(temporary, message)
+        temporary = None
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+try:
+    main()
+except Exception:
+    pass  # Fail open, including absent git/python, bad input, and full disks.
+PY
+exit 0

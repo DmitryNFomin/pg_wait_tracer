@@ -161,6 +161,7 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'state_reseeds_total',
           # Stage 2 sampled-attribution source/shadow observability.
           'sampled_attr_tick_read_failures_total',
+          'sampled_attr_tick_no_context_total',
           'sampled_attr_shadow_total',
           'sampled_attr_shadow_mismatch_total',
           'sampled_attr_shadow_active_total',
@@ -285,6 +286,35 @@ SAMPLES_AFTER=$(echo "$METRICS2" | python3 -c \
     "import json,sys; print(json.load(sys.stdin).get('samples_total', 0))")
 [[ "$SAMPLES_AFTER" -gt "$SAMPLES_BEFORE" ]]
 check $? "samples_total increased under load ($SAMPLES_BEFORE -> $SAMPLES_AFTER)"
+
+# ── #693: the at-tick attribution OUTCOME SPLIT, asserted live ─
+# Unit tests pin the classifier; nothing above pins the wiring. A later change
+# that put the db/user clause back on the shared snapshot gate would count
+# every context-less read as a FAILURE again and still pass every other
+# assertion in this file, so pin the counter itself. The expected value is
+# version-dependent, and an unresolvable version is a FAILURE, never a skip --
+# a gate that cannot see must refuse. Deliberately NOT asserting
+# read_failures == 0: a backend exiting mid-read is a real transient, and a
+# tolerance there would be test hardening.
+PG_MAJOR_LIVE=$(psql -U postgres -d postgres -tAc \
+    "SELECT current_setting('server_version_num')::int / 10000" 2>/dev/null \
+    | tr -d '[:space:]')
+[[ "$PG_MAJOR_LIVE" =~ ^[0-9]+$ ]]
+check $? "#693: resolved the live PostgreSQL major (got '$PG_MAJOR_LIVE')"
+NOCTX=$(echo "$METRICS2" | python3 -c \
+    "import json,sys; d=json.load(sys.stdin); \
+k='sampled_attr_tick_no_context_total'; print(d[k] if k in d else 'MISSING')")
+if [[ "$PG_MAJOR_LIVE" =~ ^[0-9]+$ ]] && [[ "$PG_MAJOR_LIVE" -ge 14 ]]; then
+    # Every auxiliary process reports datid AND usesysid NULL, on every tick:
+    # a structural population, so this must be nonzero or the split is dead.
+    [[ "$NOCTX" =~ ^[0-9]+$ ]] && [[ "$NOCTX" -gt 0 ]]
+    check $? "#693: sampled_attr_tick_no_context_total > 0 on PG$PG_MAJOR_LIVE (got $NOCTX)"
+else
+    # PG13's activity source only targets client/unknown/parallel-worker
+    # backends, so the context-less population never reaches the tick read.
+    [[ "$NOCTX" == "0" ]]
+    check $? "#693: sampled_attr_tick_no_context_total == 0 on PG$PG_MAJOR_LIVE (got $NOCTX)"
+fi
 
 BYTES=$(echo "$METRICS2" | python3 -c \
     "import json,sys; print(json.load(sys.stdin)['trace_bytes_written_total'])")
