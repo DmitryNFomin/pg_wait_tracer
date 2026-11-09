@@ -1210,6 +1210,9 @@ function renderFidelityChip(model, ctx) {
             (model.escalation.isAnomaly ? '#E53935' : '#4fc3f7') + '">● ' +
             esc(model.escalation.label) + '</span>';
     }
+    if (model.shading.disclaimer != null) {
+        html += '<span>' + esc(model.shading.disclaimer) + '</span>';
+    }
     chip.innerHTML = html;
 }
 

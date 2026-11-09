@@ -22,7 +22,7 @@ A trace directory (`--trace-dir`) contains:
 | `query_texts.jsonl` | query-text capture | context + query grouping key → sourced SQL text sidecar |
 | `query_sources.jsonl` | PG13 sampler | context + grouping key → durable synthetic-attribution quality |
 | `backends.jsonl` | backend-meta writer | pid → type/user/db sidecar |
-| `wait_event_names.json` | daemon | event-id → name tables (PG17+) |
+| `wait_event_names.json` | daemon | event-id → name tables (PG17+); carries no Extension/InjectionPoint/BufferPin keys (`pg_wait_events` gives no ids for them, #801), and a reader ignores any it finds |
 | `*.corrupt.<unixtime>` | recovery | preserved unreadable leftovers |
 | `pgwt.sock` | daemon | control socket |
 

@@ -84,23 +84,29 @@ int pgwt_block_agg_node_counts(const struct pgwt_trace_event *ev)
     return 1;
 }
 
-/* C7. INCLUSIVE at both ends, on the record's END timestamp — which is the
- * timestamp the trace stores (duration_ns is time already spent in
- * old_event). An event ending exactly at `to` has its whole interval inside
- * the window, so it belongs to the window; this mirrors the raw loader
- * (src/server.c, `ts < from_m || ts > to_m` -> skip) exactly. See C7 in
- * block_agg.h for why this is not #316 returning. */
+/* C7. Counting/accumulation is half-open on the record's END timestamp,
+ * matching the raw occurrence gate (#427). Time/clipping is unaffected. */
 int pgwt_block_agg_in_window(const struct pgwt_trace_event *ev,
                              uint64_t from_mono_ns, uint64_t to_mono_ns)
+{
+    if (!ev)
+        return 0;
+    return ev->timestamp_ns >= from_mono_ns && ev->timestamp_ns < to_mono_ns;
+}
+
+/* C7. Fidelity admission keeps the raw loader's inclusive selection,
+ * including markers and records closing exactly at `to`. */
+int pgwt_block_agg_admitted(const struct pgwt_trace_event *ev,
+                            uint64_t from_mono_ns, uint64_t to_mono_ns)
 {
     if (!ev)
         return 0;
     return ev->timestamp_ns >= from_mono_ns && ev->timestamp_ns <= to_mono_ns;
 }
 
-/* C7, lifted to FILE granularity. Same rule, same reason: a file whose
- * earliest record ends exactly at `to_m` still has that record inside the
- * window, so the file CAN contribute and must not be skipped.
+/* C7 at FILE/BLOCK granularity stays inclusive: a file whose earliest record
+ * ends exactly at `to_m` can still admit that record for fidelity, even
+ * though it contributes nothing to counting/accumulation.
  *
  * This exists as a shared predicate because the per-file gate was written out
  * by hand at three sites and one of them drifted: the aggregate path used
@@ -510,10 +516,14 @@ int pgwt_block_agg_add_events(struct pgwt_block_agg *a,
     if (count < 0 || (count > 0 && !events))
         return PGWT_BAGG_REFUSED_INVALID;
     for (int i = 0; i < count; i++) {
-        if (!pgwt_block_agg_in_window(&events[i], from_mono_ns, to_mono_ns))
+        if (!pgwt_block_agg_admitted(&events[i], from_mono_ns, to_mono_ns))
             continue;
+        /* exact_in_window semantics are unchanged: inclusive admission,
+         * regardless of the accumulation/counting predicates. */
         if (n_in_window)
             (*n_in_window)++;
+        if (!pgwt_block_agg_in_window(&events[i], from_mono_ns, to_mono_ns))
+            continue;
         int rc = pgwt_block_agg_add_event(a, &events[i]);
         if (rc != PGWT_BAGG_OK)
             return rc;
@@ -607,8 +617,8 @@ enum pgwt_block_plan pgwt_block_agg_plan(const struct pgwt_block_identity *id,
                                          uint64_t from_mono_ns,
                                          uint64_t to_mono_ns)
 {
-    /* An inverted window selects nothing; equal endpoints can still select
-     * records (C7). A block without an identity cannot be planned here. */
+    /* An inverted window admits nothing; equal endpoints can still admit
+     * records for fidelity (C7). A block without an identity cannot be planned. */
     if (!id)
         return PGWT_BLOCK_SKIP;
     if (to_mono_ns < from_mono_ns)
@@ -616,8 +626,8 @@ enum pgwt_block_plan pgwt_block_agg_plan(const struct pgwt_block_identity *id,
     if (id->last_timestamp_ns < id->first_timestamp_ns)
         return PGWT_BLOCK_DECODE;      /* nonsense header: do not trust bounds */
 
-    /* Inclusive-at-both-ends against the block's header bounds (C7): a block
-     * is out only if it cannot hold a record in [from, to]. */
+    /* Inclusive file/block gating (C7): SKIP only if no record can be
+     * admitted in [from, to], including for fidelity alone. */
     if (!pgwt_block_agg_file_can_contribute(id->first_timestamp_ns,
                                             id->last_timestamp_ns,
                                             from_mono_ns, to_mono_ns))
@@ -627,12 +637,11 @@ enum pgwt_block_plan pgwt_block_agg_plan(const struct pgwt_block_identity *id,
     if (!have_agg)
         return PGWT_BLOCK_DECODE;
 
-    /* Wholly inside, under the SAME bound the records are selected by: every
-     * record of a block with first >= from and last <= to satisfies
-     * ts in [from, to], which is what makes folding the whole aggregate
-     * sound. */
+    /* Wholly inside the half-open accumulation window (C7): every record
+     * must satisfy ts in [from, to). A block ending exactly at `to` must
+     * DECODE so that record is admitted for fidelity but not accumulated. */
     if (id->first_timestamp_ns >= from_mono_ns &&
-        id->last_timestamp_ns <= to_mono_ns)
+        id->last_timestamp_ns < to_mono_ns)
         return PGWT_BLOCK_MERGE;
 
     return PGWT_BLOCK_DECODE;
@@ -820,6 +829,8 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
             if (rc != PGWT_BAGG_OK)
                 break;
             if (merged) (*merged)++;
+            /* MERGE requires every record in [from, to), so all num_events
+             * also satisfy inclusive admission: exact_in_window is unchanged. */
             if (exact_in_window) *exact_in_window += id.num_events;
             continue;
         }

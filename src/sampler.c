@@ -1027,6 +1027,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     static uint8_t attr_valid[MAX_BACKENDS];
     int n = 0;
     int attr_errno = 0;
+    int attr_no_context = 0;
     for (int i = 0; i < d->backends.count && n < MAX_BACKENDS; i++) {
         struct pgwt_backend *be = &d->backends.entries[i];
         if (!be->is_alive || be->pid <= 0)
@@ -1123,6 +1124,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
 
         struct pgwt_pgbs_sampled_attr tick_raw;
         struct pgwt_sampled_attr_value tick_attr = {0};
+        int tick_rc = -1;
         int tick_ok = 0;
         if (target_tick_enabled) {
             errno = 0;
@@ -1148,15 +1150,16 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                     }
                 }
                 targets[n].status_addr = be->pgbs_addr;
-                tick_ok = be->pgbs_addr != 0 &&
-                    pgwt_pgbs_read_sampled_attr_at(
+                if (be->pgbs_addr != 0)
+                    tick_rc = pgwt_pgbs_read_sampled_attr_at(
                         be->pid, be->pgbs_addr,
-                        &d->backend_status_layout, &tick_raw) == 0;
+                        &d->backend_status_layout, &tick_raw);
             } else {
-                tick_ok = pgwt_pgbs_read_sampled_attr(
+                tick_rc = pgwt_pgbs_read_sampled_attr(
                     be->pid, d->my_be_entry_addr,
-                    &d->backend_status_layout, &tick_raw) == 0;
+                    &d->backend_status_layout, &tick_raw);
             }
+            tick_ok = (tick_rc == 0);
             if (tick_ok) {
                 tick_attr.query_id = tick_raw.query_id;
                 tick_attr.cmd_open = tick_raw.cmd_open;
@@ -1266,13 +1269,38 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                     }
                 }
             } else {
-                d->counters.sampled_attr_tick_read_failures_total++;
-                if (!attr_errno)
-                    attr_errno = errno ? errno : EAGAIN;
-                if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
-                    fprintf(stderr,
-                            "SAMPLED-ATTR-TICK-INVALID: pid=%d error=%s\n",
-                            be->pid, strerror(errno ? errno : EAGAIN));
+                switch (pgwt_sampler_tick_attr_outcome(tick_rc)) {
+                case PGWT_TICK_ATTR_OK:
+                    break;
+                case PGWT_TICK_ATTR_NO_CONTEXT:
+                    d->counters.sampled_attr_tick_no_context_total++;
+                    /* No errno: this read SUCCEEDED, it just found no
+                     * attribution context. attr_no_context keeps the SMP-1
+                     * refusal diagnosable anyway (see
+                     * pgwt_sampler_tick_read_errno) instead of reporting
+                     * "last error: Success". */
+                    attr_no_context = 1;
+                    /* Named separately from TICK-INVALID so the per-pid
+                     * evidence says which backends make up the count: on
+                     * PG18 these are the eight aux processes (3 io workers,
+                     * checkpointer, bgwriter, walwriter and the two
+                     * launchers), plus any autovacuum worker while it runs,
+                     * every tick, by design (#693). */
+                    if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+                        fprintf(stderr,
+                                "SAMPLED-ATTR-TICK-NO-CONTEXT: pid=%d\n",
+                                be->pid);
+                    break;
+                case PGWT_TICK_ATTR_READ_FAILED:
+                    d->counters.sampled_attr_tick_read_failures_total++;
+                    if (!attr_errno)
+                        attr_errno = errno ? errno : EAGAIN;
+                    if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+                        fprintf(stderr,
+                                "SAMPLED-ATTR-TICK-INVALID: pid=%d error=%s\n",
+                                be->pid, strerror(errno ? errno : EAGAIN));
+                    break;
+                }
             }
         }
 
@@ -1306,8 +1334,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             got--;
         }
     }
-    if (got == 0 && attr_errno)
-        read_errno = attr_errno;
+    if (got == 0)
+        read_errno = pgwt_sampler_tick_read_errno(read_errno, attr_errno,
+                                                  attr_no_context);
     pgwt_sampler_note_coverage(s, n, got);
 
     /* Debug-only evidence for the anomaly CPU-coverage gate. Keep each failed

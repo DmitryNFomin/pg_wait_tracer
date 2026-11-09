@@ -32,7 +32,9 @@
 #define PGWT_SAMPLER_H
 
 #include "pg_wait_tracer.h"
+#include "backend_status_layout.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include "cmdline.h"   /* enum pgwt_backend_type — drives the we==0 policy */
 
@@ -116,6 +118,45 @@ struct pgwt_sample_target {
      * the post-read command-gate recheck (#294). */
     uint64_t status_addr;
 };
+
+enum pgwt_sampled_attr_tick_outcome {
+    PGWT_TICK_ATTR_OK = 0,
+    PGWT_TICK_ATTR_NO_CONTEXT,
+    PGWT_TICK_ATTR_READ_FAILED,
+};
+
+/* rc 0 -> OK; rc < 0 -> READ_FAILED; rc == PGWT_PGBS_ATTR_NO_CONTEXT ->
+ * NO_CONTEXT; any other positive rc -> READ_FAILED. An unrecognised code
+ * is never treated as success or as a benign context-less read. */
+static inline enum pgwt_sampled_attr_tick_outcome
+pgwt_sampler_tick_attr_outcome(int rc)
+{
+    if (rc == 0)
+        return PGWT_TICK_ATTR_OK;
+    if (rc == PGWT_PGBS_ATTR_NO_CONTEXT)
+        return PGWT_TICK_ATTR_NO_CONTEXT;
+    return PGWT_TICK_ATTR_READ_FAILED;
+}
+
+/* Which errno the SMP-1 "0 of N backends readable" refusal must report.
+ *
+ * A NO_CONTEXT outcome is not a syscall failure, so it sets no errno — but a
+ * tick in which EVERY target was context-less and command-gated (CLIENT /
+ * UNKNOWN both fail closed, so all of them drop) still reaches the refusal,
+ * and with nothing set it printed "last error: Success": a nonsense diagnosis
+ * at exactly the moment an operator needs one. A real error always wins, so
+ * this never masks a genuine failure; ENODATA is the fallback, never 0.
+ * Pure, and exercised directly by the sampler unit harness. */
+static inline int pgwt_sampler_tick_read_errno(int batch_errno,
+                                               int attr_errno,
+                                               int attr_no_context)
+{
+    if (attr_errno)
+        return attr_errno;
+    if (batch_errno)
+        return batch_errno;
+    return attr_no_context ? ENODATA : 0;
+}
 
 /* The two sampled-attribution sources use the same normalized shape.  The
  * tick source supplies query_id=0 while its command gate is closed. */

@@ -2350,7 +2350,7 @@ static uint32_t pacing_timeout_wei(const char *name)
 
 /* No producer emits this bit. If it becomes a category, the precondition
  * below must fail instead of quietly testing a recognised category. */
-#define LIVE_FUTURE_CAT 0x1000U
+#define LIVE_FUTURE_CAT 0x2000U
 
 static void query_attr_background_control(uint32_t category, const char *name)
 {

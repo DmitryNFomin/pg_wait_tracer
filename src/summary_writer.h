@@ -491,7 +491,11 @@
  *     over-credited part cannot be taken back out of an immutable second.
  *     It is counted (open_cpu_overcredit_ns_total) and is the one way the
  *     per-interval measured identity in piece 2 can fail to hold exactly;
- *     the WALL identity never can.
+ *     the per-interval wall split holds when the live note or the
+ *     single-depth saved wall snapshot matches the close; a note two
+ *     intervals past the close falls back to the per-PID watermark, which
+ *     can LOSE up to one tick of that interval (an under-report, not a
+ *     misattribution between intervals; no counter shows it). Refs #803.
  *
  * WHY THE VERSION MOVES WITH THE PRODUCER. The rule above is an
  * ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
@@ -499,9 +503,10 @@
  * a window holding both double-counts the overlap.
  *
  * The producer IS wired: src/map_reader.c's pgwt_read_state_map supplies
- * pgwt_summary_note_open_ex with the open-CPU observation, and the constant
- * is 9. tests/test_v9_open_cpu_wired.sh is the live acceptance test that the
- * call is reached; tests/test_open_cpu_accounting.c covers the writer.
+ * pgwt_summary_note_open_ex with the open-CPU observation, first shipped
+ * under version 9. tests/test_v9_open_cpu_wired.sh is the live acceptance
+ * test that the call is reached; tests/test_open_cpu_accounting.c covers
+ * the writer.
  * Earlier wiring was reverted (agent/424-daemon fc7d7f5) when its counters
  * showed it had never been reached, so stamping that build 9 would have
  * written a v8 file wearing a 9. pgwt_summaries_window_current compares the
@@ -512,13 +517,21 @@
  * The SECOND content change in this version is the per-session measured-CPU
  * split (#562): cpu_offcpu_ns and cpu_measured_records add 8 + 4 bytes,
  * widening each serialized session entry from 32 to 44 bytes. The reader
- * reads that layout only for version >= 9, so the writer must stamp it 9.
+ * reads that layout only for version >= 9, so it must carry at least 9.
  *
  * The machinery for files already on disk is unchanged either way:
  * pgwt_summary_reader_open refuses any version that is not
  * PGWT_SUMMARY_VERSION and the server preflights the window, so a refusal
  * becomes a RAW RECOMPUTE, never a plausible partial answer. */
-#define PGWT_SUMMARY_VERSION  9
+/* v10 (#763): cpu_measured_records counts CPU-gap observations only. The
+ * pre-#766 v9 writer also counted measured WAIT spin, falsely labelling
+ * UNKNOWN gaps as measured CPU. The bytes are unchanged, but v9 has no
+ * provenance marker distinguishing the two accounting rules; measured-zero
+ * gaps and open-gap credits can have the same scalars as the defect.
+ * Reject ALL v9 files, including correct post-#766 files. Any overlapping
+ * request recomputes its whole window from raw; #779 preserves same-hour
+ * raw fallback under byte-cap retention. */
+#define PGWT_SUMMARY_VERSION  10
 
 /* `eff_event` sentinel: the producer resolved no effective wait id, so the
  * writer uses evt->old_event and counts the push. Not 0 -- 0 is a valid id
@@ -698,9 +711,9 @@ struct pgwt_summary_accum {
      * runqueue sibling whenever a wait in the same window happened to carry
      * a measurement, and disagreed with raw about the same window. NOTE for
      * anyone reading an OLD file: v9 files written before that fix carry the
-     * wider count, and the version was deliberately NOT bumped, so a reader
-     * cannot tell the two apart -- see the #763 discussion before relying on
-     * this counter over historical summaries. */
+     * wider count. The writer fix initially kept v9, so those files cannot
+     * be distinguished from correct post-fix v9 files. Version 10 rejects
+     * both and sends the whole request to raw (#763). */
     uint64_t cpu_measured_ns;       /* Sigma clamped cpu_ns over we==0 gaps
                                      * + v9 per-second open-gap credits      */
     uint64_t cpu_unknown_ns;        /* Sigma wall over UNKNOWN we==0 gaps     */
@@ -856,6 +869,27 @@ struct pgwt_summary_open {
                                    * [start_ns, its last note), or
                                    * PGWT_CPU_NS_UNKNOWN */
     uint64_t cpu_credited_ns;     /* measured CPU credited for THIS interval */
+
+    /* A new note can replace this interval before its closing record arrives.
+     * Retain frozen CPU accounting (Refs #709) and wall credit (Refs #803)
+     * independently. SINGLE-DEPTH: each snapshot is overwritten only by an
+     * interval with its own credits; an uncredited replacement preserves it.
+     * Close checks each identity; without a wall match it uses the per-PID
+     * watermark. Close/forget clear both snapshots. */
+    struct {
+        uint64_t start_ns;
+        uint64_t cpu_credited_ns;
+        uint32_t we;
+        uint32_t cpu_eff_we;
+        uint8_t cpu_slot;
+        uint8_t cpu_frozen;
+        uint8_t cpu_tier_known;
+        bool valid;
+        uint64_t wall_start_ns;
+        uint64_t wall_credited_ns;
+        uint32_t wall_we;
+        bool wall_valid;
+    } prev;
 };
 
 /* v9 (#424): a producer's OBSERVATION of one open on-CPU gap at tick time.
@@ -1203,7 +1237,11 @@ struct pgwt_summary_writer {
      *   overcredit_ns        measured CPU credited while open that the
      *                        closing record's own cpu_ns did not cover
      *                        (schedstat jitter): the one place the measured
-     *                        identity can fail. The WALL identity cannot.
+     *                        identity can fail. The per-interval wall split
+     *                        holds when the live note or the single-depth
+     *                        wall snapshot matches the close (else the
+     *                        watermark fallback applies, which can lose up
+     *                        to one tick: an under-report). Refs #803.
      */
     uint64_t      open_cpu_credited_ns_total;
     uint64_t      open_cpu_measured_ns_total;
