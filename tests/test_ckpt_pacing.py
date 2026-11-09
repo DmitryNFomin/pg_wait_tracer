@@ -9,10 +9,10 @@ completion target, 3m dirty rows, one generate_series client, an 8-second window
 The supplied measurements were 8.7s controls vs 17.4--19.2s broken. We require
 <=12s total and <=2s checkpointer DB Time.
 
-Residual checkpointer DB Time after the exclusion (measured, PG13, nine full-mode
+Residual checkpointer DB Time after the exclusion (measured, PG13, ten full-mode
 and eight tiered captures from the #804 branch's own runs, same workload):
-full mode 26.5--106.7ms (26.5, 35.2, 46.6, 51.1, 54.5, 58.5, 66.7, 95.8, 106.7),
-with 26.5ms from the round-4 PG13 re-gate run;
+full mode 18.3--106.7ms (18.3, 26.5, 35.2, 46.6, 51.1, 54.5, 58.5, 66.7, 95.8, 106.7),
+with 26.5ms from the round-4 PG13 re-gate run and 18.3ms from the round-5 run;
 tiered mode exactly 0.0ms in every run. Cause, full
 mode only: a capture window that begins inside a 100ms select/pselect6 sleep has
 no observed enter (src/bpf/pg_wait_tracer.bpf.c: wp_live==0 cannot fabricate
@@ -26,7 +26,7 @@ not a tight estimate of the residual. PG>=14.3 (native event) measured 1.7ms ful
 tiered (PG18, gate-3), where the probe is not attached at all.
 A >=3s pacing row and >=5s client prevent empty/quiet captures passing.
 We also require checkpointer DB Time <=10% of the measured pacing total. The
-worst measured residual is one partial 100ms sleep (26.5--106.7ms), 0.9--3.6%
+worst measured residual is one partial 100ms sleep (18.3--106.7ms), 0.6--3.6%
 of the >=3000ms pacing total, so 10% does not flake from that known source.
 This catches roughly >=10% pacing loss; it would NOT catch loss under ~10%.
 A test-only hook drops every fourth matching enter, and a full-mode partial-loss
