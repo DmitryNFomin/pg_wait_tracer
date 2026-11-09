@@ -418,91 +418,112 @@ static uint64_t scenario_first_ts(const struct scenario *sc)
 }
 
 
-/* #379: the scenario's own view of what each pid has OPEN right now.
+/* #820: an interval view independent of the order records CLOSE in.
+ * Production reads every live pid from state_map once a second. Here the
+ * scenario is the source of truth: [ts - dur, ts) says when a pid is live;
+ * holes say nothing. Sort interval starts separately from the push stream,
+ * so a long wait cannot hide behind that pid's many shorter records.
  *
- * The summary writer never infers an open interval from the record stream —
- * on a stream whose records do not tile the timeline (which is every
- * scenario with a deliberate hole in it) that would fabricate time the raw
- * path does not have. It is TOLD, by whoever knows: the daemon reads BPF's
- * state_map, and this generator looks AHEAD at the record that will close
- * the interval. Record k of pid p covers [ts_k - dur_k, ts_k), so at any
- * time T between those, p's open interval is exactly (old_event_k,
- * ts_k - dur_k) — the same pair state_map would have held.
- *
- * A scenario HOLE (the next record for p starts later than T) therefore
- * notes nothing, which is the honest answer: the scenario does not say what
- * p was doing, and the raw path has no record for it either.
- *
- * Notes are refreshed on every push because the writer only credits a note
- * younger than PGWT_SUMMARY_OPEN_STALE_NS — the fail-safe that stops a
- * vanished pid accruing time forever. A live daemon refreshes on every tick;
- * this refreshes on every record, which is at least as often. */
+ * Some synthetic scenarios overlap intervals for one pid (impossible in a
+ * real backend). The writer has one slot per pid: retain the live interval
+ * with the latest close, rather than letting short records hide it. The
+ * short records still reach push_event unchanged. No CPU prefix observation
+ * is invented: the offline producer still uses note_open's CPU refusal. */
+struct gen_open_interval {
+    uint64_t start_ns;
+    uint64_t end_ns;
+    int      event_index;
+    int      slot;
+};
+
 struct gen_open_state {
     uint32_t pids[1024];
-    int      head[1024];       /* index of the pid's next unpushed event */
+    int      live[1024];       /* interval index, NOT next unpushed record */
     int      num_pids;
-    int     *next_same_pid;    /* per-event: next event of the same pid */
+    struct gen_open_interval *intervals;
+    int      num_intervals;
+    int      cursor;
+    int      pushed;
+    uint64_t next_tick_ns;
 };
+
+static int gen_open_compare(const void *va, const void *vb)
+{
+    const struct gen_open_interval *a = va, *b = vb;
+    if (a->start_ns != b->start_ns)
+        return a->start_ns < b->start_ns ? -1 : 1;
+    return (a->event_index > b->event_index) -
+           (a->event_index < b->event_index);
+}
 
 static void gen_open_init(struct gen_open_state *g, const struct scenario *sc)
 {
-    g->num_pids = 0;
-    g->next_same_pid = NULL;
+    memset(g, 0, sizeof(*g));
+    g->next_tick_ns = UINT64_MAX;
     if (sc->num_events <= 0)
         return;
-    g->next_same_pid = malloc((size_t)sc->num_events * sizeof(int));
-    if (!g->next_same_pid)
+    g->intervals = malloc((size_t)sc->num_events * sizeof(*g->intervals));
+    if (!g->intervals)
         return;
-    int last_of_pid[1024];
-    for (int i = 0; i < sc->num_events; i++)
-        g->next_same_pid[i] = -1;
-    for (int i = sc->num_events - 1; i >= 0; i--) {
-        uint32_t pid = sc->events[i].pid;
+    for (int i = 0; i < sc->num_events; i++) {
+        const struct pgwt_trace_event *e = &sc->events[i];
+        if (!e->duration_ns || e->duration_ns > e->timestamp_ns ||
+            PGWT_IS_MARKER(e->old_event) || e->old_event == PGWT_EVENT_EXIT)
+            continue;
         int slot = -1;
         for (int k = 0; k < g->num_pids; k++)
-            if (g->pids[k] == pid) { slot = k; break; }
+            if (g->pids[k] == e->pid) { slot = k; break; }
         if (slot < 0) {
             if (g->num_pids >= 1024)
                 continue;
             slot = g->num_pids++;
-            g->pids[slot] = pid;
-            last_of_pid[slot] = -1;
+            g->pids[slot] = e->pid;
+            g->live[slot] = -1;
         }
-        g->next_same_pid[i] = last_of_pid[slot];
-        last_of_pid[slot] = i;
-        g->head[slot] = i;     /* reverse walk ends on the FIRST event */
+        struct gen_open_interval *o = &g->intervals[g->num_intervals++];
+        o->start_ns = e->timestamp_ns - e->duration_ns;
+        o->end_ns = e->timestamp_ns;
+        o->event_index = i;
+        o->slot = slot;
+        uint64_t tick = (o->start_ns / 1000000000ULL + 1) * 1000000000ULL;
+        if (tick < g->next_tick_ns)
+            g->next_tick_ns = tick;
     }
+    qsort(g->intervals, (size_t)g->num_intervals,
+          sizeof(*g->intervals), gen_open_compare);
 }
 
-/* Tell the writer every pid's open interval as of time `now`. */
+/* Observe the interval just BEFORE now: pushes at now have not closed yet,
+ * and intervals starting at now must not replace the preceding second's
+ * note before it is sealed. Also refresh at pushes for subsecond closes. */
 static void gen_open_note(struct gen_open_state *g, const struct scenario *sc,
                           struct pgwt_summary_writer *sw, uint64_t now)
 {
-    if (!g->next_same_pid)
-        return;
+    while (g->cursor < g->num_intervals &&
+           g->intervals[g->cursor].start_ns < now) {
+        int i = g->cursor++;
+        const struct gen_open_interval *o = &g->intervals[i];
+        if (o->end_ns < now || o->event_index < g->pushed)
+            continue;
+        int previous = g->live[o->slot];
+        if (previous < 0 ||
+            o->end_ns > g->intervals[previous].end_ns ||
+            (o->end_ns == g->intervals[previous].end_ns &&
+             o->event_index > g->intervals[previous].event_index))
+            g->live[o->slot] = i;
+    }
     for (int k = 0; k < g->num_pids; k++) {
-        int i = g->head[k];
+        int i = g->live[k];
         if (i < 0)
             continue;
-        const struct pgwt_trace_event *e = &sc->events[i];
-        if (e->duration_ns > e->timestamp_ns)
+        const struct gen_open_interval *o = &g->intervals[i];
+        if (o->end_ns < now || o->event_index < g->pushed) {
+            g->live[k] = -1;
             continue;
-        uint64_t start = e->timestamp_ns - e->duration_ns;
-        if (start > now)
-            continue;          /* a hole: the scenario says nothing here */
-        pgwt_summary_note_open(sw, e->pid, e->old_event, start, 0, now);
+        }
+        const struct pgwt_trace_event *e = &sc->events[o->event_index];
+        pgwt_summary_note_open(sw, e->pid, e->old_event, o->start_ns, 0, now);
     }
-}
-
-/* The record at index `i` has been pushed: advance its pid's lookahead. */
-static void gen_open_advance(struct gen_open_state *g,
-                             const struct scenario *sc, int i)
-{
-    if (!g->next_same_pid)
-        return;
-    uint32_t pid = sc->events[i].pid;
-    for (int k = 0; k < g->num_pids; k++)
-        if (g->pids[k] == pid) { g->head[k] = g->next_same_pid[i]; return; }
 }
 
 static int write_traces(const char *dir, struct scenario *sc,
@@ -546,14 +567,19 @@ static int write_traces(const char *dir, struct scenario *sc,
      * eff_unresolved_events_total, which is the production residual signal
      * for "some of this file's we == 0 time was classified the pre-v7 way".
      *
-     * v8 (#379): the push is bracketed by the open-interval feed --
-     * gen_open_note tells the writer what every pid has open as of this
-     * record's timestamp, gen_open_advance moves the pid's lookahead past
-     * the record just closed. */
+     * #820: refresh every live interval on synthetic one-second ticks,
+     * including seconds with no closing records, before the periodic seal.
+     * Refresh again immediately before a push to confirm its closing tail.
+     * Stop the clock at the final event; never invent post-capture time. */
     #define PUSH_SUMMARY(evp, idx) do { \
+        while (gopen.next_tick_ns <= (evp)->timestamp_ns) { \
+            gen_open_note(&gopen, sc, &sw, gopen.next_tick_ns); \
+            pgwt_summary_flush_completed(&sw, gopen.next_tick_ns); \
+            gopen.next_tick_ns += 1000000000ULL; \
+        } \
         gen_open_note(&gopen, sc, &sw, (evp)->timestamp_ns); \
         pgwt_summary_push_event(&sw, (evp), 0, (evp)->old_event); \
-        gen_open_advance(&gopen, sc, (idx)); \
+        gopen.pushed = (idx) + 1; \
     } while (0)
 
     if (sc->interleave) {
@@ -612,7 +638,7 @@ static int write_traces(const char *dir, struct scenario *sc,
      * was still open, so crediting it would invent a divergence instead of
      * closing one. */
     pgwt_summary_flush(&sw);
-    free(gopen.next_same_pid);
+    free(gopen.intervals);
 
     pgwt_writer_close(&ew);
     pgwt_summary_close(&sw);

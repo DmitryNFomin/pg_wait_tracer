@@ -175,6 +175,45 @@ def build_capture():
     }
 
 
+def build_own_pid_control():
+    """#820's negative control must no longer change the AAS answer.
+
+    Keep the shipped, overlapping fixture as the test subject. Only this
+    control puts its long IO interval on a separate backend; no expected
+    divergence or residual magnitude is approved by this comparison.
+    """
+    capture = build_capture()
+    long_io = [e for e in capture["events"]
+               if e["pid"] == 1001 and e["old"] == IO_DATA_FILE_READ
+               and e["dur"] == 40 * S]
+    if len(long_io) != 1:
+        raise RuntimeError("#820 control requires exactly one long IO interval")
+    long_io[0]["pid"] = 1004
+    capture["backends"].append(
+        {"pid": 1004, "type": "client", "user": "u", "db": "d"})
+    return capture
+
+
+def open_feed_control(actual, own_pid):
+    """Compare the full AAS bucket contents as well as response scalars."""
+    def fields(answer):
+        result = P.extract_aas(answer)
+        buckets = answer.get("buckets")
+        if not isinstance(buckets, list) or not buckets:
+            raise RuntimeError("#820 control needs nonempty AAS buckets")
+        for i, bucket in enumerate(buckets):
+            for key, value in bucket.items():
+                result["aas/bucket/%d/%s" % (i, key)] = value
+        return result
+
+    findings = P.compare(fields(actual), fields(own_pid), {})
+    failures = [f for f in findings if f.status != P.AGREE]
+    lines = ["  #820 own-pid control: %s (%d fields)"
+             % ("FAIL" if failures else "PASS", len(findings))]
+    lines.extend(f.line() for f in failures)
+    return not failures, lines
+
+
 # Window shapes. #379's error depends on where the edge falls relative to a
 # long record's closing second, so one shape can miss it entirely (adviser
 # review, 2026-10-14): an interior window, one ending at capture close, one
@@ -236,7 +275,7 @@ def ask(trace_dir, frm, to, stderr_path):
 #   #319 — `top_wait` means "largest total" on raw and "longest single wait"
 #          on the summary path.
 #   #410 — the four divergences THIS gate found on its first run: max_aas
-#          (peak over seconds vs over buckets), backfilled_ms and
+#          (bucket-placement residual after #820), backfilled_ms and
 #          unattributed_available (no unattributed accounting on the summary
 #          path) and io_worker_busy_pct (explicitly declared unavailable there).
 #
@@ -269,9 +308,9 @@ def load_expected():
 
 
 # Divergences this gate FOUND on its first run, filed together as #410:
-#   * aas/max_aas — the summary path's peak is the max over SECONDS, the raw
-#     path's is the max over the requested buckets. The same
-#     two-meanings-one-field shape as #319.
+#   * aas/max_aas — #820's head-only generator feed inflated this gap. The
+#     corrected feed leaves a smaller bucket-placement residual for #410;
+#     both paths already peak over buckets. Do not re-pin that residual.
 #   * time_model/io_worker_busy_pct — absent from the summary response.
 # Listed here rather than falling through to the per-window rules so that a
 # NEW divergence in one of these endpoints cannot inherit #410 by accident.
@@ -419,6 +458,7 @@ def main():
     sum_dir = generate_traces(build_capture())
     raw_dir = sum_dir + "_rawref"
     stale_dir = sum_dir + "_stalever"
+    own_pid_dir = generate_traces(build_own_pid_control())
     shutil.copytree(sum_dir, raw_dir)
     removed = sorted(glob.glob(os.path.join(raw_dir, "*.summary*")))
     for f in removed:
@@ -514,6 +554,18 @@ def main():
                 w_ok, w_lines, findings = P.verdict(
                     name, routes, r_fields, s_fields,
                     expected.get(name, {}), fallbacks=fallbacks)
+            if not is_control and name != "straddle_130s":
+                own_ans, own_oracle, own_err = ask(
+                    own_pid_dir, frm, to,
+                    os.path.join(RESULT_DIR, "err_%s_ownpid" % name))
+                own_route = P.classify_route(own_oracle, own_err)
+                feed_ok, feed_lines = open_feed_control(
+                    s_ans["aas"], own_ans["aas"])
+                if own_route != P.ROUTE_SUMMARY:
+                    feed_ok = False
+                    feed_lines.append("  FAIL #820 own-pid route: %s" % own_route)
+                w_ok = w_ok and feed_ok
+                w_lines.extend(feed_lines)
             ok = ok and w_ok
             lines.extend(w_lines)
             report["windows"][name] = {
@@ -554,6 +606,7 @@ def main():
         cleanup_traces(sum_dir)
         cleanup_traces(raw_dir)
         cleanup_traces(stale_dir)
+        cleanup_traces(own_pid_dir)
 
     print("=== test_summary_raw_parity ===")
     for l in lines:
