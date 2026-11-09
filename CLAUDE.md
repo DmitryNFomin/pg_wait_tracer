@@ -31,8 +31,11 @@ Treat one denied operation as one failed attempt only. Without evidence, write
 `UNVERIFIED:`, never a cause.
 
 Every absence claim also needs, within 8 lines, a `SEARCHED: <what was probed>` line
-and a `NOT SEARCHED: <what could hold it and was not probed>` line; `none`, empty or
-`n/a` is refused, and `UNVERIFIED:` does not stand in for it
+and a `NOT SEARCHED: <what could hold it and was not probed>` line. After trimming
+whitespace and trailing punctuation, values shorter than 8 characters are refused,
+as are values beginning with the vacuous terms `none`, `n/a`, `na`, `nothing`, `nil`,
+`no`, `all`, `everything` or `nowhere` (case-insensitive, followed by a word boundary).
+Empty values are refused, and `UNVERIFIED:` does not stand in for either line
 (`scripts/lead/absence-prepass.py`). A brief dispatching issue N must paste the live
 `gh api repos/{owner}/{repo}/issues/N/comments --paginate` output in a fence and add
 `CONTROLLING SCOPE DECISION: #N comment <id> "<quote>"` (`scripts/lead/check-brief.sh`,

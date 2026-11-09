@@ -138,6 +138,7 @@ nmissing=0
 brief_out=$(PGWT_DISP_CONTENT="$disp_content" /usr/bin/python3 - "$STATE" <<'PY'
 import contextlib
 import fcntl
+import glob
 import os
 import re
 import sys
@@ -159,6 +160,13 @@ def write_lines(stream, lines):
 try:
     with open(os.path.join(state, ".brief-gate.lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        # Start publishes unique markers independently of this lock so even
+        # a temporary lock/.spawns failure cannot disappear after repair.
+        for path in sorted(glob.glob(os.path.join(state, ".spawn-error-*.txt"))):
+            with open(path, encoding="utf-8") as trace:
+                error = trace.read().strip()
+            os.unlink(path)
+            print(f"UNKNOWN: {error or 'empty spawn-recording error marker: ' + path}")
         with open(os.path.join(state, ".spawn-payloads"), "a+", encoding="utf-8") as payloads:
             payloads.seek(0)
             diagnostics = payloads.read().splitlines()

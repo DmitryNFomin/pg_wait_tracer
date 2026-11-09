@@ -16,8 +16,15 @@ exit 88
 STUB
 # Keep the start hook's production ledger operation observable and isolated.
 export GATE_LEDGER_CALLS="$TMP/ledger-calls"
+# The ledger is deliberately machine-wide, shared with the sweep's agent cap.
+# Derive its canonical location from that consumer instead of pinning a checkout.
+EXPECTED_LEDGER=$(sed -n 's/^LEDGER="\([^"]*\)"$/\1/p' "$ROOT/scripts/lead/sweep.sh")
+[ -n "$EXPECTED_LEDGER" ] || exit 2
 cat > "$D/agent-ledger.py" <<'STUB'
 import json, os, sys
+if os.environ.get("GATE_LEDGER_FAIL"):
+    print(f"agent-ledger.py: start failed: [Errno 13] Permission denied: {sys.argv[2]!r}", file=sys.stderr)
+    sys.exit(1)
 with open(os.environ["GATE_LEDGER_CALLS"], "a") as out:
     out.write(json.dumps(sys.argv[1:]) + "\n")
 STUB
@@ -29,6 +36,7 @@ ok() { pass=$((pass+1)); printf 'ok   %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s\n' "$*"; printf '%s\n' "$OUT"; }
 reset_state() {
   rm -rf "$PGWT_LEAD_STATE_DIR/.spawns" "$PGWT_LEAD_STATE_DIR/.briefs-passed" "$PGWT_LEAD_STATE_DIR/.spawn-payloads"
+  rm -f "$PGWT_LEAD_STATE_DIR"/.spawn-error-*.txt
   : > "$D/.dispositions"
   printf '== sandbox: zero findings ==\n' > "$D/.sweep-latest.txt"
   printf '# dispatch-queue v1\nSTATUS OK\nCAP running=0 cap=3\n' > "$D/.dispatch-queue"
@@ -166,9 +174,11 @@ OUT=$(printf '%s' '{"agent_id":"start-a","agent_type":"implementer"}' | bash "$D
 expect 'start hook exits zero' 0
 if /usr/bin/grep -Eq '^[0-9]+ start-a implementer$' "$PGWT_LEAD_STATE_DIR/.spawns" &&
    /usr/bin/grep -Eq '^[0-9]+ start-a keys=agent_id,agent_type agent_type=PRESENT$' "$PGWT_LEAD_STATE_DIR/.spawn-payloads" &&
-   /usr/bin/grep -Fq '["start", "/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead/.active-agents", "start-a"]' "$GATE_LEDGER_CALLS"; then
+   /usr/bin/grep -Fq "[\"start\", \"$EXPECTED_LEDGER\", \"start-a\"]" "$GATE_LEDGER_CALLS"; then
   ok 'start records spawn and preserves canonical ledger operation'
 else bad 'start record or ledger call missing'; fi
+OUT=$(printf '%s' '{"agent_id":"ledger-unwritable","agent_type":"reviewer"}' | GATE_LEDGER_FAIL=1 bash "$D/agent-start-hook.sh" 2>&1); RC=$?
+expect 'start exits zero and exposes ledger errno' 0 "agent-ledger.py: start failed: [Errno 13] Permission denied: '$EXPECTED_LEDGER'"
 OUT=$(printf '%s' '{"agent_id":"start-unknown"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
 expect 'start without type exits zero' 0
 if /usr/bin/grep -Eq '^[0-9]+ start-unknown unknown$' "$PGWT_LEAD_STATE_DIR/.spawns" &&
@@ -179,19 +189,34 @@ if /usr/bin/grep -Eq '^[0-9]+ unknown keys=UNPARSEABLE agent_type=ABSENT$' "$PGW
 reset_state
 mkdir "$PGWT_LEAD_STATE_DIR/.spawn-payloads"
 OUT=$(printf '%s' '{"agent_id":"diag-unwritable","agent_type":"implementer"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
-expect 'start exits zero when diagnostic file cannot be written' 0
+expect 'start exits zero when diagnostic file cannot be written' 0 "SPAWN RECORDING FAILED: $PGWT_LEAD_STATE_DIR/.spawn-payloads: errno=21 "
 if /usr/bin/grep -Eq '^[0-9]+ diag-unwritable implementer$' "$PGWT_LEAD_STATE_DIR/.spawns"; then ok 'diagnostic failure preserves spawn recording'; else bad 'diagnostic failure prevented spawn record'; fi
 reset_state
 rm "$PGWT_LEAD_STATE_DIR/.spawns"; mkdir "$PGWT_LEAD_STATE_DIR/.spawns"
 OUT=$(printf '%s' '{"agent_id":"spawn-unwritable"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
-expect 'start exits zero when spawn file cannot be written' 0
+expect 'start exits zero when spawn file cannot be written' 0 "SPAWN RECORDING FAILED: $PGWT_LEAD_STATE_DIR/.spawns: errno=21 "
 if /usr/bin/grep -Eq '^[0-9]+ spawn-unwritable keys=agent_id agent_type=ABSENT$' "$PGWT_LEAD_STATE_DIR/.spawn-payloads"; then ok 'spawn failure preserves payload diagnostic'; else bad 'spawn failure prevented diagnostic'; fi
+# Restore access before Stop: it must still report the lost spawn, even though
+# every state path is healthy by then and no .spawns record could be appended.
+rm -rf "$PGWT_LEAD_STATE_DIR/.spawns"; : > "$PGWT_LEAD_STATE_DIR/.spawns"
+stop '{"stop_hook_active":true}'; expect 'loop protection preserves spawn error for a genuine Stop' 0
+stop '{"hook_event_name":"SubagentStop"}'; expect 'SubagentStop preserves spawn error for a genuine Stop' 0
+stop; expect 'Stop blocks on durable spawn-recording failure after path repair' 2 "SPAWN RECORDING FAILED: $PGWT_LEAD_STATE_DIR/.spawns: errno=21 "
+stop; expect 'reported spawn-recording failure is consumed' 0
+reset_state
+rm -f "$PGWT_LEAD_STATE_DIR/.brief-gate.lock"; mkdir "$PGWT_LEAD_STATE_DIR/.brief-gate.lock"
+OUT=$(printf '%s' '{"agent_id":"lock-unwritable","agent_type":"implementer"}' | bash "$D/agent-start-hook.sh" 2>&1); RC=$?
+expect 'start exits zero and diagnoses lock failure' 0 "SPAWN RECORDING FAILED: $PGWT_LEAD_STATE_DIR/.brief-gate.lock: errno=21 "
+rm -rf "$PGWT_LEAD_STATE_DIR/.brief-gate.lock"
+stop; expect 'Stop blocks on durable lock failure after path repair' 2 "SPAWN RECORDING FAILED: $PGWT_LEAD_STATE_DIR/.brief-gate.lock: errno=21 "
 mkdir "$TMP/unwritable"; chmod 500 "$TMP/unwritable"
 OUT=$(printf '%s' '{"agent_id":"unwritable","agent_type":"implementer"}' | PGWT_LEAD_STATE_DIR="$TMP/unwritable" bash "$D/agent-start-hook.sh" 2>&1); RC=$?
-expect 'start always exits zero for unwritable state' 0
+expect 'start always exits zero for unwritable state' 0 "SPAWN RECORDING FAILED: $TMP/unwritable/.brief-gate.lock: errno=13 "
+if [[ "$OUT" == *'SPAWN ERROR TRACE FAILED:'* && "$OUT" == *'errno=13 '* ]]; then ok 'unwritable trace failure is visible too'; else bad 'unwritable trace failure was silent'; fi
 printf 'not a directory\n' > "$TMP/not-a-dir"
 OUT=$(printf '%s' '{"agent_id":"invalid-state"}' | PGWT_LEAD_STATE_DIR="$TMP/not-a-dir" bash "$D/agent-start-hook.sh" 2>&1); RC=$?
-expect 'start always exits zero even if state path is a file' 0
+expect 'start always exits zero even if state path is a file' 0 "SPAWN RECORDING FAILED: $TMP/not-a-dir/.brief-gate.lock: errno=20 "
+if [[ "$OUT" == *'SPAWN ERROR TRACE FAILED:'* && "$OUT" == *'errno=20 '* ]]; then ok 'invalid-state trace failure is visible too'; else bad 'invalid-state trace failure was silent'; fi
 
 # Use PGWT_GH for the real checker, then let its actual pass feed the gate.
 cat > "$TMP/gh" <<'STUB'
