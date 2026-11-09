@@ -1,7 +1,8 @@
 # pg_wait_tracer — Roadmap &amp; Status (consolidated)
 
-- Refs #804: pre-14.3 checkpointer select/pselect6 pacing is visible idle in
+- Refs #804: PG13 checkpointer select/pselect6 pacing is visible idle in
   exact and sampled capture; missing attachments and inert probes refuse capture.
+  PG14.0-14.2 is deferred to #830 (PG14/15/16 Timeout-table defect) and is not covered.
 
 > **Single source of truth for what is built and what remains.**
 >

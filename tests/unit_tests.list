@@ -1044,7 +1044,8 @@ test_background_unattributed
 # src/compute.c path; this inspects the real writer's in-memory counters.
 test_summary_qattr_background
 
-# Refs #804: pre-14.3 pacing bridge and complete synthetic-id accounting.
+# Refs #804: PG13 pacing bridge and complete synthetic-id accounting.
+# PG14.0-14.2 is deferred to #830.
 test_pacing_probe
 test_pacing_accounting
 test_pacing_summary

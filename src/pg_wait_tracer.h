@@ -364,7 +364,8 @@ struct pgwt_query_text_event {
  * exactly like other instrumented idle states. NEVER written to a trace —
  * assigned by the compute-side tagging pass (pgwt_tag_events) only. */
 /* Tracer-owned Timeout id, deliberately OUTSIDE PostgreSQL's active tables.
- * Used only for the uninstrumented pre-14.3 checkpointer pacing syscall. */
+ * Used only for the uninstrumented PG13 checkpointer pacing syscall.
+ * PG14.0-14.2 is deferred to #830. */
 #define PGWT_WEI_CKPT_PACING (((u32)PG_WAIT_TIMEOUT << 24) | 30U)
 #define PGWT_WEI_NONCMD_CPU  (((uint32_t)PG_WAIT_ACTIVITY << 24) | 0x00FFFFFFU)
 

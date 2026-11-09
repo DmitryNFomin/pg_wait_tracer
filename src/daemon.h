@@ -285,7 +285,7 @@ struct pgwt_daemon {
     pid_t       pid_filter;       /* for session_event detail */
     bool        verbose;
     bool        quiet;               /* suppress view output (record only) */
-    int         pg_minor_version;   /* -1 if unavailable (14 beta/rc: no hook) */
+    int         pg_minor_version;   /* -1 = unknown (initialised in main; discovery overwrites). 0 is a VALID minor. */
     const char *ckpt_pacing_probe_state; /* ok/inert/unavailable/not_applicable */
     uint64_t    ckpt_pacing_asleep_observations;
     uint64_t    ckpt_pacing_last_check_ns;

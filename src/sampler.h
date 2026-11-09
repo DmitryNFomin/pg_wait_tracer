@@ -4,9 +4,10 @@
  * backend's PGPROC->wait_event_info (batched process_vm_readv for targets in
  * SHARED memory, per-pid pread for process-local ones — SMP-2), turn each
  * non-CPU reading into a SAMPLES record, and hand the batch to the trace
- * writer via pgwt_writer_push_samples(). A pre-14.3 checkpointer's we==0
+ * writer via pgwt_writer_push_samples(). A PG13 checkpointer's we==0
  * reading additionally checks the BPF pacing_sleep map after its memory read;
  * other sample targets need no BPF lookup for wait classification.
+ * PG14.0-14.2 is deferred to #830.
  *
  * Addresses come from the backend registry (pid -> resolved wait_event_info
  * address, the same field the watchpoint tier resolves). A validated PG14-18

@@ -670,11 +670,12 @@ const char *pgwt_class_name(uint32_t wei)
 const char *pgwt_event_name(uint32_t wei)
 {
     if (wei == 0) return "CPU";
+    /* Tracer-owned synthetic id 30 (PG13 checkpointer pacing sleep) */
+    if (wei == PGWT_WEI_CKPT_PACING) return "CheckpointWriteDelay";
     /* T2 synthetic id: on-CPU time OUTSIDE a command window, classified
      * idle by the compute tagging pass (Activity class => excluded +
      * hidden like other instrumented idle states). Named so it never
      * renders as "Unknown" where hidden events do surface (timeline). */
-    if (wei == PGWT_WEI_CKPT_PACING) return "CheckpointWriteDelay";
     if (wei == PGWT_WEI_NONCMD_CPU) return "NonCommandCpu";
 
     int cls = WE_CLASS(wei);
