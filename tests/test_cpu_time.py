@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """test_cpu_time.py — Verify CPU time dominance for compute-heavy queries.
 
-Two tests:
+Three tests:
   1. system_event: CPU event has highest total_ms for pure-compute query
   2. time_model:   CPU Time > sum of all Wait classes
+  3. per-PID ungated sched_switch CPU vs schedstat field 1, in sub-windows
 
-Requires: root, running PostgreSQL 18, pg_wait_tracer built.
+Requires: root, running PostgreSQL, pg_wait_tracer and cross_validate built.
 Usage: sudo python3 tests/test_cpu_time.py [--pid POSTMASTER_PID]
+       --conservation-only [--conservation-output DIR] runs just test 3.
 """
 import subprocess
 import sys
@@ -14,9 +16,17 @@ import os
 import re
 import time
 import argparse
+import json
+import platform
+import select
+import signal
+import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from testutil import find_postmaster
+from schedstat_probe import ProcReader
+from schedstat_lib import compare_cpu_window
 
 TRACER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                       "pg_wait_tracer")
@@ -273,9 +283,201 @@ def test_cpu_time_model(pm_pid):
               f"compute dominates)")
 
 
+def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
+    """#675: per-PID sched_switch vs schedstat field 1, command gate absent.
+
+    Own persistent clients only: two compute loops and a repeated short-query
+    client (including between-command CPU). SIGSTOP forces both counters to
+    close at each boundary. The observation pauses count in covered_s; they
+    add no backend CPU. This tests the exact accumulator, before transition
+    serialization/classification; it cannot prove those later stages conserve.
+    """
+    print("--- Test 3: ungated per-PID CPU conservation ---", flush=True)
+    cross_validate = Path(__file__).resolve().parent / "cross_validate"
+    reader = ProcReader()
+    clients, pids = [], []
+    tracer = None
+    snapshots, results = [], []
+    output = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="pgwt-675-"))
+    output.mkdir(parents=True, exist_ok=True)
+    metadata = {"kernel": platform.release(), "postmaster_pid": pm_pid,
+                "workloads": ["compute", "compute", "short-query"],
+                "nominal_window_s": window_s, "windows": windows,
+                "boundary": "owned backends SIGSTOP; closed cpu_ns_total; schedstat field 1",
+                "limit": "max(1 ms, 1% of field-1 delta)",
+                "sched_schedstats": reader.schedstats_enabled()[0],
+                "utc_start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def terminated(signum, frame):
+        raise SystemExit(128 + signum)
+
+    # A harness timeout must unwind the finally block and resume owned tasks.
+    signal.signal(signal.SIGTERM, terminated)
+
+    def stop_owned(owned_pids):
+        for pid in owned_pids:
+            os.kill(pid, signal.SIGSTOP)
+        # Synchronization deadline, never a second measurement attempt. Do
+        # not read either counter until every owned task has actually stopped.
+        deadline = time.monotonic() + 5
+        while any(reader.task_identity(pid)["state"] != "T" for pid in owned_pids):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("owned backend did not stop within 5s")
+            time.sleep(0.001)
+
+    def boundary():
+        stop_owned(pids)
+        raw = subprocess.run([str(cross_validate), "--conservation-snapshot",
+                              str(tracer.pid), *map(str, pids)],
+                             check=True, capture_output=True, text=True, timeout=5)
+        exact = json.loads(raw.stdout)
+        sample = {"map_id": exact["map_id"], "per_pid": {}}
+        for pid in pids:
+            ident = reader.task_identity(pid)
+            if ident["ppid"] != pm_pid or ident["state"] != "T":
+                raise RuntimeError(f"pid={pid} no longer a stopped child of {pm_pid}")
+            runtime, reason = reader.cpu_runtime(pid)
+            if runtime is None:
+                raise RuntimeError(reason)
+            sample["per_pid"][pid] = {
+                "runtime_ns": runtime, "exact_ns": exact["per_pid"][str(pid)],
+                "starttime_ticks": ident["starttime_ticks"],
+                "t_ns": time.monotonic_ns(), "wall_ns": time.time_ns()}
+        snapshots.append(sample)
+        return sample
+
+    try:
+        preload = subprocess.run(
+            ["psql", "-X", "-U", "postgres", "-d", "postgres", "-tAc",
+             "SHOW shared_preload_libraries"],
+            check=True, capture_output=True, text=True, timeout=10)
+        metadata["shared_preload_libraries"] = preload.stdout.strip()
+        print("CONSERVATION_METADATA " + json.dumps(metadata), flush=True)
+        with (output / "daemon.stderr").open("w") as log:
+            tracer = subprocess.Popen([TRACER, "--mode", "full", "--pid", str(pm_pid),
+                                       "--quiet", "--trace-dir", str(output / "trace")],
+                                      stdout=subprocess.DEVNULL, stderr=log)
+            # Attach before fork, as in the existing CPU tests. An unready
+            # daemon is a failure below, never an attach/retry loop.
+            time.sleep(3)
+            if tracer.poll() is not None:
+                raise RuntimeError(f"tracer exited {tracer.returncode}; see {output}/daemon.stderr")
+            metadata["daemon_scheduler"] = os.sched_getscheduler(tracer.pid)
+            metadata["daemon_priority"] = os.sched_getparam(tracer.pid).sched_priority
+            for i in range(3):
+                client = subprocess.Popen(
+                    ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, bufsize=1)
+                clients.append(client)
+                client.stdin.write("SELECT pg_backend_pid();\n")
+                client.stdin.flush()
+                if not select.select([client.stdout], [], [], 5)[0]:
+                    raise RuntimeError("client did not report its backend pid")
+                pid = int(client.stdout.readline().strip())
+                if reader.task_identity(pid)["ppid"] != pm_pid:
+                    raise RuntimeError(f"psql connected to a different postmaster (pid={pid})")
+                pids.append(pid)
+                # No output during measurement; clients stay connected.
+                client.stdin.write("\\o /dev/null\n")
+                if i < 2:
+                    client.stdin.write("DO $$ DECLARE x bigint := 0; BEGIN "
+                                       "FOR i IN 1..100000 LOOP FOR j IN 1..100000 "
+                                       "LOOP x := x + 1; END LOOP; END LOOP; END $$;\n")
+                else:
+                    # psql's gexec generates separate frontend commands,
+                    # exercising CPU outside the command-attribution gate.
+                    client.stdin.write("SELECT 'SELECT sum(g) FROM generate_series(1,10000) g;' "
+                                       "FROM generate_series(1,1000000) \\gexec\n")
+                client.stdin.flush()
+            time.sleep(1)  # workload warmup, excluded by measured endpoints
+            before = boundary()
+            for w in range(windows):
+                for pid in pids:
+                    os.kill(pid, signal.SIGCONT)
+                time.sleep(window_s)
+                after = boundary()
+                result = compare_cpu_window(before, after, pids)
+                result["window"] = w
+                results.append(result)
+                for row in result["rows"]:
+                    print(f"CONSERVATION_ROW window={w} " + json.dumps(row), flush=True)
+                check(result["ok"], f"conservation window={w} {result['reason'] or ''}")
+                # Real-state negative control: retain measured counters but
+                # request psql instead of its PostgreSQL backend. The
+                # comparator must reject this population, never return zero.
+                if w == 0:
+                    wrong = [clients[0].pid, *pids[1:]]
+                    control = compare_cpu_window(before, after, wrong)
+                    print(f"CONSERVATION_CONTROL wrong-pid-set RESULT: "
+                          f"{'PASS' if control['ok'] else 'FAIL'} reason={control['reason']}", flush=True)
+                    check(not control["ok"] and control["reason"] == "pid set mismatch",
+                          "real-state wrong-pid-set control fires")
+                    metadata["control"] = dict(control, expected_pids=wrong,
+                                               measured_pids=list(pids))
+                    # Also hit the live BPF lookup, not just offline set
+                    # validation. psql is ours and stopped but is not in the
+                    # daemon's backend map. The helper must return nonzero.
+                    try:
+                        stop_owned([clients[0].pid])
+                        bad = subprocess.run(
+                            [str(cross_validate), "--conservation-snapshot",
+                             str(tracer.pid), *map(str, wrong)],
+                            capture_output=True, text=True, timeout=5)
+                    finally:
+                        os.kill(clients[0].pid, signal.SIGCONT)
+                    print(f"CONSERVATION_CONTROL live-wrong-pid exit={bad.returncode} "
+                          f"{bad.stderr.strip()}", flush=True)
+                    check(bad.returncode == 6 and not bad.stdout and
+                          f"pid={clients[0].pid}" in bad.stderr,
+                          "live stopped non-backend PID is rejected by the BPF reader")
+                    metadata["live_control"] = {"pid": clients[0].pid,
+                                                "exit": bad.returncode,
+                                                "stderr": bad.stderr.strip()}
+                before = after
+            metadata["pids"] = pids
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        detail = str(exc)
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            detail += ": " + exc.stderr.strip()
+        check(False, f"conservation unavailable: {detail}")
+        metadata["error"] = detail
+    finally:
+        # Resume before cancellation so stopped PostgreSQL children cannot be
+        # stranded by either a failed assertion or an interrupted experiment.
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGCONT)
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        for client in clients:
+            client.terminate()
+            try:
+                client.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                client.wait()
+        if tracer is not None:
+            tracer.terminate()
+            try:
+                tracer.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                tracer.kill()
+                tracer.wait()
+        (output / "conservation.json").write_text(json.dumps(
+            {"metadata": metadata, "snapshots": snapshots, "windows": results}, indent=2) + "\n")
+        print(f"CONSERVATION_ARTIFACT {output}/conservation.json", flush=True)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--pid', type=int, help='Postmaster PID')
+    parser.add_argument('--conservation-only', action='store_true',
+                        help='run only the ungated per-PID field-1 diagnostic')
+    parser.add_argument('--conservation-output', help='raw snapshot/daemon/trace directory')
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -295,10 +497,11 @@ def main():
 
     print(f"=== test_cpu_time (postmaster PID {pm_pid}) ===")
 
-    cleanup()
-
-    test_cpu_system_event(pm_pid)
-    test_cpu_time_model(pm_pid)
+    if not args.conservation_only:
+        cleanup()
+        test_cpu_system_event(pm_pid)
+        test_cpu_time_model(pm_pid)
+    test_cpu_conservation(pm_pid, args.conservation_output)
 
     print(f"\n{tests_passed}/{tests_run} tests passed")
     sys.exit(0 if tests_failed == 0 else 1)

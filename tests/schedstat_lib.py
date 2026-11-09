@@ -29,11 +29,16 @@ when the box gets busier. The current 10% cap is a proxy for how contended
 the box is (docs/DEMO_REHEARSAL_CRITERIA.md section 3 says as much about
 its own provenance); `unexplained_ms` is not.
 
-NOTHING HERE GATES ANYTHING (deliberate, issue #386: "Do NOT add a gate on
+THE FIELD-2 DECOMPOSITION DOES NOT GATE (issue #386: "Do NOT add a gate on
 it yet"). This module parses and decomposes; the rehearsal records the
 decomposition as informational output. Registering a bound in the same
 change that first measures it is what docs/DEMO_REHEARSAL_CRITERIA.md
 exists to prevent.
+
+Separately, issue #675 uses field 1 (sum_exec_runtime) to compare the exact
+tier's ungated sched_switch accumulator in compare_cpu_window. Field 1
+does not require sched_schedstats=1. Its comparison is used only by the
+CPU diagnostic in test_cpu_time.py, not by the rehearsal decomposition.
 
 FAIL-SAFE RULE, AND THE ONE FAILURE MODE THAT MATTERS
 -----------------------------------------------------
@@ -91,6 +96,28 @@ def _refuse(reason, **extra):
 
 # ── /proc parsers ────────────────────────────────────────────────────────
 
+def parse_schedstat_fields(text):
+    """Validated (sum_exec_runtime, run_delay, pcount), or (None, reason)."""
+    if text is None:
+        return None, "schedstat unreadable (None)"
+    fields = text.split()
+    if len(fields) < 3:
+        return None, f"schedstat has {len(fields)} field(s), expected >= 3: {text.strip()!r}"
+    try:
+        values = tuple(int(f) for f in fields[:3])
+    except ValueError:
+        return None, f"schedstat field is not an integer: {text.strip()!r}"
+    if any(v < 0 for v in values):
+        return None, f"schedstat field is negative: {text.strip()!r}"
+    return values, None
+
+
+def parse_schedstat_cpu(text):
+    """Field 1: cumulative on-CPU ns; independent of sched_schedstats."""
+    values, reason = parse_schedstat_fields(text)
+    return (values[0], None) if values is not None else (None, reason)
+
+
 def parse_schedstat(text):
     """/proc/<pid>/schedstat -> (run_delay_ns, None) | (None, reason).
 
@@ -104,18 +131,53 @@ def parse_schedstat(text):
     counter that reads as 0 would be indistinguishable from a genuinely
     idle task.
     """
-    if text is None:
-        return None, "schedstat unreadable (None)"
-    fields = text.split()
-    if len(fields) < 3:
-        return None, f"schedstat has {len(fields)} field(s), expected >= 3: {text.strip()!r}"
-    try:
-        values = [int(f) for f in fields[:3]]
-    except ValueError:
-        return None, f"schedstat field is not an integer: {text.strip()!r}"
-    if any(v < 0 for v in values):
-        return None, f"schedstat field is negative: {text.strip()!r}"
-    return values[1], None
+    values, reason = parse_schedstat_fields(text)
+    return (values[1], None) if values is not None else (None, reason)
+
+
+# Fixed before the live experiment; not a platform/share tolerance. Stopped
+# boundaries remove open-stretch and stale schedstat ambiguity. Allow 1% or
+# 1 ms of accounting difference, whichever is larger; print every residual.
+CPU_CONSERVATION_REL_TOL = 0.01
+CPU_CONSERVATION_ABS_NS = 1_000_000
+
+
+def compare_cpu_window(before, after, expected_pids):
+    """Compare ungated exact and field-1 deltas at stopped boundaries.
+
+    Each endpoint has per_pid: {pid: {exact_ns, runtime_ns, t_ns,
+    starttime_ticks}}. t_ns is the actual CLOCK_MONOTONIC read time for that
+    PID, not the nominal workload duration. Missing tasks, resets, reuse,
+    zero referee CPU and wrong PID sets fail closed. This does not affect
+    the field-2 residual decomposition or its informational status.
+    """
+    expected = set(expected_pids)
+    left, right = before.get("per_pid", {}), after.get("per_pid", {})
+    if not expected or set(left) != expected or set(right) != expected:
+        return {"ok": False, "reason": "pid set mismatch", "rows": []}
+    if before.get("map_id") is None or before.get("map_id") != after.get("map_id"):
+        return {"ok": False, "reason": "state_map changed or missing", "rows": []}
+    rows = []
+    for pid in sorted(expected):
+        a, b = left[pid], right[pid]
+        required = ("exact_ns", "runtime_ns", "t_ns", "starttime_ticks")
+        if any(k not in x for x in (a, b) for k in required):
+            return {"ok": False, "reason": f"pid={pid} incomplete endpoint", "rows": rows}
+        exact = b["exact_ns"] - a["exact_ns"]
+        runtime = b["runtime_ns"] - a["runtime_ns"]
+        span = b["t_ns"] - a["t_ns"]
+        if (a["starttime_ticks"] != b["starttime_ticks"] or
+                exact < 0 or runtime <= 0 or span <= 0):
+            return {"ok": False, "reason": f"pid={pid} reuse/reset/empty span or CPU",
+                    "rows": rows}
+        residual = exact - runtime
+        limit = max(CPU_CONSERVATION_ABS_NS, runtime * CPU_CONSERVATION_REL_TOL)
+        rows.append({"pid": pid, "from_ns": a["t_ns"], "to_ns": b["t_ns"],
+                     "covered_s": span / 1e9, "exact_ns": exact,
+                     "runtime_ns": runtime, "ratio": exact / runtime,
+                     "residual_ns": residual, "limit_ns": limit,
+                     "ok": abs(residual) <= limit})
+    return {"ok": all(r["ok"] for r in rows), "rows": rows, "reason": None}
 
 
 def parse_sched_schedstats(text):

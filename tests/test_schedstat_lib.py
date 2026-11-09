@@ -537,12 +537,75 @@ def test_reader_snapshot_on_fixture_proc():
         check(s["run_delay_ns"].get(101) == 1500000
               and s["run_delay_ns"].get(102) == 2500000,
               f"field 2 taken from each backend: {s['run_delay_ns']}")
+        check(s["cpu_runtime_ns"] == {101: 900, 102: 800},
+              f"field 1 is additive, field 2 preserved: {s['cpu_runtime_ns']}")
         check(s["daemon_cpu_ticks"] == 405,
               f"daemon utime+stime recorded: {s['daemon_cpu_ticks']}")
         check(s["load"]["runnable"] == 5,
               f"run-queue length recorded: {s['load']}")
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cpu_runtime_field_one_without_schedstats():
+    check(lib.parse_schedstat_cpu("123 456 7") == (123, None),
+          "CPU parser reads field 1")
+    check(lib.parse_schedstat("123 456 7") == (456, None),
+          "existing parser still reads field 2")
+    for text in (None, "1 2", "1 no 3", "-1 2 3"):
+        check(lib.parse_schedstat_cpu(text)[0] is None,
+              f"CPU parser refuses malformed counter: {text!r}")
+    with tempfile.TemporaryDirectory() as root:
+        _fake_proc(root, schedstats="0\n")
+        reader = probe.ProcReader(root, clk_tck=100)
+        snap = reader.snapshot(100)
+        check(reader.cpu_runtime(101) == (900, None) and
+              snap["cpu_runtime_ns"] == {101: 900, 102: 800} and
+              snap["schedstats_enabled"] is False,
+              "field 1 remains readable when run_delay accumulation is off")
+
+
+def test_cpu_conservation_refuses_population_reuse_and_loss():
+    def endpoint(t, exact, runtime, start=42):
+        return {"map_id": 99, "per_pid": {101: {
+            "t_ns": t, "exact_ns": exact, "runtime_ns": runtime,
+            "starttime_ticks": start}}}
+    a = endpoint(100, 10, 20)
+    b = endpoint(2*S + 100, S + 10, S + 20)
+    good = lib.compare_cpu_window(a, b, [101])
+    check(good["ok"] and good["rows"][0]["covered_s"] == 2.0,
+          f"CPU conservation reports the actual two-second span: {good}")
+    wrong = lib.compare_cpu_window(a, b, [102])
+    check(not wrong["ok"] and wrong["reason"] == "pid set mismatch",
+          "wrong reference PID set fails")
+    check(not lib.compare_cpu_window(a, endpoint(2*S, 800_000_010, S + 20), [101])["ok"],
+          "lost exact CPU fails the fixed bound")
+    check(not lib.compare_cpu_window(a, endpoint(2*S, S, S, start=43), [101])["ok"],
+          "PID reuse fails even with matching counters")
+    check(not lib.compare_cpu_window(b, a, [101])["ok"],
+          "counter/clock rollback fails")
+    check(not lib.compare_cpu_window(a, endpoint(2*S, 20, 20), [101])["ok"],
+          "zero reference CPU refuses instead of approving no evidence")
+    changed = dict(b, map_id=100)
+    check(not lib.compare_cpu_window(a, changed, [101])["ok"],
+          "daemon map replacement fails")
+
+
+def test_cpu_identity_uses_starttime_after_parenthesised_comm():
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "101", "stat")
+        _write(path, _stat_line(101, "postgres: (client)", 100, 10, 2).strip() + " 123456\n")
+        reader = probe.ProcReader(root, clk_tck=100)
+        check(reader.task_identity(101) == {"state": "S", "ppid": 100,
+                                            "starttime_ticks": 123456},
+              "task identity reads field 22 after a comm containing spaces and parentheses")
+        _write(path, _stat_line(101, "postgres", 100, 10, 2))
+        try:
+            reader.task_identity(101)
+        except ValueError as exc:
+            check("starttime" in str(exc), "truncated identity refuses explicitly")
+        else:
+            check(False, "truncated identity must refuse")
 
 
 def test_reader_counts_a_pid_whose_schedstat_is_gone():

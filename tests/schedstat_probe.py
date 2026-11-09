@@ -20,6 +20,10 @@ Two entry points:
                      the same interval, and the actual covered span is
                      reported rather than assumed.
 
+                     Snapshots also include field 1 as cpu_runtime_ns;
+                     cpu_runtime(pid) reads it for the separate #675
+                     diagnostic without changing field-2 consumers.
+
   CLI               `python3 tests/schedstat_probe.py --parent-pid N
                     --duration 10` prints the same decomposition inputs for
                     an arbitrary process tree. This is how the reading is
@@ -114,6 +118,23 @@ class ProcReader:
         return sslib.parse_proc_stat_cpu_ticks(
             _read(os.path.join(self.proc_root, str(pid), "stat")))
 
+    def cpu_runtime(self, pid):
+        """schedstat field 1, even when field-2 schedstats are disabled."""
+        return sslib.parse_schedstat_cpu(
+            _read(os.path.join(self.proc_root, str(pid), "schedstat")))
+
+    def task_identity(self, pid):
+        """State, parent and starttime (PID reuse guard) from one stat read."""
+        text = _read(os.path.join(self.proc_root, str(pid), "stat"))
+        ppid, reason = sslib.parse_ppid(text)
+        if ppid is None:
+            raise ValueError(reason)
+        fields = text[text.rfind(")") + 1:].split()
+        if len(fields) < 20:
+            raise ValueError("stat truncated before starttime (field 22)")
+        return {"state": fields[0], "ppid": ppid,
+                "starttime_ticks": int(fields[19])}  # stat field 22
+
     def loadavg(self):
         return sslib.parse_loadavg(_read(os.path.join(self.proc_root,
                                                       "loadavg")))
@@ -128,17 +149,18 @@ class ProcReader:
         enabled, enabled_reason = self.schedstats_enabled()
         pids, enum_reason = self.backend_pids(pm_pid)
         run_delay = {}
+        cpu_runtime = {}
         unreadable = {}
         for pid in pids:
-            val, reason = sslib.parse_schedstat(
+            values, reason = sslib.parse_schedstat_fields(
                 _read(os.path.join(self.proc_root, str(pid), "schedstat")))
-            if val is None:
+            if values is None:
                 # Normalised so the same transient cause aggregates into one
                 # counted reason instead of N pid-specific strings.
                 unreadable[pid] = ("pid vanished or schedstat unreadable"
                                    if reason and "None" in reason else reason)
             else:
-                run_delay[pid] = val
+                cpu_runtime[pid], run_delay[pid] = values[:2]
         daemon_ticks = None
         daemon_ticks_reason = None
         if daemon_pid is not None:
@@ -151,6 +173,7 @@ class ProcReader:
             "backends_enumerated": len(pids),
             "enumeration_reason": enum_reason,
             "run_delay_ns": run_delay,
+            "cpu_runtime_ns": cpu_runtime,
             "unreadable": unreadable,
             "daemon_cpu_ticks": daemon_ticks,
             "daemon_cpu_ticks_reason": daemon_ticks_reason,

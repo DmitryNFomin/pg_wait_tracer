@@ -18,6 +18,11 @@
  * Usage: cross_validate <trace_dir> [--tolerance PCT] [--min-share PCT]
  *                       [--raw-ns] [--show-idle] [--abc]
  *                       [--nominal-period-ns NS]
+ * Or: cross_validate --conservation-snapshot DAEMON_PID BACKEND_PID...
+ * Reads the daemon's live, ungated sched_switch CPU accumulator for stopped
+ * workload backends. test_cpu_time.py owns/stops these backends and compares
+ * successive snapshots with schedstat field 1. No interval clipping, event
+ * classification, command gate, or sampled estimator participates.
  *
  * --abc appends the offline A/B/C decomposition and join/conservation checks.
  * --nominal-period-ns supplies the configured sampler period (default 100 ms,
@@ -59,6 +64,135 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+
+#ifdef __linux__
+#include <dirent.h>
+#include <linux/bpf.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+/* Use the BPF syscall directly: the existing server-only binary needs no
+ * libbpf link or new build target. All operations here are read-only. */
+static int conservation_bpf(enum bpf_cmd cmd, union bpf_attr *attr)
+{
+    return syscall(__NR_bpf, cmd, attr, sizeof(*attr));
+}
+
+static int conservation_state_map(unsigned daemon_pid, unsigned *map_id)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/%u/fdinfo", daemon_pid);
+    DIR *dir = opendir(path);
+    if (!dir) return -1;
+    int found = -1;
+    struct dirent *de;
+    while ((de = readdir(dir))) {
+        if (de->d_name[0] == '.') continue;
+        char fdpath[512], line[256];
+        snprintf(fdpath, sizeof(fdpath), "%s/%s", path, de->d_name);
+        FILE *f = fopen(fdpath, "r");
+        if (!f) continue;
+        unsigned id = 0;
+        while (fgets(line, sizeof(line), f))
+            if (sscanf(line, "map_id: %u", &id) == 1) break;
+        fclose(f);
+        if (!id) continue;
+        union bpf_attr attr = {0};
+        attr.map_id = id;
+        int fd = conservation_bpf(BPF_MAP_GET_FD_BY_ID, &attr);
+        if (fd < 0) continue;
+        struct bpf_map_info info = {0};
+        memset(&attr, 0, sizeof(attr));
+        attr.info.bpf_fd = fd;
+        attr.info.info_len = sizeof(info);
+        attr.info.info = (uint64_t)(uintptr_t)&info;
+        if (conservation_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr) == 0 &&
+            !strcmp(info.name, "state_map") &&
+            info.type == BPF_MAP_TYPE_HASH && info.key_size == sizeof(uint32_t) &&
+            info.value_size == sizeof(struct pgwt_pid_state)) {
+            if (found >= 0) { /* ambiguous daemon ownership */
+                close(found);
+                close(fd);
+                found = -1;
+                break;
+            }
+            found = fd;
+            *map_id = id;
+        } else close(fd);
+    }
+    closedir(dir);
+    return found;
+}
+
+static int conservation_snapshot(int argc, char **argv)
+{
+    if (argc < 4) {
+        fprintf(stderr, "usage: %s --conservation-snapshot DAEMON_PID BACKEND_PID...\n", argv[0]);
+        return 2;
+    }
+    char *end;
+    errno = 0;
+    unsigned long daemon_pid = strtoul(argv[2], &end, 10);
+    if (errno || !daemon_pid || daemon_pid > UINT32_MAX || *end ||
+        argv[2][0] < '0' || argv[2][0] > '9') return 2;
+    unsigned map_id = 0;
+    int fd = conservation_state_map((unsigned)daemon_pid, &map_id);
+    if (fd < 0) {
+        fprintf(stderr, "CONSERVATION_UNAVAILABLE daemon has no unique readable state_map\n");
+        return 6;
+    }
+    /* Buffer the result: a refusal must never leave a partial JSON record. */
+    uint64_t *cpu = calloc(argc, sizeof(*cpu));
+    if (!cpu) { close(fd); return 6; }
+    for (int i = 3; i < argc; i++) {
+        char *end, path[128], stat[4096];
+        errno = 0;
+        unsigned long n = strtoul(argv[i], &end, 10);
+        if (errno || !n || n > UINT32_MAX || *end ||
+            argv[i][0] < '0' || argv[i][0] > '9') goto refuse;
+        for (int j = 3; j < i; j++)
+            if (strtoul(argv[j], NULL, 10) == n) goto refuse;
+        uint32_t pid = (uint32_t)n;
+        snprintf(path, sizeof(path), "/proc/%u/stat", pid);
+        FILE *f = fopen(path, "r");
+        if (!f) goto refuse;
+        char *ok = fgets(stat, sizeof(stat), f);
+        fclose(f);
+        char *comm_end = ok ? strrchr(stat, ')') : NULL;
+        if (!comm_end || comm_end[1] != ' ' || comm_end[2] != 'T') goto refuse;
+        struct pgwt_pid_state state = {0};
+        union bpf_attr attr = {0};
+        attr.map_fd = fd;
+        attr.key = (uint64_t)(uintptr_t)&pid;
+        attr.value = (uint64_t)(uintptr_t)&state;
+        if (conservation_bpf(BPF_MAP_LOOKUP_ELEM, &attr) != 0 ||
+            !state.wp_live || state.on_cpu_ts) goto refuse;
+        cpu[i] = state.cpu_ns_total;
+        continue;
+refuse:
+        fprintf(stderr, "CONSERVATION_UNAVAILABLE pid=%s must be stopped, tracked, "
+                "wp_live, with its on-CPU stretch closed\n", argv[i]);
+        free(cpu);
+        close(fd);
+        return 6;
+    }
+    printf("{\"map_id\":%u,\"per_pid\":{", map_id);
+    for (int i = 3; i < argc; i++)
+        printf("%s\"%lu\":%llu", i == 3 ? "" : ",", strtoul(argv[i], NULL, 10),
+               (unsigned long long)cpu[i]);
+    printf("}}\n");
+    free(cpu);
+    close(fd);
+    return 0;
+}
+#else
+static int conservation_snapshot(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    fprintf(stderr, "CONSERVATION_UNAVAILABLE live BPF counters require Linux\n");
+    return 6;
+}
+#endif
 
 #define MAX_EVENTS 65536
 #define MAX_DISTINCT 1024
@@ -340,6 +474,8 @@ static int abc_report(struct abc_state *s, struct evt_acc *table,
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && !strcmp(argv[1], "--conservation-snapshot"))
+        return conservation_snapshot(argc, argv);
     if (argc < 2) {
         fprintf(stderr, "usage: %s <trace_dir> [--tolerance PCT] "
                 "[--min-share PCT] [--raw-ns] [--show-idle]\n", argv[0]);
