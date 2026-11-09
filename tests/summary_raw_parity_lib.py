@@ -233,7 +233,12 @@ def _rows(resp, prefix, key_field, limit=None, order_field="rowset"):
 
 
 def extract_time_model(resp):
-    out = _scalars(resp, "time_model")
+    # These keys describe the route, not a measurement. Keep
+    # io_worker_busy_pct compared so a future fabricated number still shows up.
+    out = _scalars(resp, "time_model", skip={
+        "id", "io_worker_busy_pct_unavailable",
+        "io_worker_busy_pct_unavailable_reason",
+    })
     out.update(_rows(resp, "time_model", "name"))
     # The CPU group under either row shape (#408).
     rows = resp.get("rows") if isinstance(resp, dict) else None
@@ -291,6 +296,13 @@ def extract_sessions(resp):
     return out
 
 
+def extract_events(resp):
+    """Events: every response scalar and every row, keyed by its name."""
+    out = _scalars(resp, "events")
+    out.update(_rows(resp, "events", "name"))
+    return out
+
+
 def extract_queries(resp, limit=8):
     """Queries: the top rows INCLUDING their order (the order is the answer to
     "what do I look at first") and every scalar column."""
@@ -305,6 +317,7 @@ def extract_all(answers):
     fields.update(extract_time_model(answers.get("time_model", {})))
     fields.update(extract_aas(answers.get("aas", {})))
     fields.update(extract_sessions(answers.get("top_sessions", {})))
+    fields.update(extract_events(answers.get("top_events", {})))
     fields.update(extract_queries(answers.get("top_queries", {})))
     return fields
 

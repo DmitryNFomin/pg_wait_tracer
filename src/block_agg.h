@@ -208,7 +208,9 @@ struct pgwt_block_agg_pair {
 struct pgwt_block_agg_node {
     uint32_t event_id;
     uint64_t count;
-    uint64_t total_ns;
+    uint64_t total_ns;    /* exact-tier time only */
+    uint64_t sampled_ns;  /* sampled-tier estimate; disjoint and additive
+                          * with total_ns, including sample-only nodes */
 };
 
 /* Key of a block already folded into an aggregate — the double-count guard. */
@@ -345,6 +347,13 @@ int pgwt_block_agg_merge(struct pgwt_block_agg *dst,
  * numbers. Every other refusal leaves *a untouched. */
 int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
                              const struct pgwt_trace_event *ev);
+
+/* Add a normalized SAMPLE record's duration to its node's sampled_ns only.
+ * The caller owns window and population selection (use the shared sampled
+ * transition predicate). Creates sample-only nodes; count, total_ns and pair
+ * totals stay exact-tier. Same mode/version and NOMEM rules as add_event(). */
+int pgwt_block_agg_add_sampled_event(struct pgwt_block_agg *a,
+                                     const struct pgwt_trace_event *ev);
 
 /* Accumulate every record of `events` whose timestamp is in [from, to) —
  * half-open, C7 — into a window accumulator. THE one raw-side

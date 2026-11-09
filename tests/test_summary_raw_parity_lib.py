@@ -228,7 +228,7 @@ def check(cond, what):
 def answers(db_ms=100000.0, cpu_rows="split", top_wait="Lock:relation",
             qorder=("100", "101"), client_ms=70000.0, extra=None,
             sessions=(1000, 1001)):
-    """A plausible four-endpoint answer set, parameterised on exactly the
+    """A plausible five-endpoint answer set, parameterised on exactly the
     things the real paths disagree about."""
     rows = [{"name": "DB Time", "ms": db_ms, "aas": db_ms / 1e5, "indent": 0},
             {"name": "Client", "ms": client_ms, "aas": 0.5, "indent": 1},
@@ -253,8 +253,13 @@ def answers(db_ms=100000.0, cpu_rows="split", top_wait="Lock:relation",
     qs = {"id": 4, "fidelity": "exact", "rows": [
         {"query_id": q, "total_ms": 40000.0 - i, "top_wait": top_wait}
         for i, q in enumerate(qorder)]}
+    events = {"id": 5, "fidelity": "exact", "db_time_ms": 10000.0,
+              "has_measured_cpu": True, "offcpu_ms": 4000.0,
+              "cpu_clamped_ms": 0.0,
+              "rows": [{"name": "CPU (running)", "event_id": 0,
+                        "total_ms": 6000.0, "count": 130}]}
     return {"time_model": tm, "aas": aas, "top_sessions": sess,
-            "top_queries": qs}
+            "top_queries": qs, "top_events": events}
 
 
 def fields(**kw):
@@ -273,12 +278,21 @@ MARKER_VERSION = ("INFO: 1 of 1 summary file(s) covering this window are not "
 
 
 def main():
+    import test_summary_raw_parity as G
+
     print("=== test_summary_raw_parity_lib ===")
     base = fields()
 
     # §0 the positive control: identical answers, two routes, a sane table.
     ok, lines, _ = P.verdict("w", BOTH_ROUTES, base, dict(base), {})
     check(ok, "§0 identical answers on two different routes PASS")
+    check("top_events" in G.CMDS and
+          base["events/rowset"] == "CPU (running)" and
+          base["events/row/CPU (running)/total_ms"] == 6000.0 and
+          base["events/offcpu_ms"] == 4000.0 and
+          base["events/has_measured_cpu"] is True,
+          "§0 Top Events is requested and extracts scalars and rows by name "
+          "without an indent tag")
 
     # §1 both sides raw -> the comparison is vacuous even though every field
     #    agrees. This is the exact false negative the #408 probe hit.
@@ -332,7 +346,8 @@ def main():
     empty = P.extract_all({"time_model": {"rows": [], "db_time_ms": 0},
                            "aas": {"buckets": [], "bucket_ns": 1},
                            "top_sessions": {"rows": []},
-                           "top_queries": {"rows": []}})
+                           "top_queries": {"rows": []},
+                           "top_events": {"rows": []}})
     ok, lines, _ = P.verdict("w", BOTH_ROUTES, empty, dict(empty), {})
     check(not ok, "§5 two empty answers FAIL instead of agreeing")
     check(sum(1 for l in lines if "FAIL vacuous" in l) >= 4,
@@ -372,6 +387,14 @@ def main():
     noresp = P.extract_time_model("boom")
     check(any(str(v).startswith(P.UNPARSEABLE) for v in noresp.values()),
           "§7 a non-dict response is unparseable, not absent")
+    check(P.extract_all({})["events/rowset"] == P.ABSENT,
+          "§7 missing Top Events in a partial answer is absent")
+    check(P.extract_events({"rows": ["junk"]})["events/rowset"]
+          == P.UNPARSEABLE and
+          P.extract_all({"top_events": "junk"})["events/<response>"]
+          == P.UNPARSEABLE + ":str",
+          "§7 garbage Top Events rows/responses are unparseable without "
+          "raising")
 
     # §8 dependencies: missing (127) and present-but-not-executable (126).
     probs = P.require_tools(["/definitely/not/here/pgwt-server"])
@@ -461,7 +484,6 @@ def main():
 
     # §13 the issue attribution itself, and the refusal that stops `--record`
     #     from laundering a brand-new divergence into "known".
-    import test_summary_raw_parity as G
     # The CPU rule is GONE, on purpose, and this is the assertion that says
     # so. #408 and #562 are closed by the summary v9 epoch (the record now
     # carries the per-session measured-CPU split and the sessions routing
@@ -474,6 +496,9 @@ def main():
           == "UNEXPLAINED",
           "§13 a CPU row field is UNEXPLAINED now that #408/#562 are closed "
           "-- never attributed to a closed issue")
+    check(G.issue_for("events/row/CPU (running)/total_ms", "interior_160s")
+          == "UNEXPLAINED",
+          "§13 a new Top Events CPU divergence has no pin rule")
     check(G.issue_for("sessions/row/1001/top_wait", "interior_160s") == 319,
           "§13 a top_wait field is attributed to #319")
     check(G.issue_for("time_model/row/Client/ms", "straddle_130s")

@@ -195,11 +195,11 @@ WINDOWS = {
 CONTROL_WINDOW = ("control_59s_both_raw",
                   (BASE + 200 * S, BASE + 259 * S))
 
-CMDS = ("time_model", "aas", "top_sessions", "top_queries")
+CMDS = ("time_model", "aas", "top_sessions", "top_queries", "top_events")
 
 
 def ask(trace_dir, frm, to, stderr_path):
-    """Both the four answers and the route evidence for one (dir, window)."""
+    """Both the five answers and the route evidence for one (dir, window)."""
     answers = {}
     with ServerHarness(trace_dir, stderr_path=stderr_path) as srv:
         for cmd in CMDS:
@@ -238,7 +238,7 @@ def ask(trace_dir, frm, to, stderr_path):
 #   #410 — the four divergences THIS gate found on its first run: max_aas
 #          (peak over seconds vs over buckets), backfilled_ms and
 #          unattributed_available (no unattributed accounting on the summary
-#          path) and io_worker_busy_pct (absent there).
+#          path) and io_worker_busy_pct (explicitly declared unavailable there).
 #
 # DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #324, #319 or #410
 # is fixed, its pinned fields start agreeing and this gate reports them as
@@ -300,6 +300,18 @@ def issue_for(field, window):
         return FOUND_BY_THIS_GATE[field]
     if field.endswith("/top_wait") or field.endswith("/top_wait_id"):
         return 319                      # two definitions of one column
+    # These 8 divergences are pre-existing: master's control reproduces them
+    # byte-for-byte. Adding top_events to CMDS exposed rather than caused
+    # them. At the window edge, 3000 ms is misattributed from Client:ClientWrite
+    # to Lock:relation, with the pair total conserved at 127000 ms. The ~2x
+    # avg_us discrepancy shows the count is wrong independently of that
+    # duration shift. Deleting these 8 entries is the last step of landing
+    # #818's fix, consistent with the rule above for deleting fixed pins.
+    if (window == "straddle_130s"
+            and field in {"events/row/%s/%s" % (event, column)
+                          for event in ("Client:ClientWrite", "Lock:relation")
+                          for column in ("total_ms", "avg_us", "pct", "aas")}):
+        return 818
     # No CPU rule: #408 (summaries reporting has_measured_cpu=false) and
     # #562 (Top Sessions raw measuring while summary reported wall) are both
     # CLOSED by the v9 epoch. The per-second record now carries the
@@ -310,18 +322,18 @@ def issue_for(field, window):
     # a table containing UNEXPLAINED (see unexplained()). An unattributable CPU
     # divergence therefore fails loudly and cannot be laundered into "known"
     # by regeneration. A gate that cannot attribute must refuse, never approve.
-    # CPU divergences are still possible: per-EVENT events[] and per-QUERY
-    # queries[].top_events[] tables still store WALL, so
-    # pgwt_compute_top_events_from_summaries still reports has_measured_cpu = 0
-    # (#573's events half, outside this change). A top_events/* divergence is
-    # EXPECTED and currently has no pin because this parity gate does not
-    # compare that route at all: summary_raw_parity_lib.py has no extract_events
-    # and "top_events" is not in CMDS. Its absence is not evidence of agreement.
+    # Top Events is compared too: extract_events walks its response scalars
+    # and rows. #573 reads the existing v7 record CPU totals for the
+    # unfiltered summary route, so it reports the same split as raw without
+    # a format change. The per-query table still has no measurement, but
+    # server.c:5471 routes that drill to raw. The eight window-scoped #818
+    # fields above are pinned; any unattributable top_events response field
+    # (extracted as events/*) must remain UNEXPLAINED and refuse recording.
     # No straddle_130s catch-all for #324: handle_top_queries always uses raw
     # in server.c. The remaining production readers of the full-duration
     # per-query table are tm_summary_visitor and aas_summary_visitor in
     # compute.c; both require query_id != 0 (AAS sets has_query_filter from
-    # that predicate). All four CMDS
+    # that predicate). All five CMDS
     # above are requested UNFILTERED, so #324 cannot cause a divergence here.
     # An unmatched field must remain UNEXPLAINED for unexplained()/--record
     # to refuse it, rather than laundering a new regression into "known".

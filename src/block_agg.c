@@ -212,13 +212,19 @@ pair_slot(struct pgwt_block_agg_pair *tab, int cap, uint32_t from, uint32_t to)
     }
 }
 
+/* Sample-only nodes have count == 0, but still occupy a slot. */
+static int node_occupied(const struct pgwt_block_agg_node *node)
+{
+    return node->count != 0 || node->sampled_ns != 0;
+}
+
 static struct pgwt_block_agg_node *
 node_slot(struct pgwt_block_agg_node *tab, int cap, uint32_t id)
 {
     uint32_t mask = (uint32_t)cap - 1;
     uint32_t h = node_hash(id) & mask;
     for (;;) {
-        if (tab[h].count == 0)
+        if (!node_occupied(&tab[h]))
             return &tab[h];
         if (tab[h].event_id == id)
             return &tab[h];
@@ -259,7 +265,7 @@ static int nodes_grow(struct pgwt_block_agg *a)
     if (!nt)
         return PGWT_BAGG_REFUSED_NOMEM;
     for (int i = 0; i < a->node_cap; i++) {
-        if (a->nodes[i].count == 0)
+        if (!node_occupied(&a->nodes[i]))
             continue;
         *node_slot(nt, ncap, a->nodes[i].event_id) = a->nodes[i];
     }
@@ -292,21 +298,32 @@ static int pair_add(struct pgwt_block_agg *a, uint32_t from, uint32_t to,
     return PGWT_BAGG_OK;
 }
 
-static int node_add(struct pgwt_block_agg *a, uint32_t id,
-                    uint64_t count, uint64_t total_ns)
+static int node_prepare(struct pgwt_block_agg *a, uint32_t id,
+                         struct pgwt_block_agg_node **out)
 {
-    if (count == 0)
-        return PGWT_BAGG_OK;
     if (a->node_cap == 0 || (a->n_nodes + 1) * 10 >= a->node_cap * 7) {
         int rc = nodes_grow(a);
         if (rc != PGWT_BAGG_OK)
             return rc;
     }
     struct pgwt_block_agg_node *s = node_slot(a->nodes, a->node_cap, id);
-    if (s->count == 0) {
+    if (!node_occupied(s)) {
         s->event_id = id;
         a->n_nodes++;
     }
+    *out = s;
+    return PGWT_BAGG_OK;
+}
+
+static int node_add(struct pgwt_block_agg *a, uint32_t id,
+                    uint64_t count, uint64_t total_ns)
+{
+    if (count == 0)
+        return PGWT_BAGG_OK;
+    struct pgwt_block_agg_node *s;
+    int rc = node_prepare(a, id, &s);
+    if (rc != PGWT_BAGG_OK)
+        return rc;
     s->count += count;
     s->total_ns += total_ns;
     a->node_records += count;
@@ -504,6 +521,26 @@ int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
     return PGWT_BAGG_OK;
 }
 
+int pgwt_block_agg_add_sampled_event(struct pgwt_block_agg *a,
+                                     const struct pgwt_trace_event *ev)
+{
+    if (!a || a->mode != PGWT_BAGG_MODE_WINDOW)
+        return PGWT_BAGG_REFUSED_MODE;
+    if (a->version != PGWT_BLOCK_AGG_VERSION)
+        return PGWT_BAGG_REFUSED_VERSION;
+    if (!ev || !(ev->flags & PGWT_EVENT_FLAG_SAMPLE))
+        return PGWT_BAGG_REFUSED_INVALID;
+    if (ev->duration_ns == 0)
+        return PGWT_BAGG_OK;
+    struct pgwt_block_agg_node *s;
+    int rc = node_prepare(a, ev->old_event, &s);
+    if (rc != PGWT_BAGG_OK)
+        return rc;
+    s->sampled_ns += ev->duration_ns;
+    bounds_widen(a, ev->timestamp_ns, ev->timestamp_ns);
+    return PGWT_BAGG_OK;
+}
+
 int pgwt_block_agg_add_events(struct pgwt_block_agg *a,
                               const struct pgwt_trace_event *events, int count,
                               uint64_t from_mono_ns, uint64_t to_mono_ns,
@@ -672,7 +709,7 @@ int pgwt_block_agg_node_lookup(const struct pgwt_block_agg *a,
         return 0;
     const struct pgwt_block_agg_node *s =
         node_slot(a->nodes, a->node_cap, event_id);
-    if (s->count == 0)
+    if (!node_occupied(s))
         return 0;
     if (count) *count = s->count;
     if (total_ns) *total_ns = s->total_ns;
@@ -741,7 +778,7 @@ int pgwt_block_agg_nodes_sorted(const struct pgwt_block_agg *a,
         return PGWT_BAGG_REFUSED_NOMEM;
     int k = 0;
     for (int i = 0; i < a->node_cap && k < a->n_nodes; i++)
-        if (a->nodes[i].count != 0)
+        if (node_occupied(&a->nodes[i]))
             arr[k++] = a->nodes[i];
     qsort(arr, (size_t)k, sizeof(*arr), cmp_node_total);
     *out = arr;

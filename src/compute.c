@@ -1462,6 +1462,7 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 {
     memset(out, 0, sizeof(*out));
     out->wall_ms = wall_ms;
+    out->io_worker_available = 1;
 
     /* Phase 1: accumulate per-class and per-(class, event) totals */
     struct class_accum classes[PGWT_NUM_CLASSES];
@@ -2107,8 +2108,11 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
             r->pct_db = db_time_ms > 0 ? r->total_ms / db_time_ms * 100.0 : 0;
         r->aas      = wall_ms > 0 ? r->total_ms / wall_ms : 0;
 
+        /* Top Events has no sibling "CPU (waiting for a core)" row: the
+         * client renders the remainder from the response's offcpu_ms. */
         if (ht[i].event_id == 0)
-            snprintf(r->name, sizeof(r->name), "CPU*");
+            snprintf(r->name, sizeof(r->name), "%s",
+                     has_measured_cpu ? "CPU (running)" : "CPU*");
         else
             pgwt_event_full_name(ht[i].event_id, r->name, sizeof(r->name));
         nr++;
@@ -3246,6 +3250,8 @@ struct te_summary_ctx {
     struct top_event_accum *ht;
     int      num_entries;
     uint64_t db_time_ns;
+    double   cpu_measured_ns, cpu_unknown_ns, cpu_clamped_ns;
+    int      has_measured_cpu;
     const struct pgwt_filter *f;
 };
 
@@ -3286,6 +3292,19 @@ static int te_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
             break;
         }
         return 0;
+    }
+
+    /* These are record-level window totals read straight from the file.
+     * Accumulate once per record, rather than per event-0 entry: an open-gap
+     * CPU credit can exist in a second with no closed event-0 entry. The
+     * query branch above cannot use these totals, nor can a filter that
+     * excludes CPU. */
+    if (!pgwt_is_hidden_event(0) && summary_event_matches_filter(ctx->f, 0)) {
+        ctx->cpu_measured_ns += (double)rec->cpu_measured_ns;
+        ctx->cpu_unknown_ns += (double)rec->cpu_unknown_ns;
+        ctx->cpu_clamped_ns += (double)rec->cpu_clamped_ns;
+        if (rec->cpu_measured_records > 0)
+            ctx->has_measured_cpu = 1;
     }
 
     for (int e = 0; e < SUMMARY_MAX_EVENTS; e++) {
@@ -3337,6 +3356,9 @@ void pgwt_compute_top_events_from_summaries(
     pgwt_visit_summaries(trace_dir, from_ns, to_ns, te_summary_visitor, &ctx);
 
     double db_time_ms = (double)ctx.db_time_ns / 1e6;
+    double offcpu_ns = 0.0;
+    double clamped_ns = ctx.cpu_clamped_ns;
+    int cpu_row_adjusted = 0;
 
     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
     int nr = 0;
@@ -3348,6 +3370,17 @@ void pgwt_compute_top_events_from_summaries(
         row->event_id = ctx.ht[i].event_id;
         row->count    = ctx.ht[i].count;
         row->total_ms = (double)ctx.ht[i].total_ns / 1e6;
+        if (row->event_id == 0 && ctx.has_measured_cpu) {
+            cpu_row_adjusted = 1;
+            double event0_wall_ns = (double)ctx.ht[i].total_ns;
+            double cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
+            row->total_ms = cpu_total_ns / 1e6;
+            offcpu_ns = event0_wall_ns - cpu_total_ns;
+            if (offcpu_ns < 0) {
+                clamped_ns += -offcpu_ns;
+                offcpu_ns = 0.0;
+            }
+        }
         row->exact_count = ctx.ht[i].exact_count;
         row->avg_us   = ctx.ht[i].exact_count > 0
                        ? (double)ctx.ht[i].exact_total_ns / (double)ctx.ht[i].exact_count / 1000.0 : 0;
@@ -3376,8 +3409,11 @@ void pgwt_compute_top_events_from_summaries(
             row->pct_db = db_time_ms > 0 ? row->total_ms / db_time_ms * 100.0 : 0;
         row->aas      = wall_ms > 0 ? row->total_ms / wall_ms : 0;
 
+        /* Top Events has no sibling "CPU (waiting for a core)" row: the
+         * client renders the remainder from the response's offcpu_ms. */
         if (ctx.ht[i].event_id == 0)
-            snprintf(row->name, sizeof(row->name), "CPU*");
+            snprintf(row->name, sizeof(row->name), "%s",
+                     ctx.has_measured_cpu ? "CPU (running)" : "CPU*");
         else
             pgwt_event_full_name(ctx.ht[i].event_id, row->name, sizeof(row->name));
         nr++;
@@ -3389,20 +3425,17 @@ void pgwt_compute_top_events_from_summaries(
     out->rows       = rows;
     out->num_rows   = nr;
     out->db_time_ms = db_time_ms;
-    /* #553: has_measured_cpu / offcpu_ms stay 0 (memset above) ON PURPOSE.
-     * The per-second summary's events[] table carries WALL for event 0
-     * (summary_writer.c: `se->total_ns += tns`), so this routing cannot
-     * report a measured CPU* row -- the record-level cpu_measured_ns scalars
-     * that pgwt_compute_time_model_from_summaries uses are window totals, not
-     * per-event ones, and there is no per-QUERY measurement in the file at
-     * all. 0 is therefore the honest answer for "is the CPU* row below a
-     * measurement": no. Bringing this routing onto the measurement needs the
-     * writer's per-event table to carry it, which is a format change and a
-     * separate issue -- decided: summary v9, together with #563's per-record
-     * field, so every retained trace is recomputed once rather than twice.
-     * The contract that change must satisfy is pinned as an identity (raw
-     * CPU* + raw off-CPU == summary CPU*, each side saying which quantity it
-     * is) in tests/test_agg_raw_crosscheck.c section 6f. */
+    /* An all-open-gap-credit window can have no event-0 row. Declare it
+     * unmeasured to fail safe when there is no row to split. */
+    out->has_measured_cpu = cpu_row_adjusted;
+    out->offcpu_ms = cpu_row_adjusted ? offcpu_ns / 1e6 : 0.0;
+    out->cpu_clamped_ms = clamped_ns / 1e6;
+    /* #553: the record-level v7 CPU scalars answer the split for the
+     * unfiltered route; db_time_ms still sums WALL. The per-QUERY route
+     * remains unsplit and declares has_measured_cpu = 0 because the file
+     * carries no per-query measurement. src/server.c:5471 never takes that
+     * route in production. Both contracts and conservation of CPU row +
+     * offcpu_ms are pinned in tests/test_agg_raw_crosscheck.c section 6f. */
 }
 
 /* ── Top Sessions from summaries ──────────────────────────── */
@@ -3950,15 +3983,14 @@ static int cmp_trans_desc(const void *a, const void *b)
  * that used to live inline in pgwt_compute_transitions' loop is here, in the
  * same order, so the node pass in server.c can select the identical
  * population instead of approximating it. */
-int pgwt_transition_record_counts(const struct pgwt_filter *f,
-                                  const struct pgwt_trace_event *ev)
+static int transition_record_counts_tier(const struct pgwt_filter *f,
+                                         const struct pgwt_trace_event *ev,
+                                         int sampled)
 {
     if (!ev)
         return 0;
-    /* Exact-required view: normalized sample points are not state
-     * transitions. In a mixed window they remain available to sampled
-     * views only. */
-    if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
+    /* Disjoint tiers; every other population rule is shared below. */
+    if (!!(ev->flags & PGWT_EVENT_FLAG_SAMPLE) != sampled)
         return 0;
     /* #424: a transition IS the close of one state and the start of the
      * next -- the purest INSTANT-selected quantity in the model. The caller
@@ -3977,6 +4009,18 @@ int pgwt_transition_record_counts(const struct pgwt_filter *f,
     if (PGWT_IS_MARKER(ev->old_event) || PGWT_IS_MARKER(ev->new_event))
         return 0;
     return 1;
+}
+
+int pgwt_transition_record_counts(const struct pgwt_filter *f,
+                                  const struct pgwt_trace_event *ev)
+{
+    return transition_record_counts_tier(f, ev, 0);
+}
+
+int pgwt_transition_record_counts_sampled(const struct pgwt_filter *f,
+                                          const struct pgwt_trace_event *ev)
+{
+    return transition_record_counts_tier(f, ev, 1);
 }
 
 void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,

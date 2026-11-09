@@ -93,10 +93,13 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                 if (to_mono_ns == 0 || evt->timestamp_ns <= to_mono_ns) {
                     if (evt->old_event != PGWT_MARKER_ESCALATE_START &&
                         evt->old_event != PGWT_MARKER_ESCALATE_END &&
-                        !(evt->flags & PGWT_EVENT_FLAG_IO_WORKER))
-                        pgwt_live_qattr_marker(acc,
-                            pgwt_get_or_create_pid(acc, evt->pid),
-                            evt->old_event, evt->query_id);
+                        !(evt->flags & PGWT_EVENT_FLAG_IO_WORKER)) {
+                        struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
+                        pgwt_live_qattr_marker(acc, pa, evt->old_event, evt->query_id);
+                        if (pa)
+                            pgwt_live_cmd_gate_marker(&pa->cmd_gate, evt->old_event,
+                                                      evt->timestamp_ns);
+                    }
                     if (st && (from_mono_ns == 0 || evt->timestamp_ns >= from_mono_ns))
                         st->markers_skipped++;
                 }
@@ -147,6 +150,32 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
             else                        st->straddlers_admitted++;
         }
 
+        struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
+        uint32_t eff_we = we;
+        /* The gate is an interval rule; sampled point observations keep
+         * their existing handling. Classify the record's own wall, before
+         * window clipping, just like the live closed-record sweep. Every
+         * non-marker interval must consume it, including waits, or their
+         * command-open time leaks into the next on-CPU record. */
+        if (!sampled && !PGWT_IS_MARKER(we)) {
+            uint64_t t1 = evt->timestamp_ns;
+            uint64_t t0 = t1 >= occ_ns ? t1 - occ_ns : 0;
+            bool in_cmd;
+            bool by_markers = pgwt_live_cmd_gate_classify(
+                pa ? &pa->cmd_gate : NULL, true, t0, t1,
+                /* fallback_open */ true, &in_cmd);
+            /* No CMD markers means seen == 0: background pids retain
+             * CPU/DB Time even though replay has no per-record cat_flag. */
+            eff_we = pgwt_live_effective_event(we, 0 /* replay has no cat_flag */,
+                                               true /* gate active */, in_cmd);
+            if (st) {
+                if (eff_we == PGWT_WEI_NONCMD_CPU) st->cpu_noncmd_ns += add_ns;
+                /* Match the live on-CPU-only counter; cat_flag == 0 and
+                 * gate active are the constants passed above. */
+                if (!by_markers && we == 0 && pa) st->cpu_unmarked_ns += add_ns;
+            }
+        }
+
         uint64_t cpu_add = add_ns, offcpu_add = 0;
         /* Per-event-table row value (#531). `row_add` is what the TIME
          * column of every per-event table gets (window-clipped), `row_occ`
@@ -183,14 +212,17 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                 ? (uint64_t)(((unsigned __int128)m * add_ns) / occ_ns) : 0;
             if (cpu_add > add_ns) cpu_add = add_ns;
             offcpu_add = add_ns - cpu_add;
-            row_add = cpu_add;
-            row_occ = m;
+            /* NONCMD_CPU keeps wall in its idle row, matching
+             * pgwt_accum_add_interval; only CPU* rows use measured CPU. */
+            if (eff_we == 0) {
+                row_add = cpu_add;
+                row_occ = m;
+            }
         }
 
         /* Per-PID accumulation */
-        struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
         if (pa) {
-            struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, we);
+            struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, eff_we);
             if (es) {
                 if (closed_in_window) es->count++;
                 es->total_ns += row_add;
@@ -202,16 +234,16 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                         es->histogram[bucket]++;
                 }
             }
-            if (we == 0)
+            if (eff_we == 0)
                 pa->cpu_time_ns += cpu_add;
-            else if (!pgwt_is_idle_event(we))
+            else if (!pgwt_is_idle_event(eff_we))
                 pa->wait_time_ns += add_ns;
-            if (!pgwt_is_idle_event(we))
+            if (!pgwt_is_idle_event(eff_we))
                 pa->db_time_ns += add_ns;
         }
 
         /* System-wide accumulation */
-        struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, we);
+        struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, eff_we);
         if (se) {
             if (closed_in_window) se->count++;
             se->total_ns += row_add;
@@ -228,12 +260,12 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
          * accepts only wall time and cannot express measured off-CPU.
          * Wait-labelled spin stays observability only (compute.c): every
          * other label keeps its full wall contribution. */
-        if (we == 0) {
+        if (eff_we == 0) {
             acc->tm.cpu_time_ns += cpu_add;
             acc->tm.offcpu_time_ns += offcpu_add;
             acc->tm.db_time_ns += add_ns;
         } else {
-            pgwt_update_time_model(&acc->tm, we, add_ns);
+            pgwt_update_time_model(&acc->tm, eff_we, add_ns);
         }
 
         /* Same bounded per-pid resolver as live, with replay's clipped
@@ -241,12 +273,12 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
         uint32_t cat = evt->flags & ~PGWT_REPLAY_NONCAT_FLAGS;
         if (cat & PGWT_EVENT_FLAG_IO_WORKER)
             continue; /* structurally query-less, as on the live path */
-        bool idle = pgwt_is_session_idle_event(we);
+        bool idle = pgwt_is_session_idle_event(eff_we);
         if (evt->query_id != 0) {
             if (pa)
                 pgwt_qattr_observe(&pa->qattr, evt->query_id, replay_qattr_emit, acc);
             struct pgwt_query_event_stats *qe =
-                pgwt_get_or_create_query_event(acc, evt->query_id, we);
+                pgwt_get_or_create_query_event(acc, evt->query_id, eff_we);
             if (qe) {
                 if (closed_in_window) qe->count++;
                 qe->total_ns += row_add;
@@ -261,13 +293,13 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
          * a later nonzero id on the same pid would back-fill it. The reader
          * path in src/compute.c does the same with PGWT_EVENT_FLAG_QUERY_UNATTRIB. */
         } else if (cat & (PGWT_EVENT_FLAG_MAINT | PGWT_EVENT_FLAG_BACKGROUND)) {
-            if (!pgwt_is_idle_event(we)) {
+            if (!pgwt_is_idle_event(eff_we)) {
                 struct pgwt_qattr_pending p = {
                     .count = closed_in_window ? 1 : 0, .total_ns = row_add,
                     .min_ns = exact && closed_in_window ? row_occ : UINT64_MAX,
                     .max_ns = exact && closed_in_window ? row_occ : 0,
                 };
-                replay_qattr_emit(acc, 0, we, &p, false);
+                replay_qattr_emit(acc, 0, eff_we, &p, false);
             }
         } else if (cat != 0) {
             /* An unknown CATEGORY is under-counted here. The static assertion
@@ -284,7 +316,7 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                     .min_ns = exact && closed_in_window ? row_occ : UINT64_MAX,
                     .max_ns = exact && closed_in_window ? row_occ : 0,
                 };
-                if (pgwt_qattr_defer_stats(&pa->qattr, we, &p, replay_qattr_emit, acc))
+                if (pgwt_qattr_defer_stats(&pa->qattr, eff_we, &p, replay_qattr_emit, acc))
                     acc->qattr_pending_overflow++;
             }
         }

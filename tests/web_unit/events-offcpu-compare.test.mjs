@@ -15,7 +15,7 @@ const WAITING = 'CPU (waiting for a core)';
 
 /* One measured window as both top_events and time_model represent it.
  * db_time_ms stays fixed; CPU time is split between "running" (on the
- * events table's CPU* row / overview's "CPU (running)" row) and "waiting
+ * "CPU (running)" row on both tabs) and "waiting
  * for a core" (the synthetic row on both tabs). */
 function window(offcpuMs) {
     const dbTimeMs = 1000;
@@ -24,7 +24,7 @@ function window(offcpuMs) {
         events: {
             db_time_ms: dbTimeMs, has_measured_cpu: true, offcpu_ms: offcpuMs,
             rows: [
-                { event_id: 0, name: 'CPU*', total_ms: oncpuMs },
+                { event_id: 0, name: 'CPU (running)', total_ms: oncpuMs },
                 { event_id: 0x01000015, name: 'IO:DataFileRead', total_ms: 200 },
             ],
         },
