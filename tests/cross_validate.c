@@ -21,7 +21,9 @@
  * Or: cross_validate --conservation-snapshot DAEMON_PID BACKEND_PID...
  * Reads the daemon's live, ungated sched_switch CPU accumulator for stopped
  * workload backends. test_cpu_time.py owns/stops these backends and compares
- * successive snapshots with schedstat field 1. No interval clipping, event
+ * successive snapshots with schedstat fields 1+2. Also reads the daemon-owned
+ * ringbuf_drops PERCPU_ARRAY directly: tiered control metrics currently
+ * report the sampled provider's zero default for this full-tier counter. No interval clipping, event
  * classification, command gate, or sampled estimator participates.
  * Or: cross_validate --conservation-trace TRACE_DIR WINDOWS_FILE
  * WINDOWS_FILE rows: window pid from_mono to_mono left_last_ts left_cpu
@@ -70,6 +72,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 
 #ifdef __linux__
 #include <dirent.h>
@@ -84,7 +87,9 @@ static int conservation_bpf(enum bpf_cmd cmd, union bpf_attr *attr)
     return syscall(__NR_bpf, cmd, attr, sizeof(*attr));
 }
 
-static int conservation_state_map(unsigned daemon_pid, unsigned *map_id)
+static int conservation_map(unsigned daemon_pid, const char *name,
+                            enum bpf_map_type type, unsigned value_size,
+                            unsigned *map_id)
 {
     char path[128];
     snprintf(path, sizeof(path), "/proc/%u/fdinfo", daemon_pid);
@@ -113,9 +118,8 @@ static int conservation_state_map(unsigned daemon_pid, unsigned *map_id)
         attr.info.info_len = sizeof(info);
         attr.info.info = (uint64_t)(uintptr_t)&info;
         if (conservation_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr) == 0 &&
-            !strcmp(info.name, "state_map") &&
-            info.type == BPF_MAP_TYPE_HASH && info.key_size == sizeof(uint32_t) &&
-            info.value_size == sizeof(struct pgwt_pid_state)) {
+            !strcmp(info.name, name) && info.type == type &&
+            info.key_size == sizeof(uint32_t) && info.value_size == value_size) {
             if (found >= 0) { /* ambiguous daemon ownership */
                 close(found);
                 close(fd);
@@ -130,6 +134,69 @@ static int conservation_state_map(unsigned daemon_pid, unsigned *map_id)
     return found;
 }
 
+/* PERCPU map lookups return one 8-byte slot per POSSIBLE CPU, including
+ * offline CPUs. sysconf(online) would undersize the buffer on hotplug hosts.
+ * Parse the kernel's sorted cpulist (ranges and comma-separated holes). */
+static int conservation_possible_cpus(void)
+{
+    FILE *f = fopen("/sys/devices/system/cpu/possible", "r");
+    if (!f) return -1;
+    char list[4096];
+    char *ok = fgets(list, sizeof(list), f);
+    fclose(f);
+    if (!ok || !strchr(list, '\n')) return -1;
+    char *p = list, *end;
+    unsigned long count = 0, previous = 0;
+    int first_range = 1;
+    while (*p >= '0' && *p <= '9') {
+        errno = 0;
+        unsigned long lo = strtoul(p, &end, 10), hi = lo;
+        if (errno || (!first_range && lo <= previous)) return -1;
+        p = end;
+        if (*p == '-') {
+            p++;
+            if (*p < '0' || *p > '9') return -1;
+            hi = strtoul(p, &end, 10);
+            if (errno || hi < lo) return -1;
+            p = end;
+        }
+        if (hi >= INT_MAX || count > INT_MAX - (hi - lo + 1)) return -1;
+        count += hi - lo + 1;
+        previous = hi;
+        first_range = 0;
+        if (*p == '\n' && p[1] == '\0') return (int)count;
+        if (*p++ != ',') return -1;
+    }
+    return -1;
+}
+
+static int conservation_ringbuf_drops(unsigned daemon_pid, unsigned *map_id,
+                                     uint64_t *total)
+{
+    int fd = conservation_map(daemon_pid, "ringbuf_drops",
+                             BPF_MAP_TYPE_PERCPU_ARRAY, sizeof(uint64_t), map_id);
+    if (fd < 0) return -1;
+    int ncpu = conservation_possible_cpus();
+    uint64_t *values = ncpu > 0 ? calloc((size_t)ncpu, sizeof(*values)) : NULL;
+    if (!values) { close(fd); return -1; }
+    uint32_t key = 0;
+    union bpf_attr attr = {0};
+    attr.map_fd = fd;
+    attr.key = (uint64_t)(uintptr_t)&key;
+    attr.value = (uint64_t)(uintptr_t)values;
+    int rc = conservation_bpf(BPF_MAP_LOOKUP_ELEM, &attr);
+    *total = 0;
+    if (rc == 0) {
+        for (int i = 0; i < ncpu; i++) {
+            if (UINT64_MAX - *total < values[i]) { rc = -1; break; }
+            *total += values[i];
+        }
+    }
+    free(values);
+    close(fd);
+    return rc;
+}
+
 static int conservation_snapshot(int argc, char **argv)
 {
     if (argc < 4) {
@@ -142,7 +209,8 @@ static int conservation_snapshot(int argc, char **argv)
     if (errno || !daemon_pid || daemon_pid > UINT32_MAX || *end ||
         argv[2][0] < '0' || argv[2][0] > '9') return 2;
     unsigned map_id = 0;
-    int fd = conservation_state_map((unsigned)daemon_pid, &map_id);
+    int fd = conservation_map((unsigned)daemon_pid, "state_map", BPF_MAP_TYPE_HASH,
+                              sizeof(struct pgwt_pid_state), &map_id);
     if (fd < 0) {
         fprintf(stderr, "CONSERVATION_UNAVAILABLE daemon has no unique readable state_map\n");
         return 6;
@@ -182,7 +250,18 @@ refuse:
         close(fd);
         return 6;
     }
-    printf("{\"map_id\":%u,\"per_pid\":{", map_id);
+    unsigned drops_map_id = 0;
+    uint64_t drops = 0;
+    if (conservation_ringbuf_drops((unsigned)daemon_pid, &drops_map_id, &drops) != 0) {
+        fprintf(stderr, "CONSERVATION_UNAVAILABLE no unique readable ringbuf_drops map "
+                "or possible-CPU list/lookup failed\n");
+        free(cpu);
+        close(fd);
+        return 6;
+    }
+    printf("{\"map_id\":%u,\"ringbuf_drops_map_id\":%u,"
+           "\"ringbuf_drops_total\":%" PRIu64 ",\"per_pid\":{",
+           map_id, drops_map_id, drops);
     for (int i = 3; i < argc; i++)
         printf("%s\"%lu\":{\"exact_ns\":%llu,\"last_ts\":%llu,\"last_cpu_ns\":%llu}",
                i == 3 ? "" : ",", strtoul(argv[i], NULL, 10),

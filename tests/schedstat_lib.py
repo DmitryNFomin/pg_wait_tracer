@@ -135,23 +135,49 @@ def parse_schedstat(text):
     return (values[1], None) if values is not None else (None, reason)
 
 
-# Fixed before the live experiment; not a platform/share tolerance. Stopped
-# boundaries remove open-stretch and stale schedstat ambiguity. Allow 1% or
-# 1 ms of accounting difference, whichever is larger; print every residual.
-# This 1% bound CANNOT reject #675's 0.9 pp deficit. It is an accounting
-# diagnostic only, never evidence that the issue's shortfall is absent.
-CPU_CONSERVATION_REL_TOL = 0.01
-CPU_CONSERVATION_ABS_NS = 1_000_000
+# Frozen BEFORE round 3, from all 24 per-PID rows in each round-2 arm
+# (issue #675, comment 6747690155; three stopped ~100s windows, 8 clients).
+# These are empirical references, NOT explanations of the signed bias or
+# confidence intervals from independent replications (n=1 run per arm).
+CPU_CONSERVATION_REFERENCE = {
+    "6.8.0-138-generic": (1.0212239970604682, 1.0248624366196322),
+    "4.18.0-553.157.1.el8_10.x86_64": (0.9876465551024539, 0.989132757755534),
+}
 
 
-def compare_cpu_window(before, after, expected_pids):
-    """Compare ungated exact and field-1 deltas at stopped boundaries.
+def cpu_conservation_bounds(kernel):
+    """Signed residual/G bounds from a frozen, kernel-specific reference.
+
+    The loss bound is the observed minimum minus ONE observed peak-to-peak
+    spread; the overread bound is the observed maximum. Downward headroom
+    belongs to the loss test; an additional overread is reported separately
+    as soon as it exceeds the measured maximum. Both numbers come only from
+    round 2, including after round 3 exposed drift beyond a half-spread loss
+    margin with schedstats enabled. The whole bands are 0.727688 pp (6.8)
+    and 0.297241 pp (4.18), both narrower than
+    0.9 pp: subtracting 0.009*G from ANY healthy reference row must fire.
+    There is no absolute-ns floor that could hide losses in small windows.
+    Unknown kernels refuse; opposite unexplained biases cannot share a
+    universal zero-centred tolerance. A pass means within this reference,
+    never proof of absolute CPU conservation or sampled-tier correctness.
+    """
+    low, high = CPU_CONSERVATION_REFERENCE[kernel]
+    spread = high - low
+    return {"kernel": kernel, "reference_min_ratio": low,
+            "reference_max_ratio": high, "loss_margin_ratio": spread,
+            "lower_ratio": low - spread, "upper_ratio": high,
+            "lower_residual_ratio": low - spread - 1,
+            "upper_residual_ratio": high - 1}
+
+
+def compare_cpu_window(before, after, expected_pids, *, kernel):
+    """Report raw signed residual and separate baseline-relative loss/excess.
 
     Each endpoint has per_pid: {pid: {exact_ns, runtime_ns, t_ns,
     starttime_ticks}}. t_ns is the actual CLOCK_MONOTONIC read time for that
     PID, not the nominal workload duration. Missing tasks, resets, reuse,
-    zero referee CPU and wrong PID sets fail closed. This does not affect
-    the field-2 residual decomposition or its informational status.
+    zero referee CPU and wrong PID sets fail closed. No direction or PID
+    cancels another: loss and overread are judged separately per row.
     """
     expected = set(expected_pids)
     left, right = before.get("per_pid", {}), after.get("per_pid", {})
@@ -159,6 +185,10 @@ def compare_cpu_window(before, after, expected_pids):
         return {"ok": False, "reason": "pid set mismatch", "rows": []}
     if before.get("map_id") is None or before.get("map_id") != after.get("map_id"):
         return {"ok": False, "reason": "state_map changed or missing", "rows": []}
+    try:
+        bounds = cpu_conservation_bounds(kernel)
+    except KeyError:
+        return {"ok": False, "reason": f"no CPU reference for kernel={kernel}", "rows": []}
     rows = []
     for pid in sorted(expected):
         a, b = left[pid], right[pid]
@@ -173,12 +203,24 @@ def compare_cpu_window(before, after, expected_pids):
             return {"ok": False, "reason": f"pid={pid} reuse/reset/empty span or CPU",
                     "rows": rows}
         residual = exact - runtime
-        limit = max(CPU_CONSERVATION_ABS_NS, runtime * CPU_CONSERVATION_REL_TOL)
+        lower = runtime * bounds["lower_residual_ratio"]
+        upper = runtime * bounds["upper_residual_ratio"]
+        ratio = exact / runtime
+        # Compare ratios in the same representation as the recorded extrema;
+        # subtracting 1 first can spuriously flag an equal maximum by one ULP.
+        loss = max(0, lower - residual) if ratio < bounds["lower_ratio"] else 0
+        overread = max(0, residual - upper) if ratio > bounds["upper_ratio"] else 0
         rows.append({"pid": pid, "from_ns": a["t_ns"], "to_ns": b["t_ns"],
                      "covered_s": span / 1e9, "exact_ns": exact,
-                     "runtime_ns": runtime, "ratio": exact / runtime,
-                     "residual_ns": residual, "limit_ns": limit,
-                     "ok": abs(residual) <= limit})
+                     "runtime_ns": runtime, "ratio": ratio,
+                     "residual_ns": residual, "residual_ratio": residual / runtime,
+                     "raw_direction": ("overread" if residual > 0 else
+                                       "underread" if residual < 0 else "equal"),
+                     "lower_residual_ns": lower, "upper_residual_ns": upper,
+                     "loss_ns": loss, "overread_ns": overread,
+                     "verdict": ("loss" if loss else "overread" if overread
+                                 else "within_reference"),
+                     "ok": not loss and not overread})
         switch_keys = ("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")
         if all(k in x for x in (a, b) for k in switch_keys):
             deltas = {k: b[k] - a[k] for k in switch_keys}
@@ -186,7 +228,10 @@ def compare_cpu_window(before, after, expected_pids):
                 return {"ok": False, "reason": f"pid={pid} switch counter reset", "rows": rows}
             rows[-1].update(deltas)
             rows[-1]["switches_per_s"] = sum(deltas.values()) / (span / 1e9)
-    return {"ok": all(r["ok"] for r in rows), "rows": rows, "reason": None}
+    return {"ok": all(r["ok"] for r in rows), "rows": rows, "reason": None,
+            "loss_detected": any(r["loss_ns"] > 0 for r in rows),
+            "overread_detected": any(r["overread_ns"] > 0 for r in rows),
+            "reference": bounds}
 
 
 def parse_sched_schedstats(text):

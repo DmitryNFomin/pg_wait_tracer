@@ -559,6 +559,8 @@ def test_cpu_runtime_field_one_without_schedstats():
         _fake_proc(root, schedstats="0\n")
         reader = probe.ProcReader(root, clk_tck=100)
         snap = reader.snapshot(100)
+        check(reader.cpu_counters(101)[0][:2] == (900, 1500000),
+              "one schedstat read returns both runtime and run_delay")
         check(reader.cpu_runtime(101) == (900, None) and
               snap["cpu_runtime_ns"] == {101: 900, 102: 800} and
               snap["schedstats_enabled"] is False,
@@ -570,37 +572,111 @@ def test_cpu_conservation_refuses_population_reuse_and_loss():
         return {"map_id": 99, "per_pid": {101: {
             "t_ns": t, "exact_ns": exact, "runtime_ns": runtime,
             "starttime_ticks": start}}}
+    def compare(a, b, pids):
+        return lib.compare_cpu_window(a, b, pids, kernel="6.8.0-138-generic")
+
     a = endpoint(100, 10, 20)
-    b = endpoint(2*S + 100, S + 10, S + 20)
-    good = lib.compare_cpu_window(a, b, [101])
+    b = endpoint(2*S + 100, 1_023_000_010, S + 20)
+    good = compare(a, b, [101])
     check(good["ok"] and good["rows"][0]["covered_s"] == 2.0,
           f"CPU conservation reports the actual two-second span: {good}")
-    wrong = lib.compare_cpu_window(a, b, [102])
+    wrong = compare(a, b, [102])
     check(not wrong["ok"] and wrong["reason"] == "pid set mismatch",
           "wrong reference PID set fails")
-    check(not lib.compare_cpu_window(a, endpoint(2*S, 800_000_010, S + 20), [101])["ok"],
+    check(not compare(a, endpoint(2*S, 800_000_010, S + 20), [101])["ok"],
           "lost exact CPU fails the fixed bound")
-    check(not lib.compare_cpu_window(a, endpoint(2*S, S, S, start=43), [101])["ok"],
+    check(not compare(a, endpoint(2*S, S, S, start=43), [101])["ok"],
           "PID reuse fails even with matching counters")
-    check(not lib.compare_cpu_window(b, a, [101])["ok"],
+    check(not compare(b, a, [101])["ok"],
           "counter/clock rollback fails")
-    check(not lib.compare_cpu_window(a, endpoint(2*S, 20, 20), [101])["ok"],
+    check(not compare(a, endpoint(2*S, 20, 20), [101])["ok"],
           "zero reference CPU refuses instead of approving no evidence")
     changed = dict(b, map_id=100)
-    check(not lib.compare_cpu_window(a, changed, [101])["ok"],
+    check(not compare(a, changed, [101])["ok"],
           "daemon map replacement fails")
-    small_gap = lib.compare_cpu_window(a, endpoint(2*S, 991_000_010, S + 20), [101])
-    check(small_gap["ok"] and small_gap["rows"][0]["ratio"] == .991,
-          "fixed 1% tolerance CANNOT reject a 0.9 pp deficit; ratio must be reported")
+    small_gap = compare(a, endpoint(2*S, 1_014_000_010, S + 20), [101])
+    check(not small_gap["ok"] and small_gap["loss_detected"] and
+          small_gap["rows"][0]["residual_ns"] > 0,
+          "0.9 pp loss fires even with a positive raw residual")
     switches = ("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")
     a["per_pid"][101].update(dict(zip(switches, (100, 20))))
     b["per_pid"][101].update(dict(zip(switches, (2100, 40))))
-    measured = lib.compare_cpu_window(a, b, [101])
+    measured = compare(a, b, [101])
     check(measured["rows"][0]["switches_per_s"] == 1010,
           "context switches use actual covered seconds and both status counters")
     b["per_pid"][101][switches[0]] = 99
-    check("switch counter reset" in lib.compare_cpu_window(a, b, [101])["reason"],
+    check("switch counter reset" in compare(a, b, [101])["reason"],
           "a switch counter reset refuses")
+
+
+def test_cpu_conservation_signed_reference_controls():
+    # Observed extrema, independent fixtures (not computed from bounds).
+    # The first 6.8 point is round 3 with schedstats enabled: the initial
+    # half-spread lower margin wrongly flagged it; do not regress that fix.
+    references = {
+        "6.8.0-138-generic": (1.0180103554050205, 1.0212239970604682,
+                              1.0248624366196322),
+        "4.18.0-553.157.1.el8_10.x86_64": (0.9876465551024539, 0.989132757755534),
+    }
+    g = 10**15
+
+    def endpoint(t, exact, runtime):
+        return {"map_id": 99, "per_pid": {101: {
+            "t_ns": t, "exact_ns": exact, "runtime_ns": runtime,
+            "starttime_ticks": 42}}}
+
+    before = endpoint(100, 10, 20)
+    for kernel, ratios in references.items():
+        for ratio in ratios:
+            after = endpoint(2*S, 10 + round(g * ratio), 20 + g)
+            good = lib.compare_cpu_window(before, after, [101], kernel=kernel)
+            check(good["ok"] and not good["loss_detected"],
+                  f"healthy signed reference accepted: {kernel} ratio={ratio}")
+            check(good["rows"][0]["raw_direction"] ==
+                  ("overread" if ratio > 1 else "underread"),
+                  "healthy raw sign remains visible, not rounded to conservation")
+            for deficit in (.02 * ratio, .009):
+                lost = endpoint(2*S, 10 + round(g * (ratio - deficit)), 20 + g)
+                bad = lib.compare_cpu_window(before, lost, [101], kernel=kernel)
+                check(not bad["ok"] and bad["loss_detected"] and not bad["overread_detected"],
+                      f"loss control fires: {kernel} minus {100*deficit:.6f} pp")
+            excess = endpoint(2*S, 10 + round(g * (ratio + .009)), 20 + g)
+            bad = lib.compare_cpu_window(before, excess, [101], kernel=kernel)
+            check(not bad["ok"] and bad["overread_detected"] and not bad["loss_detected"],
+                  f"extra overread classified separately: {kernel}")
+        # Simultaneous opposite departures cannot net to green across PIDs.
+        centre = (min(ratios) + max(ratios)) / 2
+        other = endpoint(2*S, 10 + round(g * (centre - .02)), 20 + g)
+        other["per_pid"][102] = dict(other["per_pid"][101],
+                                     exact_ns=10 + round(g * (centre + .02)))
+        start = endpoint(100, 10, 20)
+        start["per_pid"][102] = dict(start["per_pid"][101])
+        mixed = lib.compare_cpu_window(start, other, [101, 102], kernel=kernel)
+        check(not mixed["ok"] and mixed["loss_detected"] and mixed["overread_detected"],
+              "opposite per-PID errors both fire without cancellation")
+    unknown = lib.compare_cpu_window(before, after, [101], kernel="unknown")
+    check(not unknown["ok"] and "no CPU reference" in unknown["reason"],
+          "unmeasured kernel refuses rather than reusing a convenient baseline")
+
+
+def test_cpu_diagnostic_requires_real_drop_counter():
+    import test_cpu_time as diagnostic
+    from unittest.mock import patch
+    with patch.object(diagnostic, "daemon_control", return_value={"ringbuf_drops_total": 123}):
+        sample = diagnostic.conservation_metrics("unused.sock")
+    check(sample["ringbuf_drops_total"] == 123 and
+          sample["metrics"]["ringbuf_drops_total"] == 123 and
+          sample["to_ns"] >= sample["from_ns"],
+          "drop counter retained with raw metrics and scrape times")
+    for reply in ({}, {"ringbuf_drops_total": None}, {"ringbuf_drops_total": -1},
+                  {"ringbuf_drops_total": "0"}, {"ringbuf_drops_total": False}):
+        with patch.object(diagnostic, "daemon_control", return_value=reply):
+            try:
+                diagnostic.conservation_metrics("unused.sock")
+            except RuntimeError:
+                check(True, "missing/invalid drop counter refuses, never defaults to zero")
+            else:
+                check(False, "invalid drop counter accepted")
 
 
 def test_context_switch_reader_refuses_missing_counters():

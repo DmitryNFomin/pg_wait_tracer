@@ -118,10 +118,18 @@ class ProcReader:
         return sslib.parse_proc_stat_cpu_ticks(
             _read(os.path.join(self.proc_root, str(pid), "stat")))
 
+    def cpu_counters(self, pid):
+        """One schedstat read: (runtime ns, run_delay ns, pcount), or refusal.
+
+        The caller must check schedstats_enabled before interpreting field 2.
+        """
+        return sslib.parse_schedstat_fields(
+            _read(os.path.join(self.proc_root, str(pid), "schedstat")))
+
     def cpu_runtime(self, pid):
         """schedstat field 1, even when field-2 schedstats are disabled."""
-        return sslib.parse_schedstat_cpu(
-            _read(os.path.join(self.proc_root, str(pid), "schedstat")))
+        values, reason = self.cpu_counters(pid)
+        return (values[0], None) if values is not None else (None, reason)
 
     def context_switches(self, pid):
         """Both /proc/status switch counters; schedstat pcount needs schedstats."""
