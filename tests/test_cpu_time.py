@@ -4,7 +4,7 @@
 Three tests:
   1. system_event: CPU event has highest total_ms for pure-compute query
   2. time_model:   CPU Time > sum of all Wait classes
-  3. per-PID ungated sched_switch CPU vs schedstat field 1, in sub-windows
+  3. per-PID switching workload: ungated/gated exact vs schedstat field 1
 
 Requires: root, running PostgreSQL, pg_wait_tracer and cross_validate built.
 Usage: sudo python3 tests/test_cpu_time.py [--pid POSTMASTER_PID]
@@ -18,9 +18,10 @@ import time
 import argparse
 import json
 import platform
-import select
 import signal
 import tempfile
+import copy
+import socket
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -283,16 +284,14 @@ def test_cpu_time_model(pm_pid):
               f"compute dominates)")
 
 
-def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
-    """#675: per-PID sched_switch vs schedstat field 1, command gate absent.
+def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=100.0):
+    """#675: eight short-command pgbench clients, matching #671's load.
 
-    Own persistent clients only: two compute loops and a repeated short-query
-    client (including between-command CPU). SIGSTOP forces both counters to
-    close at each boundary. The observation pauses count in covered_s; they
-    add no backend CPU. This tests the exact accumulator, before transition
-    serialization/classification; it cannot prove those later stages conserve.
+    Three measured windows total 300s. Stopped boundaries retain exact CPU
+    since the last trace transition, so offline gated CPU needs no wall-time
+    interpolation. Boundary pauses are included in the actual covered span.
     """
-    print("--- Test 3: ungated per-PID CPU conservation ---", flush=True)
+    print("--- Test 3: switching-workload per-PID CPU diagnostic ---", flush=True)
     cross_validate = Path(__file__).resolve().parent / "cross_validate"
     reader = ProcReader()
     clients, pids = [], []
@@ -301,10 +300,11 @@ def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
     output = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="pgwt-675-"))
     output.mkdir(parents=True, exist_ok=True)
     metadata = {"kernel": platform.release(), "postmaster_pid": pm_pid,
-                "workloads": ["compute", "compute", "short-query"],
+                "workload": "pgbench default read/write, -n -c 8 -j 2; existing populated schema",
+                "clients": 8, "sample_rate_hz": 10, "mode": "tiered + manual exact escalation",
                 "nominal_window_s": window_s, "windows": windows,
                 "boundary": "owned backends SIGSTOP; closed cpu_ns_total; schedstat field 1",
-                "limit": "max(1 ms, 1% of field-1 delta)",
+                "limit": "max(1 ms, 1% of field-1 delta); CANNOT detect a 0.9 pp deficit",
                 "sched_schedstats": reader.schedstats_enabled()[0],
                 "utc_start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     previous_sigterm = signal.getsignal(signal.SIGTERM)
@@ -341,7 +341,8 @@ def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
             if runtime is None:
                 raise RuntimeError(reason)
             sample["per_pid"][pid] = {
-                "runtime_ns": runtime, "exact_ns": exact["per_pid"][str(pid)],
+                "runtime_ns": runtime, **exact["per_pid"][str(pid)],
+                **reader.context_switches(pid),
                 "starttime_ticks": ident["starttime_ticks"],
                 "t_ns": time.monotonic_ns(), "wall_ns": time.time_ns()}
         snapshots.append(sample)
@@ -355,7 +356,8 @@ def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
         metadata["shared_preload_libraries"] = preload.stdout.strip()
         print("CONSERVATION_METADATA " + json.dumps(metadata), flush=True)
         with (output / "daemon.stderr").open("w") as log:
-            tracer = subprocess.Popen([TRACER, "--mode", "full", "--pid", str(pm_pid),
+            tracer = subprocess.Popen([TRACER, "--daemon", "--mode", "tiered", "--sample-rate", "10",
+                                       "--escalation-budget", "900", "--interval", "1", "--pid", str(pm_pid),
                                        "--quiet", "--trace-dir", str(output / "trace")],
                                       stdout=subprocess.DEVNULL, stderr=log)
             # Attach before fork, as in the existing CPU tests. An unready
@@ -365,33 +367,41 @@ def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
                 raise RuntimeError(f"tracer exited {tracer.returncode}; see {output}/daemon.stderr")
             metadata["daemon_scheduler"] = os.sched_getscheduler(tracer.pid)
             metadata["daemon_priority"] = os.sched_getparam(tracer.pid).sched_priority
-            for i in range(3):
+            rows = int(psql("SELECT count(*) FROM pgbench_accounts"))
+            if rows < 1:
+                raise RuntimeError("pgbench_accounts missing/empty; seed explicitly before this test")
+            metadata["pgbench_accounts_rows"] = rows
+            appname = f"pgwt_675_{os.getpid()}"
+            with (output / "pgbench.log").open("w") as benchlog:
                 client = subprocess.Popen(
-                    ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, text=True, bufsize=1)
-                clients.append(client)
-                client.stdin.write("SELECT pg_backend_pid();\n")
-                client.stdin.flush()
-                if not select.select([client.stdout], [], [], 5)[0]:
-                    raise RuntimeError("client did not report its backend pid")
-                pid = int(client.stdout.readline().strip())
-                if reader.task_identity(pid)["ppid"] != pm_pid:
-                    raise RuntimeError(f"psql connected to a different postmaster (pid={pid})")
-                pids.append(pid)
-                # No output during measurement; clients stay connected.
-                client.stdin.write("\\o /dev/null\n")
-                if i < 2:
-                    client.stdin.write("DO $$ DECLARE x bigint := 0; BEGIN "
-                                       "FOR i IN 1..100000 LOOP FOR j IN 1..100000 "
-                                       "LOOP x := x + 1; END LOOP; END LOOP; END $$;\n")
-                else:
-                    # psql's gexec generates separate frontend commands,
-                    # exercising CPU outside the command-attribution gate.
-                    client.stdin.write("SELECT 'SELECT sum(g) FROM generate_series(1,10000) g;' "
-                                       "FROM generate_series(1,1000000) \\gexec\n")
-                client.stdin.flush()
-            time.sleep(1)  # workload warmup, excluded by measured endpoints
+                    ["pgbench", "-n", "-U", "postgres", "-d", "postgres", "-c", "8", "-j", "2",
+                     "-T", str(int(windows * window_s + 120))],
+                    env=dict(os.environ, PGAPPNAME=appname), stdout=benchlog, stderr=benchlog)
+            clients.append(client)
+            time.sleep(8)  # #671's fixed warmup; no workload retry
+            if client.poll() is not None:
+                raise RuntimeError("pgbench exited during warmup; see pgbench.log")
+            pids = [int(p) for p in psql(
+                "SELECT pid FROM pg_stat_activity WHERE backend_type='client backend' "
+                f"AND application_name='{appname}' ORDER BY pid").split()]
+            if len(pids) != 8 or any(reader.task_identity(p)["ppid"] != pm_pid for p in pids):
+                raise RuntimeError(f"expected eight owned backends on postmaster {pm_pid}: {pids}")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as ctl:
+                ctl.settimeout(10)
+                ctl.connect(str(output / "trace" / "pgwt.sock"))
+                ctl.sendall((json.dumps({"cmd": "escalate", "duration_s": int(windows * window_s + 90),
+                                        "reason": "675 round 2"}) + "\n").encode())
+                reply = b""
+                while b"\n" not in reply:
+                    part = ctl.recv(65536)
+                    if not part:
+                        raise RuntimeError("escalation control socket closed without reply")
+                    reply += part
+            metadata["escalation"] = json.loads(reply.split(b"\n")[0])
+            print("CONSERVATION_ESCALATION " + reply.decode().strip(), flush=True)
+            if not metadata["escalation"].get("ok"):
+                raise RuntimeError(f"exact escalation refused: {metadata['escalation']}")
+            time.sleep(1)  # exclude initial attach/seed before baseline
             before = boundary()
             for w in range(windows):
                 for pid in pids:
@@ -403,7 +413,12 @@ def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
                 results.append(result)
                 for row in result["rows"]:
                     print(f"CONSERVATION_ROW window={w} " + json.dumps(row), flush=True)
-                check(result["ok"], f"conservation window={w} {result['reason'] or ''}")
+                # Report ratios. The retained 1% verdict cannot resolve a
+                # 0.9 pp deficit; never advertise this experiment as PASS.
+                if not result["rows"] or result["reason"]:
+                    check(False, f"conservation refused window={w}: {result['reason']}")
+                elif not result["ok"]:
+                    check(False, f"CPU discrepancy exceeds fixed bound window={w}")
                 # Real-state negative control: retain measured counters but
                 # request psql instead of its PostgreSQL backend. The
                 # comparator must reject this population, never return zero.
@@ -414,6 +429,20 @@ def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
                           f"{'PASS' if control['ok'] else 'FAIL'} reason={control['reason']}", flush=True)
                     check(not control["ok"] and control["reason"] == "pid set mismatch",
                           "real-state wrong-pid-set control fires")
+                    # Instrument control against REAL endpoints: suppress the
+                    # entire exact increment, leaving G and identity intact.
+                    # A fractional removal can accidentally cancel an existing
+                    # over-read; this control must not depend on a clean result.
+                    # This changes a saved observation, never a live BPF map.
+                    lost = copy.deepcopy(after)
+                    for pid in pids:
+                        lost["per_pid"][pid]["exact_ns"] = before["per_pid"][pid]["exact_ns"]
+                    loss = compare_cpu_window(before, lost, pids)
+                    print("CONSERVATION_CONTROL lost-exact-cpu " + json.dumps(loss), flush=True)
+                    check(not loss["ok"] and loss["reason"] is None and
+                          any(not r["ok"] for r in loss["rows"]),
+                          "real-endpoint lost-exact-CPU control detects a shortfall")
+                    metadata["loss_control"] = loss
                     metadata["control"] = dict(control, expected_pids=wrong,
                                                measured_pids=list(pids))
                     # Also hit the live BPF lookup, not just offline set
@@ -466,6 +495,42 @@ def test_cpu_conservation(pm_pid, output_dir=None, windows=3, window_s=3.0):
             except subprocess.TimeoutExpired:
                 tracer.kill()
                 tracer.wait()
+        if len(snapshots) == windows + 1 and len(results) == windows:
+            try:
+                spec = output / "trace-windows.txt"
+                with spec.open("w") as f:
+                    for w in range(windows):
+                        for pid in pids:
+                            a, b = (snapshots[j]["per_pid"][pid] for j in (w, w + 1))
+                            f.write(f"{w} {pid} {a['t_ns']} {b['t_ns']} "
+                                    f"{a['last_ts']} {a['exact_ns'] - a['last_cpu_ns']} "
+                                    f"{b['last_ts']} {b['exact_ns'] - b['last_cpu_ns']}\n")
+                raw = subprocess.run([str(cross_validate), "--conservation-trace",
+                                      str(output / "trace"), str(spec)],
+                                     check=True, capture_output=True, text=True, timeout=120)
+                (output / "gated.jsonl").write_text(raw.stdout)
+                gated = [json.loads(line) for line in raw.stdout.splitlines()]
+                keyed = {(r["window"], r["pid"]): r for r in gated}
+                if len(keyed) != windows * len(pids):
+                    raise RuntimeError("trace output population mismatch")
+                for result in results:
+                    for row in result["rows"]:
+                        trace = keyed[(result["window"], row["pid"])]
+                        row.update(trace)
+                        row["gated_ratio"] = trace["gated_cpu_ns"] / row["runtime_ns"]
+                        row["comparator_ratio"] = trace["comparator_cpu_wall_ns"] / row["runtime_ns"]
+                        row["daemon_ratio"] = trace["daemon_cpu_ns"] / row["runtime_ns"]
+                        row["daemon_gated_ratio"] = trace["daemon_gated_cpu_ns"] / row["runtime_ns"]
+                        row["trace_minus_map_ns"] = trace["trace_cpu_ns"] - row["exact_ns"]
+                        print("CONSERVATION_THREE " + json.dumps(row), flush=True)
+                metadata["gated_definition"] = "measured cpu_ns, command gate rejects out-of-command we==0; retains CPU during waits"
+                metadata["comparator_definition"] = "we==0 wall ns accepted by existing command-majority sweep (#671 RAW_CPU_EXACT_NS)"
+                metadata["daemon_definition"] = "per-PID reconstruction of event_stream.c cpu_ns_total: we==0 CPU, zero delta falls back to wall time; wait CPU counted separately"
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                check(False, f"gated conservation unavailable: {exc}")
+                metadata["gated_error"] = str(exc)
+                if isinstance(exc, subprocess.CalledProcessError):
+                    metadata["gated_stderr"] = exc.stderr
         (output / "conservation.json").write_text(json.dumps(
             {"metadata": metadata, "snapshots": snapshots, "windows": results}, indent=2) + "\n")
         print(f"CONSERVATION_ARTIFACT {output}/conservation.json", flush=True)
@@ -476,8 +541,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--pid', type=int, help='Postmaster PID')
     parser.add_argument('--conservation-only', action='store_true',
-                        help='run only the ungated per-PID field-1 diagnostic')
+                        help='run only the switching-workload three-quantity diagnostic')
     parser.add_argument('--conservation-output', help='raw snapshot/daemon/trace directory')
+    parser.add_argument('--conservation-window-s', type=float, default=100.0,
+                        help='seconds per sub-window (three windows; default total 300s)')
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -501,7 +568,9 @@ def main():
         cleanup()
         test_cpu_system_event(pm_pid)
         test_cpu_time_model(pm_pid)
-    test_cpu_conservation(pm_pid, args.conservation_output)
+    if args.conservation_window_s <= 0 or args.conservation_window_s > 200:
+        parser.error('--conservation-window-s must be in (0, 200]')
+    test_cpu_conservation(pm_pid, args.conservation_output, window_s=args.conservation_window_s)
 
     print(f"\n{tests_passed}/{tests_run} tests passed")
     sys.exit(0 if tests_failed == 0 else 1)

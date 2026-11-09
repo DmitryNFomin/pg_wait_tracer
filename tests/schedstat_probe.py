@@ -123,6 +123,15 @@ class ProcReader:
         return sslib.parse_schedstat_cpu(
             _read(os.path.join(self.proc_root, str(pid), "schedstat")))
 
+    def context_switches(self, pid):
+        """Both /proc/status switch counters; schedstat pcount needs schedstats."""
+        text = _read(os.path.join(self.proc_root, str(pid), "status"))
+        if text is None:
+            raise ValueError(f"pid={pid} status unreadable")
+        fields = dict(line.split(":", 1) for line in text.splitlines() if ":" in line)
+        return {key: int(fields[key]) for key in
+                ("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")}
+
     def task_identity(self, pid):
         """State, parent and starttime (PID reuse guard) from one stat read."""
         text = _read(os.path.join(self.proc_root, str(pid), "stat"))

@@ -23,6 +23,11 @@
  * workload backends. test_cpu_time.py owns/stops these backends and compares
  * successive snapshots with schedstat field 1. No interval clipping, event
  * classification, command gate, or sampled estimator participates.
+ * Or: cross_validate --conservation-trace TRACE_DIR WINDOWS_FILE
+ * WINDOWS_FILE rows: window pid from_mono to_mono left_last_ts left_cpu
+ * right_last_ts right_cpu. The CPU values are cpu_ns_total-last_cpu_ns at
+ * the stopped endpoints, not wall-proportional estimates. Emits measured
+ * gated CPU, the daemon's CPU-labelled counter and comparator wall CPU.
  *
  * --abc appends the offline A/B/C decomposition and join/conservation checks.
  * --nominal-period-ns supplies the configured sampler period (default 100 ms,
@@ -64,6 +69,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <inttypes.h>
 
 #ifdef __linux__
 #include <dirent.h>
@@ -142,7 +148,7 @@ static int conservation_snapshot(int argc, char **argv)
         return 6;
     }
     /* Buffer the result: a refusal must never leave a partial JSON record. */
-    uint64_t *cpu = calloc(argc, sizeof(*cpu));
+    struct pgwt_pid_state *cpu = calloc(argc, sizeof(*cpu));
     if (!cpu) { close(fd); return 6; }
     for (int i = 3; i < argc; i++) {
         char *end, path[128], stat[4096];
@@ -167,7 +173,7 @@ static int conservation_snapshot(int argc, char **argv)
         attr.value = (uint64_t)(uintptr_t)&state;
         if (conservation_bpf(BPF_MAP_LOOKUP_ELEM, &attr) != 0 ||
             !state.wp_live || state.on_cpu_ts) goto refuse;
-        cpu[i] = state.cpu_ns_total;
+        cpu[i] = state;
         continue;
 refuse:
         fprintf(stderr, "CONSERVATION_UNAVAILABLE pid=%s must be stopped, tracked, "
@@ -178,8 +184,11 @@ refuse:
     }
     printf("{\"map_id\":%u,\"per_pid\":{", map_id);
     for (int i = 3; i < argc; i++)
-        printf("%s\"%lu\":%llu", i == 3 ? "" : ",", strtoul(argv[i], NULL, 10),
-               (unsigned long long)cpu[i]);
+        printf("%s\"%lu\":{\"exact_ns\":%llu,\"last_ts\":%llu,\"last_cpu_ns\":%llu}",
+               i == 3 ? "" : ",", strtoul(argv[i], NULL, 10),
+               (unsigned long long)cpu[i].cpu_ns_total,
+               (unsigned long long)cpu[i].last_ts,
+               (unsigned long long)cpu[i].last_cpu_ns);
     printf("}}\n");
     free(cpu);
     close(fd);
@@ -256,6 +265,152 @@ static int cmd_interval_open(struct cmd_state *st, uint64_t t1, uint64_t dur)
     if (dur == 0)
         return st->cmd_open;
     return open_ns * 2 >= dur;
+}
+
+/* #675: read the SAME trace with the SAME majority command gate as below,
+ * over explicit per-PID stopped endpoints. cpu_ns cannot be wall-prorated:
+ * the live endpoint supplies the exact CPU since last_ts for a straddler.
+ * Also retain gated we==0 WALL time, which is #671's RAW_CPU_EXACT_NS;
+ * it must not be mistaken for measured on-CPU time. No sample is involved. */
+struct conservation_window {
+    unsigned window, pid;
+    uint64_t from, to, left_ts, left_cpu, right_ts, right_cpu;
+    uint64_t trace_cpu, gated_cpu, gated_wall, daemon_cpu, daemon_gated_cpu;
+    uint64_t we0_cpu, wait_cpu;
+    uint64_t intervals, markers;
+    unsigned edges;
+};
+
+static int conservation_trace(int argc, char **argv)
+{
+    if (argc != 4) return 2;
+    struct conservation_window wins[256] = {0};
+    unsigned nw = 0;
+    FILE *f = fopen(argv[3], "r");
+    if (!f) return 6;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (nw == 256) { fclose(f); return 6; }
+        struct conservation_window *v = &wins[nw++];
+        char extra;
+        if (sscanf(line, "%u %u %" SCNu64 " %" SCNu64 " %" SCNu64
+                   " %" SCNu64 " %" SCNu64 " %" SCNu64 " %c",
+                   &v->window, &v->pid, &v->from, &v->to,
+                   &v->left_ts, &v->left_cpu, &v->right_ts, &v->right_cpu,
+                   &extra) != 8 || !v->pid || v->to <= v->from ||
+            v->left_ts > v->from || v->right_ts > v->to) {
+            fclose(f); return 6;
+        }
+    }
+    fclose(f);
+    if (!nw) return 6;
+    struct pgwt_trace_file_entry files[256];
+    int nf = pgwt_scan_trace_files(argv[2], files, 256);
+    struct pgwt_trace_event *events = malloc(MAX_EVENTS * sizeof(*events));
+    struct cmd_state *gate = calloc(CMD_HT, sizeof(*gate));
+    int rc = 6;
+    if (nf <= 0 || !events || !gate) goto done;
+    for (int fi = 0; fi < nf; fi++) {
+        struct pgwt_event_reader r;
+        if (pgwt_reader_open(&r, files[fi].path)) goto done;
+        int failed = 0;
+        for (int b = 0; b < r.num_blocks && !failed; b++) {
+            struct pgwt_block_info info;
+            int n = pgwt_reader_decode_block_info(&r, b, events, MAX_EVENTS, &info);
+            if (n < 0) { failed = 1; break; }
+            if (!n) continue;
+            if (info.block_type != PGWT_BLOCK_TRANSITIONS) continue;
+            for (int i = 0; i < n; i++) {
+                struct pgwt_trace_event *e = &events[i];
+                int owned = 0;
+                for (unsigned w = 0; w < nw; w++)
+                    if (wins[w].pid == e->pid) owned = 1;
+                if (!owned) continue;
+                struct cmd_state *st = cmd_get(gate, e->pid);
+                uint32_t ev = e->old_event;
+                if (ev == PGWT_MARKER_CMD_START || ev == PGWT_MARKER_CMD_END) {
+                    st->seen_cmd = 1;
+                    if (ev == PGWT_MARKER_CMD_START && !st->cmd_open) {
+                        st->cmd_open = 1;
+                        st->anchor = e->timestamp_ns;
+                    } else if (ev == PGWT_MARKER_CMD_END && st->cmd_open) {
+                        st->banked += e->timestamp_ns - st->anchor;
+                        st->cmd_open = 0;
+                    }
+                    for (unsigned w = 0; w < nw; w++)
+                        if (wins[w].pid == e->pid && e->timestamp_ns >= wins[w].from &&
+                            e->timestamp_ns < wins[w].to) wins[w].markers++;
+                    continue;
+                }
+                if (PGWT_IS_MARKER(ev)) continue;
+                int in_cmd = cmd_interval_open(st, e->timestamp_ns, e->duration_ns);
+                uint64_t end = e->timestamp_ns;
+                uint64_t start = end > e->duration_ns ? end - e->duration_ns : 0;
+                for (unsigned w = 0; w < nw; w++) {
+                    struct conservation_window *v = &wins[w];
+                    if (v->pid != e->pid || end <= v->from || start >= v->to) continue;
+                    uint64_t cs = start > v->from ? start : v->from;
+                    uint64_t ce = end < v->to ? end : v->to;
+                    if (!st->seen_cmd || e->cpu_ns == PGWT_CPU_NS_UNKNOWN) {
+                        failed = 1; break;
+                    }
+                    uint64_t left = 0, right = e->cpu_ns;
+                    if (start <= v->from && end > v->from) {
+                        if (start != v->left_ts) { failed = 1; break; }
+                        left = v->left_cpu;
+                        v->edges |= 1;
+                    }
+                    if (start <= v->to && end > v->to) {
+                        if (start != v->right_ts) { failed = 1; break; }
+                        right = v->right_cpu;
+                        v->edges |= 2;
+                    }
+                    if (right < left || right > e->cpu_ns) { failed = 1; break; }
+                    v->trace_cpu += right - left;
+                    v->intervals++;
+                    if (ev == 0) {
+                        v->we0_cpu += right - left;
+                        /* event_stream.c pgwt_counters_add_cpu: the daemon
+                         * metric counts only we==0, clamps nonzero CPU,
+                         * and substitutes wall duration for zero CPU. */
+                        uint64_t deposit = e->cpu_ns == 0 ? ce - cs : right - left;
+                        v->daemon_cpu += deposit;
+                        if (in_cmd) v->daemon_gated_cpu += deposit;
+                        if (e->cpu_ns > e->duration_ns) { failed = 1; break; }
+                    } else v->wait_cpu += right - left;
+                    /* Measured CPU with the command gate in the path; keep
+                     * CPU accrued during waits too, as the ungated map does.
+                     * Separately reproduce the comparator's we==0 wall CPU. */
+                    if (ev != 0 || in_cmd) v->gated_cpu += right - left;
+                    if (ev == 0 && in_cmd) v->gated_wall += ce - cs;
+                }
+                if (failed) break;
+            }
+        }
+        pgwt_reader_close(&r);
+        if (failed) goto done;
+    }
+    for (unsigned w = 0; w < nw; w++)
+        if (wins[w].edges != 3 || !wins[w].intervals || !wins[w].markers) goto done;
+    for (unsigned w = 0; w < nw; w++) {
+        struct conservation_window *v = &wins[w];
+        printf("{\"window\":%u,\"pid\":%u,\"trace_cpu_ns\":%" PRIu64
+               ",\"gated_cpu_ns\":%" PRIu64 ",\"comparator_cpu_wall_ns\":%" PRIu64
+               ",\"daemon_cpu_ns\":%" PRIu64 ",\"we0_cpu_ns\":%" PRIu64
+               ",\"daemon_gated_cpu_ns\":%" PRIu64
+               ",\"wait_cpu_ns\":%" PRIu64
+               ",\"intervals\":%" PRIu64 ",\"markers\":%" PRIu64 "}\n",
+               v->window, v->pid, v->trace_cpu, v->gated_cpu, v->gated_wall,
+               v->daemon_cpu, v->we0_cpu, v->daemon_gated_cpu, v->wait_cpu,
+               v->intervals, v->markers);
+    }
+    rc = 0;
+done:
+    if (rc) fprintf(stderr, "CONSERVATION_UNAVAILABLE trace missing measured CPU, "
+                    "command markers, or matching boundary intervals\n");
+    free(events);
+    free(gate);
+    return rc;
 }
 
 /* --abc retains only window-clipped intervals and window samples. Classification
@@ -476,6 +631,8 @@ int main(int argc, char **argv)
 {
     if (argc >= 2 && !strcmp(argv[1], "--conservation-snapshot"))
         return conservation_snapshot(argc, argv);
+    if (argc >= 2 && !strcmp(argv[1], "--conservation-trace"))
+        return conservation_trace(argc, argv);
     if (argc < 2) {
         fprintf(stderr, "usage: %s <trace_dir> [--tolerance PCT] "
                 "[--min-share PCT] [--raw-ns] [--show-idle]\n", argv[0]);

@@ -589,6 +589,40 @@ def test_cpu_conservation_refuses_population_reuse_and_loss():
     changed = dict(b, map_id=100)
     check(not lib.compare_cpu_window(a, changed, [101])["ok"],
           "daemon map replacement fails")
+    small_gap = lib.compare_cpu_window(a, endpoint(2*S, 991_000_010, S + 20), [101])
+    check(small_gap["ok"] and small_gap["rows"][0]["ratio"] == .991,
+          "fixed 1% tolerance CANNOT reject a 0.9 pp deficit; ratio must be reported")
+    switches = ("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")
+    a["per_pid"][101].update(dict(zip(switches, (100, 20))))
+    b["per_pid"][101].update(dict(zip(switches, (2100, 40))))
+    measured = lib.compare_cpu_window(a, b, [101])
+    check(measured["rows"][0]["switches_per_s"] == 1010,
+          "context switches use actual covered seconds and both status counters")
+    b["per_pid"][101][switches[0]] = 99
+    check("switch counter reset" in lib.compare_cpu_window(a, b, [101])["reason"],
+          "a switch counter reset refuses")
+
+
+def test_context_switch_reader_refuses_missing_counters():
+    with tempfile.TemporaryDirectory() as root:
+        reader = probe.ProcReader(root, clk_tck=100)
+        status = os.path.join(root, "101", "status")
+        _write(status, "Name: postgres\nvoluntary_ctxt_switches: 123\n"
+               "nonvoluntary_ctxt_switches: 7\n")
+        check(reader.context_switches(101) == {"voluntary_ctxt_switches": 123,
+                                              "nonvoluntary_ctxt_switches": 7},
+              "status switch counters read independently of schedstats")
+        for text in (None, "Name: postgres\n", "voluntary_ctxt_switches: no\n"):
+            if text is None:
+                os.unlink(status)
+            else:
+                _write(status, text)
+            try:
+                reader.context_switches(101)
+            except (ValueError, KeyError):
+                check(True, "unreadable/missing/malformed switch counters refuse")
+            else:
+                check(False, "missing switch counters must not become zero")
 
 
 def test_cpu_identity_uses_starttime_after_parenthesised_comm():
@@ -912,11 +946,83 @@ def test_decomposition_does_not_gate_the_rehearsal_verdict():
           f"not a gate in either direction): {check_result}")
 
 
+def trace_conservation_fixtures():
+    """Optional C integration arm: --trace-conservation, after build-tests.
+
+    Hand-calculated stopped endpoints exercise measured CPU, the existing
+    command gate, and #671's wall estimator as distinct instruments. No PG.
+    """
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    xval = os.path.join(tests_dir, "cross_validate")
+    gen = os.path.join(tests_dir, "gen_test_traces")
+    with tempfile.TemporaryDirectory(prefix="pgwt675-fixture-") as root:
+        scenario = os.path.join(root, "scenario.json")
+        trace = os.path.join(root, "trace")
+        spec = os.path.join(root, "windows.txt")
+        # [11,19): .3 CPU accepted, .2 rejected, .1 CPU during a wait,
+        # 2s CPU-labelled wall with zero measured CPU, .2 accepted CPU.
+        # Boundary CPU is .1/.2, NOT half the containing interval's CPU.
+        events = [
+            {"pid": 1, "ts": 10*S, "old": 0xFFFFFFF6, "new": 0},
+            {"pid": 1, "ts": 12*S, "dur": 2*S, "old": 0, "new": 0, "cpu": 400*MS},
+            {"pid": 1, "ts": 12*S, "old": 0xFFFFFFF7, "new": 0},
+            {"pid": 1, "ts": 14*S, "dur": 2*S, "old": 0, "new": 50331649, "cpu": 200*MS},
+            {"pid": 1, "ts": 16*S, "dur": 2*S, "old": 50331649, "new": 0, "cpu": 100*MS},
+            {"pid": 1, "ts": 16*S, "old": 0xFFFFFFF6, "new": 0},
+            {"pid": 1, "ts": 18*S, "dur": 2*S, "old": 0, "new": 0, "cpu": 0},
+            {"pid": 1, "ts": 20*S, "dur": 2*S, "old": 0, "new": 0, "cpu": 500*MS},
+        ]
+
+        def generate(evts):
+            if os.path.isdir(trace):
+                shutil.rmtree(trace)
+            with open(scenario, "w") as f:
+                json.dump({"cpu_measured": 1, "events": evts}, f)
+            subprocess.run([gen, "-o", trace, "-s", scenario], check=True,
+                           capture_output=True, text=True)
+
+        def run(left_ts=10*S, right_ts=18*S):
+            with open(spec, "w") as f:
+                f.write(f"0 1 {11*S} {19*S} {left_ts} {100*MS} {right_ts} {200*MS}\n")
+            return subprocess.run([xval, "--conservation-trace", trace, spec],
+                                  capture_output=True, text=True)
+
+        generate(events)
+        good = run()
+        check(good.returncode == 0, f"C trace diagnostic is available: {good.stderr}")
+        if good.returncode:
+            return
+        row = json.loads(good.stdout)
+        expected = {"trace_cpu_ns": 800*MS, "gated_cpu_ns": 600*MS,
+                    "comparator_cpu_wall_ns": 4*S, "daemon_cpu_ns": 2700*MS,
+                    "daemon_gated_cpu_ns": 2500*MS,
+                    "we0_cpu_ns": 700*MS, "wait_cpu_ns": 100*MS}
+        check(all(row[k] == v for k, v in expected.items()),
+              f"measured CPU, gate, daemon zero fallback, and wall estimate: {row}")
+        for left, right in ((9*S, 18*S), (10*S, 17*S)):
+            bad = run(left, right)
+            check(bad.returncode == 6 and not bad.stdout,
+                  "unmatched boundary refuses instead of prorating measured CPU")
+        no_markers = [e for e in events if e["old"] < 0xFFFFFF00]
+        generate(no_markers)
+        bad = run()
+        check(bad.returncode == 6 and not bad.stdout,
+              "absent command markers refuse legacy accept-all behavior")
+        unknown = [dict(e) for e in events]
+        unknown[3]["cpu"] = (1 << 64) - 1
+        generate(unknown)
+        bad = run()
+        check(bad.returncode == 6 and not bad.stdout,
+              "UNKNOWN CPU refuses instead of pretending to be measured")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             print(f"--- {name} ---")
             fn()
+    if "--trace-conservation" in sys.argv:
+        trace_conservation_fixtures()
     print(f"\n{tests_passed}/{tests_run} passed, {tests_failed} failed")
     return 1 if tests_failed else 0
 

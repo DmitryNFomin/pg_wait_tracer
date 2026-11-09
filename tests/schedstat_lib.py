@@ -138,6 +138,8 @@ def parse_schedstat(text):
 # Fixed before the live experiment; not a platform/share tolerance. Stopped
 # boundaries remove open-stretch and stale schedstat ambiguity. Allow 1% or
 # 1 ms of accounting difference, whichever is larger; print every residual.
+# This 1% bound CANNOT reject #675's 0.9 pp deficit. It is an accounting
+# diagnostic only, never evidence that the issue's shortfall is absent.
 CPU_CONSERVATION_REL_TOL = 0.01
 CPU_CONSERVATION_ABS_NS = 1_000_000
 
@@ -177,6 +179,13 @@ def compare_cpu_window(before, after, expected_pids):
                      "runtime_ns": runtime, "ratio": exact / runtime,
                      "residual_ns": residual, "limit_ns": limit,
                      "ok": abs(residual) <= limit})
+        switch_keys = ("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")
+        if all(k in x for x in (a, b) for k in switch_keys):
+            deltas = {k: b[k] - a[k] for k in switch_keys}
+            if any(v < 0 for v in deltas.values()):
+                return {"ok": False, "reason": f"pid={pid} switch counter reset", "rows": rows}
+            rows[-1].update(deltas)
+            rows[-1]["switches_per_s"] = sum(deltas.values()) / (span / 1e9)
     return {"ok": all(r["ok"] for r in rows), "rows": rows, "reason": None}
 
 
