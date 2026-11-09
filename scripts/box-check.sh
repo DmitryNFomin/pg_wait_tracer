@@ -21,6 +21,7 @@
 #   PGWT_BOX          ssh target for the default (Ubuntu) box, e.g. root@1.2.3.4
 #   PGWT_BOX_EL8 / PGWT_BOX_EL9 / PGWT_BOX_UBUNTU   per-OS targets
 #   PGWT_BOX_DIR      remote checkout root (default ~/pgwt-check)
+#   PGWT_BOX_RESULTS_DIR local log/artifact directory (default tests/results)
 #   PGWT_PGPORT / PGWT_PG_PORT_BASE   forwarded to the remote tests/run_all.sh
 #                     (via `sudo env ...`, since sudo's default env_reset would
 #                     otherwise drop them) when set on the Mac side; see
@@ -90,11 +91,12 @@ EPHEMERAL="${EPHEMERAL:-0}"
 KEEP="${KEEP:-0}"
 
 ts=$(date +%Y%m%d-%H%M%S)
-mkdir -p tests/results
+results_dir="${PGWT_BOX_RESULTS_DIR:-tests/results}"
+mkdir -p "$results_dir"
 if [[ "$EPHEMERAL" == "1" ]]; then
-    log="tests/results/box-check-ephemeral-$OS-$ts.log"
+    log="$results_dir/box-check-ephemeral-$OS-$ts.log"
 else
-    log="tests/results/box-check-$OS-$ts.log"
+    log="$results_dir/box-check-$OS-$ts.log"
 fi
 : > "$log"
 
@@ -493,13 +495,13 @@ rc=${PIPESTATUS[0]}
 # marker run_all.sh's own re-emit gates on (review item 3): a stale ui_live/
 # left over from a previous box-check must never be reported as if it were
 # this run's evidence.
-mkdir -p tests/results/ui_live
-if rsync -az --delete -e "$rsync_e" "$target:$remote_dir/tests/results/ui_live/" tests/results/ui_live/ 2>/dev/null; then
-    run_id="$(cat tests/results/ui_live/run.id 2>/dev/null || true)"
+mkdir -p "$results_dir/ui_live"
+if rsync -az --delete -e "$rsync_e" "$target:$remote_dir/tests/results/ui_live/" "$results_dir/ui_live/" 2>/dev/null; then
+    run_id="$(cat "$results_dir/ui_live/run.id" 2>/dev/null || true)"
     if [[ -n "$run_id" && "$run_id" =~ ^[0-9]+$ && "$run_id" -ge "$box_check_start_epoch" ]]; then
-        echo "box-check: tests/results/ui_live/ synced back from $target (run.id=$run_id, this invocation)"
+        echo "box-check: $results_dir/ui_live/ synced back from $target (run.id=$run_id, this invocation)"
     else
-        echo "box-check: tests/results/ui_live/ synced back from $target BUT run.id=${run_id:-<missing>} predates this invocation (started $box_check_start_epoch) -- STALE evidence from a previous run, the smoke likely did not complete this time"
+        echo "box-check: $results_dir/ui_live/ synced back from $target BUT run.id=${run_id:-<missing>} predates this invocation (started $box_check_start_epoch) -- STALE evidence from a previous run, the smoke likely did not complete this time"
     fi
 else
     echo "box-check: no tests/results/ui_live/ on $target (test_ui_live_smoke skipped or produced no artifacts)"

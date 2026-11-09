@@ -124,6 +124,14 @@ struct {
     __type(key, u32);
     __type(value, u64);
 } pacing_sleep SEC(".maps");
+/* An observed but deliberately rejected enter is not a lost pacing enter.
+ * Keep it separate so neither the sampler nor exact accounting sees idle. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_BACKENDS);
+    __type(key, u32);
+    __type(value, u8);
+} pacing_ignored_enter SEC(".maps");
 
 /* Stage 3 exact attribution is split by writer ownership. exact_attr_map is
  * BPF-only edge state; exact_seed_map is userspace-only coherent window-start
@@ -603,20 +611,27 @@ static __always_inline int pacing_enter(u64 nfds, const void *timeout,
                                          bool is_pselect)
 {
     u32 pid = bpf_get_current_pid_tgid() >> 32;
-    if (test_pacing_filter_never_match || nfds != 0 || !timeout ||
-        !bpf_map_lookup_elem(&ckpt_pacing_pids, &pid))
+    if (!bpf_map_lookup_elem(&ckpt_pacing_pids, &pid))
         return 0;
+    if (test_pacing_filter_never_match || nfds != 0 || !timeout)
+        goto ignored;
     if (is_pselect) {
         struct pgwt_pselect_timeout ts = {};
-        if (bpf_probe_read_user(&ts, sizeof(ts), timeout) ||
-            ts.tv_sec != 0 || ts.tv_nsec != 100000000)
+        /* An unreadable request is unknown, not a proven non-match: leave
+         * no marker so the unmatched-exit counter exposes that loss. */
+        if (bpf_probe_read_user(&ts, sizeof(ts), timeout))
             return 0;
+        if (ts.tv_sec != 0 || ts.tv_nsec != 100000000)
+            goto ignored;
     } else {
         struct pgwt_select_timeout tv = {};
-        if (bpf_probe_read_user(&tv, sizeof(tv), timeout) ||
-            tv.tv_sec != 0 || tv.tv_usec != 100000)
+        if (bpf_probe_read_user(&tv, sizeof(tv), timeout))
             return 0;
+        if (tv.tv_sec != 0 || tv.tv_usec != 100000)
+            goto ignored;
     }
+    /* A dropped matching enter must leave no marker: its exit is the
+     * deliberate missing-enter failure that the integer gate measures. */
     if (test_pacing_drop_every_4th && ((pacing_test_seq++ & 3) == 3))
         return 0;
     count_uprobe_fire(is_pselect ? PGWT_UPROBE_FIRE_PSELECT6 : PGWT_UPROBE_FIRE_SELECT);
@@ -628,14 +643,30 @@ static __always_inline int pacing_enter(u64 nfds, const void *timeout,
     if (st && st->wp_live && st->last_event == 0 && exact_admission_open())
         record_transition(pid, st, PGWT_WEI_CKPT_PACING);
     return 0;
+ignored:;
+    u8 present = 1;
+    bpf_map_update_elem(&pacing_ignored_enter, &pid, &present, BPF_ANY);
+    return 0;
 }
 static __always_inline int pacing_exit(void)
 {
     u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (!bpf_map_lookup_elem(&ckpt_pacing_pids, &pid))
+        return 0;
+    if (bpf_map_lookup_elem(&pacing_ignored_enter, &pid)) {
+        bpf_map_delete_elem(&pacing_ignored_enter, &pid);
+        return 0;
+    }
     /* Only a matched enter owns a sleep, but an interrupted/restarted syscall
      * still closes its true elapsed duration on this exit. */
-    if (!bpf_map_lookup_elem(&pacing_sleep, &pid))
+    if (!bpf_map_lookup_elem(&pacing_sleep, &pid)) {
+        /* For one continuously registered checkpointer, only registration
+         * mid-syscall can honestly produce this, once. Same-thread enter/exit
+         * serialize; pacing_sleep is removed only here or at process exit.
+         * Each new checkpointer registration gets its own boundary allowance. */
+        count_uprobe_fire(PGWT_UPROBE_FIRE_PACING_UNMATCHED_EXIT);
         return 0;
+    }
     bpf_map_delete_elem(&pacing_sleep, &pid);
     struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
     if (st && st->wp_live && st->last_event == PGWT_WEI_CKPT_PACING &&
@@ -821,6 +852,7 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
 
     bpf_map_delete_elem(&pacing_sleep, &pid);
     bpf_map_delete_elem(&ckpt_pacing_pids, &pid);
+    bpf_map_delete_elem(&pacing_ignored_enter, &pid);
     struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
     if (!st)
         return 0;

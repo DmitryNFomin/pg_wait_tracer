@@ -1950,6 +1950,7 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
      * anything below detaches watchpoints or flushes entries — the dump must
      * show exactly what the last live tick saw. No-op unless the env is set. */
     pgwt_debug_dump_state_map(d);
+    pgwt_pacing_probe_finish(d);
 
     /* Close any open escalation window (detaches watchpoints, writes the END
      * marker) before the event writer is torn down. */

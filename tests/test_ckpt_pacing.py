@@ -7,30 +7,31 @@ The timed-checkpoint workload follows scratchpad/i804/exp.sh: 30s timeout, .9
 completion target, 3m dirty rows, one generate_series client, an 8-second window.
 
 The supplied measurements were 8.7s controls vs 17.4--19.2s broken. We require
-<=12s total and <=2s checkpointer DB Time.
+<=12s total DB Time and retain the <=10% residual/pacing ratio as a gross-leak
+backstop. That ratio does not test the one-partial-sleep mechanism.
 
-Residual checkpointer DB Time after the exclusion (measured, PG13, ten full-mode
-and eight tiered captures from the #804 branch's own runs, same workload):
-full mode 18.3--106.7ms (18.3, 26.5, 35.2, 46.6, 51.1, 54.5, 58.5, 66.7, 95.8, 106.7),
-with 26.5ms from the round-4 PG13 re-gate run and 18.3ms from the round-5 run;
-tiered mode exactly 0.0ms in every run. Cause, full
-mode only: a capture window that begins inside a 100ms select/pselect6 sleep has
-no observed enter (src/bpf/pg_wait_tracer.bpf.c: wp_live==0 cannot fabricate
-one), so that first PARTIAL sleep is counted as load -- at most one 100ms sleep,
-and the observed maximum (106.7ms) is consistent with one full sleep plus slack
-(the slack part is inferred, not separately measured). It
-is the over-counting direction (idle_rule.h), once per window, not per sleep.
-The 2s bound is therefore ~19x the worst measured residual: it is a deliberately
-loose gross-leak ceiling that still fails the unmitigated ~8-10s pacing leak,
-not a tight estimate of the residual. PG>=14.3 (native event) measured 1.7ms full / 0.0ms
-tiered (PG18, gate-3), where the probe is not attached at all.
+The mechanism gate counts unmatched syscall exits, not elapsed milliseconds.
+For the single continuously registered checkpointer in this workload, at most
+one exit may lack an observed enter: registration can occur mid-sleep. Both
+syscall hooks are attached before registration; same-thread enters/exits
+serialize, and the sleep map is removed only on exit or process termination.
+We verify the checkpointer PID remains the same through each capture. Proven
+nonmatching requests are marked separately, so their exits are not mistaken
+for missing enters; an unreadable timeout remains an unmatched-exit failure.
+New checkpointer registrations have separate boundary allowances; this test
+does not permit replacements.
+The counter is frozen at shutdown, covering the entire capture rather than
+leaving a tail after the last live scrape. Dropping every fourth matching
+enter must fail this same quantity enforcement with >1 unmatched exit.
+
+Prior PG13 observations corroborate the boundary mechanism: full-mode residuals
+spanned 18.3--106.7ms, while tiered residuals were 0.0ms. The observed maximum
+is consistent with one requested 100ms sleep plus scheduler slack (the slack
+is inferred, not separately measured). Requested timeout is not an elapsed-time
+ceiling. At the >=3000ms pacing floor that range is 0.6--3.6%; the 10% ratio
+only catches gross loss, and cannot distinguish one partial sleep from several
+lost sleeps. PG>=14.3 uses the native event, without the syscall probe.
 A >=3s pacing row and >=5s client prevent empty/quiet captures passing.
-We also require checkpointer DB Time <=10% of the measured pacing total. The
-worst measured residual is one partial 100ms sleep (18.3--106.7ms), 0.6--3.6%
-of the >=3000ms pacing total, so 10% does not flake from that known source.
-This catches roughly >=10% pacing loss; it would NOT catch loss under ~10%.
-A test-only hook drops every fourth matching enter, and a full-mode partial-loss
-control requires the same ratio assertion to report a violation on that capture.
 
 Positive controls use a tiny dynamic background worker instead of depending on
 hardware-specific checkpoint IO speed: CPU mode really burns CPU; lock mode
@@ -172,12 +173,12 @@ def wait_pacing(ckpt, native):
     wait_for(asleep, 45, 'timed checkpoint write spreading')
 
 
-def pacing_accounting_violations(ckpt_ms, pacing_ms):
+def pacing_accounting_violations(ckpt_ms, pacing_ms, unmatched_exits):
     violations = []
-    if not ckpt_ms <= 2000:
-        violations.append('gross-leak ceiling')
+    if unmatched_exits is not None and unmatched_exits > 1:
+        violations.append('unmatched exits')
     if not ckpt_ms <= 0.10 * pacing_ms:
-        violations.append('ratio')
+        violations.append('gross-leak ratio')
     return violations
 
 
@@ -204,6 +205,20 @@ def pacing_workload_capture(pm, base, mode, ckpt, native, drop4=False):
         if drop4:
             require('PGWT_TEST_PACING_DROP_EVERY_4TH=1' in result.stderr,
                     f'{mode} partial-loss test hook is loud')
+        require(int(sql("SELECT pid FROM pg_stat_activity WHERE backend_type='checkpointer'"))
+                == ckpt, f'{mode} checkpointer PID unchanged across capture')
+        unmatched = None
+        if not native:
+            finals = re.findall(r'ckpt_pacing_final=(\{[^\n]+\})', result.stderr)
+            require(len(finals) == 1, f'{mode} final pacing counters cover the full capture')
+            counters = json.loads(finals[0])
+            print(f'{mode} final pacing counters: {json.dumps(counters, separators=(",", ":"))}',
+                  flush=True)
+            require(counters['ckpt_pacing_probe_state'] == 'ok' and counters['fires'] > 0,
+                    f'{mode} pacing probe is applicable and fires')
+            unmatched = counters['unmatched_exits']
+            require(type(unmatched) is int and unmatched >= 0,
+                    f'{mode} unmatched exits is a nonnegative integer')
         tm = report(directory, 'time_model')
         total = float(tm['db_time_ms'])
         sessions = report(directory, 'top_sessions')['rows']
@@ -214,17 +229,22 @@ def pacing_workload_capture(pm, base, mode, ckpt, native, drop4=False):
         pacing = sum(float(r['total_ms']) for r in events
                      if r['name'] == 'Timeout:CheckpointWriteDelay')
         require(pacing >= 3000, f'{mode} pacing workload present: {pacing:.1f}ms')
-        return total, ckpt_ms, pacing
+        return total, ckpt_ms, pacing, unmatched
     finally:
         stop_sql(client, label)
 
 
-def quantity(pm, base, mode, ckpt, native):
-    total, ckpt_ms, pacing = pacing_workload_capture(pm, base, mode, ckpt, native)
+def quantity(pm, base, mode, ckpt, native, drop4=False):
+    total, ckpt_ms, pacing, unmatched = pacing_workload_capture(
+        pm, base, mode, ckpt, native, drop4=drop4)
     require(5000 <= total <= 12000, f'{mode} total DB Time {total:.1f}ms in [5000,12000]')
-    violations = pacing_accounting_violations(ckpt_ms, pacing)
-    require(not violations, f'{mode} checkpointer DB Time {ckpt_ms:.1f}ms <=2000 '
-            f'and <=10% of pacing {pacing:.1f}ms; violated bounds: {violations}')
+    violations = pacing_accounting_violations(ckpt_ms, pacing, unmatched)
+    mechanism = (f'unmatched exits {unmatched} <=1' if unmatched is not None
+                 else 'native pacing event (no syscall bridge)')
+    message = (f'{mode} {mechanism}; checkpointer DB Time '
+               f'{ckpt_ms:.1f}ms <=10% of pacing {pacing:.1f}ms (gross-leak backstop); '
+               f'violated bounds: {violations}')
+    require(not violations, message)
 
 
 def compile_worker(base, pm, major):
@@ -287,7 +307,7 @@ def positive_controls(pm, base, mode, library):
         sl_events = report(directory, 'top_events', pid=sleeper)['rows']
         mis = sum(float(r['total_ms']) for r in sl_events
                   if r['name'] == 'Timeout:CheckpointWriteDelay')
-        require(mis <= 200, f'{mode} non-checkpointer 100ms sleep is NOT '
+        require(mis == 0, f'{mode} non-checkpointer 100ms sleep is NOT '
                 f'Timeout:CheckpointWriteDelay ({mis:.1f}ms)')
         if mode == 'full':
             sl_tm = report(directory, 'time_model', pid=sleeper)
@@ -328,12 +348,17 @@ def partial_loss_control(pm, base, ckpt, native):
         print('SKIP partial-loss control: PG>=14.3 supplies native CheckpointWriteDelay',
               flush=True)
         return
-    _, ckpt_ms, pacing = pacing_workload_capture(pm, base, 'full', ckpt, native, drop4=True)
-    violations = pacing_accounting_violations(ckpt_ms, pacing)
-    require('ratio' in violations,
-            f'partial-loss control reports ratio violation: checkpointer {ckpt_ms:.1f}ms, '
-            f'pacing {pacing:.1f}ms, ratio ceiling {0.10 * pacing:.1f}ms; '
-            f'violated bounds: {violations}')
+    # Call the actual quantity gate. Removing its enforcement must make this
+    # control fail, even if the diagnostic helper still reports violations.
+    try:
+        quantity(pm, base, 'full', ckpt, native, drop4=True)
+    except AssertionError as error:
+        message = str(error)
+        print(f'RED partial-loss quantity gate: {message}', flush=True)
+        require("violated bounds: ['unmatched exits', 'gross-leak ratio']" in message,
+                'partial-loss control trips the enforced integer and gross-leak ratio gates')
+    else:
+        raise AssertionError('partial-loss control: quantity gate did not fail')
 
 
 def main():
@@ -352,11 +377,11 @@ def main():
     native = version >= 140003
     require(major >= 13, f'supported PostgreSQL {version}')
     server_version = sql('SHOW server_version')
-    if major == 14 and (version < 140003 or not re.match(r'^\d+\.\d+', server_version)):
+    skip_pacing = major == 14 and (version < 140003 or not re.match(r'^\d+\.\d+', server_version))
+    if skip_pacing:
         print(f'SKIP pacing quantity/refusal/partial-loss: PG14 {server_version}: '
               'daemon does not attach the bridge; deferred to #830 '
               '(exact PG14/15/16 Timeout tables)', flush=True)
-        return
     ckpt = int(sql("SELECT pid FROM pg_stat_activity WHERE backend_type='checkpointer'"))
     # ALTER SYSTEM is restored exactly: preserve an existing auto.conf override
     # instead of converting an inherited setting into a permanent override.
@@ -375,10 +400,12 @@ def main():
             sql(f'CREATE TABLE {TABLE} WITH (autovacuum_enabled=false) AS '
                 'SELECT g, md5(g::text) m FROM generate_series(1,3000000) g')
             for mode in modes:
-                quantity(pm, base, mode, ckpt, native)
+                if not skip_pacing:
+                    quantity(pm, base, mode, ckpt, native)
                 positive_controls(pm, base, mode, library)
-            refusal(pm, base, ckpt, native)
-            partial_loss_control(pm, base, ckpt, native)
+            if not skip_pacing:
+                refusal(pm, base, ckpt, native)
+                partial_loss_control(pm, base, ckpt, native)
         finally:
             # Python finally is the trap: SIGTERM/SIGINT are converted to an
             # exception below so every exit restores GUCs and removes fixtures.

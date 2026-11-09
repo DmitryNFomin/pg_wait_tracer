@@ -1073,6 +1073,7 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     started_ns = pgwt_debug_block_begin(d);
     bpf_map_delete_elem(bpf_map__fd(d->skel->maps.ckpt_pacing_pids), &key);
     bpf_map_delete_elem(bpf_map__fd(d->skel->maps.pacing_sleep), &key);
+    bpf_map_delete_elem(bpf_map__fd(d->skel->maps.pacing_ignored_enter), &key);
     bpf_map_delete_elem(state_fd, &key);
     bpf_map_delete_elem(attr_fd, &key);
     bpf_map_delete_elem(seed_fd, &key);

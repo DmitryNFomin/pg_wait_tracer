@@ -1488,8 +1488,10 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     }
 
     uint64_t invalid_before = d->counters.invalid_wait_reads_total;
-    /* Memory first, map second: a map miss/read failure always counts load.
-     * Crossing a syscall boundary can misclassify at most this tick. */
+    /* Memory first, map second: an enter between reads can exclude an on-CPU
+     * tick; an exit between reads can count a sleeping tick as load. Either
+     * direction is the sampler's inherent one-tick quantisation at a state
+     * boundary, with one enter per exit, rather than a directional bias. */
     for (int i = 0; i < n; i++)
         if (s->read_valid[i])
             s->read_vals[i] = pgwt_sampler_pacing_event(targets[i].backend_type,

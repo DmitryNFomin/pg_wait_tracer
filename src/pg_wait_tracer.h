@@ -409,7 +409,8 @@ static inline int pgwt_classify_wei(uint32_t wei)
 #define PGWT_UPROBE_FIRE_ACTIVITY  1
 #define PGWT_UPROBE_FIRE_SELECT    2
 #define PGWT_UPROBE_FIRE_PSELECT6  3
-#define PGWT_UPROBE_FIRE_MAX       4
+#define PGWT_UPROBE_FIRE_PACING_UNMATCHED_EXIT 4
+#define PGWT_UPROBE_FIRE_MAX       5
 
 /* ── BPF Accumulator (lightweight mode — no ringbuf) ───── */
 #define ACCUM_MAP_MAX_ENTRIES 1024

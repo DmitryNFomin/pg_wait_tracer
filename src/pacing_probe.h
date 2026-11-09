@@ -26,4 +26,5 @@ struct pgwt_backend;
 int pgwt_pacing_probe_attach(struct pgwt_daemon *d);
 int pgwt_pacing_register_backend(struct pgwt_daemon *d, struct pgwt_backend *be);
 void pgwt_pacing_probe_check(struct pgwt_daemon *d);
+void pgwt_pacing_probe_finish(struct pgwt_daemon *d);
 #endif

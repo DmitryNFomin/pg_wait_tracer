@@ -17,6 +17,32 @@ static uint64_t pacing_fires(struct pgwt_daemon *d)
            pgwt_exact_uprobe_fire_count(d, PGWT_UPROBE_FIRE_PSELECT6);
 }
 
+void pgwt_pacing_probe_finish(struct pgwt_daemon *d)
+{
+    if (!d->skel || !d->ckpt_pacing_probe_state ||
+        !pgwt_needs_ckpt_pacing_probe(d->pg_major_version, d->pg_minor_version))
+        return;
+    /* Freeze exits first so teardown cannot manufacture unmatched exits by
+     * removing enters while exits are still observing the checkpointer. */
+#define DETACH_PACING(prog) do { \
+    bpf_link__destroy(d->skel->links.prog); \
+    d->skel->links.prog = NULL; \
+} while (0)
+    DETACH_PACING(on_select_exit);
+    DETACH_PACING(on_pselect6_exit);
+    DETACH_PACING(on_select_enter);
+    DETACH_PACING(on_pselect6_enter);
+#undef DETACH_PACING
+    /* Final, frozen counters cover the entire capture, including its tail;
+     * a last live control-socket scrape would leave that tail unobserved. */
+    fprintf(stderr, "INFO: ckpt_pacing_final={\"ckpt_pacing_probe_state\":\"%s\","
+            "\"fires\":%llu,\"unmatched_exits\":%llu}\n",
+            d->ckpt_pacing_probe_state,
+            (unsigned long long)pacing_fires(d),
+            (unsigned long long)pgwt_exact_uprobe_fire_count(
+                d, PGWT_UPROBE_FIRE_PACING_UNMATCHED_EXIT));
+}
+
 int pgwt_pacing_probe_attach(struct pgwt_daemon *d)
 {
     d->ckpt_pacing_asleep_observations = 0;
