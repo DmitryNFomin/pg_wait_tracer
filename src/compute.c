@@ -3276,10 +3276,11 @@ static int te_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
                     ctx->db_time_ns += sq->top_events[j].total_ns;
 
                 uint32_t h = eid & EVENT_HT_MASK;
-                while (ctx->ht[h].count > 0 && ctx->ht[h].event_id != eid)
+                while (ctx->ht[h].used && ctx->ht[h].event_id != eid)
                     h = (h + 1) & EVENT_HT_MASK;
 
-                if (ctx->ht[h].count == 0) {
+                if (!ctx->ht[h].used) {
+                    ctx->ht[h].used = 1;
                     ctx->ht[h].event_id = eid;
                     ctx->num_entries++;
                 }
@@ -3309,7 +3310,7 @@ static int te_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 
     for (int e = 0; e < SUMMARY_MAX_EVENTS; e++) {
         const struct pgwt_summary_event *se = &rec->events[e];
-        if (se->event_id == 0 && se->count == 0) continue;
+        if (se->event_id == 0 && se->count == 0 && se->total_ns == 0) continue;
         if (pgwt_is_hidden_event(se->event_id)) continue;
         if (!summary_event_matches_filter(ctx->f, se->event_id)) continue;
 
@@ -3318,10 +3319,11 @@ static int te_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
             ctx->db_time_ns += se->total_ns;
 
         uint32_t h = se->event_id & EVENT_HT_MASK;
-        while (ctx->ht[h].count > 0 && ctx->ht[h].event_id != se->event_id)
+        while (ctx->ht[h].used && ctx->ht[h].event_id != se->event_id)
             h = (h + 1) & EVENT_HT_MASK;
 
-        if (ctx->ht[h].count == 0) {
+        if (!ctx->ht[h].used) {
+            ctx->ht[h].used = 1;
             ctx->ht[h].event_id = se->event_id;
             ctx->num_entries++;
         }
@@ -3329,7 +3331,7 @@ static int te_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
         ctx->ht[h].total_ns += se->total_ns;
         /* Summaries are built from exact records only. */
         ctx->ht[h].exact_count += se->count;
-        ctx->ht[h].exact_total_ns += se->total_ns;
+        ctx->ht[h].exact_total_ns += se->full_duration_ns;
         if (se->max_ns > ctx->ht[h].max_ns)
             ctx->ht[h].max_ns = se->max_ns;
         for (int b = 0; b < HISTOGRAM_BUCKETS; b++)
@@ -3364,7 +3366,7 @@ void pgwt_compute_top_events_from_summaries(
     int nr = 0;
 
     for (int i = 0; i < EVENT_HT_SIZE; i++) {
-        if (ctx.ht[i].count == 0) continue;
+        if (!ctx.ht[i].used) continue;
 
         struct pgwt_event_row *row = &rows[nr];
         row->event_id = ctx.ht[i].event_id;

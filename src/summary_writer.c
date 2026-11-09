@@ -553,6 +553,7 @@ static int accum_event(struct pgwt_summary_accum *acc,
     if (se) {
         se->count++;
         se->total_ns += tns;
+        se->full_duration_ns += dur;
         if (dur > se->max_ns) se->max_ns = dur;
         uint32_t bucket = pgwt_duration_to_bucket(dur);
         if (bucket < HISTOGRAM_BUCKETS)
@@ -812,10 +813,11 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
         memcpy(p, &e->event_id, 4);  p += 4;
         memcpy(p, &e->count, 8);     p += 8;
         memcpy(p, &e->total_ns, 8);  p += 8;
+        memcpy(p, &e->full_duration_ns, 8); p += 8;
         memcpy(p, &e->max_ns, 8);    p += 8;
         memcpy(p, e->histogram, HISTOGRAM_BUCKETS * 8);
         p += HISTOGRAM_BUCKETS * 8;
-        /* 4 + 8 + 8 + 8 + 128 = 156 bytes per event */
+        /* 4 + 8 + 8 + 8 + 8 + 128 = 164 bytes per event */
     }
 
     /* Per-session entries: only non-empty */
@@ -904,16 +906,24 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
 
     /* Per-event entries */
     for (int i = 0; i < n_events; i++) {
-        if (p + 156 > end) return -1;
+        /* v11 adds the full-duration average numerator. Older layouts
+         * remain decodable by direct callers; the file reader refuses them
+         * for computation before reaching this function. */
+        size_t event_size = version >= 11 ? 164 : 156;
+        if (p > end || (size_t)(end - p) < event_size) return -1;
 
         uint32_t event_id;
         memcpy(&event_id, p, 4);  p += 4;
 
         struct pgwt_summary_event *e = find_or_insert_event(acc, event_id);
-        if (!e) { p += 152; continue; }
+        if (!e) { p += event_size - 4; continue; }
 
         memcpy(&e->count, p, 8);     p += 8;
         memcpy(&e->total_ns, p, 8);  p += 8;
+        e->full_duration_ns = 0; /* absent in pre-v11 files */
+        if (version >= 11) {
+            memcpy(&e->full_duration_ns, p, 8); p += 8;
+        }
         memcpy(&e->max_ns, p, 8);    p += 8;
         memcpy(e->histogram, p, HISTOGRAM_BUCKETS * 8);
         p += HISTOGRAM_BUCKETS * 8;
@@ -2253,9 +2263,8 @@ int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
      * daemon left behind — never truncate it. */
     recover_current_summary(w);
 
-    /* Allocate scratch buffers.
-     * Worst case: 1024 events × 156 + 1024 sessions × 32 + 2048 queries × 36
-     *           = 159744 + 32768 + 73728 = ~260 KB uncompressed */
+    /* Allocate scratch buffers, including 164-byte v11 events, 44-byte v9
+     * sessions, full per-query entries and both record trailers. */
     /* Derived from the table bounds, not a round number: see
      * PGWT_SUMMARY_SERIALIZE_MAX. */
     w->encode_buf_size = PGWT_SUMMARY_SERIALIZE_MAX;

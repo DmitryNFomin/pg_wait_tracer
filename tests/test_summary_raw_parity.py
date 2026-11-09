@@ -304,8 +304,8 @@ def issue_for(field, window):
     # byte-for-byte. Adding top_events to CMDS exposed rather than caused
     # them. At the window edge, 3000 ms is misattributed from Client:ClientWrite
     # to Lock:relation, with the pair total conserved at 127000 ms. The ~2x
-    # avg_us discrepancy shows the count is wrong independently of that
-    # duration shift. Deleting these 8 entries is the last step of landing
+    # avg_us discrepancy is numerator-only: counts agree (11/11 and
+    # 114/114), but summaries divide clipped time rather than full durations. Deleting these 8 entries is the last step of landing
     # #818's fix, consistent with the rule above for deleting fixed pins.
     if (window == "straddle_130s"
             and field in {"events/row/%s/%s" % (event, column)
