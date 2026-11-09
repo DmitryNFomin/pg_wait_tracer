@@ -9,9 +9,11 @@
 #define PGWT_PACING_INERT_THRESHOLD 5U
 enum pgwt_pacing_verdict { PGWT_PACING_OK, PGWT_PACING_INERT };
 void pgwt_parse_pg_version(const char *line, int *major, int *minor);
-/* Attach only for a confidently parsed major == 13, or major == 14 with a
- * parsed minor in [0,3). An unknown minor on PG14 (14beta/14rc/14devel), or a
- * failed parse leaving major 0, is not applicable: no bridge is attached and
+/* Attach only for a confidently parsed major == 13. PG14.0-14.2 is deferred
+ * to #830 (exact PG14/15/16 Timeout tables): the tracer's native PG14 id 1
+ * and synthetic id 30 share "CheckpointWriteDelay" but have opposite
+ * accounting (native counted, synthetic excluded). A failed parse leaving
+ * major 0 is not applicable: no bridge is attached and
  * the checkpointer's 100 ms pg_usleep is COUNTED as DB Time. This visible
  * over-counting is the safe failure per idle_rule.h; silently under-counting
  * is not. No parse failure can make this predicate exclude time that the

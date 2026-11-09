@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refs #804: pacing quantity, background positive controls, and inert refusal.
+"""Refs #804: pacing quantity, positive controls, inert refusal and partial loss.
 
 Linux/root/live PG13..18, matching server development headers, cc, built daemon
 and pgwt-server. No version pin. Both full and DEFAULT tiered capture are tested.
@@ -20,10 +20,16 @@ and the observed maximum (106.7ms) is consistent with one full sleep plus slack
 (the slack part is inferred, not separately measured). It
 is the over-counting direction (idle_rule.h), once per window, not per sleep.
 The 2s bound is therefore ~19x the worst measured residual: it is a deliberately
-loose ceiling that still fails the unmitigated ~8-10s pacing leak, not a tight
-estimate of the residual. PG>=14.3 (native event) measured 1.7ms full / 0.0ms
+loose gross-leak ceiling that still fails the unmitigated ~8-10s pacing leak,
+not a tight estimate of the residual. PG>=14.3 (native event) measured 1.7ms full / 0.0ms
 tiered (PG18, gate-3), where the probe is not attached at all.
 A >=3s pacing row and >=5s client prevent empty/quiet captures passing.
+We also require checkpointer DB Time <=10% of the measured pacing total. The
+worst measured residual is one partial 100ms sleep (35.2--106.7ms), 1.3--3.6%
+of the >=3000ms pacing total, so 10% does not flake from that known source.
+This catches roughly >=10% pacing loss; it would NOT catch loss under ~10%.
+A test-only hook drops every fourth matching enter, and a full-mode partial-loss
+control requires the same ratio assertion to report a violation on that capture.
 
 Positive controls use a tiny dynamic background worker instead of depending on
 hardware-specific checkpoint IO speed: CPU mode really burns CPU; lock mode
@@ -103,10 +109,12 @@ def proc_stat(pid):
     return fields[0], int(fields[11]) + int(fields[12])  # state, utime+stime
 
 
-def capture(pm, directory, mode, seconds=8, never_match=False):
+def capture(pm, directory, mode, seconds=8, never_match=False, drop4=False):
     env = dict(os.environ)
     if never_match:
         env['PGWT_TEST_PACING_FILTER_NEVER_MATCH'] = '1'
+    if drop4:
+        env['PGWT_TEST_PACING_DROP_EVERY_4TH'] = '1'
     args = [str(TRACER), '--pid', str(pm), '--interval', '8', '--duration',
             str(seconds), '--quiet', '-T', str(directory)]
     if mode == 'full':
@@ -163,7 +171,16 @@ def wait_pacing(ckpt, native):
     wait_for(asleep, 45, 'timed checkpoint write spreading')
 
 
-def quantity(pm, base, mode, ckpt, native):
+def pacing_accounting_violations(ckpt_ms, pacing_ms):
+    violations = []
+    if not ckpt_ms <= 2000:
+        violations.append('gross-leak ceiling')
+    if not ckpt_ms <= 0.10 * pacing_ms:
+        violations.append('ratio')
+    return violations
+
+
+def pacing_workload_capture(pm, base, mode, ckpt, native, drop4=False):
     # Refuse (never absorb) load this test did not start: a stray active
     # client, e.g. one leaked by an earlier test, doubles total DB Time and
     # would read as a probe miss.
@@ -180,23 +197,33 @@ def quantity(pm, base, mode, ckpt, native):
         wait_for(lambda: sql(f"SELECT count(*) FROM pg_stat_activity WHERE application_name='{label}' "
                              "AND state='active'") == '1', 5, 'CPU client running')
         client_pid = int(sql(f"SELECT pid FROM pg_stat_activity WHERE application_name='{label}'"))
-        directory = base / ('quantity_' + mode)
-        result = capture(pm, directory, mode)
+        directory = base / (('partial_loss_' if drop4 else 'quantity_') + mode)
+        result = capture(pm, directory, mode, drop4=drop4)
         require(result.returncode == 0, f'{mode} capture succeeds: {result.stderr[-1200:]}')
+        if drop4:
+            require('PGWT_TEST_PACING_DROP_EVERY_4TH=1' in result.stderr,
+                    f'{mode} partial-loss test hook is loud')
         tm = report(directory, 'time_model')
         total = float(tm['db_time_ms'])
-        require(5000 <= total <= 12000, f'{mode} total DB Time {total:.1f}ms in [5000,12000]')
         sessions = report(directory, 'top_sessions')['rows']
         ckpt_ms = sum(float(r['db_time_ms']) for r in sessions if int(r['pid']) == ckpt)
         cpu_ms = sum(float(r['db_time_ms']) for r in sessions if int(r['pid']) == client_pid)
         require(cpu_ms >= 5000, f'{mode} real CPU client counted: {cpu_ms:.1f}ms')
-        require(ckpt_ms <= 2000, f'{mode} checkpointer DB Time {ckpt_ms:.1f}ms <=2000')
         events = report(directory, 'top_events', pid=ckpt)['rows']
         pacing = sum(float(r['total_ms']) for r in events
                      if r['name'] == 'Timeout:CheckpointWriteDelay')
         require(pacing >= 3000, f'{mode} pacing workload present: {pacing:.1f}ms')
+        return total, ckpt_ms, pacing
     finally:
         stop_sql(client, label)
+
+
+def quantity(pm, base, mode, ckpt, native):
+    total, ckpt_ms, pacing = pacing_workload_capture(pm, base, mode, ckpt, native)
+    require(5000 <= total <= 12000, f'{mode} total DB Time {total:.1f}ms in [5000,12000]')
+    violations = pacing_accounting_violations(ckpt_ms, pacing)
+    require(not violations, f'{mode} checkpointer DB Time {ckpt_ms:.1f}ms <=2000 '
+            f'and <=10% of pacing {pacing:.1f}ms; violated bounds: {violations}')
 
 
 def compile_worker(base, pm, major):
@@ -295,6 +322,19 @@ def refusal(pm, base, ckpt, native):
             wait_pacing(ckpt, False)
 
 
+def partial_loss_control(pm, base, ckpt, native):
+    if native:
+        print('SKIP partial-loss control: PG>=14.3 supplies native CheckpointWriteDelay',
+              flush=True)
+        return
+    _, ckpt_ms, pacing = pacing_workload_capture(pm, base, 'full', ckpt, native, drop4=True)
+    violations = pacing_accounting_violations(ckpt_ms, pacing)
+    require('ratio' in violations,
+            f'partial-loss control reports ratio violation: checkpointer {ckpt_ms:.1f}ms, '
+            f'pacing {pacing:.1f}ms, ratio ceiling {0.10 * pacing:.1f}ms; '
+            f'violated bounds: {violations}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pid', type=int)
@@ -311,9 +351,10 @@ def main():
     native = version >= 140003
     require(major >= 13, f'supported PostgreSQL {version}')
     server_version = sql('SHOW server_version')
-    if major == 14 and not re.match(r'^\d+\.\d+', server_version):
-        print(f'SKIP pacing quantity/refusal: PG14 pre-release {server_version}: '
-              'daemon fails safe and counts the sleep (see src/pacing_probe.c)')
+    if major == 14 and (version < 140003 or not re.match(r'^\d+\.\d+', server_version)):
+        print(f'SKIP pacing quantity/refusal/partial-loss: PG14 {server_version}: '
+              'daemon does not attach the bridge; deferred to #830 '
+              '(exact PG14/15/16 Timeout tables)', flush=True)
         return
     ckpt = int(sql("SELECT pid FROM pg_stat_activity WHERE backend_type='checkpointer'"))
     # ALTER SYSTEM is restored exactly: preserve an existing auto.conf override
@@ -336,6 +377,7 @@ def main():
                 quantity(pm, base, mode, ckpt, native)
                 positive_controls(pm, base, mode, library)
             refusal(pm, base, ckpt, native)
+            partial_loss_control(pm, base, ckpt, native)
         finally:
             # Python finally is the trap: SIGTERM/SIGINT are converted to an
             # exception below so every exit restores GUCs and removes fixtures.

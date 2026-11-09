@@ -20,15 +20,16 @@ void pgwt_parse_pg_version(const char *line, int *major, int *minor)
     }
 }
 /* Fail safe toward visible over-counting, as required by idle_rule.h, never
- * silent under-counting. Only a confidently parsed major == 13, or major == 14
- * with a parsed minor in [0,3), attaches the bridge. An unknown PG14 minor
- * (14beta/14rc/14devel), or a failed parse leaving major 0, is not applicable:
- * the bridge is NOT attached, so the checkpointer's 100 ms pg_usleep is COUNTED
- * as DB Time. No parse failure can make this predicate exclude time that the
- * native path would count. */
+ * silent under-counting. Only a confidently parsed major == 13 attaches the
+ * bridge. PG14.0-14.2 is DEFERRED to #830 (exact PG14/15/16 Timeout tables):
+ * on PG14 the tracer renders native Timeout id 1 under the same label
+ * "CheckpointWriteDelay" as synthetic id 30, with opposite accounting
+ * (native counted, synthetic excluded). Unattached means the checkpointer's
+ * 100 ms pg_usleep is COUNTED as DB Time (over-counting), and a failed parse
+ * leaving major 0 stays disabled. */
 int pgwt_needs_ckpt_pacing_probe(int major, int minor)
 {
-    return major == 13 || (major == 14 && minor >= 0 && minor < 3);
+    return major == 13;
 }
 enum pgwt_pacing_verdict pgwt_pacing_probe_verdict(uint64_t fires,
     uint64_t observations, unsigned threshold)

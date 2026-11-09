@@ -1133,6 +1133,12 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     if (d->skel->rodata->test_pacing_filter_never_match)
         fprintf(stderr, "WARN: PGWT_TEST_PACING_FILTER_NEVER_MATCH=1: "
                 "TEST ONLY select/pselect6 pacing filter disabled\n");
+    const char *pacing_drop4 = getenv("PGWT_TEST_PACING_DROP_EVERY_4TH");
+    d->skel->rodata->test_pacing_drop_every_4th =
+        pacing_drop4 && strcmp(pacing_drop4, "1") == 0;
+    if (d->skel->rodata->test_pacing_drop_every_4th)
+        fprintf(stderr, "WARN: PGWT_TEST_PACING_DROP_EVERY_4TH=1: "
+                "TEST ONLY every fourth select/pselect6 pacing enter dropped\n");
     d->skel->rodata->target_postmaster_pid = d->postmaster_pid;
     d->skel->rodata->my_wait_ptr_addr = d->my_wait_ptr_addr;
     /* PG<17: my_wait_ptr_addr is MyProc (PGPROC*); on_bootstrap adds this

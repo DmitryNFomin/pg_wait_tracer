@@ -1,4 +1,4 @@
-/* Pure contracts for the pre-14.3 syscall pacing bridge. Refs #804. */
+/* Pure contracts for the PG13 syscall pacing bridge. Refs #804. */
 #include "pacing_probe.h"
 #include "sampler.h"
 #include "idle_rule.h"
@@ -24,7 +24,7 @@ int main(void)
     const struct { const char *version; int major, minor, needed; } cases[] = {
         {"12.22", 12, 22, 0}, {"13.0", 13, 0, 1}, {"13.23", 13, 23, 1},
         {"13beta1", 13, -1, 1}, {"13rc2", 13, -1, 1},
-        {"14.0", 14, 0, 1}, {"14.2", 14, 2, 1}, {"14.3", 14, 3, 0},
+        {"14.0", 14, 0, 0}, {"14.2", 14, 2, 0}, {"14.3", 14, 3, 0},
         {"14.12", 14, 12, 0}, {"15.1", 15, 1, 0}, {"16.4", 16, 4, 0},
         {"17.0", 17, 0, 0}, {"18.1", 18, 1, 0}, {"14beta1", 14, -1, 0},
         {"14rc1", 14, -1, 0}, {"14", 14, -1, 0}, {"bad", 0, -1, 0},
@@ -38,9 +38,9 @@ int main(void)
         assert(pgwt_needs_ckpt_pacing_probe(major, minor) == cases[i].needed);
     }
     assert(!pgwt_needs_ckpt_pacing_probe(14, -1));
-    assert(pgwt_needs_ckpt_pacing_probe(14, 0));
-    assert(pgwt_needs_ckpt_pacing_probe(14, 1));
-    assert(pgwt_needs_ckpt_pacing_probe(14, 2));
+    assert(!pgwt_needs_ckpt_pacing_probe(14, 0));
+    assert(!pgwt_needs_ckpt_pacing_probe(14, 1));
+    assert(!pgwt_needs_ckpt_pacing_probe(14, 2));
     assert(!pgwt_needs_ckpt_pacing_probe(14, 3));
     assert(!pgwt_needs_ckpt_pacing_probe(0, -1));
     const struct { uint64_t fires, obs; unsigned threshold; int inert; } verdicts[] = {

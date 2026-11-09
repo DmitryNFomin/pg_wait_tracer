@@ -27,6 +27,9 @@
 
 /* ── Constants from userspace (set before load via .rodata) ── */
 volatile const bool test_pacing_filter_never_match = false;
+/* TEST ONLY: deliberately lose every fourth matching pacing enter. */
+volatile const bool test_pacing_drop_every_4th = false;
+static u32 pacing_test_seq;
 volatile const u32 target_postmaster_pid = 0;
 volatile const u64 my_wait_ptr_addr = 0;
 /* PG<17 (MyProc path): my_wait_ptr_addr is the MyProc PGPROC* global, not a
@@ -614,6 +617,8 @@ static __always_inline int pacing_enter(u64 nfds, const void *timeout,
             tv.tv_sec != 0 || tv.tv_usec != 100000)
             return 0;
     }
+    if (test_pacing_drop_every_4th && ((pacing_test_seq++ & 3) == 3))
+        return 0;
     count_uprobe_fire(is_pselect ? PGWT_UPROBE_FIRE_PSELECT6 : PGWT_UPROBE_FIRE_SELECT);
     u64 now = bpf_ktime_get_ns();
     /* A map insertion failure counts load; it cannot invent idle time. */
