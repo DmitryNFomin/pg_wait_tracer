@@ -12,6 +12,9 @@ tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 [[ -f "$BOX_CHECK" ]] || fail "launcher missing: $BOX_CHECK"
+# Resolve before creating any PATH shim directory: these probes need the real
+# kernel lock, independently of the argv-only flock probes below.
+real_flock=$(command -v flock || true)
 
 # Exercise the actual privilege check on every uid, including root live-tier
 # callers. Guard every early mutation so a broken root check stays hermetic.
@@ -460,6 +463,177 @@ run_lock_probe 75 --lock-wait
 [[ $lock_rc -eq 2 ]] || fail "missing lock-wait value must return 2 (got $lock_rc)"
 [[ ! -s "$tmpdir/flock-log" ]] || fail 'missing lock-wait value reached flock'
 echo 'PASS: invalid or missing lock waits return usage rc=2 before flock'
+
+# Extract the actual EXIT trap, refusing ambiguous/missing boundaries rather
+# than letting a stale copy of the trap make this propagation matrix pass.
+preamble="$tmpdir/provision-preamble"
+awk '
+    { source[NR] = $0 }
+    /^set -euo pipefail$/ { starts++; first = NR }
+    /^trap provision_exit EXIT$/ { ends++; last = NR }
+    END {
+        if (starts != 1 || ends != 1 || first >= last) exit 2
+        for (i = first; i <= last; i++) print source[i]
+    }
+' "$SCRIPT_DIR/provision-runner.sh" > "$preamble" || {
+    echo 'FAIL: cannot extract unique provisioner EXIT trap preamble (rc=2)' >&2
+    exit 2
+}
+for route in simple subshell nested substitution pipeline function return explicit background; do
+    route_script="$tmpdir/route-$route.sh"
+    cat "$preamble" > "$route_script"
+    printf '%s\n' 'ch() { /bin/sh -c "exit $RC"; }' >> "$route_script"
+    case "$route" in
+        simple) body='ch' ;;
+        subshell) body='( ch )' ;;
+        nested) body='( ( ch ) )' ;;
+        substitution) body='x=$(ch)' ;;
+        pipeline) body='ch | cat' ;;
+        function) body='f() { ch; }; f' ;;
+        return) body='f() { return $RC; }; f' ;;
+        explicit) body='exit $RC' ;;
+        background) body='ch & wait $!' ;;
+    esac
+    printf '%s\n' "$body" 'echo "route success continued"' >> "$route_script"
+    for route_rc in 3 75 0 1 2 7; do
+        RC="$route_rc" bash "$route_script" > "$tmpdir/route-output" 2>&1
+        rc=$?
+        expected=$route_rc
+        case "$route_rc" in
+            3|75)
+                expected=1
+                /usr/bin/grep -Fq "a child command exited $route_rc; normalised to 1" "$tmpdir/route-output" ||
+                    fail "$route rc=$route_rc did not announce normalisation: $(cat "$tmpdir/route-output")"
+                class="reserved rc=$route_rc normalised"
+                ;;
+            *)
+                if /usr/bin/grep -Fq 'normalised' "$tmpdir/route-output"; then
+                    fail "$route rc=$route_rc unexpectedly announced normalisation"
+                fi
+                if [[ $route_rc -eq 0 && "$route" != explicit ]]; then
+                    /usr/bin/grep -Fq 'route success continued' "$tmpdir/route-output" ||
+                        fail "$route rc=0 did not continue after success"
+                fi
+                class="ordinary rc=$route_rc preserved"
+                ;;
+        esac
+        [[ $rc -eq $expected ]] || fail "$route rc=$route_rc must exit $expected (got $rc)"
+        echo "PASS: EXIT trap $route $class"
+    done
+done
+for route_rc in 3 75; do
+    cat "$preamble" > "$tmpdir/route-deliberate.sh"
+    printf 'PROVISION_DELIBERATE_EXIT=1; exit %s\n' "$route_rc" >> "$tmpdir/route-deliberate.sh"
+    bash "$tmpdir/route-deliberate.sh" > "$tmpdir/route-output" 2>&1
+    rc=$?
+    [[ $rc -eq $route_rc ]] || fail "deliberate exit $route_rc must be preserved (got $rc)"
+    [[ ! -s "$tmpdir/route-output" ]] || fail "deliberate exit $route_rc unexpectedly printed a normalisation message"
+    echo "PASS: EXIT trap deliberate reserved rc=$route_rc preserved"
+done
+
+if [[ -z "$real_flock" ]]; then
+    echo 'SKIP: no flock binary (runs on Linux CI/box)'
+else
+    REAL_LOCK_SHIM_BIN="$tmpdir/real-lock-bin"
+    mkdir -p "$REAL_LOCK_SHIM_BIN"
+    cp "$CHILD_SHIM_BIN/id" "$REAL_LOCK_SHIM_BIN/id"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$REAL_LOCK_SHIM_BIN/touch"
+    cp "$REAL_LOCK_SHIM_BIN/touch" "$REAL_LOCK_SHIM_BIN/chmod"
+    cat > "$REAL_LOCK_SHIM_BIN/systemctl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$REAL_SYSTEMCTL_LOG"
+kill -TERM "$PPID"
+exit 0
+SHIM
+    chmod +x "$REAL_LOCK_SHIM_BIN/"*
+    for command in id touch chmod systemctl; do
+        [[ $(PATH="/usr/local/bin:$REAL_LOCK_SHIM_BIN:$PATH" command -v "$command") == "$REAL_LOCK_SHIM_BIN/$command" ]] ||
+            fail "$command real-lock shim would be bypassed by the provisioner PATH"
+    done
+    [[ $(PATH="/usr/local/bin:$REAL_LOCK_SHIM_BIN:$PATH" command -v flock) == "$real_flock" ]] ||
+        fail 'real flock would be shadowed by the provisioner PATH'
+
+    assert_real_lock() {
+        local script="$1" mode="$2" lock="$tmpdir/real-lock" ready="$tmpdir/holder-ready"
+        local holder_pid ready_start start elapsed provision_rc lock_wait
+        local output="$tmpdir/real-lock-output" marker="$tmpdir/real-systemctl-log"
+        local timestamp_pattern='^\[provision-runner\] [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z '
+        rm -f "$ready"
+        : > "$marker"
+        ready="$ready" "$real_flock" "$lock" sh -c 'touch "$ready"; sleep 5' &
+        holder_pid=$!
+        ready_start=$SECONDS
+        while [[ ! -e "$ready" ]]; do
+            if (( SECONDS - ready_start >= 3 )); then
+                wait "$holder_pid"
+                echo 'FAIL: real flock holder did not signal readiness' >&2
+                return 1
+            fi
+            sleep 0.05
+        done
+        start=$SECONDS
+        if [[ "$mode" == TIMEOUT ]]; then
+            lock_wait=2
+        else
+            lock_wait=unbounded
+        fi
+        PATH="$REAL_LOCK_SHIM_BIN:$PATH" PROVISION_LOCK_FILE="$lock" REAL_SYSTEMCTL_LOG="$marker" \
+            bash "$script" ubuntu --lock-wait "$lock_wait" > "$output" 2>&1
+        provision_rc=$?
+        elapsed=$((SECONDS - start))
+        # Reap each fresh holder, including the bounded case and the mutant,
+        # before inspecting assertions or removing the scratch directory.
+        wait "$holder_pid" || { echo 'FAIL: real flock holder failed' >&2; return 1; }
+        /usr/bin/grep -Eq "$timestamp_pattern" "$output" || {
+            echo 'FAIL: real-lock output lacks a UTC timestamped log' >&2; return 1;
+        }
+        if /usr/bin/grep -F '[provision-runner]' "$output" | /usr/bin/grep -Ev "$timestamp_pattern"; then
+            echo 'FAIL: real-lock log line lacks its UTC timestamp' >&2
+            return 1
+        fi
+        if [[ "$mode" == TIMEOUT ]]; then
+            [[ $provision_rc -eq 75 && ! -s "$marker" && $elapsed -lt 5 ]] || {
+                echo "FAIL: TIMEOUT rc=$provision_rc elapsed=${elapsed}s must be 75, <5s and stop before systemctl" >&2; return 1;
+            }
+            /usr/bin/grep -Fq 'lock contention' "$output" &&
+                /usr/bin/grep -Fq "waiting for $lock (up to 2s)" "$output" || {
+                echo 'FAIL: TIMEOUT lacks contention or bounded waiting message' >&2; return 1;
+            }
+        else
+            /usr/bin/grep -Fq 'lock acquired' "$output" && [[ -s "$marker" ]] || {
+                echo 'FAIL: UNBOUNDED must acquire the lock and reach systemctl' >&2; return 1;
+            }
+            [[ $elapsed -ge 3 ]] || { echo "FAIL: UNBOUNDED returned too early (${elapsed}s)" >&2; return 1; }
+            /usr/bin/grep -Fq "waiting for $lock (unbounded)" "$output" || {
+                echo 'FAIL: UNBOUNDED lacks unbounded waiting message' >&2; return 1;
+            }
+            if /usr/bin/grep -Fq 'FATAL' "$output"; then
+                echo 'FAIL: UNBOUNDED printed a fatal diagnostic' >&2
+                return 1
+            fi
+        fi
+        echo "PASS: real-flock $mode waits correctly with UTC logs (rc=$provision_rc, ${elapsed}s)"
+    }
+    assert_real_lock "$SCRIPT_DIR/provision-runner.sh" TIMEOUT || exit $?
+    assert_real_lock "$SCRIPT_DIR/provision-runner.sh" UNBOUNDED || exit $?
+
+    mutant="$tmpdir/provision-bounded-mutant.sh"
+    awk '
+        $0 == "    flock 9 || rc=$?" { replaced++; print "    flock -w 3 9 || rc=$?"; next }
+        { print }
+        END { if (replaced != 1) exit 2 }
+    ' "$SCRIPT_DIR/provision-runner.sh" > "$mutant" || {
+        echo 'FAIL: cannot construct unique unbounded-flock mutant (rc=2)' >&2
+        exit 2
+    }
+    assert_real_lock "$mutant" UNBOUNDED > "$tmpdir/real-lock-mutant-verdict" 2>&1
+    mutant_rc=$?
+    [[ $mutant_rc -eq 1 ]] || fail "bounded-flock mutant escaped UNBOUNDED assertions (rc=$mutant_rc)"
+    /usr/bin/grep -Fq 'UNBOUNDED must acquire the lock and reach systemctl' "$tmpdir/real-lock-mutant-verdict" &&
+        /usr/bin/grep -Fq 'FATAL: flock' "$tmpdir/real-lock-output" &&
+        [[ ! -s "$tmpdir/real-systemctl-log" ]] || fail 'bounded-flock mutant failed for an unexpected reason'
+    echo 'PASS: real-flock UNBOUNDED case rejects the -w 3 mutant'
+fi
 
 for stage in mkdir rsync; do
     if [[ "$stage" == mkdir ]]; then

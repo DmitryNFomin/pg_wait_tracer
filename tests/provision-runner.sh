@@ -82,6 +82,7 @@ provision_exit() {
     fi
 }
 trap provision_exit EXIT
+PROVISION_START=$SECONDS
 
 OS="${1:-}"
 shift || true
@@ -160,7 +161,12 @@ if [[ $(id -u) -ne 0 ]]; then
     exit 1
 fi
 
-log() { echo "[provision-runner] $*"; }
+log() {
+    local line
+    while IFS= read -r line; do
+        printf '[provision-runner] %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
+    done <<< "$*"
+}
 
 export DEBIAN_FRONTEND=noninteractive
 # Source-built bpftool and EL8's python3.11 shim must win over distro
@@ -184,6 +190,7 @@ chmod 0666 "$LOCK_FILE"
 # Same lock make box-check (scripts/box-check.sh) uses: the cluster restarts
 # below must not race with an in-flight box-check's live tests. Hand calls
 # default to a bounded wait; box-check queues unbounded, like its build phase.
+LOCK_WAIT_START=$SECONDS
 exec 9>"$LOCK_FILE"
 rc=0
 if [[ "$LOCK_WAIT" == unbounded ]]; then
@@ -202,6 +209,7 @@ if [[ $rc -ne 0 ]]; then
     echo "FATAL: flock on $LOCK_FILE failed (rc=$rc); this is not lock contention" >&2
     exit 1
 fi
+LOCK_WAIT_SECONDS=$((SECONDS - LOCK_WAIT_START))
 log "lock acquired"
 
 # ---------------------------------------------------------------------------
@@ -940,4 +948,4 @@ fi
 # with no sign the runner was never touched. Repeat it here.
 runner_summary=""
 [[ "$OS" != "ubuntu" && -n "$RUNNER_TOKEN" ]] && runner_summary=" (runner registration skipped: OS=$OS, not ubuntu)"
-log "provisioning complete ($OS)$runner_summary"
+log "provisioning complete ($OS) in $((SECONDS - PROVISION_START))s (lock wait ${LOCK_WAIT_SECONDS}s)$runner_summary"
