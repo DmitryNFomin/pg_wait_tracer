@@ -28,6 +28,38 @@
  */
 
 import { eventColor, fmtMs, esc as escHtml } from '../format.js';
+import { buildFidelityShading, fidelityOf, fidelityLabel } from './fidelity.js';
+
+/* The DFG has no time axis. Its fidelity strip uses the same shading model
+ * as AAS, projected onto the requested window above the graph. */
+export function buildTransitionsFidelity(data, win) {
+    win = win || {};
+    const shading = buildFidelityShading(data, win);
+    const span = win.to - win.from;
+    const bounded = Number.isFinite(win.from) && Number.isFinite(win.to) && span > 0;
+    const stripBands = shading.bands.map(band => {
+        const from = bounded ? Math.max(win.from, band.from ?? win.from) : null;
+        const to = bounded ? Math.min(win.to, band.to ?? win.to) : null;
+        return {
+            ...band,
+            left: bounded ? (from - win.from) / span * 100 : 0,
+            width: bounded ? Math.max(0, to - from) / span * 100 : 100,
+        };
+    }).filter(band => band.width > 0);
+    return {
+        fidelity: fidelityOf(data),
+        fidelityLabel: fidelityLabel(fidelityOf(data)),
+        shading,
+        stripBands,
+        window: bounded ? { from: win.from, to: win.to } : null,
+    };
+}
+
+/* Same discriminator pinned by test_semantics_wire section 6. Zero exact
+ * dwell alone does not establish the absence of exact observations. */
+export function isSampledOnlyTransitionNode(node) {
+    return !!node && node.count === 0 && node.sampled_ms > 0;
+}
 
 /* DEFINITIONS (contract 5, issues #436/#438 — RELEASE-PLAN.md "Transitions
  * and simplification"), recorded here because the server-side half of the
@@ -278,7 +310,8 @@ export function findOmittedDominantNode(nodeMap, visibleNodes) {
         // #487: fail closed per candidate. Only an explicit server false is
         // eligible; missing/non-boolean idle status is unknown, never inferred
         // from a name. Other known non-idle candidates can still be ranked.
-        if (visibleNodes.has(name) || !node || node.idle !== false) continue;
+        if (visibleNodes.has(name) || !node || node.idle !== false ||
+            isSampledOnlyTransitionNode(node)) continue;
         const ms = (node && node.total_ms) || 0;
         if (ms <= 0) continue;
         const eventId = node && node.event_id != null ? node.event_id : null;
@@ -303,7 +336,7 @@ export function findDominantSourceDwellNode(nodeMap, visibleNodes) {
         const node = nodeMap[name];
         // Same fail-closed candidate policy as findOmittedDominantNode: an
         // older payload without a boolean idle flag cannot silently rank.
-        if (!node || node.idle !== false) continue;
+        if (!node || node.idle !== false || isSampledOnlyTransitionNode(node)) continue;
         const ms = (node && node.total_ms) || 0;
         if (ms <= 0) continue;
         const eventId = node && node.event_id != null ? node.event_id : null;

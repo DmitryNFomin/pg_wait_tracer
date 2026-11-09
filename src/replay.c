@@ -263,6 +263,9 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
         fprintf(stderr, "INFO: replayed %lu events from %d file(s)\n",
                 (unsigned long)total_events, files_read);
 
+    printf("Command gate: %llu ns moved from DB Time to Idle; %llu ns CPU from pids without CMD markers.\n\n",
+           (unsigned long long)rstats.cpu_noncmd_ns, (unsigned long long)rstats.cpu_unmarked_ns);
+
     /* #424: the forward scan for waits still running at --to is budgeted
      * (PGWT_REPLAY_LOOKAHEAD_BLOCKS), because nothing in the trace format
      * bounds how long one wait can be. If it ran out, say so: a window whose

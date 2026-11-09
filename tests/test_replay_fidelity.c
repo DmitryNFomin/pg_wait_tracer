@@ -1149,6 +1149,173 @@ static void test_replay_two_hours(void)
     if (system(cmd) != 0) { /* best effort */ }
 }
 
+/* #802 Half 1: one stream through replay and the server's raw time model.
+ * No category flags: the unmarked pid must be protected by seen == 0. */
+static void test_replay_command_gate(void)
+{
+    printf("CASE #802: replay command gate vs server raw time model\n");
+    const uint64_t MS = 1000000ULL, BASE = 10000000000000ULL;
+    const struct pgwt_block_info bi = { .block_type = PGWT_BLOCK_TRANSITIONS };
+    struct pgwt_trace_event stream[] = {
+        ev(123, BASE, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 0),
+        ev(123, BASE + 3 * MS, 3 * MS, 0, 0, FIX_QID),
+        ev(123, BASE + 3 * MS, 0, PGWT_MARKER_CMD_END, PGWT_MARKER_CMD_END, 0),
+        ev(123, BASE + 10 * MS, 7 * MS, 0, 0, FIX_QID),
+        ev(123, BASE + 10 * MS, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 0),
+        ev(123, BASE + 15 * MS, 5 * MS, 0, 0, FIX_QID),
+        ev(123, BASE + 15 * MS, 0, PGWT_MARKER_CMD_END, PGWT_MARKER_CMD_END, 0),
+        ev(123, BASE + 26 * MS, 11 * MS, 0, 0, FIX_QID),
+        ev(456, BASE + 26 * MS, 13 * MS, 0, 0, 0),
+    };
+    stream[1].cpu_ns = 2 * MS;
+    stream[3].cpu_ns = 1 * MS;
+    stream[5].cpu_ns = 4 * MS;
+    stream[7].cpu_ns = 3 * MS;
+    stream[8].cpu_ns = 9 * MS;
+    enum { N = sizeof(stream) / sizeof(stream[0]) };
+    /* Independent wall budgets: in-command 3+5, out-of-command 7+11,
+     * unmarked 13 ms. Idle must use wall even with measured CPU present. */
+    uint64_t inside = stream[1].duration_ns + stream[5].duration_ns;
+    uint64_t outside = stream[3].duration_ns + stream[7].duration_ns;
+    CHECK_EQ_U64(inside, 8000000, "in-command wall = 8000000 ns");
+    CHECK_EQ_U64(outside, 18000000, "out-of-command wall = 18000000 ns");
+    CHECK(outside > 0 && outside != inside,
+          "non-vacuity: out-of-command time is nonzero and differs from in-command time");
+
+    struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+    if (!a) { failures++; return; }
+    struct pgwt_replay_stats st = {0};
+    pgwt_replay_events(a, stream, N, BASE, BASE + 26 * MS, &bi, &st);
+    pgwt_replay_finish(a);
+    struct pgwt_trace_event server[N];
+    memcpy(server, stream, sizeof(server));
+    if (!pgwt_tag_events(server, N, NULL, 0)) {
+        CHECK(false, "server tagging must succeed before comparing models");
+        free(a);
+        return;
+    }
+    struct pgwt_tm_result tm;
+    const struct pgwt_filter filter = {0};
+    pgwt_compute_time_model(server, N, &filter, BASE, BASE + 26 * MS, 26.0, &tm);
+    CHECK((double)a->tm.db_time_ns == tm.db_time_ms * 1e6,
+          "replay and server DB Time agree exactly in ns");
+    CHECK((double)a->tm.activity_time_ns == tm.idle_time_ms * 1e6,
+          "replay and server Idle agree exactly in ns");
+    CHECK_EQ_U64(a->tm.db_time_ns, 21000000, "DB Time = 8 ms in-command + 13 ms unmarked");
+    CHECK_EQ_U64(a->tm.activity_time_ns, 18000000, "Idle = full out-of-command wall");
+    CHECK_EQ_U64(a->tm.cpu_time_ns, 15000000, "CPU = 6 ms in-command + 9 ms unmarked");
+    CHECK_EQ_U64(a->tm.offcpu_time_ns, 6000000, "only in-command and unmarked off-CPU stays in DB Time");
+    CHECK_EQ_U64(st.cpu_noncmd_ns, 18000000, "counter reports wall moved from DB Time to Idle");
+    CHECK_EQ_U64(st.cpu_unmarked_ns, 13000000, "counter reports unmarked-pid CPU wall");
+    const struct pgwt_event_stats *idle = find_sys(a, PGWT_WEI_NONCMD_CPU);
+    CHECK(idle && idle->count == 2 && idle->total_ns == outside &&
+          idle->min_ns == 7 * MS && idle->max_ns == 11 * MS,
+          "NONCMD_CPU row counts and durations use wall, not measured CPU");
+    const struct pgwt_event_stats *pid_idle = find_pid_ev(a, 123, PGWT_WEI_NONCMD_CPU);
+    const struct pgwt_query_event_stats *query_idle =
+        find_query_ev(a, FIX_QID, PGWT_WEI_NONCMD_CPU);
+    CHECK(pid_idle && query_idle && pid_idle->total_ns == outside &&
+          query_idle->total_ns == outside, "pid and query rows also file NONCMD_CPU as idle wall");
+    struct pgwt_pid_accum *marked = pgwt_find_pid_accum(a, 123);
+    CHECK(marked && marked->cpu_time_ns == 6 * MS && marked->db_time_ns == inside,
+          "marked pid excludes all out-of-command time from CPU and DB Time");
+    struct pgwt_pid_accum *unmarked = pgwt_find_pid_accum(a, 456);
+    CHECK(unmarked && !unmarked->cmd_gate.seen &&
+          unmarked->cpu_time_ns == 9 * MS && unmarked->db_time_ns == 13 * MS,
+          "unmarked pid stays CPU/DB Time in replay without category flags");
+    CHECK_EQ_U64(server[8].old_event, 0, "unmarked pid stays CPU in server tagging");
+    struct pgwt_tm_result bg;
+    pgwt_compute_time_model(&server[8], 1, &filter, BASE, BASE + 26 * MS, 26.0, &bg);
+    CHECK(bg.db_time_ms == 13.0 && bg.cpu_ms == 9.0 && bg.idle_time_ms == 0.0,
+          "unmarked pid stays CPU/DB Time in server raw model");
+    free(bg.rows);
+    free(tm.rows);
+
+    /* The left edge gets its gate state from pre-window markers; clipped
+     * rows/counters still carry only the time inside the requested window. */
+    pgwt_accum_init(a);
+    memset(&st, 0, sizeof(st));
+    pgwt_replay_events(a, stream, N, BASE + 5 * MS, BASE + 10 * MS, &bi, &st);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(a->tm.activity_time_ns, 5000000, "pre-window CMD_END seeds a closed left edge");
+    CHECK_EQ_U64(a->tm.db_time_ns, 0, "closed left edge contributes no DB Time");
+    CHECK_EQ_U64(st.cpu_noncmd_ns, 5000000, "gate counter is window-clipped");
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, stream, N, BASE + MS, BASE + 2 * MS, &bi, NULL);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(a->tm.db_time_ns, MS, "pre-window CMD_START seeds an open left edge");
+    CHECK_EQ_U64(a->tm.activity_time_ns, 0, "open left edge contributes no Idle");
+
+    /* A point observation remains CPU even with a known closed gate. */
+    pgwt_accum_init(a);
+    pgwt_replay_events(a, stream, 3, 0, 0, &bi, NULL);
+    struct pgwt_trace_event sample = ev(123, BASE + 4 * MS, 2 * MS, 0, 0, FIX_QID);
+    sample.flags = PGWT_EVENT_FLAG_SAMPLE;
+    memset(&st, 0, sizeof(st));
+    pgwt_replay_events(a, &sample, 1, 0, 0, NULL, &st);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(a->tm.db_time_ns, 5000000, "sample keeps its CPU weight outside command windows");
+    CHECK_EQ_U64(st.cpu_noncmd_ns, 0, "sample never contributes to the interval gate counter");
+
+    /* Every interval must consume the sweep: otherwise the wait's command
+     * time is banked and incorrectly makes the following CPU run in-command. */
+    printf("  LEG: wait_then_post_command_cpu\n");
+    const uint64_t wait_ns = 3 * MS, post_command_cpu_ns = 4 * MS;
+    CHECK_EQ_U64(wait_ns, 3000000, "wait wall = 3 * MS = 3000000 ns");
+    CHECK_EQ_U64(post_command_cpu_ns, 4000000, "post-command CPU wall = 4 * MS = 4000000 ns");
+    CHECK(wait_ns > 0 && post_command_cpu_ns > 0 && wait_ns != post_command_cpu_ns,
+          "non-vacuity: wait and post-command CPU walls are nonzero and different");
+    struct pgwt_trace_event wait_then_cpu[] = {
+        ev(123, BASE, 0, PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 0),
+        ev(123, BASE + wait_ns, wait_ns, IO_READ, 0, FIX_QID),
+        ev(123, BASE + wait_ns, 0, PGWT_MARKER_CMD_END, PGWT_MARKER_CMD_END, 0),
+        ev(123, BASE + wait_ns + post_command_cpu_ns, post_command_cpu_ns, 0, 0, FIX_QID),
+    };
+    enum { NW = sizeof(wait_then_cpu) / sizeof(wait_then_cpu[0]) };
+    pgwt_accum_init(a);
+    memset(&st, 0, sizeof(st));
+    pgwt_replay_events(a, wait_then_cpu, NW, BASE,
+                       BASE + wait_ns + post_command_cpu_ns, &bi, &st);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(a->tm.db_time_ns, wait_ns, "wait then CPU: replay DB Time = 3000000 ns");
+    CHECK_EQ_U64(a->tm.activity_time_ns, post_command_cpu_ns,
+                 "wait then CPU: replay Idle = 4000000 ns");
+    CHECK_EQ_U64(st.cpu_noncmd_ns, post_command_cpu_ns,
+                 "wait then CPU: counter moves only post-command CPU wall to Idle");
+    CHECK_EQ_U64(st.cpu_unmarked_ns, 0, "marked wait and CPU contribute no unmarked CPU wall");
+    if (pgwt_tag_events(wait_then_cpu, NW, NULL, 0)) {
+        struct pgwt_tm_result wait_tm;
+        pgwt_compute_time_model(wait_then_cpu, NW, &filter, BASE,
+                                BASE + wait_ns + post_command_cpu_ns, 7.0, &wait_tm);
+        CHECK(wait_tm.db_time_ms * 1e6 == (double)wait_ns,
+              "wait then CPU: server DB Time = 3000000 ns");
+        CHECK(wait_tm.idle_time_ms * 1e6 == (double)post_command_cpu_ns,
+              "wait then CPU: server Idle = 4000000 ns");
+        CHECK((double)a->tm.db_time_ns == wait_tm.db_time_ms * 1e6,
+              "wait then CPU: replay and server DB Time agree exactly in ns");
+        CHECK((double)a->tm.activity_time_ns == wait_tm.idle_time_ms * 1e6,
+              "wait then CPU: replay and server Idle agree exactly in ns");
+        printf("  wait_then_post_command_cpu: replay DB/Idle=%llu/%llu ns; server DB/Idle=%.0f/%.0f ns\n",
+               (unsigned long long)a->tm.db_time_ns,
+               (unsigned long long)a->tm.activity_time_ns,
+               wait_tm.db_time_ms * 1e6, wait_tm.idle_time_ms * 1e6);
+        free(wait_tm.rows);
+    } else {
+        CHECK(false, "wait then CPU: server tagging must succeed before comparing models");
+    }
+
+    /* Classifying waits also must not inflate the on-CPU-only counter. */
+    pgwt_accum_init(a);
+    memset(&st, 0, sizeof(st));
+    struct pgwt_trace_event unmarked_wait = ev(456, BASE + wait_ns, wait_ns,
+                                               IO_READ, 0, 0);
+    pgwt_replay_events(a, &unmarked_wait, 1, BASE, BASE + wait_ns, &bi, &st);
+    pgwt_replay_finish(a);
+    CHECK_EQ_U64(a->tm.db_time_ns, wait_ns, "unmarked wait retains its nonzero DB Time");
+    CHECK_EQ_U64(st.cpu_unmarked_ns, 0, "unmarked wait contributes no unmarked CPU wall");
+    free(a);
+}
+
 int main(void)
 {
     char dir[] = "/tmp/pgwt_replay_fid_XXXXXX";
@@ -1299,6 +1466,7 @@ int main(void)
 
     test_cpu_replay(true);
     test_cpu_replay(false);
+    test_replay_command_gate();
     test_parse_phase_replay();
     test_replay_commit_order();
     test_replay_flag_mask_closure();

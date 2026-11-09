@@ -368,6 +368,10 @@ struct pgwt_tm_result {
      * cat_ms[PGWT_CAT_IO_WORKER] is io_worker BUSY ms — outside DB Time. */
     double cat_ms[PGWT_NUM_CATS];
     double io_worker_busy_pct;  /* busy ms / (io_worker pids × wall) × 100 */
+    /* Like has_measured_cpu below, 0 means this route cannot answer and
+     * says so, NOT that the measured value is zero. Per-second summary
+     * records have no cat_ns; v6 drops io_worker records at the writer. */
+    int    io_worker_available;
     /* T8 measured CPU. When has_measured_cpu is set (v3 exact data present),
      * the CPU* row is the measured on-CPU time and offcpu_ms is its off-CPU /
      * runqueue-unaccounted sibling (both inside DB Time); when unset the CPU*
@@ -475,12 +479,12 @@ struct pgwt_events_result {
      *       then the unsplit gap wall by gap-inference and offcpu_ms is 0 —
      *       a refusal to split, never a claim that off-CPU time was zero.
      *
-     * pgwt_compute_top_events_from_summaries leaves both at 0: the per-second
-     * summary's events[] table carries wall for event 0 (summary_writer.c's
-     * `se->total_ns += tns`), so on that routing CPU* is the unsplit total and
-     * says so. The two paths therefore describe the SAME total split two
-     * ways, which is the identity pinned in tests/test_agg_raw_crosscheck.c
-     * section 6f: raw CPU* + raw offcpu_ms == summary CPU*.
+     * pgwt_compute_top_events_from_summaries reports the same split on the
+     * unfiltered route using the v7 record-level CPU scalars. Its query-
+     * filtered route still reports the unsplit total with has_measured_cpu
+     * = 0: the file has no per-query measurement, and production never takes
+     * that route (src/server.c:5471). Both contracts are pinned in
+     * tests/test_agg_raw_crosscheck.c section 6f.
      *
      * cpu_clamped_ms is the same self-check pgwt_compute_time_model reports
      * under that name: the measured CPU that exceeded its own clipped gap
@@ -724,7 +728,10 @@ struct pgwt_transitions_result {
  * A record is in it iff it is an exact (non-sample) record, not admitted by
  * right-edge overlap, passes the uniform filter (markers, impossible
  * durations, class/event/pid/query), and both of its states are visible and
- * real. Returns 1 for in, 0 for out.
+ * real. Returns 1 for in, 0 for out. The sampled sibling selects records
+ * rejected ONLY for carrying SAMPLE; both entry points use one file-static
+ * predicate body with a tier argument. The caller applies the same window
+ * test to both tiers. Sampled duration is additive node time, not an edge.
  *
  * Exported because the graph's NODE totals and its EDGE counts are two
  * readouts of the same population and used to be selected by two different
@@ -738,6 +745,8 @@ struct pgwt_transitions_result {
  * there is only one of it. */
 int pgwt_transition_record_counts(const struct pgwt_filter *f,
                                   const struct pgwt_trace_event *ev);
+int pgwt_transition_record_counts_sampled(const struct pgwt_filter *f,
+                                          const struct pgwt_trace_event *ev);
 
 /* Compute top state transitions (old_event → new_event).
  * Returns pairs sorted by count descending, limited to max_rows. */
