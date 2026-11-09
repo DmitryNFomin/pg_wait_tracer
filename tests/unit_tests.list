@@ -1043,3 +1043,7 @@ test_background_unattributed
 # Separate from test_background_unattributed.c, which exercises the raw
 # src/compute.c path; this inspects the real writer's in-memory counters.
 test_summary_qattr_background
+
+# Persistent box-check must stage/run the current provisioner before build,
+# forwarding the OS and leaving lock ownership to the provisioner itself.
+test_box_check_provision_persistent.sh

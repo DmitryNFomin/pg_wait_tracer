@@ -61,7 +61,28 @@
 # Takes the same lock scripts/box-check.sh uses (see the flock block below):
 # every run unconditionally restarts all four clusters, which would otherwise
 # race with an in-flight box-check's live tests from another agent's invocation.
+#
+# Stable exit-status contract (callers branch on these codes):
+#   0: provisioning succeeded.
+#   1: privilege check or provisioning failed (commands may return other errors).
+#   2: invalid arguments / usage.
+#   3: OS unsupported by this provisioner (only the unsupported-OS arm emits it).
+#  75: EX_TEMPFAIL, contention: a bounded lock wait genuinely timed out.
+# Hand invocation defaults to 600s; box-check passes --lock-wait unbounded.
+# Both 3 and 75 are reserved: only the unsupported-OS arm and bounded lock
+# timeout deliberately emit them. Any child's 3 or 75 is normalised to 1.
 set -euo pipefail
+PROVISION_DELIBERATE_EXIT=0
+
+provision_exit() {
+    local rc=$?
+    if [[ $PROVISION_DELIBERATE_EXIT -eq 0 && ( $rc -eq 3 || $rc -eq 75 ) ]]; then
+        echo "provision-runner: a child command exited $rc; normalised to 1 (3 and 75 are reserved for deliberate exits)" >&2
+        exit 1
+    fi
+}
+trap provision_exit EXIT
+PROVISION_START=$SECONDS
 
 OS="${1:-}"
 shift || true
@@ -72,6 +93,7 @@ RUNNER_TOKEN="${PGWT_RUNNER_TOKEN:-}"
 # --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" (the
 # original box's name) below — see the "GitHub Actions runner" block.
 RUNNER_NAME="${PGWT_RUNNER_NAME:-}"
+LOCK_WAIT=600
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --runner-token)
@@ -90,6 +112,18 @@ while [[ $# -gt 0 ]]; do
             RUNNER_NAME="${1#*=}"
             shift
             ;;
+        --lock-wait)
+            if [[ $# -lt 2 ]]; then
+                echo "--lock-wait requires a positive integer or unbounded" >&2
+                exit 2
+            fi
+            LOCK_WAIT="$2"
+            shift 2
+            ;;
+        --lock-wait=*)
+            LOCK_WAIT="${1#*=}"
+            shift
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 2
@@ -97,22 +131,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 RUNNER_NAME="${RUNNER_NAME:-pgwt-gate}"
-
-if [[ -z "$OS" ]]; then
-    echo "Usage: $0 <ubuntu|el8|el9> [--runner-token TOKEN] [--runner-name NAME]" >&2
+if [[ "$LOCK_WAIT" != unbounded && ! "$LOCK_WAIT" =~ ^0*[1-9][0-9]*$ ]]; then
+    echo "Invalid --lock-wait: $LOCK_WAIT (expected a positive integer or unbounded)" >&2
     exit 2
 fi
 
-if [[ $(id -u) -ne 0 ]]; then
-    echo "provision-runner.sh must run as root" >&2
-    exit 1
+if [[ -z "$OS" ]]; then
+    echo "Usage: $0 <ubuntu|el8|el9> [--runner-token TOKEN] [--runner-name NAME] [--lock-wait <SECONDS|unbounded>]" >&2
+    exit 2
 fi
 
 case "$OS" in
     el9)
         echo "STUB: el9 provisioning is not implemented yet — it is step 4" >&2
         echo "of docs/DEV_LOOP_PLAN.md (ephemeral VMs + real OS matrix)." >&2
-        exit 1
+        PROVISION_DELIBERATE_EXIT=1
+        exit 3
         ;;
     ubuntu|el8)
         ;;
@@ -122,7 +156,17 @@ case "$OS" in
         ;;
 esac
 
-log() { echo "[provision-runner] $*"; }
+if [[ $(id -u) -ne 0 ]]; then
+    echo "provision-runner.sh must run as root" >&2
+    exit 1
+fi
+
+log() {
+    local line
+    while IFS= read -r line; do
+        printf '[provision-runner] %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
+    done <<< "$*"
+}
 
 export DEBIAN_FRONTEND=noninteractive
 # Source-built bpftool and EL8's python3.11 shim must win over distro
@@ -138,21 +182,34 @@ export PATH="/usr/local/bin:$PATH"
 # 0644 as root. Real bug found running ci.yml against this box for the
 # first time: `exec 9>/tmp/pgwt-box-check.lock` as the unprivileged runner
 # user failed outright on the root-owned, 0644 file.
-touch /tmp/pgwt-box-check.lock
-chmod 0666 /tmp/pgwt-box-check.lock
+# Test seam only: box-check never sets PROVISION_LOCK_FILE.
+LOCK_FILE="${PROVISION_LOCK_FILE:-/tmp/pgwt-box-check.lock}"
+touch "$LOCK_FILE"
+chmod 0666 "$LOCK_FILE"
 
 # Same lock make box-check (scripts/box-check.sh) uses: the cluster restarts
-# below must not race with an in-flight box-check's live tests. Bounded wait
-# (not a bare `flock 9`, which blocks forever): a nested/concurrent call
-# fails loudly with a clear message instead of hanging silently until
-# whatever holds the lock finishes (a full box-check run can itself take
-# several minutes per PG version).
-log "waiting for /tmp/pgwt-box-check.lock (up to 600s)"
-exec 9>/tmp/pgwt-box-check.lock
-if ! flock -w 600 9; then
-    echo "FATAL: could not acquire /tmp/pgwt-box-check.lock within 600s -- another box-check or provisioning run holds it" >&2
+# below must not race with an in-flight box-check's live tests. Hand calls
+# default to a bounded wait; box-check queues unbounded, like its build phase.
+LOCK_WAIT_START=$SECONDS
+exec 9>"$LOCK_FILE"
+rc=0
+if [[ "$LOCK_WAIT" == unbounded ]]; then
+    log "waiting for $LOCK_FILE (unbounded)"
+    flock 9 || rc=$?
+else
+    log "waiting for $LOCK_FILE (up to ${LOCK_WAIT}s)"
+    flock -w "$LOCK_WAIT" -E 75 9 || rc=$?
+    if [[ $rc -eq 75 ]]; then
+        echo "FATAL: could not acquire $LOCK_FILE within ${LOCK_WAIT}s -- lock contention: another box-check or provisioning run holds it" >&2
+        PROVISION_DELIBERATE_EXIT=1
+        exit 75
+    fi
+fi
+if [[ $rc -ne 0 ]]; then
+    echo "FATAL: flock on $LOCK_FILE failed (rc=$rc); this is not lock contention" >&2
     exit 1
 fi
+LOCK_WAIT_SECONDS=$((SECONDS - LOCK_WAIT_START))
 log "lock acquired"
 
 # ---------------------------------------------------------------------------
@@ -891,4 +948,4 @@ fi
 # with no sign the runner was never touched. Repeat it here.
 runner_summary=""
 [[ "$OS" != "ubuntu" && -n "$RUNNER_TOKEN" ]] && runner_summary=" (runner registration skipped: OS=$OS, not ubuntu)"
-log "provisioning complete ($OS)$runner_summary"
+log "provisioning complete ($OS) in $((SECONDS - PROVISION_START))s (lock wait ${LOCK_WAIT_SECONDS}s)$runner_summary"
