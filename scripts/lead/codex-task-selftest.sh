@@ -63,6 +63,7 @@ printf '%s\n' "$input" | grep -Fqx "Working directory: $STUB_CLONE" || exit 94
 printf '%s\n' "$input" | grep -Fqx "Branch: $STUB_BRANCH" || exit 95
 printf '%s\n' "$input" | grep -Fq 'Do not create your own clone.' || exit 96
 printf '%s\n' "$input" | grep -Fqx BRIEF_SENTINEL || exit 97
+printf '%s\n' "$input" | grep -Fq '.codex-commit-msg' || exit 99
 printf '%s\n' "$STUB_BRANCH" >> "$STUB_CALLS"
 case "$STUB_MODE" in
     noop) exit 0 ;;
@@ -75,7 +76,13 @@ case "$STUB_MODE" in
         git add task.txt
         git commit -qm 'stub task commit'
         [ "$STUB_MODE" != commit-fail ] || exit 7 ;;
-    dirty|dirty-locked)
+    dirty|dirty-locked|dirty-msg|commit-then-dirty-locked)
+        # A round that commits early and then leaves more work it cannot commit.
+        if [ "$STUB_MODE" = commit-then-dirty-locked ]; then
+            printf 'early change\n' > early.txt
+            git add early.txt
+            git commit -qm 'stub early commit'
+        fi
         # What the real implementer leaves behind when it cannot commit (#777):
         # a tracked edit, an untracked text file and an untracked binary.
         printf 'uncommitted change\n' >> task.txt
@@ -83,7 +90,9 @@ case "$STUB_MODE" in
         printf '\000\001\002binary\n' > bin.dat
         # dirty-locked also leaves an index lock behind, which is how a denied
         # or crashed `git add` inside the sandbox presents itself afterwards.
-        [ "$STUB_MODE" != dirty-locked ] || : > .git/index.lock
+        case "$STUB_MODE" in dirty-locked|commit-then-dirty-locked) : > .git/index.lock ;; esac
+        [ "$STUB_MODE" != dirty-msg ] ||
+            printf 'Implementer subject line\n\nImplementer body.\n' > .codex-commit-msg
         exit 0 ;;
     *) exit 98 ;;
 esac
@@ -142,7 +151,18 @@ verify_success() {
     expected_diff=$("$REAL_GIT" -C "$FIXTURE_REAL" diff --name-only "origin/master...$STUB_BRANCH")
     printf '%s\n' "$STUB_CLONE" "$STUB_BRANCH" "$sha" "$expected_diff" > "$tmp/expected"
     cmp -s "$tmp/expected" "$tmp/out" || fail 'final output differs from path, branch, SHA, diff'
-    [ "$expected_diff" = task.txt ] || fail 'unexpected task diff'
+    [ "$expected_diff" = "${1:-task.txt}" ] || fail "unexpected task diff: $expected_diff"
+}
+# The wrapper's own commit (#777): the tip must carry the Codex trailer that
+# scripts/board-author.py reads, and the message file must never be committed.
+verify_auto_commit() {
+    grep -Fq "AUTO_COMMIT: $sha" "$tmp/err" || fail 'no AUTO_COMMIT line naming the landed tip'
+    "$REAL_GIT" -C "$FIXTURE_REAL" log -1 --format=%B "$sha" | "$REAL_GIT" interpret-trailers --parse |
+        grep -Fqx 'Co-authored-by: Codex <noreply@openai.com>' || fail 'auto-commit lacks the Codex trailer'
+    if "$REAL_GIT" -C "$FIXTURE_REAL" ls-tree -r --name-only "$sha" | grep -Fqx .codex-commit-msg; then
+        fail 'the commit message file was committed'
+    fi
+    [ -z "$("$REAL_GIT" -C "$STUB_CLONE" status --porcelain)" ] || fail 'clone still dirty after auto-commit'
 }
 
 new_branch happy
@@ -184,13 +204,18 @@ STUB_CLONE=$happy_clone
 printf 'prior untracked work\n' > "$STUB_CLONE/prior-work.txt"
 printf 'prior dirty tracked work\n' > "$STUB_CLONE/base.txt"
 run_wrapper commit
-verify_success
+verify_success 'base.txt
+prior-work.txt
+task.txt'
+verify_auto_commit
 grep -Fq 'Reusing clone:' "$tmp/err" || fail 'reuse was not announced'
 "$REAL_GIT" -C "$STUB_CLONE" merge-base --is-ancestor "$first_sha" "$sha" || fail 'prior commit was clobbered'
-[ "$("$REAL_GIT" -C "$STUB_CLONE" rev-list --count "$first_sha..$sha")" -eq 1 ] || fail 'reuse lost prior history'
+# Codex's own commit plus the wrapper's commit of what was left dirty.
+[ "$("$REAL_GIT" -C "$STUB_CLONE" rev-list --count "$first_sha..$sha")" -eq 2 ] || fail 'reuse: expected the stub commit plus one auto-commit'
 [ "$(cat "$STUB_CLONE/prior-work.txt")" = 'prior untracked work' ] || fail 'untracked work clobbered'
 [ "$(cat "$STUB_CLONE/base.txt")" = 'prior dirty tracked work' ] || fail 'dirty tracked work clobbered'
-printf '5 reuse: exit=0; %s; prior commit is ancestor, exactly one new commit, dirty tracked + untracked sentinels intact\n' "$(grep '^Reusing clone:' "$tmp/err")"
+[ "$("$REAL_GIT" -C "$FIXTURE_REAL" show "$sha:prior-work.txt")" = 'prior untracked work' ] || fail 'reuse: leftover work did not land'
+printf '5 reuse: exit=0; %s; prior commit is ancestor, stub commit + one auto-commit, dirty tracked + untracked sentinels intact and landed\n' "$(grep '^Reusing clone:' "$tmp/err")"
 
 new_branch fetch-fail
 run_wrapper commit fetch-fail
@@ -236,14 +261,42 @@ salvage_path="$tmp/brief-salvage.patch"
 new_branch salvage-happy
 rm -f "$salvage_path"
 run_wrapper dirty
-[ "$rc" -eq 21 ] || fail "salvage: expected BRANCH_UNCHANGED (21), got $rc"
+# #777: a round that could not commit used to end BRANCH_UNCHANGED (21) with
+# only a patch. The wrapper now commits it, so it must end like a committed one.
+verify_success 'bin.dat
+task.txt
+untracked.txt'
+verify_auto_commit
+[ "$("$REAL_GIT" -C "$FIXTURE_REAL" log -1 --format=%s "$sha")" = "codex round on $STUB_BRANCH" ] ||
+    fail 'auto-commit: wrong default subject'
+"$REAL_GIT" -C "$FIXTURE_REAL" cat-file -e "$sha:bin.dat" || fail 'auto-commit: binary file did not land'
 grep -Fq "SALVAGE_PATCH: $salvage_path" "$tmp/err" || fail 'salvage: no SALVAGE_PATCH line'
 [ -s "$salvage_path" ] || fail 'salvage: patch is empty'
 grep -Fq 'untracked.txt' "$salvage_path" || fail 'salvage: untracked file missing from the patch'
 grep -Fq 'GIT binary patch' "$salvage_path" || fail 'salvage: binary file not captured with --binary'
 "$REAL_GIT" -C "$STUB_CLONE" apply --check --reverse "$salvage_path" ||
     fail 'salvage: the patch does not describe the clone it came from'
-printf 'extra salvage happy path: exit=%s; patch has untracked + binary and reverse-applies\n' "$rc"
+printf 'extra salvage happy path: exit=%s; uncommitted round landed as %s with trailer; patch has untracked + binary and reverse-applies\n' "$rc" "$sha"
+
+new_branch auto-commit-msg
+rm -f "$salvage_path"
+run_wrapper dirty-msg
+verify_success 'bin.dat
+task.txt
+untracked.txt'
+verify_auto_commit
+[ "$("$REAL_GIT" -C "$FIXTURE_REAL" log -1 --format=%s "$sha")" = 'Implementer subject line' ] ||
+    fail 'auto-commit: the implementer message was not used'
+"$REAL_GIT" -C "$FIXTURE_REAL" log -1 --format=%b "$sha" | grep -Fqx 'Implementer body.' ||
+    fail 'auto-commit: the implementer body was lost'
+if grep -Fq '.codex-commit-msg' "$salvage_path"; then fail 'the commit message file leaked into the salvage patch'; fi
+# A second round in the same clone must not reuse the first round's message.
+run_wrapper dirty
+[ "$rc" -eq 0 ] || fail "auto-commit second round: expected 0, got $rc"
+sha=$("$REAL_GIT" -C "$FIXTURE_REAL" rev-parse "refs/heads/$STUB_BRANCH")
+[ "$("$REAL_GIT" -C "$FIXTURE_REAL" log -1 --format=%s "$sha")" = "codex round on $STUB_BRANCH" ] ||
+    fail 'auto-commit: a stale message from the previous round was reused'
+printf 'extra auto-commit message: implementer subject + body used, file not committed, stale message not reused\n'
 
 new_branch salvage-clean
 rm -f "$salvage_path"
@@ -268,7 +321,11 @@ grep -Fq 'SALVAGE_FAILED' "$tmp/err" ||
     fail 'salvage-unwritable: an unwritable target must say SALVAGE_FAILED'
 grep -Fq 'working tree clean' "$tmp/err" &&
     fail 'salvage-unwritable: reported a clean tree while work was only in the clone'
-printf 'extra salvage unwritable target: exit=%s; refuses loudly, never says clean\n' "$rc"
+# The patch could not be written, but the commit path is independent of it.
+[ "$rc" -eq 0 ] || fail "salvage-unwritable: the round should still land, got $rc"
+sha=$("$REAL_GIT" -C "$FIXTURE_REAL" rev-parse "refs/heads/$STUB_BRANCH")
+verify_auto_commit
+printf 'extra salvage unwritable target: exit=%s; patch refused loudly, never says clean, round still landed\n' "$rc"
 
 new_branch salvage-locked-index
 rm -f "$salvage_path"
@@ -281,6 +338,22 @@ grep -Fq 'working tree clean' "$tmp/err" &&
 [ ! -s "$salvage_path" ] ||
     grep -Fq 'untracked.txt' "$salvage_path" ||
     fail 'salvage-locked-index: wrote a patch that silently omits the untracked files'
+# Negative control for the commit path: when it cannot commit it must say so
+# and must not report a landed branch.
+[ "$rc" -eq 21 ] || fail "salvage-locked-index: expected BRANCH_UNCHANGED (21), got $rc"
+grep -Fq 'AUTO_COMMIT_FAILED' "$tmp/err" || fail 'salvage-locked-index: a failed commit must say AUTO_COMMIT_FAILED'
+[ ! -s "$tmp/out" ] || fail 'salvage-locked-index: printed a success block without a commit'
 printf 'extra salvage locked index: exit=%s; refuses rather than writing a patch missing files\n' "$rc"
 
-printf 'PASS: all six required controls, four additional refusal controls and four salvage controls\n'
+# The fail-open the reviewer found: the tip moved (an early commit) AND later
+# work could not be committed. A moved tip must not turn that into success.
+new_branch auto-commit-incomplete
+rm -f "$salvage_path"
+run_wrapper commit-then-dirty-locked
+rm -f "$STUB_CLONE/.git/index.lock"
+expect_refusal 26 AUTO_COMMIT_INCOMPLETE
+grep -Fq 'AUTO_COMMIT_FAILED' "$tmp/err" || fail 'auto-commit-incomplete: the failed commit was not reported'
+[ -n "$("$REAL_GIT" -C "$STUB_CLONE" status --porcelain)" ] || fail 'auto-commit-incomplete: control is vacuous, the clone is clean'
+printf 'extra auto-commit incomplete: exit=%s; %s; stdout empty (no success block)\n' "$rc" "$(grep '^AUTO_COMMIT_INCOMPLETE:' "$tmp/err" | cut -c1-60)"
+
+printf 'PASS: all six required controls, four additional refusal controls, four salvage controls and the auto-commit controls\n'
