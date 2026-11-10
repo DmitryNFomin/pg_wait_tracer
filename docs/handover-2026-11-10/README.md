@@ -21,6 +21,7 @@ files themselves do not know about.
 
 | `EVIDENCE_MANIFEST.md` | 2026-11-10 | every result-bearing file in the moved capture directories, with size and SHA-256 prefix | live; it is how a found copy is identified and how a loss is proven |
 | `REPOSITORY_TRAPS.md` | 2026-11-10 | the repository-specific subset of the outgoing lead's working memory | unverified working notes, never audited; the code wins wherever they disagree |
+| `issue115-harness/` | 2026-09-27, copied 2026-11-10 | the #194 verification harness: the kernel-decomposition evidence (`EVIDENCE.txt`, `EVIDENCE_BIAS.txt`) and the capture/analysis scripts that produced it, 180 KB of text | the measurements are October's and were not re-run this week; the files are a byte-identical copy of two directories that were untracked and existed only on the outgoing lead's Mac. See its own `README.md`, which also names the four files that are **not** here and the pushed `preserve/*` refs that hold three of them |
 
 The measurement evidence behind the numbers published on #381, #837 and #839 is
 **not** here: those captures are about 1.1 GB and were moved, as the last act of

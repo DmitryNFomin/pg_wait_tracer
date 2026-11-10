@@ -39,8 +39,15 @@ A second copy of round 1's capture also exists in this session's scratchpad
 `current.trace` and `2026-11-10_06.trace.lz4`. That location is volatile; this
 one is not.
 
+One further set is **not** in that directory and not untracked any more: the
+#194 verification harness, 180 KB of scripts and two kernel-decomposition
+evidence files that existed only on the outgoing lead's Mac, is now committed at
+`docs/handover-2026-11-10/issue115-harness/` and listed in its own section at
+the end of this file.
+
 Sizes are bytes, hashes are the first sixteen hex digits of SHA-256, and paths
-are relative to `tests/results/handover-2026-11-10-evidence/`. Every
+are relative to `tests/results/handover-2026-11-10-evidence/` unless a section
+header says otherwise. Every
 result-bearing file is listed -- requests, responses, scripts, logs,
 calculations, manifests, traces and summaries. An earlier version of this file
 truncated each directory at forty entries, which an adviser caught; this one
@@ -1619,4 +1626,40 @@ does not truncate.
          611  4e0e03547c84f23e  pgwt-837-classfiltered-evidence/local-state.json
          114  a8c882f3e49edae7  pgwt-837-classfiltered-evidence/start.txt
 
+```
+
+### docs/handover-2026-11-10/issue115-harness  (180K, tracked in the repository)
+
+The #194 verification harness, copied out of two untracked directories. Four
+files its drivers call are not in it; three of them are in pushed history on
+`preserve/*` branches and its own `README.md` names every ref and blob id.
+Paths here are relative to `docs/handover-2026-11-10/`.
+
+```
+        8599  35becbe474073b65  issue115-harness/README.md
+       29130  5537124c31078c36  issue115-harness/issue115_arbiter/EVIDENCE.txt
+       12244  0fd7df20d5234784  issue115-harness/issue115_arbiter/EVIDENCE_BIAS.txt
+        2671  ac3f030aa8af89fd  issue115-harness/issue115_arbiter/arb_analyze.sh
+        4774  d1e6433364d778a3  issue115-harness/issue115_arbiter/arb_capture.sh
+        2842  c07beff96b34c2d4  issue115-harness/issue115_arbiter/arb_control.sh
+         870  e6f9c15ffacc6f88  issue115-harness/issue115_arbiter/arb_ctl_analyze.sh
+        2099  65f6b0adf833a98c  issue115-harness/issue115_arbiter/bias_analyze.sh
+        5727  8f7ab4509032d60c  issue115-harness/issue115_arbiter/bias_capture.sh
+        4279  33dcbd0430217af4  issue115-harness/issue115_arbiter/sched2.bt
+         410  7d3784823a595f11  issue115-harness/issue115_oracle/analyze.sh
+         992  e3d84b29ad9364a6  issue115-harness/issue115_oracle/analyze3.sh
+        1031  3ebd1da85b1ca52c  issue115-harness/issue115_oracle/btwin.sh
+        3255  0bef941d6bd38efb  issue115-harness/issue115_oracle/capture.sh
+        4484  81ae5c66a1e1886c  issue115-harness/issue115_oracle/capture2.sh
+        5573  6d0eb7ab2afa3e0c  issue115-harness/issue115_oracle/capture3.sh
+        6294  b5036001ecdeabd2  issue115-harness/issue115_oracle/capture4.sh
+        6940  0826238ee55b543d  issue115-harness/issue115_oracle/capture5.sh
+         412  8522e1ded205efe2  issue115-harness/issue115_oracle/dbg.bt
+        3278  fe9613d6eb9cf6ad  issue115-harness/issue115_oracle/frac.sh
+        1683  545eb0810b652f03  issue115-harness/issue115_oracle/offset.bt
+        1990  a9ef58a3be97587f  issue115-harness/issue115_oracle/offset2.bt
+        1884  720b042d85e7ab97  issue115-harness/issue115_oracle/oracle_share.py
+        1336  614ebc9ada332bfc  issue115-harness/issue115_oracle/run_offset.sh
+        1337  be903991fa58f34b  issue115-harness/issue115_oracle/run_offset2.sh
+       19414  3ebda9f2c999c038  issue115-harness/issue115_oracle/xp_gate.c
 ```

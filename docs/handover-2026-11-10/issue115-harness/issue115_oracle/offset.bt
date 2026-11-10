@@ -1,0 +1,46 @@
+#!/usr/bin/env bpftrace
+/* Residual A: where our CMD_START/CMD_END markers fall relative to
+ * PostgreSQL's own statement boundaries and its own state store.
+ * PG18: STATE_RUNNING = 3 (gate opens), anything else closes the gate.
+ *   head_ns  = entry(pgstat_report_activity RUNNING) - entry(exec_simple_query)
+ *   tail_ns  = entry(pgstat_report_activity !RUNNING) - return(exec_simple_query)
+ *   open_ns  = our marker span            stmt_ns = exec_simple_query span
+ *   ra_*_dur = the probed function's own duration (bounds marker-vs-state skew)
+ */
+BEGIN { printf("tracing\n"); }
+
+uprobe:/usr/lib/postgresql/18/bin/postgres:exec_simple_query { @qs[pid] = nsecs; }
+
+uretprobe:/usr/lib/postgresql/18/bin/postgres:exec_simple_query
+{
+  if (@qs[pid] != 0) { @stmt_ns = stats(nsecs - @qs[pid]); @qr[pid] = nsecs; }
+}
+
+uprobe:/usr/lib/postgresql/18/bin/postgres:pgstat_report_activity
+{
+  @rain[pid] = nsecs;
+  @rast[pid] = arg0;
+  if (arg0 == 3) {
+    @raopen[pid] = nsecs;
+    if (@qs[pid] != 0) { @head_ns = stats(nsecs - @qs[pid]); @nhead = count(); }
+  } else {
+    if (@raopen[pid] != 0) {
+      @open_ns = stats(nsecs - @raopen[pid]);
+      @open_hist = hist(nsecs - @raopen[pid]);
+      @nopen = count();
+      delete(@raopen[pid]);
+    }
+    if (@qr[pid] != 0) { @tail_ns = stats(nsecs - @qr[pid]); @ntail = count(); delete(@qr[pid]); }
+  }
+}
+
+uretprobe:/usr/lib/postgresql/18/bin/postgres:pgstat_report_activity
+{
+  if (@rain[pid] != 0) {
+    if (@rast[pid] == 3) { @ra_open_dur = stats(nsecs - @rain[pid]); }
+    else { @ra_close_dur = stats(nsecs - @rain[pid]); }
+    delete(@rain[pid]);
+  }
+}
+
+END { clear(@qs); clear(@qr); clear(@rain); clear(@rast); clear(@raopen); }

@@ -1,0 +1,50 @@
+#!/usr/bin/env bpftrace
+/* Residual A, direct. PG18: STATE_RUNNING = 3.
+ * Our CMD marker fires at ENTRY of pgstat_report_activity.
+ * PostgreSQL's own state_change timestamp is the value GetCurrentTimestamp()
+ * returns INSIDE that same call, just before the store. So
+ *   delta_open/close = t(GetCurrentTimestamp return, inside report_activity)
+ *                      - t(report_activity entry)
+ * is exactly how far our marker leads PostgreSQL's own state timestamp,
+ * per end. Net widening of our span = delta_close - delta_open.
+ * head_ns = our open marker minus PG's own statement-start timestamp call.
+ * rfq_ns  = ReadyForQuery entry minus our close marker.
+ */
+uprobe:/usr/lib/postgresql/18/bin/postgres:SetCurrentStatementStartTimestamp { @sst[pid] = nsecs; }
+
+uprobe:/usr/lib/postgresql/18/bin/postgres:pgstat_report_activity
+{
+  @rain[pid] = nsecs; @rast[pid] = arg0; @inra[pid] = 1; @gct[pid] = 0;
+  if (arg0 == 3) {
+    @raopen[pid] = nsecs;
+    if (@sst[pid] != 0) { @head_ns = stats(nsecs - @sst[pid]); @nhead = count(); }
+  } else {
+    @raclose[pid] = nsecs;
+    if (@raopen[pid] != 0) { @open_ns = stats(nsecs - @raopen[pid]); @nopen = count(); delete(@raopen[pid]); }
+  }
+}
+
+uretprobe:/usr/lib/postgresql/18/bin/postgres:GetCurrentTimestamp
+{
+  if (@inra[pid] == 1 && @gct[pid] == 0) {
+    @gct[pid] = 1;
+    if (@rast[pid] == 3) { @delta_open = stats(nsecs - @rain[pid]); }
+    else { @delta_close = stats(nsecs - @rain[pid]); }
+  }
+}
+
+uretprobe:/usr/lib/postgresql/18/bin/postgres:pgstat_report_activity
+{
+  @inra[pid] = 0;
+  if (@rain[pid] != 0) {
+    if (@rast[pid] == 3) { @ra_open_dur = stats(nsecs - @rain[pid]); }
+    else { @ra_close_dur = stats(nsecs - @rain[pid]); }
+  }
+}
+
+uprobe:/usr/lib/postgresql/18/bin/postgres:ReadyForQuery
+{
+  if (@raclose[pid] != 0) { @rfq_ns = stats(nsecs - @raclose[pid]); @nrfq = count(); delete(@raclose[pid]); }
+}
+
+END { clear(@sst); clear(@rain); clear(@rast); clear(@inra); clear(@gct); clear(@raopen); clear(@raclose); }

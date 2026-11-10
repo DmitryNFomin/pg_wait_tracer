@@ -1,0 +1,202 @@
+######## sat ########
+ALIGNMENT window=[1790495789660689680,1790495851396214357) secs=61.735524677 backends=8: 4490,4491,4492,4493,4494,4495,4496,4497
+  excluded from the trace side: --exclude-pid 4506 --exclude-pid 4573 --exclude-pid 4576 --exclude-pid 4579 --exclude-pid 4584   (pgsa sampler=4506, daemon=4533)
+
+WINDOW wall_from=1790495789660689680 wall_to=1790495851396214357 secs=61.736
+PIDS total=17 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+IDLE raw wall = 37.701 s (of which inside a command: 0.006 s)
+CMD-OPEN total = 350.883 s over 967127 commands (mean 362.8 us)   wait inside cmd = 197.997 s   cpu outside cmd = 105.306 s
+INTERVALS cpu=759686 (mean 339.8 us) wait=505751 (mean 391.5 us) straddling=507481 (105.304 s outside)
+CPU(we==0) wall = 258.147 s   measured cpu_ns = 162.623 s
+MARKERS start=967128 end=967127 dup_start(missing END)=1 orphan_end(missing START)=0 pids_unclosed_at_end=0
+WAIT-SHORT n<1us=0 (0.000 s)  n<10us=77381 (0.629 s)  clipped_at_edges=0 (0.000 s lo + 0.000 s hi)
+HIST-WAIT(us log2) 2:856 3:30776 4:130142 5:33052 6:6918 7:11737 8:30373 9:118602 10:104087 11:31006 12:6742 13:1268 14:166 15:26
+HIST-CMDOPEN(us log2) 2:1 5:124702 6:87650 7:289513 8:133478 9:115841 10:128494 11:68322 12:15715 13:2985 14:367 15:58 16:1
+SAMPLED                        cpu=142.113s nonidle=345.423s  share=41.1%  total=387.727s active_frac=89.1% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=158.433s wait=197.997s  share=44.5%
+EXACT A (sorted, majority)     cpu=158.433s wait=197.997s  share=44.5%
+EXACT B (sorted, proportional) cpu=152.841s wait=197.997s  share=43.6%
+EXACT C (2-pass, proportional) cpu=152.841s wait=197.997s  share=43.6%
+
+event                         S_sec      C_sec    C_share  smp_share
+CPU                          158.43     152.84      43.6%      41.1%
+WALWrite                      82.62      82.62      23.5%      24.7%
+transactionid                 59.38      59.38      16.9%      17.5%
+WalSync                       47.82      47.82      13.6%      14.0%
+tuple                          5.09       5.09       1.5%       1.7%
+WalWrite                       1.38       1.38       0.4%       0.4%
+DataFileRead                   0.68       0.68       0.2%       0.2%
+DataFileWrite                  0.55       0.55       0.2%       0.1%
+LockManager                    0.22       0.22       0.1%       0.1%
+BufferContent                  0.10       0.10       0.0%       0.1%
+DataFileExtend                 0.06       0.06       0.0%       0.0%
+SpinDelay                      0.03       0.03       0.0%       0.0%
+
+SCHEDTRACE window=61.736s backends=8 wall=493.884 backend-s
+  on-CPU  (executing)                =  176.989 s
+  run-queue delay (runnable, queued) =  152.331 s
+  off-CPU (blocked / sleeping)       =  164.113 s
+  sum                                =  493.433 s (99.9% of wall; the remainder is the slice in progress at each dump boundary)
+  fsync/fdatasync wall               =    0.000 s
+  ... of which EXECUTING on a cpu    =    0.000 s (0.0% -- on-CPU time PostgreSQL reports as the IO:WalSync wait)
+
+KERNEL window=61.736s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =  175.450 s
+  schedstat f2 run_delay        (runnable, queued) =  153.797 s
+  f1+f2  (on a processor OR wanting one)           =  329.247 s
+  /proc/stat utime (tick-quantised)                =  124.820 s
+  /proc/stat stime (tick-quantised; probe cost)    =   50.662 s
+  /proc/stat utime+stime (f1 cross-check)          =  175.482 s
+  pids covered: 4490,4491,4492,4493,4494,4495,4496,4497
+PGSA  iters=3012 (48.8 Hz) samples=16393 cpu_samples=6030 share=36.8%
+  cpu backend_s  =  123.594 s   (active total 335.999 s, wait 212.405 s)
+    CPU                          36.8%    123.59s
+    LWLock:WALWrite              27.0%     90.76s
+    Lock:transactionid           18.9%     63.50s
+    IO:WalSync                   14.9%     50.18s
+    Lock:tuple                    1.6%      5.35s
+    IO:WalWrite                   0.3%      1.13s
+    IO:DataFileRead               0.2%      0.59s
+    IO:DataFileWrite              0.1%      0.39s
+
+SAMPBIAS  backends=8  window=61.736s  sampler switch-ins in window=3358 (54.4/s)
+      pid  by time %   as sampler saw it %  delta pp
+     4490      66.8%                 63.6%    -3.11
+     4491      66.9%                 61.7%    -5.13
+     4492      66.7%                 64.1%    -2.56
+     4493      66.7%                 63.2%    -3.49
+     4494      66.5%                 63.1%    -3.33
+     4495      66.8%                 63.8%    -2.97
+     4496      66.8%                 63.3%    -3.44
+     4497      66.4%                 63.2%    -3.25
+  mean fraction of backends on a processor OR runnable:
+    by time                 = 66.68%
+    at sampler switch-ins   = 63.27%
+  SCHEDULING BIAS = -3.41 pp (sampler UNDER-observes the on-cpu-or-runnable state)
+
+TORN rows=24096  active+ClientRead=114 (0.47%)  non-active+no-wait-event=5577 (23.14%)
+
+--- sampler wakeup->on-cpu delay (whole bpftrace run) ---
+SDELAY_US (sampler wakeup -> on cpu)
+@sdelay: 
+[2, 4)                 5 |                                                    |
+[4, 8)               124 |@@@@@                                               |
+[8, 16)             1113 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[16, 32)             288 |@@@@@@@@@@@@@                                       |
+[32, 64)             239 |@@@@@@@@@@@                                         |
+[64, 128)            371 |@@@@@@@@@@@@@@@@@                                   |
+[128, 256)           563 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[256, 512)           774 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[512, 1K)            525 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[1K, 2K)             131 |@@@@@@                                              |
+[2K, 4K)               3 |                                                    |
+
+
+
+@off[4491]: 27520712078
+@off[4492]: 27622574963
+@off[4495]: 27623887587
+@off[4496]: 27629489231
+--- observer costs over the window (on-CPU s) ---
+daemon:  schedstat f1 sum_exec_runtime (on a processor) = 2.667 s
+bpftrace:  schedstat f1 sum_exec_runtime (on a processor) = 0.077 s
+pgsa-sampler:  schedstat f1 sum_exec_runtime (on a processor) = 0.559 s
+######## unsat ########
+ALIGNMENT window=[1790495890449120367,1790495950449288594) secs=60.000168227 backends=2: 4756,4757
+  excluded from the trace side: --exclude-pid 4767 --exclude-pid 4838 --exclude-pid 4841 --exclude-pid 4844 --exclude-pid 4845   (pgsa sampler=4767, daemon=4798)
+
+WINDOW wall_from=1790495890449120367 wall_to=1790495950449288594 secs=60.000
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 22.567 s (of which inside a command: 0.004 s)
+CMD-OPEN total = 85.938 s over 347425 commands (mean 247.4 us)   wait inside cmd = 35.076 s   cpu outside cmd = 11.499 s
+INTERVALS cpu=488849 (mean 127.5 us) wait=141592 (mean 247.7 us) straddling=424552 (11.498 s outside)
+CPU(we==0) wall = 62.345 s   measured cpu_ns = 62.337 s
+MARKERS start=347426 end=347425 dup_start(missing END)=1 orphan_end(missing START)=0 pids_unclosed_at_end=0
+WAIT-SHORT n<1us=0 (0.000 s)  n<10us=14483 (0.122 s)  clipped_at_edges=0 (0.000 s lo + 0.000 s hi)
+HIST-WAIT(us log2) 2:43 3:5049 4:40708 5:28631 6:4225 7:1554 8:2854 9:28906 10:27830 11:1039 12:632 13:115 14:6
+HIST-CMDOPEN(us log2) 5:28152 6:39628 7:91985 8:80616 9:57492 10:43598 11:5039 12:695 13:203 14:17
+SAMPLED                        cpu=40.562s nonidle=75.374s  share=53.8%  total=102.834s active_frac=73.3% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=59.381s wait=35.076s  share=62.9%
+EXACT A (sorted, majority)     cpu=59.381s wait=35.076s  share=62.9%
+EXACT B (sorted, proportional) cpu=50.846s wait=35.076s  share=59.2%
+EXACT C (2-pass, proportional) cpu=50.846s wait=35.076s  share=59.2%
+
+event                         S_sec      C_sec    C_share  smp_share
+CPU                           59.38      50.85      59.2%      53.8%
+WalSync                       27.61      27.61      32.1%      36.5%
+WALWrite                       4.79       4.79       5.6%       6.0%
+transactionid                  1.38       1.38       1.6%       2.1%
+WalWrite                       0.94       0.94       1.1%       1.2%
+DataFileRead                   0.32       0.32       0.4%       0.3%
+DataFileWrite                  0.02       0.02       0.0%       0.0%
+DataFileExtend                 0.01       0.01       0.0%       0.0%
+BufferContent                  0.00       0.00       0.0%       0.0%
+SlruWrite                      0.00       0.00       0.0%       0.0%
+WALInsert                      0.00       0.00       0.0%       0.0%
+DataFilePrefetch               0.00       0.00       0.0%       0.0%
+
+SCHEDTRACE window=60.000s backends=2 wall=120.000 backend-s
+  on-CPU  (executing)                =   73.842 s
+  run-queue delay (runnable, queued) =    2.440 s
+  off-CPU (blocked / sleeping)       =   43.318 s
+  sum                                =  119.600 s (99.7% of wall; the remainder is the slice in progress at each dump boundary)
+  fsync/fdatasync wall               =    0.000 s
+  ... of which EXECUTING on a cpu    =    0.000 s (0.0% -- on-CPU time PostgreSQL reports as the IO:WalSync wait)
+
+KERNEL window=60.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   75.356 s
+  schedstat f2 run_delay        (runnable, queued) =    0.585 s
+  f1+f2  (on a processor OR wanting one)           =   75.941 s
+  /proc/stat utime (tick-quantised)                =   49.540 s
+  /proc/stat stime (tick-quantised; probe cost)    =   25.808 s
+  /proc/stat utime+stime (f1 cross-check)          =   75.348 s
+  pids covered: 4756,4757
+PGSA  iters=2954 (49.2 Hz) samples=3924 cpu_samples=2260 share=57.6%
+  cpu backend_s  =   45.904 s   (active total 79.702 s, wait 33.798 s)
+    CPU                          57.6%     45.90s
+    IO:WalSync                   33.6%     26.77s
+    LWLock:WALWrite               5.7%      4.53s
+    Lock:transactionid            1.6%      1.26s
+    IO:WalWrite                   1.0%      0.83s
+    IO:DataFileRead               0.5%      0.37s
+    IO:DataFileWrite              0.0%      0.02s
+    LWLock:BufferContent          0.0%      0.02s
+
+SAMPBIAS  backends=2  window=60.000s  sampler switch-ins in window=2966 (49.4/s)
+      pid  by time %   as sampler saw it %  delta pp
+     4756      63.8%                 63.6%    -0.14
+     4757      63.3%                 62.7%    -0.65
+  mean fraction of backends on a processor OR runnable:
+    by time                 = 63.57%
+    at sampler switch-ins   = 63.17%
+  SCHEDULING BIAS = -0.40 pp (no material bias)
+
+TORN rows=5909  active+ClientRead=83 (1.40%)  non-active+no-wait-event=628 (10.63%)
+
+--- sampler wakeup->on-cpu delay (whole bpftrace run) ---
+SDELAY_US (sampler wakeup -> on cpu)
+@sdelay: 
+[2, 4)               290 |@@@@@@@@                                            |
+[4, 8)              1307 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[8, 16)             1826 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[16, 32)             567 |@@@@@@@@@@@@@@@@                                    |
+[32, 64)             107 |@@@                                                 |
+[64, 128)             32 |                                                    |
+[128, 256)            14 |                                                    |
+[256, 512)            10 |                                                    |
+[512, 1K)              5 |                                                    |
+[1K, 2K)               1 |                                                    |
+
+
+
+@off[4756]: 30975861381
+@off[4757]: 31175745636
+
+@on[4757]: 51289492638
+@on[4756]: 51475418961
+--- observer costs over the window (on-CPU s) ---
+daemon:  schedstat f1 sum_exec_runtime (on a processor) = 2.595 s
+bpftrace:  schedstat f1 sum_exec_runtime (on a processor) = 0.066 s
+pgsa-sampler:  schedstat f1 sum_exec_runtime (on a processor) = 0.699 s
+sat/pgbench.log:tps = 2438.099272 (without initial connection time)
+unsat/pgbench.log:tps = 901.767864 (without initial connection time)

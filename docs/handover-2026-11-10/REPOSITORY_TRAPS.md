@@ -17,6 +17,14 @@ section.
 
 Anything that contradicts the current code is stale, and the code wins.
 
+**Two warnings about the lines below, rather than about the repository.** Any IP
+address in them was current when it was written and may since have been
+recycled to someone else's machine -- resolve a box by its Hetzner server name
+(`pgwt-gate`, `pgwt-gate-2`, `pgwt-gate-3`) and never ssh an address mined from
+a note or an old log. And the one trap this file was missing is the one that
+caught the lead on the last day, so it leads the list.
+
+- **An absence claim needs `git log --all`** — `git ls-files` answers "is it tracked now", not "does it exist". This repo keeps abandoned work on pushed `preserve/<slug>` branches that are not ancestors of master, so a file can be fully recoverable while invisible to the index, the working tree and every box. Three files I published as "gone everywhere" were on `preserve/*`; #795 makes the same mistake in its own evidence
 - **Gate box** — root@2.28.45.47, cx33, PG ports 541x, flock rule, noise numbers
 - **Gate process decisions** — cx33 stays; intermittent product bugs may be KNOWN_FAILING; #110 miss does not block PRs
 - **Orphaned background shells** — poll loops outliving agents; only /tasks or the human can clear them
