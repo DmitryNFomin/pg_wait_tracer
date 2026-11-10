@@ -64,15 +64,24 @@ every time. Last night three parallel rounds finished with their work reachable
 only because the implementers had printed their patches into their logs.
 
 I have since changed the wrapper to write the working tree out as a patch and to
-tell the implementer not to spend a round fighting git. **That change is
-committed in the same branch as this document; before that commit it existed only
-in my local checkout, which means the handover's dispatch recipe did not work for
-anyone who cloned the repository.** An adviser caught that, not me.
+tell the implementer not to spend a round fighting git. **That change ships with
+this document on `docs/handover-2026-11-10` as PR #842. Until it was pushed it
+existed only in my local checkout, which meant the handover's own dispatch recipe
+did not work for anyone who cloned the repository.** An adviser caught that, not
+me -- twice, because the first fix left the branch unpushed.
 
-The second limit was me. The largest single consumer of today's turns was
-auditing my own prose: seven audit rounds, two returning BLOCK with eight and
-then seven wrong claims. I have not instrumented that into hours, so I am not
-giving a figure; the count of rounds is what I can show.
+The second limit was me: auditing my own prose.
+
+```
+$ find scratchpad -maxdepth 1 -name "audit-*.out" -newermt "2026-11-10 00:00" | wc -l
+      13
+```
+
+Eleven of those thirteen are BLOCK and one is SEND; two of the BLOCKs listed
+eight and then seven wrong claims in a single draft. I have not instrumented the
+wall time, so I am not giving an hours figure -- but thirteen audit rounds in a
+day, eleven of them refused, is the measure of how much of my output needed
+re-derivation before it could be sent.
 
 ## 3. The failure pattern, nine instances
 
