@@ -333,6 +333,9 @@ struct pgwt_aas_result {
     struct pgwt_aas_bucket *buckets;   /* malloc'd, caller frees */
     int      num_buckets;
     uint64_t bucket_ns;
+    /* Maximum over the requested buckets of all-class AAS + Off-CPU AAS,
+     * after filtering and excluding IO workers, independent of detail_events.
+     * The event stack may total less because of top-N series truncation. */
     double   max_aas;
 
     /* Per-event breakdown (populated when detail_events=1) */
