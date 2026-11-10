@@ -58,9 +58,11 @@ The cause is one line of sandbox policy: the implementer cannot write under
 
 I had been absorbing that by hand, round after round: read the log, extract the
 patch, hand it to a landing agent. **The part I own is not the sandbox, it is
-that I kept dispatching into a workflow I already knew could not commit, and
-treated each salvage as a one-off.** The signal was printed by my own wrapper
-every time. Last night three parallel rounds finished with their work reachable
+that I kept dispatching into a workflow already known not to commit, and treated
+each salvage as a one-off.** And "already known" is not a figure of speech: it is
+filed as open issue #777, on 2026-11-04, with the same `index.lock` evidence from
+two independent clones. An adviser found that issue while reviewing this
+document, after I had written here that the failure went unnoticed. Last night three parallel rounds finished with their work reachable
 only because the implementers had printed their patches into their logs.
 
 I have since changed the wrapper to write the working tree out as a patch and to
@@ -90,9 +92,12 @@ third instance of the pattern in section 3, inside the document about it.
 
 ## 3. The failure pattern, nine instances
 
-Every wrong claim caught today was a **derived comparison** -- a ratio, a scale,
-a fraction, a generalisation across captures -- and never a measured number. The
-measurements were right every time.
+Most of the wrong claims caught today were **derived comparisons** -- a ratio, a
+scale, a fraction, a generalisation across captures -- and the measurements
+themselves held up every time. "Every one was a ratio" is itself an overstatement
+an adviser refused: instances 6, 7 and 8 below are a wrong cause, a wrong state
+and a wrong absence claim, and the audits also flagged running-state and
+code-behaviour claims.
 
 1. I wrote that both salvaged patches were backed by a green box run. True of
    #819; #821's box run had been cut off mid live-UI-smoke with no aggregate

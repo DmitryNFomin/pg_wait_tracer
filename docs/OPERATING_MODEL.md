@@ -22,8 +22,8 @@ decision or a plan-changing finding.
 
 **The lead** -- the main interactive session. Plans, splits work, dispatches
 agents, judges what comes back, publishes to the issue tracker, and reports to
-the owner. **It writes no feature code beyond a one-liner**, which is the rule
-that keeps it honest: it cannot quietly fix what it is supposed to be judging.
+the owner. **It writes no feature code beyond a one-liner**, so the agent that judges a
+change is not the agent that wrote it.
 Its own output is gated like anyone else's -- no status report reaches the owner
 without passing the audit in section 5.
 
@@ -54,9 +54,11 @@ an adviser but must say so in the report, with the evidence.
 whose conclusion is all that is needed.
 
 The cap is **three actively implementing tasks**, excluding agents idling in CI,
-a box run or review. On this Mac the real constraint is tighter: `make check`
-serialises machine-wide, so three concurrent gate-bound tasks is the practical
-ceiling.
+a box run or review. `make check` serialises machine-wide through
+`scripts/check-lock.sh`, so gate-bound work queues -- but `CLAUDE.md` line 190
+is explicit that no Mac-derived gate-phase cap may be invented on top of the
+three, and the rationale document's measurements put the boxes, not this Mac, on
+the critical path.
 
 ---
 
@@ -99,10 +101,11 @@ brief (a file)
 **The constraint that shapes all of it:** the implementer's sandbox forbids
 writes under `.git`, so `git add` cannot take its lock and **an implementer
 cannot commit**. Every round that reaches the end exits `BRANCH_UNCHANGED`.
-That is expected, not a failure. **As of PR #842** the wrapper writes the
-clone's working tree out as a patch for the landing agent (seventeen lines added
-and one changed); on `origin/master` it does not, so check which version you
-have before relying on `SALVAGE_PATCH`.
+That is expected, not a failure, and it is filed as open issue **#777**
+(2026-11-04), which carries the same `index.lock` evidence from two independent
+clones. **As of PR #842** the wrapper writes the clone's working tree out as a
+patch for the landing agent; on `origin/master` it does not, so check which
+version you have before relying on `SALVAGE_PATCH`.
 
 Two more properties of `codex-task.sh` worth knowing before using it. First,
 it fetches only `master` and bases the branch on that: a fresh clone starts the
@@ -141,8 +144,11 @@ Do not edit the tree while its check runs.
 
 Three guards a reviewer runs by hand, all Mac-side and seconds long:
 `scripts/check-test-registration.sh`, `scripts/check-runner-registration.sh`,
-and the log-header identity check above. `scripts/check-box-evidence.sh <pr>`
-reports when a PR's logged evidence has drifted from its tip.
+and the log-header identity check above. `scripts/lead/check-box-evidence.sh <pr>`
+reports when a PR's logged evidence has drifted from its tip. Note also that
+`make check-fast` writes an accepted stamp too, and that a green `run_all`
+summary can still contain known-failing entries and `xpass` lines -- read the
+aggregate, not the colour.
 
 **The boxes are the CI runners.** An agent's box run starves CI and stalls
 merges, so check the flock first
@@ -164,7 +170,9 @@ sees it. It runs a pre-pass (every absence claim needs a pasted command and its
 output within eight lines, or an explicit `UNVERIFIED:` marker) and then a codex
 pass that re-derives each claim independently and labels it VERIFIED, WRONG or
 UNVERIFIABLE. **The printed verdict is authoritative**; a piped run's exit code
-is not, and the last printed verdict is the one that counts.
+is not. "Last printed verdict" means the wrapper's own draft-bound verdict line,
+which names the draft hash -- not a verdict from a different, conflicting
+auditor run in the same file.
 
 It is not a formality. On 2026-11-10:
 
@@ -177,11 +185,13 @@ $ for f in <those files>; do grep -ohE "VERDICT:? ?(SEND|BLOCK|MALFORMED|INCONCL
 ```
 
 Three print no verdict line, because their run was killed or left empty. Two of
-the ten BLOCKs listed eight and seven wrong claims in a single draft. Every wrong claim that day was a **derived comparison** -- a ratio, a
-"same scale as", a fraction, a generalisation from one capture -- and never a
-measured number. The practice that follows: publish the measurement and its
+the ten BLOCKs listed eight and seven wrong claims in a single draft. Most of the wrong claims that day were **derived comparisons** -- a ratio, a
+"same scale as", a fraction, a generalisation from one capture -- but not all:
+the audits also flagged absence claims, running-state claims and claims about
+what code does. The practice that follows: publish the measurement and its
 command and let the reader divide; hold an adviser's number to the same bar as
-your own; and say "on this capture" until a second capture agrees.
+your own; say "on this capture" until a second capture agrees; and never publish
+an absence without the command that would refute it.
 
 Corrections are published, not quietly fixed: the original stays visible and the
 correction states what was wrong and where the error came from. Five such
@@ -201,15 +211,19 @@ branches that are empty shells, armed-but-BEHIND PRs, VMs alive, box occupancy,
 codex liveness, evidence drift, and the top tag-blocker issues that have no open
 PR and no live worktree. It writes `scripts/lead/.dispatch-queue`.
 
-The `Stop` and `SubagentStop` hooks (`scripts/lead/sweep-hook.sh`) **refuse to
-end a turn** until every finding carries a disposition recorded that turn in
-`scripts/lead/.dispositions`:
+`scripts/lead/sweep-hook.sh` is registered on both `Stop` and `SubagentStop`.
+The `Stop` registration is the one that **refuses to end a turn** until every
+finding carries a disposition recorded that turn in
+`scripts/lead/.dispositions`; it blocks once, exempts continuation events, and
+bounds how much it escalates. Each line must end with the finding's id in
+brackets or it does not count:
 
-- a plain finding takes `ACTED <command>`, `MY-CHOICE <reason>` or
-  `UNKNOWN <what could not be determined>`;
-- an escalated `issue-N` item takes only `RUNNING <agent-or-PR>`,
-  `BLOCKED-BY <other-queue-id>`, or `HELD-BY <pr> <file>` with this turn's
-  `held.sh` output.
+- a plain finding takes `ACTED <command> [hash-id]`,
+  `MY-CHOICE <reason> [hash-id]` or
+  `UNKNOWN <what could not be determined> [hash-id]`;
+- an escalated item takes only `RUNNING <agent-or-PR> [issue-N]`,
+  `BLOCKED-BY <other-queue-id> [issue-N]`, or
+  `HELD-BY <pr> <file> [issue-N]` with this turn's `held.sh` output.
 
 The vocabulary is the point: it makes "blocked" a query result rather than a
 feeling. If `held.sh` says FREE and nothing is running, the honest status is
@@ -239,18 +253,22 @@ copy resume into shifted bytes.
 | `scripts/lead/sweep.sh` | the reconciler: GitHub + git + local state into findings and the dispatch queue |
 | `scripts/lead/sweep-hook.sh` | the Stop / SubagentStop gate that demands a disposition per finding |
 | `scripts/lead/agent-start-hook.sh`, `agent-stop-hook.sh` (+ `agent-ledger.py`) | maintain the shared active-agent ledger |
-| `scripts/lead/status.sh` | render the owner-facing status skeleton |
+| `scripts/lead/status.sh` | render the owner-facing status skeleton; needs a sweep newer than 600 s |
 | `scripts/lead/check-box-evidence.sh` (+ `box-evidence-bulk.py`) | report PRs whose box evidence has drifted from their tip |
 | `scripts/lead/selftest.sh`, `codex-task-selftest.sh`, `audit-report-selftest.py`, `selftest-pr-state.py` | regression tests for all of the above |
 | `scripts/box-check.sh` | the live tier over ssh; writes the `commit=`/`tree-hash=` header that makes a log citable |
 | `scripts/check.sh` | the deterministic Mac tier; writes and removes `.pgwt-check.stamp` |
 | `scripts/check-lock.sh` | machine-wide mutual exclusion around `make check` |
 | `scripts/tree-hash.sh` | content hash of the working tree, the identity every piece of evidence is bound to |
-| `scripts/pr-ready.sh` | the mechanical definition-of-done sequence, run from inside an agent worktree |
+| `scripts/pr-ready.sh` | the mechanical definition-of-done sequence, run from inside an `agent/` worktree; it leaves provenance, coverage and review judgement to its caller |
+| `scripts/check-lock.py`, `check-runner-registration.py`, `check-section-registration.{sh,py}` | helpers the guards above call |
+| `tests/run_all.sh`, `ci_smoke.sh`, `ui_live_smoke.sh`, `ui_gallery.sh`, `provision-runner.sh` | the runners the box tier drives |
+| `.github/scripts/classify_changed_files.sh`, `cleanup_gate_cell.py` | how CI narrows tiers and releases a gate cell |
 | `scripts/check-test-registration.sh`, `check-runner-registration.sh` | refuse a tree that silently drops or orphans a test |
 | `scripts/check-link-closure.sh`, `check-runner-pin.sh`, `check-section-registration.sh`, `check-snapshot-history.sh` | the sub-guards `scripts/check.sh` calls on every `make check` |
 | `scripts/hooks/kill-guard-selftest.sh` | the kill-guard self-test CI runs |
-| `scripts/hooks/push-guard.sh` + `scripts/git-hooks/` | refuse a push without a stamp matching the tree; refuse attempts to bypass itself |
+| `scripts/hooks/push-guard.sh`, `scripts/git-hooks/pre-push` | refuse a push without a stamp matching the tree, and refuse attempts to bypass the guard |
+| `scripts/git-hooks/commit-msg` | the attribution trailers, a separate job from the push enforcement |
 | `tests/hetzner-vm.sh`, `tests/hetzner-sweep.sh` | create and delete throwaway VMs by id; the sweep is a janitor, not a targeted delete |
 
 ---
@@ -260,16 +278,19 @@ copy resume into shifted bytes.
 A new team should expect these, because they are properties of the setup rather
 than one-off mistakes:
 
-1. **The dispatch path could not produce a commit, and that went unnoticed for
-   twenty rounds.** The sandbox's `.git` restriction was visible in every
-   wrapper log as `BRANCH_UNCHANGED`; each round was hand-salvaged instead of
-   the tool being fixed, and section 9 records that the two-stage shape is itself
-   the defect rather than the remedy.
-2. **The lead's prose was the least reliable artefact in the system.** The
-   measurements held up; the sentences about them did not. Thirteen audit rounds
-   in a day, eleven refused. The audit caught every instance, but it caught them
-   downstream -- the same scrutiny applied to a brief before dispatch is
-   cheaper.
+1. **The dispatch path cannot produce a commit, and this was known before
+   today.** It is filed as open issue #777, on 2026-11-04, with the same
+   `index.lock` evidence from two independent clones. So the honest statement is
+   not that it went unnoticed: it was documented, and rounds kept being
+   dispatched into it anyway while each one was hand-salvaged. Section 9 records
+   that the two-stage shape is the defect rather than the remedy.
+2. **The lead's prose needed more re-derivation than its measurements.** The
+   measurements held up under independent replay; the sentences about them were
+   refused ten times in fourteen audit rounds in one day. I cannot claim the
+   audit caught every error -- only the ones it was given, and three more were
+   found later by advisers reviewing these documents. What is clear is that it
+   caught them downstream: the same scrutiny spent on a brief before dispatch
+   would be cheaper.
 3. **A reviewer can inherit a gap** -- seen once, so treat it as a warning
    rather than a property. A landing agent ran a branch's unit-level controls
    but not its standalone refusal controls, and reported exactly that; the
@@ -279,10 +300,12 @@ than one-off mistakes:
    handover, but with nine artefacts at stake: they existed on one Mac only, and
    the handover itself cited a plan file that lived in a temp directory.
    Anything another person needs goes into the repository or an issue comment.
-5. **Measurement evidence outgrows the places it can live.** This week's
-   captures are about 1.1 GB under `/private/tmp`; the published numbers cite
-   them. Decide, before measuring, where the capture will live if the number
-   gets published.
+5. **Published numbers end up depending on evidence with no durable home.**
+   This week's captures are about 1.1 GB under `/private/tmp` and the published
+   numbers cite them; open issue #795 records the same problem for the kernel
+   decomposition that #115, #194 and #306 must verify against, which exists on
+   one machine. The size is not the point -- the absence of a durable location
+   is. Decide where a capture will live before the number is published.
 6. **The reconciler's ranking ages.** See #808 in section 6.
 
 ## 9. What I would change
