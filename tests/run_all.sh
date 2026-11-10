@@ -128,15 +128,18 @@ known_failing=0
 xpass=0
 known_failing_results=()
 
-# KNOWN_FAILING: name|issue[|os[@kernel-major.minor]] (or |@kernel alone).
-# An omitted scope applies everywhere; both supplied predicates must match.
+# KNOWN_FAILING: name|issue|os[@kernel-major.minor]|exit=NN (or |@kernel alone).
+# Both supplied predicates must match; scoped entries MUST specify an exit.
+# Legacy name|issue applies everywhere and accepts any nonzero exit except
+# 126/127. No production entry uses that legacy form (pinned by the self-test).
 # ONLY for a test that
 # reproduces a real, filed product bug (e.g. #97, #98) — never for timing or
 # runner noise; a noisy test gets moved to a different tier or investigated,
 # it is never silenced here (see also CLAUDE.md's Rules).
 #
-# A listed test still runs in full, every time, and NEITHER outcome fails
-# the gate: an expected failure is printed loudly as "KNOWN-FAILING
+# A listed test still runs in full, every time. Only its expected exit (or
+# an unexpected pass) is classified; any other failure fails the gate.
+# An expected failure is printed loudly as "KNOWN-FAILING
 # (issue #N)"; an unexpected pass — the bug can be intermittent (it may fail
 # under one PG version's test sequence and pass under another) or already
 # fixed — is printed as "UNEXPECTED PASS (issue #N) — intermittent or fixed;
@@ -169,7 +172,9 @@ KNOWN_FAILING=(
     # ±8.8 pp. #675 tracks the sampled CPU under-read signature; causation is
     # not settled. It stays an OPEN tag-blocker: this entry does not close
     # or excuse the product defect, and grants no release exclusion.
-    'test_cross_validate_tiered|675|el8@4.18'
+    # Exit 79 requires valid captures, tolerance-only under-reads <=15.0 pp;
+    # see the measured provenance and regression-tripwire comment in the test.
+    'test_cross_validate_tiered|675|el8@4.18|exit=79'
 )
 
 # Read the runner's host, never a caller's OS/identity environment variables.
@@ -199,12 +204,14 @@ known_failing_detect_platform() {
 }
 
 # Validate the entire table before any build/test, including inactive scopes.
-# Keep name|issue compatibility; an empty third field is a malformed scope.
+# Keep unused legacy name|issue compatibility; scoped entries require exit=NN.
 known_failing_validate() {
-    local entry
-    local pattern='^[a-zA-Z0-9_]+[|][1-9][0-9]*([|]([a-z][a-z0-9_-]*(@[0-9]+[.][0-9]+)?|@[0-9]+[.][0-9]+))?$'
+    local entry code
+    local pattern='^[a-zA-Z0-9_]+[|][1-9][0-9]*([|]([a-z][a-z0-9_-]*(@[0-9]+[.][0-9]+)?|@[0-9]+[.][0-9]+)[|]exit=[1-9][0-9]*)?$'
     for entry in ${KNOWN_FAILING[@]+"${KNOWN_FAILING[@]}"}; do
-        if [[ ! "$entry" =~ $pattern ]]; then
+        code="${entry##*exit=}"
+        if [[ ! "$entry" =~ $pattern ]] ||
+            { [[ "$entry" == *'|exit='* ]] && { [[ ${#code} -gt 3 ]] || ((code > 125 || code == 78)); }; }; then
             echo "ERROR: malformed KNOWN_FAILING entry: $entry" >&2
             return 1
         fi
@@ -225,20 +232,20 @@ known_failing_scope_matches() {
 known_failing_validate || exit 2
 known_failing_detect_platform
 
-# known_failing_issue NAME — prints the tracking issue number and returns 0
+# known_failing_issue NAME — prints issue|expected-exit and returns 0
 # if NAME is listed and in scope, else returns 1 with no output.
 known_failing_issue() {
     local target="$1"
-    local entry name issue scope
+    local entry name issue scope expected
     # The ${a[@]+...} form, not a bare "${a[@]}": under `set -u` an EMPTY
     # array expands to an unbound variable on bash < 4.4 (EL8's /bin/bash is
     # 4.4, but the gate must not depend on that), which would abort run_all
     # the first time any test finished with an empty table.
     for entry in ${KNOWN_FAILING[@]+"${KNOWN_FAILING[@]}"}; do
-        IFS='|' read -r name issue scope <<< "$entry"
+        IFS='|' read -r name issue scope expected <<< "$entry"
         if [[ "$name" == "$target" ]] && known_failing_scope_matches "$scope" \
             "${KNOWN_FAILING_OS:-unknown}" "${KNOWN_FAILING_KERNEL:-unknown}"; then
-            echo "$issue"
+            echo "$issue|${expected#exit=}"
             return 0
         fi
     done
@@ -260,25 +267,34 @@ run_test() {
     }
     "$@" 2>&1 | tee "$capture"
     rc=${PIPESTATUS[0]}
-    local issue
-    if issue=$(known_failing_issue "$name"); then
+    local match issue expected
+    if match=$(known_failing_issue "$name"); then
+        IFS='|' read -r issue expected <<< "$match"
+        local classified=0
         # A listed test that could not even run (126: found but not
         # executable, 127: command/file not found) is not the known product
         # bug being tracked — it's a broken test, and must fail the gate
         # like any other test, not disappear into known_failing.
         if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
-            echo "  FAILED TO RUN (exit $rc) — not the tracked bug (issue #$issue), counts as a real failure"
+            echo "  FAILED TO RUN (exit $rc) — expected exit ${expected:-nonzero except 126/127} for issue #$issue; counts as a real failure"
             failed=$((failed + 1))
         elif [[ "$rc" -eq 0 ]]; then
             echo "  UNEXPECTED PASS (issue #$issue) — intermittent or fixed; check the issue"
             known_failing=$((known_failing + 1))
             xpass=$((xpass + 1))
-        else
+            classified=1
+        elif [[ -z "$expected" || "$rc" -eq "$expected" ]]; then
             echo "  KNOWN-FAILING (issue #$issue)"
             known_failing=$((known_failing + 1))
+            classified=1
+        else
+            echo "  FAILED (exit $rc, expected exit $expected for issue #$issue) — different failure; counts as a real failure"
+            failed=$((failed + 1))
         fi
-        if [[ "$rc" -ne 126 && "$rc" -ne 127 ]]; then
-            known_failing_results+=("$name|$issue|$rc")
+        if [[ "$classified" -eq 1 ]]; then
+            local deviations
+            deviations=$(sed -n 's/^TIERED_DEVIATIONS //p' "$capture" | tail -1)
+            known_failing_results+=("$name|$issue|$rc|$deviations")
         fi
     elif [[ "$rc" -eq 78 ]]; then
         local missing=""
@@ -907,7 +923,7 @@ if ! tier_ok; then
 fi
 
 [[ $failed -eq 0 ]] || gate_ok=0
-# box-check and CI preserve stdout + the runner exit code. Emit a JSON line
+# box-check preserves stdout + the runner exit code. Emit a JSON line
 # in that same log (not ui_live/summary.json, which describes only the UI).
 # Report only tests that actually ran in scope, including unexpected passes.
 python3 - "$gate_ok" "$KNOWN_FAILING_OS" "$KNOWN_FAILING_KERNEL" \
@@ -915,6 +931,7 @@ python3 - "$gate_ok" "$KNOWN_FAILING_OS" "$KNOWN_FAILING_KERNEL" \
     "$known_failing" "$xpass" "$total" \
     ${known_failing_results[@]+"${known_failing_results[@]}"} <<'PYEOF'
 import json
+import re
 import sys
 
 ok = sys.argv[1] == "1"
@@ -923,10 +940,18 @@ counts = dict(zip(("executed", "passed", "failed", "refused", "skipped",
                   map(int, sys.argv[4:13])))
 results = []
 for record in sys.argv[13:]:
-    name, issue, rc = record.split("|")
-    results.append(dict(test=name, issue=int(issue), exit=int(rc), xpass=rc == "0"))
+    name, issue, rc, deviations = record.split("|", 3)
+    result = dict(test=name, issue=int(issue), exit=int(rc), xpass=rc == "0")
+    measured = {}
+    if re.fullmatch(r"[0-9]+=[0-9]+(?:\.[0-9]+)?(?: [0-9]+=[0-9]+(?:\.[0-9]+)?)*", deviations):
+        measured = {rate: float(delta) for rate, delta in
+                    (arm.split("=") for arm in deviations.split())}
+        result["deviations_pp"] = measured
+    results.append(result)
     print(f"  Known-failing: {name} (issue #{issue}, "
-          + ("UNEXPECTED PASS" if rc == "0" else f"exit {rc}") + ")")
+          + ("UNEXPECTED PASS" if rc == "0" else f"exit {rc}") + ")"
+          + ("; deviations (pp): " + ", ".join(f"{rate}Hz={delta:.1f}" for rate, delta in measured.items())
+             if measured else ""))
 issues = sorted({r["issue"] for r in results})
 status = "PASS" if ok else "FAIL"
 summary = dict(ok=ok, status=status, os=sys.argv[2], kernel=sys.argv[3],
@@ -935,6 +960,12 @@ print("RUN_ALL_SUMMARY " + json.dumps(summary, sort_keys=True))
 if ok and results:
     status += (f" with {counts['known_failing_count']} known-failing (issues: "
                + ", ".join(f"#{issue}" for issue in issues) + ")")
+    measured_results = [r for r in results if "deviations_pp" in r]
+    if measured_results:
+        status += "; deviations (pp): " + "; ".join(
+            r["test"] + "[" + ", ".join(f"{rate}Hz={delta:.1f}" for rate, delta in
+                                        r["deviations_pp"].items()) + "]"
+            for r in measured_results)
 print(status)
 sys.exit(0 if ok else 1)
 PYEOF
