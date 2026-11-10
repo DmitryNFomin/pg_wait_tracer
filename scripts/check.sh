@@ -89,6 +89,9 @@ run python3 tests/test_board_author.py
 step "bash: pr-ready ordering and refusal self-test (#701)"
 run bash tests/test_pr_ready.sh
 
+step "generated tag board offline self-test (#850)"
+run scripts/lead/board-selftest.sh
+
 step "PR state drift sweep and disposition self-test (#717)"
 run python3 scripts/lead/selftest-pr-state.py
 
