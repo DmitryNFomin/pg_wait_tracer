@@ -2726,18 +2726,18 @@ static void test_sessions_overflow_is_reported(void)
      *
      * 14g pins the choice in BOTH directions, because a guard that simply
      * stopped counting would also pass an "idle denials are 0" assertion by
-     * never counting anything. So: idle-only must be 0 WHILE THE TABLE IS
-     * DEMONSTRABLY FULL and the idle time demonstrably arrived, and a mixed
-     * second must count the non-idle denials and only those. */
+     * never counting anything. #852 removes idle-only slot allocation:
+     * idle-only must leave the table EMPTY while idle time arrives; the
+     * mixed second below still fills the table with non-idle pids and tests
+     * that only non-idle denials count. */
     struct sess_probe pidle;
     sess_probe_run("sess_idle_overflow", SUMMARY_MAX_SESSIONS + EXTRA, 1,
                    EV_CLIENTREAD, &pidle);
-    CHECK(pidle.placed == SUMMARY_MAX_SESSIONS &&
+    CHECK(pidle.placed == 0 &&
           pidle.idle_ns ==
               (uint64_t)(SUMMARY_MAX_SESSIONS + EXTRA) * SESS_ONE_NS,
-          "the idle fixture really DID overflow the table and really DID "
-          "arrive: %d of %d pids placed, idle_ns=%llu (expected %llu). "
-          "Without these two the zero below is a gate that stopped counting",
+          "the idle fixture arrived without allocating session slots: "
+          "%d of %d pids placed, idle_ns=%llu (expected %llu)",
           pidle.placed, SUMMARY_MAX_SESSIONS + EXTRA,
           (unsigned long long)pidle.idle_ns,
           (unsigned long long)((uint64_t)(SUMMARY_MAX_SESSIONS + EXTRA) *
