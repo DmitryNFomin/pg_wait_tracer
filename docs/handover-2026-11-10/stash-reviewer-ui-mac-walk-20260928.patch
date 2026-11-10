@@ -1,0 +1,143 @@
+diff --git a/tests/test_ui_mac_walk_lib.py b/tests/test_ui_mac_walk_lib.py
+index 1507b776..7930163c 100644
+--- a/tests/test_ui_mac_walk_lib.py
++++ b/tests/test_ui_mac_walk_lib.py
+@@ -255,6 +255,29 @@ def test_build_tab_entry_clean():
+     check(entry["void_reason"] is None, "build_tab_entry: clean tab has no void_reason")
+ 
+ 
++def test_build_tab_entry_defaults_wall_times_to_none():
++    # Existing callers (tests/ui_mac_walk.py's Chrome walk) never pass
++    # these -- must not break, and must not fabricate a timestamp.
++    entry = lib.build_tab_entry("overview", True, "5 rows", 1.2, [], [], 2.0, None)
++    check(entry["wall_start"] is None and entry["wall_end"] is None,
++          "build_tab_entry: wall_start/wall_end default to None when not given")
++
++
++def test_build_tab_entry_persists_wall_times_and_bracket():
++    # The exact gap that made run8 un-re-derivable: these four fields must
++    # round-trip into the verdict so a future run can be re-judged from
++    # stored data alone.
++    entry = lib.build_tab_entry(
++        "overview", True, "5 rows", 1.2, [], [], 2.0, None,
++        wall_start=100.0, wall_end=100.5,
++        bracket_before={"ts": 99.0, "pressure_level": 1},
++        bracket_after={"ts": 101.0, "pressure_level": 1})
++    check(entry["wall_start"] == 100.0 and entry["wall_end"] == 100.5,
++          "build_tab_entry: wall_start/wall_end persisted verbatim")
++    check(entry["bracket_before"]["ts"] == 99.0 and entry["bracket_after"]["ts"] == 101.0,
++          "build_tab_entry: the actual bracketing samples are persisted, not just the verdict")
++
++
+ def test_build_tab_entry_console_error_fails():
+     entry = lib.build_tab_entry("events", True, "3 rows", 1.0, ["console: boom"], [], 1.0, None)
+     check(entry["ok"] is False,
+diff --git a/tests/ui_mac_walk.sh b/tests/ui_mac_walk.sh
+index cbbadac0..d8673d14 100755
+--- a/tests/ui_mac_walk.sh
++++ b/tests/ui_mac_walk.sh
+@@ -102,6 +102,7 @@ token="$(hcloud_token || true)"
+ 
+ server_id=""
+ server_ip=""
++server_name=""
+ reused=0
+ if [[ -f "$STATE_FILE" ]]; then
+     # shellcheck disable=SC1090
+@@ -144,6 +145,26 @@ ephemeral_cleanup() {
+         ' >>"$log" 2>&1
+     fi
+ 
++    # ORPHAN-WINDOW GUARD (2026-09-28: found live, this exact gap leaked a
++    # VM). server_id is only assigned AFTER `hetzner-vm.sh create`'s command
++    # substitution returns -- a SIGTERM delivered while still inside that
++    # substitution (VM already created, e.g. waiting for SSH) used to hit
++    # the `-z "$server_id"` check below and return immediately, never
++    # deleting the VM it had already paid to create. This mirrors the same
++    # guard scripts/box-check.sh's EPHEMERAL=1 path and scripts/demo-
++    # rehearsal.sh already use -- server_name is set (and pre-declared
++    # empty under `set -u`, see above) BEFORE the create call, so it
++    # survives an interruption that server_id does not.
++    if [[ -z "$server_id" && -n "$server_name" ]]; then
++        local lookup_token="$token"
++        [[ -z "$lookup_token" ]] && lookup_token="$(hcloud_token || true)"
++        if [[ -n "$lookup_token" ]]; then
++            echo "ui-mac-walk: server_id not yet known at cleanup time -- looking up '$server_name' by name (orphan-window guard)" | tee -a "$log"
++            server_id=$(curl -s "https://api.hetzner.cloud/v1/servers?name=$server_name" \
++                -H "Authorization: Bearer $lookup_token" | jq -r '.servers[0].id // empty' 2>/dev/null)
++            [[ -n "$server_id" ]] && echo "ui-mac-walk: found $server_name as id=$server_id by name lookup" | tee -a "$log"
++        fi
++    fi
+     [[ -z "$server_id" ]] && return
+     if [[ "$KEEP" == "1" ]]; then
+         cat > "$STATE_FILE" <<EOF
+diff --git a/tests/ui_mac_walk_lib.py b/tests/ui_mac_walk_lib.py
+index 8f8a29f8..4a48e555 100644
+--- a/tests/ui_mac_walk_lib.py
++++ b/tests/ui_mac_walk_lib.py
+@@ -128,13 +128,24 @@ def freshness_ok(age_s, max_age_s=FRESHNESS_MAX_AGE_S):
+ 
+ 
+ def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
+-                     pgwt_console_errors, freshness_age_s, mac_void_reason):
++                     pgwt_console_errors, freshness_age_s, mac_void_reason,
++                     wall_start=None, wall_end=None, bracket_before=None,
++                     bracket_after=None):
+     """One tab's row in the verdict. `ok` is false if the tab didn't render,
+     threw a real (non-'[pgwt]') console error, OR its window is void for
+     Mac-side infrastructure reasons -- void_reason is reported SEPARATELY so
+     a reader can tell "the product broke" from "the Mac was busy building
+     something else at the time" (criteria doc: void is infrastructure, not
+-    a product failure) rather than collapsing both into one boolean."""
++    a product failure) rather than collapsing both into one boolean.
++
++    wall_start/wall_end (epoch seconds) and bracket_before/bracket_after
++    (the actual mac_samples entries window_void_reason bracketed against,
++    or None) are persisted here -- found live 2026-09-28: their absence is
++    exactly why an earlier run's void verdict could not be re-derived from
++    its own saved summary.json afterward. All four default to None so
++    existing callers that predate this (tests/ui_mac_walk.py's Chrome walk)
++    keep working unchanged; a future run can be re-judged from stored data
++    without re-running only if these are populated."""
+     fresh_ok, fresh_detail = freshness_ok(freshness_age_s)
+     ok = bool(rendered) and not console_errors and mac_void_reason is None
+     return {
+@@ -146,6 +157,10 @@ def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
+         "pgwt_console_errors": list(pgwt_console_errors),
+         "freshness": {"age_s": freshness_age_s, "ok": fresh_ok, "detail": fresh_detail},
+         "void_reason": mac_void_reason,
++        "wall_start": wall_start,
++        "wall_end": wall_end,
++        "bracket_before": bracket_before,
++        "bracket_after": bracket_after,
+         "ok": ok,
+     }
+ 
+diff --git a/tests/ui_mac_walk_safari.py b/tests/ui_mac_walk_safari.py
+index 7f23715b..ff2ee622 100644
+--- a/tests/ui_mac_walk_safari.py
++++ b/tests/ui_mac_walk_safari.py
+@@ -528,12 +528,21 @@ def main():
+ 
+                 wall_end = time.time()
+                 void_reason = lib.window_void_reason(sampler.samples, wall_start, wall_end)
++                # Persisted alongside the verdict, not just used to compute
++                # it: found live (2026-09-28) that their absence was
++                # exactly why an earlier run's void verdict could not be
++                # re-derived from its own saved summary.json afterward.
++                bracket_before, bracket_after = lib.bracketing_samples(
++                    sampler.samples, wall_start, wall_end)
+                 entry = lib.build_tab_entry(
+                     tab_id, render_ok, render_detail, ttfp_s, console_errors,
+-                    pgwt_errors, freshness_age_s=None, mac_void_reason=void_reason)
++                    pgwt_errors, freshness_age_s=None, mac_void_reason=void_reason,
++                    wall_start=wall_start, wall_end=wall_end,
++                    bracket_before=bracket_before, bracket_after=bracket_after)
+                 tabs.append(entry)
+                 print(f"  rendered={entry['rendered']} ttfp_s={ttfp_s} "
+-                      f"console_errors={len(console_errors)} void={void_reason!r}")
++                      f"console_errors={len(console_errors)} void={void_reason!r} "
++                      f"bracket=({bracket_before}, {bracket_after})")
+ 
+             print("=== freshness pass (revisit each tab, same session) ===")
+             for entry in tabs:
