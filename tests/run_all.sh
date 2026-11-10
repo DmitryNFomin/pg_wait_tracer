@@ -126,8 +126,11 @@ skipped=0
 excluded=0
 known_failing=0
 xpass=0
+known_failing_results=()
 
-# KNOWN_FAILING: test name -> tracking issue number. ONLY for a test that
+# KNOWN_FAILING: name|issue[|os[@kernel-major.minor]] (or |@kernel alone).
+# An omitted scope applies everywhere; both supplied predicates must match.
+# ONLY for a test that
 # reproduces a real, filed product bug (e.g. #97, #98) — never for timing or
 # runner noise; a noisy test gets moved to a different tier or investigated,
 # it is never silenced here (see also CLAUDE.md's Rules).
@@ -161,21 +164,80 @@ xpass=0
 # neither outcome, so keeping it would have disarmed the very gate the fix
 # exists to satisfy — and CI's build-and-unit job (make -C tests check)
 # ignores this table entirely, so it was never the thing keeping CI green.
-KNOWN_FAILING=()
+KNOWN_FAILING=(
+    # EL8 / 4.18: sampled-versus-exact shares differ by 9.8–12.4 pp against
+    # ±8.8 pp. #675 tracks the sampled CPU under-read signature; causation is
+    # not settled. It stays an OPEN tag-blocker: this entry does not close
+    # or excuse the product defect, and grants no release exclusion.
+    'test_cross_validate_tiered|675|el8@4.18'
+)
+
+# Read the runner's host, never a caller's OS/identity environment variables.
+# Optional arguments are for the extracted-function self-test only; the runner
+# always calls this with no arguments.
+# Locals also prevent ambient ID / VERSION_ID / ID_LIKE from filling gaps in
+# os-release. Unknown identity matches no OS-scoped entry.
+known_failing_detect_platform() {
+    KNOWN_FAILING_OS=unknown
+    KNOWN_FAILING_KERNEL=unknown
+    local ID="" ID_LIKE="" VERSION_ID="" release os_release="${1:-/etc/os-release}"
+    if [[ -r "$os_release" ]]; then
+        # shellcheck disable=SC1090 # Fixed production path; fixture argument in self-test.
+        source "$os_release"
+        KNOWN_FAILING_OS="${ID:-unknown}"
+        case " $ID $ID_LIKE " in
+            *' rhel '*|*' centos '*|*' rocky '*|*' almalinux '*|*' ol '*)
+                if [[ "$VERSION_ID" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
+                    KNOWN_FAILING_OS="el${VERSION_ID%%.*}"
+                fi ;;
+        esac
+    fi
+    release="${2:-$(uname -r)}"
+    if [[ "$release" =~ ^([0-9]+[.][0-9]+)([.-]|$) ]]; then
+        KNOWN_FAILING_KERNEL="${BASH_REMATCH[1]}"
+    fi
+}
+
+# Validate the entire table before any build/test, including inactive scopes.
+# Keep name|issue compatibility; an empty third field is a malformed scope.
+known_failing_validate() {
+    local entry
+    local pattern='^[a-zA-Z0-9_]+[|][1-9][0-9]*([|]([a-z][a-z0-9_-]*(@[0-9]+[.][0-9]+)?|@[0-9]+[.][0-9]+))?$'
+    for entry in ${KNOWN_FAILING[@]+"${KNOWN_FAILING[@]}"}; do
+        if [[ ! "$entry" =~ $pattern ]]; then
+            echo "ERROR: malformed KNOWN_FAILING entry: $entry" >&2
+            return 1
+        fi
+    done
+}
+
+# Explicit arguments let the offline harness exercise host identities without
+# adding any production environment override.
+known_failing_scope_matches() {
+    local scope="$1" os="$2" kernel="$3"
+    [[ -z "$scope" ]] && return 0
+    local want_os="${scope%%@*}" want_kernel=""
+    [[ "$scope" != *@* ]] || want_kernel="${scope#*@}"
+    [[ -z "$want_os" || "$want_os" == "$os" ]] &&
+        [[ -z "$want_kernel" || "$want_kernel" == "$kernel" ]]
+}
+
+known_failing_validate || exit 2
+known_failing_detect_platform
 
 # known_failing_issue NAME — prints the tracking issue number and returns 0
-# if NAME is listed in KNOWN_FAILING, else returns 1 with no output.
+# if NAME is listed and in scope, else returns 1 with no output.
 known_failing_issue() {
     local target="$1"
-    local entry name issue
+    local entry name issue scope
     # The ${a[@]+...} form, not a bare "${a[@]}": under `set -u` an EMPTY
     # array expands to an unbound variable on bash < 4.4 (EL8's /bin/bash is
     # 4.4, but the gate must not depend on that), which would abort run_all
-    # the first time any test finished — with the list now empty, that is
-    # every run.
+    # the first time any test finished with an empty table.
     for entry in ${KNOWN_FAILING[@]+"${KNOWN_FAILING[@]}"}; do
-        IFS='|' read -r name issue <<< "$entry"
-        if [[ "$name" == "$target" ]]; then
+        IFS='|' read -r name issue scope <<< "$entry"
+        if [[ "$name" == "$target" ]] && known_failing_scope_matches "$scope" \
+            "${KNOWN_FAILING_OS:-unknown}" "${KNOWN_FAILING_KERNEL:-unknown}"; then
             echo "$issue"
             return 0
         fi
@@ -214,6 +276,9 @@ run_test() {
         else
             echo "  KNOWN-FAILING (issue #$issue)"
             known_failing=$((known_failing + 1))
+        fi
+        if [[ "$rc" -ne 126 && "$rc" -ne 127 ]]; then
+            known_failing_results+=("$name|$issue|$rc")
         fi
     elif [[ "$rc" -eq 78 ]]; then
         local missing=""
@@ -822,9 +887,10 @@ echo ""
 
 # An all-skip run must never be green: something is wrong with the
 # environment or the runner itself if nothing executed (TST-4).
+gate_ok=1
 if [[ $executed -eq 0 ]]; then
     echo "ERROR: no test was executed — refusing to report success"
-    exit 1
+    gate_ok=0
 fi
 
 # issue #528: an all-skip run was the only absence this script used to refuse.
@@ -837,7 +903,38 @@ if ! tier_ok; then
     for tier_line in ${TIER_ERROR_LINES[@]+"${TIER_ERROR_LINES[@]}"}; do
         echo "  - $tier_line"
     done
-    exit 1
+    gate_ok=0
 fi
 
-[[ $failed -eq 0 ]]
+[[ $failed -eq 0 ]] || gate_ok=0
+# box-check and CI preserve stdout + the runner exit code. Emit a JSON line
+# in that same log (not ui_live/summary.json, which describes only the UI).
+# Report only tests that actually ran in scope, including unexpected passes.
+python3 - "$gate_ok" "$KNOWN_FAILING_OS" "$KNOWN_FAILING_KERNEL" \
+    "$executed" "$passed" "$failed" "$refused" "$skipped" "$excluded" \
+    "$known_failing" "$xpass" "$total" \
+    ${known_failing_results[@]+"${known_failing_results[@]}"} <<'PYEOF'
+import json
+import sys
+
+ok = sys.argv[1] == "1"
+counts = dict(zip(("executed", "passed", "failed", "refused", "skipped",
+                   "excluded", "known_failing_count", "xpass", "total"),
+                  map(int, sys.argv[4:13])))
+results = []
+for record in sys.argv[13:]:
+    name, issue, rc = record.split("|")
+    results.append(dict(test=name, issue=int(issue), exit=int(rc), xpass=rc == "0"))
+    print(f"  Known-failing: {name} (issue #{issue}, "
+          + ("UNEXPECTED PASS" if rc == "0" else f"exit {rc}") + ")")
+issues = sorted({r["issue"] for r in results})
+status = "PASS" if ok else "FAIL"
+summary = dict(ok=ok, status=status, os=sys.argv[2], kernel=sys.argv[3],
+               known_failing=results, issues=issues, **counts)
+print("RUN_ALL_SUMMARY " + json.dumps(summary, sort_keys=True))
+if ok and results:
+    status += (f" with {counts['known_failing_count']} known-failing (issues: "
+               + ", ".join(f"#{issue}" for issue in issues) + ")")
+print(status)
+sys.exit(0 if ok else 1)
+PYEOF

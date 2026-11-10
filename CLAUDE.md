@@ -281,6 +281,9 @@ code bigger than a one-liner.
   `known-failing` without failing the gate; passes also count as `xpass`. Review
   every `xpass` against its issue, never assume staleness. Exit 126 (not executable)
   or 127 (command/file not found) fails the gate even for listed tests.
+  Optional scopes (`name|issue|os@kernel-major.minor`, either predicate may be
+  omitted) match the runner's `/etc/os-release` and `uname -r`; outside that
+  scope the test must pass normally.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#known-failing-invocations`)
 - Never commit locally generated PNGs to `tests/web_snapshots/`; baselines are
   regenerated only by CI's `snapshots` job.

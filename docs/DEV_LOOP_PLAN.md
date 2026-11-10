@@ -42,6 +42,22 @@ reintroduce noisy-neighbour variance in the one job most sensitive to it.
 
 ## Test tiers
 
+`tests/run_all.sh` classifies the open #675 signature only on EL8 with kernel
+4.18: `test_cross_validate_tiered|675|el8@4.18`. Entries use `name|issue` for
+all hosts, or `name|issue|os`, `name|issue|@major.minor`, or
+`name|issue|os@major.minor` for a scope (both predicates must match when supplied).
+The runner reads `/etc/os-release` once and `uname -r`; caller environment
+variables cannot override that identity. Outside the scope, failure fails the
+gate. Tests always execute, including scoped entries; a pass is an `xpass` and
+126/127 always fails. The final verdict is `PASS with N known-failing (issues:
+#675)` when applicable, with each test and issue named in the summary.
+`RUN_ALL_SUMMARY {…}` in the box-check/CI stdout log carries the counts,
+detected OS/kernel, `issues`, and `known_failing` records (`test`, `issue`, `exit`,
+`xpass`); the exit code remains authoritative. This is separate from the UI-only
+`tests/results/ui_live/summary.json`. #675 remains an open tag-blocker; a
+classified gate does not authorize shipping it. Offline scope/classifier and
+negative-control coverage: `python3 -B tests/test_run_all_known_failing.py`.
+
 | Tier | What | Where | Trigger | Blocks merge |
 |---|---|---|---|---|
 | Deterministic | C units, synthetic Python, Node builders, Go bridge, Playwright vs mock, protocol-drift | Mac (`make check`) and `ubuntu-latest` | every push | yes |
