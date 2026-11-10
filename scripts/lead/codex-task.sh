@@ -6,7 +6,8 @@
 # Slashes become %2F and literal percent signs become %25 (no name collisions).
 # Exits: 2 usage, 10 BRIEF_MISSING, 11 INVALID_BRANCH, 12 UNSAFE_CLONE_PATH,
 # 13 SETUP_FAILED, 14 CLONE_BUSY, 20 BRANCH_MISSING, 21 BRANCH_UNCHANGED,
-# 22 FETCH_FAILED, 23 COMMIT_UNREACHABLE, 24 CODEX_FAILED, 25 DIFF_FAILED.
+# 22 FETCH_FAILED, 23 COMMIT_UNREACHABLE, 24 CODEX_FAILED, 25 DIFF_FAILED,
+# 26 AUTO_COMMIT_INCOMPLETE.
 # Codex cannot write under .git in its sandbox (#777), so THIS wrapper commits
 # the round after Codex exits: whatever is in the clone's working tree goes onto
 # the task branch as one commit and is fetched into the real repository. 21 now
@@ -153,7 +154,9 @@ fi
 # Commit the round here, outside the sandbox (#777). Runs even when Codex
 # returned non-zero, so an interrupted round still lands on the branch. A
 # failure is LOUD and leaves the salvage patch above as the only copy.
+autocommit_failed=0
 if [ -n "$(git -C "$clone" status --porcelain 2>/dev/null)" ]; then
+    autocommit_failed=1
     head_branch=$(git -C "$clone" symbolic-ref --quiet --short HEAD 2>/dev/null) || head_branch=''
     if [ "$head_branch" != "$branch" ]; then
         printf 'AUTO_COMMIT_FAILED: clone HEAD is on "%s", not %s; the work is in %s only\n' \
@@ -172,7 +175,10 @@ if [ -n "$(git -C "$clone" status --porcelain 2>/dev/null)" ]; then
         case $commit_err in
             failed:*) printf 'AUTO_COMMIT_FAILED: git commit %s; the work is in %s only\n' \
                 "$(printf '%s' "$commit_err" | tr '\n' ' ')" "$clone" >&2 ;;
-            *) printf 'AUTO_COMMIT: %s\n' "$(git -C "$clone" rev-parse --verify HEAD)" >&2 ;;
+            *) autocommit_failed=0
+               printf 'AUTO_COMMIT: %s\n' "$(git -C "$clone" rev-parse --verify HEAD)" >&2
+               # Name what went in: a reused clone commits its leftovers too.
+               git -C "$clone" show --stat --format= HEAD >&2 || : ;;
         esac
     fi
 fi
@@ -184,6 +190,10 @@ git -C "$repo" fetch "$clone" "refs/heads/$branch:refs/heads/$branch" --force >&
 type=$(git -C "$repo" cat-file -t "$tip" 2>/dev/null) || die 23 'COMMIT_UNREACHABLE: fetched commit is unreachable'
 landed=$(git -C "$repo" rev-parse --verify "refs/heads/$branch" 2>/dev/null) || die 23 'COMMIT_UNREACHABLE: fetched branch is missing'
 [ "$type" = commit ] && [ "$landed" = "$tip" ] || die 23 'COMMIT_UNREACHABLE: fetched branch does not resolve to the expected commit'
+# A branch that moved is not a landed round if later work could not be
+# committed: the tip is fetched, but the rest exists only in the clone, so this
+# must never print the success block.
+[ "$autocommit_failed" -eq 0 ] || die 26 "AUTO_COMMIT_INCOMPLETE: $branch was fetched at $tip, but uncommitted work remains in $clone only"
 [ "$codex_rc" -eq 0 ] || die 24 "CODEX_FAILED: codex exit $codex_rc; committed work was fetched and verified"
 diff=$(git -C "$repo" diff --name-only "refs/remotes/origin/master...refs/heads/$branch") || die 25 'DIFF_FAILED: cannot compare branch with origin/master'
 # Only verified success emits this final block on stdout: path, branch, SHA,

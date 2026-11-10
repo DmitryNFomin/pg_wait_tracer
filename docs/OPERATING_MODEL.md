@@ -103,8 +103,10 @@ itself after codex exits -- everything in the clone's working tree becomes one
 commit on the task branch, with the message the implementer left in
 `.codex-commit-msg` and a `Co-authored-by: Codex` trailer -- and fetches it into
 the real repository. A finished round exits 0 with a branch, not
-`BRANCH_UNCHANGED` with a patch, so the "apply the patch" half of the landing
-step below is gone. The paragraph that follows describes how it ran before.
+`BRANCH_UNCHANGED` with a patch, so nobody has to apply a patch by hand any
+more (the patch is still written as a second copy). If the commit cannot be made
+the wrapper says `AUTO_COMMIT_FAILED` and never prints its success block. The
+paragraph that follows describes how it ran before this change.
 
 **The constraint that shapes all of it:** the implementer's sandbox forbids
 writes under `.git`, so `git add` cannot take its lock and **an implementer

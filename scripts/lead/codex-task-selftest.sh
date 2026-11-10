@@ -76,7 +76,13 @@ case "$STUB_MODE" in
         git add task.txt
         git commit -qm 'stub task commit'
         [ "$STUB_MODE" != commit-fail ] || exit 7 ;;
-    dirty|dirty-locked|dirty-msg)
+    dirty|dirty-locked|dirty-msg|commit-then-dirty-locked)
+        # A round that commits early and then leaves more work it cannot commit.
+        if [ "$STUB_MODE" = commit-then-dirty-locked ]; then
+            printf 'early change\n' > early.txt
+            git add early.txt
+            git commit -qm 'stub early commit'
+        fi
         # What the real implementer leaves behind when it cannot commit (#777):
         # a tracked edit, an untracked text file and an untracked binary.
         printf 'uncommitted change\n' >> task.txt
@@ -84,7 +90,7 @@ case "$STUB_MODE" in
         printf '\000\001\002binary\n' > bin.dat
         # dirty-locked also leaves an index lock behind, which is how a denied
         # or crashed `git add` inside the sandbox presents itself afterwards.
-        [ "$STUB_MODE" != dirty-locked ] || : > .git/index.lock
+        case "$STUB_MODE" in dirty-locked|commit-then-dirty-locked) : > .git/index.lock ;; esac
         [ "$STUB_MODE" != dirty-msg ] ||
             printf 'Implementer subject line\n\nImplementer body.\n' > .codex-commit-msg
         exit 0 ;;
@@ -338,5 +344,16 @@ grep -Fq 'working tree clean' "$tmp/err" &&
 grep -Fq 'AUTO_COMMIT_FAILED' "$tmp/err" || fail 'salvage-locked-index: a failed commit must say AUTO_COMMIT_FAILED'
 [ ! -s "$tmp/out" ] || fail 'salvage-locked-index: printed a success block without a commit'
 printf 'extra salvage locked index: exit=%s; refuses rather than writing a patch missing files\n' "$rc"
+
+# The fail-open the reviewer found: the tip moved (an early commit) AND later
+# work could not be committed. A moved tip must not turn that into success.
+new_branch auto-commit-incomplete
+rm -f "$salvage_path"
+run_wrapper commit-then-dirty-locked
+rm -f "$STUB_CLONE/.git/index.lock"
+expect_refusal 26 AUTO_COMMIT_INCOMPLETE
+grep -Fq 'AUTO_COMMIT_FAILED' "$tmp/err" || fail 'auto-commit-incomplete: the failed commit was not reported'
+[ -n "$("$REAL_GIT" -C "$STUB_CLONE" status --porcelain)" ] || fail 'auto-commit-incomplete: control is vacuous, the clone is clean'
+printf 'extra auto-commit incomplete: exit=%s; %s; stdout empty (no success block)\n' "$rc" "$(grep '^AUTO_COMMIT_INCOMPLETE:' "$tmp/err" | cut -c1-60)"
 
 printf 'PASS: all six required controls, four additional refusal controls, four salvage controls and the auto-commit controls\n'
