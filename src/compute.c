@@ -1172,17 +1172,10 @@ void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
                 }
             }
 
-            /* Convert ns → AAS and compute max */
-            double evt_max = 0.0;
-            for (int b = 0; b < actual_buckets; b++) {
-                double total = 0.0;
-                for (int s = 0; s < ns; s++) {
+            /* Convert ns → AAS */
+            for (int b = 0; b < actual_buckets; b++)
+                for (int s = 0; s < ns; s++)
                     out->event_aas[b * ns + s] /= (double)bucket_ns;
-                    total += out->event_aas[b * ns + s];
-                }
-                if (total > evt_max) evt_max = total;
-            }
-            out->max_aas = evt_max;  /* override with event-level max */
         }
     }
 }

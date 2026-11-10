@@ -3,6 +3,7 @@
 
 Generates 4 backends each active for exactly 5 seconds, verifies AAS ≈ 4.0.
 Also verifies per-class AAS breakdown sums correctly.
+Pins max_aas to the full bucket total when the event stack is truncated.
 """
 import os
 import sys
@@ -11,6 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
     CPU, IO_DATA_FILE_READ, LOCK_RELATION, LWLOCK_WAL_WRITE,
+    CLASS_IO, make_event_id,
 )
 
 BASE_TS = 10_000_000_000_000
@@ -51,6 +53,49 @@ def build_scenario():
         "queries": [{"id": 100 + i, "text": f"SELECT {i}"} for i in range(4)],
         "events": events,
     }
+
+
+def check_event_peak(t, sessions):
+    """Top-16 truncation must not change the peak; 16 is the control."""
+    duration = 5_000_000_000
+    scenario = {
+        "backends": [
+            {"pid": 2000 + i, "type": "client", "user": "test", "db": "testdb"}
+            for i in range(sessions)
+        ],
+        "events": [
+            {"pid": 2000 + i, "ts": BASE_TS + duration, "dur": duration,
+             "old": make_event_id(CLASS_IO, i), "new": CPU}
+            for i in range(sessions)
+        ],
+    }
+    trace_dir = generate_traces(scenario)
+    try:
+        with ServerHarness(trace_dir) as srv:
+            window = {"from_": BASE_TS, "to_": BASE_TS + duration,
+                      "buckets": 1, "filters": {"class": "io"}}
+            classes = srv.query("aas", **window)
+            events = srv.query("aas", detail="events", **window)
+
+            print(f"--- {sessions} simultaneous distinct IO events ---")
+            t.check_eq(len(classes["buckets"]), 1, "One class bucket")
+            total = sum(v for k, v in classes["buckets"][0].items()
+                        if k not in ("t", "total", "cat"))
+            t.check_eq(total, sessions, f"Class bucket total = {sessions}")
+            t.check_eq(classes["max_aas"], sessions,
+                       f"Class max_aas = {sessions}")
+            t.check_eq(events["max_aas"], sessions,
+                       f"Event-detail max_aas = {sessions}")
+            t.check_eq(events.get("breakdown"), "events", "Event breakdown returned")
+            t.check_eq(len(events["series"]), 16, "16 event series returned")
+            t.check_eq(len({s["event_id"] for s in events["series"]}), 16,
+                       "16 distinct event IDs returned")
+            t.check_eq(len(events["buckets"]), 1, "One event bucket")
+            stack = events["buckets"][0]["aas"]
+            t.check_eq(len(stack), 16, "16 event bucket values returned")
+            t.check_eq(sum(stack), 16, "Returned event stack total = 16")
+    finally:
+        cleanup_traces(trace_dir)
 
 
 def main():
@@ -115,6 +160,9 @@ def main():
 
     finally:
         cleanup_traces(trace_dir)
+
+    check_event_peak(t, 17)
+    check_event_peak(t, 16)
 
     sys.exit(0 if t.summary() else 1)
 
