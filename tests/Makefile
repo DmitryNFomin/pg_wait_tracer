@@ -18,7 +18,7 @@ BUILD     = ../build
 LIBBPF_INC ?=
 LIBBPF_LIB ?= -lbpf
 
-TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
+TESTS     = test_pacing_probe test_pacing_accounting test_pacing_summary test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
             test_wp_attr \
             test_trace_perms \
@@ -142,7 +142,7 @@ test_trace_perms: test_trace_perms.c $(BUILD)/event_writer.o \
 test_event_reader: test_event_reader.c $(BUILD)/event_reader.o replay_accum.o $(BUILD)/event_writer.o \
                    $(BUILD)/map_reader.o $(BUILD)/summary_writer.o \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
-                   $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
+                   $(BUILD)/discovery.o $(BUILD)/pacing_probe.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
 test_bucket: test_bucket.c
@@ -321,7 +321,7 @@ test_interference_bounds: test_interference_bounds.c ../src/compute.c \
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_interference_bounds.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
-test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
+test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/pacing_probe.c ../src/spawn.c \
                    ../src/backend_status_layout.c \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -lelf -lz
@@ -343,7 +343,7 @@ test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
 # out of wait_event.c, so linking wait_event.c alone no longer resolves. Like
 # the rest of this list it is a SOURCE, not a $(BUILD) object: the -pie link
 # needs -fPIE objects and the main build's are not.
-DISCOVERY_TEST_DEPS = test_discovery.c ../src/discovery.c ../src/spawn.c \
+DISCOVERY_TEST_DEPS = test_discovery.c ../src/discovery.c ../src/pacing_probe.c ../src/spawn.c \
                       ../src/backend_status_layout.c \
                       ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c
 
@@ -360,7 +360,7 @@ test_discovery_nopie: $(DISCOVERY_TEST_DEPS)
 # exercised against a real note table rather than a fixture. Only
 # discovery.c is needed (no daemon.h, no BPF skeleton, no wait-event
 # tables): the selector is pure and the parser needs libelf alone.
-EXEC_SITES_TEST_DEPS = test_exec_sites.c ../src/discovery.c ../src/spawn.c \
+EXEC_SITES_TEST_DEPS = test_exec_sites.c ../src/discovery.c ../src/pacing_probe.c ../src/spawn.c \
                        ../src/backend_status_layout.c \
                        ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c
 
@@ -530,7 +530,7 @@ gen_bench_traces: gen_bench_traces.c $(SERVER_OBJS)
 test_concurrent_rw: test_concurrent_rw.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
                     $(BUILD)/map_reader.o $(BUILD)/summary_writer.o \
                     $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
-                    $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
+                    $(BUILD)/discovery.o $(BUILD)/pacing_probe.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
 # cross_validate: A4 sampled-vs-exact comparison tool. Server build
@@ -1120,3 +1120,20 @@ test_background_unattributed: test_background_unattributed.c ../src/compute.c \
                              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                              $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+# Pacing bridge: pure contracts run on Mac; only unused Linux read APIs are
+# stubbed there. Reuse the complete raw/summary oracles with synthetic id 30.
+test_pacing_probe: test_pacing_probe.c ../src/pacing_probe.c ../src/sampler.c \
+                   ../src/idle_rule.c ../src/wait_event.c ../src/spawn.c ../src/cJSON.c
+	$(CC) $(CFLAGS) -DPGWT_SERVER -include pacing_sampler_compat.h -o $@ $^
+
+test_pacing_accounting: test_idle_accounting.c ../src/compute.c \
+                       $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                       $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -DPGWT_TEST_CKPT_WEI=PGWT_WEI_CKPT_PACING -o $@ $^ -lm
+
+test_pacing_summary: test_idle_summary.c ../src/compute.c \
+                    $(BUILD)/server_summary_writer.o $(BUILD)/server_summary_reader.o \
+                    $(BUILD)/server_event_writer.o $(BUILD)/wait_event.o \
+                    $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -DPGWT_TEST_CKPT_WEI=PGWT_WEI_CKPT_PACING -o $@ $^ -llz4 -lz -lm

@@ -96,6 +96,8 @@ uint32_t pgwt_idle_rule_timeout_mask(void)
 
 int pgwt_is_idle_event(uint32_t wei)
 {
+    if (wei == PGWT_WEI_CKPT_PACING)
+        return 1;
     if (WE_CLASS(wei) == PG_WAIT_ACTIVITY)
         return 1;
     if (wei == WEI(PG_WAIT_CLIENT, 0))          /* Client:ClientRead */

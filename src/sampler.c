@@ -439,6 +439,13 @@ int pgwt_sampled_attr_active_query_mismatch(
            tick->query_id != uprobe->query_id;
 }
 
+uint32_t pgwt_sampler_pacing_event(enum pgwt_backend_type type, uint32_t pid,
+    uint32_t wei, pgwt_pacing_lookup_fn lookup, void *ctx)
+{
+    return type == PGWT_BT_CHECKPOINTER && wei == 0 && lookup &&
+           lookup(ctx, pid) == 1 ? PGWT_WEI_CKPT_PACING : wei;
+}
+
 int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
                              const uint32_t *vals, const uint8_t *valid,
                              int n, uint64_t tick_ts,
@@ -639,6 +646,7 @@ bool pgwt_exact_attr_shadow_comparable(const struct pgwt_exact_attr *edge,
 #ifndef PGWT_SERVER
 
 #include "daemon.h"
+#include "pacing_probe.h"
 #include "backend.h"
 #include "event_writer.h"
 #include "discovery.h"
@@ -981,6 +989,16 @@ static int sampler_live_cmd_gate(void *ctx, int idx,
  * wait_event_info (shared-memory batch + per-pid fallbacks), encode wait
  * readings AND policy-gated on-CPU readings (T2: we==0 is a first-class CPU
  * sample), and push a SAMPLES block. Called from the daemon timer. */
+static int pacing_lookup(void *ctx, uint32_t pid)
+{
+    struct pgwt_daemon *d = ctx;
+    if (!pgwt_needs_ckpt_pacing_probe(d->pg_major_version, d->pg_minor_version))
+        return 0;
+    uint64_t entered;
+    int fd = bpf_map__fd(d->skel->maps.pacing_sleep);
+    return fd >= 0 && bpf_map_lookup_elem(fd, &pid, &entered) == 0;
+}
+
 int pgwt_sampler_poll(struct pgwt_daemon *d)
 {
     struct pgwt_sampler *s = d->sampler;
@@ -1073,6 +1091,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                     pgwt_bm_write(d->backend_meta, be->pid, &be->meta);
             }
         }
+        if (pgwt_pacing_register_backend(d, be) != 0) return -1;
         /* SMP-2: classify the address — only verified-shared addresses may
          * be batched through a foreign pid. */
         if (be->wp_addr_shared < 0)
@@ -1469,6 +1488,14 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     }
 
     uint64_t invalid_before = d->counters.invalid_wait_reads_total;
+    /* Memory first, map second: an enter between reads can exclude an on-CPU
+     * tick; an exit between reads can count a sleeping tick as load. Either
+     * direction is the sampler's inherent one-tick quantisation at a state
+     * boundary, with one enter per exit, rather than a directional bias. */
+    for (int i = 0; i < n; i++)
+        if (s->read_valid[i])
+            s->read_vals[i] = pgwt_sampler_pacing_event(targets[i].backend_type,
+                targets[i].pid, s->read_vals[i], pacing_lookup, d);
     int count = pgwt_sampler_build_batch(targets, s->read_vals, s->read_valid,
                                          n, tick_ts, s->samples,
                                          &d->counters.invalid_wait_reads_total,

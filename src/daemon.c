@@ -1,5 +1,6 @@
 /* daemon.c — Main event loop: epoll on ring buffer, timer, signals */
 #include "daemon.h"
+#include "pacing_probe.h"
 #include "backend.h"
 #include "control.h"
 #include "discovery.h"
@@ -1126,6 +1127,18 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     }
 
     /* Set rodata constants before loading */
+    const char *pacing_test = getenv("PGWT_TEST_PACING_FILTER_NEVER_MATCH");
+    d->skel->rodata->test_pacing_filter_never_match =
+        pacing_test && strcmp(pacing_test, "1") == 0;
+    if (d->skel->rodata->test_pacing_filter_never_match)
+        fprintf(stderr, "WARN: PGWT_TEST_PACING_FILTER_NEVER_MATCH=1: "
+                "TEST ONLY select/pselect6 pacing filter disabled\n");
+    const char *pacing_drop4 = getenv("PGWT_TEST_PACING_DROP_EVERY_4TH");
+    d->skel->rodata->test_pacing_drop_every_4th =
+        pacing_drop4 && strcmp(pacing_drop4, "1") == 0;
+    if (d->skel->rodata->test_pacing_drop_every_4th)
+        fprintf(stderr, "WARN: PGWT_TEST_PACING_DROP_EVERY_4TH=1: "
+                "TEST ONLY every fourth select/pselect6 pacing enter dropped\n");
     d->skel->rodata->target_postmaster_pid = d->postmaster_pid;
     d->skel->rodata->my_wait_ptr_addr = d->my_wait_ptr_addr;
     /* PG<17: my_wait_ptr_addr is MyProc (PGPROC*); on_bootstrap adds this
@@ -1266,6 +1279,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                 strerror(errno));
         goto fail;
     }
+
+    if (pgwt_pacing_probe_attach(d) != 0)
+        goto fail;
 
     /* S3: exact CPU accounting via sched_switch (docs/S3_SCHED_SWITCH_CPU.md).
      * Attached whenever measured CPU is on (BTF present). On the rare failure
@@ -1719,6 +1735,9 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
                 timeout_ms = remaining;
         }
 
+        if (pgwt_needs_ckpt_pacing_probe(d->pg_major_version, d->pg_minor_version) &&
+            (timeout_ms < 0 || timeout_ms > 1000))
+            timeout_ms = 1000;
         uint64_t started_ns = pgwt_debug_block_begin(d);
         int n = epoll_wait(d->epoll_fd, events, 8, timeout_ms);
         pgwt_debug_block_end(d, "epoll_wait", 0, started_ns);
@@ -1738,6 +1757,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             break;
         }
 
+        pgwt_pacing_probe_check(d);
+        if (!d->running) break;
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == d->timer_fd) {
                 started_ns = pgwt_debug_block_begin(d);
@@ -1797,7 +1818,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
     if (d->exit_reason != PGWT_EXIT_PG_DEAD)
         fprintf(stderr, "\npg_wait_tracer: shutting down\n");
-    return 0;
+    return d->ckpt_pacing_fatal ? -1 : 0;
 }
 
 /* PGWT_DEBUG_DUMP_STATE (DEBUG ONLY): dump the final BPF state_map to stderr
@@ -1929,6 +1950,7 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
      * anything below detaches watchpoints or flushes entries — the dump must
      * show exactly what the last live tick saw. No-op unless the env is set. */
     pgwt_debug_dump_state_map(d);
+    pgwt_pacing_probe_finish(d);
 
     /* Close any open escalation window (detaches watchpoints, writes the END
      * marker) before the event writer is torn down. */

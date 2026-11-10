@@ -5,6 +5,10 @@
 > merely believed, read `HANDOVER_2026-11-10.md` in this directory first and
 > treat the sections below as history.
 
+- Refs #804: PG13 checkpointer select/pselect6 pacing is visible idle in
+  exact and sampled capture; missing attachments and inert probes refuse capture.
+  PG14.0-14.2 is deferred to #830 (PG14/15/16 Timeout-table defect) and is not covered.
+
 > **Single source of truth for what is built and what remains.**
 >
 > This file consolidates and **replaces** the previously-scattered planning

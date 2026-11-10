@@ -285,6 +285,11 @@ struct pgwt_daemon {
     pid_t       pid_filter;       /* for session_event detail */
     bool        verbose;
     bool        quiet;               /* suppress view output (record only) */
+    int         pg_minor_version;   /* -1 = unknown (initialised in main; discovery overwrites). 0 is a VALID minor. */
+    const char *ckpt_pacing_probe_state; /* ok/inert/unavailable/not_applicable */
+    uint64_t    ckpt_pacing_asleep_observations;
+    uint64_t    ckpt_pacing_last_check_ns;
+    bool        ckpt_pacing_fatal;
     int         pg_major_version;   /* 14, 15, 16, 17, or 18 */
     int         st_query_id_offset; /* 0 = not available */
     int         st_activity_offset; /* st_activity_raw in PgBackendStatus, 0 = N/A */

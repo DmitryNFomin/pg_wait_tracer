@@ -541,6 +541,7 @@ LIVE_TESTS=(
     "test_overhead|overhead_quick|"
     "test_client_wait|python3|test_client_wait.py"
     "test_cpu_time|python3|test_cpu_time.py"
+    "test_ckpt_pacing|python3|test_ckpt_pacing.py"
     "test_lwlock|python3|test_lwlock.py"
     # compute_query_id is a PG14+ GUC (tests/provision-runner.sh only sets it
     # for 14+); test_query_event asserts on it directly and errors out on

@@ -280,6 +280,12 @@ static const char *timeout_events[] = {
     [9] = "WalSummarizerError",
 };
 #define TIMEOUT_EVENTS_MAX 9
+/* The reserved synthetic id is outside every active PostgreSQL table; do
+ * not extend a table to include it or widen the version-derived idle mask. */
+_Static_assert(TIMEOUT_EVENTS_MAX < WE_EVENT(PGWT_WEI_CKPT_PACING),
+               "PG Timeout table must not collide with tracer id 30");
+_Static_assert(TIMEOUT_EVENTS_PG13_MAX < WE_EVENT(PGWT_WEI_CKPT_PACING),
+               "PG13 synthetic pacing replaces an absent event");
 
 /* ── Activity Events (class 0x05, 18 events, 0-indexed) ──── */
 static const char *activity_events[] = {
@@ -591,6 +597,9 @@ static void rebuild_idle_mask(void)
     uint32_t mask = 0;
     uint32_t cov = 0;
     for (int id = 0; id < 32; id++) {
+        /* Reserved tracer id is outside the active PG table. Its universal
+         * display name must not enter either version-derived mask. */
+        if ((uint32_t)id == WE_EVENT(PGWT_WEI_CKPT_PACING)) continue;
         const char *n;
         if (verified) {
             n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
@@ -612,7 +621,8 @@ static void rebuild_idle_mask(void)
     pgwt_idle_rule_set_timeout_mask(mask);
 }
 
-/* Coverage is a by-product of the same loop that builds the pacing mask,
+/* Tracer-owned id 30 is universally classifiable without a catalog entry.
+ * PostgreSQL coverage is a by-product of the same loop that builds the pacing mask,
  * computed from the same resolved name n, so they cannot disagree about
  * which ids can be classified. An uninitialised process reports zero
  * coverage, matching the empty mask. A missed rebuild_idle_mask() call now
@@ -620,6 +630,7 @@ static void rebuild_idle_mask(void)
  * mask never received. */
 int pgwt_timeout_id_is_classifiable(uint32_t id)
 {
+    if (id == WE_EVENT(PGWT_WEI_CKPT_PACING)) return 1;
     return id < 32 && ((timeout_coverage_mask >> id) & 1u);
 }
 
@@ -659,6 +670,8 @@ const char *pgwt_class_name(uint32_t wei)
 const char *pgwt_event_name(uint32_t wei)
 {
     if (wei == 0) return "CPU";
+    /* Tracer-owned synthetic id 30 (PG13 checkpointer pacing sleep) */
+    if (wei == PGWT_WEI_CKPT_PACING) return "CheckpointWriteDelay";
     /* T2 synthetic id: on-CPU time OUTSIDE a command window, classified
      * idle by the compute tagging pass (Activity class => excluded +
      * hidden like other instrumented idle states). Named so it never

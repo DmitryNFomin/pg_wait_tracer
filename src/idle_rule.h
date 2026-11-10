@@ -28,8 +28,9 @@
  * (src/wait_event_pg13.inc timeout_events_pg13[]) has id 1 = PgSleep, and no
  * CheckpointWriteDelay or SpinDelay at all. So a hardcoded id list is a
  * SILENT WRONG ANSWER on PG13 — it would classify PgSleep as pacing on PG13
- * and nothing as pacing where the names moved. The live tier runs PG
- * 13/16/17/18.
+ * and nothing as pacing where the names moved. CI capture-smoke has cells for
+ * PG 13/16/17/18 (ci.yml matrix.pg), nightly.yml covers PG 13/17/18, and `make box-check PG=N`
+ * selects one major via run_all.sh --pg-version.
  *
  * So: wait_event.c derives an id-indexed bitmask from the ACTIVE name table
  * (via pgwt_timeout_name_is_pacing) and installs it here, and it rebuilds it
@@ -60,6 +61,12 @@
  */
 int pgwt_timeout_name_is_pacing(const char *name);
 
+/* PGWT_WEI_CKPT_PACING is tracer-owned Timeout id 30, outside the active
+ * PostgreSQL enum tables. It is always idle, even with an empty version mask,
+ * visible, and never session-idle. Do not insert it into the tables or mask.
+ * On PG13 it replaces the absent CheckpointWriteDelay row,
+ * so the six pacing names / seven visible Idle rows still bound the output.
+ */
 /* How many names pacing_timeout_names[] holds. The maximum number of VISIBLE
  * idle events is therefore this + 1 (Client:ClientRead); Activity is hidden
  * and never gets a row. src/compute.c static-asserts its Idle child-row budget

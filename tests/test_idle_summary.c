@@ -115,7 +115,11 @@ static int tests_failed = 0;
 #define ONE_SEC 1000000000ULL
 
 /* PG18 Timeout ids; tests/test_wait_event.c pins them by name. */
-#define EV_CHECKPOINT_DELAY WEI(PG_WAIT_TIMEOUT, 1)   /* pacing */
+/* Compile the same full-path oracle against the tracer-owned event too. */
+#ifndef PGWT_TEST_CKPT_WEI
+#define PGWT_TEST_CKPT_WEI WEI(PG_WAIT_TIMEOUT, 1)
+#endif
+#define EV_CHECKPOINT_DELAY PGWT_TEST_CKPT_WEI
 #define EV_PGSLEEP          WEI(PG_WAIT_TIMEOUT, 2)   /* DB Time */
 #define EV_VACUUM_DELAY     WEI(PG_WAIT_TIMEOUT, 7)   /* pacing */
 #define EV_CLIENTREAD       WEI(PG_WAIT_CLIENT, 0)    /* idle, visible */
@@ -1711,7 +1715,10 @@ static void test_zero_parent_excess_is_detected(void)
             memset(&e, 0, sizeof(e));
             e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 950;
             e.timestamp_ns = origin + (uint64_t)s2 * ONE_SEC + 100 * MS;
-            e.old_event = EV_CHECKPOINT_DELAY; e.duration_ns = 40 * MS;
+            /* This deliberately tests inconsistent NATIVE table masks. The
+             * tracer-owned event is unconditionally idle and cannot model
+             * that corruption. Keep the native id in both oracle builds. */
+            e.old_event = WEI(PG_WAIT_TIMEOUT, 1); e.duration_ns = 40 * MS;
             pgwt_summary_push_event(w, &e, 0, e.old_event);
         }
         if (w) { pgwt_summary_flush(w); pgwt_summary_close(w);
@@ -2041,10 +2048,12 @@ static void test_bypass_suite(void)
     {
         memset(&c, 0, sizeof(c));
         pgwt_visit_summaries(badmask, 0, 0, rec_visitor, &c);
-        CHECK(c.class_ns[PGWT_CLASS_TIMEOUT] == 85ULL * MS * SLICES,
+        uint64_t expected_timeout =
+            (EV_CHECKPOINT_DELAY == PGWT_WEI_CKPT_PACING ? 45ULL : 85ULL) * MS * SLICES;
+        CHECK(c.class_ns[PGWT_CLASS_TIMEOUT] == expected_timeout,
               "with an empty mask the writer puts all %llu ns of Timeout time "
               "into class_ns (got %llu) — this is the number the old lumped "
-              "writer produced", (unsigned long long)(85ULL * MS * SLICES),
+              "writer produced", (unsigned long long)expected_timeout,
               (unsigned long long)c.class_ns[PGWT_CLASS_TIMEOUT]);
         CHECK(c.class_ns[PGWT_CLASS_TIMEOUT] != 30ULL * MS * SLICES,
               "and it differs from the correct value, so section 2 can go red");

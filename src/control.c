@@ -143,6 +143,17 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "exact_activity_uprobe_fires_total",
                      pgwt_exact_uprobe_fire_count(
                          (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_ACTIVITY));
+    cjson_add_uint64(root, "ckpt_pacing_select_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_SELECT));
+    cjson_add_uint64(root, "ckpt_pacing_pselect6_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_PSELECT6));
+    cjson_add_uint64(root, "ckpt_pacing_unmatched_exits_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_PACING_UNMATCHED_EXIT));
+    cJSON_AddStringToObject(root, "ckpt_pacing_probe_state",
+        d->ckpt_pacing_probe_state ? d->ckpt_pacing_probe_state : "not_applicable");
     cJSON_AddNumberToObject(root, "escalation_seconds_remaining",
                             pgwt_escalation_remaining_s(d));
     cJSON_AddNumberToObject(root, "escalation_budget_remaining_s",
@@ -282,6 +293,17 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "exact_activity_uprobe_fires_total",
                      pgwt_exact_uprobe_fire_count(
                          (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_ACTIVITY));
+    cjson_add_uint64(root, "ckpt_pacing_select_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_SELECT));
+    cjson_add_uint64(root, "ckpt_pacing_pselect6_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_PSELECT6));
+    cjson_add_uint64(root, "ckpt_pacing_unmatched_exits_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_PACING_UNMATCHED_EXIT));
+    cJSON_AddStringToObject(root, "ckpt_pacing_probe_state",
+        d->ckpt_pacing_probe_state ? d->ckpt_pacing_probe_state : "not_applicable");
     cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
                             d->exact_probes.core.attached_mask);
     cJSON_AddNumberToObject(root, "exact_probe_exec_attach_errno",

@@ -1599,8 +1599,12 @@ static void test_cpu_row_measured_bypass(void)
      * "none of them is in the CPU class" about the empty set. */
     CHECK(idle_seen > 1,
           "the idle sweep found more than one idle event to look at");
-    CHECK(pacing_seen == 6,
-          "...including all six PG18 Timeout pacing ids (mask 0x29B)");
+    /* Six PG18 pacing ids from the mask (0x29B) plus the one tracer-owned
+     * id, PGWT_WEI_CKPT_PACING (Timeout id 30, Refs #804), which is idle
+     * unconditionally and sits inside this sweep's 0..63 id range. */
+    CHECK(pacing_seen == 7,
+          "...including all six PG18 Timeout pacing ids (mask 0x29B) plus "
+          "the tracer-owned checkpointer pacing id");
     CHECK(pgwt_is_idle_event(CLIENT_READ) != 0,
           "...and Client:ClientRead, the one idle event with a visible row");
     CHECK(idle_in_cpu == 0,

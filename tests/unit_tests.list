@@ -1047,3 +1047,9 @@ test_summary_qattr_background
 # Persistent box-check must stage/run the current provisioner before build,
 # forwarding the OS and leaving lock ownership to the provisioner itself.
 test_box_check_provision_persistent.sh
+
+# Refs #804: PG13 pacing bridge and complete synthetic-id accounting.
+# PG14.0-14.2 is deferred to #830.
+test_pacing_probe
+test_pacing_accounting
+test_pacing_summary

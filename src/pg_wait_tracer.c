@@ -312,6 +312,7 @@ int main(int argc, char **argv)
     d->timer_fd  = -1;
     d->sample_timer_fd = -1;
     d->signal_fd = -1;
+    d->pg_minor_version = -1;  /* sentinel: discovery/replay may not set it; 0 is a valid minor */
     d->interval  = 5;
     d->view      = PGWT_VIEW_TIME_MODEL;
     d->mode      = PGWT_MODE_TIERED; /* default: low-overhead always-on sampler
@@ -749,7 +750,7 @@ int main(int argc, char **argv)
                 break;
             }
 
-            pgwt_daemon_run(d);
+            if (pgwt_daemon_run(d) != 0) rc = 1;
             pgwt_daemon_cleanup(d);
 
             if (d->exit_reason != PGWT_EXIT_PG_DEAD)
@@ -794,8 +795,8 @@ done:
         return 1;
     }
 
-    pgwt_daemon_run(d);
+    int run_rc = pgwt_daemon_run(d);
     pgwt_daemon_cleanup(d);
     free(d);
-    return 0;
+    return run_rc != 0 ? 1 : 0;
 }

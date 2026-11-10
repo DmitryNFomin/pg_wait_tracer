@@ -377,15 +377,16 @@ for V in 13 16 17 18; do
             PSQL=psql
             PGBENCH=pgbench
             PG_ISREADY=pg_isready
-            if ! dpkg -s "postgresql-$V" >/dev/null 2>&1; then
+            # The pacing positive-control worker needs matching server headers.
+            if ! dpkg -s "postgresql-$V" "postgresql-server-dev-$V" >/dev/null 2>&1; then
                 if ! apt-cache show "postgresql-$V" >/dev/null 2>&1; then
                     log "postgresql-$V not in the live PGDG repo — adding apt-archive"
                     echo "deb https://apt-archive.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
                         > /etc/apt/sources.list.d/pgdg-archive.list
                     apt-get update -qq
                 fi
-                log "installing postgresql-$V postgresql-contrib-$V"
-                apt-get install -y -qq "postgresql-$V" "postgresql-contrib-$V" >/dev/null
+                log "installing postgresql-$V postgresql-contrib-$V postgresql-server-dev-$V"
+                apt-get install -y -qq "postgresql-$V" "postgresql-contrib-$V" "postgresql-server-dev-$V" >/dev/null
             else
                 log "postgresql-$V already installed"
             fi
@@ -422,7 +423,8 @@ for V in 13 16 17 18; do
             PSQL="/usr/pgsql-$V/bin/psql"
             PGBENCH="/usr/pgsql-$V/bin/pgbench"
             PG_ISREADY="/usr/pgsql-$V/bin/pg_isready"
-            if ! rpm -q "postgresql$V-server" >/dev/null 2>&1; then
+            # The pacing positive-control worker needs matching server headers.
+            if ! rpm -q "postgresql$V-server" "postgresql$V-devel" >/dev/null 2>&1; then
                 if ! dnf list "postgresql$V-server" >/dev/null 2>&1; then
                     log "postgresql$V-server not in the live PGDG repo — adding PGDG archive"
                     cat > "/etc/yum.repos.d/pgdg$V-archive.repo" <<EOF
@@ -433,8 +435,8 @@ enabled=1
 gpgcheck=0
 EOF
                 fi
-                log "installing postgresql$V-server postgresql$V-contrib"
-                dnf install -y "postgresql$V-server" "postgresql$V-contrib"
+                log "installing postgresql$V-server postgresql$V-contrib postgresql$V-devel"
+                dnf install -y "postgresql$V-server" "postgresql$V-contrib" "postgresql$V-devel"
             else
                 log "postgresql$V-server already installed"
             fi
