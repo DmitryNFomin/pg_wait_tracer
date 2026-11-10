@@ -98,6 +98,14 @@ brief (a file)
   -> lead: open the PR, arm auto-merge in the same turn as the READY verdict
 ```
 
+**Update, 2026-11-10 (#777 fixed):** `codex-task.sh` now commits the round
+itself after codex exits -- everything in the clone's working tree becomes one
+commit on the task branch, with the message the implementer left in
+`.codex-commit-msg` and a `Co-authored-by: Codex` trailer -- and fetches it into
+the real repository. A finished round exits 0 with a branch, not
+`BRANCH_UNCHANGED` with a patch, so the "apply the patch" half of the landing
+step below is gone. The paragraph that follows describes how it ran before.
+
 **The constraint that shapes all of it:** the implementer's sandbox forbids
 writes under `.git`, so `git add` cannot take its lock and **an implementer
 cannot commit**. Every round that reaches the end exits `BRANCH_UNCHANGED`.
