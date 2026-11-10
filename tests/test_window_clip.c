@@ -2852,11 +2852,14 @@ static void test_exec_detail_raw_duration_bypass(void)
     pgwt_free_execution_detail(&res);
 }
 
-/* #757: the integer-ns contract, including the two formatter straddlers.
+/* #757: the integer-ns contract, including the two formatter straddlers and
+ * a .6-ns fraction that must round up rather than truncate.
  * The rational tenth and rounding below are an independent test oracle. */
 static void test_cpu_integer_contract(void)
 {
-    for (uint64_t cpu = 10433330; cpu <= 10433332; cpu += 2) {
+    const uint64_t inputs[] = {10433330, 10433332, 10433336};
+    for (size_t variant = 0; variant < sizeof(inputs) / sizeof(inputs[0]); variant++) {
+        uint64_t cpu = inputs[variant];
         struct pgwt_trace_event ev = {0};
         ev.pid = 42; ev.query_id = 99;
         ev.timestamp_ns = 1790778045790378496ULL;
@@ -2888,6 +2891,51 @@ static void test_cpu_integer_contract(void)
               "757 session CPU uses the same exact integer numerator");
         CHECK(ts.rows[0].offcpu_ms == off_ms, "757 exact session off-CPU total");
         free(tm.rows); free(te.rows); free(ts.rows);
+    }
+}
+
+/* #757: open-gap credits can leave a summary second with more measured CPU
+ * than its wall share. Keep the edge excess in the skew diagnostic. The raw
+ * equivalent clamps the same measurement before calculating its remainder. */
+static void test_cpu_clamped_excess(void)
+{
+    struct pgwt_filter f = {0};
+    struct pgwt_summary_accum rec = {0};
+    rec.class_ns[PGWT_CLASS_CPU] = 100000;
+    rec.cpu_measured_ns = 150000;
+    rec.cpu_measured_records = 1;
+    rec.events[0].event_id = 0;
+    rec.events[0].count = 1;
+    rec.events[0].total_ns = 100000;
+    struct pgwt_trace_event ev = {0};
+    ev.pid = 42;
+    ev.timestamp_ns = 2000000000;
+    ev.duration_ns = 100000;
+    ev.cpu_ns = 150000;
+    for (int summary = 0; summary < 2; summary++) {
+        struct pgwt_tm_result tm;
+        struct pgwt_events_result te;
+        if (summary) {
+            fake_summary_rec = &rec;
+            pgwt_compute_time_model_from_summaries("unused", 1000000000,
+                                                   2000000000, &f, 1000, &tm);
+            pgwt_compute_top_events_from_summaries("unused", 1000000000,
+                                                   2000000000, &f, 1000, &te);
+            fake_summary_rec = NULL;
+        } else {
+            pgwt_compute_time_model(&ev, 1, &f, 1000000000, 2000000000, 1000, &tm);
+            pgwt_compute_top_events(&ev, 1, &f, 1000000000, 2000000000, 1000, &te);
+        }
+        CHECK(tm.cpu_clamped_ms == 0.05, summary
+              ? "757 summary time_model clamp excess == 0.05 ms"
+              : "757 raw time_model clamp excess == 0.05 ms");
+        CHECK(te.cpu_clamped_ms == 0.05, summary
+              ? "757 summary top_events clamp excess == 0.05 ms"
+              : "757 raw top_events clamp excess == 0.05 ms");
+        CHECK(tm.offcpu_ms == 0 && te.offcpu_ms == 0,
+              "757 over-wall measurement has zero off-CPU on both views");
+        free(tm.rows);
+        free(te.rows);
     }
 }
 
@@ -2950,6 +2998,7 @@ int main(void)
     printf("=== test_window_clip ===\n");
 
     test_cpu_integer_contract();
+    test_cpu_clamped_excess();
     test_cpu_integer_aggregation();
     test_straddler_leading_edge();
     test_straddler_trailing_edge();

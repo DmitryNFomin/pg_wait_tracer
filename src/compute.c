@@ -1592,8 +1592,11 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     /* The CPU class total is the measured (or legacy-inferred) CPU. */
     classes[PGWT_CLASS_CPU].total_ns = cpu_measured_ns;
 
-    if (has_measured_cpu)
-        offcpu_ns = pgwt_offcpu_ns(cpu_gap_ns, cpu_measured_ns);
+    if (has_measured_cpu) {
+        uint64_t excess_ns = 0;
+        offcpu_ns = pgwt_offcpu_ns(cpu_gap_ns, cpu_measured_ns, &excess_ns);
+        cpu_clamped_ns += (double)excess_ns;
+    }
 
     for (int c = 0; c < PGWT_NUM_CATS; c++)
         out->cat_ms[c] = cat_ns[c] / 1e6;
@@ -1987,7 +1990,9 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
             double frac = event_window_frac(clip_u, ev->duration_ns);
             row_ns = pgwt_cpu_clip_ns(ev->cpu_ns, clip_u, ev->duration_ns,
                                        &cpu_clamped_ns);
-            cpu_offcpu_ns += pgwt_offcpu_ns(clip_u, row_ns);
+            uint64_t excess_ns = 0;
+            cpu_offcpu_ns += pgwt_offcpu_ns(clip_u, row_ns, &excess_ns);
+            cpu_clamped_ns += (double)excess_ns;
             /* A measured ZERO is a signal (the gap was all runqueue); zero
              * overlap is absence and must not claim a measurement. */
             if (frac > 0.0)
@@ -2204,7 +2209,9 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
                 double frac = event_window_frac(clip_u, ev->duration_ns);
                 row_ns = pgwt_cpu_clip_ns(ev->cpu_ns, clip_u, ev->duration_ns,
                                            &cpu_clamped_ns);
-                ht[h].offcpu_ns += pgwt_offcpu_ns(clip_u, row_ns);
+                uint64_t excess_ns = 0;
+                ht[h].offcpu_ns += pgwt_offcpu_ns(clip_u, row_ns, &excess_ns);
+                cpu_clamped_ns += (double)excess_ns;
                 /* A measured ZERO is a signal (the gap was all runqueue);
                  * zero overlap is absence and must not claim a
                  * measurement. */
@@ -3042,14 +3049,14 @@ void pgwt_compute_time_model_from_summaries(
      * STEP 1: the CPU class row becomes CPU* = measured + gap-inferred, which
      * is normally SMALLER than rec->class_ns[CPU] (that is the full wall of
      * every we == 0 gap). The difference is the runqueue time, which step 2
-     * recovers as a residual -- so DB Time does not move: it is still built
-     * from class_ns, and CPU* + Off-CPU* adds back up to the gap total.
+     * recovers as a residual. DB Time is still built from class_ns. At a
+     * window edge, CPU* can exceed the gap wall after open-gap credits are
+     * placed; that excess belongs in cpu_clamped_ms.
      *
      * STEP 2: subtract integer CPU* from the integer CPU gap wall. This
-     * equals the sum of the nonnegative per-record remainders, since every
-     * measured CPU contribution was clamped to its own wall at write time.
-     * Using the gap wall directly avoids floating-point cancellation against
-     * unrelated waits in DB Time.
+     * floors negative remainders at zero and counts the excess in the clamp
+     * diagnostic. Using the gap wall directly avoids floating-point
+     * cancellation against unrelated waits in DB Time.
      *
      * Order matters: this runs BEFORE the qsort below, because the classes
      * array is sorted by total and the CPU total changes here. */
@@ -3058,7 +3065,9 @@ void pgwt_compute_time_model_from_summaries(
     if (ctx.has_measured_cpu) {
         uint64_t cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
         ctx.classes[PGWT_CLASS_CPU].total_ns = (double)cpu_total_ns;
-        offcpu_ns = pgwt_offcpu_ns(ctx.cpu_gap_ns, cpu_total_ns);
+        uint64_t excess_ns = 0;
+        offcpu_ns = pgwt_offcpu_ns(ctx.cpu_gap_ns, cpu_total_ns, &excess_ns);
+        cpu_clamped_ns += (double)excess_ns;
     }
 
     /* Build result rows (same format as raw compute). The row budget matches
@@ -3319,7 +3328,9 @@ void pgwt_compute_top_events_from_summaries(
             uint64_t event0_wall_ns = ctx.ht[i].total_ns;
             uint64_t cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
             row->total_ms = (double)cpu_total_ns / 1e6;
-            offcpu_ns = pgwt_offcpu_ns(event0_wall_ns, cpu_total_ns);
+            uint64_t excess_ns = 0;
+            offcpu_ns = pgwt_offcpu_ns(event0_wall_ns, cpu_total_ns, &excess_ns);
+            clamped_ns += (double)excess_ns;
         }
         row->exact_count = ctx.ht[i].exact_count;
         row->avg_us   = ctx.ht[i].exact_count > 0
@@ -3523,8 +3534,8 @@ void pgwt_compute_top_sessions_from_summaries(
         /* v9 (#424, #562): subtract only MEASURED gaps' off-CPU remainder.
          * UNKNOWN gaps stay whole in the CPU column; only observations
          * below can establish that this window has a measurement. */
-        uint64_t cpu_col_ns = pgwt_offcpu_ns(ctx.ht[i].cpu_ns, ctx.ht[i].offcpu_ns);
-        uint64_t off_ns = pgwt_offcpu_ns(ctx.ht[i].cpu_ns, cpu_col_ns);
+        uint64_t cpu_col_ns = pgwt_offcpu_ns(ctx.ht[i].cpu_ns, ctx.ht[i].offcpu_ns, NULL);
+        uint64_t off_ns = pgwt_offcpu_ns(ctx.ht[i].cpu_ns, cpu_col_ns, NULL);
         row->cpu_pct = db > 0 ? (double)cpu_col_ns / db * 100.0 : 0;
         row->offcpu_ms = (double)off_ns / 1e6;
         off_total_ns += off_ns;

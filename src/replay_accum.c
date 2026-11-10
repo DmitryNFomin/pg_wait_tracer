@@ -209,7 +209,8 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
             if (st && evt->cpu_ns > occ_ns)
                 st->cpu_clamped_ns += evt->cpu_ns - occ_ns;
             cpu_add = pgwt_cpu_clip_ns(evt->cpu_ns, add_ns, occ_ns, NULL);
-            offcpu_add = pgwt_offcpu_ns(add_ns, cpu_add);
+            offcpu_add = pgwt_offcpu_ns(add_ns, cpu_add,
+                                       st ? &st->cpu_clamped_ns : NULL);
             /* NONCMD_CPU keeps wall in its idle row, matching
              * pgwt_accum_add_interval; only CPU* rows use measured CPU. */
             if (eff_we == 0) {

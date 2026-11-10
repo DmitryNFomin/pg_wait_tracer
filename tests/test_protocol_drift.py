@@ -16,6 +16,8 @@ passing against a protocol that no longer exists.  This test:
 Run: python3 tests/test_protocol_drift.py
   (No root, no PG, no SSH, no third-party deps — needs pgwt-server and
    tests/gen_test_traces built.)
+Run only the mock CPU contract (no server or Unix socket):
+  python3 tests/test_protocol_drift.py --mock-only
 """
 import os
 import sys
@@ -24,6 +26,7 @@ import json
 import socket
 import subprocess
 import threading
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server_harness import (
@@ -476,6 +479,38 @@ def check_top_sessions_cpu_fields(t, srv):
             f"(got {real.get('offcpu_ms')!r}, rows sum to {total!r})")
 
 
+def check_mock_cpu_accounting(t):
+    """#757: run the mock's CPU wire contract without Linux-only server probes."""
+    events = mock_query("top_events", 1)
+    t.check("offcpu_aas" in events and events["offcpu_aas"] is None,
+            "[mock cpu] unmeasured Events offcpu_aas is present and null")
+    # Use a measured fixture as well: null alone cannot detect a bad divisor
+    # or an implementation that always returns null. The CPU row loses the
+    # same 260 ms carried by the synthetic remainder.
+    canned = mock_server._CANNED["top_events"]
+    rows = [dict(r, total_ms=r["total_ms"] - 260) if r["event_id"] == 0
+            else dict(r) for r in canned["rows"]]
+    with patch.dict(canned, has_measured_cpu=True, offcpu_ms=260, rows=rows):
+        for wall_ms in (1000, 4000):
+            start = mock_server._FROM_NS
+            events = mock_server.handle_request({"cmd": "top_events", "id": 2,
+                "from": start, "to": start + wall_ms * MS})
+            t.check(events.get("offcpu_aas") == 260 / wall_ms,
+                    f"[mock cpu] measured Events offcpu_aas == 260/{wall_ms}")
+        with patch.dict(canned, offcpu_ms=0):
+            events = mock_query("top_events", 3)
+            t.check(events.get("offcpu_aas") == 0,
+                    "[mock cpu] measured zero Events offcpu_aas is numeric zero")
+    for near_tie, tick in ((False, 0), (True, 0), (True, 1)):
+        with patch.object(mock_server, "_NEARTIE_MODE", near_tie), \
+             patch.object(mock_server, "_NEARTIE_TICKS", tick):
+            sessions = mock_query("top_sessions", 4)
+        expected = sum(r["db_time_ms"] * r["cpu_pct"] / 100
+                       for r in sessions["rows"])
+        t.check(sessions.get("cpu_ms") == expected,
+                f"[mock cpu] Sessions cpu_ms == per-session CPU (near_tie={near_tie}, tick={tick})")
+
+
 # ── #333: a corrupt trace must not answer as an empty one ───────────────────
 #
 # Lives here because this is the suite that owns "what the real server's
@@ -856,7 +891,12 @@ def check_transitions_fidelity_ranges(t, srv):
 
 
 def main():
+    if sys.argv[1:] == ["--mock-only"]:
+        t = TestRunner("test_protocol_drift --mock-only")
+        check_mock_cpu_accounting(t)
+        sys.exit(0 if t.summary() else 1)
     t = TestRunner("test_protocol_drift")
+    check_mock_cpu_accounting(t)
     trace_dir = generate_traces(SCENARIO)
     try:
         with ServerHarness(trace_dir) as srv:

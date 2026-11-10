@@ -38,11 +38,14 @@ static inline uint64_t pgwt_cpu_clip_ns(uint64_t cpu_ns, uint64_t clip_ns,
     return rounded < clip_ns ? rounded : clip_ns;
 }
 
-/* Off-CPU is the nonnegative integer remainder of the CPU gap wall. Since
- * each contribution is clamped above, residual(sum(wall), sum(cpu)) equals
- * sum(residual(wall, cpu)); waits and floating-point cancellation play no part. */
-static inline uint64_t pgwt_offcpu_ns(uint64_t gap_ns, uint64_t cpu_ns)
+/* Off-CPU is the nonnegative integer remainder of the CPU gap wall. Summary
+ * window edges can carry more CPU than wall after open-gap credits are placed.
+ * Preserve that excess in the optional integer-ns clamp diagnostic. */
+static inline uint64_t pgwt_offcpu_ns(uint64_t gap_ns, uint64_t cpu_ns,
+                                     uint64_t *clamped_ns)
 {
+    if (clamped_ns && cpu_ns > gap_ns)
+        *clamped_ns += cpu_ns - gap_ns;
     return gap_ns > cpu_ns ? gap_ns - cpu_ns : 0;
 }
 
