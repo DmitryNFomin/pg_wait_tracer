@@ -24,10 +24,11 @@ file, one Python script and the two evidence files.
 
 ## What is NOT here, and where it is. Read this before planning a re-run.
 
-The drivers call files that lived on the capture box under `/root/arb/` and
-`/root/xp/`: `kernel_cpu_arbiter.py` (the kernel sampler itself, the thing that
-reads `schedstat`), `sched.bt`, `sched2.bt.tmpl` and `sleep.sql`. None of them is
-in this directory.
+The drivers call three files that lived on the capture box under `/root/arb/`:
+`kernel_cpu_arbiter.py` (the kernel sampler itself, the thing that reads
+`schedstat`), `sched.bt` and `sched2.bt.tmpl`. A fourth, `sleep.sql`, is named
+only in a comment as an example value for an optional variable, so nothing here
+actually calls it. None of the four is in this directory.
 
 **An earlier draft of this file said they were lost everywhere. That was wrong,
 and an adviser caught it before it was published.** I had searched the working
