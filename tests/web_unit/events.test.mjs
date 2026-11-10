@@ -262,11 +262,13 @@ test('server-flagged truncation reaches the events model', () => {
 test('#576 has_measured_cpu + offcpu_ms adds a synthetic "CPU (waiting for a core)" row', () => {
     const data = {
         has_measured_cpu: true, offcpu_ms: 260, db_time_ms: 1000,
-        rows: [ev({ name: 'CPU*', total_ms: 480, pct: 48 }),
+        rows: [ev({ name: 'CPU (running)', total_ms: 480, pct: 48 }),
                ev({ name: 'IO:DataFileRead', total_ms: 260, pct: 26 })],
     };
     const m = buildEventsModel(data, null);
     assert.equal(m.table.rows.length, 3);
+    assert.equal(m.table.rows[0].row.name, 'CPU (running)');
+    assert.ok(m.table.rows[0].cells[0].html.includes('CPU (running)'));
     const last = m.table.rows[2];
     const nameHtml = last.cells[0].html;
     assert.ok(nameHtml.includes('CPU (waiting for a core)'), nameHtml);
@@ -277,8 +279,8 @@ test('#576 has_measured_cpu + offcpu_ms adds a synthetic "CPU (waiting for a cor
     assert.equal(sumPct, 100);
 });
 
-test('#576 has_measured_cpu=false (sampled/v2, and the v7/v8 summary routing '
-    + 'until the v9 epoch lands) adds NOTHING -- inert by design, not a bug',
+test('#576 has_measured_cpu=false (sampled/v2 or a direct per-query summary '
+    + 'call) adds NOTHING -- inert by design, not a bug',
     () => {
     const data = {
         has_measured_cpu: false, offcpu_ms: 0, db_time_ms: 1000,
@@ -291,7 +293,7 @@ test('#576 has_measured_cpu=false (sampled/v2, and the v7/v8 summary routing '
 test('#576 has_measured_cpu=true but offcpu_ms is 0 -- no fabricated zero row', () => {
     const data = {
         has_measured_cpu: true, offcpu_ms: 0, db_time_ms: 1000,
-        rows: [ev({ name: 'CPU*', total_ms: 1000, pct: 100 })],
+        rows: [ev({ name: 'CPU (running)', total_ms: 1000, pct: 100 })],
     };
     const m = buildEventsModel(data, null);
     assert.equal(m.table.rows.length, 1);
@@ -301,7 +303,7 @@ test('#576 the synthetic row\'s unknown columns (Count/Avg/P50/P95/P99/Max/AAS) 
     + 'render "—", never a fabricated value', () => {
     const data = {
         has_measured_cpu: true, offcpu_ms: 260, db_time_ms: 1000,
-        rows: [ev({ name: 'CPU*', total_ms: 740, pct: 74 })],
+        rows: [ev({ name: 'CPU (running)', total_ms: 740, pct: 74 })],
     };
     const m = buildEventsModel(data, null);
     const row = m.table.rows[1];

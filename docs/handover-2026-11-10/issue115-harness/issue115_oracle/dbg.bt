@@ -1,0 +1,4 @@
+uprobe:/usr/lib/postgresql/18/bin/postgres:pgstat_report_activity { @inra[pid]=1; @nra=count(); }
+uretprobe:/usr/lib/postgresql/18/bin/postgres:pgstat_report_activity { @inra[pid]=0; }
+uretprobe:/usr/lib/postgresql/18/bin/postgres:GetCurrentTimestamp { @ngct=count(); if (@inra[pid]==1) { @ngct_in=count(); } }
+uretprobe:/usr/lib/postgresql/18/bin/postgres:GetCurrentStatementStartTimestamp { @ngcsst=count(); }

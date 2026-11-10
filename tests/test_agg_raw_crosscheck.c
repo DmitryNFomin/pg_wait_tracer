@@ -249,15 +249,13 @@
  *      unfiltered per-class columns. NOT reachable — handle_top_queries
  *      forces raw for both — so they stay reported rather than fixed.
  *
- *  N12. (#553) Top Events' CPU* row: MEASURED on-CPU ns on the raw path,
- *      unsplit gap WALL on the summary path, because the writer's events[]
- *      table and per-query top_events[] list both store wall for event 0.
- *      Unlike N10/N11 this one IS reachable — an unfiltered window >= 120 s
- *      routes to summaries and every UI preset is >= 300 s — so it is a real
- *      divergence awaiting the summary v9 format change, not a comparability
- *      artefact. The matrix is blind to it by construction (build_stream is
- *      all-UNKNOWN, N1), so section 6f builds a MEASURED fixture through the
- *      real writer and pins both answers plus the identity between them.
+ *  N12. (#553/#573) CLOSED for unfiltered Top Events: the record-level v7
+ *      CPU scalars always carried the split, and the reader now uses them
+ *      without a format change. Only the per-query route remains unsplit:
+ *      the file has no per-query measurement and server.c:5471 forces that
+ *      drill to raw in production. The matrix is all-UNKNOWN (N1), so 6f
+ *      uses measured AND UNKNOWN records to prove exact unfiltered parity
+ *      and conservation on both routes, catching a dropped cpu_unknown_ns.
  *
  * ROW ORDER is also not comparable: both paths qsort by total descending and
  * neither sort is stable, so equal totals may come back in either order.
@@ -827,9 +825,9 @@ static int diff_top_events(const char *lbl, const struct pgwt_events_result *raw
     /* #553's three response-level fields. The matrix fixture is all-UNKNOWN,
      * so here these compare 0 against 0 -- which is exactly why they must be
      * present: without them the comparator cannot SEE a measured-CPU
-     * divergence at all, and section 6f's "the gate detects the registered
-     * hole" assertion would be satisfied by a blind comparator rather than by
-     * a visible hole. Section 4b mutates each one to prove it is read. */
+     * divergence at all. Section 6f proves unfiltered agreement and the
+     * retained query-only hole; 4b mutates each scalar with identical rows
+     * to prove it is read independently of row differences. */
     if (raw->has_measured_cpu != sum->has_measured_cpu)
         D("has_measured_cpu %d vs %d",
           raw->has_measured_cpu, sum->has_measured_cpu);
@@ -1271,18 +1269,11 @@ static const struct pair PAIRS[] = {
       F_NONE | F_CLASS | F_EVENT | F_QUERY, NULL },
     { "pgwt_compute_top_events_from_summaries",   run_top_events,
       F_NONE | F_CLASS | F_EVENT,
-      "N12 (#553): MEASURED CPU. The summary events[] table and the "
-      "per-query top_events[] list both store WALL for event 0 "
-      "(summary_writer.c's `se->total_ns += tns`), so this twin's CPU* is "
-      "the unsplit gap wall and has_measured_cpu is 0, while the raw path "
-      "reports the measurement plus offcpu_ms. The matrix cannot see it "
-      "(build_stream is all-UNKNOWN, hole N1), so section 6f pins both "
-      "answers and the identity between them: raw CPU* + raw off-CPU == "
-      "summary CPU*. This is a REAL user-visible divergence, not a "
-      "comparability artefact -- should_use_summaries routes an unfiltered "
-      "window >= 120 s here, and every UI preset is >= 300 s. The owner's "
-      "fix is to make the summary twin carry the measurement at summary "
-      "v9 (with #563's field, one bump); 6f flips one constant then. "
+      "N12 (#553/#573): CLOSED unfiltered using the existing v7 record CPU "
+      "scalars, no format change. Only the per-query route remains unsplit "
+      "and unmeasured; server.c:5471 forces that drill to raw. Section 6f "
+      "proves exact unfiltered parity with mixed measured/UNKNOWN tiers "
+      "and conservation on both routes (the N1 matrix is all-UNKNOWN). "
       "N9: under a QUERY filter the summary path reads the per-query "
       "top_events[] list, which carries no histogram and no max -- so the "
       "LATENCY columns come back as 'absent' (has_latency_dist = 0, which "
@@ -2288,7 +2279,8 @@ static void div316_half_open(const struct fixture *fx)
  * `if (old_ev != 0)`, so event 0 -- CPU -- was never filed, and the Events
  * tab drilled into one query over a >= 120 s window lost the whole CPU* row:
  * measured raw 7002.426 ms vs summary 2949.426 ms, -57.9%, on this fixture.
- * REACHABLE: handle_top_events has no query guard.
+ * The direct query-summary call remains covered here; src/server.c:5471
+ * routes that drill to raw in production.
  *
  * The null LATENCY columns on this path are a different thing and are
  * deliberate (#103): the per-query list carries no histogram and no max. That
@@ -2662,65 +2654,47 @@ static void div319_top_wait(uint64_t origin)
     mini_free(&m);
 }
 
-/* ── 6f. #553: the SAME total, split two ways ───────────────────────────
+/* ── 6f. #553/#573: the SAME total, with the unfiltered split ──────────
  *
- * The matrix above cannot see this at all: build_stream() stamps every record
- * PGWT_CPU_NS_UNKNOWN (hole N1), and with no measurement the raw path's CPU*
- * IS the gap wall -- identical to the summary path by construction. So a
- * measured-CPU divergence could appear in production with this whole file
- * green. This case feeds MEASURED cpu_ns through the real writer and the real
- * reader and pins the contract the two paths actually have:
+ * build_stream() is all PGWT_CPU_NS_UNKNOWN (N1), so it cannot prove the
+ * measured split. This mixed-tier fixture passes measured AND UNKNOWN gaps
+ * through the real writer and reader: CPU row = measured + unknown wall,
+ * off-CPU = measured gap wall - measured CPU, DB = both tiers' wall.
+ * CPU_NS != DUR anchors the split; the separable UNKNOWN term catches a
+ * reader that drops cpu_unknown_ns even if it reads cpu_measured_ns.
  *
- *     raw CPU* + raw offcpu_ms == summary CPU*     (the same total)
- *     raw.has_measured_cpu == 1                    (raw says it measured)
- *     summary.has_measured_cpu == 0                (summary says it did not)
- *
- * NOT a bug being papered over, and NOT an agreement check: the summary
- * events[] table stores WALL for event 0 (summary_writer.c's
- * `se->total_ns += tns`), and the per-query top_events[] list does the same,
- * so this twin cannot answer with a measurement. Demanding that the two CPU*
- * values be EQUAL would be demanding the raw path carry wall again -- i.e.
- * asserting #553's defect. What is pinned instead is that neither path loses
- * time and each one SAYS which quantity it is reporting.
- *
- * EXPECTED TO FLIP AT PGWT_SUMMARY_VERSION 9. The owner's decision is that
- * the summary twin will carry measured CPU (a writer format change, with
- * #563's per-record field, in one version bump). When that lands, change
- * SUMMARY_SPLITS_CPU below from 0 to 1 -- ONE line. The identity assertion is
- * written over the TOTAL on both sides, so it does not change: it holds while
- * the summary keeps the total on the CPU row, and it holds once the summary
- * splits it into CPU* + off-CPU. The two literal assertions pick their
- * expected value from that same constant, and diff_top_events' three #553
- * fields then stop reporting a difference, which is what makes the registry
- * note above stale rather than this case.
- *
- * WHAT THE NEXT IMPLEMENTER MUST CHANGE for this to pass at v9: the writer's
- * per-event table (and the per-query top_events[] list) must carry measured
- * on-CPU ns for event 0 instead of `se->total_ns += tns` wall, and
- * pgwt_compute_top_events_from_summaries must set has_measured_cpu and fill
- * offcpu_ms with the gaps' remainder -- i.e. the same two numbers the raw
- * path produces here, 520 and 780. Then SUMMARY_SPLITS_CPU becomes 1 and
- * every line below is unchanged.
+ * No format change: the record-level v7 CPU scalars were always there. The
+ * unfiltered Top Events summary route now reads them and agrees exactly
+ * with raw and time_model on this window. The per-query route deliberately
+ * remains unsplit with has_measured_cpu = 0: the file has no per-query
+ * measurement, and src/server.c:5471 never takes it in production. N12 is
+ * closed for the unfiltered route, retained only for that direct query call.
+ * Both routes conserve CPU row + offcpu_ms, while db_time_ms stays WALL.
  */
 static void div553_measured_cpu_identity(uint64_t origin)
 {
-    /* 0 today; 1 at summary v9. The ONE line that changes. */
-    const int SUMMARY_SPLITS_CPU = 0;
+    printf("  6f. #553/#573: mixed-tier CPU split agrees unfiltered, query "
+           "route stays unsplit, both conserve time\n");
 
-    printf("  6f. #553: raw CPU* + off-CPU == summary CPU*, and each path "
-           "says which it is\n");
+    enum { NREC = 130, NUNK = 130 };      /* > 120 s: a real summary window */
+    const uint64_t DUR = 10 * MS, CPU_NS = 4 * MS, UNK_DUR = 5 * MS;
+    const double CPU_MEAS_MS_EXP = (double)(NREC * CPU_NS) / 1e6;
+    const double UNK_MS_EXP = (double)(NUNK * UNK_DUR) / 1e6;
+    const double CPU_ROW_MS_EXP = CPU_MEAS_MS_EXP + UNK_MS_EXP;
+    const double OFF_MS_EXP = (double)(NREC * (DUR - CPU_NS)) / 1e6;
+    const double DB_MS_EXP = (double)(NREC * DUR + NUNK * UNK_DUR) / 1e6;
 
-    enum { NREC = 130 };                 /* > 120 s: a real summary window */
-    const uint64_t DUR = 10 * MS, CPU_NS = 4 * MS;
-    const double CPU_MS_EXP  = (double)(NREC * CPU_NS) / 1e6;        /*  520 */
-    const double OFF_MS_EXP  = (double)(NREC * (DUR - CPU_NS)) / 1e6;/*  780 */
-    const double DB_MS_EXP   = (double)(NREC * DUR) / 1e6;           /* 1300 */
+    CHECK(CPU_NS != DUR,
+          "6f: measured CPU differs from gap wall -- there is time to split");
+    CHECK(UNK_MS_EXP > 0 && CPU_MEAS_MS_EXP != CPU_ROW_MS_EXP,
+          "6f: UNKNOWN is a real separable term (%.6f ms): measured %.6f "
+          "differs from CPU row %.6f", UNK_MS_EXP, CPU_MEAS_MS_EXP,
+          CPU_ROW_MS_EXP);
 
-    struct pgwt_trace_event ev[NREC];
+    struct pgwt_trace_event ev[NREC + NUNK];
     memset(ev, 0, sizeof(ev));
     for (int i = 0; i < NREC; i++) {
-        /* An on-CPU gap (old_event 0) closing mid-second, carrying a
-         * MEASUREMENT: 10 ms of wall of which 4 ms was on a core. */
+        /* 10 ms of wall, 4 ms on a core, closing mid-second. */
         ev[i].timestamp_ns = origin + (uint64_t)i * ONE_SEC + 500 * MS;
         ev[i].duration_ns  = DUR;
         ev[i].cpu_ns       = CPU_NS;
@@ -2729,26 +2703,37 @@ static void div553_measured_cpu_identity(uint64_t origin)
         ev[i].pid          = 301;
         ev[i].query_id     = QID_A;
     }
+    for (int i = 0; i < NUNK; i++) {
+        struct pgwt_trace_event *u = &ev[NREC + i];
+        u->timestamp_ns = origin + (uint64_t)i * ONE_SEC + 700 * MS;
+        u->duration_ns  = UNK_DUR;
+        u->cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+        u->old_event    = EV_CPU;
+        u->new_event    = EV_LOCK_A;
+        u->pid          = 301;
+        u->query_id     = QID_A;
+    }
 
     struct mini m;
-    if (mini_build(&m, "fixture_553_measured", origin, ev, NREC) != 0)
+    if (mini_build(&m, "fixture_553_measured", origin, ev, NREC + NUNK) != 0)
         return;                 /* mini_build already counted the failure */
-    /* The fixture's own premises: a writer that dropped records, or a window
-     * under the 120 s threshold, would make every number below smaller for a
-     * reason that has nothing to do with #553. */
-    CHECK(m.records == NREC && m.block_events == (uint64_t)NREC &&
-          m.overflow == 0,
-          "6f: all %d measured records committed, no overflow (%d records, "
-          "%llu block events, overflow %u)", NREC, m.records,
+    /* Fixture premises: no dropped records, overflow, or too-short window. */
+    /* Both tiers occupy the same NREC seconds: records count seconds,
+     * while block_events and occurrence counts include both tiers. */
+    CHECK(m.records == NREC &&
+          m.block_events == (uint64_t)(NREC + NUNK) && m.overflow == 0,
+          "6f: all %d mixed-tier events committed, no overflow (%d seconds, "
+          "%llu block events, overflow %u)", NREC + NUNK, m.records,
           (unsigned long long)m.block_events, m.overflow);
     CHECK(m.to_ns - m.from_ns >= 120 * ONE_SEC,
           "6f: the window is %.0f s -- wide enough that the server would "
           "route this to summaries", (double)(m.to_ns - m.from_ns) / 1e9);
 
-    /* Unfiltered and under the per-query drill-down: both summary routings
-     * read a wall-only table (events[] and top_events[] respectively), so
-     * both must satisfy the identity. */
     for (int query = 0; query < 2; query++) {
+        /* src/server.c:5471 never serves the query route from summaries:
+         * the file has no per-query measurement, so q=1 legitimately stays
+         * unsplit and declares itself unmeasured on this direct call. */
+        const int SUMMARY_SPLITS_CPU = !query;
         struct pgwt_filter f;
         memset(&f, 0, sizeof(f));
         if (query) f.query_id = QID_A;
@@ -2761,90 +2746,75 @@ static void div553_measured_cpu_identity(uint64_t origin)
         const struct pgwt_event_row *a = ev_find(&raw, EV_CPU);
         const struct pgwt_event_row *b = ev_find(&sum, EV_CPU);
 
-        /* NON-VACUITY first: an absent CPU row on either side makes every
-         * identity below a statement about 0 == 0. */
-        CHECK(a != NULL && b != NULL && a->count == NREC && b->count == NREC,
-              "6f[q=%d]: both paths have a populated CPU* row (raw %s/%llu, "
+        CHECK(a != NULL && b != NULL && a->count == NREC + NUNK &&
+              b->count == NREC + NUNK,
+              "6f[q=%d]: both paths have a populated CPU row (raw %s/%llu, "
               "summary %s/%llu)", query, a ? "yes" : "NO",
               a ? (unsigned long long)a->count : 0, b ? "yes" : "NO",
               b ? (unsigned long long)b->count : 0);
         if (!a || !b) { free_ev(&raw); free_ev(&sum); continue; }
 
-        /* Each term against its own hand-computed literal, before any
-         * cross-path identity: an identity over two wrong numbers still
-         * holds. */
-        CHECK(a->total_ms == CPU_MS_EXP && raw.offcpu_ms == OFF_MS_EXP &&
-              raw.db_time_ms == DB_MS_EXP,
-              "6f[q=%d]: raw is measured CPU %.6f + off-CPU %.6f of DB %.6f "
+        /* Check each term against the fixture's computed expectation before
+         * the identity: an identity over two wrong numbers can still hold. */
+        CHECK(a->total_ms == CPU_ROW_MS_EXP && raw.offcpu_ms == OFF_MS_EXP &&
+              raw.db_time_ms == DB_MS_EXP && sum.db_time_ms == DB_MS_EXP,
+              "6f[q=%d]: raw CPU %.6f + off-CPU %.6f, DB raw/summary %.6f/%.6f "
               "(expected %.0f / %.0f / %.0f)", query, a->total_ms,
-              raw.offcpu_ms, raw.db_time_ms, CPU_MS_EXP, OFF_MS_EXP,
-              DB_MS_EXP);
+              raw.offcpu_ms, raw.db_time_ms, sum.db_time_ms, CPU_ROW_MS_EXP,
+              OFF_MS_EXP, DB_MS_EXP);
         CHECK(raw.has_measured_cpu == 1,
-              "6f[q=%d]: the raw path DECLARES its CPU* row a measurement "
-              "(has_measured_cpu %d)", query, raw.has_measured_cpu);
+              "6f[q=%d]: raw declares its CPU row measured (%d)",
+              query, raw.has_measured_cpu);
         CHECK(sum.has_measured_cpu == SUMMARY_SPLITS_CPU,
-              "6f[q=%d]: the summary path declares has_measured_cpu %d "
-              "(expected %d -- flip SUMMARY_SPLITS_CPU at summary v9)",
+              "6f[q=%d]: summary declares has_measured_cpu %d (expected %d)",
               query, sum.has_measured_cpu, SUMMARY_SPLITS_CPU);
+        CHECK(strcmp(a->name, "CPU (running)") == 0 &&
+              strcmp(b->name, SUMMARY_SPLITS_CPU ? "CPU (running)" : "CPU*") == 0,
+              "6f[q=%d]: CPU labels follow measurement (raw %s, summary %s)",
+              query, a->name, b->name);
 
-        /* THE IDENTITY, in the form that survives the v9 flip: the two paths
-         * describe the same total. Today the summary keeps all of it on the
-         * CPU row (offcpu 0); at v9 it splits, and this line is unchanged. */
         CHECK(b->total_ms + sum.offcpu_ms == a->total_ms + raw.offcpu_ms,
-              "6f[q=%d]: summary CPU* + off-CPU (%.6f + %.6f) == raw CPU* + "
-              "off-CPU (%.6f + %.6f) -- no time is lost or invented by "
-              "either routing", query, b->total_ms, sum.offcpu_ms,
-              a->total_ms, raw.offcpu_ms);
-        CHECK(b->total_ms == (SUMMARY_SPLITS_CPU ? CPU_MS_EXP
-                                                 : CPU_MS_EXP + OFF_MS_EXP),
-              "6f[q=%d]: the summary CPU* row is %.6f ms -- the UNSPLIT "
-              "%.0f ms wall today, the measured %.0f ms at v9", query,
-              b->total_ms, CPU_MS_EXP + OFF_MS_EXP, CPU_MS_EXP);
+              "6f[q=%d]: summary CPU + off-CPU (%.6f + %.6f) == raw CPU + "
+              "off-CPU (%.6f + %.6f) -- no time lost or invented", query,
+              b->total_ms, sum.offcpu_ms, a->total_ms, raw.offcpu_ms);
+        CHECK(b->total_ms == (SUMMARY_SPLITS_CPU ? CPU_ROW_MS_EXP : DB_MS_EXP),
+              "6f[q=%d]: summary CPU row %.6f ms is %s (split %.0f, wall %.0f)",
+              query, b->total_ms, SUMMARY_SPLITS_CPU ? "split" : "unsplit",
+              CPU_ROW_MS_EXP, DB_MS_EXP);
         CHECK(sum.offcpu_ms == (SUMMARY_SPLITS_CPU ? OFF_MS_EXP : 0.0),
-              "6f[q=%d]: and its off-CPU remainder is %.6f ms -- 0 today "
-              "(a refusal to split, not a claim of zero), %.0f at v9",
-              query, sum.offcpu_ms, OFF_MS_EXP);
-        CHECK(a->total_ms != b->total_ms,
-              "6f[q=%d]: the two CPU* numbers really do differ here (%.6f vs "
-              "%.6f), so none of the assertions above is satisfied by the two "
-              "paths agreeing", query, a->total_ms, b->total_ms);
+              "6f[q=%d]: summary off-CPU %.6f ms (expected %.0f; unsplit 0 "
+              "refuses to split, never claims zero)", query, sum.offcpu_ms,
+              SUMMARY_SPLITS_CPU ? OFF_MS_EXP : 0.0);
+        CHECK(SUMMARY_SPLITS_CPU ? a->total_ms == b->total_ms
+                                : a->total_ms != b->total_ms,
+              "6f[q=%d]: CPU rows %s (%.6f vs %.6f); non-vacuity is anchored "
+              "on CPU_NS != DUR and the separable UNKNOWN term above", query,
+              SUMMARY_SPLITS_CPU ? "agree" : "differ", a->total_ms, b->total_ms);
 
-        /* And the GATE reports it rather than passing it. Note what this
-         * does NOT prove: the row totals differ here too, so this line is
-         * satisfied by the ROW comparison alone and says nothing about
-         * whether diff_top_events reads the three #553 scalars. Section 4b's
-         * probes are what prove that -- they mutate each scalar with the
-         * rows left identical. Both are needed: 4b shows the fields are
-         * read, this shows the registered hole is reported and not
-         * swallowed. */
-        CHECK(diff_top_events("6f measured CPU", &raw, &sum, 0) > 0,
-              "6f[q=%d]: the matrix comparator REPORTS this registered hole "
-              "instead of passing it", query);
+        /* 4b independently proves the comparator reads each CPU scalar by
+         * mutating it with identical rows. Here it must see exact agreement
+         * unfiltered and the retained query-only hole on the direct call. */
+        int differences = diff_top_events("6f measured CPU", &raw, &sum, 0);
+        CHECK(SUMMARY_SPLITS_CPU ? differences == 0 : differences > 0,
+              "6f[q=%d]: comparator %s (%d differences)", query,
+              SUMMARY_SPLITS_CPU ? "agrees exactly" : "reports the query hole",
+              differences);
 
-        /* The contrast that shows the hole is the TABLE's, not the file's:
-         * the time model's summary path already carries measured CPU (the
-         * per-second record has cpu_measured_ns window totals), so both
-         * paths agree there on the same blocks and the same window. That is
-         * what makes "the summary file cannot answer this" false as a
-         * general statement and true for top_events' per-event tables. */
         if (!query) {
             struct pgwt_tm_result tr, ts;
             pgwt_compute_time_model(m.wall, m.n, &f, m.from_ns, m.to_ns,
                                     m.wall_ms, &tr);
             pgwt_compute_time_model_from_summaries(m.dir, m.from_ns, m.to_ns,
                                                    &f, m.wall_ms, &ts);
-            CHECK(tr.cpu_ms == CPU_MS_EXP && ts.cpu_ms == CPU_MS_EXP &&
+            CHECK(tr.cpu_ms == CPU_ROW_MS_EXP && ts.cpu_ms == CPU_ROW_MS_EXP &&
                   tr.offcpu_ms == OFF_MS_EXP && ts.offcpu_ms == OFF_MS_EXP,
-                  "6f: BOTH time_model paths measure CPU %.6f/%.6f and "
-                  "off-CPU %.6f/%.6f (expected %.0f / %.0f) -- the gap is "
-                  "the per-event table, not the capture", tr.cpu_ms,
-                  ts.cpu_ms, tr.offcpu_ms, ts.offcpu_ms, CPU_MS_EXP,
-                  OFF_MS_EXP);
-            CHECK(ts.cpu_ms != b->total_ms,
-                  "6f: ...so one response's CPU (%.6f) and the other's CPU* "
-                  "row (%.6f) disagree on the SAME window -- which is the "
-                  "user-visible consequence #553 is about", ts.cpu_ms,
-                  b->total_ms);
+                  "6f: BOTH time_model paths CPU %.6f/%.6f, off-CPU %.6f/%.6f "
+                  "(expected %.0f / %.0f)", tr.cpu_ms, ts.cpu_ms, tr.offcpu_ms,
+                  ts.offcpu_ms, CPU_ROW_MS_EXP, OFF_MS_EXP);
+            CHECK(ts.cpu_ms == b->total_ms,
+                  "6f: time_model CPU %.6f and Top Events CPU row %.6f agree "
+                  "on the SAME window -- #553's user-visible contract",
+                  ts.cpu_ms, b->total_ms);
             free_tm(&tr); free_tm(&ts);
         }
         free_ev(&raw); free_ev(&sum);
@@ -2866,7 +2836,7 @@ static void div553_measured_cpu_identity(uint64_t origin)
  * - pgwt_compute_top_events vs pgwt_compute_top_events_from_summaries: YES,
  *   both sides' events[] tables carry idle events (the source of the Idle
  *   sub-rows), so the ClientRead event row itself must agree. Compare that
- *   row directly: the full diff_top_events also sees 6f's separate #553 hole.
+ *   row directly; 6f separately proves the unfiltered CPU split agrees.
  * - top_sessions / top_queries / aas / heatmap: NO. All four drop idle
  *   records on raw; pgwt_compute_top_sessions and pgwt_compute_aas both
  *   continue on pgwt_is_idle_event in src/compute.c. The writer's sessions[]
@@ -3064,7 +3034,7 @@ static void div681_measured_cpu_inside_visible_idle(uint64_t origin)
           "intervals (%.6f ms) is credited the same way by both tiers", ms);
 
     /* The unfiltered events[] route carries idle too. Compare the entire
-     * ClientRead row, leaving the distinct #553 CPU* table issue to 6f. */
+     * ClientRead row; 6f separately proves the #553/#573 CPU split. */
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_events_result raw_events, sum_events;

@@ -41,6 +41,8 @@ and each asserts a FAILURE, never a skip:
   §15 every pin in the TRACKED table carries the issue issue_for() assigns,
       and none points at a closed issue -- the label is display-only to
       compare(), so nothing else would notice it drifting
+  §16 availability declarations prevent a fabricated zero from earning XPASS;
+      measured zero and honest unavailable null remain valid
 
 Pure Python: no server, no trace files, milliseconds. Runs in `make check`
 (scripts/check.sh) and in the box/CI tier (tests/unit_tests.list), because a
@@ -228,7 +230,7 @@ def check(cond, what):
 def answers(db_ms=100000.0, cpu_rows="split", top_wait="Lock:relation",
             qorder=("100", "101"), client_ms=70000.0, extra=None,
             sessions=(1000, 1001)):
-    """A plausible four-endpoint answer set, parameterised on exactly the
+    """A plausible five-endpoint answer set, parameterised on exactly the
     things the real paths disagree about."""
     rows = [{"name": "DB Time", "ms": db_ms, "aas": db_ms / 1e5, "indent": 0},
             {"name": "Client", "ms": client_ms, "aas": 0.5, "indent": 1},
@@ -241,7 +243,7 @@ def answers(db_ms=100000.0, cpu_rows="split", top_wait="Lock:relation",
     elif cpu_rows == "merged":
         rows += [{"name": "CPU*", "ms": 10000.0, "aas": 0.1, "indent": 1}]
     tm = {"id": 1, "fidelity": "exact", "db_time_ms": db_ms, "rows": rows,
-          "has_measured_cpu": cpu_rows == "split"}
+          "has_measured_cpu": cpu_rows == "split", "io_worker_busy_pct": 0.0}
     if extra:
         tm.update(extra)
     aas = {"id": 2, "fidelity": "exact", "bucket_ns": 1_000_000_000,
@@ -253,12 +255,28 @@ def answers(db_ms=100000.0, cpu_rows="split", top_wait="Lock:relation",
     qs = {"id": 4, "fidelity": "exact", "rows": [
         {"query_id": q, "total_ms": 40000.0 - i, "top_wait": top_wait}
         for i, q in enumerate(qorder)]}
+    events = {"id": 5, "fidelity": "exact", "db_time_ms": 10000.0,
+              "has_measured_cpu": True, "offcpu_ms": 4000.0,
+              "cpu_clamped_ms": 0.0,
+              "rows": [{"name": "CPU (running)", "event_id": 0,
+                        "total_ms": 6000.0, "count": 130}]}
     return {"time_model": tm, "aas": aas, "top_sessions": sess,
-            "top_queries": qs}
+            "top_queries": qs, "top_events": events}
 
 
 def fields(**kw):
     return P.extract_all(answers(**kw))
+
+
+def io_fields(value, unavailable=P.ABSENT, reason=P.ABSENT):
+    response = answers()
+    tm = response["time_model"]
+    tm["io_worker_busy_pct"] = value
+    if unavailable != P.ABSENT:
+        tm["io_worker_busy_pct_unavailable"] = unavailable
+    if reason != P.ABSENT:
+        tm["io_worker_busy_pct_unavailable_reason"] = reason
+    return P.extract_all(response)
 
 
 BOTH_ROUTES = {"raw": P.ROUTE_RAW, "summary": P.ROUTE_SUMMARY}
@@ -273,12 +291,21 @@ MARKER_VERSION = ("INFO: 1 of 1 summary file(s) covering this window are not "
 
 
 def main():
+    import test_summary_raw_parity as G
+
     print("=== test_summary_raw_parity_lib ===")
     base = fields()
 
     # §0 the positive control: identical answers, two routes, a sane table.
     ok, lines, _ = P.verdict("w", BOTH_ROUTES, base, dict(base), {})
     check(ok, "§0 identical answers on two different routes PASS")
+    check("top_events" in G.CMDS and
+          base["events/rowset"] == "CPU (running)" and
+          base["events/row/CPU (running)/total_ms"] == 6000.0 and
+          base["events/offcpu_ms"] == 4000.0 and
+          base["events/has_measured_cpu"] is True,
+          "§0 Top Events is requested and extracts scalars and rows by name "
+          "without an indent tag")
 
     # §1 both sides raw -> the comparison is vacuous even though every field
     #    agrees. This is the exact false negative the #408 probe hit.
@@ -332,7 +359,8 @@ def main():
     empty = P.extract_all({"time_model": {"rows": [], "db_time_ms": 0},
                            "aas": {"buckets": [], "bucket_ns": 1},
                            "top_sessions": {"rows": []},
-                           "top_queries": {"rows": []}})
+                           "top_queries": {"rows": []},
+                           "top_events": {"rows": []}})
     ok, lines, _ = P.verdict("w", BOTH_ROUTES, empty, dict(empty), {})
     check(not ok, "§5 two empty answers FAIL instead of agreeing")
     check(sum(1 for l in lines if "FAIL vacuous" in l) >= 4,
@@ -345,8 +373,9 @@ def main():
     check(not ok, "§5 a single-session answer FAILS as vacuous")
 
     # §6 absence is not equality.
-    raw_extra = fields(extra={"io_worker_busy_pct": 0})
-    ok, lines, _ = P.verdict("w", BOTH_ROUTES, raw_extra, base, {})
+    missing_io = dict(base)
+    del missing_io[P.IO_BUSY]
+    ok, lines, _ = P.verdict("w", BOTH_ROUTES, base, missing_io, {})
     check(not ok, "§6 a field present on the raw side only FAILS")
     check(any(P.MISSING in l and "io_worker_busy_pct" in l for l in lines),
           "§6 ... reported as MISSING-FIELD, not as a value difference")
@@ -372,6 +401,14 @@ def main():
     noresp = P.extract_time_model("boom")
     check(any(str(v).startswith(P.UNPARSEABLE) for v in noresp.values()),
           "§7 a non-dict response is unparseable, not absent")
+    check(P.extract_all({})["events/rowset"] == P.ABSENT,
+          "§7 missing Top Events in a partial answer is absent")
+    check(P.extract_events({"rows": ["junk"]})["events/rowset"]
+          == P.UNPARSEABLE and
+          P.extract_all({"top_events": "junk"})["events/<response>"]
+          == P.UNPARSEABLE + ":str",
+          "§7 garbage Top Events rows/responses are unparseable without "
+          "raising")
 
     # §8 dependencies: missing (127) and present-but-not-executable (126).
     probs = P.require_tools(["/definitely/not/here/pgwt-server"])
@@ -411,8 +448,9 @@ def main():
     # §11 a known divergence that disappeared is XPASS and PASSES.
     ok, lines, _ = P.verdict("w", BOTH_ROUTES, base, dict(base), tbl)
     check(ok, "§11 a recorded divergence that now agrees PASSES")
-    check(any(P.XPASS in l and "delete this entry" in l for l in lines),
-          "§11 ... reported as xpass with 'delete this entry'")
+    check(any(P.XPASS in l and "test_data_summary_honesty.py" in l
+              for l in lines) and not any("delete this entry" in l for l in lines),
+          "§11 ... xpass points to honesty proof before changing a pin")
 
     # §12 each defect class on its own merits -- not merely today's knowns.
     #     a) a wrong NUMBER in one class row
@@ -461,19 +499,21 @@ def main():
 
     # §13 the issue attribution itself, and the refusal that stops `--record`
     #     from laundering a brand-new divergence into "known".
-    import test_summary_raw_parity as G
     # The CPU rule is GONE, on purpose, and this is the assertion that says
     # so. #408 and #562 are closed by the summary v9 epoch (the record now
     # carries the per-session measured-CPU split and the sessions routing
     # reports it), and a rule still mapping a CPU divergence to a closed
     # issue is worse than no rule: the next one would be filed into a closed
-    # ticket and vanish. UNEXPLAINED is the loud answer, and `--record`
-    # refuses to write it -- so a new CPU divergence cannot be laundered
-    # into "known" by a regeneration.
+    # ticket and vanish. UNEXPLAINED is the honest attribution. NEW and
+    # CHANGED-DIVERGENCE fail before --record consults unexplained(), so a
+    # new CPU divergence cannot be regenerated into "known" either way.
     check(G.issue_for("time_model/row/CPU*/ms", "interior_160s")
           == "UNEXPLAINED",
           "§13 a CPU row field is UNEXPLAINED now that #408/#562 are closed "
           "-- never attributed to a closed issue")
+    check(G.issue_for("events/row/CPU (running)/total_ms", "interior_160s")
+          == "UNEXPLAINED",
+          "§13 a new Top Events CPU divergence has no pin rule")
     check(G.issue_for("sessions/row/1001/top_wait", "interior_160s") == 319,
           "§13 a top_wait field is attributed to #319")
     check(G.issue_for("time_model/row/Client/ms", "straddle_130s")
@@ -515,8 +555,8 @@ def main():
     # §15 the TRACKED table's issue labels must match issue_for()'s rule.
     #     compare() uses an entry's "issue" for DISPLAY only, so a stale label
     #     is invisible to the gate -- and a label pointing at a CLOSED issue
-    #     arms a trap, because this gate's own rule is "delete an entry the
-    #     moment its issue is fixed". Eight straddle pins pointed at closed
+    #     used to arm a trap through the gate's "delete this entry" advice.
+    #     Eight straddle pins pointed at closed
     #     #379 (v8's documented queries[] carve-out, not a #379 regression);
     #     the next reader would have deleted them and blinded the window.
     #     This check is what stops that label drifting back.
@@ -538,6 +578,77 @@ def main():
               for e in tbl.values()),
           "§15 no pin points at CLOSED #379 (its fix landed in v8; a pin there "
           "invites deletion of a live pin)")
+
+    # §16 #821: a measured zero is valid; a declared-unavailable zero is
+    # contradictory. The raw wire form (no declarations) is established by
+    # test_data_summary_honesty.py and the PG17 step-0 route probe.
+    raw = io_fields(0.0)
+    unavailable = io_fields(None, True, P.IO_SUMMARY_REASON)
+    pin = {P.IO_BUSY: {"issue": 410, "raw": 0, "summary": None}}
+    check(raw[P.IO_UNAVAILABLE] is False
+          and unavailable[P.IO_UNAVAILABLE] is True,
+          "§16 declarations are compared as bool against bool")
+    ok, lines, findings = P.verdict("w", BOTH_ROUTES, raw, unavailable, pin)
+    check(ok and not any(f.status == P.XPASS for f in findings),
+          "§16 honest null + unavailable=true PASSES as known, never xpass")
+    check({f.field for f in findings if f.status == P.KNOWN}
+          == {P.IO_BUSY, P.IO_UNAVAILABLE, P.IO_REASON},
+          "§16 honest declaration differences are reported under the value pin")
+    check(P.record_table(findings) == pin,
+          "§16 recording the honest pair retains its sole value pin")
+    measured_zero = io_fields(0.0, False)
+    ok, _, _ = P.verdict("w", BOTH_ROUTES, raw, measured_zero, {})
+    check(ok, "§16 legitimate measured zero PASSES")
+    ok, _, findings = P.verdict("w", BOTH_ROUTES, raw, measured_zero, pin)
+    check(ok and any(f.field == P.IO_BUSY and f.status == P.XPASS
+                     for f in findings),
+          "§16 measured zero can xpass a nullable pin when declarations agree")
+    ok, _, findings = P.verdict("w", BOTH_ROUTES, unavailable,
+                               dict(unavailable), {})
+    check(ok and all(f.status == P.AGREE for f in findings),
+          "§16 two honest unavailable nulls agree without evidence of a fix")
+    ok, _, findings = P.verdict("w", BOTH_ROUTES, unavailable,
+                               dict(unavailable), pin)
+    check(not ok and not any(f.status == P.XPASS for f in findings),
+          "§16 changing both sides to unavailable cannot xpass a measured pin")
+
+    fabricated = io_fields(0.0, True, P.IO_SUMMARY_REASON)
+    ok, lines, findings = P.verdict("w", BOTH_ROUTES, raw, fabricated, pin)
+    check(not ok and not any(f.status == P.XPASS for f in findings)
+          and not any("delete this entry" in l for l in lines),
+          "§16 exact fabrication FAILS with no xpass or deletion advice")
+    check(any(f.field == P.IO_UNAVAILABLE and f.status in P.FAIL_STATUSES
+              for f in findings),
+          "§16 fabrication reports the availability disagreement")
+    check(any(f.field == P.IO_BUSY and f.status == P.BAD for f in findings),
+          "§16 fabrication reports its declaration-versus-value contradiction")
+    ok, _, _ = P.verdict("w", BOTH_ROUTES, fabricated, dict(fabricated), {})
+    check(not ok, "§16 equal fabricated values and true flags still FAIL")
+    for label, broken in (
+            ("missing null declaration", io_fields(None)),
+            ("missing unavailable reason", io_fields(None, True)),
+            ("null unavailable reason", io_fields(None, True, None)),
+            ("empty unavailable reason", io_fields(None, True, "")),
+            ("numeric bool declaration", io_fields(None, 1, P.IO_SUMMARY_REASON)),
+            ("null declared available", io_fields(None, False))):
+        ok, _, findings = P.verdict("w", BOTH_ROUTES, broken, dict(broken), {})
+        check(not ok and any(f.status in (P.BAD, P.MISSING) for f in findings),
+              "§16 %s fails validation even on both sides" % label)
+    for field in P.IO_DECLARATIONS:
+        dropped = dict(unavailable)
+        del dropped[field]
+        ok, _, findings = P.verdict("w", BOTH_ROUTES, dropped, dict(dropped), {})
+        check(not ok and any(f.field == field and f.status == P.MISSING
+                             for f in findings),
+              "§16 dropping %s from BOTH extracted maps cannot skip it" % field)
+    malformed = dict(raw)
+    malformed[P.IO_UNAVAILABLE] = 0
+    ok, _, _ = P.verdict("w", BOTH_ROUTES, malformed, dict(malformed), {})
+    check(not ok, "§16 numeric flags in extracted maps cannot equal bools")
+    for field in ("events/row/Client:ClientWrite/total_ms",
+                  "events/row/Lock:relation/avg_us"):
+        check(G.issue_for(field, "straddle_130s") == "UNEXPLAINED",
+              "§16 a future %s pin cannot inherit closed #818" % field)
 
     print("--- %d checks, %d failed ---" % (CHECKS[0], len(FAILURES)))
     for f in FAILURES:

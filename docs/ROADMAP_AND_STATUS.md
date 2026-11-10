@@ -1,5 +1,10 @@
 # pg_wait_tracer — Roadmap &amp; Status (consolidated)
 
+> **This file was last updated well before the 2026-11-10 handover and is not
+> the current state.** For what is actually open, what is measured and what is
+> merely believed, read `HANDOVER_2026-11-10.md` in this directory first and
+> treat the sections below as history.
+
 - Refs #804: PG13 checkpointer select/pselect6 pacing is visible idle in
   exact and sampled capture; missing attachments and inert probes refuse capture.
   PG14.0-14.2 is deferred to #830 (PG14/15/16 Timeout-table defect) and is not covered.

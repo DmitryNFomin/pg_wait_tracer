@@ -410,6 +410,34 @@ def check_transitions_idle_flag(t, srv):
                 f"(got {node.get('idle')!r})")
 
 
+def check_transitions_sampled_ms(t, srv):
+    """#808: pin numeric sampled_ms and count on EVERY real transitions node.
+
+    The schema diff is symmetric: if both real and mock omit the field it
+    passes. merge_schemas also folds null into a single other type, hiding a
+    field missing from some nodes. Check each real node independently so
+    missing, null and non-numeric values cannot pass as measured zero.
+    count == 0 && sampled_ms > 0 is the sampled-only discriminator;
+    total_ms == 0 also admits zero-duration exact observations.
+    """
+    real = srv.query("transitions")
+    t.check("error" not in real,
+            "[transitions sampled_ms] real server answered without error"
+            + (f" (got: {real.get('error')})" if "error" in real else ""))
+    if "error" in real:
+        return
+    nodes = real.get("nodes", [])
+    t.check(len(nodes) > 0,
+            "[transitions sampled_ms] real nodes array is non-empty")
+    for node in nodes:
+        for field in ("sampled_ms", "count"):
+            value = node.get(field)
+            t.check(isinstance(value, (int, float)) and not isinstance(value, bool),
+                    f"[transitions {field}] node "
+                    f"{node.get('name', '<unnamed>')!r} carries numeric {field} "
+                    f"(got {value!r})")
+
+
 def check_top_sessions_cpu_fields(t, srv):
     """#562: the measured-CPU contract on Top Sessions, asserted POSITIVELY.
 
@@ -791,6 +819,42 @@ def check_aas_fidelity_ranges(t, srv):
             f"{real.get('fidelity')!r})")
 
 
+def check_transitions_fidelity_ranges(t, srv):
+    """#808: pin ranges independently of the symmetric mock comparison.
+
+    Ranges can be absent when coverage cannot substantiate the token. Check
+    their shape whenever present, and require presence for a mixed window.
+    This gate's default fixture has exact transitions only; do not invent a
+    mixed window or require optional ranges on a single-fidelity response.
+    """
+    real = srv.query("transitions")
+    t.check("error" not in real,
+            "[transitions fidelity ranges] real server answered without error")
+    if "error" in real:
+        return
+    print(f"  [transitions fidelity ranges] default window fidelity={real.get('fidelity')}")
+    if real.get("fidelity") == "mixed":
+        t.check("fidelity_ranges" in real,
+                "[transitions fidelity ranges] mixed window carries ranges")
+    if "fidelity_ranges" not in real:
+        return
+    ranges = real["fidelity_ranges"]
+    t.check(isinstance(ranges, list) and len(ranges) > 0,
+            "[transitions fidelity ranges] present ranges are a non-empty array")
+    if not isinstance(ranges, list):
+        return
+    for i, r in enumerate(ranges):
+        t.check(isinstance(r, dict) and set(r) == {"from", "to", "fidelity"},
+                f"[transitions fidelity ranges] range {i} keys are from/to/fidelity")
+        if not isinstance(r, dict):
+            continue
+        for key in ("from", "to"):
+            t.check(isinstance(r.get(key), int) and not isinstance(r.get(key), bool),
+                    f"[transitions fidelity ranges] range {i} {key} is integer wall ns")
+        t.check(r.get("fidelity") in ("exact", "sampled", "mixed", "none"),
+                f"[transitions fidelity ranges] range {i} fidelity is a known token")
+
+
 def main():
     t = TestRunner("test_protocol_drift")
     trace_dir = generate_traces(SCENARIO)
@@ -816,9 +880,11 @@ def main():
                 for d in diffs:
                     print(f"    DRIFT: {d}")
             check_transitions_idle_flag(t, srv)
+            check_transitions_sampled_ms(t, srv)
             check_protocol_revision(t, srv)
             check_top_sessions_cpu_fields(t, srv)
             check_aas_fidelity_ranges(t, srv)
+            check_transitions_fidelity_ranges(t, srv)
         check_optional_probe_control(t, trace_dir)
     finally:
         cleanup_traces(trace_dir)

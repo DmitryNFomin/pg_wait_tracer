@@ -243,6 +243,8 @@ struct pgwt_replay_stats {
      * SAMPLES record has no wall of its own, and CPU measured during a
      * WAIT-labelled gap is the separate wait_gap self-check quantity. */
     uint64_t cpu_clamped_ns;
+    uint64_t cpu_noncmd_ns;     /* window ns moved from DB Time to Idle by CMD markers */
+    uint64_t cpu_unmarked_ns;   /* window we==0 ns kept as CPU: pid has seen no CMD marker */
 };
 
 /* How many TRANSITIONS blocks past `--to` one replay run may decode looking

@@ -575,8 +575,16 @@ accounting rule and not about the byte layout:
   histogram/heatmap only change route for this counter fix.
   Queries already always reads raw. The v9 byte layout is unchanged.
 
+- **v11** (#818) — each per-event entry gains `full_duration_ns`, the sum of
+  exact occurrences' full durations recorded at close, alongside `max_ns`
+  and the histogram. Entries grow from 156 to 164 bytes. Top Events uses
+  this sum for `avg_us`; `total_ns` continues to carry clipped per-second
+  wall credit for totals, percentages and AAS. Older files lack the average
+  numerator and are refused for computation; any overlapping window
+  recomputes the whole request from raw.
+
 This list is kept in step with `PGWT_SUMMARY_VERSION` in
-`src/summary_writer.h`, which is **10** as of 2026-11-05. It stopped at v6 for
+`src/summary_writer.h`, which is **11** as of 2026-11-09. It stopped at v6 for
 two bumps; a version list that trails the constant is worse than no list,
 because it reads as "nothing has changed since" — and it misled once more
 after that, when the v7/v8 entries were added against a tree that had since

@@ -13,10 +13,47 @@ import {
     restoreAllTransitionsState, estimateNodeFootprint, computeGridOrder, isLayoutAnchorNode,
     buildTransitionsDisclosure, findDominantSourceDwellNode, TRANSITIONS_SEMANTICS_NOTE,
     transitionsDataError, transitionsIdleCoverageGap,
+    buildTransitionsFidelity, isSampledOnlyTransitionNode,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
 import { states as galleryStates } from '../../web/static/dev/fixtures/transitions.mjs';
+
+test('#808 Transitions fidelity: exact, mixed with ranges, mixed without ranges', () => {
+    const win = { from: 100, to: 300 };
+    for (const data of [{ fidelity: 'exact' }, {}]) {
+        const model = buildTransitionsFidelity(data, win);
+        assert.equal(model.fidelity, 'exact');
+        assert.equal(model.shading.showLegend, false);
+        assert.deepEqual(model.shading.bands, []);
+        assert.deepEqual(model.stripBands, []);
+    }
+    const ranged = buildTransitionsFidelity({ fidelity: 'mixed', fidelity_ranges: [
+        { from: 100, to: 200, fidelity: 'exact' },
+        { from: 200, to: 300, fidelity: 'sampled' },
+    ] }, win);
+    assert.equal(ranged.fidelity, 'mixed');
+    assert.equal(ranged.fidelityLabel, 'Mixed (sampled + exact)');
+    assert.equal(ranged.shading.showLegend, true);
+    assert.deepEqual(ranged.shading.bands, [{ from: 200, to: 300, kind: 'sampled' }]);
+    assert.deepEqual(ranged.stripBands, [
+        { from: 200, to: 300, kind: 'sampled', left: 50, width: 50 },
+    ]);
+    const fallback = buildTransitionsFidelity({ fidelity: 'mixed' }, win);
+    assert.equal(fallback.shading.showLegend, true);
+    assert.equal(fallback.fidelityLabel, ranged.fidelityLabel);
+    assert.deepEqual(fallback.stripBands, [
+        { from: 100, to: 300, kind: 'mixed', left: 0, width: 100 },
+    ]);
+    assert.doesNotThrow(() => buildTransitionsFidelity({ fidelity: 'mixed' }));
+});
+
+test('#808 sampled-only discriminator requires count == 0 and sampled_ms > 0', () => {
+    assert.equal(isSampledOnlyTransitionNode({ count: 0, sampled_ms: 10, total_ms: 0 }), true);
+    assert.equal(isSampledOnlyTransitionNode({ count: 1, sampled_ms: 10, total_ms: 0 }), false);
+    assert.equal(isSampledOnlyTransitionNode({ count: 0, sampled_ms: 0, total_ms: 0 }), false);
+    assert.equal(isSampledOnlyTransitionNode({ sampled_ms: 10, total_ms: 0 }), false);
+});
 
 for (const state of ['dense-dfg', 'threshold-simplified']) {
     test('#507 fixture ' + state + ': VacuumDelay is pacing idle', () => {
@@ -1601,6 +1638,36 @@ function viewHarness456(t) {
         flush() { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn()); },
     };
 }
+
+test('#808 mixed fidelity chip and strip refresh, clear for exact, and preserve unavailable', t => {
+    const h = viewHarness456(t);
+    h.ctx.timeRange.from = 100;
+    h.ctx.timeRange.to = 300;
+    const payload = { ...replay456(), fidelity: 'mixed', fidelity_ranges: [
+        { from: 100, to: 200, fidelity: 'exact' },
+        { from: 200, to: 300, fidelity: 'sampled' },
+    ] };
+    const mount = data => h.view.mount(h.root,
+        h.view.build({ transitions: data }, h.ctx), h.ctx);
+    mount(payload);
+    let chip = h.elements.get('dfg-fidelity-chip');
+    assert.equal(chip.style.display, '');
+    assert.match(chip.innerHTML, /Mixed \(sampled \+ exact\)/);
+    assert.match(chip.innerHTML, /left:50%;width:50%/);
+    assert.doesNotMatch(chip.innerHTML, /totals may|estimated/);
+    const { fidelity_ranges, ...withoutRanges } = payload;
+    mount(withoutRanges);
+    assert.match(chip.innerHTML, /left:0%;width:100%/);
+    mount({ ...withoutRanges, fidelity: 'exact' });
+    assert.equal(chip.style.display, 'none');
+    assert.equal(chip.innerHTML, '');
+    mount({ code: 'full_fidelity_required', unavailable: 'Exact data required', fidelity: 'sampled' });
+    assert.equal(h.elements.has('dfg-fidelity-chip'), false);
+    assert.match(h.root.innerHTML, /No full-fidelity data/);
+    mount(payload);
+    chip = h.elements.get('dfg-fidelity-chip');
+    assert.match(chip.innerHTML, /left:50%;width:50%/);
+});
 
 test('#456 frozen replay names the omitted Lock:relation with exact dwell and visibility', () => {
     assertReplay456(replay456());

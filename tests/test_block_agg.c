@@ -56,6 +56,7 @@
  *   §1b C7 at FILE granularity: the per-file window gate, with a boundary
  *       sweep against the raw loader's rule transcribed independently
  *   §2 build + merge against literal expected values
+ *   §2b sample-only nodes retain their time through lookup and table growth
  *   §3 merge is associative and commutative
  *   §4 the straddle rule (a pair whose old_event began in an earlier block)
  *   §5 plan() is a partition: exactly one of SKIP/MERGE/DECODE per block
@@ -452,6 +453,15 @@ static void section1_predicate_differential(void)
               "%s: pgwt_compute_transitions counted=%d, "
               "pgwt_block_agg_record_counts=%d",
               names[i], raw_counted, mine);
+        struct pgwt_trace_event exact = cases[i], sampled = cases[i];
+        exact.flags &= ~PGWT_EVENT_FLAG_SAMPLE;
+        sampled.flags |= PGWT_EVENT_FLAG_SAMPLE;
+        CHECK(pgwt_transition_record_counts_sampled(&f, &sampled) ==
+              pgwt_transition_record_counts(&f, &exact),
+              "%s: tiers share all non-SAMPLE population rules", names[i]);
+        CHECK(!pgwt_transition_record_counts(&f, &sampled) &&
+              !pgwt_transition_record_counts_sampled(&f, &exact),
+              "%s: exact and sampled tiers are disjoint", names[i]);
         if (raw_counted) n_counted++; else n_rejected++;
         free(r.rows);
     }
@@ -643,6 +653,24 @@ static void section2_literals(void)
           "merged bounds expected [1000, 2100], got [%" PRIu64 ", %" PRIu64 "]",
           win.first_timestamp_ns, win.last_timestamp_ns);
 
+    /* #808: the server-level block_agg fast path is unreachable today
+     * (bagg_window_eligible unconditionally refuses). Its zero sampled time
+     * is testable here: committed TRANSITIONS blocks and their merge never
+     * accumulate samples. This is not server fast-path end-to-end coverage. */
+    const struct pgwt_block_agg *aggs[] = { &a0, &a1, &win };
+    for (int j = 0; j < 3; j++) {
+        struct pgwt_block_agg_node *nodes = NULL;
+        int n_nodes = 0;
+        CHECK(pgwt_block_agg_nodes_sorted(aggs[j], &nodes, &n_nodes) ==
+              PGWT_BAGG_OK && n_nodes > 0,
+              "#808 aggregate %d has nodes for the sampled_ns zero pin", j);
+        for (int i = 0; i < n_nodes; i++)
+            CHECK(nodes[i].sampled_ns == 0,
+                  "#808 aggregate %d node %u sampled_ns is structurally zero",
+                  j, nodes[i].event_id);
+        free(nodes);
+    }
+
     /* An absent pair is reported ABSENT and the out params are untouched —
      * never read as a zero (C8). */
     c = 0xdeadbeef; t = 0xdeadbeef;
@@ -653,6 +681,56 @@ static void section2_literals(void)
 
     pgwt_block_agg_free(&a0);
     pgwt_block_agg_free(&a1);
+    pgwt_block_agg_free(&win);
+}
+
+static void section2b_sampled_nodes(void)
+{
+    printf("=== §2b sampled-only nodes survive lookup and growth ===\n");
+    struct pgwt_block_agg win;
+    pgwt_block_agg_init_window(&win);
+    struct pgwt_trace_event ev = {
+        .timestamp_ns = TS_BASE, .pid = 101,
+        .new_event = E_CPU, .duration_ns = 100,
+        .flags = PGWT_EVENT_FLAG_SAMPLE,
+    };
+    /* Enough distinct ids to force rehashing a table of count-zero nodes. */
+    for (uint32_t i = 0; i < 100; i++) {
+        ev.old_event = E_IO1 + i;
+        CHECK(pgwt_block_agg_add_sampled_event(&win, &ev) == PGWT_BAGG_OK,
+              "sample-only insert %u", i);
+    }
+    /* Revisit an existing sampled node, then give it exact time as well. */
+    ev.old_event = E_IO1;
+    CHECK(pgwt_block_agg_add_sampled_event(&win, &ev) == PGWT_BAGG_OK,
+          "repeat sampled node after growth");
+    ev.flags = 0;
+    ev.duration_ns = 700;
+    CHECK(pgwt_block_agg_add_event(&win, &ev) == PGWT_BAGG_OK,
+          "add exact time to existing sampled node");
+    ev.flags = PGWT_EVENT_FLAG_SAMPLE;
+    ev.duration_ns = 100;
+    CHECK(pgwt_block_agg_add_sampled_event(&win, &ev) == PGWT_BAGG_OK,
+          "add sampled time to existing exact node");
+    CHECK(win.n_nodes == 100 && win.node_records == 1 &&
+          win.node_total_ns == 700 && win.total_transitions == 1 &&
+          win.pair_total_ns == 700,
+          "samples never change exact node or edge totals");
+    struct pgwt_block_agg_node *nodes = NULL;
+    int n_nodes = 0;
+    CHECK(pgwt_block_agg_nodes_sorted(&win, &nodes, &n_nodes) == PGWT_BAGG_OK &&
+          n_nodes == 100, "readout retains all sample-only nodes after growth");
+    for (int i = 0; i < n_nodes; i++) {
+        uint64_t count = 99, total_ns = 99;
+        int mixed = nodes[i].event_id == E_IO1;
+        CHECK(pgwt_block_agg_node_lookup(&win, nodes[i].event_id,
+                                        &count, &total_ns) &&
+              count == (uint64_t)mixed && total_ns == (mixed ? 700U : 0U) &&
+              nodes[i].sampled_ns == (mixed ? 300U : 100U),
+              "node %u retains disjoint exact and sampled totals",
+              nodes[i].event_id);
+    }
+    free(nodes);
     pgwt_block_agg_free(&win);
 }
 
@@ -2473,6 +2551,7 @@ int main(void)
 
     section1_predicate_differential();
     section2_literals();
+    section2b_sampled_nodes();
     section3_merge_algebra();
     section4_straddle();
     section5_plan_partition();

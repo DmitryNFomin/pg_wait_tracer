@@ -35,6 +35,9 @@ int pgwt_summary_reader_open(struct pgwt_summary_reader *r, const char *path)
         return -1;
     }
     /* COMPUTATION requires the CURRENT accounting version.
+     * v11 adds events[].full_duration_ns; v10 and earlier cannot provide
+     * Top Events' full-duration average numerator. Keep the same WARN and
+     * whole-window raw preflight contract for those files too.
      *
      * v1/v2 precomputed their per-second class_ns and per-query totals under
      * the pre-2026-10-06 rule (idle events lumped into the class totals), so

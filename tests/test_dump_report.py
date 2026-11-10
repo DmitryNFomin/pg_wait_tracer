@@ -23,8 +23,8 @@ WHAT THIS PINS
      while this table accounts for every millisecond -- time_model's
      shortfall, filed as #575, with the numbers recorded so fixing it turns
      2d red rather than letting the overlap be discovered by accident;
-  4. CPU* is the measured 40.0 ms, not the 100.0 ms wall -- without this the
-     sum above is satisfied by reverting #553 entirely (section 1).
+  4. CPU (running) is the measured 40.0 ms, not the 100.0 ms wall -- without
+     this the sum above is satisfied by reverting #553 entirely (section 1).
 
 WHY SECTION 2 IS HALF THE FILE (false negatives). A gate that cannot see must
 refuse, never approve. Every way this check could be satisfied without
@@ -200,12 +200,12 @@ def test_measured_dump_accounts_for_offcpu(t):
                     TM_RE)
 
     # PREMISE, asserted before anything else: this fixture really is the
-    # measured shape. If CPU* carried wall (#553 reverted) the column would
-    # sum to 100% with no off-CPU row at all, and every check below would be
-    # satisfied by the defect.
-    cpu_total, cpu_pct = find(ev, "CPU*")
+    # measured shape. If CPU (running) carried wall (#553 reverted), the
+    # column would sum to 100% with no off-CPU row at all, and every check
+    # below would be satisfied by the defect.
+    cpu_total, cpu_pct = find(ev, "CPU (running)")
     t.check_eq(cpu_total, CPU_MS,
-               f"premise: CPU* is the MEASURED {CPU_MS} ms "
+               f"premise: CPU (running) is the MEASURED {CPU_MS} ms "
                f"(the gap wall would read {CPU_MS + OFFCPU_MS})")
     io_total, _ = find(ev, "IO:DataFileRead")
     t.check_eq(io_total, IO_MS,
@@ -214,7 +214,7 @@ def test_measured_dump_accounts_for_offcpu(t):
     off_total, off_pct = find(ev, OFFCPU_ROW)
     t.check_eq(off_total, OFFCPU_MS,
                f"Top Events prints '{OFFCPU_ROW}' = {OFFCPU_MS} ms, the time "
-               f"the CPU* row no longer claims")
+               f"the CPU (running) row no longer claims")
     t.check_eq(off_pct, round(OFFCPU_MS / DB_TIME_MS * 100.0, 1),
                "...with its share of DB Time, not a bare millisecond count")
 
@@ -244,7 +244,7 @@ def test_measured_dump_accounts_for_offcpu(t):
                "itself")
     t.check(find(tm, "CPU (running)")[0] == cpu_total,
             "...and the Time Model's measured CPU row equals Top Events' "
-            "CPU* row")
+            "CPU (running) row")
 
 
 # ── 2. the false negatives ─────────────────────────────────────────────────
@@ -318,7 +318,8 @@ def test_all_runqueue_gap(t):
     A measured zero is a SIGNAL, not absence. This used to be the corner
     where this table and the Time Model table disagreed about whether the
     row exists at all:
-      - here: CPU* 0.0 ms, '<OFFCPU_ROW>' = the whole gap wall, column 100%;
+      - here: CPU (running) 0.0 ms, '<OFFCPU_ROW>' = the whole gap wall,
+        column 100%;
       - time_model, PRE-#575: NO CPU rows at all, because its rows sat behind
         `classes[PGWT_CLASS_CPU].total_ns <= 0 -> continue` and the measured
         total is 0 -- so 100 ms of real DB Time appeared on no row of that
@@ -354,10 +355,10 @@ def test_all_runqueue_gap(t):
 
     # PREMISE: a measured ZERO, not a missing row and not an absent
     # measurement -- the row must exist and read 0.0.
-    cpu_total, cpu_pct = find(ev, "CPU*")
+    cpu_total, cpu_pct = find(ev, "CPU (running)")
     t.check_eq(cpu_total, 0.0,
-               "premise: CPU* is present and reads 0.0 ms -- the gap was "
-               "measured as all runqueue, not left unmeasured")
+               "premise: CPU (running) is present and reads 0.0 ms -- the gap "
+               "was measured as all runqueue, not left unmeasured")
     all_off = CPU_MS + OFFCPU_MS              # the whole gap wall, 100.0 ms
     off_total, off_pct = find(ev, OFFCPU_ROW)
     t.check_eq(off_total, all_off,

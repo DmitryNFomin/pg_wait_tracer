@@ -36,12 +36,55 @@
 import {
     buildTransitionsOption, buildVariantsPanel, buildTransitionsDisclosure,
     restoreAllTransitionsState, TRANSITIONS_SEMANTICS_NOTE, transitionsDataError,
+    buildTransitionsFidelity,
 } from '../lib/builders/transitions.js';
-import { isUnavailable } from '../lib/builders/fidelity.js';
+import {
+    isUnavailable, SAMPLED_BAND_COLOR, SAMPLED_BORDER, MIXED_BAND_COLOR, MIXED_BORDER,
+} from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
 import { esc } from '../lib/format.js';
 
 const DEFAULT_THRESHOLD = 20;
+
+/* Match the AAS fidelity chip; the time strip gives its bands a time domain
+ * without implying that graph node positions represent timestamps. */
+function renderFidelityChip(model) {
+    const chip = document.getElementById('dfg-fidelity-chip');
+    if (!chip) return;
+    chip.style.display = model.shading.showLegend ? '' : 'none';
+    if (!model.shading.showLegend) { chip.innerHTML = ''; return; }
+    const swatch = (fill, border) =>
+        '<span style="width:14px;height:10px;display:inline-block;border-radius:2px;' +
+        'background:' + fill + ';border:1px dashed ' + border + '"></span>';
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center">' +
+        '<span>' + esc(model.fidelityLabel) + '</span>' +
+        '<span style="display:inline-flex;align-items:center;gap:5px">' +
+        swatch(SAMPLED_BAND_COLOR, SAMPLED_BORDER) + 'sampled</span>';
+    if (model.fidelity === 'mixed') {
+        html += '<span style="display:inline-flex;align-items:center;gap:5px">' +
+            swatch(MIXED_BAND_COLOR, MIXED_BORDER) + 'mixed window</span>';
+    }
+    html += '</div><div role="img" aria-label="Window fidelity bands" ' +
+        'style="position:relative;height:10px;margin-top:6px;background:#1a1a2e">';
+    for (const band of model.stripBands) {
+        const mixed = band.kind === 'mixed';
+        html += '<span title="' + esc(band.kind) + '" style="position:absolute;box-sizing:border-box;' +
+            'height:100%;left:' + band.left + '%;width:' + band.width + '%;background:' +
+            (mixed ? MIXED_BAND_COLOR : SAMPLED_BAND_COLOR) + ';border:1px dashed ' +
+            (mixed ? MIXED_BORDER : SAMPLED_BORDER) + '"></span>';
+    }
+    html += '</div>';
+    if (model.window) {
+        const time = ns => esc(new Date(ns / 1e6).toLocaleTimeString());
+        html += '<div style="display:flex;justify-content:space-between">' +
+            '<span>' + time(model.window.from) + '</span><span>' +
+            time(model.window.to) + '</span></div>';
+    }
+    chip.innerHTML = html;
+}
+
+const FIDELITY_HOST = '<div id="dfg-fidelity-chip" style="display:none;' +
+    'padding:0 20px 8px;font-size:11px;color:#aaa"></div>';
 
 /* Preserve where inside the node the user grabbed it: the cursor delta moves
  * the BUILT centre by the same amount instead of snapping the centre under the
@@ -308,6 +351,7 @@ export function createTransitionsView() {
             '<div id="dfg-semantics-note" style="padding:0 20px 8px;color:#888;' +
                 'font-size:11px;font-style:italic">' + esc(TRANSITIONS_SEMANTICS_NOTE) +
             '</div>' +
+            FIDELITY_HOST +
             '<div id="dfg-container" style="width:100%;height:550px;background:#1a1a2e"></div>' +
             '<div id="dfg-variants"></div>';
 
@@ -452,7 +496,7 @@ export function createTransitionsView() {
             return { transitions: data };
         },
 
-        build(data) {
+        build(data, ctx) {
             const t = data.transitions;
             // EXACT-required (A3): a sampled-only window returns the structured
             // "unavailable" marker for transitions — show the escalate panel.
@@ -461,6 +505,7 @@ export function createTransitionsView() {
             if (dataError) return { dataError };
             const hasLinks = !!(t && t.links && t.links.length > 0);
             return {
+                ...buildTransitionsFidelity(t, ctx && ctx.timeRange),
                 transitions: t,
                 hasLinks,
                 total: (t && t.total) || 0,
@@ -485,12 +530,15 @@ export function createTransitionsView() {
 
             if (!model.hasLinks) {
                 disposeChart();
-                el.innerHTML = '<p style="color:#888;padding:20px">No transitions found</p>';
+                el.innerHTML = FIDELITY_HOST +
+                    '<p style="color:#888;padding:20px">No transitions found</p>';
+                renderFidelityChip(model);
                 return;
             }
             dataRef = model.transitions;
 
             ensureShell(el);
+            renderFidelityChip(model);
             renderDFG(threshold);   // sets #dfg-total too (idle-hidden count included)
 
             // The variants panel always starts (or reverts to) 'idle' on

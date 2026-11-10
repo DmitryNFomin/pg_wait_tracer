@@ -17,23 +17,41 @@ After the fix:
     fast path and is honestly labeled "exact";
   * a window with no data at all is labeled "none" — never "exact".
 """
+import base64
 import hashlib
 import json
 import os
+from pathlib import Path
+import re
 import shutil
 import struct
 import sys
 import tempfile
+import zlib
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
     CPU, IO_DATA_FILE_READ,
 )
+from summary_raw_parity_lib import classify_route, ROUTE_RAW, ROUTE_SUMMARY
 
 BASE = 10_000_000_000_000
 S = 1_000_000_000
 PERIOD = 1 * S      # 1 Hz sampling keeps the sample count small
+
+
+def summary_format_version():
+    """Read the writer's version; a missing definition must fail loudly."""
+    header = Path(__file__).resolve().parents[1] / "src" / "summary_writer.h"
+    match = re.search(r"^#define\s+PGWT_SUMMARY_VERSION\s+(\d+)\s*$",
+                      header.read_text(), re.MULTILINE)
+    if match is None:
+        raise RuntimeError(f"PGWT_SUMMARY_VERSION missing from {header}")
+    return int(match.group(1))
+
+
+PGWT_SUMMARY_VERSION = summary_format_version()
 
 
 def build_tiered_15min():
@@ -152,8 +170,96 @@ def test_full_mode_still_fast(t):
         cleanup_traces(trace_dir)
 
 
+def test_io_worker_availability(t):
+    print("\n### 4. IO worker utilization declares summary unavailability ###")
+    scenario, lo, hi = build_full_300s()
+    trace_dir = generate_traces(scenario)
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgwt-io-worker-") as logs:
+            for route, frm, to in (
+                    (ROUTE_SUMMARY, lo, hi),
+                    (ROUTE_RAW, lo + S, lo + 60 * S)):
+                err_path = os.path.join(logs, route + ".log")
+                with ServerHarness(trace_dir, stderr_path=err_path) as srv:
+                    tm = srv.query("time_model", from_=frm, to_=to)
+                # Exact fidelity alone cannot distinguish raw from summaries.
+                # Reuse the parity gate's event-limit oracle and stderr proof.
+                with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1},
+                                   stderr_path=err_path + ".oracle") as srv:
+                    oracle = srv.query("time_model", from_=frm, to_=to)
+                with open(err_path) as f:
+                    stderr = f.read()
+                t.check_eq(classify_route(
+                    oracle, stderr, marker_expected=(route == ROUTE_SUMMARY)),
+                    route, route + ": production route proved")
+                key = "io_worker_busy_pct"
+                t.check(key in tm, route + ": utilization key is present")
+                if route == ROUTE_SUMMARY:
+                    t.check(tm.get(key) is None,
+                            "summary utilization is null, never measured zero")
+                    t.check(tm.get(key + "_unavailable") is True,
+                            "summary declares utilization unavailable")
+                    reason = tm.get(key + "_unavailable_reason")
+                    t.check(isinstance(reason, str) and bool(reason),
+                            "summary provides a non-empty reason token")
+                    t.check("categories" not in tm,
+                            "summary does not fabricate category rows")
+                else:
+                    value = tm.get(key)
+                    t.check(type(value) in (int, float),
+                            "raw utilization is a measured number")
+                    for suffix in ("_unavailable", "_unavailable_reason"):
+                        t.check(key + suffix not in tm,
+                                "raw omits " + key + suffix)
+                    t.check(isinstance(tm.get("categories"), list),
+                            "raw retains category rows")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 LEGACY_V9_SHA256 = (
     "23cb7e097d4a0fe2aafd74de05b44549e742718b070bfa212f7561d662443418")
+
+
+# Finalized, unmodified v10 output from the real writer at
+# 6c0b78692dbbdece8472f171c3b6c9a8f56738de (7d219c43^), NOT v11 bytes
+# relabeled as v10. To reproduce: compile that revision's summary_writer.c
+# AND summary_writer.h with -DPGWT_SERVER -Isrc; link gen_test_traces.c as
+# described in fixtures/summary_v9_wait_spin/README.md, substituting this
+# writer object. Generate v9_wait_spin_scenario() and keep current.summary.
+# zlib/base64 only packs the frozen file into this test; the hash pins the
+# original 24,212 bytes, including the old per-event layout and footer/index.
+LEGACY_V10_SHA256 = (
+    "a4f32d85d55e371b3c67fa088c1c2cefe7ca8bb32261ef1f7364187688c7f79c")
+LEGACY_V10_ZLIB_BASE64 = (
+    "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"
+)
 
 
 def v9_wait_spin_scenario():
@@ -173,8 +279,8 @@ def v9_wait_spin_scenario():
             "backends": [{"pid": 41001, "type": "client"}]}
 
 
-def test_retired_v9_cpu_split(t):
-    print("\n### 3. Real v9 refuses the whole window; v10 stays on summaries ###")
+def test_retired_summary_cpu_split(t):
+    print("\n### 3. Real v9/v10 refuse; the current writer stays on summaries ###")
     legacy = os.path.join(os.path.dirname(__file__), "fixtures",
                           "summary_v9_wait_spin", "current.summary")
     # Frozen bytes from the old writer, not an invented version number.
@@ -187,21 +293,35 @@ def test_retired_v9_cpu_split(t):
     # README) is what keeps this evidence from being silently regenerated.
     t.check_eq(hashlib.sha256(raw).hexdigest(), LEGACY_V9_SHA256,
                "retired fixture is the frozen pre-#766 writer's bytes")
-    for arm in ("v10", "v9", "mixed"):
+    v10 = zlib.decompress(base64.b64decode(LEGACY_V10_ZLIB_BASE64))
+    t.check_eq(struct.unpack("<IH", v10[:6])[1], 10,
+               "retired fixture really is v10")
+    t.check_eq(hashlib.sha256(v10).hexdigest(), LEGACY_V10_SHA256,
+               "retired fixture is the frozen pre-#818 writer's bytes")
+    retired = {9: raw, 10: v10}
+    for version in retired:
+        t.check(PGWT_SUMMARY_VERSION > version,
+                f"v{version} is retired, not the current-writer control")
+    for arm, version, mixed in (
+            ("current", None, False),
+            ("v9", 9, False), ("mixed_v9", 9, True),
+            ("v10", 10, False), ("mixed_v10", 10, True)):
         trace_dir = generate_traces(v9_wait_spin_scenario())
         try:
             current = os.path.join(trace_dir, "current.summary")
             with open(current, "rb") as f:
-                t.check_eq(struct.unpack("<IH", f.read(6))[1], 10,
-                           arm + ": fresh writer stamps v10")
-            if arm == "mixed":
+                t.check_eq(struct.unpack("<IH", f.read(6))[1],
+                           PGWT_SUMMARY_VERSION,
+                           arm + f": fresh writer stamps v{PGWT_SUMMARY_VERSION}")
+            if mixed:
                 shutil.copyfile(current, os.path.join(
                     trace_dir, "1970-01-01_02.summary.lz4"))
-            if arm != "v10":
-                shutil.copyfile(legacy, current)
+            if version is not None:
+                with open(current, "wb") as f:
+                    f.write(retired[version])
                 # The frozen file is finalized and has its own footer/index.
                 os.unlink(current + ".meta")
-            with tempfile.TemporaryDirectory(prefix="pgwt-v9-refusal-") as logs:
+            with tempfile.TemporaryDirectory(prefix="pgwt-retired-summary-refusal-") as logs:
                 err_path = os.path.join(logs, "server.log")
                 with ServerHarness(trace_dir, stderr_path=err_path) as srv:
                     aas = srv.query("aas", from_=BASE, to_=BASE + 130 * S,
@@ -233,19 +353,20 @@ def test_retired_v9_cpu_split(t):
                            arm + ": aas answered the requested window")
                 # 'cat' is emitted only by handle_aas's raw branch. AAS uses
                 # class keys; CPU* is a Time Model row, checked above.
-                t.check(all(("cat" in b) == (arm != "v10")
+                t.check(all(("cat" in b) == (version is not None)
                             for b in aas.get("buckets", [])),
                         arm + ": aas took the required production route")
-                if arm == "v10":
+                if version is None:
                     t.check("recomputing from raw" not in stderr,
-                            "v10-only control still takes summaries")
+                            "current-only control still takes summaries")
                 else:
-                    marker = ("INFO: 1 of %d summary file(s) covering this "
-                              "window are not summary v10 -- recomputing "
-                              "from raw events" % (2 if arm == "mixed" else 1))
+                    marker = (f"INFO: 1 of {2 if mixed else 1} summary file(s) "
+                              "covering this window are not summary "
+                              f"v{PGWT_SUMMARY_VERSION} -- recomputing "
+                              "from raw events")
                     t.check_eq(stderr.count(marker), 3,
                                arm + ": aas, time_model AND top_sessions "
-                               "each log the v10 refusal")
+                               f"each log the v{version} refusal")
         finally:
             cleanup_traces(trace_dir)
 
@@ -255,7 +376,8 @@ def main():
     print(f"=== {t.name} ===")
     test_tiered_15min(t)
     test_full_mode_still_fast(t)
-    test_retired_v9_cpu_split(t)
+    test_retired_summary_cpu_split(t)
+    test_io_worker_availability(t)
     sys.exit(0 if t.summary() else 1)
 
 
