@@ -122,13 +122,102 @@ int main(void)
     CHECK(w.phase[0].value.state == PGWT_PHASE_MIXED && w.phase[0].n_ranges == 2 &&
           w.phase[0].ranges[1].to_ns == 400, "torn last line ignored, earlier records retained");
     pgwt_phase_window_free(&w);
-    put("\n", "a"); unknown(100, 400, "malformed complete record refuses capability");
+    /* A restart must discard only the uncommitted fragment, preserving
+     * both earlier observations and the new observation's boundary. */
+    struct pgwt_phase_record restart = rec(300, 1, 1, 1);
+    FILE *recovery_log = tmpfile();
+    int recovery_stderr = dup(STDERR_FILENO);
+    if (!recovery_log || recovery_stderr < 0 ||
+        dup2(fileno(recovery_log), STDERR_FILENO) < 0) return 2;
+    CHECK(pgwt_phase_append(dir, getgid(), &restart, &errors) == 0,
+          "restart appends after recovering torn tail");
+    fflush(stderr);
+    if (dup2(recovery_stderr, STDERR_FILENO) < 0) return 2;
+    close(recovery_stderr); rewind(recovery_log);
+    char diagnostic[512] = {0};
+    (void)fgets(diagnostic, sizeof(diagnostic), recovery_log);
+    fclose(recovery_log);
+    CHECK(errors == 1 && strstr(diagnostic, "recovered torn tail") &&
+          strstr(diagnostic, "truncated_bytes=") && strstr(diagnostic, "write_failures=1"),
+          "torn-tail recovery is counted and logged");
+    errors = 0;
+    w = readwin(150, 400);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_MIXED && w.phase[0].n_ranges == 3 &&
+          w.phase[0].ranges[0].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[0].ranges[1].value.state == PGWT_PHASE_UNAVAILABLE &&
+          w.phase[0].ranges[1].from_ns == 200 && w.phase[0].ranges[1].to_ns == 300 &&
+          w.phase[0].ranges[2].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[0].ranges[2].from_ns == 300 && w.phase[0].ranges[2].to_ns == 400 &&
+          w.phase[1].value.state == PGWT_PHASE_MIXED && w.phase[1].n_ranges == 3 &&
+          !strcmp(w.phase[1].ranges[0].value.reason, "binary_no_sdt") &&
+          !strcmp(w.phase[1].ranges[1].value.reason, "kernel_no_ref_ctr") &&
+          w.phase[1].ranges[2].value.state == PGWT_PHASE_AVAILABLE,
+          "valid records survive torn fragment and new start for both phases");
+    pgwt_phase_window_free(&w);
+    on_disk = fopen(path, "r");
+    int lines = 0, malformed = 0;
+    if (!on_disk) return 2;
+    while (fgets(diagnostic, sizeof(diagnostic), on_disk)) {
+        lines++;
+        json = cJSON_Parse(diagnostic);
+        if (!json) malformed++;
+        cJSON_Delete(json);
+    }
+    fclose(on_disk);
+    CHECK(lines == 3 && malformed == 0,
+          "recovery removes fragment without adding a bad or blank line");
+    put("bad complete line\n", "a");
+    w = readwin(300, 400);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[1].value.state == PGWT_PHASE_AVAILABLE,
+          "bad complete line keeps earlier valid records");
+    pgwt_phase_window_free(&w);
+    put("bad complete line\n", "w"); put(first, "a");
+    w = readwin(100, 200);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[1].value.state == PGWT_PHASE_UNAVAILABLE,
+          "bad complete line does not hide later valid records");
+    pgwt_phase_window_free(&w);
+    put("", "w");
+    char large_tail[9001];
+    memset(large_tail, 'x', sizeof(large_tail) - 1);
+    large_tail[sizeof(large_tail) - 1] = 0;
+    put(large_tail, "a");
+    CHECK(pgwt_phase_append(dir, getgid(), &restart, &errors) == 0 && errors == 1,
+          "recovery handles a file with no complete records");
+    errors = 0;
+    w = readwin(300, 400);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[1].value.state == PGWT_PHASE_AVAILABLE,
+          "new start is readable after discarding an entirely torn file");
+    pgwt_phase_window_free(&w);
+    put(first, "w"); put(large_tail, "a");
+    CHECK(pgwt_phase_append(dir, getgid(), &restart, &errors) == 0 && errors == 1,
+          "multi-buffer recovery preserves complete prefix");
+    errors = 0;
+    w = readwin(100, 400);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[1].value.state == PGWT_PHASE_MIXED && w.phase[1].n_ranges == 2 &&
+          w.phase[1].ranges[0].from_ns == 100 && w.phase[1].ranges[0].to_ns == 300,
+          "multi-buffer recovery keeps earlier phase states and restart boundary");
+    pgwt_phase_window_free(&w);
     put(first, "w");
     FILE *binary_line = fopen(path, "a");
     const char nul_record[] = "\0junk\n";
     if (!binary_line || fwrite(nul_record, 1, sizeof(nul_record) - 1, binary_line) != sizeof(nul_record) - 1 ||
         fclose(binary_line)) return 2;
-    unknown(100, 200, "embedded NUL in complete line is invalid, not a torn tail");
+    w = readwin(100, 200);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[1].value.state == PGWT_PHASE_UNAVAILABLE,
+          "embedded NUL line is skipped without hiding earlier valid records");
+    pgwt_phase_window_free(&w);
+    put(large_tail, "w");
+    put("\n", "a"); put(first, "a");
+    w = readwin(100, 200);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
+          w.phase[1].value.state == PGWT_PHASE_UNAVAILABLE,
+          "oversized bad line is skipped without hiding later valid records");
+    pgwt_phase_window_free(&w);
     char *ver = strstr(first, "\"version\":1");
     if (!ver) return 2;
     ver[strlen("\"version\":")] = '9';

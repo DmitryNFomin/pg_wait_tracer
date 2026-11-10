@@ -314,7 +314,9 @@ naming, and retention are identical to trace files with the
 
 Append-only JSON Lines, one record per daemon capture start (including a
 daemon re-attach after PostgreSQL restarts). Example, shown on multiple lines
-for readability; each record on disk occupies one newline-terminated line:
+for readability; each record on disk occupies one newline-terminated line.
+The file grows by one line (about 200 bytes) per daemon start and is not trimmed
+or compacted; complete records remain for the lifetime of the trace directory:
 
 ```json
 {"version":1,"start_wall_ns":"1794300000000000000","kernel_release":"6.8.0",
@@ -355,6 +357,10 @@ This counter is currently internal; server/control responses are unchanged.
 If the start clock cannot be read, persistence refuses the untimestamped
 record with the same counted/logged failure. Writes use append mode, 0640,
 the resolved trace group, and `fsync`. A partial write may leave a torn tail.
+Before appending on the next start, the writer truncates only the incomplete
+suffix back to the last newline (or zero if there is no complete line).
+Recovery increments the same failure counter and logs the discarded byte count.
+The trace directory has one daemon writer.
 
 `pgwt_phase_read_window()` in `src/phase_capability.c` accepts a trace
 directory and a half-open **wall-time** interval `[from_ns,to_ns)`. Callers
@@ -369,13 +375,12 @@ mixed with clipped ranges, or unknown. Adjacent equal state/reason ranges
 coalesce. A reason change also produces mixed. Any unknown interval,
 including any part before the first record, makes the aggregate unknown;
 valid ranges are still returned for partial coverage. Missing, unreadable,
-empty, malformed, or unsupported-version files return unknown, without
-consulting the reader host. An incomplete last line is ignored and earlier
-complete records remain usable. A complete malformed line or unsupported
-version makes the entire file unknown, even outside the requested interval.
-After a torn append the next writer adds a separating newline without
-rewriting history; if that terminates malformed JSON, readers conservatively
-return unknown for the file. Blank lines are ignored.
+empty, or unsupported-version files return unknown, without consulting the
+reader host. An incomplete last line is ignored. Complete malformed lines are
+skipped, preserving valid observations before and after them; the preceding
+valid record still applies until the next valid start. A file with no valid
+records is unknown. An unsupported version still makes the entire file unknown,
+even outside the requested interval. Blank lines are ignored.
 
 Keep/copy this file with archived traces, including summary-only archives.
 Like the other `.jsonl` sidecars, retention preserves it under both hours

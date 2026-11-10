@@ -63,6 +63,9 @@ void pgwt_phase_measure(const char *pmu_dir, pgwt_phase_note_fn enumerate,
         {"query__execute__start", "query__execute__done"},
         {"query__plan__start", "query__plan__done"}
     };
+    /* kernel_no_ref_ctr assumes the PostgreSQL SDT notes carry semaphores
+     * (as the supported PostgreSQL builds do). Semaphore-free notes do not
+     * need the reference-counter ABI; enumeration alone does not prove this. */
     enum pgwt_phase_fact kernel = pgwt_phase_kernel_fact(pmu_dir);
     for (int p = 0; p < PGWT_CAP_PHASE_COUNT; p++) {
         int start = enumerate ? enumerate(ctx, notes[p][0]) : -1;

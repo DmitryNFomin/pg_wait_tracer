@@ -53,13 +53,17 @@ void pgwt_phase_measure(const char *pmu_dir, pgwt_phase_note_fn enumerate,
                          void *ctx, struct pgwt_phase_value phase[PGWT_CAP_PHASE_COUNT]);
 
 /* One append, permissions 0640 and supplied trace group, flushed to disk.
- * Every failure increments *write_failures and logs WARN. Never exits.
+ * Every failure increments *write_failures and logs WARN. Recovering a
+ * previous torn tail also increments/logs this counter, even on success.
+ * Complete lines are preserved; only an uncommitted suffix is truncated.
+ * Single writer per trace directory. Never exits.
  * Caller owns the counter (normally daemon-lifetime state). */
 int pgwt_phase_append(const char *trace_dir, gid_t trace_gid,
                       const struct pgwt_phase_record *record,
                       uint64_t *write_failures);
 
-/* Output is initialized even on failure. Missing/unreadable/invalid files
+/* Complete malformed lines are skipped; unsupported versions fail closed.
+ * Output is initialized even on failure. Missing/unreadable/invalid files
  * return -1 with UNKNOWN; success returns 0 (possibly UNKNOWN coverage).
  * UNKNOWN anywhere dominates MIXED. Ranges are clipped/coalesced per phase.
  * Records apply until the next start, last record through to_ns. No host

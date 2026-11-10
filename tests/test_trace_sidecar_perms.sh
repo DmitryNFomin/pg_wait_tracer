@@ -41,6 +41,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# #622 declares kernel/SDT expectations independently of the measurement.
+python3 "$SCRIPT_DIR/testutil.py" phase-expectation >/dev/null || exit $?
+
 echo "=== test_trace_sidecar_perms ==="
 
 if [[ $(id -u) -ne 0 ]]; then
@@ -147,17 +150,21 @@ CAPS="$TRACE_DIR/phase_capabilities.jsonl"
 [[ -s "$CAPS" ]]
 check $? "$CAPS exists and is non-empty (#848)"
 if [[ -s "$CAPS" ]]; then
-    python3 - "$CAPS" <<'PYEOF'
+    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$CAPS" <<'PYEOF'
 import json, sys
+from testutil import resolve_declared_phase_mask
+expected = resolve_declared_phase_mask()
 records = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 assert len(records) == 1, records
 r = records[0]
 assert r["version"] == 1 and int(r["start_wall_ns"]) > 0 and r["kernel_release"], r
 for p in ("execute", "plan"):
-    assert r[p]["state"] in ("available", "unavailable", "unknown"), r
-    assert r[p]["reason"], r
+    if expected:
+        assert r[p]["state"] == "available" and r[p]["reason"] == "none", (p, r)
+    else:
+        assert r[p]["state"] == "unavailable" and r[p]["reason"] == "kernel_no_ref_ctr", (p, r)
 PYEOF
-    check $? "phase sidecar carries version, start, kernel and independent phase states"
+    check $? "phase sidecar matches the declared kernel capability for both phases"
 fi
 [[ -s "$NAMES" ]]
 check $? "$NAMES exists and is non-empty (#499)"

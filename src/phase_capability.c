@@ -98,7 +98,7 @@ int pgwt_phase_append(const char *dir, gid_t gid,
     json = cJSON_PrintUnformatted(obj);
     if (!json) goto done;
     size_t len = strlen(json);
-    line = malloc(len + 3);
+    line = malloc(len + 1);
     if (!line) goto done;
     fd = open(path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0640);
     if (fd < 0) { saved = errno; goto done; }
@@ -107,16 +107,28 @@ int pgwt_phase_append(const char *dir, gid_t gid,
     if ((gid != (gid_t)-1 && fchown(fd, (uid_t)-1, gid) != 0) || fchmod(fd, 0640) != 0) {
         saved = errno; goto done;
     }
-    /* Isolate a previous crash's torn append without rewriting history.
-     * A now-complete malformed line remains untrusted by the reader. */
-    size_t prefix = 0;
-    if (st.st_size > 0) {
-        char last;
-        if (pread(fd, &last, 1, st.st_size - 1) != 1) { saved = EIO; goto done; }
-        if (last != '\n') line[prefix++] = '\n';
+    /* A single daemon owns this trace directory. Discard only an
+     * uncommitted suffix; a separator would turn it into a bad full line. */
+    off_t end = st.st_size, committed = end;
+    char tail[4096];
+    while (end > 0) {
+        size_t n = end < (off_t)sizeof(tail) ? (size_t)end : sizeof(tail);
+        off_t start = end - (off_t)n;
+        if (pread(fd, tail, n, start) != (ssize_t)n) { saved = EIO; goto done; }
+        size_t i = n;
+        while (i > 0 && tail[i - 1] != '\n') i--;
+        if (i > 0) { committed = start + (off_t)i; break; }
+        committed = end = start;
     }
-    memcpy(line + prefix, json, len); line[prefix + len] = '\n';
-    size_t bytes = prefix + len + 1;
+    if (committed < st.st_size) {
+        if (ftruncate(fd, committed) != 0) { saved = errno; goto done; }
+        if (errors) ++*errors;
+        fprintf(stderr, "WARN: phase_capabilities.jsonl recovered torn tail: "
+                "truncated_bytes=%jd (write_failures=%" PRIu64 ")\n",
+                (intmax_t)(st.st_size - committed), errors ? *errors : 0);
+    }
+    memcpy(line, json, len); line[len] = '\n';
+    size_t bytes = len + 1;
     /* One append syscall: a partial write is a counted failure, never a
      * retry that might interleave fragments. fsync also detects delayed IO. */
     ssize_t wrote = write(fd, line, bytes);
@@ -256,11 +268,18 @@ int pgwt_phase_read_window(const char *dir, uint64_t from, uint64_t to,
     while (!failure) {
         int got_line = read_line(f, line, sizeof(line));
         if (got_line == 0) break;
-        if (got_line < 0) { failure = "invalid_record"; break; }
+        /* A complete corrupt line must not poison valid observations on
+         * either side. read_line consumes it through LF, including NULs or
+         * oversized lines. Real stream errors still fail below via ferror. */
+        if (got_line < 0) {
+            if (ferror(f)) break;
+            continue;
+        }
         if (line[0] == 0) continue;
         struct pgwt_phase_record next = {0};
         int parsed = parse_record(line, &next);
-        if (parsed != 0) { failure = parsed == -2 ? "unsupported_version" : "invalid_record"; break; }
+        if (parsed == -2) { failure = "unsupported_version"; break; }
+        if (parsed != 0) continue;
         if (have_prev && next.start_wall_ns < prev.start_wall_ns) { failure = "unordered_records"; break; }
         if (have_prev) {
             if (interval(out, &prev, next.start_wall_ns, from, to) != 0) failure = "allocation_failed";
