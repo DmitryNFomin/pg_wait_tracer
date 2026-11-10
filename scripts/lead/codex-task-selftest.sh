@@ -75,6 +75,16 @@ case "$STUB_MODE" in
         git add task.txt
         git commit -qm 'stub task commit'
         [ "$STUB_MODE" != commit-fail ] || exit 7 ;;
+    dirty|dirty-locked)
+        # What the real implementer leaves behind when it cannot commit (#777):
+        # a tracked edit, an untracked text file and an untracked binary.
+        printf 'uncommitted change\n' >> task.txt
+        printf 'brand new\n' > untracked.txt
+        printf '\000\001\002binary\n' > bin.dat
+        # dirty-locked also leaves an index lock behind, which is how a denied
+        # or crashed `git add` inside the sandbox presents itself afterwards.
+        [ "$STUB_MODE" != dirty-locked ] || : > .git/index.lock
+        exit 0 ;;
     *) exit 98 ;;
 esac
 STUB
@@ -215,4 +225,62 @@ sha=$("$REAL_GIT" -C "$STUB_CLONE" rev-parse "refs/heads/$STUB_BRANCH")
 [ "$("$REAL_GIT" -C "$FIXTURE_REAL" rev-parse "refs/heads/$STUB_BRANCH")" = "$sha" ] || fail 'Codex failure lost committed work'
 [ "$("$REAL_GIT" -C "$FIXTURE_REAL" cat-file -t "$sha")" = commit ] || fail 'salvaged commit unreachable'
 printf 'extra Codex failure: exit=%s; %s; stdout empty\n' "$rc" "$(grep '^CODEX_FAILED:' "$tmp/err")"
-printf 'PASS: all six required controls and four additional refusal controls\n'
+# ---------------------------------------------------------------------------
+# Salvage controls (#777): the wrapper's last job is to make uncommitted work
+# reachable. The failure that matters is not a missing patch, it is a patch
+# reported as "clean" or written incomplete while the work exists only in the
+# clone, so each control below asserts the LOUD outcome.
+# ---------------------------------------------------------------------------
+salvage_path="$tmp/brief-salvage.patch"
+
+new_branch salvage-happy
+rm -f "$salvage_path"
+run_wrapper dirty
+[ "$rc" -eq 21 ] || fail "salvage: expected BRANCH_UNCHANGED (21), got $rc"
+grep -Fq "SALVAGE_PATCH: $salvage_path" "$tmp/err" || fail 'salvage: no SALVAGE_PATCH line'
+[ -s "$salvage_path" ] || fail 'salvage: patch is empty'
+grep -Fq 'untracked.txt' "$salvage_path" || fail 'salvage: untracked file missing from the patch'
+grep -Fq 'GIT binary patch' "$salvage_path" || fail 'salvage: binary file not captured with --binary'
+"$REAL_GIT" -C "$STUB_CLONE" apply --check --reverse "$salvage_path" ||
+    fail 'salvage: the patch does not describe the clone it came from'
+printf 'extra salvage happy path: exit=%s; patch has untracked + binary and reverse-applies\n' "$rc"
+
+new_branch salvage-clean
+rm -f "$salvage_path"
+run_wrapper noop
+[ "$rc" -eq 21 ] || fail "salvage-clean: expected 21, got $rc"
+grep -Fq 'SALVAGE_PATCH: none (working tree clean)' "$tmp/err" ||
+    fail 'salvage-clean: a clean tree must say so'
+[ ! -e "$salvage_path" ] || fail 'salvage-clean: left an empty patch behind'
+printf 'extra salvage clean tree: exit=%s; reports clean and writes nothing\n' "$rc"
+
+new_branch salvage-unwritable
+rm -f "$salvage_path"
+mkdir -p "$tmp/nowrite"
+printf 'BRIEF_SENTINEL\n' > "$tmp/nowrite/brief.md"
+chmod 500 "$tmp/nowrite"
+STUB_MODE=dirty STUB_GIT_MODE=normal
+export STUB_MODE STUB_GIT_MODE
+rc=0
+(cd "$tmp" && "$wrapper" "$tmp/nowrite/brief.md" "$STUB_BRANCH") > "$tmp/out" 2> "$tmp/err" || rc=$?
+chmod 700 "$tmp/nowrite"
+grep -Fq 'SALVAGE_FAILED' "$tmp/err" ||
+    fail 'salvage-unwritable: an unwritable target must say SALVAGE_FAILED'
+grep -Fq 'working tree clean' "$tmp/err" &&
+    fail 'salvage-unwritable: reported a clean tree while work was only in the clone'
+printf 'extra salvage unwritable target: exit=%s; refuses loudly, never says clean\n' "$rc"
+
+new_branch salvage-locked-index
+rm -f "$salvage_path"
+run_wrapper dirty-locked
+rm -f "$STUB_CLONE/.git/index.lock"
+grep -Fq 'SALVAGE_FAILED' "$tmp/err" ||
+    fail 'salvage-locked-index: a locked index must say SALVAGE_FAILED, not a partial patch'
+grep -Fq 'working tree clean' "$tmp/err" &&
+    fail 'salvage-locked-index: reported a clean tree while work was only in the clone'
+[ ! -s "$salvage_path" ] ||
+    grep -Fq 'untracked.txt' "$salvage_path" ||
+    fail 'salvage-locked-index: wrote a patch that silently omits the untracked files'
+printf 'extra salvage locked index: exit=%s; refuses rather than writing a patch missing files\n' "$rc"
+
+printf 'PASS: all six required controls, four additional refusal controls and four salvage controls\n'
