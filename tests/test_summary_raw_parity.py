@@ -5,6 +5,12 @@ The same capture, the same unfiltered window, answered through fresh-summary,
 missing-summary raw, and stale-version raw arms. See the library for what is
 compared and for every refuse-rather-than-approve rule; this is the live half.
 
+Parity has no ground truth. It catches a value that contradicts its own
+availability declaration, but a fabricator that also flips unavailable to
+false can still agree with raw. Only tests/test_data_summary_honesty.py can
+catch that fabrication (it did: 62/63, "summary utilization is null, never
+measured zero"). XPASS alone is not evidence of a fix.
+
 HOW THE RAW REFERENCE IS OBTAINED, AND WHY THIS WAY
 ─────────────────────────────────────────────────────────────────────────────
 There is no supported way to force the raw path for an unfiltered window >=
@@ -62,6 +68,10 @@ every number then agrees perfectly, and the gate still goes red.
 stale fallback and oracle have run: it zeroes only that answer's measured CPU
 scalar. Routes, preflight markers, rows and DB Time stay intact, so the new
 arm must reject it on numeric completeness rather than refusal or vacuity.
+--sabotage-io-worker-value injects #821's exact fabrication after the real
+summary route and oracle have run: utilization becomes 0.0 while its
+unavailable=true declaration and reason stay intact. This must fail without
+XPASS, and --record must refuse.
 
 WHERE THIS RUNS
 ─────────────────────────────────────────────────────────────────────────────
@@ -218,10 +228,10 @@ def ask(trace_dir, frm, to, stderr_path):
 # ── Expected divergences ───────────────────────────────────────────────────
 #
 # Each entry: the field, the OPEN ISSUE it belongs to, and the exact pair
-# measured on master (c27bf7d) with this fixture. Regenerate with --record
-# ONLY after a deliberate fix or fixture change, and delete an entry the
-# moment its issue is fixed — a fixed field shows up as XPASS, which is
-# reported and does not fail.
+# measured on master (c27bf7d) with this fixture. --record only normalizes a
+# passing table: NEW and CHANGED-DIVERGENCE fail before recording can run.
+# A deliberate fixture change needs reviewed, hand-edited pins and a rerun.
+# XPASS reports agreement, not proof that the owning issue is fixed.
 #
 #   #408 — the summary path reports has_measured_cpu=false, so it emits one
 #          `CPU*` row where raw emits `CPU (running)` + `CPU (waiting for a
@@ -240,12 +250,11 @@ def ask(trace_dir, frm, to, stderr_path):
 #          unattributed_available (no unattributed accounting on the summary
 #          path) and io_worker_busy_pct (explicitly declared unavailable there).
 #
-# DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #324, #319 or #410
-# is fixed, its pinned fields start agreeing and this gate reports them as
-# `xpass ... delete this entry` and still passes. Removing those lines from
-# tests/summary_raw_parity_expected.json is the last step of that fix, not an
-# edit to be nervous about: leaving a stale entry behind only costs the gate
-# its grip on that field.
+# Before changing a pin after XPASS, prove the fix with the owning honesty
+# gate (tests/test_data_summary_honesty.py for IO worker availability).
+# Matching values alone can be matching fabrications. --record cannot ADD a
+# pin on a passing run: only KNOWN entries survive; XPASS entries are omitted.
+# Review the honesty evidence before using --record to remove a pin.
 # PGWT_PARITY_EXPECTED points the gate at a different expected-divergence
 # table. It exists for this gate's OWN red demonstrations (an entry with a
 # perturbed magnitude must report CHANGED-DIVERGENCE; an empty table must make
@@ -272,7 +281,7 @@ def load_expected():
 #   * aas/max_aas — the summary path's peak is the max over SECONDS, the raw
 #     path's is the max over the requested buckets. The same
 #     two-meanings-one-field shape as #319.
-#   * time_model/io_worker_busy_pct — absent from the summary response.
+#   * time_model/io_worker_busy_pct — null and declared unavailable on summary.
 # Listed here rather than falling through to the per-window rules so that a
 # NEW divergence in one of these endpoints cannot inherit #410 by accident.
 #
@@ -300,53 +309,42 @@ def issue_for(field, window):
         return FOUND_BY_THIS_GATE[field]
     if field.endswith("/top_wait") or field.endswith("/top_wait_id"):
         return 319                      # two definitions of one column
-    # These 8 divergences are pre-existing: master's control reproduces them
-    # byte-for-byte. Adding top_events to CMDS exposed rather than caused
-    # them. At the window edge, 3000 ms is misattributed from Client:ClientWrite
-    # to Lock:relation, with the pair total conserved at 127000 ms. The ~2x
-    # avg_us discrepancy is numerator-only: counts agree (11/11 and
-    # 114/114), but summaries divide clipped time rather than full durations. Deleting these 8 entries is the last step of landing
-    # #818's fix, consistent with the rule above for deleting fixed pins.
-    if (window == "straddle_130s"
-            and field in {"events/row/%s/%s" % (event, column)
-                          for event in ("Client:ClientWrite", "Lock:relation")
-                          for column in ("total_ms", "avg_us", "pct", "aas")}):
-        return 818
     # No CPU rule: #408 (summaries reporting has_measured_cpu=false) and
     # #562 (Top Sessions raw measuring while summary reported wall) are both
     # CLOSED by the v9 epoch. The per-second record now carries the
     # per-session measured-CPU split and sessions routing reports it, making
     # all 32 sessions/* pins xpass and be deleted. Mapping a future CPU
-    # divergence to a closed issue is WORSE than no rule: without attribution,
-    # issue_for falls through to "UNEXPLAINED", and --record REFUSES to write
-    # a table containing UNEXPLAINED (see unexplained()). An unattributable CPU
-    # divergence therefore fails loudly and cannot be laundered into "known"
-    # by regeneration. A gate that cannot attribute must refuse, never approve.
+    # divergence to a closed issue is WORSE than no rule. NEW and
+    # CHANGED-DIVERGENCE are in FAIL_STATUSES, so --record returns at
+    # `if not ok` BEFORE unexplained() is consulted. An unattributable CPU
+    # divergence cannot be regenerated into "known" for that stronger reason;
+    # unexplained() is an additional attribution guard on a passing run.
     # Top Events is compared too: extract_events walks its response scalars
     # and rows. #573 reads the existing v7 record CPU totals for the
     # unfiltered summary route, so it reports the same split as raw without
     # a format change. The per-query table still has no measurement, but
-    # server.c:5471 routes that drill to raw. The eight window-scoped #818
-    # fields above are pinned; any unattributable top_events response field
-    # (extracted as events/*) must remain UNEXPLAINED and refuse recording.
+    # server.c routes that drill to raw. #818 fixed the eight window-scoped
+    # Top Events divergences; their pins and attribution rule are gone.
+    # Only time_model/io_worker_busy_pct remains pinned in straddle_130s.
+    # A future unattributable events/* divergence must remain UNEXPLAINED;
+    # its NEW or CHANGED-DIVERGENCE verdict prevents recording.
     # No straddle_130s catch-all for #324: handle_top_queries always uses raw
     # in server.c. The remaining production readers of the full-duration
     # per-query table are tm_summary_visitor and aas_summary_visitor in
     # compute.c; both require query_id != 0 (AAS sets has_query_filter from
     # that predicate). All five CMDS
     # above are requested UNFILTERED, so #324 cannot cause a divergence here.
-    # An unmatched field must remain UNEXPLAINED for unexplained()/--record
-    # to refuse it, rather than laundering a new regression into "known".
+    # An unmatched field must remain UNEXPLAINED rather than inherit a
+    # refuted cause. Its failing verdict already prevents recording.
     return "UNEXPLAINED"
 
 
 def unexplained(recorded):
     """Entries a regeneration could not attribute to anything.
 
-    --record refuses to write a table containing these. Otherwise the one
-    command that exists to record a deliberate change would be the easiest way
-    to launder a brand-new divergence into "known": it would land in the table
-    with the word UNEXPLAINED next to it and the gate would go green.
+    NEW and CHANGED-DIVERGENCE already fail the verdict; --record returns
+    at `if not ok` before this additional attribution guard is consulted.
+    A passing run can only retain KNOWN pins, never add a new divergence.
     """
     return [(w, f) for w, tbl in recorded.items() for f, e in tbl.items()
             if e.get("issue") == "UNEXPLAINED"]
@@ -396,6 +394,7 @@ def main():
     record = "--record" in sys.argv
     sabotage = "--sabotage" in sys.argv
     sabotage_stale = "--sabotage-stale-fallback" in sys.argv
+    sabotage_io = "--sabotage-io-worker-value" in sys.argv
 
     tool_problems = P.require_tools([SERVER_BIN, GEN_BIN])
     if tool_problems:
@@ -437,6 +436,7 @@ def main():
     ok = True
     report = {"commit_fixture": "synthetic", "sabotage": sabotage,
               "sabotage_stale_fallback": sabotage_stale,
+              "sabotage_io_worker_value": sabotage_io,
               "summary_format_version": summary_format_version(),
               "summary_files_present": sorted(
                   os.path.basename(p) for p in glob.glob(
@@ -481,6 +481,14 @@ def main():
                                                   marker_expected=not is_control)}
             fallbacks = {"raw": P.fallback_reason(r_err),
                          "summary": P.fallback_reason(s_err)}
+            if sabotage_io and not is_control:
+                tm = s_ans["time_model"]
+                if tm.get("io_worker_busy_pct_unavailable") is not True:
+                    raise RuntimeError("IO sabotage needs unavailable=true")
+                # #821's exact wrong fix, with the declaration preserved.
+                tm["io_worker_busy_pct"] = 0.0
+                lines.append("SABOTAGE summary IO utilization: 0.0, "
+                             "unavailable=true")
             r_fields = P.extract_all(r_ans)
             s_fields = P.extract_all(s_ans)
 
