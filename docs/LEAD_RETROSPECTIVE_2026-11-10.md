@@ -16,7 +16,11 @@ $ gh issue list --label tag-blocker --state all --limit 300 --json createdAt --j
 21
 ```
 
-Eighteen closed and twenty-one filed over seven days, against twenty open now.
+Those three numbers use the cutoff `>=2026-11-03`, which is eight and a half
+days rather than seven. On a true rolling seven days, to 09:30Z, it is eighteen
+closed against fifteen filed. The sign of the net flips between the two windows,
+which is the honest headline: the backlog did not move in a direction this data
+can establish.
 Arithmetic on those three numbers puts the open count seven days ago at
 seventeen, but I am labelling that as a derivation and not a measurement: a label
 can be added long after an issue is created, an issue can be reopened, and

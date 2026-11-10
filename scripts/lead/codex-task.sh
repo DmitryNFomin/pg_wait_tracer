@@ -101,15 +101,39 @@ codex_rc=0
 (cd "$clone" && codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 || codex_rc=$?
 
 # Salvage the working tree unconditionally: the implementer sandbox forbids
-# writes under .git, so a finished round normally leaves its work uncommitted
-# and only here is it still reachable (issue: every round exits BRANCH_UNCHANGED).
+# writes under .git (issue #777), so a finished round normally leaves its work
+# uncommitted and only here is it still reachable. Every failure in this block
+# is LOUD: the one thing it must never do is report "clean" while the work is
+# still only in the clone.
 salvage="$(dirname "$brief")/$(basename "$brief" .md)-salvage.patch"
-git -C "$clone" add -A -N >/dev/null 2>&1
-if git -C "$clone" diff HEAD > "$salvage" 2>/dev/null && [ -s "$salvage" ]; then
-    printf 'SALVAGE_PATCH: %s\n' "$salvage" >&2
-else
-    rm -f "$salvage"
-    printf 'SALVAGE_PATCH: none (working tree clean)\n' >&2
+case $salvage in *-salvage.patch) ;; *) salvage="$salvage-salvage.patch" ;; esac
+salvage_n=0
+while [ -e "$salvage" ]; do
+    salvage_n=$((salvage_n + 1))
+    salvage="${salvage%-salvage.patch}-salvage.$salvage_n.patch"
+done
+# -N makes untracked files visible to `git diff HEAD`; its failure (a locked or
+# unwritable index) would silently drop exactly those files from the patch.
+add_err=$(git -C "$clone" add -A -N 2>&1) || {
+    printf 'SALVAGE_FAILED: cannot stage the clone (%s); the work is still in %s only\n' \
+        "$(printf '%s' "$add_err" | tr '\n' ' ')" "$clone" >&2
+    salvage=''
+}
+if [ -n "$salvage" ]; then
+    # --binary so a new binary file produces an appliable patch rather than
+    # "Binary files differ".
+    if ! git -C "$clone" diff --binary HEAD > "$salvage" 2>/dev/null; then
+        printf 'SALVAGE_FAILED: cannot write %s; the work is still in %s only\n' \
+            "$salvage" "$clone" >&2
+    elif [ -s "$salvage" ]; then
+        printf 'SALVAGE_PATCH: %s\n' "$salvage" >&2
+    elif [ -n "$(git -C "$clone" status --porcelain 2>/dev/null)" ]; then
+        printf 'SALVAGE_FAILED: empty patch but the clone is dirty; the work is still in %s only\n' \
+            "$clone" >&2
+    else
+        rm -f "$salvage"
+        printf 'SALVAGE_PATCH: none (working tree clean)\n' >&2
+    fi
 fi
 
 # Salvage committed work even when Codex itself returned a non-zero status.
