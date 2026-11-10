@@ -214,6 +214,9 @@ run python3 tests/test_multi_window_lib.py
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
+step "python: tag checklist exact-SHA evidence and blocker refusals"
+run python3 tests/test_tag_checklist.py
+
 # Fake workload/daemon processes and pg_stat_statements results: no live PG or BPF.
 step "python: capture-smoke failure diagnostics (#614)"
 run python3 tests/test_capture_smoke_diagnostics.py

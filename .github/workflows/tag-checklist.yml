@@ -1,0 +1,43 @@
+name: Tag checklist
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [master]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: read
+
+jobs:
+  checklist:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Evaluate the completed master CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKLIST_SHA: ${{ github.event.workflow_run.head_sha }}
+          CHECKLIST_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: >-
+          scripts/tag-checklist.sh "$CHECKLIST_SHA" --run-id "$CHECKLIST_RUN_ID"
+          --base-ref "$CHECKLIST_SHA^"
+          --json --markdown-output tag-checklist.md > tag-checklist.json
+      - name: Upload the checklist snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: tag-checklist-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}
+          path: |
+            tag-checklist.md
+            tag-checklist.json
+          if-no-files-found: error
+          retention-days: 30
