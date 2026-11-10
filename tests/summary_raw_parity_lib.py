@@ -71,8 +71,8 @@ not a skip (tests/test_summary_raw_parity_lib.py drives each one):
   * a KNOWN divergence changes magnitude      -> FAIL (each entry pins the
     measured pair, so "known issue" never licenses a new number)
   * a KNOWN divergence disappears             -> XPASS, reported, does NOT
-    fail: that is what a fix for #408/#379/#319 looks like, and the entry is
-    then deleted.
+    fail. Agreement alone is not proof of a fix; nullable pins also require
+    agreeing availability declarations and a measured value.
   * the stale arm has no oracle               -> FAIL (`stale_verdict` refuses
     without a raw reference rather than silently grading the version-refused
     answer against the fresh SUMMARY one, which would inherit the main arm's
@@ -83,6 +83,16 @@ capture is measured: test_summary_raw_parity.py's selftest_detectors() drives
 `stale_verdict` through thirteen ways its detection could be blinded, requires
 a CLEAN refusal from each, and requires correct inputs to still PASS -- so a
 detector that refuses unconditionally cannot masquerade as a working one.
+
+LIMIT OF PARITY
+─────────────────────────────────────────────────────────────────────────────
+This gate compares two routes and has no ground truth. Availability checks
+catch a declaration-versus-value contradiction, including a fabricated zero
+that still declares unavailable=true. A fabricator that also flips the
+declaration to false can still agree with raw. Only
+tests/test_data_summary_honesty.py can catch that fabrication; it did (62/63,
+"summary utilization is null, never measured zero"). XPASS is route agreement,
+not evidence that the owning defect is fixed.
 """
 
 import math
@@ -105,6 +115,12 @@ ABS_TOL = 1e-6
 
 ABSENT = "<absent>"
 UNPARSEABLE = "<unparseable>"
+
+IO_BUSY = "time_model/io_worker_busy_pct"
+IO_UNAVAILABLE = IO_BUSY + "_unavailable"
+IO_REASON = IO_BUSY + "_unavailable_reason"
+IO_DECLARATIONS = (IO_UNAVAILABLE, IO_REASON)
+IO_SUMMARY_REASON = "summary_no_category_data"
 
 
 #: Default side labels. `labels` exists because this module compares THREE
@@ -233,12 +249,24 @@ def _rows(resp, prefix, key_field, limit=None, order_field="rowset"):
 
 
 def extract_time_model(resp):
-    # These keys describe the route, not a measurement. Keep
-    # io_worker_busy_pct compared so a future fabricated number still shows up.
-    out = _scalars(resp, "time_model", skip={
-        "id", "io_worker_busy_pct_unavailable",
-        "io_worker_busy_pct_unavailable_reason",
-    })
+    out = _scalars(resp, "time_model")
+    # The honesty fixture proves raw returns a measured number and omits
+    # both declarations. Normalize that supported wire form to False/None,
+    # never infer availability for a null or missing measurement. Summary's
+    # null requires an explicit bool and a non-empty reason.
+    if isinstance(resp, dict):
+        value = resp.get("io_worker_busy_pct", ABSENT)
+        flag = resp.get("io_worker_busy_pct_unavailable",
+                        False if _num(value) else ABSENT)
+        out[IO_BUSY] = value if _scalar(value) else UNPARSEABLE
+        out[IO_UNAVAILABLE] = (flag if type(flag) is bool or flag == ABSENT
+                               else UNPARSEABLE)
+        reason = resp.get("io_worker_busy_pct_unavailable_reason",
+                          ABSENT if flag is True else None)
+        out[IO_REASON] = (reason if (reason is None and flag is not True)
+                         or reason == ABSENT
+                         or (isinstance(reason, str) and reason)
+                         else UNPARSEABLE)
     out.update(_rows(resp, "time_model", "name"))
     # The CPU group under either row shape (#408).
     rows = resp.get("rows") if isinstance(resp, dict) else None
@@ -331,6 +359,29 @@ def compare(raw_fields, summary_fields, expected,
     A pinned pair per entry is what keeps "known issue" from licensing an
     arbitrary new number.
     """
+    # Validate the extracted contract too: dropping a required declaration
+    # from BOTH maps must not remove it from the comparison's key union.
+    raw_fields, summary_fields = dict(raw_fields), dict(summary_fields)
+    for fields in (raw_fields, summary_fields):
+        if IO_BUSY in fields:
+            fields.setdefault(IO_UNAVAILABLE, ABSENT)
+            if fields[IO_UNAVAILABLE] is True:
+                fields.setdefault(IO_REASON, ABSENT)
+    expected = dict(expected)
+    pin = expected.get(IO_BUSY)
+    if pin and all(_same(fields.get(IO_BUSY, ABSENT), pin.get(side))
+                   for fields, side in ((raw_fields, "raw"),
+                                        (summary_fields, "summary"))):
+        # The existing nullable value pin already describes the honest
+        # availability difference. Derive its declarations rather than add
+        # pins which could independently bless an unavailable measurement.
+        for field in IO_DECLARATIONS:
+            expected[field] = {"issue": pin.get("issue")}
+            for side in ("raw", "summary"):
+                unavailable = pin.get(side) is None
+                expected[field][side] = (
+                    unavailable if field == IO_UNAVAILABLE else
+                    IO_SUMMARY_REASON if unavailable else None)
     findings = []
     for field in sorted(set(raw_fields) | set(summary_fields)):
         rv = raw_fields.get(field, ABSENT)
@@ -354,15 +405,49 @@ def compare(raw_fields, summary_fields, expected,
             findings.append(Finding(field, rv, sv, BAD, issue=iss, labels=labels))
             continue
 
+        if (field == IO_UNAVAILABLE and
+                (type(rv) is not bool or type(sv) is not bool)) or \
+           (field == IO_REASON and any(
+               fields.get(IO_UNAVAILABLE) is True and
+               (not isinstance(value, str) or not value)
+               for fields, value in ((raw_fields, rv), (summary_fields, sv)))):
+            findings.append(Finding(field, rv, sv, BAD, issue=iss, labels=labels,
+                                    note="invalid availability declaration"))
+            continue
+
+        if field == IO_BUSY:
+            contradictions = []
+            for side, fields, value in ((labels[0], raw_fields, rv),
+                                        (labels[1], summary_fields, sv)):
+                flag = fields.get(IO_UNAVAILABLE, ABSENT)
+                if (flag is True and value is not None) or \
+                   (flag is False and not _num(value)):
+                    contradictions.append(
+                        "%s: value contradicts unavailable=%r" % (side, flag))
+            if contradictions:
+                findings.append(Finding(field, rv, sv, BAD, issue=iss,
+                                        labels=labels,
+                                        note="; ".join(contradictions)))
+                continue
+
         if _same(rv, sv):
             if exp:
+                if field == IO_BUSY and (exp.get("raw") is None or
+                                         exp.get("summary") is None):
+                    flags = [fields.get(IO_UNAVAILABLE, ABSENT)
+                             for fields in (raw_fields, summary_fields)]
+                    if not all(flag is False for flag in flags) or rv is None:
+                        findings.append(Finding(
+                            field, rv, sv, CHANGED, issue=iss, labels=labels,
+                            note="nullable pin requires agreeing measured "
+                                 "availability; see declaration findings"))
+                        continue
                 findings.append(Finding(
                     field, rv, sv, XPASS, issue=iss, labels=labels,
-                    note="recorded as divergent, now AGREES -- if #%s is "
-                         "fixed, delete this entry from "
-                         "tests/summary_raw_parity_expected.json. Removing "
-                         "the pin is the last step of landing that fix, not "
-                         "an edit to be nervous about" % iss))
+                    note="recorded as divergent, now AGREES; agreement is "
+                         "not proof of a fix -- verify #%s with "
+                         "tests/test_data_summary_honesty.py before "
+                         "changing its pin" % iss))
             else:
                 findings.append(Finding(field, rv, sv, AGREE, labels=labels))
             continue
@@ -691,10 +776,14 @@ def stale_verdict(window, routes, stale_fields, summary_fields, stderr_text,
 
 def record_table(findings):
     """The expected-divergence table for the divergences just measured, ready
-    to paste into the gate. Used by `--record` after a deliberate fix or
-    fixture change, never to silence a surprise."""
+    to paste into the gate. The live caller refuses a failed verdict BEFORE
+    writing: NEW and CHANGED cannot be recorded. On a passing run only KNOWN
+    pins survive; availability expectations are derived from the value pin.
+    """
     out = {}
     for f in findings:
+        if f.field in IO_DECLARATIONS:
+            continue
         if f.status in (KNOWN, CHANGED, NEW, MISSING):
             out[f.field] = {"issue": f.issue if f.issue is not None else "UNFILED",
                             "raw": f.raw, "summary": f.summary}
