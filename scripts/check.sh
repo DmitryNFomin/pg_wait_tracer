@@ -217,6 +217,15 @@ run python3 tests/test_multi_window_lib.py
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
+step "python: tag checklist exact-SHA evidence and blocker refusals"
+run python3 tests/test_tag_checklist.py
+
+step "tag checklist: real inventory retains every historical ID"
+run python3 scripts/tag-checklist.py "$(git rev-parse HEAD)" --check-history
+
+step "tag checklist: workflow_run still targets the CI workflow name"
+run python3 -c 'import re; from pathlib import Path; assert re.search(r"(?m)^name: CI\s*$", Path(".github/workflows/ci.yml").read_text()), "tag checklist trigger requires name: CI"'
+
 # Fake workload/daemon processes and pg_stat_statements results: no live PG or BPF.
 step "python: capture-smoke failure diagnostics (#614)"
 run python3 tests/test_capture_smoke_diagnostics.py
