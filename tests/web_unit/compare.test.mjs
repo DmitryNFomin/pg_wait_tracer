@@ -116,7 +116,8 @@ test('one-window entities are new/gone and never receive infinity ratios', () =>
     assert.equal(newly.ratio, null);
     assert.equal(gone.ratio, null);
     const m = buildTableModel(compareEventsConfig, [newly, gone], null);
-    const ratioCells = m.rows.map(r => r.cells.at(-1).html);
+    const ratioIndex = compareEventsConfig.columns.findIndex(c => c.key === 'ratio');
+    const ratioCells = m.rows.map(r => r.cells[ratioIndex].html);
     assert.ok(ratioCells[0].includes('new'));
     assert.ok(ratioCells[1].includes('gone'));
     assert.ok(!ratioCells.join('').includes('Infinity'));

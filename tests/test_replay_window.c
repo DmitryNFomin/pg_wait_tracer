@@ -791,8 +791,33 @@ static void test_overlapping_files(void)
     }
 }
 
+static void test_cpu_integer_contract(void)
+{
+    /* Include a .6 ns contribution: the two original probe inputs alone
+     * round down and cannot detect replay's truncation. */
+    for (uint64_t cpu = 10433330; cpu <= 10433336; cpu += 2) {
+        struct pgwt_trace_event ev = {0};
+        ev.pid = 42; ev.query_id = 99;
+        ev.timestamp_ns = 1790778045790378496ULL;
+        ev.duration_ns = 10485760; ev.cpu_ns = cpu;
+        struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+        pgwt_accum_init(a);
+        struct pgwt_block_info bi = { PGWT_BLOCK_TRANSITIONS, 0, 0, 0, 0 };
+        pgwt_replay_events(a, &ev, 1, ev.timestamp_ns - 1048576,
+                           ev.timestamp_ns, &bi, NULL);
+        uint64_t want_cpu = (cpu + 5) / 10;
+        CHECK(a->tm.cpu_time_ns == want_cpu, "757 replay exact rounded CPU");
+        CHECK(a->tm.offcpu_time_ns == 1048576 - want_cpu,
+              "757 replay exact integer off-CPU");
+        CHECK(tot(a, 0) == want_cpu, "757 replay event CPU equals time model CPU");
+        pgwt_replay_finish(a);
+        free(a);
+    }
+}
+
 int main(void)
 {
+    test_cpu_integer_contract();
     char dir[]  = "/tmp/pgwt_replay_win_XXXXXX";
     char dir2[] = "/tmp/pgwt_replay_cln_XXXXXX";
     char dir3[] = "/tmp/pgwt_replay_lag_XXXXXX";

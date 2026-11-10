@@ -2852,10 +2852,105 @@ static void test_exec_detail_raw_duration_bypass(void)
     pgwt_free_execution_detail(&res);
 }
 
+/* #757: the integer-ns contract, including the two formatter straddlers.
+ * The rational tenth and rounding below are an independent test oracle. */
+static void test_cpu_integer_contract(void)
+{
+    for (uint64_t cpu = 10433330; cpu <= 10433332; cpu += 2) {
+        struct pgwt_trace_event ev = {0};
+        ev.pid = 42; ev.query_id = 99;
+        ev.timestamp_ns = 1790778045790378496ULL;
+        ev.duration_ns = 10485760; ev.cpu_ns = cpu;
+        uint64_t from = ev.timestamp_ns - 1048576;
+        double wall_ms = 1048576.0 / 1e6;
+        uint64_t expected_cpu = (cpu + 5) / 10;
+        double cpu_ms = (double)expected_cpu / 1e6;
+        double off_ms = (double)(1048576 - expected_cpu) / 1e6;
+        struct pgwt_filter f = {.pid = 42, .query_id = 99};
+        struct pgwt_tm_result tm;
+        struct pgwt_events_result te;
+        struct pgwt_sessions_result ts;
+        pgwt_compute_time_model(&ev, 1, &f, from, ev.timestamp_ns, wall_ms, &tm);
+        pgwt_compute_top_events(&ev, 1, &f, from, ev.timestamp_ns, wall_ms, &te);
+        pgwt_compute_top_sessions(&ev, 1, &f, from, ev.timestamp_ns, wall_ms, &ts);
+        CHECK(tm.offcpu_ms == off_ms, "757 time_model exact integer off-CPU");
+        CHECK(tm.offcpu_ms == te.offcpu_ms && te.offcpu_ms == ts.offcpu_ms,
+              "757 exact off-CPU parity across all three handlers");
+        CHECK(te.num_rows == 1 && ts.num_rows == 1, "757 expected CPU/session rows");
+        double tm_cpu_ms = -1;
+        for (int i = 0; i < tm.num_rows; i++)
+            if (strcmp(tm.rows[i].name, "CPU (running)") == 0)
+                tm_cpu_ms = tm.rows[i].time_ms;
+        CHECK(tm_cpu_ms == cpu_ms && tm.cpu_ms == te.rows[0].total_ms &&
+              tm.cpu_ms == ts.cpu_ms && tm.cpu_ms == cpu_ms,
+              "757 exact integer CPU totals");
+        CHECK(ts.rows[0].cpu_pct == (double)expected_cpu / 1048576.0 * 100.0,
+              "757 session CPU uses the same exact integer numerator");
+        CHECK(ts.rows[0].offcpu_ms == off_ms, "757 exact session off-CPU total");
+        free(tm.rows); free(te.rows); free(ts.rows);
+    }
+}
+
+/* Aggregation must happen in ns, including across sessions and summary rows.
+ * The small, unequal remainders expose summing already-converted doubles. */
+static void test_cpu_integer_aggregation(void)
+{
+    struct pgwt_trace_event ev[3] = {{0}};
+    struct pgwt_summary_accum rec = {0};
+    uint64_t cpu_ns = 0, gap_ns = 3 * 1048576;
+    for (int i = 0; i < 3; i++) {
+        ev[i].pid = 42 + i;
+        ev[i].timestamp_ns = 1790778045790378496ULL;
+        ev[i].duration_ns = 10485760;
+        ev[i].cpu_ns = 10433330 + i * 6;
+        uint64_t measured = (ev[i].cpu_ns + 5) / 10;
+        cpu_ns += measured;
+        rec.sessions[i].pid = ev[i].pid;
+        rec.sessions[i].db_time_ns = 1048576;
+        rec.sessions[i].cpu_ns = 1048576;
+        rec.sessions[i].cpu_offcpu_ns = 1048576 - measured;
+        rec.sessions[i].cpu_measured_records = 1;
+    }
+    rec.num_sessions = 3;
+    rec.cpu_measured_records = 3;
+    rec.cpu_measured_ns = cpu_ns;
+    rec.class_ns[PGWT_CLASS_CPU] = gap_ns;
+    rec.events[0].event_id = 0;
+    rec.events[0].count = 3;
+    rec.events[0].total_ns = gap_ns;
+    uint64_t from = ev[0].timestamp_ns - 1048576, to = ev[0].timestamp_ns;
+    struct pgwt_filter f = {0};
+    for (int summary = 0; summary < 2; summary++) {
+        struct pgwt_tm_result tm;
+        struct pgwt_events_result te;
+        struct pgwt_sessions_result ts;
+        if (summary) {
+            fake_summary_rec = &rec;
+            pgwt_compute_time_model_from_summaries("unused", from, to, &f, 1.048576, &tm);
+            pgwt_compute_top_events_from_summaries("unused", from, to, &f, 1.048576, &te);
+            pgwt_compute_top_sessions_from_summaries("unused", from, to, &f, 1.048576, &ts);
+            fake_summary_rec = NULL;
+        } else {
+            pgwt_compute_time_model(ev, 3, &f, from, to, 1.048576, &tm);
+            pgwt_compute_top_events(ev, 3, &f, from, to, 1.048576, &te);
+            pgwt_compute_top_sessions(ev, 3, &f, from, to, 1.048576, &ts);
+        }
+        CHECK(tm.cpu_ms == (double)cpu_ns / 1e6 &&
+              tm.cpu_ms == te.rows[0].total_ms && tm.cpu_ms == ts.cpu_ms,
+              "757 raw/summary exact CPU aggregation across sessions");
+        CHECK(tm.offcpu_ms == (double)(gap_ns - cpu_ns) / 1e6 &&
+              tm.offcpu_ms == te.offcpu_ms && tm.offcpu_ms == ts.offcpu_ms,
+              "757 raw/summary exact off-CPU aggregation across sessions");
+        free(tm.rows); free(te.rows); free(ts.rows);
+    }
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
 
+    test_cpu_integer_contract();
+    test_cpu_integer_aggregation();
     test_straddler_leading_edge();
     test_straddler_trailing_edge();
     test_cross_tab_agreement();
@@ -2909,8 +3004,8 @@ int main(void)
      * `if (str)` / `if (in)` for the same reason section 13's do -- the
      * record-present CHECK is what fails, and the shortfall in this count
      * is what catches a section that stopped running its body at all.
-     * Measured on the merged tree: 317. */
-    if (checks < 317) {
+     * Measured on the merged tree: 317. #757 adds 16 exact assertions. */
+    if (checks < 333) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

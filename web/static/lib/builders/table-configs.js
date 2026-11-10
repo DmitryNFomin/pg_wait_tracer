@@ -484,14 +484,13 @@ export function createOverviewOrder() {
  * has_measured_cpu is false on sampled/v2 data and direct per-query summary
  * calls, whose CPU* row carries the unsplit gap wall. The unfiltered summary
  * route reads the existing v7 record CPU scalars (#573) and carries the same
- * measured split as raw. A 0 (or missing/non-finite) offcpu_ms adds no row either --
- * printing a 0.0 "CPU (waiting for a core)" row would claim a measured-zero
- * remainder when has_measured_cpu alone does not guarantee one exists this
- * window.
+ * measured split as raw. A numeric offcpu_aas includes measured zero; null or
+ * missing AAS stays unavailable. Older payloads without AAS retain their
+ * positive-duration row without inventing an AAS value.
  *
- * Unknown fields on the synthetic row (count, avg_us, every percentile, aas)
+ * Unknown fields on the synthetic row (count, avg_us, every percentile)
  * are null, not fabricated: this is a residual duration, not an observed
- * wait with its own sessions/latencies/occupancy -- every formatter in
+ * wait with its own counts/latencies -- every formatter in
  * eventsConfig already renders null as "—" (fmtCount/fmtUs/fmtAas/pctlCell),
  * so no column needs special-casing for this one extra row. */
 export function addCpuWaitingRow(data) {
@@ -499,7 +498,8 @@ export function addCpuWaitingRow(data) {
     if (!data || !data.has_measured_cpu) return rows;
     const offcpu = data.offcpu_ms;
     const dbTime = data.db_time_ms;
-    if (!(offcpu > 0) || !(dbTime > 0)) return rows;
+    if (!Number.isFinite(offcpu) || offcpu < 0 || !(dbTime > 0)) return rows;
+    if (offcpu === 0 && !Number.isFinite(data.offcpu_aas)) return rows;
     return rows.concat([{
         name: 'CPU (waiting for a core)',
         event_id: null,
@@ -509,7 +509,7 @@ export function addCpuWaitingRow(data) {
         p50_us: null, p95_us: null, p99_us: null, max_us: null,
         p50_overflow: false, p95_overflow: false, p99_overflow: false,
         pct: offcpu / dbTime * 100,
-        aas: null,
+        aas: Number.isFinite(data.offcpu_aas) ? data.offcpu_aas : null,
     }]);
 }
 
@@ -892,7 +892,11 @@ export const compareOverviewConfig = {
 
 export const compareEventsConfig = {
     columns: [{ key: '_entityLabel', label: 'Wait Event', sortable: false, format: r =>
-        _dot(r.name) + esc(r.name) }].concat(deltaColumns),
+        _dot(r.name) + esc(r.name) }].concat(deltaColumns, [
+        { key: 'a_aas', label: 'A AAS', cls: 'num', sortable: false, format: r => fmtAas(r._a?.aas) },
+        { key: 'b_aas', label: 'B AAS', cls: 'num', sortable: false,
+          format: r => fmtAas(r._b?.aas) },
+    ]),
     rowClass: () => 'clickable',
     onClick: eventsConfig.onClick,
 };

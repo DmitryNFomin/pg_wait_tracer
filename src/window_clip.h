@@ -20,4 +20,30 @@ static inline uint64_t event_window_ns(const struct pgwt_trace_event *ev,
     return end > start ? end - start : 0;
 }
 
+/* The shared CPU contract: prorate, clamp to the clipped gap wall, then round
+ * once to integer ns. All consumers accumulate these integers before converting
+ * to display units. clamped_ns is an optional measurement-skew diagnostic. */
+static inline uint64_t pgwt_cpu_clip_ns(uint64_t cpu_ns, uint64_t clip_ns,
+                                        uint64_t duration_ns, double *clamped_ns)
+{
+    if (clip_ns == 0 || duration_ns == 0) return 0;
+    if (clip_ns == duration_ns && cpu_ns <= clip_ns) return cpu_ns;
+    double frac = (double)clip_ns / (double)duration_ns;
+    double measured = (double)cpu_ns * frac;
+    if (measured >= (double)clip_ns) {
+        if (clamped_ns) *clamped_ns += measured - (double)clip_ns;
+        return clip_ns;
+    }
+    uint64_t rounded = (uint64_t)(measured + 0.5);
+    return rounded < clip_ns ? rounded : clip_ns;
+}
+
+/* Off-CPU is the nonnegative integer remainder of the CPU gap wall. Since
+ * each contribution is clamped above, residual(sum(wall), sum(cpu)) equals
+ * sum(residual(wall, cpu)); waits and floating-point cancellation play no part. */
+static inline uint64_t pgwt_offcpu_ns(uint64_t gap_ns, uint64_t cpu_ns)
+{
+    return gap_ns > cpu_ns ? gap_ns - cpu_ns : 0;
+}
+
 #endif
