@@ -90,11 +90,27 @@ before=$(git -C "$clone" rev-parse --verify "refs/heads/$branch") || die 13 'SET
 prompt=$(mktemp "$lock/brief.XXXXXX") || die 13 'SETUP_FAILED: cannot create prompt'
 {
     printf 'Working directory: %s\nBranch: %s\n' "$clone" "$branch"
-    printf 'Work and commit on this branch in this directory. Do not create your own clone.\n\n'
+    printf 'Work on this branch in this directory. Do not create your own clone.\n'
+    printf 'Your sandbox forbids writes under .git, so git add and git commit will fail with\n'
+    printf '"Operation not permitted". Do not fight it and do not spend a round on it: leave your\n'
+    printf 'changes in the working tree, say so in your report, and this wrapper captures them as a\n'
+    printf 'patch for a landing agent. Report the evidence as if the commit had happened.\n\n'
     cat "$brief"
 } > "$prompt" || die 13 'SETUP_FAILED: cannot read brief'
 codex_rc=0
 (cd "$clone" && codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 || codex_rc=$?
+
+# Salvage the working tree unconditionally: the implementer sandbox forbids
+# writes under .git, so a finished round normally leaves its work uncommitted
+# and only here is it still reachable (issue: every round exits BRANCH_UNCHANGED).
+salvage="$(dirname "$brief")/$(basename "$brief" .md)-salvage.patch"
+git -C "$clone" add -A -N >/dev/null 2>&1
+if git -C "$clone" diff HEAD > "$salvage" 2>/dev/null && [ -s "$salvage" ]; then
+    printf 'SALVAGE_PATCH: %s\n' "$salvage" >&2
+else
+    rm -f "$salvage"
+    printf 'SALVAGE_PATCH: none (working tree clean)\n' >&2
+fi
 
 # Salvage committed work even when Codex itself returned a non-zero status.
 tip=$(git -C "$clone" rev-parse --verify "refs/heads/$branch" 2>/dev/null) || die 20 "BRANCH_MISSING: branch does not exist in clone afterwards: $branch"
