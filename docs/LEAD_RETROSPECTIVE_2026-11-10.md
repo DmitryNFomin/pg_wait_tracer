@@ -73,15 +73,20 @@ me -- twice, because the first fix left the branch unpushed.
 The second limit was me: auditing my own prose.
 
 ```
-$ find scratchpad -maxdepth 1 -name "audit-*.out" -newermt "2026-11-10 00:00" | wc -l
-      13
+$ find scratchpad -maxdepth 2 -name "audit-*.out" -newermt "2026-11-10 00:00" | wc -l
+      14
+$ for f in <those files>; do grep -ohE "VERDICT:? ?(SEND|BLOCK|MALFORMED|INCONCLUSIVE|AMBIGUOUS)" "$f" | tail -1; done | sort | uniq -c
+  10 BLOCK
+   1 SEND
 ```
 
-Eleven of those thirteen are BLOCK and one is SEND; two of the BLOCKs listed
-eight and then seven wrong claims in a single draft. I have not instrumented the
-wall time, so I am not giving an hours figure -- but thirteen audit rounds in a
-day, eleven of them refused, is the measure of how much of my output needed
-re-derivation before it could be sent.
+Ten BLOCK, one SEND, and three files with no verdict line because their run was
+killed or left empty. Two of the BLOCKs listed eight and then seven wrong claims
+in a single draft. I have not instrumented the wall time, so I am not giving an
+hours figure -- but fourteen audit rounds in a day, ten of them refused, is the
+measure of how much of my output needed re-derivation before it could be sent.
+I also got this very count wrong twice before pasting the command: it is the
+third instance of the pattern in section 3, inside the document about it.
 
 ## 3. The failure pattern, nine instances
 
