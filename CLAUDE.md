@@ -2,6 +2,15 @@
 
 PostgreSQL eBPF tracer: C/BPF daemon, `pgwt-server`, Go WebSocket bridge,
 ECharts/uPlot UI. Plan/status: `docs/ROADMAP_AND_STATUS.md`. Run nothing eBPF-related on macOS.
+> **Picking this work up after 2026-11-10?** Start at
+> [`docs/HANDOVER_2026-11-10.md`](docs/HANDOVER_2026-11-10.md): the open release
+> blockers with what is measured and what is only read from source, the state of
+> every open PR, three decisions nobody made, and where the measurement evidence
+> lives. Then
+> [`docs/OPERATING_MODEL.md`](docs/OPERATING_MODEL.md) for how the work was
+> organised and [`docs/LEAD_RETROSPECTIVE_2026-11-10.md`](docs/LEAD_RETROSPECTIVE_2026-11-10.md)
+> for how its reporting failed, which is worth reading before trusting either.
+
 
 ## RULE 0 — no status report reaches the owner unaudited. No exceptions.
 

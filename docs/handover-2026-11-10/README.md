@@ -19,8 +19,12 @@ files themselves do not know about.
 | `PRESENTER-NOTES-8ab558b.md` | 2026-10-22 | presenter notes for a demo candidate | historical |
 | `stash-reviewer-ui-mac-walk-20260928.patch` | 2026-09-28 | a reviewer's `git stash` entry, found during the handover cleanup: 72 added lines across `tests/ui_mac_walk.sh`, `tests/ui_mac_walk_lib.py`, `tests/ui_mac_walk_safari.py` and `tests/test_ui_mac_walk_lib.py` | **do not apply.** None of those four files exists on master any more; they were tracked once and have since been removed. It is kept only so the work is not silently dropped, and the stash itself was deleted after this copy was made |
 
+| `EVIDENCE_MANIFEST.md` | 2026-11-10 | every result-bearing file in the moved capture directories, with size and SHA-256 prefix | live; it is how a found copy is identified and how a loss is proven |
+| `REPOSITORY_TRAPS.md` | 2026-11-10 | the repository-specific subset of the outgoing lead's working memory | unverified working notes, never audited; the code wins wherever they disagree |
+
 The measurement evidence behind the numbers published on #381, #837 and #839 is
-**not** here: those captures are hundreds of megabytes and live under
-`/private/tmp` on that Mac. `docs/HANDOVER_2026-11-10.md` section 7 lists their
+**not** here: those captures are about 1.1 GB and were moved, as the last act of
+the handover, to `tests/results/handover-2026-11-10-evidence/` -- untracked, but
+durable on disk rather than in `/private/tmp`. `docs/HANDOVER_2026-11-10.md` section 7 lists their
 paths and says how to re-derive a published number from them. If that machine is
 wiped, the published numbers remain in the issue comments and the raw data does not.
