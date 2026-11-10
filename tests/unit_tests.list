@@ -1047,3 +1047,7 @@ test_summary_qattr_background
 # Persistent box-check must stage/run the current provisioner before build,
 # forwarding the OS and leaving lock ownership to the provisioner itself.
 test_box_check_provision_persistent.sh
+
+# #848: independent kernel/binary classification and versioned sidecar windows.
+test_phase_capability
+test_phase_probe

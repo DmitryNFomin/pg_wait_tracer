@@ -74,7 +74,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             trace_closure_probe \
             open_ckpt_stub \
             test_restart_second_identity \
-            test_background_unattributed
+            test_background_unattributed \
+            test_phase_capability test_phase_probe
 
 .PHONY: all clean check
 
@@ -1120,3 +1121,10 @@ test_background_unattributed: test_background_unattributed.c ../src/compute.c \
                              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                              $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+# #848: independent capability facts and persisted window metadata; no BPF.
+test_phase_capability: test_phase_capability.c ../src/phase_capability.c ../src/cJSON.c ../src/phase_capability.h ../src/compute.h
+	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+test_phase_probe: test_phase_probe.c ../src/phase_probe.c ../src/phase_capability.c ../src/cJSON.c ../src/phase_capability.h
+	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)

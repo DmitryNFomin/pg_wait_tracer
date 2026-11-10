@@ -22,6 +22,7 @@ A trace directory (`--trace-dir`) contains:
 | `query_texts.jsonl` | query-text capture | context + query grouping key → sourced SQL text sidecar |
 | `query_sources.jsonl` | PG13 sampler | context + grouping key → durable synthetic-attribution quality |
 | `backends.jsonl` | backend-meta writer | pid → type/user/db sidecar |
+| `phase_capabilities.jsonl` | daemon startup | independent execute/plan capability observations, versioned history |
 | `wait_event_names.json` | daemon | event-id → name tables (PG17+); carries no Extension/InjectionPoint/BufferPin keys (`pg_wait_events` gives no ids for them, #801), and a reader ignores any it finds |
 | `*.corrupt.<unixtime>` | recovery | preserved unreadable leftovers |
 | `pgwt.sock` | daemon | control socket |
@@ -308,6 +309,80 @@ totals, per-event stats + histograms, per-session, per-query — see
 `pgwt_summary_serialize`). Lifecycle, meta protocol, rotation, recovery,
 naming, and retention are identical to trace files with the
 `.summary`/`.summary.lz4` names.
+
+## phase_capabilities.jsonl (version 1)
+
+Append-only JSON Lines, one record per daemon capture start (including a
+daemon re-attach after PostgreSQL restarts). Example, shown on multiple lines
+for readability; each record on disk occupies one newline-terminated line:
+
+```json
+{"version":1,"start_wall_ns":"1794300000000000000","kernel_release":"6.8.0",
+ "execute":{"state":"available","reason":"none"},
+ "plan":{"state":"unavailable","reason":"binary_no_sdt"}}
+```
+
+`start_wall_ns` is Unix `CLOCK_REALTIME` nanoseconds at daemon initialization,
+encoded as a decimal **string** to preserve all 64 bits. `kernel_release`
+comes from `uname`, for provenance, never for version-based inference.
+Each phase has `available`, `unavailable`, or `unknown` state and a reason code:
+
+| Reason | State | Evidence |
+|---|---|---|
+| `none` | available | PMU reference-counter ABI and both phase SDT notes present |
+| `kernel_no_ref_ctr` | unavailable | readable uprobe PMU lacks `format/ref_ctr_offset` |
+| `binary_no_sdt` | unavailable | PostgreSQL ELF lacks at least one start/done note for this phase |
+| `kernel_probe_failed` | unknown | kernel inspection failed or returned an unrecognized ABI |
+| `binary_probe_failed` | unknown | binary inspection failed, including malformed metadata |
+
+The kernel measurement reads `/sys/bus/event_source/devices/uprobe/type` and
+`format/ref_ctr_offset` (`config:32-63`). This is the ABI published by
+[Linux's uprobe PMU](https://github.com/torvalds/linux/blob/v6.8/kernel/events/core.c),
+independently of an attach attempt. An inaccessible/missing PMU or format
+directory is unknown. Binary measurement reuses the SDT-site enumerator in
+strict mode and requires the `postgresql:query__execute__start/done` and
+`postgresql:query__plan__start/done` pairs separately. An inspection failure
+always yields unknown, even if the other measurement proves a limitation.
+When both prove limitations, `kernel_no_ref_ctr` takes precedence.
+
+Capability describes kernel/binary support, **not** successful attachment,
+active capture policy, or the presence of captured events. The attach errno,
+`--skip-usdt`, sampled mode, and the attach-only test hook do not change it.
+Measurements never prevent capture. Append/open/permission/allocation/I/O
+failures increment the daemon's `phase_capability_write_failures` counter
+and log a WARN with the counter; no failed append is silently ignored.
+This counter is currently internal; server/control responses are unchanged.
+If the start clock cannot be read, persistence refuses the untimestamped
+record with the same counted/logged failure. Writes use append mode, 0640,
+the resolved trace group, and `fsync`. A partial write may leave a torn tail.
+
+`pgwt_phase_read_window()` in `src/phase_capability.c` accepts a trace
+directory and a half-open **wall-time** interval `[from_ns,to_ns)`. Callers
+must translate raw monotonic bounds using the trace's own clock mapping.
+Records apply from their start until the next record; the last applies
+through the requested end. These intervals describe capability observations,
+not daemon uptime or capture coverage. Equal start times use the last record;
+a backward clock step (out-of-order records) makes the file unknown.
+
+The result is independent per phase: available, unavailable with reason,
+mixed with clipped ranges, or unknown. Adjacent equal state/reason ranges
+coalesce. A reason change also produces mixed. Any unknown interval,
+including any part before the first record, makes the aggregate unknown;
+valid ranges are still returned for partial coverage. Missing, unreadable,
+empty, malformed, or unsupported-version files return unknown, without
+consulting the reader host. An incomplete last line is ignored and earlier
+complete records remain usable. A complete malformed line or unsupported
+version makes the entire file unknown, even outside the requested interval.
+After a torn append the next writer adds a separating newline without
+rewriting history; if that terminates malformed JSON, readers conservatively
+return unknown for the file. Blank lines are ignored.
+
+Keep/copy this file with archived traces, including summary-only archives.
+Like the other `.jsonl` sidecars, retention preserves it under both hours
+and size policies, counts its bytes toward the directory cap, and includes
+it in any protected-files-over-cap warning. No compaction is performed.
+Old traces without this sidecar remain unknown. The reader API is available
+for later server/replay wiring; this addition changes no response formats.
 
 ## query_texts.jsonl (and PII — DUR-10)
 

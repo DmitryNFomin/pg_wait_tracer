@@ -143,6 +143,22 @@ check $? "daemon wrote a -v log ($(wc -l < "$LOG" 2>/dev/null) lines), so the WA
 # The sidecar is written at the END of pgwt_discover(), which runs BEFORE the
 # control socket exists — so by here the write has already happened or failed.
 NAMES="$TRACE_DIR/wait_event_names.json"
+CAPS="$TRACE_DIR/phase_capabilities.jsonl"
+[[ -s "$CAPS" ]]
+check $? "$CAPS exists and is non-empty (#848)"
+if [[ -s "$CAPS" ]]; then
+    python3 - "$CAPS" <<'PYEOF'
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+assert len(records) == 1, records
+r = records[0]
+assert r["version"] == 1 and int(r["start_wall_ns"]) > 0 and r["kernel_release"], r
+for p in ("execute", "plan"):
+    assert r[p]["state"] in ("available", "unavailable", "unknown"), r
+    assert r[p]["reason"], r
+PYEOF
+    check $? "phase sidecar carries version, start, kernel and independent phase states"
+fi
 [[ -s "$NAMES" ]]
 check $? "$NAMES exists and is non-empty (#499)"
 
@@ -217,6 +233,10 @@ check $? "scaffolding: $BASE is traversable (0755), got $BASE_MODE"
 NAMES_GID=$(stat -c %g "$NAMES" 2>/dev/null || echo "")
 [[ "$NAMES_GID" == "$TRACE_GID" ]]
 check $? "the sidecar carries the same group as the trace (got '$NAMES_GID')"
+CAPS_GID=$(stat -c %g "$CAPS" 2>/dev/null || echo "")
+CAPS_MODE=$(stat -c %a "$CAPS" 2>/dev/null || echo "")
+[[ "$CAPS_GID" == "$TRACE_GID" && "$CAPS_MODE" == "640" ]]
+check $? "phase sidecar carries trace group and mode 0640 (got '$CAPS_GID/$CAPS_MODE')"
 
 # A non-root account in that group. Members come from the group's own member
 # list AND from every passwd entry whose primary gid matches.
@@ -253,10 +273,10 @@ head -c 64 "$TRACE_FILE" > "$CONTROL"
 chown 0:0 "$CONTROL"
 chmod 0640 "$CONTROL"
 
-READER_OUT=$(python3 - "$READER" "$TRACE_FILE" "$NAMES" "$CONTROL" <<'PYEOF'
+READER_OUT=$(python3 - "$READER" "$TRACE_FILE" "$NAMES" "$CAPS" "$CONTROL" <<'PYEOF'
 import os, pwd, sys
 
-name, trace, names, control = sys.argv[1:5]
+name, trace, names, caps, control = sys.argv[1:6]
 pw = pwd.getpwnam(name)
 r, w = os.pipe()
 pid = os.fork()
@@ -268,7 +288,7 @@ if pid == 0:
         os.setuid(pw.pw_uid)
         res = []
         res.append("dropped_root" if os.getuid() != 0 else "STILL_ROOT")
-        for label, path in (("trace", trace), ("sidecar", names)):
+        for label, path in (("trace", trace), ("sidecar", names), ("phase", caps)):
             try:
                 with open(path, "rb") as f:
                     res.append("read_%s_%d" % (label, len(f.read(64))))
@@ -306,6 +326,8 @@ check $? "non-root user '$READER' opened and read the trace file (#500)"
 
 grep -qE "read_sidecar_[1-9][0-9]*" <<<"$READER_OUT"
 check $? "non-root user '$READER' read wait_event_names.json (#500)"
+grep -qE "read_phase_[1-9][0-9]*" <<<"$READER_OUT"
+check $? "non-root user '$READER' read phase_capabilities.jsonl (#848)"
 
 grep -q "control_denied" <<<"$READER_OUT"
 check $? "the root:root 0640 control file stayed unreadable (the check has teeth)"
