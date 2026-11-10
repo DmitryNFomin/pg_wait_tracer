@@ -30,7 +30,6 @@ jobs:
           CHECKLIST_RUN_ID: ${{ github.event.workflow_run.id }}
         run: >-
           scripts/tag-checklist.sh "$CHECKLIST_SHA" --run-id "$CHECKLIST_RUN_ID"
-          --base-ref "$CHECKLIST_SHA^"
           --json --markdown-output tag-checklist.md > tag-checklist.json
       - name: Upload the checklist snapshot
         uses: actions/upload-artifact@v4

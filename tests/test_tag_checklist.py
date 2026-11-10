@@ -102,8 +102,10 @@ class TagChecklistTests(unittest.TestCase):
                 self.assertIn("void jobs", self.run_script(success=False))
 
     def test_g_removed_row_refused(self):
-        baseline = self.fixture / "base.tsv"
-        baseline.write_text(baseline.read_text() + baseline.read_text().splitlines()[1].replace("L001", "L002", 1) + "\n")
+        baseline = self.fixture / "history.json"
+        versions = json.loads(baseline.read_text())
+        versions.append(versions[0] + versions[0].splitlines()[1].replace("L001", "L002", 1) + "\n")
+        baseline.write_text(json.dumps(versions))
         self.assertIn("removed TSV row(s): L002", self.run_script(success=False))
 
     def test_h_none_is_green_unproven(self):
@@ -167,28 +169,219 @@ class TagChecklistTests(unittest.TestCase):
         with self.assertRaisesRegex(module.Refused, "failed"):
             module.command(["python3", "-c", "import sys; sys.exit(7)"])
 
-    def test_merge_base_includes_rows_added_at_current_head(self):
+    def module(self):
         spec = importlib.util.spec_from_file_location("tag_checklist", SCRIPT)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        baseline = (self.fixture / "base.tsv").read_text()
-        baseline += baseline.splitlines()[1].replace("L001", "L002", 1) + "\n"
-        def git(argv):
-            if argv == ["git", "merge-base", "HEAD", "origin/master"]:
-                return SHA
-            if argv == ["git", "ls-tree", SHA, "--", "tests/tag_checklist.tsv"]:
-                return "100644 blob fixture tests/tag_checklist.tsv"
-            if argv == ["git", "show", SHA + ":tests/tag_checklist.tsv"]:
-                return baseline
-            self.fail("unexpected Git baseline command: " + repr(argv))
-        with mock.patch.object(module, "command", side_effect=git):
-            data = module.baseline_from_git(ROOT / "tests/tag_checklist.tsv", "origin/master")
-        with self.assertRaisesRegex(module.Refused, "removed TSV row.*L002"):
-            module.append_only(module.parse_tsv(self.tsv.read_text()), module.parse_tsv(data))
-        # On master workflow runs, explicitly compare the parent: HEAD is
-        # already the merged commit, so origin/master may include a deletion.
+        return module
+
+    def test_three_commit_history_keeps_deleted_ids(self):
+        """Build real Git objects without modifying the checkout's index/.git."""
+        repo = Path(self.temp.name) / "repo"
+        repo.mkdir()
+        repo = repo.resolve()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        one = self.tsv.read_text()
+        two = one + one.splitlines()[1].replace("L001", "L002", 1) + "\n"
+        stream = bytearray()
+        for mark, data in enumerate((two, one, one), 1):
+            stream.extend((f"commit refs/heads/main\nmark :{mark}\n"
+                           f"committer Fixture <fixture@example.invalid> {1700000000 + mark} +0000\n"
+                           f"data 8\ncommit {mark}\n").encode())
+            if mark > 1:
+                stream.extend(f"from :{mark - 1}\n".encode())
+            path = "later.txt" if mark == 3 else "tests/tag_checklist.tsv"
+            payload = b"later\n" if mark == 3 else data.encode()
+            stream.extend(f"M 100644 inline {path}\ndata {len(payload)}\n".encode())
+            stream.extend(payload + b"\n\n")
+        subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream, check=True)
+        shas = subprocess.check_output(["git", "rev-list", "--reverse", "main"], cwd=repo, text=True).splitlines()
+        module = self.module()
+        original_command = module.command
+        with mock.patch.object(module, "ROOT", repo), mock.patch.object(
+                module, "command", side_effect=lambda argv: original_command(argv, cwd=repo)):
+            module.append_only(module.parse_tsv(two), module.history_from_git(repo / "tests/tag_checklist.tsv", shas[0]))
+            print("three-commit fixture added: OK (L001, L002)")
+            for label, sha in zip(("deleting", "later"), shas[1:]):
+                with self.assertRaisesRegex(module.Refused, "removed TSV row.*L002") as refused:
+                    module.check_history(module.parse_tsv(one), repo / "tests/tag_checklist.tsv", sha)
+                print(f"three-commit fixture {label}: REFUSED: {refused.exception}")
+                (repo / "scripts").mkdir(exist_ok=True)
+                shutil.copyfile(SCRIPT, repo / "scripts/tag-checklist.py")
+                (repo / "tests").mkdir(exist_ok=True)
+                (repo / "tests/tag_checklist.tsv").write_text(one)
+                result = subprocess.run(["python3", str(repo / "scripts/tag-checklist.py"), sha,
+                                         "--check-history"], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("removed TSV row(s): L002", result.stderr)
+            # The real --check-history entry point is used by make check.
+            self.assertIn('--check-history', (ROOT / "scripts/check.sh").read_text())
+            with self.assertRaisesRegex(module.Refused, "removed TSV row.*L002"):
+                module.check_history(module.parse_tsv(one), repo / "tests/tag_checklist.tsv", shas[2])
+
+    def test_unreadable_and_shallow_history_refused(self):
+        module = self.module()
+        with mock.patch.object(module, "command", return_value="true\n"):
+            with self.assertRaisesRegex(module.Refused, "complete first-parent history"):
+                module.history_from_git(ROOT / "tests/tag_checklist.tsv", SHA)
+        with mock.patch.object(module, "command", side_effect=module.Refused("history read failed")):
+            with self.assertRaisesRegex(module.Refused, "history read failed"):
+                module.history_from_git(ROOT / "tests/tag_checklist.tsv", SHA)
         workflow = (ROOT / ".github/workflows/tag-checklist.yml").read_text()
-        self.assertIn('--base-ref "$CHECKLIST_SHA^"', workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertNotIn("--base-ref", workflow)
+
+    def test_old_retirement_cannot_be_reused_after_an_active_version(self):
+        active = self.tsv.read_text()
+        self.edit_row(state="retired", reason="Replaced by a new obligation")
+        retired = self.tsv.read_text()
+        self.tsv.write_text(active)
+        (self.fixture / "history.json").write_text(json.dumps([active, retired, active]))
+        self.assertIn("retired id reused: L001", self.run_script(success=False))
+
+    def test_in_progress_run_cannot_certify_early_success(self):
+        self.json_edit("run-list.json", lambda runs: runs["ci.yml"][0].update(status="in_progress"))
+        self.json_edit("run-123.json", lambda view: view.update(status="in_progress", conclusion=None))
+        self.assertEqual(self.run_script()["lines"][0]["state"], "NOT-RUN")
+
+    def test_step_name_is_exact_not_substring(self):
+        self.json_edit("run-123.json", lambda view: view["jobs"][0]["steps"][0].update(name="Run synthetic data tests (skipped)"))
+        self.assertEqual(self.run_script()["lines"][0]["state"], "NOT-RUN")
+
+    def add_rerun(self):
+        self.json_edit("run-list.json", lambda runs: runs["ci.yml"].append({**runs["ci.yml"][0], "databaseId": 124}))
+        view = json.loads((self.fixture / "run-123.json").read_text())
+        view.update(databaseId=124, conclusion="failure", attempt=2)
+        view["jobs"][0]["steps"][0]["conclusion"] = "failure"
+        (self.fixture / "run-124.json").write_text(json.dumps(view))
+
+    def test_highest_run_id_and_run_id_override(self):
+        self.add_rerun()
+        result = self.run_script()
+        self.assertEqual(result["sources"][0]["run"], 124)
+        self.assertEqual(result["lines"][0]["state"], "RED")
+        pinned = self.run_script("--run-id", "123")
+        self.assertEqual(pinned["sources"][0]["run"], 123)
+        self.assertEqual(pinned["lines"][0]["state"], "GREEN")
+        self.assertIn("requested run 999 absent", self.run_script("--run-id", "999", success=False))
+
+    def test_latest_attempt_of_same_run_is_read(self):
+        self.json_edit("run-123.json", lambda view: view.update(attempt=2))
+        result = self.run_script()
+        self.assertEqual(result["sources"][0]["attempt"], 2)
+        self.assertEqual(result["counts"]["GREEN"], 1)
+
+    def test_later_passing_run_supersedes_failed_run(self):
+        self.add_rerun()
+        self.json_edit("run-123.json", lambda view: view["jobs"][0]["steps"][0].update(conclusion="failure"))
+        self.json_edit("run-124.json", lambda view: view["jobs"][0]["steps"][0].update(conclusion="success"))
+        result = self.run_script()
+        self.assertEqual(result["sources"][0]["run"], 124)
+        self.assertEqual(result["counts"]["GREEN"], 1)
+
+    def test_no_ci_run_refused(self):
+        self.json_edit("run-list.json", lambda runs: runs.update({"ci.yml": []}))
+        self.assertIn("no CI run", self.run_script(success=False))
+        self.edit_row(tests="", evidence="")
+        self.assertIn("no CI run", self.run_script(success=False))
+
+    def test_missing_run_conclusion_refused(self):
+        self.json_edit("run-123.json", lambda view: view.pop("conclusion"))
+        self.assertIn("missing/invalid conclusion", self.run_script(success=False))
+
+    def test_weak_tolerances_never_certify_numbers(self):
+        for tolerance in ("substring", "presence", "ordering", "exit-code"):
+            for proof in ("PR #1", "NONE"):
+                with self.subTest(tolerance=tolerance, proof=proof):
+                    self.edit_row(tolerance=tolerance, red_proof=proof)
+                    result = self.run_script()
+                    self.assertEqual(result["lines"][0]["state"], "WEAK")
+                    self.assertEqual(result["counts"]["GREEN"], 0)
+        self.blocker(["line:L001"])
+        self.assertEqual(self.run_script()["lines"][0]["state"], "RED")
+
+    def test_invalid_tolerance_refused(self):
+        self.edit_row(tolerance="exact (substring)")
+        self.assertIn("tolerance must", self.run_script(success=False))
+
+    def test_pr_proof_must_exist_and_be_merged(self):
+        for metadata in (None, {"number": 1, "state": "OPEN", "mergedAt": None},
+                         {"number": 1, "state": "CLOSED", "mergedAt": None},
+                         {"number": True, "state": "MERGED", "mergedAt": "2026-11-01"},
+                         {"number": 1, "state": "MERGED", "mergedAt": True},
+                         {"number": 2, "state": "MERGED", "mergedAt": "2026-11-01"}):
+            with self.subTest(metadata=metadata):
+                (self.fixture / "proofs.json").write_text(json.dumps({"PR #1": metadata}))
+                self.assertIn("PR must exist and be merged", self.run_script(success=False))
+        module = self.module()
+        rows = module.parse_tsv(self.tsv.read_text())
+        with mock.patch.object(module, "gh_json", return_value={
+                "number": 1, "state": "MERGED", "mergedAt": "2026-11-01"}) as gh:
+            module.verify_red_proofs(rows, SHA)
+            gh.assert_called_once_with(["pr", "view", "1", "--json", "number,state,mergedAt"])
+        with mock.patch.object(module, "gh_json", side_effect=module.Refused("gh unavailable")):
+            with self.assertRaisesRegex(module.Refused, "gh unavailable"):
+                module.verify_red_proofs(rows, SHA)
+
+    def test_live_run_view_uses_latest_attempt(self):
+        module = self.module()
+        rows = module.parse_tsv(self.tsv.read_text())
+        view = json.loads((self.fixture / "run-123.json").read_text())
+        view["attempt"] = 2
+        run_list = json.loads((self.fixture / "run-list.json").read_text())["ci.yml"]
+        calls = []
+        def gh(argv):
+            calls.append(argv)
+            if argv[:2] == ["run", "list"]:
+                return run_list
+            if argv[:3] == ["run", "view", "123"]:
+                self.assertNotIn("--attempt", argv, "gh defaults to the latest attempt; never pin an old attempt")
+                return view
+            if argv[:2] == ["issue", "list"]:
+                return []
+            self.fail("unexpected gh command: " + repr(argv))
+        with mock.patch.object(module, "gh_json", side_effect=gh):
+            _, sources, _ = module.load_evidence(rows, SHA)
+        self.assertEqual(sources[0]["attempt"], 2)
+        self.assertEqual(len(calls), 3)
+
+    def test_sha_proof_must_be_ancestor_of_evaluated_commit(self):
+        ancestor = "b" * 40
+        self.edit_row(red_proof=ancestor)
+        for is_ancestor, descendant in ((False, SHA), (True, "c" * 40), (True, SHA)):
+            (self.fixture / "proofs.json").write_text(json.dumps({ancestor: {
+                "ancestor": ancestor, "descendant": descendant, "isAncestor": is_ancestor}}))
+            if is_ancestor and descendant == SHA:
+                self.assertEqual(self.run_script()["counts"]["GREEN"], 1)
+            else:
+                self.assertIn("not a verified ancestor", self.run_script(success=False))
+        module = self.module()
+        rows = module.parse_tsv(self.tsv.read_text())
+        with mock.patch.object(module, "command", return_value="") as git:
+            module.verify_red_proofs(rows, SHA)
+            git.assert_called_once_with(["git", "merge-base", "--is-ancestor", ancestor, SHA])
+        with mock.patch.object(module, "command", side_effect=module.Refused("not ancestor")):
+            with self.assertRaisesRegex(module.Refused, "not ancestor"):
+                module.verify_red_proofs(rows, SHA)
+
+    def test_markdown_identifies_run_conclusion_sha(self):
+        path = self.fixture / "report.md"
+        self.run_script("--markdown-output", str(path))
+        output = path.read_text()
+        self.assertIn("run `123`", output)
+        self.assertIn("conclusion `success`", output)
+        self.assertIn("SHA `" + SHA + "`", output)
+
+    def test_ci_name_guard(self):
+        check = (ROOT / "scripts/check.sh").read_text()
+        guard = next(line.removeprefix("run ") for line in check.splitlines()
+                     if line.startswith("run python3 -c ") and "tag checklist trigger requires" in line)
+        for name, expected in (("CI", 0), ("Renamed CI", 1)):
+            repo = Path(self.temp.name) / name
+            (repo / ".github/workflows").mkdir(parents=True)
+            (repo / ".github/workflows/ci.yml").write_text("name: " + name + "\n")
+            result = subprocess.run(["bash", "-c", guard], cwd=repo, capture_output=True)
+            self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_inventory_citations_and_ci_registration(self):
         """A renamed or unregistered citation must not silently retain proof."""

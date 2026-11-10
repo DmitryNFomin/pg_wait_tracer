@@ -1,2 +1,0 @@
-id	area	statement	tolerance	tests	evidence	platforms	red_proof
-L001	Overview	Overview displays DB Time	exact	tests/example.py::test_db_time	ci.yml/build-and-unit/Run synthetic data tests	Ubuntu / fixture	PR #1

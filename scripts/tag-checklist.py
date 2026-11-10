@@ -3,8 +3,9 @@
 
 Offline fixtures: run-list.json maps workflow filenames to gh run-list arrays;
 run-<databaseId>.json is gh run-view JSON (headSha, jobs, workflowName, status);
-issues.json is gh issue-list JSON; base.tsv is the merge-base inventory (empty
-only for the first introduction). No fixture or command accepts typed verdicts.
+issues.json is gh issue-list JSON; history.json contains historical TSV versions;
+proofs.json contains PR metadata and commit-ancestry observations.
+No fixture or command accepts typed readiness verdicts.
 """
 import argparse
 from collections import Counter
@@ -18,7 +19,15 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 COLUMNS = "id area statement tolerance tests evidence platforms red_proof".split()
-STATES = ("GREEN", "GREEN-UNPROVEN", "RED", "NOT-RUN", "NO-TEST", "RETIRED")
+STATES = ("GREEN", "GREEN-UNPROVEN", "WEAK", "RED", "NOT-RUN", "NO-TEST", "RETIRED")
+WEAK_TOLERANCES = {"substring", "presence", "ordering", "exit-code"}
+
+
+def valid_tolerance(value):
+    # A bound must contain a number and an explicit comparison/uncertainty.
+    return value in {"exact", *WEAK_TOLERANCES} or bool(
+        re.search(r"(?:±|<=|>=|<|>|≤|≥)\s*\d", value)
+        or re.fullmatch(r"\d+(?:\.\d+)?–\d+(?:\.\d+)?(?:\s+\S.*)?", value))
 
 
 class Refused(ValueError):
@@ -32,7 +41,7 @@ def command(argv, cwd=ROOT):
     return result.stdout
 
 
-def parse_tsv(data, allow_empty=False):
+def parse_tsv(data, allow_empty=False, historical=False):
     if not data.strip() and allow_empty:
         return []
     reader = csv.DictReader(io.StringIO(data), delimiter="\t")
@@ -51,6 +60,8 @@ def parse_tsv(data, allow_empty=False):
         ids.add(ident)
         if any(not row[key] for key in ("area", "statement", "tolerance", "platforms", "red_proof")):
             raise Refused(f"{ident}: empty required field")
+        if not historical and not valid_tolerance(row["tolerance"]):
+            raise Refused(f"{ident}: tolerance must be exact, a numeric bound, substring, presence, ordering or exit-code")
         if row["red_proof"] != "NONE" and not re.fullmatch(
                 r"(?:PR #[1-9][0-9]*|#[1-9][0-9]*|[0-9a-f]{40}|https://github\.com/[^/]+/[^/]+/(?:pull/[1-9][0-9]*|commit/[0-9a-f]{40})(?:#\S+)?)",
                 row["red_proof"]):
@@ -82,11 +93,63 @@ def append_only(rows, baseline):
             raise Refused(f"retired id reused: {old['id']}")
 
 
-def baseline_from_git(path, ref):
-    relative = path.resolve().relative_to(ROOT).as_posix()
-    base = command(["git", "merge-base", "HEAD", ref]).strip()
-    entry = command(["git", "ls-tree", base, "--", relative]).strip()
-    return command(["git", "show", f"{base}:{relative}"]) if entry else ""
+def history_from_git(path, sha):
+    """Every version on the evaluated commit's first-parent history, including it.
+
+    Do not compare only a parent/merge-base: that forgives a deletion one commit
+    later. Refuse shallow history even when the path's visible log looks complete.
+    """
+    relative = path.resolve().relative_to(ROOT.resolve()).as_posix()
+    if command(["git", "rev-parse", "--is-shallow-repository"]).strip() != "false":
+        raise Refused("complete first-parent history required; fetch-depth: 0")
+    command(["git", "cat-file", "-e", f"{sha}^{{commit}}"])
+    revisions = command(["git", "log", "--first-parent", "--format=%H", sha, "--", relative]).splitlines()
+    baseline = []
+    for revision in revisions:
+        entry = command(["git", "ls-tree", revision, "--", relative]).strip()
+        if entry:  # The deletion itself has no blob; earlier versions still do.
+            baseline.extend(parse_tsv(command(["git", "show", f"{revision}:{relative}"]), historical=True))
+    return baseline
+
+
+def check_history(rows, path, sha, offline=None):
+    if offline:
+        versions = read_json(offline / "history.json")
+        if not isinstance(versions, list) or any(not isinstance(data, str) for data in versions):
+            raise Refused("history.json must contain historical TSV versions")
+        baseline = [row for data in versions for row in parse_tsv(data, historical=True)]
+    else:
+        baseline = history_from_git(path, sha)
+    append_only(rows, baseline)
+
+
+def verify_red_proofs(rows, sha, offline=None):
+    proofs = read_json(offline / "proofs.json") if offline else None
+    for proof in sorted({row["red_proof"] for row in rows} - {"NONE"}):
+        pr = re.fullmatch(r"(?:PR #|#)([1-9][0-9]*)", proof)
+        commit = re.fullmatch(r"[0-9a-f]{40}", proof)
+        # URLs accepted by the parser are resolved, never trusted as prose.
+        if not pr and not commit:
+            pr = re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/([1-9][0-9]*)(?:#\S+)?", proof)
+            commit = re.fullmatch(r"https://github\.com/[^/]+/[^/]+/commit/([0-9a-f]{40})(?:#\S+)?", proof)
+        if pr:
+            number = int(pr[1])
+            target = proof if proof.startswith("https://") else str(number)
+            data = proofs.get(proof) if offline and isinstance(proofs, dict) else (
+                gh_json(["pr", "view", target, "--json", "number,state,mergedAt"]) if not offline else None)
+            if (not isinstance(data, dict) or type(data.get("number")) is not int or data.get("number") != number
+                    or data.get("state") != "MERGED" or not isinstance(data.get("mergedAt"), str) or not data["mergedAt"]):
+                raise Refused(f"red_proof {proof}: PR must exist and be merged")
+        elif commit:
+            ancestor = proof if len(proof) == 40 else commit[1]
+            if offline:
+                data = proofs.get(proof) if isinstance(proofs, dict) else None
+                if not isinstance(data, dict) or data.get("ancestor") != ancestor or data.get("descendant") != sha or data.get("isAncestor") is not True:
+                    raise Refused(f"red_proof {proof}: not a verified ancestor of {sha}")
+            else:
+                command(["git", "merge-base", "--is-ancestor", ancestor, sha])
+        else:
+            raise Refused(f"unverifiable red_proof: {proof}")
 
 
 def read_json(path):
@@ -105,7 +168,7 @@ def gh_json(args):
 
 def load_evidence(rows, sha, offline=None, run_id=None):
     workflows = sorted({item.split("/", 1)[0] for row in rows
-                        for item in [row["evidence"]] if item and item != "box-check"})
+                        for item in [row["evidence"]] if item and item != "box-check"}) or ["ci.yml"]
     lists = read_json(offline / "run-list.json") if offline else None
     if offline and not isinstance(lists, dict):
         raise Refused("run-list.json must map workflow filenames to run arrays")
@@ -129,17 +192,19 @@ def load_evidence(rows, sha, offline=None, run_id=None):
             if not runs:
                 raise Refused(f"{workflow}: requested run {run_id} absent for {sha}")
         if not runs:
-            sources.append({"workflow": workflow, "run": None})
-            continue
+            raise Refused(f"{workflow}: no CI run for {sha}")
         run = max(runs, key=lambda entry: entry["databaseId"])
         ident = run["databaseId"]
         view = read_json(offline / f"run-{ident}.json") if offline else gh_json([
-            "run", "view", str(ident), "--json", "headSha,jobs,workflowName,status,databaseId"])
+            "run", "view", str(ident), "--json", "headSha,jobs,workflowName,status,databaseId,conclusion,attempt"])
         if not isinstance(view, dict) or view.get("headSha") != sha:
             raise Refused(f"run {ident}: wrong sha (wanted {sha})")
         if (view.get("databaseId") != ident or view.get("workflowName") != run["workflowName"]
                 or view.get("status") != run["status"]):
             raise Refused(f"run {ident}: run-list/view identity or status mismatch")
+        if (view.get("conclusion") not in (None, "", "success", "failure", "skipped", "cancelled", "timed_out", "action_required", "neutral", "stale", "startup_failure")
+                or (view["status"] == "completed" and not view.get("conclusion"))):
+            raise Refused(f"run {ident}: missing/invalid conclusion")
         jobs = view.get("jobs")
         if not isinstance(jobs, list) or not jobs:
             raise Refused(f"run {ident}: empty/void jobs JSON")
@@ -159,7 +224,8 @@ def load_evidence(rows, sha, offline=None, run_id=None):
                 # In-progress runs can never grant proof, even if an early
                 # step is already successful.
                 steps[key] = step.get("conclusion") if run["status"] == "completed" else "in_progress"
-        sources.append({"workflow": workflow, "run": ident, "status": run["status"]})
+        sources.append({"workflow": workflow, "run": ident, "status": run["status"],
+                        "conclusion": view.get("conclusion"), "sha": sha, "attempt": view.get("attempt")})
     issues = read_json(offline / "issues.json") if offline else gh_json([
         "issue", "list", "--state", "open", "--label", "tag-blocker", "--limit", "10000",
         "--json", "number,title,labels"])
@@ -206,6 +272,8 @@ def evaluate(rows, steps, issues):
             state, reason = "NO-TEST", "no tests or no evidence step"
         elif not all_success:
             state, reason = "NOT-RUN", "box-only, absent, skipped, unfinished or non-success step"
+        elif row["tolerance"] in WEAK_TOLERANCES:
+            state, reason = "WEAK", "asserts only " + row["tolerance"] + "; cannot certify numerical correctness"
         elif row["red_proof"] == "NONE":
             state, reason = "GREEN-UNPROVEN", "red_proof NONE"
         else:
@@ -229,6 +297,11 @@ def markdown(result):
         return str(value).replace("&", "&amp;").replace("<", "&lt;").replace("|", "&#124;").replace("\n", " ").replace("\r", " ")
     out = [f"# {result['header']}", "", f"Commit: `{result['sha']}`", "",
            " · ".join(f"{state} {count}" for state, count in result["counts"].items()), ""]
+    for source in result["sources"]:
+        conclusion = source.get("conclusion") or "pending"
+        out.append(f"CI `{cell(source['workflow'])}` run `{source['run']}` attempt `{source.get('attempt')}`: "
+                   f"{cell(source['status'])}, conclusion `{cell(conclusion)}`, SHA `{source['sha']}`")
+    out.append("")
     for area in dict.fromkeys(row["area"] for row in result["lines"]):
         out.extend([f"## {cell(area)}", "", "| ID | Guarantee | State | Tolerance | Platforms | Reason |",
                     "|---|---|---|---|---|---|"])
@@ -244,7 +317,7 @@ def main(argv=None):
     parser.add_argument("sha", help="full 40-character commit SHA")
     parser.add_argument("--tsv", type=Path, default=ROOT / "tests/tag_checklist.tsv")
     parser.add_argument("--offline", type=Path)
-    parser.add_argument("--base-ref", default="origin/master")
+    parser.add_argument("--check-history", action="store_true", help="validate the real TSV against HEAD history without querying CI")
     parser.add_argument("--run-id", type=int, help="pin to the workflow_run ID")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--markdown-output", type=Path, help="also write Markdown from the same evidence snapshot")
@@ -253,8 +326,11 @@ def main(argv=None):
         if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
             raise Refused("requires a full lowercase 40-character commit sha")
         rows = parse_tsv(args.tsv.read_text())
-        baseline = (args.offline / "base.tsv").read_text() if args.offline else baseline_from_git(args.tsv, args.base_ref)
-        append_only(rows, parse_tsv(baseline, allow_empty=True))
+        check_history(rows, args.tsv, args.sha, args.offline)
+        if args.check_history:
+            print(f"OK: {len(rows)} checklist rows retain every historical first-parent ID")
+            return 0
+        verify_red_proofs(rows, args.sha, args.offline)
         steps, sources, issues = load_evidence(rows, args.sha, args.offline, args.run_id)
         result = report(args.sha, evaluate(rows, steps, issues), sources)
         if args.markdown_output:
