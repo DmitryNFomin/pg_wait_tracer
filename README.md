@@ -1,5 +1,10 @@
 # pg_wait_tracer
 
+> **Working on this repository after 2026-11-10?** `docs/HANDOVER_2026-11-10.md`
+> is the handover: open release blockers, open PRs, the decisions left unmade,
+> and where the measurement evidence lives. `docs/OPERATING_MODEL.md` describes
+> how the work was run.
+
 Real-time, **tiered** PostgreSQL wait event tracer.
 
 pg_wait_tracer attaches to a running PostgreSQL cluster and observes wait

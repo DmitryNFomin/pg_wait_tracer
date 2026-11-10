@@ -94,7 +94,7 @@ measure of how much of my output needed re-derivation before it could be sent.
 I also got this very count wrong twice before pasting the command: it is the
 third instance of the pattern in section 3, inside the document about it.
 
-## 3. The failure pattern, nine instances
+## 3. The failure pattern, ten instances
 
 Most of the wrong claims caught today were **derived comparisons** -- a ratio, a
 scale, a fraction, a generalisation across captures -- and the measurements
@@ -136,6 +136,19 @@ code-behaviour claims.
 
 Three of those nine were published where the owner can read them, on #381, and
 all three are corrected there with the originals left visible.
+
+**Instance ten, added after the rest of this document was written, and the
+only one of the ten an adviser caught before it reached anyone.** Committing the
+#115 harness for #795, I wrote in its README and in the handover that four files
+it depends on were "gone everywhere", on the strength of a `find / -xdev` on
+three gate boxes, a `find` of this Mac and `git ls-files`. An adviser ran
+`git log --all --diff-filter=A --name-only` and found three of the four on pushed
+`preserve/*` branches, `kernel_cpu_arbiter.py` in four distinct versions. The
+claim was false, and the shape is the familiar one: I searched the places that
+confirm a present state and called the result an absence. `git ls-files` answers
+"is it tracked now"; only `git log --all` answers "does it exist". The entry in
+`REPOSITORY_TRAPS.md` about absence claims needed this exact line and did not
+have it.
 
 **On "what I have changed": instance (9) happened after I wrote, in the first
 draft of this document, that I had stopped publishing derived comparisons.** So I
