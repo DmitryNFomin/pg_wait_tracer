@@ -151,15 +151,17 @@ CAPS="$TRACE_DIR/phase_capabilities.jsonl"
 check $? "$CAPS exists and is non-empty (#848)"
 if [[ -s "$CAPS" ]]; then
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$CAPS" <<'PYEOF'
-import json, sys
+import json, os, sys
 from testutil import resolve_declared_phase_mask
 expected = resolve_declared_phase_mask()
+# box-check declares 0 for OS=el8. Its Ubuntu markers-absent rehearsal
+# also declares 0, but forces only attachment off: capability stays available.
 records = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 assert len(records) == 1, records
 r = records[0]
 assert r["version"] == 1 and int(r["start_wall_ns"]) > 0 and r["kernel_release"], r
 for p in ("execute", "plan"):
-    if expected:
+    if expected or os.environ.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1":
         assert r[p]["state"] == "available" and r[p]["reason"] == "none", (p, r)
     else:
         assert r[p]["state"] == "unavailable" and r[p]["reason"] == "kernel_no_ref_ctr", (p, r)

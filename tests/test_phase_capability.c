@@ -63,6 +63,90 @@ static void unknown(uint64_t a, uint64_t b, const char *why)
           w.phase[1].value.state == PGWT_PHASE_UNKNOWN, why);
     pgwt_phase_window_free(&w);
 }
+/* Check both phases, including the aggregate and the exact returned range. */
+static void one_range(uint64_t lo, uint64_t hi, enum pgwt_phase_state state,
+                      const char *reason, const char *message)
+{
+    struct pgwt_phase_window w = readwin(lo, hi);
+    for (int p = 0; p < PGWT_CAP_PHASE_COUNT; p++) {
+        struct pgwt_phase_result *r = &w.phase[p];
+        CHECK(r->value.state == state && !strcmp(r->value.reason, reason) &&
+              r->n_ranges == 1 && r->ranges[0].from_ns == lo &&
+              r->ranges[0].to_ns == hi && r->ranges[0].value.state == state &&
+              !strcmp(r->ranges[0].value.reason, reason), message);
+    }
+    pgwt_phase_window_free(&w);
+}
+static void corrupt_records(void)
+{
+    const char *available100 =
+        "{\"version\":1,\"start_wall_ns\":\"100\",\"kernel_release\":\"fixture\","
+        "\"execute\":{\"state\":\"available\",\"reason\":\"none\"},"
+        "\"plan\":{\"state\":\"available\",\"reason\":\"none\"}}\n";
+    const char *corrupt200 =
+        "{\"version\":1,\"start_wall_ns\":\"200\",\"kernel_release\":\"fixture\","
+        "\"execute\":{\"state\":\"unavailable\",\"reason\":\"kernel_no_ref_ctr\"},\"pl#corrupt\n";
+    const char *available300 =
+        "{\"version\":1,\"start_wall_ns\":\"300\",\"kernel_release\":\"fixture\","
+        "\"execute\":{\"state\":\"available\",\"reason\":\"none\"},"
+        "\"plan\":{\"state\":\"available\",\"reason\":\"none\"}}\n";
+    put(available100, "w"); put(corrupt200, "a"); put(available300, "a");
+    one_range(100, 200, PGWT_PHASE_UNKNOWN, "invalid_record",
+              "corrupt middle line invalidates previous valid start [100,200)");
+    one_range(200, 300, PGWT_PHASE_UNKNOWN, "invalid_record",
+              "corrupt middle line cannot extend available over [200,300)");
+    one_range(300, 400, PGWT_PHASE_AVAILABLE, "none",
+              "corrupt middle line preserves next valid start [300,400)");
+    struct pgwt_phase_window w = readwin(150, 350);
+    for (int p = 0; p < PGWT_CAP_PHASE_COUNT; p++) {
+        struct pgwt_phase_result *r = &w.phase[p];
+        CHECK(r->value.state == PGWT_PHASE_MIXED && r->n_ranges == 2 &&
+              r->ranges[0].from_ns == 150 && r->ranges[0].to_ns == 300 &&
+              r->ranges[0].value.state == PGWT_PHASE_UNKNOWN &&
+              !strcmp(r->ranges[0].value.reason, "invalid_record") &&
+              r->ranges[1].from_ns == 300 && r->ranges[1].to_ns == 350 &&
+              r->ranges[1].value.state == PGWT_PHASE_AVAILABLE &&
+              !strcmp(r->ranges[1].value.reason, "none"),
+              "unknown and available coverage produces mixed with clipped ranges");
+    }
+    pgwt_phase_window_free(&w);
+    put(available100, "w"); put(corrupt200, "a");
+    one_range(100, 200, PGWT_PHASE_UNKNOWN, "invalid_record",
+              "corrupt last complete line invalidates previous start [100,200)");
+    one_range(200, 400, PGWT_PHASE_UNKNOWN, "invalid_record",
+              "corrupt last complete line stays unknown through requested end");
+    /* A record before the immediately preceding start remains trustworthy. */
+    put(available100, "w"); put(available300, "a"); put(corrupt200, "a");
+    one_range(100, 300, PGWT_PHASE_AVAILABLE, "none",
+              "corrupt last complete line preserves earlier closed interval");
+    one_range(300, 400, PGWT_PHASE_UNKNOWN, "invalid_record",
+              "corrupt last complete line invalidates last start through window end");
+    put(corrupt200, "w"); put(available300, "a");
+    one_range(100, 300, PGWT_PHASE_UNKNOWN, "invalid_record",
+              "corrupt first line makes prefix unknown with invalid_record");
+    one_range(300, 400, PGWT_PHASE_AVAILABLE, "none",
+              "corrupt first line preserves next valid record");
+    put(corrupt200, "w");
+    w = readwin(100, 400);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_UNKNOWN &&
+          w.phase[1].value.state == PGWT_PHASE_UNKNOWN &&
+          !strcmp(w.phase[0].value.reason, "invalid_record") &&
+          !strcmp(w.phase[1].value.reason, "invalid_record"),
+          "only corrupt complete record is unknown with invalid_record");
+    pgwt_phase_window_free(&w);
+    put(available100, "w"); put("\n", "a"); put(available300, "a");
+    one_range(100, 300, PGWT_PHASE_UNKNOWN, "invalid_record",
+              "empty complete line is an invalid record");
+    one_range(300, 400, PGWT_PHASE_AVAILABLE, "none",
+              "valid record after empty line keeps its state");
+    /* Same bytes without LF are a torn tail, not a committed corrupt line. */
+    put(available100, "w");
+    FILE *f = fopen(path, "a");
+    size_t n = strlen(corrupt200) - 1;
+    if (!f || fwrite(corrupt200, 1, n, f) != n || fclose(f)) exit(2);
+    one_range(100, 400, PGWT_PHASE_AVAILABLE, "none",
+              "torn corrupt tail does not invalidate earlier valid record");
+}
 static void no_allocations(void *p) { (void)p; }
 static void *fail_allocation(size_t n) { (void)n; return NULL; }
 int main(void)
@@ -100,7 +184,13 @@ int main(void)
           w.phase[0].ranges[0].to_ns == 200, "last start extends to window end");
     pgwt_phase_window_free(&w);
     deny_read = 1; unknown(100, 200, "EACCES sidecar is unknown"); deny_read = 0;
-    unknown(50, 150, "part of window before first record makes aggregate unknown");
+    w = readwin(50, 150);
+    CHECK(w.phase[0].value.state == PGWT_PHASE_MIXED &&
+          w.phase[1].value.state == PGWT_PHASE_MIXED &&
+          w.phase[0].n_ranges == 2 &&
+          !strcmp(w.phase[0].ranges[0].value.reason, "before_first_record"),
+          "window spanning before-first unknown and known states is mixed");
+    pgwt_phase_window_free(&w);
     unknown(1, 100, "window entirely before first record is unknown");
     unknown(100, 100, "empty window is unknown");
     unknown(200, 100, "reversed window is unknown");
@@ -168,9 +258,11 @@ int main(void)
           "recovery removes fragment without adding a bad or blank line");
     put("bad complete line\n", "a");
     w = readwin(300, 400);
-    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
-          w.phase[1].value.state == PGWT_PHASE_AVAILABLE,
-          "bad complete line keeps earlier valid records");
+    CHECK(w.phase[0].value.state == PGWT_PHASE_UNKNOWN &&
+          w.phase[1].value.state == PGWT_PHASE_UNKNOWN &&
+          !strcmp(w.phase[0].value.reason, "invalid_record") &&
+          !strcmp(w.phase[1].value.reason, "invalid_record"),
+          "bad complete line invalidates preceding start");
     pgwt_phase_window_free(&w);
     put("bad complete line\n", "w"); put(first, "a");
     w = readwin(100, 200);
@@ -207,9 +299,11 @@ int main(void)
     if (!binary_line || fwrite(nul_record, 1, sizeof(nul_record) - 1, binary_line) != sizeof(nul_record) - 1 ||
         fclose(binary_line)) return 2;
     w = readwin(100, 200);
-    CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE &&
-          w.phase[1].value.state == PGWT_PHASE_UNAVAILABLE,
-          "embedded NUL line is skipped without hiding earlier valid records");
+    CHECK(w.phase[0].value.state == PGWT_PHASE_UNKNOWN &&
+          w.phase[1].value.state == PGWT_PHASE_UNKNOWN &&
+          !strcmp(w.phase[0].value.reason, "invalid_record") &&
+          !strcmp(w.phase[1].value.reason, "invalid_record"),
+          "embedded NUL complete line invalidates preceding start");
     pgwt_phase_window_free(&w);
     put(large_tail, "w");
     put("\n", "a"); put(first, "a");
@@ -229,7 +323,7 @@ int main(void)
           pgwt_phase_append(dir, getgid(), &b, &errors) == 0, "append asymmetric unknown restart");
     w = readwin(100, 300);
     CHECK(w.phase[0].value.state == PGWT_PHASE_AVAILABLE && w.phase[0].n_ranges == 1 &&
-          w.phase[1].value.state == PGWT_PHASE_UNKNOWN, "same states coalesce per phase; unknown dominates mixed");
+          w.phase[1].value.state == PGWT_PHASE_MIXED, "same states coalesce per phase; known and unknown states are mixed");
     pgwt_phase_window_free(&w);
     struct pgwt_phase_record c = rec(200, 1, 0, 1);
     CHECK(pgwt_phase_append(dir, getgid(), &c, &errors) == 0, "append equal start time");
@@ -247,7 +341,7 @@ int main(void)
           w.phase[0].ranges[0].from_ns == a.start_wall_ns, "timestamp survives JSON without double precision loss");
     pgwt_phase_window_free(&w);
     w = readwin(a.start_wall_ns - 1, a.start_wall_ns + 1);
-    CHECK(w.phase[0].value.state == PGWT_PHASE_UNKNOWN && w.phase[0].n_ranges == 2 &&
+    CHECK(w.phase[0].value.state == PGWT_PHASE_MIXED && w.phase[0].n_ranges == 2 &&
           w.phase[0].ranges[1].from_ns == a.start_wall_ns,
           "one-nanosecond prefix exposes any timestamp rounding");
     pgwt_phase_window_free(&w);
@@ -277,7 +371,9 @@ int main(void)
             strstr(first, "write_failures=")) logged++;
     fclose(warnings);
     CHECK(logged == 3, "every failed write emits one diagnostic with its counter");
-    rmdir(path); rmdir(dir);
+    rmdir(path);
+    corrupt_records();
+    unlink(path); rmdir(dir);
     printf("phase_capability: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

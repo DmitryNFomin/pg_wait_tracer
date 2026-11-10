@@ -256,7 +256,7 @@ int pgwt_phase_read_window(const char *dir, uint64_t from, uint64_t to,
 {
     char path[4096], line[4096];
     struct pgwt_phase_record prev = {0};
-    int have_prev = 0;
+    int have_prev = 0, saw_invalid = 0;
     memset(out, 0, sizeof(*out));
     if (from >= to) return unknown_window(out, "invalid_window");
     if (make_path(path, sizeof(path), dir) != 0) return unknown_window(out, "unreadable_file");
@@ -268,43 +268,43 @@ int pgwt_phase_read_window(const char *dir, uint64_t from, uint64_t to,
     while (!failure) {
         int got_line = read_line(f, line, sizeof(line));
         if (got_line == 0) break;
-        /* A complete corrupt line must not poison valid observations on
-         * either side. read_line consumes it through LF, including NULs or
-         * oversized lines. Real stream errors still fail below via ferror. */
-        if (got_line < 0) {
-            if (ferror(f)) break;
+        if (got_line < 0 && ferror(f)) break;
+        struct pgwt_phase_record next = {0};
+        int parsed = got_line < 0 ? -1 : parse_record(line, &next);
+        if (parsed == -2) { failure = "unsupported_version"; break; }
+        if (parsed != 0) {
+            /* No field of a corrupt record, including its timestamp, is
+             * trustworthy. Invalidate the pending interval from the previous
+             * valid start through the next valid start (or the window end).
+             * A torn tail never reaches here: read_line returns 0 for it. */
+            saw_invalid = 1;
+            for (int p = 0; p < PGWT_CAP_PHASE_COUNT; p++)
+                prev.phase[p] = value(PGWT_PHASE_UNKNOWN, "invalid_record");
             continue;
         }
-        if (line[0] == 0) continue;
-        struct pgwt_phase_record next = {0};
-        int parsed = parse_record(line, &next);
-        if (parsed == -2) { failure = "unsupported_version"; break; }
-        if (parsed != 0) continue;
         if (have_prev && next.start_wall_ns < prev.start_wall_ns) { failure = "unordered_records"; break; }
         if (have_prev) {
             if (interval(out, &prev, next.start_wall_ns, from, to) != 0) failure = "allocation_failed";
         } else if (from < next.start_wall_ns) {
             struct pgwt_phase_record unknown = {.start_wall_ns = from};
             for (int p = 0; p < PGWT_CAP_PHASE_COUNT; p++)
-                unknown.phase[p] = value(PGWT_PHASE_UNKNOWN, "before_first_record");
+                unknown.phase[p] = value(PGWT_PHASE_UNKNOWN,
+                                         saw_invalid ? "invalid_record" : "before_first_record");
             if (interval(out, &unknown, next.start_wall_ns, from, to) != 0) failure = "allocation_failed";
         }
         prev = next; have_prev = 1;
     }
     if (ferror(f)) failure = "unreadable_file";
     if (fclose(f) != 0) failure = "unreadable_file";
-    if (!failure && !have_prev) failure = "no_records";
+    if (!failure && !have_prev) failure = saw_invalid ? "invalid_record" : "no_records";
     if (!failure && interval(out, &prev, to, from, to) != 0) failure = "allocation_failed";
     if (failure) return unknown_window(out, failure);
     for (int p = 0; p < PGWT_CAP_PHASE_COUNT; p++) {
         struct pgwt_phase_result *r = &out->phase[p];
         r->value = r->n_ranges ? r->ranges[0].value : value(PGWT_PHASE_UNKNOWN, "no_records");
-        for (size_t i = 0; i < r->n_ranges; i++) {
-            if (r->ranges[i].value.state == PGWT_PHASE_UNKNOWN) {
-                r->value = r->ranges[i].value; break;
-            }
-            if (!same(&r->value, &r->ranges[i].value)) r->value = value(PGWT_PHASE_MIXED, "mixed_runs");
-        }
+        /* Adjacent equal values are already coalesced. Unknown is a range
+         * state too: combining it with different coverage must report mixed. */
+        if (r->n_ranges > 1) r->value = value(PGWT_PHASE_MIXED, "mixed_runs");
     }
     return 0;
 }

@@ -372,15 +372,19 @@ a backward clock step (out-of-order records) makes the file unknown.
 
 The result is independent per phase: available, unavailable with reason,
 mixed with clipped ranges, or unknown. Adjacent equal state/reason ranges
-coalesce. A reason change also produces mixed. Any unknown interval,
-including any part before the first record, makes the aggregate unknown;
-valid ranges are still returned for partial coverage. Missing, unreadable,
-empty, or unsupported-version files return unknown, without consulting the
-reader host. An incomplete last line is ignored. Complete malformed lines are
-skipped, preserving valid observations before and after them; the preceding
-valid record still applies until the next valid start. A file with no valid
-records is unknown. An unsupported version still makes the entire file unknown,
-even outside the requested interval. Blank lines are ignored.
+coalesce. A reason change also produces mixed. Windows combining unknown
+and known coverage report mixed with their ranges; a window entirely within
+one unknown range reports unknown. Coverage before the first record is unknown.
+Missing, unreadable, empty, or unsupported-version files return unknown, without
+consulting the reader host. An incomplete last line is ignored. A complete
+malformed or unparseable line (including an empty line) makes coverage from the
+previous valid start to the next valid start unknown, reason `invalid_record`:
+no timestamp in the corrupt record can be trusted. Without a previous valid
+start, that unknown prefix starts at the requested window's beginning; without
+a next valid start, it extends through the requested end. Valid observations
+outside that interval keep their states. A file with no valid records is
+unknown. An unsupported version still makes the entire file unknown, even
+outside the requested interval.
 
 Keep/copy this file with archived traces, including summary-only archives.
 Like the other `.jsonl` sidecars, retention preserves it under both hours

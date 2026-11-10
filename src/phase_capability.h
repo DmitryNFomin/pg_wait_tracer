@@ -62,10 +62,13 @@ int pgwt_phase_append(const char *trace_dir, gid_t trace_gid,
                       const struct pgwt_phase_record *record,
                       uint64_t *write_failures);
 
-/* Complete malformed lines are skipped; unsupported versions fail closed.
+/* Complete malformed lines invalidate coverage from the previous valid
+ * start (or window start) until the next valid start, reason invalid_record.
+ * Torn tails are ignored; unsupported versions fail closed for the file.
  * Output is initialized even on failure. Missing/unreadable/invalid files
  * return -1 with UNKNOWN; success returns 0 (possibly UNKNOWN coverage).
- * UNKNOWN anywhere dominates MIXED. Ranges are clipped/coalesced per phase.
+ * Different state/reason ranges yield MIXED, including UNKNOWN with known
+ * coverage. Ranges are clipped/coalesced per phase.
  * Records apply until the next start, last record through to_ns. No host
  * fallback. Free output with pgwt_phase_window_free, also after failure. */
 int pgwt_phase_read_window(const char *trace_dir, uint64_t from_ns,
