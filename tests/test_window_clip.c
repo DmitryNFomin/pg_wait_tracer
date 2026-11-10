@@ -38,6 +38,9 @@
 #include "wait_event.h"
 #include "pg_wait_tracer.h"
 #include "summary_reader.h"
+#include "event_reader.h"
+#include "map_reader.h"
+#include "window_clip.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1646,26 +1649,12 @@ static void test_cpu_row_measured_bypass(void)
     CHECK_MS(m.offcpu_ms, 0.0, "...with no off-CPU carried over");
     free(m.rows);
 
-    /* 11m. ROUNDING, not truncation. The row accumulator is integer ns and
-     * the split is a double, so every straddling record leaves a fractional
-     * nanosecond; truncating it biases that remainder into off-CPU on EVERY
-     * record. compute.c:1845 rounds for exactly that reason, and a reviewer
-     * showed the claim was untested: changing `(uint64_t)(m + 0.5)` to
-     * `(uint64_t)m` left the whole suite green, because every earlier fixture
-     * splits to a whole nanosecond.
-     *
-     * The fixture is built so the two differ by HALF a nanosecond per record,
-     * and then AMPLIFIED by 2000 records -- not because 1 ns is acceptable,
-     * but because CHECK_MS's tolerance IS 1e-6 ms (one nanosecond), so a
-     * one-record difference sits exactly on its boundary and would pass. 2000
-     * records put the difference at 0.002 ms, two thousand times the
-     * tolerance, which is a gate rather than a coin flip.
-     *
-     * Per record: 2000 ns duration, 1000 ns of it in window (frac 0.5),
-     * cpu_ns 501 -> m = 250.5 ns. Rounded 251, truncated 250.
-     *   CPU*    = 2000 * 251 ns  = 0.502 ms   (truncation: 0.500 ms)
-     *   off-CPU = 2000 * 749 ns  = 1.498 ms   (truncation: 1.500 ms)
-     *   DB Time = 2000 * 1000 ns = 2.000 ms   (unchanged either way) */
+    /* 11m. Cumulative rounding allocates the tie once, at the prefix.
+     * Each record has CPU 501 ns over 2000 ns wall; this window covers its
+     * trailing 1000 ns. F(1000) = round(250.5) = 251, F(2000) = 501,
+     * so the suffix receives 250 CPU ns and 750 off-CPU ns. Separately
+     * rounding both halves to 251 would invent one CPU ns per record.
+     * Amplify by 2000 records to retain this pre-existing rounding check. */
     static struct pgwt_trace_event frac[2000];
     for (int i = 0; i < 2000; i++)
         frac[i] = mk(1, CPU_GAP, WFROM + 1000, 2000, 44, 501);
@@ -1673,12 +1662,10 @@ static void test_cpu_row_measured_bypass(void)
     pgwt_compute_top_events(frac, 2000, &f, WFROM, WTO, 10000.0, &r);
     CHECK_MS(r.db_time_ms, 2.0,
              "2000 half-in-window gaps: DB Time is the clipped wall, 2.000 ms");
-    CHECK_MS(ev_total_ms(&r, CPU_GAP), 0.502,
-             "250.5 ns of measured CPU per record ROUNDS up to 251 ns "
-             "(truncation would read 0.500 ms)");
-    CHECK_MS(r.offcpu_ms, 1.498,
-             "...and the half-nanosecond is not biased into off-CPU "
-             "(truncation would read 1.500 ms)");
+    CHECK_MS(ev_total_ms(&r, CPU_GAP), 0.500,
+             "trailing half receives 501 - round(250.5) = 250 CPU ns per record");
+    CHECK_MS(r.offcpu_ms, 1.500,
+             "...and the trailing residual is 750 off-CPU ns per record");
     CHECK(r.has_measured_cpu != 0,
           "...and this is a measurement, not the unsplit wall (which would "
           "also read 2.000 ms on the CPU row)");
@@ -2993,10 +2980,180 @@ static void test_cpu_integer_aggregation(void)
     }
 }
 
+/* #757 round 4: assertions use integer ns recovered from the public ms
+ * fields, with exact per-window ms expectations as well. Adding binary
+ * floating-point ms would test display conversion instead of allocation. */
+struct cpu_window_totals { uint64_t cpu, off, db, clamp; };
+
+static struct cpu_window_totals cpu_window(const struct pgwt_trace_event *ev,
+                                           uint64_t from, uint64_t to,
+                                           int consumer)
+{
+    struct cpu_window_totals r = {0};
+    struct pgwt_filter f = {0};
+    double wall_ms = (double)(to - from) / 1e6;
+    double cpu_ms = 0, off_ms = 0, db_ms = 0, clamp_ms = 0;
+    if (consumer == 0) {
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model(ev, 1, &f, from, to, wall_ms, &tm);
+        cpu_ms = tm.cpu_ms; off_ms = tm.offcpu_ms; db_ms = tm.db_time_ms;
+        clamp_ms = tm.cpu_clamped_ms;
+        free(tm.rows);
+    } else if (consumer == 1) {
+        struct pgwt_events_result te;
+        pgwt_compute_top_events(ev, 1, &f, from, to, wall_ms, &te);
+        for (int i = 0; i < te.num_rows; i++)
+            if (te.rows[i].event_id == 0) cpu_ms = te.rows[i].total_ms;
+        off_ms = te.offcpu_ms; db_ms = te.db_time_ms;
+        clamp_ms = te.cpu_clamped_ms;
+        free(te.rows);
+    } else if (consumer == 2) {
+        struct pgwt_sessions_result ts;
+        pgwt_compute_top_sessions(ev, 1, &f, from, to, wall_ms, &ts);
+        cpu_ms = ts.cpu_ms; off_ms = ts.offcpu_ms;
+        for (int i = 0; i < ts.num_rows; i++) db_ms += ts.rows[i].db_time_ms;
+        clamp_ms = ts.cpu_clamped_ms;
+        free(ts.rows);
+    } else {
+        struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+        if (!a) abort();
+        pgwt_accum_init(a);
+        struct pgwt_replay_stats st = {0};
+        pgwt_replay_events(a, ev, 1, from, to, NULL, &st);
+        r.cpu = a->tm.cpu_time_ns; r.off = a->tm.offcpu_time_ns;
+        r.db = a->tm.db_time_ns; r.clamp = st.cpu_clamped_ns;
+        pgwt_replay_finish(a);
+        free(a);
+        return r;
+    }
+    r.cpu = llround(cpu_ms * 1e6); r.off = llround(off_ms * 1e6);
+    r.db = llround(db_ms * 1e6); r.clamp = llround(clamp_ms * 1e6);
+    CHECK(cpu_ms == (double)r.cpu / 1e6 && off_ms == (double)r.off / 1e6 &&
+          db_ms == (double)r.db / 1e6 && clamp_ms == (double)r.clamp / 1e6,
+          "757 partition public fields are exact integer-ns conversions");
+    return r;
+}
+
+/* Independent oracle: quotient + remainder, round ties toward +infinity. */
+static uint64_t cpu_endpoint_oracle(uint64_t cpu, uint64_t offset, uint64_t dur)
+{
+    __uint128_t product = (__uint128_t)cpu * offset;
+    return (uint64_t)(product / dur) + (product % dur >= (dur / 2 + dur % 2));
+}
+
+static void test_cpu_partition_additivity(void)
+{
+    const uint64_t cpus[] = {3, 10433333, 150000};
+    const uint64_t durations[] = {4, 10485760, 100000};
+    const char *names[] = {"time_model", "top_events", "top_sessions", "replay"};
+    for (int v = 0; v < 3; v++) {
+        struct pgwt_trace_event ev = mk(42, CPU_GAP, T0 + durations[v],
+                                        durations[v], 99, cpus[v]);
+        /* Half, each third boundary, then all three thirds together. */
+        uint64_t cuts[][4] = {{0, durations[v] / 2, durations[v], 0},
+                             {0, durations[v] / 3, durations[v], 0},
+                             {0, durations[v] * 2 / 3, durations[v], 0},
+                             {0, durations[v] / 3, durations[v] * 2 / 3, durations[v]}};
+        for (int c = 0; c < 4; c++) {
+            int parts = c == 3 ? 3 : 2;
+            for (int consumer = 0; consumer < 4; consumer++) {
+                struct cpu_window_totals whole = cpu_window(&ev, T0, ev.timestamp_ns, consumer);
+                struct cpu_window_totals sum = {0};
+                char msg[200];
+                for (int j = 0; j < parts; j++) {
+                    uint64_t a = cuts[c][j], b = cuts[c][j + 1];
+                    struct cpu_window_totals part = cpu_window(&ev, T0 + a, T0 + b, consumer);
+                    uint64_t measured = cpu_endpoint_oracle(cpus[v], b, durations[v]) -
+                                        cpu_endpoint_oracle(cpus[v], a, durations[v]);
+                    uint64_t want_cpu = measured < b - a ? measured : b - a;
+                    snprintf(msg, sizeof(msg), "757 partition %s cpu=%llu cut=%d part=%d exact CPU/off/DB/clamp",
+                             names[consumer], (unsigned long long)cpus[v], c, j);
+                    CHECK(part.cpu == want_cpu && part.off == b - a - want_cpu &&
+                          part.db == b - a && part.clamp == measured - want_cpu, msg);
+                    sum.cpu += part.cpu; sum.off += part.off; sum.db += part.db; sum.clamp += part.clamp;
+                }
+                snprintf(msg, sizeof(msg), "757 partition %s cpu=%llu cut=%d sum == whole CPU/off/DB/clamp",
+                         names[consumer], (unsigned long long)cpus[v], c);
+                CHECK(sum.cpu == whole.cpu && sum.off == whole.off && sum.db == whole.db &&
+                      sum.clamp == whole.clamp && whole.cpu + whole.clamp == cpus[v] &&
+                      whole.cpu + whole.off == durations[v], msg);
+            }
+        }
+    }
+}
+
+static uint64_t cpu_random(uint64_t *state)
+{
+    /* Fixed xorshift64 seed; independent of libc/platform RNGs. */
+    *state ^= *state << 13; *state ^= *state >> 7; *state ^= *state << 17;
+    return *state;
+}
+
+static void test_cpu_partition_property(void)
+{
+    uint64_t seed = 0x757c0ffee1234567ULL;
+    int bad = 0, bounded = 0, skewed = 0;
+    for (int i = 0; i < 10000; i++) {
+        uint64_t dur = i % 10 == 0 ? 1 : 1 + cpu_random(&seed) % (7 * S(86400));
+        uint64_t cpu = cpu_random(&seed) % ((1ULL << 62) + 1);
+        if (i % 2 == 0) cpu %= dur + 1;
+        if (i == 1) cpu = 1ULL << 62;
+        uint64_t cut = cpu_random(&seed) % (dur + 1);
+        struct pgwt_trace_event ev = mk(42, CPU_GAP, T0 + dur, dur, 99, cpu);
+        uint64_t xl = 0, xr = 0, xw = 0;
+        uint64_t left = pgwt_cpu_clip_ns(&ev, T0, T0 + cut, &xl);
+        uint64_t right = pgwt_cpu_clip_ns(&ev, T0 + cut, T0 + dur, &xr);
+        uint64_t whole = pgwt_cpu_clip_ns(&ev, T0, T0 + dur, &xw);
+        uint64_t expected_left = cpu_endpoint_oracle(cpu, cut, dur);
+        int ok = left <= cut && right <= dur - cut && left + right == whole &&
+                 left + xl == expected_left && right + xr == cpu - expected_left &&
+                 xl + xr == xw && whole + xw == cpu &&
+                 (cut - left) + (dur - cut - right) == dur - whole;
+        if (!ok && bad++ == 0)
+            printf("  property first counterexample i=%d cpu=%llu dur=%llu cut=%llu left=%llu right=%llu excess=%llu+%llu\n",
+                   i, (unsigned long long)cpu, (unsigned long long)dur, (unsigned long long)cut,
+                   (unsigned long long)left, (unsigned long long)right,
+                   (unsigned long long)xl, (unsigned long long)xr);
+        if (cpu <= dur) bounded++; else skewed++;
+    }
+    CHECK(bad == 0, "757 property 10000 seeded partitions conserve CPU/off/wall/excess exactly");
+    CHECK(bounded > 0 && skewed > 0, "757 property exercises both bounded CPU and over-wall skew");
+    printf("  property records=10000 bounded=%d skewed=%d failures=%d seed=0x757c0ffee1234567\n",
+           bounded, skewed, bad);
+}
+
+static void test_cpu_endpoint_bounds(void)
+{
+    struct pgwt_trace_event ev = mk(42, CPU_GAP, UINT64_MAX, UINT64_MAX, 99, UINT64_MAX - 1);
+    uint64_t excess = 0, cut = UINT64_MAX / 2;
+    uint64_t left = pgwt_cpu_clip_ns(&ev, 0, cut, &excess);
+    uint64_t right = pgwt_cpu_clip_ns(&ev, cut, 0, &excess);
+    CHECK(left == cpu_endpoint_oracle(ev.cpu_ns, cut, ev.duration_ns) &&
+          left + right == ev.cpu_ns && excess == 0,
+          "757 bounds maximum 128-bit product and unbounded endpoints conserve");
+    ev.duration_ns = 4; ev.cpu_ns = 3;
+    CHECK(pgwt_cpu_clip_ns(&ev, UINT64_MAX - 2, 0, NULL) == 1,
+          "757 bounds suffix at UINT64_MAX keeps the tie in the prefix");
+    CHECK(pgwt_cpu_clip_ns(&ev, UINT64_MAX - 2, UINT64_MAX - 2, NULL) == 0 &&
+          pgwt_cpu_clip_ns(&ev, 1, 2, NULL) == 0 &&
+          pgwt_cpu_clip_ns(&ev, UINT64_MAX, 0, NULL) == 0 &&
+          pgwt_cpu_clip_ns(&ev, UINT64_MAX, UINT64_MAX - 2, NULL) == 0,
+          "757 bounds empty, outside, touching and reversed windows contribute zero");
+    ev.timestamp_ns = 3;
+    CHECK(pgwt_cpu_clip_ns(&ev, 0, 0, NULL) == 0,
+          "757 bounds impossible record cannot underflow");
+    ev.duration_ns = 0;
+    CHECK(pgwt_cpu_clip_ns(&ev, 0, 0, NULL) == 0,
+          "757 bounds zero duration cannot divide by zero");
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
 
+    test_cpu_partition_additivity();
+    test_cpu_partition_property();
+    test_cpu_endpoint_bounds();
     test_cpu_integer_contract();
     test_cpu_clamped_excess();
     test_cpu_integer_aggregation();
@@ -3053,8 +3210,9 @@ int main(void)
      * `if (str)` / `if (in)` for the same reason section 13's do -- the
      * record-present CHECK is what fails, and the shortfall in this count
      * is what catches a section that stopped running its body at all.
-     * Measured on the merged tree: 317. #757 adds 16 exact assertions. */
-    if (checks < 333) {
+     * Measured before round 4: 354. Round 4 adds 280 partition/property/
+     * endpoint assertions, including all four consumers (floor 634). */
+    if (checks < 634) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

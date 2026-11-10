@@ -167,11 +167,14 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
 # pgwt_compute_aas clipped it, the Overview/Top-N summers did not (+1.28% on a
 # 60 s rehearsal window, unbounded under a lock pileup). Same build shape as
 # test_live_accum: compute.c compiled directly with -DPGWT_SERVER, its only
-# foreign symbol (pgwt_visit_summaries) stubbed in the test. Runs anywhere.
-test_window_clip: test_window_clip.c ../src/compute.c \
+# foreign symbol (pgwt_visit_summaries) stubbed in the test. Round 4 also
+# links the BPF-free replay/reader core to compare all four consumers.
+test_window_clip: test_window_clip.c ../src/compute.c ../src/replay_accum.c \
+                  ../src/map_reader.c ../src/event_reader.c \
+                  $(BUILD)/server_event_writer.o \
                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
                   ../src/window_clip.h
-	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(filter-out %.h,$^) -lm
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(filter-out %.h,$^) -lm -llz4 -lz
 
 # #387: out-of-window / zero-duration CPU records cannot supply a measured
 # signal. Same BPF-free build and summary visitor stub as test_window_clip.

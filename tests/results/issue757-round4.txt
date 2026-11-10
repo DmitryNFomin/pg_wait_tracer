@@ -1,0 +1,136 @@
+#757 round 4: cumulative CPU endpoint allocation
+Baseline: 3e4d5a59. Work performed in the supplied branch/worktree.
+
+Implementation and scope
+src/window_clip.h:35 pgwt_cpu_clip_ns: F(b)-F(a), integer half-up endpoints,
+128-bit products; CPU is capped to clipped wall and integer excess is recorded.
+Allocation is an accounting rule, not knowledge of when CPU actually ran.
+Callers: raw time_model (compute.c:1535), top_events (:1986),
+top_sessions (:2200), CLI replay (replay_accum.c:202).
+Raw clamp accumulators now remain uint64_t until display conversion.
+Replay previously counted the entire record excess in each overlapping window;
+it now allocates that excess with the CPU share so partitions conserve it.
+Summary time_model/top_events/top_sessions read pre-aggregated integers, not
+CPU shares clipped from raw records. Their existing pgwt_offcpu_ns calls remain
+at compute.c:3058, :3321, :3526-3527. The summary AAS visitor bins whole
+per-second records too. Summary-to-raw fallback uses the raw functions above.
+No summary writer, format, or expected-divergence entry was changed.
+Raw AAS bucket fractional allocation and wait-gap observability are outside
+this current-helper-caller change; no new additivity claim is made for them.
+
+Red before production changes
+Command: env CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib
+  make -C tests test_window_clip && ./tests/test_window_clip
+Only tests and their link recipe had changed for this red run.
+The new endpoint-boundary tests were added later and have separate negative controls.
+  FAIL: 757 partition time_model cpu=3 cut=0 sum == whole CPU/off/DB/clamp (test_window_clip.c:3095)
+  FAIL: 757 partition top_events cpu=3 cut=0 sum == whole CPU/off/DB/clamp (test_window_clip.c:3095)
+  FAIL: 757 partition top_sessions cpu=3 cut=0 sum == whole CPU/off/DB/clamp (test_window_clip.c:3095)
+  FAIL: 757 partition replay cpu=3 cut=0 sum == whole CPU/off/DB/clamp (test_window_clip.c:3095)
+  FAIL: 757 partition time_model cpu=10433333 cut=0 sum == whole CPU/off/DB/clamp (test_window_clip.c:3095)
+  property first counterexample i=1 cpu=3373375633202508909 dur=215767218333282 cut=180981190299420 left=180981190299420 right=34786028033862 excess=2829338452484846592+543821413499328896
+  FAIL: 757 property 10000 seeded partitions conserve CPU/off/wall/excess exactly (test_window_clip.c:3146)
+  property records=10000 bounded=5001 skewed=4999 failures=5053 seed=0x757c0ffee1234567
+629 checks, 84 failures
+
+Green and exact tests
+Final C build command:
+env CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib make -C tests <targets below> gen_test_traces CFLAGS='-g -O2 -Wall -Werror=implicit-function-declaration -I../src -I../include -I/opt/homebrew/include -include ../demos/replay-compat.h -L/opt/homebrew/lib'
+All targets below execute from tests/ (./<target>); final command output:
+test_window_clip PASS  | 634 checks, 0 failures
+test_agg_raw_crosscheck PASS  | 270 checks, 0 failed
+test_cpu_split_parity PASS  | 142 checks, 0 failed
+test_io_worker_parity PASS  | 58 checks, 0 failed
+test_io_worker_summary PASS  | 63 checks, 0 failed
+test_replay_window PASS 235 checks, 0 failures | ALL PASSED
+test_replay_fidelity PASS   PASS: no pending aggregates survive completion | ALL PASSED
+test_idle_summary PASS  | 425 checks, 0 failed
+test_idle_accounting PASS  | 170 checks, 0 failed
+test_time_model_absence PASS test_nonempty_windows complete (9 nonempty snapshots) | PASS: test_time_model_absence (0 failures)
+test_live_accum PASS  | 282/282 checks passed
+test_straddler_accounting PASS 48 checks, 0 failures | === test_straddler_accounting: PASS ===
+test_open_cpu_accounting PASS 123 checks, 0 failures | === test_open_cpu_accounting: PASS ===
+test_rotation_open_credit PASS 92 checks, 0 failures | === test_rotation_open_credit: PASS ===
+test_summary_qattr_background PASS PASS: 0 failure(s)
+  property records=10000 bounded=5001 skewed=4999 failures=0 seed=0x757c0ffee1234567
+Property seed 0x757c0ffee1234567; CPU includes 2^62, durations 1 ns to 7 days.
+Additional endpoint cases cover products near UINT128_MAX, unbounded endpoints,
+UINT64_MAX timestamps, zero duration, impossible records and empty/outside windows.
+Each half/third/three-way partition checks CPU, off-CPU, DB Time and clamp excess
+for all four consumers, against an independently computed rational oracle.
+Public ms fields are checked exactly against integer-ns conversions; partition
+sums are compared in ns, avoiding a separate binary-float display-addition effect.
+
+Existing expectations that moved (all other arithmetic expectations retained)
+11m CPU: 0.502 -> 0.500 ms; off-CPU: 1.498 -> 1.500 ms.
+For each CPU=501, wall=2000 ns record, the tested trailing half gets
+501 - round_half_up(501/2) = 250 CPU ns, 750 off-CPU ns. The prefix gets 251.
+There are 2000 records; separately rounding both halves would invent 2000 CPU ns.
+Assertion floor: 333 -> 634 (354 pre-existing executed checks + 280 new checks).
+The .6-ns rounding case still expects 1043334 CPU ns in its trailing tenth.
+The four existing raw/summary time_model/Events cpu_clamped_ms == 0.05 checks pass.
+
+Negative controls (each compiled and executed; restored in a finally block)
+Command: python3 /tmp/757r4/negative-controls.py
+Compilation: clang -g -O2 -Wall -Werror=implicit-function-declaration -DPGWT_SERVER
+  -Isrc -Iinclude -I/opt/homebrew/include -include demos/replay-compat.h
+  tests/test_window_clip.c src/compute.c src/replay_accum.c src/map_reader.c
+  src/event_reader.c build/server_event_writer.o build/wait_event.o
+  build/idle_rule.o build/spawn.o build/cJSON.o -L/opt/homebrew/lib -llz4 -lz -lm
+  -o /tmp/757r4/negative-<mutation>
+per-share: replace endpoint subtraction by round_half_up(C*(b-a)/duration).
+overflow64: remove the 128-bit promotion on both products.
+replay-clamp: count the full record excess per window instead of helper excess.
+per-share:   FAIL: 757 partition time_model cpu=3 cut=0 part=1 exact CPU/off/DB/clamp (tests/test_window_clip.c:3072)
+per-share:   FAIL: 757 bounds suffix at UINT64_MAX keeps the tie in the prefix (tests/test_window_clip.c:3136)
+per-share: 634 checks, 59 failures
+overflow64:   FAIL: 757 property 10000 seeded partitions conserve CPU/off/wall/excess exactly (tests/test_window_clip.c:3119)
+overflow64:   FAIL: 757 bounds maximum 128-bit product and unbounded endpoints conserve (tests/test_window_clip.c:3133)
+overflow64: 634 checks, 2 failures
+replay-clamp:   FAIL: 757 partition replay cpu=150000 cut=0 part=0 exact CPU/off/DB/clamp (tests/test_window_clip.c:3072)
+replay-clamp: 634 checks, 13 failures
+
+Raw versus summary
+Command: demos/build-server-local.sh
+==> pgwt-server ready at /private/tmp/pgwt-codex/agent%2F757-shared-cpu-accounting/pgwt-server
+Command: python3 tests/test_summary_raw_parity.py
+=== test_summary_raw_parity: PASS ===
+Command: python3 tests/test_summary_raw_parity_lib.py
+--- 98 checks, 0 failed ---
+Additionally linked a baseline server with HEAD compute.c/window_clip.h and the
+same server objects/writer as the final server. Instrumented P.compare to save
+every actual extracted field pair, including pairs the existing gate considers
+equal within its old formatting tolerance. Compared baseline/final with exact ==.
+Commands: python3 /tmp/757r4/run-parity.py before; ... after;
+  python3 /tmp/757r4/compare-exact.py
+capture observations=12 field pairs=2892 (raw/summary=1446; stale/raw=1446)
+exact before/after changed pairs=0 new raw/summary disagreements=0
+Thus no measured field needs a new raw/summary value pair reported.
+Command: git diff --exit-code -- src/summary_writer.c src/summary_writer.h tests/summary_raw_parity_expected.json
+Exit 0, no diff.
+
+Other permitted checks
+python3 tests/test_data_offcpu_identity.py -> 6/6 tests passed
+python3 tests/test_data_time_model.py -> 29/29 tests passed
+python3 tests/test_data_events.py -> 85/85 tests passed
+python3 tests/test_data_sessions.py -> 4/4 tests passed
+python3 tests/test_data_filters.py -> 16/16 tests passed
+python3 tests/test_data_window_bound.py -> 192/192 tests passed
+python3 tests/test_data_summary_honesty.py -> 87/87 tests passed
+node --test 'tests/web_unit/*.test.mjs' -> ℹ tests 900 | ℹ pass 900 | ℹ fail 0 | ℹ skipped 0
+scripts/check-test-registration.sh -> OK: test-registration guard (base 42727667d2ea075b4ad8c8f5c5f3dea16d0756b3) — append-only invariant holds
+scripts/check-runner-registration.sh -> OK: runner-registration guard -- every tests/ci_smoke.sh invocation (5) is also invoked by tests/run_all.sh (176 invocations total, including tests/unit_tests.list entries); every candidate test file on disk (169 scanned: tests/test_*.{py,sh} plus tests/web_unit/*.test.mjs) is invoked by a runner or covered by a glob; or is a documented exemption (2 listed, 2 currently invoke no runner).
+git diff --check -> exit 0, no output.
+
+Build limitations / UNVERIFIED
+Native make pgwt-server initially failed on macOS st_mtim/SOCK_CLOEXEC; a flags-only
+attempt then failed on pipe2. The existing demos/build-server-local.sh compatibility
+build resolved these and built the final server. No portability code was changed.
+Optional test_system_event_offcpu build: ld: library bpf not found; not executed.
+Its daemon-object link recipe is unavailable in this macOS server-only build.
+No make check, box-check, ui-gallery, scripts/tree-hash.sh, Linux/live/eBPF checks,
+PR, push, or issue comment was run (per scope).
+Lead report audit attempt: AUDIT INCONCLUSIVE (auditor exit 1). Its CLI output:
+Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)
+Commit message is in .codex-commit-msg. Scratch scripts/binaries/logs are in /tmp/757r4;
+only this evidence file is intentionally included as a new tracked artifact.

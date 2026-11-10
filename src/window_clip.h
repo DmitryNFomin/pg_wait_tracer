@@ -20,22 +20,37 @@ static inline uint64_t event_window_ns(const struct pgwt_trace_event *ev,
     return end > start ? end - start : 0;
 }
 
-/* The shared CPU contract: prorate, clamp to the clipped gap wall, then round
- * once to integer ns. All consumers accumulate these integers before converting
- * to display units. clamped_ns is an optional measurement-skew diagnostic. */
-static inline uint64_t pgwt_cpu_clip_ns(uint64_t cpu_ns, uint64_t clip_ns,
-                                        uint64_t duration_ns, double *clamped_ns)
+/* Allocate measured CPU by cumulative integer endpoints. For the record
+ * [s,e), F(t) = round_half_up(cpu_ns * (clamp(t,s,e) - s) / (e-s));
+ * a window receives F(to) - F(from). Adjacent windows therefore telescope
+ * to exactly the record's CPU, including ties and values above 2^53.
+ * The 128-bit products and rounding additions cannot overflow: each factor
+ * is at most UINT64_MAX, leaving room for duration_ns / 2 in the product.
+ *
+ * This is an additive integer accounting rule; it does not tell us where
+ * inside the interval the CPU was actually used. Zero bounds are unbounded,
+ * as in event_window_ns. The caller supplies a known CPU measurement.
+ * Over-wall CPU is clamped to this window's wall; the optional integer-ns
+ * diagnostic receives the excess, which is additive over partitions too. */
+static inline uint64_t pgwt_cpu_clip_ns(const struct pgwt_trace_event *ev,
+                                        uint64_t from_ns, uint64_t to_ns,
+                                        uint64_t *clamped_ns)
 {
-    if (clip_ns == 0 || duration_ns == 0) return 0;
-    if (clip_ns == duration_ns && cpu_ns <= clip_ns) return cpu_ns;
-    double frac = (double)clip_ns / (double)duration_ns;
-    double measured = (double)cpu_ns * frac;
-    if (measured >= (double)clip_ns) {
-        if (clamped_ns) *clamped_ns += measured - (double)clip_ns;
-        return clip_ns;
+    uint64_t dur = ev->duration_ns;
+    if (dur == 0 || dur > ev->timestamp_ns) return 0;
+    uint64_t s = ev->timestamp_ns - dur;
+    uint64_t a = s, b = ev->timestamp_ns;
+    if (from_ns != 0 && a < from_ns) a = from_ns;
+    if (to_ns != 0 && b > to_ns) b = to_ns;
+    if (b <= a) return 0;
+    uint64_t fa = (uint64_t)(((__uint128_t)ev->cpu_ns * (a - s) + dur / 2) / dur);
+    uint64_t fb = (uint64_t)(((__uint128_t)ev->cpu_ns * (b - s) + dur / 2) / dur);
+    uint64_t share = fb - fa, wall = b - a;
+    if (share > wall) {
+        if (clamped_ns) *clamped_ns += share - wall;
+        return wall;
     }
-    uint64_t rounded = (uint64_t)(measured + 0.5);
-    return rounded < clip_ns ? rounded : clip_ns;
+    return share;
 }
 
 /* Off-CPU is the nonnegative integer remainder of the CPU gap wall. Summary
