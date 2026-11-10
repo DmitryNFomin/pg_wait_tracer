@@ -81,14 +81,15 @@ executions query needs, are gated on --mode full only"*).
 sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 ```
 
-> **START ON AN EMPTY TRACE DIRECTORY.** Summary files are now **v10**
-> (`PGWT_SUMMARY_VERSION`, `src/summary_writer.h`): CPU-gap observations
-> exclude measured wait spin (#763). Every v9 file is refused, including
-> correct post-#766 files, because v9 has no accounting-rule provenance.
+> **START ON AN EMPTY TRACE DIRECTORY.** Summary files are now **v11**
+> (`PGWT_SUMMARY_VERSION`, `src/summary_writer.h`): per-event entries carry
+> full occurrence durations at close for Top Events' average (#818),
+> separately from clipped wall credit. Every v10 or earlier file is refused
+> because it lacks that numerator.
 > Each bump (v3's idle-event exclusion, v4's exact idle scalars, v5's
 > missing CPU* row, v6's io_worker exclusion, v7's measured-CPU split,
 > v8's long-interval spread, v9's open on-CPU credit and per-session split,
-> v10's CPU-gap-only observation count)
+> v10's CPU-gap-only observation count, v11's full-duration event sum)
 > changed the accounting rule the per-second records precompute at WRITE
 > time, so a directory holding
 > seconds from two different versions would blend two accounting rules
@@ -100,10 +101,10 @@ sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 > The answer is still correct, but the 900 s Overview window is exactly the
 > request that fast path exists for: taking the raw path for it costs the
 > paint latency this project spent a week reducing, live, during a walk. If
-> a v9 directory is left in place for a v10 server, it is refused on the
+> a v10 directory is left in place for a v11 server, it is refused on the
 > summary fast path and the whole 900 s Overview request takes the raw path.
-> If `/var/lib/pgwt/traces` holds anything written before the v10 upgrade
-> (or any earlier version), move it aside (`mv traces traces.pre-v10`)
+> If `/var/lib/pgwt/traces` holds anything written before the v11 upgrade
+> (or any earlier version), move it aside (`mv traces traces.pre-v11`)
 > before starting the daemon. A fresh `mktemp -d` directory, as
 > `tests/demo_rehearsal.sh` uses, is never affected.
 

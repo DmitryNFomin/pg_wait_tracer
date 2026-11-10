@@ -1499,12 +1499,13 @@ static size_t strip_v4_additions(const uint8_t *in, size_t in_size,
 {
     /* Walk the current layout and remove fields absent before round 2.
      *   class_ns                      PGWT_NUM_CLASSES * 8
-     *   events    (non-empty slots)   28 + HISTOGRAM_BUCKETS*8 each
+     *   events    (non-empty slots)   36 + HISTOGRAM_BUCKETS*8 each
      *   sessions  (non-empty slots)   44 each
      *   queries                       36 + NUM_CLASSES*8 + 1 + nte*20 + [8]
      *   trailer                       [12]
      * The bracketed parts are what round 2 added; v7's trailer and v9's
-     * 12 session bytes must also come off to recover the historical layout. */
+     * 12 session bytes and v11's per-event full_duration_ns must also come
+     * off to recover the historical layout. */
     const uint8_t *p = in;
     uint8_t *o = out;
     size_t n;
@@ -1513,8 +1514,10 @@ static size_t strip_v4_additions(const uint8_t *in, size_t in_size,
 
     for (int i = 0; i < SUMMARY_MAX_EVENTS; i++) {
         const struct pgwt_summary_event *e = &src->events[i];
-        if (e->event_id == 0 && e->count == 0) continue;
-        n = 28 + HISTOGRAM_BUCKETS * 8;  memcpy(o, p, n); p += n; o += n;
+        if (e->event_id == 0 && e->count == 0 && e->total_ns == 0) continue;
+        n = 20;                        memcpy(o, p, n); p += n; o += n;
+        p += 8;                          /* DROP v11 full_duration_ns */
+        n = 8 + HISTOGRAM_BUCKETS * 8;  memcpy(o, p, n); p += n; o += n;
     }
     for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++) {
         const struct pgwt_summary_session *ss = &src->sessions[i];
@@ -1587,16 +1590,21 @@ static void test_old_layout_is_incompatible(void)
     size_t old_size = strip_v4_additions(current, current_size, acc, old);
 
     /* Later additions must also come off to recover the actual old layout:
-     * 12 per v9 session + 8 per query + 12 + v7's 40. */
-    int nq = 0, ns = 0;
+     * 8 per v11 event + 12 per v9 session + 8 per query + 12 + v7's 40. */
+    int nev = 0, nq = 0, ns = 0;
+    for (int i = 0; i < SUMMARY_MAX_EVENTS; i++)
+        if (!(acc->events[i].event_id == 0 && acc->events[i].count == 0 &&
+              acc->events[i].total_ns == 0)) nev++;
     for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
         if (!(acc->sessions[i].pid == 0 && acc->sessions[i].db_time_ns == 0)) ns++;
     for (int i = 0; i < SUMMARY_MAX_QUERIES; i++)
         if (!(acc->queries[i].query_id == 0 && acc->queries[i].count == 0)) nq++;
     CHECK(nq > 0, "the record has %d query entries", nq);
-    CHECK(current_size - old_size == (size_t)ns * 12 + (size_t)nq * 8 + 12 + 40,
-          "the round-2 payload is %zu bytes shorter = %d sessions x 12 + "
-          "%d queries x 8 + 12 + 40", current_size - old_size, ns, nq);
+    CHECK(current_size - old_size == (size_t)nev * 8 + (size_t)ns * 12 +
+                                    (size_t)nq * 8 + 12 + 40,
+          "the round-2 payload is %zu bytes shorter = %d events x 8 + "
+          "%d sessions x 12 + %d queries x 8 + 12 + 40",
+          current_size - old_size, nev, ns, nq);
 
     /* 9a. Current bytes round-trip exactly -- the control, without which a
      * mismatch below could just mean the parser is broken for everything. */
@@ -1633,11 +1641,14 @@ static void test_old_layout_is_incompatible(void)
             back->num_queries = acc->num_queries;
             int rc = pgwt_summary_deserialize(old, old_size, back, 4);
             int wrong = (rc != 0) || (back->idle_ns != acc->idle_ns);
+            printf("  9b: wrong=%d (rc=%d, idle_ns %llu vs the real %llu)\n",
+                   wrong, rc, (unsigned long long)back->idle_ns,
+                   (unsigned long long)acc->idle_ns);
             CHECK(wrong,
                   "an old-layout payload read as v4 is REFUSED or mis-parsed "
-                  "(rc=%d, idle_ns %llu vs the real %llu) -- this is why the "
+                  "(wrong=%d, rc=%d, idle_ns %llu vs the real %llu) -- this is why the "
                   "version had to move rather than the layout change in place",
-                  rc, (unsigned long long)back->idle_ns,
+                  wrong, rc, (unsigned long long)back->idle_ns,
                   (unsigned long long)acc->idle_ns);
             free(back);
         }
@@ -1653,7 +1664,9 @@ static void test_old_layout_is_incompatible(void)
             back->num_events = acc->num_events;
             back->num_sessions = acc->num_sessions;
             back->num_queries = acc->num_queries;
-            CHECK(pgwt_summary_deserialize(old, old_size, back, 2) == 0,
+            int rc = pgwt_summary_deserialize(old, old_size, back, 2);
+            printf("  9c: rc=%d (the same old-layout payload as v2)\n", rc);
+            CHECK(rc == 0,
                   "the same old-layout payload parses cleanly as v2 -- so 9b "
                   "is the v4-only fields, not a malformed buffer");
             free(back);
@@ -3587,8 +3600,12 @@ static void test_v9_session_fields(void)
                 back->num_events = w->accum.num_events;
                 back->num_sessions = w->accum.num_sessions;
                 back->num_queries = w->accum.num_queries;
-                rc = pgwt_summary_deserialize(v9, size, back, 9);
-                CHECK(rc == 0, "16d: saturated v9 session parses (%d)", rc);
+                /* The writer emits the current format: v11's extra event
+                 * bytes precede this session, so use its version to locate
+                 * the v9 session fields without shifting their offsets. */
+                rc = pgwt_summary_deserialize(v9, size, back,
+                                               PGWT_SUMMARY_VERSION);
+                CHECK(rc == 0, "16d: saturated current-format session parses (%d)", rc);
                 ss = NULL;
                 for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++)
                     if (back->sessions[i].pid == e.pid) {

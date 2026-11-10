@@ -531,7 +531,12 @@
  * Reject ALL v9 files, including correct post-#766 files. Any overlapping
  * request recomputes its whole window from raw; #779 preserves same-hour
  * raw fallback under byte-cap retention. */
-#define PGWT_SUMMARY_VERSION  10
+/* v11 (#818): events[].full_duration_ns sums exact occurrences' FULL
+ * durations at close, alongside max_ns and histogram. total_ns remains the
+ * per-second clipped wall credit. Each event grows from 156 to 164 bytes.
+ * Older files lack the average numerator and are refused for computation;
+ * the existing window preflight recomputes the whole request from raw. */
+#define PGWT_SUMMARY_VERSION  11
 
 /* `eff_event` sentinel: the producer resolved no effective wait id, so the
  * writer uses evt->old_event and counts the push. Not 0 -- 0 is a valid id
@@ -582,7 +587,7 @@
  * its buffer from it and refuses to write past out_size.
  *
  *   class_ns   PGWT_NUM_CLASSES * 8
- *   events     SUMMARY_MAX_EVENTS   * (4+8+8+8 + HISTOGRAM_BUCKETS*8)
+ *   events     SUMMARY_MAX_EVENTS   * (4+8+8+8+8 + HISTOGRAM_BUCKETS*8)
  *   sessions   SUMMARY_MAX_SESSIONS * (4+8+8+4+8)
  *              + v9 (#424): 8 + 4 per session (off-CPU and observations)
  *   queries    SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES*8 + 1
@@ -592,7 +597,7 @@
  */
 #define PGWT_SUMMARY_SERIALIZE_MAX                                            \
     ((size_t)(PGWT_NUM_CLASSES * 8)                                           \
-     + (size_t)SUMMARY_MAX_EVENTS   * (28 + HISTOGRAM_BUCKETS * 8)            \
+     + (size_t)SUMMARY_MAX_EVENTS   * (36 + HISTOGRAM_BUCKETS * 8)            \
      + (size_t)SUMMARY_MAX_SESSIONS * 44                                      \
      + (size_t)SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES * 8 + 1          \
                                        + SUMMARY_QUERY_TOP_EVENTS * 20 + 8)   \
@@ -601,9 +606,10 @@
 /* ── Per-second accumulator ───────────────────────────────── */
 
 struct pgwt_summary_event {
-    uint32_t event_id;         /* wait_event_info, 0 = unused slot */
+    uint32_t event_id;         /* wait_event_info; 0 is also CPU */
     uint64_t count;
-    uint64_t total_ns;
+    uint64_t total_ns;         /* clipped wall credit in this second */
+    uint64_t full_duration_ns; /* full exact durations, only at close (v11) */
     uint64_t max_ns;
     uint64_t histogram[HISTOGRAM_BUCKETS];
 };

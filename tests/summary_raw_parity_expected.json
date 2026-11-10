@@ -36,46 +36,6 @@
   }
  },
  "straddle_130s": {
-  "events/row/Client:ClientWrite/aas": {
-   "issue": 818,
-   "raw": 0.5384615384615384,
-   "summary": 0.5153846153846153
-  },
-  "events/row/Client:ClientWrite/avg_us": {
-   "issue": 818,
-   "raw": 11818181.818181818,
-   "summary": 6090909.09090909
-  },
-  "events/row/Client:ClientWrite/pct": {
-   "issue": 818,
-   "raw": 27.765217322322442,
-   "summary": 26.575279437080052
-  },
-  "events/row/Client:ClientWrite/total_ms": {
-   "issue": 818,
-   "raw": 70000,
-   "summary": 67000
-  },
-  "events/row/Lock:relation/aas": {
-   "issue": 818,
-   "raw": 0.43846153846153846,
-   "summary": 0.46153846153846156
-  },
-  "events/row/Lock:relation/avg_us": {
-   "issue": 818,
-   "raw": 500000,
-   "summary": 526315.789473684
-  },
-  "events/row/Lock:relation/pct": {
-   "issue": 818,
-   "raw": 22.608819819605415,
-   "summary": 23.7987577048478
-  },
-  "events/row/Lock:relation/total_ms": {
-   "issue": 818,
-   "raw": 57000,
-   "summary": 60000
-  },
   "time_model/io_worker_busy_pct": {
    "issue": 410,
    "raw": 0,
