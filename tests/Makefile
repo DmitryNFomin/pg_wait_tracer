@@ -1063,8 +1063,11 @@ test_open_overlay: test_open_overlay.c ../src/open_overlay.c ../src/cJSON.c
 # record rule is unreachable), plus a bypass suite for the lookahead budget,
 # an unreadable block header and a SAMPLES tail. Same build shape as
 # test_replay_fidelity: the reader and replay accumulator against the BPF-free
-# accumulator core, so no bpftool is needed.
-test_replay_window: test_replay_window.c ../src/event_reader.c replay_accum.o \
+# accumulator core, so no bpftool is needed. Also links the real CLI replay
+# entry point and printers to capture the zero-wall CPU skew warning.
+test_replay_window: test_replay_window.c ../src/event_reader.c \
+                    ../src/replay.c ../src/output.c ../src/snapshot.c \
+                    ../src/cmdline.c replay_accum.o \
                     map_reader_core.o $(BUILD)/server_event_writer.o \
                     $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
                     $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o

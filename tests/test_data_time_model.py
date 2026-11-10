@@ -147,6 +147,50 @@ def check_cpu_aas_contract(t):
         cleanup_traces(trace_dir)
 
 
+def check_zero_wall_cpu_diagnostic(t):
+    instant = BASE_TS + 1_000_000_000
+    trace_dir = generate_traces({
+        "cpu_measured": 1,
+        "backends": [{"pid": 42, "type": "client"}],
+        "events": [{"pid": 42, "ts": instant, "dur": 0,
+                    "cpu": 700000, "old": CPU, "new": CPU}],
+    })
+    try:
+        with ServerHarness(trace_dir) as srv:
+            for cmd in ("time_model", "top_events", "top_sessions"):
+                def query(start, end):
+                    result = srv.query(cmd, from_=start, to_=end,
+                                       filters={"pid": 42})
+                    t.check("error" not in result,
+                            "757 zero-wall " + cmd + " answers raw request")
+                    t.check(not result.get("has_measured_cpu"),
+                            "757 zero-wall " + cmd + " keeps CPU split unavailable")
+                    t.check(result.get("offcpu_ms") == 0,
+                            "757 zero-wall " + cmd + " adds no off-CPU time")
+                    return result
+
+                whole = query(instant - 2, instant + 2)
+                print(f"757 zero-wall {cmd}: cpu_clamped_ms={whole.get('cpu_clamped_ms')}")
+                t.check(whole.get("cpu_clamped_ms") == 0.7,
+                        "757 zero-wall " + cmd + " emits all 0.7 ms as excess")
+                if cmd == "time_model":
+                    t.check(whole["cpu_ms"] == whole["db_time_ms"] == 0,
+                            "757 zero-wall Overview contributes no CPU/DB time")
+                elif cmd == "top_events":
+                    t.check(whole["db_time_ms"] == 0 and
+                            all(row["total_ms"] == 0 for row in whole["rows"]),
+                            "757 zero-wall Events contributes no CPU/DB time")
+                for delta in (-1, 0, 1):
+                    cut = instant + delta
+                    left = query(instant - 2, cut)["cpu_clamped_ms"]
+                    right = query(cut, instant + 2)["cpu_clamped_ms"]
+                    t.check((left, right) == ((0.7, 0) if delta > 0 else (0, 0.7))
+                            and left + right == whole["cpu_clamped_ms"],
+                            f"757 zero-wall {cmd} cut instant{delta:+d}: excess owned once")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 def main():
     t = TestRunner("test_data_time_model")
     print(f"=== {t.name} ===")
@@ -195,6 +239,7 @@ def main():
         cleanup_traces(trace_dir)
 
     check_cpu_aas_contract(t)
+    check_zero_wall_cpu_diagnostic(t)
     sys.exit(0 if t.summary() else 1)
 
 

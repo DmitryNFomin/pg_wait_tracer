@@ -31,13 +31,23 @@ static inline uint64_t event_window_ns(const struct pgwt_trace_event *ev,
  * inside the interval the CPU was actually used. Zero bounds are unbounded,
  * as in event_window_ns. The caller supplies a known CPU measurement.
  * Over-wall CPU is clamped to this window's wall; the optional integer-ns
- * diagnostic receives the excess, which is additive over partitions too. */
+ * diagnostic receives the excess, which is additive over partitions too.
+ * A zero-duration record contributes no CPU time: its entire measurement
+ * is excess, owned by the window containing its instant under [from,to).
+ * This also applies with unbounded endpoints; empty windows own no instant. */
 static inline uint64_t pgwt_cpu_clip_ns(const struct pgwt_trace_event *ev,
                                         uint64_t from_ns, uint64_t to_ns,
                                         uint64_t *clamped_ns)
 {
     uint64_t dur = ev->duration_ns;
-    if (dur == 0 || dur > ev->timestamp_ns) return 0;
+    if (dur == 0) {
+        if (clamped_ns &&
+            (from_ns == 0 || ev->timestamp_ns >= from_ns) &&
+            (to_ns == 0 || ev->timestamp_ns < to_ns))
+            *clamped_ns += ev->cpu_ns;
+        return 0;
+    }
+    if (dur > ev->timestamp_ns) return 0;
     uint64_t s = ev->timestamp_ns - dur;
     uint64_t a = s, b = ev->timestamp_ns;
     if (from_ns != 0 && a < from_ns) a = from_ns;

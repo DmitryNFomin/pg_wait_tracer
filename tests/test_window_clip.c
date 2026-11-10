@@ -1516,8 +1516,8 @@ static void test_cpu_row_measured_bypass(void)
     CHECK_MS(h.offcpu_ms, 0.0, "zero-width window: no off-CPU");
     free(h.rows);
 
-    /* 11h. ZERO-DURATION record carrying a measurement: frac is 0, so nothing
-     * is attributed and nothing divides by zero. */
+    /* 11h. ZERO-DURATION record: no time is attributed, but all measured
+     * CPU is excess. This diagnostic does not claim an in-window CPU split. */
     struct pgwt_trace_event zdur =
         mk(1, CPU_GAP, WFROM + S(1), 0, 36, MS_NS(4));
     struct pgwt_events_result i2;
@@ -1527,6 +1527,8 @@ static void test_cpu_row_measured_bypass(void)
     CHECK(i2.has_measured_cpu == 0,
           "...and claims no measurement (no wall to measure over)");
     CHECK_MS(i2.offcpu_ms, 0.0, "...and no off-CPU");
+    CHECK(i2.cpu_clamped_ms == 4.0,
+          "757 zero-wall top_events reports all 4 ms as excess");
     free(i2.rows);
 
     /* 11i. A WAIT that carries measured cpu_ns (a backend spinning on-CPU
@@ -3089,22 +3091,68 @@ static uint64_t cpu_random(uint64_t *state)
     return *state;
 }
 
+static void test_zero_wall_cpu_partitions(void)
+{
+    struct pgwt_trace_event ev = mk(42, CPU_GAP, T0, 0, 99, 700000);
+    const char *names[] = {"time_model", "top_events", "top_sessions", "replay"};
+    for (int consumer = 0; consumer < 4; consumer++) {
+        struct cpu_window_totals whole = cpu_window(&ev, T0 - 2, T0 + 2, consumer);
+        char msg[180];
+        snprintf(msg, sizeof(msg), "757 zero-wall %s: whole excess == 700000 ns, CPU/off/DB == 0", names[consumer]);
+        CHECK(whole.clamp == 700000 && whole.cpu == 0 && whole.off == 0 && whole.db == 0, msg);
+        for (int delta = -1; delta <= 1; delta++) {
+            uint64_t cut = T0 + delta;
+            struct cpu_window_totals left = cpu_window(&ev, T0 - 2, cut, consumer);
+            struct cpu_window_totals right = cpu_window(&ev, cut, T0 + 2, consumer);
+            snprintf(msg, sizeof(msg), "757 zero-wall %s: cut instant%+d owns excess exactly once (sum == 700000 ns)", names[consumer], delta);
+            CHECK(left.clamp == (delta > 0 ? 700000 : 0) &&
+                  right.clamp == (delta > 0 ? 0 : 700000) &&
+                  left.clamp + right.clamp == whole.clamp &&
+                  left.cpu + right.cpu + left.off + right.off + left.db + right.db == 0, msg);
+        }
+    }
+    /* Zero means unbounded; all other edges obey [from,to), including
+     * empty/reversed windows. Existing diagnostic totals must be added to. */
+    const uint64_t windows[][3] = {
+        {0, 0, 700000}, {T0, 0, 700000}, {0, T0 + 1, 700000},
+        {0, T0, 0}, {T0 + 1, 0, 0}, {T0, T0, 0}, {T0 + 1, T0, 0}
+    };
+    for (size_t i = 0; i < sizeof(windows) / sizeof(windows[0]); i++) {
+        uint64_t excess = 11;
+        CHECK(pgwt_cpu_clip_ns(&ev, windows[i][0], windows[i][1], &excess) == 0 &&
+              excess == 11 + windows[i][2],
+              "757 zero-wall helper: half-open/unbounded bounds add excess without time");
+    }
+    CHECK(pgwt_cpu_clip_ns(&ev, 0, 0, NULL) == 0,
+          "757 zero-wall helper: optional diagnostic may be NULL");
+}
+
 static void test_cpu_partition_property(void)
 {
     uint64_t seed = 0x757c0ffee1234567ULL;
-    int bad = 0, bounded = 0, skewed = 0;
+    int bad = 0, bounded = 0, skewed = 0, zero_wall = 0;
     for (int i = 0; i < 10000; i++) {
         uint64_t dur = i % 10 == 0 ? 1 : 1 + cpu_random(&seed) % (7 * S(86400));
         uint64_t cpu = cpu_random(&seed) % ((1ULL << 62) + 1);
         if (i % 2 == 0) cpu %= dur + 1;
         if (i == 1) cpu = 1ULL << 62;
         uint64_t cut = cpu_random(&seed) % (dur + 1);
+        uint64_t from = T0, to = T0 + dur, split = T0 + cut;
+        if (i % 7 == 0) {
+            dur = 0;
+            cpu = 1 + cpu_random(&seed) % (1ULL << 62);
+            from = T0 - 2; to = T0 + 2;
+            split = T0 - 1 + cpu_random(&seed) % 3;
+            zero_wall++;
+        }
         struct pgwt_trace_event ev = mk(42, CPU_GAP, T0 + dur, dur, 99, cpu);
         uint64_t xl = 0, xr = 0, xw = 0;
-        uint64_t left = pgwt_cpu_clip_ns(&ev, T0, T0 + cut, &xl);
-        uint64_t right = pgwt_cpu_clip_ns(&ev, T0 + cut, T0 + dur, &xr);
-        uint64_t whole = pgwt_cpu_clip_ns(&ev, T0, T0 + dur, &xw);
-        uint64_t expected_left = cpu_endpoint_oracle(cpu, cut, dur);
+        uint64_t left = pgwt_cpu_clip_ns(&ev, from, split, &xl);
+        uint64_t right = pgwt_cpu_clip_ns(&ev, split, to, &xr);
+        uint64_t whole = pgwt_cpu_clip_ns(&ev, from, to, &xw);
+        uint64_t expected_left = dur ? cpu_endpoint_oracle(cpu, cut, dur) :
+                                      (T0 < split ? cpu : 0);
+        if (!dur) cut = 0;
         int ok = left <= cut && right <= dur - cut && left + right == whole &&
                  left + xl == expected_left && right + xr == cpu - expected_left &&
                  xl + xr == xw && whole + xw == cpu &&
@@ -3118,8 +3166,9 @@ static void test_cpu_partition_property(void)
     }
     CHECK(bad == 0, "757 property 10000 seeded partitions conserve CPU/off/wall/excess exactly");
     CHECK(bounded > 0 && skewed > 0, "757 property exercises both bounded CPU and over-wall skew");
-    printf("  property records=10000 bounded=%d skewed=%d failures=%d seed=0x757c0ffee1234567\n",
-           bounded, skewed, bad);
+    CHECK(zero_wall > 0, "757 property exercises zero-length records with nonzero CPU");
+    printf("  property records=10000 bounded=%d skewed=%d zero_wall=%d failures=%d seed=0x757c0ffee1234567\n",
+           bounded, skewed, zero_wall, bad);
 }
 
 static void test_cpu_endpoint_bounds(void)
@@ -3152,6 +3201,7 @@ int main(void)
     printf("=== test_window_clip ===\n");
 
     test_cpu_partition_additivity();
+    test_zero_wall_cpu_partitions();
     test_cpu_partition_property();
     test_cpu_endpoint_bounds();
     test_cpu_integer_contract();
@@ -3211,8 +3261,10 @@ int main(void)
      * record-present CHECK is what fails, and the shortfall in this count
      * is what catches a section that stopped running its body at all.
      * Measured before round 4: 354. Round 4 adds 280 partition/property/
-     * endpoint assertions, including all four consumers (floor 634). */
-    if (checks < 634) {
+     * endpoint assertions, including all four consumers (floor 634).
+     * Round 5 adds 47 zero-wall diagnostic/partition/property assertions
+     * without changing the existing expected values (floor 681). */
+    if (checks < 681) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;

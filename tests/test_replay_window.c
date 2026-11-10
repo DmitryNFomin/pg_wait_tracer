@@ -50,6 +50,8 @@
 #include "map_reader.h"
 #include "wait_event.h"
 #include "pg_wait_tracer.h"
+#include "daemon.h"
+#include "replay.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -60,6 +62,14 @@
 
 static int failures = 0;
 static int checks   = 0;
+
+/* The BPF-free core excludes this live-only header label. Replay must
+ * never ask for it; keep the real CLI printers and abort on that path. */
+const char *pgwt_live_cpu_gate_name(const struct pgwt_daemon *d)
+{
+    (void)d;
+    abort();
+}
 
 #define CHECK(cond, ...) do { \
     checks++; \
@@ -815,6 +825,67 @@ static void test_cpu_integer_contract(void)
     }
 }
 
+/* Use the same tmpfile/dup2 capture as test_system_event_offcpu.c, but run
+ * the real CLI replay entry point, reader and printers together. */
+static void test_zero_wall_cpu_warning(void)
+{
+    char dir[] = "/tmp/pgwt_replay_zero_wall_XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(2); }
+    struct pgwt_event_writer writer;
+    if (pgwt_writer_init(&writer, dir, 18, 24, NULL) != 0) exit(2);
+    writer.cpu_measured = true;
+    struct pgwt_trace_event record = ev(1500, 0, 0);
+    record.cpu_ns = 700000;
+    if (pgwt_writer_push_event(&writer, &record) != 0 ||
+        pgwt_writer_close(&writer) != 0) exit(2);
+    pgwt_writer_destroy(&writer);
+
+    char path[600];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_replay_stats stats = {0};
+    uint64_t decoded = 0;
+    struct pgwt_accumulator *acc = replay(path, 0, 0, NULL, &stats, -1, &decoded, NULL);
+    if (!acc) exit(2);
+    CHECK_EQ(decoded, 1, "757 zero-wall replay decodes exactly one record");
+    CHECK_EQ(stats.cpu_clamped_ns, 700000,
+             "757 zero-wall replay cpu_clamped_ns == 700000");
+    CHECK_EQ(acc->tm.cpu_time_ns + acc->tm.offcpu_time_ns + acc->tm.db_time_ns, 0,
+             "757 zero-wall replay contributes no time");
+    free(acc);
+
+    struct pgwt_daemon *d = calloc(1, sizeof(*d));
+    FILE *capture = tmpfile();
+    if (!d || !capture) exit(2);
+    d->trace_dir = dir;
+    d->view = PGWT_VIEW_TIME_MODEL;
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0 || dup2(fileno(capture), STDOUT_FILENO) < 0) exit(2);
+    int rc = pgwt_run_replay(d, NULL, NULL);
+    fflush(stdout);
+    if (dup2(saved, STDOUT_FILENO) < 0) exit(2);
+    close(saved);
+    if (fseek(capture, 0, SEEK_END) != 0) exit(2);
+    long size = ftell(capture);
+    if (size < 0) exit(2);
+    rewind(capture);
+    char *output = calloc((size_t)size + 1, 1);
+    if (!output || fread(output, 1, (size_t)size, capture) != (size_t)size) exit(2);
+    fclose(capture);
+    CHECK(rc == 0, "757 zero-wall CLI replay succeeds");
+    const char *warning = "NOTE: 0.7 ms of measured CPU exceeded the wall time of the interval it belongs to";
+    const char *first = strstr(output, warning);
+    CHECK(first != NULL,
+          "757 zero-wall CLI prints measured CPU exceeded the wall warning (0.7 ms)");
+    CHECK(first && !strstr(first + strlen(warning), warning),
+          "757 zero-wall CLI prints the warning exactly once");
+    free(output);
+    free(d);
+    if (unlink(path) != 0) exit(2);
+    snprintf(path, sizeof(path), "%s/current.trace.meta", dir);
+    if (unlink(path) != 0 || rmdir(dir) != 0) exit(2);
+}
+
 int main(void)
 {
     test_cpu_integer_contract();
@@ -1528,6 +1599,8 @@ int main(void)
         snprintf(rm534, sizeof(rm534), "rm -rf %s %s %s", d4, d5, d6);
         if (system(rm534) != 0) { /* best effort */ }
     }
+
+    test_zero_wall_cpu_warning();
 
     free(all);
     free(w);
