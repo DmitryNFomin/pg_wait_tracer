@@ -317,6 +317,30 @@ static void test_pending_summary_rotation(void)
     CHECK(dir_bytes() == 110 && warn[0] == '\0', "rotation releases raw for cap eviction");
 }
 
+static void test_phase_capability_sidecar(void)
+{
+    char warn[1024];
+    reset_dir();
+    put("phase_capabilities.jsonl", 50);
+    put("current.trace", 10);
+    put("2025-01-01_10.trace.lz4", 100);
+    put("2025-01-01_11.trace.lz4", 100);
+    cleanup(0, 210, warn, sizeof(warn));
+    CHECK(exists("phase_capabilities.jsonl"), "phase capability history is protected from size eviction");
+    CHECK(!exists("2025-01-01_10.trace.lz4") && exists("2025-01-01_11.trace.lz4") && dir_bytes() == 160,
+          "phase capability bytes count toward the cap");
+    char sidecar[600];
+    struct timespec old[2] = {{1, 0}, {1, 0}};
+    snprintf(sidecar, sizeof(sidecar), "%s/phase_capabilities.jsonl", trace_dir);
+    if (utimensat(AT_FDCWD, sidecar, old, 0)) exit(2);
+    cleanup(1, 0, warn, sizeof(warn));
+    CHECK(exists("phase_capabilities.jsonl") && dir_bytes() == 60,
+          "phase capability history survives hours retention");
+    cleanup(0, 1, warn, sizeof(warn));
+    CHECK(exists("phase_capabilities.jsonl") && strstr(warn, "59 bytes over"),
+          "protected capability bytes are counted in over-cap warning");
+}
+
 int main(void)
 {
     if (!mkdtemp(trace_dir)) return 2;
@@ -328,6 +352,7 @@ int main(void)
     test_failed_unlink_other_hours();
     test_sidecar_accounting();
     test_pending_summary_rotation();
+    test_phase_capability_sidecar();
     reset_dir();
     rmdir(trace_dir);
     printf("retention_order: %d checks, %d failures\n", checks, failures);

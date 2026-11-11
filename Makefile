@@ -110,6 +110,8 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/provider_coop.c \
              $(SRC_DIR)/sampler.c \
              $(SRC_DIR)/exact_probe.c \
+             $(SRC_DIR)/phase_probe.c \
+             $(SRC_DIR)/phase_capability.c \
              $(SRC_DIR)/escalation.c \
              $(SRC_DIR)/escalation_budget.c \
              $(SRC_DIR)/anomaly.c \
@@ -141,6 +143,7 @@ USER_OBJS  = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(USER_SRCS))
 
 # pgwt-server: lightweight replay server (no BPF dependencies)
 SERVER_SRCS = $(SRC_DIR)/server.c \
+              $(SRC_DIR)/phase_capability.c \
               $(SRC_DIR)/compute.c \
               $(SRC_DIR)/backend_span.c \
               $(SRC_DIR)/open_overlay.c \
