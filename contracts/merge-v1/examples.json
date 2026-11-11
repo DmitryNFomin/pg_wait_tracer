@@ -1645,7 +1645,8 @@
       }
      ],
      "exit_nonzero": false,
-     "notes": "reject A9 and mark/report the epoch invalid."
+     "notes": "reject A9 and mark/report the epoch invalid.",
+     "epoch_invalid": true
     },
     "Q": {
      "outputs": [
@@ -1662,7 +1663,8 @@
       }
      ],
      "exit_nonzero": false,
-     "notes": "reject A9 and mark/report the epoch invalid."
+     "notes": "reject A9 and mark/report the epoch invalid.",
+     "epoch_invalid": true
     }
    },
    "transcription_notes": []
