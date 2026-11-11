@@ -41,8 +41,13 @@ Treat one denied operation as one failed attempt only. Without evidence, write
 
 ## RULE 1 — advisers first, the owner last. Never ask the owner what an adviser can answer.
 
-Send design, scope, sequencing, approach and option questions to **both advisers first**:
-Fable (`.claude/agents/adviser.md`) and Astra, in parallel. Ask the owner only if
+Send these questions to **both advisers first**, Fable (`.claude/agents/adviser.md`)
+and Astra, in parallel: a design or contract decision; a failure mode not seen
+before; anything that would otherwise become a question to the owner. Routine
+readiness, ordering and numbers read straight from a test log need no adviser:
+the contracts, the differential and the mutants decide those (owner, 2026-11-11).
+Each adviser gets one written question in a fresh session, answers once and
+stops; never resume an adviser conversation. Ask the owner only if
 the advisers disagree and the lead cannot adjudicate on evidence; the lead disagrees with both;
 or the decision is the owner's (money, machines, release timing, RULE 2 exclusions).
 Tell the owner what both advisers said and where the lead disagrees.
@@ -179,15 +184,15 @@ code bigger than a one-liner.
   Delegate web searches, `gh api` reads, price lookups and code archaeology to
   Haiku/Sonnet; get one short report. The orchestrator does not research.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#orchestrator-turns`)
-- **Capacity check EVERY turn, before replying to an agent report**: check
-  active implementers vs cap; codex (free immediately on return); both boxes
-  (`uptime` plus `fuser /tmp/pgwt-box-check.lock`); advisers; open PRs needing
-  `gh pr update-branch` for `BEHIND`. Answer AND fill idle capacity in the SAME
-  turn. Do not count blocked work as idle. Determine blocking by shared FILES,
-  not phase number: modules run in
-  parallel, wiring serially. A box excluded from general gating remains available
-  to reproduce the very issue that excludes it.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#idle-capacity`)
+- **Start only authorised work** (owner, 2026-11-11): the lead starts only work in
+  the accepted plan (`docs/REWORK_PLAN_2026-11-11.md`) or work the owner named. An
+  owner agreeing to a proposal is not a go for building; ask "start now?". A free
+  box or a free agent slot is never a reason to start something. Check capacity
+  (implementers vs cap, boxes via `uptime` plus `fuser /tmp/pgwt-box-check.lock`,
+  open PRs `BEHIND`) when a unit finishes, not every turn. Determine blocking by
+  shared FILES, not phase number: modules run in parallel, wiring serially.
+  (supersedes the former "capacity check every turn" rule; history in
+  `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#idle-capacity`)
 - **Reports to the owner: FIVE LINES at most** — merged / in flight / blocked /
   needs you. Use long form only for owner decisions or plan-changing findings.
   Put bug narratives in the issue tracker; link them.
@@ -241,17 +246,15 @@ code bigger than a one-liner.
     `tests/web_unit/*.test.mjs` register every matching file. Leave live guard
     execution as a manual reviewer step; let a human judge deliberate manual-only tools.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#evidence-guard-incidents`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#runner-registration-gaps`)
-- **Adviser**: consult BOTH by default — Fable via `.claude/agents/adviser.md`
-  and Astra (`codex exec -m gpt-6-astra`, see Models above). Keep one Fable
-  conversation per session; resume with SendMessage, never
-  respawn. Consult on every found issue,
-  plan and numeric claim BEFORE acting and BEFORE reporting. Consult both before
-  accepting/rejecting review verdicts or returning branches; owner-facing numbers,
-  measurements or facts; plans, ordering or scheduling; infrastructure/cost
-  recommendations; retractions/corrections. Do not skip for cost: dispatch in
-  parallel, do independent work meanwhile, block only dependent work. Advisers
-  review reasoning, not code; never edit, commit or create cloud resources.
-  The lead may overrule advice but must say so in the report.
+- **Adviser**: Fable via `.claude/agents/adviser.md`, and
+  Astra (`codex exec -m gpt-6-astra`, see Models above), consulted as RULE 1 says:
+  design or contract decisions, failure modes not seen before, and anything that
+  would become an owner question. One written question per adviser, a fresh
+  session each time, one answer; never resume an adviser conversation (owner,
+  2026-11-11: long-lived adviser sessions were the largest single cost).
+  Dispatch both in parallel and do independent work meanwhile. Advisers review
+  reasoning, not code; never edit, commit or create cloud resources. The lead
+  may overrule advice but must say so in the report.
   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#adviser-incidents`)
 
 ## Rules
