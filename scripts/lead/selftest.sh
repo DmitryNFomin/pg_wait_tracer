@@ -856,10 +856,21 @@ run_history_cases() {
   local match_pattern=""
   [ "$tree_tool" != cbe ] || match_pattern="EVIDENCE-OK $TREE_SAME_SHA (tree $TREE_BASE)"
   rm -f "$tree_logs"/box-check-*.log
+  tree_log "$TREE_BASE_SHA" "$TREE_BASE"
+  tree_run
+  if [ "$tree_tool" = cbe ]; then
+    tree_assert 'tree-identical moved commit' 0 "EVIDENCE-OK $TREE_BASE_SHA (tree $TREE_BASE)"
+  else
+    tree_assert 'tree-identical moved commit' 0 ''
+  fi
   printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" > "$tree_logs/box-check-1.log"
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" "$TREE_BASE" > "$tree_logs/box-check-2.log"
   tree_run
   tree_assert 'old other-commit legacy log is ignored' 0 'ignored (pre-#861 format)' "${match_pattern:-ignored (pre-#861 format)}"
+
+  printf 'box-check: commit=%s tree-hash=not-hex\n' "$TREE_BASE_SHA" > "$tree_logs/box-check-1.log"
+  tree_run
+  tree_assert 'old malformed legacy log is ignored' 0 'ignored (pre-#861 format)' "${match_pattern:-ignored (pre-#861 format)}"
 
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_BASE_SHA" "$TREE_SRC" "$TREE_DOCS" > "$tree_logs/box-check-1.log"
   tree_run
@@ -867,26 +878,26 @@ run_history_cases() {
 
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_BASE_SHA" "$TREE_SRC" "$TREE_SRC" > "$tree_logs/box-check-3.log"
   tree_run
-  tree_assert 'newer other-commit log cannot displace matching tip' 0 "$match_pattern"
+  tree_assert 'newer different tree cannot displace matching tree' 0 "$match_pattern"
   rm -f "$tree_logs/box-check-3.log"
 
   printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" > "$tree_logs/box-check-1.log"
   tree_run
-  tree_assert 'old matching-tip legacy log is superseded' 0 'ignored (pre-#861 format)' "${match_pattern:-ignored (pre-#861 format)}"
+  tree_assert 'old matching-tree legacy log is superseded' 0 'ignored (pre-#861 format)' "${match_pattern:-ignored (pre-#861 format)}"
 
   tree_log "$TREE_SAME_SHA" "$TREE_BASE"
   printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" > "$tree_logs/box-check-2.log"
   tree_run
-  tree_assert 'newest matching-tip legacy log is refused' 3 UNKNOWN: built-from=missing
+  tree_assert 'newest matching-tree legacy log is refused' 3 UNKNOWN: built-from=missing
 
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" "$TREE_SRC" > "$tree_logs/box-check-2.log"
   tree_run
-  tree_assert 'newest matching-tip bad provenance cannot use older pass' 3 UNKNOWN: built-from=
+  tree_assert 'newest matching-tree bad provenance cannot use older pass' 3 UNKNOWN: built-from=
 
   tree_log "$TREE_SAME_SHA" "$TREE_SRC"
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" "$TREE_BASE" > "$tree_logs/box-check-2.log"
   tree_run
-  tree_assert 'newest matching-tip pass supersedes older drift' 0 "$match_pattern"
+  tree_assert 'newest matching-tree pass supersedes older drift' 0 "$match_pattern"
 
   printf 'old log without a certified header\n' > "$tree_logs/box-check-1.log"
   tree_run
@@ -894,10 +905,10 @@ run_history_cases() {
   tree_log "$TREE_SAME_SHA" "$TREE_BASE"
   printf 'box-check: source commit=%s tree-hash=%s (build provenance pending)\n' "$TREE_SAME_SHA" "$TREE_BASE" > "$tree_logs/box-check-2.log"
   tree_run
-  tree_assert 'newest matching-tip pending build is refused' 3 UNKNOWN: built-from=missing
+  tree_assert 'newest matching-tree pending build is refused' 3 UNKNOWN: built-from=missing
   rm -f "$tree_logs"/box-check-*.log
 
-  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" "$TREE_SRC" > "$tree_logs/box-check-ubuntu-20260101-000000.log"
+  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" "$TREE_SRC" > "$tree_logs/box-check-ubuntu-20260101-000000.log"
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" "$TREE_BASE" > "$tree_logs/box-check-el8-20260102-000000.log"
   tree_run
   tree_assert 'newest timestamp wins across OS prefixes' 0 "$match_pattern"
@@ -919,7 +930,11 @@ run_tree_evidence_cases() {
 
   tree_log "$TREE_BASE_SHA" "$TREE_BASE"
   tree_run
-  tree_assert 'other commit cannot certify tip even with identical tree' 1 EVIDENCE-MISSING
+  if [ "$tree_tool" = cbe ]; then
+    tree_assert 'tree-identical moved commit' 0 "EVIDENCE-OK $TREE_BASE_SHA (tree $TREE_BASE)"
+  else
+    tree_assert 'tree-identical moved commit' 0 ''
+  fi
 
   tree_log "$TREE_SAME_SHA" "$TREE_BASE"
   tree_run
@@ -950,7 +965,11 @@ run_tree_evidence_cases() {
   tree_log "$TREE_BASE_SHA" "$TREE_BASE"
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" "$TREE_SRC" > "$tree_logs/box-check-2.log"
   tree_run
-  tree_assert 'newest matching-tip drift beats older identical tree' 1 EVIDENCE-TREE-DRIFT FINDING
+  if [ "$tree_tool" = cbe ]; then
+    tree_assert 'any older matching tree wins' 0 "EVIDENCE-OK $TREE_BASE_SHA (tree $TREE_BASE)"
+  else
+    tree_assert 'any older matching tree wins' 0 ''
+  fi
 
   tree_log "$TREE_SAME_SHA" "$TREE_SRC"
   printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_DOCS" "$TREE_DOCS" > "$tree_logs/box-check-2.log"
@@ -984,7 +1003,7 @@ run_tree_evidence_cases() {
 
   printf 'box-check: commit=%s tree-hash=not-hex built-from=%s\n' "$TREE_SAME_SHA" "$TREE_BASE" > "$tree_logs/box-check-1.log"
   tree_run
-  tree_assert 'matching-tip malformed tree remains UNKNOWN' 3 UNKNOWN: tree-hash=
+  tree_assert 'matching-tree malformed tree remains UNKNOWN' 3 UNKNOWN: tree-hash=
 }
 run_tree_evidence_cases cbe
 
@@ -1226,18 +1245,20 @@ import subprocess
 import sys
 sources = [Path(sys.argv[1]), Path(sys.argv[2])]
 mutations = (
-    ('all-commits', '[ "$c" = "$HEAD_SHA" ] || continue', ':',
-     'if m and m.group(1) == head:', 'if m:'),
+    ('newest-only', '[ "$t" = "$TIP_TREE" ] || continue', ':',
+     'if t.group(1) == tip_tree:', 'if True:'),
+    ('commit-only', 'fallback="$log" # newest identified tree', '[ "$c" = "$HEAD_SHA" ] || continue; fallback="$log"',
+     'fallback = (log, line)  # newest identified tree', 'if not line.startswith(f"box-check: commit={head} "):\n            continue\n        fallback = (log, line)'),
     ('oldest', 'selected="$log"', '[ -z "$selected" ] || continue; selected="$log"',
-     'if m and m.group(1) == head:', 'if m and m.group(1) == head and selected is None:'),
+     'if t.group(1) == tip_tree:', 'if t.group(1) == tip_tree and selected is None:'),
     ('filename-sort', 'return (stamp.group(1) if stamp else name, name)', 'return (name, name)',
      'return (stamp.group(1) if stamp else name, name)', 'return (name, name)'),
     ('ignore-pending', 'if [ -z "$line" ]; then', 'if false; then',
      'if not lines:', 'if False:'),
-    ('validate-history', '[ "$c" = "$HEAD_SHA" ] || continue',
-     'if [[ "$line" =~ tree-hash=([^[:space:]]+)[[:space:]]built-from=([^[:space:]]+) ]] && [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then echo "UNKNOWN: old provenance"; exit 3; fi; [ "$c" = "$HEAD_SHA" ] || continue',
-     'if m and m.group(1) == head:',
-     'old = re.search(r"tree-hash=(\\S+) built-from=(\\S+)", line)\n        if old and old.group(1) != old.group(2):\n            return ("UNKNOWN", "old provenance", False)\n        if m and m.group(1) == head:'),
+    ('validate-history', '[ "$t" = "$TIP_TREE" ] || continue',
+     'if [[ "$line" =~ tree-hash=([^[:space:]]+)[[:space:]]built-from=([^[:space:]]+) ]] && [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then echo "UNKNOWN: old provenance"; exit 3; fi; [ "$t" = "$TIP_TREE" ] || continue',
+     'if t.group(1) == tip_tree:',
+     'old = re.search(r"tree-hash=(\\S+) built-from=(\\S+)", line)\n        if old and old.group(1) != old.group(2):\n            return ("UNKNOWN", "old provenance", False)\n        if t.group(1) == tip_tree:'),
     ('legacy-poisons', 'echo "$log ignored (pre-#861 format)"',
      'echo "UNKNOWN: legacy log"; exit 3',
      'print(f"   NOTE: PR #{pr.get(\'number\')} {log} ignored (pre-#861 format)")',
@@ -1260,13 +1281,14 @@ if [ "$?" != 0 ]; then
   fail=$((fail+1)); echo 'FAIL cannot construct history negative controls'
 else
   for control_tool in cbe beb; do
-    for mutation in all-commits oldest legacy-poisons validate-history filename-sort ignore-pending; do
+    for mutation in commit-only newest-only oldest legacy-poisons validate-history filename-sort ignore-pending; do
       case "$mutation" in
-        all-commits) named='newer other-commit log cannot displace matching tip' ;;
-        oldest) named='newest matching-tip legacy log is refused' ;;
+        commit-only) named='tree-identical moved commit' ;;
+        newest-only) named='newer different tree cannot displace matching tree' ;;
+        oldest) named='newest matching-tree legacy log is refused' ;;
         validate-history) named='old other-commit invalid provenance is ignored' ;;
         filename-sort) named='newest timestamp wins across OS prefixes' ;;
-        ignore-pending) named='newest matching-tip pending build is refused' ;;
+        ignore-pending) named='newest matching-tree pending build is refused' ;;
         legacy-poisons) named='old other-commit legacy log is ignored' ;;
       esac
       (
@@ -1298,8 +1320,8 @@ if [ "${BOX_EVIDENCE_CONTROL:-0}" = 1 ]; then
         mkdir -p "$tree_logs"
         run_history_cases
       ) > "$TMP/master-control" 2>&1
-      if /usr/bin/grep -Fq "FAIL $control_tool tree evidence: newest matching-tip legacy log is refused" "$TMP/master-control" \
-         && /usr/bin/grep -Fq "FAIL $control_tool tree evidence: newest matching-tip bad provenance cannot use older pass" "$TMP/master-control"; then
+      if /usr/bin/grep -Fq "FAIL $control_tool tree evidence: newest matching-tree legacy log is refused" "$TMP/master-control" \
+         && /usr/bin/grep -Fq "FAIL $control_tool tree evidence: newest matching-tree bad provenance cannot use older pass" "$TMP/master-control"; then
         pass=$((pass+1)); echo "ok   $control_tool origin/master control fails newest-run provenance refusals by name"
       else
         fail=$((fail+1)); echo "FAIL $control_tool origin/master must fail newest-run provenance refusals"

@@ -5,8 +5,9 @@
 # hash. Box-check evidence likewise identifies tested bytes by tree-hash=:
 # a reconciliation commit can move the PR tip without changing its tree,
 # and a log's commit= alone cannot identify the tree actually tested.
-# The newest log with commit= equal to the PR tip decides the verdict. Older
-# commits are ignored, including pre-#861 logs which cannot prove provenance.
+# Select by tree, so evidence survives a tree-identical moved commit (#714).
+# The newest log for that tree must certify built-from=tree-hash. Historical
+# pre-#861 logs outside the selection are ignored, never allowed to poison it.
 #
 # It also checks a second, unrelated-looking but same-family leak: a PR
 # whose branch is named agent/<N>-<slug> (asserting it addresses issue #N,
@@ -134,8 +135,9 @@ PYLOGS
     fi
     legacy_logs=()
     selected=""
-    # Filename timestamps order runs. Only the newest matching-tip header
-    # decides the verdict; historical logs cannot poison or rescue that run.
+    fallback=""
+    # Prefer the tip tree regardless of commit=. Within one tree, the newest
+    # run decides provenance; otherwise compare the newest available tree.
     for log in "${LOGS[@]}"; do
       if [ ! -r "$log" ]; then
         echo "UNKNOWN: $log is not readable"
@@ -149,20 +151,40 @@ PYLOGS
       if [[ "$line" != *' built-from='* ]]; then
         legacy_logs+=("$log")
       fi
-      [ "$c" = "$HEAD_SHA" ] || continue
+      t=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)([[:space:]].*)?$/\1/p')
+      if [ -z "$t" ]; then
+        # Malformed certificates remain UNKNOWN. An old legacy header without
+        # a usable tree cannot poison a newer, identified certificate.
+        if [[ "$line" == *' built-from='* ]]; then
+          echo "UNKNOWN: $log has no parseable tree-hash= header"
+          exit 3
+        fi
+        if [ -n "$line" ]; then
+          fallback="$log"
+          fallback_line="$line"
+        fi
+        continue
+      fi
+      fallback="$log" # newest identified tree
+      fallback_line="$line"
+      [ "$t" = "$TIP_TREE" ] || continue
       selected="$log"
       selected_line="$line"
     done
+    if [ -z "$selected" ] && [ -n "$fallback" ]; then
+      selected="$fallback"
+      selected_line="$fallback_line"
+    fi
     for log in "${legacy_logs[@]}"; do
       [ "$log" = "$selected" ] || echo "$log ignored (pre-#861 format)"
     done
     if [ -z "$selected" ]; then
-      echo "EVIDENCE-MISSING (no log for tip commit=$HEAD_SHA)"
+      echo "EVIDENCE-MISSING (no log with an identified tree)"
       finding=1
     else
       log="$selected"
       line="$selected_line"
-      c="$HEAD_SHA"
+      c=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=([0-9a-f]+)( .*)?$/\1/p')
       t=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)([[:space:]].*)?$/\1/p')
       if [ -z "$t" ]; then
         echo "UNKNOWN: $log has no parseable tree-hash= header"
@@ -176,7 +198,7 @@ PYLOGS
       if [ "$t" = "$TIP_TREE" ]; then
         echo "EVIDENCE-OK $c (tree $TIP_TREE)"
       else
-        # Compare the newest matching-tip log's tree.
+        # No matching tree: compare the newest log's tree, as in #714.
         LOGGED_TREE="$t"
         if ! git cat-file -e "$LOGGED_TREE" 2>/dev/null; then
           echo "EVIDENCE-UNIDENTIFIED logged tree $LOGGED_TREE unresolvable (FINDING)"

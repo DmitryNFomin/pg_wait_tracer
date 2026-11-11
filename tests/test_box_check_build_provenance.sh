@@ -3,9 +3,34 @@
 # the REAL clean targets; only compilation/network/identity calls are shimmed.
 # shellcheck disable=SC2016
 set -euo pipefail
+# Bound the entire process group, including shell waits and blocked children.
+# No dependency on GNU timeout (this suite also runs on macOS).
+if [[ "${1:-}" != --bounded-child ]]; then
+    exec python3 - "$0" <<'PYBOUND'
+import os
+import signal
+import subprocess
+import sys
+child = subprocess.Popen(['bash', sys.argv[1], '--bounded-child'], start_new_session=True)
+try:
+    sys.exit(child.wait(timeout=120))
+except subprocess.TimeoutExpired:
+    os.killpg(child.pid, signal.SIGKILL)
+    child.wait()
+    sys.exit('FAIL: provenance self-test exceeded 120 seconds')
+finally:
+    # Also reap leftover descendants if a failed step exited its parent early.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+PYBOUND
+fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
+tmp=$(cd "$tmp" && pwd -P)
 trap 'rm -rf "$tmp"' EXIT
+export TMPDIR="$tmp"
 fail() { echo "FAIL: $*" >&2; return 1; }
 real_git=$(command -v git)
 real_make=$(command -v make)
@@ -206,9 +231,9 @@ print('PASS: Git hash roundtrip covers executable modes, symlinks, nested paths 
 PYHASH
 
 # Invoke the WHOLE launcher with local transport shims. The shim runs the
-# actual remote helper, not compilation/network. Two launchers are interleaved
-# at barriers: X sync -> Y sync -> X build. No flock binary is needed on Mac;
-# separate tests inspect that the real command still acquires the box flock.
+# actual local build helper, never the remote command. Two launchers are
+# interleaved at barriers: X sync -> Y sync -> X build. All simulated remote
+# operations are explicit Python operations confined to this test's temp dir.
 real_rsync=$(command -v rsync)
 export REAL_RSYNC="$real_rsync" FIXTURE_TMP="$tmp"
 cat > "$tmp/bin/transport" <<'PYTRANSPORT'
@@ -220,14 +245,27 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 temp = Path(os.environ['FIXTURE_TMP'])
+assert all('/tmp/pgwt-box-check.lock' not in arg for arg in args), 'FAIL: shim command references real box lock'
+def scratch(path):
+    path = Path(path).resolve()
+    assert temp.resolve() in path.parents, 'FAIL: simulated operation outside test temp dir: ' + str(path)
+    return path
 label = os.environ.get('RUN_LABEL', 'single')
 with open(os.environ['CALL_LOG'], 'a') as log:
-    log.write(name + ' ' + args[-1] + '\n')
-if name == 'git':
+    log.write(name + ' ' + (args[-1] if args else '') + '\n')
+if name == 'mktemp':
+    # macOS mktemp without a template need not honour TMPDIR. Keep the
+    # launcher's local source manifests inside this test's directory too.
+    assert not args, 'unexpected local mktemp arguments'
+    fd, path = tempfile.mkstemp(dir=temp)
+    os.close(fd)
+    print(path)
+elif name == 'git':
     if args == ['rev-parse', '--abbrev-ref', 'HEAD']:
         print('HEAD')
     elif args == ['rev-parse', '--short', 'HEAD']:
@@ -248,18 +286,18 @@ elif name == 'rsync':
     if src.startswith('fixture:'):
         sys.exit(1)  # no live UI artifacts in this fixture
     dst = dst[len('fixture:'):] if dst.startswith('fixture:') else dst
-    subprocess.run([os.environ['REAL_RSYNC'], *args[:-1], dst], check=True)
+    scratch(src)
+    scratch(dst)
+    subprocess.run([os.environ['REAL_RSYNC'], *args[:-1], dst], check=True, timeout=10)
     if dst.endswith('/.pgwt-box-source-manifest'):
         if os.environ.get('TAMPER_SYNC') == '1':
             Path(dst).parent.joinpath('source.c').write_text('tampered source\n')
         (temp / (label + '.synced')).touch()
 elif name == 'ssh':
     command = args[-1]
-    if 'mktemp -d ' in command or 'FIXED-DIR-CONTROL' in command:
-        subprocess.run(['bash', '-c', command], check=True)
-    elif 'tests/run_all.sh --require-live' in command:
-        directory = re.search(r"cd '([^']+)'", command).group(1)
-        (temp / (label + '.directory')).write_text(directory)
+    if 'tests/run_all.sh --require-live' in command:
+        directory = scratch(re.search(r"^cd '([^']+)'", command).group(1))
+        (temp / (label + '.directory')).write_text(str(directory))
         if os.environ.get('INTERLEAVE') == '1' and label == 'X':
             deadline = time.monotonic() + 8
             while not (temp / 'Y.synced').exists():
@@ -267,19 +305,28 @@ elif name == 'ssh':
                     sys.exit('FAIL: Y never synced before X build')
                 time.sleep(0.01)
         build = re.search(r'bash scripts/box-build.sh ([0-9a-f]+) ([0-9a-f]+)', command)
-        rc = subprocess.run(['bash', 'scripts/box-build.sh', *build.groups()], cwd=directory).returncode
+        rc = subprocess.run(['bash', 'scripts/box-build.sh', *build.groups()], cwd=directory, timeout=10).returncode
         if rc == 0:
             shutil.copyfile(Path(directory, 'pgwt-server'), temp / (label + '.binary'))
         sys.exit(rc)
     elif command.startswith('sudo rm -rf -- '):
-        directory = shlex.split(command)[4]
-        shutil.rmtree(directory, ignore_errors=True)
+        # Apply EVERY prune operand so deleting the root cannot escape the test.
+        for directory in shlex.split(command)[4:]:
+            shutil.rmtree(scratch(directory), ignore_errors=True)
+    elif re.fullmatch(r"mkdir -p '[^']+' && mktemp -d '[^']+\.XXXXXXXXXX'", command):
+        template = scratch(shlex.split(command)[-1])
+        template.parent.mkdir(parents=True, exist_ok=True)
+        print(tempfile.mkdtemp(prefix=template.name[:-10], dir=template.parent))
+    elif re.fullmatch(r"mkdir -p '[^']+' && mkdir -p '([^']+\.FIXED-DIR-CONTROL)'; echo '\1'", command):
+        directory = scratch(shlex.split(command)[-1])
+        directory.mkdir(parents=True, exist_ok=True)
+        print(directory)
     # Provisioning, host identity: no operations outside the scratch tree.
 else:
     sys.exit('unexpected network tool: ' + name)
 PYTRANSPORT
 chmod +x "$tmp/bin/transport"
-for command in git ssh rsync curl security hcloud; do ln -sf transport "$tmp/bin/$command"; done
+for command in git ssh rsync curl security hcloud mktemp; do ln -sf transport "$tmp/bin/$command"; done
 for label in single X Y; do
     fixture="$tmp/local-$label"
     mkdir -p "$fixture/scripts" "$fixture/tests/results"
@@ -306,7 +353,9 @@ for label in single X Y; do
 done
 launch() {
     local label="$1" script="$2" interleave="${3:-0}"
-    cp "$script" "$tmp/local-$label/scripts/box-check.sh"
+    # The scratch launcher emits only scratch lock paths. The transport above
+    # independently refuses the real lock path in ANY argument, before dispatch.
+    sed "s@/tmp/pgwt-box-check.lock@$tmp/simulated-box-check.lock@g" "$script" > "$tmp/local-$label/scripts/box-check.sh"
     CALL_LOG="$tmp/calls-$label" RUN_LABEL="$label" INTERLEAVE="$interleave" \
         LAUNCH_TREE_HASH="$(cat "$tmp/hash-$label")" LAUNCH_MANIFEST="$tmp/manifest-$label" \
         PGWT_BOX=fixture PGWT_BOX_DIR="$tmp/destination" EPHEMERAL=0 OS=ubuntu EXPECT_CACHE=reset \
@@ -327,6 +376,30 @@ PY
     echo 'PASS: detached HEAD uses/logs SHA plus unique suffix; helper inside existing lock; private directory pruned'
 }
 assert_launcher "$ROOT/scripts/box-check.sh"
+rc=0
+CALL_LOG="$tmp/guard-calls" ssh fixture 'touch /tmp/pgwt-box-check.lock' > "$tmp/guard.log" 2>&1 || rc=$?
+if [[ $rc == 0 ]] || ! grep -Fq 'FAIL: shim command references real box lock' "$tmp/guard.log"; then
+    fail 'real lock command guard escaped'
+fi
+echo 'PASS: transport rejects commands referencing the real box lock before dispatch'
+# A second run remains under the same root while the first launcher prunes.
+# Check its bytes as well as directory existence, and grade a root-delete mutant.
+assert_prune_scope() {
+    local script="$1"
+    mkdir -p "$tmp/destination/other-run"
+    printf 'other run source\n' > "$tmp/destination/other-run/source.c"
+    launch single "$script" || { cat "$tmp/launcher-single.log"; return 1; }
+    [[ ! -d "$(cat "$tmp/single.directory")" ]] || { fail 'own run directory not pruned'; return 1; }
+    [[ -d "$tmp/destination" && -d "$tmp/destination/other-run" ]] &&
+        [[ $(cat "$tmp/destination/other-run/source.c") == 'other run source' ]] ||
+        { fail 'prune removed remote root or another run'; return 1; }
+    echo 'PASS: prune removes only its own run; remote root and other run bytes survive'
+}
+assert_prune_scope "$ROOT/scripts/box-check.sh"
+sed "s@sudo rm -rf -- '\$remote_dir'@sudo rm -rf -- '\$remote_dir' '\$remote_root'@" "$ROOT/scripts/box-check.sh" > "$tmp/prune-root.sh"
+if assert_prune_scope "$tmp/prune-root.sh" > "$tmp/control.log" 2>&1; then fail 'prune-root mutant escaped'; exit 1; fi
+grep -Fq 'FAIL: prune removed remote root or another run' "$tmp/control.log"
+echo 'PASS: negative control prune-root fails by name: prune removed remote root or another run'
 echo 'PASS: full announced file set includes tracked tests/results archive bytes'
 sed '/^rsync -azr --checksum /d' "$ROOT/scripts/box-check.sh" > "$tmp/no-overlay.sh"
 if assert_launcher "$tmp/no-overlay.sh" > "$tmp/control.log" 2>&1; then fail 'missing announced file overlay escaped'; exit 1; fi

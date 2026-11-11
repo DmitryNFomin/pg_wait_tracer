@@ -29,7 +29,7 @@ UNKNOWN for the affected PR without stopping the remaining checks.
 
 Same vocabulary as check-box-evidence.sh, with the same reasoning: an empty
 result and a failed lookup must never look alike.
-  CANDIDATE: PR #N (branch) EVIDENCE-MISSING -- no matching-tip box-check log reachable
+  CANDIDATE: PR #N (branch) EVIDENCE-MISSING -- no box-check log reachable
   CANDIDATE: PR #N (branch) EVIDENCE-TREE-DRIFT tip=<tree> logged=<tree>
     FINDING(src/tests) or NOTE(other); run the single-PR tool for file details
   CANDIDATE: PR #N (branch) EVIDENCE-UNIDENTIFIED logged tree <tree> unresolvable
@@ -38,8 +38,9 @@ result and a failed lookup must never look alike.
                                               is bad; once, globally, when an
                                               entire INPUT file is bad
 
-Only the newest matching-tip commit log decides the verdict. Historical
-pre-#861 logs are listed as ignored; they cannot poison or rescue evidence.
+Select by tree regardless of commit= (#714). The newest log for the selected
+tree must certify built-from=tree-hash. Historical pre-#861 logs outside that
+selection are listed as ignored; they cannot poison evidence.
 Exit codes: 0 no findings (NOTE drift may be printed), 1 CANDIDATE findings
 (src/tests drift, unidentified/missing evidence, closing refs), 3 at least one
 UNKNOWN was printed (same "a finding and 'we could not tell' are not the
@@ -121,6 +122,7 @@ def evidence_for(pr, wt_map):
     if not tip_tree:
         return ("UNKNOWN", f"empty tip tree for {head}", False)
     selected = None
+    fallback = None
     legacy_logs = []
     for log in logs:
         try:
@@ -133,16 +135,25 @@ def evidence_for(pr, wt_map):
         except OSError as e:
             return ("UNKNOWN", f"{log} unreadable ({e})", False)
         line = lines[-1] if lines else ""
-        m = re.match(r"box-check: commit=([0-9a-f]+)(?:\s|$)", line)
         if " built-from=" not in line:
             legacy_logs.append(log)
-        if m and m.group(1) == head:
+        t = re.match(r"box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)(?:\s|$)", line)
+        if not t:
+            if " built-from=" in line:
+                return ("UNKNOWN", f"{log} has no parseable tree-hash=", False)
+            if line:
+                fallback = (log, line)
+            continue
+        fallback = (log, line)  # newest identified tree
+        if t.group(1) == tip_tree:
             selected = (log, line)
+    if selected is None:
+        selected = fallback
     for log in legacy_logs:
         if selected is None or log != selected[0]:
             print(f"   NOTE: PR #{pr.get('number')} {log} ignored (pre-#861 format)")
     if selected is None:
-        return ("MISSING", f"no log for tip commit={head}", True)
+        return ("MISSING", "no log with an identified tree", True)
     log, line = selected
     t = re.match(r"box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)(?:\s|$)", line)
     if not t:
@@ -225,7 +236,7 @@ def main(argv):
         if wt_map is not None:
             kind, detail, evidence_finding = evidence_for(pr, wt_map)
             if kind == "MISSING":
-                print(f"   CANDIDATE: PR #{num} ({branch}) EVIDENCE-MISSING -- {detail or 'no matching-tip box-check log reachable'}")
+                print(f"   CANDIDATE: PR #{num} ({branch}) EVIDENCE-MISSING -- {detail or 'no box-check log reachable'}")
             elif kind in ("TREE-DRIFT", "UNIDENTIFIED"):
                 print(f"   CANDIDATE: PR #{num} ({branch}) EVIDENCE-{kind} {detail}")
             elif kind == "UNKNOWN":
