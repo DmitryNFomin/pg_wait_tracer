@@ -287,6 +287,15 @@ clean:
 	rm -rf $(BUILD_DIR) $(TARGET) pgwt-server
 	rm -f $(INC_DIR)/vmlinux.h $(INC_DIR)/pg_wait_tracer.skel.h
 
+# A different source tree may have left NEWER outputs on a persistent box.
+# Extend the normal clean targets to cover every build-artifact rsync exclude,
+# including objects/libraries outside build/ and binaries from older runners.
+.PHONY: clean-box
+clean-box: clean
+	$(MAKE) -C tests clean
+	rm -f pg_wait_tracer-asan pgwt-server-asan $(CLIENT_OUT)
+	find . -name .git -prune -o \( -type f -o -type l \) \( -name '*.o' -o -name '*.a' -o -name '*.so' \) -exec rm -f {} +
+
 # ---------------------------------------------------------------------------
 # Developer loop (CLAUDE.md). None of these need the BPF build.
 #   check          deterministic tier on this machine (node/go/python/Playwright),

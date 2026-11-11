@@ -127,6 +127,25 @@ report "$ok" "real box-check.sh: .DS_Store is still excluded (baseline junk excl
 echo "$out1" | grep -q 'test_wait_event\.c' && ok=true || ok=false
 report "$ok" "real box-check.sh: tests/test_wait_event.c (ordinary tracked-shaped source) IS still transferred -- the exclude is not overly broad"
 
+# The remote build certificate must survive --delete, and a local certificate
+# must never be allowed to replace it. Exercise the actual rsync decisions.
+printf 'remote certificate\n' > "$dst1/.pgwt-box-built-from"
+marker_out=$(up_rsync_dry_run "$BOX_CHECK" "$src1" "$dst1" 2>&1); marker_rc=$?
+[[ $marker_rc -eq 0 && "$marker_out" != *'.pgwt-box-built-from'* ]] && ok=true || ok=false
+report "$ok" 'remote build marker is protected from rsync --delete'
+printf 'local impostor certificate\n' > "$src1/.pgwt-box-built-from"
+marker_out=$(up_rsync_dry_run "$BOX_CHECK" "$src1" "$dst1" 2>&1); marker_rc=$?
+[[ $marker_rc -eq 0 && "$marker_out" != *'.pgwt-box-built-from'* ]] && ok=true || ok=false
+report "$ok" 'local build marker cannot overwrite remote provenance'
+sed "s@ --exclude '/.pgwt-box-built-from'@@" "$BOX_CHECK" > "$tmpdir/no-marker-exclude.sh"
+marker_out=$(up_rsync_dry_run "$tmpdir/no-marker-exclude.sh" "$src1" "$dst1" 2>&1); marker_rc=$?
+[[ $marker_rc -eq 0 && "$marker_out" == *'.pgwt-box-built-from'* ]] && ok=true || ok=false
+report "$ok" 'RED: removing marker exclude allows local provenance to overwrite remote marker'
+rm "$src1/.pgwt-box-built-from"
+marker_out=$(up_rsync_dry_run "$tmpdir/no-marker-exclude.sh" "$src1" "$dst1" 2>&1); marker_rc=$?
+[[ $marker_rc -eq 0 && "$marker_out" == *'.pgwt-box-built-from'* ]] && ok=true || ok=false
+report "$ok" 'RED: removing marker exclude allows --delete to erase remote marker'
+
 # =============================================================================
 # 2. RED: a fixture reproducing the PRE-#567 up-rsync (no object_excludes
 #    array, no reference to it on the invocation line -- exactly
@@ -176,13 +195,13 @@ report "$ok" "a missing script file makes the extractor refuse (rc=$rc4, want 2)
 #    is typically newer than a freshly-synced source file, so plain `make`
 #    would consider the stale .o up to date and never rebuild it.
 # =============================================================================
-remote_line=$(grep 'nproc' "$BOX_CHECK")
+remote_line=$(tr '\n' ' ' < "$REPO_ROOT/scripts/box-build.sh")
 [[ -n "$remote_line" ]] && ok=true || ok=false
-report "$ok" "found the remote build command line in box-check.sh"
+report "$ok" "found the remote build commands in box-build.sh"
 clean_pos=$(printf '%s' "$remote_line" | grep -bo 'make -C tests clean' | head -1 | cut -d: -f1)
-build_pos=$(printf '%s' "$remote_line" | grep -bo 'make build-tests &&' | head -1 | cut -d: -f1)
+build_pos=$(printf '%s' "$remote_line" | grep -bo 'make build-tests' | head -1 | cut -d: -f1)
 [[ -n "$clean_pos" && -n "$build_pos" ]] && ok=true || ok=false
-report "$ok" "remote command contains both 'make -C tests clean' and 'make build-tests &&' (clean_pos=${clean_pos:-<missing>} build_pos=${build_pos:-<missing>})"
+report "$ok" "remote command contains both 'make -C tests clean' and 'make build-tests' (clean_pos=${clean_pos:-<missing>} build_pos=${build_pos:-<missing>})"
 if [[ -n "$clean_pos" && -n "$build_pos" ]]; then
     [[ "$clean_pos" -lt "$build_pos" ]] && ok=true || ok=false
 else
@@ -192,7 +211,7 @@ report "$ok" "'make -C tests clean' runs BEFORE 'make build-tests' in the remote
 
 # RED: a pre-#567-style remote line (no clean step) must be recognized as
 # missing the guard, not silently accepted as "ordering is fine".
-old_remote_line=$(printf '%s' "$remote_line" | sed 's/make -C tests clean && //')
+old_remote_line=$(printf '%s' "$remote_line" | sed 's/make -C tests clean //')
 old_clean_pos=$(printf '%s' "$old_remote_line" | grep -bo 'make -C tests clean' | head -1 | cut -d: -f1)
 [[ -z "$old_clean_pos" ]] && ok=true || ok=false
 report "$ok" "RED: pre-#567-style remote line (clean step removed) is correctly reported as missing 'make -C tests clean'"

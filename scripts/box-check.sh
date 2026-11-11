@@ -74,7 +74,7 @@
 #      ever catch) is still reaped on the next call, and is also available
 #      on demand as `make hetzner-sweep`.
 #
-# Each run gets its own remote directory named after the local branch, and a
+# Each branch (or detached commit's short SHA) gets a remote directory, and a
 # box-wide flock serialises concurrent runs (timing tests must not overlap;
 # harmless-but-unnecessary on a private EPHEMERAL box, which nothing else
 # ever touches).
@@ -347,6 +347,9 @@ fi
 box_check_start_epoch=$(date +%s)
 
 branch=$(git rev-parse --abbrev-ref HEAD | tr '/' '_')
+# Detached review worktrees must not all collide in pgwt-check/HEAD. The
+# build marker below still handles different working trees at the same SHA.
+[[ "$branch" != HEAD ]] || branch=$(git rev-parse --short HEAD)
 remote_root="${PGWT_BOX_DIR:-pgwt-check}"
 remote_dir="$remote_root/$branch"
 
@@ -381,7 +384,9 @@ fi
 # of a tree that no longer exists (e.g. a branch rebased after its gate
 # run) and still look like evidence. A reviewer matches these two values
 # against the PR head and `scripts/tree-hash.sh` output.
-echo "box-check: commit=$(git rev-parse HEAD) tree-hash=$(scripts/tree-hash.sh)" | tee -a "$log"
+commit=$(git rev-parse HEAD) || exit 1
+tree_hash=$(scripts/tree-hash.sh) || exit 1
+echo "box-check: source commit=$commit tree-hash=$tree_hash (build provenance pending)" | tee -a "$log"
 echo "box-check: target=$target OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES -> $remote_dir (log: $log)" | tee -a "$log"
 ssh -o BatchMode=yes $ssh_strict "$target" \
     "mkdir -p '$remote_dir' && printf 'box-check: remote hostname=%s machine_id=%s\\n' \"\$(hostname -f 2>/dev/null || hostname)\" \"\$(cat /etc/machine-id 2>/dev/null || echo unavailable)\"" \
@@ -453,7 +458,7 @@ rsync -az --delete -e "$rsync_e" \
     --exclude '/pgwt-server' --exclude '/pgwt-server-asan' \
     --exclude '/pg_wait_tracer' --exclude '/pg_wait_tracer-asan' \
     --exclude 'tests/results' --exclude 'web/pgwt' --exclude '__pycache__' \
-    --exclude '.pgwt-check.stamp' \
+    --exclude '.pgwt-check.stamp' --exclude '/.pgwt-box-built-from' \
     "${junk_excludes[@]}" \
     "${object_excludes[@]}" \
     ./ "$target:$remote_dir/" || exit 1
@@ -507,26 +512,17 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
 # web/pgwt and fails loudly if it is missing, same as the other binaries).
 #
-# issue #567: `make -C tests clean` BEFORE `make build-tests`, not top-level
-# `make clean`. The object_excludes above stop a NEW tests/*.o from being
-# sent, but excluded files are not deleted by --delete either (that needs
-# --delete-excluded, which would also delete /build -- itself excluded on
-# purpose, to keep the daemon's build incremental across runs on the same
-# remote_dir). So a stale object already on the box from a run before this
-# fix, or from this very Mac's `make check` having synced one in the past,
-# would otherwise sit there forever with a Mach-O/mtime make() has no reason
-# to touch, and a *valid*-ELF stale object would then link silently into a
-# test binary that is not built from the tree under review. `make -C tests
-# clean` (tests/Makefile) only removes tests/map_reader_core.o,
-# test_exec_index and $(TESTS) -- not the top-level `clean` target, which
-# also deletes $(BUILD_DIR) and the generated BPF skeleton headers and would
-# force a full daemon rebuild on every single box-check run.
+# box-build.sh invalidates all excluded build outputs with make clean-box
+# unless their marker certifies this exact source tree. It removes the marker
+# BEFORE any build, restores it only on complete success, and logs built-from
+# alongside tree-hash. Keep this inside the existing lock on both box paths.
+# It also retains #567's unconditional tests clean before build-tests.
 # issue #615: build-tests forwards the top-level resolved libbpf headers and
 # library to the tests sub-make. On EL8 these must be the bundled versions;
 # the tests' default -lbpf would silently select the old system library.
 lock_header='exec 9>/tmp/pgwt-box-check.lock; if flock -n 9; then echo "box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)"; else lock_wait_start_ns=$(date +%s%N); echo "box-check: waiting for /tmp/pgwt-box-check.lock"; flock 9 || exit; lock_wait_ms=$(( ($(date +%s%N) - lock_wait_start_ns) / 1000000 )); echo "box-check: lock acquired (waited_for_lock=yes, lock_wait_ms=${lock_wait_ms})"; fi;'
 ssh -o BatchMode=yes $ssh_strict "$target" \
-    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header $preflight make -j\$(nproc) && make -C tests clean && make build-tests && make pgwt-client && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
+    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header $preflight bash scripts/box-build.sh $tree_hash $commit && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
     2>&1 | tee -a "$log"
 rc=${PIPESTATUS[0]}
 

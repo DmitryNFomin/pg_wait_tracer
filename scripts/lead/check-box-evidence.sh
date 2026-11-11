@@ -141,6 +141,12 @@ else
         echo "UNKNOWN: $log has no parseable tree-hash= header"
         exit 3
       fi
+      b=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=[0-9a-f]+ tree-hash=[0-9a-f]+ built-from=([0-9a-f]+)([[:space:]].*)?$/\1/p')
+      # Legacy logs cannot prove binary provenance; require a new box run.
+      if [ -z "$b" ] || [ "$b" != "$t" ]; then
+        echo "UNKNOWN: $log built-from=${b:-missing} differs from tree-hash=$t; rerun box-check"
+        exit 3
+      fi
       commits+=("$c")
       trees+=("$t")
     done

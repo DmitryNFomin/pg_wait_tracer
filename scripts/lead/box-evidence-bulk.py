@@ -130,6 +130,10 @@ def evidence_for(pr, wt_map):
         t = re.match(r"box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)(?:\s|$)", lines[-1])
         if not t:
             return ("UNKNOWN", f"{log} has no parseable tree-hash=", False)
+        b = re.match(r"box-check: commit=[0-9a-f]+ tree-hash=[0-9a-f]+ built-from=([0-9a-f]+)(?:\s|$)", lines[-1])
+        if not b or b.group(1) != t.group(1):
+            return ("UNKNOWN", f"{log} built-from={b.group(1) if b else 'missing'} "
+                    f"differs from tree-hash={t.group(1)}; rerun box-check", False)
         trees.append(t.group(1))
     if tip_tree in trees:
         return ("OK", None, False)

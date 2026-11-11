@@ -629,7 +629,7 @@ mk_gh_json() {
 # case 16: EVIDENCE-OK, no NO-CLOSING-REF (branch does not match agent/N-) -> exit 0
 rm -f "$CBE_FIXTURE"/tests/results/*.log
 cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<EOF
-box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE
+box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE built-from=$TREE_BASE
 EOF
 json=$(mk_gh_json "$TREE_BASE_SHA" agent/lead-stuff "")
 out=$(run_cbe json "$json"); rc=$?
@@ -663,7 +663,7 @@ else
   printf '%s\n' "$out" | sed 's/^/       /'
 fi
 cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<EOF
-box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE
+box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE built-from=$TREE_BASE
 EOF
 
 # case 19: NO-CLOSING-REF-CANDIDATE fires when the branch names an OPEN
@@ -762,7 +762,7 @@ fi
 # case 24: an unreadable log file -> UNKNOWN, not silently skipped as if it
 # did not exist (that would collapse "unreadable" into "absent").
 cat > "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log" <<EOF
-box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE
+box-check: commit=$TREE_BASE_SHA tree-hash=$TREE_BASE built-from=$TREE_BASE
 EOF
 chmod 000 "$CBE_FIXTURE/tests/results/box-check-ubuntu-20260101-000000.log"
 json=$(mk_gh_json "$TREE_BASE_SHA" agent/lead-stuff "")
@@ -820,7 +820,7 @@ tree_run() {
   fi
 }
 tree_log() {
-  printf 'box-check: commit=%s tree-hash=%s\n' "$1" "$2" > "$tree_logs/box-check-1.log"
+  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$1" "$2" "$2" > "$tree_logs/box-check-1.log"
 }
 tree_assert() {
   local desc="$1" want_rc="$2" pattern ok=1
@@ -843,6 +843,15 @@ tree_assert() {
     printf '%s\n' "$out" | sed 's/^/       /'
   fi
 }
+run_built_from_cases() {
+  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" "$TREE_SRC" > "$tree_logs/box-check-1.log"
+  tree_run
+  tree_assert 'foreign built-from is refused' 3 UNKNOWN: built-from= 'rerun box-check'
+
+  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" > "$tree_logs/box-check-1.log"
+  tree_run
+  tree_assert 'legacy missing built-from is refused' 3 UNKNOWN: built-from=missing 'rerun box-check'
+}
 run_tree_evidence_cases() {
   local tree_tool="$1" tree_logs match_pattern diff_detail
   if [ "$tree_tool" = cbe ]; then
@@ -860,6 +869,8 @@ run_tree_evidence_cases() {
   tree_log "$TREE_BASE_SHA" "$TREE_BASE"
   tree_run
   tree_assert 'tree-identical moved commit' 0 "$match_pattern"
+
+  run_built_from_cases
 
   # Same commit= as the tip, but a different tested tree: sha equality must
   # neither override a src finding nor suppress a docs-only note (#714).
@@ -881,12 +892,12 @@ run_tree_evidence_cases() {
   tree_assert 'missing log stays a finding' 1 EVIDENCE-MISSING
 
   tree_log "$TREE_BASE_SHA" "$TREE_BASE"
-  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" > "$tree_logs/box-check-2.log"
+  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" "$TREE_SRC" > "$tree_logs/box-check-2.log"
   tree_run
   tree_assert 'any older matching tree wins over newer drift' 0 "$match_pattern"
 
   tree_log "$TREE_SAME_SHA" "$TREE_SRC"
-  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_DOCS" > "$tree_logs/box-check-2.log"
+  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_DOCS" "$TREE_DOCS" > "$tree_logs/box-check-2.log"
   tree_run
   tree_assert 'newest filename selects the drift severity' 0 EVIDENCE-TREE-DRIFT "logged=$TREE_DOCS"
   rm -f "$tree_logs/box-check-2.log"
@@ -904,7 +915,7 @@ run_tree_evidence_cases() {
   tree_assert 'unresolvable tip is UNKNOWN even when commit matches' 3 UNKNOWN: 'tip tree'
 
   tree_log "$TREE_SAME_SHA" not-a-tree
-  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" > "$tree_logs/box-check-2.log"
+  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" "$TREE_BASE" > "$tree_logs/box-check-2.log"
   tree_run
   tree_assert 'malformed older header is not hidden by a matching log' 3 UNKNOWN: tree-hash=
   rm -f "$tree_logs/box-check-2.log"
@@ -977,7 +988,7 @@ fi
 
 # case 28: EVIDENCE-OK (log tree matches the tip tree) produces NO output -- a
 # clean pass must not read the same as "nothing was checked".
-printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" > "$BEB_FIX/wtA/tests/results/box-check-ubuntu-1.log"
+printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_BASE_SHA" "$TREE_BASE" "$TREE_BASE" > "$BEB_FIX/wtA/tests/results/box-check-ubuntu-1.log"
 beb_prs "[{\"number\":1,\"headRefOid\":\"$TREE_BASE_SHA\",\"headRefName\":\"agent/lead-stuff\",\"closingIssuesReferences\":[]}]"
 beb_issues ''; beb_wt_ok agent/lead-stuff "$BEB_FIX/wtA"
 out=$(run_beb); rc=$?
@@ -1108,13 +1119,46 @@ run_tree_evidence_cases beb
 # still wins over any subsequent finding in the overall exit status.
 run_beb_bad_tip_case() {
   local tree_tool=beb
-  printf 'box-check: commit=%s tree-hash=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" > "$BEB_FIX/wtA/tests/results/box-check-1.log"
+  printf 'box-check: commit=%s tree-hash=%s built-from=%s\n' "$TREE_SAME_SHA" "$TREE_SRC" "$TREE_SRC" > "$BEB_FIX/wtA/tests/results/box-check-1.log"
   beb_prs "[{\"number\":1,\"headRefOid\":\"$TREE_MISSING\",\"headRefName\":\"agent/bad-tip\",\"closingIssuesReferences\":[]},{\"number\":2,\"headRefOid\":\"$TREE_SAME_SHA\",\"headRefName\":\"agent/good-tip\",\"closingIssuesReferences\":[]}]"
   beb_issues ''; beb_wt_ok agent/bad-tip "$BEB_FIX/wtA" agent/good-tip "$BEB_FIX/wtA"
   out=$(run_beb); rc=$?
   tree_assert 'bad tip degrades only its own PR' 3 'UNKNOWN: PR #1' 'CANDIDATE: PR #2 (agent/good-tip) EVIDENCE-TREE-DRIFT'
 }
 run_beb_bad_tip_case
+
+# Disabling just the provenance check must make BOTH refusal cases fail by
+# name in BOTH readers. Reuse the same fixtures/assertions, without network.
+/usr/bin/python3 - "$CBE" "$BEB" "$TMP" <<'PY'
+from pathlib import Path
+import sys
+for source, before, after, name in (
+    (sys.argv[1], 'if [ -z "$b" ] || [ "$b" != "$t" ]; then', 'if false; then', 'unchecked-cbe.sh'),
+    (sys.argv[2], 'if not b or b.group(1) != t.group(1):', 'if False:', 'unchecked-beb.py'),
+):
+    text = Path(source).read_text()
+    assert text.count(before) == 1, f'cannot construct unique {name} control'
+    Path(sys.argv[3], name).write_text(text.replace(before, after))
+PY
+if [ "$?" != 0 ]; then
+  fail=$((fail+1)); echo 'FAIL cannot construct built-from negative controls'
+else
+  for control_tool in cbe beb; do
+    if (
+      CBE="$TMP/unchecked-cbe.sh"; BEB="$TMP/unchecked-beb.py"
+      tree_tool="$control_tool"
+      if [ "$tree_tool" = cbe ]; then tree_logs="$CBE_FIXTURE/tests/results"; else tree_logs="$BEB_FIX/wtA/tests/results"; fi
+      mkdir -p "$tree_logs"; rm -f "$tree_logs"/box-check-*.log
+      tree_pass=0; tree_fail=0; TREE_CONTROL=1
+      run_built_from_cases
+      [ "$tree_fail" = 2 ] && [ "$tree_pass" = 0 ]
+    ); then
+      pass=$((pass+1)); echo "ok   $control_tool built-from negative control: both refusal cases fail by name"
+    else
+      fail=$((fail+1)); echo "FAIL $control_tool built-from negative control escaped refusal cases"
+    fi
+  done
+fi
 
 echo "== new tree-evidence cases (fixed): $tree_pass passed, $tree_fail failed =="
 if [ "${BOX_EVIDENCE_CONTROL:-0}" = 1 ]; then
