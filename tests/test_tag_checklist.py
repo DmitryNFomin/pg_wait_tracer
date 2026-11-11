@@ -126,11 +126,11 @@ class TagChecklistTests(unittest.TestCase):
         self.assertNotIn("test gap", line["reason"])
 
     def test_no_test_and_box_only_are_distinct(self):
-        self.edit_row(tests="")
+        self.edit_row(tests="", tolerance="", red_proof="NONE")
         self.assertEqual(self.run_script()["lines"][0]["state"], "NO-TEST")
-        self.edit_row(tests="tests/example.py::test_db_time", evidence="box-check")
+        self.edit_row(tests="tests/example.py::test_db_time", evidence="box-check", tolerance="exact")
         self.assertEqual(self.run_script()["lines"][0]["state"], "NOT-RUN")
-        self.edit_row(evidence="")
+        self.edit_row(evidence="", tolerance="")
         self.assertEqual(self.run_script()["lines"][0]["state"], "NO-TEST")
 
     def test_absent_cancelled_and_unfinished_steps(self):
@@ -282,7 +282,7 @@ class TagChecklistTests(unittest.TestCase):
     def test_no_ci_run_refused(self):
         self.json_edit("run-list.json", lambda runs: runs.update({"ci.yml": []}))
         self.assertIn("no CI run", self.run_script(success=False))
-        self.edit_row(tests="", evidence="")
+        self.edit_row(tests="", evidence="", tolerance="", red_proof="NONE")
         self.assertIn("no CI run", self.run_script(success=False))
 
     def test_missing_run_conclusion_refused(self):
@@ -304,6 +304,39 @@ class TagChecklistTests(unittest.TestCase):
         self.edit_row(tolerance="exact (substring)")
         self.assertIn("tolerance must", self.run_script(success=False))
 
+    def test_no_test_nonempty_tolerance_refused(self):
+        for tests, evidence in (("", "ci.yml/build-and-unit/Run synthetic data tests"),
+                                ("tests/example.py::test_db_time", ""), ("", "")):
+            for tolerance in ("presence", "exact", "exit-code", "<1 ms"):
+                with self.subTest(tests=tests, evidence=evidence, tolerance=tolerance):
+                    self.edit_row(tests=tests, evidence=evidence, tolerance=tolerance, red_proof="NONE")
+                    self.assertIn("L001: NO-TEST row tolerance must be empty", self.run_script(success=False))
+
+    def test_no_test_empty_tolerance_accepted_and_history_compatible(self):
+        self.edit_row(tests="", evidence="", tolerance="", red_proof="NONE")
+        self.assertEqual(self.run_script()["lines"][0]["state"], "NO-TEST")
+        module = self.module()
+        for tolerance in ("presence", "exact", "exit-code"):
+            self.edit_row(tolerance=tolerance)
+            self.assertEqual(module.parse_tsv(self.tsv.read_text(), historical=True)[0]["tolerance"], tolerance)
+        self.edit_row(tests="tests/example.py::test_db_time",
+                      evidence="ci.yml/build-and-unit/Run synthetic data tests", tolerance="")
+        self.assertIn("empty required field", self.run_script(success=False))
+
+    def test_negative_control_no_test_tolerance_fails_by_name(self):
+        source = SCRIPT.read_text()
+        guard = 'if not historical and (not row["tests"] or not row["evidence"]) and row["tolerance"]:'
+        self.assertEqual(source.count(guard), 1)
+        mutant = Path(self.temp.name) / "no-test-tolerance.py"
+        mutant.write_text(source.replace(guard, 'if False:'))
+        name = "test_no_test_nonempty_tolerance_refused"
+        result = unittest.TestResult()
+        with mock.patch.dict(globals(), SCRIPT=mutant):
+            type(self)(name).run(result)
+        self.assertFalse(result.errors, result.errors)
+        self.assertTrue(any(name in case.id() for case, _ in result.failures), name)
+        print("negative control nonempty NO-TEST tolerance: caught by " + name)
+
     def test_pr_proof_must_exist_and_be_merged(self):
         for metadata in (None, {"number": 1, "state": "OPEN", "mergedAt": None},
                          {"number": 1, "state": "CLOSED", "mergedAt": None},
@@ -316,12 +349,124 @@ class TagChecklistTests(unittest.TestCase):
         module = self.module()
         rows = module.parse_tsv(self.tsv.read_text())
         with mock.patch.object(module, "gh_json", return_value={
-                "number": 1, "state": "MERGED", "mergedAt": "2026-11-01"}) as gh:
+                "number": 1, "state": "MERGED", "mergedAt": "2026-11-01", "files": [{"path": "tests/example.py"}]}) as gh:
             module.verify_red_proofs(rows, SHA)
-            gh.assert_called_once_with(["pr", "view", "1", "--json", "number,state,mergedAt"])
+            gh.assert_called_once_with(["pr", "view", "1", "--json", "number,state,mergedAt,files"])
         with mock.patch.object(module, "gh_json", side_effect=module.Refused("gh unavailable")):
             with self.assertRaisesRegex(module.Refused, "gh unavailable"):
                 module.verify_red_proofs(rows, SHA)
+
+    def assert_proof_refused(self, proof, files=("tests/example.py",), row="L001"):
+        error = self.run_script(success=False)
+        self.assertIn("REFUSED:", error)
+        for value in (row, proof, *files):
+            self.assertIn(value, error)
+        return error
+
+    def test_pr_proof_unrelated_test_file_refused(self):
+        self.json_edit("proofs.json", lambda proofs: proofs["PR #1"].update(
+            files=[{"path": "tests/example.py.bak"}, {"path": "src/example.py"}]))
+        self.assertIn("does not touch", self.assert_proof_refused("PR #1"))
+
+    def test_pr_proof_missing_invalid_or_empty_files_refused(self):
+        for files in (None, {}, "tests/example.py", ["tests/example.py"],
+                      [{"path": None}], [{"path": ""}], [{"filename": "tests/example.py"}], []):
+            with self.subTest(files=files):
+                self.json_edit("proofs.json", lambda proofs: proofs["PR #1"].update(files=files))
+                self.assert_proof_refused("PR #1")
+        self.json_edit("proofs.json", lambda proofs: proofs["PR #1"].pop("files"))
+        self.assert_proof_refused("PR #1")
+
+    def test_pr_proof_matches_any_csv_test_file_and_preserves_aliases(self):
+        selectors = io.StringIO()
+        csv.writer(selectors, lineterminator="").writerow([
+            "tests/other.py::test_one", "tests/example.py::test_two, with comma"])
+        self.edit_row(tests=selectors.getvalue())
+        metadata = json.loads((self.fixture / "proofs.json").read_text())["PR #1"]
+        for proof in ("PR #1", "#1", "https://github.com/owner/repo/pull/1#discussion"):
+            with self.subTest(proof=proof):
+                self.edit_row(red_proof=proof)
+                (self.fixture / "proofs.json").write_text(json.dumps({proof: metadata}))
+                self.assertEqual(self.run_script()["counts"]["GREEN"], 1)
+                self.json_edit("proofs.json", lambda proofs: proofs[proof].update(files=[]))
+                self.assert_proof_refused(proof, ("tests/other.py", "tests/example.py"))
+
+    def test_same_pr_proof_is_checked_for_each_row(self):
+        self.tsv.write_text(self.tsv.read_text() + self.tsv.read_text().splitlines()[1].replace(
+            "L001", "L002", 1).replace("tests/example.py", "tests/other.py") + "\n")
+        self.assert_proof_refused("PR #1", ("tests/other.py",), row="L002")
+        self.json_edit("proofs.json", lambda proofs: proofs["PR #1"]["files"].append({"path": "tests/other.py"}))
+        self.assertEqual(self.run_script()["counts"]["GREEN"], 2)
+
+    def test_sha_proof_unrelated_test_file_refused(self):
+        ancestor = "b" * 40
+        self.edit_row(red_proof=ancestor)
+        (self.fixture / "proofs.json").write_text(json.dumps({ancestor: {
+            "ancestor": ancestor, "descendant": SHA, "isAncestor": True,
+            "files": ["tests/example.py.bak", "src/example.py"]}}))
+        self.assertIn("does not touch", self.assert_proof_refused(ancestor))
+
+    def test_sha_proof_missing_invalid_or_empty_files_refused(self):
+        ancestor = "b" * 40
+        self.edit_row(red_proof=ancestor)
+        for files in (None, {}, "tests/example.py", [{"path": "tests/example.py"}], [None], [""], []):
+            with self.subTest(files=files):
+                (self.fixture / "proofs.json").write_text(json.dumps({ancestor: {
+                    "ancestor": ancestor, "descendant": SHA, "isAncestor": True, "files": files}}))
+                self.assert_proof_refused(ancestor)
+        self.json_edit("proofs.json", lambda proofs: proofs[ancestor].pop("files"))
+        self.assert_proof_refused(ancestor)
+
+    def test_sha_proof_matches_any_test_file_and_preserves_url(self):
+        ancestor = "b" * 40
+        self.edit_row(tests="tests/other.py::test_one,tests/example.py::test_two")
+        for proof in (ancestor, "https://github.com/owner/repo/commit/" + ancestor + "#diff"):
+            with self.subTest(proof=proof):
+                self.edit_row(red_proof=proof)
+                (self.fixture / "proofs.json").write_text(json.dumps({proof: {
+                    "ancestor": ancestor, "descendant": SHA, "isAncestor": True,
+                    "files": ["tests/example.py"]}}))
+                self.assertEqual(self.run_script()["counts"]["GREEN"], 1)
+                self.json_edit("proofs.json", lambda proofs: proofs[proof].update(files=[]))
+                self.assert_proof_refused(proof, ("tests/other.py", "tests/example.py"))
+
+    def test_same_sha_proof_is_checked_for_each_row(self):
+        ancestor = "b" * 40
+        self.edit_row(red_proof=ancestor)
+        self.tsv.write_text(self.tsv.read_text() + self.tsv.read_text().splitlines()[1].replace(
+            "L001", "L002", 1).replace("tests/example.py", "tests/other.py") + "\n")
+        (self.fixture / "proofs.json").write_text(json.dumps({ancestor: {
+            "ancestor": ancestor, "descendant": SHA, "isAncestor": True,
+            "files": ["tests/example.py"]}}))
+        self.assert_proof_refused(ancestor, ("tests/other.py",), row="L002")
+        self.json_edit("proofs.json", lambda proofs: proofs[ancestor]["files"].append("tests/other.py"))
+        self.assertEqual(self.run_script()["counts"]["GREEN"], 2)
+
+    def test_pr_proof_without_test_files_refused(self):
+        self.edit_row(tests="", tolerance="")
+        self.assert_proof_refused("PR #1", ())
+
+    def test_proof_file_lookup_failures_name_row_proof_and_files(self):
+        module = self.module()
+        rows = module.parse_tsv(self.tsv.read_text())
+        for exception in (module.Refused("gh unavailable"), OSError("gh missing")):
+            with self.subTest(exception=exception):
+                with mock.patch.object(module, "gh_json", side_effect=exception):
+                    with self.assertRaises(module.Refused) as refused:
+                        module.verify_red_proofs(rows, SHA)
+                for value in ("L001", "PR #1", "tests/example.py", str(exception)):
+                    self.assertIn(value, str(refused.exception))
+        ancestor = "b" * 40
+        rows[0]["red_proof"] = ancestor
+        with mock.patch.object(module, "command", side_effect=["", module.Refused("file lookup failed")]):
+            with self.assertRaises(module.Refused) as refused:
+                module.verify_red_proofs(rows, SHA)
+        for value in ("L001", ancestor, "tests/example.py", "file lookup failed"):
+            self.assertIn(value, str(refused.exception))
+        self.json_edit("proofs.json", lambda proofs: proofs["PR #1"].pop("files"))
+        self.assert_proof_refused("PR #1")
+        (self.fixture / "proofs.json").unlink()
+        self.assert_proof_refused("PR #1")
 
     def test_live_run_view_uses_latest_attempt(self):
         module = self.module()
@@ -350,19 +495,120 @@ class TagChecklistTests(unittest.TestCase):
         self.edit_row(red_proof=ancestor)
         for is_ancestor, descendant in ((False, SHA), (True, "c" * 40), (True, SHA)):
             (self.fixture / "proofs.json").write_text(json.dumps({ancestor: {
-                "ancestor": ancestor, "descendant": descendant, "isAncestor": is_ancestor}}))
+                "ancestor": ancestor, "descendant": descendant, "isAncestor": is_ancestor,
+                "files": ["tests/example.py"]}}))
             if is_ancestor and descendant == SHA:
                 self.assertEqual(self.run_script()["counts"]["GREEN"], 1)
             else:
                 self.assertIn("not a verified ancestor", self.run_script(success=False))
         module = self.module()
         rows = module.parse_tsv(self.tsv.read_text())
-        with mock.patch.object(module, "command", return_value="") as git:
+        with mock.patch.object(module, "command", side_effect=["", "tests/example.py\0"]) as git:
             module.verify_red_proofs(rows, SHA)
-            git.assert_called_once_with(["git", "merge-base", "--is-ancestor", ancestor, SHA])
+            self.assertEqual(git.call_args_list, [
+                mock.call(["git", "merge-base", "--is-ancestor", ancestor, SHA]),
+                mock.call(["git", "diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id",
+                           "--name-only", "-r", "-z", ancestor])])
         with mock.patch.object(module, "command", side_effect=module.Refused("not ancestor")):
             with self.assertRaisesRegex(module.Refused, "not ancestor"):
                 module.verify_red_proofs(rows, SHA)
+
+    def test_negative_control_any_merged_pr_or_ancestor_fails_by_name(self):
+        source = SCRIPT.read_text()
+        # Restore the defect: identity/merge/ancestry suffice, regardless of files.
+        replacements = {
+            'files = data.get("files")': 'files = []',
+            'paths = data.get("files")': 'paths = []',
+            'if not test_files.intersection(changed_files[proof]):': 'if False:',
+        }
+        for old, new in replacements.items():
+            self.assertEqual(source.count(old), 1, old)
+            source = source.replace(old, new)
+        mutant = Path(self.temp.name) / "any-merged-proof.py"
+        mutant.write_text(source)
+        names = [
+            "test_pr_proof_unrelated_test_file_refused",
+            "test_pr_proof_missing_invalid_or_empty_files_refused",
+            "test_pr_proof_matches_any_csv_test_file_and_preserves_aliases",
+            "test_same_pr_proof_is_checked_for_each_row",
+            "test_sha_proof_unrelated_test_file_refused",
+            "test_sha_proof_missing_invalid_or_empty_files_refused",
+            "test_sha_proof_matches_any_test_file_and_preserves_url",
+            "test_same_sha_proof_is_checked_for_each_row",
+            "test_pr_proof_without_test_files_refused",
+        ]
+        result = unittest.TestResult()
+        with mock.patch.dict(globals(), SCRIPT=mutant):
+            unittest.TestSuite(type(self)(name) for name in names).run(result)
+        self.assertFalse(result.errors, result.errors)
+        for name in names:
+            self.assertTrue(any(name in case.id() for case, _ in result.failures), name)
+            print("negative control any merged PR/ancestor: caught by " + name)
+
+    def test_git_proof_reads_root_and_ordinary_commit_files(self):
+        repo = (Path(self.temp.name) / "proof-repo").resolve()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        stream = bytearray()
+        for mark, path in enumerate(("tests/example.py", "docs/unrelated.md", "tests/other.py"), 1):
+            stream.extend((f"commit refs/heads/main\nmark :{mark}\n"
+                           f"committer Fixture <fixture@example.invalid> {1700000000 + mark} +0000\n"
+                           f"data 8\ncommit {mark}\n").encode())
+            if mark > 1:
+                stream.extend(f"from :{mark - 1}\n".encode())
+            stream.extend(f"M 100644 inline {path}\ndata 5\ntest\n\n\n".encode())
+        subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream, check=True)
+        shas = subprocess.check_output(["git", "rev-list", "--reverse", "main"], cwd=repo, text=True).splitlines()
+        module = self.module()
+        rows = module.parse_tsv(self.tsv.read_text())
+        rows[0]["tests"] = "tests/example.py::test_one,tests/other.py::test_two"
+        original_command = module.command
+        with mock.patch.object(module, "command", side_effect=lambda argv: original_command(argv, cwd=repo)):
+            for sha in (shas[0], shas[2]):
+                rows[0]["red_proof"] = sha
+                module.verify_red_proofs(rows, shas[-1])
+            rows[0]["red_proof"] = shas[1]
+            with self.assertRaisesRegex(module.Refused, "L001.*" + shas[1] + ".*tests/example.py.*does not touch"):
+                module.verify_red_proofs(rows, shas[-1])
+            rows[0]["red_proof"] = shas[-1]
+            with self.assertRaises(module.Refused):
+                module.verify_red_proofs(rows, shas[0])
+
+    def test_git_merge_proof_uses_changes_from_first_parent(self):
+        repo = (Path(self.temp.name) / "merge-repo").resolve()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        stream = bytearray()
+        # main: root -> test change -> unrelated merge
+        # side: root -> docs change -> merge bringing in the test change
+        commits = [
+            ("main", 1, None, None, "tests/example.py"),
+            ("main", 2, 1, None, "tests/other.py"),
+            ("side", 3, 1, None, "docs/unrelated.md"),
+            ("main", 4, 2, 3, "docs/unrelated.md"),
+            ("side", 5, 3, 2, "tests/other.py"),
+        ]
+        for branch, mark, parent, merge, path in commits:
+            stream.extend((f"commit refs/heads/{branch}\nmark :{mark}\n"
+                           f"committer Fixture <fixture@example.invalid> {1700000000 + mark} +0000\n"
+                           f"data 8\ncommit {mark}\n").encode())
+            if parent:
+                stream.extend(f"from :{parent}\n".encode())
+            if merge:
+                stream.extend(f"merge :{merge}\n".encode())
+            stream.extend(f"M 100644 inline {path}\ndata 5\ntest\n\n\n".encode())
+        subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream, check=True)
+        module = self.module()
+        rows = module.parse_tsv(self.tsv.read_text())
+        rows[0]["tests"] = "tests/other.py::test_two"
+        original_command = module.command
+        with mock.patch.object(module, "command", side_effect=lambda argv: original_command(argv, cwd=repo)):
+            for branch in ("main", "side"):
+                sha = subprocess.check_output(["git", "rev-parse", branch], cwd=repo, text=True).strip()
+                rows[0]["red_proof"] = sha
+                if branch == "side":
+                    module.verify_red_proofs(rows, sha)
+                else:
+                    with self.assertRaisesRegex(module.Refused, "does not touch"):
+                        module.verify_red_proofs(rows, sha)
 
     def test_markdown_identifies_run_conclusion_sha(self):
         path = self.fixture / "report.md"
@@ -382,6 +628,48 @@ class TagChecklistTests(unittest.TestCase):
             (repo / ".github/workflows/ci.yml").write_text("name: " + name + "\n")
             result = subprocess.run(["bash", "-c", guard], cwd=repo, capture_output=True)
             self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_workflow_permissions_guard(self):
+        check = (ROOT / "scripts/check.sh").read_text()
+        guard = next(line.removeprefix("run ") for line in check.splitlines()
+                     if line.startswith("run python3 -c ") and "tag checklist permissions must" in line)
+        workflow = (ROOT / ".github/workflows/tag-checklist.yml").read_text()
+        variants = {
+            "required_read_scopes": workflow,
+            "missing_pr_scope": workflow.replace("  pull-requests: read\n", ""),
+            "extra_read_scope": workflow.replace("  contents: read", "  checks: read\n  contents: read"),
+            "duplicate_scope": workflow.replace("  contents: read", "  contents: read\n  contents: read"),
+            "missing_block": workflow.replace("permissions:", "unused:"),
+            "job_override": workflow.replace("  checklist:", "  checklist:\n    permissions: write-all"),
+        }
+        variants.update({"write_" + scope: workflow.replace(scope + ": read", scope + ": write")
+                         for scope in ("contents", "actions", "issues", "pull-requests")})
+        for name, data in variants.items():
+            with self.subTest(name=name):
+                repo = Path(self.temp.name) / name
+                path = repo / ".github/workflows/tag-checklist.yml"
+                path.parent.mkdir(parents=True)
+                path.write_text(data)
+                result = subprocess.run(["bash", "-c", guard], cwd=repo, capture_output=True)
+                self.assertEqual(result.returncode, 0 if name == "required_read_scopes" else 1, result.stderr)
+
+    def test_negative_control_workflow_permissions_fails_by_name(self):
+        original_read = Path.read_text
+        def weakened_guard(path, *args, **kwargs):
+            source = original_read(path, *args, **kwargs)
+            if path == ROOT / "scripts/check.sh":
+                source = "\n".join(
+                    "run python3 -c 'pass # tag checklist permissions must'"
+                    if line.startswith("run python3 -c ") and "tag checklist permissions must" in line else line
+                    for line in source.splitlines())
+            return source
+        result = unittest.TestResult()
+        name = "test_workflow_permissions_guard"
+        with mock.patch.object(Path, "read_text", weakened_guard):
+            type(self)(name).run(result)
+        self.assertFalse(result.errors, result.errors)
+        self.assertTrue(any(name in case.id() for case, _ in result.failures), name)
+        print("negative control unchecked workflow permissions: caught by " + name)
 
     def test_inventory_citations_and_ci_registration(self):
         """A renamed or unregistered citation must not silently retain proof."""

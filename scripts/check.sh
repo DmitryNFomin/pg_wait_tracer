@@ -226,6 +226,9 @@ run python3 scripts/tag-checklist.py "$(git rev-parse HEAD)" --check-history
 step "tag checklist: workflow_run still targets the CI workflow name"
 run python3 -c 'import re; from pathlib import Path; assert re.search(r"(?m)^name: CI\s*$", Path(".github/workflows/ci.yml").read_text()), "tag checklist trigger requires name: CI"'
 
+step "tag checklist: workflow permissions are exactly the required read-only scopes"
+run python3 -c 'import re; from pathlib import Path; workflow = Path(".github/workflows/tag-checklist.yml").read_text(); blocks = re.findall(r"(?m)^permissions:\n((?:[ \t]+[^\n]*\n|\n)*)", workflow); expected = ["actions: read", "contents: read", "issues: read", "pull-requests: read"]; assert len(re.findall(r"(?m)^\s*permissions:", workflow)) == 1 and len(blocks) == 1 and sorted(line.strip() for line in blocks[0].splitlines() if line.strip()) == expected, "tag checklist permissions must be exactly contents/actions/issues/pull-requests: read"'
+
 # Fake workload/daemon processes and pg_stat_statements results: no live PG or BPF.
 step "python: capture-smoke failure diagnostics (#614)"
 run python3 tests/test_capture_smoke_diagnostics.py

@@ -4,7 +4,7 @@
 Offline fixtures: run-list.json maps workflow filenames to gh run-list arrays;
 run-<databaseId>.json is gh run-view JSON (headSha, jobs, workflowName, status);
 issues.json is gh issue-list JSON; history.json contains historical TSV versions;
-proofs.json contains PR metadata and commit-ancestry observations.
+proofs.json contains PR metadata, commit ancestry and changed-file observations.
 No fixture or command accepts typed readiness verdicts.
 """
 import argparse
@@ -58,9 +58,12 @@ def parse_tsv(data, allow_empty=False, historical=False):
         if not re.fullmatch(r"L[0-9]{3,}", ident) or ident in ids:
             raise Refused(f"invalid or duplicate id: {ident}")
         ids.add(ident)
-        if any(not row[key] for key in ("area", "statement", "tolerance", "platforms", "red_proof")):
+        if (any(not row[key] for key in ("area", "statement", "platforms", "red_proof"))
+                or (row["tests"] and row["evidence"] and not row["tolerance"])):
             raise Refused(f"{ident}: empty required field")
-        if not historical and not valid_tolerance(row["tolerance"]):
+        if not historical and (not row["tests"] or not row["evidence"]) and row["tolerance"]:
+            raise Refused(f"{ident}: NO-TEST row tolerance must be empty")
+        if not historical and row["tolerance"] and not valid_tolerance(row["tolerance"]):
             raise Refused(f"{ident}: tolerance must be exact, a numeric bound, substring, presence, ordering or exit-code")
         if row["red_proof"] != "NONE" and not re.fullmatch(
                 r"(?:PR #[1-9][0-9]*|#[1-9][0-9]*|[0-9a-f]{40}|https://github\.com/[^/]+/[^/]+/(?:pull/[1-9][0-9]*|commit/[0-9a-f]{40})(?:#\S+)?)",
@@ -124,32 +127,57 @@ def check_history(rows, path, sha, offline=None):
 
 
 def verify_red_proofs(rows, sha, offline=None):
-    proofs = read_json(offline / "proofs.json") if offline else None
-    for proof in sorted({row["red_proof"] for row in rows} - {"NONE"}):
-        pr = re.fullmatch(r"(?:PR #|#)([1-9][0-9]*)", proof)
-        commit = re.fullmatch(r"[0-9a-f]{40}", proof)
-        # URLs accepted by the parser are resolved, never trusted as prose.
-        if not pr and not commit:
-            pr = re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/([1-9][0-9]*)(?:#\S+)?", proof)
-            commit = re.fullmatch(r"https://github\.com/[^/]+/[^/]+/commit/([0-9a-f]{40})(?:#\S+)?", proof)
-        if pr:
-            number = int(pr[1])
-            target = proof if proof.startswith("https://") else str(number)
-            data = proofs.get(proof) if offline and isinstance(proofs, dict) else (
-                gh_json(["pr", "view", target, "--json", "number,state,mergedAt"]) if not offline else None)
-            if (not isinstance(data, dict) or type(data.get("number")) is not int or data.get("number") != number
-                    or data.get("state") != "MERGED" or not isinstance(data.get("mergedAt"), str) or not data["mergedAt"]):
-                raise Refused(f"red_proof {proof}: PR must exist and be merged")
-        elif commit:
-            ancestor = proof if len(proof) == 40 else commit[1]
-            if offline:
-                data = proofs.get(proof) if isinstance(proofs, dict) else None
-                if not isinstance(data, dict) or data.get("ancestor") != ancestor or data.get("descendant") != sha or data.get("isAncestor") is not True:
-                    raise Refused(f"red_proof {proof}: not a verified ancestor of {sha}")
-            else:
-                command(["git", "merge-base", "--is-ancestor", ancestor, sha])
-        else:
-            raise Refused(f"unverifiable red_proof: {proof}")
+    proofs, changed_files = None, {}
+    for row in rows:
+        proof = row["red_proof"]
+        if proof == "NONE":
+            continue
+        test_files = {test.split("::", 1)[0] for test in next(csv.reader([row["tests"]]))} if row["tests"] else set()
+        try:
+            if proof not in changed_files:
+                if offline and proofs is None:
+                    proofs = read_json(offline / "proofs.json")
+                pr = re.fullmatch(r"(?:PR #|#)([1-9][0-9]*)", proof)
+                commit = re.fullmatch(r"[0-9a-f]{40}", proof)
+                # URLs accepted by the parser are resolved, never trusted as prose.
+                if not pr and not commit:
+                    pr = re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/([1-9][0-9]*)(?:#\S+)?", proof)
+                    commit = re.fullmatch(r"https://github\.com/[^/]+/[^/]+/commit/([0-9a-f]{40})(?:#\S+)?", proof)
+                if pr:
+                    number = int(pr[1])
+                    target = proof if proof.startswith("https://") else str(number)
+                    data = proofs.get(proof) if offline and isinstance(proofs, dict) else (
+                        gh_json(["pr", "view", target, "--json", "number,state,mergedAt,files"]) if not offline else None)
+                    if (not isinstance(data, dict) or type(data.get("number")) is not int or data.get("number") != number
+                            or data.get("state") != "MERGED" or not isinstance(data.get("mergedAt"), str) or not data["mergedAt"]):
+                        raise Refused("PR must exist and be merged")
+                    files = data.get("files")
+                    if (not isinstance(files, list) or any(not isinstance(item, dict)
+                            or not isinstance(item.get("path"), str) or not item["path"] for item in files)):
+                        raise Refused("missing/invalid PR changed files")
+                    paths = [item["path"] for item in files]
+                elif commit:
+                    ancestor = proof if len(proof) == 40 else commit[1]
+                    if offline:
+                        data = proofs.get(proof) if isinstance(proofs, dict) else None
+                        if not isinstance(data, dict) or data.get("ancestor") != ancestor or data.get("descendant") != sha or data.get("isAncestor") is not True:
+                            raise Refused(f"not a verified ancestor of {sha}")
+                        paths = data.get("files")
+                    else:
+                        command(["git", "merge-base", "--is-ancestor", ancestor, sha])
+                        # Compare merges to their first parent; include root commits.
+                        paths = command(["git", "diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id",
+                                         "--name-only", "-r", "-z", ancestor]).rstrip("\0").split("\0")
+                    if not isinstance(paths, list) or any(not isinstance(path, str) or not path for path in paths):
+                        raise Refused("missing/invalid commit changed files")
+                else:
+                    raise Refused("unverifiable proof")
+                changed_files[proof] = set(paths)
+            if not test_files.intersection(changed_files[proof]):
+                raise Refused("proof does not touch any row test file")
+        except (Refused, OSError) as exc:
+            files = ", ".join(sorted(test_files)) or "(none)"
+            raise Refused(f"{row['id']}: red_proof {proof}; row test files: {files}: {exc}") from exc
 
 
 def read_json(path):
