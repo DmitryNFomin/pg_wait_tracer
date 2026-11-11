@@ -19,11 +19,8 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Fraction of an event that lies inside the window, for quantities measured
- * per-event rather than in wall time (cpu_ns). Matches the ov/dur split
- * pgwt_compute_aas applies per bucket, so CPU* agrees between the two paths.
- * Exactly 1.0 when the window does not cut the event, which keeps the
- * no-window path bit-identical. */
+/* Fraction used only by the wait-gap CPU observability diagnostic.
+ * CPU-gap accounting uses pgwt_cpu_clip_ns and cumulative integer endpoints. */
 static inline double event_window_frac(uint64_t clip_ns, uint64_t dur_ns)
 {
     if (dur_ns == 0) return 0.0;
@@ -50,7 +47,7 @@ static inline double event_window_frac(uint64_t clip_ns, uint64_t dur_ns)
  *      class_ns, events[].total_ns, sessions[].db_time_ns, queries[] time,
  *      AAS buckets, cpu_measured/offcpu.
  *      Selected by OVERLAP; contributed CLIPPED through event_window_ns()
- *      (and event_window_frac() for cpu_ns). A right-open record IS
+ *      (and pgwt_cpu_clip_ns() for measured CPU gaps). A right-open record IS
  *      included -- its in-window part is real time that really elapsed.
  *
  *  INSTANT-selected (a property of one completed observation)
@@ -1479,8 +1476,9 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
      * where v3 cpu_ns exists, else the legacy full gap); offcpu_ns its off-CPU
      * sibling; the two sum to the old full CPU-class total, so DB Time is
      * unchanged. cpu_clamped/wait_gap are the self-checks (5.6). */
-    double cpu_measured_ns = 0.0, offcpu_ns = 0.0;
-    double cpu_clamped_ns = 0.0, wait_gap_cpu_ns = 0.0;
+    uint64_t cpu_measured_ns = 0, offcpu_ns = 0, cpu_gap_ns = 0;
+    uint64_t cpu_clamped_ns = 0;
+    double wait_gap_cpu_ns = 0.0;
     int    has_measured_cpu = 0;
     double cat_ns[PGWT_NUM_CATS] = {0};
     /* io_worker busy%% needs the worker-pool size: count distinct io_worker
@@ -1528,31 +1526,20 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
         db_time_ns += dur_ns;
         int cls_idx = pgwt_wait_class_index(ev->old_event);
         if (cls_idx == PGWT_CLASS_CPU) {
-            /* T8 revision (docs/ROADMAP_AND_STATUS.md): CPU* is the SUM
-             * of every interval's measured cpu_ns (conserved = true CPU);
-             * Off-CPU* is a GLOBAL RESIDUAL computed after the loop, never a
-             * per-interval dur-cpu split. `se.sum_exec_runtime` is only current
-             * at a tick (1ms) or a context switch, so a sub-ms CPU burst before
-             * a wait leaks (whole) into the FOLLOWING wait interval's delta; a
-             * per-interval split therefore double-counts that leak. Summing all
-             * cpu_ns (here + the wait branch below) is leak-immune, and the
-             * residual recovers the real runqueue time from exact totals. A
-             * stale-0 on a we==0 gap now correctly adds 0 (its burst is counted
-             * in the interval it leaked to) — no full-gap fallback (which
-             * over-stated CPU* past physical cores, Finding #1). */
+            /* Accumulate the integer CPU gap wall independently of waits.
+             * Per-record clamping makes the global residual exactly additive. */
+            cpu_gap_ns += clip_u;
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
-                /* Split measured CPU by the in-window fraction, the same
-                 * ov/dur split pgwt_compute_aas uses per bucket. */
-                double m = (double)ev->cpu_ns * frac;
-                if (m > dur_ns) { cpu_clamped_ns += m - dur_ns; m = dur_ns; }
-                cpu_measured_ns += m;
+                /* Allocate by cumulative endpoints so window partitions
+                 * preserve every measured integer nanosecond. */
+                cpu_measured_ns += pgwt_cpu_clip_ns(ev, from_ns, to_ns, &cpu_clamped_ns);
                 /* A measured zero is a signal; zero overlap is absence. */
-                if (frac > 0.0)
+                if (clip_u > 0)
                     has_measured_cpu = 1;
             } else {
                 /* UNKNOWN: sampled/v2/legacy — never measured. Gap-inference:
                  * the whole gap is CPU*, and no Off-CPU* for this window. */
-                cpu_measured_ns += dur_ns;
+                cpu_measured_ns += clip_u;
             }
         } else {
             /* The wait keeps its FULL wall time and its LABEL. With S3, a
@@ -1602,23 +1589,10 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     /* The CPU class total is the measured (or legacy-inferred) CPU. */
     classes[PGWT_CLASS_CPU].total_ns = cpu_measured_ns;
 
-    /* T8 revision: Off-CPU* = DB Time - CPU* - Σ wait durations (the residual
-     * runqueue/unaccounted remainder of the on-CPU gaps). Computed from EXACT
-     * totals only (DB Time and wait durations are timestamp-exact; CPU* is a
-     * conserved sum), so it is immune to the per-interval sub-ms CPU leak. Only
-     * meaningful where some cpu_ns was measured; UNKNOWN-only windows show CPU*
-     * alone. Clamp at 0 (a positive clamp = CPU* exceeded DB-waits, a
-     * measurement inconsistency worth counting). */
     if (has_measured_cpu) {
-        double wait_total_ns = 0.0;
-        for (int c = 0; c < PGWT_NUM_CLASSES; c++)
-            if (c != PGWT_CLASS_CPU)
-                wait_total_ns += classes[c].total_ns;
-        double resid = db_time_ns - cpu_measured_ns - wait_total_ns;
-        if (resid < 0) { cpu_clamped_ns += -resid; resid = 0.0; }
-        offcpu_ns = resid;
-    } else {
-        offcpu_ns = 0.0;
+        uint64_t excess_ns = 0;
+        offcpu_ns = pgwt_offcpu_ns(cpu_gap_ns, cpu_measured_ns, &excess_ns);
+        cpu_clamped_ns += excess_ns;
     }
 
     for (int c = 0; c < PGWT_NUM_CATS; c++)
@@ -1928,9 +1902,8 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
      * silently dropped. has_measured_cpu says which of the two things the
      * CPU* row IS: a measurement (1) or the unsplit gap wall (0). */
     uint64_t cpu_offcpu_ns = 0;
-    /* Double, like time_model's: the overshoot is the fractional difference
-     * of two doubles, and rounding it per record would hide a sub-ns skew. */
-    double cpu_clamped_ns = 0.0;
+    /* Integer excess allocated by the same endpoints as the CPU share. */
+    uint64_t cpu_clamped_ns = 0;
     int has_measured_cpu = 0;
 
     for (int i = 0; i < count; i++) {
@@ -1983,9 +1956,9 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
          * replay path, src/event_reader.c).
          *
          * Arithmetic is the time model's, record for record: the measurement
-         * is split by the in-window FRACTION (not taken whole -- a straddling
-         * gap contributes only the CPU that happened inside the window) and
-         * clamped to the clipped wall, since sum_exec_runtime is only current
+         * is allocated by cumulative integer endpoints (an accounting rule,
+         * not the actual timing of CPU use) and clamped to the clipped wall,
+         * since sum_exec_runtime is only current
          * at a tick or a context switch and a leaked sub-ms burst can exceed
          * its own interval. UNKNOWN (sampled / v2 / no CPU capability) keeps
          * gap-inference: the whole gap is CPU*, and there is no off-CPU
@@ -2010,26 +1983,13 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
         uint64_t row_ns = clip_u;
         if (pgwt_wait_class_index(ev->old_event) == PGWT_CLASS_CPU &&
             ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
-            double frac = event_window_frac(clip_u, ev->duration_ns);
-            double m = (double)ev->cpu_ns * frac;
-            /* Skew self-check, same name and meaning as time_model's: the
-             * excess is CLAMPED away (it is not time that happened in this
-             * gap) but it is COUNTED, so a measurement that overshoots its
-             * own wall is visible instead of silently absorbed. */
-            if (m > (double)clip_u) {
-                cpu_clamped_ns += m - (double)clip_u;
-                m = (double)clip_u;
-            }
-            /* This accumulator is integer ns (the row totals are), so the
-             * split is ROUNDED, not truncated -- truncation would bias every
-             * straddling record's sub-ns remainder into off-CPU. m <= clip_u
-             * holds above, so the rounded value cannot exceed clip_u either,
-             * and `clip_u - row_ns` below stays non-negative. */
-            row_ns = (uint64_t)(m + 0.5);
-            cpu_offcpu_ns += clip_u - row_ns;
+            row_ns = pgwt_cpu_clip_ns(ev, from_ns, to_ns, &cpu_clamped_ns);
+            uint64_t excess_ns = 0;
+            cpu_offcpu_ns += pgwt_offcpu_ns(clip_u, row_ns, &excess_ns);
+            cpu_clamped_ns += excess_ns;
             /* A measured ZERO is a signal (the gap was all runqueue); zero
              * overlap is absence and must not claim a measurement. */
-            if (frac > 0.0)
+            if (clip_u > 0)
                 has_measured_cpu = 1;
         }
         ht[h].total_ns += row_ns;
@@ -2182,11 +2142,8 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
     pgwt_pid_index_init(&ix);
     struct session_accum *ht = NULL;
     int num_entries = 0, cap_entries = 0, alloc_failed = 0;
-    /* #562, response-level, same three as pgwt_events_result's. Double for
-     * the clamp, like the time model's: the overshoot is the fractional
-     * difference of two doubles and rounding it per record would hide a
-     * sub-ns skew. */
-    double cpu_clamped_ns = 0.0;
+    /* #562: response-level integer excess, same as Events and Time Model. */
+    uint64_t cpu_clamped_ns = 0;
     int    has_measured_cpu = 0;
 
     for (int i = 0; i < count && !alloc_failed; i++) {
@@ -2222,8 +2179,8 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
              * not the on-CPU gap's wall -- the same correction #553/PR #559
              * made to pgwt_compute_top_events and #531/PR #554 to the CLI
              * replay path, with the same arithmetic record for record: the
-             * measurement is split by the in-window FRACTION (a straddling
-             * gap contributes only the CPU that happened inside the window)
+             * measurement is allocated by cumulative integer endpoints
+             * (an accounting rule, not the actual timing of CPU use)
              * and clamped to the clipped wall, because sum_exec_runtime is
              * only current at a tick or a context switch and a leaked sub-ms
              * burst can exceed its own interval. The excess is clamped away
@@ -2240,22 +2197,14 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
              * nothing else maps there, so the two are the same selector. */
             uint64_t row_ns = clip_u;
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
-                double frac = event_window_frac(clip_u, ev->duration_ns);
-                double m = (double)ev->cpu_ns * frac;
-                if (m > (double)clip_u) {
-                    cpu_clamped_ns += m - (double)clip_u;
-                    m = (double)clip_u;
-                }
-                /* Rounded, not truncated: truncation would bias every
-                 * straddling record's sub-ns remainder into off-CPU. m <=
-                 * clip_u holds above, so the rounded value cannot exceed
-                 * clip_u either and the subtraction below stays >= 0. */
-                row_ns = (uint64_t)(m + 0.5);
-                ht[h].offcpu_ns += clip_u - row_ns;
+                row_ns = pgwt_cpu_clip_ns(ev, from_ns, to_ns, &cpu_clamped_ns);
+                uint64_t excess_ns = 0;
+                ht[h].offcpu_ns += pgwt_offcpu_ns(clip_u, row_ns, &excess_ns);
+                cpu_clamped_ns += excess_ns;
                 /* A measured ZERO is a signal (the gap was all runqueue);
                  * zero overlap is absence and must not claim a
                  * measurement. */
-                if (frac > 0.0)
+                if (clip_u > 0)
                     has_measured_cpu = 1;
             }
             ht[h].cpu_ns += row_ns;
@@ -2288,6 +2237,7 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
     struct pgwt_session_row *rows = num_entries
         ? calloc((size_t)num_entries, sizeof(*rows)) : NULL;
     int nr = 0;
+    uint64_t off_total_ns = 0, cpu_total_ns = 0;
     if (num_entries && !rows) {
         free(ht);
         pgwt_pid_index_free(&ix);
@@ -2311,6 +2261,8 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
          * waits PLUS the runqueue time. */
         r->wait_pct = db > 0 ? (double)ht[i].wait_ns / db * 100.0 : 0;
         r->offcpu_ms = (double)ht[i].offcpu_ns / 1e6;
+        off_total_ns += ht[i].offcpu_ns;
+        cpu_total_ns += ht[i].cpu_ns;
 
         /* Find top wait from per-PID hash table */
         uint32_t top_id = 0;
@@ -2341,10 +2293,8 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
     /* #562: the response-level trio. offcpu_ms is the Σ over rows so a
      * client that does not walk them can still account for the time the CPU
      * column no longer claims. */
-    double off_total_ms = 0.0;
-    for (int i = 0; i < nr; i++)
-        off_total_ms += rows[i].offcpu_ms;
-    out->offcpu_ms        = off_total_ms;
+    out->cpu_ms           = (double)cpu_total_ns / 1e6;
+    out->offcpu_ms        = (double)off_total_ns / 1e6;
     out->cpu_clamped_ms   = cpu_clamped_ns / 1e6;
     out->has_measured_cpu = has_measured_cpu;
 }
@@ -2902,8 +2852,9 @@ struct tm_summary_ctx {
      * record -- so those requests leave has_measured_cpu at 0 and keep the
      * single "CPU*" row, which is honest about what cannot be split rather
      * than a split computed from the wrong population. */
-    double cpu_measured_ns;      /* Sigma measured cpu_ns (clamped at write) */
-    double cpu_unknown_ns;       /* Sigma wall of UNKNOWN we==0 gaps         */
+    uint64_t cpu_gap_ns;
+    uint64_t cpu_measured_ns;    /* Sigma measured cpu_ns (clamped at write) */
+    uint64_t cpu_unknown_ns;     /* Sigma wall of UNKNOWN we==0 gaps         */
     double cpu_clamped_ns;
     double wait_gap_cpu_ns;
     int    has_measured_cpu;
@@ -2992,15 +2943,15 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
         /* v7 (#408): the measured-CPU split for this second. cpu_measured +
          * cpu_unknown is the CPU* total (exactly what the raw path's single
          * cpu_measured_ns accumulator holds, both tiers in one number); the
-         * runqueue row is derived after the visit as the residual
-         * DB - CPU* - Sigma waits, from these exact totals.
+         * runqueue row is derived from the integer CPU gap wall minus CPU*.
          *
          * has_measured_cpu follows the RECORD COUNT, never the nanoseconds: a
          * measured zero is a signal (this window can separate running from
          * waiting, and nothing ran) while an absent measurement is not, and
          * summing to zero cannot tell the two apart. */
-        ctx->cpu_measured_ns  += (double)rec->cpu_measured_ns;
-        ctx->cpu_unknown_ns   += (double)rec->cpu_unknown_ns;
+        ctx->cpu_measured_ns  += rec->cpu_measured_ns;
+        ctx->cpu_gap_ns += rec->class_ns[PGWT_CLASS_CPU];
+        ctx->cpu_unknown_ns   += rec->cpu_unknown_ns;
         ctx->cpu_clamped_ns   += (double)rec->cpu_clamped_ns;
         ctx->wait_gap_cpu_ns  += (double)rec->wait_gap_cpu_ns;
         if (rec->cpu_measured_records > 0)
@@ -3087,30 +3038,25 @@ void pgwt_compute_time_model_from_summaries(
      * STEP 1: the CPU class row becomes CPU* = measured + gap-inferred, which
      * is normally SMALLER than rec->class_ns[CPU] (that is the full wall of
      * every we == 0 gap). The difference is the runqueue time, which step 2
-     * recovers as a residual -- so DB Time does not move: it is still built
-     * from class_ns, and CPU* + Off-CPU* adds back up to the gap total.
+     * recovers as a residual. DB Time is still built from class_ns. At a
+     * window edge, CPU* can exceed the gap wall after open-gap credits are
+     * placed; that excess belongs in cpu_clamped_ms.
      *
-     * STEP 2: Off-CPU* = DB - CPU* - Sigma waits, from exact totals rather
-     * than a per-interval wall-minus-cpu split, because sum_exec_runtime is
-     * only current at a tick or a context switch and a per-interval split
-     * double-counts the sub-ms burst that leaks into the next interval. A
-     * negative residual is a measurement inconsistency: clamp at 0 and count
-     * the clamp, exactly as raw does.
+     * STEP 2: subtract integer CPU* from the integer CPU gap wall. This
+     * floors negative remainders at zero and counts the excess in the clamp
+     * diagnostic. Using the gap wall directly avoids floating-point
+     * cancellation against unrelated waits in DB Time.
      *
      * Order matters: this runs BEFORE the qsort below, because the classes
      * array is sorted by total and the CPU total changes here. */
-    double offcpu_ns = 0.0;
+    uint64_t offcpu_ns = 0;
     double cpu_clamped_ns = ctx.cpu_clamped_ns;
     if (ctx.has_measured_cpu) {
-        double cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
-        ctx.classes[PGWT_CLASS_CPU].total_ns = cpu_total_ns;
-        double wait_total_ns = 0.0;
-        for (int c = 0; c < PGWT_NUM_CLASSES; c++)
-            if (c != PGWT_CLASS_CPU)
-                wait_total_ns += ctx.classes[c].total_ns;
-        double resid = ctx.db_time_ns - cpu_total_ns - wait_total_ns;
-        if (resid < 0) { cpu_clamped_ns += -resid; resid = 0.0; }
-        offcpu_ns = resid;
+        uint64_t cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
+        ctx.classes[PGWT_CLASS_CPU].total_ns = (double)cpu_total_ns;
+        uint64_t excess_ns = 0;
+        offcpu_ns = pgwt_offcpu_ns(ctx.cpu_gap_ns, cpu_total_ns, &excess_ns);
+        cpu_clamped_ns += (double)excess_ns;
     }
 
     /* Build result rows (same format as raw compute). The row budget matches
@@ -3243,7 +3189,8 @@ struct te_summary_ctx {
     struct top_event_accum *ht;
     int      num_entries;
     uint64_t db_time_ns;
-    double   cpu_measured_ns, cpu_unknown_ns, cpu_clamped_ns;
+    uint64_t cpu_measured_ns, cpu_unknown_ns;
+    double   cpu_clamped_ns;
     int      has_measured_cpu;
     const struct pgwt_filter *f;
 };
@@ -3294,8 +3241,8 @@ static int te_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
      * query branch above cannot use these totals, nor can a filter that
      * excludes CPU. */
     if (!pgwt_is_hidden_event(0) && summary_event_matches_filter(ctx->f, 0)) {
-        ctx->cpu_measured_ns += (double)rec->cpu_measured_ns;
-        ctx->cpu_unknown_ns += (double)rec->cpu_unknown_ns;
+        ctx->cpu_measured_ns += rec->cpu_measured_ns;
+        ctx->cpu_unknown_ns += rec->cpu_unknown_ns;
         ctx->cpu_clamped_ns += (double)rec->cpu_clamped_ns;
         if (rec->cpu_measured_records > 0)
             ctx->has_measured_cpu = 1;
@@ -3351,7 +3298,7 @@ void pgwt_compute_top_events_from_summaries(
     pgwt_visit_summaries(trace_dir, from_ns, to_ns, te_summary_visitor, &ctx);
 
     double db_time_ms = (double)ctx.db_time_ns / 1e6;
-    double offcpu_ns = 0.0;
+    uint64_t offcpu_ns = 0;
     double clamped_ns = ctx.cpu_clamped_ns;
     int cpu_row_adjusted = 0;
 
@@ -3367,14 +3314,12 @@ void pgwt_compute_top_events_from_summaries(
         row->total_ms = (double)ctx.ht[i].total_ns / 1e6;
         if (row->event_id == 0 && ctx.has_measured_cpu) {
             cpu_row_adjusted = 1;
-            double event0_wall_ns = (double)ctx.ht[i].total_ns;
-            double cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
-            row->total_ms = cpu_total_ns / 1e6;
-            offcpu_ns = event0_wall_ns - cpu_total_ns;
-            if (offcpu_ns < 0) {
-                clamped_ns += -offcpu_ns;
-                offcpu_ns = 0.0;
-            }
+            uint64_t event0_wall_ns = ctx.ht[i].total_ns;
+            uint64_t cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
+            row->total_ms = (double)cpu_total_ns / 1e6;
+            uint64_t excess_ns = 0;
+            offcpu_ns = pgwt_offcpu_ns(event0_wall_ns, cpu_total_ns, &excess_ns);
+            clamped_ns += (double)excess_ns;
         }
         row->exact_count = ctx.ht[i].exact_count;
         row->avg_us   = ctx.ht[i].exact_count > 0
@@ -3561,6 +3506,7 @@ void pgwt_compute_top_sessions_from_summaries(
     struct pgwt_session_row *rows = ctx.num_entries
         ? calloc((size_t)ctx.num_entries, sizeof(*rows)) : NULL;
     int nr = 0;
+    uint64_t off_total_ns = 0, cpu_total_ns = 0;
     if (ctx.num_entries && !rows) {
         free(ctx.ht);
         pgwt_pid_index_free(&ctx.ix);
@@ -3577,10 +3523,12 @@ void pgwt_compute_top_sessions_from_summaries(
         /* v9 (#424, #562): subtract only MEASURED gaps' off-CPU remainder.
          * UNKNOWN gaps stay whole in the CPU column; only observations
          * below can establish that this window has a measurement. */
-        uint64_t cpu_col_ns = ctx.ht[i].cpu_ns > ctx.ht[i].offcpu_ns
-                            ? ctx.ht[i].cpu_ns - ctx.ht[i].offcpu_ns : 0;
-        row->cpu_pct   = db > 0 ? (double)cpu_col_ns / db * 100.0 : 0;
-        row->offcpu_ms = (double)ctx.ht[i].offcpu_ns / 1e6;
+        uint64_t cpu_col_ns = pgwt_offcpu_ns(ctx.ht[i].cpu_ns, ctx.ht[i].offcpu_ns, NULL);
+        uint64_t off_ns = pgwt_offcpu_ns(ctx.ht[i].cpu_ns, cpu_col_ns, NULL);
+        row->cpu_pct = db > 0 ? (double)cpu_col_ns / db * 100.0 : 0;
+        row->offcpu_ms = (double)off_ns / 1e6;
+        off_total_ns += off_ns;
+        cpu_total_ns += cpu_col_ns;
         /* wait_pct is the SAME quantity on both paths and must use the same
          * floating-point EXPRESSION too. It once read `100 - cpu_pct`, which
          * is algebraically Sigma waits/db here when CPU is the full gap wall,
@@ -3610,10 +3558,8 @@ void pgwt_compute_top_sessions_from_summaries(
 
     out->rows     = rows;
     out->num_rows = nr;
-    double off_total_ms = 0.0;
-    for (int i = 0; i < nr; i++)
-        off_total_ms += rows[i].offcpu_ms;
-    out->offcpu_ms = off_total_ms;
+    out->cpu_ms = (double)cpu_total_ns / 1e6;
+    out->offcpu_ms = (double)off_total_ns / 1e6;
     /* #562: cpu_clamped_ms is the one residual: no per-session source, so 0. */
 }
 

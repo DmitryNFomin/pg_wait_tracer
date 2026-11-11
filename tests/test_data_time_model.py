@@ -83,6 +83,114 @@ def build_scenario():
     }
 
 
+def check_cpu_aas_contract(t):
+    # The long unfiltered window uses summaries; the PID-filtered twin uses
+    # raw events. The load-budget oracle proves the long request used summaries.
+    events = [{"pid": 42, "ts": BASE_TS + sec * 1_000_000_000 + 10485760,
+               "dur": 10485760, "cpu": 10433332, "old": CPU, "new": CPU, "qid": 99}
+              for sec in range(140)]
+    events += [{"pid": 43, "ts": BASE_TS + sec * 1_000_000_000 + 10485760,
+                "dur": 10485760, "cpu": 10485760, "old": CPU, "new": CPU, "qid": 99}
+               for sec in range(150, 290)]
+    trace_dir = generate_traces({"cpu_measured": 1, "events": events,
+        "backends": [{"pid": 42, "type": "client"}, {"pid": 43, "type": "client"}],
+        "queries": [{"id": 99, "text": "SELECT 1"}]})
+    try:
+        bounds = dict(from_=BASE_TS, to_=BASE_TS + 140_000_000_000)
+        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": "1"}) as srv:
+            for cmd in ("top_events", "time_model"):
+                oracle = srv.query(cmd, **bounds)
+                t.check("error" not in oracle and oracle.get("rows"),
+                        "757 summary route survives a one-event load budget: " + cmd)
+        with ServerHarness(trace_dir) as srv:
+            for route, filters in (("summary", {}), ("raw", {"pid": 42})):
+                tm = srv.query("time_model", filters=filters, **bounds)
+                te = srv.query("top_events", filters=filters, **bounds)
+                ts = srv.query("top_sessions", filters=filters, **bounds)
+                t.check(ts.get("cpu_ms") == tm["cpu_ms"],
+                        "757 " + route + " Sessions CPU total == Overview CPU exactly")
+                t.check(ts["offcpu_ms"] == tm["offcpu_ms"],
+                        "757 " + route + " Sessions off-CPU total == Overview exactly")
+                waiting = next(r for r in tm["rows"] if r["name"] == "CPU (waiting for a core)")
+                t.check(te.get("offcpu_aas") is not None,
+                        "757 " + route + " emitted Events offcpu_aas is available")
+                t.check(te.get("offcpu_aas") == waiting["aas"],
+                        "757 " + route + " emitted Events AAS == Overview waiting AAS exactly")
+                t.check(te["offcpu_ms"] == tm["offcpu_ms"],
+                        "757 " + route + " emitted integer off-CPU totals agree exactly")
+            for filters in ({"class": "cpu"}, {"event_id": 0}):
+                tm = srv.query("time_model", filters=filters, **bounds)
+                te = srv.query("top_events", filters=filters, **bounds)
+                ts = srv.query("top_sessions", filters=filters, **bounds)
+                t.check(tm["cpu_ms"] == te["rows"][0]["total_ms"] == ts["cpu_ms"],
+                        "757 CPU class/event filter exact CPU parity across handlers")
+                t.check(tm["offcpu_ms"] == te["offcpu_ms"] == ts["offcpu_ms"],
+                        "757 CPU class/event filter exact off-CPU parity across handlers")
+            # The C suite pins both probe inputs; this wire case also checks
+            # the full requested window denominator for a one-tenth straddle.
+            end = events[0]["ts"]
+            clipped = dict(from_=end - 1048576, to_=end, filters={"pid": 42})
+            tm = srv.query("time_model", **clipped)
+            te = srv.query("top_events", **clipped)
+            waiting = next(r for r in tm["rows"] if r["name"] == "CPU (waiting for a core)")
+            t.check(te.get("offcpu_aas") == waiting["aas"],
+                    "757 raw straddle emitted AAS exact equality")
+            for filters in ({}, {"pid": 43}):
+                zero = srv.query("top_events", filters=filters,
+                    from_=BASE_TS + 150_000_000_000, to_=BASE_TS + 290_000_000_000)
+                t.check(zero["has_measured_cpu"] and zero["offcpu_aas"] == 0,
+                        "757 raw/summary measured zero AAS remains numeric zero")
+            unavailable = srv.query("top_events", filters={"pid": 999}, **bounds)
+            t.check(unavailable.get("offcpu_aas", "missing") is None,
+                    "757 unmeasured Events AAS emits null, not zero")
+    finally:
+        cleanup_traces(trace_dir)
+
+
+def check_zero_wall_cpu_diagnostic(t):
+    instant = BASE_TS + 1_000_000_000
+    trace_dir = generate_traces({
+        "cpu_measured": 1,
+        "backends": [{"pid": 42, "type": "client"}],
+        "events": [{"pid": 42, "ts": instant, "dur": 0,
+                    "cpu": 700000, "old": CPU, "new": CPU}],
+    })
+    try:
+        with ServerHarness(trace_dir) as srv:
+            for cmd in ("time_model", "top_events", "top_sessions"):
+                def query(start, end):
+                    result = srv.query(cmd, from_=start, to_=end,
+                                       filters={"pid": 42})
+                    t.check("error" not in result,
+                            "757 zero-wall " + cmd + " answers raw request")
+                    t.check(not result.get("has_measured_cpu"),
+                            "757 zero-wall " + cmd + " keeps CPU split unavailable")
+                    t.check(result.get("offcpu_ms") == 0,
+                            "757 zero-wall " + cmd + " adds no off-CPU time")
+                    return result
+
+                whole = query(instant - 2, instant + 2)
+                print(f"757 zero-wall {cmd}: cpu_clamped_ms={whole.get('cpu_clamped_ms')}")
+                t.check(whole.get("cpu_clamped_ms") == 0.7,
+                        "757 zero-wall " + cmd + " emits all 0.7 ms as excess")
+                if cmd == "time_model":
+                    t.check(whole["cpu_ms"] == whole["db_time_ms"] == 0,
+                            "757 zero-wall Overview contributes no CPU/DB time")
+                elif cmd == "top_events":
+                    t.check(whole["db_time_ms"] == 0 and
+                            all(row["total_ms"] == 0 for row in whole["rows"]),
+                            "757 zero-wall Events contributes no CPU/DB time")
+                for delta in (-1, 0, 1):
+                    cut = instant + delta
+                    left = query(instant - 2, cut)["cpu_clamped_ms"]
+                    right = query(cut, instant + 2)["cpu_clamped_ms"]
+                    t.check((left, right) == ((0.7, 0) if delta > 0 else (0, 0.7))
+                            and left + right == whole["cpu_clamped_ms"],
+                            f"757 zero-wall {cmd} cut instant{delta:+d}: excess owned once")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 def main():
     t = TestRunner("test_data_time_model")
     print(f"=== {t.name} ===")
@@ -130,6 +238,8 @@ def main():
     finally:
         cleanup_traces(trace_dir)
 
+    check_cpu_aas_contract(t)
+    check_zero_wall_cpu_diagnostic(t)
     sys.exit(0 if t.summary() else 1)
 
 
