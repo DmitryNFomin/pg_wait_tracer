@@ -561,7 +561,12 @@ static int accum_event(struct pgwt_summary_accum *acc,
     }
 
     /* Per-session stats */
-    struct pgwt_summary_session *ss = find_or_insert_session(acc, evt->pid);
+    /* #852: raw excludes idle before inserting a session. An idle-only pid
+     * carries no session payload, but allocating it here exposed an extra
+     * zero row and consumed capacity needed by active pids. Do not test tns:
+     * a non-idle close can retain occurrence data after all wall was credited. */
+    struct pgwt_summary_session *ss = ev_idle ? NULL
+        : find_or_insert_session(acc, evt->pid);
     if (!ss && !ev_idle) {
         /* #555: the mirror of events_overflow above. A full sessions[] used
          * to drop this pid's time with no signal at all, while class_ns and

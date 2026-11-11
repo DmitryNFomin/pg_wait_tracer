@@ -583,8 +583,14 @@ accounting rule and not about the byte layout:
   numerator and are refused for computation; any overlapping window
   recomputes the whole request from raw.
 
+- **v12** (#852) — idle-only events no longer allocate per-session entries,
+  matching raw Sessions membership and preserving capacity for active pids.
+  The bytes are unchanged. Older summaries retain extra pid-only rows;
+  filtering zero DB Time would also discard valid non-idle occurrences, so
+  older accounting versions force a whole-window raw recompute.
+
 This list is kept in step with `PGWT_SUMMARY_VERSION` in
-`src/summary_writer.h`, which is **11** as of 2026-11-09. It stopped at v6 for
+`src/summary_writer.h`, which is **12** as of 2026-11-10. It stopped at v6 for
 two bumps; a version list that trails the constant is worse than no list,
 because it reads as "nothing has changed since" — and it misled once more
 after that, when the v7/v8 entries were added against a tree that had since
