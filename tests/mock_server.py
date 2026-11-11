@@ -347,17 +347,14 @@ _CANNED["top_events"] = {
     # #553 (additive, protocol shape — gated by tests/test_protocol_drift.py):
     # the real server emits these on EVERY top_events response.
     # has_measured_cpu says which quantity the CPU* row IS — measured on-CPU
-    # ns (v3 exact data) or the unsplit on-CPU gap wall (sampled/v2 data, and
-    # the summary routing). offcpu_ms is the runqueue remainder: inside
+    # ns (v3 exact data) or the unsplit on-CPU gap wall (sampled/v2 data).
+    # offcpu_ms is the runqueue remainder: inside
     # db_time_ms but on no row.
     #
     # Canned as the UNSPLIT shape (False / 0), because that is the one
     # consistent with these canned rows: they sum to exactly db_time_ms
     # (4800 + 2100 + 1500 + 1200 + 1000 + 800 + 800 + 300 = 12500), which is
-    # only true when no off-CPU time has been split out. Claiming
-    # has_measured_cpu=True next to a 0 remainder and a 100%-summing table
-    # would be a payload the real server cannot produce. No UI code reads
-    # either field yet (nothing to exercise visually); the measured shape is
+    # consistent with no off-CPU time having been split out. The measured shape is
     # pinned in C, in tests/test_window_clip.c sections 10-11 (there is no
     # section 15 -- that reference was wrong), and the text-report surface in
     # tests/test_dump_report.py.
@@ -368,6 +365,7 @@ _CANNED["top_events"] = {
     # field is always present, like time_model's.
     "has_measured_cpu": False,
     "offcpu_ms": 0.0,
+    "offcpu_aas": None,  # unavailable measurement; measured zero is numeric 0
     "cpu_clamped_ms": 0.0,
     "rows": [
         {"name": "CPU*",             "event_id": 0,          "class": "CPU",
@@ -443,17 +441,15 @@ _CANNED["top_sessions"] = {
     # offcpu_ms on every row.
     #
     # has_measured_cpu says which quantity the cpu_pct column IS -- measured
-    # on-CPU time (v3 exact data) or the unsplit on-CPU gap wall (sampled/v2
-    # data, and the summary routing, whose per-second record stores wall).
+    # on-CPU time (v3 exact data) or the unsplit on-CPU gap wall (sampled/v2 data).
     #
     # Canned as the UNSPLIT shape (False, every remainder 0.0), because that
     # is the one consistent with these canned rows: their cpu_pct + wait_pct
-    # is exactly 100 on every row, which is only true when no runqueue time
-    # has been split out. Claiming has_measured_cpu=True beside a 0 remainder
-    # and a 100%-summing pair would be a payload the real server cannot
-    # produce. The measured shape is pinned in C instead, in
+    # is exactly 100 on every row, consistent with no runqueue time
+    # having been split out. The measured shape is pinned in C instead, in
     # tests/test_window_clip.c section 13.
     "has_measured_cpu": False,
+    "cpu_ms": 5474.0,  # sum(db_time_ms * cpu_pct / 100) over these sessions
     "offcpu_ms": 0.0,
     "cpu_clamped_ms": 0.0,
     "rows": [
@@ -1099,17 +1095,22 @@ def _handle_request_inner(cmd, req_id, msg):
         return resp
 
     if cmd == "top_events":
-        rows = _CANNED["top_events"]["rows"]
+        canned = _CANNED["top_events"]
+        rows = canned["rows"]
         filters = msg.get("filters", {})
         if "class" in filters:
             cls = filters["class"]
             rows = [r for r in rows if r["class"].lower() == cls.lower()]
         if _is_compare_baseline(msg):
             rows = _baseline_rows(rows, "total_ms")
+        wall_ms = (msg.get("to", _TO_NS) - msg.get("from", _FROM_NS)) / 1_000_000
+        offcpu_aas = (canned["offcpu_ms"] / wall_ms
+                      if canned["has_measured_cpu"] and wall_ms > 0 else None)
         return {"id": req_id,
                 "db_time_ms": _CANNED["top_events"]["db_time_ms"],
                 "has_measured_cpu": _CANNED["top_events"]["has_measured_cpu"],
                 "offcpu_ms": _CANNED["top_events"]["offcpu_ms"],
+                "offcpu_aas": offcpu_aas,
                 "cpu_clamped_ms": _CANNED["top_events"]["cpu_clamped_ms"],
                 "rows": rows}
 
@@ -1134,6 +1135,8 @@ def _handle_request_inner(cmd, req_id, msg):
                     r["db_time_ms"] = round(base_b * (1 - swing), 1)
                 rows.append(r)
             resp = dict(resp, rows=rows)
+        resp["cpu_ms"] = sum(r["db_time_ms"] * r["cpu_pct"] / 100
+                             for r in resp["rows"])
         return resp
 
     if cmd == "top_queries":

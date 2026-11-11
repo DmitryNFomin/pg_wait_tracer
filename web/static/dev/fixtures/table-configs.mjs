@@ -126,14 +126,14 @@ export const states = {
         compare: {
             kind: 'events',
             a: { db_time_ms: 10000, fidelity: 'exact', rows: [
-                { event_id: 1, name: 'IO:DataFileRead', class: 'IO', total_ms: 3200 },
-                { event_id: 2, name: 'Lock:new_in_A', class: 'Lock', total_ms: 700 },
-                { event_id: 3, name: 'IPC:below_floor', class: 'IPC', total_ms: 140 },
+                { event_id: 1, name: 'IO:DataFileRead', class: 'IO', total_ms: 3200, aas: 0.32 },
+                { event_id: 2, name: 'Lock:new_in_A', class: 'Lock', total_ms: 700, aas: 0.07 },
+                { event_id: 3, name: 'IPC:below_floor', class: 'IPC', total_ms: 140, aas: 0.014 },
             ] },
             b: { db_time_ms: 10000, fidelity: 'exact', rows: [
-                { event_id: 1, name: 'IO:DataFileRead', class: 'IO', total_ms: 1200 },
-                { event_id: 3, name: 'IPC:below_floor', class: 'IPC', total_ms: 100 },
-                { event_id: 4, name: 'Client:gone_from_A', class: 'Client', total_ms: 500 },
+                { event_id: 1, name: 'IO:DataFileRead', class: 'IO', total_ms: 1200, aas: 0.12 },
+                { event_id: 3, name: 'IPC:below_floor', class: 'IPC', total_ms: 100, aas: 0.01 },
+                { event_id: 4, name: 'Client:gone_from_A', class: 'Client', total_ms: 500, aas: 0.05 },
             ] },
         },
     },

@@ -228,16 +228,16 @@ struct pgwt_replay_stats {
      * Their records are missing from the answer; the old loop skipped them
      * without a word, which reads as a complete smaller window. */
     uint64_t blocks_unreadable;
-    /* #534: measured CPU that EXCEEDED its interval's wall, summed over the
-     * records this window replayed, in NANOSECONDS -- the same unit and the
-     * same meaning as the live path's cpu_clamped_ns_total (src/daemon.h,
+    /* #534: measured CPU that EXCEEDED its interval's wall, allocated to the
+     * intervals inside this replay window, in NANOSECONDS -- the same unit
+     * and meaning as the live path's cpu_clamped_ns_total (src/daemon.h,
      * src/event_stream.c), the summary writer's and compute's. Non-zero is a
      * MEASUREMENT-QUALITY signal: clock skew, a schedstat read straddling a
      * boundary, or an accounting error. event_reader.c has always clamped
      * this quantity; it used to discard the remainder, so a skewed trace
      * replayed as though it were clean and silence was indistinguishable
-     * from zero. Unscaled by the window clip on purpose: it is a property of
-     * the RECORD's measurement, not a time quantity being apportioned.
+     * from zero. Cumulative endpoint allocation apportions the excess along
+     * with CPU, so adjacent windows sum to the full record's excess.
      *
      * Only exact, on-CPU (we == 0) records with a known cpu_ns contribute: a
      * SAMPLES record has no wall of its own, and CPU measured during a

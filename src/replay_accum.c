@@ -192,26 +192,17 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
         uint64_t row_add = add_ns, row_occ = occ_ns;
         if (we == 0 && !sampled && evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
             /* #495: match map_reader.c's measured CPU split and compute.c's
-             * window scaling. Clamp skew before scaling; measured zero is
-             * real zero, while UNKNOWN keeps legacy whole-gap CPU. Samples
+             * window allocation. Clamp skew in the allocated share; measured
+             * zero is real zero, while UNKNOWN keeps legacy whole-gap CPU. Samples
              * keep their whole sample-period weight as CPU, with no
              * off-CPU. */
             uint64_t m = evt->cpu_ns < occ_ns ? evt->cpu_ns : occ_ns;
-            /* #534: the clamp removes a measurable amount -- report it
-             * instead of discarding it. Non-zero means measured CPU
-             * exceeded the wall interval it belongs to (clock skew, a
-             * schedstat read straddling a boundary, an accounting error),
-             * exactly what the live path's cpu_clamped_ns_total says, in
-             * the same unit. Silence here is indistinguishable from zero,
-             * so a trace with real skew replayed as though it were clean.
-             * Deliberately NOT scaled by the window clip: it describes the
-             * record's measurement, not time being apportioned. */
-            if (st && evt->cpu_ns > occ_ns)
-                st->cpu_clamped_ns += evt->cpu_ns - occ_ns;
-            cpu_add = occ_ns
-                ? (uint64_t)(((unsigned __int128)m * add_ns) / occ_ns) : 0;
-            if (cpu_add > add_ns) cpu_add = add_ns;
-            offcpu_add = add_ns - cpu_add;
+            /* The CPU share and its skew diagnostic use the same window
+             * endpoints, so both conserve across adjacent replay windows. */
+            cpu_add = pgwt_cpu_clip_ns(evt, from_mono_ns, to_mono_ns,
+                                       st ? &st->cpu_clamped_ns : NULL);
+            offcpu_add = pgwt_offcpu_ns(add_ns, cpu_add,
+                                       st ? &st->cpu_clamped_ns : NULL);
             /* NONCMD_CPU keeps wall in its idle row, matching
              * pgwt_accum_add_interval; only CPU* rows use measured CPU. */
             if (eff_we == 0) {
