@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <limits.h>
 
 static int checks, failures;
 #define CHECK(c, name) do { checks++; if (!(c)) { \
@@ -348,7 +349,7 @@ static void test_stream(void)
 
 static void test_legacy(const char *argv0)
 {
-    char path[1024];
+    char path[PATH_MAX];
     CHECK(realpath(argv0, path) != NULL, "legacy_fixture_executable_path");
     char *slash = strrchr(path, '/');
     if (!slash) return;

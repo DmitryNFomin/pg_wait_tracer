@@ -9,9 +9,12 @@ import os
 import hashlib
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+
+from server_harness import ServerHarness
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = ROOT / "tests"
@@ -155,11 +158,28 @@ def main():
             "? w->sample_buf_max_period_ns : 0;", "? sample_period_ns : 0;")},
             ["maximum lookahead storage=current cache=0 request=0: DB Time",
              "maximum lookahead storage=archive cache=1 request=1: DB Time"])
-        server_test("jitter_labeled_nominal", {"server": replace(server,
-            "fc->sample_period_ns = reader.nominal_sample_period_ns;",
-            "fc->sample_period_ns = bi.sample_period_ns;")},
-            ["maximum lookahead storage=current cache=1 request=1: reports nominal cadence",
-             "maximum lookahead storage=archive cache=0 request=0: one nominal period is fidelity edge slop"])
+        v4_dir = tmp / "cadence-v4"
+        v4_dir.mkdir()
+        checked([baseline, "--lookahead-fixture", v4_dir])
+        v3_dir = tmp / "cadence-v3"
+        v3_dir.mkdir()
+        shutil.copyfile(TESTS / "fixtures/sample_weights_v3/current.trace",
+                        v3_dir / "current.trace")
+        # write_lookahead_fixture configures 10 Hz despite jitter/stalls.
+        # The frozen v3 fixture's last block stores 110 ms (see its README).
+        # Both expectations come from fixture construction, not server output.
+        for version, trace_dir, expected_period in (
+                (4, v4_dir, 1_000_000_000 // 10),
+                (3, v3_dir, 110_000_000)):
+            (trace_dir / "backends.jsonl").write_text(
+                '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+            for cache in (0, 1):
+                with ServerHarness(str(trace_dir), env={"PGWT_CURRENT_TRACE_CACHE": cache}) as srv:
+                    for repeat in range(2):
+                        response = srv.query("time_model")
+                        assert response.get("sample_period_ns") == expected_period, (
+                            version, cache, repeat, expected_period, response)
+            print(f"v{version} cadence: sample_period_ns={expected_period}", flush=True)
         server_test("file_cache_mean", {"server": replace(server,
             "/* Reader already supplied this tick's exact duration_ns. */",
             "ce->events[ce->count].duration_ns = bi.sample_period_ns;")},
