@@ -63,6 +63,16 @@ largest interval between completed full consumer drain passes, including the
 final drain after stopping/joining writers.
 Per-CPU delivery and attempts are printed as well as aggregate counters.
 
+Perf RAW framing is an 8-byte event header, a 4-byte raw length, the 64-byte
+record, and 4 bytes of trailing kernel padding: the advertised raw length is
+68, and the whole event is 80 bytes. The old reader required raw length 64
+and rejected every sample before checking its fields. Payload starts at byte
+12, not byte 16; `memcpy` avoids alignment assumptions and reads `cpu` at
+payload offset 8. The reader requires the exact framing and length, a matching
+callback CPU, an in-range participating CPU, the expected TID, nonzero timestamp
+and sequence, and zero record padding. Kernel framing padding is unspecified.
+`make -C tests/bench_nmi_transport test-reader` tests this decoding on macOS too.
+
 `failures.EAGAIN` and `.ENOSPC` are exact helper return values. A NULL return from
 ringbuf reserve has **no errno**; it increments both `other` and the diagnostic
 `reserve_null`. The loader disables unused transport maps and sets a read-only

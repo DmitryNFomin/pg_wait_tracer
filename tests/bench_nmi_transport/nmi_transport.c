@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "transport.h"
+#include "reader.h"
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <linux/hw_breakpoint.h>
@@ -129,7 +129,7 @@ static int receive_record(void *ctx, void *data, size_t size)
     memcpy(&r, data, sizeof(r));
     if (r.cpu >= (uint32_t)e->possible) { ++e->bad_records; return 0; }
     struct cpu_result *c = &e->results[r.cpu];
-    if (!c->expected_tid || r.tid != c->expected_tid || !r.seq) {
+    if (!transport_record_valid(&r, c->expected_tid)) {
         ++e->bad_records;
         return 0;
     }
@@ -141,14 +141,13 @@ static int receive_record(void *ctx, void *data, size_t size)
     }
     return 0;
 }
-static void receive_perf(void *ctx, int cpu, void *data, __u32 size)
+static void receive_perf(void *ctx, int cpu, const void *sample, size_t size)
 {
     struct experiment *e = ctx;
     struct transport_record r;
-    if (size != sizeof(r)) { ++e->bad_records; return; }
-    memcpy(&r, data, sizeof(r));
+    if (!transport_decode_perf(&r, sample, size)) { ++e->bad_records; return; }
     if (r.cpu != (uint32_t)cpu) { ++e->bad_records; return; }
-    (void)receive_record(ctx, data, size);
+    (void)receive_record(ctx, &r, sizeof(r));
 }
 /* Raw API allows selecting the CPU and an explicit byte watermark. */
 static enum bpf_perf_event_ret receive_raw(void *ctx, int cpu,
@@ -157,11 +156,8 @@ static enum bpf_perf_event_ret receive_raw(void *ctx, int cpu,
     struct experiment *e = ctx;
     const unsigned char *payload = (const unsigned char *)(event + 1);
     if (event->type == PERF_RECORD_SAMPLE) {
-        uint32_t size;
-        if (event->size < sizeof(*event) + sizeof(size)) goto malformed;
-        memcpy(&size, payload, sizeof(size));
-        if (size > event->size - sizeof(*event) - sizeof(size)) goto malformed;
-        receive_perf(ctx, cpu, (void *)(payload + sizeof(size)), size);
+        if (event->size < sizeof(*event)) goto malformed;
+        receive_perf(ctx, cpu, payload, event->size - sizeof(*event));
     } else if (event->type == PERF_RECORD_LOST) {
         uint64_t lost;
         if (event->size < sizeof(*event) + 2 * sizeof(uint64_t)) goto malformed;

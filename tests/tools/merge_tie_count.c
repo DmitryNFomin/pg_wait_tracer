@@ -25,11 +25,43 @@
 #include <string.h>
 #include <sys/stat.h>
 
+static const uint32_t marker_kinds[TIE_MARKER_KINDS] = {
+    PGWT_MARKER_PLAN_START, PGWT_MARKER_PLAN_END,
+    PGWT_MARKER_EXEC_START, PGWT_MARKER_EXEC_END,
+    PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_END
+};
+
+static int add_pid(struct tie_pids *p, uint32_t pid)
+{
+    if (!pid) return 0;
+    size_t lo = 0, hi = p->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (p->values[mid] < pid) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < p->count && p->values[lo] == pid) return 0;
+    if (p->count == p->capacity) {
+        size_t cap = p->capacity ? p->capacity * 2 : 64;
+        if (cap < p->capacity || cap > SIZE_MAX / sizeof(*p->values)) return -1;
+        void *values = realloc(p->values, cap * sizeof(*p->values));
+        if (!values) return -1;
+        p->values = values;
+        p->capacity = cap;
+    }
+    memmove(p->values + lo + 1, p->values + lo,
+            (p->count - lo) * sizeof(*p->values));
+    p->values[lo] = pid;
+    ++p->count;
+    return 0;
+}
+
 int tie_add(struct tie_capture *c, const struct pgwt_trace_event *e,
             enum pgwt_block_type type)
 {
     ++c->scanned;
     ++c->position;
+    if (add_pid(&c->pids, e->pid)) return -1;
     if (type != PGWT_BLOCK_TRANSITIONS) return 0;
     uint32_t kind = e->new_event;
     bool marker = kind == PGWT_MARKER_PLAN_START || kind == PGWT_MARKER_PLAN_END
@@ -40,6 +72,10 @@ int tie_add(struct tie_capture *c, const struct pgwt_trace_event *e,
     int category = TIE_IGNORED;
     if (e->pid && !(e->flags & PGWT_EVENT_FLAG_SAMPLE))
         category = marker ? TIE_MARKER : transition ? TIE_TRANSITION : TIE_IGNORED;
+    if (category == TIE_MARKER) {
+        for (size_t i = 0; i < TIE_MARKER_KINDS; ++i)
+            if (kind == marker_kinds[i]) ++c->markers_by_kind[i];
+    } else if (category == TIE_TRANSITION) ++c->transition_records;
     if (c->count == c->capacity) {
         size_t cap = c->capacity ? c->capacity * 2 : 4096;
         if (cap < c->capacity || cap > SIZE_MAX / sizeof(*c->records)) return -1;
@@ -72,6 +108,11 @@ static int add_checked(uint64_t *sum, uint64_t n)
 int tie_finish(struct tie_capture *c, struct tie_counts *out)
 {
     struct tie_counts v = { .captures = 1, .records_scanned = c->scanned };
+    v.transition_records = c->transition_records;
+    for (size_t i = 0; i < TIE_MARKER_KINDS; ++i) {
+        v.markers_by_kind[i] = c->markers_by_kind[i];
+        if (add_checked(&v.marker_records, c->markers_by_kind[i])) return -1;
+    }
     if (c->count) qsort(c->records, c->count, sizeof(*c->records), record_compare);
     for (size_t i = 0; i < c->count;) {
         size_t j = i;
@@ -98,6 +139,11 @@ int tie_finish(struct tie_capture *c, struct tie_counts *out)
     ADD(captures); ADD(records_scanned); ADD(groups); ADD(mixed_groups); ADD(N);
     ADD(marker_before_transition); ADD(marker_after_transition);
     ADD(ambiguous_generation_groups);
+    ADD(marker_records); ADD(transition_records);
+    for (size_t i = 0; i < TIE_MARKER_KINDS; ++i)
+        if (add_checked(&out->markers_by_kind[i], v.markers_by_kind[i])) return -1;
+    for (size_t i = 0; i < c->pids.count; ++i)
+        if (add_pid(&out->pids, c->pids.values[i])) return -1;
 #undef ADD
     return 0;
 }
@@ -194,6 +240,7 @@ done:
     closedir(dir);
     free(events);
     free(capture.records);
+    free(capture.pids.values);
     for (size_t i = 0; i < nfiles; ++i) free(files[i].path);
     free(files);
     return rc;
@@ -218,10 +265,20 @@ int main(int argc, char **argv)
            ",\"N\":%" PRIu64 ",\"marker_before_transition\":%" PRIu64
            ",\"marker_after_transition\":%" PRIu64
            ",\"ambiguous_generation_groups\":%" PRIu64
+           ",\"marker_records\":%" PRIu64
+           ",\"markers_by_kind\":{\"PLAN_START\":%" PRIu64 ",\"PLAN_END\":%" PRIu64
+           ",\"EXEC_START\":%" PRIu64 ",\"EXEC_END\":%" PRIu64
+           ",\"CMD_START\":%" PRIu64 ",\"CMD_END\":%" PRIu64 "}"
+           ",\"transition_records\":%" PRIu64 ",\"distinct_pids\":%zu"
            ",\"generation_evidence\":\"unavailable_in_v2_v4\"}\n",
            c.captures, c.records_scanned, c.groups, c.mixed_groups, c.N,
            c.marker_before_transition, c.marker_after_transition,
-           c.ambiguous_generation_groups);
+           c.ambiguous_generation_groups, c.marker_records,
+           c.markers_by_kind[TIE_PLAN_START], c.markers_by_kind[TIE_PLAN_END],
+           c.markers_by_kind[TIE_EXEC_START], c.markers_by_kind[TIE_EXEC_END],
+           c.markers_by_kind[TIE_CMD_START], c.markers_by_kind[TIE_CMD_END],
+           c.transition_records, c.pids.count);
+    free(c.pids.values);
     return 0;
 }
 #endif
