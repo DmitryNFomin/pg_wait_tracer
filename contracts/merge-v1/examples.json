@@ -1932,6 +1932,263 @@
    "transcription_notes": [
     "Second input is the exact duplicate (same pos 1, same envelope) with d=20,C=C0; in N, q omitted per \u00a75 (q applies to Q only)."
    ]
+  },
+  {
+   "id": 21,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": {
+    "cutoffs": {
+     "P0": 0,
+     "P1": 0,
+     "E": 0,
+     "L": 0
+    },
+    "suspended": false,
+    "queues": "empty",
+    "baseline": "C0",
+    "last_observed": "C0",
+    "next_q": {
+     "A": 1,
+     "B": 1
+    }
+   },
+   "inputs": [
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 20,
+     "pos": 1
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 10,
+     "pos": 2
+    },
+    {
+     "kind": "DATA",
+     "source": "E",
+     "pos": 3,
+     "t": 15,
+     "who": "A",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "A15",
+     "d": 30,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 21,
+     "pos": 1,
+     "d": 31,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 21,
+     "pos": 1,
+     "d": 31,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 21,
+     "pos": 4,
+     "d": 31,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 21,
+     "pos": 1,
+     "d": 31,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 30,
+       "C": "C0",
+       "reason": "seal_violation"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "reject A15 and suspend; no DATA or frontier."
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 30,
+       "C": "C0",
+       "reason": "seal_violation"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "reject A15 and suspend; no DATA or frontier."
+    }
+   },
+   "transcription_notes": [
+    "Added 2026-11-11 to cover mutant M6 (a weaker later boundary retracts an earlier one). Expected output by Astra, confirmed independently by Sonnet and gpt-6.1-sol (contract only, no code); transcribed by the lead."
+   ]
+  },
+  {
+   "id": 22,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": {
+    "cutoffs": {
+     "P0": 0,
+     "P1": 0,
+     "E": 0,
+     "L": 0
+    },
+    "suspended": false,
+    "queues": "empty",
+    "baseline": "C0",
+    "last_observed": "C0",
+    "next_q": {
+     "A": 1,
+     "B": 1
+    }
+   },
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 10,
+     "who": "A",
+     "rec": "TRANS",
+     "q": 2,
+     "label": "A10"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "A10",
+       "who": "A",
+       "t": 10
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "sequence_gap"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "no DATA or frontier."
+    }
+   },
+   "transcription_notes": [
+    "Added 2026-11-11 to cover mutant M11 (Q mode accepts a gap); q applies to Q only. Expected output by Astra, confirmed independently by Sonnet and gpt-6.1-sol (contract only, no code); transcribed by the lead."
+   ]
+  },
+  {
+   "id": 23,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": {
+    "cutoffs": {
+     "P0": 6,
+     "P1": 6,
+     "E": 6,
+     "L": 6
+    },
+    "suspended": true,
+    "queues": "empty",
+    "baseline": "C0",
+    "last_observed": "C0",
+    "next_q": {
+     "A": 1,
+     "B": 1
+    },
+    "frozen_note": "A/B frozen with no valid frontier"
+   },
+   "inputs": [
+    {
+     "kind": "CHECK",
+     "d": 10,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [],
+     "exit_nonzero": false,
+     "notes": "unchanged counters cause no new VOID, and suspension suppresses FRONTIER."
+    },
+    "Q": {
+     "outputs": [],
+     "exit_nonzero": false,
+     "notes": "unchanged counters cause no new VOID, and suspension suppresses FRONTIER."
+    }
+   },
+   "transcription_notes": [
+    "Added 2026-11-11 to cover mutant M12 (frontier emitted while suspended). Expected output by Astra, confirmed independently by Sonnet and gpt-6.1-sol (contract only, no code); transcribed by the lead."
+   ]
   }
  ]
 }

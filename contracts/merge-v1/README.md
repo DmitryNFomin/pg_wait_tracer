@@ -26,5 +26,11 @@ Oracle results:
 | v2 | 10 of 20 | 10 rows (detection time, implicit boundaries, release granularity, sequence baseline, repeated VOID, writer rejection, breach exit) |
 | v3 | 20 of 20 on order, frontier values, d, C and exit | VOID reason labels undefined (Sonnet, 5 rows); N-mode applicability of rows 11-12 (Sonnet); none (sol) |
 
+Rows 21-23 (added 2026-11-11): the first implementation passed rows 1-20 but three required
+broken versions (M6 boundary retraction, M11 sequence gap accepted, M12 frontier while suspended)
+were not caught because no row exercised them. Astra wrote the three rows from the contract only
+(`oracle-rows21-23/QUESTION-astra.md`, `ANSWER-astra.md`); Sonnet and gpt-6.1-sol answered them
+independently and matched on every output. No rule text changed.
+
 After v3 the lead added the closed list of VOID reasons to section 4 (marked in the text). The
 v3 labels the authors guessed differ only in wording from that list.
