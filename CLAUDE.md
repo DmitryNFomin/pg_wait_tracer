@@ -305,24 +305,16 @@ Registered in `.claude/settings.json` (`*` means no matcher):
 | Event | Matcher | Command |
 |---|---|---|
 | `PreToolUse` | `Bash` | `scripts/hooks/push-guard.sh` |
-| `Stop` | `*` | `scripts/lead/sweep-hook.sh` |
 | `SubagentStart` | `*` | `scripts/lead/agent-start-hook.sh` |
 | `SubagentStop` | `*` | `scripts/lead/agent-stop-hook.sh` |
-| `SubagentStop` | `*` | `scripts/lead/sweep-hook.sh` |
 
 - `PreToolUse`: screens Bash command text; can refuse a push or other command
   matching the push-guard bypass/tampering denylist.
-- `Stop`: refreshes stale sweep data; can refuse to end a turn until every
-  finding carries this turn's disposition.
 - `SubagentStart`: records the agent ID in the shared active-agent ledger;
   always exits 0 and cannot refuse agent creation.
 - `SubagentStop` ledger hook: removes the agent ID from that ledger;
   always exits 0 and never refuses a stop.
-- `SubagentStop` sweep hook: refreshes stale sweep data; can refuse to end a
-  turn until every finding carries this turn's disposition.
 
-Both sweep registrations allow `stop_hook_active=true` continuations;
-escalated dispatch findings require `RUNNING` or `BLOCKED-BY` dispositions.
 
 ## Local setup (one-time)
 
