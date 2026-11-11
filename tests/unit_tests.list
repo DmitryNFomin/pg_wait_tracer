@@ -1060,3 +1060,4 @@ test_session_rows
 # #848: independent kernel/binary classification and versioned sidecar windows.
 test_phase_capability
 test_phase_probe
+test_core_merge_contract

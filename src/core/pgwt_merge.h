@@ -35,7 +35,7 @@ typedef struct {
 } pgwt_merge_counters;
 typedef struct { uint64_t d; pgwt_merge_counters counters; } pgwt_merge_observation;
 typedef struct {
-    uint64_t pid, g, next_q;
+    uint64_t pid, g, next_q;         /* Q proof must establish next_q >= 1 */
     bool identity_proved, sequence_proved;
 } pgwt_merge_attachment;
 typedef struct {
@@ -103,8 +103,10 @@ typedef struct {
     uint64_t frontier, faults[PGWT_MERGE_REASON_COUNT];
 } pgwt_merge_report;
 
-/* On allocation failure create attempts allocation_fail VOID and returns NULL.
- * status distinguishes that from an invalid/overflowing configuration breach. */
+/* Creation failures attempt VOID when a sink is available, then return NULL.
+ * status reports suspension for allocation/missing proofs and exit-required for
+ * malformed/overflowing configurations. The caller reports creation/VOID
+ * persistence failure out of band (no coordinator report exists on NULL). */
 pgwt_merge *pgwt_merge_create(const pgwt_merge_config *, pgwt_merge_status *status);
 void pgwt_merge_destroy(pgwt_merge *);
 pgwt_merge_status pgwt_merge_feed(pgwt_merge *, const pgwt_merge_input *);

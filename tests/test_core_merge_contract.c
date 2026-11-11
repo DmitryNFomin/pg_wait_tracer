@@ -592,12 +592,193 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
     return field == NULL;
 }
 
+/* Direct API checks cover normative paths absent from the frozen 20 rows.
+ * They are deliberately excluded from mutation coverage of those rows. */
+typedef struct {
+    pgwt_merge_output outputs[32];
+    size_t count;
+    bool reject_void;
+} safety_capture;
+
+static bool safety_sink(void *context, const pgwt_merge_output *out,
+                         pgwt_merge_observation *post)
+{
+    safety_capture *c = context;
+    (void)post;
+    if (out->kind == PGWT_MERGE_OUT_VOID && c->reject_void) return false;
+    if (c->count >= 32) return false;
+    c->outputs[c->count++] = *out;
+    return true;
+}
+
+static bool safety_checks(void)
+{
+#define VERIFY(test) do { if (!(test)) { \
+    fprintf(stderr, "core merge safety: line %d failed: %s\n", __LINE__, #test); \
+    pgwt_merge_destroy(m); return false; } } while (0)
+    pgwt_merge *m = NULL;
+    safety_capture c = {0};
+    pgwt_merge_source sources[4] = {{.qualified = true}, {.qualified = true},
+                                   {.qualified = true}, {.qualified = true}};
+    pgwt_merge_attachment a = {.pid = 10, .g = 1, .next_q = 1,
+                               .identity_proved = true, .sequence_proved = true};
+    pgwt_merge_observation obs = {.d = 42, .counters = {.known = true}};
+    pgwt_merge_config config = {.mode = PGWT_MERGE_Q, .sources = sources, .source_count = 4,
+        .staged_capacity = 2, .payload_capacity = 8, .attachment_capacity = 1,
+        .attachments = &a, .attachment_count = 1, .observation = obs,
+        .last_observed = obs.counters, .sink = safety_sink, .sink_context = &c};
+    pgwt_merge_status status;
+    /* Overflow is a breach with a VOID attempt, never an allocation refusal. */
+    config.staged_capacity = SIZE_MAX;
+    VERIFY(pgwt_merge_create(&config, &status) == NULL);
+    VERIFY(status == PGWT_MERGE_EXIT_REQUIRED && c.count == 1 &&
+           c.outputs[0].reason == PGWT_MERGE_MALFORMED_ENVELOPE && c.outputs[0].d == 42);
+    config.staged_capacity = 2;
+    c.count = 0;
+    config.attachment_count = SIZE_MAX;
+    VERIFY(pgwt_merge_create(&config, &status) == NULL);
+    VERIFY(status == PGWT_MERGE_EXIT_REQUIRED &&
+           c.outputs[0].reason == PGWT_MERGE_MALFORMED_ENVELOPE);
+    config.attachment_count = 2;
+    c.count = 0;
+    VERIFY(pgwt_merge_create(&config, &status) == NULL);
+    VERIFY(status == PGWT_MERGE_SUSPENDED && c.outputs[0].reason == PGWT_MERGE_ALLOCATION_FAIL);
+    config.attachment_count = 1;
+    c.count = 0;
+    a.sequence_proved = false;
+    VERIFY(pgwt_merge_create(&config, &status) == NULL);
+    VERIFY(status == PGWT_MERGE_SUSPENDED && c.outputs[0].reason == PGWT_MERGE_UNKNOWN_EVIDENCE);
+    a.sequence_proved = true;
+    a.next_q = 0;
+    c.count = 0;
+    VERIFY(pgwt_merge_create(&config, &status) == NULL);
+    VERIFY(c.outputs[0].reason == PGWT_MERGE_UNKNOWN_EVIDENCE);
+    a.next_q = 1;
+    c.count = 0;
+    m = pgwt_merge_create(&config, &status);
+    VERIFY(m && status == PGWT_MERGE_OK);
+    /* Zero is a valid exact unsigned source position; capacity exhaustion
+     * pauses capture and preserves detection time, without heap growth. */
+    pgwt_merge_input in = {.kind = PGWT_MERGE_DATA, .observation = obs,
+        .record = {.source = 0, .o = 0, .t = 10, .pid = 10, .g = 1, .q = 1,
+                   .rank = PGWT_MERGE_TRANS, .identity_known = true, .has_q = true}};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK && c.count == 0);
+    in.record.o = 1; in.record.t = 11; in.record.q = 2;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK);
+    in.record.o = 2; in.record.t = 12; in.record.q = 3;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED);
+    VERIFY(c.count == 1 && c.outputs[0].reason == PGWT_MERGE_ALLOCATION_FAIL);
+    /* FAULT is immediate and separately reported even during suspension. */
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_FAULT, .observation = obs,
+                             .reason = PGWT_MERGE_DEPENDENCY_LOST};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED && c.count == 2);
+    in.reason = PGWT_MERGE_PERF_LOST;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED && c.count == 3);
+    VERIFY(c.outputs[1].reason == PGWT_MERGE_DEPENDENCY_LOST &&
+           c.outputs[2].reason == PGWT_MERGE_PERF_LOST);
+    /* No revival by boundaries; REARM requires repaired identity and a
+     * positive proved Q baseline, then fresh boundaries in the new epoch. */
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_BOUNDARY, .observation = obs,
+                             .source = 1, .p = 0, .w = 100};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED && c.count == 3);
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_REARM, .observation = obs,
+        .attachments = &a, .attachment_count = 1, .attachment_proofs_fresh = true};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED);
+    in.identity_repaired = true;
+    a.next_q = 0;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED);
+    a.next_q = 1;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK);
+    VERIFY(pgwt_merge_get_report(m).epoch == 2 && !pgwt_merge_get_report(m).has_frontier);
+    c.count = 0;
+    /* Untimed TEXT accepts only its own envelope fields, retains lifecycle
+     * position order, and stays staged until W>0. */
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_TEXT, .observation = obs,
+        .record = {.source = 3, .o = 0, .rank = (pgwt_merge_rank)99,
+                   .dependency = (pgwt_merge_dependency)99, .payload = "x", .payload_size = 1}};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK && c.count == 0);
+    in.record.o = 1; in.record.payload = "y";
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK && c.count == 0);
+    for (size_t s = 0; s < 4; ++s) {
+        in = (pgwt_merge_input){.kind = PGWT_MERGE_BOUNDARY, .observation = obs,
+                                 .source = s, .p = 3, .w = 11};
+        VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK);
+        if (s < 3) VERIFY(c.count == 0);
+    }
+    VERIFY(c.count == 3 && c.outputs[0].kind == PGWT_MERGE_OUT_TEXT &&
+           c.outputs[0].record.o == 0 && c.outputs[1].record.o == 1 &&
+           c.outputs[2].kind == PGWT_MERGE_OUT_FRONTIER && c.outputs[2].F == 10);
+    /* A reset/decrease is unknown accounting; an identical reread emits
+     * no second report, and an explicit new FAULT still emits VOID. */
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_CHECK, .observation = obs};
+    in.observation.counters.value[0] = 1;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED);
+    VERIFY(c.outputs[3].reason == PGWT_MERGE_COUNTER_CHANGE);
+    in.observation = obs;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED);
+    VERIFY(c.outputs[4].reason == PGWT_MERGE_COUNTER_UNKNOWN);
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED && c.count == 5);
+    c.reject_void = true;
+    in.kind = PGWT_MERGE_FAULT; in.reason = PGWT_MERGE_DUPLICATE_IDENTITY;
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_EXIT_REQUIRED);
+    VERIFY(pgwt_merge_get_report(m).void_failed);
+    pgwt_merge_destroy(m);
+    m = NULL;
+    c = (safety_capture){0};
+    config.staged_capacity = 3;
+    m = pgwt_merge_create(&config, &status);
+    VERIFY(m);
+    /* Later-arriving TEXT precedes DATA in the same complete eligible batch. */
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_DATA, .observation = obs,
+        .record = {.source = 0, .o = 0, .t = 10, .pid = 10, .g = 1, .q = 1,
+                   .rank = PGWT_MERGE_TRANS, .identity_known = true, .has_q = true}};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK);
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_TEXT, .observation = obs,
+        .record = {.source = 3, .o = 0, .payload = "x", .payload_size = 1}};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK);
+    in.record.o = 1; in.record.payload = "y";
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK && c.count == 0);
+    for (size_t s = 0; s < 4; ++s) {
+        in = (pgwt_merge_input){.kind = PGWT_MERGE_BOUNDARY, .observation = obs,
+                                 .source = s, .p = 2, .w = 11};
+        VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK);
+    }
+    VERIFY(c.count == 4 && c.outputs[0].kind == PGWT_MERGE_OUT_TEXT &&
+           c.outputs[0].record.o == 0 && c.outputs[1].kind == PGWT_MERGE_OUT_TEXT &&
+           c.outputs[1].record.o == 1 && c.outputs[2].kind == PGWT_MERGE_OUT_DATA &&
+           c.outputs[2].record.t == 10 && c.outputs[3].kind == PGWT_MERGE_OUT_FRONTIER);
+    pgwt_merge_destroy(m);
+    m = NULL;
+    c = (safety_capture){0};
+    config.staged_capacity = 2;
+    m = pgwt_merge_create(&config, &status);
+    VERIFY(m);
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_TEXT, .observation = obs,
+        .record = {.source = 3, .o = 0, .payload = "123456789", .payload_size = 9}};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_SUSPENDED);
+    VERIFY(c.outputs[0].reason == PGWT_MERGE_ALLOCATION_FAIL);
+    /* Impossible REARM size must be rejected before reading attachments. */
+    in = (pgwt_merge_input){.kind = PGWT_MERGE_REARM, .observation = obs,
+        .attachment_proofs_fresh = true, .identity_repaired = true, .attachment_count = SIZE_MAX};
+    VERIFY(pgwt_merge_feed(m, &in) == PGWT_MERGE_EXIT_REQUIRED);
+    VERIFY(c.outputs[1].reason == PGWT_MERGE_MALFORMED_ENVELOPE);
+    pgwt_merge_destroy(m);
+#undef VERIFY
+    puts("core merge safety: passed");
+    return true;
+}
+
 int main(int argc, char **argv)
 {
-    const char *path = argc > 1 ? argv[1] : "contracts/merge-v1/examples.json";
+    bool fixture_only = argc > 1 && !strcmp(argv[1], "--fixture-only");
+    bool safety_only = argc > 1 && !strcmp(argv[1], "--safety-only");
+    if (!fixture_only && !safety_checks()) return 2;
+    if (safety_only) return 0;
+    int path_arg = fixture_only ? 2 : 1;
+    const char *path = argc > path_arg ? argv[path_arg] : "contracts/merge-v1/examples.json";
     char error[256];
     json_document *d = read_document(path, error, sizeof(error));
-    if (!d && argc == 1) d = read_document("../contracts/merge-v1/examples.json", error, sizeof(error));
+    if (!d && argc <= path_arg) d = read_document("../contracts/merge-v1/examples.json", error, sizeof(error));
     if (!d) { fprintf(stderr, "fixture: %s\n", error); return 2; }
     const json_node *rows = member(d->root, "rows");
     if (!rows || rows->kind != J_ARRAY || list_length(rows) < 20) {

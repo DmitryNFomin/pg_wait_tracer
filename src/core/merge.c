@@ -44,6 +44,16 @@ static bool same_counters(pgwt_merge_counters a, pgwt_merge_counters b)
     return a.known && b.known && memcmp(a.value, b.value, sizeof(a.value)) == 0;
 }
 
+static pgwt_merge_reason counter_fault(pgwt_merge_counters now,
+                                       pgwt_merge_counters previous)
+{
+    if (!now.known) return PGWT_MERGE_COUNTER_UNKNOWN;
+    if (previous.known)
+        for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i)
+            if (now.value[i] < previous.value[i]) return PGWT_MERGE_COUNTER_UNKNOWN;
+    return PGWT_MERGE_COUNTER_CHANGE;
+}
+
 static bool internal(pgwt_merge_reason r)
 {
     return r >= PGWT_MERGE_DUPLICATE_IDENTITY;
@@ -142,7 +152,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     if (W == 0 || !m->report.qualified) return m->report.status;
     if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
     if (!same_counters(obs.counters, m->baseline))
-        return fault(m, PGWT_MERGE_COUNTER_CHANGE, obs);
+        return fault(m, counter_fault(obs.counters, m->observed), obs);
     /* Fixed in-place insertion sort keeps payload slots paired with envelopes. */
     for (size_t i = 1; i < m->count; ++i) {
         struct staged v = m->queue[i];
@@ -202,7 +212,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->baseline))
-            return fault(m, PGWT_MERGE_COUNTER_CHANGE, obs);
+            return fault(m, counter_fault(obs.counters, m->observed), obs);
         if (!v->text) { m->last = v->record; m->has_last = true; }
     }
     memcpy(m->attachments, m->prospective,
@@ -225,7 +235,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         m->report.frontier = F;
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->baseline))
-            return fault(m, PGWT_MERGE_COUNTER_CHANGE, obs);
+            return fault(m, counter_fault(obs.counters, m->observed), obs);
     }
     return m->report.status;
 }
@@ -235,7 +245,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
 static pgwt_merge_status position(pgwt_merge *m, size_t s, uint64_t o,
                                   pgwt_merge_observation obs)
 {
-    if (s >= m->config.source_count || !o)
+    if (s >= m->config.source_count)
         return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
     struct source_state *src = &m->sources[s];
     if (src->has_position && o <= src->position)
@@ -259,8 +269,9 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
         /* contract §3: duplicate first, clock regression second, seal third. */
         if (position(m, r->source, r->o, obs) == PGWT_MERGE_EXIT_REQUIRED)
             return m->report.status;
-        if ((unsigned)r->rank > PGWT_MERGE_EXIT ||
-            (unsigned)r->dependency > PGWT_MERGE_LOST ||
+        if ((in->kind == PGWT_MERGE_DATA &&
+             ((unsigned)r->rank > PGWT_MERGE_EXIT ||
+              (unsigned)r->dependency > PGWT_MERGE_LOST)) ||
             (r->payload_size && !r->payload) ||
             (in->kind == PGWT_MERGE_TEXT && r->source != m->config.source_count - 1))
             return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
@@ -316,22 +327,24 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
         /* contract §4: observation checkpoint is independent of valid baseline. */
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->observed))
-            return fault(m, PGWT_MERGE_COUNTER_CHANGE, obs);
+            return fault(m, counter_fault(obs.counters, m->observed), obs);
         m->observed = obs.counters;
         break;
     case PGWT_MERGE_REARM:
         /* contract §4: explicit recovery, fresh boundaries (all reset to zero),
          * fresh attachments, readable baseline, repaired lifecycle evidence. */
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
+        if (in->attachment_count > SIZE_MAX / sizeof(*m->attachments))
+            return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
+        if (in->attachment_count > m->config.attachment_capacity)
+            return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
         if (!in->attachment_proofs_fresh ||
             (m->identity_repair_needed && !in->identity_repaired) ||
             !proofs_valid(in->attachments, in->attachment_count))
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
-        if (in->attachment_count > m->config.attachment_capacity)
-            return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
         if (m->config.mode == PGWT_MERGE_Q)
             for (size_t i = 0; i < in->attachment_count; ++i)
-                if (!in->attachments[i].sequence_proved)
+                if (!in->attachments[i].sequence_proved || !in->attachments[i].next_q)
                     return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
         if (m->report.epoch == UINT64_MAX)
             return fault(m, PGWT_MERGE_MALFORMED_ENVELOPE, obs);
@@ -359,19 +372,41 @@ pgwt_merge_status pgwt_merge_feed(pgwt_merge *m, const pgwt_merge_input *in)
     return release(m, obs);
 }
 
+/* Creation failures obey the same VOID/exit distinction as feed failures,
+ * including failures detected before any coordinator memory exists. */
+static pgwt_merge *create_fault(const pgwt_merge_config *c, pgwt_merge_status *status,
+                                pgwt_merge_reason reason)
+{
+    if (status) *status = internal(reason) ? PGWT_MERGE_EXIT_REQUIRED : PGWT_MERGE_SUSPENDED;
+    if (c && c->sink) {
+        pgwt_merge_observation obs = c->observation;
+        pgwt_merge_output out = {.kind = PGWT_MERGE_OUT_VOID, .d = obs.d,
+            .epoch = 1, .counters = obs.counters, .reason = reason};
+        (void)c->sink(c->sink_context, &out, &obs);
+    }
+    return NULL;
+}
+
 pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *status)
 {
-    *status = PGWT_MERGE_EXIT_REQUIRED;
-    if (!c || !c->sink || !c->sources || c->source_count < 2 ||
-        (unsigned)c->mode > PGWT_MERGE_Q || !c->staged_capacity ||
-        c->attachment_count > c->attachment_capacity ||
-        !proofs_valid(c->attachments, c->attachment_count)) return NULL;
+    if (!status || !c || !c->sink || !c->sources || c->source_count < 2 ||
+        (unsigned)c->mode > PGWT_MERGE_Q || !c->staged_capacity)
+        return create_fault(c, status, PGWT_MERGE_MALFORMED_ENVELOPE);
     /* contract §2/§4: exact size arithmetic; overflow is an internal breach. */
     if (c->source_count > SIZE_MAX / sizeof(struct source_state) ||
         c->staged_capacity > SIZE_MAX / sizeof(struct staged) ||
         c->attachment_capacity > SIZE_MAX / sizeof(pgwt_merge_attachment) ||
+        c->attachment_count > SIZE_MAX / sizeof(pgwt_merge_attachment) ||
         (c->payload_capacity && c->staged_capacity > SIZE_MAX / c->payload_capacity))
-        return NULL;
+        return create_fault(c, status, PGWT_MERGE_MALFORMED_ENVELOPE);
+    if (c->attachment_count > c->attachment_capacity)
+        return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
+    if (!proofs_valid(c->attachments, c->attachment_count))
+        return create_fault(c, status, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    if (c->mode == PGWT_MERGE_Q)
+        for (size_t i = 0; i < c->attachment_count; ++i)
+            if (!c->attachments[i].sequence_proved || !c->attachments[i].next_q)
+                return create_fault(c, status, PGWT_MERGE_UNKNOWN_EVIDENCE);
     pgwt_merge *m = calloc(1, sizeof(*m));
     if (m) {
         m->config = *c;
@@ -393,12 +428,7 @@ pgwt_merge *pgwt_merge_create(const pgwt_merge_config *c, pgwt_merge_status *sta
     if (!m || !m->sources || !m->queue || !m->attachments || !m->prospective ||
         !m->queue[0].bytes) {
         pgwt_merge_destroy(m);
-        pgwt_merge_observation obs = c->observation;
-        pgwt_merge_output out = {.kind = PGWT_MERGE_OUT_VOID, .d = obs.d,
-            .epoch = 1, .counters = obs.counters, .reason = PGWT_MERGE_ALLOCATION_FAIL};
-        (void)c->sink(c->sink_context, &out, &obs);
-        *status = PGWT_MERGE_SUSPENDED;
-        return NULL;
+        return create_fault(c, status, PGWT_MERGE_ALLOCATION_FAIL);
     }
     m->config = *c;
     m->report.status = c->suspended ? PGWT_MERGE_SUSPENDED : PGWT_MERGE_OK;

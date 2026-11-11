@@ -76,7 +76,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_restart_second_identity \
             test_background_unattributed \
             test_session_rows \
-            test_phase_capability test_phase_probe
+            test_phase_capability test_phase_probe \
+            test_core_merge_contract
 
 .PHONY: all clean check
 
@@ -1157,3 +1158,6 @@ test_phase_capability: test_phase_capability.c ../src/phase_capability.c ../src/
 
 test_phase_probe: test_phase_probe.c ../src/phase_probe.c ../src/phase_capability.c ../src/cJSON.c ../src/phase_capability.h
 	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ $(filter %.c,$^)
