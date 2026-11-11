@@ -555,8 +555,8 @@ marker = re.search(r'^PHASE_REFUSED_MARKER="([^"]*)"$', runner, re.MULTILINE)
 report(marker is not None and marker.group(1) == tu.PHASE_REFUSED_MARKER,
        "runner marker literal equals testutil.PHASE_REFUSED_MARKER")
 functions = [marker.group(0)] if marker else []
-for name in ("known_failing_issue", "phase_dependent_test", "run_test",
-             "undeclared_phase_test"):
+for name in ("known_failing_scope_matches", "known_failing_issue",
+             "phase_dependent_test", "run_test", "undeclared_phase_test"):
     match = re.search(r"(?ms)^" + name + r"\(\) \{.*?^\}", runner)
     report(match is not None, "runner function %s is reachable" % name)
     if match:
