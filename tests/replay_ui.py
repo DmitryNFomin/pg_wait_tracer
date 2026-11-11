@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def trace_headers(directory):
-    """Same uncompressed 28-byte header on current and rotated .trace.lz4."""
+    """Read the shared 28-byte v2/v3/v4 prefix; no block offsets are used."""
     headers = []
     paths = list(Path(directory).glob('*.trace.lz4'))
     current = Path(directory) / 'current.trace'

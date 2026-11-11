@@ -457,6 +457,56 @@ static void test_capture_metadata(void)
     rmdir(dir);
 }
 
+/* Cross-validator fixture: one v4 block with 100/90/110/80/120ms
+ * weights. Window [BASE, BASE+400ms) includes the first four observations:
+ * CPU=190ms, Lock=110ms, idle=80ms. Header-only weighting gives 200/100/100.
+ * The exact tier spans the same window and supplies an ABC join target. */
+static int write_cross_validate_fixture(const char *dir)
+{
+    struct pgwt_event_writer *w = calloc(1, sizeof(*w));
+    if (!w || pgwt_writer_init(w, dir, 18, 24, NULL)) return 1;
+    w->nominal_sample_period_ns = P;
+    struct pgwt_trace_event e = {.pid = 1000, .timestamp_ns = BASE,
+        .old_event = 0, .new_event = 0, .duration_ns = P};
+    if (pgwt_writer_push_event(w, &e)) return 1;
+    e.timestamp_ns = BASE + 190000000ULL;
+    e.duration_ns = 190000000ULL;
+    if (pgwt_writer_push_event(w, &e)) return 1;
+    e.timestamp_ns = BASE + 400000000ULL;
+    e.duration_ns = 210000000ULL;
+    e.old_event = e.new_event = 50331648; /* Lock:relation */
+    if (pgwt_writer_push_event(w, &e)) return 1;
+    uint64_t weights[] = {P, 90000000, 110000000, 80000000, 120000000};
+    uint32_t events[] = {0, 0, 50331648, 100663296, 0};
+    uint64_t now = BASE;
+    for (int i = 0; i < 5; i++) {
+        if (i) now += weights[i];
+        e = (struct pgwt_trace_event){.pid = 1000, .timestamp_ns = now,
+                                     .new_event = events[i]};
+        if (pgwt_writer_push_samples(w, &e, 1, weights[i])) return 1;
+    }
+    pgwt_writer_close(w); pgwt_writer_destroy(w); free(w);
+    /* Assert the intended negative-control shape, not just the totals. */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, path)) return 1;
+    int found = 0;
+    for (int b = 0; b < r.num_blocks; b++) {
+        struct pgwt_trace_event out[5];
+        struct pgwt_block_info info;
+        int n = pgwt_reader_decode_block_info(&r, b, out, 5, &info);
+        if (n <= 0) { pgwt_reader_close(&r); return 1; }
+        if (info.block_type != PGWT_BLOCK_SAMPLES) continue;
+        if (n != 5 || info.sample_period_ns != P) return 1;
+        for (int i = 0; i < n; i++)
+            if (out[i].duration_ns != weights[i]) return 1;
+        found++;
+    }
+    pgwt_reader_close(&r);
+    return found != 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--fixture") == 0)
@@ -465,6 +515,8 @@ int main(int argc, char **argv)
         return write_fixture(argv[2], 0, 1) != 0;
     if (argc == 3 && strcmp(argv[1], "--lookahead-fixture") == 0)
         return write_lookahead_fixture(argv[2]);
+    if (argc == 3 && strcmp(argv[1], "--cross-validate-fixture") == 0)
+        return write_cross_validate_fixture(argv[2]);
     test_intervals();
     test_writer();
     test_stream();

@@ -19,6 +19,7 @@ These run without a live PostgreSQL: gen_test_traces emits SAMPLES blocks
 from the "samples"/"sample_period_ns" inputs (A1).
 """
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -652,8 +653,54 @@ def test_legacy_sample_weights(t):
                 "from": BASE_TS - PERIOD, "to": BASE_TS + 290_000_000})
             t.check_eq(tm["db_time_ms"], 310,
                        "legacy trace retains stored inflated 310ms weights")
-            t.check("sample_period_ns" not in tm,
-                    "legacy nominal cadence is unknown, never relabeled mean")
+            t.check_eq(tm["sample_period_ns"], 110000000,
+                       "legacy response retains last stored block period")
+
+
+def test_legacy_master_responses(t):
+    """Frozen master expectations, including all deterministic fields.
+
+    These files predate v4. The v3 mixed fixture includes the review's
+    [1s,3s] AAS split; old stored periods control both response cadence and
+    fidelity slop. Cache on/off must match the SAME master expectations.
+    """
+    fixtures = Path(__file__).parent / "fixtures"
+    root = fixtures / "legacy_responses"
+    paths = {"mixed_v3": root / "mixed_v3",
+             "sampled_v3": fixtures / "sample_weights_v3",
+             "golden_v2": fixtures / "golden/rev2/trace",
+             "golden_v3": fixtures / "golden/rev3/trace"}
+    cases = json.loads((root / "responses.json").read_text())
+    for cache in ("0", "1"):
+        for label, directory in paths.items():
+            with ServerHarness(str(directory), env={"PGWT_CURRENT_TRACE_CACHE": cache}) as srv:
+                for case in cases:
+                    if case["fixture"] != label:
+                        continue
+                    response = srv.query(case["command"], **case["args"])
+                    for key in ("id", "now_ns", "server_version"):
+                        response.pop(key, None)
+                    expected = dict(case["expected"])
+                    if case["command"] == "info":
+                        # Master reports the replay host's CPU count, not a
+                        # trace property. Assert that contract on Mac/Linux
+                        # instead of pinning this fixture's generating host.
+                        expected["num_cpus"] = max(1, os.sysconf("SC_NPROCESSORS_ONLN"))
+                    # Compare canonical JSON bytes, keeping every field and
+                    # numeric representation that is stable across builds.
+                    # #857 added two fields after this branch split. Both
+                    # complete API bodies are independently frozen from
+                    # unmodified master builds; accept either so this test
+                    # also runs unchanged when that commit is merged. No
+                    # legacy field/value can be dropped or substituted.
+                    master_857 = dict(expected, **case.get("master_857_additions", {}))
+                    actual = json.dumps(response, sort_keys=True)
+                    bodies = (json.dumps(expected, sort_keys=True),
+                              json.dumps(master_857, sort_keys=True))
+                    matches = actual in bodies
+                    label_text = (f"master {label} cache={cache} {case['command']} "
+                                  f"{case['args']}: full response matches master")
+                    t.check(matches, label_text if matches else label_text + f"; got {actual}")
 
 
 def main():
@@ -662,6 +709,7 @@ def main():
     test_measured_tick_window(t)
     test_derived_weights_and_nominal(t)
     test_legacy_sample_weights(t)
+    test_legacy_master_responses(t)
     test_sampled_only(t)
     test_exact_unavailable(t)
     test_mixed_merge(t)

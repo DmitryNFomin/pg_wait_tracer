@@ -2862,12 +2862,19 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
             /* SMP-3 delayed ticks carry their measured inter-tick elapsed
              * time. Retain the maximum for request lookahead even when later
              * nominal-period blocks follow the stalled block. */
-            fc->sample_period_ns = reader.nominal_sample_period_ns;
+            /* v2/v3 responses historically report the last nonzero stored
+             * block period. Preserve that cadence and fidelity edge slop;
+             * only v4 has durable nominal cadence metadata. */
+            uint64_t cadence = reader.header.version >= 4
+                             ? reader.nominal_sample_period_ns
+                             : bi.sample_period_ns;
+            if (cadence)
+                fc->sample_period_ns = cadence;
             if (bi.max_sample_weight_ns > fc->max_sample_period_ns)
                 fc->max_sample_period_ns = bi.max_sample_weight_ns;
             /* Nominal cadence controls coverage continuity in v4. Legacy
              * captures have no nominal metadata; retain their stored weight
-             * as a continuity bound, without reporting it as cadence. */
+             * as both the legacy reported period and continuity bound. */
             uint64_t continuity = reader.nominal_sample_period_ns
                                 ? reader.nominal_sample_period_ns
                                 : bi.max_sample_weight_ns;

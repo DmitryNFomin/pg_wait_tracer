@@ -8,6 +8,12 @@ Written for Phase T5 of the Trust Milestone (DUR-5/6: the format and its
 durability guarantees were previously implicit in the code); the v3 cpu_ns
 column was added in Phase T8 (measured CPU, docs/ROADMAP_AND_STATUS.md).
 
+**Upgrade the daemon and server together.** An older server (reading only
+v2/v3) refuses a v4 file on stderr with `ERROR: unsupported trace version 4
+... regenerate with this build`. Its JSON response carries `fidelity: "none"`
+and zero DB Time (and zero `from_ns`/`to_ns`), so a partial upgrade can show an
+empty view. Check the server's stderr and upgrade it to read the new capture.
+
 ## Scope and general rules
 
 A trace directory (`--trace-dir`) contains:
@@ -66,9 +72,12 @@ write. It is durable in **every raw file**, survives rotation/recovery, and
 belongs to that file's capture generation (not a mutable directory sidecar).
 Server `sample_period_ns` responses and fidelity edge slop use this nominal
 cadence; no jittered effective weight is labelled nominal. A library caller
-must set `writer.nominal_sample_period_ns` before its first push. v2/v3 and
-unconfigured callers have unknown nominal cadence (0); the server omits the
-cadence field and retains its existing 1-second unknown-cadence slop fallback.
+must set `writer.nominal_sample_period_ns` before its first push.
+Unconfigured v4 callers have unknown nominal cadence (0); the server omits
+that cadence field and uses a 1-second edge slop. For v2/v3 files the server
+preserves the legacy responses: the last nonzero stored block period supplies
+`sample_period_ns` and the fidelity edge slop, even though that period is a
+measured mean rather than configured nominal cadence.
 
 Summary files reuse the **28-byte prefix only**, without the v4 extension, with magic `0x53574750`
 ("PGWS") and their own version (currently 2; v1 files remain readable).

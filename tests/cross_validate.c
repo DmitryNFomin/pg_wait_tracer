@@ -523,7 +523,7 @@ int main(int argc, char **argv)
     if (!idle_tab) { perror("calloc idle_tab"); return 1; }
     long   n_samples_cpu = 0;        /* we==0 samples counted in the window */
     long   n_samples_noncpu = 0;
-    uint64_t sample_period_seen = 0; /* last SAMPLES block period, for arithmetic */
+    uint64_t sample_period_seen = 0; /* v4 nominal cadence / legacy block mean */
     struct abc_state abc_data = {0};
 
     for (int fi = 0; fi < nfiles; fi++) {
@@ -541,17 +541,21 @@ int main(int argc, char **argv)
                     uint64_t w = pgwt_reader_mono_to_wall(&r, e->timestamp_ns);
                     if (w < win_from || w >= win_to)
                         continue;
+                    /* The product decoder supplies each v4 tick's exact
+                     * weight in duration_ns; v2/v3 retain the stored mean. */
                     uint32_t ev = e->new_event;
                     /* Learn the period BEFORE the idle filter: a window whose
                      * only in-range samples are idle still has a period, and
                      * the idle section converts ns back to samples with it. */
-                    sample_period_seen = info.sample_period_ns;
+                    sample_period_seen = r.header.version >= 4
+                                       ? info.nominal_sample_period_ns
+                                       : info.sample_period_ns;
                     if (abc) {
                         if (abc_data.ns == abc_data.cs)
                             abc_data.samples = abc_grow(abc_data.samples,
                                 &abc_data.cs, sizeof(*abc_data.samples));
                         abc_data.samples[abc_data.ns++] = (struct abc_sample){
-                            w, info.sample_period_ns, e->pid, ev};
+                            w, e->duration_ns, e->pid, ev};
                     }
                     /* T2: we==0 samples are first-class CPU (the capture
                      * side already applied the command gate). */
@@ -559,13 +563,13 @@ int main(int argc, char **argv)
                         /* NOT DB Time -- kept out of every share, recorded in
                          * the idle table so --show-idle can SHOW where the
                          * time went instead of leaving it to be inferred. */
-                        double ic = (double)info.sample_period_ns;
+                        double ic = (double)e->duration_ns;
                         acc_find(idle_tab, ev)->sampled_ns += ic;
                         idle_sampled_ns += ic;
                         idle_samples++;
                         continue;
                     }
-                    double contrib = (double)info.sample_period_ns;
+                    double contrib = (double)e->duration_ns;
                     acc_find(table, ev)->sampled_ns += contrib;
                     total_sampled_ns += contrib;
                     n_samples++;

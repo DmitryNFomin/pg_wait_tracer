@@ -1771,7 +1771,7 @@ static void test_unreadable_window(void)
     snprintf(path, sizeof(path), "%s/current.trace", dir);
     FILE *fp = fopen(path, "r+b");
     if (!fp) exit(2);
-    if (fseek(fp, sizeof(struct pgwt_trace_file_header) +
+    if (fseek(fp, pgwt_trace_file_header_size(PGWT_TRACE_VERSION) +
               offsetof(struct pgwt_trace_block_header, block_type), SEEK_SET)
         != 0 || fputc(255, fp) == EOF || fclose(fp) != 0) exit(2);
     cur_cache_drop(&srv->cur);
