@@ -42,6 +42,31 @@ reintroduce noisy-neighbour variance in the one job most sensitive to it.
 
 ## Test tiers
 
+`tests/run_all.sh` classifies the open #675 signature only on EL8 with kernel
+4.18: `test_cross_validate_tiered|675|el8@4.18|exit=79`. Scoped entries require
+`name|issue|os@major.minor|exit=NN` (either scope predicate may be omitted;
+both must match when supplied). The unused legacy `name|issue` form applies
+to all hosts and accepts any failure except 126/127.
+The runner reads `/etc/os-release` once and `uname -r`; caller environment
+variables cannot override that identity. Outside the scope, failure fails the
+gate. Tests always execute, including scoped entries; a pass is an `xpass` and
+126/127 always fails. A different nonzero exit fails with actual and expected
+codes. Exit 79 requires valid captures and only tolerance failures in the
+sampled-under-reading direction, all deviations <=15.0 pp. The ceiling is a
+regression tripwire for the open defect, not an accuracy claim; remove it and
+the entry together when #675 is fixed. The final verdict starts with
+`PASS with N known-failing (issues: #675)` when applicable, with each test and
+issue named in the summary.
+`RUN_ALL_SUMMARY {…}` in the box-check stdout log carries the counts,
+detected OS/kernel, `issues`, and `known_failing` records (`test`, `issue`, `exit`,
+`xpass`, and `deviations_pp` by rate when the test emits
+`TIERED_DEVIATIONS 10=… 50=…`); the human summary and final verdict repeat
+these deviations so drift is visible.
+The exit code remains authoritative. This is separate from the UI-only
+`tests/results/ui_live/summary.json`. #675 remains an open tag-blocker; a
+classified gate does not authorize shipping it. Offline scope/classifier and
+negative-control coverage: `python3 -B tests/test_run_all_known_failing.py`.
+
 | Tier | What | Where | Trigger | Blocks merge |
 |---|---|---|---|---|
 | Deterministic | C units, synthetic Python, Node builders, Go bridge, Playwright vs mock, protocol-drift | Mac (`make check`) and `ubuntu-latest` | every push | yes |

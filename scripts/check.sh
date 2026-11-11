@@ -89,6 +89,9 @@ run python3 tests/test_board_author.py
 step "bash: pr-ready ordering and refusal self-test (#701)"
 run bash tests/test_pr_ready.sh
 
+step "generated tag board offline self-test (#850)"
+run scripts/lead/board-selftest.sh
+
 step "PR state drift sweep and disposition self-test (#717)"
 run python3 scripts/lead/selftest-pr-state.py
 
@@ -170,6 +173,9 @@ run scripts/check-section-registration.sh
 step "exact-window mask gate bypass suite (#591)"
 run tests/test_uprobe_mask_gate.py
 
+step "runner known-failing scope and summary self-test (#760)"
+run python3 -B tests/test_run_all_known_failing.py
+
 # Runner-image pin guard (2026-10-22). GitHub rolled `ubuntu-latest` to Ubuntu
 # 26.04 and four gating jobs went red at once (run 39765852420): Playwright
 # 1.60.0 has no chromium for ubuntu26.04-x64, setup-python handed the
@@ -213,6 +219,18 @@ run python3 tests/test_multi_window_lib.py
 
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
+
+step "python: tag checklist exact-SHA evidence and blocker refusals"
+run python3 tests/test_tag_checklist.py
+
+step "tag checklist: real inventory retains every historical ID"
+run python3 scripts/tag-checklist.py "$(git rev-parse HEAD)" --check-history
+
+step "tag checklist: workflow_run still targets the CI workflow name"
+run python3 -c 'import re; from pathlib import Path; assert re.search(r"(?m)^name: CI\s*$", Path(".github/workflows/ci.yml").read_text()), "tag checklist trigger requires name: CI"'
+
+step "tag checklist: workflow permissions are exactly the required read-only scopes"
+run python3 -c 'import re; from pathlib import Path; workflow = Path(".github/workflows/tag-checklist.yml").read_text(); blocks = re.findall(r"(?m)^permissions:\n((?:[ \t]+[^\n]*\n|\n)*)", workflow); expected = ["actions: read", "contents: read", "issues: read", "pull-requests: read"]; assert len(re.findall(r"(?m)^\s*permissions:", workflow)) == 1 and len(blocks) == 1 and sorted(line.strip() for line in blocks[0].splitlines() if line.strip()) == expected, "tag checklist permissions must be exactly contents/actions/issues/pull-requests: read"'
 
 # Fake workload/daemon processes and pg_stat_statements results: no live PG or BPF.
 step "python: capture-smoke failure diagnostics (#614)"

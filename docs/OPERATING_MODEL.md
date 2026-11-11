@@ -327,3 +327,15 @@ than one-off mistakes:
   in a session that disappears.
 - Keep a single durable index of where every published number's evidence lives,
   updated when it is published rather than at a handover.
+
+## Generated tag board (#850)
+
+`scripts/lead/board.sh render` prints the live board; issue creation fixes its start time.
+The fenced TSV between `<!-- plan:begin -->` and `<!-- plan:end -->` holds the lead's plan.
+`board.sh set <item> key=value...` adds/updates a row and publishes; the first `est` also fills `est0`.
+`est0` is write-once; moved estimates and overdue work remain visible in the header.
+GitHub issue closure and open PRs determine state before the lead's prose does.
+Every unplanned open tag-blocker is listed, and unlabelled planned issues are flagged.
+`board.sh publish` refreshes the issue while preserving the existing plan block's bytes.
+Use `--issue N` or `PGWT_BOARD_ISSUE`; `--offline DIR` reads board/issues/prs JSON and optional `now.txt`.
+A missing plan is explicit in render; `set` initializes it, while publish refuses to erase the legacy board.

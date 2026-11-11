@@ -536,7 +536,12 @@
  * per-second clipped wall credit. Each event grows from 156 to 164 bytes.
  * Older files lack the average numerator and are refused for computation;
  * the existing window preflight recomputes the whole request from raw. */
-#define PGWT_SUMMARY_VERSION  11
+/* v12 (#852): idle closes no longer create sessions[]. The layout is
+ * unchanged, but older files contain pid-only idle rows. A zero occupancy
+ * row cannot be filtered safely: non-idle closes can also have zero time
+ * after open credits, or zero duration. Refuse older accounting versions
+ * through the existing preflight and recompute the whole window from raw. */
+#define PGWT_SUMMARY_VERSION  12
 
 /* `eff_event` sentinel: the producer resolved no effective wait id, so the
  * writer uses evt->old_event and counts the push. Not 0 -- 0 is a valid id
