@@ -1061,3 +1061,4 @@ test_session_rows
 test_phase_capability
 test_phase_probe
 test_core_merge_contract
+test_merge_tie_count
