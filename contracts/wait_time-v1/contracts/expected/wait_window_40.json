@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_40",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_ns": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_count": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "derivation": "Distinct duplicate positive waits overlap for 18446744073709551615-0 ns: rule 4 violated.\nCoverage fills W; do not sum invalid waits or deduplicate; both values and all diagnostics=null."
+}

@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_22",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 1,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 1,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 1,
+      "covered_ns": 1,
+      "required_ns": 1
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 0,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 0,
+      "covered_ns": 1,
+      "required_ns": 1
+    }
+  },
+  "derivation": "closed=6-5=1; open=0; total=1.\nClose 6 is excluded: count=0; required=6-5=1; covered=1."
+}

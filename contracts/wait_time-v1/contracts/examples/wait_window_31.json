@@ -1,0 +1,29 @@
+{
+ "id": "wait_window_31",
+ "name": "completion at exit, window starts at exit, exit covered",
+ "evidence": {
+  "life": [
+   0,
+   10
+  ],
+  "coverage": [
+   [
+    0,
+    10
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    8,
+    10
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 10,
+  "to": 12
+ }
+}

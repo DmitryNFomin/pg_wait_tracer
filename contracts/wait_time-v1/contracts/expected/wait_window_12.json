@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_12",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 3,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 3,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 3,
+      "covered_ns": 3,
+      "required_ns": 3
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 1,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 1,
+      "covered_ns": 3,
+      "required_ns": 3
+    }
+  },
+  "derivation": "closed=15-12=3; open=0; total=3; close 15 in [12,30) gives count=1.\nR=[12,15), required=15-12=3; covered=3; span ends at exit 15."
+}

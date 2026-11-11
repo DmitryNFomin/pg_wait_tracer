@@ -1,0 +1,38 @@
+{
+  "id": "wait_window_32",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 0,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 0,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 0,
+      "covered_ns": 0,
+      "required_ns": 0
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_count": 1,
+      "covered_ns": 0,
+      "required_ns": 0
+    }
+  },
+  "derivation": "R is empty: required=covered=0; closed=open=total=0, so wait_time is complete.\n10 <= close 10 < 12: recorded_count=1; no span ends at exit, so completed_waits unavailable."
+}

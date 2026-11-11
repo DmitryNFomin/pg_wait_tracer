@@ -1,0 +1,27 @@
+{
+ "id": "wait_window_37",
+ "name": "coverage beyond open observation",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    10
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   2,
+   5
+  ]
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 0,
+  "to": 10
+ }
+}

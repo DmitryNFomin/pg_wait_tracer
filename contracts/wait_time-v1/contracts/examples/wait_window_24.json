@@ -1,0 +1,34 @@
+{
+ "id": "wait_window_24",
+ "name": "invalid evidence: overlapping waits",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    20
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    2,
+    8
+   ],
+   [
+    "Lock",
+    6,
+    9
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 0,
+  "to": 20
+ }
+}

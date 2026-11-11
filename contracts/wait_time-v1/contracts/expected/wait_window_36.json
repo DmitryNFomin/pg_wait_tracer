@@ -1,0 +1,38 @@
+{
+  "id": "wait_window_36",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid",
+      "invalid_window"
+    ],
+    "diagnostic": {
+      "recorded_ns": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid",
+      "invalid_window"
+    ],
+    "diagnostic": {
+      "recorded_count": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "derivation": "Wait start 8 > end 2: evidence_invalid; query from 10 >= to 5: invalid_window.\nBoth reasons retained alphabetically; no coverage reason for invalid window; all diagnostics=null."
+}

@@ -1,0 +1,39 @@
+{
+ "id": "wait_window_05",
+ "name": "other event in same evidence",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    20
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    0,
+    6
+   ],
+   [
+    "Lock",
+    6,
+    8
+   ],
+   [
+    "PgSleep",
+    8,
+    14
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "Lock",
+  "from": 0,
+  "to": 20
+ }
+}

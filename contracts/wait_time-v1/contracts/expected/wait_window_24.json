@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_24",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_ns": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_count": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "derivation": "Occupied overlap [6,8) has 8-6=2 ns: rule 4 violated across events.\nCoverage [0,20) fills W, so no coverage reason; both values and all diagnostics=null."
+}

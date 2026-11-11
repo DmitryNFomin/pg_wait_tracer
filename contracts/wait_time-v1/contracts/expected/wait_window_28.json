@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_28",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_ns": 3,
+      "covered_ns": 0,
+      "required_ns": 10
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_count": 1,
+      "covered_ns": 0,
+      "required_ns": 10
+    }
+  },
+  "derivation": "recorded_ns=5-2=3; open=0; close 5 gives recorded_count=1 even without coverage.\nrequired=10-0=10; covered=0; gap=10, so both unavailable."
+}

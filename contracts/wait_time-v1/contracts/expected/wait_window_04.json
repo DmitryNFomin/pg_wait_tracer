@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_04",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 0,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 0,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 0,
+      "covered_ns": 2,
+      "required_ns": 2
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 1,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 1,
+      "covered_ns": 2,
+      "required_ns": 2
+    }
+  },
+  "derivation": "PgSleep occupation in [6,8) is empty: closed=0; open=0; total=0.\nClose 6 is included: count=1; required=8-6=2; covered=2."
+}

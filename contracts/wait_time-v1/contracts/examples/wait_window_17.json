@@ -1,0 +1,33 @@
+{
+ "id": "wait_window_17",
+ "name": "open wait, window extends past as_of",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    18
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    1,
+    4
+   ]
+  ],
+  "open": [
+   "PgSleep",
+   10,
+   18
+  ]
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 12,
+  "to": 25
+ }
+}

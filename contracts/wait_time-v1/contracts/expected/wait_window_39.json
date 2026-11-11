@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_39",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_ns": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_count": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "derivation": "Wait start -1 < 0 violates unsigned timestamp rule 1 and life_start 0 <= start.\nCoverage [0,2) fills W; no gap under either C07 reading; values and diagnostics=null."
+}
