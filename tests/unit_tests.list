@@ -1057,3 +1057,4 @@ test_phase_probe
 
 # Core wait_time v1: independent contract answers, no server dependency.
 test_core_wait_time_contract
+test_core_wait_time_differential.py

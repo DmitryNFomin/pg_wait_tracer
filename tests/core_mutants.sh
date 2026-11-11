@@ -51,6 +51,17 @@ mutants = [
      "time->detail_present = true;", "08"),
     ("M10", "if (e->has_open && s.end > e->open.as_of)",
      "if (false)", "37"),
+    ("X4", "(i && s.start < e->coverage[i - 1].start)", "false", "diff:X4"),
+    ("X5", "e->life_end >= q->to", "e->life_end > q->to", "diff:X5"),
+    ("X7", "e->open.as_of >= e->life_end", "e->open.as_of > e->life_end", "diff:X7"),
+    ("X8", "(e->has_life_end && w.end > e->life_end)", "false", "diff:X8"),
+    ("X9", "if (s.start < positive_end)", "if (false)", "diff:X9"),
+    ("X10", "e->open.start < e->life_start", "false", "diff:X10"),
+    # Move the time window while preserving full-trace occupation. Saturate
+    # UINT64_MAX endpoints so this is a semantic mutant without wrap/crashes.
+    ("X11", "closed += clipped_ns(w.start, w.end, q->from, q->to);",
+     "closed += clipped_ns(w.start, w.end, "
+     "q->from + (q->from < UINT64_MAX), q->to + (q->to < UINT64_MAX));", "diff:X11"),
 ]
 
 def build(directory, output):
@@ -93,8 +104,16 @@ try:
             print("core mutants: baseline FAILED\n" + baseline.stdout)
             sys.exit(2)
         print(baseline.stdout.splitlines()[-1], flush=True)
+        baseline_diff = run([sys.executable, "-B",
+                             str(root / "tests/test_core_wait_time_differential.py"),
+                             "--source-root", str(base)], timeout=55)
+        if baseline_diff.returncode != 0 or has_sanitizer_error(baseline_diff.stdout):
+            print("core mutants: baseline differential FAILED\n" + baseline_diff.stdout)
+            sys.exit(2)
+        print(baseline_diff.stdout.strip(), flush=True)
 
         failed = False
+        killed = 0
         for name, old, new, case in mutants:
             directory = work / name
             shutil.copytree(base, directory, ignore=shutil.ignore_patterns("contract-test", "*.dSYM"))
@@ -117,15 +136,40 @@ try:
                 print(f"{name} TIMEOUT (not a kill)", flush=True)
                 failed = True
                 continue
-            intended = re.search(rf"^wait_window_{case}\.json MISMATCH \(.+\)$", result.stdout, re.M)
-            cases = re.findall(r"^wait_window_\d+\.json (?:PASS|MISMATCH)\b", result.stdout, re.M)
-            if (result.returncode == 1 and intended and summary(result.stdout)
-                    and len(cases) >= 48 and not has_sanitizer_error(result.stdout)):
-                print(f"{name} KILLED (wait_window_{case}, build OK, case mismatch)", flush=True)
+            if case.startswith("diff:"):
+                # Require a successful sanitized build, full evaluation, and
+                # an actual reference mismatch on the named distinguishing input.
+                try:
+                    result = run([sys.executable, "-B",
+                                  str(root / "tests/test_core_wait_time_differential.py"),
+                                  "--source-root", str(directory)], timeout=55)
+                except subprocess.TimeoutExpired:
+                    print(f"{name} TIMEOUT (not a kill)", flush=True)
+                    failed = True
+                    continue
+                intended = re.search(rf"^{case[5:]} MISMATCH \(.+\)$", result.stdout, re.M)
+                finished = re.search(r"^core wait_time differential: \d+ cases, \d+ differences,", result.stdout, re.M)
+                preserved = name != "X11" or "X11 whole-trace: MATCH" in result.stdout
+                if (result.returncode == 1 and intended and finished and preserved
+                        and not has_sanitizer_error(result.stdout)):
+                    print(f"{name} KILLED (differential {case[5:]}, build OK, reference mismatch)", flush=True)
+                    killed += 1
+                else:
+                    print(f"{name} SURVIVED/ERROR (exit {result.returncode}; not an intended reference mismatch)\n"
+                          + result.stdout, flush=True)
+                    failed = True
             else:
-                print(f"{name} SURVIVED/ERROR (exit {result.returncode}; not an intended case mismatch)\n"
-                      + result.stdout, flush=True)
-                failed = True
+                intended = re.search(rf"^wait_window_{case}\.json MISMATCH \(.+\)$", result.stdout, re.M)
+                cases = re.findall(r"^wait_window_\d+\.json (?:PASS|MISMATCH)\b", result.stdout, re.M)
+                if (result.returncode == 1 and intended and summary(result.stdout)
+                        and len(cases) >= 48 and not has_sanitizer_error(result.stdout)):
+                    print(f"{name} KILLED (contract wait_window_{case}, build OK, case mismatch)", flush=True)
+                    killed += 1
+                else:
+                    print(f"{name} SURVIVED/ERROR (exit {result.returncode}; not an intended case mismatch)\n"
+                          + result.stdout, flush=True)
+                    failed = True
+        print(f"core mutants: {killed}/{len(mutants)} KILLED", flush=True)
         sys.exit(1 if failed else 0)
 except (OSError, subprocess.TimeoutExpired) as error:
     print(f"core mutants: harness error: {error}")

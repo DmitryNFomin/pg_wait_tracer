@@ -82,7 +82,7 @@ static bool adapter_checks(void)
         {"{\"coverage\":[],\"waits\":[],\"open\":null}", valid_q, PGWT_CORE_LIFE_INVALID, 0},
         {"{\"life\":[0,null],\"waits\":[],\"open\":null}", valid_q, PGWT_CORE_COVERAGE_INVALID, 0},
         {"{\"life\":[0,null],\"coverage\":[],\"open\":null}", valid_q, PGWT_CORE_WAITS_INVALID, 0},
-        {"{\"life\":[0,null],\"coverage\":[],\"waits\":[]}", valid_q, PGWT_CORE_OPEN_INVALID, 0},
+        {"{\"life\":[0,null],\"coverage\":[],\"waits\":[]}", valid_q, PGWT_CORE_OPEN_INVALID | PGWT_CORE_OPEN_AS_OF_INVALID, 0},
         {valid_e, "{\"from\":0,\"to\":10}", 0, PGWT_CORE_QUERY_EVENT_INVALID},
         {valid_e, "{\"event\":\"E\",\"to\":10}", 0, PGWT_CORE_QUERY_FROM_INVALID},
         {valid_e, "{\"event\":\"E\",\"from\":0}", 0, PGWT_CORE_QUERY_TO_INVALID},
@@ -96,7 +96,7 @@ static bool adapter_checks(void)
         {"{\"life\":[0,null],\"coverage\":[],\"waits\":[[\"E\",0,1,2]],\"open\":null}", valid_q, PGWT_CORE_WAITS_INVALID, 0},
         {"{\"life\":[0,null],\"coverage\":[],\"waits\":[[true,0,1]],\"open\":null}", valid_q, PGWT_CORE_WAITS_INVALID, 0},
         {"{\"life\":[0,null],\"coverage\":[],\"waits\":[],\"open\":[\"E\",0]}", valid_q, PGWT_CORE_OPEN_INVALID | PGWT_CORE_OPEN_AS_OF_INVALID, 0},
-        {"{\"life\":[0,null],\"coverage\":[],\"waits\":[],\"open\":[\"E\",0,1,2]}", valid_q, PGWT_CORE_OPEN_INVALID, 0},
+        {"{\"life\":[0,null],\"coverage\":[],\"waits\":[],\"open\":[\"E\",0,1,2]}", valid_q, PGWT_CORE_OPEN_INVALID | PGWT_CORE_OPEN_AS_OF_INVALID, 0},
         {"{\"life\":[0,null],\"coverage\":[],\"waits\":[],\"open\":false}", valid_q, PGWT_CORE_OPEN_INVALID | PGWT_CORE_OPEN_AS_OF_INVALID, 0},
         {valid_e, "{\"event\":true,\"from\":0,\"to\":10}", 0, PGWT_CORE_QUERY_EVENT_INVALID},
         {"{\"life\":[0,null],\"coverage\":[],\"waits\":[],\"open\":null,\"extra\":false}",
@@ -113,13 +113,54 @@ static bool adapter_checks(void)
                          "{\"event\":\"\\ud83d\\ude00\",\"from\":0,\"to\":1}", 0, 0);
 }
 
+/* Preparation owns no input storage, handles large unordered evidence, and
+ * supports repeated queries after its scratch has been released. */
+static bool preparation_checks(void)
+{
+    const size_t count = 20000;
+    pgwt_core_wait *waits = calloc(count, sizeof(*waits));
+    pgwt_core_wait *scratch = calloc(count, sizeof(*scratch));
+    if (!waits || !scratch) { free(waits); free(scratch); return false; }
+    const pgwt_core_event event = {"A", 1};
+    /* Reverse order, with a real zero-length close at every positive start. */
+    for (size_t i = 0; i < count; ++i) {
+        uint64_t start = (count - 1 - i) / 2 * 2;
+        waits[i] = (pgwt_core_wait){event, start, start + (i % 2 == 0)};
+    }
+    pgwt_core_span span = {0, count};
+    pgwt_core_evidence e = {.coverage = &span, .coverage_count = 1,
+                            .waits = waits, .wait_count = count};
+    pgwt_core_prepared p;
+    bool ok = pgwt_core_prepare(&e, scratch, count - 1, &p) == -1 && !p.evidence;
+    ok = ok && pgwt_core_prepare(&e, NULL, count, &p) == -1 && !p.evidence;
+    ok = ok && pgwt_core_prepare(&e, scratch, count, &p) == 0 && p.evidence_valid;
+    free(scratch);
+    pgwt_core_result t, n;
+    pgwt_core_query q = {.event = event, .from = 0, .to = count};
+    pgwt_core_wait_metrics(&p, &q, &t, &n);
+    pgwt_core_result again_t, again_n;
+    pgwt_core_wait_metrics(&p, &q, &again_t, &again_n);
+    ok = ok && memcmp(&t, &again_t, sizeof(t)) == 0 &&
+         memcmp(&n, &again_n, sizeof(n)) == 0;
+    for (size_t i = 0; i < count; ++i)
+        ok = ok && waits[i].start == (count - 1 - i) / 2 * 2 &&
+             waits[i].end == waits[i].start + (i % 2 == 0);
+    free(waits);
+    ok = ok && pgwt_core_prepare(NULL, NULL, 0, &p) == 0;
+    pgwt_core_wait_metrics(&p, &q, &t, &n);
+    ok = ok && !t.value.present && t.reason_count == 1 &&
+         strcmp(t.reasons[0], "evidence_invalid") == 0;
+    if (!ok) fprintf(stderr, "prepared evidence checks failed\n");
+    return ok;
+}
+
 /* Exit 1 means completed case comparisons found a mismatch. Exit 2 means a
  * harness failure (including too few cases), never a killed numerical mutant. */
 int main(int argc, char **argv)
 {
     const char *root = "contracts/wait_time-v1/contracts";
     if (argc > 2) { fprintf(stderr, "usage: %s [contract-directory]\n", argv[0]); return 2; }
-    if (!adapter_checks()) return 2;
+    if (!adapter_checks() || !preparation_checks()) return 2;
     if (argc == 2) root = argv[1];
     else if (access(root, R_OK) != 0) root = "../contracts/wait_time-v1/contracts";
     char pattern[4096];
@@ -149,7 +190,19 @@ int main(int argc, char **argv)
             printf("%s ERROR (%s)\n", name, error); harness_error = true; continue;
         }
         pgwt_core_result time, completed;
-        pgwt_core_wait_metrics(&input.evidence, &input.query, &time, &completed);
+        pgwt_core_prepared prepared;
+        size_t count = input.evidence.wait_count;
+        pgwt_core_wait *scratch = count ? calloc(count, sizeof(*scratch)) : NULL;
+        if ((count && !scratch) ||
+            pgwt_core_prepare(&input.evidence, scratch, count, &prepared) != 0) {
+            free(scratch);
+            pgwt_contract_case_free(&input);
+            harness_error = true;
+            printf("%s ERROR (prepare failed)\n", name);
+            continue;
+        }
+        free(scratch); /* prepared borrows evidence only, not scratch. */
+        pgwt_core_wait_metrics(&prepared, &input.query, &time, &completed);
         char time_json[2048], count_json[2048];
         int status;
         if (pgwt_contract_result_json(&time, time_json, sizeof(time_json)) != 0 ||

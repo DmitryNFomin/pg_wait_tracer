@@ -392,13 +392,14 @@ int pgwt_contract_case_load(const char *path, pgwt_contract_case *out,
     }
 
     const json_node *open = member(evidence, "open");
-    if (!open) e->invalid_fields |= PGWT_CORE_OPEN_INVALID;
+    if (!open) e->invalid_fields |= PGWT_CORE_OPEN_INVALID | PGWT_CORE_OPEN_AS_OF_INVALID;
     e->has_open = open && open->kind != J_NULL;
     if (e->has_open) {
         bool event_ok = event_string(item(open, 0), &e->open.event);
         bool start_ok = integer(item(open, 1), &e->open.start);
         bool as_of_ok = integer(item(open, 2), &e->open.as_of);
-        if (!as_of_ok) e->invalid_fields |= PGWT_CORE_OPEN_AS_OF_INVALID;
+        if (!array_size(open, 3) || !as_of_ok)
+            e->invalid_fields |= PGWT_CORE_OPEN_AS_OF_INVALID;
         if (!array_size(open, 3) || !event_ok || !start_ok || !as_of_ok)
             e->invalid_fields |= PGWT_CORE_OPEN_INVALID;
     }

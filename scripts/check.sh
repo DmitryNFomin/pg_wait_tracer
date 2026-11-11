@@ -48,8 +48,10 @@ need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Lo
 need node; need go; need python3
 
 # Portable C core: this script builds/runs the contract C test in a temporary
-# directory, then requires every numerical mutant to fail its intended case.
+# directory. The differential compares against the independent reference;
+# every numerical mutant must then fail its intended distinguishing case.
 step "core wait_time contract and mutation checks"
+run python3 -B tests/test_core_wait_time_differential.py
 run bash tests/core_mutants.sh
 
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv

@@ -5,7 +5,8 @@
  * One evidence object describes ONE backend generation. Times are uint64_t ns.
  * The computation allocates nothing, borrows all input storage, and does not
  * reorder or modify it. Results own fixed storage for at most four reasons;
- * their string pointers refer to static literals. Work is O(waits^2 + coverage).
+ * their string pointers refer to static literals. Preparation is
+ * O(waits log waits + coverage); each metric call is O(waits + coverage).
  * Callers provide two distinct, non-null result objects and readable arrays of
  * the stated lengths. Events are byte strings (UTF-8 for JSON), length delimited
  * so even embedded NULs compare exactly. No other project header is required.
@@ -37,8 +38,9 @@ typedef struct {
  * callers leave invalid_fields zero. The core checks semantic validity itself.
  * OPEN_AS_OF_INVALID must be set whenever an existing open record's as_of is
  * missing or not an in-range integer, independently of OPEN_INVALID (7.2).
- * Missing open sets OPEN_INVALID, with has_open false. Non-null malformed open
- * sets has_open true. This preserves whether a coverage gap is knowable.
+ * Missing open or a non-null open with other than three elements also sets
+ * OPEN_AS_OF_INVALID: rule 8 cannot be established. Missing open has has_open
+ * false; non-null malformed open has has_open true.
  */
 enum {
     PGWT_CORE_LIFE_INVALID = 1u << 0,
@@ -95,7 +97,27 @@ typedef struct {
     } diagnostic;
 } pgwt_core_result;
 
-void pgwt_core_wait_metrics(const pgwt_core_evidence *evidence,
+/* Prepared handles borrow immutable evidence (including arrays/event strings).
+ * Do not modify evidence until all queries are finished; prepare again after
+ * any change. Members are implementation state, not caller-settable flags. */
+typedef struct {
+    const pgwt_core_evidence *evidence;
+    bool coverage_knowable, evidence_valid;
+} pgwt_core_prepared;
+
+/* Validate once, without allocation or changes to evidence. scratch_len is the
+ * number of pgwt_core_wait entries, at least evidence->wait_count; scratch must
+ * be distinct from input arrays. It is used for an in-place heapsort and may
+ * be freed/reused immediately after preparation. Zero waits need no scratch.
+ * Returns 0 even for invalid evidence (queries then report evidence_invalid),
+ * -1 for insufficient/null scratch; on failure *prepared is cleared. NULL
+ * evidence prepares an invalid-evidence handle successfully. prepared must
+ * be non-null. */
+int pgwt_core_prepare(const pgwt_core_evidence *evidence,
+                      pgwt_core_wait *scratch, size_t scratch_len,
+                      pgwt_core_prepared *prepared);
+
+void pgwt_core_wait_metrics(const pgwt_core_prepared *prepared,
                             const pgwt_core_query *query,
                             pgwt_core_result *wait_time,
                             pgwt_core_result *completed);

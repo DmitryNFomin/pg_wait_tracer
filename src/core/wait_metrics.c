@@ -40,7 +40,7 @@ static bool valid_coverage(const pgwt_core_evidence *e)
         (e->invalid_fields & PGWT_CORE_COVERAGE_INVALID) ||
         (e->coverage_count && !e->coverage))
         return false;
-    if (e->has_open && (e->invalid_fields & PGWT_CORE_OPEN_AS_OF_INVALID))
+    if (e->invalid_fields & PGWT_CORE_OPEN_AS_OF_INVALID)
         return false;
     for (size_t i = 0; i < e->coverage_count; ++i) {
         pgwt_core_span s = e->coverage[i];
@@ -60,31 +60,57 @@ static bool valid_coverage(const pgwt_core_evidence *e)
     return true;
 }
 
-/* contract 2.4-5: positive interiors disjoint; a zero-length record may
- * touch another record but cannot sit strictly inside it. No dedup (7.6). */
-static bool conflicting_waits(pgwt_core_wait a, pgwt_core_wait b)
+/* Sort by start then end, with zero-length waits before positive waits at
+ * the same start. Heapsort has bounded O(n log n) work and allocates nothing. */
+static bool later_wait(pgwt_core_wait a, pgwt_core_wait b)
 {
-    if (a.start == a.end)
-        return b.start < a.start && a.start < b.end;
-    if (b.start == b.end)
-        return a.start < b.start && b.start < a.end;
-    return max_time(a.start, b.start) < min_time(a.end, b.end);
+    return a.start > b.start || (a.start == b.start && a.end > b.end);
 }
 
-static bool valid_waits(const pgwt_core_evidence *e)
+static void sift_down(pgwt_core_wait *waits, size_t root, size_t count)
+{
+    while (root < count / 2) {
+        size_t child = root * 2 + 1;
+        if (child + 1 < count && later_wait(waits[child + 1], waits[child]))
+            ++child;
+        if (!later_wait(waits[child], waits[root])) break;
+        pgwt_core_wait tmp = waits[root];
+        waits[root] = waits[child];
+        waits[child] = tmp;
+        root = child;
+    }
+}
+
+static void sort_waits(pgwt_core_wait *waits, size_t count)
+{
+    for (size_t i = count / 2; i > 0; --i) sift_down(waits, i - 1, count);
+    for (size_t i = count; i > 1; --i) {
+        pgwt_core_wait tmp = waits[0];
+        waits[0] = waits[i - 1];
+        waits[i - 1] = tmp;
+        sift_down(waits, 0, i - 1);
+    }
+}
+
+static bool valid_waits(const pgwt_core_evidence *e, pgwt_core_wait *scratch)
 {
     if (e->invalid_fields || (e->wait_count && !e->waits))
         return false;
+    for (size_t i = 0; i < e->wait_count; ++i) scratch[i] = e->waits[i];
+    sort_waits(scratch, e->wait_count);
+    uint64_t positive_end = 0;
     for (size_t i = 0; i < e->wait_count; ++i) {
-        pgwt_core_wait w = e->waits[i];
+        pgwt_core_wait w = scratch[i];
         /* contract 2.1, 2.3 */
         if (!valid_event(w.event) || w.start > w.end ||
             w.start < e->life_start ||
             (e->has_life_end && w.end > e->life_end))
             return false;
-        for (size_t j = 0; j < i; ++j)
-            if (conflicting_waits(w, e->waits[j]))
-                return false;
+        /* contract 2.4-5: the previous positive interval's end suffices
+         * after sorting. Zeros at its start sort before it; at its end they
+         * pass. Duplicate zeros remain distinct; positive duplicates fail. */
+        if (w.start < positive_end) return false;
+        if (w.start < w.end) positive_end = w.end;
         /* contract 2.6: also excludes zero-length closes after open.start. */
         if (e->has_open && w.end > e->open.start)
             return false;
@@ -138,21 +164,31 @@ static void reasons(pgwt_core_result *r, bool gap, bool evidence_invalid,
     if (window_invalid) r->reasons[r->reason_count++] = "invalid_window";
 }
 
-void pgwt_core_wait_metrics(const pgwt_core_evidence *e,
+int pgwt_core_prepare(const pgwt_core_evidence *e, pgwt_core_wait *scratch,
+                      size_t scratch_len, pgwt_core_prepared *prepared)
+{
+    *prepared = (pgwt_core_prepared){0};
+    if (!e) return 0;
+    if (e->wait_count > scratch_len || (e->wait_count && !scratch)) return -1;
+    prepared->evidence = e;
+    prepared->coverage_knowable = valid_coverage(e);
+    prepared->evidence_valid = prepared->coverage_knowable && valid_waits(e, scratch);
+    return 0;
+}
+
+void pgwt_core_wait_metrics(const pgwt_core_prepared *prepared,
                             const pgwt_core_query *q,
                             pgwt_core_result *time,
                             pgwt_core_result *completed)
 {
     /* Null input objects are malformed; outputs must be distinct and non-null. */
-    const pgwt_core_evidence missing_e = {
-        .invalid_fields = PGWT_CORE_LIFE_INVALID | PGWT_CORE_COVERAGE_INVALID |
-                          PGWT_CORE_WAITS_INVALID | PGWT_CORE_OPEN_INVALID
-    };
+    const pgwt_core_evidence missing_e = {0};
+    const pgwt_core_evidence *e = prepared && prepared->evidence ?
+                                  prepared->evidence : &missing_e;
     const pgwt_core_query missing_q = {
         .invalid_fields = PGWT_CORE_QUERY_OBJECT_INVALID |
                           PGWT_CORE_QUERY_FROM_INVALID | PGWT_CORE_QUERY_TO_INVALID
     };
-    if (!e) e = &missing_e;
     if (!q) q = &missing_q;
     init_result(time, "wait_time", "ns");
     init_result(completed, "completed_waits", "count");
@@ -163,8 +199,8 @@ void pgwt_core_wait_metrics(const pgwt_core_evidence *e,
         (PGWT_CORE_QUERY_FROM_INVALID | PGWT_CORE_QUERY_TO_INVALID));
     bool invalid_window = endpoints_valid && q->from >= q->to;
     bool invalid_query = q->invalid_fields || !valid_event(q->event);
-    bool coverage_knowable = valid_coverage(e);
-    bool evidence_invalid = !coverage_knowable || !valid_waits(e);
+    bool coverage_knowable = prepared && prepared->coverage_knowable;
+    bool evidence_invalid = !prepared || !prepared->evidence_valid;
     bool coverage_gap = false;
     bool completion_gap = false;
     uint64_t required = 0, covered = 0;
