@@ -47,6 +47,11 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+# Portable C core: this script builds/runs the contract C test in a temporary
+# directory, then requires every numerical mutant to fail its intended case.
+step "core wait_time contract and mutation checks"
+run bash tests/core_mutants.sh
+
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
 # below (see issue #118). --fast doesn't need Playwright at all.

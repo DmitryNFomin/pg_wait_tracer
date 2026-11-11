@@ -76,7 +76,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_restart_second_identity \
             test_background_unattributed \
             test_session_rows \
-            test_phase_capability test_phase_probe
+            test_phase_capability test_phase_probe \
+            test_core_wait_time_contract
 
 .PHONY: all clean check
 
@@ -1141,3 +1142,6 @@ test_phase_capability: test_phase_capability.c ../src/phase_capability.c ../src/
 
 test_phase_probe: test_phase_probe.c ../src/phase_probe.c ../src/phase_capability.c ../src/cJSON.c ../src/phase_capability.h
 	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+test_core_wait_time_contract: test_core_wait_time_contract.c ../src/core/wait_metrics.c ../src/core/contract_json.c ../src/core/pgwt_core.h ../src/core/contract_json.h
+	$(CC) $(CFLAGS) -std=c11 -o $@ $(filter %.c,$^)
