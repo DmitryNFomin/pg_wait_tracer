@@ -312,6 +312,7 @@ void pgwt_exact_probe_core_cleanup(struct pgwt_exact_probe_core *core,
 
 #include <unistd.h>
 #include <time.h>
+#include <sys/utsname.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -322,6 +323,30 @@ static uint64_t mono_ns(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+static int phase_note_count(void *ctx, const char *note)
+{
+    struct pgwt_exec_site_plan plan = {0};
+    return pgwt_elf_usdt_sites_checked(ctx, "postgresql", note, 0, &plan);
+}
+
+void pgwt_exact_probe_measure_phases(struct pgwt_daemon *d)
+{
+    struct pgwt_phase_record *r = &d->phase_capabilities;
+    struct utsname u;
+    pgwt_phase_measure("/sys/bus/event_source/devices/uprobe", phase_note_count,
+                       (void *)d->pg_binary_saved, r->phase);
+    if (uname(&u) == 0) {
+        snprintf(r->kernel_release, sizeof(r->kernel_release), "%s", u.release);
+    } else {
+        snprintf(r->kernel_release, sizeof(r->kernel_release), "unknown");
+        for (int p = 0; p < PGWT_CAP_PHASE_COUNT; p++)
+            r->phase[p] = pgwt_phase_classify(PGWT_PHASE_ERROR, PGWT_PHASE_ERROR);
+    }
+    fprintf(stderr, "INFO: phase capability: execute=%s (%s), plan=%s (%s), kernel=%s\n",
+            pgwt_phase_state_name(r->phase[0].state), r->phase[0].reason,
+            pgwt_phase_state_name(r->phase[1].state), r->phase[1].reason, r->kernel_release);
 }
 
 static struct bpf_link **skeleton_link_slot(struct pgwt_daemon *d,

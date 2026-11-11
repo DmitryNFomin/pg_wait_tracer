@@ -998,6 +998,17 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
 {
     int err;
 
+    /* Capability evidence starts with this capture, also after re-attach to
+     * a restarted PostgreSQL. It never gates capture or probe attachment. */
+    struct timespec phase_start;
+    memset(&d->phase_capabilities, 0, sizeof(d->phase_capabilities));
+    if (clock_gettime(CLOCK_REALTIME, &phase_start) == 0)
+        d->phase_capabilities.start_wall_ns =
+            (uint64_t)phase_start.tv_sec * 1000000000ULL + phase_start.tv_nsec;
+    else
+        fprintf(stderr, "WARN: cannot timestamp phase capability measurement: %s\n", strerror(errno));
+    pgwt_exact_probe_measure_phases(d);
+
     d->sample_armed_ns = 0;
     d->sample_armed_at_ns = 0;
 
@@ -1363,6 +1374,11 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         d->event_writer->verbose = d->verbose;
         d->event_writer->nominal_sample_period_ns = 1000000000ULL /
             (uint64_t)(d->sample_rate_hz > 0 ? d->sample_rate_hz : 10);
+        /* Same trace group as raw/summary; append failure is counted/logged
+         * by the writer, and must never reach the daemon's fail path. */
+        pgwt_phase_append(d->trace_dir, d->event_writer->trace_gid,
+                           d->phase_capabilities.start_wall_ns ? &d->phase_capabilities : NULL,
+                           &d->phase_capability_write_failures);
         /* T8: write real cpu_ns only when the capability probe confirmed
          * measured CPU; otherwise every TRANSITIONS record is stamped
          * PGWT_CPU_NS_UNKNOWN so readers fall back to gap-inference. */

@@ -110,6 +110,8 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/provider_coop.c \
              $(SRC_DIR)/sampler.c \
              $(SRC_DIR)/exact_probe.c \
+             $(SRC_DIR)/phase_probe.c \
+             $(SRC_DIR)/phase_capability.c \
              $(SRC_DIR)/escalation.c \
              $(SRC_DIR)/escalation_budget.c \
              $(SRC_DIR)/anomaly.c \
@@ -141,6 +143,7 @@ USER_OBJS  = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(USER_SRCS))
 
 # pgwt-server: lightweight replay server (no BPF dependencies)
 SERVER_SRCS = $(SRC_DIR)/server.c \
+              $(SRC_DIR)/phase_capability.c \
               $(SRC_DIR)/compute.c \
               $(SRC_DIR)/backend_span.c \
               $(SRC_DIR)/open_overlay.c \
@@ -286,6 +289,15 @@ pgwt-client:
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) pgwt-server
 	rm -f $(INC_DIR)/vmlinux.h $(INC_DIR)/pg_wait_tracer.skel.h
+
+# A different source tree may have left NEWER outputs on a persistent box.
+# Extend the normal clean targets to cover every build-artifact rsync exclude,
+# including objects/libraries outside build/ and binaries from older runners.
+.PHONY: clean-box
+clean-box: clean
+	$(MAKE) -C tests clean
+	rm -f pg_wait_tracer-asan pgwt-server-asan $(CLIENT_OUT)
+	find . -name .git -prune -o \( -type f -o -type l \) \( -name '*.o' -o -name '*.a' -o -name '*.so' \) -exec rm -f {} +
 
 # ---------------------------------------------------------------------------
 # Developer loop (CLAUDE.md). None of these need the BPF build.

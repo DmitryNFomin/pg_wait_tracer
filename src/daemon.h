@@ -17,6 +17,7 @@
 #include "effective_cores.h"
 #include "backend_status_layout.h"
 #include "exact_probe.h"
+#include "phase_capability.h"
 #include "pgss_resolver.h"
 
 #include <stdbool.h>
@@ -383,6 +384,8 @@ struct pgwt_daemon {
     struct pgwt_query_text_capture *query_text_capture; /* NULL if disabled */
     struct pgwt_pgss_resolver *pgss_resolver;            /* PG14+ async text */
     struct pgwt_backend_meta_writer *backend_meta;       /* NULL if disabled */
+    struct pgwt_phase_record phase_capabilities; /* independent of attach policy/outcomes */
+    uint64_t phase_capability_write_failures;    /* per process; every failure also WARNs */
 
     /* Time windows */
 #define PGWT_MAX_WINDOWS 3
