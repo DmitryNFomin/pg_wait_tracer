@@ -178,6 +178,7 @@ static void test_file_roundtrip(void)
     CHECK(hdr.start_time_ns > 0, "start_time_ns > 0");
     CHECK(hdr.clock_offset_ns > 0, "clock_offset_ns > 0");
 
+    fseek(fp, (long)pgwt_trace_file_header_size(hdr.version), SEEK_SET);
     /* Read first block header */
     struct pgwt_trace_block_header bh;
     nr = fread(&bh, sizeof(bh), 1, fp);
@@ -206,10 +207,10 @@ static void test_file_roundtrip(void)
     struct pgwt_block_index_entry idx[2];
     nr = fread(idx, sizeof(idx[0]), footer_num_blocks, fp);
     CHECK(nr == footer_num_blocks, "read block index");
-    CHECK(idx[0].file_offset == sizeof(struct pgwt_trace_file_header),
+    CHECK(idx[0].file_offset == pgwt_trace_file_header_size(hdr.version),
           "first block offset=%lu == %lu (header size)",
           (unsigned long)idx[0].file_offset,
-          (unsigned long)sizeof(struct pgwt_trace_file_header));
+          (unsigned long)pgwt_trace_file_header_size(hdr.version));
     CHECK(idx[1].file_offset > idx[0].file_offset,
           "second block offset > first");
     CHECK(idx[0].timestamp_ns < idx[1].timestamp_ns,

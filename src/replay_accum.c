@@ -51,15 +51,14 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
                          struct pgwt_replay_stats *st)
 {
     int is_samples = bi && bi->block_type == PGWT_BLOCK_SAMPLES;
-    uint64_t period = is_samples ? bi->sample_period_ns : 0;
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *evt = &events[i];
         int sampled = is_samples || (evt->flags & PGWT_EVENT_FLAG_SAMPLE);
-        /* The file sort carries each sample block's weight in duration_ns
-         * on its private decoded copy. Direct block callers use bi. */
-        uint64_t sample_ns = bi ? period : evt->duration_ns;
-        if (st && sampled && sample_ns) st->sample_period_ns = sample_ns;
+        /* The reader supplies every sample's exact weight in duration_ns. */
+        uint64_t sample_ns = evt->duration_ns;
+        if (st && sampled && bi)
+            st->sample_period_ns = bi->nominal_sample_period_ns;
 
         uint32_t we;
         uint64_t add_ns;   /* time credited to THIS window (clipped) */
@@ -68,22 +67,16 @@ void pgwt_replay_events(struct pgwt_accumulator *acc,
         int closed_in_window;
 
         if (sampled) {
-            /* A sample is a POINT observation of the CURRENT wait
-             * (new_event): worth one sample period of estimated time, no real
-             * duration, and no interval to clip. So it keeps its own
-             * timestamp-selected rule — the overlap rule below is for
-             * intervals only. */
-            if (from_mono_ns > 0 && evt->timestamp_ns < from_mono_ns)
-                continue;
-            if (to_mono_ns > 0 && evt->timestamp_ns > to_mono_ns) {
-                if (is_samples)
-                    break;  /* a SAMPLES block is sorted and holds only points */
-                continue;
-            }
+            /* Estimated backward interval, clipped by the same integer
+             * overlap rule as the server. Keep occurrence counts separate. */
+            add_ns = event_window_ns(evt, from_mono_ns, to_mono_ns);
+            closed_in_window =
+                (from_mono_ns == 0 || evt->timestamp_ns >= from_mono_ns) &&
+                (to_mono_ns == 0 || evt->timestamp_ns <= to_mono_ns);
+            if (!add_ns && !closed_in_window) continue;
             we = evt->new_event;
-            occ_ns = add_ns = sample_ns;
+            occ_ns = sample_ns;
             exact = 0;
-            closed_in_window = 1;
         } else {
             /* #586: replay pre-window markers in stream order to seed
              * cmd_qid at the left edge, exactly as the server's seeded tag
@@ -373,8 +366,7 @@ int pgwt_replay_file(struct pgwt_event_reader *r,
         int right_open = 0;
         int cand = pgwt_reader_block_candidate(r, bi, 0,
                                                to_mono_ns, &hdr, &right_open);
-        if (cand == 0)
-            continue;
+        if (cand == 0) continue;
         /* #586: TRANSITIONS before `from` may contain the command-id
          * markers needed by a left-edge wait. Decode them for seeds only;
          * pgwt_replay_events still applies the original time admission.
@@ -431,10 +423,8 @@ int pgwt_replay_file(struct pgwt_event_reader *r,
             events = grown;
             capacity = next;
         }
-        /* Preserve sample weights across the merge, including files whose
-         * sampling period changes between blocks. No extra record type. */
-        if (binfo.block_type == PGWT_BLOCK_SAMPLES)
-            for (int i = 0; i < n; i++) buf[i].duration_ns = binfo.sample_period_ns;
+        if (st && binfo.block_type == PGWT_BLOCK_SAMPLES)
+            st->sample_period_ns = binfo.nominal_sample_period_ns;
         memcpy(events + count, buf, (size_t)n * sizeof(*buf));
         count = needed;
     }

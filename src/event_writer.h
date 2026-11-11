@@ -16,12 +16,10 @@
 /* ── On-disk format constants ─────────────────────────────── */
 
 #define PGWT_TRACE_MAGIC      0x54574750   /* "PGWT" little-endian */
-/* v3 (T8): TRANSITIONS blocks gain a 7th column, cpu_ns (measured on-CPU
- * nanoseconds per interval; PGWT_CPU_NS_UNKNOWN sentinel when not measured).
- * SAMPLES blocks are unchanged. v2 files remain readable — the reader surfaces
- * cpu_ns = PGWT_CPU_NS_UNKNOWN for their events and the compute layer falls
- * back to gap-inference. See docs/TRACE_FORMAT.md. */
-#define PGWT_TRACE_VERSION    3
+/* v4: SAMPLES weights are the first weight plus differences between distinct
+ * tick timestamps. File/header extensions store nominal cadence and maximum
+ * effective block weight. v2/v3 retain their stored mean-weight semantics. */
+#define PGWT_TRACE_VERSION    4
 #define PGWT_FLAG_LZ4         0x0001
 /* The remaining bits of the header `flags` field carry the closure status
  * (#424 deliverable 1): PGWT_FLAG_CLOSURE_TRACKED / _CLOSED_CLEAN / _ROTATED
@@ -46,8 +44,7 @@
  * fallback-scan cap; a real block is ≤ ~190 KB uncompressed). */
 #define PGWT_MAX_BLOCK_COMPRESSED (10u * 1024 * 1024)
 
-/* DUR-8: batch buffered sample-type records into ~1 s blocks instead of one
- * tiny block per sampler tick (~10× fewer blocks at 10 Hz). */
+/* DUR-8: batch samples across jittered ticks for ~1 s or 4096 records. */
 #define PGWT_SAMPLE_BATCH_NS  1000000000ULL
 
 /* Block type (trace format v2). Identifies what a block's columns mean.
@@ -60,7 +57,7 @@
  *                 (ts, pid, event, query_id) — no old_event, no duration.
  *                 This is what the A2 sampler writes. Each sample means
  *                 "at timestamp T, pid P was in event E"; A3 treats it as
- *                 a point observation worth `sample_period_ns`, never an
+ *                 a point observation with a reader-derived weight, never an
  *                 interval.
  *
  *                 Event id 0 (T2): a first-class CPU sample — "at T, pid P
@@ -89,11 +86,9 @@ struct pgwt_trace_file_header {
     uint64_t clock_offset_ns;    /* CLOCK_MONOTONIC at file creation */
 } __attribute__((packed));
 
-/* Block header (v2: 40 bytes).
- * block_type/sample_period_ns are new in v2. sample_period_ns is the
- * effective weight of each sample in a SAMPLES block (0 for TRANSITIONS).
- * reserved keeps the 8-byte fields naturally aligned and leaves room for
- * a future v3 without another size bump. */
+/* Common v2+ block prefix (40 bytes). v4 appends a u64 maximum sample
+ * weight before the payload. sample_period_ns is the FIRST tick's weight in
+ * v4; in v2/v3 it is the stored mean weight of every sample. */
 struct pgwt_trace_block_header {
     uint64_t first_timestamp_ns;
     uint64_t last_timestamp_ns;
@@ -102,7 +97,7 @@ struct pgwt_trace_block_header {
     uint32_t uncompressed_size;
     uint16_t block_type;         /* enum pgwt_block_type */
     uint16_t reserved;           /* 0; reserved for future use */
-    uint64_t sample_period_ns;   /* SAMPLES: effective sample weight; TRANSITIONS: 0 */
+    uint64_t sample_period_ns;   /* SAMPLES: first weight (v4), mean (v2/v3); else 0 */
 } __attribute__((packed));
 
 /* Block index entry (16 bytes) */
@@ -110,6 +105,16 @@ struct pgwt_block_index_entry {
     uint64_t timestamp_ns;
     uint64_t file_offset;
 } __attribute__((packed));
+
+/* v4 extensions follow the common prefixes; summary headers stay unchanged. */
+static inline size_t pgwt_trace_file_header_size(unsigned version)
+{
+    return sizeof(struct pgwt_trace_file_header) + (version >= 4 ? 8 : 0);
+}
+static inline size_t pgwt_trace_block_header_size(unsigned version)
+{
+    return sizeof(struct pgwt_trace_block_header) + (version >= 4 ? 8 : 0);
+}
 
 /* ── Writer state ─────────────────────────────────────────── */
 
@@ -132,6 +137,9 @@ struct pgwt_event_writer {
      * infers CPU from gaps. The daemon sets it from its startup CPU-accounting
      * probe (src/daemon.c §5.4). Default false is the safe legacy behavior. */
     bool          cpu_measured;
+    /* Set before the first push; persisted per file, including rotations.
+     * 0 means unknown/not configured (never infer nominal from jitter). */
+    uint64_t      nominal_sample_period_ns;
 
     /* Current file */
     FILE         *fp;
@@ -155,15 +163,13 @@ struct pgwt_event_writer {
     struct pgwt_trace_event events[PGWT_BLOCK_EVENTS];
     int           num_events;
 
-    /* Pending sample-type record buffer (DUR-8): many small pushes (one per
-     * sampler tick) are batched into ~1 s blocks. Type-agnostic — any
-     * non-TRANSITIONS block type routed through pgwt_writer_push_samples'
-     * buffering path shares it; a type or period change flushes first. */
+    /* Pending SAMPLES batch. A new tick joins only if its supplied weight
+     * equals its timestamp minus the last buffered tick's timestamp. Empty
+     * ticks, clamps and discontinuities therefore force a new block. */
     struct pgwt_trace_event sample_buf[PGWT_BLOCK_EVENTS];
     int           num_sample_buf;
-    uint16_t      sample_buf_type;        /* enum pgwt_block_type of batch */
-    uint64_t      sample_buf_period_ns;   /* period of the first batched push */
-    uint64_t      sample_buf_weight_ns;   /* Σ period_i per record (weighted mean) */
+    uint64_t      sample_buf_period_ns;   /* first tick's weight */
+    uint64_t      sample_buf_max_period_ns;
 
     /* Scratch buffers (allocated once) */
     uint8_t      *encode_buf;
@@ -229,15 +235,14 @@ int  pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
 int  pgwt_writer_push_event(struct pgwt_event_writer *w,
                             const struct pgwt_trace_event *evt);
 
-/* Write a SAMPLES block (trace format v2). The A2 sampler calls this once
- * per drain with the samples it collected this tick-batch. Only the pid,
- * new_event (= sampled event), query_id, and timestamp_ns fields of each
- * struct are used; old_event/duration_ns are ignored (samples carry
- * neither). `sample_period_ns` is recorded in the block header so the
- * compute layer (A3) can weight each sample. Samples must be sorted by
- * timestamp ascending (delta-varint encoding requires it). A pending
- * TRANSITIONS block, if any, is flushed first so block boundaries stay
- * clean. Returns 0 on success, -1 on error. */
+/* Buffer samples (v4). Normally called once per tick; bulk callers may pass
+ * several sorted ticks with a common supplied weight. Only pid, new_event,
+ * query_id and timestamp_ns are stored. The first tick's supplied weight is
+ * stored in the header; subsequent tick weights are timestamp differences.
+ * A discontinuity flushes before that tick; capacity/time/publication also
+ * cut blocks. Set nominal_sample_period_ns before the first write so readers
+ * can report the configured cadence independently of measured weights.
+ * Returns 0 on success, -1 on error. */
 int  pgwt_writer_push_samples(struct pgwt_event_writer *w,
                               const struct pgwt_trace_event *samples,
                               int count, uint64_t sample_period_ns);

@@ -35,7 +35,7 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
         return -1;
     }
     if (r->header.version < 2 || r->header.version > PGWT_TRACE_VERSION) {
-        /* v2 and v3 are read; v1 stays rejected (no deployed installs existed).
+        /* v2/v3/v4 are read; v1 stays rejected (no deployed installs existed).
          * A v2 file's TRANSITIONS records lack the cpu_ns column — the decoder
          * surfaces PGWT_CPU_NS_UNKNOWN for them and compute falls back to
          * gap-inference (T8 §5.3). A newer-than-known version is skipped — its
@@ -48,6 +48,15 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
         fclose(r->fp); r->fp = NULL;
         return -1;
     }
+
+    if (r->header.version >= 4 &&
+        fread(&r->nominal_sample_period_ns, sizeof(uint64_t), 1, r->fp) != 1) {
+        fprintf(stderr, "ERROR: truncated v4 trace header in %s\n", path);
+        fclose(r->fp); r->fp = NULL;
+        return -1;
+    }
+    const long file_header_size = (long)pgwt_trace_file_header_size(r->header.version);
+    const long block_extra = r->header.version >= 4 ? 8 : 0;
 
     r->mono_to_wall = (int64_t)r->header.start_time_ns
                     - (int64_t)r->header.clock_offset_ns;
@@ -82,7 +91,7 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
             if (fscanf(mf, "%d", &committed) == 1 && committed > 0 &&
                 committed < PGWT_MAX_READ_BLOCKS) {
                 /* Scan exactly 'committed' blocks sequentially */
-                fseek(r->fp, (long)sizeof(struct pgwt_trace_file_header),
+                fseek(r->fp, file_header_size,
                       SEEK_SET);
                 r->block_index = malloc(committed *
                                         sizeof(struct pgwt_block_index_entry));
@@ -100,7 +109,7 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
                                 .timestamp_ns = bh.first_timestamp_ns,
                                 .file_offset = (uint64_t)off,
                             };
-                        if (fseek(r->fp, (long)bh.compressed_size,
+                        if (fseek(r->fp, block_extra + (long)bh.compressed_size,
                                   SEEK_CUR) != 0)
                             break;
                     }
@@ -124,7 +133,7 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
             nb > 0 && nb < PGWT_MAX_READ_BLOCKS) {  /* sanity cap */
             long index_start = ftell(r->fp) - 4
                              - (long)nb * (long)sizeof(struct pgwt_block_index_entry);
-            if (index_start >= (long)sizeof(struct pgwt_trace_file_header)) {
+            if (index_start >= file_header_size) {
                 fseek(r->fp, index_start, SEEK_SET);
                 r->block_index = malloc(nb * sizeof(struct pgwt_block_index_entry));
                 if (r->block_index &&
@@ -136,7 +145,7 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
                      * in-bounds offsets — verify before trusting it. */
                     int valid =
                         r->block_index[0].file_offset ==
-                        sizeof(struct pgwt_trace_file_header);
+                        (uint64_t)file_header_size;
                     for (uint32_t i = 1; valid && i < nb; i++)
                         if (r->block_index[i].file_offset <=
                                 r->block_index[i - 1].file_offset ||
@@ -160,7 +169,7 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
 
     /* Strategy 3: Sequential scan (backward compat, no meta or footer) */
     if (!have_index) {
-        fseek(r->fp, (long)sizeof(struct pgwt_trace_file_header), SEEK_SET);
+        fseek(r->fp, file_header_size, SEEK_SET);
         int cap = 128;
         r->block_index = malloc(cap * sizeof(struct pgwt_block_index_entry));
         if (!r->block_index) {
@@ -185,7 +194,7 @@ int pgwt_reader_open(struct pgwt_event_reader *r, const char *path)
                 .timestamp_ns = bh.first_timestamp_ns,
                 .file_offset = (uint64_t)block_offset,
             };
-            if (fseek(r->fp, (long)bh.compressed_size, SEEK_CUR) != 0)
+            if (fseek(r->fp, block_extra + (long)bh.compressed_size, SEEK_CUR) != 0)
                 break;
         }
         if (r->num_blocks == 0) {
@@ -232,6 +241,27 @@ void pgwt_reader_close(struct pgwt_event_reader *r)
     free(r->decode_buf); r->decode_buf = NULL;
 }
 
+/* Reads the v4 maximum without decompressing any records. */
+static int read_block_header(struct pgwt_event_reader *r,
+                             struct pgwt_trace_block_header *bh,
+                             struct pgwt_block_info *info)
+{
+    if (fread(bh, sizeof(*bh), 1, r->fp) != 1) return -1;
+    uint64_t max_weight = bh->sample_period_ns;
+    if (r->header.version >= 4 &&
+        fread(&max_weight, sizeof(max_weight), 1, r->fp) != 1) return -1;
+    if (info) {
+        info->block_type = (enum pgwt_block_type)bh->block_type;
+        info->sample_period_ns = bh->sample_period_ns;
+        info->max_sample_weight_ns = max_weight;
+        info->nominal_sample_period_ns = r->nominal_sample_period_ns;
+        info->first_timestamp_ns = bh->first_timestamp_ns;
+        info->last_timestamp_ns = bh->last_timestamp_ns;
+        info->num_events = bh->num_events;
+    }
+    return 0;
+}
+
 int pgwt_reader_block_info(struct pgwt_event_reader *r, int block_idx,
                            struct pgwt_block_info *info)
 {
@@ -240,15 +270,7 @@ int pgwt_reader_block_info(struct pgwt_event_reader *r, int block_idx,
 
     fseek(r->fp, (long)r->block_index[block_idx].file_offset, SEEK_SET);
     struct pgwt_trace_block_header bh;
-    if (fread(&bh, sizeof(bh), 1, r->fp) != 1)
-        return -1;
-
-    info->block_type        = (enum pgwt_block_type)bh.block_type;
-    info->sample_period_ns  = bh.sample_period_ns;
-    info->first_timestamp_ns = bh.first_timestamp_ns;
-    info->last_timestamp_ns  = bh.last_timestamp_ns;
-    info->num_events         = bh.num_events;
-    return 0;
+    return read_block_header(r, &bh, info);
 }
 
 int pgwt_reader_decode_block(struct pgwt_event_reader *r, int block_idx,
@@ -268,17 +290,8 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
 
     /* Read block header */
     struct pgwt_trace_block_header bh;
-    if (fread(&bh, sizeof(bh), 1, r->fp) != 1)
-        return -1;
-
+    if (read_block_header(r, &bh, info) != 0) return -1;
     enum pgwt_block_type block_type = (enum pgwt_block_type)bh.block_type;
-    if (info) {
-        info->block_type        = block_type;
-        info->sample_period_ns  = bh.sample_period_ns;
-        info->first_timestamp_ns = bh.first_timestamp_ns;
-        info->last_timestamp_ns  = bh.last_timestamp_ns;
-        info->num_events         = bh.num_events;
-    }
 
     /* Unknown block type (written by a NEWER build): skip the block rather
      * than decode it with the wrong columnar layout — garbage must never be
@@ -337,8 +350,8 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
 
     if (block_type == PGWT_BLOCK_SAMPLES) {
         /* SAMPLES layout: event (u32), query_id (u64). No old_event,
-         * no duration. Surface as a point observation: sampled event in
-         * new_event, old_event/duration cleared, FLAG_SAMPLE set. */
+         * no stored duration. Surface the effective weight in duration_ns,
+         * sampled event in new_event, old_event cleared, FLAG_SAMPLE set. */
         for (int i = 0; i < count; i++) {
             if (avail < 4) return -1;
             memcpy(&out[i].new_event, p, 4); p += 4; avail -= 4;
@@ -347,12 +360,19 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
             if (avail < 8) return -1;
             memcpy(&out[i].query_id, p, 8); p += 8; avail -= 8;
         }
+        uint64_t tick_ts = count ? out[0].timestamp_ns : 0;
+        uint64_t weight = bh.sample_period_ns;
         for (int i = 0; i < count; i++) {
+            if (r->header.version >= 4 && out[i].timestamp_ns != tick_ts) {
+                if (out[i].timestamp_ns < tick_ts) return -1;
+                weight = out[i].timestamp_ns - tick_ts;
+                tick_ts = out[i].timestamp_ns;
+            }
             out[i].old_event = 0;
-            out[i].duration_ns = 0;
+            out[i].duration_ns = weight;
             out[i].flags = PGWT_EVENT_FLAG_SAMPLE;
             /* Samples carry no measured CPU — the sampled tier's CPU signal is
-             * the we==0 sample itself, weighted by sample_period. */
+             * the we==0 sample itself, weighted by this tick's effective weight. */
             out[i].cpu_ns = PGWT_CPU_NS_UNKNOWN;
         }
         return count;
@@ -455,14 +475,11 @@ int pgwt_reader_block_candidate(struct pgwt_event_reader *r, int bi,
         return 0;
 
     if (to_mono_ns != 0 && hdr.first_timestamp_ns > to_mono_ns) {
-        /* Everything in this block closes after `to`. An interval record can
-         * still have STARTED inside the window (a wait still running at
-         * `to`), so the block is a straddler candidate and the caller's
-         * budget decides whether to pay for it. A SAMPLES block cannot: its
-         * records are point observations, so a sample past `to` is simply
-         * outside the window. */
+        /* Samples have bounded backward estimates, so the block's maximum
+         * weight bounds lookahead without spending the transition budget.
+         * Transitions can have started arbitrarily far before their close. */
         if (hdr.block_type == PGWT_BLOCK_SAMPLES)
-            return 0;
+            return hdr.first_timestamp_ns - to_mono_ns <= hdr.max_sample_weight_ns;
         if (right_open) *right_open = 1;
     }
     return 1;

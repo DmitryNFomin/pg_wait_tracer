@@ -351,6 +351,8 @@ static void test_cpu_replay(bool measured)
     w.cpu_measured = measured;
     /* FIX_QID so the query_event table's CPU* row is exercised too: it is a
      * third per-event view of the same record and renders the same label. */
+    w.nominal_sample_period_ns = PERIOD;
+
     struct pgwt_trace_event trans[] = {
         ev(2000, BASE + 10 * MS, 10 * MS, 0, IO_READ, FIX_QID),
         ev(2001, BASE + 30 * MS, 10 * MS, 0, IO_READ, FIX_QID),
@@ -381,9 +383,9 @@ static void test_cpu_replay(bool measured)
         fprintf(stderr, "CPU fixture reader open failed\n");
         exit(1);
     }
-    /* cpu_measured=false still writes v3, with UNKNOWN in its CPU column;
+    /* cpu_measured=false still writes the current version, with UNKNOWN in its CPU column;
      * v2 decoding supplies the same sentinel without a column. */
-    CHECK_EQ_U64(r.header.version, 3, "real writer emits v3 CPU column");
+    CHECK_EQ_U64(r.header.version, PGWT_TRACE_VERSION, "current writer retains CPU column");
     CHECK_EQ_U64(r.num_blocks, measured ? 2 : 1,
                  "CPU fixture has expected interval/sample blocks");
     struct pgwt_trace_event *buf = malloc(PGWT_BLOCK_EVENTS * sizeof(*buf));
@@ -1332,6 +1334,7 @@ int main(void)
         return 1;
     }
 
+    w.nominal_sample_period_ns = PERIOD;
     struct pgwt_trace_event trans[] = {
         /* escalation START marker (pid 0, ESC_PACK payload) */
         ev(0, BASE, 0, PGWT_MARKER_ESCALATE_START, PGWT_MARKER_ESCALATE_START,

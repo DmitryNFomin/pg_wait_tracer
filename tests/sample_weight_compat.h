@@ -1,5 +1,5 @@
-/* The portable weight test links sampler.c's real pure helpers. It never
- * calls the Linux capture reader; fail loudly if that changes on macOS. */
+/* Portable tests link the real timing, lifecycle and accumulation code.
+ * They never call the Linux capture reader; fail loudly if that changes. */
 #ifdef __APPLE__
 #include <stdlib.h>
 #include <sys/types.h>

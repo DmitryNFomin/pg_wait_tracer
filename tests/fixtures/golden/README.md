@@ -23,7 +23,7 @@ tests/fixtures/golden/
 ```
 
 `<N>` is the trace format version — `PGWT_TRACE_VERSION` in
-`src/event_writer.h` (currently 2, so `rev2/`).
+`src/event_writer.h` (currently 4; `rev2/`, `rev3/` and `rev4/` are retained).
 
 ## Determinism
 
@@ -58,3 +58,12 @@ When you deliberately change the on-disk format (new `PGWT_TRACE_VERSION`):
    `test_golden_rev<N+1>()` case with its own pinned checksum.
 
 The point is cumulative coverage: every historical on-disk shape stays tested.
+
+## rev4 (#863)
+
+Uses the same input as rev3, with the v4 writer: 36-byte raw file header,
+48-byte raw block headers, nominal cadence 100000000 ns, and per-block
+maximum weights. The frozen checksum includes the reader-derived sample
+weights. Legacy rev2/rev3 checksums continue to checksum on-disk columns
+(sample durations remain zero for those checksums), with a separate frozen
+`sample_weights_v3` fixture checking the unified weight API.

@@ -231,6 +231,13 @@ struct pgwt_sampler {
 };
 
 /* Provider hooks (see provider.h). Exposed for the vtable in sampler.c. */
+/* Live folding, also built by the portable weight parity test. */
+void pgwt_sampler_accumulate(struct pgwt_daemon *d,
+                            const struct pgwt_trace_event *samples,
+                            int count, uint64_t period_ns);
+/* Advances the clock even for ticks producing zero records. */
+uint64_t pgwt_sampler_tick_period(struct pgwt_sampler *s, uint64_t tick_ts);
+
 int  pgwt_sampler_start(struct pgwt_daemon *d);
 int  pgwt_sampler_stop(struct pgwt_daemon *d);
 int  pgwt_sampler_poll(struct pgwt_daemon *d);

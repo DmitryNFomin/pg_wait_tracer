@@ -13,7 +13,7 @@
  *   DUR-7: a corrupt meta high-watermark or block header never drives the
  *          reader into a huge allocation or a garbage index.
  *   DUR-8: SAMPLES pushes are batched ~1 s per block (not per tick), the
- *          per-block period preserves the SMP-3 weights, a period jump cuts
+ *          per-record weights preserve the SMP-3 weights, a discontinuity cuts
  *          a new block, and the block index stays time-sorted when
  *          transitions and samples interleave.
  *
@@ -534,9 +534,9 @@ static void test_sample_batching(void)
     free(w);
 }
 
-static void test_sample_period_jump_cuts_block(void)
+static void test_sample_weight_discontinuity_cuts_block(void)
 {
-    printf("--- DUR-8: SMP-3 stall tick gets its own block ---\n");
+    printf("--- DUR-8: a weight/timestamp discontinuity starts a block ---\n");
     const char *dir = subdir("stall");
     rm_rf(dir);
 
@@ -545,8 +545,9 @@ static void test_sample_period_jump_cuts_block(void)
 
     uint64_t t0 = 1000000000000ULL;
     uint64_t nominal = 100000000ULL;   /* 100 ms */
-    /* 3 normal ticks, then a stalled tick weighted 500 ms (SMP-3), then 2
-     * normal ticks. The stall tick must not share a block. */
+    /* Three ordinary ticks, an unrecorded tick at +300ms, then a slow
+     * 500ms tick at +800ms. The missing tick forces a new block; two
+     * subsequent 100ms ticks may join that block. */
     push_sample_tick(w, t0 + 0 * nominal, 5, nominal);
     push_sample_tick(w, t0 + 1 * nominal, 5, nominal);
     push_sample_tick(w, t0 + 2 * nominal, 5, nominal);
@@ -559,18 +560,18 @@ static void test_sample_period_jump_cuts_block(void)
     snprintf(cur, sizeof(cur), "%s/current.trace", dir);
     struct pgwt_event_reader r;
     CHECK(pgwt_reader_open(&r, cur) == 0, "reader open");
-    CHECK(r.num_blocks == 3, "period jumps cut blocks (got %d)",
+    CHECK(r.num_blocks == 2, "unrepresented gap cuts block (got %d)",
           r.num_blocks);
 
-    /* Verify per-block periods: 100 ms, 500 ms, 100 ms — the total
-     * estimated time (Σ count × period) must equal the exact per-tick sum. */
+    /* The 600 ms timestamp gap disagrees with the supplied 500 ms weight,
+     * so it starts a block. The subsequent 100 ms ticks can join it. */
     uint64_t total_weight = 0;
     static struct pgwt_trace_event buf[PGWT_BLOCK_EVENTS];
     for (int b = 0; b < r.num_blocks; b++) {
         struct pgwt_block_info bi;
         int n = pgwt_reader_decode_block_info(&r, b, buf, PGWT_BLOCK_EVENTS,
                                               &bi);
-        total_weight += (uint64_t)n * bi.sample_period_ns;
+        for (int i = 0; i < n; i++) total_weight += buf[i].duration_ns;
     }
     uint64_t expected = 5 * (5 * nominal + 500000000ULL);
     CHECK(total_weight == expected,
@@ -936,7 +937,7 @@ int main(void)
     test_recover_degenerate_files();
     test_rotation_collision();
     test_sample_batching();
-    test_sample_period_jump_cuts_block();
+    test_sample_weight_discontinuity_cuts_block();
     test_interleaved_index_sorted();
     test_meta_sanity_caps();
     test_size_cap_retention();

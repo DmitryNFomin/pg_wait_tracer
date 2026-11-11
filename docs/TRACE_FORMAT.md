@@ -1,9 +1,9 @@
-# pg_wait_tracer on-disk trace format (v3)
+# pg_wait_tracer on-disk trace format (v4)
 
-Status: authoritative spec for trace format version 3 (what a current build
-writes) and the sidecar files in a trace directory. v2 files remain
-READABLE (their TRANSITIONS records surface `cpu_ns = PGWT_CPU_NS_UNKNOWN`
-and the compute layer falls back to gap-inference); v1 stays rejected.
+Status: authoritative spec for trace format version 4 (what a current build
+writes) and the sidecar files in a trace directory. v2/v3 files remain
+READABLE (v2 TRANSITIONS records surface `cpu_ns = PGWT_CPU_NS_UNKNOWN`
+and fall back to gap-inference; v3 retains its measured CPU column); v1 stays rejected.
 Written for Phase T5 of the Trust Milestone (DUR-5/6: the format and its
 durability guarantees were previously implicit in the code); the v3 cpu_ns
 column was added in Phase T8 (measured CPU, docs/ROADMAP_AND_STATUS.md).
@@ -40,7 +40,7 @@ captured at file creation; readers derive the mono→wall mapping per file
 ## Trace file layout
 
 ```
-[file header — 28 bytes]
+[file header — 36 bytes in v4; 28 in v2/v3]
 [block 0][block 1]...[block N-1]
 [footer: block index — N × 16 bytes][block count — u32]
 ```
@@ -48,21 +48,32 @@ captured at file creation; readers derive the mono→wall mapping per file
 `current.trace` has no footer while being written; archives always do
 (rotation and startup recovery both append one).
 
-### File header (28 bytes, struct pgwt_trace_file_header)
+### File header (v4: 36 bytes; v2/v3: 28 bytes)
 
 | off | size | field | value |
 |---|---|---|---|
 | 0 | 4 | magic | `0x54574750` ("PGWT" as LE bytes) |
-| 4 | 2 | version | 3 (v2 still read; see the cpu_ns column below) |
+| 4 | 2 | version | 4 (v2/v3 still read) |
 | 6 | 2 | flags | bit 0: LZ4-compressed blocks |
 | 8 | 4 | pg_version | PostgreSQL major version |
 | 12 | 8 | start_time_ns | CLOCK_REALTIME at file creation |
 | 20 | 8 | clock_offset_ns | CLOCK_MONOTONIC at file creation |
+| 28 | 8 | nominal_sample_period_ns (**v4 only**) | configured `1e9 / sample_rate_hz`; 0 = unknown |
 
-Summary files reuse the same header struct with magic `0x53574750`
+The first 28 bytes are `struct pgwt_trace_file_header`; the v4 extension is
+one little-endian u64. The daemon sets the nominal period before the first
+write. It is durable in **every raw file**, survives rotation/recovery, and
+belongs to that file's capture generation (not a mutable directory sidecar).
+Server `sample_period_ns` responses and fidelity edge slop use this nominal
+cadence; no jittered effective weight is labelled nominal. A library caller
+must set `writer.nominal_sample_period_ns` before its first push. v2/v3 and
+unconfigured callers have unknown nominal cadence (0); the server omits the
+cadence field and retains its existing 1-second unknown-cadence slop fallback.
+
+Summary files reuse the **28-byte prefix only**, without the v4 extension, with magic `0x53574750`
 ("PGWS") and their own version (currently 2; v1 files remain readable).
 
-### Block header (40 bytes, struct pgwt_trace_block_header)
+### Block header (v4: 48 bytes; v2/v3: 40 bytes)
 
 | off | size | field |
 |---|---|---|
@@ -73,7 +84,14 @@ Summary files reuse the same header struct with magic `0x53574750`
 | 24 | 4 | uncompressed_size |
 | 28 | 2 | block_type (enum pgwt_block_type) |
 | 30 | 2 | reserved (0) |
-| 32 | 8 | sample_period_ns (SAMPLES: nominal per-sample weight; else 0) |
+| 32 | 8 | sample_period_ns (v4 SAMPLES: **first tick weight**; v2/v3: stored per-record mean; else 0) |
+| 40 | 8 | max_sample_weight_ns (**v4 only**; maximum effective weight of any sample in this block; TRANSITIONS: 0) |
+
+The first 40 bytes are `struct pgwt_trace_block_header`. The v4 maximum is a
+separate u64 extension on **all** raw block types, so readers can scan without
+decoding payloads. Header-only sample lookahead uses this maximum, including
+when the largest weight is not the first. The format cost is 8 bytes per raw
+file plus 8 bytes per block; payload columns and the footer are unchanged.
 
 The compressed payload (LZ4, `LZ4_compress_default`) follows immediately.
 
@@ -92,7 +110,7 @@ watchpoint (full/escalated) tier:
 4. new_event: raw u32 × num_events (`0xFFFFFFFF` = process exit)
 5. duration_ns: unsigned LEB128 varint × num_events
 6. query_id: raw u64 × num_events
-7. cpu_ns: unsigned LEB128 varint × num_events **(v3 only)** — measured
+7. cpu_ns: unsigned LEB128 varint × num_events **(v3/v4)** — measured
    on-CPU nanoseconds consumed during `old_event` (the task's
    `se.sum_exec_runtime` delta over the interval, read by the watchpoint
    BPF in the backend's own task context). For a wait-labeled `old_event`
@@ -113,13 +131,30 @@ watchpoint (full/escalated) tier:
 3. event: raw u32 × num_events (the sampled wait event)
 4. query_id: raw u64 × num_events
 
-A sample means "at time T, pid P was in event E" and is worth ONE
-`sample_period_ns` of estimated time — never an interval measurement. The
-reader surfaces samples with `PGWT_EVENT_FLAG_SAMPLE` set; on-disk records
-carry no flags. SAMPLES blocks are UNCHANGED in v3 — they have no cpu_ns
-column (the sampled tier's CPU signal is the `we==0` sample itself, weighted
-by `sample_period_ns`); the reader surfaces `cpu_ns = PGWT_CPU_NS_UNKNOWN`
-for every sample.
+A sample means "at time T, pid P was in event E". Its estimated backward
+interval is `(T − weight, T]`; this is an estimate, never an interval
+measurement. On disk no duration or flags column is stored. The reader sets
+`PGWT_EVENT_FLAG_SAMPLE`, `duration_ns` to the effective weight, and `cpu_ns`
+to `PGWT_CPU_NS_UNKNOWN`. Both replay and server consumers preserve that
+per-record weight. The sampled tier's CPU signal is the `event == 0` sample,
+weighted exactly like every other sample.
+
+**v4 weight decoding.** Start with the header's `sample_period_ns`. All
+records of the first tick share that weight. At each **distinct** timestamp,
+replace the weight with `timestamp − previous_distinct_timestamp`; all
+records sharing that timestamp receive the same weight. Do not use the prior
+record's delta when it is zero (several backends observed in one tick).
+A block split in the middle of a tick repeats that tick's weight in the next
+block's header, so it also decodes independently.
+
+**v2/v3 weight decoding is unchanged:** every record retains the stored block
+mean, including old inflation and integer truncation. Old traces therefore
+keep their stored (inflated) weights. Re-deriving them would require original
+tick boundaries, the nominal first-edge term, clamp knowledge and evidence of
+zero-record/failed ticks. Those ticks leave no record, so a timestamp gap in
+an old block cannot distinguish one slow tick from several ticks with empty
+ones in between. Timestamp-only retroactive correction is not exact and is
+not performed.
 
 **Weights and batching (DUR-8, #863).** Consecutive ticks use their measured
 inter-tick elapsed time, including intervals below nominal under ±10% jitter.
@@ -130,13 +165,18 @@ It is never carried into a later tick. A daemon restart starts a fresh edge
 term. During escalation the sampler keeps ticking; the server subtracts
 exact coverage from each sample's backward interval.
 
-The writer buffers sample-type pushes with **identical** measured periods
-and cuts a block after roughly one second (or at 4096 records). A different
-period or block type flushes the pending batch first. Jittered ticks therefore
-usually get separate blocks. One header period preserves every record's
-weight exactly, without averaging time between ticks or truncating integer
-nanoseconds. Readers make no assumption about records per block, so older
-batched files remain readable.
+The v4 writer lets a tick join the pending block only when its supplied
+weight equals `tick_timestamp − last_pushed_tick_timestamp` (with strictly
+increasing tick timestamps). Otherwise it flushes and starts a block whose
+header stores that tick's supplied weight. The rule detects an omitted empty
+or failed tick, a clamped stall, and non-monotonic/nominal fallback ticks;
+the first tick of any block always has its explicit supplied weight. The
+initial nominal edge may share a block with subsequent ordinary ticks.
+Jitter alone never cuts a block. Existing cuts remain: 4096 records, a batch
+spanning at least one second at the end of a push, publication, rotation and
+close. A production push is one tick; bulk callers can supply multiple ticks
+with a common weight. The per-block maximum includes the first weight and
+all subsequent effective tick weights.
 
 ### Markers
 
@@ -344,13 +384,21 @@ not be exposed. Trace keys and `backends.jsonl` metadata are also sensitive.
 
 ## Versioning
 
-Readers accept versions 2 and 3 (a file newer than the build knows is
-skipped loudly, never mis-decoded); v1 stays rejected (no deployed v1
-installs existed). v3 added column 7 (`cpu_ns`) to TRANSITIONS blocks as a
-STRICTLY APPENDED column — a v2 file simply lacks it and the reader stamps
-`PGWT_CPU_NS_UNKNOWN`, so appending a trailing varint column is itself a
-sanctioned additive-evolution move alongside: new block types (the reader
-skips blocks with a type it does not know rather than mis-decoding them),
-the block header's `reserved` field, and header `flags` bits. When adding
-another such column, bump the version and gate the extra `for` loop on
-`header.version >= N` exactly as the reader does for cpu_ns.
+Readers accept versions 2, 3 and 4; v1 stays rejected. v3 added TRANSITIONS
+column 7 (`cpu_ns`); v2 records lack it and surface `PGWT_CPU_NS_UNKNOWN`.
+v4 changes SAMPLES weight semantics and extends raw file/block headers as
+specified above; v2/v3 payload decoding and stored weights remain unchanged.
+Recovery uses the file version to scan the appropriate header sizes and
+archives the original bytes without conversion.
+
+An old (v3) `pgwt-server` rejects each v4 file before block decoding and prints:
+
+```
+ERROR: unsupported trace version 4 in <path> (this build reads versions 2-3; regenerate with this build)
+```
+
+It skips that file; when it is the only file, `--dump` reports no events
+(and currently exits 0). It does not apply the legacy mean rule to v4 data.
+Appending a weight column under v3 would be unsafe: old decoders do not reject
+trailing SAMPLES columns and would silently use the wrong weights. Any
+semantic/layout change requires a file version bump and gated decoding.

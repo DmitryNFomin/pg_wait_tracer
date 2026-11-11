@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from decimal import Decimal
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
@@ -33,6 +34,8 @@ from server_harness import (
 BASE_TS = 10_000_000_000_000  # 10000s in ns (> 1hr so server range expansion is safe)
 PERIOD = 100_000_000          # 100ms = 10 Hz sample period
 
+
+WEIGHT_BIN = Path(__file__).with_name("test_sample_weight")
 
 def sample_at(pid, ts, event, qid=0):
     return {"pid": pid, "ts": ts, "event": event, "qid": qid}
@@ -45,7 +48,7 @@ def test_measured_tick_window(t):
     [first tick, last tick] clips it away; 600 jittered intervals between
     those ticks tile exactly 60 seconds. No tolerance hides a weighting bias.
     """
-    binary = Path(__file__).with_name("test_sample_weight")
+    binary = WEIGHT_BIN
     with tempfile.TemporaryDirectory(prefix="pgwt-weight-server-") as trace_dir:
         subprocess.run([str(binary), "--fixture", trace_dir], check=True)
         Path(trace_dir, "backends.jsonl").write_text(
@@ -571,10 +574,94 @@ def test_dump_annotation(t):
         cleanup_traces(trace_dir)
 
 
+def test_derived_weights_and_nominal(t):
+    binary = WEIGHT_BIN
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-lookahead-") as trace_dir:
+        subprocess.run([str(binary), "--lookahead-fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        # The 900ms tick is not the block's first tick (100ms). It closes
+        # AFTER this window and contributes all 100ms by backward overlap.
+        bounds = {"from": BASE_TS + 400_000_000, "to": BASE_TS + 500_000_000}
+        for storage in ("current", "archive"):
+            if storage == "archive":
+                Path(trace_dir, "current.trace").rename(
+                    Path(trace_dir, "2026-11-11_06.trace.lz4"))
+                Path(trace_dir, "current.trace.meta").unlink()
+            for cache in ("0", "1"):
+                with ServerHarness(trace_dir, env={"PGWT_CURRENT_TRACE_CACHE": cache}) as srv:
+                    for repeat in range(2):
+                        label = f"maximum lookahead storage={storage} cache={cache} request={repeat}"
+                        tm = srv.query("time_model", **bounds)
+                        rows = {r["name"]: r for r in tm["rows"]}
+                        t.check_eq(rows["DB Time"]["ms"], 100, label + ": DB Time")
+                        t.check_eq(tm.get("sample_period_ns"), PERIOD,
+                                   label + ": reports nominal cadence")
+                        aas = srv.query("aas", buckets=1, **bounds)
+                        active = sum(v for k, v in aas["buckets"][0].items()
+                                     if k != "t" and isinstance(v, (int, float)))
+                        t.check_eq(active, 1, label + ": AAS")
+                        edge = srv.query("aas", **bounds)
+                        t.check("fidelity_ranges" not in edge,
+                                label + ": one nominal period is fidelity edge slop")
+                        over = srv.query("aas", **{
+                            "from": bounds["from"], "to": bounds["to"] + 1})
+                        t.check_eq(over.get("fidelity_ranges"), [{
+                            "from": bounds["from"], "to": bounds["to"] + 1,
+                            "fidelity": "sampled"}],
+                            label + ": nominal period plus 1ns exceeds edge slop")
+                        # Exercise the event-table consumer.
+                        events = srv.query("top_events", **bounds)
+                        t.check_eq(events["db_time_ms"], 100, label + ": event totals")
+                        halves = []
+                        for lo, hi in ((400_000_000, 450_000_000),
+                                       (450_000_000, 500_000_000)):
+                            r = srv.query("time_model", **{
+                                "from": BASE_TS + lo, "to": BASE_TS + hi})
+                            halves.append(next(row["ms"] for row in r["rows"]
+                                               if row["name"] == "DB Time"))
+                        t.check_eq(sum(halves), 100, label + ": exact adjacent additivity")
+
+    # Integer nanoseconds at arbitrary edges of the 60s measured stream.
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-additive-") as trace_dir:
+        subprocess.run([str(binary), "--fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            lo, mid, hi = (BASE_TS + 12345678901, BASE_TS + 20133333338,
+                           BASE_TS + 51000000003)
+            values = []
+            for start, end in ((lo, hi), (lo, mid), (mid, hi)):
+                r = srv.query("time_model", **{"from": start, "to": end})
+                ns = Decimal(str(next(row["ms"] for row in r["rows"]
+                                      if row["name"] == "DB Time"))) * 1_000_000
+                t.check_eq(ns, end - start, "arbitrary window equals elapsed ns")
+                values.append(ns)
+            t.check_eq(values[0], values[1] + values[2], "integer window additivity")
+
+
+def test_legacy_sample_weights(t):
+    import shutil
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-legacy-") as trace_dir:
+        shutil.copyfile(Path(__file__).parent / "fixtures/sample_weights_v3/current.trace",
+                        Path(trace_dir, "current.trace"))
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            tm = srv.query("time_model", **{
+                "from": BASE_TS - PERIOD, "to": BASE_TS + 290_000_000})
+            t.check_eq(tm["db_time_ms"], 310,
+                       "legacy trace retains stored inflated 310ms weights")
+            t.check("sample_period_ns" not in tm,
+                    "legacy nominal cadence is unknown, never relabeled mean")
+
+
 def main():
     t = TestRunner("test_data_fidelity")
     print(f"=== {t.name} ===")
     test_measured_tick_window(t)
+    test_derived_weights_and_nominal(t)
+    test_legacy_sample_weights(t)
     test_sampled_only(t)
     test_exact_unavailable(t)
     test_mixed_merge(t)

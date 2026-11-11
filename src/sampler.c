@@ -24,6 +24,7 @@
  * source directly. */
 #include "idle_rule.h"      /* pgwt_is_session_idle_event */
 #include "pg_wait_tracer.h"
+#include "daemon.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -547,6 +548,15 @@ uint64_t pgwt_sampler_effective_period(uint64_t nominal_ns,
     return elapsed;
 }
 
+/* Advance before reading backends, including empty and failed-read ticks. */
+uint64_t pgwt_sampler_tick_period(struct pgwt_sampler *s, uint64_t tick_ts)
+{
+    uint64_t weight = pgwt_sampler_effective_period(s->sample_period_ns,
+                                                    s->last_tick_ns, tick_ts);
+    s->last_tick_ns = tick_ts;
+    return weight;
+}
+
 uint64_t pgwt_sampler_tick_lateness(uint64_t armed_ns,
                                     uint64_t armed_at_ns,
                                     uint64_t now_ns)
@@ -774,6 +784,8 @@ static void seed_state_entry(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
     }
 }
 
+#endif /* !PGWT_SERVER: lifecycle is portable and tested on macOS. */
+
 int pgwt_sampler_start(struct pgwt_daemon *d)
 {
     struct pgwt_sampler *s = calloc(1, sizeof(*s));
@@ -790,11 +802,14 @@ int pgwt_sampler_start(struct pgwt_daemon *d)
     /* qid dump buffers sized to the loaded exact_attr_map capacity.
      * shrunk via PGWT_STATE_MAP_ENTRIES in test builds). */
     s->qid_cap = MAX_BACKENDS;
+#ifndef PGWT_SERVER
     if (d->skel) {
         uint32_t me = bpf_map__max_entries(d->skel->maps.exact_attr_map);
         if (me > 0 && (int)me < s->qid_cap)
             s->qid_cap = (int)me;
     }
+
+#endif
 
     s->read_vals = calloc(MAX_BACKENDS, sizeof(*s->read_vals));
     s->read_valid = calloc(MAX_BACKENDS, sizeof(*s->read_valid));
@@ -835,6 +850,10 @@ int pgwt_sampler_stop(struct pgwt_daemon *d)
     return 0;
 }
 
+#if !defined(PGWT_SERVER) || defined(PGWT_SAMPLE_ACCUM_TEST)
+
+#include "wait_event.h"
+
 /* Fold one sample batch into the live in-process accumulator so the running
  * --view output reflects sampled-mode data in real time.
  *
@@ -850,7 +869,7 @@ int pgwt_sampler_stop(struct pgwt_daemon *d)
  * The build_batch records keep their on-disk shape (new_event set, old/duration
  * zero) so the trace-file format is unchanged; we read new_event here and apply
  * the per-sample weight locally. */
-static void pgwt_sampler_accumulate(struct pgwt_daemon *d,
+void pgwt_sampler_accumulate(struct pgwt_daemon *d,
                                     const struct pgwt_trace_event *samples,
                                     int count, uint64_t period_ns)
 {
@@ -943,6 +962,10 @@ static void pgwt_sampler_accumulate(struct pgwt_daemon *d,
     }
 }
 
+#endif
+
+#ifndef PGWT_SERVER
+
 /* #294: the live fresh-gate read behind pgwt_sampler_recheck_cmd_gate. One
  * coherent PgBackendStatus snapshot for one backend, taken AFTER this tick's
  * wait_event_info read, decided by the SAME predicate the tick source used
@@ -989,12 +1012,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     /* SMP-3: weight this tick by the MEASURED inter-tick elapsed time, not
      * the nominal period — when the daemon stalls (attach storms, load) and
      * timer expirations coalesce, the nominal weight would silently deflate
-     * AAS/DB-Time exactly when it matters. The SAMPLES block header carries
-     * the per-block period, so the on-disk format is unchanged. */
-    uint64_t period_ns = pgwt_sampler_effective_period(s->sample_period_ns,
-                                                       s->last_tick_ns,
-                                                       tick_ts);
-    s->last_tick_ns = tick_ts;
+     * AAS/DB-Time exactly when it matters. The v4 writer preserves this weight
+     * as the first weight in a block or a timestamp difference. */
+    uint64_t period_ns = pgwt_sampler_tick_period(s, tick_ts);
 
     const bool tick_source_enabled =
         pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);

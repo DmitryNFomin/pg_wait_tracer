@@ -626,7 +626,7 @@ static void recover_current_trace(struct pgwt_event_writer *w)
     struct pgwt_block_index_entry *idx = NULL;
     int nidx = 0, cap = 0;
     uint64_t nevents = 0;
-    long pos = (long)sizeof(hdr);
+    long pos = (long)pgwt_trace_file_header_size(hdr.version);
     struct pgwt_trace_block_header bh;
     while (nidx < PGWT_MAX_READ_BLOCKS) {
         if (fseek(fp, pos, SEEK_SET) != 0 ||
@@ -637,7 +637,8 @@ static void recover_current_trace(struct pgwt_event_writer *w)
             bh.compressed_size > PGWT_MAX_BLOCK_COMPRESSED ||
             bh.block_type > 15)
             break;
-        long end = pos + (long)sizeof(bh) + (long)bh.compressed_size;
+        long end = pos + (long)pgwt_trace_block_header_size(hdr.version) +
+                   (long)bh.compressed_size;
         if (end > fsize)
             break;   /* torn tail: block header landed, payload didn't */
         if (nidx >= cap) {
@@ -665,7 +666,7 @@ static void recover_current_trace(struct pgwt_event_writer *w)
     if (nidx == 0) {
         free(idx);
         fclose(fp);
-        if (fsize > (long)sizeof(hdr)) {
+        if (fsize > (long)pgwt_trace_file_header_size(hdr.version)) {
             char aside[600];
             snprintf(aside, sizeof(aside), "%s.corrupt.%lld", cur,
                      (long long)time(NULL));
@@ -865,7 +866,8 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
         .start_time_ns = w->file_start_wall_ns,
         .clock_offset_ns = w->file_start_mono_ns,
     };
-    if (fwrite(&hdr, sizeof(hdr), 1, w->fp) != 1) {
+    if (fwrite(&hdr, sizeof(hdr), 1, w->fp) != 1 ||
+        fwrite(&w->nominal_sample_period_ns, sizeof(uint64_t), 1, w->fp) != 1) {
         fprintf(stderr, "WARN: cannot write trace file header: %s\n", strerror(errno));
         fclose(w->fp);
         w->fp = NULL;
@@ -953,7 +955,10 @@ static int write_typed_block(struct pgwt_event_writer *w,
         .reserved = 0,
         .sample_period_ns = sample_period_ns,
     };
+    uint64_t max_weight = block_type == PGWT_BLOCK_SAMPLES
+                        ? w->sample_buf_max_period_ns : 0;
     if (fwrite(&bh, sizeof(bh), 1, w->fp) != 1 ||
+        fwrite(&max_weight, sizeof(max_weight), 1, w->fp) != 1 ||
         fwrite(w->compress_buf, 1, compressed_size, w->fp) != (size_t)compressed_size) {
         fprintf(stderr, "WARN: trace file write failed: %s\n", strerror(errno));
         w->enabled = false;
@@ -961,7 +966,8 @@ static int write_typed_block(struct pgwt_event_writer *w,
     }
 
     w->total_events_written += count;
-    w->total_bytes_written += sizeof(bh) + compressed_size;
+    w->total_bytes_written += pgwt_trace_block_header_size(PGWT_TRACE_VERSION) +
+                              compressed_size;
 
     /* #424: the publication high-watermark. Every record in this block is now
      * in the file (fflush + the meta count below), so the LAST TRANSITIONS
@@ -1017,19 +1023,14 @@ static int flush_block_core(struct pgwt_event_writer *w)
     return rc;
 }
 
-/* Write the pending batched sample-type block (DUR-8). SAMPLES pushes share
- * a block only when their periods match exactly: one header period must
- * preserve every tick's interval, including when backend counts change. */
+/* First weight plus timestamp differences reconstruct every tick exactly. */
 static int flush_sample_buf(struct pgwt_event_writer *w)
 {
     if (w->num_sample_buf == 0 || !w->fp) return 0;
-
-    uint64_t period = w->sample_buf_weight_ns / (uint64_t)w->num_sample_buf;
     int rc = write_typed_block(w, w->sample_buf, w->num_sample_buf,
-                               (enum pgwt_block_type)w->sample_buf_type,
-                               period);
+                               PGWT_BLOCK_SAMPLES, w->sample_buf_period_ns);
     w->num_sample_buf = 0;
-    w->sample_buf_weight_ns = 0;
+    w->sample_buf_max_period_ns = 0;
     w->sample_buf_period_ns = 0;
     return rc;
 }
@@ -1301,42 +1302,36 @@ int pgwt_writer_push_samples(struct pgwt_event_writer *w,
         }
     }
 
-    /* DUR-8: buffer equal-period sample pushes for up to roughly one second
-     * (or PGWT_BLOCK_EVENTS records).
-     * The buffering is type-agnostic: a pending batch of a DIFFERENT block
-     * type is flushed before this one starts. A different measured period
-     * also flushes first: averaging nearby periods loses integer nanoseconds
-     * and moves time between ticks/backends, breaking elapsed-time weights. */
-    if (w->num_sample_buf > 0) {
-        uint64_t p0 = w->sample_buf_period_ns;
-        if (w->sample_buf_type != (uint16_t)PGWT_BLOCK_SAMPLES ||
-            sample_period_ns != p0) {
-            if (flush_samples(w) != 0)
-                return -1;
-        }
-    }
-
+    /* Production pushes one tick. Also accept multiple ticks with the same
+     * supplied weight (fixture/library callers), applying the rule to each. */
     int off = 0;
     while (off < count) {
-        if (w->num_sample_buf == 0) {
-            w->sample_buf_type = (uint16_t)PGWT_BLOCK_SAMPLES;
-            w->sample_buf_period_ns = sample_period_ns;
+        uint64_t ts = samples[off].timestamp_ns;
+        int end = off + 1;
+        while (end < count && samples[end].timestamp_ns == ts) end++;
+        if (w->num_sample_buf > 0) {
+            uint64_t last = w->sample_buf[w->num_sample_buf - 1].timestamp_ns;
+            if (ts <= last || sample_period_ns != ts - last) {
+                if (flush_samples(w) != 0) return -1;
+            }
         }
-        int room = PGWT_BLOCK_EVENTS - w->num_sample_buf;
-        int chunk = count - off;
-        if (chunk > room) chunk = room;
-        memcpy(&w->sample_buf[w->num_sample_buf], samples + off,
-               (size_t)chunk * sizeof(*samples));
-        w->num_sample_buf += chunk;
-        w->sample_buf_weight_ns += (uint64_t)chunk * sample_period_ns;
-        off += chunk;
-        if (w->num_sample_buf >= PGWT_BLOCK_EVENTS) {
-            if (flush_samples(w) != 0)
+        while (off < end) {
+            if (w->num_sample_buf == 0) {
+                w->sample_buf_period_ns = sample_period_ns;
+            }
+            int room = PGWT_BLOCK_EVENTS - w->num_sample_buf;
+            int chunk = end - off;
+            if (chunk > room) chunk = room;
+            memcpy(&w->sample_buf[w->num_sample_buf], samples + off,
+                   (size_t)chunk * sizeof(*samples));
+            w->num_sample_buf += chunk;
+            if (sample_period_ns > w->sample_buf_max_period_ns)
+                w->sample_buf_max_period_ns = sample_period_ns;
+            off += chunk;
+            if (w->num_sample_buf >= PGWT_BLOCK_EVENTS && flush_samples(w) != 0)
                 return -1;
         }
     }
-
-    /* Time-based cut: the pending batch spans ~1 s of ticks. */
     if (w->num_sample_buf > 0 &&
         w->sample_buf[w->num_sample_buf - 1].timestamp_ns -
         w->sample_buf[0].timestamp_ns >= PGWT_SAMPLE_BATCH_NS)

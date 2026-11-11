@@ -1361,6 +1361,8 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             goto fail;
         }
         d->event_writer->verbose = d->verbose;
+        d->event_writer->nominal_sample_period_ns = 1000000000ULL /
+            (uint64_t)(d->sample_rate_hz > 0 ? d->sample_rate_hz : 10);
         /* T8: write real cpu_ns only when the capability probe confirmed
          * measured CPU; otherwise every TRANSITIONS record is stamped
          * PGWT_CPU_NS_UNKNOWN so readers fall back to gap-inference. */
