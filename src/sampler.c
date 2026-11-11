@@ -542,8 +542,6 @@ uint64_t pgwt_sampler_effective_period(uint64_t nominal_ns,
     if (last_tick_ns == 0 || now_ns <= last_tick_ns)
         return nominal_ns;
     uint64_t elapsed = now_ns - last_tick_ns;
-    if (elapsed < nominal_ns)
-        return nominal_ns;   /* the timer never fires early; jitter only */
     if (elapsed > 60ULL * 1000000000ULL)
         return 60ULL * 1000000000ULL;   /* sanity clamp on absurd stalls */
     return elapsed;

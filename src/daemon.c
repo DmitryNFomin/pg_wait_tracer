@@ -675,9 +675,10 @@ static void log_sampler_timer_health(const struct pgwt_daemon *d)
 /* SMP-5: arm the sampler timer ONE-SHOT with a +/-10% jittered period.
  * Fixed-phase sampling aliases with periodic workloads (a job that wakes
  * every 100 ms could hide from — or monopolize — a 10 Hz sampler forever);
- * jittering each tick's phase breaks the lock-step. Total sample weight is
- * unaffected: every tick is weighted by the MEASURED inter-tick elapsed
- * time (SMP-3, pgwt_sampler_effective_period). */
+ * jittering each tick's phase breaks the lock-step. Consecutive tick weights
+ * use measured inter-tick elapsed, including intervals below nominal. The
+ * first tick uses a nominal edge estimate; stalls credit at most 60s, leaving
+ * the rest uncredited (pgwt_sampler_effective_period). */
 static void arm_sample_timer_jittered(struct pgwt_daemon *d)
 {
     int hz = d->sample_rate_hz > 0 ? d->sample_rate_hz : 10;

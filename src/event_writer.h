@@ -91,7 +91,7 @@ struct pgwt_trace_file_header {
 
 /* Block header (v2: 40 bytes).
  * block_type/sample_period_ns are new in v2. sample_period_ns is the
- * nominal interval between samples in a SAMPLES block (0 for TRANSITIONS).
+ * effective weight of each sample in a SAMPLES block (0 for TRANSITIONS).
  * reserved keeps the 8-byte fields naturally aligned and leaves room for
  * a future v3 without another size bump. */
 struct pgwt_trace_block_header {
@@ -102,7 +102,7 @@ struct pgwt_trace_block_header {
     uint32_t uncompressed_size;
     uint16_t block_type;         /* enum pgwt_block_type */
     uint16_t reserved;           /* 0; reserved for future use */
-    uint64_t sample_period_ns;   /* SAMPLES: nominal sample interval; TRANSITIONS: 0 */
+    uint64_t sample_period_ns;   /* SAMPLES: effective sample weight; TRANSITIONS: 0 */
 } __attribute__((packed));
 
 /* Block index entry (16 bytes) */

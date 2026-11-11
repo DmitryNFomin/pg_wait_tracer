@@ -405,10 +405,12 @@ int pgwt_sampled_attr_active_query_mismatch(
 void pgwt_read_cmd_gate(pid_t pid, uint64_t dqs_addr, uint64_t be_entry_addr,
                         int st_query_id_off, int *cmd_open, uint64_t *query_id);
 
-/* SMP-3: effective sample period for the tick at `now_ns`, given the
- * previous tick's timestamp (0 = first tick → nominal). Late/missed ticks
- * yield a longer period so total sample weight tracks wall time; the result
- * is clamped to [nominal, 60s] (a sampler can be late, never early). */
+/* Effective sample weight: measured inter-tick elapsed, including intervals
+ * shorter than nominal under jitter. First tick (last == 0) and invalid
+ * non-monotonic inputs retain the nominal fallback. The first tick is one
+ * explicit window-edge estimate; offline queries clip its backward interval.
+ * Late ticks credit at most 60s to the observed state. Any remainder is
+ * unobserved/uncredited time, never carried forward to another tick. */
 uint64_t pgwt_sampler_effective_period(uint64_t nominal_ns,
                                        uint64_t last_tick_ns,
                                        uint64_t now_ns);

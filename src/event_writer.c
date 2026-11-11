@@ -1017,11 +1017,9 @@ static int flush_block_core(struct pgwt_event_writer *w)
     return rc;
 }
 
-/* Write the pending batched sample-type block (DUR-8). The block period is
- * the count-weighted mean of the batched pushes' periods, so the block's
- * TOTAL estimated time equals the exact per-tick sum (SMP-3 weights are
- * preserved in aggregate; the compatibility gate in push bounds the per-tick
- * skew to ~1.6%). */
+/* Write the pending batched sample-type block (DUR-8). SAMPLES pushes share
+ * a block only when their periods match exactly: one header period must
+ * preserve every tick's interval, including when backend counts change. */
 static int flush_sample_buf(struct pgwt_event_writer *w)
 {
     if (w->num_sample_buf == 0 || !w->fp) return 0;
@@ -1303,19 +1301,16 @@ int pgwt_writer_push_samples(struct pgwt_event_writer *w,
         }
     }
 
-    /* DUR-8: buffer sample-type records and cut a block roughly once per
-     * second instead of once per sampler tick (~10× fewer blocks at 10 Hz).
+    /* DUR-8: buffer equal-period sample pushes for up to roughly one second
+     * (or PGWT_BLOCK_EVENTS records).
      * The buffering is type-agnostic: a pending batch of a DIFFERENT block
-     * type is flushed before this one starts. A push whose period deviates
-     * from the pending batch by more than ~1.6% (period/64) also flushes
-     * first — timer jitter batches, an SMP-3 stall tick (measured elapsed ≫
-     * nominal) gets its own block so its compensation weight stays exact. */
+     * type is flushed before this one starts. A different measured period
+     * also flushes first: averaging nearby periods loses integer nanoseconds
+     * and moves time between ticks/backends, breaking elapsed-time weights. */
     if (w->num_sample_buf > 0) {
         uint64_t p0 = w->sample_buf_period_ns;
-        uint64_t diff = sample_period_ns > p0 ? sample_period_ns - p0
-                                              : p0 - sample_period_ns;
         if (w->sample_buf_type != (uint16_t)PGWT_BLOCK_SAMPLES ||
-            diff > p0 / 64) {
+            sample_period_ns != p0) {
             if (flush_samples(w) != 0)
                 return -1;
         }

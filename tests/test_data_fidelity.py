@@ -21,6 +21,8 @@ from the "samples"/"sample_period_ns" inputs (A1).
 import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
@@ -34,6 +36,58 @@ PERIOD = 100_000_000          # 100ms = 10 Hz sample period
 
 def sample_at(pid, ts, event, qid=0):
     return {"pid": pid, "ts": ts, "event": event, "qid": qid}
+
+
+def test_measured_tick_window(t):
+    """#863: real sampler helper → writer → server, without rounding.
+
+    A nominal first sample supplies the defined left-edge term. Querying
+    [first tick, last tick] clips it away; 600 jittered intervals between
+    those ticks tile exactly 60 seconds. No tolerance hides a weighting bias.
+    """
+    binary = Path(__file__).with_name("test_sample_weight")
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-server-") as trace_dir:
+        subprocess.run([str(binary), "--fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            bounds = {"from": BASE_TS, "to": BASE_TS + 60_000_000_000}
+            tm = srv.query("time_model", **bounds)
+            rows = {r["name"]: r for r in tm["rows"]}
+            t.check_eq(rows["DB Time"]["ms"], 60000,
+                       "measured ticks: 60s active backend = 60000ms DB Time")
+            aas = srv.query("aas", buckets=1, **bounds)
+            active = sum(v for k, v in aas["buckets"][0].items()
+                         if k != "t" and isinstance(v, (int, float)))
+            t.check_eq(active, 1,
+                       "measured ticks: 60s active backend = AAS 1.0")
+            edge_bounds = {"from": BASE_TS - PERIOD, "to": bounds["to"]}
+            edge_tm = srv.query("time_model", **edge_bounds)
+            edge_rows = {r["name"]: r for r in edge_tm["rows"]}
+            t.check_eq(edge_rows["DB Time"]["ms"], 60100,
+                       "first tick: one 100ms edge term, clipped by window")
+
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-escalation-") as trace_dir:
+        subprocess.run([str(binary), "--escalation-fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            tm = srv.query("time_model", **bounds)
+            rows = {r["name"]: r for r in tm["rows"]}
+            t.check_eq(rows["DB Time"]["ms"], 60000,
+                       "escalation: exact window and sampled ticks tile 60s")
+            # END is at 20.05s; the first subsequent tick at 20.09s has a
+            # 90ms weight. Only its 40ms tail survives exact subtraction.
+            boundary = {"from": BASE_TS + 19_990_000_000,
+                        "to": BASE_TS + 20_090_000_000}
+            tm = srv.query("time_model", **boundary)
+            rows = {r["name"]: r for r in tm["rows"]}
+            t.check_eq(rows["DB Time"]["ms"], 100,
+                       "post-escalation tick: 60ms exact + 40ms sampled")
+            aas = srv.query("aas", buckets=1, **boundary)
+            active = sum(v for k, v in aas["buckets"][0].items()
+                         if k != "t" and isinstance(v, (int, float)))
+            t.check_eq(active, 1, "post-escalation tick: AAS 1.0")
 
 
 # ── 1. Sampled-only estimators ────────────────────────────────────────
@@ -520,6 +574,7 @@ def test_dump_annotation(t):
 def main():
     t = TestRunner("test_data_fidelity")
     print(f"=== {t.name} ===")
+    test_measured_tick_window(t)
     test_sampled_only(t)
     test_exact_unavailable(t)
     test_mixed_merge(t)

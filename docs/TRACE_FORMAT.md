@@ -121,18 +121,22 @@ column (the sampled tier's CPU signal is the `we==0` sample itself, weighted
 by `sample_period_ns`); the reader surfaces `cpu_ns = PGWT_CPU_NS_UNKNOWN`
 for every sample.
 
-**Batching (DUR-8).** The writer buffers sample-type pushes and cuts a
-block roughly once per second (or at 4096 records), instead of one tiny
-block per sampler tick — ~10× fewer blocks at 10 Hz. The block's
-`sample_period_ns` is the count-weighted mean of the batched ticks'
-periods, so the block's total estimated time equals the exact per-tick sum;
-a push whose period deviates more than ~1.6 % (period/64) from the pending
-batch — an SMP-3 stall tick with its measured, compensating weight — is cut
-into its own block so its weight stays exact. The buffering layer is
-type-agnostic: a future sample-like block type flows through the same
-batching with its own type/period gate. Readers make no assumption about
-records-per-block, so files written by older per-tick writers stay
-readable.
+**Weights and batching (DUR-8, #863).** Consecutive ticks use their measured
+inter-tick elapsed time, including intervals below nominal under ±10% jitter.
+The first tick has a nominal-period edge estimate; a query clips the sample's
+backward interval to its requested window. Stalls credit at most 60 seconds
+to the state observed at the end; the excess is unobserved, uncredited time.
+It is never carried into a later tick. A daemon restart starts a fresh edge
+term. During escalation the sampler keeps ticking; the server subtracts
+exact coverage from each sample's backward interval.
+
+The writer buffers sample-type pushes with **identical** measured periods
+and cuts a block after roughly one second (or at 4096 records). A different
+period or block type flushes the pending batch first. Jittered ticks therefore
+usually get separate blocks. One header period preserves every record's
+weight exactly, without averaging time between ticks or truncating integer
+nanoseconds. Readers make no assumption about records per block, so older
+batched files remain readable.
 
 ### Markers
 
