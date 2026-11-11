@@ -78,6 +78,19 @@ These are rules of construction, enforced by files and by the build, not by revi
    waits, category defaults, window placement or percentiles.
 7. **Every unit records its real cost:** rounds, tokens, gate-box hours.
 
+Added 2026-11-11, owner approval, from Anthropic's and OpenAI's published practice
+(`docs/rework/readings.md`):
+
+8. **Reviewers report defects, not opinions.** Only what breaks a contract, a documented guarantee
+   or a real path, each with a concrete failure; no style, no hypothetical concerns
+   (`.claude/agents/reviewer.md`).
+9. **Two strikes.** If a unit fails review twice, there is no third correction: the lead rewrites
+   the brief and a fresh implementer round starts from it.
+10. **Status only a test can change.** Each contract has a status file listing its claims; a row is
+    marked passing only by the test run that proves it, never by hand or by the implementer.
+11. **Every check earns its place.** After each slice, compare each review stage's cost with what it
+    actually caught, and drop or keep it per type of work on that evidence.
+
 ## 4. The first slice (pilot)
 
 Purpose: prove the method on something small before anything else is committed.
@@ -87,7 +100,8 @@ Purpose: prove the method on something small before anything else is committed.
 - **Path:** contract → independent answers → new core → server → bridge → one small panel in the
   Events view, running beside the old code on the same trace files.
 - **Budget:** 1 round for the contract, 1 for the independent answers, 2 implementation rounds
-  (codex), 2 review rounds, 1–2 gate-box hours.
+  (codex), 2 review rounds — one per unit, two units: the core, then trace-to-screen — 1–2 gate-box
+  hours.
 - **Must show:** hand calculation, independent reference and new core agree; the browser shows the
   values and the "unavailable" reasons; a mutant that moves time across a window edge fails even
   though the whole-trace total is unchanged; the same evidence split into different blocks gives
