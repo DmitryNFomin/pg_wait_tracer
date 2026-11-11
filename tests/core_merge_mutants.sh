@@ -24,15 +24,16 @@ mutations = [
     ("M4", [("    CMP(t);\n    CMP(pid);", "    CMP(t);\n    CMP(source);\n    CMP(pid);")], "pid before source"),
     ("M5", [("if (r->t > src->proof.cutoff) src->proof.cutoff = r->t;",
               "if (false) src->proof.cutoff = r->t;")], "implicit perf boundary"),
-    ("M6", [("if (in->w > m->sources[in->source].proof.cutoff)", "if (true)")],
+    ("M6", [("if (in->w > m->sources[in->source].accepted_boundary)", "if (true)"),
+            ("if (in->w > m->sources[in->source].proof.cutoff)", "if (true)")],
      "needs: accept w=20, then weaker w=10, then DATA t=15 on that source"),
     ("M7", [("    bool breach = internal(reason);",
               "    if (m->report.status == PGWT_MERGE_SUSPENDED) return m->report.status;\n    bool breach = internal(reason);")], "fault during suspension"),
     ("M8", [("            if (perf && src->has_data && r->t < src->last_t)\n"
               "                return late_fault(m, PGWT_MERGE_CLOCK_REGRESSION, in);\n"
-              "            if (r->t < src->proof.cutoff)\n"
+              "            if (r->t < src->accepted_boundary)\n"
               "                return late_fault(m, PGWT_MERGE_SEAL_VIOLATION, in);",
-              "            if (r->t < src->proof.cutoff)\n"
+              "            if (r->t < src->accepted_boundary)\n"
               "                return late_fault(m, PGWT_MERGE_SEAL_VIOLATION, in);\n"
               "            if (perf && src->has_data && r->t < src->last_t)\n"
               "                return late_fault(m, PGWT_MERGE_CLOCK_REGRESSION, in);")], "clock diagnostic precedence"),
@@ -58,6 +59,29 @@ mutations = [
     ("M12", [("    if (m->report.status != PGWT_MERGE_OK) return m->report.status;\n    uint64_t W",
                "    if (m->report.status == PGWT_MERGE_EXIT_REQUIRED) return m->report.status;\n    uint64_t W")],
      "needs: suspended, cutoffs=6, no frontier, CHECK with unchanged baseline C0"),
+    ("M13", [("        struct source_state *src = &m->sources[r->source];",
+               "        if (m->report.status != PGWT_MERGE_OK) return m->report.status;\n"
+               "        struct source_state *src = &m->sources[r->source];")],
+     "late DATA ignored while suspended; needs row 24"),
+    ("M14", [("        pgwt_merge_attachment *a = &generation->proof;",
+               "        pgwt_merge_attachment *a = &generation->proof;\n"
+               "        if (!a->identity_proved) return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);")],
+     "new generation refused; needs row 25"),
+    ("M15", [("m->dependencies[m->dependency_count++] = r->dependency_id;",
+               "m->dependencies[m->dependency_count++] = 0;")],
+     "dependency never becomes available; needs row 26"),
+    ("M16", [("        for (size_t s = 0; s < m->config.source_count; ++s)\n"
+               "            m->sources[s].proof.cutoff = 0;",
+               "        for (size_t s = 0; s < m->config.source_count; ++s) {\n"
+               "            m->sources[s].proof.cutoff = 0;\n"
+               "            m->sources[s].accepted_boundary = 0;\n"
+               "        }")],
+     "REARM resets boundaries; needs row 27"),
+    ("M17", [("        if (m->report.status == PGWT_MERGE_OK) {\n"
+               "            if (check(m, obs) == PGWT_MERGE_EXIT_REQUIRED) return m->report.status;",
+               "        if (false) {\n"
+               "            if (check(m, obs) == PGWT_MERGE_EXIT_REQUIRED) return m->report.status;")],
+     "REARM accepted while active; needs rows 28/31"),
 ]
 compiler = shlex.split(os.environ.get("CC", "cc"))
 flags = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-g"]
@@ -87,7 +111,7 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
         if run.returncode == 0 and re.search(r"core merge contract: (\d+)/\1 passed", run.stdout):
             return "SURVIVED", log
         return "RUNTIME_ERROR", log
-    # A broken baseline must never masquerade as twelve killed mutants.
+    # A broken baseline must never masquerade as killed mutants.
     try:
         result, detail = build_and_run(original)
     except (OSError, subprocess.TimeoutExpired) as exc:

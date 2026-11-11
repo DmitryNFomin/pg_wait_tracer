@@ -13,7 +13,7 @@
 
 typedef enum { PGWT_MERGE_N, PGWT_MERGE_Q } pgwt_merge_mode;
 typedef enum { PGWT_MERGE_OK, PGWT_MERGE_SUSPENDED,
-               PGWT_MERGE_EXIT_REQUIRED } pgwt_merge_status;
+               PGWT_MERGE_EXIT_REQUIRED, PGWT_MERGE_REARM_REJECTED } pgwt_merge_status;
 typedef enum {
     PGWT_MERGE_COUNTER_CHANGE, PGWT_MERGE_COUNTER_UNKNOWN,
     PGWT_MERGE_PERF_LOST, PGWT_MERGE_CLOCK_REGRESSION,
@@ -48,6 +48,9 @@ typedef struct {
     pgwt_merge_rank rank;
     bool identity_known, has_q;
     pgwt_merge_dependency dependency;
+    /* Nonzero stable metadata identity: DATA WAIT requires this ID; TEXT
+     * supplies it. Availability survives TEXT publication within an epoch. */
+    uint64_t dependency_id;
     const void *payload;
     size_t payload_size;
 } pgwt_merge_record;
@@ -59,7 +62,7 @@ typedef enum {
 typedef struct {
     pgwt_merge_input_kind kind;
     pgwt_merge_observation observation;
-    pgwt_merge_record record;       /* DATA/TEXT; TEXT uses source,o,payload */
+    pgwt_merge_record record;       /* TEXT uses source,o,payload,dependency_id */
     size_t source;                 /* BOUNDARY/LOSS */
     uint64_t w, p, n;               /* boundary cutoff/position or LOST count */
     pgwt_merge_reason reason;       /* FAULT: closed reason list above */
@@ -86,6 +89,10 @@ typedef struct {
     const pgwt_merge_source *sources;
     size_t source_count;            /* >= 2, last two indices are E and L */
     size_t staged_capacity, payload_capacity, attachment_capacity;
+    /* Retained histories are bounded; exhaustion causes allocation_fail.
+     * Zero selects staged_capacity for these two capacities. Generation
+     * history (including earlier epochs) uses attachment_capacity. */
+    size_t frontier_capacity, dependency_capacity;
     const pgwt_merge_attachment *attachments;
     size_t attachment_count;
     pgwt_merge_observation observation; /* readable epoch baseline */
@@ -102,6 +109,10 @@ typedef struct {
     bool epoch_invalid, has_frontier, void_failed, qualified;
     uint64_t frontier, faults[PGWT_MERGE_REASON_COUNT];
 } pgwt_merge_report;
+typedef struct {
+    bool has_frontier, invalid;
+    uint64_t frontier;
+} pgwt_merge_epoch_report;
 
 /* Creation failures attempt VOID when a sink is available, then return NULL.
  * status reports suspension for allocation/missing proofs and exit-required for
@@ -109,8 +120,13 @@ typedef struct {
  * persistence failure out of band (no coordinator report exists on NULL). */
 pgwt_merge *pgwt_merge_create(const pgwt_merge_config *, pgwt_merge_status *status);
 void pgwt_merge_destroy(pgwt_merge *);
+/* REARM_REJECTED describes the request; get_report().status still describes
+ * the epoch, including suspension caused by that request's counter CHECK. */
 pgwt_merge_status pgwt_merge_feed(pgwt_merge *, const pgwt_merge_input *);
 pgwt_merge_report pgwt_merge_get_report(const pgwt_merge *);
+/* epoch_invalid in the aggregate report is sticky across REARM. Query each
+ * affected epoch here; last_invalid_epoch is the latest affected epoch. */
+pgwt_merge_epoch_report pgwt_merge_get_epoch_report(const pgwt_merge *, uint64_t epoch);
 const char *pgwt_merge_reason_name(pgwt_merge_reason);
 
 #endif

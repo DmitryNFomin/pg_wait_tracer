@@ -399,6 +399,30 @@ static const json_node *identity(const fixture *f, const char *who)
     return id;
 }
 
+/* Stable dependency IDs come exclusively from input names/requires, never
+ * from expected outputs or from whether TEXT has already arrived. */
+static uint64_t dependency_id(const fixture *f, const json_node *name)
+{
+    const char *key = string_value(name);
+    uint64_t index = 0;
+    for (const json_node *n = member(f->row, "inputs")->child; n; n = n->next) {
+        ++index;
+        const json_node *candidate = string_is(member(n, "kind"), "TEXT")
+            ? member(n, "name") : member(n, "requires");
+        if (string_is(candidate, key)) return index;
+    }
+    fputs("fixture: dependency name absent from inputs\n", stderr); exit(2);
+}
+
+static pgwt_merge_status status_value(const json_node *n)
+{
+    if (string_is(n, "ok")) return PGWT_MERGE_OK;
+    if (string_is(n, "suspended")) return PGWT_MERGE_SUSPENDED;
+    if (string_is(n, "exit_required")) return PGWT_MERGE_EXIT_REQUIRED;
+    if (string_is(n, "rearm_rejected")) return PGWT_MERGE_REARM_REJECTED;
+    fputs("fixture: unknown status\n", stderr); exit(2);
+}
+
 static bool sink(void *context, const pgwt_merge_output *out, pgwt_merge_observation *post)
 {
     fixture *f = context;
@@ -502,11 +526,12 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
     }
     pgwt_merge_attachment attachments[32];
     size_t na = 0;
-    for (const json_node *id = member(root, "identities")->child; id; id = id->next) {
-        if (na == 32) { fputs("fixture: too many identities\n", stderr); exit(2); }
+    const char *const attached[] = {"A", "B"}; /* §5 default attachment proofs */
+    for (size_t i = 0; i < sizeof(attached) / sizeof(attached[0]); ++i) {
+        const json_node *id = identity(&f, attached[i]);
         attachments[na++] = (pgwt_merge_attachment){.pid = number(member(id, "pid")),
             .g = number(member(id, "g")), .identity_proved = true, .sequence_proved = true,
-            .next_q = optional_number(member(member(start, "next_q"), id->key), 1)};
+            .next_q = optional_number(member(member(start, "next_q"), attached[i]), 1)};
     }
     pgwt_merge_config config = {.mode = !strcmp(mode, "N") ? PGWT_MERGE_N : PGWT_MERGE_Q,
         .sources = sources, .source_count = source_count, .staged_capacity = 128,
@@ -524,7 +549,11 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
     pgwt_merge_status status;
     pgwt_merge *m = pgwt_merge_create(&config, &status);
     if (!m) { fputs("fixture: create failed\n", stderr); exit(2); }
-    for (const json_node *n = inputs->child; n; n = n->next) {
+    pgwt_merge_status input_statuses[256] = {0};
+    bool processed[256] = {0};
+    if (list_length(inputs) > 256) { fputs("fixture: too many inputs\n", stderr); exit(2); }
+    size_t input_index = 0;
+    for (const json_node *n = inputs->child; n; n = n->next, ++input_index) {
         const json_node *kind = member(n, "kind");
         if (string_is(kind, "NOTE") || string_is(kind, "WRITER_REJECT")) continue;
         pgwt_merge_input in = {.observation = {.d = optional_number(member(n, "d"), 0),
@@ -538,6 +567,7 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
             const char *payload = string_value(member(n, text ? "name" : "label"));
             in.record.payload = payload;
             in.record.payload_size = strlen(payload);
+            if (text) in.record.dependency_id = dependency_id(&f, member(n, "name"));
             if (!text) {
                 const json_node *id = identity(&f, string_value(member(n, "who")));
                 in.record.pid = number(member(id, "pid"));
@@ -545,6 +575,10 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
                 in.record.identity_known = true;
                 in.record.t = number(member(n, "t"));
                 in.record.rank = rank_of(member(n, "rec"));
+                if (member(n, "requires")) {
+                    in.record.dependency = PGWT_MERGE_WAIT;
+                    in.record.dependency_id = dependency_id(&f, member(n, "requires"));
+                }
                 if (config.mode == PGWT_MERGE_Q && in.record.rank == PGWT_MERGE_TRANS && member(n, "q")) {
                     in.record.has_q = true;
                     in.record.q = number(member(n, "q"));
@@ -555,6 +589,27 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
             in.source = source(&f, member(n, "source"));
             in.p = number(member(n, "pos"));
             in.w = number(member(n, "w"));
+        } else if (string_is(kind, "REARM")) {
+            in.kind = PGWT_MERGE_REARM;
+            in.attachment_proofs_fresh = true;
+            in.identity_repaired = true;
+            na = 0;
+            const json_node *proofs = member(n, "proofs");
+            if (!proofs || proofs->kind != J_OBJECT) {
+                fputs("fixture: missing REARM proofs\n", stderr); exit(2);
+            }
+            for (const json_node *p = proofs->child; p; p = p->next) {
+                if (na == 32) { fputs("fixture: too many proofs\n", stderr); exit(2); }
+                const json_node *id = identity(&f, p->key);
+                attachments[na++] = (pgwt_merge_attachment){.pid = number(member(id, "pid")),
+                    .g = number(member(id, "g")), .identity_proved = true,
+                    .sequence_proved = true, .next_q = number(member(p, "next_q"))};
+            }
+            in.attachments = attachments;
+            in.attachment_count = na;
+            if (!equal_counters(in.observation.counters, counters(&f, member(n, "baseline")))) {
+                fputs("fixture: REARM baseline differs from observation\n", stderr); exit(2);
+            }
         } else if (string_is(kind, "CHECK")) in.kind = PGWT_MERGE_CHECK;
         else if (string_is(kind, "LOSS")) {
             in.kind = PGWT_MERGE_LOSS;
@@ -570,6 +625,8 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
             if (!found) { fputs("fixture: unknown fault\n", stderr); exit(2); }
         } else { fputs("fixture: unsupported input kind\n", stderr); exit(2); }
         status = pgwt_merge_feed(m, &in);
+        input_statuses[input_index] = status;
+        processed[input_index] = true;
         if (status == PGWT_MERGE_EXIT_REQUIRED) break;
     }
     const json_node *outputs = member(expected, "outputs");
@@ -583,7 +640,19 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
         field = "exit_nonzero";
     /* Contract §4 invalidation is an out-of-band report, not an output kind. */
     uint64_t row_id = number(member(row, "id"));
-    if (!field && row_id == 17 && !pgwt_merge_get_report(m).epoch_invalid) field = "epoch invalidation";
+    const json_node *invalid = member(expected, "epoch_invalid");
+    if (!field && pgwt_merge_get_report(m).epoch_invalid != (invalid ? boolean(invalid) : false))
+        field = "epoch_invalid";
+    const json_node *statuses = member(expected, "statuses");
+    if (statuses && statuses->kind != J_ARRAY) {
+        fputs("fixture: statuses must be an array\n", stderr); exit(2);
+    }
+    for (const json_node *s = statuses ? statuses->child : NULL; s; s = s->next) {
+        uint64_t index = number(member(s, "input_index"));
+        if (index >= list_length(inputs)) { fputs("fixture: bad status index\n", stderr); exit(2); }
+        if (!field && (!processed[index] || input_statuses[index] != status_value(member(s, "status"))))
+            field = "statuses";
+    }
     if (!field && f.reject && !f.rejected) field = "writer rejection not reached";
     if (field) printf("row %" PRIu64 "/%s MISMATCH %s at output %zu (got %zu, expected %zu)\n",
                       row_id, mode, field, mismatch, f.count, list_length(outputs));
@@ -592,7 +661,7 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
     return field == NULL;
 }
 
-/* Direct API checks cover normative paths absent from the frozen 20 rows.
+/* Direct API checks cover normative paths absent from the frozen rows.
  * They are deliberately excluded from mutation coverage of those rows. */
 typedef struct {
     pgwt_merge_output outputs[32];
@@ -768,11 +837,201 @@ static bool safety_checks(void)
     return true;
 }
 
+static pgwt_merge_status safety_feed(pgwt_merge *m, uint64_t positions[4], pgwt_merge_input in)
+{
+    if (in.kind == PGWT_MERGE_DATA || in.kind == PGWT_MERGE_TEXT)
+        in.record.o = positions[in.record.source]++;
+    else if (in.kind == PGWT_MERGE_BOUNDARY) in.p = positions[in.source]++;
+    return pgwt_merge_feed(m, &in);
+}
+
+static pgwt_merge_status safety_seal(pgwt_merge *m, uint64_t positions[4], uint64_t w,
+                                     pgwt_merge_observation obs)
+{
+    for (size_t s = 0; s < 4; ++s) {
+        pgwt_merge_status status = safety_feed(m, positions,
+            (pgwt_merge_input){.kind = PGWT_MERGE_BOUNDARY, .source = s, .w = w,
+                               .observation = obs});
+        if (status != PGWT_MERGE_OK) return status;
+    }
+    return PGWT_MERGE_OK;
+}
+
+/* Exercise recovery/history and actual held-batch resolution beyond the frozen
+ * examples. Mutants still run only the unmodified contract fixture. */
+static bool recovery_checks(void)
+{
+#define VERIFY(test) do { if (!(test)) { \
+    fprintf(stderr, "core merge recovery: line %d failed: %s\n", __LINE__, #test); \
+    pgwt_merge_destroy(m); return false; } } while (0)
+    pgwt_merge *m = NULL;
+    safety_capture c = {0};
+    pgwt_merge_source sources[4] = {{.qualified = true}, {.qualified = true},
+                                   {.qualified = true}, {.qualified = true}};
+    pgwt_merge_attachment a = {.pid = 10, .g = 1, .next_q = 1,
+                               .identity_proved = true, .sequence_proved = true};
+    pgwt_merge_observation obs = {.d = 42, .counters = {.known = true}};
+    pgwt_merge_config config = {.mode = PGWT_MERGE_Q, .sources = sources, .source_count = 4,
+        .staged_capacity = 8, .payload_capacity = 8, .attachment_capacity = 4,
+        .frontier_capacity = 2, .dependency_capacity = 2,
+        .attachments = &a, .attachment_count = 1, .observation = obs,
+        .last_observed = obs.counters, .sink = safety_sink, .sink_context = &c};
+    pgwt_merge_status status;
+    uint64_t positions[4] = {0};
+    m = pgwt_merge_create(&config, &status);
+    VERIFY(m);
+    pgwt_merge_input data = {.kind = PGWT_MERGE_DATA, .observation = obs,
+        .record = {.source = 0, .t = 10, .pid = 10, .g = 1, .q = 1,
+            .rank = PGWT_MERGE_TRANS, .identity_known = true, .has_q = true,
+            .dependency = PGWT_MERGE_WAIT, .dependency_id = 7}};
+    VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+    VERIFY(safety_seal(m, positions, 11, obs) == PGWT_MERGE_OK && c.count == 0);
+    pgwt_merge_input text = {.kind = PGWT_MERGE_TEXT, .observation = obs,
+        .record = {.source = 3, .payload = "x", .payload_size = 1, .dependency_id = 7}};
+    VERIFY(safety_feed(m, positions, text) == PGWT_MERGE_OK);
+    VERIFY(c.count == 3 && c.outputs[0].kind == PGWT_MERGE_OUT_TEXT &&
+           c.outputs[1].kind == PGWT_MERGE_OUT_DATA && c.outputs[2].F == 10);
+    /* Availability remains after TEXT leaves the staging queue. */
+    data.record.t = 11; data.record.q = 2;
+    VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+    VERIFY(safety_seal(m, positions, 12, obs) == PGWT_MERGE_OK && c.count == 5);
+    pgwt_merge_input loss = {.kind = PGWT_MERGE_LOSS, .source = 0, .n = 1, .observation = obs};
+    VERIFY(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+    a.next_q = 3;
+    pgwt_merge_input rearm = {.kind = PGWT_MERGE_REARM, .observation = obs,
+        .attachments = &a, .attachment_count = 1, .attachment_proofs_fresh = true,
+        .identity_repaired = true};
+    VERIFY(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+    data.record.t = 12; data.record.q = 3;
+    VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+    VERIFY(safety_seal(m, positions, 13, obs) == PGWT_MERGE_OK && c.count == 6);
+    /* Metadata from the lost epoch cannot satisfy a fresh epoch. */
+    VERIFY(safety_feed(m, positions, text) == PGWT_MERGE_OK && c.count == 9);
+    pgwt_merge_destroy(m);
+
+    c = (safety_capture){0}; memset(positions, 0, sizeof(positions)); a.next_q = 1;
+    m = pgwt_merge_create(&config, &status);
+    VERIFY(m);
+    data.record.dependency = PGWT_MERGE_READY; data.record.dependency_id = 0;
+    data.record.t = 10; data.record.q = 1;
+    VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+    VERIFY(safety_seal(m, positions, 11, obs) == PGWT_MERGE_OK);
+    VERIFY(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+    a.next_q = 2;
+    VERIFY(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+    VERIFY(safety_seal(m, positions, 5, obs) == PGWT_MERGE_OK && c.count == 3);
+    data.record.t = 9; data.record.q = 2;
+    VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_SUSPENDED);
+    VERIFY(c.outputs[3].reason == PGWT_MERGE_CLOCK_REGRESSION);
+    VERIFY(pgwt_merge_get_epoch_report(m, 1).invalid &&
+           !pgwt_merge_get_epoch_report(m, 2).has_frontier &&
+           pgwt_merge_get_report(m).last_invalid_epoch == 1);
+    VERIFY(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+    VERIFY(pgwt_merge_get_report(m).epoch_invalid);
+    VERIFY(safety_seal(m, positions, 12, obs) == PGWT_MERGE_OK);
+    VERIFY(c.count == 5 && c.outputs[4].kind == PGWT_MERGE_OUT_FRONTIER && c.outputs[4].F == 11);
+    VERIFY(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+    VERIFY(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+    data.record.source = 2;
+    VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_SUSPENDED);
+    VERIFY(c.outputs[6].reason == PGWT_MERGE_SEAL_VIOLATION &&
+           pgwt_merge_get_epoch_report(m, 1).invalid && pgwt_merge_get_epoch_report(m, 3).invalid &&
+           pgwt_merge_get_report(m).last_invalid_epoch == 3);
+    /* Retained history is never overwritten on exhaustion. */
+    VERIFY(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+    VERIFY(safety_seal(m, positions, 13, obs) == PGWT_MERGE_SUSPENDED);
+    VERIFY(c.count == 8 && c.outputs[7].reason == PGWT_MERGE_ALLOCATION_FAIL &&
+           !pgwt_merge_get_epoch_report(m, 5).has_frontier && pgwt_merge_get_epoch_report(m, 1).invalid);
+    pgwt_merge_destroy(m);
+
+    for (unsigned mode = PGWT_MERGE_N; mode <= PGWT_MERGE_Q; ++mode) {
+        config.mode = (pgwt_merge_mode)mode;
+        config.attachment_count = 0;
+        c = (safety_capture){0}; memset(positions, 0, sizeof(positions));
+        m = pgwt_merge_create(&config, &status);
+        VERIFY(m);
+        pgwt_merge_input birth = {.kind = PGWT_MERGE_DATA, .observation = obs,
+            .record = {.source = 3, .t = 10, .pid = 30, .g = 1,
+                       .rank = PGWT_MERGE_FORK, .identity_known = true}};
+        VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+        /* FORK and INIT can establish their proof in successive releases. */
+        VERIFY(safety_seal(m, positions, 11, obs) == PGWT_MERGE_OK && c.count == 2);
+        birth.record.t = 11; birth.record.rank = PGWT_MERGE_INIT;
+        VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+        data.record = (pgwt_merge_record){.source = 0, .t = 11, .pid = 30, .g = 1,
+            .rank = PGWT_MERGE_TRANS, .identity_known = true, .has_q = true, .q = 1};
+        VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+        VERIFY(safety_seal(m, positions, 12, obs) == PGWT_MERGE_OK && c.count == 5);
+        VERIFY(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+        rearm.attachment_count = 0;
+        VERIFY(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+        birth.record.t = 12; birth.record.rank = PGWT_MERGE_FORK;
+        VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+        birth.record.rank = PGWT_MERGE_INIT;
+        VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+        VERIFY(safety_seal(m, positions, 13, obs) == PGWT_MERGE_SUSPENDED);
+        VERIFY(c.count == 7 && c.outputs[6].reason == PGWT_MERGE_UNKNOWN_EVIDENCE);
+        pgwt_merge_destroy(m);
+
+        /* An earlier generation must EXIT in output order before a new FORK. */
+        for (unsigned exited = 0; exited <= 1; ++exited) {
+            config.attachment_count = 1;
+            c = (safety_capture){0}; memset(positions, 0, sizeof(positions)); a.next_q = 1;
+            m = pgwt_merge_create(&config, &status);
+            VERIFY(m);
+            birth.record = (pgwt_merge_record){.source = 3, .t = 9, .pid = 10, .g = 1,
+                .rank = PGWT_MERGE_EXIT, .identity_known = true};
+            if (exited) VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+            birth.record.t = 10; birth.record.g = 2; birth.record.rank = PGWT_MERGE_FORK;
+            VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+            birth.record.rank = PGWT_MERGE_INIT;
+            VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+            data.record.pid = 10; data.record.g = 2; data.record.t = 10;
+            VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            /* A later queued generation must not prevent the earlier birth
+             * from being proved in the same complete eligible batch. */
+            birth.record.t = 12; birth.record.rank = PGWT_MERGE_EXIT;
+            VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+            birth.record.t = 13; birth.record.g = 3; birth.record.rank = PGWT_MERGE_FORK;
+            VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+            birth.record.rank = PGWT_MERGE_INIT;
+            VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+            data.record.g = 3; data.record.t = 13;
+            VERIFY(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            status = safety_seal(m, positions, 14, obs);
+            if (exited) VERIFY(status == PGWT_MERGE_OK && c.count == 9);
+            else VERIFY(status == PGWT_MERGE_SUSPENDED && c.count == 1 &&
+                        c.outputs[0].reason == PGWT_MERGE_UNKNOWN_EVIDENCE);
+            pgwt_merge_destroy(m);
+        }
+        /* Unpublished lifecycle records discarded by loss remain history. */
+        config.attachment_count = 0;
+        c = (safety_capture){0}; memset(positions, 0, sizeof(positions));
+        m = pgwt_merge_create(&config, &status);
+        VERIFY(m);
+        birth.record = (pgwt_merge_record){.source = 3, .t = 10, .pid = 30, .g = 1,
+            .rank = PGWT_MERGE_FORK, .identity_known = true};
+        VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+        VERIFY(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+        VERIFY(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+        birth.record.t = 12;
+        VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+        birth.record.rank = PGWT_MERGE_INIT;
+        VERIFY(safety_feed(m, positions, birth) == PGWT_MERGE_OK);
+        VERIFY(safety_seal(m, positions, 13, obs) == PGWT_MERGE_SUSPENDED);
+        VERIFY(c.count == 2 && c.outputs[1].reason == PGWT_MERGE_UNKNOWN_EVIDENCE);
+        pgwt_merge_destroy(m);
+    }
+#undef VERIFY
+    puts("core merge recovery: passed");
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     bool fixture_only = argc > 1 && !strcmp(argv[1], "--fixture-only");
     bool safety_only = argc > 1 && !strcmp(argv[1], "--safety-only");
-    if (!fixture_only && !safety_checks()) return 2;
+    if (!fixture_only && (!safety_checks() || !recovery_checks())) return 2;
     if (safety_only) return 0;
     int path_arg = fixture_only ? 2 : 1;
     const char *path = argc > path_arg ? argv[path_arg] : "contracts/merge-v1/examples.json";
@@ -781,24 +1040,57 @@ int main(int argc, char **argv)
     if (!d && argc <= path_arg) d = read_document("../contracts/merge-v1/examples.json", error, sizeof(error));
     if (!d) { fprintf(stderr, "fixture: %s\n", error); return 2; }
     const json_node *rows = member(d->root, "rows");
-    if (!rows || rows->kind != J_ARRAY || list_length(rows) < 20) {
-        fputs("fixture: fewer than 20 rows\n", stderr); free_document(d); return 2;
+    size_t row_count = list_length(rows);
+    if (!rows || rows->kind != J_ARRAY || !row_count || row_count > SIZE_MAX / 2) {
+        fputs("fixture: invalid row set\n", stderr); free_document(d); return 2;
     }
+    /* Inventory the exact row IDs and modes before replay. Completion is
+     * checked against this set, so a skipped row cannot reduce the denominator. */
+    typedef struct {
+        const json_node *row;
+        const char *mode;
+        uint64_t id;
+        bool ran;
+    } fixture_case;
+    if (row_count * 2 > SIZE_MAX / sizeof(fixture_case)) {
+        fputs("fixture: too many rows\n", stderr); free_document(d); return 2;
+    }
+    fixture_case *cases = calloc(row_count * 2, sizeof(*cases));
+    if (!cases) { fputs("fixture: allocation failed\n", stderr); free_document(d); return 2; }
     size_t total = 0, passed = 0;
     for (const json_node *r = rows->child; r; r = r->next) {
+        uint64_t id = number(member(r, "id"));
+        for (size_t i = 0; i < total; ++i)
+            if (cases[i].id == id) {
+                fputs("fixture: duplicate row id\n", stderr); free(cases); free_document(d); return 2;
+            }
         const json_node *modes = member(r, "modes");
         if (!modes || modes->kind != J_ARRAY || !list_length(modes)) {
-            fputs("fixture: no listed modes\n", stderr); free_document(d); return 2;
+            fputs("fixture: no listed modes\n", stderr); free(cases); free_document(d); return 2;
         }
         for (const json_node *m = modes->child; m; m = m->next) {
             if (!string_is(m, "N") && !string_is(m, "Q")) {
-                fputs("fixture: unknown mode\n", stderr); free_document(d); return 2;
+                fputs("fixture: unknown mode\n", stderr); free(cases); free_document(d); return 2;
             }
-            ++total;
-            if (run_case(d->root, r, m->string)) ++passed;
+            for (const json_node *prior = modes->child; prior != m; prior = prior->next)
+                if (string_is(prior, m->string)) {
+                    fputs("fixture: duplicate mode\n", stderr); free(cases); free_document(d); return 2;
+                }
+            cases[total++] = (fixture_case){.row = r, .mode = m->string, .id = id};
         }
     }
+    for (size_t i = 0; i < total; ++i) {
+        if (run_case(d->root, cases[i].row, cases[i].mode)) ++passed;
+        cases[i].ran = true;
+    }
+    bool complete = true;
+    for (size_t i = 0; i < total; ++i)
+        if (!cases[i].ran) {
+            fprintf(stderr, "fixture: skipped row %" PRIu64 "/%s\n", cases[i].id, cases[i].mode);
+            complete = false;
+        }
     printf("core merge contract: %zu/%zu passed\n", passed, total);
+    free(cases);
     free_document(d);
-    return total == passed ? 0 : 1;
+    return complete && total == passed ? 0 : 1;
 }
