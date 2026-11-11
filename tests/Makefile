@@ -1185,4 +1185,4 @@ endif
 clean: clean-measurement-tools
 clean-measurement-tools:
 	rm -f tools/merge_tie_count
-	$(MAKE) -C bench_nmi_transport clean
+	if [ -d bench_nmi_transport ]; then $(MAKE) -C bench_nmi_transport clean; fi
