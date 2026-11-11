@@ -11,6 +11,10 @@ change is its own reviewed change and invalidates every result that depended on 
   deferred to the full fix (section 7). Sections 2-5 there are superseded by `CONTRACT.md`.
 - `CHALLENGE-fable.md` — Fable's challenge of v1. Two of its claims were corrected by an
   independent audit; the corrections are stated in DESIGN-v2.md section 0.
+- `examples.json` — the 20 examples of `CONTRACT.md` section 5 as a machine-readable fixture
+  (inputs expanded to primitives, expected outputs copied from the Expected column). Transcribed by
+  a separate Sonnet agent that read only `CONTRACT.md`; per-row `transcription_notes` record every
+  judgement. Tests read expected outputs from this file, never from code.
 - `oracle-v2/`, `oracle-v3/` — what two independent answer authors (Claude Sonnet and gpt-6.1-sol)
   were given (`CONTRACT.md` with the expected column blank, `TASK.md`) and what they answered.
   They had no code access.
