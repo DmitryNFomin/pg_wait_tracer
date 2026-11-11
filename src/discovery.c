@@ -355,9 +355,9 @@ static const char *bounded_str(const char *p, const char *end)
     return NULL;
 }
 
-int pgwt_elf_usdt_sites(const char *binary, const char *provider,
+static int elf_usdt_sites(const char *binary, const char *provider,
                         const char *name, int marker,
-                        struct pgwt_exec_site_plan *plan)
+                        struct pgwt_exec_site_plan *plan, bool strict)
 {
     if (!binary || !provider || !name || !plan)
         return -1;
@@ -377,6 +377,15 @@ int pgwt_elf_usdt_sites(const char *binary, const char *provider,
         close(fd);
         return -1;
     }
+    size_t sections;
+    GElf_Ehdr ehdr;
+    if (strict && (!gelf_getehdr(elf, &ehdr) ||
+        ehdr.e_ident[EI_CLASS] != ELFCLASS64 || ehdr.e_ident[EI_DATA] != ELFDATA2LSB ||
+        elf_getshdrnum(elf, &sections) != 0 || sections == 0)) {
+        elf_end(elf);
+        close(fd);
+        return -1;
+    }
 
     /* stapsdt base correction. sdt.h records, per note, the link-time
      * address of the `_.stapsdt.base` anchor; a prelinked/relocated image
@@ -389,22 +398,35 @@ int pgwt_elf_usdt_sites(const char *binary, const char *provider,
 
     int added = 0;
     int rc_overflow = 0;
+    int malformed = 0;
     size_t shstrndx = 0;
-    elf_getshdrstrndx(elf, &shstrndx);
+    if (elf_getshdrstrndx(elf, &shstrndx) != 0 && strict)
+        malformed = 1;
 
+    size_t visited = 0;
     Elf_Scn *scn = NULL;
     while ((scn = elf_nextscn(elf, scn)) != NULL) {
+        visited++;
         GElf_Shdr shdr;
-        if (gelf_getshdr(scn, &shdr) == NULL)
+        if (gelf_getshdr(scn, &shdr) == NULL) {
+            malformed = 1;
             continue;
-        if (shdr.sh_type != SHT_NOTE)
+        }
+        const char *sname = strict ? elf_strptr(elf, shstrndx, shdr.sh_name) : NULL;
+        if (strict && !sname) malformed = 1;
+        if (shdr.sh_type != SHT_NOTE) {
+            if (strict && sname && !strcmp(sname, ".note.stapsdt")) malformed = 1;
             continue;
-        const char *sname = elf_strptr(elf, shstrndx, shdr.sh_name);
+        }
+        if (!strict) sname = elf_strptr(elf, shstrndx, shdr.sh_name);
+        if (!sname) malformed = 1;
         if (!sname || strcmp(sname, ".note.stapsdt") != 0)
             continue;
         Elf_Data *data = elf_getdata(scn, NULL);
-        if (!data || !data->d_buf)
+        if (!data || !data->d_buf || (strict && data->d_size != shdr.sh_size)) {
+            malformed = 1;
             continue;
+        }
 
         const char *buf = (const char *)data->d_buf;
         size_t len = data->d_size;
@@ -415,23 +437,29 @@ int pgwt_elf_usdt_sites(const char *binary, const char *provider,
             memcpy(&descsz, buf + off + 4, 4);
             memcpy(&type, buf + off + 8, 4);
             size_t nm_off = off + 12;
-            size_t nm_pad = (namesz + 3u) & ~3u;
+            size_t nm_pad = ((size_t)namesz + 3u) & ~(size_t)3u;
             size_t ds_off = nm_off + nm_pad;
-            size_t ds_pad = (descsz + 3u) & ~3u;
+            size_t ds_pad = ((size_t)descsz + 3u) & ~(size_t)3u;
             size_t next = ds_off + ds_pad;
             /* Any arithmetic that leaves the section is a malformed note
              * table: stop, do not resynchronise on a guess. */
-            if (next <= off || ds_off > len || next > len)
+            if (next <= off || ds_off > len || next > len) {
+                malformed = 1;
                 break;
+            }
             off = next;
 
             if (type != 3 /* NT_STAPSDT */)
                 continue;
-            if (namesz != 8 || strncmp(buf + nm_off, "stapsdt", 8) != 0)
+            if (namesz != 8 || strncmp(buf + nm_off, "stapsdt", 8) != 0) {
+                malformed = 1;
                 continue;
+            }
             /* loc + base + semaphore, then three NUL-terminated strings. */
-            if (descsz < 3 * sizeof(uint64_t) + 3)
+            if (descsz < 3 * sizeof(uint64_t) + 3) {
+                malformed = 1;
                 continue;
+            }
 
             uint64_t loc = 0, note_base = 0;
             memcpy(&loc, buf + ds_off, 8);
@@ -440,14 +468,20 @@ int pgwt_elf_usdt_sites(const char *binary, const char *provider,
             const char *p = buf + ds_off + 24;
             const char *dend = buf + ds_off + descsz;
             const char *prov = bounded_str(p, dend);
-            if (!prov) continue;
+            if (!prov) { malformed = 1; continue; }
             const char *pname = bounded_str(prov + strlen(prov) + 1, dend);
-            if (!pname) continue;
+            if (!pname) { malformed = 1; continue; }
+            if (strict && !bounded_str(pname + strlen(pname) + 1, dend)) {
+                malformed = 1;
+                continue;
+            }
 
             if (strcmp(prov, provider) != 0 || strcmp(pname, name) != 0)
                 continue;
-            if (loc == 0)
+            if (loc == 0) {
+                malformed = 1;
                 continue;   /* 0 is the ELF header, never a probe */
+            }
 
             if (plan->n_sites >= PGWT_MAX_USDT_SITES) {
                 rc_overflow = 1;
@@ -466,18 +500,36 @@ int pgwt_elf_usdt_sites(const char *binary, const char *provider,
             s->canonical = 0;
             added++;
         }
+        if (off != len) malformed = 1;
         if (rc_overflow)
             break;
     }
+    if (strict && visited + 1 != sections) malformed = 1;
 
     elf_end(elf);
     close(fd);
 
+    if (strict && malformed)
+        return -1;
     if (rc_overflow) {
         plan->refusal = PGWT_EXEC_SITES_OVERFLOW;
         return -1;
     }
     return added;
+}
+
+int pgwt_elf_usdt_sites(const char *binary, const char *provider,
+                        const char *name, int marker,
+                        struct pgwt_exec_site_plan *plan)
+{
+    return elf_usdt_sites(binary, provider, name, marker, plan, false);
+}
+
+int pgwt_elf_usdt_sites_checked(const char *binary, const char *provider,
+                                const char *name, int marker,
+                                struct pgwt_exec_site_plan *plan)
+{
+    return elf_usdt_sites(binary, provider, name, marker, plan, true);
 }
 
 int pgwt_exec_sites_select(struct pgwt_exec_site_plan *plan)

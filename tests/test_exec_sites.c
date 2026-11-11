@@ -42,7 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <elf.h>
+#include <libelf.h>
 
 static int run = 0, failed = 0;
 #define CHECK(c, ...) do { \
@@ -51,6 +51,10 @@ static int run = 0, failed = 0;
                     printf("\n"); } \
     } while (0)
 
+/* The generated ELF fixtures below can run on macOS with libelf too.
+ * This mode runs these fixtures alone; registered Linux builds still run
+ * every existing selector and ELF assembler/proc-self test. */
+#ifndef PGWT_TEST_STRICT_READER_ONLY
 /* ── The probe notes this binary carries ──────────────────────────────── */
 
 /* sys/sdt.h's base anchor, verbatim in effect: a weak hidden symbol every
@@ -536,10 +540,107 @@ static void test_elf_refusals(void)
     }
 }
 
+#endif /* !PGWT_TEST_STRICT_READER_ONLY */
+
+/* Strict capability inspection must distinguish absent notes from broken
+ * metadata. Construct ELF64 files directly, so these fixtures do not depend
+ * on the host assembler, installed PostgreSQL, or sys/sdt.h. */
+static void test_strict_elf_notes(void)
+{
+    static const char names[] = "\0.shstrtab\0.note.stapsdt\0";
+    static const char provider[] = "postgresql";
+    static const char probe[] = "query__execute__start";
+    unsigned char image[1024] = {0};
+    Elf64_Ehdr eh = {0};
+    memcpy(eh.e_ident, ELFMAG, SELFMAG);
+    eh.e_ident[EI_CLASS] = ELFCLASS64;
+    eh.e_ident[EI_DATA] = ELFDATA2LSB;
+    eh.e_ident[EI_VERSION] = EV_CURRENT;
+    eh.e_type = ET_EXEC;
+    eh.e_machine = EM_X86_64;
+    eh.e_version = EV_CURRENT;
+    eh.e_ehsize = sizeof(eh);
+    eh.e_shoff = sizeof(eh);
+    eh.e_shentsize = sizeof(Elf64_Shdr);
+    eh.e_shnum = 3;
+    eh.e_shstrndx = 1;
+    Elf64_Shdr sh[3] = {0};
+    sh[1].sh_name = 1;
+    sh[1].sh_type = SHT_STRTAB;
+    sh[1].sh_offset = sizeof(eh) + sizeof(sh);
+    sh[1].sh_size = sizeof(names);
+    sh[1].sh_addralign = 1;
+    sh[2].sh_name = 11;
+    sh[2].sh_type = SHT_NOTE;
+    sh[2].sh_offset = (sh[1].sh_offset + sizeof(names) + 3) & ~3ULL;
+    sh[2].sh_addralign = 4;
+    size_t note_off = sh[2].sh_offset;
+    uint32_t hdr[] = {8, 24 + sizeof(provider) + sizeof(probe) + 1, 3};
+    uint64_t addresses[] = {0x401000, 0, 0x402000};
+    memcpy(image + note_off, hdr, sizeof(hdr));
+    memcpy(image + note_off + 12, "stapsdt", 8);
+    memcpy(image + note_off + 20, addresses, sizeof(addresses));
+    memcpy(image + note_off + 44, provider, sizeof(provider));
+    memcpy(image + note_off + 44 + sizeof(provider), probe, sizeof(probe));
+    sh[2].sh_size = (20 + hdr[1] + 3) & ~3U;
+    size_t size = note_off + sh[2].sh_size;
+    memcpy(image, &eh, sizeof(eh));
+    memcpy(image + eh.e_shoff, sh, sizeof(sh));
+    memcpy(image + sh[1].sh_offset, names, sizeof(names));
+    char path[] = "/tmp/pgwt_strict_sdtXXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) { perror("strict fixture"); exit(2); }
+#define SAVE_FIXTURE() do { \
+    if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) != 0 || \
+        write(fd, image, size) != (ssize_t)size) exit(2); \
+} while (0)
+#define COUNT_NOTES() pgwt_elf_usdt_sites_checked(path, provider, probe, PGWT_SITE_EXEC_START, &plan)
+    struct pgwt_exec_site_plan plan = {0};
+    SAVE_FIXTURE();
+    CHECK(COUNT_NOTES() == 1 && plan.n_sites == 1 && plan.sites[0].elf_addr == addresses[0],
+          "strict reader finds SDT note with semaphore");
+    uint64_t zero = 0;
+    memcpy(image + note_off + 36, &zero, sizeof(zero));
+    SAVE_FIXTURE(); memset(&plan, 0, sizeof(plan));
+    CHECK(COUNT_NOTES() == 1 && plan.n_sites == 1,
+          "strict reader finds SDT note without semaphore");
+    /* A different requested note is absent in a valid SDT table. */
+    memset(&plan, 0, sizeof(plan));
+    CHECK(pgwt_elf_usdt_sites_checked(path, provider, "query__plan__start",
+                                    PGWT_SITE_EXEC_START, &plan) == 0 && plan.n_sites == 0,
+          "strict reader returns absence for missing phase in valid notes");
+    /* Keep a valid ELF but remove the note section entirely. */
+    sh[2].sh_type = SHT_PROGBITS; sh[2].sh_name = 0;
+    memcpy(image + eh.e_shoff, sh, sizeof(sh));
+    SAVE_FIXTURE(); memset(&plan, 0, sizeof(plan));
+    CHECK(COUNT_NOTES() == 0 && plan.n_sites == 0,
+          "strict reader returns absence for binary without SDT notes");
+    sh[2].sh_type = SHT_NOTE; sh[2].sh_name = 11;
+    /* Descriptor crosses the section boundary, but the ELF is readable. */
+    hdr[1] = 1000;
+    memcpy(image + note_off, hdr, sizeof(hdr));
+    memcpy(image + eh.e_shoff, sh, sizeof(sh));
+    SAVE_FIXTURE(); memset(&plan, 0, sizeof(plan));
+    CHECK(COUNT_NOTES() == -1,
+          "strict reader rejects corrupt descriptor as error, never absence");
+    hdr[1] = 24 + sizeof(provider) + sizeof(probe) + 1;
+    memcpy(image + note_off, hdr, sizeof(hdr));
+    /* Restore the header, then physically truncate the section bytes. */
+    size -= 8;
+    SAVE_FIXTURE(); memset(&plan, 0, sizeof(plan));
+    CHECK(COUNT_NOTES() == -1,
+          "strict reader rejects truncated note section as error, never absence");
+    close(fd); unlink(path);
+#undef COUNT_NOTES
+#undef SAVE_FIXTURE
+}
+
 int main(void)
 {
     printf("test_exec_sites: #464 canonical execution probe sites\n");
 
+    test_strict_elf_notes();
+#ifndef PGWT_TEST_STRICT_READER_ONLY
     /* Keep the instrumented functions reachable so the compiler cannot
      * discard them (and with them their notes). */
     pgwt_test_canonical_fn();
@@ -559,6 +660,7 @@ int main(void)
     test_runtime_addr();
     test_elf_notes_in_this_binary();
     test_elf_refusals();
+#endif
 
     printf("test_exec_sites: %d/%d checks passed\n", run - failed, run);
     if (failed) {

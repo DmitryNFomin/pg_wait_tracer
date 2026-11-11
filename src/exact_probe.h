@@ -195,6 +195,9 @@ void pgwt_exact_probe_core_cleanup(struct pgwt_exact_probe_core *core,
                                    void *ctx);
 
 #ifndef PGWT_SERVER
+/* Read-only independent measurement; never changes attach policy or fails
+ * daemon startup. Caller supplies start_wall_ns captured at init entry. */
+void pgwt_exact_probe_measure_phases(struct pgwt_daemon *d);
 int pgwt_exact_probe_startup(struct pgwt_daemon *d);
 void pgwt_exact_probe_reconcile_sampled(struct pgwt_daemon *d);
 int pgwt_exact_probe_acquire(struct pgwt_daemon *d, uint64_t generation,

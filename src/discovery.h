@@ -224,6 +224,13 @@ int pgwt_elf_usdt_sites(const char *binary, const char *provider,
                         const char *name, int marker,
                         struct pgwt_exec_site_plan *plan);
 
+/* Capability measurement variant: malformed notes/ELF metadata are errors,
+ * not missing notes. Same enumeration, no attachment, ELF64 little-endian.
+ * A fresh plan is required for each name. */
+int pgwt_elf_usdt_sites_checked(const char *binary, const char *provider,
+                                const char *name, int marker,
+                                struct pgwt_exec_site_plan *plan);
+
 /* Resolve a FUNC symbol's link-time range [lo, hi). Requires STT_FUNC with
  * a NON-ZERO st_size: a sizeless symbol cannot bound anything, and treating
  * it as [v, v) would silently admit no site (or, with a sloppy comparison,
