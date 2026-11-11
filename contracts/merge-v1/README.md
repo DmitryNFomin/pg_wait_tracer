@@ -32,5 +32,16 @@ were not caught because no row exercised them. Astra wrote the three rows from t
 (`oracle-rows21-23/QUESTION-astra.md`, `ANSWER-astra.md`); Sonnet and gpt-6.1-sol answered them
 independently and matched on every output. No rule text changed.
 
+Rows 24-31 and DECISIONS 25/27/28 with amendments 25a/27a/28a (added 2026-11-11): the P1 code
+review (Opus) reproduced behaviours the text governs but no row exercised: late DATA while
+suspended, a backend created after the epoch starts, a dependency arriving after the record that
+needs it, and REARM (restart after loss) on a suspended and on an active epoch. Astra wrote rows
+24-28 from the contract alone and proposed DECISIONS 25, 27, 28 where the text did not decide
+(`oracle-rows24-28/`). Fable challenged the decisions; the lead wrote the amendments 25a, 27a,
+28a from that challenge and rows 29-31 that exercise them (`oracle-rows29-31/`). Sonnet and
+gpt-6.1-sol matched every expected output of rows 24-31 independently, and rows 24-28 also match
+the reviewer's own expected outputs. New fixture fields: `REARM` inputs, identity `D`, and
+per-mode `epoch_invalid` and `statuses` expectations.
+
 After v3 the lead added the closed list of VOID reasons to section 4 (marked in the text). The
 v3 labels the authors guessed differ only in wording from that list.

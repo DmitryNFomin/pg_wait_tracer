@@ -85,6 +85,10 @@
   "B": {
    "pid": 20,
    "g": 1
+  },
+  "D": {
+   "pid": 30,
+   "g": 1
   }
  },
  "rows": [
@@ -2188,6 +2192,1006 @@
    },
    "transcription_notes": [
     "Added 2026-11-11 to cover mutant M12 (frontier emitted while suspended). Expected output by Astra, confirmed independently by Sonnet and gpt-6.1-sol (contract only, no code); transcribed by the lead."
+   ]
+  },
+  {
+   "id": 24,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 1,
+     "d": 11,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 1,
+     "d": 11,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 1,
+     "d": 11,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 1,
+     "d": 11,
+     "C": "C0"
+    },
+    {
+     "kind": "CHECK",
+     "d": 12,
+     "C": "Ce"
+    },
+    {
+     "kind": "DATA",
+     "source": "P1",
+     "pos": 2,
+     "t": 9,
+     "who": "A",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "A9",
+     "d": 13,
+     "C": "Ce"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 12,
+       "C": "Ce",
+       "reason": "counter_change"
+      },
+      {
+       "kind": "VOID",
+       "d": 13,
+       "C": "Ce",
+       "reason": "seal_violation"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Reject A9; epoch invalid including published F10. Suspension does not disable arrival fault detection.",
+     "epoch_invalid": true
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 12,
+       "C": "Ce",
+       "reason": "counter_change"
+      },
+      {
+       "kind": "VOID",
+       "d": 13,
+       "C": "Ce",
+       "reason": "seal_violation"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Reject A9; epoch invalid including published F10. Suspension does not disable arrival fault detection.",
+     "epoch_invalid": true
+    }
+   },
+   "transcription_notes": [
+    "A9 pos 2 on P1 (after P1 boundary pos 1). epoch_invalid=true encodes 'mark/report the epoch invalid, including its published F10'."
+   ]
+  },
+  {
+   "id": 25,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": {
+    "note": "only A/B attached; D has no separate attachment/sequence-initialization proof"
+   },
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 2,
+     "t": 10,
+     "who": "D",
+     "rec": "INIT",
+     "label": "INIT_D10",
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D10",
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 2,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 1,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 1,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 3,
+     "d": 12,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10
+      },
+      {
+       "kind": "DATA",
+       "label": "INIT_D10",
+       "who": "D",
+       "t": 10
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D10",
+       "who": "D",
+       "t": 10
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Q same as N (DECISION 25)."
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10
+      },
+      {
+       "kind": "DATA",
+       "label": "INIT_D10",
+       "who": "D",
+       "t": 10
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D10",
+       "who": "D",
+       "t": 10
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Q same as N (DECISION 25)."
+    }
+   },
+   "transcription_notes": [
+    "D=(pid=30,g=1) defined in the identities file; lifecycle records omit q. start carries a note only: A/B attached, D has no separate proof. Labels FORK_D10/INIT_D10/TRANS_D10 chosen; d=12,C=C0 attached to every input."
+   ]
+  },
+  {
+   "id": 26,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 10,
+     "who": "A",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "A10",
+     "requires": "x"
+    },
+    {
+     "kind": "TEXT",
+     "source": "L",
+     "pos": 1,
+     "name": "x"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 2
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 1
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 1
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 2
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 50,
+     "pos": 3
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 50,
+     "pos": 2
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 50,
+     "pos": 2
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 50,
+     "pos": 3
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "TEXT",
+       "name": "x"
+      },
+      {
+       "kind": "DATA",
+       "label": "A10",
+       "who": "A",
+       "t": 10
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 49,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Both initial arrivals at W=0 staged; dependency available before first eligible-batch validation."
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "TEXT",
+       "name": "x"
+      },
+      {
+       "kind": "DATA",
+       "label": "A10",
+       "who": "A",
+       "t": 10
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 49,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Both initial arrivals at W=0 staged; dependency available before first eligible-batch validation."
+    }
+   },
+   "transcription_notes": [
+    "No d/C attached (counters remain C0, none stated). TEXT pos 1 on L, so L boundaries are pos 2 and 3."
+   ]
+  },
+  {
+   "id": 27,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "LOSS",
+     "source": "P0",
+     "n": 1,
+     "d": 15,
+     "C": "Ce"
+    },
+    {
+     "kind": "REARM",
+     "d": 16,
+     "C": "Ce",
+     "baseline": "Ce",
+     "proofs": {
+      "A": {
+       "next_q": 1
+      },
+      "B": {
+       "next_q": 1
+      }
+     }
+    },
+    {
+     "kind": "DATA",
+     "source": "P1",
+     "pos": 2,
+     "t": 9,
+     "who": "A",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "A9",
+     "d": 20,
+     "C": "Ce"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 12,
+     "pos": 2,
+     "d": 21,
+     "C": "Ce"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 12,
+     "pos": 3,
+     "d": 21,
+     "C": "Ce"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 12,
+     "pos": 2,
+     "d": 21,
+     "C": "Ce"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 12,
+     "pos": 2,
+     "d": 21,
+     "C": "Ce"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 15,
+       "C": "Ce",
+       "reason": "perf_lost"
+      },
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "Ce",
+       "reason": "seal_violation"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Reject A9, suspend new epoch e1, mark/report e0 invalid (F10 disproved). S(12) produces no output (DECISION 27).",
+     "epoch_invalid": true
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 15,
+       "C": "Ce",
+       "reason": "perf_lost"
+      },
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "Ce",
+       "reason": "seal_violation"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Reject A9, suspend new epoch e1, mark/report e0 invalid (F10 disproved). S(12) produces no output (DECISION 27).",
+     "epoch_invalid": true
+    }
+   },
+   "transcription_notes": [
+    "REARM is input index 5; no status expected (accepted). epoch_invalid=true encodes e0 being reported invalid. A9 pos 2 on P1, so S(12) P1 boundary pos 3. Final S(12) outputs nothing (suspended)."
+   ]
+  },
+  {
+   "id": 28,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 10,
+     "who": "A",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "A10",
+     "d": 11,
+     "C": "C0"
+    },
+    {
+     "kind": "REARM",
+     "d": 12,
+     "C": "C0",
+     "baseline": "C0",
+     "proofs": {
+      "A": {
+       "next_q": 2
+      },
+      "B": {
+       "next_q": 1
+      }
+     }
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 2,
+     "d": 13,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 1,
+     "d": 13,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 1,
+     "d": 13,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 1,
+     "d": 13,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "A10",
+       "who": "A",
+       "t": 10
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "REARM rejected without output or state change (DECISION 28); Q next_q(A) stays 1 until release.",
+     "statuses": [
+      {
+       "input_index": 1,
+       "status": "rearm_rejected"
+      }
+     ]
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "A10",
+       "who": "A",
+       "t": 10
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "REARM rejected without output or state change (DECISION 28); Q next_q(A) stays 1 until release.",
+     "statuses": [
+      {
+       "input_index": 1,
+       "status": "rearm_rejected"
+      }
+     ]
+    }
+   },
+   "transcription_notes": [
+    "REARM carries d=12,C=C0 and proofs next_q A=2,B=1 as stated; its status rearm_rejected is on input_index 1. REARM consumes no source position."
+   ]
+  },
+  {
+   "id": 29,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 9,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "D9",
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 2,
+     "t": 10,
+     "who": "D",
+     "rec": "INIT",
+     "label": "INIT_D10",
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 10,
+     "pos": 2,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 10,
+     "pos": 1,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 10,
+     "pos": 1,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 10,
+     "pos": 3,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 3,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 2,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 2,
+     "d": 12,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 4,
+     "d": 12,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 12,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Both modes: at W=10 D9 eligible but D FORK/INIT (t=10) are not, so no creation proof precedes D's first TRANS (DECISION 25a). Later S(11) produces no output (suspended)."
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 12,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "Both modes: at W=10 D9 eligible but D FORK/INIT (t=10) are not, so no creation proof precedes D's first TRANS (DECISION 25a). Later S(11) produces no output (suspended)."
+    }
+   },
+   "transcription_notes": [
+    "D defined in identities file. The VOID arises when S(10) completes (W=10); the later S(11) yields nothing. Only A/B attached (no start override)."
+   ]
+  },
+  {
+   "id": 30,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 11,
+     "pos": 1,
+     "d": 14,
+     "C": "C0"
+    },
+    {
+     "kind": "LOSS",
+     "source": "P0",
+     "n": 1,
+     "d": 15,
+     "C": "Ce"
+    },
+    {
+     "kind": "REARM",
+     "d": 16,
+     "C": "Ce",
+     "baseline": "Ce",
+     "proofs": {
+      "A": {
+       "next_q": 1
+      },
+      "B": {
+       "next_q": 1
+      }
+     }
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 5,
+     "pos": 2,
+     "d": 17,
+     "C": "Ce"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 5,
+     "pos": 2,
+     "d": 17,
+     "C": "Ce"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 5,
+     "pos": 2,
+     "d": 17,
+     "C": "Ce"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 5,
+     "pos": 2,
+     "d": 17,
+     "C": "Ce"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 15,
+       "C": "Ce",
+       "reason": "perf_lost"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "After REARM cutoffs are 5 but F4 is at or below retained F10, so no FRONTIER (DECISION 27a)."
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "FRONTIER",
+       "F": 10,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 15,
+       "C": "Ce",
+       "reason": "perf_lost"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "After REARM cutoffs are 5 but F4 is at or below retained F10, so no FRONTIER (DECISION 27a)."
+    }
+   },
+   "transcription_notes": [
+    "Row 27 start and first three inputs, then S(5) with positions 2 per source. Expected outputs exclude any frontier after REARM; no epoch_invalid stated, so omitted."
+   ]
+  },
+  {
+   "id": 31,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "REARM",
+     "d": 12,
+     "C": "Ce",
+     "baseline": "Ce",
+     "proofs": {
+      "A": {
+       "next_q": 1
+      },
+      "B": {
+       "next_q": 1
+      }
+     }
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 12,
+       "C": "Ce",
+       "reason": "counter_change"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "REARM in active epoch rejected (DECISION 28/28a); observation processed as CHECK(d=12,C=Ce).",
+     "statuses": [
+      {
+       "input_index": 0,
+       "status": "rearm_rejected"
+      }
+     ]
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 12,
+       "C": "Ce",
+       "reason": "counter_change"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": "REARM in active epoch rejected (DECISION 28/28a); observation processed as CHECK(d=12,C=Ce).",
+     "statuses": [
+      {
+       "input_index": 0,
+       "status": "rearm_rejected"
+      }
+     ]
+    }
+   },
+   "transcription_notes": [
+    "Row gives no proof values; used next_q A=1,B=1 as a placeholder (irrelevant, rejected). VOID is from the CHECK treatment of the REARM observation."
    ]
   }
  ]
