@@ -146,6 +146,32 @@ with tempfile.TemporaryDirectory(prefix="pgwt-known-failing-") as temp:
         negative(label, lambda r: check_result(r, **expected),
                  run(root, os_name, release, rc, source=mutant))
 
+    # Exit 79 is reserved for a matching test AND scope, never a global pass.
+    # Collect failures so an unlisted-exit mutant names every affected case.
+    unexpected_79_failures = []
+    for label, os_name, release, source in (
+        ("out-of-scope exit 79", "ubuntu", "6.8.0-31-generic", RUNNER),
+        ("unlisted exit 79", "el8", "4.18.0", mutate("    '" + ENTRY + "'\n", "")),
+        ("different-test entry exit 79", "el8", "4.18.0",
+         mutate(ENTRY, "another_test|675|el8@4.18|exit=79")),
+    ):
+        result = run(root, os_name, release, 79, source=source)
+        try:
+            summary = check_result(result, failed=1)
+        except AssertionError:
+            print(f"  FAIL {label}: {result.stdout}")
+            unexpected_79_failures.append(label)
+            continue
+        print(f"  PASS {label}: failed={summary['failed']}, "
+              f"known-failing={summary['known_failing_count']}; "
+              f"{result.stdout.splitlines()[-1]}; exit={result.returncode}")
+        old = 'elif [[ "$rc" -eq 0 ]]; then\n        passed=$((passed + 1))'
+        new = 'elif [[ "$rc" -eq 0 || "$rc" -eq 79 ]]; then\n        passed=$((passed + 1))'
+        assert source.count(old) == 1
+        negative(label, lambda r: check_result(r, failed=1),
+                 run(root, os_name, release, 79, source=source.replace(old, new, 1)))
+    assert not unexpected_79_failures, unexpected_79_failures
+
     for rc in (1, 42):
         def check_mismatch(result):
             check_result(result, failed=1)
