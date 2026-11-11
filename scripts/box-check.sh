@@ -74,7 +74,7 @@
 #      ever catch) is still reaped on the next call, and is also available
 #      on demand as `make hetzner-sweep`.
 #
-# Each branch (or detached commit's short SHA) gets a remote directory, and a
+# Each invocation gets a private remote directory (pruned after artifact pull), and a
 # box-wide flock serialises concurrent runs (timing tests must not overlap;
 # harmless-but-unnecessary on a private EPHEMERAL box, which nothing else
 # ever touches).
@@ -339,19 +339,14 @@ else
     # END persistent provisioning
 fi
 
-# issue #93: this invocation's start time, used below to tell a FRESH
-# tests/results/ui_live/run.id (written by run_all.sh's own $PGWT_RUN_MARKER,
-# which is always >= this) from a STALE one left over from a previous
-# box-check (tests/results is excluded from the up-rsync above, so the box
-# keeps the last run's ui_live/ between invocations).
+# issue #93: also refuse artifacts whose run.id predates this invocation.
 box_check_start_epoch=$(date +%s)
 
 branch=$(git rev-parse --abbrev-ref HEAD | tr '/' '_')
-# Detached review worktrees must not all collide in pgwt-check/HEAD. The
-# build marker below still handles different working trees at the same SHA.
+# Keep detached runs identifiable by short SHA, never the shared name HEAD.
 [[ "$branch" != HEAD ]] || branch=$(git rev-parse --short HEAD)
 remote_root="${PGWT_BOX_DIR:-pgwt-check}"
-remote_dir="$remote_root/$branch"
+remote_dir=""
 
 # EPHEMERAL boxes get a brand-new host key every run (a fresh IP each time)
 # -- StrictHostKeyChecking=no is needed so ssh/rsync don't refuse an
@@ -366,6 +361,35 @@ ssh_strict=""
 rsync_e="ssh"
 [[ -n "$ssh_strict" ]] && rsync_e="ssh $ssh_strict"
 
+# An atomic mktemp on the BOX guarantees uniqueness even for two clones with
+# the same branch, tree, timestamp and local PID. Syncs cannot overwrite each
+# other, so keep them outside the flock: CI waits only for build/tests as before.
+# EPHEMERAL uses the same isolation; its existing VM cleanup prunes the directory
+# too (KEEP=1 retains it for debugging). Persistent runs remove only their own
+# directory after pulling artifacts, on failure as well as success.
+source_manifest=""
+run_cleanup() {
+    local rc=$?
+    [[ -z "$source_manifest" ]] || rm -f "$source_manifest" "$source_manifest.paths"
+    if [[ "$EPHEMERAL" == 1 ]]; then
+        ephemeral_cleanup
+    elif [[ -n "$remote_dir" ]]; then
+        if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$target" "sudo rm -rf -- '$remote_dir'"; then
+            echo "box-check: WARNING: could not prune $target:$remote_dir; remove it manually" >&2
+            rc=1
+        fi
+    fi
+    exit "$rc"
+}
+trap run_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+# shellcheck disable=SC2086,SC2029
+remote_dir=$(ssh -o BatchMode=yes $ssh_strict "$target" \
+    "mkdir -p '$remote_root' && mktemp -d '$remote_root/$branch.XXXXXXXXXX'") || exit 1
+[[ "$remote_dir" == "$remote_root/$branch."* && "$remote_dir" != *$'\n'* ]] || { echo 'box-check: invalid private directory response' >&2; remote_dir=""; exit 1; }
+
 # #622: the launcher knows which tier it provisioned. A caller override
 # stays authoritative, including an empty/invalid declaration that must fail.
 if [[ "${PGWT_EXPECT_PHASE_PROBES+x}" != "x" ]]; then
@@ -376,16 +400,14 @@ if [[ "${PGWT_EXPECT_PHASE_PROBES+x}" != "x" ]]; then
     fi
 fi
 
-# Record exactly what tree is about to be synced (the rsync two lines
-# below sends ./, the Mac-side working tree, as-is) -- recorded here,
-# immediately before that rsync, so nothing can change the tree in
-# between and make this drift from what was actually tested. Without
-# this a "box-check passed" log carries no commit id, so it can be true
-# of a tree that no longer exists (e.g. a branch rebased after its gate
-# run) and still look like evidence. A reviewer matches these two values
-# against the PR head and `scripts/tree-hash.sh` output.
+# Record the announced tree and its exact file set. On the box, hash the
+# synced BYTES before building: concurrent local edits or rsync's size/mtime
+# quick check must cause refusal instead of a false built-from certificate.
 commit=$(git rev-parse HEAD) || exit 1
 tree_hash=$(scripts/tree-hash.sh) || exit 1
+source_manifest=$(mktemp) || exit 1
+git ls-tree -rz "$tree_hash" > "$source_manifest" || exit 1
+git ls-tree -rz --name-only "$tree_hash" > "$source_manifest.paths" || exit 1
 echo "box-check: source commit=$commit tree-hash=$tree_hash (build provenance pending)" | tee -a "$log"
 echo "box-check: target=$target OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES -> $remote_dir (log: $log)" | tee -a "$log"
 ssh -o BatchMode=yes $ssh_strict "$target" \
@@ -462,6 +484,16 @@ rsync -az --delete -e "$rsync_e" \
     "${junk_excludes[@]}" \
     "${object_excludes[@]}" \
     ./ "$target:$remote_dir/" || exit 1
+# The Git tree also contains tracked evidence under tests/results/, which the
+# ordinary source sync excludes. Overlay the EXACT announced file set so the
+# remote hash can equal tree-hash.sh, including those archived bytes. This does
+# not transfer untracked/ignored local results or build products. Explicit -r
+# is needed with --files-from; --checksum also closes rsync's size/mtime shortcut
+# if a local edit landed during the first sync. Verification still refuses any
+# bytes that changed since the announced tree. Both transfers stay outside the
+# lock, in this invocation's private directory.
+rsync -azr --checksum --from0 --files-from="$source_manifest.paths" -e "$rsync_e" ./ "$target:$remote_dir/" || exit 1
+rsync -az -e "$rsync_e" "$source_manifest" "$target:$remote_dir/.pgwt-box-source-manifest" || exit 1
 
 pgarg=""; [[ -n "$PG" ]] && pgarg="--pg-version $PG"
 # The remote command below runs tests/run_all.sh via sudo, and default
@@ -512,10 +544,11 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
 # web/pgwt and fails loudly if it is missing, same as the other binaries).
 #
-# box-build.sh invalidates all excluded build outputs with make clean-box
-# unless their marker certifies this exact source tree. It removes the marker
-# BEFORE any build, restores it only on complete success, and logs built-from
-# alongside tree-hash. Keep this inside the existing lock on both box paths.
+# box-build.sh verifies synced bytes, then unconditionally invalidates outputs
+# with make clean-box. It removes the marker BEFORE verification/build, restores
+# it only on complete success, and logs built-from alongside tree-hash.
+# Keep this inside the existing lock on both box paths. Lock wait messages and
+# EPHEMERAL's uncontended acquisition are unchanged; rsync adds no lock time.
 # It also retains #567's unconditional tests clean before build-tests.
 # issue #615: build-tests forwards the top-level resolved libbpf headers and
 # library to the tests sub-make. On EL8 these must be the bundled versions;

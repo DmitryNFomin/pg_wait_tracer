@@ -5,8 +5,8 @@
 # hash. Box-check evidence likewise identifies tested bytes by tree-hash=:
 # a reconciliation commit can move the PR tip without changing its tree,
 # and a log's commit= alone cannot identify the tree actually tested.
-# This script compares every reachable box-check log's tree to the PR tip's
-# tree and reports the newest log's divergence when none matches.
+# The newest log with commit= equal to the PR tip decides the verdict. Older
+# commits are ignored, including pre-#861 logs which cannot prove provenance.
 #
 # It also checks a second, unrelated-looking but same-family leak: a PR
 # whose branch is named agent/<N>-<slug> (asserting it addresses issue #N,
@@ -113,8 +113,17 @@ if [ -z "$WT_PATH" ] || [ ! -d "$WT_PATH/tests/results" ]; then
   echo "EVIDENCE-MISSING"
   finding=1
 else
-  mapfile -t LOGS < <(find "$WT_PATH/tests/results" -maxdepth 1 -type f \
-      -name 'box-check-*.log' 2>/dev/null | sort)
+  mapfile -t LOGS < <(/usr/bin/python3 - "$WT_PATH/tests/results" <<'PYLOGS'
+import glob, os, re, sys
+def newest_key(path):
+    name = os.path.basename(path)
+    stamp = re.search(r"(\d{8}-\d{6})\.log$", name)
+    return (stamp.group(1) if stamp else name, name)
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "box-check-*.log")), key=newest_key):
+    if os.path.isfile(path):
+        print(path)
+PYLOGS
+  )
   if [ "${#LOGS[@]}" -eq 0 ]; then
     echo "EVIDENCE-MISSING"
     finding=1
@@ -123,63 +132,74 @@ else
       echo "UNKNOWN: cannot resolve tip tree for $HEAD_SHA: $(cat "$TMP/tree.err")"
       exit 3
     fi
-    commits=()
-    trees=()
+    legacy_logs=()
+    selected=""
+    # Filename timestamps order runs. Only the newest matching-tip header
+    # decides the verdict; historical logs cannot poison or rescue that run.
     for log in "${LOGS[@]}"; do
       if [ ! -r "$log" ]; then
         echo "UNKNOWN: $log is not readable"
         exit 3
       fi
       line=$(/usr/bin/grep -h '^box-check: commit=' "$log" | tail -1)
-      c=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=([0-9a-f]+)( .*)?$/\1/p')
-      if [ -z "$c" ]; then
-        echo "UNKNOWN: $log has no parseable commit= header"
-        exit 3
+      if [ -z "$line" ]; then
+        line=$(/usr/bin/grep -h '^box-check: source commit=' "$log" | tail -1 | /usr/bin/sed 's/box-check: source /box-check: /')
       fi
+      c=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=([0-9a-f]+)( .*)?$/\1/p')
+      if [[ "$line" != *' built-from='* ]]; then
+        legacy_logs+=("$log")
+      fi
+      [ "$c" = "$HEAD_SHA" ] || continue
+      selected="$log"
+      selected_line="$line"
+    done
+    for log in "${legacy_logs[@]}"; do
+      [ "$log" = "$selected" ] || echo "$log ignored (pre-#861 format)"
+    done
+    if [ -z "$selected" ]; then
+      echo "EVIDENCE-MISSING (no log for tip commit=$HEAD_SHA)"
+      finding=1
+    else
+      log="$selected"
+      line="$selected_line"
+      c="$HEAD_SHA"
       t=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=[0-9a-f]+ tree-hash=([0-9a-f]+)([[:space:]].*)?$/\1/p')
       if [ -z "$t" ]; then
         echo "UNKNOWN: $log has no parseable tree-hash= header"
         exit 3
       fi
       b=$(printf '%s' "$line" | /usr/bin/sed -nE 's/^box-check: commit=[0-9a-f]+ tree-hash=[0-9a-f]+ built-from=([0-9a-f]+)([[:space:]].*)?$/\1/p')
-      # Legacy logs cannot prove binary provenance; require a new box run.
       if [ -z "$b" ] || [ "$b" != "$t" ]; then
         echo "UNKNOWN: $log built-from=${b:-missing} differs from tree-hash=$t; rerun box-check"
         exit 3
       fi
-      commits+=("$c")
-      trees+=("$t")
-    done
-    match=""
-    for i in "${!trees[@]}"; do
-      [ "${trees[$i]}" = "$TIP_TREE" ] && { match="${commits[$i]}"; break; }
-    done
-    if [ -n "$match" ]; then
-      echo "EVIDENCE-OK $match (tree $TIP_TREE)"
-    else
-      # Compare the most recent log's tree (logs sorted by filename, which
-      # embeds a zero-padded timestamp, so the last element is the newest).
-      LOGGED_TREE="${trees[${#trees[@]}-1]}"
-      if ! git cat-file -e "$LOGGED_TREE" 2>/dev/null; then
-        echo "EVIDENCE-UNIDENTIFIED logged tree $LOGGED_TREE unresolvable (FINDING)"
-        finding=1
+      if [ "$t" = "$TIP_TREE" ]; then
+        echo "EVIDENCE-OK $c (tree $TIP_TREE)"
       else
-        if ! git diff-tree -r --name-status "$TIP_TREE" "$LOGGED_TREE" > "$TMP/tree.diff" 2>"$TMP/diff.err"; then
-          echo "UNKNOWN: cannot compare tip tree $TIP_TREE to logged tree $LOGGED_TREE: $(cat "$TMP/diff.err")"
-          exit 3
-        fi
-        echo "EVIDENCE-TREE-DRIFT tip=$TIP_TREE logged=$LOGGED_TREE (diff: tip -> logged)"
-        if /usr/bin/awk -F'\t' '{ for (i=2; i<=NF; i++) if ($i ~ /^"?(src|tests)\//) found=1 } END { exit !found }' "$TMP/tree.diff"; then
-          echo "FINDING: src/ or tests/ changed"
+        # Compare the newest matching-tip log's tree.
+        LOGGED_TREE="$t"
+        if ! git cat-file -e "$LOGGED_TREE" 2>/dev/null; then
+          echo "EVIDENCE-UNIDENTIFIED logged tree $LOGGED_TREE unresolvable (FINDING)"
           finding=1
         else
-          echo "NOTE: only paths outside src/ and tests/ changed"
+          if ! git diff-tree -r --name-status "$TIP_TREE" "$LOGGED_TREE" > "$TMP/tree.diff" 2>"$TMP/diff.err"; then
+            echo "UNKNOWN: cannot compare tip tree $TIP_TREE to logged tree $LOGGED_TREE: $(cat "$TMP/diff.err")"
+            exit 3
+          fi
+          echo "EVIDENCE-TREE-DRIFT tip=$TIP_TREE logged=$LOGGED_TREE (diff: tip -> logged)"
+          if /usr/bin/awk -F'\t' '{ for (i=2; i<=NF; i++) if ($i ~ /^"?(src|tests)\//) found=1 } END { exit !found }' "$TMP/tree.diff"; then
+            echo "FINDING: src/ or tests/ changed"
+            finding=1
+          else
+            echo "NOTE: only paths outside src/ and tests/ changed"
+          fi
+          cat "$TMP/tree.diff"
         fi
-        cat "$TMP/tree.diff"
       fi
     fi
   fi
 fi
+
 
 # ---- [2] closing-keyword leak -----------------------------------------------
 # Only applies when the branch name itself asserts which issue(s) it
