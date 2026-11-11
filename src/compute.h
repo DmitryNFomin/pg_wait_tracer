@@ -497,12 +497,8 @@ struct pgwt_events_result {
      * skewed measurement was silently absorbed on this response while
      * time_model counted it.
      *
-     * Same name, same per-record arithmetic; not guaranteed to be the same
-     * NUMBER on every window. time_model folds a SECOND term into its
-     * counter (a negative DB − CPU* − Σwaits residual, compute.c's
-     * `if (resid < 0)`), which this per-event table has no analogue for. The
-     * two agree where that residual is non-negative, which is what
-     * tests/test_window_clip.c 11e asserts on a single-gap window. */
+     * The integer CPU-gap residual and skew clamp are shared by the raw
+     * handlers. No extra floating-point DB-minus-waits clamp is applied. */
     double offcpu_ms;
     double cpu_clamped_ms;
     int    has_measured_cpu;
@@ -567,13 +563,8 @@ struct pgwt_sessions_result {
      *   has_measured_cpu == 0 — no in-window gap carried a measurement, so
      *       cpu_pct is the unsplit gap wall and every offcpu_ms is 0.
      *
-     * pgwt_compute_top_sessions_from_summaries leaves it 0 ON PURPOSE: the
-     * per-second record's struct pgwt_summary_session stores `cpu_ns += tns`
-     * — WALL (src/summary_writer.c) — and the format has no measured column,
-     * so that routing cannot report a measurement and says so. That is a
-     * REAL divergence at the 120 s routing threshold, not a comparability
-     * artefact, pinned as an identity (raw cpu + raw offcpu == summary cpu)
-     * in tests/test_window_clip.c section 13d.
+     * The summary route uses the stored per-session gap wall and integer
+     * off-CPU remainder to recover the same CPU total and measured flag.
      *
      * cpu_clamped_ms is the skew self-check, same name and meaning as
      * pgwt_tm_result's: measured CPU that exceeded its own clipped gap wall
@@ -582,6 +573,7 @@ struct pgwt_sessions_result {
      * row — it is not time that happened — and counted here, so a skewed
      * measurement is visible instead of silently absorbed. Outside every
      * row and outside db_time_ms. */
+    double cpu_ms;             /* integer CPU ns total converted once */
     double offcpu_ms;          /* Σ of the rows' offcpu_ms, for the response */
     double cpu_clamped_ms;
     int    has_measured_cpu;

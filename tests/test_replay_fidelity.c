@@ -1318,8 +1318,48 @@ static void test_replay_command_gate(void)
     free(a);
 }
 
+static void test_cpu_integer_contract(void)
+{
+    /* Include a .6 ns contribution: the two original probe inputs alone
+     * round down and cannot detect replay's truncation. */
+    for (uint64_t cpu = 10433330; cpu <= 10433336; cpu += 2) {
+        struct pgwt_trace_event ev = {0};
+        ev.pid = 42; ev.query_id = 99;
+        ev.timestamp_ns = 1790778045790378496ULL;
+        ev.duration_ns = 10485760; ev.cpu_ns = cpu;
+        struct pgwt_accumulator *a = calloc(1, sizeof(*a));
+        pgwt_accum_init(a);
+        struct pgwt_block_info bi = { PGWT_BLOCK_TRANSITIONS, 0, 0, 0, 0 };
+        pgwt_replay_events(a, &ev, 1, ev.timestamp_ns - 1048576,
+                           ev.timestamp_ns, &bi, NULL);
+        uint64_t want_cpu = (cpu + 5) / 10;
+        CHECK(a->tm.cpu_time_ns == want_cpu, "757 replay exact rounded CPU");
+        CHECK(a->tm.offcpu_time_ns == 1048576 - want_cpu,
+              "757 replay exact integer off-CPU");
+        struct pgwt_filter f = {.pid = 42, .query_id = 99};
+        struct pgwt_tm_result tm;
+        struct pgwt_events_result te;
+        struct pgwt_sessions_result ts;
+        double wall_ms = 1048576.0 / 1e6;
+        uint64_t from = ev.timestamp_ns - 1048576;
+        pgwt_compute_time_model(&ev, 1, &f, from, ev.timestamp_ns, wall_ms, &tm);
+        pgwt_compute_top_events(&ev, 1, &f, from, ev.timestamp_ns, wall_ms, &te);
+        pgwt_compute_top_sessions(&ev, 1, &f, from, ev.timestamp_ns, wall_ms, &ts);
+        CHECK((double)a->tm.cpu_time_ns / 1e6 == tm.cpu_ms &&
+              tm.cpu_ms == te.rows[0].total_ms && tm.cpu_ms == ts.cpu_ms,
+              "757 replay CPU equals all server CPU totals exactly");
+        CHECK((double)a->tm.offcpu_time_ns / 1e6 == tm.offcpu_ms &&
+              tm.offcpu_ms == te.offcpu_ms && te.offcpu_ms == ts.offcpu_ms,
+              "757 replay off-CPU equals all server totals exactly");
+        free(tm.rows); free(te.rows); free(ts.rows);
+        pgwt_replay_finish(a);
+        free(a);
+    }
+}
+
 int main(void)
 {
+    test_cpu_integer_contract();
     char dir[] = "/tmp/pgwt_replay_fid_XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
 

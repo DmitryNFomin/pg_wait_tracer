@@ -5358,7 +5358,13 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
      * as the AAS one, so a query-filtered Time Model disagreed with
      * query-filtered Events and Queries over any window an interval crosses.
      * See the full note at handle_top_events. */
-    if (should_use_summaries(srv, req, &wfid) && req->filter.query_id == 0) {
+    /* #757: match Sessions' routing for filtered populations. Record-wide
+     * summary CPU scalars cannot supply every filtered time-model split;
+     * the raw path also preserves clipping at fractional window edges. */
+    int filter_needs_raw = (req->filter.query_id != 0 ||
+                            req->filter.class_name[0] != '\0' ||
+                            req->filter.has_event_filter);
+    if (should_use_summaries(srv, req, &wfid) && !filter_needs_raw) {
         pgwt_compute_time_model_from_summaries(srv->trace_dir, from, to,
                                                 &req->filter, wall_ms, &tm);
         from_summaries = 1;
@@ -5489,7 +5495,13 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
      * filtered drill loses the summary fast path and becomes subject to
      * reject_overload -- paid deliberately, and the refusal says so (see the
      * query_filter_exact hint there). */
-    if (should_use_summaries(srv, req, &wfid) && req->filter.query_id == 0) {
+    /* #757: match Sessions' routing for filtered populations. Record-wide
+     * summary CPU scalars cannot supply every filtered time-model split;
+     * the raw path also preserves clipping at fractional window edges. */
+    int filter_needs_raw = (req->filter.query_id != 0 ||
+                            req->filter.class_name[0] != '\0' ||
+                            req->filter.has_event_filter);
+    if (should_use_summaries(srv, req, &wfid) && !filter_needs_raw) {
         pgwt_compute_top_events_from_summaries(srv->trace_dir, from, to,
                                                 &req->filter, wall_ms, &res);
         from_summaries = 1;
@@ -5579,6 +5591,10 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
      * Same field names, same meaning, as the time_model response. */
     cJSON_AddBoolToObject(root, "has_measured_cpu", res.has_measured_cpu);
     cJSON_AddNumberToObject(root, "offcpu_ms", res.offcpu_ms);
+    if (res.has_measured_cpu && wall_ms > 0)
+        cJSON_AddNumberToObject(root, "offcpu_aas", res.offcpu_ms / wall_ms);
+    else
+        cJSON_AddNullToObject(root, "offcpu_aas");
     cJSON_AddNumberToObject(root, "cpu_clamped_ms", res.cpu_clamped_ms);
     emit_json(root);
 
@@ -5744,6 +5760,7 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
      * on the summary path, which has no per-session source for it and
      * therefore reports 0. */
     cJSON_AddBoolToObject(root, "has_measured_cpu", res.has_measured_cpu);
+    cJSON_AddNumberToObject(root, "cpu_ms", res.cpu_ms);
     cJSON_AddNumberToObject(root, "offcpu_ms", res.offcpu_ms);
     cJSON_AddNumberToObject(root, "cpu_clamped_ms", res.cpu_clamped_ms);
 
