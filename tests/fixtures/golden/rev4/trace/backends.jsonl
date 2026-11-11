@@ -1,0 +1,3 @@
+{"pid":1000,"type":"client","user":"postgres","db":"app","addr":"127.0.0.1(5432)"}
+{"pid":1001,"type":"client","user":"postgres","db":"app","addr":"127.0.0.1(5432)"}
+{"pid":1002,"type":"autovacuum worker"}

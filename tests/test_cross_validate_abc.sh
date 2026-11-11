@@ -256,6 +256,25 @@ sed '$d' "$TMP/stripped.out" > "$TMP/stripped-trimmed.out"
 diff -u "$TMP/plain.out" "$TMP/stripped-trimmed.out"
 chk 'ABC leaves all previous output bytes unchanged' yes yes
 
+# Frozen master v3 mixed fixture: overlap [1s,2s), ten 100ms Lock
+# observations. Preserve the legacy stored block period and one-second sum.
+rc=0
+"$XVAL" fixtures/legacy_responses/mixed_v3 --raw-ns --tolerance 100 > "$TMP/legacy-v3.out" 2>&1 || rc=$?
+chk 'legacy v3 exit' "$rc" 0
+chk 'legacy v3 stored period' "$(field "$TMP/legacy-v3.out" RAW_SAMPLE_PERIOD_NS)" 100000000
+chk 'legacy v3 stored sample weights' "$(field "$TMP/legacy-v3.out" RAW_TOTAL_SAMPLED_NS)" 1000000000
+
+# v4 must use the product decoder's per-record weights for raw DB Time,
+# idle time and ABC. All five unequal ticks share ONE SAMPLES block; the
+# helper checks that layout before this tool sees it.
+./test_sample_weight --cross-validate-fixture "$TMP/jitter"
+run "$TMP/jitter" "$TMP/jitter.out" 0 --raw-ns --show-idle
+chk 'v4 jitter CPU weight' "$(field "$TMP/jitter.out" RAW_CPU_SAMPLED_NS)" 190000000
+chk 'v4 jitter Lock weight' "$(field "$TMP/jitter.out" RAW_NONCPU_SAMPLED_NS)" 110000000
+chk 'v4 jitter total weight' "$(field "$TMP/jitter.out" RAW_TOTAL_SAMPLED_NS)" 300000000
+chk 'v4 jitter idle weight' "$(field "$TMP/jitter.out" IDLE_TOTAL_SAMPLED_NS)" 80000000
+chk 'v4 jitter ABC weight' "$(field "$TMP/jitter.out" ABC_SAMPLED_MEASURED_NS)" 380000000
+
 # Negative control: compile a temporary mutant of the actual instrument,
 # dropping ONE ns at every C_measured deposit. On equal.json four samples
 # lose 4ns, so the independently summed residual MUST be -4 and exit MUST be

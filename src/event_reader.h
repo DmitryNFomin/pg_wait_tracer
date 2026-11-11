@@ -16,6 +16,7 @@ struct pgwt_event_reader {
     char          path[512];
 
     struct pgwt_trace_file_header header;
+    uint64_t nominal_sample_period_ns; /* v4 file extension; 0 = unknown */
 
     struct pgwt_block_index_entry *block_index;
     int           num_blocks;
@@ -58,7 +59,9 @@ void pgwt_reader_close(struct pgwt_event_reader *r);
 /* Per-block metadata surfaced to consumers (trace format v2). */
 struct pgwt_block_info {
     enum pgwt_block_type block_type;   /* TRANSITIONS or SAMPLES */
-    uint64_t sample_period_ns;         /* SAMPLES: nominal interval; else 0 */
+    uint64_t sample_period_ns;         /* first weight (v4), stored mean (v2/v3) */
+    uint64_t max_sample_weight_ns;     /* safe header-only lookahead */
+    uint64_t nominal_sample_period_ns; /* capture cadence, never a weight */
     uint64_t first_timestamp_ns;       /* monotonic */
     uint64_t last_timestamp_ns;        /* monotonic */
     /* Records in the block as WRITTEN, straight from the block header. Lets a
@@ -74,7 +77,8 @@ struct pgwt_block_info {
  *
  * Both block types decode into pgwt_trace_event. For a SAMPLES block, each
  * record is a point observation: new_event = sampled event id, old_event = 0,
- * duration_ns = 0, and flags has PGWT_EVENT_FLAG_SAMPLE set so consumers can
+ * duration_ns = effective sample weight (v4: first weight + tick differences;
+ * v2/v3: stored block mean), and flags has PGWT_EVENT_FLAG_SAMPLE set so consumers can
  * distinguish samples from transition intervals per-record. For a TRANSITIONS
  * block, flags is 0 and all columns are populated as before. */
 int pgwt_reader_decode_block(struct pgwt_event_reader *r, int block_idx,
@@ -116,8 +120,9 @@ int pgwt_reader_find_block(const struct pgwt_event_reader *r, uint64_t mono_ns);
  *
  * `*info` (optional) receives the header. `*right_open` (optional) is set
  * when every record in the block closes after `to` — the block can only
- * contribute still-running straddlers, which is where a caller's lookahead
- * budget applies. 0 / 0 bounds mean unbounded on that side.
+ * contribute still-running TRANSITIONS straddlers, where the caller's
+ * lookahead budget applies. SAMPLES use the header maximum effective weight
+ * to admit backward estimates past `to`, without spending that budget. 0 / 0 bounds mean unbounded on that side.
  *
  * This is the sound replacement for "binary-search the index, then iterate
  * forward until a block starts after `to`": that pattern assumes the index
@@ -214,7 +219,7 @@ struct pgwt_replay_stats {
     uint64_t transitions;       /* exact records that CLOSED in the window */
     uint64_t samples;           /* sampled records accumulated (ASH math) */
     uint64_t markers_skipped;   /* structural markers skipped */
-    uint64_t sample_period_ns;  /* sample period seen (0 if none) */
+    uint64_t sample_period_ns;  /* nominal cadence (0 if unknown) */
     /* #424: exact records admitted by OVERLAP whose close is past `to` —
      * clipped time was credited, no occurrence was counted. Non-zero means
      * the right-edge scan actually found something, which is what makes a
@@ -293,8 +298,8 @@ _Static_assert((PGWT_REPLAY_KNOWN_FLAGS & ~PGWT_REPLAY_NONCAT_FLAGS) ==
  * `bi` is the block's header info for direct decoded-block callers:
  *   - TRANSITIONS records accumulate exactly (durations, histograms);
  *     markers drive query attribution but contribute no wait data.
- *   - SAMPLES records are point observations: each is worth one
- *     sample_period_ns of time (ASH estimate) for counts/time-model/query
+ *   - SAMPLES records are observations carrying their effective weights in
+ *     duration_ns (ASH estimate) for counts/time-model/query
  *     totals, but contributes NOTHING to min/max/histograms — those are
  *     real-latency-only and would be fabricated from samples.
  * `st` (optional) is updated with what was accumulated.
@@ -309,7 +314,7 @@ _Static_assert((PGWT_REPLAY_KNOWN_FLAGS & ~PGWT_REPLAY_NONCAT_FLAGS) ==
  * Calls must follow per-pid timestamp order. pgwt_replay_file supplies this
  * order across blocks; callers visit files in ascending wall-clock order.
  * bi == NULL is the file merge's private representation: sample records
- * carry their block's sample_period_ns in duration_ns. */
+ * carry their reader-derived tick weights in duration_ns. */
 void pgwt_replay_events(struct pgwt_accumulator *acc,
                          const struct pgwt_trace_event *events, int count,
                          uint64_t from_mono_ns, uint64_t to_mono_ns,

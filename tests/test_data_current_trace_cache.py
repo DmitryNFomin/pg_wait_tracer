@@ -346,8 +346,8 @@ def write_meta(trace_dir, committed):
 
 # ── on-disk block layout (src/event_writer.h) ────────────────────────────────
 #
-# A trace file is a 28-byte packed file header followed, per block, by a
-# 40-byte packed block header and `compressed_size` payload bytes. After the
+# v2/v3 use 28-byte file and 40-byte block headers; v4 uses 36 and 48.
+# Each block header is followed by `compressed_size` payload bytes. After the
 # last block there is either nothing (the shape a LIVE current.trace has: the
 # daemon writes the block index only on rotation) or a footer of
 # num_blocks * 16-byte index entries followed by a uint32 count — which is
@@ -355,9 +355,11 @@ def write_meta(trace_dir, committed):
 TRACE_MAGIC = 0x54574750
 # magic, version, flags, pg_version, start_time_ns, clock_offset_ns
 TRACE_HDR = struct.Struct("<IHHIQQ")
+TRACE_HDR_V4 = struct.Struct("<IHHIQQQ")
 # first_ts, last_ts, num_events, compressed_size, uncompressed_size,
 # block_type, reserved, sample_period_ns
 BLOCK_HDR = struct.Struct("<QQIIIHHQ")
+BLOCK_HDR_V4 = struct.Struct("<QQIIIHHQQ")
 # timestamp_ns, file_offset
 INDEX_ENTRY = struct.Struct("<QQ")
 FOOTER_COUNT = struct.Struct("<I")
@@ -367,6 +369,22 @@ FOOTER_COUNT = struct.Struct("<I")
 # 28/40/16 sizes are asserted above: a silent divergence from the C side would
 # make this walk accept a header the product rejects, or stop at one it reads.
 BLOCK_EVENTS = 4096
+
+
+def trace_layout(blob):
+    """Validate the prefix and select the complete file/block header sizes."""
+    if len(blob) < TRACE_HDR.size:
+        raise AssertionError("shorter than a trace file header")
+    magic, version = TRACE_HDR.unpack_from(blob)[:2]
+    if magic != TRACE_MAGIC:
+        raise AssertionError("not a trace file (magic 0x%08x)" % magic)
+    if version in (2, 3):
+        return TRACE_HDR, BLOCK_HDR
+    if version == 4:
+        if len(blob) < TRACE_HDR_V4.size:
+            raise AssertionError("shorter than a v4 file header")
+        return TRACE_HDR_V4, BLOCK_HDR_V4
+    raise AssertionError("unsupported trace version %d" % version)
 
 
 def block_extents(path):
@@ -386,31 +404,23 @@ def block_extents(path):
     something else, and every assertion built on it would be measuring
     something else — so each unexplained shape raises instead.
     """
-    if TRACE_HDR.size != 28 or BLOCK_HDR.size != 40 or INDEX_ENTRY.size != 16:
-        raise AssertionError("header sizes moved: file=%d block=%d index=%d "
-                             "(src/event_writer.h says 28, 40 and 16)"
-                             % (TRACE_HDR.size, BLOCK_HDR.size,
-                                INDEX_ENTRY.size))
+    if (TRACE_HDR.size, BLOCK_HDR.size, TRACE_HDR_V4.size,
+            BLOCK_HDR_V4.size, INDEX_ENTRY.size) != (28, 40, 36, 48, 16):
+        raise AssertionError("header sizes diverged from src/event_writer.h")
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         blob = f.read()
     if len(blob) != size:
         raise AssertionError("%s: read %d of %d bytes"
                              % (path, len(blob), size))
-    if size < TRACE_HDR.size:
-        raise AssertionError("%s is shorter than a file header (%d bytes)"
-                             % (path, size))
-    magic = TRACE_HDR.unpack_from(blob, 0)[0]
-    if magic != TRACE_MAGIC:
-        raise AssertionError("%s is not a trace file (magic 0x%08x)"
-                             % (path, magic))
+    file_hdr, block_hdr = trace_layout(blob)
     out = []
-    off = TRACE_HDR.size
-    while off + BLOCK_HDR.size <= size:
-        _first, _last, num_events, csize = BLOCK_HDR.unpack_from(blob, off)[:4]
+    off = file_hdr.size
+    while off + block_hdr.size <= size:
+        _first, _last, num_events, csize = block_hdr.unpack_from(blob, off)[:4]
         if num_events <= 0 or num_events > BLOCK_EVENTS or csize <= 0:
             break
-        end = off + BLOCK_HDR.size + csize
+        end = off + block_hdr.size + csize
         if end > size:
             break
         out.append((off, end))
@@ -1565,7 +1575,7 @@ def bypass_refusal_reason_survives_epipe(tr):
             shutil.rmtree(d, ignore_errors=True)
 
 
-def bypass_block_extents_refuses(tr):
+def bypass_block_extents_refuses(tr, version=4):
     """block_extents() decides WHERE bypass_truncated_file_under_meta cuts.
     A parse that answered anyway on a file it could not account for would hand
     back an offset that silently means something else, and every assertion
@@ -1583,15 +1593,37 @@ def bypass_block_extents_refuses(tr):
     try:
         path = os.path.join(good, "current.trace")
         extents = block_extents(path)
+        if version == 3:
+            # TRANSITIONS payload columns are identical in v3/v4. Strip only
+            # the v4 header extensions and rebuild the index offsets, giving
+            # this same strict parser/refusal suite a real legacy layout.
+            original = open(path, "rb").read()
+            header = list(TRACE_HDR.unpack_from(original))
+            header[1] = 3
+            parts = [TRACE_HDR.pack(*header)]
+            offsets = []
+            offset = TRACE_HDR.size
+            for start, end in extents:
+                offsets.append((BLOCK_HDR.unpack_from(original, start)[0], offset))
+                block = (original[start:start + BLOCK_HDR.size]
+                         + original[start + BLOCK_HDR_V4.size:end])
+                parts.append(block)
+                offset += len(block)
+            parts.extend(INDEX_ENTRY.pack(ts, off) for ts, off in offsets)
+            parts.append(FOOTER_COUNT.pack(len(offsets)))
+            with open(path, "wb") as f:
+                f.write(b"".join(parts))
+            extents = block_extents(path)
         size = os.path.getsize(path)
+        payload = open(path, "rb").read()
+        header_size = trace_layout(payload)[0].size
         contiguous = all(extents[i][1] == extents[i + 1][0]
                          for i in range(len(extents) - 1))
-        tr.check(len(extents) > 1 and extents[0][0] == 28 and contiguous and
+        tr.check(len(extents) > 1 and extents[0][0] == header_size and contiguous and
                  extents[-1][1] <= size,
                  "a real current.trace parses to contiguous blocks from byte "
-                 "28 (%d blocks, last ends %d, file %d)"
-                 % (len(extents), extents[-1][1], size))
-        payload = open(path, "rb").read()
+                 "%d (%d blocks, last ends %d, file %d)"
+                 % (header_size, len(extents), extents[-1][1], size))
         n = len(extents)
         footerless = payload[:extents[-1][1]]
         lying_count = (payload[:size - 4]
@@ -1623,9 +1655,10 @@ def bypass_block_extents_refuses(tr):
             refused = (
                 ("an empty file", b""),
                 ("a file shorter than the header", payload[:20]),
-                ("a header with no block at all", payload[:28]),
+                ("a header with no block at all", payload[:header_size]),
                 ("a wrong magic", b"XXXX" + payload[4:]),
-                ("a torn block header", payload[:28 + 10]),
+                ("an unsupported version", payload[:4] + struct.pack("<H", 5) + payload[6:]),
+                ("a torn block header", payload[:header_size + 10]),
                 ("a block payload cut short", payload[:extents[0][1] - 16]),
                 ("trailing bytes after the footer", payload + b"junk"),
                 ("a footer that counts one block too many", lying_count),
@@ -1645,7 +1678,8 @@ def section_bypass(tr):
     print("\n### 5. bypass suite: ways this test could stop checking ###")
     bypass_dependencies(tr)
     bypass_refusal_reason_survives_epipe(tr)
-    bypass_block_extents_refuses(tr)
+    bypass_block_extents_refuses(tr, version=3)
+    bypass_block_extents_refuses(tr, version=4)
     bypass_stats_parser(tr)
     trace_dir = generate_traces(busy_scenario(span_s=10, pids=2, per_pid=2000))
     try:

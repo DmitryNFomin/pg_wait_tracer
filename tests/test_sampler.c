@@ -876,9 +876,9 @@ static void test_effective_period(void)
     CHECK(pgwt_sampler_effective_period(NOM, 1000, 1000 + 3 * NOM) == 3 * NOM,
           "coalesced ticks weighted by measured elapsed");
 
-    /* Early/backwards clock never shrinks below nominal. */
-    CHECK(pgwt_sampler_effective_period(NOM, 1000, 1000 + NOM / 2) == NOM,
-          "early tick clamps to nominal");
+    /* Jitter can deliberately fire before the nominal period. */
+    CHECK(pgwt_sampler_effective_period(NOM, 1000, 1000 + NOM / 2) == NOM / 2,
+          "early tick uses measured elapsed");
     CHECK(pgwt_sampler_effective_period(NOM, 5000, 1000) == NOM,
           "non-monotonic input clamps to nominal");
 

@@ -109,7 +109,10 @@ static uint64_t decode_checksum(const char *dir, int expect_version,
             h = mix_u32(h, e->pid);
             h = mix_u32(h, e->old_event);
             h = mix_u32(h, e->new_event);
-            h = mix_u64(h, e->duration_ns);
+            /* Legacy checksums pin on-disk columns; samples never stored a
+             * duration column. The unified reader now surfaces their weight. */
+            h = mix_u64(h, (e->flags & PGWT_EVENT_FLAG_SAMPLE) && expect_version < 4
+                          ? 0 : e->duration_ns);
             h = mix_u64(h, e->query_id);
             h = mix_u32(h, e->flags);
             if (include_cpu)
@@ -193,11 +196,31 @@ static void test_golden_rev3(const char *argv0)
           (unsigned long long)GOLDEN_REV3_CHECKSUM);
 }
 
+static void test_golden_rev4(const char *argv0)
+{
+    char dir[800];
+    golden_dir(argv0, "rev4", dir, sizeof(dir));
+    int blocks = 0, events = 0;
+    uint64_t h = decode_checksum(dir, 4, 1, &blocks, &events);
+    CHECK(blocks == 2 && events == 14, "v4 frozen blocks/events");
+    CHECK(h == 0xf40542171e1e0d59ULL, "v4 checksum 0x%016llx", (unsigned long long)h);
+    char path[900];
+    snprintf(path, sizeof(path), "%s/current.trace", dir);
+    struct pgwt_event_reader r;
+    CHECK(pgwt_reader_open(&r, path) == 0, "v4 frozen open");
+    CHECK(r.nominal_sample_period_ns == 100000000, "v4 durable nominal period");
+    struct pgwt_block_info bi;
+    CHECK(pgwt_reader_block_info(&r, 1, &bi) == 0 &&
+          bi.max_sample_weight_ns == 100000000, "v4 header-only maximum weight");
+    pgwt_reader_close(&r);
+}
+
 int main(int argc, char **argv)
 {
     printf("=== test_golden_fixture ===\n");
     test_golden_rev2(argc > 0 ? argv[0] : "");
     test_golden_rev3(argc > 0 ? argv[0] : "");
+    test_golden_rev4(argc > 0 ? argv[0] : "");
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

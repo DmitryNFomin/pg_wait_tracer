@@ -1106,8 +1106,8 @@ int main(void)
         struct pgwt_accumulator *a =
             replay(path, BASE + 3250 * MS, BASE + 3750 * MS, &b, &s9, -1,
                    NULL, NULL);
-        CHECK_EQ(tot(a, EV_SAMPLE), 4 * PERIOD,
-                 "4 samples from the earlier-starting block are in the window");
+        CHECK_EQ(tot(a, EV_SAMPLE), 350 * MS,
+                 "sample weights clipped to the 350ms window");
         CHECK_EQ(s9.samples, 4, "…and are reported as samples");
         CHECK_EQ(tot(a, EV_AFTER), 100 * MS,
                  "the transitions block in the same range is unaffected");
@@ -1145,8 +1145,8 @@ int main(void)
         struct pgwt_accumulator *a =
             replay(path3, BASE + 6000 * MS, BASE + 7000 * MS, &b, &s10, -1,
                    NULL, NULL);
-        CHECK_EQ(tot(a, EV_SAMPLE), 11 * PERIOD,
-                 "11 sampler ticks found in the block the binary search "
+        CHECK_EQ(tot(a, EV_SAMPLE), 10 * PERIOD,
+                 "10 periods from 11 boundary ticks in the block the binary search "
                  "skipped");
         CHECK_EQ(s10.samples, 11, "…and reported");
         CHECK_EQ(s10.right_edge_truncated, 0, "no truncation needed");

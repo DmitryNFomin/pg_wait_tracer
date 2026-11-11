@@ -15,6 +15,9 @@ test_event_writer
 test_event_reader
 test_trace_v2
 test_sampler
+# #863: portable integer tick-weight conservation and trace round-trip.
+test_sample_weight
+test_sample_weight_controls.py
 test_anomaly
 test_escalation_budget
 test_wp_attr

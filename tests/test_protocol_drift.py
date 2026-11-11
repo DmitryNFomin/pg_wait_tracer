@@ -92,6 +92,16 @@ def _seq(pid, qid, start, pairs):
     return events
 
 
+def trace_header_size(path):
+    # Raw file prefix is shared; v4 appends the nominal-period u64.
+    with open(path, "rb") as f:
+        prefix = f.read(6)
+    version = int.from_bytes(prefix[4:6], "little")
+    if len(prefix) != 6 or version not in (2, 3, 4):
+        raise AssertionError("invalid trace version in corruption fixture")
+    return 36 if version == 4 else 28
+
+
 SCENARIO = {
     "backends": [
         {"pid": 1000, "type": "client", "user": "u", "db": "d"},
@@ -604,8 +614,9 @@ def check_corrupt_trace_refusal(t):
     short_dir = generate_traces(SCENARIO)
     try:
         path = os.path.join(short_dir, "current.trace")
+        header_size = trace_header_size(path)
         with open(path, "r+b") as f:
-            f.truncate(30)          # header (28 B) + 2 stray bytes
+            f.truncate(header_size + 2)  # intact header + 2 stray bytes
         with open(path + ".meta") as f:
             t.check(int(f.read().strip()) >= 1,
                     "[corrupt trace] the meta still claims a committed block")
@@ -625,8 +636,9 @@ def check_corrupt_trace_refusal(t):
     fresh_dir = generate_traces(SCENARIO)
     try:
         path = os.path.join(fresh_dir, "current.trace")
+        header_size = trace_header_size(path)
         with open(path, "r+b") as f:
-            f.truncate(28)          # sizeof(struct pgwt_trace_file_header)
+            f.truncate(header_size)      # intact header, no blocks
         with open(path + ".meta", "w") as f:
             f.write("0\n")
         _corrupt_probe(t, fresh_dir, "corrupt trace/nothing committed", False)

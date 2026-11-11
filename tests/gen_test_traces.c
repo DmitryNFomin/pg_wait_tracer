@@ -556,6 +556,8 @@ static int write_traces(const char *dir, struct scenario *sc,
         gen_open_advance(&gopen, sc, (idx)); \
     } while (0)
 
+    ew.nominal_sample_period_ns = sc->sample_period_ns;
+
     if (sc->interleave) {
         /* Realistic tiered block structure: walk events and samples in
          * global timestamp order. Contiguous runs of samples are pushed as

@@ -219,7 +219,7 @@ struct pgwt_trace_event {
  *
  *   - the trace reader sets SAMPLE on records decoded from a SAMPLES block:
  *     a point observation (new_event = sampled event; old_event = 0;
- *     duration_ns = 0), worth one sample_period_ns, never an interval;
+ *     duration_ns = reader-derived effective weight), never a measured interval;
  *   - BPF/on_watchpoint sets CMD_OPEN on ringbuf transition events emitted
  *     while the backend's command-open gate was set, so the LIVE accumulator
  *     can classify we==0 intervals without a marker sweep (the offline

@@ -321,14 +321,17 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
      * rendering near-zero activity or fabricated histograms. */
     if (rstats.samples > 0) {
         printf("NOTE: this trace contains sampled data "
-               "(%llu samples at %.1f ms period, %llu exact transitions).\n"
-               "      Sampled wait durations are ASH estimates "
-               "(sample count x period);\n"
-               "      histograms/min/max reflect exact data only. "
-               "For merged analysis use pgwt-server (--view).\n\n",
+               "(%llu samples, %llu exact transitions).\n",
                (unsigned long long)rstats.samples,
-               rstats.sample_period_ns / 1e6,
                (unsigned long long)rstats.transitions);
+        if (rstats.sample_period_ns)
+            printf("      Configured nominal sample period: %.1f ms.\n",
+                   rstats.sample_period_ns / 1e6);
+        else
+            printf("      Nominal sample period is unknown for this capture.\n");
+        printf("      Sampled wait durations are weighted ASH estimates;\n"
+               "      histograms/min/max reflect exact data only. "
+               "For merged analysis use pgwt-server (--view).\n\n");
     }
 
     /* Display results using existing output functions */
