@@ -1047,3 +1047,6 @@ test_summary_qattr_background
 # Persistent box-check must stage/run the current provisioner before build,
 # forwarding the OS and leaving lock ownership to the provisioner itself.
 test_box_check_provision_persistent.sh
+
+# #852: session membership at close/open credit, including zero occupancy.
+test_session_rows

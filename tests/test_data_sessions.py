@@ -4,15 +4,132 @@
 Verifies that top_sessions correctly attributes time to each PID.
 """
 import os
+from pathlib import Path
+import shutil
+import struct
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
     CPU, IO_DATA_FILE_READ, LOCK_RELATION, ACTIVITY_IDLE,
 )
+import summary_raw_parity_lib as parity
 
 BASE_TS = 10_000_000_000_000
+S = 1_000_000_000
+
+
+def row_scenario():
+    """The middle 120s has two active pids, one idle-only pid, and a pid
+    active ONLY in the neighbouring window. Every interval stays inside
+    its closing second, so this tests membership, not boundary arithmetic.
+    Equal active totals also exercise the pid tie-break in the row order.
+    """
+    events = []
+    for second in (0, 60, 120, 179, 180, 239):
+        for pid in (1000, 1001, 9000, 9001):
+            active = pid in (1000, 1001) or (pid == 9001 and second < 60)
+            events.append({"pid": pid, "ts": BASE_TS + second * S + S // 2,
+                           "dur": 10_000_000,
+                           "old": IO_DATA_FILE_READ if active else ACTIVITY_IDLE,
+                           "new": CPU, "qid": 0})
+    return {"backends": [{"pid": pid, "type": "bgwriter"}
+                          for pid in (1000, 1001, 9000, 9001)],
+            "events": events}
+
+
+def require_pids(response, expected):
+    if "error" in response:
+        raise AssertionError(response)
+    actual = [row["pid"] for row in response["rows"]]
+    if actual != expected:
+        raise AssertionError(f"pids {actual}, expected {expected}")
+
+
+def test_row_routes(t):
+    trace_dir = generate_traces(row_scenario())
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgwt_session_rows_") as scratch:
+            raw_dir = os.path.join(scratch, "raw")
+            stale_dir = os.path.join(scratch, "v11")
+            shutil.copytree(trace_dir, raw_dir)
+            shutil.copytree(trace_dir, stale_dir)
+            for path in Path(raw_dir).glob("*.summary*"):
+                path.unlink()
+            # Real v11 output from origin/master (4c2f6b87), including the
+            # pid-only idle rows. Raw files come from the same scenario.
+            fixture = Path(__file__).parent / "fixtures/session_rows_v11"
+            if struct.unpack_from("=IH", (fixture / "current.summary").read_bytes()) != (
+                    0x53574750, 11):
+                raise AssertionError("legacy fixture must be an actual v11 summary")
+            for name in ("current.summary", "current.summary.meta"):
+                shutil.copyfile(fixture / name, Path(stale_dir) / name)
+
+            windows = (("middle", 60, 180, [1000, 1001]),
+                       ("neighbour", 0, 120, [1000, 1001, 9001]))
+            for route, directory, expected_route in (
+                    ("raw", raw_dir, parity.ROUTE_RAW),
+                    ("summary", trace_dir, parity.ROUTE_SUMMARY),
+                    ("v11 fallback", stale_dir, parity.ROUTE_RAW)):
+                for window, lo, hi, expected in windows:
+                    bounds = {"from_": BASE_TS + lo * S,
+                              "to_": BASE_TS + hi * S}
+                    err = os.path.join(scratch, "stderr")
+                    with ServerHarness(directory, stderr_path=err) as srv:
+                        for limit in (None, 1, 10):
+                            args = {} if limit is None else {"limit": limit}
+                            answer = srv.query("top_sessions", **bounds, **args)
+                            # top_sessions has no top-N cap on EITHER route.
+                            # limit belongs to other commands, and 1 must
+                            # still return BOTH active rows here.
+                            try:
+                                require_pids(answer, expected)
+                            except AssertionError as exc:
+                                t.check(False, f"{route}/{window}/limit={limit}: {exc}")
+                            else:
+                                t.check(True, f"{route}/{window}/limit={limit}: {expected}")
+                        # A PID filter independently forces raw and tests
+                        # that the excluded pid really has no active row.
+                        idle = srv.query("top_sessions", **bounds,
+                                         filters={"pid": 9000})
+                        t.check_eq(idle.get("rows"), [], f"{route}: idle pid filter")
+                    normal_stderr = Path(err).read_text()
+                    with ServerHarness(directory, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+                        oracle = srv.query("time_model", **bounds)
+                    actual_route = parity.classify_route(oracle, normal_stderr)
+                    t.check_eq(actual_route, expected_route, f"{route}/{window}: route proof")
+                    if route == "v11 fallback":
+                        t.check("not summary v" in normal_stderr,
+                                "old summaries refused by accounting version")
+
+            # Negative controls: each detector must reject the exact shape
+            # it is intended to catch, including extra rows at zero DB Time.
+            for bad in ([1000, 1001, 9000], [1000], [1001, 1000]):
+                try:
+                    require_pids({"rows": [{"pid": p} for p in bad]}, [1000, 1001])
+                except AssertionError:
+                    t.check(True, f"row detector rejects {bad}")
+                else:
+                    t.check(False, f"row detector accepted {bad}")
+            t.check_eq(parity.classify_route(
+                {"code": "window_too_large", "max_events": 1}, ""), parity.ROUTE_UNKNOWN,
+                       "route detector rejects missing fallback evidence")
+            # Extend the parity gate through its public extraction/comparison
+            # core without editing the two files owned by another branch.
+            good = {"rows": [{"pid": 1000, "db_time_ms": 0}]}
+            for bad in ({"rows": []}, {"rows": good["rows"] + [
+                    {"pid": 9000, "db_time_ms": 0}]}):
+                findings = parity.compare(parity.extract_sessions(good),
+                                          parity.extract_sessions(bad), {})
+                t.check(any(f.field == "sessions/rowset" and f.status == parity.NEW
+                            for f in findings), "parity core rejects changed session row set")
+            t.check(all(f.status == parity.AGREE for f in parity.compare(
+                parity.extract_sessions(good), parity.extract_sessions(good), {})),
+                "parity core accepts identical zero-time non-idle rows")
+    finally:
+        cleanup_traces(trace_dir)
 
 
 def build_scenario():
@@ -83,13 +200,7 @@ def main():
                            "PID 1001 DB Time = 5ms")
 
             print("--- PID 1002: idle, excluded ---")
-            s3 = by_pid.get(1002, {})
-            # Idle backend may or may not appear; if it does, DB Time should be 0
-            if s3:
-                t.check_approx(s3.get("db_time_ms", 0), 0.0, 0.001,
-                               "PID 1002 DB Time = 0ms (idle)")
-            else:
-                t.check(True, "PID 1002 not in output (idle excluded)")
+            t.check(1002 not in by_pid, "PID 1002 not in output (idle excluded)")
 
             print("--- Ordering ---")
             if len(rows) >= 2:
@@ -99,6 +210,7 @@ def main():
     finally:
         cleanup_traces(trace_dir)
 
+    test_row_routes(t)
     sys.exit(0 if t.summary() else 1)
 
 

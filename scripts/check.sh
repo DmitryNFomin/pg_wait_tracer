@@ -89,6 +89,9 @@ run python3 tests/test_board_author.py
 step "bash: pr-ready ordering and refusal self-test (#701)"
 run bash tests/test_pr_ready.sh
 
+step "generated tag board offline self-test (#850)"
+run scripts/lead/board-selftest.sh
+
 step "PR state drift sweep and disposition self-test (#717)"
 run python3 scripts/lead/selftest-pr-state.py
 
@@ -213,6 +216,15 @@ run python3 tests/test_multi_window_lib.py
 
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
+
+step "python: tag checklist exact-SHA evidence and blocker refusals"
+run python3 tests/test_tag_checklist.py
+
+step "tag checklist: real inventory retains every historical ID"
+run python3 scripts/tag-checklist.py "$(git rev-parse HEAD)" --check-history
+
+step "tag checklist: workflow_run still targets the CI workflow name"
+run python3 -c 'import re; from pathlib import Path; assert re.search(r"(?m)^name: CI\s*$", Path(".github/workflows/ci.yml").read_text()), "tag checklist trigger requires name: CI"'
 
 # Fake workload/daemon processes and pg_stat_statements results: no live PG or BPF.
 step "python: capture-smoke failure diagnostics (#614)"
