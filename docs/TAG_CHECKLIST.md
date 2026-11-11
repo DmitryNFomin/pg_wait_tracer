@@ -177,3 +177,5 @@ assuming a passing gate proves it detects its own failure.
   paint, unbudgeted interactions and 10 s replay API latency. L159–L170 and L217 keep
   per-view recovery uncovered; L171–L173 keep end-to-end execution
   duration/timestamp/P95 oracles uncovered.
+
+- 2026-11-11: Added eight rows (L270–L277) from the blocker mapping.
