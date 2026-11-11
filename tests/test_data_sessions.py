@@ -176,6 +176,52 @@ def build_scenario():
     }
 
 
+def test_zero_time_non_idle_row(t):
+    """#852: zero DB Time alone must not exclude a non-idle session."""
+    # Three 10ms closes for pid 1000 in [60,180); the other closes keep
+    # the window inside the capture. Pid 7000 has ONLY one zero-duration
+    # IO close at 100.5s, so nothing else can give it a session row.
+    events = [{"pid": 1000, "ts": BASE_TS + second * S + S // 2,
+               "dur": 10_000_000, "old": IO_DATA_FILE_READ,
+               "new": CPU, "qid": 0}
+              for second in (0, 60, 120, 179, 180, 239)]
+    events.append({"pid": 7000, "ts": BASE_TS + 100 * S + S // 2,
+                   "dur": 0, "old": IO_DATA_FILE_READ, "new": CPU, "qid": 0})
+    scenario = {"backends": [{"pid": pid, "type": "bgwriter"}
+                              for pid in (1000, 7000)],
+                "events": sorted(events, key=lambda event: event["ts"])}
+    expected_rows = [(1000, 30.0), (7000, 0.0)]  # (pid, DB Time in ms)
+    bounds = {"from_": BASE_TS + 60 * S, "to_": BASE_TS + 180 * S}
+    trace_dir = generate_traces(scenario)
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgwt_zero_time_row_") as scratch:
+            raw_dir = os.path.join(scratch, "raw")
+            shutil.copytree(trace_dir, raw_dir)
+            for path in Path(raw_dir).glob("*.summary*"):
+                path.unlink()
+            route_rows = {}
+            for route, directory, expected_route in (
+                    ("raw", raw_dir, parity.ROUTE_RAW),
+                    ("summary", trace_dir, parity.ROUTE_SUMMARY)):
+                err = os.path.join(scratch, "stderr")
+                with ServerHarness(directory, stderr_path=err) as srv:
+                    answer = srv.query("top_sessions", **bounds)
+                t.check("error" not in answer,
+                        f"zero-time-non-idle/{route}: successful response")
+                route_rows[route] = [(row["pid"], row["db_time_ms"])
+                                     for row in answer.get("rows", [])]
+                t.check_eq(route_rows[route], expected_rows,
+                           f"zero-time-non-idle/{route}: pid 7000 retained at 0ms")
+                with ServerHarness(directory, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+                    oracle = srv.query("top_sessions", **bounds)
+                t.check_eq(parity.classify_route(oracle, Path(err).read_text()),
+                           expected_route, f"zero-time-non-idle/{route}: route proof")
+            t.check_eq(route_rows["summary"], route_rows["raw"],
+                       "zero-time-non-idle: routes have identical row sets and order")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 def main():
     t = TestRunner("test_data_sessions")
     print(f"=== {t.name} ===")
@@ -211,6 +257,7 @@ def main():
         cleanup_traces(trace_dir)
 
     test_row_routes(t)
+    test_zero_time_non_idle_row(t)
     sys.exit(0 if t.summary() else 1)
 
 
