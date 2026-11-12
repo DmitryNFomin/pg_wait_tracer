@@ -1,0 +1,96 @@
+{
+  "id": "23_rotation_missing_file",
+  "description": "The middle file of a same-capture chain is absent.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 1,
+          "pid": 101,
+          "fork": 0,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "TRANS",
+          "t": 3,
+          "pid": 101,
+          "old": null,
+          "new": "PgSleep",
+          "duration": 2
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 8,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    },
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 1,
+      "previous": 0,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": false,
+      "records": []
+    },
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 2,
+      "previous": 1,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "TRANS",
+          "t": 16,
+          "pid": 101,
+          "old": "PgSleep",
+          "new": null,
+          "duration": 13
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 20,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": 0
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 3,
+    "to": 20
+  }
+}

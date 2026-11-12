@@ -1,0 +1,47 @@
+{
+  "id": "08_attach_failure",
+  "description": "The capture never obtains ATTACH_OK for this discovered backend.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 10,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 20,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": 0
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 1,
+    "to": 20
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "id": "31_late_data_revokes_prefix",
+  "description": "An attachment at 1 receives FRONTIER 10. A9 from P1 is rejected at detection 12 for a seal violation; the merge epoch invalidation is persisted in VOID. The offending DATA is absent from storage.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 1,
+          "pid": 101,
+          "fork": 0,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 10,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "VOID",
+          "t": 12,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+          "reason": "seal_violation",
+          "invalid_from": 1
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": 0
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 1,
+    "to": 10
+  }
+}

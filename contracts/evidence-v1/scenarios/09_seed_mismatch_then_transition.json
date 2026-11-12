@@ -1,0 +1,65 @@
+{
+  "id": "09_seed_mismatch_then_transition",
+  "description": "Seed mismatch prevents reread certification; a later genuine transition anchors tracing.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 5,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 8,
+          "pid": 101,
+          "fork": 0,
+          "method": "transition",
+          "seed": "Lock",
+          "state": "PgSleep",
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "TRANS",
+          "t": 8,
+          "pid": 101,
+          "old": "Lock",
+          "new": "PgSleep",
+          "duration": 7
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 15,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": 0
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 8,
+    "to": 15
+  }
+}

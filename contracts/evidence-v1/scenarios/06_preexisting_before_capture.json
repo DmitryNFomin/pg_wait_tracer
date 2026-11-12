@@ -1,0 +1,60 @@
+{
+  "id": "06_preexisting_before_capture",
+  "description": "A backend discovered at 10 has an unknown start with lower bound zero.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 10,
+          "pid": 101,
+          "fork": null,
+          "start": 0,
+          "start_known": false,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 12,
+          "pid": 101,
+          "fork": null,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "TRANS",
+          "t": 14,
+          "pid": 101,
+          "old": null,
+          "new": "PgSleep",
+          "duration": 2
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 20,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": null
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 2,
+    "to": 20
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "id": "03_exit_inside_window",
+  "description": "Matching LIFE exit and terminal transition, followed by a global frontier.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 1,
+          "pid": 101,
+          "fork": 0,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "TRANS",
+          "t": 3,
+          "pid": 101,
+          "old": null,
+          "new": "PgSleep",
+          "duration": 2
+        },
+        {
+          "kind": "TRANS",
+          "t": 10,
+          "pid": 101,
+          "old": "PgSleep",
+          "new": "$EXIT",
+          "duration": 7
+        },
+        {
+          "kind": "LIFE",
+          "t": 10,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": 10
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 12,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": 0
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 5,
+    "to": 15
+  }
+}

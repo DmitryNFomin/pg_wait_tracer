@@ -1,0 +1,76 @@
+{
+  "id": "05_known_exit_lost_terminal",
+  "description": "Exit LIFE survives, terminal transition does not; the loss is detected later.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 1,
+          "pid": 101,
+          "fork": 0,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "TRANS",
+          "t": 3,
+          "pid": 101,
+          "old": null,
+          "new": "PgSleep",
+          "duration": 2
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 8,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "LIFE",
+          "t": 12,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": 12
+        },
+        {
+          "kind": "VOID",
+          "invalid_from": null,
+          "t": 14,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+          "reason": "event_ring_drop"
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": 0
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 6,
+    "to": 16
+  }
+}
