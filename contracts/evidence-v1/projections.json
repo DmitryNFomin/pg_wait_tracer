@@ -1,0 +1,546 @@
+{
+ "01_ordinary_run": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    15
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    3,
+    7
+   ],
+   [
+    "Lock",
+    9,
+    12
+   ]
+  ],
+  "open": null
+ },
+ "02_pid_reuse_delayed_life": {
+  "life": [
+   12,
+   null
+  ],
+  "coverage": [
+   [
+    13,
+    20
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "Lock",
+   15,
+   20
+  ]
+ },
+ "03_exit_inside_window": {
+  "life": [
+   0,
+   10
+  ],
+  "coverage": [
+   [
+    1,
+    10
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    3,
+    10
+   ]
+  ],
+  "open": null
+ },
+ "04_window_starts_at_exit": {
+  "life": [
+   0,
+   10
+  ],
+  "coverage": [
+   [
+    1,
+    10
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    3,
+    10
+   ]
+  ],
+  "open": null
+ },
+ "05_known_exit_lost_terminal": {
+  "life": [
+   0,
+   12
+  ],
+  "coverage": [
+   [
+    1,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   8
+  ]
+ },
+ "06_preexisting_before_capture": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    12,
+    20
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   14,
+   20
+  ]
+ },
+ "07_preexisting_covered_window": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    12,
+    20
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   14,
+   20
+  ]
+ },
+ "08_attach_failure": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [],
+  "waits": [],
+  "open": null
+ },
+ "09_seed_mismatch_then_transition": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    9,
+    15
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   8,
+   15
+  ]
+ },
+ "10_equal_nonzero_seed": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [],
+  "waits": [],
+  "open": null
+ },
+ "11_unknown_entry_close_boundary": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    17,
+    25
+   ]
+  ],
+  "waits": [
+   [
+    "Lock",
+    16,
+    22
+   ]
+  ],
+  "open": null
+ },
+ "12_loss_then_recovery_crossing": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    16,
+    24
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   18,
+   24
+  ]
+ },
+ "13_loss_then_recovery_later_window": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    16,
+    24
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   18,
+   24
+  ]
+ },
+ "14_global_loss_other_backend": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   8
+  ]
+ },
+ "15_frontier_without_reattach": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   8
+  ]
+ },
+ "16_crash_with_uncertified_suffix": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   8
+  ]
+ },
+ "17_wait_spans_frontiers": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    20
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   20
+  ]
+ },
+ "18_detach_mid_wait": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    12
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   12
+  ]
+ },
+ "19_end_without_final_frontier": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   8
+  ]
+ },
+ "20_two_escalation_windows": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    15,
+    23
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   17,
+   23
+  ]
+ },
+ "21_second_escalation_window": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    15,
+    23
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   17,
+   23
+  ]
+ },
+ "22_rotation_open_wait": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    20
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    3,
+    16
+   ]
+  ],
+  "open": null
+ },
+ "23_rotation_missing_file": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   8
+  ]
+ },
+ "24_restart_same_pid": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    16,
+    24
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "Lock",
+   18,
+   24
+  ]
+ },
+ "25_distinct_zero_length_waits": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    10
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    5,
+    5
+   ],
+   [
+    "PgSleep",
+    5,
+    5
+   ]
+  ],
+  "open": null
+ },
+ "26_unreadable_counters": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   3,
+   8
+  ]
+ },
+ "27_preempt_rt_unqualified": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [],
+  "waits": [],
+  "open": null
+ },
+ "28_legacy_v2": {
+  "life": null,
+  "coverage": [],
+  "waits": [],
+  "open": null
+ },
+ "29_legacy_v3": {
+  "life": null,
+  "coverage": [],
+  "waits": [],
+  "open": null
+ },
+ "30_legacy_v4": {
+  "life": null,
+  "coverage": [],
+  "waits": [],
+  "open": null
+ },
+ "31_late_data_revokes_prefix": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [],
+  "waits": [],
+  "open": null
+ },
+ "32_end_before_delayed_transition": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    1,
+    12
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   11,
+   12
+  ]
+ },
+ "33_anchor_transition_before_attach": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    9,
+    15
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   8,
+   15
+  ]
+ }
+}
