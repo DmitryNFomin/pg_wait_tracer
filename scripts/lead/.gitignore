@@ -11,3 +11,4 @@
 .active-agents
 .briefs-passed
 .brief-gate.lock
+tick-state/
