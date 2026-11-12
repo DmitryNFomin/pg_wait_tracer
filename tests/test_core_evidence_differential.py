@@ -461,6 +461,43 @@ def end_cases():
     def records(c): return c["files"][0]["records"]
     def end(c): return next(r for r in records(c) if r["kind"] == "END")
     def frontier(t): return {"kind":"FRONTIER", "t":t, "counters":[0]*15}
+    def late_end(c, transition_anchor):
+        r = records(c)
+        attach = dict(r[1], t=10, state="w", seed="w", method="reread")
+        if transition_anchor:
+            attach.update(method="transition", seed=None)
+            edge = {"kind":"TRANS", "t":10, "pid":101,
+                    "old":"x", "new":"w", "duration":0}
+            endpoint, left = 10, 11
+        else:
+            edge = {"kind":"TRANS", "t":60, "pid":101,
+                    "old":"w", "new":None, "duration":0}
+            endpoint, left = 50, 61
+        r[:] = [r[0], attach, edge, frontier(100),
+                dict(end(c), t=endpoint), frontier(200)]
+        c["query"] = {"event":"w", "from":left, "to":100}
+    add("18", "end_shrinks_below_anchor_trim", lambda c: late_end(c, True))
+    add("18", "end_shrinks_below_unknown_close", lambda c: late_end(c, False))
+    def invalid_after_resolution(c):
+        r = records(c)
+        life = dict(r[0], fork=None, start_known=False)
+        attach = dict(r[1], t=50, fork=None, seed="x", state="y")
+        r[:] = [life, attach, frontier(10), dict(life, t=20, start=5), frontier(60)]
+        c["target"]["fork"] = None
+        c["query"] = {"event":"y", "from":0, "to":60}
+    add("18", "g36_invalid_after_resolution", invalid_after_resolution)
+    def empty_before_life_two_runs(c):
+        r = records(c)
+        life = dict(r[0], t=1, fork=1, start=1)
+        attach = dict(r[1], fork=1)
+        ending = dict(end(c), fork=1)
+        # R is empty and needs no exit certificate. Both candidates are full;
+        # the earlier [1,3] wins over the later point [12,12].
+        r[:] = [life, dict(attach, t=1), dict(ending, t=3),
+                dict(attach, t=12), dict(ending, t=12), frontier(15)]
+        c["target"]["fork"] = 1
+        c["query"] = {"event":"w", "from":0, "to":1}
+    add("18", "run_empty_before_life_two_runs", empty_before_life_two_runs)
     add("18", "end_caps_open")
     add("02", "reuse_query_old_window", lambda c: c["query"].update(**{"from":1,"to":10}))
     def invalid_late_life(c):
@@ -640,7 +677,14 @@ def generated_runs():
                 current,entry=new,t if new else None
             t+=rng.randrange(1,4)
             end={"kind":"END","pid":101,"fork":0,"t":t,"reason":rng.choice(["detach","deescalate","stop"])}
-            if i%3==0: deps.insert(1,end) # END can precede delayed edges
+            if i%4==0:
+                # A physically late END can retract a previously representable
+                # snapshot. Vary e from anchor through the old frontier so it
+                # can exclude the anchor trim or an unknown-entry close.
+                end["t"] = rng.randint(a, t)
+                deps.extend([{"kind":"FRONTIER", "t":t+1, "counters":[0]*15}, end])
+                t += 2  # the next frontier must exceed the one before END
+            elif i%3==0: deps.insert(1,end) # END can precede delayed edges
             else: deps.append(end)
             if i%7==0: deps.insert(1,{"kind":"FRONTIER","t":a,"counters":[0]*15})
             r.extend(deps)

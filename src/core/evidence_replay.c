@@ -353,7 +353,13 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
                 .has_fork = in->has_fork, .fork = in->fork});
             if (!target || final.invalid) continue;
             if (e->has_life_end && endpoint >= e->life_end && !terminal) continue;
-            if (!anchored || !portion || trimmed > endpoint) continue;
+            if (!anchored || !portion || trimmed > endpoint) {
+                /* CONTRACT.md §§4–5: END caps the candidate endpoint even
+                 * after a prior frontier. An anchored run with no representable
+                 * portion replaces its older snapshot with no candidate. */
+                if (anchored) run->has_snapshot = false;
+                continue;
+            }
             pgwt_core_wait *saved = waits ? malloc(waits * sizeof(*saved)) : NULL;
             if (waits && !saved) goto allocation_error;
             if (waits) memcpy(saved, candidate, waits * sizeof(*candidate));

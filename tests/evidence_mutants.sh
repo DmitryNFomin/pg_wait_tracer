@@ -139,7 +139,7 @@ guard_mutants = [
     ('G33_ordinary_fork_bound', 'start <= t->t && ', '', '02_pid_reuse_delayed_life', 'projection.coverage.length'),
     ('G34_ordinary_exit_bound', ' && (!life->has_exit || t->t < life->exit)', '', '02_pid_reuse_delayed_life', 'projection.coverage.length'),
     ('G35_unique_assignment', 'if (choices != 1) blocked = true;', '', 'reuse_missing_old_exit', 'projection.coverage.length'),
-    ('G36_tracking_invalid_life', 'if (!life || g[k].invalid || !attach) continue;', 'if (!life || !attach) continue;', 'invalid_late_life_attachment', 'keys'),
+    ('G36_tracking_invalid_life', 'if (!life || g[k].invalid || !attach) continue;', 'if (!life || !attach) continue;', 'g36_invalid_after_resolution', 'keys'),
     ('G37_attach_lower_bound', 'attach->t < life->start || ', '', 'refuse_attach_before_fork', 'keys'),
     ('G38_attach_exit_bound', 'life->has_exit && attach->t >= life->exit', 'false', 'exit_attach_at_exit', 'keys'),
     ('G39_unresolved_identity_blocks', 'blocked || attach->t > frontier', 'attach->t > frontier', 'reuse_missing_old_exit', 'projection.coverage.length'),
@@ -294,13 +294,16 @@ u4_guards += [
 u4_guards.append((
     'U447_END_inclusive_transition', 'if (t->t > endpoint) continue;', 'if (t->t >= endpoint) continue;',
     'end_includes_tied_close', 'projection.waits.length'))
+u4_guards += [
+    ('U448_query_full_without_exit_b', 'bo == right - left && (!exit_needed || ', 'bo == right - left && (', 'run_empty_before_life_two_runs', 'projection.coverage[0][0]'),
+    ('U449_END_discards_unrepresentable_snapshot', 'if (anchored) run->has_snapshot = false;', '', 'end_shrinks_below_anchor_trim', 'projection.coverage.length'),
+]
 guard_mutants += u4_guards
 
 # These deletions are algebraically redundant on reachable candidates, rather
 # than missing witnesses. Every one still builds and runs BOTH entire suites.
 # Any observed difference contradicts its proof and fails the harness.
 equivalent_deletions = {
-    'G36_tracking_invalid_life': 'pending resolution already requires valid LIFE; invalid generations receive no transitions and cannot project final evidence',
     'U428_query_window': 'from>=to gives zero overlap for every run; all preferences tie by time',
     'U429_query_start_lifetime': 'every run begins at/after LIFE.start; lower clipping cannot change overlap or the winner',
     'U433_query_tie_start': 'nonoverlapping runs have the same start/end time ordering, retained in append order',
@@ -313,6 +316,7 @@ equivalent_deletions = {
 }
 
 differential_mutants += [
+    ('E30_END_discards_unknown_prefix_snapshot', 'if (anchored) run->has_snapshot = false;', '', 'end_shrinks_below_unknown_close', 'projection.coverage.length'),
     ('E23_END_never_closes', 'run->has_open = entry_known;', 'if (run->end && entry_known) { saved = realloc(run->waits, (waits+1)*sizeof(*saved)); if (!saved) goto allocation_error; run->waits=saved; run->waits[run->wait_count++] = (pgwt_core_wait){current,entry,endpoint}; } run->has_open = entry_known && !run->end;', 'end_caps_open', 'projection.waits.length'),
     ('E24_END_never_changes_life', 'out->coverage = selected->coverage;', 'out->coverage = selected->coverage; if (selected->end) { e->has_life_end=true; e->life_end=selected->end->t; }', 'end_caps_open', 'projection.life[1]'),
     ('E26_tie_start_reverse', 'a->coverage.start < b->coverage.start', 'a->coverage.start > b->coverage.start', 'run_equal_overlap', 'projection.coverage[0][0]'),
