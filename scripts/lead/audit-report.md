@@ -46,8 +46,18 @@ Properties exercised by `audit-report-selftest.py`:
    VERIFIED/UNVERIFIABLE records and status-word narration or prompt echoes count
    as contamination; non-WRONG quotes found at the wrong line still withhold
    authorization. Draft-bound WRONG forces BLOCK even alongside SEND.
-   UNVERIFIABLE means attempted checks failed for access
-   reasons and alone permits SEND. Legacy exact-quote findings also work, including
+   UNVERIFIABLE means attempted checks failed for access reasons. If its
+   draft-bound quote matches `#[0-9]+` or a whole word `PR`, `merged`, `issue`,
+   `CI`, `check`, `review`, or `comment` (case insensitive), it withholds SEND as
+   `AUDIT INCONCLUSIVE (GitHub claim not checkable from the snapshot: line N)`.
+   This applies even without an explicit issue/PR number, on fresh and replayed
+   decisions, and to legacy findings. Only non-GitHub access failures alone
+   permit SEND, including process-list and session claims in a draft that also
+   contains verified GitHub claims. Draft-bound WRONG still forces BLOCK.
+   The auditor may finish with `VERDICT: INCONCLUSIVE` for an uncheckable GitHub
+   claim; that verdict without such a finding is malformed. The parser applies
+   the GitHub refusal even if the auditor says SEND.
+   Legacy exact-quote findings also work, including
    `WRONG:`. Attempted legacy findings with ` -> ` and a status word still fail
    closed when they cannot bind to the draft. The brief permits only well-formed
    CLAIM JSON lines, blank lines and one VERDICT line, with no narration.
@@ -60,17 +70,23 @@ Properties exercised by `audit-report-selftest.py`:
 5. **A fresh auditor invocation first captures GitHub evidence on the host.**
    The auditor retains `--sandbox read-only` with no network. When the draft
    contains `#` followed by digits or a whole word from `PR`, `merged`, `issue`,
-   `CI`, `check` (case insensitive), the wrapper fetches each distinct `#number`
+   `CI`, `check`, `review`, `comment` (case insensitive), the wrapper fetches each distinct `#number`
    with `gh pr view`. Only an explicit response that the number is not a PR
-   triggers `gh issue view`, including comments. It also fetches
-   `gh pr list --state all --limit 40`. Each call has a 30-second timeout.
+   triggers `gh issue view`, including comments. Each referenced PR also gets
+   `gh pr view N --json comments,reviews`. It also fetches
+   `gh pr list --state all --limit 200 --json number,title,state,mergedAt,closedAt,headRefName`
+   and `gh run list --branch master --limit 10 --json databaseId,headSha,status,conclusion,workflowName,createdAt`.
+   Each call has a 30-second timeout.
    A fresh `github-snapshot-*` directory inside the attempt holds JSON files
-   named `pr-N.json` or `issue-N.json`, plus `pr-list.json`. Every file records
+   named `pr-N.json` and `pr-N-comments-reviews.json`, or `issue-N.json`, plus
+   `pr-list.json` and `run-list.json`. Every file records
    `fetched_at_utc`, the exact `command`, and its result in `data`. Files have
    mode 0400 and the completed directory has mode 0500.
-   The brief names that directory and requires GitHub claims to be checked
+   The brief names that directory and its snapshot files and requires GitHub claims to be checked
    against these primary observations at the recorded times; contradictions
-   are WRONG. The list's 40-result limit does not establish unbounded absence.
+   are WRONG. The PR list's 200-result limit does not establish unbounded absence;
+   the run list's 10-result limit does not establish every workflow's state for
+   a commit. CI findings must identify the run and commit checked.
    Failed calls, invalid JSON or snapshot write failures withhold authorization
    as `AUDIT INCONCLUSIVE (GitHub snapshot failed: <what>)` before the auditor
    starts. They do not publish a decision; retries fetch a fresh directory.
