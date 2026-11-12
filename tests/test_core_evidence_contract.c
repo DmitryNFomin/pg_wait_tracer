@@ -8,7 +8,7 @@
 
 static bool in_scope(const char *id)
 {
-    const char *prefixes[] = {"01_", "02_", "03_", "04_", "06_", "07_", "24_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_"};
+    const char *prefixes[] = {"01_", "02_", "03_", "04_", "06_", "07_", "24_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_", "09_", "10_", "11_", "33_"};
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
         if (!strncmp(id, prefixes[i], 3)) return true;
     return false;
@@ -50,11 +50,12 @@ static int native_provisional(void)
         {.kind = PGWT_EVIDENCE_ATTACH_OK, .pid = 101, .t = 12, .fork = 38,
          .reread = true, .counters = {.known = true}},
         {.kind = PGWT_EVIDENCE_TRANS, .pid = 101, .t = 14, .new_event = event, .duration = 2},
-        {.kind = PGWT_EVIDENCE_FRONTIER, .t = 20, .counters = {.known = true}}
+        {.kind = PGWT_EVIDENCE_FRONTIER, .t = 20, .counters = {.known = true}},
+        {.kind = PGWT_EVIDENCE_OTHER, .pid = 101, .t = 15, .new_event = event, .duration = 1}
     };
     pgwt_evidence_file file = {.version = 5, .boot = {"boot", 4}, .capture = capture,
         .present = true, .qualified = true, .baseline = {.known = true},
-        .records = records, .record_count = sizeof(records) / sizeof(records[0])};
+        .records = records, .record_count = 4};
     pgwt_evidence_input input = {.files = &file, .file_count = 1, .capture = capture,
         .pid = 101, .fork = 39};
     pgwt_core_query query = {.event = event, .from = 12, .to = 20};
@@ -70,7 +71,55 @@ static int native_provisional(void)
     pgwt_evidence_output_free(&out);
     puts(pass ? "evidence native_provisional_fork_bytes PASS" :
                 "evidence native_provisional_fork_bytes FAIL projection");
-    return !pass;
+    /* Unknown kinds must be refused even when their native fields look like a
+     * valid transition. The JSON loader cannot express this pid-bearing OTHER. */
+    file.record_count = sizeof(records) / sizeof(records[0]);
+    const char *reason = NULL;
+    status = pgwt_evidence_replay(&input, &query, &out, &reason);
+    bool kind_pass = status == PGWT_REPLAY_UNSUPPORTED && reason &&
+        !strcmp(reason, "unsupported record kind") &&
+        !out.wait_time.metric && !out.completed_waits.metric;
+    pgwt_evidence_output_free(&out);
+    puts(kind_pass ? "evidence native_unsupported_kind PASS" :
+                     "evidence native_unsupported_kind FAIL unsupported");
+    return !pass || !kind_pass;
+}
+
+/* Exercise public-API state validation without the JSON adapter's checks. */
+static int native_attachment_validation(void)
+{
+    pgwt_evidence_record records[] = {
+        {.kind = PGWT_EVIDENCE_LIFE, .pid = 101, .t = 0, .has_fork = true,
+         .start_known = true},
+        {.kind = PGWT_EVIDENCE_ATTACH_OK, .pid = 101, .t = 1, .has_fork = true,
+         .reread = true, .counters = {.known = true}},
+        {.kind = PGWT_EVIDENCE_FRONTIER, .t = 10, .counters = {.known = true}}
+    };
+    pgwt_evidence_file file = {.version = 5, .boot = {"boot", 4}, .capture = {"A", 1},
+        .present = true, .qualified = true, .baseline = {.known = true},
+        .records = records, .record_count = 3};
+    pgwt_evidence_input input = {.files = &file, .file_count = 1, .capture = {"A", 1},
+        .pid = 101, .has_fork = true};
+    pgwt_core_query query = {.event = {"wait", 4}, .from = 1, .to = 10};
+    const pgwt_core_event invalid[] = {{"$EXIT", 5}, {"", 0}, {NULL, 1}};
+    int failed = 0;
+    for (size_t field = 0; field < 2; ++field) {
+        bool pass = true;
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+            /* No anchor dependency can mask the field's own validation. */
+            records[1].reread = false;
+            records[1].seed = field ? (pgwt_core_event){0} : invalid[i];
+            records[1].state = field ? invalid[i] : (pgwt_core_event){0};
+            pgwt_evidence_output out;
+            pgwt_replay_status status = pgwt_evidence_replay(&input, &query, &out, NULL);
+            pass &= status == PGWT_REPLAY_UNSUPPORTED && !out.wait_time.metric && !out.completed_waits.metric;
+            pgwt_evidence_output_free(&out);
+        }
+        printf("evidence native_invalid_%s %s\n", field ? "state" : "seed",
+               pass ? "PASS" : "FAIL validation");
+        failed |= !pass;
+    }
+    return failed;
 }
 
 int main(int argc, char **argv)
@@ -88,7 +137,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "evidence harness: need 33 frozen scenarios, found %zu\n", paths.gl_pathc);
         globfree(&paths); return 2;
     }
-    int mismatch = native_provisional(), harness_error = 0;
+    int mismatch = native_provisional() | native_attachment_validation(), harness_error = 0;
     for (size_t i = 0; i < paths.gl_pathc; ++i) {
         evidence_case input;
         char field[512] = {0};

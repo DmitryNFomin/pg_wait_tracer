@@ -47,7 +47,7 @@ mutants = [
         e->has_open = false;
     }
     free(history);""", "17_wait_spans_frontiers", "wait_time"),
-    ("E5_merge_zero_waits", "if (!null_event(current))", """if (!null_event(current) &&
+    ("E5_merge_zero_waits", "if (entry_known)", """if (entry_known &&
                 !(entry == t->t && waits &&
                   candidate[waits - 1].start == entry &&
                   candidate[waits - 1].end == t->t &&
@@ -72,8 +72,8 @@ mutants = [
         e->open = (pgwt_core_open_wait){last->new_event, last->t, last->t};
     }
     free(history);""", "28_legacy_v2", "wait_time"),
-    ("E8_shift_coverage", "out->coverage = (pgwt_core_span){attach->t, endpoint};",
-     "out->coverage = (pgwt_core_span){attach->t + 1, endpoint};",
+    ("E8_shift_coverage", "out->coverage = (pgwt_core_span){trimmed, endpoint};",
+     "out->coverage = (pgwt_core_span){trimmed + 1, endpoint};",
      "17_wait_spans_frontiers", "projection.coverage[0][0]"),
     ("E9_accept_end", 'return unsupported(why, "unsupported record kind");',
      'continue; /* ignore unknown storage kinds */',
@@ -85,7 +85,7 @@ differential_mutants = [
      "transition_after_frontier", "projection.waits.length"),
     ("E11_no_pid_check", "if (r->kind != PGWT_EVIDENCE_FRONTIER && r->pid != in->pid)",
      "if (0)", "refuse_other_pid_transition", "keys"),
-    ("E12_no_duration_check", "(!null_event(current) && t->t - t->duration != entry)", "false",
+    ("E12_no_duration_check", "(entry_known && t->t - t->duration != entry)", "false",
      "inconsistent_duration", "keys"),
     ("E13_no_old_state_check", "!same(t->old_event, current) ||", "",
      "inconsistent_old_state", "keys"),
@@ -98,7 +98,7 @@ differential_mutants = [
 ]
 
 
-# U2 semantic guard inventory, one independent deletion per row. This also
+# U1/U2 semantic guard inventory, one independent deletion per row. This also
 # repeats the U1 prefix/state gates touched by the replay refactor. Allocation,
 # pointer checks and loop mechanics are not evidence-semantic deletions.
 # --guard-sweep runs BOTH full suites for every deletion; the default mode
@@ -143,8 +143,8 @@ guard_mutants = [
     ('G37_attach_lower_bound', 'attach->t < life->start || ', '', 'refuse_attach_before_fork', 'keys'),
     ('G38_attach_exit_bound', 'life->has_exit && attach->t >= life->exit', 'false', 'exit_attach_at_exit', 'keys'),
     ('G39_unresolved_identity_blocks', 'blocked || attach->t > frontier', 'attach->t > frontier', 'reuse_missing_old_exit', 'projection.coverage.length'),
-    ('G40_attach_before_frontier', 'blocked || attach->t > frontier', 'blocked', 'refuse_last_frontier_before_attach', 'projection.coverage.length'),
-    ('G41_endpoint_requires_exit', 'life->has_exit && life->exit < frontier ?', 'life->exit < frontier ?', '01_ordinary_run', 'projection.coverage[0][1]'),
+    ('G40_attach_before_frontier', 'blocked || attach->t > frontier', 'blocked', 'future_reread_mismatch_pending', 'keys'),
+    ('G41_endpoint_requires_exit', 'life->has_exit && life->exit < frontier ?', 'life->exit < frontier ?', '01_ordinary_run', 'projection.coverage.length'),
     ('G42_endpoint_capped_by_frontier', 'life->has_exit && life->exit < frontier ?', 'life->has_exit ?', 'exit_after_frontier', 'projection.coverage.length'),
     ('G43_assigned_generation', 'if (assigned[j] != k) continue;', '', '02_pid_reuse_delayed_life', 'keys'),
     ('G44_exit_is_terminal', 'terminal || !same(t->old_event, current)', '!same(t->old_event, current)', 'duplicate_nonwaiting_exit', 'keys'),
@@ -168,14 +168,14 @@ guard_mutants = [
     ('G62_capture_failure_propagates', 'if (status != PGWT_REPLAY_OK) goto done;', '', 'inconsistent_duration', 'keys'),
     ('G63_physical_prefix', 'history[j].order >= i || ', '', 'transition_after_frontier', 'projection.waits.length'),
     ('G64_frontier_advance', 'if (has_frontier && r->t <= frontier) {', 'if (false) {', 'refuse_nonadvancing_frontier_15', 'keys'),
-    ('G65_duration_consistency', '(!null_event(current) && t->t - t->duration != entry)', 'false', 'inconsistent_duration', 'keys'),
+    ('G65_duration_consistency', '(entry_known && t->t - t->duration != entry)', 'false', 'inconsistent_duration', 'keys'),
     ('G66_old_state_consistency', '!same(t->old_event, current) ||', '', 'inconsistent_old_state', 'keys'),
-    ('G67_reread_reconciles_anchor', 'if (t->t <= attach->t) continue;', '', 'transitions_through_reread', 'keys'),
+    ('G67_reread_reconciles_anchor', 'if (attach->reread && t->t == attach->t) continue;', '', 'transitions_through_reread', 'keys'),
     ('G68_qualification', 'if (!file->qualified) continue;', '', '27_preempt_rt_unqualified', 'projection.coverage.length'),
     ('G69_legacy_prefix', 'if (file->version != 5) continue;', '', 'legacy_life_shaped_records', 'projection.coverage.length'),
-    ('G70_attach_reread_only', 'if (!r->reread || !null_event(r->seed)', 'if (!null_event(r->seed)', 'guard_attach_transition', 'keys'),
-    ('G71_attach_seed_null', '!r->reread || !null_event(r->seed) || ', '!r->reread || ', 'guard_attach_seed_nonnull', 'keys'),
-    ('G72_attach_state_null', ' || !null_event(r->state))', ')', 'guard_attach_state_nonnull', 'keys'),
+    ('G70_attach_reread_only', 'bool anchored = attach->reread;', 'bool anchored = true;', 'guard_attach_transition', 'projection.coverage.length'),
+    ('G71_attach_seed_null', '!same(attach->seed, current)', 'false', 'guard_attach_seed_nonnull', 'keys'),
+    ('G72_attach_state_null', 'pgwt_core_event current = attach->state;', 'pgwt_core_event current = attach->seed;', 'guard_attach_state_nonnull', 'keys'),
     ('G73_ordinary_exit_strict', 't->t < life->exit))', 't->t <= life->exit))', 'guard_ordinary_edge_then_terminal_at_exit', 'projection.coverage.length'),
     ('G74_transition_changes_state', '                       same(r->old_event, r->new_event) || r->duration > r->t', '                       r->duration > r->t', 'guard_same_event_transition', 'keys'),
     ('G75_duration_within_timestamp', 'same(r->old_event, r->new_event) || r->duration > r->t', 'same(r->old_event, r->new_event)', 'guard_duration_exceeds_timestamp', 'keys'),
@@ -185,7 +185,62 @@ guard_mutants = [
     ('G79_first_physical_discovery', '    if (!g->life) g->discovery = r->t;\n', '    if (!g->life || r->t < g->discovery) g->discovery = r->t;\n', 'guard_first_physical_discovery', 'projection.coverage.length'),
 ]
 
-contract_guards = {'G58_key_ignores_absent_fork_bytes', 'G59_final_ignores_absent_fork_bytes'}
+# U3 inventory includes every new/changed semantic branch and each term of
+# compound guards. The two +1 assignments have separate semantic mutants;
+# overflow is rejected by portion, without saturating or projecting wraparound.
+u3_guards = [
+    ('G80_attachment_seed_state', '!state(r->seed) || ', '', 'native_invalid_seed', 'validation'),
+    ('G81_attachment_verified_state', '!state(r->state)', 'false', 'native_invalid_state', 'validation'),
+    ('G82_reread_equality_method', 'attach->reread && !same(attach->seed, current)', '!same(attach->seed, current)', 'anchor_seed_is_not_old', 'keys'),
+    ('G83_reread_seed_equality', '!same(attach->seed, current)', 'false', 'reread_seed_mismatch', 'keys'),
+    ('G84_anchor_lower_bound', 'if (t->t < attach->t) continue;', '', 'anchor_prior_transition', 'projection.coverage.length'),
+    ('G85_anchor_dispatch', 'if (!anchored) {', 'if (false) {', '09_seed_mismatch_then_transition', 'keys'),
+    ('G86_anchor_exact_time', 'if (t->t != attach->t) break;', '', 'anchor_wrong_time', 'projection.coverage.length'),
+    ('G87_anchor_state', 'if (!same(t->new_event, current)) {', 'if (false) {', 'anchor_wrong_state', 'keys'),
+    ('G88_anchor_old_side_trim', 'if (!null_event(t->old_event)) {', 'if (false) {', '09_seed_mismatch_then_transition', 'projection.coverage[0][0]'),
+    ('G89_anchor_trim_overflow', 'portion = t->t != UINT64_MAX;\n                        trimmed', 'portion = true;\n                        trimmed', 'anchor_trim_overflow', 'projection.coverage.length'),
+    ('G90_reconcile_only_reread', 'attach->reread && t->t == attach->t', 't->t == attach->t', 'anchor_later_ties', 'projection.waits.length'),
+    ('G91_reconcile_only_anchor_time', 'attach->reread && t->t == attach->t', 'attach->reread', '11_unknown_entry_close_boundary', 'projection.coverage.length'),
+    ('G92_duration_requires_entry', 'entry_known && t->t - t->duration != entry', 't->t - t->duration != entry', 'unknown_close_duration_not_entry', 'keys'),
+    ('G93_unknown_close_named_old', '!null_event(current) && !entry_known', '!entry_known', '01_ordinary_run', 'projection.coverage[0][0]'),
+    ('G94_unknown_close_entry', '!null_event(current) && !entry_known', '!null_event(current)', '01_ordinary_run', 'projection.coverage[0][0]'),
+    ('G95_append_known_only', 'if (entry_known)\n                    candidate', 'if (true)\n                    candidate', '01_ordinary_run', 'projection.waits.length'),
+    ('G96_unknown_close_trim', 'if (unknown_close) {', 'if (false) {', '11_unknown_entry_close_boundary', 'projection.coverage.length'),
+    ('G97_unknown_trim_overflow', 'portion = t->t != UINT64_MAX;\n                    trimmed', 'portion = true;\n                    trimmed', 'unknown_trim_overflow', 'projection.coverage.length'),
+    ('G98_anchor_dependency', '!anchored || !portion || ', '!portion || ', 'anchor_missing_null_state', 'projection.coverage.length'),
+    ('G99_representable_portion', '!anchored || !portion || ', '!anchored || ', '10_equal_nonzero_seed', 'projection.coverage.length'),
+    ('G100_trim_before_endpoint', ' || trimmed > endpoint', '', 'unknown_close_at_frontier', 'projection.coverage.length'),
+    ('G101_seed_entry_unknown', 'bool entry_known = false, portion', 'bool entry_known = true, portion', '11_unknown_entry_close_boundary', 'keys'),
+    ('G102_seed_portion_unknown', 'portion = null_event(current);', 'portion = true;', '10_equal_nonzero_seed', 'projection.coverage.length'),
+    ('G103_transition_needs_anchor', 'bool anchored = attach->reread;', 'bool anchored = true;', '09_seed_mismatch_then_transition', 'keys'),
+    ('G104_reread_needs_no_transition', 'bool anchored = attach->reread;', 'bool anchored = false;', '01_ordinary_run', 'projection.coverage.length'),
+    ('G105_anchor_null_has_no_entry', 'entry_known = !null_event(current);\n                    portion', 'entry_known = true;\n                    portion', 'anchor_null_then_wait', 'keys'),
+    ('G106_new_null_has_no_entry', 'entry_known = !null_event(current);\n            }', 'entry_known = true;\n            }', '01_ordinary_run', 'projection.waits.length'),
+    ('G107_open_requires_entry', 'e->has_open = entry_known;', 'e->has_open = false;', '09_seed_mismatch_then_transition', 'projection.open'),
+    ('G108_anchor_named_has_entry', 'entry_known = !null_event(current);\n                    portion', 'entry_known = false;\n                    portion', '09_seed_mismatch_then_transition', 'projection.open'),
+    ('G109_new_named_has_entry', 'entry_known = !null_event(current);\n            }', 'entry_known = false;\n            }', '01_ordinary_run', 'projection.coverage[0][0]'),
+    ('G110_anchor_null_old_not_trimmed', 'if (!null_event(t->old_event)) {', 'if (true) {', 'anchor_old_null', 'projection.coverage[0][0]'),
+]
+# U2's former attachment-shape refusals now exercise U3's anchor and seed
+# reconciliation rules with the same reviewer witnesses.
+guard_mutants += u3_guards
+guard_mutants.append((
+    'R14_kind_check',
+    'if (r->kind != PGWT_EVIDENCE_LIFE && r->kind != PGWT_EVIDENCE_ATTACH_OK &&',
+    'if (false && r->kind != PGWT_EVIDENCE_ATTACH_OK &&',
+    'native_unsupported_kind', 'unsupported'))
+
+differential_mutants += [
+    ('E17_seed_has_no_entry', 'bool entry_known = false, portion = null_event(current);', 'bool entry_known = !null_event(current), portion = true;', '10_equal_nonzero_seed', 'projection.coverage.length'),
+    ('E18_anchor_entry_instant', 'entry = t->t;\n                    entry_known', 'entry = t->t + 1;\n                    entry_known', '09_seed_mismatch_then_transition', 'projection.open[1]'),
+    ('E19_anchor_exclude_one_ns', 'trimmed = t->t + 1; /* Wrapped value is never projected. */\n                    }', 'trimmed = t->t;\n                    }', '09_seed_mismatch_then_transition', 'projection.coverage[0][0]'),
+    ('E20_unknown_exclude_one_ns', 'trimmed = t->t + 1; /* Wrapped value is never projected. */\n                }', 'trimmed = t->t;\n                }', '11_unknown_entry_close_boundary', 'projection.coverage[0][0]'),
+    ('E21_preserve_real_wait_start', '(pgwt_core_wait){current, entry, t->t}', '(pgwt_core_wait){current, entry < trimmed ? trimmed : entry, t->t}', '11_unknown_entry_close_boundary', 'projection.waits[0][1]'),
+    ('E22_anchor_old_is_untrusted', 'continue; /* The anchor\'s old side is untrusted. */', '; /* consume the untrusted old side */', '09_seed_mismatch_then_transition', 'keys'),
+]
+
+contract_guards = {'G58_key_ignores_absent_fork_bytes', 'G59_final_ignores_absent_fork_bytes',
+                   'G80_attachment_seed_state', 'G81_attachment_verified_state', 'R14_kind_check'}
 
 
 def differential_case(binary, work, case):
@@ -203,7 +258,7 @@ def contract(binary):
     result = diff.execute([binary, diff.CONTRACT])
     output = result.stdout + result.stderr
     rows = re.findall(r"^evidence \S+ (?:PASS|UNSUPPORTED-OK|FAIL .+)$", output, re.M)
-    valid = len(rows) == 34 and not diff.sanitizer_error(output) and " ERROR " not in output
+    valid = len(rows) == 37 and not diff.sanitizer_error(output) and " ERROR " not in output
     return result.returncode, output, valid
 
 

@@ -47,7 +47,7 @@ static bool key(const pgwt_evidence_record *a, const pgwt_evidence_record *b)
 }
 
 /* Validate every capture, including uncertified suffixes. Rotation, loss,
- * multiple PIDs and multiple attachments per generation remain outside U2. */
+ * multiple PIDs and multiple attachments per generation remain outside U3. */
 static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
 {
     if (!in || in->unsupported_shape || !in->files)
@@ -78,7 +78,7 @@ static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
                     r->start > r->t || (r->has_exit && (r->exit < r->start || r->exit > r->t)))
                     return unsupported(why, "unsupported lifetime");
             } else if (r->kind == PGWT_EVIDENCE_ATTACH_OK) {
-                if (!r->reread || !null_event(r->seed) || !null_event(r->state))
+                if (!state(r->seed) || !state(r->state))
                     return unsupported(why, "unsupported attachment");
                 for (size_t j = 0; j < i; ++j)
                     if (f->records[j].kind == PGWT_EVIDENCE_ATTACH_OK && key(r, &f->records[j]))
@@ -220,35 +220,66 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
             }
             if (blocked || attach->t > frontier) continue;
             uint64_t endpoint = life->has_exit && life->exit < frontier ? life->exit : frontier;
-            pgwt_core_event current = {0};
+            pgwt_core_event current = attach->state;
             uint64_t entry = 0;
+            uint64_t trimmed = attach->t;
+            bool entry_known = false, portion = null_event(current);
+            bool anchored = attach->reread;
+            if (attach->reread && !same(attach->seed, current)) {
+                status = unsupported(reason, "unsupported reread seed mismatch"); goto done;
+            }
             size_t waits = 0;
             bool terminal = false;
             for (size_t j = 0; j < count; ++j) {
                 const pgwt_evidence_record *t = history[j].record;
                 if (assigned[j] != k) continue;
+                /* Timestamp order, not append position relative to ATTACH_OK,
+                 * selects the first transition at the anchor, including ties. */
+                if (t->t < attach->t) continue;
+                if (!anchored) {
+                    if (t->t != attach->t) break;
+                    if (!same(t->new_event, current)) {
+                        status = unsupported(reason, "unsupported anchor state mismatch"); goto done;
+                    }
+                    anchored = true;
+                    entry = t->t;
+                    entry_known = !null_event(current);
+                    portion = true;
+                    if (!null_event(t->old_event)) {
+                        portion = t->t != UINT64_MAX;
+                        trimmed = t->t + 1; /* Wrapped value is never projected. */
+                    }
+                    continue; /* The anchor's old side is untrusted. */
+                }
                 /* A reread reconciles transitions THROUGH its anchor. */
-                if (t->t <= attach->t) continue;
+                if (attach->reread && t->t == attach->t) continue;
                 if (terminal || !same(t->old_event, current) ||
-                    (!null_event(current) && t->t - t->duration != entry)) {
+                    (entry_known && t->t - t->duration != entry)) {
                     status = unsupported(reason, "unsupported inconsistent run"); goto done;
                 }
-                if (!null_event(current))
+                bool unknown_close = !null_event(current) && !entry_known;
+                if (entry_known)
                     candidate[waits++] = (pgwt_core_wait){current, entry, t->t};
+                if (unknown_close) {
+                    portion = t->t != UINT64_MAX;
+                    trimmed = t->t + 1; /* Wrapped value is never projected. */
+                }
                 terminal = exit_event(t->new_event);
                 current = terminal ? (pgwt_core_event){0} : t->new_event;
                 entry = t->t;
+                entry_known = !null_event(current);
             }
             bool target = target_capture && key(g[k].identity, &(pgwt_evidence_record){
                 .has_fork = in->has_fork, .fork = in->fork});
             if (!target || final.invalid) continue;
             if (e->has_life_end && endpoint >= e->life_end && !terminal) continue;
+            if (!anchored || !portion || trimmed > endpoint) continue;
             memcpy(out->waits, candidate, waits * sizeof(*candidate));
             e->wait_count = waits;
-            out->coverage = (pgwt_core_span){attach->t, endpoint};
+            out->coverage = (pgwt_core_span){trimmed, endpoint};
             e->coverage = &out->coverage;
             e->coverage_count = 1;
-            e->has_open = !null_event(current);
+            e->has_open = entry_known;
             e->open = (pgwt_core_open_wait){current, entry, endpoint};
         }
     }

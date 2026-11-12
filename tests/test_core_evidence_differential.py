@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic U1/U2 logical replay versus the frozen independent evaluator.
+"""Deterministic U1/U2/U3 logical replay versus the frozen independent evaluator.
 
 Builds only portable C in a temporary directory. CFLAGS selects sanitizers.
 The contract mode runs the C test against both frozen answer files.
@@ -63,7 +63,7 @@ def fixture(prefix):
 
 
 def named_cases():
-    cases = [fixture(v) for v in ("01", "02", "03", "04", "06", "07", "08", "16", "17", "24", "25", "27", "28", "29", "30")]
+    cases = [fixture(v) for v in ("01", "02", "03", "04", "06", "07", "08", "09", "10", "11", "16", "17", "24", "25", "27", "28", "29", "30", "33")]
     ordinary = fixture("01")
     records = ordinary["files"][0]["records"]
     c = copy.deepcopy(ordinary)
@@ -329,9 +329,129 @@ def generated_lifecycles():
     return cases
 
 
+def attachment_cases():
+    """Distinguish entry proof, the close-inclusive left edge and delayed anchors."""
+    cases = []
+    def add(prefix, name, edit=lambda c: None):
+        c = fixture(prefix)
+        c["id"] = name
+        edit(c)
+        cases.append(c)
+    def records(c): return c["files"][0]["records"]
+    def anchor(c): return next(r for r in records(c) if r["kind"] == "ATTACH_OK")
+    def edge(c): return next(r for r in records(c) if r["kind"] == "TRANS")
+    add("09", "anchor_seed_is_not_old", lambda c: anchor(c).update(seed="other"))
+    add("09", "anchor_old_null", lambda c: edge(c).update(old=None))
+    add("09", "anchor_new_null", lambda c: [anchor(c).update(state=None), edge(c).update(new=None)])
+    def null_anchor_then_wait(c):
+        anchor(c)["state"] = edge(c)["new"] = None
+        records(c).insert(-1, {"kind":"TRANS", "t":10, "pid":101, "old":None, "new":"PgSleep", "duration":10})
+    add("09", "anchor_null_then_wait", null_anchor_then_wait)
+    add("09", "anchor_wrong_state", lambda c: anchor(c).update(state="other"))
+    add("09", "anchor_missing", lambda c: records(c).remove(edge(c)))
+    add("09", "anchor_missing_null_state", lambda c: [records(c).remove(edge(c)), anchor(c).update(state=None)])
+    add("09", "anchor_wrong_time", lambda c: edge(c).update(t=9))
+    add("09", "anchor_before_time", lambda c: edge(c).update(t=7))
+    add("09", "anchor_prior_transition", lambda c: records(c).insert(2, {
+        "kind":"TRANS", "t":7, "pid":101, "old":None, "new":"Lock", "duration":0}))
+    add("09", "anchor_after_frontier", lambda c: records(c).append(records(c).pop(3)))
+    def next_frontier(c):
+        records(c).append(records(c).pop(3))
+        records(c).append({"kind":"FRONTIER", "t":25, "counters":[0]*15})
+    add("09", "delayed_anchor_next_frontier", next_frontier)
+    add("33", "attach_after_frontier", lambda c: records(c).append(records(c).pop(3)))
+    def anchor_ties(c):
+        r = records(c)
+        r.insert(-1, {"kind":"TRANS", "t":8, "pid":101, "old":"PgSleep", "new":"Lock", "duration":0})
+        r.insert(-1, {"kind":"TRANS", "t":8, "pid":101, "old":"Lock", "new":"PgSleep", "duration":0})
+        c["query"].update(event="Lock", **{"from":9})
+    add("33", "anchor_later_ties", anchor_ties)
+    def reversed_ties(c):
+        anchor_ties(c)
+        r = records(c)
+        r[2], r[4] = r[4], r[2]
+    add("33", "anchor_first_tie_controls", reversed_ties)
+    add("10", "reread_seed_mismatch", lambda c: anchor(c).update(seed="Lock"))
+    add("10", "future_reread_mismatch_pending", lambda c: anchor(c).update(seed="Lock", t=21))
+    add("01", "reread_null_seed_mismatch", lambda c: anchor(c).update(seed="Lock"))
+    add("10", "reread_named_seed_null", lambda c: anchor(c).update(seed=None))
+    add("11", "unknown_close_at_frontier", lambda c: records(c)[-1].update(t=16))
+    add("11", "unknown_close_before_frontier", lambda c: records(c)[-1].update(t=17))
+    add("11", "unknown_close_duration_untrusted", lambda c: edge(c).update(duration=16))
+    add("11", "unknown_close_duration_not_entry", lambda c: edge(c).update(duration=1))
+    add("11", "unknown_close_bad_old", lambda c: edge(c).update(old="other"))
+    add("11", "known_close_bad_duration", lambda c: records(c)[3].update(duration=5))
+    def unknown_to_null(c):
+        r = records(c)
+        r.pop(3)
+        edge(c)["new"] = None
+    add("11", "unknown_close_to_null", unknown_to_null)
+    def unknown_exit(c):
+        unknown_to_null(c)
+        edge(c)["new"] = "$EXIT"
+        records(c).insert(-1, dict(records(c)[0], t=16, exit=16))
+    add("11", "unknown_entry_exit", unknown_exit)
+    def at_max(c, old=None):
+        r = records(c)
+        r[-1]["t"] = MAX
+        anchor(c)["t"] = MAX
+        edge(c).update(t=MAX, old=old)
+        c["query"].update(**{"from":MAX-1, "to":MAX})
+    add("09", "anchor_trim_overflow", lambda c: at_max(c, "Lock"))
+    add("09", "anchor_max_null_old", at_max)
+    def unknown_max(c):
+        unknown_to_null(c)
+        edge(c)["t"] = records(c)[-1]["t"] = MAX
+        c["query"].update(**{"from":MAX-1, "to":MAX})
+    add("11", "unknown_trim_overflow", unknown_max)
+    def close_ties(c):
+        r = records(c)
+        r[3]["t"], r[3]["duration"] = 16, 0
+    add("11", "known_zero_wait_after_unknown", close_ties)
+    def zero_anchor(c):
+        r = records(c)
+        r.pop(1)
+        anchor(c)["t"] = 0
+        edge(c).update(t=0, duration=0, old=None)
+        r.insert(-1, {"kind":"TRANS", "t":2, "pid":101, "old":"PgSleep", "new":None, "duration":2})
+    add("09", "known_entry_at_zero", zero_anchor)
+    def reread_tie(c):
+        records(c).insert(2, {"kind":"TRANS", "t":12, "pid":101, "old":"Lock", "new":"PgSleep", "duration":1})
+    add("11", "nonzero_reread_reconciles_ties", reread_tie)
+    add("09", "anchor_empty_point_excluded", lambda c: records(c)[-1].update(t=8))
+    add("09", "anchor_empty_point_allowed", lambda c: [edge(c).update(old=None), records(c)[-1].update(t=8)])
+    add("09", "anchor_first_trimmed_point", lambda c: records(c)[-1].update(t=9))
+    return cases
+
+
+def generated_attachments():
+    rng = random.Random(SEED + 3)
+    named = attachment_cases()
+    cases = copy.deepcopy(named)
+    for i in range(1200):
+        # Preserve close/anchor boundary cases while moving through the entire
+        # uint64 range; the required 1 ns trim never scales with timestamps.
+        c = copy.deepcopy(named[i % len(named)])
+        c["id"] = f"attachment_{i:04d}"
+        if not any(r["t"] == MAX for r in c["files"][0]["records"]):
+            scale = rng.randrange(1, 9)
+            offset = rng.choice([0, 1, (1 << 53)+7, 1 << 63, MAX-1000])
+            for r in c["files"][0]["records"]:
+                for k in ("t", "fork", "start", "exit"):
+                    if r.get(k) is not None: r[k] = offset + scale*r[k]
+                if "duration" in r: r["duration"] *= scale
+            if c["target"]["fork"] is not None:
+                c["target"]["fork"] = offset + scale*c["target"]["fork"]
+            left, right = sorted(rng.choices(range(30), k=2))
+            c["query"].update(event=rng.choice(["PgSleep", "Lock", "absent"]),
+                                **{"from":offset+scale*left, "to":offset+scale*right})
+        cases.append(c)
+    return cases
+
+
 def generate():
     rng = random.Random(SEED)
-    cases = named_cases() + guard_cases() + generated_lifecycles()
+    cases = named_cases() + guard_cases() + generated_lifecycles() + generated_attachments()
     names = ["PgSleep", "Lock", "A", "other", 'quote"slash\\', "\u2603", "A\0B", "\U0001f600"]
     for i in range(2400):
         offset = rng.choice([0, 0, 100, (1 << 53) + 7, (1 << 63), MAX - 100])
@@ -546,12 +666,12 @@ def differential(binary, work, selected=None):
         if len(cases) + len(refusals) != 1:
             raise RuntimeError("unknown/duplicate selected differential case")
     expected = []
-    scope_refusals = {"guard_attach_transition", "guard_attach_nonzero_counter"}
+    scope_refusals = {"guard_attach_nonzero_counter"}
     for case in cases:
         answer = reference_answer(reference, case)
         if case["id"] in scope_refusals:
-            # The reference supports more attachment shapes than U2's public
-            # API (nonwaiting rereads and zero counters only). Prove the
+            # The reference supports nonzero attachment counters beyond this
+            # unit's zero-counter public API. Prove the
             # reference withholds coverage and both values before requiring
             # the core's documented whole-input refusal for these shapes.
             if (answer.get("projection", {}).get("coverage") != [] or
