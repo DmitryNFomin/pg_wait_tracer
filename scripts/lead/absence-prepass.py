@@ -84,7 +84,7 @@ COMPILED = [re.compile(p, re.IGNORECASE) for p in PATTERNS]
 SEARCH_ABSENCE_RE = re.compile(
     r"\b(?:does(?: not|n't) exist|not found|nowhere|none exist|no such|"
     r"is not present|isn't there|not there|"
-    r"absent (?:from|in|on|under|within|at)|"
+    r"absent (?:from|in|on|under|within|at|everywhere)|"
     r"no mechanical check|nothing (?:checks|references)|no caller|no guard|"
     r"(?:contains|there (?:is|are)) no|"
     r"no\b[^.\n]{0,60}\banywhere|"
