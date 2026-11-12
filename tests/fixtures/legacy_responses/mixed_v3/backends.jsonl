@@ -1,0 +1,2 @@
+{"pid":1000,"type":"client","user":"test","db":"testdb","addr":"127.0.0.1(5432)"}
+{"pid":1001,"type":"client","user":"test","db":"testdb","addr":"127.0.0.1(5432)"}

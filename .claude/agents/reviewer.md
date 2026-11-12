@@ -24,6 +24,23 @@ Steps, in order:
    claims not matched by code.
 5. If `web/` changed, also run the `ui-reviewer` checklist or delegate to it.
 
+What counts as a finding (owner decision 2026-11-11; see
+docs/REWORK_PLAN_2026-11-11.md, section 3):
+- Report only defects that break a contract under `contracts/`, a documented
+  guarantee, or a path a user or the gate actually takes. Each finding needs a
+  concrete failure scenario: input, expected, actual — reproduced, or marked
+  "read from source, not reproduced".
+- Do not report style, naming, refactoring wishes, or hypothetical concerns
+  with no reachable failure. A review that finds nothing is a valid review;
+  do not search for something to say.
+- Where an independent oracle exists (a contract's expected answers or its
+  reference evaluator), check the code against it; never derive an expected
+  value from the code under review.
+- This is the unit's only review round. A blocker sends the unit back once;
+  if the corrected unit fails review again, the lead rewrites the brief and a
+  fresh implementer round starts (two-strikes rule) — do not ask for a third
+  correction.
+
 Write the PR body with exactly these sections:
 - **What changed** (3–6 lines, user-facing wording)
 - **Evidence**: check stamp, box-check log name + last summary lines, gallery

@@ -15,6 +15,9 @@ test_event_writer
 test_event_reader
 test_trace_v2
 test_sampler
+# #863: portable integer tick-weight conservation and trace round-trip.
+test_sample_weight
+test_sample_weight_controls.py
 test_anomaly
 test_escalation_budget
 test_wp_attr
@@ -1047,6 +1050,9 @@ test_summary_qattr_background
 # Persistent box-check must stage/run the current provisioner before build,
 # forwarding the OS and leaving lock ownership to the provisioner itself.
 test_box_check_provision_persistent.sh
+
+# #861: clean builds, synced source identity and concurrent-run isolation.
+test_box_check_build_provenance.sh
 
 # #852: session membership at close/open credit, including zero occupancy.
 test_session_rows

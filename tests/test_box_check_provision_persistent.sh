@@ -134,6 +134,7 @@ case "$name" in
         remote_command="${*: -1}"
         case "$remote_command" in
             'mkdir -p pgwt-provision') exit "${MKDIR_RC:-0}" ;;
+            *'mktemp -d '*) printf 'pgwt-check/fixture-head.run1234567\n' ;;
             'rm -f '*) exit "${CLEANUP_RC:-0}" ;;
             'sudo bash pgwt-provision/'*-tests-provision-runner.sh\ *)
                 if [[ -n "${PROVISION_REAL:-}" ]]; then

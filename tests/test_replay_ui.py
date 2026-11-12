@@ -77,8 +77,15 @@ class ReplayComparisonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'current.trace'
             start = 1792846167123456789
-            path.write_bytes(struct.pack('<IHHIQQ',0x54574750,2,0,17,start,123))
-            self.assertEqual(trace_headers(tmp)[0]['start_wall_ns'],str(start))
+            for version in (2, 3, 4):
+                with self.subTest(version=version):
+                    raw = struct.pack('<IHHIQQ',0x54574750,version,0,17,start,123)
+                    if version == 4:
+                        raw += struct.pack('<Q', 100000000)
+                    path.write_bytes(raw)
+                    header = trace_headers(tmp)[0]
+                    self.assertEqual(header['start_wall_ns'],str(start))
+                    self.assertEqual(header['version'],version)
             path.write_bytes(b'bad')
             with self.assertRaisesRegex(ValueError, 'unreadable'):
                 trace_headers(tmp)

@@ -19,8 +19,12 @@ These run without a live PostgreSQL: gen_test_traces emits SAMPLES blocks
 from the "samples"/"sample_period_ns" inputs (A1).
 """
 import os
+import json
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
+from decimal import Decimal
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
@@ -32,8 +36,62 @@ BASE_TS = 10_000_000_000_000  # 10000s in ns (> 1hr so server range expansion is
 PERIOD = 100_000_000          # 100ms = 10 Hz sample period
 
 
+WEIGHT_BIN = Path(__file__).with_name("test_sample_weight")
+
 def sample_at(pid, ts, event, qid=0):
     return {"pid": pid, "ts": ts, "event": event, "qid": qid}
+
+
+def test_measured_tick_window(t):
+    """#863: real sampler helper → writer → server, without rounding.
+
+    A nominal first sample supplies the defined left-edge term. Querying
+    [first tick, last tick] clips it away; 600 jittered intervals between
+    those ticks tile exactly 60 seconds. No tolerance hides a weighting bias.
+    """
+    binary = WEIGHT_BIN
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-server-") as trace_dir:
+        subprocess.run([str(binary), "--fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            bounds = {"from": BASE_TS, "to": BASE_TS + 60_000_000_000}
+            tm = srv.query("time_model", **bounds)
+            rows = {r["name"]: r for r in tm["rows"]}
+            t.check_eq(rows["DB Time"]["ms"], 60000,
+                       "measured ticks: 60s active backend = 60000ms DB Time")
+            aas = srv.query("aas", buckets=1, **bounds)
+            active = sum(v for k, v in aas["buckets"][0].items()
+                         if k != "t" and isinstance(v, (int, float)))
+            t.check_eq(active, 1,
+                       "measured ticks: 60s active backend = AAS 1.0")
+            edge_bounds = {"from": BASE_TS - PERIOD, "to": bounds["to"]}
+            edge_tm = srv.query("time_model", **edge_bounds)
+            edge_rows = {r["name"]: r for r in edge_tm["rows"]}
+            t.check_eq(edge_rows["DB Time"]["ms"], 60100,
+                       "first tick: one 100ms edge term, clipped by window")
+
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-escalation-") as trace_dir:
+        subprocess.run([str(binary), "--escalation-fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            tm = srv.query("time_model", **bounds)
+            rows = {r["name"]: r for r in tm["rows"]}
+            t.check_eq(rows["DB Time"]["ms"], 60000,
+                       "escalation: exact window and sampled ticks tile 60s")
+            # END is at 20.05s; the first subsequent tick at 20.09s has a
+            # 90ms weight. Only its 40ms tail survives exact subtraction.
+            boundary = {"from": BASE_TS + 19_990_000_000,
+                        "to": BASE_TS + 20_090_000_000}
+            tm = srv.query("time_model", **boundary)
+            rows = {r["name"]: r for r in tm["rows"]}
+            t.check_eq(rows["DB Time"]["ms"], 100,
+                       "post-escalation tick: 60ms exact + 40ms sampled")
+            aas = srv.query("aas", buckets=1, **boundary)
+            active = sum(v for k, v in aas["buckets"][0].items()
+                         if k != "t" and isinstance(v, (int, float)))
+            t.check_eq(active, 1, "post-escalation tick: AAS 1.0")
 
 
 # ── 1. Sampled-only estimators ────────────────────────────────────────
@@ -517,9 +575,141 @@ def test_dump_annotation(t):
         cleanup_traces(trace_dir)
 
 
+def test_derived_weights_and_nominal(t):
+    binary = WEIGHT_BIN
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-lookahead-") as trace_dir:
+        subprocess.run([str(binary), "--lookahead-fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        # The 900ms tick is not the block's first tick (100ms). It closes
+        # AFTER this window and contributes all 100ms by backward overlap.
+        bounds = {"from": BASE_TS + 400_000_000, "to": BASE_TS + 500_000_000}
+        for storage in ("current", "archive"):
+            if storage == "archive":
+                Path(trace_dir, "current.trace").rename(
+                    Path(trace_dir, "2026-11-11_06.trace.lz4"))
+                Path(trace_dir, "current.trace.meta").unlink()
+            for cache in ("0", "1"):
+                with ServerHarness(trace_dir, env={"PGWT_CURRENT_TRACE_CACHE": cache}) as srv:
+                    for repeat in range(2):
+                        label = f"maximum lookahead storage={storage} cache={cache} request={repeat}"
+                        tm = srv.query("time_model", **bounds)
+                        rows = {r["name"]: r for r in tm["rows"]}
+                        t.check_eq(rows["DB Time"]["ms"], 100, label + ": DB Time")
+                        t.check_eq(tm.get("sample_period_ns"), PERIOD,
+                                   label + ": reports nominal cadence")
+                        aas = srv.query("aas", buckets=1, **bounds)
+                        active = sum(v for k, v in aas["buckets"][0].items()
+                                     if k != "t" and isinstance(v, (int, float)))
+                        t.check_eq(active, 1, label + ": AAS")
+                        edge = srv.query("aas", **bounds)
+                        t.check("fidelity_ranges" not in edge,
+                                label + ": one nominal period is fidelity edge slop")
+                        over = srv.query("aas", **{
+                            "from": bounds["from"], "to": bounds["to"] + 1})
+                        t.check_eq(over.get("fidelity_ranges"), [{
+                            "from": bounds["from"], "to": bounds["to"] + 1,
+                            "fidelity": "sampled"}],
+                            label + ": nominal period plus 1ns exceeds edge slop")
+                        # Exercise the event-table consumer.
+                        events = srv.query("top_events", **bounds)
+                        t.check_eq(events["db_time_ms"], 100, label + ": event totals")
+                        halves = []
+                        for lo, hi in ((400_000_000, 450_000_000),
+                                       (450_000_000, 500_000_000)):
+                            r = srv.query("time_model", **{
+                                "from": BASE_TS + lo, "to": BASE_TS + hi})
+                            halves.append(next(row["ms"] for row in r["rows"]
+                                               if row["name"] == "DB Time"))
+                        t.check_eq(sum(halves), 100, label + ": exact adjacent additivity")
+
+    # Integer nanoseconds at arbitrary edges of the 60s measured stream.
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-additive-") as trace_dir:
+        subprocess.run([str(binary), "--fixture", trace_dir], check=True)
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            lo, mid, hi = (BASE_TS + 12345678901, BASE_TS + 20133333338,
+                           BASE_TS + 51000000003)
+            values = []
+            for start, end in ((lo, hi), (lo, mid), (mid, hi)):
+                r = srv.query("time_model", **{"from": start, "to": end})
+                ns = Decimal(str(next(row["ms"] for row in r["rows"]
+                                      if row["name"] == "DB Time"))) * 1_000_000
+                t.check_eq(ns, end - start, "arbitrary window equals elapsed ns")
+                values.append(ns)
+            t.check_eq(values[0], values[1] + values[2], "integer window additivity")
+
+
+def test_legacy_sample_weights(t):
+    import shutil
+    with tempfile.TemporaryDirectory(prefix="pgwt-weight-legacy-") as trace_dir:
+        shutil.copyfile(Path(__file__).parent / "fixtures/sample_weights_v3/current.trace",
+                        Path(trace_dir, "current.trace"))
+        Path(trace_dir, "backends.jsonl").write_text(
+            '{"pid":1000,"type":"client","user":"test","db":"testdb"}\n')
+        with ServerHarness(trace_dir) as srv:
+            tm = srv.query("time_model", **{
+                "from": BASE_TS - PERIOD, "to": BASE_TS + 290_000_000})
+            t.check_eq(tm["db_time_ms"], 310,
+                       "legacy trace retains stored inflated 310ms weights")
+            t.check_eq(tm["sample_period_ns"], 110000000,
+                       "legacy response retains last stored block period")
+
+
+def test_legacy_master_responses(t):
+    """Frozen master expectations, including all deterministic fields.
+
+    These files predate v4. The v3 mixed fixture includes the review's
+    [1s,3s] AAS split; old stored periods control both response cadence and
+    fidelity slop. Cache on/off must match the SAME master expectations.
+    """
+    fixtures = Path(__file__).parent / "fixtures"
+    root = fixtures / "legacy_responses"
+    paths = {"mixed_v3": root / "mixed_v3",
+             "sampled_v3": fixtures / "sample_weights_v3",
+             "golden_v2": fixtures / "golden/rev2/trace",
+             "golden_v3": fixtures / "golden/rev3/trace"}
+    cases = json.loads((root / "responses.json").read_text())
+    for cache in ("0", "1"):
+        for label, directory in paths.items():
+            with ServerHarness(str(directory), env={"PGWT_CURRENT_TRACE_CACHE": cache}) as srv:
+                for case in cases:
+                    if case["fixture"] != label:
+                        continue
+                    response = srv.query(case["command"], **case["args"])
+                    for key in ("id", "now_ns", "server_version"):
+                        response.pop(key, None)
+                    expected = dict(case["expected"])
+                    if case["command"] == "info":
+                        # Master reports the replay host's CPU count, not a
+                        # trace property. Assert that contract on Mac/Linux
+                        # instead of pinning this fixture's generating host.
+                        expected["num_cpus"] = max(1, os.sysconf("SC_NPROCESSORS_ONLN"))
+                    # Compare canonical JSON bytes, keeping every field and
+                    # numeric representation that is stable across builds.
+                    # #857 added two fields after this branch split. Both
+                    # complete API bodies are independently frozen from
+                    # unmodified master builds; accept either so this test
+                    # also runs unchanged when that commit is merged. No
+                    # legacy field/value can be dropped or substituted.
+                    master_857 = dict(expected, **case.get("master_857_additions", {}))
+                    actual = json.dumps(response, sort_keys=True)
+                    bodies = (json.dumps(expected, sort_keys=True),
+                              json.dumps(master_857, sort_keys=True))
+                    matches = actual in bodies
+                    label_text = (f"master {label} cache={cache} {case['command']} "
+                                  f"{case['args']}: full response matches master")
+                    t.check(matches, label_text if matches else label_text + f"; got {actual}")
+
+
 def main():
     t = TestRunner("test_data_fidelity")
     print(f"=== {t.name} ===")
+    test_measured_tick_window(t)
+    test_derived_weights_and_nominal(t)
+    test_legacy_sample_weights(t)
+    test_legacy_master_responses(t)
     test_sampled_only(t)
     test_exact_unavailable(t)
     test_mixed_merge(t)

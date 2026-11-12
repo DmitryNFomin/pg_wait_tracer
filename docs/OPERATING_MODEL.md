@@ -221,7 +221,9 @@ branches that are empty shells, armed-but-BEHIND PRs, VMs alive, box occupancy,
 codex liveness, evidence drift, and the top tag-blocker issues that have no open
 PR and no live worktree. It writes `scripts/lead/.dispatch-queue`.
 
-`scripts/lead/sweep-hook.sh` is registered on both `Stop` and `SubagentStop`.
+**Removed on 2026-11-11 by the owner's decision** (see `docs/REWORK_PLAN_2026-11-11.md`, section 8): `scripts/lead/sweep-hook.sh` is no longer registered in `.claude/settings.json`. The script and its self-tests remain in the tree; the paragraph below describes how it behaved while registered.
+
+Until then, `scripts/lead/sweep-hook.sh` was registered on both `Stop` and `SubagentStop`.
 The `Stop` registration is the one that **refuses to end a turn** until every
 finding carries a disposition recorded that turn in
 `scripts/lead/.dispositions`; it blocks once, exempts continuation events, and
@@ -261,7 +263,7 @@ copy resume into shifted bytes.
 | `scripts/lead/audit-report.sh` (+ `audit-report.py`, `absence-prepass.py`) | re-derive every claim in a draft report; SEND or BLOCK |
 | `scripts/lead/held.sh` | the only sanctioned source of a "held by #N" claim |
 | `scripts/lead/sweep.sh` | the reconciler: GitHub + git + local state into findings and the dispatch queue |
-| `scripts/lead/sweep-hook.sh` | the Stop / SubagentStop gate that demands a disposition per finding |
+| `scripts/lead/sweep-hook.sh` | formerly the Stop / SubagentStop gate that demanded a disposition per finding; unregistered 2026-11-11 |
 | `scripts/lead/agent-start-hook.sh`, `agent-stop-hook.sh` (+ `agent-ledger.py`) | maintain the shared active-agent ledger |
 | `scripts/lead/status.sh` | render the owner-facing status skeleton; needs a sweep newer than 600 s |
 | `scripts/lead/check-box-evidence.sh` (+ `box-evidence-bulk.py`) | report PRs whose box evidence has drifted from their tip |

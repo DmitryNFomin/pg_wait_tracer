@@ -100,7 +100,7 @@ static void test_mixed_roundtrip(void)
     struct pgwt_event_reader r;
     CHECK(pgwt_reader_open(&r, path) == 0, "reader_open");
     CHECK(r.header.version == PGWT_TRACE_VERSION, "version=%u", r.header.version);
-    CHECK(r.header.version == 3, "version is 3 (T8 cpu_ns column)");
+    CHECK(r.header.version == PGWT_TRACE_VERSION, "current version keeps T8 cpu_ns column");
     CHECK(r.num_blocks == 2, "num_blocks=%d (expected 2)", r.num_blocks);
 
     struct pgwt_trace_event out[PGWT_BLOCK_EVENTS];
@@ -140,7 +140,7 @@ static void test_mixed_roundtrip(void)
             out[i].new_event != samp[i].new_event ||   /* sampled event */
             out[i].query_id != samp[i].query_id ||
             out[i].old_event != 0 ||                    /* cleared */
-            out[i].duration_ns != 0 ||                  /* cleared */
+            out[i].duration_ns != SAMPLE_PERIOD ||      /* reader-derived weight */
             out[i].cpu_ns != PGWT_CPU_NS_UNKNOWN ||     /* samples carry no CPU */
             (out[i].flags & PGWT_EVENT_FLAG_SAMPLE) == 0)  /* flagged */
             smiss++;

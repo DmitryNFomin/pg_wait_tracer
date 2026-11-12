@@ -231,6 +231,13 @@ struct pgwt_sampler {
 };
 
 /* Provider hooks (see provider.h). Exposed for the vtable in sampler.c. */
+/* Live folding, also built by the portable weight parity test. */
+void pgwt_sampler_accumulate(struct pgwt_daemon *d,
+                            const struct pgwt_trace_event *samples,
+                            int count, uint64_t period_ns);
+/* Advances the clock even for ticks producing zero records. */
+uint64_t pgwt_sampler_tick_period(struct pgwt_sampler *s, uint64_t tick_ts);
+
 int  pgwt_sampler_start(struct pgwt_daemon *d);
 int  pgwt_sampler_stop(struct pgwt_daemon *d);
 int  pgwt_sampler_poll(struct pgwt_daemon *d);
@@ -405,10 +412,12 @@ int pgwt_sampled_attr_active_query_mismatch(
 void pgwt_read_cmd_gate(pid_t pid, uint64_t dqs_addr, uint64_t be_entry_addr,
                         int st_query_id_off, int *cmd_open, uint64_t *query_id);
 
-/* SMP-3: effective sample period for the tick at `now_ns`, given the
- * previous tick's timestamp (0 = first tick → nominal). Late/missed ticks
- * yield a longer period so total sample weight tracks wall time; the result
- * is clamped to [nominal, 60s] (a sampler can be late, never early). */
+/* Effective sample weight: measured inter-tick elapsed, including intervals
+ * shorter than nominal under jitter. First tick (last == 0) and invalid
+ * non-monotonic inputs retain the nominal fallback. The first tick is one
+ * explicit window-edge estimate; offline queries clip its backward interval.
+ * Late ticks credit at most 60s to the observed state. Any remainder is
+ * unobserved/uncredited time, never carried forward to another tick. */
 uint64_t pgwt_sampler_effective_period(uint64_t nominal_ns,
                                        uint64_t last_tick_ns,
                                        uint64_t now_ns);

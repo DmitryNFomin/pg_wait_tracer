@@ -19,7 +19,7 @@ LIBBPF_INC ?=
 LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
-            test_trace_v2 test_sampler test_anomaly test_escalation_budget \
+            test_trace_v2 test_sampler test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
             test_wp_attr \
             test_trace_perms \
             test_exact_probe \
@@ -392,6 +392,22 @@ test_trace_v2: test_trace_v2.c $(BUILD)/server_event_writer.o \
 # its own -- which is exactly why the idle rule lives there.
 test_sampler: test_sampler.c ../src/sampler.c ../src/anomaly.c ../src/idle_rule.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
+
+# Pure timing + real writer/reader; also runnable on macOS. The compatibility
+# header aborts if the Linux process reader is accidentally invoked there.
+test_sample_weight: test_sample_weight.c ../src/sampler.c ../src/idle_rule.c \
+                    $(BUILD)/server_event_writer.o $(BUILD)/server_event_reader.o \
+                    replay_accum.o map_reader_core.o replay_compute_core.o \
+                    $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o \
+                    $(BUILD)/server_cJSON.o $(BUILD)/server_summary_reader.o \
+                    $(BUILD)/server_summary_writer.o sample_weight_compat.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -DPGWT_SAMPLE_ACCUM_TEST -include sample_weight_compat.h -o $@ $(filter %.c %.o,$^) -llz4 -lm
+
+# Real-writer cost probe; accepts DIR BACKENDS SECONDS DISRUPTIONS.
+# Compile this same source against archived baseline sources for comparisons.
+bench_sample_weight: bench_sample_weight.c ../src/sampler.c ../src/idle_rule.c \
+                     $(BUILD)/server_event_writer.o sample_weight_compat.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -include sample_weight_compat.h -o $@ $(filter %.c %.o,$^) -llz4
 
 # test_anomaly: anomaly rule engine (AAS-vs-baseline, lock-fraction,
 # CPU-demand CUSUM, hysteresis/cooldown, baseline protection, metrics

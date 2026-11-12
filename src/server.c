@@ -343,7 +343,9 @@ struct cur_cache_block {
     int      count;              /* records decoded from this block */
     uint64_t index_ts;           /* block_index[b].timestamp_ns — identity */
     uint64_t file_offset;        /* block_index[b].file_offset  — identity */
-    uint64_t sample_period_ns;   /* pgwt_block_info.sample_period_ns */
+    uint64_t sample_period_ns;   /* first weight / legacy mean */
+    uint64_t max_sample_weight_ns;
+    uint64_t nominal_sample_period_ns;
     uint64_t last_ts;            /* pgwt_block_info.last_timestamp_ns */
     uint8_t  is_sample;          /* block_type == PGWT_BLOCK_SAMPLES */
 };
@@ -1532,6 +1534,8 @@ static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
     cb->index_ts = reader->block_index[b].timestamp_ns;
     cb->file_offset = reader->block_index[b].file_offset;
     cb->sample_period_ns = bi->sample_period_ns;
+    cb->max_sample_weight_ns = bi->max_sample_weight_ns;
+    cb->nominal_sample_period_ns = bi->nominal_sample_period_ns;
     cb->last_ts = bi->last_timestamp_ns;
     cb->is_sample = (bi->block_type == PGWT_BLOCK_SAMPLES);
     cc->count += n;
@@ -1640,13 +1644,13 @@ get_cached_immutable(struct pgwt_server *srv, const char *path)
             }
             ce->events[ce->count] = block_buf[i];
             /* Normalize samples into interval shape so the duration-based
-             * estimators apply ASH math (each sample worth sample_period_ns).
+             * estimators use each sample's reader-derived weight.
              * Keep the SAMPLE flag for the exact-wins merge and fidelity.
              * Timestamps stay MONOTONIC in the cache; the wall conversion
              * happens per query with the generation-canonical offset. */
             if (block_buf[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
                 ce->events[ce->count].old_event = block_buf[i].new_event;
-                ce->events[ce->count].duration_ns = bi.sample_period_ns;
+                /* Reader already supplied this tick's exact duration_ns. */
             }
             ce->count++;
         }
@@ -2137,7 +2141,7 @@ static void straddle_report(const struct straddle_scan *ss)
  * intervals may overlap the requested right edge. Appends events at
  * *total (growing as needed) with timestamps left MONOTONIC. SAMPLES
  * records are normalized to interval shape (old_event = sampled event,
- * duration_ns = sample_period_ns) so the duration-based estimators apply
+ * duration_ns = reader-derived tick weight) so the duration-based estimators apply
  * ASH math.
  * DUR-9: `pid` != 0 pushes the pid filter into the load (events for other
  * pids never enter the working array); *overloaded is set and the load
@@ -2323,13 +2327,13 @@ static void load_file_range_mono(struct pgwt_server *srv,
             bi.block_type = cb->is_sample ? PGWT_BLOCK_SAMPLES
                                           : PGWT_BLOCK_TRANSITIONS;
             bi.sample_period_ns = cb->sample_period_ns;
-            /* Reconstructed from the descriptor, not from the records: these
-             * two are inert in this function today (only block_type and
-             * sample_period_ns are read below), and deriving them from
-             * rec[n-1] instead would quietly diverge from the block header the
-             * decode path reports if a future reader ever consults them. */
+            bi.max_sample_weight_ns = cb->max_sample_weight_ns;
+            bi.nominal_sample_period_ns = cb->nominal_sample_period_ns;
+            /* Keep metadata identical on cache and decode paths. Per-record
+             * weights already live in the cached records. */
             bi.first_timestamp_ns = cb->index_ts;
             bi.last_timestamp_ns = cb->last_ts;
+            bi.num_events = (uint32_t)cb->count;
             cc->stat_blocks_served++;
         } else {
             n = pgwt_reader_decode_block_info(&reader, b, block_buf,
@@ -2435,7 +2439,7 @@ static void load_file_range_mono(struct pgwt_server *srv,
             (*events)[*total] = rec[i];
             if (rec[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
                 (*events)[*total].old_event = rec[i].new_event;
-                (*events)[*total].duration_ns = bi.sample_period_ns;
+                /* Preserve the reader-derived tick weight. */
             }
             if (right_open) {
                 /* Derived here, at the ONE place that knows both the record
@@ -2858,14 +2862,25 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
             /* SMP-3 delayed ticks carry their measured inter-tick elapsed
              * time. Retain the maximum for request lookahead even when later
              * nominal-period blocks follow the stalled block. */
-            if (bi.sample_period_ns)
-                fc->sample_period_ns = bi.sample_period_ns;
-            if (bi.sample_period_ns > fc->max_sample_period_ns)
-                fc->max_sample_period_ns = bi.sample_period_ns;
-            /* Merge adjacent sample spans (gap up to 2 periods) */
+            /* v2/v3 responses historically report the last nonzero stored
+             * block period. Preserve that cadence and fidelity edge slop;
+             * only v4 has durable nominal cadence metadata. */
+            uint64_t cadence = reader.header.version >= 4
+                             ? reader.nominal_sample_period_ns
+                             : bi.sample_period_ns;
+            if (cadence)
+                fc->sample_period_ns = cadence;
+            if (bi.max_sample_weight_ns > fc->max_sample_period_ns)
+                fc->max_sample_period_ns = bi.max_sample_weight_ns;
+            /* Nominal cadence controls coverage continuity in v4. Legacy
+             * captures have no nominal metadata; retain their stored weight
+             * as both the legacy reported period and continuity bound. */
+            uint64_t continuity = reader.nominal_sample_period_ns
+                                ? reader.nominal_sample_period_ns
+                                : bi.max_sample_weight_ns;
             span_list_add(&fc->s_spans, &fc->n_s, &fc->cap_s,
                           bi.first_timestamp_ns, bi.last_timestamp_ns,
-                          bi.sample_period_ns * 2);
+                          continuity * 2);
         } else {
             fc->has_transitions = 1;
             span_list_add(&fc->t_spans, &fc->n_t, &fc->cap_t,
@@ -7747,6 +7762,8 @@ static int bagg_decode_block(void *ctx, struct pgwt_event_reader *r,
         bi->block_type = cb->is_sample ? PGWT_BLOCK_SAMPLES
                                        : PGWT_BLOCK_TRANSITIONS;
         bi->sample_period_ns  = cb->sample_period_ns;
+        bi->max_sample_weight_ns = cb->max_sample_weight_ns;
+        bi->nominal_sample_period_ns = cb->nominal_sample_period_ns;
         bi->first_timestamp_ns = cb->index_ts;
         bi->last_timestamp_ns  = cb->last_ts;
         bi->num_events         = (uint32_t)cb->count;

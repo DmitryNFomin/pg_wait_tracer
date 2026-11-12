@@ -31,7 +31,7 @@ struct pgwt_daemon;
 struct pgwt_metrics;
 
 /* Capture fidelity — what a tier's records mean. SAMPLED records are point
- * observations (worth one sample_period_ns each); EXACT records are
+ * observations (each with its own effective tick weight); EXACT records are
  * transition intervals with real durations. A3's compute layer keys view
  * availability off this. */
 enum pgwt_fidelity {
