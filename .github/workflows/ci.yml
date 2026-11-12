@@ -97,6 +97,73 @@ concurrency:
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
+  core-status:
+    name: core-status
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN at the top of this file
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run core status (plain and sanitizers)
+        run: |
+          status=0
+          evidence=tests/results/core_status
+          for mode in plain sanitizers; do
+            if [ "$mode" = sanitizers ]; then
+              CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+                bash scripts/core-status.sh || status=1
+            else
+              env -u CFLAGS bash scripts/core-status.sh || status=1
+            fi
+            # The script replaces its JSON and logs on each invocation.
+            # Preserve each run, including failed evidence, before the next.
+            mkdir -p "$evidence/$mode"
+            find "$evidence" -maxdepth 1 -type f \
+              -exec mv {} "$evidence/$mode/" \;
+          done
+          exit "$status"
+
+      - name: Record core-status provenance
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          try:
+              result = subprocess.run(["bash", "scripts/tree-hash.sh"],
+                                      capture_output=True, text=True)
+              tree_hash = result.stdout.strip() if result.returncode == 0 else (
+                  f"unavailable: scripts/tree-hash.sh exited {result.returncode}: "
+                  + result.stderr.strip())
+          except OSError as error:
+              tree_hash = f"unavailable: scripts/tree-hash.sh could not run: {error}"
+          provenance = {
+              "github": {
+                  "sha": os.environ["GITHUB_SHA"],
+                  "run_id": os.environ["GITHUB_RUN_ID"],
+                  "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              },
+              "job": os.environ["GITHUB_JOB"],
+              "tree_hash": tree_hash,
+          }
+          for mode in ("plain", "sanitizers"):
+              directory = Path("tests/results/core_status") / mode
+              directory.mkdir(parents=True, exist_ok=True)
+              (directory / "provenance.json").write_text(
+                  json.dumps(provenance, indent=2) + "\n")
+          PY
+
+      - name: Upload core-status evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-status-${{ github.sha }}
+          path: tests/results/core_status/
+          retention-days: 90
+          if-no-files-found: error
+
   changed_files:
     # Drives how much of the self-hosted gate-box capture matrix runs below.
     # Real numbers that motivated this: 8 open PRs produced ~20 CI runs, each
