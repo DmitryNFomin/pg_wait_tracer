@@ -12,7 +12,7 @@
 # Wired into scripts/check.sh (make check): this self-test uses pure git
 # with no Linux/BPF/PG dependency. The actual repository guard remains a
 # manual reviewer evidence step: run scripts/check-test-registration.sh
-# before declaring READY (see CLAUDE.md's "Three evidence guards" bullet).
+# before declaring READY (see docs/agent-procedures/dispatch-review.md, "Three evidence guards").
 #
 # Usage: tests/test_check_test_registration.sh (run from anywhere)
 set -uo pipefail

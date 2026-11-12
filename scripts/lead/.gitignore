@@ -9,3 +9,5 @@
 .dispatch-queue
 .dispatch-queue.tmp
 .active-agents
+.briefs-passed
+.brief-gate.lock

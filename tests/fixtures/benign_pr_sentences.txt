@@ -1,0 +1,13 @@
+An assertion that cannot fail reads as coverage, so it
+The retried request cannot produce this refusal at all.
+It cannot affect a freshly
+- **PREFIX** is read from the trace start to the window's left edge, so narrowing cannot reduce it.
+kernel cannot have.
+this cannot recur.
+membership cannot close either way.
+two concurrent runs targeting the *same* branch cannot corrupt each
+CI cannot carry it: `.github/workflows/ci.yml` uses a closed `sudo env` allowlist with `EXPECT_PHASE=1` hardcoded, and `env_reset` drops everything else.
+**Non-vacuity control** (this Mac cannot compile C — box-only
+`tests/test_phase_absent_live.py:171` — check 2 restates check 1 (`ATTR_MASK` is `0x3`, so once the union is asserted exactly `0x3`, `(union & 0x3) == 0x3` cannot fail).
+a counter that cannot move reads as evidence of health
+The harness enforces the one guarantee it can enforce mechanically.
