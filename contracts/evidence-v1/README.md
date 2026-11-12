@@ -26,6 +26,8 @@ CONTRACT.md sections 1 and 3 (FRONTIER barrier, coherent reread, END instant) ar
   33/33 and its target projections equal `projections.json` 33/33; it reported no ambiguity for any scenario.
   `REPORT.md` lists six contract sentences it judged ambiguous in general; no scenario exercises them.
   Implementations use it for differential testing; it is not product code.
+  `REPORT.md` mentions `run_all.sh`, the driver used in the writer's directory; it is omitted here because it
+  assumes that directory's layout and would overwrite `REPORT.md`. Run `replay.py <scenario.json>` directly.
 
 An implementation change may not edit anything in this directory. Changing the contract is its own
 reviewed change and invalidates the expected answers.
