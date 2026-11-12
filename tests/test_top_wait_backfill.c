@@ -1,21 +1,8 @@
-/* test_top_wait_backfill.c — Sessions retain #319's raw top_wait backfill;
- * Queries now compute their entire answer directly from raw events.
- * Summary-only top_wait (longest single wait per second) disagrees with
- * raw's largest per-event TOTAL over the window in the shared fixture:
- * IO:WalSync has one 40 ms wait; Lock:relation has ten 10 ms waits.
- *
- * Sections 1 and 2 pin the Sessions backfill and overload degradation.
- * Section 2b requires each overload hint to offer only what can help:
- * Events says a query filter forced raw; Queries, which no filter can
- * narrow, offers the time range alone, for all four filter shapes.
- * Section 3 pins Queries' raw top_wait against the summary-only IO answer.
- * Section 3b requires an unfiltered >=120 s request that would qualify for
- * summaries to match direct raw computation, including clipped row totals
- * and percentages. Its straddling interval forces a numeric disagreement
- * with summaries: a fixture that cannot distinguish the routes must fail.
- * Sections 4 and 5 retain summary-predicate and query-filtered Events gates.
- * Sections 6 and 7 pin raw unattributed/backfilled measurements, empty
- * controls with and without summaries, and terminal raw compute failure.
+/* test_top_wait_backfill.c — long EXACT requests use raw while summaries
+ * are disabled. Sessions retain raw top_wait; oversized and unreadable raw
+ * windows refuse instead of returning degraded summary answers. Direct
+ * summary computations remain migration controls, never numerical truth.
+ * Query/Event clipping, overload hints and raw measurement guards remain.
  */
 #define main pgwt_server_main
 #include "../src/server.c"
@@ -214,10 +201,7 @@ static void build_fixture(const char *dir, uint64_t base_mono, int with_summarie
     }
 }
 
-/* Sessions still route on this predicate. Queries deliberately override a
- * true result, so their gates must pair it with direct raw expectations and
- * a summary-only answer that differs. Events also has a query-id guard.
- * Summary-less controls prove the predicate is not vacuously true. */
+/* The production predicate must reject summaries in every filter shape. */
 static int summaries_would_be_used(struct pgwt_server *srv, struct pgwt_request *req)
 {
     struct pgwt_wfid wf = {0};
@@ -304,10 +288,14 @@ static void test_backfill_matches_raw(const char *dir, uint64_t base_mono)
     req.from_ns = 0;
     req.to_ns = 0; /* use server's own discovered coverage */
 
-    CHECK(summaries_would_be_used(srv, &req),
-          "the SUMMARY route is taken for this request -- otherwise the raw "
-          "path answers it, the backfill never runs, and every assertion "
-          "below passes without testing anything");
+    CHECK(!summaries_would_be_used(srv, &req),
+          "summaries are off even for this long EXACT window");
+    CHECK(srv->latest_wall_ns - srv->earliest_wall_ns >= 120 * ONE_SEC,
+          "the exact fixture spans >=120 s");
+    struct pgwt_wfid wf = {0};
+    CHECK(should_use_summaries(srv, &req, &wf) == 0 &&
+          wf.fid == PGWT_FIDELITY_EXACT,
+          "disabled summary predicate still fills exact window fidelity");
 
     cJSON *out = call_top_sessions(srv, &req);
     CHECK(out != NULL, "handle_top_sessions produced parseable JSON");
@@ -368,7 +356,7 @@ static void test_backfill_matches_raw(const char *dir, uint64_t base_mono)
     free(srv);
 }
 
-/* ── Section 2: raw backfill overload reports absence, not a wrong name ── */
+/* ── Section 2: raw overload refuses despite current summaries ──────── */
 static int child_overload_absence(const char *dir)
 {
     setenv("PGWT_LOAD_MAX_EVENTS", "3", 1);   /* far below this fixture's events */
@@ -382,51 +370,15 @@ static int child_overload_absence(const char *dir)
     cJSON *out = call_top_sessions(srv, &req);
     if (!out) { fprintf(stderr, "child: no JSON\n"); return 1; }
 
-    int ok = 1;
-    cJSON *err = cJSON_GetObjectItem(out, "error");
-    if (err != NULL) {
-        fprintf(stderr, "child: got a hard error, not a degraded response: %s\n",
-                cJSON_IsString(err) ? err->valuestring : "?");
-        ok = 0;
-    }
-    cJSON *unavail = cJSON_GetObjectItem(out, "top_wait_unavailable");
-    if (!(unavail && cJSON_IsTrue(unavail))) {
-        fprintf(stderr, "child: top_wait_unavailable not set true\n");
-        ok = 0;
-    }
-    cJSON *reason = cJSON_GetObjectItem(out, "top_wait_unavailable_reason");
-    if (!(reason && cJSON_IsString(reason) && reason->valuestring[0] != '\0')) {
-        fprintf(stderr, "child: top_wait_unavailable_reason missing/empty\n");
-        ok = 0;
-    }
-    cJSON *rows = cJSON_GetObjectItem(out, "rows");
-    if (!cJSON_IsArray(rows) || cJSON_GetArraySize(rows) == 0) {
-        fprintf(stderr, "child: rows missing -- a degraded top_wait must not "
-                "take db_time_ms etc. down with it\n");
-        ok = 0;
-    } else {
-        cJSON *row = find_row(rows, TARGET_PID);
-        if (!row) {
-            fprintf(stderr, "child: pid %d missing from degraded rows\n",
-                    TARGET_PID);
-            ok = 0;
-        } else {
-            cJSON *tw = cJSON_GetObjectItem(row, "top_wait");
-            if (!(tw && cJSON_IsNull(tw))) {
-                fprintf(stderr, "child: row top_wait is not null (%s) -- "
-                        "the row must not carry the summary-only name\n",
-                        tw && cJSON_IsString(tw) ? tw->valuestring
-                                                  : "(not a string either)");
-                ok = 0;
-            }
-            cJSON *dbt = cJSON_GetObjectItem(row, "db_time_ms");
-            if (!(dbt && cJSON_IsNumber(dbt) && dbt->valuedouble > 0)) {
-                fprintf(stderr, "child: db_time_ms missing/zero -- the cheap "
-                        "summary fields must survive a top_wait degrade\n");
-                ok = 0;
-            }
-        }
-    }
+    cJSON *code = cJSON_GetObjectItem(out, "code");
+    cJSON *limit = cJSON_GetObjectItem(out, "max_events");
+    int ok = cJSON_IsString(cJSON_GetObjectItem(out, "error")) &&
+             cJSON_IsString(code) &&
+             strcmp(code->valuestring, "window_too_large") == 0 &&
+             cJSON_IsNumber(limit) && limit->valuedouble == 3 &&
+             cJSON_GetObjectItem(out, "rows") == NULL;
+    if (!ok)
+        fprintf(stderr, "child: expected window_too_large, never summary rows\n");
     cJSON_Delete(out);
     free(srv);
     return ok ? 0 : 1;
@@ -434,8 +386,7 @@ static int child_overload_absence(const char *dir)
 
 static void test_overload_reports_absence(const char *dir)
 {
-    printf("--- 2. raw-backfill overload: absence with a reason, never a "
-           "wrong name or a silent blank ---\n");
+    printf("--- 2. summaries off: oversized raw window refuses ---\n");
     fflush(stdout);
     pid_t pid = fork();
     if (pid < 0) {
@@ -448,16 +399,15 @@ static void test_overload_reports_absence(const char *dir)
     int status = 0;
     waitpid(pid, &status, 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "child reported absence-with-reason correctly (exit %d, signalled=%d)",
+          "child refused the oversized window correctly (exit %d, signalled=%d)",
           WIFEXITED(status) ? WEXITSTATUS(status) : -1, !WIFEXITED(status));
 }
 
-/* The summary answer survives damage to raw blocks, but its top_wait must
- * not masquerade as the raw answer. Isolate unreadability from both budget
- * refusal flags so neither can accidentally carry this regression. */
+/* Damage only the raw payload: current summaries cannot rescue the request.
+ * Isolate unreadability from event-budget and allocation refusals. */
 static void test_unreadable_reports_absence(uint64_t base_mono)
 {
-    printf("--- 2a. unreadable raw backfill preserves summaries with a reason ---\n");
+    printf("--- 2a. unreadable raw input refuses despite current summaries ---\n");
     char dir[] = "/tmp/pgwt_top_wait_unreadable_XXXXXX";
     if (!mkdtemp(dir)) { printf("FATAL: mkdtemp unreadable\n"); exit(2); }
     build_fixture(dir, base_mono, 1, FIXTURE_MIXED);
@@ -476,8 +426,8 @@ static void test_unreadable_reports_absence(uint64_t base_mono)
         != 0 || fputc(255, fp) == EOF || fclose(fp) != 0) exit(2);
     cur_cache_drop(&srv->cur);
 
-    CHECK(summaries_would_be_used(srv, &req),
-          "unreadable raw fixture still selects the summary route");
+    CHECK(!summaries_would_be_used(srv, &req),
+          "unreadable raw fixture cannot select summaries");
     int count = 0;
     struct pgwt_load_info info = {0};
     struct pgwt_trace_event *events = server_load_events_fi(
@@ -487,23 +437,21 @@ static void test_unreadable_reports_absence(uint64_t base_mono)
     free(events);
 
     cJSON *out = call_top_sessions(srv, &req);
-    CHECK(out && cJSON_GetObjectItem(out, "error") == NULL,
-          "unreadable backfill yields a degraded Sessions response");
-    cJSON *unavail = cJSON_GetObjectItem(out, "top_wait_unavailable");
-    CHECK(cJSON_IsTrue(unavail), "unreadable backfill sets top_wait_unavailable");
-    cJSON *reason = cJSON_GetObjectItem(out, "top_wait_unavailable_reason");
-    CHECK(cJSON_IsString(reason) &&
-          strcmp(reason->valuestring, "trace_unreadable") == 0,
-          "unreadable-only backfill reason is trace_unreadable");
+    CHECK(out && cJSON_IsString(cJSON_GetObjectItem(out, "error")),
+          "unreadable raw window refuses instead of using summaries");
+    cJSON *code = cJSON_GetObjectItem(out, "code");
+    CHECK(cJSON_IsString(code) && strcmp(code->valuestring, "trace_unreadable") == 0,
+          "raw decoding failure reports trace_unreadable");
+    CHECK(cJSON_GetObjectItem(out, "top_wait_unavailable") == NULL,
+          "refusal does not degrade a summary answer");
+    CHECK(cJSON_GetObjectItem(out, "top_wait_unavailable_reason") == NULL,
+          "refusal has no summary-backfill reason");
     cJSON *fidelity = cJSON_GetObjectItem(out, "fidelity");
-    CHECK(cJSON_IsString(fidelity) && strcmp(fidelity->valuestring, "exact") == 0,
-          "summary fidelity survives unreadable raw backfill");
-    cJSON *row = find_row(cJSON_GetObjectItem(out, "rows"), TARGET_PID);
-    CHECK(row && cJSON_IsNull(cJSON_GetObjectItem(row, "top_wait")),
-          "target summary row survives with a null top_wait");
-    cJSON *dbt = cJSON_GetObjectItem(row, "db_time_ms");
-    CHECK(cJSON_IsNumber(dbt) && dbt->valuedouble > 0,
-          "summary DB time survives unreadable raw backfill");
+    CHECK(cJSON_IsString(fidelity), "raw refusal carries window fidelity");
+    CHECK(cJSON_GetObjectItem(out, "rows") == NULL,
+          "unreadable trace cannot fall back to summary rows");
+    CHECK(cJSON_GetObjectItem(out, "db_time_ms") == NULL,
+          "unreadable trace cannot fall back to summary DB time");
     cJSON_Delete(out);
     server_destroy(srv);
     free(srv);
@@ -673,8 +621,8 @@ static void test_queries_top_wait_matches_raw(const char *dir)
     req.from_ns = 0;
     req.to_ns = 0;
 
-    CHECK(summaries_would_be_used(srv, &req),
-          "should_use_summaries WOULD accept this window; Queries forces raw");
+    CHECK(!summaries_would_be_used(srv, &req),
+          "summaries stay off for the long Queries window");
 
     cJSON *out = call_top_queries(srv, &req);
     CHECK(out != NULL, "handle_top_queries produced parseable JSON");
@@ -749,8 +697,8 @@ static void test_queries_force_raw(const char *dir)
     req.to_ns = srv->earliest_wall_ns - 10 * MS + 127 * ONE_SEC;
     CHECK(req.to_ns - req.from_ns >= 120 * ONE_SEC,
           "unfiltered Queries window spans >=120 s");
-    CHECK(summaries_would_be_used(srv, &req),
-          "should_use_summaries is TRUE; handler must override its answer");
+    CHECK(!summaries_would_be_used(srv, &req),
+          "summaries stay off for the bounded Queries window");
 
     struct pgwt_queries_result raw, summary_only;
     compute_raw_queries(srv, &req, &raw);
@@ -860,17 +808,10 @@ static void test_queries_force_raw(const char *dir)
 }
 
 /* -- Section 4: the route assertion can actually be FALSE ---------------- */
-/* Without this, summaries_would_be_used could be a constant-true predicate (a
- * typo'd field, a short-circuit, a refactor that makes should_use_summaries
- * always take the summary branch) and sections 1 and 3 would still read as
- * if they had proved the route. Same fixture events, same 130 s window,
- * same 0/0 request -- ONLY the summary file is absent. If this comes back
- * true, the predicate is not discriminating and sections 1 and 3 are
- * unproven. */
+/* A summary-less control must also use raw and retain the correct top wait. */
 static void test_route_predicate_discriminates(const char *dir_no_summaries)
 {
-    printf("--- 4. the route predicate is not vacuously true: no summary "
-           "file => not the summary route ---\n");
+    printf("--- 4. missing summaries also leave the request on raw ---\n");
 
     struct pgwt_server *srv = calloc(1, sizeof(*srv));
     CHECK(srv != NULL && server_init(srv, dir_no_summaries) == 0,
@@ -883,14 +824,11 @@ static void test_route_predicate_discriminates(const char *dir_no_summaries)
     CHECK(srv->latest_wall_ns > srv->earliest_wall_ns &&
           srv->latest_wall_ns - srv->earliest_wall_ns >=
               120ULL * 1000000000ULL,
-          "the summary-less fixture still spans >= 120 s, so a FALSE route "
-          "here is the missing summary file and not a too-short window "
+          "the summary-less fixture still spans >= 120 s "
           "(span %.1f s)",
           (double)(srv->latest_wall_ns - srv->earliest_wall_ns) / 1e9);
     CHECK(!summaries_would_be_used(srv, &req),
-          "summaries_would_be_used is FALSE with no summary file -- so the TRUE "
-          "it returns in sections 1 and 3 is a real observation, not a "
-          "constant");
+          "summaries stay off with no summary file too");
 
     /* And the served answer is still the right one, from raw. A route the
      * backfill does not cover must not be a route that returns a wrong
@@ -910,7 +848,7 @@ static void test_route_predicate_discriminates(const char *dir_no_summaries)
 
 /* -- Section 5: #526 query-filtered Events must bypass summaries --------- */
 /* Merely seeing a Lock row would miss the regression: both routes have one.
- * Prove should_use_summaries WOULD accept this request, then compare the
+ * Require summaries to stay off for this request, then compare the
  * served number with a direct raw computation AND pin a different summary-
  * only number. If that gap disappears, this fixture must FAIL, not skip.
  * handle_top_events exposes fidelity but no route/source field: exact
@@ -944,9 +882,8 @@ static void test_events_query_filter_uses_raw(const char *dir, int straddle)
     req.filter.query_id = TARGET_QID;
     if (straddle)
         req.to_ns = srv->earliest_wall_ns - 10 * MS + 127 * ONE_SEC;
-    CHECK(summaries_would_be_used(srv, &req),
-          "should_use_summaries WOULD accept the query-filtered window; "
-          "the handler's query_id conjunct is the guard under test");
+    CHECK(!summaries_would_be_used(srv, &req),
+          "summaries stay off for the query-filtered Events window");
 
     int count = 0;
     struct pgwt_load_info linfo = {0};
@@ -1050,8 +987,8 @@ static void test_queries_unattributed_survives(const char *dir)
     CHECK(srv != NULL && server_init(srv, dir) == 0, "server_init");
     if (!srv) return;
     struct pgwt_request req = {0};
-    CHECK(summaries_would_be_used(srv, &req),
-          "should_use_summaries WOULD accept this unfiltered Queries window");
+    CHECK(!summaries_would_be_used(srv, &req),
+          "summaries stay off for the unfiltered Queries window");
     struct pgwt_queries_result raw;
     compute_raw_queries(srv, &req, &raw);
     CHECK(raw.unattributed_ms > 0 && raw.unattributed_count > 0,
@@ -1095,8 +1032,8 @@ static void test_queries_empty_controls(const char *dir, int no_query_rows,
     if (!srv) return;
     struct pgwt_request req = {0};
     if (with_summaries)
-        CHECK(summaries_would_be_used(srv, &req),
-              "should_use_summaries WOULD accept the empty-input control");
+        CHECK(!summaries_would_be_used(srv, &req),
+              "summaries stay off for the empty-input control");
     struct pgwt_queries_result raw;
     compute_raw_queries(srv, &req, &raw);
     CHECK(no_query_rows ? (raw.num_rows == 0 && raw.unattributed_ms > 0)
@@ -1136,7 +1073,7 @@ static int child_queries_failure(const char *dir)
     struct pgwt_server *srv = calloc(1, sizeof(*srv));
     if (!srv || server_init(srv, dir) != 0) return 1;
     struct pgwt_request req = {0};
-    if (!summaries_would_be_used(srv, &req)) return 2;
+    if (summaries_would_be_used(srv, &req)) return 2;
     cJSON *out = call_top_queries(srv, &req);
     if (!out) return 3;
     cJSON *code = cJSON_GetObjectItem(out, "code");

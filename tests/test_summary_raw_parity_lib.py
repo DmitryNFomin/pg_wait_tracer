@@ -650,6 +650,40 @@ def main():
         check(G.issue_for(field, "straddle_130s") == "UNEXPLAINED",
               "§16 a future %s pin cannot inherit closed #818" % field)
 
+    # §17 the production summaries-off guard, alongside all historical
+    # anti-vacuity tests above. Same-route RAW is now required for this guard.
+    commands = ("time_model", "aas", "top_sessions", "top_queries", "top_events", "heatmap")
+    routes = {arm + "/" + cmd: P.ROUTE_RAW
+              for arm in ("fresh", "missing", "stale") for cmd in commands}
+    off_answers = {arm: dict(base) for arm in ("fresh", "missing", "stale")}
+    ok, _ = P.summaries_off_verdict("positive", routes, off_answers, commands)
+    check(ok, "§17 complete identical raw answers PASS with summaries off")
+    for endpoint in routes:
+        for route in (P.ROUTE_SUMMARY, P.ROUTE_UNKNOWN):
+            broken = dict(routes, **{endpoint: route})
+            ok, lines = P.summaries_off_verdict("route", broken, off_answers, commands)
+            check(not ok and any(endpoint in line for line in lines),
+                  "§17 rejects %s routing to %s" % (endpoint, route))
+    for arm in off_answers:
+        for label, arm_fields in (("empty", {}), ("zero DB Time", dict(base, **{
+                "time_model/db_time_ms": 0})),
+                ("missing field", {k: v for k, v in base.items()
+                                   if k != "time_model/row/Lock/ms"}),
+                ("wrong value", dict(base, **{"time_model/row/Lock/ms": -1}))):
+            broken = dict(off_answers, **{arm: arm_fields})
+            ok, lines = P.summaries_off_verdict("content", routes, broken, commands)
+            check(not ok and len(lines) > 1,
+                  "§17 rejects %s %s" % (arm, label))
+    for label, broken_routes, broken_off_answers, cmds in (
+            ("missing endpoint", {k: v for k, v in routes.items()
+                                  if k != "fresh/heatmap"}, off_answers, commands),
+            ("missing arm", routes, {k: v for k, v in off_answers.items()
+                                    if k != "stale"}, commands),
+            ("empty command inventory", {}, off_answers, ())):
+        ok, lines = P.summaries_off_verdict(label, broken_routes, broken_off_answers, cmds)
+        check(not ok and any("inventory" in line for line in lines),
+              "§17 rejects " + label)
+
     print("--- %d checks, %d failed ---" % (CHECKS[0], len(FAILURES)))
     for f in FAILURES:
         print("  failed: %s" % f)

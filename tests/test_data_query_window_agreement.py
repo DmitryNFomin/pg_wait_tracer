@@ -58,18 +58,10 @@ than merely consistent.
 
 THE ROUTE IS MEASURED, NOT ASSUMED
 ─────────────────────────────────────────────────────────────────────────────
-"Four raw answers agreeing" is cheap if the window were never
-summary-eligible in the first place. So each shape also runs the route oracle
-test_summary_raw_parity.py uses: a second server with
-PGWT_LOAD_MAX_EVENTS=1, where the raw path must refuse (window_too_large) and
-the summary path answers anyway.
-
-  * QUERY-FILTERED: all four commands must REFUSE. That is the guard being
-    tested — before #684, aas and time_model answered here from summaries.
-  * UNFILTERED, same window: time_model and aas must ANSWER. This is the
-    PREMISE CONTROL. It proves the window really is summary-eligible (>= 120 s,
-    EXACT, current summary files), so the refusals above are caused by the
-    query filter and not by an unusable fixture.
+Each >=120 s EXACT window has current summary files. With
+PGWT_LOAD_MAX_EVENTS=1, query-filtered and unfiltered requests must refuse
+with window_too_large: summaries are off until rebuilt from the core.
+The normal-budget checks require the nonempty, independently clipped totals.
 
 Each query-filtered refusal is asserted to carry THAT command's own arm in
 src/server.c's reject_overload: "a query filter forces the exact path" for
@@ -280,16 +272,13 @@ def check_route(t, trace_dir, name, frm, to):
                     f"{name}/{cmd}: the refusal carries this command's own "
                     f"arm, {HINT_FRAGMENT[cmd]!r} ({hint!r})")
 
-        # PREMISE CONTROL: unfiltered, the same window IS answered from
-        # summaries. Without this, every refusal above could come from a
-        # window that was never summary-eligible and the guard would be
-        # untested.
+        # Summaries are disabled even for an unfiltered EXACT long window.
+        # The normal-budget checks above still require nonempty raw totals.
         for cmd in ("time_model", "aas"):
             resp = srv.query(cmd, from_=frm, to_=to, buckets=10)
-            t.check("error" not in resp,
-                    f"{name}/{cmd}: UNFILTERED, the same window still takes "
-                    f"the summary route, so the query filter is what forces "
-                    f"raw above ({resp.get('code')!r})")
+            t.check_eq(resp.get("code"), "window_too_large",
+                       f"{name}/{cmd}: unfiltered long window also reads raw")
+
 
 
 def main():

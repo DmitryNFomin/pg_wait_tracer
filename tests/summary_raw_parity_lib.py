@@ -1,98 +1,13 @@
 #!/usr/bin/env python3
-"""summary_raw_parity_lib.py — the PURE comparison core of the summary-vs-raw
-parity gate (tests/test_summary_raw_parity.py).
+"""Pure checks for summaries-off routing, plus historical parity detectors.
 
-WHY THIS GATE EXISTS
-─────────────────────────────────────────────────────────────────────────────
-pgwt-server answers a window from EITHER raw events OR per-second summaries
-(`should_use_summaries`, src/server.c): any unfiltered window >= 120 s with
-EXACT fidelity goes to summaries. Nothing ever compared the two answers on the
-same window, and that single gap is why #402, #403, #408, #379 and #319 all
-survived three clean rehearsals — the rehearsal's conservation checks use a
-60 s window, which takes the RAW path and therefore never looks at the code
-that answers the demo's own 900 s window.
+The production gate calls summaries_off_verdict: fresh, missing and stale
+summary files must all leave every endpoint on raw, with complete identical
+answers. Empty data, unknown routes and missing fields must fail.
 
-This module holds everything that can be checked without a server: field
-extraction, comparison, the issue-numbered expected-divergence table, the
-route proof and the verdict. The live half — building a synthetic capture,
-running both routes, proving they ARE two routes — is
-tests/test_summary_raw_parity.py; the false-negative suite over this module is
-tests/test_summary_raw_parity_lib.py.
-
-WHAT IS COMPARED
-─────────────────────────────────────────────────────────────────────────────
-Not a hand-picked list of numbers. For every endpoint the extraction walks
-EVERY top-level scalar and EVERY scalar in EVERY row, plus three derived
-fields the per-key walk cannot see on its own:
-
-  * `<view>/rowset`      — the row SET and its ORDER. The summary path emits
-                           one `CPU*` where raw emits `CPU (running)` +
-                           `CPU (waiting for a core)` (#408); a check that
-                           only compared per-row numbers would call that "no
-                           difference", because the rows never meet.
-  * `time_model/cpu_group_ms` — the CPU group total (every row whose name
-                           starts with CPU) under either row shape, because
-                           #408's real harm is a +3.54% CPU total that the
-                           per-row walk cannot reach while the names differ.
-  * `aas/integral_ms`    — the AAS chart's integral; bucket layout may
-                           legitimately differ, the area a viewer reads as DB
-                           time may not.
-
-Absence is a value: a key present on one side only is a FAILURE (a blank
-column in the UI), never "equal". A `top_wait` that is null on BOTH sides
-agrees (an honest "unknown" is allowed); null on one side and a name on the
-other does not.
-
-TOLERANCE
-─────────────────────────────────────────────────────────────────────────────
-Both paths replay the same fixed on-disk file, so both are deterministic and
-the comparison is EXACT up to float formatting (1e-9 relative, 1e-6 absolute).
-Deliberately not a percentage allowance: #408 is +3.54% and #379 is +1.14% on
-DB Time, so any "2% tolerance" would swallow exactly the defects this gate
-exists to catch.
-
-A GATE THAT CANNOT SEE MUST REFUSE, NEVER APPROVE
-─────────────────────────────────────────────────────────────────────────────
-Every known way this check could pass while measuring nothing is a FAIL here,
-not a skip (tests/test_summary_raw_parity_lib.py drives each one):
-
-  * both sides took the same route            -> FAIL. About to become live:
-    the #408/#379 fixes bump the summary format v6 -> v7, after which a v6
-    capture is REFUSED and silently recomputed from raw — both sides raw,
-    perfect agreement, nothing compared. Version refusal is detected as its
-    own named case of the same-route failure.
-  * a route could not be determined at all    -> FAIL
-  * either side is empty/vacuous              -> FAIL
-  * a compared field is MISSING on one side   -> FAIL
-  * a compared field is unparseable           -> FAIL
-  * a dependency is missing or not executable -> FAIL (never a skip: 126/127
-    and "the two paths agree" must not share an exit status)
-  * an empty expected table                   -> every divergence FAILs
-  * a KNOWN divergence changes magnitude      -> FAIL (each entry pins the
-    measured pair, so "known issue" never licenses a new number)
-  * a KNOWN divergence disappears             -> XPASS, reported, does NOT
-    fail. Agreement alone is not proof of a fix; nullable pins also require
-    agreeing availability declarations and a measured value.
-  * the stale arm has no oracle               -> FAIL (`stale_verdict` refuses
-    without a raw reference rather than silently grading the version-refused
-    answer against the fresh SUMMARY one, which would inherit the main arm's
-    registered holes AND pass a refusal that leaked summary numbers)
-
-The stale arm's detectors are additionally re-proved on every run, before any
-capture is measured: test_summary_raw_parity.py's selftest_detectors() drives
-`stale_verdict` through thirteen ways its detection could be blinded, requires
-a CLEAN refusal from each, and requires correct inputs to still PASS -- so a
-detector that refuses unconditionally cannot masquerade as a working one.
-
-LIMIT OF PARITY
-─────────────────────────────────────────────────────────────────────────────
-This gate compares two routes and has no ground truth. Availability checks
-catch a declaration-versus-value contradiction, including a fabricated zero
-that still declares unavailable=true. A fabricator that also flips the
-declaration to false can still agree with raw. Only
-tests/test_data_summary_honesty.py can catch that fabrication; it did (62/63,
-"summary utilization is null, never measured zero"). XPASS is route agreement,
-not evidence that the owning defect is fixed.
+The historical two-route verdict, stale-version preflight, comparison pins
+and anti-vacuity detectors remain tested for the eventual summary rebuild;
+they no longer describe production routing. Their tolerances are unchanged.
 """
 
 import math
@@ -788,3 +703,30 @@ def record_table(findings):
             out[f.field] = {"issue": f.issue if f.issue is not None else "UNFILED",
                             "raw": f.raw, "summary": f.summary}
     return out
+
+
+def summaries_off_verdict(name, routes, fields_by_arm, commands):
+    """Require complete RAW answers with fresh, missing and stale summaries.
+
+    This checks routing and input independence, not numerical correctness.
+    Historical parity verdicts keep their distinct-route requirement.
+    """
+    arms = {"fresh", "missing", "stale"}
+    expected_routes = {arm + "/" + cmd for arm in arms for cmd in commands}
+    lines = ["--- summaries off: %s ---" % name]
+    if not commands or set(routes) != expected_routes or set(fields_by_arm) != arms:
+        return False, lines + ["FAIL incomplete route or answer inventory"]
+    for endpoint, route in sorted(routes.items()):
+        if route != ROUTE_RAW:
+            lines.append("FAIL %s must use raw, got %s" % (endpoint, route))
+    for arm, fields in fields_by_arm.items():
+        lines.extend("FAIL " + problem for problem in vacuity_problems(fields, arm))
+    reference = fields_by_arm["missing"]
+    for arm in ("fresh", "stale"):
+        findings = compare(reference, fields_by_arm[arm], {},
+                           labels=("missing", arm))
+        lines.extend(f.line() for f in findings if f.status != AGREE)
+    ok = len(lines) == 1
+    lines.append("PASS all endpoints use raw and summary files do not change "
+                 "complete answers" if ok else "FAIL summaries-off guard")
+    return ok, lines

@@ -1,38 +1,18 @@
 #!/bin/bash
-# test_v9_open_cpu_wired.sh — is the summary v9 open-CPU PRODUCER actually
-# wired, on a real capture?
+# test_v9_open_cpu_wired.sh — summaries must stay off on a real capture.
 #
-# This is the one #424 failure that still looks green. The v9 writer can be
-# in the build, every unit test can pass, every control key can be present
-# and numeric, and the live loop can still never hand the writer an
-# observation — in which case `summary_open_cpu_credited_ns` stays 0 and
-# nothing says so. The counters that make it visible
-# (open_cpu_refused_total, cpu_open_uncredited_ns_total) were published
-# nowhere before agent B put them on the control socket; before that an
-# unwired producer was unobservable, not merely unobserved.
+# The producer-wiring check comes back when summaries are rebuilt from the
+# core: docs/REWORK_PLAN_2026-11-11.md section 5, "Rollups (summaries)".
+# Until then, a live daemon must leave summary_open_cpu_notes_total and
+# summary_open_credited_ns_total at 0 before and after a proven CPU stimulus,
+# and must not create .summary or .summary.meta files in the capture directory.
 #
 # PRECONDITIONS, each checked and each a REFUSAL (exit 2) rather than a pass:
-#   - WATCHPOINT PROBES ARE ATTACHED (exact_probe_attached_mask > 0). Note
-#     that this is NOT "tier == exact", which is what this header claimed
-#     until 2026-10-28 while the code below checked the mask -- see the
-#     comment at the check itself for why the mask is the fact and the tier
-#     label is not. The producer lives in pgwt_read_state_map, which only
-#     runs when the mode maintains watchpoint intervals; without them a zero
-#     is CORRECT, so asserting non-zero there would fail a healthy daemon.
-#   - the control socket answers `metrics`.
-#   - the seven v9 keys are present.
-#   - the stimulus is PROVEN: a CPU-only statement must actually have been
-#     on-CPU across at least two ticks, evidenced by cpu_ns_total moving.
-#     Without that the assertion would be about the workload, not the wiring.
-#   - seconds really were SEALED (summary_open_credited_ns_total > 0), else
-#     nothing could have been credited by anyone.
-#   - THE WRITER WAS ASKED (summary_open_cpu_notes_total > 0). Added
-#     2026-10-28 after this script printed "the producer is not wired" on a
-#     capture where that was not established: a zero credited_ns is BOTH
-#     "the producer never offered an observation" and "it offered one every
-#     tick and the credit path dropped it", and until this counter existed
-#     nothing on the wire separated them.
-# Only once ALL of those hold does a zero count as a FAILURE (exit 1).
+#   - watchpoint probes are attached (exact_probe_attached_mask > 0).
+#   - the control socket answers `metrics` successfully.
+#   - the v9 keys and writer-activity counters are present and numeric.
+#   - CPU statements complete across ticks and cpu_ns_total moves.
+# Only after those hold can writer activity be a FAILURE (exit 1).
 #
 # NOTE ON EXIT 2, because the distinction is only in this script's output:
 # tests/run_all.sh counts any non-zero exit as a failure, so a REFUSE turns
@@ -63,7 +43,7 @@ if [[ -z "$PM_PID" ]]; then
     exit 2
 fi
 
-echo "=== test_v9_open_cpu_wired (#424, summary v9 producer) ==="
+echo "=== test_v9_open_cpu_wired (summaries off until core rebuild) ==="
 
 TRACE_DIR=$(mktemp -d /tmp/pgwt_v9wired_XXXXXX)
 DAEMON_LOG=$(mktemp /tmp/pgwt_v9wired_daemon_XXXXXX.log)
@@ -127,11 +107,11 @@ try:
 except Exception:
     sys.exit(0)
 v = r.get('$2')
-print(v if isinstance(v, (int, float)) else '')
+print(v if type(v) is int and v >= 0 else '')
 "
 }
 
-# ── full mode, so the watchpoint interval loop (the producer) runs ───────
+# ── full mode, so watchpoint intervals are exercised ───────────────────
 "$TRACER" --daemon --mode full --pid "$PM_PID" -i 1 -T "$TRACE_DIR" -v \
     >/dev/null 2>"$DAEMON_LOG" &
 TRACER_PID=$!
@@ -168,7 +148,7 @@ for _ in $(seq 1 20); do
 done
 if [[ -z "$MASK" ]] || [[ "$MASK" -le 0 ]]; then
     echo "REFUSE: no watchpoint probes attached (exact_probe_attached_mask="
-    echo "        ${MASK:-absent}) after 20 s. The producer loop is"
+    echo "        ${MASK:-absent}) after 20 s. The exact interval loop is"
     echo "        unreachable here, so a zero would be correct and this"
     echo "        check would be measuring nothing."
     echo "  status: $STATUS"
@@ -176,27 +156,45 @@ if [[ -z "$MASK" ]] || [[ "$MASK" -le 0 ]]; then
 fi
 TIER=$(printf '%s' "$STATUS" | python3 -c \
     "import json,sys;print(json.load(sys.stdin).get('tier',''))" 2>/dev/null)
-echo "  ok: watchpoints attached (mask=$MASK, tier=$TIER) -- producer reachable"
+echo "  ok: watchpoints attached (mask=$MASK, tier=$TIER) -- exact interval loop reachable"
 
-M0=$(ctl '{"cmd":"metrics"}')
-CPU0=$(num "$M0" cpu_ns_total)
-if [[ -z "$CPU0" ]]; then
-    echo "REFUSE: metrics has no numeric cpu_ns_total -- cannot prove a stimulus"
-    exit 2
-fi
-
-for k in summary_open_cpu_credited_ns summary_open_cpu_measured_ns \
-         summary_open_cpu_unknown_ns summary_open_cpu_eff_rejected_total \
-         summary_open_cpu_class_divergent_ns \
-         summary_open_cpu_tier_mismatch_total summary_open_cpu_overcredit_ns; do
-    if [[ -z "$(num "$M0" "$k")" ]]; then
-        echo "REFUSE: control socket has no numeric '$k'."
-        echo "        The v9 keys are missing, so this test cannot tell a"
-        echo "        wired producer from an unwired one."
+# Check the same keys at both ends: a missing counter must not look like 0.
+SUMMARY_KEYS=(
+    summary_open_cpu_credited_ns summary_open_cpu_measured_ns
+    summary_open_cpu_unknown_ns summary_open_cpu_eff_rejected_total
+    summary_open_cpu_class_divergent_ns summary_open_cpu_tier_mismatch_total
+    summary_open_cpu_overcredit_ns summary_open_cpu_notes_total
+    summary_open_credited_ns_total summary_open_cpu_io_worker_refused_total
+    summary_open_cpu_unplaced_total
+)
+check_metrics() {
+    if ! printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    r = json.load(sys.stdin)
+    sys.exit(0 if isinstance(r, dict) and r.get("ok") is True else 1)
+except (ValueError, TypeError):
+    sys.exit(1)
+'; then
+        echo "REFUSE: metrics did not return a successful JSON response"
         exit 2
     fi
-done
-echo "  ok: all seven v9 control keys present and numeric"
+    local k
+    for k in cpu_ns_total "${SUMMARY_KEYS[@]}"; do
+        if [[ -z "$(num "$1" "$k")" ]]; then
+            echo "REFUSE: metrics has no non-negative integer '$k'"
+            exit 2
+        fi
+    done
+}
+
+M0=$(ctl '{"cmd":"metrics"}') || {
+    echo "REFUSE: metrics request failed before the stimulus"
+    exit 2
+}
+check_metrics "$M0"
+CPU0=$(num "$M0" cpu_ns_total)
+echo "  ok: metrics answers and all required counters are present and numeric"
 
 # ── the stimulus: ONE on-CPU interval per backend, held open across
 #    several 1 s ticks, because that is the only thing v9 can spread. ─────
@@ -289,237 +287,50 @@ fi
 echo "  ok: $stim_ok of 3 CPU statements completed, spanning ${STIM_S}s of ticks"
 sleep 3   # let the ticks after the statements land
 
-M1=$(ctl '{"cmd":"metrics"}')
+M1=$(ctl '{"cmd":"metrics"}') || {
+    echo "REFUSE: metrics request failed after the stimulus"
+    exit 2
+}
+check_metrics "$M1"
 CPU1=$(num "$M1" cpu_ns_total)
-if [[ -z "$CPU1" ]] || [[ "$CPU1" -le "$CPU0" ]]; then
-    echo "REFUSE: cpu_ns_total did not move ($CPU0 -> ${CPU1:-?})."
-    echo "        The CPU statement never registered, so a zero credited_ns"
-    echo "        would be a statement about the workload, not the wiring."
+if [[ "$CPU1" -le "$CPU0" ]]; then
+    echo "REFUSE: cpu_ns_total did not move ($CPU0 -> $CPU1)."
+    echo "        The CPU statement never registered, so this check cannot"
+    echo "        establish that summaries stayed off under CPU load."
     exit 2
 fi
 echo "  ok: stimulus PROVEN -- cpu_ns_total moved $CPU0 -> $CPU1"
 
-# ── THE FIFTH PRECONDITION: was the writer ASKED? ───────────────────────
-# Read from the SAME metrics object as the counter below, because the two
-# have to describe one instant. summary_open_cpu_notes_total counts on-CPU
-# notes that arrived carrying an observation, before any refusal inside the
-# writer -- so:
-#
-#   key absent  -> this daemon predates the counter. This script cannot tell
-#                  "never asked" from "asked and dropped", which is exactly
-#                  the verdict it would otherwise print. REFUSE.
-#   0           -> the PRODUCER never offered an observation. credited == 0
-#                  is then the correct answer and says nothing about the
-#                  credit path; the defect is the call site. REFUSE.
-#   > 0         -> the writer was asked. Only now does a zero credited_ns
-#                  mean the credit path placed nothing. FAIL.
-#
-# This is why the run of 2026-10-28 (box-check-ubuntu-20261028-121033,
-# commit 31a03da6) was misread: all four preconditions above held and were
-# printed, yet credited / refused / uncredited were ALL zero, which is both
-# states at once. No sleep and no retry is added -- the number either is on
-# the wire at the instant the counter is read or it is not.
-NOTES=$(num "$M1" summary_open_cpu_notes_total)
-if [[ -z "$NOTES" ]]; then
-    echo "  REFUSE: metrics has no numeric 'summary_open_cpu_notes_total'."
-    echo "          Without it a zero credited_ns is BOTH 'the producer never"
-    echo "          offered an observation' and 'it did and nothing was"
-    echo "          credited'. This daemon predates the counter, so this"
-    echo "          check cannot name a defect and will not guess one."
-    exit 2
-fi
-if [[ "$NOTES" -le 0 ]]; then
-    echo "  REFUSE: summary_open_cpu_notes_total = 0. The writer was never"
-    echo "          ASKED about an on-CPU gap, so credited_ns == 0 is the"
-    echo "          CORRECT answer and the credit path was never exercised."
-    echo "          The defect is upstream, at the producer call site in"
-    echo "          pgwt_read_state_map (src/map_reader.c) or in what the"
-    echo "          state-map scan sees -- not in the writer."
-    exit 2
-fi
-echo "  ok: the writer WAS asked -- summary_open_cpu_notes_total = $NOTES"
-
-
-CRED=$(num "$M1" summary_open_cpu_credited_ns)
-MEAS=$(num "$M1" summary_open_cpu_measured_ns)
-REFUSED=$(num "$M1" summary_open_cpu_refused_total)
-UNCRED=$(num "$M1" summary_cpu_open_uncredited_ns_total)
-IOREF=$(num "$M1" summary_open_io_worker_refused_total)
-IOREF_CPU=$(num "$M1" summary_open_cpu_io_worker_refused_total)
-UNPLACED=$(num "$M1" summary_open_cpu_unplaced_total)
-MISMATCH=$(num "$M1" summary_open_note_mismatch_total)
-TBLFULL=$(num "$M1" summary_open_table_full_total)
-EXPIRED=$(num "$M1" summary_open_notes_expired_total)
-V8CRED=$(num "$M1" summary_open_credited_ns_total)
-echo "  summary_open_cpu_credited_ns   = $CRED"
-echo "  summary_open_cpu_measured_ns   = ${MEAS:-n/a}"
-echo "  summary_open_cpu_refused_total = ${REFUSED:-n/a}"
-echo "  summary_cpu_open_uncredited_ns_total = ${UNCRED:-n/a}"
-# Every exit between the note and the credit, so a verdict NAMES the one
-# that took the observation instead of leaving it to be inferred.
-echo "  summary_open_io_worker_refused_total = ${IOREF:-n/a}  (WAIT notes included)"
-echo "  summary_open_cpu_io_worker_refused_total = ${IOREF_CPU:-n/a}  (the on-CPU subset)"
-echo "  summary_open_cpu_unplaced_total      = ${UNPLACED:-n/a}"
-# Printed next to uncredited because it is the only thing that makes
-# uncredited COMPARABLE across captures. uncredited adds a closed CPU
-# record's WHOLE duration whenever `already == 0`, and `already` is the
-# note's credit only while the close-time identity check holds; when it does
-# not, an interval that WAS credited is still counted whole. Non-zero here
-# means a reading of uncredited is partly that, not a population of
-# never-credited gaps. See the comment at this key in src/control.c.
-echo "  summary_open_note_mismatch_total     = ${MISMATCH:-n/a}  (makes uncredited comparable)"
-echo "  summary_open_table_full_total        = ${TBLFULL:-n/a}"
-echo "  summary_open_notes_expired_total     = ${EXPIRED:-n/a}"
-echo "  summary_open_credited_ns_total = ${V8CRED:-n/a}  (WAIT credit, same seal)"
-
-# The two keys that make a zero ATTRIBUTABLE are preconditions, not
-# decoration: without them this script is back to inferring which of three
-# states a zero is, which is the mistake of 2026-10-28. A daemon that
-# predates them cannot be read, and will not be guessed at.
-if [[ -z "$IOREF_CPU" ]] || [[ -z "$UNPLACED" ]]; then
-    echo "  REFUSE: metrics has no numeric"
-    echo "          'summary_open_cpu_io_worker_refused_total' /"
-    echo "          'summary_open_cpu_unplaced_total'. Without the first,"
-    echo "          summary_open_io_worker_refused_total overlaps"
-    echo "          notes_total by an unknown amount (34 notes beside 39"
-    echo "          refusals on the 2026-10-28 capture); without the second,"
-    echo "          'every gap ended inside its own second' and 'the seal"
-    echo "          dropped them' are the same three zeros. This daemon"
-    echo "          predates both and cannot name a defect."
-    exit 2
-fi
-
-# What the CREDIT PATH was actually offered: notes minus the ones the
-# io_worker rule declined at the note. Subtraction, not inference.
-OFFERED=$(( NOTES - IOREF_CPU ))
-echo "  offered to the credit path     = $OFFERED  (notes $NOTES - io_worker $IOREF_CPU)"
-
-if [[ "$CRED" -gt 0 ]]; then
-    # ── A NUMBER, not "greater than zero" ───────────────────────────────
-    # "credited > 0" is the weakest assertion this capture can carry, and
-    # one second of credit out of a ten-second gap satisfies it -- i.e. a
-    # credit path that places the FIRST second and then stops passes it.
-    # So the verdict is a band, derived from quantities this same run
-    # measured rather than from a constant someone chose:
-    #
-    #   (1) measured > 0            v7's split survived the spread. A
-    #                               credit that places wall and no
-    #                               measurement destroys the CPU*/Off-CPU*
-    #                               split, which is the whole reason v8
-    #                               refused to spread on-CPU gaps at all.
-    #   (2) measured <= wall        coherence. A second cannot hold more
-    #                               measured CPU than its own wall; the
-    #                               reverse makes the reader's
-    #                               DB - CPU* - Sigma residual negative.
-    #   (3) 4 * measured >= DELTA   the BULK of the stimulus, not a token
-    #                               second. DELTA is this daemon's own
-    #                               schedstat total across the stimulus
-    #                               (cpu_ns_total), which is independent
-    #                               provenance from the credit -- that part
-    #                               is what makes the comparison worth
-    #                               making at all.
-    #
-    # THE 25% IS EMPIRICAL, NOT DERIVED, and this comment said otherwise
-    # until 2026-10-28. The retracted argument ran "a gap of L seconds can
-    # place about L - 2.1 of them, so at the >= 3 s floor above the placed
-    # fraction is already ~30%". It does not hold, for two independent
-    # reasons, and a reviewer relied on it:
-    #   - the >= 3 s check measures the BATCH wall time of three concurrent
-    #     psql children. It bounds no individual interval's length, which is
-    #     the quantity the L - 2.1 argument needs.
-    #   - DELTA carries every other backend's CPU as well. Calling that
-    #     "headroom" assumes its sign without measuring it, and on an idle
-    #     box versus a loaded one it is exactly what moves the ratio.
-    # So the floor is what it is: a number set BELOW every value measured so
-    # far, whose job is to reject a token credit. REPORTED on pgwt-gate-3 and
-    # one ephemeral VM, same stimulus, n = 4: 86%, 61%, 60%, 64% (min 60, spread
-    # 26 pp; the 86% is a hand-run on an otherwise idle box, which is the
-    # smaller denominator). 25% is 2.4x below the minimum observed and 2.5x
-    # above the ~10% a first-second-only credit produces (harness scenario
-    # J). It is NOT a model of the seal lag, and nobody should read one out
-    # of it: if a future run lands under 25%, that is a finding about the
-    # seal to investigate, not noise to absorb by widening this number.
-    DELTA=$(( CPU1 - CPU0 ))
-    bad=0
-    if [[ -z "$MEAS" ]] || [[ "$MEAS" -le 0 ]]; then
-        echo "  FAIL: credited $CRED ns of WALL with measured CPU"
-        echo "        ${MEAS:-n/a} -- the spread placed time and destroyed"
-        echo "        v7's measured split, which is worse than refusing to"
-        echo "        spread. src/summary_writer.c credit_open_cpu_measured."
+bad=0
+for k in summary_open_cpu_notes_total summary_open_credited_ns_total; do
+    before=$(num "$M0" "$k")
+    after=$(num "$M1" "$k")
+    if [[ "$before" -ne 0 ]] || [[ "$after" -ne 0 ]]; then
+        echo "  FAIL: $k is $before -> $after; summaries must stay off"
         bad=1
-    elif [[ "$MEAS" -gt "$CRED" ]]; then
-        echo "  FAIL: measured $MEAS ns > wall $CRED ns. A second cannot"
-        echo "        hold more measured CPU than its own wall; this makes"
-        echo "        the reader's DB - CPU* - Sigma residual negative."
-        bad=1
-    elif (( MEAS * 4 < DELTA )); then
-        echo "  FAIL: measured $MEAS ns is under a quarter of the"
-        echo "        stimulus' own $DELTA ns of schedstat CPU. The credit"
-        echo "        path placed a token amount, not the gap -- which is"
-        echo "        what 'credited > 0' alone would have approved."
-        bad=1
+    else
+        echo "  ok: $k stayed 0 -> 0 across the stimulus"
     fi
-    if [[ "$bad" -ne 0 ]]; then
-        echo "=== test_v9_open_cpu_wired: FAIL ==="
-        exit 1
-    fi
-    echo "  ok: the v9 open-CPU producer IS wired and the credit is coherent"
-    echo "      wall $CRED ns, measured $MEAS ns, stimulus CPU $DELTA ns"
-    echo "      (measured/stimulus = $(( MEAS * 100 / (DELTA > 0 ? DELTA : 1) ))%, floor 25%)"
-    echo "=== test_v9_open_cpu_wired: PASS ==="
-    exit 0
-fi
+done
 
-# ── credited == 0. Four states, and each names a different file. ─────────
-if [[ -n "$V8CRED" ]] && [[ "$V8CRED" -eq 0 ]]; then
-    echo "  REFUSE: summary_open_cpu_credited_ns is 0, but so is"
-    echo "          summary_open_credited_ns_total -- NOTHING sealed in this"
-    echo "          capture, so the open-CPU path was never reached and this"
-    echo "          says nothing about whether the producer is wired. Fix the"
-    echo "          seal trigger (writer_seal_through is only called from"
-    echo "          push_event and flush_completed, and returns immediately"
-    echo "          while w->fp is NULL) before reading this check again."
+# Include rotated/compressed summaries as well as current.summary and its
+# metadata. A failed directory scan is a refusal, not evidence of absence.
+SUMMARY_FILES=$(find "$TRACE_DIR" -type f \( -name '*.summary' -o \
+    -name '*.summary.meta' -o -name '*.summary.lz4' \)) || {
+    echo "REFUSE: cannot inspect the capture directory for summary files"
     exit 2
+}
+if [[ -n "$SUMMARY_FILES" ]]; then
+    echo "  FAIL: summaries must stay off, but capture contains summary files:"
+    printf '%s\n' "$SUMMARY_FILES"
+    bad=1
+else
+    echo "  ok: capture directory has no summary files or summary metadata"
 fi
 
-if [[ "$OFFERED" -le 0 ]]; then
-    echo "  REFUSE: all $NOTES on-CPU observations carried the io_worker"
-    echo "          flag ($IOREF_CPU of $NOTES), and io_worker time is"
-    echo "          outside the time model by rule (summary v6), so"
-    echo "          declining them is CORRECT. The credit path was offered"
-    echo "          nothing. On a PG18 io_method=worker cluster the io"
-    echo "          workers are the only backends with an on-CPU gap when"
-    echo "          the stimulus itself does not hold one -- so this says"
-    echo "          the stimulus failed, not the writer."
-    exit 2
+if [[ "$bad" -ne 0 ]]; then
+    echo "=== test_v9_open_cpu_wired: FAIL ==="
+    exit 1
 fi
-
-if [[ "$UNPLACED" -gt 0 ]]; then
-    echo "  REFUSE: summary_open_cpu_credited_ns = $CRED, with $OFFERED"
-    echo "          observations offered after the io_worker rule and"
-    echo "          summary_open_cpu_unplaced_total = $UNPLACED intervals"
-    echo "          retired without open-CPU credit. These are aggregate"
-    echo "          counts of observations and intervals, not a per-interval"
-    echo "          trace. They do not establish interval lengths, that every"
-    echo "          offered interval was retired unplaced, or why credit is 0."
-    echo "          Unplaced is also non-zero on passing captures (11 and 13"
-    echo "          in the committed MERGE and FINAL box logs). This reading"
-    echo "          establishes neither a failed stimulus nor a correct writer."
-    echo "          Correlate note, seal and close timing for the stimulus pids"
-    echo "          before assigning a cause; this verdict remains REFUSE."
-    exit 2
-fi
-
-echo "  FAIL: summary_open_cpu_credited_ns is 0 on a capture whose CPU"
-echo "        stimulus is proven, with the v9 keys present, with"
-echo "        summary_open_credited_ns_total = ${V8CRED:-n/a} proving seconds"
-echo "        really were sealed, with $OFFERED observations OFFERED to the"
-echo "        credit path after the io_worker rule, and with"
-echo "        summary_open_cpu_unplaced_total = 0 -- so not one of them was"
-echo "        retired early either. They were accepted and the SEAL placed"
-echo "        none of them: src/summary_writer.c credit_open_second /"
-echo "        writer_seal_through. refused_total=${REFUSED:-n/a}"
-echo "        table_full=${TBLFULL:-n/a} notes_expired=${EXPIRED:-n/a}"
-echo "        uncredited_ns=${UNCRED:-n/a} is what it cost."
-echo "=== test_v9_open_cpu_wired: FAIL ==="
-exit 1
+echo "=== test_v9_open_cpu_wired: PASS ==="
+exit 0

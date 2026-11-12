@@ -4836,19 +4836,11 @@ static int server_init(struct pgwt_server *srv, const char *trace_dir)
     return 0;
 }
 
-/* ── Summary threshold (coverage-aware — FID-2) ───────────── */
+/* ── Summaries disabled pending the core rebuild ──────────── */
 
-/* Use the summary fast path for ranges >= 120 s (instant response, ~300KB
- * peak memory) — but ONLY when the window is fully exact-covered (or
- * empty): summaries are fed by the exact (watchpoint) path alone, so over
- * a window with uncovered sampled data they would silently drop it — in
- * default tiered mode that made "last 15 minutes" return escalation
- * slivers (or nothing) labeled "exact". Such windows fall back to the raw
- * path, which merges samples with ASH math and labels honestly.
- * Force raw events when a pid filter is active — summaries don't have
- * per-PID event/class breakdown. query_id is handled via v2 per-query
- * data. *wf is always filled with the window's coverage-derived fidelity
- * so the summary-path response can carry an honest label. */
+/* Preserve coverage refresh and window fidelity for every caller. All
+ * requests read raw events until summaries are rebuilt from the core;
+ * reject_overload refuses windows exceeding the existing event limit. */
 static int should_use_summaries(struct pgwt_server *srv,
                                 struct pgwt_request *req,
                                 struct pgwt_wfid *wf)
@@ -4858,47 +4850,7 @@ static int should_use_summaries(struct pgwt_server *srv,
     uint64_t to   = req->to_ns   ? req->to_ns   : srv->latest_wall_ns;
     *wf = window_fidelity(srv, from, to);
 
-    if (req->filter.pid != 0)
-        return 0;
-    if (to <= from) return 0;
-    if (to - from < 120ULL * 1000000000ULL)
-        return 0;
-    /* Summaries are only honest when exact data covers everything the
-     * window contains (EXACT), or the window is empty (NONE). */
-    if (wf->fid != PGWT_FIDELITY_EXACT && wf->fid != PGWT_FIDELITY_NONE)
-        return 0;
-
-    /* ACCOUNTING-VERSION PREFLIGHT (summary v3, 2026-10-06).
-     *
-     * v1/v2 files precomputed their per-second totals under the old idle rule,
-     * so the reader refuses them. Refusing is not enough on its own: this
-     * function used to decide purely on fidelity, and pgwt_visit_summaries
-     * SKIPS a file it cannot open -- so a window containing one older file
-     * would have been answered from the remaining files and returned a
-     * plausible PARTIAL result (or an empty 900 s answer if every file was
-     * old), with "fidelity": "exact" on it and no error anywhere.
-     *
-     * Checking it here turns that into a REAL RAW FALLBACK: returning 0 sends
-     * the caller down the raw-events path, which is the source of truth and is
-     * always complete. If that path is too large it refuses out loud
-     * (reject_overload) -- an explicit error, never a quiet wrong number. */
-    int considered = 0, unusable = 0;
-    if (!pgwt_summaries_window_current(srv->trace_dir, from, to,
-                                       &considered, &unusable)) {
-        /* Two different refusals, and conflating them is how #403 read as
-         * normal operation: "0 of 0 files are not v6" describes an empty
-         * overlap set as a version problem. No file in the window means the
-         * summary path cannot answer it at all. */
-        if (considered == 0)
-            fprintf(stderr, "INFO: no summary file covers this window "
-                    "-- recomputing from raw events\n");
-        else
-            fprintf(stderr, "INFO: %d of %d summary file(s) covering this "
-                    "window are not summary v%d -- recomputing from raw "
-                    "events\n", unusable, considered, PGWT_SUMMARY_VERSION);
-        return 0;
-    }
-    return 1;
+    return 0;
 }
 
 /* ── Fidelity (trace format v2, D3) ───────────────────────── */
