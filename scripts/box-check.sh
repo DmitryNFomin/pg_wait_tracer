@@ -89,6 +89,10 @@ PG="${PG:-}"
 EPHEMERAL="${EPHEMERAL:-0}"
 KEEP="${KEEP:-0}"
 
+# Bound dead connections so failures reach the EXIT cleanup trap. Keep the
+# same transport options on direct SSH calls and rsync's SSH subprocesses.
+ssh_keepalive=(-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ConnectTimeout=20)
+
 ts=$(date +%Y%m%d-%H%M%S)
 mkdir -p tests/results
 if [[ "$EPHEMERAL" == "1" ]]; then
@@ -272,9 +276,9 @@ if [[ "$EPHEMERAL" == "1" ]]; then
     # the repo on the box first, hence the early minimal rsync (full rsync
     # + build/test happens below like every other box-check run).
     echo "box-check: staging repo + running tests/provision-runner.sh $OS on $target (refreshes bpftool for this VM's kernel)" | tee -a "$log"
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" "mkdir -p pgwt-provision" 2>>"$log"
-    rsync -az -e "ssh -o StrictHostKeyChecking=no" ./tests/provision-runner.sh "$target:pgwt-provision/tests-provision-runner.sh" 2>>"$log"
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" "sudo bash pgwt-provision/tests-provision-runner.sh $OS" 2>&1 | tee -a "$log"
+    ssh -o BatchMode=yes "${ssh_keepalive[@]}" -o StrictHostKeyChecking=no "$target" "mkdir -p pgwt-provision" 2>>"$log"
+    rsync -az -e "ssh ${ssh_keepalive[*]} -o StrictHostKeyChecking=no" ./tests/provision-runner.sh "$target:pgwt-provision/tests-provision-runner.sh" 2>>"$log"
+    ssh -o BatchMode=yes "${ssh_keepalive[@]}" -o StrictHostKeyChecking=no "$target" "sudo bash pgwt-provision/tests-provision-runner.sh $OS" 2>&1 | tee -a "$log"
     provision_rc=${PIPESTATUS[0]}
     if [[ $provision_rc -ne 0 ]]; then
         echo "box-check: tests/provision-runner.sh $OS failed (rc=$provision_rc) on the fresh ephemeral VM" | tee -a "$log" >&2
@@ -322,11 +326,11 @@ else
     # so implementing that OS removes the skip along with that arm.
     echo "box-check: staging + running tests/provision-runner.sh $OS on persistent $target" | tee -a "$log"
     prov_stage="pgwt-provision/$(date +%s)-$$-tests-provision-runner.sh"
-    ssh -o BatchMode=yes "$target" "mkdir -p pgwt-provision" 2>>"$log" || { echo "box-check: provision directory creation failed on persistent $target (see $log)" | tee -a "$log" >&2; exit 1; }
-    rsync -az -e ssh ./tests/provision-runner.sh "$target:$prov_stage" 2>>"$log" || { echo "box-check: provisioner rsync stage failed on persistent $target (see $log)" | tee -a "$log" >&2; exit 1; }
-    ssh -o BatchMode=yes "$target" "sudo bash $prov_stage $OS --lock-wait unbounded" 2>&1 | tee -a "$log"
+    ssh -o BatchMode=yes "${ssh_keepalive[@]}" "$target" "mkdir -p pgwt-provision" 2>>"$log" || { echo "box-check: provision directory creation failed on persistent $target (see $log)" | tee -a "$log" >&2; exit 1; }
+    rsync -az -e "ssh ${ssh_keepalive[*]}" ./tests/provision-runner.sh "$target:$prov_stage" 2>>"$log" || { echo "box-check: provisioner rsync stage failed on persistent $target (see $log)" | tee -a "$log" >&2; exit 1; }
+    ssh -o BatchMode=yes "${ssh_keepalive[@]}" "$target" "sudo bash $prov_stage $OS --lock-wait unbounded" 2>&1 | tee -a "$log"
     provision_rc=${PIPESTATUS[0]}
-    ssh -o BatchMode=yes "$target" "rm -f \"$prov_stage\"" 2>>"$log" || true
+    ssh -o BatchMode=yes "${ssh_keepalive[@]}" "$target" "rm -f \"$prov_stage\"" 2>>"$log" || true
     if [[ $provision_rc -eq 3 ]]; then
         echo "box-check: WARNING: provisioner does not support OS=$OS (unsupported, rc=3); provisioning skipped for that reason; using persistent $target as-is" | tee -a "$log" >&2
     elif [[ $provision_rc -eq 75 ]]; then
@@ -358,8 +362,8 @@ ssh_strict=""
 # openrsync (macOS's /usr/bin/rsync) is stricter about -e's argument than
 # GNU rsync -- build it without a trailing space rather than rely on both
 # implementations tolerating "ssh " when $ssh_strict is empty.
-rsync_e="ssh"
-[[ -n "$ssh_strict" ]] && rsync_e="ssh $ssh_strict"
+rsync_e="ssh ${ssh_keepalive[*]}"
+[[ -n "$ssh_strict" ]] && rsync_e="ssh ${ssh_keepalive[*]} $ssh_strict"
 
 # An atomic mktemp on the BOX guarantees uniqueness even for two clones with
 # the same branch, tree, timestamp and local PID. Syncs cannot overwrite each
@@ -374,7 +378,8 @@ run_cleanup() {
     if [[ "$EPHEMERAL" == 1 ]]; then
         ephemeral_cleanup
     elif [[ -n "$remote_dir" ]]; then
-        if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$target" "sudo rm -rf -- '$remote_dir'"; then
+        # OpenSSH uses the first value; retain cleanup's shorter connect timeout.
+        if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "${ssh_keepalive[@]}" "$target" "sudo rm -rf -- '$remote_dir'"; then
             echo "box-check: WARNING: could not prune $target:$remote_dir; remove it manually" >&2
             rc=1
         fi
@@ -386,7 +391,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 # shellcheck disable=SC2086,SC2029
-remote_dir=$(ssh -o BatchMode=yes $ssh_strict "$target" \
+remote_dir=$(ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
     "mkdir -p '$remote_root' && mktemp -d '$remote_root/$branch.XXXXXXXXXX'") || exit 1
 [[ "$remote_dir" == "$remote_root/$branch."* && "$remote_dir" != *$'\n'* ]] || { echo 'box-check: invalid private directory response' >&2; remote_dir=""; exit 1; }
 
@@ -410,7 +415,7 @@ git ls-tree -rz "$tree_hash" > "$source_manifest" || exit 1
 git ls-tree -rz --name-only "$tree_hash" > "$source_manifest.paths" || exit 1
 echo "box-check: source commit=$commit tree-hash=$tree_hash (build provenance pending)" | tee -a "$log"
 echo "box-check: target=$target OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL PGWT_EXPECT_PHASE_PROBES=$PGWT_EXPECT_PHASE_PROBES -> $remote_dir (log: $log)" | tee -a "$log"
-ssh -o BatchMode=yes $ssh_strict "$target" \
+ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
     "mkdir -p '$remote_dir' && printf 'box-check: remote hostname=%s machine_id=%s\\n' \"\$(hostname -f 2>/dev/null || hostname)\" \"\$(cat /etc/machine-id 2>/dev/null || echo unavailable)\"" \
     2>&1 | tee -a "$log"
 [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
@@ -554,7 +559,7 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # library to the tests sub-make. On EL8 these must be the bundled versions;
 # the tests' default -lbpf would silently select the old system library.
 lock_header='exec 9>/tmp/pgwt-box-check.lock; if flock -n 9; then echo "box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)"; else lock_wait_start_ns=$(date +%s%N); echo "box-check: waiting for /tmp/pgwt-box-check.lock"; flock 9 || exit; lock_wait_ms=$(( ($(date +%s%N) - lock_wait_start_ns) / 1000000 )); echo "box-check: lock acquired (waited_for_lock=yes, lock_wait_ms=${lock_wait_ms})"; fi;'
-ssh -o BatchMode=yes $ssh_strict "$target" \
+ssh -o BatchMode=yes "${ssh_keepalive[@]}" $ssh_strict "$target" \
     "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header $preflight bash scripts/box-build.sh $tree_hash $commit && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
     2>&1 | tee -a "$log"
 rc=${PIPESTATUS[0]}

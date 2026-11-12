@@ -265,7 +265,7 @@ echo 'PASS: persistent el9 rc=3 announces unsupported-OS skip and reaches build'
 # independently of BEGIN/END markers; refuse if it does not occur exactly once.
 mutant="$tmpdir/box-check-mutant.sh"
 awk '
-    /^[[:space:]]*ssh -o BatchMode=yes "\$target" / &&
+    /^[[:space:]]*ssh -o BatchMode=yes / &&
         /sudo bash \$prov_stage \$OS/ { removed++; next }
     { print }
     END { if (removed != 1) exit 2 }
