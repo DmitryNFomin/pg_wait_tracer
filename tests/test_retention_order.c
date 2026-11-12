@@ -2,6 +2,7 @@
  * Summary files here are legacy fixtures, not output from a running daemon.
  * Archive contents are opaque to cleanup; exact byte sizes trip the cap. */
 #include "event_writer.h"
+#include "summary_writer.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -79,6 +80,79 @@ static uint64_t dir_bytes(void)
     }
     closedir(d);
     return bytes;
+}
+
+static void cleanup_disabled_summary(char *warn, size_t warn_size)
+{
+    FILE *capture = tmpfile();
+    int saved = dup(STDERR_FILENO);
+    if (!capture || saved < 0 || dup2(fileno(capture), STDERR_FILENO) < 0)
+        exit(2);
+    /* The same startup call as the daemon, with no summary writer. */
+    pgwt_summary_cleanup_disabled(NULL, trace_dir);
+    fflush(stderr);
+    if (dup2(saved, STDERR_FILENO) < 0) exit(2);
+    close(saved);
+    rewind(capture);
+    size_t n = fread(warn, 1, warn_size - 1, capture);
+    warn[n] = '\0';
+    fclose(capture);
+}
+
+static int unchanged(const char *name, size_t bytes)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", trace_dir, name);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = 0;
+    int ch, ok = 1;
+    while ((ch = fgetc(f)) != EOF) {
+        if (ch != 'x') ok = 0;
+        n++;
+    }
+    if (ferror(f)) ok = 0;
+    fclose(f);
+    return ok && n == bytes;
+}
+
+static void test_disabled_summary_startup(void)
+{
+    int failures_before = failures;
+    char warn[1024];
+    reset_dir();
+    put("current.summary", 100);
+    put("current.summary.meta", 10);
+    put("current.trace", 137);
+    put("current.trace.meta", 11);
+    put("2025-01-01_10.trace.lz4", 191);
+    CHECK(exists("current.summary") && exists("current.summary.meta"),
+          "startup fixture contains a leftover summary and meta");
+    cleanup_disabled_summary(warn, sizeof(warn));
+    CHECK(!exists("current.summary") && !exists("current.summary.meta"),
+          "disabled startup removes leftover current.summary and meta");
+    CHECK(unchanged("current.trace", 137) && unchanged("current.trace.meta", 11) &&
+          unchanged("2025-01-01_10.trace.lz4", 191),
+          "disabled startup leaves live and archived raw bytes untouched");
+    CHECK(warn[0] == '\0', "disabled startup removal succeeds silently");
+    cleanup_disabled_summary(warn, sizeof(warn));
+    CHECK(warn[0] == '\0', "disabled startup tolerates already absent summary files");
+
+    put("current.summary", 100);
+    put("current.summary.meta", 10);
+    refuse_unlink = "current.summary"; /* refuse both names, even as root */
+    cleanup_disabled_summary(warn, sizeof(warn));
+    CHECK(exists("current.summary") && exists("current.summary.meta"),
+          "failed disabled startup cleanup returns with leftovers in place");
+    CHECK(strstr(warn, "WARN:") && strstr(warn, "continuing without summaries") &&
+          strchr(warn, '\n') && strchr(warn, '\n')[1] == '\0',
+          "disabled startup reports both unlink errors in one line and continues");
+    CHECK(unchanged("current.trace", 137) && unchanged("current.trace.meta", 11) &&
+          unchanged("2025-01-01_10.trace.lz4", 191),
+          "failed disabled startup cleanup also preserves raw bytes");
+    refuse_unlink = NULL;
+    printf("%s: disabled summary startup removes leftovers and preserves raw files\n",
+           failures == failures_before ? "PASS" : "FAIL");
 }
 
 static void cleanup(unsigned hours, uint64_t cap, char *warn, size_t warn_size)
@@ -368,6 +442,7 @@ static void test_phase_capability_sidecar(void)
 int main(void)
 {
     if (!mkdtemp(trace_dir)) return 2;
+    test_disabled_summary_startup();
     test_single_eviction();
     test_suffixes_and_age_order();
     test_raw_only_control();

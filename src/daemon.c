@@ -1396,6 +1396,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
          * and maintenance guard this pointer; raw retention must not wait
          * for a live summary to rotate. */
         d->summary_writer = NULL;
+        /* Legacy current.summary is skipped by ordinary retention. Discard
+         * it and its meta now that no summary writer will recover them. */
+        pgwt_summary_cleanup_disabled(d->summary_writer, d->trace_dir);
 
         /* The sidecar is also the context/source-aware sink for sampled PG13
          * synthetic and PG14+ pgss text. It must exist even when the legacy
