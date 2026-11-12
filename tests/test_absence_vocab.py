@@ -131,10 +131,32 @@ class AbsenceVocabulary(unittest.TestCase):
                     self.assertEqual(bool(PREPASS.non_vacuous(scope)), valid)
                     scopes = {"SEARCHED": "src/ and tests/", "NOT SEARCHED": "remote branches"}
                     scopes[label] = scope
-                    draft = ("The feature is missing.\n```console\nrg feature src/\n"
+                    draft = ("The feature is absent from src/.\n```console\nrg feature src/\n"
                              "(no output)\n```\n" +
                              "\n".join(f"{key}: {value}" for key, value in scopes.items()))
                     self.assertEqual(exit_code(draft), 0 if valid else 1)
+
+    def test_evidenced_operational_claims_need_no_search_scopes(self):
+        evidence = "\n```console\n$ tail /tmp/full-run.log\nFAIL: 0\n```\n"
+        for claim in ("The full run finished with zero failures.",
+                      "The full run had no failures.", "This operation never runs.",
+                      "The script lacks a guard.", "The trailer is missing."):
+            with self.subTest(claim=claim):
+                self.assertEqual(exit_code(claim + evidence), 0)
+        claim = "The full run finished with zero failures."
+        self.assertEqual(exit_code(claim + "\n" * 10 + evidence), 1)
+
+    def test_search_absence_requires_scopes_even_with_evidence(self):
+        evidence = "\n```console\n$ rg feature src/\n(no output)\n```\n"
+        for claim in ("The feature does not exist.", "The feature doesn't exist.",
+                      "The feature was not found.", "The feature exists nowhere.",
+                      "The feature is absent from src/.",
+                      "Zero failures; the feature was not found."):
+            with self.subTest(claim=claim):
+                self.assertEqual(exit_code(claim + evidence), 1)
+                self.assertEqual(exit_code(claim + evidence +
+                                           "SEARCHED: src/ and tests/\n"
+                                           "NOT SEARCHED: remote branches\n"), 0)
 
 
 if __name__ == "__main__":

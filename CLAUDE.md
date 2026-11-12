@@ -2,6 +2,7 @@
 
 Read [the accepted rework plan](docs/REWORK_PLAN_2026-11-11.md), especially method rules 1–11, first.
 The rework is the current work; start only the owner-authorised slice or named task.
+Read [the roadmap and current status](docs/ROADMAP_AND_STATUS.md) for priorities and progress.
 
 ## RULE 0 — no status report reaches the owner unaudited
 
@@ -48,7 +49,7 @@ For PR readiness: start box-check first, run full make check concurrently; paste
 CI-infrastructure-only work may substitute real gate-box workflow evidence; subsequent docs/test-only rounds may reuse evidence under the procedure's exclusions.
 For UI changes, paste gallery counts and justify each changed/added/removed cell. Get fresh independent reviewer approval or list owner design questions.
 Run test-registration and runner-registration guards; verify box log commit and tree hash against the tested tree. Use `/pr-ready`.
-Read [release procedures](docs/agent-procedures/release.md) before gates/readiness: evidence paths, exact exemptions and snapshot/VM promotion rules.
+Read [release procedures](docs/agent-procedures/release.md) before gates/readiness: never exempt `src/`, `web/`, `tests/run_all.sh`, `tests/unit_tests.list` or any live-tier test; evidence paths and snapshot/VM promotion rules.
 
 ## Owner rules
 
@@ -77,7 +78,7 @@ Never use sweep cutoffs to remove your VM. Never commit local PNGs to `tests/web
 Never mask runner noise with retries/tolerances/confirmation loops; real filed product bugs alone qualify for KNOWN_FAILING; review every xpass.
 Add C tests to `tests/unit_tests.list`, pure UI builder tests to `tests/web_unit/`; `[skip ci]` is docs-only.
 Push only with a passing make check stamp; never bypass push guard or machine-wide check lock (override variables are human-only).
-Read [testing/push procedures](docs/agent-procedures/testing-and-push.md) for KNOWN_FAILING scopes, evidence reuse, cleanup and guard details.
+Read [testing/push procedures](docs/agent-procedures/testing-and-push.md) for branch naming (`agent/<slug>`), KNOWN_FAILING scopes, evidence reuse, cleanup and guard details.
 
 ## Claude hooks
 

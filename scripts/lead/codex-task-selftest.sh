@@ -505,9 +505,14 @@ for mode in budget-dirty budget-noop; do
         "$REAL_GIT" -C "$FIXTURE_REAL" show "$sha:base.txt" | grep -Fqx 'partial tracked work' || fail 'partial tracked work lost'
         [ "$("$REAL_GIT" -C "$FIXTURE_REAL" show "$sha:partial.txt")" = 'new partial file' ] || fail 'partial untracked work lost'
         [ "$("$REAL_GIT" -C "$FIXTURE_REAL" log -1 --format=%s "$sha")" = 'Budget partial work' ] || fail 'partial message lost'
+        grep -Fq "work was fetched and verified at $sha" "$tmp/err" || fail 'budget salvage message lost'
+        outcome='work fetched'
     else
         [ "$sha" = "$fresh" ] || fail 'no-op budget moved branch'
+        grep -Fq "branch did not move; no new work was committed; unchanged tip fetched and verified at $sha" "$tmp/err" || fail 'no-op budget message is inaccurate'
+        if grep -Fq 'work was fetched and verified' "$tmp/err"; then fail 'no-op budget claims fetched work'; fi
+        outcome='branch unchanged; no new work committed; tip fetched and verified'
     fi
-    printf 'extra %s: exit=27; process group stopped; work fetched; elapsed=%ss\n' "$mode" "$elapsed"
+    printf 'extra %s: exit=27; process group stopped; %s; elapsed=%ss\n' "$mode" "$outcome" "$elapsed"
 done
 printf 'PASS: existing wrapper/salvage controls, six brief-gate refusals, and budget stop/salvage/fetch controls\n'

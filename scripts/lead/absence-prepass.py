@@ -16,9 +16,10 @@ phrases this session's drafts were caught using: "no mechanical check",
 nowhere", "has no", "never", "zero", "absent", "missing", "unreachable",
 "not on master", "no path", "does not exist", "is not present".
 
-A hit is EXCUSED only when, within WINDOW lines, the draft contains ALL of:
+A hit needs evidence within WINDOW lines:
   - evidence: paired ``` fences with at least one content line, or an
-    indented code block of two or more consecutive lines;
+    indented code block of two or more consecutive lines.
+Non-existence-by-search phrasings additionally need, within WINDOW lines:
   - a SEARCHED: line with a non-vacuous value;
   - a NOT SEARCHED: line with a non-vacuous value.
 Values must have at least eight characters after stripping whitespace and
@@ -77,6 +78,17 @@ PATTERNS = [
     r"\b(?:grep|rg) returned (?:0|no) matches\b",
 ]
 COMPILED = [re.compile(p, re.IGNORECASE) for p in PATTERNS]
+
+# Keep existential/search claims separate from operational claims such as
+# "zero failures", "never runs", "lacks a guard" or "missing a trailer".
+SEARCH_ABSENCE_RE = re.compile(
+    r"\b(?:does(?: not|n't) exist|not found|nowhere|none exist|no such|"
+    r"is not present|isn't there|not there|"
+    r"absent (?:from|in|on|under|within|at)|"
+    r"no mechanical check|nothing (?:checks|references)|no caller|no guard|"
+    r"(?:contains|there (?:is|are)) no|"
+    r"no\b[^.\n]{0,60}\banywhere|"
+    r"(?:grep|rg) returned (?:0|no) matches)\b", re.IGNORECASE)
 
 FENCE_RE = re.compile(r"^\s*```")
 INDENT_RE = re.compile(r"^(?: {4,}|\t)\S")
@@ -157,6 +169,8 @@ def missing_requirements(idx, lines, evidence):
     missing = []
     if not has_nearby_evidence(idx, evidence, len(lines)):
         missing.append("evidence block missing")
+    if not SEARCH_ABSENCE_RE.search(lines[idx]):
+        return missing
     nearby = lines[max(0, idx - WINDOW):idx + WINDOW + 1]
     for label, pattern in SCOPE_RES.items():
         values = [m.group(1).strip() for line in nearby if (m := pattern.match(line))]
@@ -198,7 +212,8 @@ def main(argv):
     print(
         "An absence claim needs a pasted command+output (fenced or indented "
         "block) within "
-        f"{WINDOW} lines, plus non-vacuous SEARCHED: and NOT SEARCHED: lines."
+        f"{WINDOW} lines. Non-existence-by-search claims also need non-vacuous "
+        "SEARCHED: and NOT SEARCHED: lines within that window."
     )
     return 1
 

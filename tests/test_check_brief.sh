@@ -359,5 +359,28 @@ CHECK_RAW=1 check "comment headings cannot replace contract" 1 "<!--
 $CONTRACT
 -->"
 CHECK_RAW=1 check "comment cannot fill empty Task" 1 "${CONTRACT/Implement the parser./<!-- task pending -->}"
+
+# Exercise the checkout state layout without writing to the real repository's
+# index or objects. The checker must create both files without changing the hash.
+TREE_FIXTURE="$TMP/tree-fixture"
+mkdir -p "$TREE_FIXTURE/scripts/lead"
+printf '%s\n' "$CONTRACT" > "$TMP/tree-brief.md"
+if cp "$ROOT/.gitignore" "$TREE_FIXTURE/.gitignore" &&
+   cp "$ROOT/scripts/tree-hash.sh" "$TREE_FIXTURE/scripts/" &&
+   cp "$ROOT/scripts/lead/.gitignore" "$ROOT/scripts/lead/check-brief.sh" \
+      "$ROOT/scripts/lead/brief_contract.py" "$TREE_FIXTURE/scripts/lead/" &&
+   git init -q "$TREE_FIXTURE" &&
+   git -C "$TREE_FIXTURE" read-tree --empty &&
+   tree_before=$(bash "$TREE_FIXTURE/scripts/tree-hash.sh") &&
+   PGWT_LEAD_STATE_DIR="$TREE_FIXTURE/scripts/lead" \
+      bash "$TREE_FIXTURE/scripts/lead/check-brief.sh" "$TMP/tree-brief.md" > "$TMP/tree-check-out" &&
+   [ -s "$TREE_FIXTURE/scripts/lead/.briefs-passed" ] &&
+   [ -f "$TREE_FIXTURE/scripts/lead/.brief-gate.lock" ] &&
+   tree_after=$(bash "$TREE_FIXTURE/scripts/tree-hash.sh") &&
+   [ "$tree_before" = "$tree_after" ]; then
+  pass=$((pass+1)); echo "ok   check-brief leaves tree-hash unchanged ($tree_before)"
+else
+  fail=$((fail+1)); echo 'FAIL check-brief changes tree-hash or fixture failed'
+fi
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

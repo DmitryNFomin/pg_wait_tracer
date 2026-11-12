@@ -217,7 +217,10 @@ landed=$(git -C "$repo" rev-parse --verify "refs/heads/$branch" 2>/dev/null) || 
 # committed: the tip is fetched, but the rest exists only in the clone, so this
 # must never print the success block.
 [ "$autocommit_failed" -eq 0 ] || die 26 "AUTO_COMMIT_INCOMPLETE: $branch was fetched at $tip, but uncommitted work remains in $clone only"
-[ "$budget_exceeded" -eq 0 ] || die 27 "BUDGET_EXCEEDED: wall-clock budget ${budget_seconds}s; work was fetched and verified at $tip"
+if [ "$budget_exceeded" -eq 1 ]; then
+    [ "$tip" != "$before" ] || die 27 "BUDGET_EXCEEDED: wall-clock budget ${budget_seconds}s; branch did not move; no new work was committed; unchanged tip fetched and verified at $tip"
+    die 27 "BUDGET_EXCEEDED: wall-clock budget ${budget_seconds}s; work was fetched and verified at $tip"
+fi
 [ "$codex_rc" -eq 0 ] || die 24 "CODEX_FAILED: codex exit $codex_rc; committed work was fetched and verified"
 diff=$(git -C "$repo" diff --name-only "refs/remotes/origin/master...refs/heads/$branch") || die 25 'DIFF_FAILED: cannot compare branch with origin/master'
 # Only verified success emits this final block on stdout: path, branch, SHA,
