@@ -56,16 +56,9 @@ DUR_NS = 1_000_000  # 1 ms per event
 #   CAPTURE the whole trace, loaded by `--dump`, which has no range flag at
 #           all, so there is nothing to narrow.
 #
-# Round 3 adds the other half: the JSON `hint`, which web/static/app.js
-# renders verbatim. src/server.c composes both the stderr line and the hint
-# from ONE table (pgwt_overload_arms). The cases below assert the hint IS the
-# tail of the stderr line — byte for byte — for every kind INCLUDING WINDOW,
-# with exactly two documented exceptions, each pinned by its own exact string
-# and asserted not to contradict the log:
-#   * top_queries keeps #694's sentence, which BEGINS with the table's
-#     "narrow the time range" and then explains why no filter helps;
-#   * a query-filtered top_events/top_sessions/heatmap and -- #684 -- aas and
-#     time_model keep #526's "a query filter forces the exact path".
+# The JSON `hint` is rendered verbatim by web/static/app.js. The table
+# supplies both the stderr sentence and the hint. Only top_queries elaborates
+# on it to explain why no filter reduces that command's all-pids load.
 # Everything else, on every kind, must match exactly, so a change to one
 # consumer and not the other is red and an operator quoting the log can never
 # be contradicted by the user's screen.
@@ -76,22 +69,16 @@ DUR_NS = 1_000_000  # 1 ms per event
 # load_execution_rows' window load, variants) pass 0 unconditionally and must
 # not be offered it.
 REFUSAL_PREFIX = "ERROR: window too large:"
-WINDOW_TAIL = "— narrow the time range"
+WINDOW_HINT = "the raw event limit was exceeded; narrow the time range"
+WINDOW_TAIL = "— " + WINDOW_HINT
 SEP = "— "
 PID_CLAUSE = "add a pid filter"
-# #694 and #526, verbatim: the two WINDOW hints that elaborate instead of
-# repeating the table sentence.
-TOP_QUERIES_HINT = ("narrow the time range; Queries always reads raw events "
+TOP_QUERIES_HINT = (WINDOW_HINT + "; Queries always reads raw events "
                     "for every pid, because execution statistics need every "
                     "backend's markers, so no filter reduces this load")
-# #526's explanation followed by the table's WINDOW sentence verbatim. The
-# three commands on this arm forward req->filter.pid, so the sentence is the
-# pid-advice one; round 4's literal ended at "narrow the time range" and so
-# both diverged from the log and withheld a reduction that works.
-QUERY_FILTER_HINT = ("a query filter forces the exact path, which loads raw "
-                     "events; narrow the time range, or add a pid filter: "
-                     "this load reads every pid and applies the request's "
-                     "pid filter while loading")
+WINDOW_PID_HINT = (WINDOW_HINT + ", or add a pid filter: "
+                   "this load reads every pid and applies the request's "
+                   "pid filter while loading")
 S = 1_000_000_000
 MS = 1_000_000
 MARKER_EXEC_START = 0xFFFFFFF0
@@ -195,12 +182,8 @@ def grade_contains_sentence(t, label, err, resp):
     """The stderr sentence must appear in the JSON hint VERBATIM.
 
     Weaker than grade_agreement (which demands equality) and used only where
-    an arm legitimately adds an explanation the load kind cannot know: #694's
-    top_queries sentence and #526's query-filter sentence. Both COMPOSE the
-    table's sentence, so the log's words are always present on the screen —
-    the relation this checks. Round 4 left #526 as a literal that merely
-    ended with "narrow the time range", which is how the one surviving
-    screen/log divergence hid behind a non-contradiction check.
+    top_queries adds an explanation of its all-pids load. Its hint composes
+    the table sentence, so the log's words remain present on the screen.
 
     Vacuity guards first: a missing stderr line, a missing hint, or an empty
     sentence FAILS rather than satisfying a containment nobody can evaluate.
@@ -376,62 +359,43 @@ def check_window_arm(t, err_dir):
                    "reduction/window: the all-pids caller still refuses WITH "
                    "a pid filter, so withholding the clause there is correct")
 
-        # The two documented elaborations, each pinned to its own merged
-        # string AND asserted not to contradict the log: #694's must BEGIN
-        # with the stderr sentence; #526's must still name the range
-        # reduction and borrow no other kind's explanation.
+        # The top_queries elaboration must begin with the shared sentence.
         resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
                         os.path.join(err_dir, "window-topqueries.err"),
                         "top_queries")
         t.check_eq(resp.get("code"), "window_too_large",
                    "window/top_queries: refused")
         t.check_eq(resp.get("hint"), TOP_QUERIES_HINT,
-                   "window/top_queries: reproduces #694's merged hint byte "
-                   "for byte, composed from the table rather than literal")
+                   "window/top_queries: composes the event-limit sentence "
+                   "with the all-pids explanation")
         grade_contains_sentence(t, "window/top_queries", err, resp)
 
-        # #526: the one leg where round 4 let the screen and the log differ.
-        # Its hint now COMPOSES the table sentence, so the pid reduction —
-        # real here, because top_events forwards req->filter.pid — is no
-        # longer withheld, and the containment check below is an agreement
-        # check rather than the weak non-contradiction one it replaced.
-        resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
-                        os.path.join(err_dir, "window-queryfilter.err"),
-                        "top_events", filters={"query_id": 42})
-        t.check_eq(resp.get("code"), "window_too_large",
-                   "window/query-filter: refused")
-        t.check_eq(resp.get("hint"), QUERY_FILTER_HINT,
-                   "window/query-filter: #526's explanation followed by the "
-                   "table's sentence verbatim")
-        grade_contains_sentence(t, "window/query-filter", err, resp)
-        hint = resp.get("hint") or ""
-        t.check(PID_CLAUSE in hint,
-                f"window/query-filter: the hint no longer withholds the pid "
-                f"reduction that works for this command ({hint!r})")
-        t.check("the prefix is read from" not in hint and
-                "its bounds come from the selected execution" not in hint and
-                "whole capture" not in hint,
-                f"window/query-filter: borrows no other kind's explanation "
-                f"({hint!r})")
-
-        # #684 put aas and time_model on the SAME arm, because both now take
-        # the query_id == 0 guard: a query-filtered window really is pushed
-        # onto raw for them too, and both forward req->filter.pid into that
-        # load. Asserted byte for byte against the same constant, so the five
-        # commands on this arm cannot drift apart.
-        for cmd in ("aas", "time_model"):
-            resp, err = ask(trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
-                            os.path.join(err_dir,
-                                         "window-queryfilter-%s.err" % cmd),
-                            cmd, filters={"query_id": 42})
-            t.check_eq(resp.get("code"), "window_too_large",
-                       f"window/query-filter/{cmd}: refused — #684's guard "
-                       f"put this command on the raw path")
-            t.check_eq(resp.get("hint"), QUERY_FILTER_HINT,
-                       f"window/query-filter/{cmd}: the same composed hint as "
-                       f"top_events, byte for byte")
-            grade_contains_sentence(t, "window/query-filter/" + cmd, err,
-                                    resp)
+        # Summaries are off: the SAME oversized window refuses with and
+        # without a query filter. The filter cannot be blamed for raw loading.
+        # Cover every command that used to add that explanation, and pin the
+        # hint as the stderr tail on both requests.
+        for cmd in ("top_events", "top_sessions", "heatmap", "aas", "time_model"):
+            hints = []
+            for filtered in (False, True):
+                label = f"window/query-filter/{cmd}/{filtered}"
+                resp, err = ask(
+                    trace_dir, {"PGWT_LOAD_MAX_EVENTS": 5_000},
+                    os.path.join(err_dir, f"window-{cmd}-{filtered}.err"),
+                    cmd, filters={"query_id": 42} if filtered else {})
+                t.check_eq(resp.get("code"), "window_too_large",
+                           f"{label}: the same oversized window refuses")
+                t.check_eq(resp.get("max_events"), 5_000,
+                           f"{label}: the event limit is unchanged")
+                hint = resp.get("hint") or ""
+                hints.append(hint)
+                t.check_eq(hint, WINDOW_PID_HINT,
+                           f"{label}: names the event limit and range reduction")
+                t.check("query filter" not in hint.lower(),
+                        f"{label}: the hint does not blame the query filter "
+                        f"({hint!r})")
+                grade_agreement(t, label, err, resp)
+            t.check_eq(hints[0], hints[1],
+                       f"window/{cmd}: adding a query filter leaves the hint unchanged")
 
         # CONTEXT: handle_execution_detail's load is bounded by the SELECTED
         # EXECUTION (req.start_ns/end_ns), not req.from/to, and it passes

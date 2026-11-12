@@ -63,11 +63,9 @@ PGWT_LOAD_MAX_EVENTS=1, query-filtered and unfiltered requests must refuse
 with window_too_large: summaries are off until rebuilt from the core.
 The normal-budget checks require the nonempty, independently clipped totals.
 
-Each query-filtered refusal is asserted to carry THAT command's own arm in
-src/server.c's reject_overload: "a query filter forces the exact path" for
-time_model, aas and top_events, which the filter really does push onto raw
-(#684 added the first two), and #694's "no filter reduces this load" for
-top_queries, which loads every pid whatever the filter says.
+Each refusal names the raw event limit and suggests narrowing the range.
+Query filters do not cause raw loading while summaries are off. top_queries
+also explains why no filter reduces its all-pids load.
 
 WHERE THIS RUNS
 ─────────────────────────────────────────────────────────────────────────────
@@ -107,18 +105,14 @@ INTERIOR_SECS = list(range(210, 440, 10))
 
 CMDS = ("time_model", "aas", "top_events", "top_queries")
 
-# The refusal hints src/server.c's reject_overload composes for these
-# commands. top_queries is deliberately NOT on #526/#684's arm: it loads every
-# pid unconditionally, so no filter reduces its load and #694 gave it its own
-# sentence. Asserting the right one per command is the point -- a single
-# fragment accepted everywhere would pass on a hint that lied about which
-# reduction works.
-QUERY_FILTER_HINT_FRAGMENT = "a query filter forces the exact path"
+# All window refusals name the limit; top_queries additionally explains
+# that filters cannot reduce its all-pids load.
+WINDOW_HINT_FRAGMENT = "the raw event limit was exceeded; narrow the time range"
 ALL_PIDS_HINT_FRAGMENT = "no filter reduces this load"
 HINT_FRAGMENT = {
-    "time_model":  QUERY_FILTER_HINT_FRAGMENT,
-    "aas":         QUERY_FILTER_HINT_FRAGMENT,
-    "top_events":  QUERY_FILTER_HINT_FRAGMENT,
+    "time_model":  WINDOW_HINT_FRAGMENT,
+    "aas":         WINDOW_HINT_FRAGMENT,
+    "top_events":  WINDOW_HINT_FRAGMENT,
     "top_queries": ALL_PIDS_HINT_FRAGMENT,
 }
 
@@ -268,7 +262,9 @@ def check_route(t, trace_dir, name, frm, to):
                        f"RAW route (the oracle refuses) — before #684 aas "
                        f"and time_model answered here from summaries")
             hint = resp.get("hint") or ""
-            t.check(HINT_FRAGMENT[cmd] in hint,
+            t.check(WINDOW_HINT_FRAGMENT in hint and
+                    "query filter" not in hint.lower() and
+                    HINT_FRAGMENT[cmd] in hint,
                     f"{name}/{cmd}: the refusal carries this command's own "
                     f"arm, {HINT_FRAGMENT[cmd]!r} ({hint!r})")
 
