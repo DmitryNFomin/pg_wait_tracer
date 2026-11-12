@@ -17,9 +17,19 @@ STUB = r'''#!/usr/bin/env python3
 import json, os, re, sys
 from pathlib import Path
 args = sys.argv[1:]
-assert args[0] == "exec", args
+assert args[0] in ("exec", "sandbox"), args
 assert sys.stdin.read() == ""
 root = Path(os.environ["AUDIT_TEST_CASE"])
+if args[0] == "sandbox":
+    with (root / "probes.jsonl").open("a") as f:
+        f.write(json.dumps(args) + "\n")
+    assert args[args.index("--") + 1:] == [
+        "gh", "api", "repos/{owner}/{repo}", "--jq", ".full_name"], args
+    if os.environ.get("AUDIT_TEST_PROBE_RC", "0") != "0":
+        sys.stderr.write("error connecting to api.github.com\n")
+        sys.exit(int(os.environ["AUDIT_TEST_PROBE_RC"]))
+    sys.stdout.write("DmitryNFomin/pg_wait_tracer\n")
+    sys.exit(0)
 with (root / "calls.jsonl").open("a") as f:
     f.write(json.dumps(args) + "\n")
 prompt = args[-1]
@@ -205,6 +215,54 @@ class GateTests(unittest.TestCase):
         console = self.run_gate(claim("The count is 4.", "UNVERIFIABLE", "gh HTTP 403") + "VERDICT: SEND\n")
         self.assertIn("VERDICT SEND", console)
         self.assertIn("0 wrong, 1 unverifiable", console)
+
+    def test_github_probe_failure_refuses(self):
+        self.draft.write_text("PR #850 is open.\n")
+        console = self.run_gate(
+            claim("PR #850 is open.", "UNVERIFIABLE", "gh connection failed") +
+            "VERDICT: SEND\n", AUDIT_TEST_PROBE_RC="1")
+        self.assertIn("AUDIT INCONCLUSIVE (auditor cannot reach GitHub)", console)
+        self.assertNotIn("VERDICT SEND", console)
+        self.assertFalse((self.case / "calls.jsonl").exists(),
+                         "failed probe must stop before the auditor runs")
+        self.assertFalse(list((self.case / "state").rglob("decision.json")))
+        # An unsuccessful probe has not consumed this draft's independent pass.
+        self.assertIn("VERDICT SEND", self.run_gate(
+            claim("PR #850 is open.") + "VERDICT: SEND\n"))
+
+    def test_github_probe_success_proceeds(self):
+        self.draft.write_text("PR #850 is open.\n")
+        console = self.run_gate(claim("PR #850 is open.") + "VERDICT: SEND\n")
+        self.assertIn("VERDICT SEND", console)
+        self.assertTrue((self.case / "probes.jsonl").exists(),
+                        "audit must probe GitHub before proceeding")
+        probes = (self.case / "probes.jsonl").read_text().splitlines()
+        calls = (self.case / "calls.jsonl").read_text().splitlines()
+        self.assertEqual(len(probes), 1, "a successful audit needs a sandboxed probe")
+        self.assertEqual(len(calls), 1)
+        probe, auditor = json.loads(probes[0]), json.loads(calls[0])
+        def config(args):
+            return [args[i + 1] for i, arg in enumerate(args) if arg == "-c"]
+        self.assertEqual(config(probe), config(auditor),
+                         "probe and auditor must share the same settings")
+
+    def test_failed_probe_without_github_claim_proceeds(self):
+        self.draft.write_text("The printer checked merger circuitry.\n")
+        self.assertIn("VERDICT SEND", self.run_gate(
+            claim("The printer checked merger circuitry.") + "VERDICT: SEND\n",
+            AUDIT_TEST_PROBE_RC="1"))
+        self.assertTrue((self.case / "probes.jsonl").exists())
+
+    def test_github_claim_detection(self):
+        for index, text in enumerate(("See #850.", "A pr exists.", "Already MERGED.",
+                                      "An issue exists.", "CI passed.", "The check passed.")):
+            with self.subTest(text=text):
+                self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
+                self.draft.write_text(text + "\n")
+                console = self.run_gate(claim(text) + "VERDICT: SEND\n",
+                                        AUDIT_TEST_PROBE_RC="1")
+                self.assertIn("AUDIT INCONCLUSIVE (auditor cannot reach GitHub)", console)
+                self.assertNotIn("VERDICT SEND", console)
 
     def test_no_verdict(self):
         self.assertIn("AUDIT MALFORMED (no VERDICT line)", self.run_gate(claim("The count is 4.")))

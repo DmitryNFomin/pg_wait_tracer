@@ -19,6 +19,25 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 MAX_AGE = 600  # Replays are the same observation, not a fresh status check.
 STATUS = r"(VERIFIED|WRONG|UNVERIFIABLE)"
+GITHUB_CLAIM = re.compile(r"#[0-9]+|\b(?:PR|merged|issue|CI|check)\b", re.IGNORECASE)
+# Share configuration with `codex sandbox`, which has no --sandbox option.
+AUDITOR_CONFIG = ["-c", 'sandbox_mode="read-only"',
+                  "-c", "memories.use_memories=false",
+                  "-c", "memories.generate_memories=false"]
+
+
+def github_probe(log):
+    """Exercise gh itself under the auditor's command sandbox, not the host's."""
+    command = ["codex", "sandbox", *AUDITOR_CONFIG, "--",
+               "gh", "api", "repos/{owner}/{repo}", "--jq", ".full_name"]
+    with log.open("w") as output:
+        try:
+            return subprocess.run(command, cwd=REPO, stdin=subprocess.DEVNULL,
+                                  stdout=output, stderr=subprocess.STDOUT,
+                                  timeout=30).returncode == 0
+        except (OSError, subprocess.TimeoutExpired) as error:
+            output.write(f"GitHub probe failed: {error}\n")
+            return False
 
 
 def refuse(message, digest="unknown"):
@@ -192,6 +211,11 @@ def audit(source, content, digest):
             # NEVER read the previous transcript or final answer.
             return emit(record, digest, replay=True)
         attempt.mkdir(mode=0o700, exist_ok=True)
+        probe_log = attempt / "github-probe.txt"
+        print(f"GitHub probe output: {probe_log}", flush=True)
+        reachable = github_probe(probe_log)
+        if not reachable and GITHUB_CLAIM.search(content.decode()):
+            return refuse("AUDIT INCONCLUSIVE (auditor cannot reach GitHub)", digest)
         transcript = attempt / "transcript.txt"
         final = attempt / "final.txt"
         # A retry must not mistake an aborted attempt's final answer for its own.
@@ -203,8 +227,7 @@ def audit(source, content, digest):
             snapshot.write_bytes(content)
             snapshot.chmod(0o400)
             command = ["codex", "exec", "--ephemeral", "--sandbox", "read-only",
-                       "-c", "memories.use_memories=false",
-                       "-c", "memories.generate_memories=false",
+                       *AUDITOR_CONFIG,
                        "--output-last-message", str(final), brief(snapshot, digest)]
             with transcript.open("w") as output:
                 rc = subprocess.run(command, cwd=REPO, stdin=subprocess.DEVNULL,

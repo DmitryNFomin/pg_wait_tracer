@@ -57,6 +57,25 @@ Properties exercised by `audit-report-selftest.py`:
    before Codex or decision replay. `never`, `does not exist`, and `exists nowhere`
    without nearby evidence still BLOCK without an auditor invocation. A change to
    the source draft or repo during an audit withholds authorization.
+5. **A fresh auditor invocation first probes GitHub.** The wrapper runs
+   `codex sandbox` with the same configuration as the auditor, executing
+   `gh api repos/{owner}/{repo} --jq .full_name` with a 30-second timeout.
+   A failed probe withholds authorization as
+   `AUDIT INCONCLUSIVE (auditor cannot reach GitHub)` before invoking the
+   auditor if the draft contains `#` followed by digits or a whole word from
+   `PR`, `merged`, `issue`, `CI`, `check` (case insensitive). A draft without
+   these markers may proceed despite probe failure. Probe failure does not
+   publish a decision, so the same draft can be retried after access is restored.
+   Existing replay semantics remain as described above.
+
+The current invocation retains `--sandbox read-only`; network enablement is
+unfinished. The installed CLI's documentation says that legacy sandbox settings
+override permission profiles, and that `sandbox_workspace_write.network_access`
+applies to workspace-write. A read-only filesystem profile with networking would
+require replacing the legacy flag. See the official
+[permission-profile documentation](https://learn.chatgpt.com/docs/permissions).
+Domain restrictions do not enforce GitHub GET-only access; enabling networking
+would also require accounting for that residual write risk.
 
 The tests use a deterministic PATH stub that models recursive searches, intermediate
 WRONG/tool-result output, prompt echoes, unavailable access, and an absurd count
