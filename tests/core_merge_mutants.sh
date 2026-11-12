@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Frozen-fixture mutation checks. Only a clean row-mismatch exit kills a mutant.
+# Contract mutation checks. Only the intended clean assertion failure kills.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 exec python3 - "$repo" <<'PYTHON'
@@ -83,29 +83,84 @@ mutations = [
                "            if (check(m, obs) == PGWT_MERGE_EXIT_REQUIRED) return m->report.status;")],
      "REARM accepted while active; needs rows 28/31"),
 ]
+# New mutants run only their named direct API case. Each match requires a
+# successful build, the REACHED marker and the exact intended assertion.
+guard_mutations = [
+    ('M18', [('if (r->dependency == PGWT_MERGE_LOST)\n            return fault(m, PGWT_MERGE_DEPENDENCY_LOST, obs);', '')],
+     'dependency_lost', 'dependency_lost VOID before any DATA or FRONTIER'),
+    ('M19', [('if (in->record.t <= m->frontiers[i].frontier) {',
+              'if (i + 1 == m->frontier_count && in->record.t <= m->frontiers[i].frontier) {')],
+     'older_epochs', 'seal_violation VOID invalidates both epochs'),
+    ('M20', [('    if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n'
+              '    if (!same_counters(obs.counters, m->baseline))\n'
+              '        return fault(m, counter_fault(obs.counters, m->observed), obs);\n'
+              '    /* Fixed', '    /* Fixed')],
+     'counter_before_batch', 'counter fault VOID stops publication at its checkpoint'),
+    ('M21', [('        if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n'
+              '        if (!same_counters(obs.counters, m->baseline))\n'
+              '            return fault(m, counter_fault(obs.counters, m->observed), obs);\n'
+              '        if (!v->text)', '        if (!v->text)')],
+     'counter_after_data', 'counter fault VOID stops publication at its checkpoint'),
+    ('M22', [('        if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);\n'
+              '        if (!same_counters(obs.counters, m->baseline))\n'
+              '            return fault(m, counter_fault(obs.counters, m->observed), obs);\n'
+              '    }\n    return m->report.status;\n}',
+              '    }\n    return m->report.status;\n}')],
+     'counter_after_frontier', 'counter fault VOID stops publication at its checkpoint'),
+    ('M23', [('if (r->q < a->next_q) return fault(m, PGWT_MERGE_SEQUENCE_REUSE, obs);', '')],
+     'sequence_reuse', 'sequence_reuse VOID requires exit before DATA'),
+    ('M24', [('if (!r->has_q || !a->sequence_proved)', 'if (false)')],
+     'sequence_missing', 'missing sequence evidence VOID before DATA'),
+    ('M25', [('if (W == 0 || !m->report.qualified)', 'if (W == 0)')],
+     'unqualified_source', 'unqualified cutoff holds DATA and FRONTIER'),
+    ('M26', [('if (!in->attachment_proofs_fresh ||', 'if (false ||')],
+     'rearm_fresh_proofs', 'stale attachment proofs refuse REARM with VOID'),
+    ('M27', [('if (generation->creation == 1 && r->rank != PGWT_MERGE_FORK)', 'if (false)')],
+     'fork_requires_init', 'invalid creation proof VOID before lifecycle DATA'),
+    ('M28', [('} else if (generation->creation && r->rank == PGWT_MERGE_FORK) {\n'
+              '            return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);\n        }', '}')],
+     'fork_twice', 'invalid creation proof VOID before lifecycle DATA'),
+    ('M29', [('        if (m->report.status != PGWT_MERGE_OK && r->rank != PGWT_MERGE_TRANS)\n'
+              '                a->lifecycle_seen = true;', '')],
+     'suspended_lifecycle', 'invalid creation proof VOID before lifecycle DATA'),
+]
 compiler = shlex.split(os.environ.get("CC", "cc"))
 flags = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-g"]
 flags += shlex.split(os.environ.get("CFLAGS", ""))
 env = dict(os.environ, ASAN_OPTIONS="halt_on_error=1:exitcode=86",
            UBSAN_OPTIONS="halt_on_error=1:exitcode=87:print_stacktrace=1")
 failed = False
+killed = 0
 with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
     work = Path(tmp)
     (work / "src/core").mkdir(parents=True)
     (work / "tests").mkdir()
     shutil.copy2(repo / "src/core/pgwt_merge.h", work / "src/core/pgwt_merge.h")
-    def build_and_run(source, test_source=original_test):
+    def build_and_run(source, test_source=original_test, guard=None, baseline=False):
         (work / "tests/test_core_merge_contract.c").write_text(test_source)
         (work / "src/core/merge.c").write_text(source)
         build = subprocess.run(compiler + flags + ["tests/test_core_merge_contract.c", "src/core/merge.c",
                                "-o", "contract"], cwd=work, env=env, capture_output=True, text=True, timeout=60)
         if build.returncode:
             return "BUILD_ERROR", build.stderr
-        run = subprocess.run([str(work / "contract"), "--fixture-only",
-                              str(repo / "contracts/merge-v1/examples.json")], cwd=work, env=env,
+        args = (["--guard-case", guard[0]] if guard else
+                ([] if baseline else ["--fixture-only"]) +
+                [str(repo / "contracts/merge-v1/examples.json")])
+        run = subprocess.run([str(work / "contract")] + args, cwd=work, env=env,
                              capture_output=True, text=True, timeout=20)
         log = run.stdout + run.stderr
         if re.search(r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log):
+            return "RUNTIME_ERROR", log
+        if guard:
+            case, assertion = guard
+            reached = f"guard {case} REACHED {assertion}"
+            mismatch = f"guard {case} MISMATCH {assertion}"
+            lines = log.splitlines()
+            if (run.returncode == 1 and reached in lines and mismatch in lines and
+                    "SETUP_ERROR" not in log and log.count(" MISMATCH ") == 1):
+                return "KILLED", mismatch
+            if run.returncode == 0 and f"guard {case} PASS" in lines:
+                return "SURVIVED", log
             return "RUNTIME_ERROR", log
         if run.returncode == 1 and re.search(r"^row [0-9]+/[NQ] MISMATCH .+", run.stdout, re.M):
             return "KILLED", re.search(r"^row .+ MISMATCH .+", run.stdout, re.M).group(0)
@@ -114,14 +169,16 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
         return "RUNTIME_ERROR", log
     # A broken baseline must never masquerade as killed mutants.
     try:
-        result, detail = build_and_run(original)
+        result, detail = build_and_run(original, baseline=True)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"baseline ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
     if result != "SURVIVED":
         print(f"baseline ERROR ({result}): {detail}", file=sys.stderr)
         sys.exit(2)
-    for name, edits, explanation in mutations:
+    targets = {name: (case, assertion) for name, _, case, assertion in guard_mutations}
+    all_mutations = mutations + [(name, edits, case) for name, edits, case, _ in guard_mutations]
+    for name, edits, explanation in all_mutations:
         source = original_test if name == "M10" else original
         try:
             for before, after in edits:
@@ -129,12 +186,13 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
                     raise ValueError("mutation anchor must occur exactly once")
                 source = source.replace(before, after, 1)
             result, detail = (build_and_run(original, source) if name == "M10"
-                              else build_and_run(source))
+                              else build_and_run(source, guard=targets.get(name)))
         except subprocess.TimeoutExpired:
             result, detail = "TIMEOUT", "build or execution timed out"
         except (OSError, ValueError) as exc:
             result, detail = "ERROR", str(exc)
         if result == "KILLED":
+            killed += 1
             print(f"{name} KILLED: {detail}", flush=True)
         elif result == "SURVIVED":
             print(f"{name} SURVIVED: {explanation}", flush=True)
@@ -142,5 +200,6 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
         else:
             print(f"{name} {result}: {detail.strip().replace(chr(10), ' ')[:600]}", flush=True)
             failed = True
+print(f"core merge mutants: {killed}/{len(all_mutations)} killed", flush=True)
 sys.exit(1 if failed else 0)
 PYTHON

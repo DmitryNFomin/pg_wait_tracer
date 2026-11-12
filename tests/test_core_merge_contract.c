@@ -661,22 +661,26 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
     return field == NULL;
 }
 
-/* Direct API checks cover normative paths absent from the frozen rows.
- * They are deliberately excluded from mutation coverage of those rows. */
+/* Direct API checks cover normative paths absent from the frozen rows. */
 typedef struct {
     pgwt_merge_output outputs[32];
     size_t count;
     bool reject_void;
+    bool refresh_post;
+    pgwt_merge_output_kind refresh_kind;
+    size_t refresh_after, refresh_seen;
+    pgwt_merge_observation refreshed;
 } safety_capture;
 
 static bool safety_sink(void *context, const pgwt_merge_output *out,
                          pgwt_merge_observation *post)
 {
     safety_capture *c = context;
-    (void)post;
     if (out->kind == PGWT_MERGE_OUT_VOID && c->reject_void) return false;
     if (c->count >= 32) return false;
     c->outputs[c->count++] = *out;
+    if (c->refresh_post && out->kind == c->refresh_kind &&
+        ++c->refresh_seen == c->refresh_after) *post = c->refreshed;
     return true;
 }
 
@@ -858,7 +862,7 @@ static pgwt_merge_status safety_seal(pgwt_merge *m, uint64_t positions[4], uint6
 }
 
 /* Exercise recovery/history and actual held-batch resolution beyond the frozen
- * examples. Mutants still run only the unmodified contract fixture. */
+ * examples. */
 static bool recovery_checks(void)
 {
 #define VERIFY(test) do { if (!(test)) { \
@@ -1027,11 +1031,262 @@ static bool recovery_checks(void)
     return true;
 }
 
+/* Each named case derives its outcome from merge-v1/CONTRACT.md, rather
+ * than from a product trace. --guard-case isolates its intended mutant. */
+static const char *const guard_names[] = {
+    "dependency_lost", "older_epochs", "counter_before_batch",
+    "counter_after_data", "counter_after_frontier", "sequence_reuse",
+    "sequence_missing", "unqualified_source", "rearm_fresh_proofs",
+    "fork_requires_init", "fork_twice", "suspended_lifecycle"
+};
+
+enum {
+    G_DEPENDENCY, G_EPOCHS, G_COUNTER_BEFORE, G_COUNTER_DATA, G_COUNTER_FRONTIER,
+    G_REUSE, G_SEQUENCE, G_UNQUALIFIED, G_FRESH, G_INIT, G_FORK, G_SUSPENDED
+};
+
+static int guard_case(size_t which)
+{
+#define SETUP(test) do { if (!(test)) { \
+    fprintf(stderr, "guard %s SETUP_ERROR line %d: %s\n", name, __LINE__, #test); \
+    pgwt_merge_destroy(m); return 2; } } while (0)
+#define EXPECT(test, label) do { \
+    printf("guard %s REACHED %s\n", name, label); \
+    if (!(test)) { \
+        printf("guard %s MISMATCH %s\n", name, label); \
+        pgwt_merge_destroy(m); return 1; \
+    } \
+} while (0)
+    const char *name = guard_names[which];
+    bool counter_case = which >= G_COUNTER_BEFORE && which <= G_COUNTER_FRONTIER;
+    /* Readable changed and unreadable vectors exercise both branches at each
+     * counter checkpoint. DATA checks cover a failure after either record. */
+    unsigned variants = counter_case ? (which == G_COUNTER_DATA ? 4 : 2) : 1;
+    for (unsigned variant = 0; variant < variants; ++variant) {
+        pgwt_merge *m = NULL;
+        safety_capture c = {0};
+        uint64_t positions[4] = {0};
+        pgwt_merge_source sources[4] = {{.qualified = true}, {.qualified = true},
+                                       {.qualified = true}, {.qualified = true}};
+        pgwt_merge_attachment a = {.pid = 10, .g = 1, .next_q = 1,
+            .identity_proved = true, .sequence_proved = true};
+        pgwt_merge_observation obs = {.d = 42, .counters = {.known = true}};
+        pgwt_merge_config config = {.mode = PGWT_MERGE_N,
+            .sources = sources, .source_count = 4, .staged_capacity = 8,
+            .payload_capacity = 8, .attachment_capacity = 4,
+            .attachments = &a, .attachment_count = 1, .observation = obs,
+            .last_observed = obs.counters, .sink = safety_sink, .sink_context = &c};
+        if (which == G_REUSE || which == G_SEQUENCE) config.mode = PGWT_MERGE_Q;
+        if (which == G_UNQUALIFIED) sources[1].qualified = false;
+        if (which == G_INIT || which == G_FORK || which == G_SUSPENDED)
+            config.attachment_count = 0;
+        pgwt_merge_status status;
+        m = pgwt_merge_create(&config, &status);
+        SETUP(m && status == PGWT_MERGE_OK);
+        pgwt_merge_input data = {.kind = PGWT_MERGE_DATA, .observation = obs,
+            .record = {.source = 2, .t = 10, .pid = 10, .g = 1, .q = 1,
+                .rank = PGWT_MERGE_TRANS, .identity_known = true, .has_q = true}};
+        pgwt_merge_input loss = {.kind = PGWT_MERGE_LOSS, .source = 0, .n = 1,
+                                 .observation = obs};
+        pgwt_merge_input rearm = {.kind = PGWT_MERGE_REARM, .observation = obs,
+            .attachments = &a, .attachment_count = config.attachment_count,
+            .attachment_proofs_fresh = true, .identity_repaired = true};
+        switch (which) {
+        case G_DEPENDENCY:
+            /* §3: validate the COMPLETE eligible batch before output; a lost
+             * dependency causes VOID. §4 fixes the reason and detection d. */
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            data.record.t = 11;
+            data.record.dependency = PGWT_MERGE_LOST;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            status = safety_seal(m, positions, 12, obs);
+            EXPECT(status == PGWT_MERGE_SUSPENDED && c.count == 1 &&
+                   c.outputs[0].kind == PGWT_MERGE_OUT_VOID &&
+                   c.outputs[0].reason == PGWT_MERGE_DEPENDENCY_LOST &&
+                   c.outputs[0].d == 42,
+                   "dependency_lost VOID before any DATA or FRONTIER");
+            break;
+        case G_EPOCHS: {
+            /* §4 DECISION 27: invalidate EVERY earlier published prefix
+             * disproved by late DATA, alongside VOID in the current epoch. */
+            SETUP(safety_seal(m, positions, 11, obs) == PGWT_MERGE_OK);
+            SETUP(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+            SETUP(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+            SETUP(safety_seal(m, positions, 21, obs) == PGWT_MERGE_OK);
+            SETUP(c.count == 3 && c.outputs[0].F == 10 && c.outputs[2].F == 20);
+            data.record.t = 5;
+            status = safety_feed(m, positions, data);
+            pgwt_merge_epoch_report e1 = pgwt_merge_get_epoch_report(m, 1);
+            pgwt_merge_epoch_report e2 = pgwt_merge_get_epoch_report(m, 2);
+            EXPECT(status == PGWT_MERGE_SUSPENDED && c.count == 4 &&
+                   c.outputs[3].kind == PGWT_MERGE_OUT_VOID &&
+                   c.outputs[3].reason == PGWT_MERGE_SEAL_VIOLATION &&
+                   e1.has_frontier && e1.frontier == 10 && e1.invalid &&
+                   e2.has_frontier && e2.frontier == 20 && e2.invalid,
+                   "seal_violation VOID invalidates both epochs");
+            break;
+        }
+        case G_COUNTER_BEFORE:
+        case G_COUNTER_DATA:
+        case G_COUNTER_FRONTIER: {
+            /* §3: counters validate before the batch and after publication;
+             * §4: change or unreadability immediately causes VOID. A
+             * successful prefix remains observable but uncertified. */
+            pgwt_merge_observation changed = {.d = 77, .counters = {.known = true}};
+            changed.counters.value[11] = 1;
+            if (variant % 2) changed.counters.known = false;
+            pgwt_merge_reason reason = changed.counters.known ?
+                PGWT_MERGE_COUNTER_CHANGE : PGWT_MERGE_COUNTER_UNKNOWN;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            data.record.t = 11;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            for (size_t s = 0; s < 3; ++s)
+                SETUP(safety_feed(m, positions, (pgwt_merge_input){
+                    .kind = PGWT_MERGE_BOUNDARY, .source = s, .w = 12,
+                    .observation = obs}) == PGWT_MERGE_OK);
+            SETUP(c.count == 0);
+            size_t prefix = 0;
+            if (which != G_COUNTER_BEFORE) {
+                c.refresh_post = true;
+                c.refresh_kind = which == G_COUNTER_DATA ?
+                    PGWT_MERGE_OUT_DATA : PGWT_MERGE_OUT_FRONTIER;
+                c.refresh_after = which == G_COUNTER_DATA ? variant / 2 + 1 : 1;
+                c.refreshed = changed;
+                prefix = which == G_COUNTER_DATA ? c.refresh_after : 3;
+            }
+            status = safety_feed(m, positions, (pgwt_merge_input){
+                .kind = PGWT_MERGE_BOUNDARY, .source = 3, .w = 12,
+                .observation = which == G_COUNTER_BEFORE ? changed : obs});
+            bool prefix_ok = true;
+            for (size_t i = 0; i < prefix && i < c.count; ++i)
+                if (c.outputs[i].kind != (i < 2 ? PGWT_MERGE_OUT_DATA :
+                                                               PGWT_MERGE_OUT_FRONTIER))
+                    prefix_ok = false;
+            EXPECT(status == PGWT_MERGE_SUSPENDED && c.count == prefix + 1 &&
+                   prefix_ok && c.outputs[prefix].kind == PGWT_MERGE_OUT_VOID &&
+                   c.outputs[prefix].reason == reason && c.outputs[prefix].d == 77 &&
+                   equal_counters(c.outputs[prefix].counters, changed.counters) &&
+                   pgwt_merge_get_report(m).has_frontier == (which == G_COUNTER_FRONTIER),
+                   "counter fault VOID stops publication at its checkpoint");
+            break;
+        }
+        case G_REUSE:
+        case G_SEQUENCE:
+            /* §2: Q records start at proved next_q; unexplained reuse is an
+             * internal breach. Missing q is unknown sequence evidence (§4). */
+            if (which == G_SEQUENCE) data.record.has_q = false;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            if (which == G_REUSE) {
+                data.record.t = 11; /* distinct physical record, reused q=1 */
+                SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            }
+            status = safety_seal(m, positions, 12, obs);
+            if (which == G_REUSE) {
+                EXPECT(status == PGWT_MERGE_EXIT_REQUIRED && c.count == 1 &&
+                       c.outputs[0].kind == PGWT_MERGE_OUT_VOID &&
+                       c.outputs[0].reason == PGWT_MERGE_SEQUENCE_REUSE,
+                       "sequence_reuse VOID requires exit before DATA");
+            } else {
+                EXPECT(status == PGWT_MERGE_SUSPENDED && c.count == 1 &&
+                       c.outputs[0].kind == PGWT_MERGE_OUT_VOID &&
+                       c.outputs[0].reason == PGWT_MERGE_UNKNOWN_EVIDENCE,
+                       "missing sequence evidence VOID before DATA");
+            }
+            break;
+        case G_UNQUALIFIED:
+            /* §3 qualification table and §4: cutoffs without sufficient
+             * boundary proof are diagnostics, never release certificates. */
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            status = safety_seal(m, positions, 12, obs);
+            EXPECT(status == PGWT_MERGE_OK && c.count == 0 &&
+                   pgwt_merge_get_report(m).diagnostic_cutoff == 12 &&
+                   !pgwt_merge_get_report(m).qualified &&
+                   !pgwt_merge_get_report(m).has_frontier,
+                   "unqualified cutoff holds DATA and FRONTIER");
+            break;
+        case G_FRESH:
+            /* §4: explicit recovery requires fresh attachment proofs even
+             * when the supplied identities and sequence values are valid. */
+            SETUP(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+            rearm.attachment_proofs_fresh = false;
+            status = safety_feed(m, positions, rearm);
+            EXPECT(status == PGWT_MERGE_SUSPENDED && c.count == 2 &&
+                   c.outputs[1].kind == PGWT_MERGE_OUT_VOID &&
+                   c.outputs[1].reason == PGWT_MERGE_UNKNOWN_EVIDENCE &&
+                   pgwt_merge_get_report(m).epoch == 1,
+                   "stale attachment proofs refuse REARM with VOID");
+            break;
+        case G_INIT:
+        case G_FORK:
+        case G_SUSPENDED:
+            /* §2 DECISION 25/25a: only a NEW generation with valid FORK and
+             * INIT can bootstrap; earlier lifecycle evidence survives epochs.
+             * §4: suspension suppresses output, not evidence consumption. */
+            data.record.pid = 30;
+            data.record.source = 3;
+            data.record.rank = PGWT_MERGE_FORK;
+            if (which == G_SUSPENDED)
+                SETUP(safety_feed(m, positions, loss) == PGWT_MERGE_SUSPENDED);
+            SETUP(safety_feed(m, positions, data) ==
+                  (which == G_SUSPENDED ? PGWT_MERGE_SUSPENDED : PGWT_MERGE_OK));
+            if (which == G_SUSPENDED) {
+                SETUP(c.count == 1); /* suspended FORK produced no output */
+                SETUP(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+                data.record.t = 12;
+                SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            } else if (which == G_FORK) {
+                data.record.t = 11;
+                SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            }
+            data.record.t = 12;
+            data.record.rank = which == G_INIT ? PGWT_MERGE_TRANS : PGWT_MERGE_INIT;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            status = safety_seal(m, positions, 13, obs);
+            size_t prior = which == G_SUSPENDED ? 1 : 0;
+            EXPECT(status == PGWT_MERGE_SUSPENDED && c.count == prior + 1 &&
+                   c.outputs[prior].kind == PGWT_MERGE_OUT_VOID &&
+                   c.outputs[prior].reason == PGWT_MERGE_UNKNOWN_EVIDENCE,
+                   "invalid creation proof VOID before lifecycle DATA");
+            break;
+        }
+        pgwt_merge_destroy(m);
+    }
+#undef EXPECT
+#undef SETUP
+    printf("guard %s PASS\n", name);
+    return 0;
+}
+
+static int guard_checks(size_t *passed)
+{
+    *passed = 0;
+    for (size_t i = 0; i < sizeof(guard_names) / sizeof(*guard_names); ++i) {
+        int result = guard_case(i);
+        if (result) return result;
+        ++*passed;
+    }
+    printf("core merge guard cases: %zu/%zu passed\n", *passed,
+           sizeof(guard_names) / sizeof(*guard_names));
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--guard-case")) {
+        if (argc == 3)
+            for (size_t i = 0; i < sizeof(guard_names) / sizeof(*guard_names); ++i)
+                if (!strcmp(argv[2], guard_names[i])) return guard_case(i);
+        fputs("unknown or missing guard case\n", stderr);
+        return 2;
+    }
+    size_t guard_passed = 0;
     bool fixture_only = argc > 1 && !strcmp(argv[1], "--fixture-only");
     bool safety_only = argc > 1 && !strcmp(argv[1], "--safety-only");
     if (!fixture_only && (!safety_checks() || !recovery_checks())) return 2;
+    if (!fixture_only) {
+        int result = guard_checks(&guard_passed);
+        if (result) return result;
+    }
     if (safety_only) return 0;
     int path_arg = fixture_only ? 2 : 1;
     const char *path = argc > path_arg ? argv[path_arg] : "contracts/merge-v1/examples.json";
@@ -1089,7 +1344,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "fixture: skipped row %" PRIu64 "/%s\n", cases[i].id, cases[i].mode);
             complete = false;
         }
-    printf("core merge contract: %zu/%zu passed\n", passed, total);
+    printf("core merge contract: %zu/%zu passed\n", passed + guard_passed, total + guard_passed);
     free(cases);
     free_document(d);
     return complete && total == passed ? 0 : 1;
