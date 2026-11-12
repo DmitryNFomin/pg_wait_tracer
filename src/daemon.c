@@ -1392,20 +1392,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                     d->trace_dir, ret,
                     d->event_writer->retention_bytes ? ", size-capped" : "");
 
-        /* Init summary writer (alongside event writer) */
-        d->summary_writer = calloc(1, sizeof(*d->summary_writer));
-        if (!d->summary_writer) {
-            fprintf(stderr, "FATAL: cannot allocate summary writer\n");
-            goto fail;
-        }
-        if (pgwt_summary_writer_init(d->summary_writer, d->trace_dir,
-                                      ret, d->trace_group) != 0) {
-            fprintf(stderr, "FATAL: cannot initialize summary writer\n");
-            free(d->summary_writer);
-            d->summary_writer = NULL;
-            goto fail;
-        }
-        d->summary_writer->verbose = d->verbose;
+        /* Summaries stay disabled until rebuilt from the core. Producers
+         * and maintenance guard this pointer; raw retention must not wait
+         * for a live summary to rotate. */
+        d->summary_writer = NULL;
 
         /* The sidecar is also the context/source-aware sink for sampled PG13
          * synthetic and PG14+ pgss text. It must exist even when the legacy

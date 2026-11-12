@@ -1,4 +1,5 @@
 /* #779: exercise the real retention pass, including its failure path.
+ * Summary files here are legacy fixtures, not output from a running daemon.
  * Archive contents are opaque to cleanup; exact byte sizes trip the cap. */
 #include "event_writer.h"
 
@@ -294,7 +295,7 @@ static void test_pending_summary_rotation(void)
     put("2025-01-01_10.1.trace.lz4", 100);
     put("current.summary", 100);
     put("current.trace", 10);
-    /* The same naming anchor the daemon supplies for a live summary.
+    /* Legacy live-writer guard: inject the former daemon naming anchor.
      * Raw can rotate early at its block cap while summary stays live. */
     live_summary_ns = (uint64_t)mktime(&tm) * 1000000000ULL;
     CHECK(dir_bytes() == 410, "pending rotation fixture really exceeds cap");
@@ -315,6 +316,29 @@ static void test_pending_summary_rotation(void)
           exists("2025-01-01_10.1.trace.lz4"),
           "later summary publication cannot create a summary-only hour");
     CHECK(dir_bytes() == 110 && warn[0] == '\0', "rotation releases raw for cap eviction");
+}
+
+/* With the daemon writer off, even a leftover current.summary must not
+ * pin same-hour raw archives. Live files themselves remain protected. */
+static void test_summary_writer_off(void)
+{
+    char warn[1024], raw_name[80];
+    time_t now = time(NULL);
+    struct tm hour;
+    localtime_r(&now, &hour);
+    strftime(raw_name, sizeof(raw_name), "%Y-%m-%d_%H.trace.lz4", &hour);
+    reset_dir();
+    put(raw_name, 100);
+    put("current.summary", 100);
+    put("current.trace", 10);
+    CHECK(live_summary_ns == 0, "disabled writer supplies zero retention coupling");
+    CHECK(dir_bytes() == 210, "current-hour raw fixture exceeds byte cap");
+    cleanup(0, 110, warn, sizeof(warn));
+    CHECK(!exists(raw_name), "disabled writer permits same-hour raw eviction immediately");
+    CHECK(exists("current.summary") && exists("current.trace"),
+          "byte cap preserves legacy live files");
+    CHECK(dir_bytes() == 110 && warn[0] == '\0',
+          "zero summary coupling reaches cap without an hourly hold");
 }
 
 static void test_phase_capability_sidecar(void)
@@ -352,6 +376,7 @@ int main(void)
     test_failed_unlink_other_hours();
     test_sidecar_accounting();
     test_pending_summary_rotation();
+    test_summary_writer_off();
     test_phase_capability_sidecar();
     reset_dir();
     rmdir(trace_dir);
