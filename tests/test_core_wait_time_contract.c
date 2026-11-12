@@ -154,21 +154,21 @@ static bool preparation_checks(void)
     return ok;
 }
 
+static bool invalid_evidence_result(const pgwt_core_result *r)
+{
+    return !r->value.present && !r->detail_present &&
+           strcmp(r->completeness, "unavailable") == 0 &&
+           r->reason_count == 1 && strcmp(r->reasons[0], "evidence_invalid") == 0 &&
+           !r->diagnostic.recorded.present && !r->diagnostic.covered_ns.present &&
+           !r->diagnostic.required_ns.present;
+}
+
 static bool rejected_prepared(const char *name, const pgwt_core_prepared *p,
                               const pgwt_core_query *q)
 {
     pgwt_core_result t, n;
     pgwt_core_wait_metrics(p, q, &t, &n);
-    const pgwt_core_result *results[] = {&t, &n};
-    bool ok = true;
-    for (size_t i = 0; i < 2; ++i) {
-        const pgwt_core_result *r = results[i];
-        ok = ok && !r->value.present && !r->detail_present &&
-             strcmp(r->completeness, "unavailable") == 0 &&
-             r->reason_count == 1 && strcmp(r->reasons[0], "evidence_invalid") == 0 &&
-             !r->diagnostic.recorded.present && !r->diagnostic.covered_ns.present &&
-             !r->diagnostic.required_ns.present;
-    }
+    bool ok = invalid_evidence_result(&t) && invalid_evidence_result(&n);
     printf("prepared %s %s\n", name, ok ? "PASS" : "MISMATCH (expected evidence_invalid)");
     return ok;
 }
@@ -220,6 +220,127 @@ static bool prepared_integrity_checks(void)
     return ok && restored;
 }
 
+static bool prepared_mutation_checks(void)
+{
+    const pgwt_core_event event = {"A", 1};
+    pgwt_core_query q = {.event = event, .to = UINT64_MAX};
+    const uint64_t middle = UINT64_MAX / 2 + 1;
+    pgwt_core_wait waits[] = {{event, 0, middle}, {event, middle, UINT64_MAX}};
+    pgwt_core_span coverage[] = {{0, UINT64_MAX}, {0, 0}};
+    pgwt_core_wait scratch[2];
+    pgwt_core_evidence e = {.coverage = coverage, .coverage_count = 1,
+                            .waits = waits, .wait_count = 2};
+    pgwt_core_prepared p;
+    if (pgwt_core_prepare(&e, scratch, 2, &p) || !p.evidence_valid) return false;
+    /* Omitting start from the digest accepts an overlap and wraps the sum to
+     * 9223372036854775807, despite claiming complete coverage. */
+    waits[1].start = 0;
+    bool ok = rejected_prepared("changed_wait_start", &p, &q);
+
+    waits[0] = (pgwt_core_wait){event, 10, 20};
+    e.wait_count = 1;
+    coverage[0] = (pgwt_core_span){0, 300};
+    coverage[1] = (pgwt_core_span){300, 900};
+    e.coverage_count = 2;
+    q.to = 900;
+    if (pgwt_core_prepare(&e, scratch, 2, &p) || !p.evidence_valid) return false;
+    /* The overlapping spans sum to 900 while leaving [600,900) uncovered.
+     * Omitting coverage values accepts them and returns complete 10. */
+    coverage[0].end = 600;
+    coverage[1].end = 600;
+    ok = rejected_prepared("changed_coverage_values", &p, &q) && ok;
+
+    char open_bytes[] = "A";
+    coverage[0] = (pgwt_core_span){0, 900};
+    e.coverage_count = 1;
+    e.has_open = true;
+    e.open = (pgwt_core_open_wait){{open_bytes, 1}, 30, 900};
+    if (pgwt_core_prepare(&e, scratch, 2, &p) || !p.evidence_valid) return false;
+    e.open.start = 31;
+    ok = rejected_prepared("changed_open_start", &p, &q) && ok;
+    e.open.start = 30;
+    e.open.as_of = 901;
+    ok = rejected_prepared("changed_open_as_of", &p, &q) && ok;
+    e.open.as_of = 900;
+    open_bytes[0] = 'B';
+    ok = rejected_prepared("changed_open_event_bytes", &p, &q) && ok;
+    open_bytes[0] = 'A';
+    e.life_start = 1;
+    ok = rejected_prepared("changed_life_start", &p, &q) && ok;
+    return ok;
+}
+
+static bool rejected_batch(const char *name, const pgwt_core_prepared *p,
+                           const pgwt_core_query *queries)
+{
+    pgwt_core_result times[3], completeds[3];
+    memset(times, 0xa5, sizeof(times));
+    memset(completeds, 0xa5, sizeof(completeds));
+    pgwt_core_wait_metrics_many(p, queries, 3, times, completeds);
+    bool ok = true;
+    for (size_t i = 0; i < 3; ++i)
+        ok = invalid_evidence_result(&times[i]) &&
+             invalid_evidence_result(&completeds[i]) && ok;
+    printf("prepared %s %s\n", name, ok ? "PASS" : "MISMATCH (expected evidence_invalid)");
+    return ok;
+}
+
+static bool same_result(const pgwt_core_result *a, const pgwt_core_result *b)
+{
+    char left[2048], right[2048];
+    return pgwt_contract_result_json(a, left, sizeof(left)) == 0 &&
+           pgwt_contract_result_json(b, right, sizeof(right)) == 0 &&
+           strcmp(left, right) == 0;
+}
+
+static bool prepared_batch_checks(void)
+{
+    const pgwt_core_event event = {"A", 1};
+    pgwt_core_wait waits[] = {{event, 10, 20}, {{"B", 1}, 30, 35}}, scratch[2];
+    pgwt_core_span coverage = {0, 100};
+    pgwt_core_evidence e = {.coverage = &coverage, .coverage_count = 1,
+                            .waits = waits, .wait_count = 2, .has_open = true,
+                            .open = {event, 40, 100}};
+    pgwt_core_query queries[] = {
+        {.event = event, .to = 100},
+        {.event = {"B", 1}, .from = 25, .to = 40},
+        {.event = {"absent", 6}, .to = 100},
+        {.event = {"", 0}, .to = 100},
+        {.event = event, .from = 10, .to = 10}
+    };
+    pgwt_core_prepared p;
+    if (pgwt_core_prepare(&e, scratch, 2, &p) || !p.evidence_valid) return false;
+    pgwt_core_result times[5], completeds[5], t, n;
+    /* Empty batches accept NULL for every pointer. */
+    pgwt_core_wait_metrics_many(NULL, NULL, 0, NULL, NULL);
+    pgwt_core_wait_metrics_many(&p, queries, 5, times, completeds);
+    const uint64_t expected_times[] = {70, 5, 0}, expected_counts[] = {1, 1, 0};
+    bool ok = true;
+    for (size_t i = 0; i < 5; ++i) {
+        pgwt_core_wait_metrics(&p, &queries[i], &t, &n);
+        ok = same_result(&times[i], &t) && same_result(&completeds[i], &n) && ok;
+        if (i < 3)
+            ok = times[i].value.present && times[i].value.value == expected_times[i] &&
+                 completeds[i].value.present && completeds[i].value.value == expected_counts[i] && ok;
+    }
+    pgwt_core_wait_metrics_many(&p, NULL, 5, times, completeds);
+    pgwt_core_wait_metrics(&p, NULL, &t, &n);
+    for (size_t i = 0; i < 5; ++i)
+        ok = same_result(&times[i], &t) && same_result(&completeds[i], &n) && ok;
+    printf("prepared batch_results %s\n", ok ? "PASS" : "MISMATCH (query results)");
+
+    /* Each new batch must recheck evidence, even after a successful call. */
+    waits[0].end = 21;
+    ok = rejected_batch("batch_changed_between_calls", &p, queries) && ok;
+    waits[0].end = 20;
+    pgwt_core_prepared copied;
+    memcpy(&copied, &p, sizeof(p));
+    ok = rejected_batch("batch_copied_handle", &copied, queries) && ok;
+    pgwt_core_prepared forged = {.evidence = &e, .coverage_knowable = true, .evidence_valid = true};
+    ok = rejected_batch("batch_forged_handle", &forged, queries) && ok;
+    return ok;
+}
+
 /* Exit 1 means completed case comparisons found a mismatch. Exit 2 means a
  * harness failure (including too few cases), never a killed numerical mutant. */
 int main(int argc, char **argv)
@@ -228,6 +349,8 @@ int main(int argc, char **argv)
     if (argc > 2) { fprintf(stderr, "usage: %s [contract-directory]\n", argv[0]); return 2; }
     if (!adapter_checks() || !preparation_checks()) return 2;
     bool integrity_ok = prepared_integrity_checks();
+    integrity_ok = prepared_mutation_checks() && integrity_ok;
+    integrity_ok = prepared_batch_checks() && integrity_ok;
     if (argc == 2) root = argv[1];
     else if (access(root, R_OK) != 0) root = "../contracts/wait_time-v1/contracts";
     char pattern[4096];

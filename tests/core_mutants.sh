@@ -37,18 +37,37 @@ mutants = json.loads((root / "contracts/wait_time-v1/mutants.json").read_text())
 # successful build and full case run; a crash/harness failure is never a kill.
 integrity_cases = ["forged_fields", "copied_handle", "changed_wait_end",
                    "increased_wait_count", "swapped_wait_array",
-                   "swapped_coverage_array", "changed_event_bytes"]
+                   "swapped_coverage_array", "changed_event_bytes",
+                   "changed_wait_start", "changed_coverage_values",
+                   "changed_open_start", "changed_open_as_of",
+                   "changed_open_event_bytes", "changed_life_start",
+                   "batch_changed_between_calls", "batch_copied_handle", "batch_forged_handle"]
 integrity_mutants = [
-    ("H1_trust_forged_handle", "if (!prepared_intact(prepared)) prepared = NULL;",
-     "/* trust caller-prepared state */", ["forged_fields"]),
-    ("H2_allow_copied_handle", "p->tag == prepared_tag(p) && ", "", ["copied_handle"]),
-    ("H3_trust_changed_evidence", " && evidence_unchanged(p)", "", integrity_cases[2:]),
+    ("H1_skip_batch_check", "if (!prepared_intact(prepared)) prepared = NULL;",
+     "/* trust caller-prepared state */", ["forged_fields", "batch_changed_between_calls",
+                                           "batch_copied_handle", "batch_forged_handle"]),
+    ("H2_allow_copied_handle", "p->tag == prepared_tag(p) && ", "",
+     ["copied_handle", "batch_copied_handle"]),
+    ("H3_trust_changed_evidence", " && evidence_unchanged(p)", "", integrity_cases[2:-2]),
     ("H4_skip_header_digest", "p->header_digest == evidence_header_digest(p->evidence) &&",
      "true &&", ["swapped_wait_array", "swapped_coverage_array"]),
     ("H5_skip_layout_digest", "p->layout_digest == evidence_layout_digest(p) &&",
      "true &&", ["changed_wait_end"]),
     ("H6_skip_event_digest", "p->event_digest == evidence_event_digest(p);",
      "true;", ["changed_event_bytes"]),
+    ("H7_skip_wait_start", "h = digest_u64(h, e->waits[i].start);", "",
+     ["changed_wait_start"]),
+    ("H8_skip_coverage_values", """            h = digest_u64(h, e->coverage[i].start);
+            h = digest_u64(h, e->coverage[i].end);""", "",
+     ["changed_coverage_values"]),
+    ("H9_skip_open_fields", """        h = digest_event_layout(h, e->open.event);
+        h = digest_u64(h, e->open.start);
+        h = digest_u64(h, e->open.as_of);""", "",
+     ["changed_open_start", "changed_open_as_of"]),
+    ("H10_skip_open_event_bytes", "if (e->has_open) h = digest_event_bytes(h, e->open.event);", "",
+     ["changed_open_event_bytes"]),
+    ("H11_skip_life_start", "h = digest_u64(h, e->life_start);", "",
+     ["changed_life_start"]),
 ]
 
 def build(directory, output):

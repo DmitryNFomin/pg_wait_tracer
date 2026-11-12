@@ -164,15 +164,14 @@ static void reasons(pgwt_core_result *r, bool gap, bool evidence_invalid,
     if (window_invalid) r->reasons[r->reason_count++] = "invalid_window";
 }
 
-/* FNV-1a over explicit, length-delimited fields, never struct padding.
- * Distinct seeds separate metadata, array layouts, event bytes and the tag. */
+/* Mix explicit 64-bit fields, never struct padding. XOR, multiplication by an
+ * odd number and rotation are bijective: any single changed word is detected.
+ * Rotation also spreads high-bit changes into lower bits before the next word.
+ * Distinct seeds separate the stages and the handle tag. */
 static uint64_t digest_u64(uint64_t hash, uint64_t value)
 {
-    for (unsigned i = 0; i < 8; ++i) {
-        hash = (hash ^ (value & 255)) * UINT64_C(1099511628211);
-        value >>= 8;
-    }
-    return hash;
+    uint64_t mixed = (hash ^ value) * UINT64_C(1099511628211);
+    return (mixed << 27) | (mixed >> 37);
 }
 
 static uint64_t digest_event_layout(uint64_t hash, pgwt_core_event event)
@@ -284,12 +283,12 @@ int pgwt_core_prepare(const pgwt_core_evidence *e, pgwt_core_wait *scratch,
     return 0;
 }
 
-void pgwt_core_wait_metrics(const pgwt_core_prepared *prepared,
-                            const pgwt_core_query *q,
-                            pgwt_core_result *time,
-                            pgwt_core_result *completed)
+/* The batch entry point has already checked integrity. */
+static void wait_metrics_intact(const pgwt_core_prepared *prepared,
+                                const pgwt_core_query *q,
+                                pgwt_core_result *time,
+                                pgwt_core_result *completed)
 {
-    if (!prepared_intact(prepared)) prepared = NULL;
     /* Null input objects are malformed; outputs must be distinct and non-null. */
     const pgwt_core_evidence missing_e = {0};
     const pgwt_core_evidence *e = prepared && prepared->evidence ?
@@ -366,4 +365,24 @@ void pgwt_core_wait_metrics(const pgwt_core_prepared *prepared,
         time->detail.closed_ns = closed;
         time->detail.open_ns = open;
     }
+}
+
+void pgwt_core_wait_metrics_many(const pgwt_core_prepared *prepared,
+                                 const pgwt_core_query *queries, size_t k,
+                                 pgwt_core_result *wait_times,
+                                 pgwt_core_result *completeds)
+{
+    if (!k) return;
+    if (!prepared_intact(prepared)) prepared = NULL;
+    for (size_t i = 0; i < k; ++i)
+        wait_metrics_intact(prepared, queries ? &queries[i] : NULL,
+                            &wait_times[i], &completeds[i]);
+}
+
+void pgwt_core_wait_metrics(const pgwt_core_prepared *prepared,
+                            const pgwt_core_query *query,
+                            pgwt_core_result *wait_time,
+                            pgwt_core_result *completed)
+{
+    pgwt_core_wait_metrics_many(prepared, query, 1, wait_time, completed);
 }
