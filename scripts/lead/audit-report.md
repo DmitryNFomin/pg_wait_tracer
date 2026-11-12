@@ -30,7 +30,7 @@ Properties exercised by `audit-report-selftest.py`:
    transcript and final answer are saved separately, outside the repository and
    outside the snapshot directory. It starts a new `exec --ephemeral`, with memory
    injection and generation explicitly disabled. It is instructed to search the
-   repo and GitHub, not scratchpad trees, archives or session histories; individually
+   repo and the supplied GitHub snapshot, not scratchpad trees, archives or session histories; individually
    cited scratchpad evidence remains available. A recursive search of the supplied
    draft directory cannot reach earlier audits. This is a data-flow and instruction
    boundary, not an OS prohibition on reading arbitrary files: the read-only CLI
@@ -57,25 +57,25 @@ Properties exercised by `audit-report-selftest.py`:
    before Codex or decision replay. `never`, `does not exist`, and `exists nowhere`
    without nearby evidence still BLOCK without an auditor invocation. A change to
    the source draft or repo during an audit withholds authorization.
-5. **A fresh auditor invocation first probes GitHub.** The wrapper runs
-   `codex sandbox` with the same configuration as the auditor, executing
-   `gh api repos/{owner}/{repo} --jq .full_name` with a 30-second timeout.
-   A failed probe withholds authorization as
-   `AUDIT INCONCLUSIVE (auditor cannot reach GitHub)` before invoking the
-   auditor if the draft contains `#` followed by digits or a whole word from
-   `PR`, `merged`, `issue`, `CI`, `check` (case insensitive). A draft without
-   these markers may proceed despite probe failure. Probe failure does not
-   publish a decision, so the same draft can be retried after access is restored.
-   Existing replay semantics remain as described above.
-
-The current invocation retains `--sandbox read-only`; network enablement is
-unfinished. The installed CLI's documentation says that legacy sandbox settings
-override permission profiles, and that `sandbox_workspace_write.network_access`
-applies to workspace-write. A read-only filesystem profile with networking would
-require replacing the legacy flag. See the official
-[permission-profile documentation](https://learn.chatgpt.com/docs/permissions).
-Domain restrictions do not enforce GitHub GET-only access; enabling networking
-would also require accounting for that residual write risk.
+5. **A fresh auditor invocation first captures GitHub evidence on the host.**
+   The auditor retains `--sandbox read-only` with no network. When the draft
+   contains `#` followed by digits or a whole word from `PR`, `merged`, `issue`,
+   `CI`, `check` (case insensitive), the wrapper fetches each distinct `#number`
+   with `gh pr view`. Only an explicit response that the number is not a PR
+   triggers `gh issue view`, including comments. It also fetches
+   `gh pr list --state all --limit 40`. Each call has a 30-second timeout.
+   A fresh `github-snapshot-*` directory inside the attempt holds JSON files
+   named `pr-N.json` or `issue-N.json`, plus `pr-list.json`. Every file records
+   `fetched_at_utc`, the exact `command`, and its result in `data`. Files have
+   mode 0400 and the completed directory has mode 0500.
+   The brief names that directory and requires GitHub claims to be checked
+   against these primary observations at the recorded times; contradictions
+   are WRONG. The list's 40-result limit does not establish unbounded absence.
+   Failed calls, invalid JSON or snapshot write failures withhold authorization
+   as `AUDIT INCONCLUSIVE (GitHub snapshot failed: <what>)` before the auditor
+   starts. They do not publish a decision; retries fetch a fresh directory.
+   Drafts without the markers skip GitHub entirely. Existing replay semantics
+   remain as described above.
 
 The tests use a deterministic PATH stub that models recursive searches, intermediate
 WRONG/tool-result output, prompt echoes, unavailable access, and an absurd count

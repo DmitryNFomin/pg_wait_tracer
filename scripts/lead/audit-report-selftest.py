@@ -5,6 +5,7 @@
 The stub simulates a tree search; it does not manufacture the wrapper's verdict.
 """
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -17,19 +18,9 @@ STUB = r'''#!/usr/bin/env python3
 import json, os, re, sys
 from pathlib import Path
 args = sys.argv[1:]
-assert args[0] in ("exec", "sandbox"), args
+assert args[0] == "exec", args
 assert sys.stdin.read() == ""
 root = Path(os.environ["AUDIT_TEST_CASE"])
-if args[0] == "sandbox":
-    with (root / "probes.jsonl").open("a") as f:
-        f.write(json.dumps(args) + "\n")
-    assert args[args.index("--") + 1:] == [
-        "gh", "api", "repos/{owner}/{repo}", "--jq", ".full_name"], args
-    if os.environ.get("AUDIT_TEST_PROBE_RC", "0") != "0":
-        sys.stderr.write("error connecting to api.github.com\n")
-        sys.exit(int(os.environ["AUDIT_TEST_PROBE_RC"]))
-    sys.stdout.write("DmitryNFomin/pg_wait_tracer\n")
-    sys.exit(0)
 with (root / "calls.jsonl").open("a") as f:
     f.write(json.dumps(args) + "\n")
 prompt = args[-1]
@@ -58,6 +49,45 @@ sys.stdout.write(raw + final)
 sys.stderr.write("stub stderr retained\n")
 sys.exit(int(os.environ.get("AUDIT_TEST_RC", "0")))
 '''
+GH_STUB = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+root = Path(os.environ["AUDIT_TEST_CASE"])
+with (root / "gh-calls.jsonl").open("a") as f:
+    f.write(json.dumps(args) + "\n")
+assert sys.stdin.read() == ""
+kind = " ".join(args[:2])
+fields = {
+    "pr view": "number,title,state,isDraft,mergedAt,closedAt,mergeStateStatus,headRefOid,autoMergeRequest,closingIssuesReferences,statusCheckRollup",
+    "issue view": "number,title,state,closedAt,comments",
+    "pr list": "number,title,state,mergedAt",
+}
+assert args[-2:] == ["--json", fields[kind]], args
+if os.environ.get("AUDIT_TEST_GH_FAIL") in ("all", kind):
+    sys.stderr.write("error connecting to api.github.com\n")
+    sys.exit(1)
+if os.environ.get("AUDIT_TEST_GH_BAD_JSON"):
+    sys.stdout.write("not JSON\n")
+    sys.exit(0)
+if kind == "pr view" and args[2] == "850":
+    sys.stderr.write("GraphQL: Could not resolve to a PullRequest with the number of 850. (repository.pullRequest)\n")
+    sys.exit(1)
+if kind == "pr list":
+    assert args == ["pr", "list", "--state", "all", "--limit", "40", "--json", fields[kind]], args
+    data = [{"number": 882, "title": "CI evidence", "state": "MERGED", "mergedAt": "2026-11-12T19:49:00Z"}]
+elif kind == "issue view":
+    data = dict(number=int(args[2]), title="Rework", state="OPEN", closedAt=None,
+                comments=[dict(body="Owner scope", createdAt="2026-11-12T19:00:00Z")])
+else:
+    data = dict(number=int(args[2]), title="Change", state="OPEN", isDraft=False,
+                mergedAt=None, closedAt=None, mergeStateStatus="CLEAN", headRefOid="a" * 40,
+                autoMergeRequest=None, closingIssuesReferences=[], statusCheckRollup=[])
+if os.environ.get("AUDIT_TEST_SNAPSHOT_WRITE_FAIL"):
+    for directory in Path(os.environ["AUDIT_REPORT_STATE_DIR"]).rglob("github-snapshot-*"):
+        (directory / ("pr-list.json" if kind == "pr list" else f"{args[0]}-{args[2]}.json")).mkdir(exist_ok=True)
+sys.stdout.write(json.dumps(data) + "\n")
+'''
 
 
 def claim(quote, status="VERIFIED", evidence="checked the named revision", line=1):
@@ -76,6 +106,9 @@ class GateTests(unittest.TestCase):
         stub = bindir / "codex"
         stub.write_text(STUB)
         stub.chmod(0o755)
+        gh = bindir / "gh"
+        gh.write_text(GH_STUB)
+        gh.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
                         AUDIT_TEST_CASE=str(self.case),
                         # The production cache is private and outside the repo.
@@ -216,42 +249,69 @@ class GateTests(unittest.TestCase):
         self.assertIn("VERDICT SEND", console)
         self.assertIn("0 wrong, 1 unverifiable", console)
 
-    def test_github_probe_failure_refuses(self):
+    def test_github_snapshot_failure_refuses(self):
         self.draft.write_text("PR #850 is open.\n")
         console = self.run_gate(
             claim("PR #850 is open.", "UNVERIFIABLE", "gh connection failed") +
-            "VERDICT: SEND\n", AUDIT_TEST_PROBE_RC="1")
-        self.assertIn("AUDIT INCONCLUSIVE (auditor cannot reach GitHub)", console)
+            "VERDICT: SEND\n", AUDIT_TEST_GH_FAIL="all")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
         self.assertNotIn("VERDICT SEND", console)
         self.assertFalse((self.case / "calls.jsonl").exists(),
-                         "failed probe must stop before the auditor runs")
+                         "failed snapshot must stop before the auditor runs")
         self.assertFalse(list((self.case / "state").rglob("decision.json")))
-        # An unsuccessful probe has not consumed this draft's independent pass.
+        self.assertEqual(len((self.case / "gh-calls.jsonl").read_text().splitlines()), 1,
+                         "a connection failure must not trigger the issue fallback")
+        # Negative control: success must run the auditor on the same hash.
         self.assertIn("VERDICT SEND", self.run_gate(
             claim("PR #850 is open.") + "VERDICT: SEND\n"))
 
-    def test_github_probe_success_proceeds(self):
-        self.draft.write_text("PR #850 is open.\n")
-        console = self.run_gate(claim("PR #850 is open.") + "VERDICT: SEND\n")
+    def test_github_snapshot_success_proceeds(self):
+        self.draft.write_text("PR #882 is merged; issue #850 is open; see #882.\n")
+        console = self.run_gate(claim(self.draft.read_text().strip()) + "VERDICT: SEND\n")
         self.assertIn("VERDICT SEND", console)
-        self.assertTrue((self.case / "probes.jsonl").exists(),
-                        "audit must probe GitHub before proceeding")
-        probes = (self.case / "probes.jsonl").read_text().splitlines()
+        snapshots = list((self.case / "state").rglob("github-snapshot-*"))
+        self.assertEqual(len(snapshots), 1)
+        directory = snapshots[0]
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o500)
+        prompt = (self.case / "prompt.txt").read_text()
+        self.assertIn(f"GITHUB_SNAPSHOT_DIR={directory}", prompt)
+        self.assertIn("A claim contradicted by this snapshot is WRONG.", prompt)
+        self.assertEqual({p.name for p in directory.iterdir()},
+                         {"pr-882.json", "issue-850.json", "pr-list.json"})
+        for path in directory.iterdir():
+            self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+            record = json.loads(path.read_text())
+            timestamp = datetime.fromisoformat(record["fetched_at_utc"].replace("Z", "+00:00"))
+            self.assertEqual(timestamp.utcoffset().total_seconds(), 0)
+            self.assertLess(abs((datetime.now(timezone.utc) - timestamp).total_seconds()), 30)
+            self.assertEqual(record["command"][0], "gh")
+        issue = json.loads((directory / "issue-850.json").read_text())["data"]
+        self.assertEqual(issue["comments"][0]["body"], "Owner scope")
+        self.assertEqual(json.loads((directory / "pr-882.json").read_text())["data"]["number"], 882)
+        self.assertEqual(json.loads((directory / "pr-list.json").read_text())["data"][0]["state"], "MERGED")
+        gh_calls = [json.loads(line) for line in (self.case / "gh-calls.jsonl").read_text().splitlines()]
+        self.assertEqual([args[:3] for args in gh_calls], [
+            ["pr", "view", "850"], ["issue", "view", "850"],
+            ["pr", "view", "882"], ["pr", "list", "--state"]])
         calls = (self.case / "calls.jsonl").read_text().splitlines()
-        self.assertEqual(len(probes), 1, "a successful audit needs a sandboxed probe")
         self.assertEqual(len(calls), 1)
-        probe, auditor = json.loads(probes[0]), json.loads(calls[0])
-        def config(args):
-            return [args[i + 1] for i, arg in enumerate(args) if arg == "-c"]
-        self.assertEqual(config(probe), config(auditor),
-                         "probe and auditor must share the same settings")
+        # Negative control: a checked contradiction still BLOCKs with snapshots.
+        self.draft.write_text("PR #882 is open.\n")
+        self.assertIn("VERDICT BLOCK", self.run_gate(
+            claim("PR #882 is open.", "WRONG", "pr-list.json data[0].state=MERGED") + "VERDICT: SEND\n"))
 
-    def test_failed_probe_without_github_claim_proceeds(self):
+    def test_without_github_claim_skips_snapshot(self):
         self.draft.write_text("The printer checked merger circuitry.\n")
         self.assertIn("VERDICT SEND", self.run_gate(
             claim("The printer checked merger circuitry.") + "VERDICT: SEND\n",
-            AUDIT_TEST_PROBE_RC="1"))
-        self.assertTrue((self.case / "probes.jsonl").exists())
+            AUDIT_TEST_GH_FAIL="all"))
+        self.assertFalse((self.case / "gh-calls.jsonl").exists())
+        self.assertFalse(list((self.case / "state").rglob("github-snapshot-*")))
+        # Negative control: one whole-word GitHub marker requires a snapshot.
+        self.draft.write_text("The check passed.\n")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", self.run_gate(
+            claim("The check passed.") + "VERDICT: SEND\n", AUDIT_TEST_GH_FAIL="all"))
+        self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 1)
 
     def test_github_claim_detection(self):
         for index, text in enumerate(("See #850.", "A pr exists.", "Already MERGED.",
@@ -260,9 +320,36 @@ class GateTests(unittest.TestCase):
                 self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
                 self.draft.write_text(text + "\n")
                 console = self.run_gate(claim(text) + "VERDICT: SEND\n",
-                                        AUDIT_TEST_PROBE_RC="1")
-                self.assertIn("AUDIT INCONCLUSIVE (auditor cannot reach GitHub)", console)
+                                        AUDIT_TEST_GH_FAIL="all")
+                self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
                 self.assertNotIn("VERDICT SEND", console)
+
+    def test_github_partial_snapshot_failure_refuses(self):
+        for index, kind in enumerate(("issue view", "pr list")):
+            with self.subTest(kind=kind):
+                self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
+                self.draft.write_text("Issue #850 is open.\n")
+                console = self.run_gate(claim("Issue #850 is open.") + "VERDICT: SEND\n",
+                                        AUDIT_TEST_GH_FAIL=kind)
+                self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+                self.assertFalse((self.case / "calls.jsonl").exists())
+                self.assertFalse(list(Path(self.env["AUDIT_REPORT_STATE_DIR"]).rglob("decision.json")))
+        self.assertIn("VERDICT SEND", self.run_gate(claim("Issue #850 is open.") + "VERDICT: SEND\n"))
+
+    def test_github_snapshot_write_failure_refuses(self):
+        self.draft.write_text("PR #882 is open.\n")
+        console = self.run_gate(claim("PR #882 is open.") + "VERDICT: SEND\n",
+                                AUDIT_TEST_SNAPSHOT_WRITE_FAIL="1")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+        self.assertFalse((self.case / "calls.jsonl").exists())
+        self.assertIn("VERDICT SEND", self.run_gate(claim("PR #882 is open.") + "VERDICT: SEND\n"))
+
+    def test_github_invalid_json_refuses(self):
+        self.draft.write_text("CI passed.\n")
+        console = self.run_gate(claim("CI passed.") + "VERDICT: SEND\n", AUDIT_TEST_GH_BAD_JSON="1")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+        self.assertFalse((self.case / "calls.jsonl").exists())
+        self.assertIn("VERDICT SEND", self.run_gate(claim("CI passed.") + "VERDICT: SEND\n"))
 
     def test_no_verdict(self):
         self.assertIn("AUDIT MALFORMED (no VERDICT line)", self.run_gate(claim("The count is 4.")))
@@ -363,6 +450,10 @@ class GateTests(unittest.TestCase):
         args = json.loads((self.case / "calls.jsonl").read_text().splitlines()[0])
         for flag in ("--ephemeral", "--output-last-message"):
             self.assertIn(flag, args)
+        self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
+        self.assertEqual([args[i + 1] for i, arg in enumerate(args) if arg == "-c"],
+                         ['sandbox_mode="read-only"', "memories.use_memories=false",
+                          "memories.generate_memories=false"])
         self.assertIn("memories.use_memories=false", args)
         self.assertIn("memories.generate_memories=false", args)
         self.assertNotIn(str(self.draft), (self.case / "prompt.txt").read_text())
