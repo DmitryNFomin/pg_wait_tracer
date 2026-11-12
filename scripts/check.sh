@@ -103,6 +103,9 @@ run python3 tests/test_absence_vocab.py
 step "POSIX shell: Codex task wrapper self-test"
 run scripts/lead/codex-task-selftest.sh
 
+step "deterministic lead tick offline self-test"
+run scripts/lead/tick-selftest.sh
+
 step "board-labels trailer authorship regression tests (#771)"
 run python3 tests/test_board_author.py
 
