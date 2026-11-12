@@ -164,6 +164,110 @@ static void reasons(pgwt_core_result *r, bool gap, bool evidence_invalid,
     if (window_invalid) r->reasons[r->reason_count++] = "invalid_window";
 }
 
+/* FNV-1a over explicit, length-delimited fields, never struct padding.
+ * Distinct seeds separate metadata, array layouts, event bytes and the tag. */
+static uint64_t digest_u64(uint64_t hash, uint64_t value)
+{
+    for (unsigned i = 0; i < 8; ++i) {
+        hash = (hash ^ (value & 255)) * UINT64_C(1099511628211);
+        value >>= 8;
+    }
+    return hash;
+}
+
+static uint64_t digest_event_layout(uint64_t hash, pgwt_core_event event)
+{
+    hash = digest_u64(hash, (uintptr_t)event.data);
+    return digest_u64(hash, event.length);
+}
+
+static uint64_t evidence_header_digest(const pgwt_core_evidence *e)
+{
+    uint64_t h = UINT64_C(14695981039346656037);
+    h = digest_u64(h, e->life_start);
+    h = digest_u64(h, e->has_life_end);
+    if (e->has_life_end) h = digest_u64(h, e->life_end);
+    h = digest_u64(h, (uintptr_t)e->coverage);
+    h = digest_u64(h, e->coverage_count);
+    h = digest_u64(h, (uintptr_t)e->waits);
+    h = digest_u64(h, e->wait_count);
+    h = digest_u64(h, e->invalid_fields);
+    h = digest_u64(h, e->has_open);
+    if (e->has_open) {
+        h = digest_event_layout(h, e->open.event);
+        h = digest_u64(h, e->open.start);
+        h = digest_u64(h, e->open.as_of);
+    }
+    return h;
+}
+
+static uint64_t evidence_layout_digest(const pgwt_core_prepared *p)
+{
+    const pgwt_core_evidence *e = p->evidence;
+    uint64_t h = UINT64_C(7809847782465536322);
+    if (p->coverage_knowable) {
+        for (size_t i = 0; i < e->coverage_count; ++i) {
+            h = digest_u64(h, e->coverage[i].start);
+            h = digest_u64(h, e->coverage[i].end);
+        }
+    }
+    if (p->evidence_valid) {
+        for (size_t i = 0; i < e->wait_count; ++i) {
+            h = digest_event_layout(h, e->waits[i].event);
+            h = digest_u64(h, e->waits[i].start);
+            h = digest_u64(h, e->waits[i].end);
+        }
+    }
+    return h;
+}
+
+static uint64_t digest_event_bytes(uint64_t h, pgwt_core_event event)
+{
+    h = digest_u64(h, event.length);
+    for (size_t i = 0; i < event.length; ++i)
+        h = (h ^ (unsigned char)event.data[i]) * UINT64_C(1099511628211);
+    return h;
+}
+
+static uint64_t evidence_event_digest(const pgwt_core_prepared *p)
+{
+    const pgwt_core_evidence *e = p->evidence;
+    uint64_t h = UINT64_C(9650029242287828579);
+    /* Invalid evidence may contain unreadable arrays or event strings. Only
+     * coverage is queried in that case, and its layout was checked above. */
+    if (p->evidence_valid) {
+        for (size_t i = 0; i < e->wait_count; ++i)
+            h = digest_event_bytes(h, e->waits[i].event);
+        if (e->has_open) h = digest_event_bytes(h, e->open.event);
+    }
+    return h;
+}
+
+static uint64_t prepared_tag(const pgwt_core_prepared *p)
+{
+    uint64_t h = digest_u64(UINT64_C(2870177450012600261), (uintptr_t)p);
+    h = digest_u64(h, (uintptr_t)p->evidence);
+    h = digest_u64(h, p->coverage_knowable);
+    h = digest_u64(h, p->evidence_valid);
+    h = digest_u64(h, p->header_digest);
+    h = digest_u64(h, p->layout_digest);
+    return digest_u64(h, p->event_digest);
+}
+
+static bool evidence_unchanged(const pgwt_core_prepared *p)
+{
+    /* Each comparison must finish before the next stage can dereference
+     * pointers or lengths checked by that comparison. */
+    return p->header_digest == evidence_header_digest(p->evidence) &&
+           p->layout_digest == evidence_layout_digest(p) &&
+           p->event_digest == evidence_event_digest(p);
+}
+
+static bool prepared_intact(const pgwt_core_prepared *p)
+{
+    return p && p->evidence && p->tag == prepared_tag(p) && evidence_unchanged(p);
+}
+
 int pgwt_core_prepare(const pgwt_core_evidence *e, pgwt_core_wait *scratch,
                       size_t scratch_len, pgwt_core_prepared *prepared)
 {
@@ -173,6 +277,10 @@ int pgwt_core_prepare(const pgwt_core_evidence *e, pgwt_core_wait *scratch,
     prepared->evidence = e;
     prepared->coverage_knowable = valid_coverage(e);
     prepared->evidence_valid = prepared->coverage_knowable && valid_waits(e, scratch);
+    prepared->header_digest = evidence_header_digest(e);
+    prepared->layout_digest = evidence_layout_digest(prepared);
+    prepared->event_digest = evidence_event_digest(prepared);
+    prepared->tag = prepared_tag(prepared);
     return 0;
 }
 
@@ -181,6 +289,7 @@ void pgwt_core_wait_metrics(const pgwt_core_prepared *prepared,
                             pgwt_core_result *time,
                             pgwt_core_result *completed)
 {
+    if (!prepared_intact(prepared)) prepared = NULL;
     /* Null input objects are malformed; outputs must be distinct and non-null. */
     const pgwt_core_evidence missing_e = {0};
     const pgwt_core_evidence *e = prepared && prepared->evidence ?

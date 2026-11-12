@@ -154,6 +154,72 @@ static bool preparation_checks(void)
     return ok;
 }
 
+static bool rejected_prepared(const char *name, const pgwt_core_prepared *p,
+                              const pgwt_core_query *q)
+{
+    pgwt_core_result t, n;
+    pgwt_core_wait_metrics(p, q, &t, &n);
+    const pgwt_core_result *results[] = {&t, &n};
+    bool ok = true;
+    for (size_t i = 0; i < 2; ++i) {
+        const pgwt_core_result *r = results[i];
+        ok = ok && !r->value.present && !r->detail_present &&
+             strcmp(r->completeness, "unavailable") == 0 &&
+             r->reason_count == 1 && strcmp(r->reasons[0], "evidence_invalid") == 0 &&
+             !r->diagnostic.recorded.present && !r->diagnostic.covered_ns.present &&
+             !r->diagnostic.required_ns.present;
+    }
+    printf("prepared %s %s\n", name, ok ? "PASS" : "MISMATCH (expected evidence_invalid)");
+    return ok;
+}
+
+/* These public-API misuse regressions are separate from the frozen arithmetic
+ * answers. Every rejection must cover both metrics and all diagnostics. */
+static bool prepared_integrity_checks(void)
+{
+    char event_bytes[] = "A";
+    const pgwt_core_event event = {event_bytes, 1};
+    const pgwt_core_query q = {.event = {"A", 1}, .to = UINT64_MAX};
+    pgwt_core_span coverage[] = {{0, UINT64_MAX}}, other_coverage[] = {{0, UINT64_MAX}};
+    pgwt_core_wait waits[] = {{event, 0, UINT64_MAX}, {event, 0, UINT64_MAX}};
+    pgwt_core_wait other_waits[] = {{event, 0, UINT64_MAX}};
+    pgwt_core_wait scratch[2];
+    pgwt_core_evidence e = {.coverage = coverage, .coverage_count = 1,
+                            .waits = waits, .wait_count = 2};
+    /* The original forged handle produced the wrapped sum UINT64_MAX - 1. */
+    pgwt_core_prepared p = {.evidence = &e, .coverage_knowable = true, .evidence_valid = true};
+    bool ok = rejected_prepared("forged_fields", &p, &q);
+    e.wait_count = 1;
+    if (pgwt_core_prepare(&e, scratch, 2, &p)) return false;
+    pgwt_core_prepared copied;
+    memcpy(&copied, &p, sizeof(p));
+    ok = rejected_prepared("copied_handle", &copied, &q) && ok;
+
+    /* Move the end while retaining readable storage; overlap would overflow
+     * if the cached validation were accepted after a count/array change. */
+    waits[0].end = UINT64_MAX - 1;
+    ok = rejected_prepared("changed_wait_end", &p, &q) && ok;
+    waits[0].end = UINT64_MAX;
+    e.wait_count = 2;
+    ok = rejected_prepared("increased_wait_count", &p, &q) && ok;
+    e.wait_count = 1;
+    e.waits = other_waits;
+    ok = rejected_prepared("swapped_wait_array", &p, &q) && ok;
+    e.waits = waits;
+    e.coverage = other_coverage;
+    ok = rejected_prepared("swapped_coverage_array", &p, &q) && ok;
+    e.coverage = coverage;
+    event_bytes[0] = 'B';
+    ok = rejected_prepared("changed_event_bytes", &p, &q) && ok;
+    event_bytes[0] = 'A';
+    pgwt_core_result t, n;
+    pgwt_core_wait_metrics(&p, &q, &t, &n);
+    bool restored = t.value.present && t.value.value == UINT64_MAX &&
+                    n.value.present && n.value.value == 0;
+    printf("prepared restored_evidence %s\n", restored ? "PASS" : "MISMATCH (unchanged result)");
+    return ok && restored;
+}
+
 /* Exit 1 means completed case comparisons found a mismatch. Exit 2 means a
  * harness failure (including too few cases), never a killed numerical mutant. */
 int main(int argc, char **argv)
@@ -161,6 +227,7 @@ int main(int argc, char **argv)
     const char *root = "contracts/wait_time-v1/contracts";
     if (argc > 2) { fprintf(stderr, "usage: %s [contract-directory]\n", argv[0]); return 2; }
     if (!adapter_checks() || !preparation_checks()) return 2;
+    bool integrity_ok = prepared_integrity_checks();
     if (argc == 2) root = argv[1];
     else if (access(root, R_OK) != 0) root = "../contracts/wait_time-v1/contracts";
     char pattern[4096];
@@ -220,5 +287,5 @@ int main(int argc, char **argv)
     }
     globfree(&paths);
     printf("core wait_time contract: %zu/48 passed\n", passed);
-    return harness_error ? 2 : mismatches ? 1 : 0;
+    return harness_error ? 2 : mismatches || !integrity_ok ? 1 : 0;
 }

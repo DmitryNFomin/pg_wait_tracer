@@ -32,6 +32,25 @@ def run(command, **kwargs):
 # Mutation sites, replacements and distinguishing inputs belong to the contract.
 mutants = json.loads((root / "contracts/wait_time-v1/mutants.json").read_text())
 
+# Public-API integrity regressions are implementation obligations, separate
+# from the frozen numerical mutants. Each named assertion must fail after a
+# successful build and full case run; a crash/harness failure is never a kill.
+integrity_cases = ["forged_fields", "copied_handle", "changed_wait_end",
+                   "increased_wait_count", "swapped_wait_array",
+                   "swapped_coverage_array", "changed_event_bytes"]
+integrity_mutants = [
+    ("H1_trust_forged_handle", "if (!prepared_intact(prepared)) prepared = NULL;",
+     "/* trust caller-prepared state */", ["forged_fields"]),
+    ("H2_allow_copied_handle", "p->tag == prepared_tag(p) && ", "", ["copied_handle"]),
+    ("H3_trust_changed_evidence", " && evidence_unchanged(p)", "", integrity_cases[2:]),
+    ("H4_skip_header_digest", "p->header_digest == evidence_header_digest(p->evidence) &&",
+     "true &&", ["swapped_wait_array", "swapped_coverage_array"]),
+    ("H5_skip_layout_digest", "p->layout_digest == evidence_layout_digest(p) &&",
+     "true &&", ["changed_wait_end"]),
+    ("H6_skip_event_digest", "p->event_digest == evidence_event_digest(p);",
+     "true;", ["changed_event_bytes"]),
+]
+
 def build(directory, output):
     return run(compiler + flags + ["-I" + str(directory / "src"),
                str(directory / "tests/test_core_wait_time_contract.c"),
@@ -62,6 +81,10 @@ try:
         print("CORE CONTRACT BEGIN\n" + baseline.stdout.rstrip() + "\nCORE CONTRACT END", flush=True)
         if baseline.returncode != 0 or not summary(baseline.stdout) or has_sanitizer_error(baseline.stdout):
             print("core mutants: baseline FAILED")
+            sys.exit(2)
+        if any(baseline.stdout.splitlines().count(f"prepared {case} PASS") != 1
+               for case in integrity_cases):
+            print("core mutants: missing baseline integrity assertion")
             sys.exit(2)
         baseline_diff = run([sys.executable, "-B",
                              str(root / "tests/test_core_wait_time_differential.py"),
@@ -138,6 +161,42 @@ try:
                           + result.stdout, flush=True)
                     failed = True
         print(f"core mutants: {killed}/{len(mutants)} KILLED", flush=True)
+        integrity_killed = 0
+        for name, old, new, cases in integrity_mutants:
+            directory = work / name
+            shutil.copytree(base, directory, ignore=shutil.ignore_patterns("contract-test", "*.dSYM"))
+            source = directory / "src/core/wait_metrics.c"
+            text = source.read_text()
+            if text.count(old) != 1:
+                print(f"prepared mutant {name} PATCH_ERROR", flush=True)
+                failed = True
+                continue
+            patched = text.replace(old, new, 1)
+            source.write_text(patched)
+            try:
+                built = build(directory, directory / "contract-test")
+                if built.returncode != 0:
+                    print(f"prepared mutant {name} BUILD_ERROR (not a kill)\n{built.stdout}", flush=True)
+                    failed = True
+                    continue
+                result = run([str(directory / "contract-test"),
+                              str(root / "contracts/wait_time-v1/contracts")], timeout=15)
+            except subprocess.TimeoutExpired:
+                print(f"prepared mutant {name} TIMEOUT (not a kill)", flush=True)
+                failed = True
+                continue
+            intended = all(result.stdout.splitlines().count(
+                f"prepared {case} MISMATCH (expected evidence_invalid)") == 1 for case in cases)
+            rows = re.findall(r"^wait_window_\d+\.json PASS$", result.stdout, re.M)
+            if (result.returncode == 1 and intended and summary(result.stdout) and
+                    len(rows) == 48 and not has_sanitizer_error(result.stdout)):
+                print(f"prepared mutant {name} KILLED (build OK; assertions: {', '.join(cases)})", flush=True)
+                integrity_killed += 1
+            else:
+                print(f"prepared mutant {name} SURVIVED/ERROR (not an intended assertion failure)\n"
+                      + result.stdout, flush=True)
+                failed = True
+        print(f"prepared mutants: {integrity_killed}/{len(integrity_mutants)} KILLED", flush=True)
         sys.exit(1 if failed else 0)
 except (OSError, subprocess.TimeoutExpired) as error:
     print(f"core mutants: harness error: {error}")
