@@ -76,7 +76,9 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_restart_second_identity \
             test_background_unattributed \
             test_session_rows \
-            test_phase_capability test_phase_probe
+            test_phase_capability test_phase_probe \
+            test_core_merge_contract \
+            test_merge_tie_count
 
 .PHONY: all clean check
 
@@ -1157,3 +1159,33 @@ test_phase_capability: test_phase_capability.c ../src/phase_capability.c ../src/
 
 test_phase_probe: test_phase_probe.c ../src/phase_probe.c ../src/phase_capability.c ../src/cJSON.c ../src/phase_capability.h
 	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ $(filter %.c,$^)
+
+# Refs #871: standalone corpus measurement and its portable in-memory unit.
+# Use the regular test flags for product sources (as dump_markers does).
+# Sanitizers are opt-in via CFLAGS, like the top-level test-asan workflow;
+# a normal build must also work on hosts without sanitizer runtimes.
+MERGE_TIE_SRCS = tools/merge_tie_count.c ../src/event_reader.c ../src/event_writer.c
+
+tools/merge_tie_count: $(MERGE_TIE_SRCS) tools/merge_tie_count.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(MERGE_TIE_SRCS) -llz4
+
+test_merge_tie_count: test_merge_tie_count.c $(MERGE_TIE_SRCS) tools/merge_tie_count.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -DMERGE_TIE_COUNT_NO_MAIN -o $@ test_merge_tie_count.c $(MERGE_TIE_SRCS) -llz4
+
+# Manual Linux measurement only; excluded from all/check and macOS builds.
+.PHONY: bench-nmi-transport
+bench-nmi-transport:
+ifeq ($(shell uname -s),Linux)
+	$(MAKE) -C bench_nmi_transport LIBBPF_INC="$(LIBBPF_INC)" LIBBPF_LIB="$(LIBBPF_LIB)"
+else
+	@echo "bench-nmi-transport requires Linux" >&2; exit 1
+endif
+
+.PHONY: clean-measurement-tools
+clean: clean-measurement-tools
+clean-measurement-tools:
+	rm -f tools/merge_tie_count
+	if [ -d bench_nmi_transport ]; then $(MAKE) -C bench_nmi_transport clean; fi
