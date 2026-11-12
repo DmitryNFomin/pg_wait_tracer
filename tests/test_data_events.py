@@ -178,8 +178,8 @@ def check_percentile_nearest_rank(t):
 
 
 def build_exact_300s_scenario():
-    """A >= 120 s fully-EXACT window, so should_use_summaries() takes the
-    summary fast path (pattern from test_data_summary_honesty.py).
+    """A >= 120 s fully-EXACT window with current summary files.
+    Summaries must remain off for this formerly eligible window.
 
     150 x IO:DataFileRead 1 ms + 150 x Lock:relation 100 ms, all under
     query 100, spread one per second over 300 s.
@@ -210,10 +210,10 @@ def check_query_filtered_summary_gating(t):
         with ServerHarness(trace_dir) as srv:
             frm, to = lo - 10_000_000_000, hi + 10_000_000_000   # ~320 s
 
-            print("--- #103 summary path, UNFILTERED (system histogram) ---")
+            print("--- #103 long raw window, UNFILTERED (system histogram) ---")
             resp = srv.query("top_events", from_=frm, to_=to)
             t.check_eq(resp.get("fidelity"), "exact",
-                       "long exact window answered from summaries (exact)")
+                       "long raw window retains exact fidelity")
             rows = {r["name"]: r for r in resp.get("rows", [])}
             lock = rows.get("Lock:relation", {})
             io = rows.get("IO:DataFileRead", {})
@@ -222,7 +222,7 @@ def check_query_filtered_summary_gating(t):
             t.check_eq(lock.get("p50_overflow"), True,
                        "unfiltered: Lock p50_overflow = true (100ms waits)")
             t.check_approx(lock.get("max_us", -1), 100000.0, 0.01,
-                           "unfiltered: Lock max = 100ms (summaries carry max)")
+                           "unfiltered: Lock max = 100ms from raw durations")
             t.check_approx(io.get("p50_us", -1), 1024.0, 0.01,
                            "unfiltered: IO p50 = 1024us (in-range bucket)")
             t.check_eq(io.get("p50_overflow"), False,
@@ -275,12 +275,13 @@ def check_query_filtered_summary_gating(t):
         # Same mechanism as test_summary_raw_parity.py's classify_route:
         # raw must refuse at this limit, while a summary answer would succeed.
         with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
-            oracle = srv.query("top_events", from_=frm, to_=to,
-                               filters={"query_id": 100})
-            t.check_eq(oracle.get("code"), "window_too_large",
-                       "query-filtered request reaches raw (load-limit refusal)")
-            t.check_eq(oracle.get("max_events"), 1,
-                       "raw oracle applied the one-event load limit")
+            for label, filters in (("unfiltered", {}), ("query-filtered", {"query_id": 100})):
+                oracle = srv.query("top_events", from_=frm, to_=to, filters=filters)
+                t.check_eq(oracle.get("code"), "window_too_large",
+                           label + ": long window reaches raw (load-limit refusal)")
+                t.check_eq(oracle.get("max_events"), 1,
+                           label + ": raw oracle applied the one-event limit")
+
     finally:
         cleanup_traces(trace_dir)
 

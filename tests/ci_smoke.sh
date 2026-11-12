@@ -207,22 +207,9 @@ else
             python3 "$SCRIPT_DIR/test_deterministic.py" --pid "$PM_PID"
         run_section "execution-detail containing span on a real capture (#479)" \
             python3 "$SCRIPT_DIR/test_execution_span_live.py" --pid "$PM_PID"
-        # NOT invoked here: tests/test_v9_open_cpu_wired.sh. The v9 open-CPU
-        # producer was reverted (agent/424-daemon fc7d7f5), so the check has
-        # no wired producer to confirm and BOTH its outcomes are non-zero --
-        # FAIL when seconds demonstrably sealed, REFUSE (exit 2) when they
-        # did not. run_section sets overall=1 on any non-zero exit, so either
-        # one reddens the CI job that runs this file (.github/workflows/
-        # ci.yml and nightly.yml, on the self-hosted gate boxes, which do
-        # have watchpoints).
-        #
-        # Worth stating because it is the same hole twice, mirrored: this
-        # invocation survived a green 134/134 box-check for exactly the
-        # reason the FIRST version of the gate was invisible -- run_all.sh
-        # never invokes ci_smoke.sh, so box-check can see neither its
-        # presence nor its absence. The script stays in tests/ as the
-        # acceptance test; re-add it here and in run_all.sh's LIVE_TESTS in
-        # the same commit that wires the producer.
+        # The summaries-off assertion in test_v9_open_cpu_wired.sh runs in
+        # run_all.sh's LIVE_TESTS. Restore its producer-wiring check when
+        # summaries are rebuilt from the core (rework plan section 5).
     else
         summary "### WARNING: full-mode watchpoint assertions SKIPPED"
         summary "perf hardware breakpoints are unavailable in this environment"

@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
-"""test_data_summary_honesty.py — T1/FID-2: the summary fast-path must be
-coverage-aware and the fidelity label must reflect the actual data source.
-
-Before the fix, should_use_summaries() selected the summary path on range
-length alone (>= 120 s) and stamped "fidelity":"exact" — but summaries are
-fed only by the exact (watchpoint) path. In the DEFAULT tiered mode a
-"last 15 minutes" query therefore returned escalation slivers or nothing,
-labeled exact: the worst possible violation of "never a silent empty
-result" and of the standing rule that "last 15 min must mean NOW".
-
-After the fix:
-  * a >= 120 s window whose sampled data is not fully covered by exact data
-    falls back to the raw (merge) path → correct ASH-estimated values,
-    honest "sampled"/"mixed" label;
-  * a >= 120 s window fully covered by exact data still uses the summary
-    fast path and is honestly labeled "exact";
-  * a window with no data at all is labeled "none" — never "exact".
+"""Summaries stay off: long EXACT windows read raw, preserve fidelity and
+refuse at the event limit, even with current or retired summary files.
+Sampled windows retain honest values and empty windows retain fidelity=none.
 """
 import base64
 import hashlib
@@ -34,7 +20,7 @@ from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
     CPU, IO_DATA_FILE_READ,
 )
-from summary_raw_parity_lib import classify_route, ROUTE_RAW, ROUTE_SUMMARY
+from summary_raw_parity_lib import classify_route, ROUTE_RAW
 
 BASE = 10_000_000_000_000
 S = 1_000_000_000
@@ -144,19 +130,32 @@ def build_full_300s():
     }, BASE, ts
 
 
-def test_full_mode_still_fast(t):
-    print("\n### 2. Exact-covered long window keeps the summary path ###")
+def test_full_mode_reads_raw(t):
+    print("\n### 2. Exact-covered long window reads raw and enforces the event limit ###")
     scenario, lo, hi = build_full_300s()
     trace_dir = generate_traces(scenario)
     try:
+        frm, to = lo - 10 * S, hi + 10 * S
+        commands = ("aas", "time_model", "top_events", "top_sessions", "heatmap")
+        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+            for cmd in commands:
+                refused = srv.query(cmd, from_=frm, to_=to, buckets=10)
+                t.check_eq(refused.get("code"), "window_too_large",
+                           cmd + ": current summaries cannot bypass event limit")
+                t.check_eq(refused.get("max_events"), 1,
+                           cmd + ": one-event oracle is active")
         with ServerHarness(trace_dir) as srv:
-            frm, to = lo - 10 * S, hi + 10 * S
+            for cmd in commands:
+                answer = srv.query(cmd, from_=frm, to_=to, buckets=10)
+                t.check("error" not in answer, cmd + ": normal budget answers")
+                t.check_eq(answer.get("fidelity"), "exact",
+                           cmd + ": long raw window retains exact fidelity")
             tm = srv.query("time_model", from_=frm, to_=to)
             rows = {r["name"]: r for r in tm["rows"]}
             t.check_eq(tm.get("fidelity"), "exact",
                        "fully exact-covered window labeled exact")
             t.check_approx(rows.get("DB Time", {}).get("ms", -1),
-                           300_000.0, 0.001, "DB Time = 300s from summaries")
+                           300_000.0, 0.001, "DB Time = 300s from raw events")
 
             # A window with NO data must be labeled none — never exact.
             empty = srv.query("time_model",
@@ -171,48 +170,28 @@ def test_full_mode_still_fast(t):
 
 
 def test_io_worker_availability(t):
-    print("\n### 4. IO worker utilization declares summary unavailability ###")
+    print("\n### 4. Long and short raw windows retain measured IO utilization ###")
     scenario, lo, hi = build_full_300s()
     trace_dir = generate_traces(scenario)
     try:
         with tempfile.TemporaryDirectory(prefix="pgwt-io-worker-") as logs:
-            for route, frm, to in (
-                    (ROUTE_SUMMARY, lo, hi),
-                    (ROUTE_RAW, lo + S, lo + 60 * S)):
-                err_path = os.path.join(logs, route + ".log")
+            for label, frm, to in (("long", lo, hi),
+                                   ("short", lo + S, lo + 60 * S)):
+                err_path = os.path.join(logs, label + ".log")
                 with ServerHarness(trace_dir, stderr_path=err_path) as srv:
                     tm = srv.query("time_model", from_=frm, to_=to)
-                # Exact fidelity alone cannot distinguish raw from summaries.
-                # Reuse the parity gate's event-limit oracle and stderr proof.
-                with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1},
-                                   stderr_path=err_path + ".oracle") as srv:
+                with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
                     oracle = srv.query("time_model", from_=frm, to_=to)
-                with open(err_path) as f:
-                    stderr = f.read()
-                t.check_eq(classify_route(
-                    oracle, stderr, marker_expected=(route == ROUTE_SUMMARY)),
-                    route, route + ": production route proved")
+                stderr = Path(err_path).read_text()
+                t.check_eq(classify_route(oracle, stderr, marker_expected=False),
+                           ROUTE_RAW, label + ": production raw route proved")
                 key = "io_worker_busy_pct"
-                t.check(key in tm, route + ": utilization key is present")
-                if route == ROUTE_SUMMARY:
-                    t.check(tm.get(key) is None,
-                            "summary utilization is null, never measured zero")
-                    t.check(tm.get(key + "_unavailable") is True,
-                            "summary declares utilization unavailable")
-                    reason = tm.get(key + "_unavailable_reason")
-                    t.check(isinstance(reason, str) and bool(reason),
-                            "summary provides a non-empty reason token")
-                    t.check("categories" not in tm,
-                            "summary does not fabricate category rows")
-                else:
-                    value = tm.get(key)
-                    t.check(type(value) in (int, float),
-                            "raw utilization is a measured number")
-                    for suffix in ("_unavailable", "_unavailable_reason"):
-                        t.check(key + suffix not in tm,
-                                "raw omits " + key + suffix)
-                    t.check(isinstance(tm.get("categories"), list),
-                            "raw retains category rows")
+                t.check(type(tm.get(key)) in (int, float),
+                        label + ": raw utilization is a measured number")
+                for suffix in ("_unavailable", "_unavailable_reason"):
+                    t.check(key + suffix not in tm, label + ": raw omits " + key + suffix)
+                t.check(isinstance(tm.get("categories"), list),
+                        label + ": raw retains category rows")
     finally:
         cleanup_traces(trace_dir)
 
@@ -280,7 +259,7 @@ def v9_wait_spin_scenario():
 
 
 def test_retired_summary_cpu_split(t):
-    print("\n### 3. Real v9/v10 refuse; the current writer stays on summaries ###")
+    print("\n### 3. Current, v9/v10 and mixed files all leave requests on raw ###")
     legacy = os.path.join(os.path.dirname(__file__), "fixtures",
                           "summary_v9_wait_spin", "current.summary")
     # Frozen bytes from the old writer, not an invented version number.
@@ -353,20 +332,15 @@ def test_retired_summary_cpu_split(t):
                            arm + ": aas answered the requested window")
                 # 'cat' is emitted only by handle_aas's raw branch. AAS uses
                 # class keys; CPU* is a Time Model row, checked above.
-                t.check(all(("cat" in b) == (version is not None)
-                            for b in aas.get("buckets", [])),
-                        arm + ": aas took the required production route")
-                if version is None:
-                    t.check("recomputing from raw" not in stderr,
-                            "current-only control still takes summaries")
-                else:
-                    marker = (f"INFO: 1 of {2 if mixed else 1} summary file(s) "
-                              "covering this window are not summary "
-                              f"v{PGWT_SUMMARY_VERSION} -- recomputing "
-                              "from raw events")
-                    t.check_eq(stderr.count(marker), 3,
-                               arm + ": aas, time_model AND top_sessions "
-                               f"each log the v{version} refusal")
+                t.check(bool(aas.get("buckets")) and
+                        all("cat" in b for b in aas["buckets"]),
+                        arm + ": aas took the raw production route")
+                with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+                    for cmd in ("aas", "time_model", "top_sessions"):
+                        refused = srv.query(cmd, from_=BASE, to_=BASE + 130 * S)
+                        t.check_eq(refused.get("code"), "window_too_large",
+                                   arm + ": " + cmd + " refuses instead of reading summaries")
+
         finally:
             cleanup_traces(trace_dir)
 
@@ -375,7 +349,7 @@ def main():
     t = TestRunner("test_data_summary_honesty")
     print(f"=== {t.name} ===")
     test_tiered_15min(t)
-    test_full_mode_still_fast(t)
+    test_full_mode_reads_raw(t)
     test_retired_summary_cpu_split(t)
     test_io_worker_availability(t)
     sys.exit(0 if t.summary() else 1)
