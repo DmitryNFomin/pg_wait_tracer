@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_13",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_ns": 5,
+      "covered_ns": 17,
+      "required_ns": 20
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_count": 2,
+      "covered_ns": 17,
+      "required_ns": 20
+    }
+  },
+  "derivation": "recorded_ns=(4-1)+(12-10)=3+2=5; closes {4,12}: recorded_count=2.\nrequired=20; covered=(6-0)+(20-9)=6+11=17; gap=3, both unavailable."
+}

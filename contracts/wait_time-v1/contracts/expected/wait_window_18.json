@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_18",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 3,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 3,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 3,
+      "covered_ns": 18,
+      "required_ns": 18
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 1,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 1,
+      "covered_ns": 18,
+      "required_ns": 18
+    }
+  },
+  "derivation": "PgSleep closed=4-1=3; open Lock contributes 0; total=3; count=1 at 4.\nrequired=18-0=18; covered=18; both complete."
+}

@@ -1,0 +1,29 @@
+{
+ "id": "wait_window_45",
+ "name": "empty event in query",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    20
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    2,
+    5
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "",
+  "from": 0,
+  "to": 10
+ }
+}

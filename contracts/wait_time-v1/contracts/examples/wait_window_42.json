@@ -1,0 +1,27 @@
+{
+ "id": "wait_window_42",
+ "name": "open wait before a known exit, window reaches the exit",
+ "evidence": {
+  "life": [
+   0,
+   10
+  ],
+  "coverage": [
+   [
+    0,
+    8
+   ]
+  ],
+  "waits": [],
+  "open": [
+   "PgSleep",
+   2,
+   8
+  ]
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 0,
+  "to": 12
+ }
+}

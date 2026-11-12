@@ -1,0 +1,39 @@
+{
+ "id": "wait_window_03",
+ "name": "worked: close exactly at window start",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    20
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    0,
+    6
+   ],
+   [
+    "Lock",
+    6,
+    8
+   ],
+   [
+    "PgSleep",
+    8,
+    14
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 6,
+  "to": 10
+ }
+}

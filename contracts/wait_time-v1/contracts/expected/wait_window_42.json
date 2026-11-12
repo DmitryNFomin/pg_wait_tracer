@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_42",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_ns": 6,
+      "covered_ns": 8,
+      "required_ns": 10
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_count": 0,
+      "covered_ns": 8,
+      "required_ns": 10
+    }
+  },
+  "derivation": "closed=0; open=8-2=6; recorded_ns=6; no recorded close, recorded_count=0.\nR=[0,10): required=10; covered=8; gap=2 and exit 10 uncertified, both unavailable."
+}

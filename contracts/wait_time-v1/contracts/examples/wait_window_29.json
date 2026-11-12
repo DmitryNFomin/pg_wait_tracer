@@ -1,0 +1,33 @@
+{
+ "id": "wait_window_29",
+ "name": "touching coverage spans",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    5
+   ],
+   [
+    5,
+    10
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    2,
+    8
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 0,
+  "to": 10
+ }
+}
