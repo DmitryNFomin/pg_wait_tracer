@@ -1069,3 +1069,8 @@ test_core_wait_time_differential.py
 test_core_evidence_contract
 test_core_evidence_differential.py
 test_core_merge_contract
+
+# Refs #871: corpus measurement and portable transport reader/accounting.
+test_merge_tie_count
+test_nmi_transport_reader
+test_nmi_transport_qualification.py

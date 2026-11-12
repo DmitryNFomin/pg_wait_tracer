@@ -208,8 +208,8 @@ struct {
 
 /* event_ringbuf drop counter (A2). Single per-CPU u64 bumped when a
  * bpf_ringbuf_output() into event_ringbuf fails (capacity or reservation
- * contention, including NMI context). PERCPU so the hot path stays
- * atomic-free; the daemon sums across CPUs and surfaces it as
+ * contention, including NMI context). Nesting-safe atomic increments;
+ * the daemon sums across CPUs and surfaces it as
  * ringbuf_drops_total on the control socket. */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -217,6 +217,39 @@ struct {
     __type(key, u32);
     __type(value, u64);
 } ringbuf_drops SEC(".maps");
+
+/* Refs #871: failure-path-only transport diagnostics. Stable slot names
+ * accompany maps.ringbuf_drops for later daemon readers;
+ * this change does not enable a new transport or alter daemon metrics.
+ * PERCPU alone is not nesting-safe: a watchpoint can interrupt a uprobe or
+ * tracepoint on the same CPU. Atomic XADD (including the legacy aggregate)
+ * prevents lost increments without a shared cross-CPU producer lock.
+ * Never reset these counters while producers are attached. */
+enum pgwt_ring_failure_site {
+    PGWT_RING_FAIL_WAIT_TRANSITION,
+    PGWT_RING_FAIL_EXIT_TRANSITION,
+    PGWT_RING_FAIL_MARKER,
+    PGWT_RING_FAIL_COMMAND_BOUNDARY,
+    PGWT_RING_FAIL_LIFECYCLE_INIT,
+    PGWT_RING_FAIL_LIFECYCLE_FORK,
+    PGWT_RING_FAIL_LIFECYCLE_EXIT,
+    PGWT_RING_FAIL_QUERY_TEXT,
+    PGWT_RING_FAIL_PG13_QUERY_TEXT,
+    PGWT_RING_FAIL_SITE_MAX
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, PGWT_RING_FAIL_SITE_MAX);
+    __type(key, u32);
+    __type(value, u64);
+} ringbuf_site_drops SEC(".maps");
+
+static __always_inline void count_ring_fail(u32 site)
+{
+    u64 *count = bpf_map_lookup_elem(&ringbuf_site_drops, &site);
+    if (count)
+        __sync_fetch_and_add(count, 1);
+}
 
 /* Map-insert failure counters (CAP-1/CAP-6). Slots defined in
  * pg_wait_tracer.h (PGWT_BPF_FAIL_*). PERCPU so the hot path stays
@@ -242,15 +275,16 @@ static __always_inline void count_map_fail(u32 slot)
  * bpf_ringbuf_output() returns 0 on success, negative when reservation/output
  * fails; an NMI-context reservation can lose spinlock contention even while
  * the ring has free capacity. */
-static __always_inline void emit_event(const struct pgwt_trace_event *evt)
+static __always_inline void emit_event(const struct pgwt_trace_event *evt, u32 site)
 {
     long rc = bpf_ringbuf_output(&event_ringbuf, (void *)evt, sizeof(*evt),
                                  BPF_RB_NO_WAKEUP);
     if (rc) {
+        count_ring_fail(site);
         u32 zero = 0;
         u64 *drops = bpf_map_lookup_elem(&ringbuf_drops, &zero);
         if (drops)
-            (*drops)++;
+            __sync_fetch_and_add(drops, 1);
     }
 }
 
@@ -588,7 +622,7 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
                 .query_id = query_id,
                 .cpu_ns = cpu_delta,
             };
-            emit_event(&evt);
+            emit_event(&evt, PGWT_RING_FAIL_WAIT_TRANSITION);
         }
 
         /* Transition to new state */
@@ -669,6 +703,8 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
             ev->addr = wait_addr;
             ev->timestamp = bpf_ktime_get_ns();
             bpf_ringbuf_submit(ev, 0);
+        } else {
+            count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_INIT);
         }
     }
     return 0;
@@ -703,6 +739,8 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
         ev->addr = 0;
         ev->timestamp = bpf_ktime_get_ns();
         bpf_ringbuf_submit(ev, 0);
+    } else {
+        count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_FORK);
     }
     return 0;
 }
@@ -767,7 +805,7 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
                 .cpu_ns = cpu_delta,
             };
             if (exact_admission_open()) {
-                emit_event(&evt);
+                emit_event(&evt, PGWT_RING_FAIL_EXIT_TRANSITION);
                 closed_accounted = true;
             }
         }
@@ -816,6 +854,8 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
         ev->addr = 0;
         ev->timestamp = now;
         bpf_ringbuf_submit(ev, 0);
+    } else {
+        count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_EXIT);
     }
     return 0;
 }
@@ -853,7 +893,7 @@ static __always_inline void emit_marker(u32 marker)
         .duration_ns = 0,
         .query_id = qid,
     };
-    emit_event(&evt);
+    emit_event(&evt, PGWT_RING_FAIL_MARKER);
 }
 
 /* #464: is THIS firing site an admitted canonical execution boundary?
@@ -966,8 +1006,10 @@ int on_report_query_id(struct pt_regs *ctx)
 
     struct pgwt_query_text_event *evt;
     evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
-    if (!evt)
+    if (!evt) {
+        count_ring_fail(PGWT_RING_FAIL_QUERY_TEXT);
         return 0; /* leave unseen: a later execution retries raw capture */
+    }
     evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
     evt->pid = pid;
     evt->query_id = query_id;
@@ -1060,7 +1102,7 @@ int on_report_activity(struct pt_regs *ctx)
             .query_id = query_id,
         };
         if (exact_admission_open())
-            emit_event(&evt);
+            emit_event(&evt, PGWT_RING_FAIL_COMMAND_BOUNDARY);
     }
     if ((pg13_synthetic_attr || pg13_query_attr) && !open)
         note_query_edge(pid, 0, now);
@@ -1143,8 +1185,10 @@ int on_executor_start(struct pt_regs *ctx)
 
     struct pgwt_query_text_event *evt;
     evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
-    if (!evt)
+    if (!evt) {
+        count_ring_fail(PGWT_RING_FAIL_PG13_QUERY_TEXT);
         return 0; /* leave unseen: a later execution retries raw capture */
+    }
     evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
     evt->pid = pid;
     evt->query_id = query_id;
