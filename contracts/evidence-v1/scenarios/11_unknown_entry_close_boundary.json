@@ -1,0 +1,68 @@
+{
+  "id": "11_unknown_entry_close_boundary",
+  "description": "An unknown-entry seeded wait closes at 16 and a new named wait begins there.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 10,
+          "pid": 101,
+          "fork": null,
+          "start": 0,
+          "start_known": false,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 12,
+          "pid": 101,
+          "fork": null,
+          "method": "reread",
+          "seed": "PgSleep",
+          "state": "PgSleep",
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "TRANS",
+          "t": 16,
+          "pid": 101,
+          "old": "PgSleep",
+          "new": "Lock",
+          "duration": 5
+        },
+        {
+          "kind": "TRANS",
+          "t": 22,
+          "pid": 101,
+          "old": "Lock",
+          "new": null,
+          "duration": 6
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 25,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": null
+  },
+  "query": {
+    "event": "Lock",
+    "from": 16,
+    "to": 25
+  }
+}

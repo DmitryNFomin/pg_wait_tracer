@@ -1,0 +1,52 @@
+{
+  "id": "10_equal_nonzero_seed",
+  "description": "Matching reread of an already-open PgSleep; no entry transition is present.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 10,
+          "pid": 101,
+          "fork": null,
+          "start": 0,
+          "start_known": false,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 12,
+          "pid": 101,
+          "fork": null,
+          "method": "reread",
+          "seed": "PgSleep",
+          "state": "PgSleep",
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 20,
+          "counters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": null
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 12,
+    "to": 20
+  }
+}

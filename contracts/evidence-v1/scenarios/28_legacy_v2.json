@@ -1,0 +1,44 @@
+{
+  "id": "28_legacy_v2",
+  "description": "Legacy v2 exact-looking transitions without LIFE, ATTACH_OK, or FRONTIER evidence.",
+  "files": [
+    {
+      "version": 2,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": false,
+      "loss_baseline": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "present": true,
+      "records": [
+        {
+          "kind": "TRANS",
+          "t": 5,
+          "pid": 101,
+          "old": "PgSleep",
+          "new": null,
+          "duration": 3
+        },
+        {
+          "kind": "TRANS",
+          "t": 8,
+          "pid": 101,
+          "old": null,
+          "new": "Lock",
+          "duration": 3
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": null
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 2,
+    "to": 8
+  }
+}
