@@ -101,6 +101,7 @@ def generate():
         ("A1_missing", {"life": [10, 36], "coverage": [], "waits": []}),
         ("A1_short", {"life": [10, 36], "coverage": [], "waits": [], "open": ["A", 10]}),
         ("A1_long", {"life": [10, 36], "coverage": [], "waits": [], "open": ["A", 10, 20, 30]}),
+        ("A1_empty_event", {"life": [0, None], "coverage": [[0, 5]], "waits": [], "open": ["", 1, 5]}),
         ("X4", {"life": [0, 40], "coverage": [[20, 20], [0, 10]], "waits": [], "open": None}),
         ("X5", {"life": [40, 40], "coverage": [], "waits": [], "open": None}),
         ("X7", {"life": [0, 40], "coverage": [[0, 40]], "waits": [], "open": ["A", 0, 40]}),
@@ -113,7 +114,7 @@ def generate():
         ("exit_touch", {"life": [0, 40], "coverage": [[0, 40]], "waits": [["A", 40, 40]], "open": None}),
     ]
     cases = [{"id": name, "evidence": e,
-              "query": {"event": "A", "from": 0, "to": 6 if name == "X11" else 40}}
+              "query": {"event": "A", "from": 0, "to": {"A1_empty_event": 5, "X11": 6}.get(name, 40)}}
              for name, e in named]
     for i in range(6300):
         e = valid_case()

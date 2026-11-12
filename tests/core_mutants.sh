@@ -63,6 +63,7 @@ mutants = [
     ("X11", "closed += clipped_ns(w.start, w.end, q->from, q->to);",
      "closed += clipped_ns(w.start, w.end, "
      "q->from + (q->from < UINT64_MAX), q->to + (q->to < UINT64_MAX));", "diff:X11"),
+    ("X12", "!valid_event(e->open.event) || ", "", "diff:A1_empty_event"),
 ]
 
 def build(directory, output):
