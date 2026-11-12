@@ -96,26 +96,8 @@ def shifted(value, offset):
 
 
 def generate():
-    # Named distinguishing inputs are also used by the mutation harness.
-    named = [
-        ("A1_missing", {"life": [10, 36], "coverage": [], "waits": []}),
-        ("A1_short", {"life": [10, 36], "coverage": [], "waits": [], "open": ["A", 10]}),
-        ("A1_long", {"life": [10, 36], "coverage": [], "waits": [], "open": ["A", 10, 20, 30]}),
-        ("A1_empty_event", {"life": [0, None], "coverage": [[0, 5]], "waits": [], "open": ["", 1, 5]}),
-        ("X4", {"life": [0, 40], "coverage": [[20, 20], [0, 10]], "waits": [], "open": None}),
-        ("X5", {"life": [40, 40], "coverage": [], "waits": [], "open": None}),
-        ("X7", {"life": [0, 40], "coverage": [[0, 40]], "waits": [], "open": ["A", 0, 40]}),
-        ("X8", {"life": [0, 10], "coverage": [[0, 10]], "waits": [["A", 5, 20]], "open": None}),
-        ("X9", {"life": [0, 40], "coverage": [[0, 20], [10, 30]], "waits": [], "open": None}),
-        ("X10", {"life": [10, 40], "coverage": [[10, 30]], "waits": [], "open": ["A", 0, 30]}),
-        ("X11", {"life": [0, 40], "coverage": [[0, 40]], "waits": [["A", 5, 10]], "open": None}),
-        ("X11_whole", {"life": [0, 40], "coverage": [[0, 40]], "waits": [["A", 5, 10]], "open": None}),
-        ("duplicates", {"life": [0, 40], "coverage": [[0, 40]], "waits": [["A", 0, 0], ["A", 0, 0], ["A", 0, 40]], "open": None}),
-        ("exit_touch", {"life": [0, 40], "coverage": [[0, 40]], "waits": [["A", 40, 40]], "open": None}),
-    ]
-    cases = [{"id": name, "evidence": e,
-              "query": {"event": "A", "from": 0, "to": {"A1_empty_event": 5, "X11": 6}.get(name, 40)}}
-             for name, e in named]
+    # The contract freezes both evidence and queries, independently of this runner.
+    cases = json.loads((ROOT / "contracts/wait_time-v1/differential_cases.json").read_text())
     for i in range(6300):
         e = valid_case()
         if rnd.random() < 0.45:
@@ -218,9 +200,14 @@ def main():
             output.extend(run.stdout.splitlines())
         if len(output) != len(cases):
             raise RuntimeError(f"driver returned {len(output)} answers for {len(cases)} cases")
+        named_ids = {case["id"] for case in json.loads(
+            (ROOT / "contracts/wait_time-v1/differential_cases.json").read_text())}
         mismatches = 0
         for case, line in zip(cases, output):
             actual, expected = json.loads(line), reference.evaluate(case)
+            if case["id"] in named_ids:
+                equal = all(actual[m] == expected[m] for m in ("wait_time", "completed_waits"))
+                print(f"NAMED {case['id']} " + ("MATCH" if equal else "MISMATCH"), flush=True)
             if case["id"] == "X11_whole":
                 equal = all(actual[m] == expected[m] for m in ("wait_time", "completed_waits"))
                 print("X11 whole-trace: " + ("MATCH" if equal else "MISMATCH"))

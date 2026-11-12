@@ -53,8 +53,8 @@ need node; need go; need python3
 # Keep ASan/UBSan coverage in this gate; standalone runs select it via CFLAGS.
 step "core wait_time contract and mutation checks"
 core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
-run env CFLAGS="$core_cflags" python3 -B tests/test_core_wait_time_differential.py
-run env CFLAGS="$core_cflags" bash tests/core_mutants.sh
+run env CFLAGS="$core_cflags" bash scripts/core-status.sh
+run bash tests/test_core_status.sh
 
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping

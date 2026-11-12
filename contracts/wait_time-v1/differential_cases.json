@@ -1,0 +1,357 @@
+[
+  {
+    "id": "A1_missing",
+    "evidence": {
+      "life": [
+        10,
+        36
+      ],
+      "coverage": [],
+      "waits": []
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "A1_short",
+    "evidence": {
+      "life": [
+        10,
+        36
+      ],
+      "coverage": [],
+      "waits": [],
+      "open": [
+        "A",
+        10
+      ]
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "A1_long",
+    "evidence": {
+      "life": [
+        10,
+        36
+      ],
+      "coverage": [],
+      "waits": [],
+      "open": [
+        "A",
+        10,
+        20,
+        30
+      ]
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "A1_empty_event",
+    "evidence": {
+      "life": [
+        0,
+        null
+      ],
+      "coverage": [
+        [
+          0,
+          5
+        ]
+      ],
+      "waits": [],
+      "open": [
+        "",
+        1,
+        5
+      ]
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 5
+    }
+  },
+  {
+    "id": "X4",
+    "evidence": {
+      "life": [
+        0,
+        40
+      ],
+      "coverage": [
+        [
+          20,
+          20
+        ],
+        [
+          0,
+          10
+        ]
+      ],
+      "waits": [],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "X5",
+    "evidence": {
+      "life": [
+        40,
+        40
+      ],
+      "coverage": [],
+      "waits": [],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "X7",
+    "evidence": {
+      "life": [
+        0,
+        40
+      ],
+      "coverage": [
+        [
+          0,
+          40
+        ]
+      ],
+      "waits": [],
+      "open": [
+        "A",
+        0,
+        40
+      ]
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "X8",
+    "evidence": {
+      "life": [
+        0,
+        10
+      ],
+      "coverage": [
+        [
+          0,
+          10
+        ]
+      ],
+      "waits": [
+        [
+          "A",
+          5,
+          20
+        ]
+      ],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "X9",
+    "evidence": {
+      "life": [
+        0,
+        40
+      ],
+      "coverage": [
+        [
+          0,
+          20
+        ],
+        [
+          10,
+          30
+        ]
+      ],
+      "waits": [],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "X10",
+    "evidence": {
+      "life": [
+        10,
+        40
+      ],
+      "coverage": [
+        [
+          10,
+          30
+        ]
+      ],
+      "waits": [],
+      "open": [
+        "A",
+        0,
+        30
+      ]
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "X11",
+    "evidence": {
+      "life": [
+        0,
+        40
+      ],
+      "coverage": [
+        [
+          0,
+          40
+        ]
+      ],
+      "waits": [
+        [
+          "A",
+          5,
+          10
+        ]
+      ],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 6
+    }
+  },
+  {
+    "id": "X11_whole",
+    "evidence": {
+      "life": [
+        0,
+        40
+      ],
+      "coverage": [
+        [
+          0,
+          40
+        ]
+      ],
+      "waits": [
+        [
+          "A",
+          5,
+          10
+        ]
+      ],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "duplicates",
+    "evidence": {
+      "life": [
+        0,
+        40
+      ],
+      "coverage": [
+        [
+          0,
+          40
+        ]
+      ],
+      "waits": [
+        [
+          "A",
+          0,
+          0
+        ],
+        [
+          "A",
+          0,
+          0
+        ],
+        [
+          "A",
+          0,
+          40
+        ]
+      ],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  },
+  {
+    "id": "exit_touch",
+    "evidence": {
+      "life": [
+        0,
+        40
+      ],
+      "coverage": [
+        [
+          0,
+          40
+        ]
+      ],
+      "waits": [
+        [
+          "A",
+          40,
+          40
+        ]
+      ],
+      "open": null
+    },
+    "query": {
+      "event": "A",
+      "from": 0,
+      "to": 40
+    }
+  }
+]
