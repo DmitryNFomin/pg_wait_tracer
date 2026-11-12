@@ -56,6 +56,12 @@ core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
 run env CFLAGS="$core_cflags" bash scripts/core-status.sh
 run bash tests/test_core_status.sh
 
+# evidence-v1 U1 logical replay, alongside the existing portable core gate.
+step "core evidence contract, differential and mutation checks"
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py --contract-only
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py
+run env CFLAGS="$core_cflags" bash tests/evidence_mutants.sh
+
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
 # below (see issue #118). --fast doesn't need Playwright at all.

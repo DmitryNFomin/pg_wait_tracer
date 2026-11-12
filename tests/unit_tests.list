@@ -1064,3 +1064,7 @@ test_phase_probe
 # Core wait_time v1: independent contract answers, no server dependency.
 test_core_wait_time_contract
 test_core_wait_time_differential.py
+
+# evidence-v1 U1: logical replay, frozen projections and independent differential.
+test_core_evidence_contract
+test_core_evidence_differential.py
