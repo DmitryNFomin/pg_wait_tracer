@@ -159,7 +159,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: core-status-${{ github.sha }}
+          name: core-status-${{ github.sha }}-${{ github.run_attempt }}
           path: tests/results/core_status/
           retention-days: 90
           if-no-files-found: error
