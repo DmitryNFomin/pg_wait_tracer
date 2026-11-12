@@ -12,6 +12,14 @@ CONTRACT.md sections 1 and 3 (FRONTIER barrier, coherent reread, END instant) ar
   codex) and `answers-sonnet.md` (Claude Sonnet). `TASK.md` is the instruction both received.
   Both report no ambiguity. Their 66 result objects (33 scenarios x 2 metrics) are identical.
 - `expected.json`: those result objects, extracted by script, one row per scenario.
+- `projections.json`: per scenario, the replay projection (life, coverage, closed waits, open wait) that
+  both answer sets give. Extracted mechanically from each set and compared: 33 of 33 identical. A contract test
+  compares an implementation's projection with this file, so a projection error that leaves the result object
+  unchanged is still caught.
+- `oracle-v1/inputs/merge-v1.md`: the exact merge-v1 contract text both answer-writers read (byte-identical
+  to `contracts/merge-v1/CONTRACT.md` on draft PR 873 at cdefcf89, not yet on master). The wait_time v1 text
+  they read is byte-identical to `contracts/wait_time-v1/contracts/metrics/wait_time.md` on master.
+- `notes.md`: the design notes CONTRACT.md cites (N2, N4, N5). The answer-writers did not receive it.
 
 An implementation change may not edit anything in this directory. Changing the contract is its own
 reviewed change and invalidates the expected answers.
