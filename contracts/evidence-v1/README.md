@@ -20,6 +20,12 @@ CONTRACT.md sections 1 and 3 (FRONTIER barrier, coherent reread, END instant) ar
   to `contracts/merge-v1/CONTRACT.md` on draft PR 873 at cdefcf89, not yet on master). The wait_time v1 text
   they read is byte-identical to `contracts/wait_time-v1/contracts/metrics/wait_time.md` on master.
 - `notes.md`: the design notes CONTRACT.md cites (N2, N4, N5). The answer-writers did not receive it.
+- `reference/`: an executable reference evaluator (`replay.py`, Python standard library), written by
+  gpt-6.1-sol (codex) from the same inputs the answer-writers received and nothing else (`TASK.md`), with
+  no expected answers in its directory. Run over all 33 scenarios, its result objects equal `expected.json`
+  33/33 and its target projections equal `projections.json` 33/33; it reported no ambiguity for any scenario.
+  `REPORT.md` lists six contract sentences it judged ambiguous in general; no scenario exercises them.
+  Implementations use it for differential testing; it is not product code.
 
 An implementation change may not edit anything in this directory. Changing the contract is its own
 reviewed change and invalidates the expected answers.
