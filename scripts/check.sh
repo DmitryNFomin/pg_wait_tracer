@@ -156,6 +156,9 @@ run scripts/check-link-closure.sh
 step "runner-registration guard self-test"
 run tests/test_check_runner_registration.sh
 
+step "contract guard self-test (#850)"
+run bash tests/test_check_contract_guard.sh
+
 step "agent working agreement guard self-test"
 run python3 -B tests/test_check_agent_agreement.py
 
