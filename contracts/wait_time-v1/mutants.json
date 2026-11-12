@@ -1,0 +1,110 @@
+[
+  {
+    "id": "M1",
+    "original": "q->from <= w.end && w.end < q->to",
+    "replacement": "q->from <= w.end && w.end <= q->to",
+    "intended_case": "case:wait_window_02.json"
+  },
+  {
+    "id": "M2",
+    "original": "q->from <= w.end && w.end < q->to",
+    "replacement": "q->from < w.end && w.end < q->to",
+    "intended_case": "case:wait_window_03.json"
+  },
+  {
+    "id": "M3",
+    "original": "clipped_ns(e->open.start, e->open.as_of, q->from, q->to)",
+    "replacement": "clipped_ns(e->open.start, q->to, q->from, q->to)",
+    "intended_case": "case:wait_window_17.json"
+  },
+  {
+    "id": "M4",
+    "original": "completion_gap = coverage_gap || !exit_certified(e, q);",
+    "replacement": "completion_gap = coverage_gap;",
+    "intended_case": "case:wait_window_32.json"
+  },
+  {
+    "id": "M5",
+    "original": "time->value.present = !coverage_gap;",
+    "replacement": "time->value.present = true;",
+    "intended_case": "case:wait_window_08.json"
+  },
+  {
+    "id": "M6",
+    "original": "if (!same_event(w.event, q->event))",
+    "replacement": "if (w.start == w.end || !same_event(w.event, q->event))",
+    "intended_case": "case:wait_window_19.json"
+  },
+  {
+    "id": "M7",
+    "original": "closed += clipped_ns(w.start, w.end, q->from, q->to);",
+    "replacement": "double sum = (double)closed + (double)clipped_ns(w.start, w.end, q->from, q->to);\n        closed = sum >= (double)UINT64_MAX ? UINT64_MAX : (uint64_t)sum;",
+    "intended_case": "case:wait_window_26.json"
+  },
+  {
+    "id": "M8",
+    "original": "bool coverage_gap = false;\n    bool completion_gap = false;",
+    "replacement": "bool coverage_gap = invalid_window;\n    bool completion_gap = invalid_window;",
+    "intended_case": "case:wait_window_36.json"
+  },
+  {
+    "id": "M9",
+    "original": "time->detail_present = time->value.present;",
+    "replacement": "time->detail_present = true;",
+    "intended_case": "case:wait_window_08.json"
+  },
+  {
+    "id": "M10",
+    "original": "if (e->has_open && s.end > e->open.as_of)",
+    "replacement": "if (false)",
+    "intended_case": "case:wait_window_37.json"
+  },
+  {
+    "id": "X4",
+    "original": "(i && s.start < e->coverage[i - 1].start)",
+    "replacement": "false",
+    "intended_case": "diff:X4"
+  },
+  {
+    "id": "X5",
+    "original": "e->life_end >= q->to",
+    "replacement": "e->life_end > q->to",
+    "intended_case": "diff:X5"
+  },
+  {
+    "id": "X7",
+    "original": "e->open.as_of >= e->life_end",
+    "replacement": "e->open.as_of > e->life_end",
+    "intended_case": "diff:X7"
+  },
+  {
+    "id": "X8",
+    "original": "(e->has_life_end && w.end > e->life_end)",
+    "replacement": "false",
+    "intended_case": "diff:X8"
+  },
+  {
+    "id": "X9",
+    "original": "if (s.start < positive_end)",
+    "replacement": "if (false)",
+    "intended_case": "diff:X9"
+  },
+  {
+    "id": "X10",
+    "original": "e->open.start < e->life_start",
+    "replacement": "false",
+    "intended_case": "diff:X10"
+  },
+  {
+    "id": "X11",
+    "original": "closed += clipped_ns(w.start, w.end, q->from, q->to);",
+    "replacement": "closed += clipped_ns(w.start, w.end, q->from + (q->from < UINT64_MAX), q->to + (q->to < UINT64_MAX));",
+    "intended_case": "diff:X11"
+  },
+  {
+    "id": "X12",
+    "original": "!valid_event(e->open.event) || ",
+    "replacement": "",
+    "intended_case": "diff:A1_empty_event"
+  }
+]
