@@ -70,6 +70,12 @@ if [ "$STUB_MODE" != noop ]; then
     printf 'tokens used\n12,345\n' >&2
 fi
 case "$STUB_MODE" in
+    interrupted)
+        exec python3 -c '
+import os, pathlib, time
+pathlib.Path(os.environ["STUB_SIGNAL_READY"]).write_text(str(os.getpid()))
+time.sleep(60)
+' ;;
     budget-noop|budget-dirty)
         if [ "$STUB_MODE" = budget-dirty ]; then
             printf 'partial tracked work\n' >> base.txt
@@ -538,6 +544,35 @@ datetime.datetime.strptime(row[0], '%Y-%m-%dT%H:%M:%SZ')
 assert row[5].isdigit(), 'cost wall seconds must be numeric'
 PY
 }
+run_interrupted() {
+    STUB_MODE=interrupted
+    STUB_GIT_MODE=normal
+    STUB_SIGNAL_READY="$tmp/signal-ready"
+    export STUB_MODE STUB_GIT_MODE STUB_SIGNAL_READY
+    rm -f "$STUB_SIGNAL_READY"
+    python3 - "$wrapper" "$tmp" "$STUB_BRANCH" "$1" <<'PY'
+import os, pathlib, signal, subprocess, sys, time
+wrapper, tmp, branch, name = sys.argv[1:]
+root = pathlib.Path(tmp)
+with (root / 'out').open('w') as out, (root / 'err').open('w') as err:
+    process = subprocess.Popen([wrapper, str(root / 'brief'), branch], cwd=root,
+                               stdout=out, stderr=err)
+    try:
+        deadline = time.monotonic() + 10
+        ready = pathlib.Path(os.environ['STUB_SIGNAL_READY'])
+        while not ready.exists():
+            assert process.poll() is None, 'wrapper must reach the interrupted Codex case'
+            assert time.monotonic() < deadline, 'interruption fixture must become ready'
+            time.sleep(0.02)
+        signum = getattr(signal, 'SIG' + name)
+        process.send_signal(signum)
+        assert process.wait(timeout=10) == 128 + signum, 'wrapper must preserve interruption exit'
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+PY
+}
 cost_case() {
     case "$1" in
         parsed)
@@ -548,6 +583,12 @@ cost_case() {
             run_wrapper noop
             [ "$rc" -eq 21 ] || return 1
             check_cost unknown BRANCH_UNCHANGED 0 ;;
+        interrupted-TERM)
+            run_interrupted TERM
+            check_cost 12345 INTERRUPTED 143 ;;
+        interrupted-INT)
+            run_interrupted INT
+            check_cost 12345 INTERRUPTED 130 ;;
         append-fail)
             mv "$PGWT_LEAD_STATE_DIR/costs.tsv" "$tmp/saved-costs"
             mkdir "$PGWT_LEAD_STATE_DIR/costs.tsv"
@@ -566,7 +607,7 @@ cost_case() {
 }
 write_brief
 "$here/check-brief.sh" "$tmp/brief" > "$tmp/check-out" || fail 'cost brief refused'
-for case_name in parsed unknown append-fail; do
+for case_name in parsed unknown append-fail interrupted-TERM interrupted-INT; do
     new_branch "cost-$case_name"
     cost_case "$case_name" || fail "cost $case_name control failed"
     python3 - "$wrapper" "$case_name" <<'PY'
@@ -579,10 +620,13 @@ old, new = {
     'unknown': ('END { print (value == "" ? "unknown" : value) }', 'END { print (value == "" ? "0" : value) }'),
     'append-fail': ("(append_cost) 2>/dev/null || printf 'WARNING: could not append cost record\\n' >&2",
                     "(append_cost) 2>/dev/null || exit 99"),
+    'interrupted-TERM': ('cost_outcome=INTERRUPTED', 'cost_outcome='),
+    'interrupted-INT': ('cost_outcome=INTERRUPTED', 'cost_outcome='),
 }[case]
 assert source.count(old) == 1, 'cost mutation target must be unique'
 path.write_text(source.replace(old, new))
 PY
+    sh -n "$wrapper" || fail 'cost mutant must parse'
     new_branch "cost-mutant-$case_name"
     if cost_case "$case_name" > "$tmp/cost-mutant-out" 2>&1; then
         fail "cost $case_name mutant survived"
@@ -590,9 +634,10 @@ PY
     case "$case_name" in
         parsed|unknown) intended='cost tokens must match' ;;
         append-fail) intended='append failure must preserve exit codes and warn once' ;;
+        interrupted-TERM|interrupted-INT) intended='cost row must be appended once' ;;
     esac
     grep -Fq "$intended" "$tmp/cost-mutant-out" || fail "cost $case_name mutant failed wrong assertion"
     cp "$tmp/wrapper-original" "$wrapper"
 done
-printf 'PASS cost ledger: parsed tokens, unknown tokens, append failure preserves exits 0/21 and warns once; 3 mutants caught at intended assertions\n'
+printf 'PASS cost ledger: parsed tokens, unknown tokens, append failure preserves exits 0/21 and warns once, TERM/INT rows are INTERRUPTED; 5 mutants caught at intended assertions\n'
 printf 'PASS: existing wrapper/salvage controls, six brief-gate refusals, and budget stop/salvage/fetch controls\n'

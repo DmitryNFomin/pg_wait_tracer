@@ -63,6 +63,8 @@ mkdir "$lock" 2>/dev/null || die 14 "CLONE_BUSY: lock exists: $lock"
 prompt=
 checked_brief=
 cost_outcome=
+cost_pid=
+cost_tee=
 cost_log="$lock/codex-output"
 cost_pipe="$lock/codex-pipe"
 append_cost() (
@@ -82,6 +84,10 @@ append_cost() (
         >> "${PGWT_LEAD_STATE_DIR:-$repo/scripts/lead}/costs.tsv"
 )
 cleanup() {
+    if [ "$cost_outcome" = INTERRUPTED ]; then
+        cost_end=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+        cost_wall=$(( $(date +%s) - cost_start ))
+    fi
     if [ -n "$cost_outcome" ]; then
         (append_cost) 2>/dev/null || printf 'WARNING: could not append cost record\n' >&2
     fi
@@ -91,9 +97,18 @@ cleanup() {
     rm -f "$lock/budget-exceeded"
     rmdir "$lock"
 }
+interrupted() {
+    codex_rc=$1
+    if [ -n "$cost_pid" ]; then
+        kill -TERM "$cost_pid" 2>/dev/null || :
+        wait "$cost_pid" 2>/dev/null || :
+    fi
+    [ -z "$cost_tee" ] || wait "$cost_tee" 2>/dev/null || :
+    exit "$codex_rc"
+}
 trap cleanup 0
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM HUP
 
 # Freeze the bytes covered by the pass, so editing the source brief during a
 # fetch cannot change either the dispatched scope or its budget.
@@ -157,18 +172,25 @@ prompt=$(mktemp "$lock/brief.XXXXXX") || die 13 'SETUP_FAILED: cannot create pro
 } > "$prompt" || die 13 'SETUP_FAILED: cannot read brief'
 codex_rc=0
 cost_start=$(date +%s)
+cost_outcome=INTERRUPTED
 # Keep streaming output and the supervisor's exact exit code: tee is outside
 # the command's status path. If capture setup fails, run the original path.
 if (mkfifo "$cost_pipe" && : > "$cost_log") 2>/dev/null; then
     tee "$cost_log" < "$cost_pipe" >&2 &
     cost_tee=$!
-    (cd "$clone" && python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
-        codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") > "$cost_pipe" 2>&1 || codex_rc=$?
+    (cd "$clone" && exec python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
+        codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") > "$cost_pipe" 2>&1 &
+    cost_pid=$!
+    wait "$cost_pid" || codex_rc=$?
     wait "$cost_tee" || :
 else
-    (cd "$clone" && python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
-        codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 || codex_rc=$?
+    (cd "$clone" && exec python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
+        codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 &
+    cost_pid=$!
+    wait "$cost_pid" || codex_rc=$?
 fi
+cost_pid=
+cost_tee=
 cost_stop=$(date +%s)
 cost_end=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 cost_wall=$((cost_stop - cost_start))

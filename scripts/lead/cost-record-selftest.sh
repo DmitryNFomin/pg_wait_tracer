@@ -83,9 +83,13 @@ def unknown(f):
 
 
 def post(f):
-    result = f.call('--post')
+    edited = f.root / 'edited.md'
+    edited.write_text('Cost record: edited by lead\nReviewer: 123 tokens\nAdvisers: none\nBox hours: 0\n')
+    # Posting an edited file does not depend on a local ledger or a new draft.
+    f.ledger.unlink()
+    result = f.call('--post', str(edited))
     assert result.returncode == 0, 'post must use gh pr comment'
-    assert f.post.read_text() == result.stdout, 'posted body file must equal printed draft'
+    assert f.post.read_text() == result.stdout == edited.read_text(), 'post must preserve the edited file'
     calls = [json.loads(row) for row in f.log.read_text().splitlines()]
     assert calls[-1][:4] == ['pr', 'comment', '99', '--body-file'], 'post must target PR with body file'
     assert not Path(calls[-1][4]).exists(), 'draft temp file must be cleaned'
@@ -96,14 +100,36 @@ def draft_only(f):
     assert not f.post.exists(), 'default draft must not post'
 
 
+def unfilled(f):
+    edited = f.root / 'unfilled.md'
+    edited.write_text('Cost record: 123 tokens\n- Reviewer: [FILL IN reviewer]\n')
+    result = f.call('--post', str(edited))
+    assert result.returncode != 0 and not f.post.exists(), 'unfilled record must be refused without posting'
+
+
+def clone_names(f):
+    with f.ledger.open('a') as stream:
+        stream.write('2026-11-12T19:03:00Z\tagent/slice\t/brief\tsha\t300\t8\t0\tAUTO_COMMIT\n'
+                     '2026-11-12T19:04:00Z\tagent%2Fslice\t/brief\tsha\t400\t9\t0\tAUTO_COMMIT\n'
+                     '2026-11-12T19:05:00Z\tagent%2Fother\t/brief\tsha\t999\t9\t0\tAUTO_COMMIT\n')
+    out = f.call().stdout
+    assert 'Codex total: 1050 tokens (4 rounds).' in out and '999' not in out, 'clone naming aliases must match only this branch'
+
+
 CASES = [
-    ('branch rounds', draft, ("if len(row) > 1 and row[1] == branch", 'if len(row) > 1'),
+    ('branch rounds', draft, ("if len(row) > 1 and row[1] in aliases", 'if len(row) > 1'),
      'second branch round must appear'),
     ('total', total, ("total = sum(int(row[4]) for row in rows if row[4] != 'unknown')", 'total = 0'),
      'total must sum branch rounds'),
     ('unknown', unknown, ('if unknown:', 'if False:'), 'unknown must not become zero in total'),
     ('post to PR', post, ('gh pr comment', 'gh issue comment'), 'post must use gh pr comment'),
-    ('draft only', draft_only, ('post=0', 'post=1'), 'default draft must not post'),
+    ('draft only', draft_only, ('PY\ncat "$draft"\n', 'PY\ncat "$draft"\ngh pr comment "$pr" --body-file "$draft"\n'), 'default draft must not post'),
+    ('edited file', post, ('cat -- "$post_file" > "$draft"', "printf 'Cost record: regenerated draft\\n' > \"$draft\""),
+     'post must preserve the edited file'),
+    ('unfilled refusal', unfilled, ("if grep -Fq '[FILL IN'", "if false && grep -Fq '[FILL IN'"),
+     'unfilled record must be refused without posting'),
+    ('clone aliases', clone_names, ('row[1] in aliases', 'row[1] == branch'),
+     'clone naming aliases must match only this branch'),
 ]
 
 with tempfile.TemporaryDirectory(prefix='pgwt-cost-record-selftest-') as temp:
@@ -120,13 +146,16 @@ with tempfile.TemporaryDirectory(prefix='pgwt-cost-record-selftest-') as temp:
     f.env['COST_HEAD'] = 'slice'
     draft(f)
     f.env['COST_HEAD'] = 'agent/missing'
-    result = f.call('--post')
+    result = f.call()
     assert result.returncode != 0 and 'no cost rows' in result.stderr and not f.post.exists()
     f.env['COST_HEAD'] = 'slice'
     f.ledger.unlink()
-    assert f.call('--post').returncode != 0 and not f.post.exists()
+    assert f.call().returncode != 0 and not f.post.exists()
+    assert f.call('--post').returncode != 0 and not f.post.exists(), 'post needs a file argument'
+    assert f.call('--post', str(f.root / 'missing.md')).returncode != 0 and not f.post.exists(), 'unreadable edited file must not post'
 
 print('PASS draft branch rounds, total, unknown subtotal, reviewer/adviser/box placeholders, PR body-file post, draft-only, unprefixed branch, missing ledger/rows refusal')
-print('PASS negative controls: 5 parsed mutants reached their cases and failed intended assertions')
+print('PASS edited-file post, unfilled refusal, agent/ and agent%2F row aliases')
+print('PASS negative controls: 8 parsed mutants reached their cases and failed intended assertions')
 print('cost-record-selftest: PASS')
 PY
