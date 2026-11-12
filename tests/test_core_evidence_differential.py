@@ -127,6 +127,47 @@ def named_cases():
     return cases
 
 
+def guard_cases():
+    """Reviewer witnesses for individual semantic guards, derived from fixtures."""
+    cases = []
+    def add(prefix, name, edit):
+        c = fixture(prefix)
+        c["id"] = "guard_" + name
+        edit(c)
+        cases.append(c)
+    def records(c): return c["files"][0]["records"]
+    add("01", "attach_transition", lambda c: records(c)[1].update(method="transition"))
+    add("01", "attach_seed_nonnull", lambda c: records(c)[1].update(seed="Lock"))
+    add("01", "attach_state_nonnull", lambda c: records(c)[1].update(state="Lock"))
+    def edge_at_exit(c):
+        r = records(c)
+        r[3]["new"] = None
+        r.insert(4, {"kind": "TRANS", "t": 10, "pid": 101,
+                     "old": None, "new": "$EXIT", "duration": 0})
+    add("03", "ordinary_edge_then_terminal_at_exit", edge_at_exit)
+    def same_event(c):
+        r = records(c)
+        r.insert(3, {"kind": "TRANS", "t": 5, "pid": 101,
+                     "old": "PgSleep", "new": "PgSleep", "duration": 2})
+        r[4]["duration"] = 2
+    add("01", "same_event_transition", same_event)
+    add("01", "duration_exceeds_timestamp", lambda c: records(c)[2].update(duration=5))
+    add("01", "empty_old_state", lambda c: records(c)[2].update(old=""))
+    def future_start(c):
+        c["target"]["fork"] = 1
+        records(c)[0].update(fork=1, start=1)  # observation remains at t=0
+        records(c)[1]["fork"] = 1
+    add("01", "life_start_after_observation", future_start)
+    add("01", "attach_nonzero_counter", lambda c: records(c)[1]["counters"].__setitem__(11, 1))
+    def earlier_duplicate(c):
+        r = records(c)
+        r.insert(1, dict(r[0], t=5))  # first physical discovery remains t=10
+        r.insert(2, {"kind": "TRANS", "t": 7, "pid": 101,
+                     "old": None, "new": "Lock", "duration": 0})
+    add("06", "first_physical_discovery", earlier_duplicate)
+    return cases
+
+
 def lifecycle_cases():
     cases = []
     def add(prefix, name, edit):
@@ -290,7 +331,7 @@ def generated_lifecycles():
 
 def generate():
     rng = random.Random(SEED)
-    cases = named_cases() + generated_lifecycles()
+    cases = named_cases() + guard_cases() + generated_lifecycles()
     names = ["PgSleep", "Lock", "A", "other", 'quote"slash\\', "\u2603", "A\0B", "\U0001f600"]
     for i in range(2400):
         offset = rng.choice([0, 0, 100, (1 << 53) + 7, (1 << 63), MAX - 100])
@@ -504,7 +545,21 @@ def differential(binary, work, selected=None):
         refusals = [c for c in refusals if c["id"] == selected]
         if len(cases) + len(refusals) != 1:
             raise RuntimeError("unknown/duplicate selected differential case")
-    expected = [reference_answer(reference, c) for c in cases]
+    expected = []
+    scope_refusals = {"guard_attach_transition", "guard_attach_nonzero_counter"}
+    for case in cases:
+        answer = reference_answer(reference, case)
+        if case["id"] in scope_refusals:
+            # The reference supports more attachment shapes than U2's public
+            # API (nonwaiting rereads and zero counters only). Prove the
+            # reference withholds coverage and both values before requiring
+            # the core's documented whole-input refusal for these shapes.
+            if (answer.get("projection", {}).get("coverage") != [] or
+                    any(answer.get(metric, {}).get("completeness") != "unavailable"
+                        for metric in ("wait_time", "completed_waits"))):
+                raise RuntimeError(f"reference did not refuse coverage for {case['id']}")
+            answer = {"error": "unsupported"}
+        expected.append(answer)
     expected += [{"error": "unsupported"} for _ in refusals]
     all_cases = cases + refusals
     paths = []
@@ -528,6 +583,11 @@ def differential(binary, work, selected=None):
             print(f"evidence differential {case['id']} MISMATCH {field} "
                   f"actual={json.dumps(actual, ensure_ascii=True, separators=(',', ':'))} "
                   f"expected={json.dumps(want, ensure_ascii=True, separators=(',', ':'))}")
+        elif case["id"].startswith("guard_"):
+            outcome = "unsupported" if "error" in want else want["wait_time"]["completeness"]
+            reference_outcome = "unavailable" if case["id"] in scope_refusals else outcome
+            print(f"evidence differential {case['id']} PASS "
+                  f"reference={reference_outcome} core={outcome}")
     print(f"evidence differential: {len(cases)} reference cases, {len(refusals)} unsupported cases, "
           f"{mismatches} differences, seed=0x{SEED:x}")
     return 1 if mismatches else 0

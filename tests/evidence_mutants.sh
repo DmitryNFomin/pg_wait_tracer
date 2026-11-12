@@ -173,6 +173,16 @@ guard_mutants = [
     ('G67_reread_reconciles_anchor', 'if (t->t <= attach->t) continue;', '', 'transitions_through_reread', 'keys'),
     ('G68_qualification', 'if (!file->qualified) continue;', '', '27_preempt_rt_unqualified', 'projection.coverage.length'),
     ('G69_legacy_prefix', 'if (file->version != 5) continue;', '', 'legacy_life_shaped_records', 'projection.coverage.length'),
+    ('G70_attach_reread_only', 'if (!r->reread || !null_event(r->seed)', 'if (!null_event(r->seed)', 'guard_attach_transition', 'keys'),
+    ('G71_attach_seed_null', '!r->reread || !null_event(r->seed) || ', '!r->reread || ', 'guard_attach_seed_nonnull', 'keys'),
+    ('G72_attach_state_null', ' || !null_event(r->state))', ')', 'guard_attach_state_nonnull', 'keys'),
+    ('G73_ordinary_exit_strict', 't->t < life->exit))', 't->t <= life->exit))', 'guard_ordinary_edge_then_terminal_at_exit', 'projection.coverage.length'),
+    ('G74_transition_changes_state', '                       same(r->old_event, r->new_event) || r->duration > r->t', '                       r->duration > r->t', 'guard_same_event_transition', 'keys'),
+    ('G75_duration_within_timestamp', 'same(r->old_event, r->new_event) || r->duration > r->t', 'same(r->old_event, r->new_event)', 'guard_duration_exceeds_timestamp', 'keys'),
+    ('G76_old_state_valid', '} else if (!state(r->old_event) || ', '} else if (', 'guard_empty_old_state', 'keys'),
+    ('G77_life_start_not_future', ' ||\n                    r->start > r->t ||', ' ||', 'guard_life_start_after_observation', 'keys'),
+    ('G78_attach_zero_counters', 'if (!zero_counters(&r->counters))\n                    return unsupported(why, "unsupported attachment counters");', '', 'guard_attach_nonzero_counter', 'keys'),
+    ('G79_first_physical_discovery', '    if (!g->life) g->discovery = r->t;\n', '    if (!g->life || r->t < g->discovery) g->discovery = r->t;\n', 'guard_first_physical_discovery', 'projection.coverage.length'),
 ]
 
 contract_guards = {'G58_key_ignores_absent_fork_bytes', 'G59_final_ignores_absent_fork_bytes'}
