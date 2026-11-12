@@ -31,9 +31,9 @@ def fixture(root):
     evidence = {
         "contract": {"kind": "attestation", "link": "#123"},
         "answer": {"kind": "attestation",
-                   "link": "https://github.com/example/project/pull/124"},
+                   "link": "https://github.com/DmitryNFomin/pg_wait_tracer/pull/124"},
         "cost": {"kind": "attestation",
-                 "link": "https://github.com/example/project/issues/125#issuecomment-126"},
+                 "link": "https://github.com/DmitryNFomin/pg_wait_tracer/issues/125#issuecomment-126"},
         "core": {"kind": "core-status", "contract": "example-v1"},
         "binary": {"kind": "box-check", "path": "box.log"},
     }

@@ -85,7 +85,7 @@ def attestation(record):
         link = f"{REPOSITORY}/pull/{link[1:]}"
     else:
         require(re.fullmatch(
-            r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
+            re.escape(REPOSITORY) + r"/"
             r"(?:pull/[1-9][0-9]*|issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*)", link),
             "malformed attestation link")
     return [link]
