@@ -131,6 +131,13 @@ jobs:
       - name: Kill guard self-test
         run: scripts/hooks/kill-guard-selftest.sh
 
+      - name: Contract guard
+        if: github.event_name == 'pull_request'
+        env:
+          CONTRACT_BASE: ${{ github.event.pull_request.base.sha }}
+          CONTRACT_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: scripts/check-contract-guard.sh "$CONTRACT_BASE" "$CONTRACT_HEAD"
+
       - name: Classify the change (src/ vs web+tests+tooling vs docs-only)
         id: filter
         run: |
