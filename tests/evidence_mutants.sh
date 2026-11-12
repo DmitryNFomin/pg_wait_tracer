@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 exec python3 -B - <<'PY'
 import importlib.util
+import contextlib
+import io
 from pathlib import Path
 import re
 import shutil
@@ -16,7 +18,7 @@ spec = importlib.util.spec_from_file_location("evidence_differential", root / "t
 diff = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(diff)
 
-# (name, source text, replacement, intended frozen case, required first mismatch)
+# (name, source text, replacement, intended case, required first mismatch)
 mutants = [
     ("E1_no_attach", "if (!attach || attach->t > frontier || e->invalid_fields) continue;", """
         if (!attach && !e->invalid_fields) {
@@ -84,6 +86,34 @@ mutants = [
      "19_end_without_final_frontier", "unsupported"),
 ]
 
+differential_mutants = [
+    ("E10_no_physical_prefix", "history[j].order >= i || ", "",
+     "transition_after_frontier", "projection.waits.length"),
+    ("E11_no_pid_check", "if (r->kind != PGWT_EVIDENCE_FRONTIER && r->pid != in->pid)",
+     "if (0)", "refuse_other_pid_transition", "keys"),
+    ("E12_no_duration_check", "(!null_event(current) && t->t - t->duration != entry)", "false",
+     "inconsistent_duration", "keys"),
+    ("E13_no_old_state_check", "!same(t->old_event, current) ||", "",
+     "inconsistent_old_state", "keys"),
+    ("E14_no_transition_lifetime", "if (t->t < e->life_start) {", "if (0) {",
+     "refuse_transition_before_fork", "keys"),
+    ("E15_no_attach_lifetime", "if (attach->t < e->life_start) {", "if (0) {",
+     "refuse_attach_before_fork", "keys"),
+    ("E16_no_frontier_advance", "if (has_frontier && r->t <= frontier) {", "if (0) {",
+     "refuse_nonadvancing_frontier_15", "keys"),
+]
+
+
+def differential_case(binary, work, case):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        status = diff.differential(binary, work, case)
+    text = output.getvalue()
+    # The differential rejects crashes, sanitizer errors and malformed output.
+    valid = bool(re.search(r"^evidence differential: [01] reference cases, [01] unsupported cases, "
+                           r"1 differences, seed=0x[0-9a-f]+$", text, re.M))
+    return status, text, valid
+
 
 def contract(binary):
     result = diff.execute([binary, diff.CONTRACT])
@@ -110,7 +140,8 @@ def main():
         if diff.differential(binary, work):
             raise RuntimeError("baseline differential failed")
         failed = False
-        for name, old, new, case, field in mutants:
+        all_mutants = mutants + differential_mutants
+        for name, old, new, case, field in all_mutants:
             directory = work / name
             shutil.copytree(base, directory, ignore=shutil.ignore_patterns("contract-test", "*.dSYM"))
             source = directory / "src/core/evidence_replay.c"
@@ -121,19 +152,27 @@ def main():
             executable = directory / "contract-test"
             try:
                 diff.build(directory, executable)
-                status, output, valid = contract(executable)
+                if name in {m[0] for m in differential_mutants}:
+                    status, output, valid = differential_case(executable, directory, case)
+                    intended = re.search(
+                        rf"^evidence differential {re.escape(case)} MISMATCH ({re.escape(field)}) ",
+                        output, re.M)
+                else:
+                    status, output, valid = contract(executable)
+                    intended = re.search(
+                        rf"^evidence {re.escape(case)} FAIL ({re.escape(field)}(?:[.\[].*)?)$",
+                        output, re.M)
             except (RuntimeError, OSError) as error:
                 print(f"{name} SURVIVED/ERROR (build/run failure is not a kill): {error}", flush=True)
                 failed = True
                 continue
-            intended = re.search(rf"^evidence {re.escape(case)} FAIL ({re.escape(field)}(?:[.\[].*)?)$", output, re.M)
             if status == 1 and valid and intended:
                 extra = "; both result objects unchanged" if name == "E8_shift_coverage" else ""
                 print(f"{name} KILLED ({case}, {intended[1]}, build OK{extra})", flush=True)
             else:
                 print(f"{name} SURVIVED/ERROR (exit {status}; intended comparison not proven)\n{output}", flush=True)
                 failed = True
-        print(f"evidence mutants: {len(mutants)} checked, " + ("FAIL" if failed else "all KILLED"))
+        print(f"evidence mutants: {len(all_mutants)} checked, " + ("FAIL" if failed else "all KILLED"))
         return 1 if failed else 0
 
 

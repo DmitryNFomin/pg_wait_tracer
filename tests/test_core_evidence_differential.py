@@ -112,6 +112,18 @@ def named_cases():
     c["id"] = "legacy_qualified_flag"
     c["files"][0]["qualified"] = True
     cases.append(c)
+    c = copy.deepcopy(ordinary)
+    c["id"] = "transition_after_frontier"
+    r = c["files"][0]["records"]
+    r.append(r.pop(5))  # Lock closes only after the certifying physical prefix.
+    c["query"]["event"] = "Lock"
+    cases.append(c)
+    for name, field, value in (("inconsistent_duration", "duration", 5),
+                               ("inconsistent_old_state", "old", "Lock")):
+        c = copy.deepcopy(ordinary)
+        c["id"] = name
+        c["files"][0]["records"][3][field] = value
+        cases.append(c)
     return cases
 
 
@@ -136,7 +148,7 @@ def generate():
                                 "old": current, "new": new, "duration": t - entry})
             current, entry = new, t
         # Reorder timestamp groups while retaining physical order within ties.
-        # Every required dependency is still appended before its FRONTIER.
+        # Start with dependencies before FRONTIER, then vary physical prefixes.
         groups = []
         for tr in transitions:
             if not groups or groups[-1][0]["t"] != tr["t"]:
@@ -160,6 +172,20 @@ def generate():
                             "duration": t + 5 - entry})
         if i % 19 == 0:
             records = deps  # no FRONTIER at all
+        if transitions:
+            fault = i % 5
+            tr = rng.choice(transitions)
+            if fault == 0 and frontiers[0] in records:
+                # Include timestamps inside a certificate but outside its prefix.
+                records.remove(tr)
+                records.append(tr)
+            elif fault == 1:
+                tr["pid"] = 102
+            elif fault == 2:
+                # Keep the duration individually valid, but inconsistent with entry.
+                tr["duration"] = (tr["duration"] + 1) % (tr["t"] + 1)
+            elif fault == 3:
+                tr["old"] = next(n for n in names if n not in (tr["old"], tr["new"]))
         qualified, version, target_fork = i % 7 != 0, 5, fork
         if i % 13 == 0:
             version, qualified, target_fork = 2 + (i % 3), False, None
@@ -186,7 +212,7 @@ def generate():
 
 
 def refusal_cases():
-    """U1 must refuse the entire input, even when the suffix is uncertified."""
+    """Whole-input refusals and metric refusals, including uncertified suffixes."""
     cases = []
     def add(name, edit):
         c = fixture("01")
@@ -218,7 +244,31 @@ def refusal_cases():
     add("future_schema", lambda c: c["files"][0].__setitem__("version", 6))
     add("record_extension", lambda c: c["files"][0]["records"][-1].__setitem__("run", 2))
     add("invalid_time_token", lambda c: c["files"][0]["records"][-1].__setitem__("t", 15.0))
-    return cases
+    add("other_pid_transition", lambda c: c["files"][0]["records"].insert(6, {
+        "kind": "TRANS", "t": 13, "pid": 102, "old": None,
+        "new": "PgSleep", "duration": 0}))
+    def transition_before_fork(c):
+        c["target"]["fork"] = 1
+        r = c["files"][0]["records"]
+        r[0].update(t=1, fork=1, start=1)
+        r[1]["fork"] = 1
+        r.insert(2, {"kind": "TRANS", "t": 0, "pid": 101, "old": None,
+                     "new": "Lock", "duration": 0})
+    add("transition_before_fork", transition_before_fork)
+    def attach_before_fork(c):
+        c["target"]["fork"] = 2
+        c["files"][0]["records"][0].update(t=2, fork=2, start=2)
+        c["files"][0]["records"][1]["fork"] = 2
+    add("attach_before_fork", attach_before_fork)
+    for t in (15, 14):
+        add(f"nonadvancing_frontier_{t}", lambda c, t=t: c["files"][0]["records"].append({
+            "kind": "FRONTIER", "t": t, "counters": [0] * 15}))
+    # A frontier before the attach withholds coverage, rather than invalidating
+    # the entire input. Compare these unavailable metrics with the reference.
+    unavailable = fixture("01")
+    unavailable["id"] = "refuse_last_frontier_before_attach"
+    unavailable["files"][0]["records"][1]["t"] = 20
+    return cases, [unavailable]
 
 
 def reference_module():
@@ -232,11 +282,17 @@ def reference_module():
 def reference_answer(reference, case):
     try:
         output = reference.section_7_scenario(case)
-    except reference.Ambiguity as error:
-        raise RuntimeError(f"reference ambiguity for {case['id']}: {error}") from error
+    except reference.Ambiguity:
+        # No independent numerical answer exists. Require a whole-input refusal,
+        # never a result object (even one whose metrics claim unavailability).
+        return {"error": "unsupported"}
     if len(output) != 3:
         raise RuntimeError(f"reference did not produce all objects for {case['id']}")
     target = case["target"]
+    # The reference handles multiple PIDs; U1 explicitly supports only one.
+    if any(r["kind"] == "TRANS" and r["pid"] != target["pid"]
+           for f in case["files"] for r in f["records"]):
+        return {"error": "unsupported"}
     cores = [p["core"] for p in output[0]["projection"]
              if all(p["generation"][key] == value for key, value in target.items())]
     if len(cores) != 1:
@@ -264,7 +320,9 @@ def first_difference(actual, expected, path=""):
 
 def differential(binary, work, selected=None):
     reference = reference_module()
-    cases, refusals = generate(), refusal_cases()
+    cases = generate()
+    refusals, metric_refusals = refusal_cases()
+    cases.extend(metric_refusals)
     if selected:
         cases = [c for c in cases if c["id"] == selected]
         refusals = [c for c in refusals if c["id"] == selected]
