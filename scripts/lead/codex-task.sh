@@ -62,7 +62,30 @@ lock="$root/$flat.lock"
 mkdir "$lock" 2>/dev/null || die 14 "CLONE_BUSY: lock exists: $lock"
 prompt=
 checked_brief=
+cost_outcome=
+cost_log="$lock/codex-output"
+cost_pipe="$lock/codex-pipe"
+append_cost() (
+    tokens=unknown
+    if [ -r "$cost_log" ]; then
+        tokens=$(awk '
+        pending { gsub(/,/, ""); if ($0 ~ /^[[:space:]]*[0-9]+[[:space:]]*$/) {
+            value = $0; gsub(/[[:space:]]/, "", value)
+        }; pending = 0 }
+        /^[[:space:]]*tokens used[[:space:]]*$/ { pending = 1 }
+        END { print (value == "" ? "unknown" : value) }
+        ' "$cost_log") || return 1
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$cost_end" "$branch" "$brief" "$brief_sha" "$tokens" \
+        "$cost_wall" "$codex_rc" "$cost_outcome" \
+        >> "${PGWT_LEAD_STATE_DIR:-$repo/scripts/lead}/costs.tsv"
+)
 cleanup() {
+    if [ -n "$cost_outcome" ]; then
+        (append_cost) 2>/dev/null || printf 'WARNING: could not append cost record\n' >&2
+    fi
+    rm -f "$cost_log" "$cost_pipe"
     [ -z "$prompt" ] || rm -f "$prompt"
     [ -z "$checked_brief" ] || rm -f "$checked_brief"
     rm -f "$lock/budget-exceeded"
@@ -133,10 +156,26 @@ prompt=$(mktemp "$lock/brief.XXXXXX") || die 13 'SETUP_FAILED: cannot create pro
     cat "$checked_brief"
 } > "$prompt" || die 13 'SETUP_FAILED: cannot read brief'
 codex_rc=0
-(cd "$clone" && python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
-    codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 || codex_rc=$?
+cost_start=$(date +%s)
+# Keep streaming output and the supervisor's exact exit code: tee is outside
+# the command's status path. If capture setup fails, run the original path.
+if (mkfifo "$cost_pipe" && : > "$cost_log") 2>/dev/null; then
+    tee "$cost_log" < "$cost_pipe" >&2 &
+    cost_tee=$!
+    (cd "$clone" && python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
+        codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") > "$cost_pipe" 2>&1 || codex_rc=$?
+    wait "$cost_tee" || :
+else
+    (cd "$clone" && python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
+        codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 || codex_rc=$?
+fi
+cost_stop=$(date +%s)
+cost_end=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+cost_wall=$((cost_stop - cost_start))
+cost_outcome=BRANCH_UNCHANGED
 budget_exceeded=0
 [ ! -f "$lock/budget-exceeded" ] || budget_exceeded=1
+[ "$budget_exceeded" -eq 0 ] || cost_outcome=BUDGET_EXCEEDED
 
 # Salvage the working tree unconditionally: the implementer sandbox forbids
 # writes under .git (issue #777), so a finished round normally leaves its work
@@ -208,6 +247,9 @@ fi
 
 # Fetch committed work even when Codex itself returned a non-zero status.
 tip=$(git -C "$clone" rev-parse --verify "refs/heads/$branch" 2>/dev/null) || die 20 "BRANCH_MISSING: branch does not exist in clone afterwards: $branch"
+if [ "$budget_exceeded" -eq 0 ] && [ "$tip" != "$before" ]; then
+    cost_outcome=AUTO_COMMIT
+fi
 [ "$budget_exceeded" -eq 1 ] || [ "$tip" != "$before" ] || die 21 "BRANCH_UNCHANGED: branch did not move: $branch (codex exit $codex_rc)"
 git -C "$repo" fetch "$clone" "refs/heads/$branch:refs/heads/$branch" --force >&2 || die 22 'FETCH_FAILED: could not fetch task branch into real repository'
 type=$(git -C "$repo" cat-file -t "$tip" 2>/dev/null) || die 23 'COMMIT_UNREACHABLE: fetched commit is unreachable'

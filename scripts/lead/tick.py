@@ -167,6 +167,26 @@ def collect(data, now):
         error(exc)
         return items, acted
     try:
+        cutoff_file = STATE / 'cost-cutoff'
+        if cutoff_file.exists():
+            cutoff = datetime.fromisoformat(cutoff_file.read_text().strip().replace('Z', '+00:00'))
+            if cutoff.utcoffset() is None or cutoff.utcoffset().total_seconds() != 0:
+                raise ValueError('cost-cutoff must be an ISO UTC time')
+            # Deliberately check only page 1 of merged PRs (limit 30).
+            merged = gh('pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '30',
+                        '--json', 'number,mergedAt,body')
+            for pr in merged:
+                merged_at = datetime.fromisoformat(pr['mergedAt'].replace('Z', '+00:00'))
+                if merged_at < cutoff or 'Cost record' in (pr['body'] or ''):
+                    continue
+                pages = gh('api', f'repos/{repo}/issues/{pr["number"]}/comments?per_page=100',
+                           '--paginate', '--slurp')
+                if not any('Cost record' in (comment['body'] or '')
+                           for page in pages for comment in page):
+                    items.append(line(f'cost-{pr["number"]}', 'merged without a cost record'))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
+        error(exc)
+    try:
         prs = [pr for page in graphql(OPEN_QUERY, repo)
                for pr in page['data']['repository']['pullRequests']['nodes']
                if pr['autoMergeRequest'] is not None]
@@ -245,7 +265,7 @@ def once(data):
     now = time.time()
     items, acted = collect(data, now)
     data['seen'] = {item: stamp for item, stamp in data['seen'].items() if item in items}
-    reported = [item for item in items if item.startswith(('NEEDS-LEAD follow-', 'NEEDS-LEAD tick-error '))
+    reported = [item for item in items if item.startswith(('NEEDS-LEAD follow-', 'NEEDS-LEAD tick-error ', 'NEEDS-LEAD cost-'))
                 or item not in data['seen'] or now - data['seen'][item] >= 3600]
     data['reported'] = reported
     save(data)

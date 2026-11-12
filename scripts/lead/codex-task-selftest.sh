@@ -66,6 +66,9 @@ printf '%s\n' "$input" | grep -Fq 'Do not create your own clone.' || exit 96
 printf '%s\n' "$input" | grep -Fqx BRIEF_SENTINEL || exit 97
 printf '%s\n' "$input" | grep -Fq '.codex-commit-msg' || exit 99
 printf '%s\n' "$STUB_BRANCH" >> "$STUB_CALLS"
+if [ "$STUB_MODE" != noop ]; then
+    printf 'tokens used\n12,345\n' >&2
+fi
 case "$STUB_MODE" in
     budget-noop|budget-dirty)
         if [ "$STUB_MODE" = budget-dirty ]; then
@@ -515,4 +518,81 @@ for mode in budget-dirty budget-noop; do
     fi
     printf 'extra %s: exit=27; process group stopped; %s; elapsed=%ss\n' "$mode" "$outcome" "$elapsed"
 done
+
+# Cost checks use the same real wrapper/fixture as the existing controls.
+# Each mutant runs to completion and must fail the intended cost assertion.
+cp "$wrapper" "$tmp/wrapper-original"
+check_cost() {
+    python3 - "$PGWT_LEAD_STATE_DIR/costs.tsv" "$STUB_BRANCH" "$1" "$2" "$3" "$tmp/brief" <<'PY'
+import csv, datetime, hashlib, pathlib, sys
+path, branch, tokens, outcome, code, brief = sys.argv[1:]
+with open(path, newline='') as stream:
+    rows = [row for row in csv.reader(stream, delimiter='\t') if row[1] == branch]
+assert len(rows) == 1, 'cost row must be appended once'
+row = rows[0]
+assert len(row) == 8, 'cost row must have eight columns'
+assert row[4] == tokens, 'cost tokens must match'
+assert row[7] == outcome and row[6] == code, 'cost outcome and Codex exit must match'
+assert row[2] == brief and row[3] == hashlib.sha256(pathlib.Path(brief).read_bytes()).hexdigest(), 'cost brief identity must match'
+datetime.datetime.strptime(row[0], '%Y-%m-%dT%H:%M:%SZ')
+assert row[5].isdigit(), 'cost wall seconds must be numeric'
+PY
+}
+cost_case() {
+    case "$1" in
+        parsed)
+            run_wrapper dirty
+            [ "$rc" -eq 0 ] || return 1
+            check_cost 12345 AUTO_COMMIT 0 ;;
+        unknown)
+            run_wrapper noop
+            [ "$rc" -eq 21 ] || return 1
+            check_cost unknown BRANCH_UNCHANGED 0 ;;
+        append-fail)
+            mv "$PGWT_LEAD_STATE_DIR/costs.tsv" "$tmp/saved-costs"
+            mkdir "$PGWT_LEAD_STATE_DIR/costs.tsv"
+            run_wrapper dirty
+            dirty_rc=$rc
+            warnings=$(grep -c '^WARNING: could not append cost record$' "$tmp/err" || true)
+            run_wrapper noop
+            noop_rc=$rc
+            rmdir "$PGWT_LEAD_STATE_DIR/costs.tsv"
+            mv "$tmp/saved-costs" "$PGWT_LEAD_STATE_DIR/costs.tsv"
+            [ "$dirty_rc" -eq 0 ] && [ "$noop_rc" -eq 21 ] && [ "$warnings" -eq 1 ] &&
+                [ "$(grep -c '^WARNING: could not append cost record$' "$tmp/err" || true)" -eq 1 ] || {
+                    echo 'append failure must preserve exit codes and warn once'; return 1;
+                } ;;
+    esac
+}
+write_brief
+"$here/check-brief.sh" "$tmp/brief" > "$tmp/check-out" || fail 'cost brief refused'
+for case_name in parsed unknown append-fail; do
+    new_branch "cost-$case_name"
+    cost_case "$case_name" || fail "cost $case_name control failed"
+    python3 - "$wrapper" "$case_name" <<'PY'
+from pathlib import Path
+import sys
+path, case = Path(sys.argv[1]), sys.argv[2]
+source = path.read_text()
+old, new = {
+    'parsed': ('END { print (value == "" ? "unknown" : value) }', 'END { print "unknown" }'),
+    'unknown': ('END { print (value == "" ? "unknown" : value) }', 'END { print (value == "" ? "0" : value) }'),
+    'append-fail': ("(append_cost) 2>/dev/null || printf 'WARNING: could not append cost record\\n' >&2",
+                    "(append_cost) 2>/dev/null || exit 99"),
+}[case]
+assert source.count(old) == 1, 'cost mutation target must be unique'
+path.write_text(source.replace(old, new))
+PY
+    new_branch "cost-mutant-$case_name"
+    if cost_case "$case_name" > "$tmp/cost-mutant-out" 2>&1; then
+        fail "cost $case_name mutant survived"
+    fi
+    case "$case_name" in
+        parsed|unknown) intended='cost tokens must match' ;;
+        append-fail) intended='append failure must preserve exit codes and warn once' ;;
+    esac
+    grep -Fq "$intended" "$tmp/cost-mutant-out" || fail "cost $case_name mutant failed wrong assertion"
+    cp "$tmp/wrapper-original" "$wrapper"
+done
+printf 'PASS cost ledger: parsed tokens, unknown tokens, append failure preserves exits 0/21 and warns once; 3 mutants caught at intended assertions\n'
 printf 'PASS: existing wrapper/salvage controls, six brief-gate refusals, and budget stop/salvage/fetch controls\n'
