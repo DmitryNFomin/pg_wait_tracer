@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_41",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 6,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 0,
+      "open_ns": 6
+    },
+    "diagnostic": {
+      "recorded_ns": 6,
+      "covered_ns": 8,
+      "required_ns": 8
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 0,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 0,
+      "covered_ns": 8,
+      "required_ns": 8
+    }
+  },
+  "derivation": "as_of 8 < exit 10 is valid; closed=0; open=8-2=6; total=6; count=0.\nR=[0,8): required=8-0=8; covered=8; exit is not in W."
+}

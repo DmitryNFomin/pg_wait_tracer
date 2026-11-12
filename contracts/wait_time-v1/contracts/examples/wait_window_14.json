@@ -1,0 +1,38 @@
+{
+ "id": "wait_window_14",
+ "name": "coverage gap outside window",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    6
+   ],
+   [
+    9,
+    20
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    1,
+    4
+   ],
+   [
+    "PgSleep",
+    10,
+    12
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 9,
+  "to": 20
+ }
+}

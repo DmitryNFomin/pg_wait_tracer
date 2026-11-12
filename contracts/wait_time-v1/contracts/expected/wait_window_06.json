@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_06",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 0,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 0,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 0,
+      "covered_ns": 20,
+      "required_ns": 20
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 0,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 0,
+      "covered_ns": 20,
+      "required_ns": 20
+    }
+  },
+  "derivation": "No IO records: closed=0; open=0; total=0; count=0.\nrequired=20-0=20; covered=20; both measured zeros are complete."
+}

@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_10",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 5,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 5,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 5,
+      "covered_ns": 15,
+      "required_ns": 15
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 2,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 2,
+      "covered_ns": 15,
+      "required_ns": 15
+    }
+  },
+  "derivation": "closed=(9-5)+(13-12)=4+1=5; open=0; total=5.\nCloses {9,13}: count=2; R=[5,20), required=20-5=15; covered=15."
+}

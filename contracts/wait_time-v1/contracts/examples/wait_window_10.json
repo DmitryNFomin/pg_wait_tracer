@@ -1,0 +1,34 @@
+{
+ "id": "wait_window_10",
+ "name": "window starts before lifetime",
+ "evidence": {
+  "life": [
+   5,
+   null
+  ],
+  "coverage": [
+   [
+    5,
+    20
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    5,
+    9
+   ],
+   [
+    "PgSleep",
+    12,
+    13
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 0,
+  "to": 20
+ }
+}

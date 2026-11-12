@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_05",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": 2,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "detail": {
+      "closed_ns": 2,
+      "open_ns": 0
+    },
+    "diagnostic": {
+      "recorded_ns": 2,
+      "covered_ns": 20,
+      "required_ns": 20
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": 1,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "complete",
+    "reasons": [],
+    "diagnostic": {
+      "recorded_count": 1,
+      "covered_ns": 20,
+      "required_ns": 20
+    }
+  },
+  "derivation": "Lock closed=8-6=2; open=0; total=2.\nLock closes at 8: count=1; required=20-0=20; covered=20."
+}

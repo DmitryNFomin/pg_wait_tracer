@@ -1,0 +1,29 @@
+{
+ "id": "wait_window_43",
+ "name": "window ends before exit; exit not in window",
+ "evidence": {
+  "life": [
+   0,
+   15
+  ],
+  "coverage": [
+   [
+    0,
+    12
+   ]
+  ],
+  "waits": [
+   [
+    "PgSleep",
+    2,
+    5
+   ]
+  ],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 3,
+  "to": 12
+ }
+}

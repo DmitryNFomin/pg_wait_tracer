@@ -1,0 +1,38 @@
+{
+  "id": "wait_window_35",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete",
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_ns": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete",
+      "evidence_invalid"
+    ],
+    "diagnostic": {
+      "recorded_count": null,
+      "covered_ns": null,
+      "required_ns": null
+    }
+  },
+  "derivation": "Waits overlap [3,6), length 6-3=3: evidence_invalid.\nValid coverage=4-0=4; required=10-0=10; gap=6 adds coverage_incomplete; diagnostics still all null."
+}

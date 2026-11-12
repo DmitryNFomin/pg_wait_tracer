@@ -1,0 +1,36 @@
+{
+  "id": "wait_window_09",
+  "wait_time": {
+    "metric": "wait_time",
+    "version": 1,
+    "value": null,
+    "unit": "ns",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_ns": 0,
+      "covered_ns": 0,
+      "required_ns": 10
+    }
+  },
+  "completed_waits": {
+    "metric": "completed_waits",
+    "version": 1,
+    "value": null,
+    "unit": "count",
+    "basis": "observed",
+    "completeness": "unavailable",
+    "reasons": [
+      "coverage_incomplete"
+    ],
+    "diagnostic": {
+      "recorded_count": 0,
+      "covered_ns": 0,
+      "required_ns": 10
+    }
+  },
+  "derivation": "No matching occupation or closes in [30,40): recorded_ns=0; recorded_count=0.\nrequired=40-30=10; covered=0; gap=10, so both unavailable."
+}

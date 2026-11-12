@@ -1,0 +1,23 @@
+{
+ "id": "wait_window_27",
+ "name": "covered window with no waits at all",
+ "evidence": {
+  "life": [
+   0,
+   null
+  ],
+  "coverage": [
+   [
+    0,
+    20
+   ]
+  ],
+  "waits": [],
+  "open": null
+ },
+ "query": {
+  "event": "PgSleep",
+  "from": 3,
+  "to": 9
+ }
+}

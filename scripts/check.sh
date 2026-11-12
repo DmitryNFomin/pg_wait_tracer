@@ -47,6 +47,15 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+# Portable C core: this script builds/runs the contract C test in a temporary
+# directory. The differential compares against the independent reference;
+# every numerical mutant must then fail its intended distinguishing case.
+# Keep ASan/UBSan coverage in this gate; standalone runs select it via CFLAGS.
+step "core wait_time contract and mutation checks"
+core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_wait_time_differential.py
+run env CFLAGS="$core_cflags" bash tests/core_mutants.sh
+
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
 # below (see issue #118). --fast doesn't need Playwright at all.
