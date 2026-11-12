@@ -17,6 +17,7 @@ root = Path.cwd()
 compiler = shlex.split(os.environ.get("CC", "cc"))
 flags = ["-std=c11", "-g", "-O2", "-Wall", "-Wextra", "-Wno-unused-parameter",
          "-Werror=implicit-function-declaration"]
+# Sanitizers are selected by the caller, consistently with the differential.
 flags += shlex.split(os.environ.get("CFLAGS", ""))
 environment = os.environ.copy()
 environment.setdefault("ASAN_OPTIONS", "abort_on_error=1")
@@ -80,15 +81,6 @@ def summary(output):
 try:
     with tempfile.TemporaryDirectory(prefix="pgwt-core-mutants-") as tmp:
         work = Path(tmp)
-        probe = work / "sanitizer-probe"
-        sanitizer_flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
-        check = run(compiler + flags + sanitizer_flags + ["-x", "c", "-", "-o", str(probe)],
-                    input="int main(void) { return 0; }\n", timeout=45)
-        if check.returncode == 0 and run([str(probe)], timeout=15).returncode == 0:
-            flags += sanitizer_flags
-        else:
-            print("core mutants: address/undefined sanitizers unavailable", flush=True)
-
         base = work / "baseline"
         (base / "src").mkdir(parents=True)
         (base / "tests").mkdir()
@@ -137,7 +129,7 @@ try:
                 failed = True
                 continue
             if case.startswith("diff:"):
-                # Require a successful sanitized build, full evaluation, and
+                # Require a successful build, full evaluation, and
                 # an actual reference mismatch on the named distinguishing input.
                 try:
                     result = run([sys.executable, "-B",

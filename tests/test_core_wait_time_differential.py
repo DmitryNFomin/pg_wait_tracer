@@ -191,9 +191,10 @@ def main():
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-g", "-O2", "-Wall", "-Wextra", "-Wno-unused-parameter",
             "-Werror=implicit-function-declaration"]
+        # Select sanitizers through CFLAGS, like the test-asan workflow. A
+        # normal run must compare every case without sanitizer runtimes too.
         command += shlex.split(os.environ.get("CFLAGS", ""))
-        command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-                    "-I" + str(src), str(driver), str(src / "core/wait_metrics.c"),
+        command += ["-I" + str(src), str(driver), str(src / "core/wait_metrics.c"),
                     str(src / "core/contract_json.c"), "-o", str(binary)]
         built = subprocess.run(command, capture_output=True, text=True, timeout=45)
         if built.returncode:
