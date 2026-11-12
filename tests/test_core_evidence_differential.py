@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic U1/U2/U3 logical replay versus the frozen independent evaluator.
+"""Deterministic U1/U2/U3/U4 logical replay versus the frozen independent evaluator.
 
 Builds only portable C in a temporary directory. CFLAGS selects sanitizers.
 The contract mode runs the C test against both frozen answer files.
@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "contracts/evidence-v1"
 MAX = (1 << 64) - 1
 SEED = 0x868001
+SCOPE_REFUSALS = {"guard_attach_nonzero_counter"}
 
 
 def environment():
@@ -63,7 +64,7 @@ def fixture(prefix):
 
 
 def named_cases():
-    cases = [fixture(v) for v in ("01", "02", "03", "04", "06", "07", "08", "09", "10", "11", "16", "17", "24", "25", "27", "28", "29", "30", "33")]
+    cases = [fixture(v) for v in ("01", "02", "03", "04", "06", "07", "08", "09", "10", "11", "16", "17", "24", "25", "27", "28", "29", "30", "33", "18", "19", "20", "21", "32")]
     ordinary = fixture("01")
     records = ordinary["files"][0]["records"]
     c = copy.deepcopy(ordinary)
@@ -449,9 +450,224 @@ def generated_attachments():
     return cases
 
 
+def end_cases():
+    """END publication, timestamp assignment and ordered query preferences."""
+    cases = []
+    def add(prefix, name, edit=lambda c: None):
+        c = fixture(prefix)
+        c["id"] = name
+        edit(c)
+        cases.append(c)
+    def records(c): return c["files"][0]["records"]
+    def end(c): return next(r for r in records(c) if r["kind"] == "END")
+    def frontier(t): return {"kind":"FRONTIER", "t":t, "counters":[0]*15}
+    add("18", "end_caps_open")
+    add("02", "reuse_query_old_window", lambda c: c["query"].update(**{"from":1,"to":10}))
+    def invalid_late_life(c):
+        r=records(c)
+        r.extend([dict(r[0],t=21,start=13),frontier(25)])
+    add("06", "invalid_late_life_attachment", invalid_late_life)
+    add("19", "end_pending_eof")
+    add("19", "end_no_frontier", lambda c: records(c).__setitem__(slice(None), [r for r in records(c) if r["kind"] != "FRONTIER"]))
+    add("18", "end_beyond_frontier", lambda c: end(c).update(t=20))
+    add("18", "end_at_frontier", lambda c: end(c).update(t=15))
+    add("18", "end_before_prior_frontier", lambda c: end(c).update(t=6))
+    add("18", "end_before_attach", lambda c: end(c).update(t=0))
+    add("18", "end_other_generation", lambda c: end(c).update(fork=99))
+    add("18", "end_duplicate", lambda c: records(c).insert(-1, copy.deepcopy(end(c))))
+    add("18", "end_missing_attach", lambda c: records(c).__setitem__(slice(None), [r for r in records(c) if r["kind"] != "ATTACH_OK"]))
+    add("18", "end_without_life", lambda c: records(c).pop(0))
+    add("18", "end_reason_invalid", lambda c: end(c).update(reason="flush"))
+    for reason in ("stop", "detach", "deescalate"):
+        add("18", "end_reason_" + reason, lambda c, reason=reason: end(c).update(reason=reason))
+    add("18", "end_unqualified", lambda c: c["files"][0].update(qualified=False))
+    add("32", "end_delayed_transition")
+    add("32", "end_tied_transition", lambda c: records(c)[3].update(t=12, duration=11))
+    add("32", "end_excludes_future_transition", lambda c: records(c)[3].update(t=13, duration=12))
+    def late_close(c):
+        records(c).insert(-1, {"kind":"TRANS", "pid":101, "t":13, "old":"PgSleep", "new":None, "duration":10})
+    add("18", "end_excludes_later_close", late_close)
+    def tie_close(c):
+        late_close(c)
+        records(c)[-2].update(t=12, duration=9)
+    add("18", "end_includes_tied_close", tie_close)
+    add("18", "end_at_anchor", lambda c: end(c).update(t=1))
+    def point_anchor(c):
+        r=records(c)
+        r.insert(-1,{"kind":"END","pid":101,"fork":0,"t":8,"reason":"stop"})
+        next(x for x in r if x["kind"]=="TRANS")["old"]=None
+    add("09", "end_transition_point", point_anchor)
+    def invalid_pending(c):
+        invalid_late_life(c)
+        r=records(c)
+        r.insert(-1,dict(next(x for x in r if x["kind"]=="ATTACH_OK")))
+    add("06", "invalid_life_pending_attachment", invalid_pending)
+    def two_closed(c):
+        records(c).insert(3,{"kind":"TRANS","pid":101,"t":6,"old":"PgSleep","new":None,"duration":3})
+        c["query"].update(**{"from":15,"to":23})
+    add("20", "run_waits_isolated", two_closed)
+    def terminal_second(c, after=True):
+        r=records(c)
+        r.insert(-1,dict(r[0],t=23,exit=23))
+        r.insert(-1,{"kind":"TRANS","pid":101,"t":23,"old":"PgSleep","new":"$EXIT","duration":6})
+        if after: c["query"].update(**{"from":24,"to":30})
+        else:
+            for rec in r:
+                for k in ("t","fork","start","exit"):
+                    if rec.get(k) is not None: rec[k]+=5
+            c["target"]["fork"]=5
+            c["query"].update(**{"from":0,"to":4})
+    add("20", "run_query_wholly_after_exit", terminal_second)
+    add("20", "run_query_wholly_before_life", lambda c: terminal_second(c,False))
+    add("18", "end_future_unassigned", lambda c: records(c).insert(-1,
+        {"kind":"TRANS","pid":101,"t":30,"old":None,"new":"$EXIT","duration":0}))
+    def third_touching(c):
+        touching(c, True)
+        r=records(c)
+        r.extend([dict(r[5],t=30), dict(r[7],t=35), frontier(40)])
+        c["query"].update(**{"from":30,"to":35})
+    # Populated below after touching() is defined.
+
+    add("18", "end_after_last_frontier", lambda c: records(c).append(records(c).pop(-2)))
+    for name, left, right in (("run_first_full",1,8), ("run_second_full",15,23),
+            ("run_cross_boundary",1,23), ("run_overlap_first",2,18),
+            ("run_overlap_second",7,22), ("run_equal_overlap",5,18),
+            ("run_no_overlap",25,30), ("run_invalid_window",30,2)):
+        add("20", name, lambda c, left=left, right=right: c["query"].update(**{"from":left,"to":right}))
+    add("20", "run_invalid_event", lambda c: c["query"].update(event=""))
+    add("20", "run_missing_endpoint", lambda c: c["query"].pop("from"))
+    add("20", "run_null_query", lambda c: c.update(query=None))
+    add("20", "run_event_independent", lambda c: c["query"].update(event="absent"))
+    def all_pending(c):
+        records(c).__setitem__(slice(None), [r for r in records(c) if r["kind"] != "FRONTIER"] + [frontier(25)])
+    add("20", "run_all_pending", all_pending)
+    def reverse_time(c):
+        r=records(c)
+        r[:] = [r[0]] + r[5:8] + r[1:4] + [frontier(25)]
+    add("20", "run_reverse_append_time", reverse_time)
+    def touching(c, tie=False):
+        r=records(c)
+        r[5]["t"] = 8
+        if tie:
+            r[6].update(t=8, duration=0)
+        c["query"].update(**{"from":1,"to":23})
+    add("20", "run_touching_no_tie", touching)
+    add("20", "run_touching_tied_transition", lambda c: touching(c, True))
+    add("20", "run_touching_blocks_third", third_touching)
+    add("20", "run_overlap_invalid", lambda c: records(c)[5].update(t=7))
+    def no_end(c): records(c).pop(3)
+    add("20", "run_no_first_end", no_end)
+    def end_exit(c):
+        r=records(c)
+        r.insert(-1, dict(r[0], t=12, exit=12))
+        r.insert(-1, {"kind":"TRANS", "pid":101, "t":12, "old":"PgSleep", "new":"$EXIT", "duration":9})
+        c["query"].update(**{"from":3,"to":13})
+    add("18", "end_exit_certified", end_exit)
+    def missing_exit(c):
+        records(c).insert(-1, dict(records(c)[0], t=12, exit=12))
+        c["query"].update(**{"from":3,"to":13})
+    add("18", "end_exit_fallback", missing_exit)
+    def empty_exit(c):
+        r=records(c)
+        r[:] = [r[0], r[1], dict(end(c), t=8),
+                dict(r[1], t=15),
+                {"kind":"TRANS", "pid":101, "t":20, "old":None,"new":"$EXIT","duration":5},
+                dict(r[0], t=20, exit=20), frontier(25)]
+        c["query"].update(**{"from":20,"to":21})
+    add("18", "run_empty_required_exit", empty_exit)
+    def tie_end(c):
+        # Distinct point runs with the same start test the b tie-break;
+        # no transitions at the touching boundary.
+        r=records(c)
+        r[:] = [r[0], dict(r[1],t=5), dict(end(c),t=5), dict(r[1],t=5), dict(end(c),t=8), frontier(10)]
+        c["query"].update(**{"from":20,"to":30})
+    add("18", "run_tie_smallest_end", tie_end)
+    def other_end(c):
+        r=records(c)
+        r[:]=[r[0],r[1],dict(r[0], t=2, fork=2, start=2),dict(end(c),fork=2),frontier(15)]
+    add("18", "end_other_generation_known", other_end)
+    def cross_generation(c, target_old=False):
+        r=records(c)
+        life,attach,ending=r[0],r[1],end(c)
+        r[:]=[life,attach,frontier(8),dict(ending,t=20),dict(life,t=20,exit=20),
+            {"kind":"TRANS","pid":101,"t":20,"old":None,"new":"$EXIT","duration":0},
+            dict(life,t=20,start=20,fork=20),dict(attach,t=20,fork=20,method="transition",state="PgSleep"),
+            {"kind":"TRANS","pid":101,"t":20,"old":None,"new":"PgSleep","duration":0},frontier(25)]
+        if target_old: c["query"].update(**{"from":1,"to":21})
+        else:
+            c["target"]["fork"]=20
+            c["query"].update(**{"from":20,"to":25})
+    add("18", "run_touching_other_first_generation", cross_generation)
+    add("18", "run_touching_other_second_generation", lambda c: cross_generation(c,True))
+    def other_transition(c):
+        cross_generation(c)
+        r=records(c)
+        r.pop(8)
+        r[7].update(method="reread",state=None)
+        r.insert(8,dict(r[3],fork=20))
+        r.insert(9,dict(r[7]))
+    add("18", "run_touching_other_transition", other_transition)
+    add("20", "run_query_before_life", lambda c: c["query"].update(**{"from":0,"to":8}))
+    add("18", "run_query_after_exit", end_exit)
+    return cases
+
+
+def generated_runs():
+    rng = random.Random(SEED + 4)
+    named = end_cases()
+    cases = copy.deepcopy(named)
+    for i in range(1600):
+        c=fixture("18")
+        c["id"]=f"end_run_{i:04d}"
+        r=c["files"][0]["records"]
+        r[:]=[r[0]]
+        t=1
+        for run in range(rng.randint(1,4)):
+            a=t
+            seed=rng.choice([None,None,"Lock"])
+            method=rng.choice(["reread","transition"])
+            current=seed
+            entry=None
+            deps=[{"kind":"ATTACH_OK","pid":101,"fork":0,"t":a,"method":method,
+                   "seed":seed,"state":current,"counters":[0]*15}]
+            if method=="transition":
+                deps.append({"kind":"TRANS","pid":101,"t":a,"old":"old","new":current,"duration":0})
+                entry=a if current else None
+            for _ in range(rng.randrange(5)):
+                t+=rng.randrange(1,4)
+                new=rng.choice([x for x in [None,"PgSleep","Lock"] if x!=current])
+                deps.append({"kind":"TRANS","pid":101,"t":t,"old":current,"new":new,"duration":t-entry if entry is not None else 0})
+                current,entry=new,t if new else None
+            t+=rng.randrange(1,4)
+            end={"kind":"END","pid":101,"fork":0,"t":t,"reason":rng.choice(["detach","deescalate","stop"])}
+            if i%3==0: deps.insert(1,end) # END can precede delayed edges
+            else: deps.append(end)
+            if i%7==0: deps.insert(1,{"kind":"FRONTIER","t":a,"counters":[0]*15})
+            r.extend(deps)
+            if i%5: r.append({"kind":"FRONTIER","t":t,"counters":[0]*15})
+            t+=rng.randrange(1,5)
+        if i%11: r.append({"kind":"FRONTIER","t":t,"counters":[0]*15})
+        if i%13==0:
+            ends=[x for x in r if x["kind"]=="END"]
+            rng.choice(ends)["t"]=rng.randrange(t+1)
+        if i%17==0:
+            c["query"].pop("event")
+        else:
+            left,right=sorted(rng.choices(range(t+8),k=2))
+            c["query"].update(event=rng.choice(["PgSleep","Lock","absent"]),**{"from":left,"to":right})
+        offset=rng.choice([0,1,(1<<53)+7,1<<63,MAX-200])
+        for rec in r:
+            for key in ("t","fork","start","exit"):
+                if rec.get(key) is not None: rec[key]+=offset
+        c["target"]["fork"]+=offset
+        for key in ("from","to"): c["query"][key]+=offset
+        cases.append(c)
+    return cases
+
+
 def generate():
     rng = random.Random(SEED)
-    cases = named_cases() + guard_cases() + generated_lifecycles() + generated_attachments()
+    cases = named_cases() + guard_cases() + generated_lifecycles() + generated_attachments() + generated_runs()
     names = ["PgSleep", "Lock", "A", "other", 'quote"slash\\', "\u2603", "A\0B", "\U0001f600"]
     for i in range(2400):
         offset = rng.choice([0, 0, 100, (1 << 53) + 7, (1 << 63), MAX - 100])
@@ -560,7 +776,7 @@ def refusal_cases():
     add("rotation", lambda c: c["files"][0].__setitem__("file_no", 1))
     add("previous", lambda c: c["files"][0].__setitem__("previous", 0))
     add("missing_file", lambda c: c["files"][0].__setitem__("present", False))
-    add("second_attach", lambda c: c["files"][0]["records"].append(copy.deepcopy(c["files"][0]["records"][1])))
+    add("second_attach", lambda c: c["files"][0]["records"].extend([copy.deepcopy(c["files"][0]["records"][1]), {"kind":"FRONTIER", "t":20, "counters":[0]*15}]))
     add("other_generation", lambda c: c["files"][0]["records"].append({
         "kind": "LIFE", "t": 20, "pid": 102, "fork": 20, "start": 20, "start_known": True, "exit": None}))
     add("future_schema", lambda c: c["files"][0].__setitem__("version", 6))
@@ -655,7 +871,8 @@ def first_difference(actual, expected, path=""):
     return None
 
 
-def differential(binary, work, selected=None):
+def prepare_corpus(work, selected=None):
+    """Freeze this run's reference answers and serialized inputs once per sweep."""
     reference = reference_module()
     cases = generate()
     refusals, metric_refusals = refusal_cases()
@@ -666,10 +883,9 @@ def differential(binary, work, selected=None):
         if len(cases) + len(refusals) != 1:
             raise RuntimeError("unknown/duplicate selected differential case")
     expected = []
-    scope_refusals = {"guard_attach_nonzero_counter"}
     for case in cases:
         answer = reference_answer(reference, case)
-        if case["id"] in scope_refusals:
+        if case["id"] in SCOPE_REFUSALS:
             # The reference supports nonzero attachment counters beyond this
             # unit's zero-counter public API. Prove the
             # reference withholds coverage and both values before requiring
@@ -687,6 +903,13 @@ def differential(binary, work, selected=None):
         path = work / f"input-{i}.json"
         path.write_text(json.dumps(case, ensure_ascii=True))
         paths.append(path)
+    return cases, refusals, expected, all_cases, paths
+
+
+def differential(binary, work, selected=None, corpus=None):
+    if corpus is not None and selected is not None:
+        raise RuntimeError("a selected case cannot reuse a full corpus")
+    cases, refusals, expected, all_cases, paths = corpus if corpus is not None else prepare_corpus(work, selected)
     answers = []
     for start in range(0, len(paths), 250):
         result = execute([binary, "--json"] + paths[start:start + 250])
@@ -705,7 +928,7 @@ def differential(binary, work, selected=None):
                   f"expected={json.dumps(want, ensure_ascii=True, separators=(',', ':'))}")
         elif case["id"].startswith("guard_"):
             outcome = "unsupported" if "error" in want else want["wait_time"]["completeness"]
-            reference_outcome = "unavailable" if case["id"] in scope_refusals else outcome
+            reference_outcome = "unavailable" if case["id"] in SCOPE_REFUSALS else outcome
             print(f"evidence differential {case['id']} PASS "
                   f"reference={reference_outcome} core={outcome}")
     print(f"evidence differential: {len(cases)} reference cases, {len(refusals)} unsupported cases, "

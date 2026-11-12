@@ -8,7 +8,7 @@
 
 static bool in_scope(const char *id)
 {
-    const char *prefixes[] = {"01_", "02_", "03_", "04_", "06_", "07_", "24_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_", "09_", "10_", "11_", "33_"};
+    const char *prefixes[] = {"01_", "02_", "03_", "04_", "06_", "07_", "24_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_", "09_", "10_", "11_", "33_", "18_", "19_", "20_", "21_", "32_"};
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
         if (!strncmp(id, prefixes[i], 3)) return true;
     return false;
@@ -122,6 +122,59 @@ static int native_attachment_validation(void)
     return failed;
 }
 
+/* Native END strings can be malformed in ways the JSON loader cannot encode.
+ * Ignored fork bytes also must not split provisional END/attachment keys. */
+static int native_end(void)
+{
+    pgwt_evidence_record records[] = {
+        {.kind=PGWT_EVIDENCE_LIFE, .pid=101, .t=0, .fork=31},
+        {.kind=PGWT_EVIDENCE_ATTACH_OK, .pid=101, .t=1, .fork=32,
+         .reread=true, .counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_TRANS, .pid=101, .t=3, .new_event={"wait",4}, .duration=2},
+        {.kind=PGWT_EVIDENCE_END, .pid=101, .t=8, .fork=33, .end_reason={"stop",4}},
+        {.kind=PGWT_EVIDENCE_FRONTIER, .t=10, .counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_ATTACH_OK, .pid=101, .t=12, .fork=34,
+         .reread=true, .counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_TRANS, .pid=101, .t=14, .new_event={"wait",4}, .duration=2},
+        {.kind=PGWT_EVIDENCE_END, .pid=101, .t=20, .fork=35, .end_reason={"detach",6}},
+        {.kind=PGWT_EVIDENCE_FRONTIER, .t=22, .counters={.known=true}}
+    };
+    pgwt_evidence_file file = {.version=5, .boot={"boot",4}, .capture={"A",1},
+        .present=true, .qualified=true, .baseline={.known=true},
+        .records=records, .record_count=9};
+    pgwt_evidence_input input = {.files=&file, .file_count=1, .capture={"A",1}, .pid=101, .fork=36};
+    pgwt_core_query query = {.event={"wait",4}, .from=1, .to=8};
+    pgwt_evidence_output out;
+    bool pass = true;
+    for (size_t i=0; i<2; ++i) {
+        if (i) { query.from=12; query.to=20; }
+        pgwt_replay_status status=pgwt_evidence_replay(&input, &query, &out, NULL);
+        pass &= status==PGWT_REPLAY_OK && out.projection.coverage_count==1 &&
+            out.coverage.start==query.from && out.coverage.end==query.to &&
+            out.projection.has_open && out.projection.wait_count==0 &&
+            out.wait_time.value.present && out.wait_time.value.value==(i ? 6 : 5) &&
+            out.completed_waits.value.present && out.completed_waits.value.value==0;
+        pgwt_evidence_output_free(&out);
+    }
+    puts(pass ? "evidence native_end_provisional PASS" : "evidence native_end_provisional FAIL projection");
+    bool valid = true;
+    const pgwt_core_event invalid[] = {{NULL,4},{"",0},{"stopX",5},{"stop",3},{"$EXIT",5}};
+    for (size_t i=0; i<sizeof(invalid)/sizeof(invalid[0]); ++i) {
+        records[3].end_reason=invalid[i];
+        pgwt_replay_status status=pgwt_evidence_replay(&input, &query, &out, NULL);
+        valid &= status==PGWT_REPLAY_UNSUPPORTED && !out.wait_time.metric && !out.completed_waits.metric;
+        pgwt_evidence_output_free(&out);
+    }
+    puts(valid ? "evidence native_end_reason PASS" : "evidence native_end_reason FAIL validation");
+    records[3].end_reason=(pgwt_core_event){"stop",4};
+    pgwt_replay_status status=pgwt_evidence_replay(&input, NULL, &out, NULL);
+    bool null_query = status==PGWT_REPLAY_OK && out.coverage.start==1 && out.coverage.end==8 &&
+        !out.wait_time.value.present && !out.completed_waits.value.present;
+    pgwt_evidence_output_free(&out);
+    puts(null_query ? "evidence native_null_query PASS" : "evidence native_null_query FAIL projection");
+    return !pass || !valid || !null_query;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 3 && !strcmp(argv[1], "--json")) return json_cases(argc, argv);
@@ -137,7 +190,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "evidence harness: need 33 frozen scenarios, found %zu\n", paths.gl_pathc);
         globfree(&paths); return 2;
     }
-    int mismatch = native_provisional() | native_attachment_validation(), harness_error = 0;
+    int mismatch = native_provisional() | native_attachment_validation() | native_end(), harness_error = 0;
     for (size_t i = 0; i < paths.gl_pathc; ++i) {
         evidence_case input;
         char field[512] = {0};

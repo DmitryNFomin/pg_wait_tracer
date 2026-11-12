@@ -3,18 +3,17 @@
 
 #include "pgwt_core.h"
 
-/* Logical U2 input, not a trace codec. Accepts independent initial files in
+/* Logical U4 input, not a trace codec. Accepts independent initial files in
  * one boot, one PID with timestamp-resolved generations (including provisional
- * LIFE), exits, and one nonwaiting reread attachment per generation. Legacy
- * v2-v4 files retain no exact evidence; unqualified v5 retains LIFE only.
- * END, VOID, other kinds/PIDs, transition anchors, nonzero seeds, nonzero loss
- * counters and same-capture file chains remain explicitly unsupported, even
- * in an uncertified suffix. Strings are length-delimited; {NULL,0} means a
+ * LIFE), exits, reread/transition attachments, END and query-specific run selection.
+ * Legacy v2-v4 files retain no exact evidence; unqualified v5 retains LIFE only.
+ * VOID, other kinds/PIDs, nonzero loss counters and same-capture file chains
+ * remain explicitly unsupported, even in an uncertified suffix. Strings are length-delimited; {NULL,0} means a
  * nonwaiting state. Callers supply readable arrays/strings of stated lengths.
  */
 typedef enum {
     PGWT_EVIDENCE_OTHER, PGWT_EVIDENCE_LIFE, PGWT_EVIDENCE_ATTACH_OK,
-    PGWT_EVIDENCE_TRANS, PGWT_EVIDENCE_FRONTIER
+    PGWT_EVIDENCE_TRANS, PGWT_EVIDENCE_FRONTIER, PGWT_EVIDENCE_END
 } pgwt_evidence_kind;
 
 typedef struct {
@@ -31,13 +30,15 @@ typedef struct {
     /* LIFE */
     uint64_t start, exit;
     bool start_known, has_exit;
-    /* ATTACH_OK: false means a transition anchor (outside U2). */
+    /* ATTACH_OK: false means a transition anchor. */
     bool reread;
     pgwt_core_event seed, state;
     /* TRANS */
     pgwt_core_event old_event, new_event;
     uint64_t duration;
     pgwt_evidence_counters counters;
+    /* END: exactly detach, deescalate, or stop. */
+    pgwt_core_event end_reason;
     /* Set by a codec/adapter when the logical shape could not be decoded. */
     bool unsupported_shape;
 } pgwt_evidence_record;

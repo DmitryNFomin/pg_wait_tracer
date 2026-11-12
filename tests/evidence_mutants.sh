@@ -72,12 +72,12 @@ mutants = [
         e->open = (pgwt_core_open_wait){last->new_event, last->t, last->t};
     }
     free(history);""", "28_legacy_v2", "wait_time"),
-    ("E8_shift_coverage", "out->coverage = (pgwt_core_span){trimmed, endpoint};",
-     "out->coverage = (pgwt_core_span){trimmed + 1, endpoint};",
+    ("E8_shift_coverage", "run->coverage = (pgwt_core_span){trimmed, endpoint};",
+     "run->coverage = (pgwt_core_span){trimmed + 1, endpoint};",
      "17_wait_spans_frontiers", "projection.coverage[0][0]"),
-    ("E9_accept_end", 'return unsupported(why, "unsupported record kind");',
+    ("E9_accept_unknown_kind", 'return unsupported(why, "unsupported record kind");',
      'continue; /* ignore unknown storage kinds */',
-     "19_end_without_final_frontier", "unsupported"),
+     "native_unsupported_kind", "unsupported"),
 ]
 
 differential_mutants = [
@@ -112,11 +112,11 @@ guard_mutants = [
     ('G06_provisional_has_no_fork', ': r->has_fork) ||', ': false) ||', 'refuse_life_provisional_with_fork', 'keys'),
     ('G07_exit_not_before_start', 'r->exit < r->start || ', '', 'refuse_life_exit_before_start', 'keys'),
     ('G08_exit_not_after_observation', 'r->exit > r->t', 'false', 'refuse_life_exit_after_observation', 'keys'),
-    ('G09_attachment_kind', 'f->records[j].kind == PGWT_EVIDENCE_ATTACH_OK && ', '', '01_ordinary_run', 'keys'),
-    ('G10_attachment_generation', ' && key(r, &f->records[j])', '', '02_pid_reuse_delayed_life', 'keys'),
+    ('G09_attachment_kind', 'if (p->kind == PGWT_EVIDENCE_ATTACH_OK) {', 'if (false) {', '01_ordinary_run', 'keys'),
+    ('G10_attachment_generation', 'runs[h].generation == k && (!runs[h].end', '(!runs[h].end', '02_pid_reuse_delayed_life', 'keys'),
     ('G11_reserved_new_event', ' && !exit_event(r->new_event)', '', '02_pid_reuse_delayed_life', 'keys'),
     ('G12_key_fork_presence', 'a->has_fork == b->has_fork && ', '', 'reuse_provisional_then_observed', 'projection.coverage.length'),
-    ('G13_key_fork_timestamp', 'a->fork == b->fork', 'true', '02_pid_reuse_delayed_life', 'keys'),
+    ('G13_key_fork_timestamp', 'a->fork == b->fork', 'true', '02_pid_reuse_delayed_life', 'projection.coverage.length'),
     ('G14_life_start_immutable', 'g->life->start != r->start ||', '', 'life_lower_bound_changed', 'projection.life'),
     ('G15_life_exit_not_retracted', '!r->has_exit || ', '', 'life_zero_exit_retracted', 'projection.life'),
     ('G16_life_exit_immutable', 'g->life->exit != r->exit', 'false', 'life_exit_changed', 'projection.life'),
@@ -129,9 +129,9 @@ guard_mutants = [
     ('G23_life_capture_isolation', 'if (target_capture && final.life', 'if (final.life', 'restart_life_exit_isolation', 'projection.life[1]'),
     ('G24_invalid_final_life', 'final.life && !final.invalid', 'final.life', 'life_exit_retracted', 'projection.life'),
     ('G25_prefix_life_dispatch', 'if (r->kind == PGWT_EVIDENCE_LIFE)\n            lifetime', 'if (true)\n            lifetime', '01_ordinary_run', 'projection.coverage.length'),
-    ('G26_prefix_attach_dispatch', 'if (r->kind == PGWT_EVIDENCE_ATTACH_OK)\n            g[', 'if (true)\n            g[', '02_pid_reuse_delayed_life', 'keys'),
+    ('G26_prefix_attach_dispatch', '(p->kind != PGWT_EVIDENCE_ATTACH_OK && p->kind != PGWT_EVIDENCE_END)', '(p->kind != PGWT_EVIDENCE_END)', '01_ordinary_run', 'projection.coverage.length'),
     ('G27_frontier_dispatch', 'if (r->kind != PGWT_EVIDENCE_FRONTIER) continue;', '', '02_pid_reuse_delayed_life', 'keys'),
-    ('G28_assignment_cutoff', ' || t->t > frontier', '', 'frontier_exact_transition', 'projection.waits.length'),
+    ('G28_assignment_cutoff', ' || t->t > frontier', '', 'end_future_unassigned', 'projection.coverage[0][1]'),
     ('G29_assignment_invalid_life', 'if (!life || g[k].invalid) continue;', 'if (!life) continue;', 'reuse_invalid_old_life', 'projection.coverage.length'),
     ('G30_provisional_discovery_bound', 'life->has_fork ? life->fork : g[k].discovery', 'life->fork', 'provisional_edge_before_discovery', 'projection.coverage.length'),
     ('G31_exit_matching_timestamp', 'life->has_exit && life->exit == t->t', 'life->has_exit', 'exit_unmatched_sentinel', 'projection.coverage.length'),
@@ -139,17 +139,17 @@ guard_mutants = [
     ('G33_ordinary_fork_bound', 'start <= t->t && ', '', '02_pid_reuse_delayed_life', 'projection.coverage.length'),
     ('G34_ordinary_exit_bound', ' && (!life->has_exit || t->t < life->exit)', '', '02_pid_reuse_delayed_life', 'projection.coverage.length'),
     ('G35_unique_assignment', 'if (choices != 1) blocked = true;', '', 'reuse_missing_old_exit', 'projection.coverage.length'),
-    ('G36_tracking_invalid_life', 'if (!life || g[k].invalid || !attach) continue;', 'if (!life || !attach) continue;', 'invalid_life_skips_attach', 'keys'),
+    ('G36_tracking_invalid_life', 'if (!life || g[k].invalid || !attach) continue;', 'if (!life || !attach) continue;', 'invalid_late_life_attachment', 'keys'),
     ('G37_attach_lower_bound', 'attach->t < life->start || ', '', 'refuse_attach_before_fork', 'keys'),
     ('G38_attach_exit_bound', 'life->has_exit && attach->t >= life->exit', 'false', 'exit_attach_at_exit', 'keys'),
     ('G39_unresolved_identity_blocks', 'blocked || attach->t > frontier', 'attach->t > frontier', 'reuse_missing_old_exit', 'projection.coverage.length'),
     ('G40_attach_before_frontier', 'blocked || attach->t > frontier', 'blocked', 'future_reread_mismatch_pending', 'keys'),
     ('G41_endpoint_requires_exit', 'life->has_exit && life->exit < frontier ?', 'life->exit < frontier ?', '01_ordinary_run', 'projection.coverage.length'),
     ('G42_endpoint_capped_by_frontier', 'life->has_exit && life->exit < frontier ?', 'life->has_exit ?', 'exit_after_frontier', 'projection.coverage.length'),
-    ('G43_assigned_generation', 'if (assigned[j] != k) continue;', '', '02_pid_reuse_delayed_life', 'keys'),
+    ('G43_assigned_generation', 'if (assigned[j] != k) continue;', '', 'run_touching_other_first_generation', 'keys'),
     ('G44_exit_is_terminal', 'terminal || !same(t->old_event, current)', '!same(t->old_event, current)', 'duplicate_nonwaiting_exit', 'keys'),
     ('G45_coverage_capture_isolation', 'bool target = target_capture && key(', 'bool target = key(', 'restart_same_key_reversed', 'projection.coverage[0][0]'),
-    ('G46_coverage_generation_isolation', 'key(g[k].identity, &(pgwt_evidence_record){\n                .has_fork = in->has_fork, .fork = in->fork})', 'true', 'reuse_other_generation_terminal', 'projection.coverage[0][0]'),
+    ('G46_coverage_generation_isolation', 'key(g[k].identity, &(pgwt_evidence_record){\n                .has_fork = in->has_fork, .fork = in->fork})', 'true', 'reuse_query_old_window', 'projection.coverage[0][0]'),
     ('G47_invalid_life_suppresses_coverage', 'if (!target || final.invalid) continue;', 'if (!target) continue;', 'life_exit_retracted', 'projection.coverage.length'),
     ('G48_fallback_requires_known_exit', 'e->has_life_end && endpoint', 'endpoint', '01_ordinary_run', 'projection.coverage.length'),
     ('G49_fallback_reaches_exit', 'endpoint >= e->life_end && ', '', 'exit_missing_terminal_fallback', 'projection.coverage.length'),
@@ -216,7 +216,7 @@ u3_guards = [
     ('G104_reread_needs_no_transition', 'bool anchored = attach->reread;', 'bool anchored = false;', '01_ordinary_run', 'projection.coverage.length'),
     ('G105_anchor_null_has_no_entry', 'entry_known = !null_event(current);\n                    portion', 'entry_known = true;\n                    portion', 'anchor_null_then_wait', 'keys'),
     ('G106_new_null_has_no_entry', 'entry_known = !null_event(current);\n            }', 'entry_known = true;\n            }', '01_ordinary_run', 'projection.waits.length'),
-    ('G107_open_requires_entry', 'e->has_open = entry_known;', 'e->has_open = false;', '09_seed_mismatch_then_transition', 'projection.open'),
+    ('G107_open_requires_entry', 'run->has_open = entry_known;', 'run->has_open = false;', '09_seed_mismatch_then_transition', 'projection.open'),
     ('G108_anchor_named_has_entry', 'entry_known = !null_event(current);\n                    portion', 'entry_known = false;\n                    portion', '09_seed_mismatch_then_transition', 'projection.open'),
     ('G109_new_named_has_entry', 'entry_known = !null_event(current);\n            }', 'entry_known = false;\n            }', '01_ordinary_run', 'projection.coverage[0][0]'),
     ('G110_anchor_null_old_not_trimmed', 'if (!null_event(t->old_event)) {', 'if (true) {', 'anchor_old_null', 'projection.coverage[0][0]'),
@@ -239,8 +239,91 @@ differential_mutants += [
     ('E22_anchor_old_is_untrusted', 'continue; /* The anchor\'s old side is untrusted. */', '; /* consume the untrusted old side */', '09_seed_mismatch_then_transition', 'keys'),
 ]
 
+# U4 semantic guards, removed independently. Pointer/allocation checks are not
+# semantic guards. END assignment is resolved only by a physical FRONTIER.
+u4_guards = [
+    ('U401_END_kind', 'r->kind != PGWT_EVIDENCE_END)', 'true)', '18_detach_mid_wait', 'keys'),
+    ('U402_END_reason', 'if (!same(r->end_reason, (pgwt_core_event){"detach", 6}) &&', 'if (false &&', 'native_end_reason', 'validation'),
+    ('U403_END_detach', '(pgwt_core_event){"detach", 6}', '(pgwt_core_event){"other", 5}', 'end_reason_detach', 'keys'),
+    ('U404_END_deescalate', '(pgwt_core_event){"deescalate", 10}', '(pgwt_core_event){"other", 5}', 'end_reason_deescalate', 'keys'),
+    ('U405_END_stop', '(pgwt_core_event){"stop", 4}', '(pgwt_core_event){"other", 5}', 'end_reason_stop', 'keys'),
+    ('U406_pending_once', 'processed[j] || ', '', '18_detach_mid_wait', 'keys'),
+    ('U407_pending_END', ' && p->kind != PGWT_EVIDENCE_END)', ')', '18_detach_mid_wait', 'projection.coverage[0][1]'),
+    ('U408_overlap_END_presence', '(!runs[h].end || runs[h].end->t > p->t)', '(!runs[h].end)', 'run_overlap_invalid', 'keys'),
+    ('U409_overlap_END_order', 'runs[h].end->t > p->t', 'false', 'run_overlap_invalid', 'keys'),
+    ('U410_END_generation', 'runs[h].generation == k && runs[h].attach->t', 'runs[h].attach->t', 'end_other_generation_known', 'keys'),
+    ('U411_END_lower_bound', 'runs[h].attach->t <= p->t && ', '', 'end_before_attach', 'keys'),
+    ('U412_END_once', ' && !runs[h].end)', ')', 'end_duplicate', 'keys'),
+    ('U413_END_unique', 'if (choices != 1) {', 'if (false) {', 'end_duplicate', 'keys'),
+    ('U414_END_cap', 'if (run->end && run->end->t < endpoint) endpoint = run->end->t;', '', 'end_caps_open', 'projection.coverage[0][1]'),
+    ('U415_END_cap_presence', 'run->end && run->end->t < endpoint', 'false', 'end_caps_open', 'projection.coverage[0][1]'),
+    ('U416_END_cap_frontier', 'run->end && run->end->t < endpoint', 'run->end', 'end_beyond_frontier', 'projection.coverage[0][1]'),
+    ('U417_run_transition_endpoint', 'if (t->t > endpoint) continue;', '', 'end_excludes_later_close', 'projection.waits.length'),
+    ('U418_run_touching_ties', 'if (touching) continue;', '', 'run_touching_tied_transition', 'keys'),
+    ('U419_touching_first_generation', 'runs[x].generation == k && ', '', 'run_touching_other_first_generation', 'projection.coverage.length'),
+    ('U420_touching_second_generation', 'runs[y].generation == k &&', 'true &&', 'run_touching_other_second_generation', 'projection.coverage[0][1]'),
+    ('U421_touching_boundary', 'runs[x].end->t == runs[y].attach->t', 'false', 'run_touching_tied_transition', 'keys'),
+    ('U422_touching_transition_generation', 'assigned[j] == k && history[j].record->t', 'history[j].record->t', 'run_touching_other_transition', 'projection.coverage.length'),
+    ('U423_touching_transition_time', 'history[j].record->t == runs[y].attach->t', 'true', 'run_touching_no_tie', 'projection.coverage[0][0]'),
+    ('U424_query_overlap', 'if (ao != bo) return ao > bo;', '', 'run_cross_boundary', 'projection.coverage[0][0]'),
+    ('U425_query_malformed', 'q && !q->invalid_fields && nonempty(q->event) && q->from < q->to', 'q', 'run_invalid_event', 'projection.coverage[0][0]'),
+    ('U426_query_invalid_fields', '!q->invalid_fields && ', '', 'run_missing_endpoint', 'projection.coverage[0][0]'),
+    ('U427_query_event_shape', 'nonempty(q->event) && ', '', 'run_invalid_event', 'projection.coverage[0][0]'),
+    ('U428_query_window', ' && q->from < q->to', '', 'run_invalid_window', 'projection.coverage[0][0]'),
+    ('U429_query_start_lifetime', 'q->from > life->life_start ? q->from : life->life_start', 'q->from', 'run_query_before_life', 'projection.coverage[0][0]'),
+    ('U430_query_end_lifetime', 'life->has_life_end && life->life_end < q->to ? life->life_end : q->to', 'q->to', 'run_empty_required_exit', 'projection.coverage[0][0]'),
+    ('U431_query_full_preference', 'if (af != bf) return af;', '', 'run_empty_required_exit', 'projection.coverage[0][0]'),
+    ('U432_query_exit_needed', 'life->has_life_end && q->from <= life->life_end && life->life_end < q->to', 'false', 'run_empty_required_exit', 'projection.coverage[0][0]'),
+    ('U433_query_tie_start', 'if (a->coverage.start != b->coverage.start) return a->coverage.start < b->coverage.start;', '', 'run_equal_overlap', 'projection.coverage[0][0]'),
+    ('U434_query_tie_end', 'if (a->coverage.end != b->coverage.end) return a->coverage.end < b->coverage.end;', '', 'run_tie_smallest_end', 'projection.coverage[0][1]'),
+    ('U435_query_one_run', 'prefer(&runs[h], selected, e, query)', 'true', 'run_first_full', 'projection.coverage[0][0]'),
+]
+u4_guards += [
+    ('U436_pending_invalid_life', 'if (!g[k].life || g[k].invalid) continue;', 'if (!g[k].life) continue;', 'invalid_life_pending_attachment', 'keys'),
+    ('U437_END_shape_dispatch', 'r->kind == PGWT_EVIDENCE_END) {', 'false) {', '18_detach_mid_wait', 'keys'),
+    ('U438_touching_distinct_runs', 'x != y && ', '', 'end_transition_point', 'projection.coverage.length'),
+    ('U439_select_snapshot', 'runs[h].has_snapshot && ', '', 'anchor_missing_null_state', 'projection.coverage.length'),
+    ('U440_query_exit_left', 'q->from <= life->life_end && ', '', 'run_query_wholly_after_exit', 'projection.coverage[0][0]'),
+    ('U441_query_exit_right', 'q->from <= life->life_end && life->life_end < q->to', 'q->from <= life->life_end', 'run_query_wholly_before_life', 'projection.coverage[0][0]'),
+    ('U442_query_clamp_empty', 'if (right < left) right = left;', '', 'run_query_wholly_before_life', 'projection'),
+    ('U443_query_exit_endpoint_a', 'a->coverage.end == life->life_end && ', '', 'run_empty_required_exit', 'projection'),
+    ('U444_query_exit_endpoint_b', 'b->coverage.end == life->life_end && ', '', 'run_empty_required_exit', 'projection'),
+    ('U445_query_exit_terminal_a', ' && a->terminal', '', 'run_empty_required_exit', 'projection'),
+    ('U446_query_exit_terminal_b', ' && b->terminal', '', 'run_empty_required_exit', 'projection'),
+]
+u4_guards.append((
+    'U447_END_inclusive_transition', 'if (t->t > endpoint) continue;', 'if (t->t >= endpoint) continue;',
+    'end_includes_tied_close', 'projection.waits.length'))
+guard_mutants += u4_guards
+
+# These deletions are algebraically redundant on reachable candidates, rather
+# than missing witnesses. Every one still builds and runs BOTH entire suites.
+# Any observed difference contradicts its proof and fails the harness.
+equivalent_deletions = {
+    'G36_tracking_invalid_life': 'pending resolution already requires valid LIFE; invalid generations receive no transitions and cannot project final evidence',
+    'U428_query_window': 'from>=to gives zero overlap for every run; all preferences tie by time',
+    'U429_query_start_lifetime': 'every run begins at/after LIFE.start; lower clipping cannot change overlap or the winner',
+    'U433_query_tie_start': 'nonoverlapping runs have the same start/end time ordering, retained in append order',
+    'U434_query_tie_end': 'equal-start runs are point/touching runs, whose endpoints already follow append order',
+    'U442_query_clamp_empty': 'right<left makes all overlaps zero; wrapped required length cannot equal zero, preserving all ties',
+    'U443_query_exit_endpoint_a': 'terminal can only be set by the unique LIFE.exit transition',
+    'U444_query_exit_endpoint_b': 'terminal can only be set by the unique LIFE.exit transition',
+    'U445_query_exit_terminal_a': 'a snapshot at LIFE.exit is retained only when terminal is certified',
+    'U446_query_exit_terminal_b': 'a snapshot at LIFE.exit is retained only when terminal is certified',
+}
+
+differential_mutants += [
+    ('E23_END_never_closes', 'run->has_open = entry_known;', 'if (run->end && entry_known) { saved = realloc(run->waits, (waits+1)*sizeof(*saved)); if (!saved) goto allocation_error; run->waits=saved; run->waits[run->wait_count++] = (pgwt_core_wait){current,entry,endpoint}; } run->has_open = entry_known && !run->end;', 'end_caps_open', 'projection.waits.length'),
+    ('E24_END_never_changes_life', 'out->coverage = selected->coverage;', 'out->coverage = selected->coverage; if (selected->end) { e->has_life_end=true; e->life_end=selected->end->t; }', 'end_caps_open', 'projection.life[1]'),
+    ('E26_tie_start_reverse', 'a->coverage.start < b->coverage.start', 'a->coverage.start > b->coverage.start', 'run_equal_overlap', 'projection.coverage[0][0]'),
+    ('E27_tie_end_reverse', 'a->coverage.end < b->coverage.end', 'a->coverage.end > b->coverage.end', 'run_tie_smallest_end', 'projection.coverage[0][1]'),
+    ('E28_waits_one_run', 'e->wait_count = selected->wait_count;', 'e->wait_count = selected->wait_count; for (size_t h=0; h<run_count; ++h) if (&runs[h] != selected && runs[h].has_snapshot && runs[h].wait_count) { memcpy(out->waits+e->wait_count,runs[h].waits,runs[h].wait_count*sizeof(*out->waits)); e->wait_count+=runs[h].wait_count; }', 'run_waits_isolated', 'projection.waits.length'),
+    ('E29_END_append_order_is_not_time', 'if (t->t > endpoint) continue;', 'if (t->t > endpoint || (run->end && history[j].order > (size_t)(run->end-file->records))) continue;', 'end_delayed_transition', 'projection.open'),
+    ('E25_END_requires_frontier', 'if (r->kind != PGWT_EVIDENCE_FRONTIER) continue;', 'if (r->kind != PGWT_EVIDENCE_FRONTIER && r->kind != PGWT_EVIDENCE_END) continue;', 'end_pending_eof', 'projection.coverage[0][1]'),
+]
+
 contract_guards = {'G58_key_ignores_absent_fork_bytes', 'G59_final_ignores_absent_fork_bytes',
-                   'G80_attachment_seed_state', 'G81_attachment_verified_state', 'R14_kind_check'}
+                   'G80_attachment_seed_state', 'G81_attachment_verified_state', 'R14_kind_check', 'U402_END_reason'}
 
 
 def differential_case(binary, work, case):
@@ -258,14 +341,14 @@ def contract(binary):
     result = diff.execute([binary, diff.CONTRACT])
     output = result.stdout + result.stderr
     rows = re.findall(r"^evidence \S+ (?:PASS|UNSUPPORTED-OK|FAIL .+)$", output, re.M)
-    valid = len(rows) == 37 and not diff.sanitizer_error(output) and " ERROR " not in output
+    valid = len(rows) == 40 and not diff.sanitizer_error(output) and " ERROR " not in output
     return result.returncode, output, valid
 
 
-def full_differential(binary, work):
+def full_differential(binary, work, corpus):
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        status = diff.differential(binary, work)
+        status = diff.differential(binary, work, corpus=corpus)
     text = output.getvalue()
     valid = bool(re.search(r"^evidence differential: [0-9]+ reference cases, [0-9]+ unsupported cases, "
                            r"[0-9]+ differences, seed=0x[0-9a-f]+$", text, re.M))
@@ -289,7 +372,8 @@ def main():
         status, output, valid = contract(binary)
         if status != 0 or not valid:
             raise RuntimeError("baseline contract failed:\n" + output)
-        if diff.differential(binary, work):
+        corpus = diff.prepare_corpus(work)
+        if diff.differential(binary, work, corpus=corpus):
             raise RuntimeError("baseline differential failed")
         failed = False
         all_mutants = guard_mutants if sweep else mutants + differential_mutants + guard_mutants
@@ -308,11 +392,18 @@ def main():
             executable = directory / "contract-test"
             try:
                 diff.build(directory, executable)
-                if sweep:
+                if sweep or name in equivalent_deletions:
                     cs, co, cv = contract(executable)
-                    ds, do, dv = full_differential(executable, directory)
+                    ds, do, dv = full_differential(executable, directory, corpus)
                     if not cv or not dv or cs not in (0, 1) or ds not in (0, 1):
                         raise RuntimeError(f"invalid suite run: contract={cs}, differential={ds}\n{co}\n{do}")
+                    if name in equivalent_deletions:
+                        equivalent = cs == 0 and ds == 0
+                        print(f"{name} | {line} | contract={cs} differential={ds} | "
+                              f"{'SURVIVED (cannot change an answer)' if equivalent else 'EQUIVALENCE DISPROVED'}: "
+                              f"{equivalent_deletions[name]}", flush=True)
+                        if not equivalent: failed = True
+                        continue
                     if name in contract_guards:
                         intended = re.search(
                             rf"^evidence {re.escape(case)} FAIL ({re.escape(field)}(?:[.\[].*)?)$", co, re.M)
@@ -347,7 +438,7 @@ def main():
                 print(f"{name} SURVIVED/ERROR (exit {status}; intended comparison not proven)\n{output}", flush=True)
                 failed = True
         label = "evidence guard deletions" if sweep else "evidence mutants"
-        print(f"{label}: {len(all_mutants)} checked, " + ("FAIL" if failed else "all KILLED"))
+        print(f"{label}: {len(all_mutants)} checked, " + ("FAIL" if failed else f"{len(all_mutants)-len(equivalent_deletions)} KILLED; {len(equivalent_deletions)} equivalent survivors (cannot change an answer)"))
         return 1 if failed else 0
 
 
