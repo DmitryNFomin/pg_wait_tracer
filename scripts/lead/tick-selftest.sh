@@ -40,13 +40,17 @@ elif args[:2] == ['repo', 'view']:
 elif args[:2] == ['api', 'graphql']:
     query = next(x for x in args if x.startswith('query='))
     if 'pullRequests(' in query:
-        value = {'pullRequests': {'nodes': f['prs']}}
+        nodes = [dict(pr) for pr in f['prs']]
+        if 'baseRefName' not in query:
+            for pr in nodes:
+                pr.pop('baseRefName', None)
+        value = {'pullRequests': {'nodes': nodes}}
     else:
         number = next(x.split('=')[1] for x in args if x.startswith('number='))
         value = {'pullRequest': {'commits': {'nodes': [{'commit': {
             'statusCheckRollup': {'contexts': {'nodes': f.get('checks', {}).get(number, [])}}
         }}]}}}
-    print(json.dumps([{'data': {'repository': value}}]))
+    print(json.dumps(f.get('graphql_pages', [{'data': {'repository': value}}])))
 elif args[:2] == ['pr', 'update-branch']:
     print('updated')
 elif args[:2] == ['pr', 'view']:
@@ -61,10 +65,10 @@ else:
 '''
 
 
-def pr(number=1, state='CLEAN', age=0, created='2026-01-01T00:00:00Z', armed=True):
+def pr(number=1, state='CLEAN', age=0, created='2026-01-01T00:00:00Z', armed=True, base='master'):
     return dict(number=number, createdAt=created,
                 updatedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - age)),
-                headRefOid=f'head{number}', mergeStateStatus=state, state='OPEN',
+                headRefOid=f'head{number}', baseRefName=base, mergeStateStatus=state, state='OPEN',
                 autoMergeRequest={'enabledAt': created} if armed else None)
 
 
@@ -137,6 +141,22 @@ def unsafe(f):
     assert f.updates() == [], 'src delta must never update-branch'
 
 
+def stacked(f):
+    # The master delta looks safe, but update-branch would merge agent/x.
+    f.data['prs'] = [pr(state='BEHIND', base='agent/x')]
+    result = f.call('once')
+    needs(result, 'NEEDS-LEAD pr-1-behind behind; base agent/x is not master',
+          'non-master base must require judgement even with a safe master delta')
+    assert f.updates() == [], 'non-master base must never update-branch'
+
+
+def graphql_page(f):
+    for page in (None, False, 7, 'bad', []):
+        f.data['graphql_pages'] = [page]
+        needs(f.call('once'), 'NEEDS-LEAD tick-error gh graphql: expected an object page',
+              'non-object GraphQL page must be an explicit tick-error')
+
+
 def dirty(f):
     f.data['prs'] = [pr(state='DIRTY')]
     needs(f.call('once'), 'NEEDS-LEAD pr-1-dirty DIRTY', 'DIRTY must wake the lead')
@@ -205,6 +225,12 @@ CASES = [
     ('src delta refuses update', unsafe,
      ("path.startswith('src/') or path == 'tests/run_all.sh'", "False"),
      'src delta must require judgement'),
+    ('non-master base refuses update', stacked,
+     ("and pr['baseRefName'] != 'master'", 'and False'),
+     'non-master base must require judgement even with a safe master delta'),
+    ('non-object GraphQL page', graphql_page,
+     ("raise RuntimeError('gh graphql: expected an object page')", 'continue'),
+     'non-object GraphQL page must be an explicit tick-error'),
     ('armed DIRTY', dirty,
      ("if pr['mergeStateStatus'] == 'DIRTY':", 'if False:'), 'DIRTY must wake the lead'),
     ('failed required check', failed,
@@ -314,8 +340,8 @@ with tempfile.TemporaryDirectory(prefix='pgwt-tick-selftest-') as temp:
             proc.kill()
             proc.wait()
 
-print('PASS safe-oldest, src-delta, DIRTY, failed-check, stalled, follow-repeat-until-done, gh-error, quiet, 60m-dedup, watch')
-print('PASS negative controls: 10 compiled mutants reached their cases and failed the intended assertions')
+print('PASS safe-oldest, src-delta, non-master-base, graphql-page, DIRTY, failed-check, stalled, follow-repeat-until-done, gh-error, quiet, 60m-dedup, watch')
+print('PASS negative controls: 12 compiled mutants reached their cases and failed the intended assertions')
 print('PASS extras: run_all/src-rename/truncation; legacy/optional/active/unarmed checks; state-follow/git-error; slots; watch-acked/new')
-print('tick-selftest: PASS (10 required cases with caught mutants; 5 extra groups)')
+print('tick-selftest: PASS (12 required cases with caught mutants; 5 extra groups)')
 PY

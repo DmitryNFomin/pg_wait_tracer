@@ -25,7 +25,7 @@ STATE = STATE_BASE / 'tick-state'
 OPEN_QUERY = '''query($owner:String!, $name:String!, $endCursor:String) {
   repository(owner:$owner, name:$name) {
     pullRequests(states:OPEN, first:100, after:$endCursor) {
-      nodes { number createdAt updatedAt headRefOid mergeStateStatus state
+      nodes { number createdAt updatedAt headRefOid baseRefName mergeStateStatus state
               autoMergeRequest { enabledAt } }
       pageInfo { hasNextPage endCursor }
     }
@@ -74,6 +74,8 @@ def graphql(query, repo, number=None):
         args += ['-F', f'number={number}']
     pages = gh(*args)
     for page in pages:
+        if not isinstance(page, dict):
+            raise RuntimeError('gh graphql: expected an object page')
         if page.get('errors'):
             raise RuntimeError(f'gh graphql: {page["errors"]}')
     return pages
@@ -176,7 +178,9 @@ def collect(data, now):
     for pr in prs:
         n = pr['number']
         try:
-            if pr['mergeStateStatus'] == 'BEHIND':
+            if pr['mergeStateStatus'] == 'BEHIND' and pr['baseRefName'] != 'master':
+                items.append(line(f'pr-{n}-behind', f'behind; base {pr["baseRefName"]} is not master'))
+            elif pr['mergeStateStatus'] == 'BEHIND':
                 delta = gh('api', f'repos/{repo}/compare/{pr["headRefOid"]}...master?per_page=1')
                 paths = sorted({path for file in delta['files']
                                 for path in (file['filename'], file.get('previous_filename')) if path})
