@@ -10,18 +10,22 @@ absence asserted with nothing pasted, and real evidence buried where a
 grader can't find it. This script catches the first kind mechanically, so
 a BLOCK does not have to wait on codex noticing the same thing.
 
-Vocabulary is taken verbatim from CLAUDE.md's RULE 0 text and the specific
+Vocabulary comes from CLAUDE.md RULE 0, docs/agent-procedures/reporting.md and the specific
 phrases this session's drafts were caught using: "no mechanical check",
 "nothing checks", "not implemented", "implemented nowhere", "exists
 nowhere", "has no", "never", "zero", "absent", "missing", "unreachable",
 "not on master", "no path", "does not exist", "is not present".
 
-A hit is EXCUSED only when, within a small window of lines around it, the
-draft contains either:
-  - a fenced code block (```...```) of at least two lines, or
-  - an indented code block (two or more consecutive lines starting with
-    4+ spaces or a tab), or
-  - an explicit "UNVERIFIED:" marker.
+A hit is EXCUSED only when, within WINDOW lines, the draft contains ALL of:
+  - evidence: paired ``` fences with at least one content line, or an
+    indented code block of two or more consecutive lines;
+  - a SEARCHED: line with a non-vacuous value;
+  - a NOT SEARCHED: line with a non-vacuous value.
+Values must have at least eight characters after stripping whitespace and
+trailing punctuation, and must not start (case-insensitively) with none,
+nothing, n/a, na, nil, no, all, everything, or nowhere. Optional '-' or '*'
+bullets are accepted. SEARCHED:, NOT SEARCHED:, and UNVERIFIED: lines are
+not claims themselves; UNVERIFIED: never excuses a different claim.
 Proximity (not "anywhere in the file") is deliberate: a single pasted
 command near the top of a long report must not blanket-excuse an
 unrelated absence claim near the bottom. That would make the gate pass
@@ -33,38 +37,61 @@ Exit codes:
   2  usage/IO error (missing file, unreadable, etc.) -- never silence
 """
 import re
+import string
 import sys
+import unicodedata
 
 WINDOW = 8  # lines of context searched on each side of a hit
 
 PATTERNS = [
-    r"no mechanical check",
-    r"nothing checks",
-    r"not implemented",
-    r"implemented nowhere",
-    r"exists nowhere",
-    r"has no\b",
+    r"\bno mechanical check\b",
+    r"\bnothing (?:checks|references)\b",
+    r"\bnot implemented\b",
+    r"\bnowhere\b",
+    r"\bhas no\b",
     r"\bnever\b",
     r"\bzero\b",
     r"\babsent\b",
     r"\bmissing\b",
     r"\bunreachable\b",
-    r"not on master",
-    r"no path\b",
-    r"does not exist",
-    r"is not present",
+    r"\bnot on (?:master|(?:the )?remote)\b",
+    r"\bno path\b",
+    r"\bdoes(?: not|n't) exist\b",
+    r"\bis not present\b",
+    r"\bno\b[^.\n]{0,60}\banywhere\b",
+    r"\bdo(?:es)? not work\b",
+    r"\bnot found\b",
+    r"\bno such\b",
+    r"\bnone exist\b",
+    r"\bisn't there\b",
+    r"\bnot there\b",
+    r"\bnot (?:been )?merged\b",
+    r"\b(?:I|we) (?:can't|cannot|could not|couldn't)\b",
+    r"^\s*cannot (?:access|find|read|write|reach|run|open)\b",
+    r"\bno caller\b",
+    r"\b(?:contains|there (?:is|are)) no\b",
+    r"\b(?:isn't|not) (?:wired|called)\b",
+    r"\blacks\b",
+    r"\bnobody has\b",
+    r"\bno guard\b",
+    r"\b(?:grep|rg) returned (?:0|no) matches\b",
 ]
 COMPILED = [re.compile(p, re.IGNORECASE) for p in PATTERNS]
 
 FENCE_RE = re.compile(r"^\s*```")
 INDENT_RE = re.compile(r"^(?: {4,}|\t)\S")
-UNVERIFIED_RE = re.compile(r"UNVERIFIED:", re.IGNORECASE)
+SCOPE_RES = {
+    label: re.compile(r"^\s*(?:[-*]\s*)?" + label + r":\s*(.*)", re.IGNORECASE)
+    for label in ("SEARCHED", "NOT SEARCHED")
+}
+UNVERIFIED_RE = re.compile(r"^\s*(?:[-*]\s*)?UNVERIFIED:", re.IGNORECASE)
+VACUOUS_RE = re.compile(r"^(?:none|nothing|n/a|na|nil|no|all|everything|nowhere)\b", re.IGNORECASE)
 
 
 def classify_lines(lines):
     """Return a set of 0-based line indices that are "evidence lines":
     inside a fenced block of >=2 lines, part of an indented run of >=2
-    consecutive lines, or carrying an explicit UNVERIFIED: marker."""
+    consecutive lines. UNVERIFIED: markers are not evidence."""
     evidence = set()
 
     # Fenced blocks: pair up ``` markers; everything strictly between two
@@ -90,11 +117,6 @@ def classify_lines(lines):
     if len(run) >= 2:
         evidence.update(run)
 
-    # Explicit UNVERIFIED: marker lines.
-    for idx, l in enumerate(lines):
-        if UNVERIFIED_RE.search(l):
-            evidence.add(idx)
-
     return evidence
 
 
@@ -106,7 +128,8 @@ def find_hits(lines):
     evidence = classify_lines(lines)
     hits = []
     for idx, line in enumerate(lines):
-        if idx in evidence:
+        if (idx in evidence or UNVERIFIED_RE.match(line)
+                or any(pat.match(line) for pat in SCOPE_RES.values())):
             continue
         for pat in COMPILED:
             m = pat.search(line)
@@ -120,6 +143,28 @@ def has_nearby_evidence(idx, evidence, total):
     lo = max(0, idx - WINDOW)
     hi = min(total - 1, idx + WINDOW)
     return any(j in evidence for j in range(lo, hi + 1))
+
+
+def non_vacuous(value):
+    value = value.strip()
+    while value and (value[-1].isspace() or value[-1] in string.punctuation
+                     or unicodedata.category(value[-1]).startswith("P")):
+        value = value[:-1]
+    return len(value) >= 8 and not VACUOUS_RE.match(value)
+
+
+def missing_requirements(idx, lines, evidence):
+    missing = []
+    if not has_nearby_evidence(idx, evidence, len(lines)):
+        missing.append("evidence block missing")
+    nearby = lines[max(0, idx - WINDOW):idx + WINDOW + 1]
+    for label, pattern in SCOPE_RES.items():
+        values = [m.group(1).strip() for line in nearby if (m := pattern.match(line))]
+        if not values:
+            missing.append(f"{label} line missing")
+        elif not any(non_vacuous(value) for value in values):
+            missing.append(f"{label} value is vacuous: '{values[0]}'")
+    return missing
 
 
 def main(argv):
@@ -137,23 +182,23 @@ def main(argv):
     lines = text.splitlines()
     hits, evidence = find_hits(lines)
 
-    unevidenced = [
-        (lineno, phrase, content)
-        for (idx, lineno, phrase, content) in hits
-        if not has_nearby_evidence(idx, evidence, len(lines))
-    ]
+    unevidenced = []
+    for idx, lineno, phrase, content in hits:
+        missing = missing_requirements(idx, lines, evidence)
+        if missing:
+            unevidenced.append((lineno, phrase, content, missing))
 
     if not unevidenced:
         print("PREPASS: no unevidenced absence claim found")
         return 0
 
     print(f"PREPASS BLOCK: {len(unevidenced)} unevidenced absence claim(s) in {path}")
-    for lineno, phrase, content in unevidenced:
-        print(f'  line {lineno} ("{phrase}"): {content}')
+    for lineno, phrase, content, missing in unevidenced:
+        print(f'  line {lineno} ("{phrase}"): {content} -- {"; ".join(missing)}')
     print(
         "An absence claim needs a pasted command+output (fenced or indented "
         "block) within "
-        f"{WINDOW} lines, or an explicit UNVERIFIED: marker on that line."
+        f"{WINDOW} lines, plus non-vacuous SEARCHED: and NOT SEARCHED: lines."
     )
     return 1
 

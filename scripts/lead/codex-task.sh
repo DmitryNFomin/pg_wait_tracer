@@ -5,9 +5,9 @@
 # .git; Codex runs only in the external clone. Never push from this wrapper.
 # Slashes become %2F and literal percent signs become %25 (no name collisions).
 # Exits: 2 usage, 10 BRIEF_MISSING, 11 INVALID_BRANCH, 12 UNSAFE_CLONE_PATH,
-# 13 SETUP_FAILED, 14 CLONE_BUSY, 20 BRANCH_MISSING, 21 BRANCH_UNCHANGED,
+# 13 SETUP_FAILED, 14 CLONE_BUSY, 15 BRIEF_UNCHECKED, 20 BRANCH_MISSING, 21 BRANCH_UNCHANGED,
 # 22 FETCH_FAILED, 23 COMMIT_UNREACHABLE, 24 CODEX_FAILED, 25 DIFF_FAILED,
-# 26 AUTO_COMMIT_INCOMPLETE.
+# 26 AUTO_COMMIT_INCOMPLETE, 27 BUDGET_EXCEEDED.
 # Codex cannot write under .git in its sandbox (#777), so THIS wrapper commits
 # the round after Codex exits: whatever is in the clone's working tree goes onto
 # the task branch as one commit and is fetched into the real repository. 21 now
@@ -19,6 +19,15 @@ die() { code=$1; shift; printf '%s\n' "$*" >&2; exit "$code"; }
 brief=$1
 branch=$2
 [ -f "$brief" ] && [ -r "$brief" ] || die 10 "BRIEF_MISSING: brief file does not exist or is unreadable: $brief"
+unchecked='BRIEF_UNCHECKED: run scripts/lead/check-brief.sh <brief> first (no passing record for this exact brief content)'
+brief_sha=$(shasum -a 256 < "$brief" 2>/dev/null) || die 15 "$unchecked"
+brief_sha=${brief_sha%% *}
+now=$(date +%s) || die 15 "$unchecked"
+passes="${PGWT_LEAD_STATE_DIR:-/Users/dmitryfomin/work/git/pg_wait_tracer/scripts/lead}/.briefs-passed"
+[ -r "$passes" ] && awk -v sha="$brief_sha" -v now="$now" '
+    $1 ~ /^[0-9]+$/ && $2 == sha && NF >= 3 && $1 >= now - 86400 && $1 <= now { found = 1 }
+    END { exit !found }
+' "$passes" 2>/dev/null || die 15 "$unchecked"
 git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || die 11 "INVALID_BRANCH: $branch"
 git check-ref-format --branch "$branch" >/dev/null 2>&1 || die 11 "INVALID_BRANCH: $branch"
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null) || die 13 'SETUP_FAILED: script must live inside the real repository'
@@ -52,13 +61,24 @@ mkdir -p "$root" || die 13 'SETUP_FAILED: cannot create clone root'
 lock="$root/$flat.lock"
 mkdir "$lock" 2>/dev/null || die 14 "CLONE_BUSY: lock exists: $lock"
 prompt=
+checked_brief=
 cleanup() {
     [ -z "$prompt" ] || rm -f "$prompt"
+    [ -z "$checked_brief" ] || rm -f "$checked_brief"
+    rm -f "$lock/budget-exceeded"
     rmdir "$lock"
 }
 trap cleanup 0
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
+
+# Freeze the bytes covered by the pass, so editing the source brief during a
+# fetch cannot change either the dispatched scope or its budget.
+checked_brief=$(mktemp "$lock/checked.XXXXXX") || die 13 'SETUP_FAILED: cannot snapshot brief'
+cat "$brief" > "$checked_brief" || die 15 "$unchecked"
+checked_sha=$(shasum -a 256 < "$checked_brief" 2>/dev/null) || die 15 "$unchecked"
+[ "${checked_sha%% *}" = "$brief_sha" ] || die 15 "$unchecked"
+budget_seconds=$(python3 "$repo/scripts/lead/brief_contract.py" "$checked_brief") || die 15 "$unchecked"
 
 upstream=$(git -C "$repo" remote get-url origin) || die 13 'SETUP_FAILED: origin is missing'
 # Resolve local relative origin URLs against the source worktree, not the clone.
@@ -110,10 +130,13 @@ prompt=$(mktemp "$lock/brief.XXXXXX") || die 13 'SETUP_FAILED: cannot create pro
     printf 'this branch. So before you finish: delete scratch files you do not want committed, and\n'
     printf 'write the commit message (subject line, blank line, body) to the file .codex-commit-msg\n'
     printf 'in this directory. That file itself is never committed.\n\n'
-    cat "$brief"
+    cat "$checked_brief"
 } > "$prompt" || die 13 'SETUP_FAILED: cannot read brief'
 codex_rc=0
-(cd "$clone" && codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 || codex_rc=$?
+(cd "$clone" && python3 "$repo/scripts/lead/run-budget.py" "$budget_seconds" "$lock/budget-exceeded" \
+    codex exec --cd "$clone" --sandbox workspace-write - < "$prompt") >&2 || codex_rc=$?
+budget_exceeded=0
+[ ! -f "$lock/budget-exceeded" ] || budget_exceeded=1
 
 # Salvage the working tree unconditionally: the implementer sandbox forbids
 # writes under .git (issue #777), so a finished round normally leaves its work
@@ -185,7 +208,7 @@ fi
 
 # Fetch committed work even when Codex itself returned a non-zero status.
 tip=$(git -C "$clone" rev-parse --verify "refs/heads/$branch" 2>/dev/null) || die 20 "BRANCH_MISSING: branch does not exist in clone afterwards: $branch"
-[ "$tip" != "$before" ] || die 21 "BRANCH_UNCHANGED: branch did not move: $branch (codex exit $codex_rc)"
+[ "$budget_exceeded" -eq 1 ] || [ "$tip" != "$before" ] || die 21 "BRANCH_UNCHANGED: branch did not move: $branch (codex exit $codex_rc)"
 git -C "$repo" fetch "$clone" "refs/heads/$branch:refs/heads/$branch" --force >&2 || die 22 'FETCH_FAILED: could not fetch task branch into real repository'
 type=$(git -C "$repo" cat-file -t "$tip" 2>/dev/null) || die 23 'COMMIT_UNREACHABLE: fetched commit is unreachable'
 landed=$(git -C "$repo" rev-parse --verify "refs/heads/$branch" 2>/dev/null) || die 23 'COMMIT_UNREACHABLE: fetched branch is missing'
@@ -194,6 +217,7 @@ landed=$(git -C "$repo" rev-parse --verify "refs/heads/$branch" 2>/dev/null) || 
 # committed: the tip is fetched, but the rest exists only in the clone, so this
 # must never print the success block.
 [ "$autocommit_failed" -eq 0 ] || die 26 "AUTO_COMMIT_INCOMPLETE: $branch was fetched at $tip, but uncommitted work remains in $clone only"
+[ "$budget_exceeded" -eq 0 ] || die 27 "BUDGET_EXCEEDED: wall-clock budget ${budget_seconds}s; work was fetched and verified at $tip"
 [ "$codex_rc" -eq 0 ] || die 24 "CODEX_FAILED: codex exit $codex_rc; committed work was fetched and verified"
 diff=$(git -C "$repo" diff --name-only "refs/remotes/origin/master...refs/heads/$branch") || die 25 'DIFF_FAILED: cannot compare branch with origin/master'
 # Only verified success emits this final block on stdout: path, branch, SHA,

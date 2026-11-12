@@ -1,309 +1,87 @@
 # pg_wait_tracer — working agreement for agents
 
-PostgreSQL eBPF tracer: C/BPF daemon, `pgwt-server`, Go WebSocket bridge,
-ECharts/uPlot UI. Plan/status: `docs/ROADMAP_AND_STATUS.md`. Run nothing eBPF-related on macOS.
-> **Picking this work up after 2026-11-10?** Start at
-> [`docs/HANDOVER_2026-11-10.md`](docs/HANDOVER_2026-11-10.md): the open release
-> blockers with what is measured and what is only read from source, the state of
-> every open PR, three decisions nobody made, and where the measurement evidence
-> lives. Then
-> [`docs/OPERATING_MODEL.md`](docs/OPERATING_MODEL.md) for how the work was
-> organised and [`docs/LEAD_RETROSPECTIVE_2026-11-10.md`](docs/LEAD_RETROSPECTIVE_2026-11-10.md)
-> for how its reporting failed, which is worth reading before trusting either.
+Read [the accepted rework plan](docs/REWORK_PLAN_2026-11-11.md), especially method rules 1–11, first.
+The rework is the current work; start only the owner-authorised slice or named task.
 
+## RULE 0 — no status report reaches the owner unaudited
 
-## RULE 0 — no status report reaches the owner unaudited. No exceptions.
+Before any owner status/progress report, run `scripts/lead/audit-report.sh <draft-file>`; fix BLOCK and paste SEND.
+Paste command/output for every count, absence, permissions and running claim; otherwise label `UNVERIFIED:`.
+One denied operation proves one failed attempt. Absence claims need non-vacuous `SEARCHED:` and `NOT SEARCHED:` within 8 lines.
+Use this turn's `scripts/lead/held.sh <path>...` output for HELD; FREE work not running is READY-NOT-STARTED by my choice.
+Name the top ledger item not running, with held output or “my choice”.
+Read [reporting procedures](docs/agent-procedures/reporting.md) before drafting reports or drawing conclusions from probes.
 
-Verify the lead's claims before the owner sees them. Before **any** status report,
-progress summary or answer about why work is or is not happening, run:
+## RULE 1 — advisers first, the owner last (#870)
 
-```
-scripts/lead/audit-report.sh <draft-file>     # codex re-derives every claim; returns SEND or BLOCK
-```
+Ask both Fable (`.claude/agents/adviser.md`) and Astra in parallel for design/contract decisions, new failure modes or owner questions.
+Routine readiness, ordering and test-log numbers need no adviser: contracts, differential checks and mutants decide.
+One written question per fresh adviser session, one answer, then stop; never resume or advise/review your own code.
+Ask the owner only for unresolved adviser disagreement, disagreement with both, or owner decisions (money, machines, release, exclusions).
+Read [adviser procedures](docs/agent-procedures/advisers.md) when consulting advisers or reporting a failure.
 
-Fix **BLOCK** drafts before sending. Paste the verdict line with the report.
-For held claims, run `scripts/lead/held.sh <path>...` (prints `HELD <path> by #N`
-or `FREE <path>`); use only:
+## RULE 2 — never ship a known defect
 
-- `RUNNING <item> <PR/agent> since <t>`
-- `HELD <item> by #N on <files>` — paste **this turn's** `held.sh` output
-- `READY-NOT-STARTED <item>: my choice — I ran <X> instead`
-
-If `held.sh` says FREE and the item is not running, report **READY-NOT-STARTED
-by my choice**, never "blocked". Every report must name the **top ledger item
-not running**, with `held.sh` output or "my choice".
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#held-claims`)
-
-Paste a command and its output for every **count**, **absence** ("exists nowhere",
-"not merged", "unreachable"), **permissions** claim ("I can't"), and **running** claim.
-Treat one denied operation as one failed attempt only. Without evidence, write
-`UNVERIFIED:`, never a cause.
-
-## RULE 1 — advisers first, the owner last. Never ask the owner what an adviser can answer.
-
-Send these questions to **both advisers first**, Fable (`.claude/agents/adviser.md`)
-and Astra, in parallel: a design or contract decision; a failure mode not seen
-before; anything that would otherwise become a question to the owner. Routine
-readiness, ordering and numbers read straight from a test log need no adviser:
-the contracts, the differential and the mutants decide those (owner, 2026-11-11).
-Each adviser gets one written question in a fresh session, answers once and
-stops; never resume an adviser conversation. Ask the owner only if
-the advisers disagree and the lead cannot adjudicate on evidence; the lead disagrees with both;
-or the decision is the owner's (money, machines, release timing, RULE 2 exclusions).
-Tell the owner what both advisers said and where the lead disagrees.
-A sol 6.1 coder may consult an Astra adviser directly, but the adviser MUST be
-a separate agent session: a session never advises itself, and no session
-reviews or advises on code it wrote.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#advisers-before-owner`)
-
-Try first; on failure, tell both advisers what was attempted and what happened.
-Report failures to the owner only afterwards, with attempts, outcomes, options and
-a recommendation; never a bare "this does not work, FYI". Solve it first otherwise.
-If both advisers find no way, report what X, Y and Z they considered and each cost.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#failure-reports`)
-
-## RULE 2 — never ship a known defect. "Good enough" is not a state.
-
-Do not ship known wrong numbers, divergent paths, mismatched percentage bases or
-disagreeing views, even on a green branch. Fix correctly; disclosure or caveats do
-not substitute. Only an explicit owner exclusion, in his words on the issue,
-permits shipping; the lead cannot grant or infer it, including from "better than master".
-Treat inability to report matching numbers as a product defect. Two views of one
-quantity must agree; fix the disagreement instead of asking which wrong number to display.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#matching-numbers`)
+Wrong numbers, divergent paths, mismatched percentage bases or disagreeing views must be fixed, even on green branches.
+Only an explicit owner exclusion in his words on the issue permits shipping; caveats and “better than master” do not.
+Two views of one quantity must agree; inability to report matching numbers is a product defect.
 
 ### Release tag criteria
 
-**`tag-blocker`** — an open defect that makes the release tag wrong. Any one of:
-
-- (a) the product reports a number a user would act on that is wrong, or two views of one
-  quantity disagree;
-- (b) a **UX defect** — the interface is wrong, misleading, or unusable on a path a user
-  takes: a control that does nothing, a value rendered as a raw internal token or
-  `null`, a view that never recovers from an error, a label that contradicts the data;
-- (c) a documented guarantee is false;
-- (d) a gate we rely on for (a)–(c) cannot detect its own failure case.
-
-**Not** a tag-blocker: our own process tooling and dashboards; test coverage for a defect
-that has not shipped; anything whose fix is a documentation change.
+`tag-blocker`: an open defect making the tag wrong: (a) an actionable number is wrong or two views disagree;
+(b) a real UX path is wrong, misleading or unusable (dead control, raw token/null, unrecovered error, contradictory label);
+(c) a documented guarantee is false; (d) a gate relied on for (a)–(c) cannot detect its own failure case.
+Not tag-blockers: process tooling/dashboards, coverage for unshipped defects, documentation-only fixes.
 
 ## The three commands
 
 | Command | Runs where / evidence | When |
 |---|---|---|
-| `make check` (`check-fast` = seconds) | Mac: Node builders, Go bridge, py_compile, Playwright UI/chaos vs `tests/mock_server.py` | Before every push; push guard enforces it |
-| `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux over ssh (`$PGWT_BOX`, `$PGWT_BOX_EL8`…): build, C units, synthetic data, protocol drift, real-PG capture (`tests/run_all.sh --require-live`, `tests/ui_live_smoke.sh`, `tests/results/ui_live/summary.json`) | Before every PR; use `OS=el8` with `$PGWT_BOX_EL8` for kernel/libbpf/layout changes |
-| `make box-check EPHEMERAL=1 [PG=…] [KEEP=1] [PGWT_SNAPSHOT_IMAGE=<id>]` | Private Hetzner VM from a `pgwt=gate-snapshot` image, same live tier; automatic deletion unless `KEEP=1` prints the delete command | Same Hetzner machine class as the gate box, so the same per-OS evidence; `EPHEMERAL=1` resolves `pgwt=gate-snapshot,os=$OS` (ubuntu alone also accepts the legacy, pre-os-label snapshot) — availability is a property of the snapshot inventory, not a hardcoded OS allow-list, so kernel/libbpf/layout work can run `OS=el8` this way too once an el8 image carries that label. `PGWT_SNAPSHOT_IMAGE=<id>` pins to an exact image id instead, bypassing the label lookup — for reproducing a past run, or proving a *candidate* image works end to end before it is promoted to the live label (promotion is a separate, deliberate step: labelling a new OS's image `pgwt=gate-snapshot` before every caller's `--snapshot-os` filter has merged makes it `latest` for every OTHER agent's unscoped `EPHEMERAL=1`, OS=ubuntu by default); see the **Persistent boxes FIRST** paragraph below for when to use this mode |
-| `make ui-gallery [BASE=ref]` | Mac: all UI snapshot cells → `tests/results/ui_gallery/index.html` + `summary.json` | Before every PR touching `web/` |
-
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#ubuntu-vm-evidence`)
-
-**Persistent boxes FIRST; throwaway VMs only as exceptions.** Before creating any
-VM, check both `pgwt-gate` and `pgwt-gate-2`; use a free box. Use `EPHEMERAL=1`
-only when both are busy with CI or another agent holding the flock; report which
-box was busy and why.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#persistent-boxes-first`)
-
-Logs: `tests/results/box-check-*.log` (`box-check-ephemeral-*.log` for `EPHEMERAL=1`),
-`tests/results/ui_gallery/`, `tests/results/ui_live/summary.json`.
-
-`make hetzner-sweep` deletes `pgwt=ephemeral` VMs older than 6h (automatic at
-every `box-check` start). The script never touches `pgwt-gate` or `pgwt-gate-2`
-by name, regardless of label. It refuses cutoffs below 1h unless `FORCE_ALL=1`;
-regardless of cutoff, it never sweeps VMs younger than a few minutes or with
-unknown age (missing/unparseable `created=`), which it never treats as infinitely
-old (issue #162). Remove your own VM by id:
-`tests/hetzner-vm.sh delete <id>`, never by sweep cutoff.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#vm-cleanup`)
+| `make check` (`check-fast` = seconds) | Mac: builders, Go, Python, UI/chaos vs mock server | Before every push; guard enforces stamp |
+| `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux: build, C, synthetic, protocol, real PG + live UI | Before every PR; el8 for kernel/libbpf/layout; `EPHEMERAL=1` only by VM rules below |
+| `make ui-gallery [BASE=ref]` | Mac: `tests/results/ui_gallery/index.html` + `summary.json` | Every PR touching `web/` |
 
 ## Definition of done
 
-Declare a PR ready only with ALL evidence in its body:
+The brief's authorised scope, exclusions, commands/evidence, rounds, wall-clock budget and report deadline govern the unit.
+For PR readiness: start box-check first, run full make check concurrently; paste run_all summary and live-UI verdict in the PR.
+CI-infrastructure-only work may substitute real gate-box workflow evidence; subsequent docs/test-only rounds may reuse evidence under the procedure's exclusions.
+For UI changes, paste gallery counts and justify each changed/added/removed cell. Get fresh independent reviewer approval or list owner design questions.
+Run test-registration and runner-registration guards; verify box log commit and tree hash against the tested tree. Use `/pr-ready`.
+Read [release procedures](docs/agent-procedures/release.md) before gates/readiness: evidence paths, exact exemptions and snapshot/VM promotion rules.
 
-0. **Start `box-check` FIRST; run `make check` while it runs** (`make check`: median ~7 min, n=3; well under the 40-min box run, so serial execution wastes the check's wall time).
-   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#parallel-checks`)
-1. Full `make check` (not `--fast`) passed on the final tree.
-2. `make box-check` passed; paste the run_all summary (last ~20 lines), including
-   the live-UI-smoke verdict (`tests/results/ui_live/summary.json`).
-   CI-infrastructure-only branches (no `src/` or test-assertion changes) may
-   substitute real `gh workflow run` gate-box evidence; state this in the PR body.
-   After the first passing `box-check`, docs-only review rounds or `tests/`-only
-   rounds touching no live-tier test may skip re-runs; name each round and why in
-   the PR body. Never exempt `src/`, `web/`, `tests/run_all.sh`,
-   `tests/unit_tests.list`, or any live-tier test; if unsure, run `box-check`.
-   `.github/workflows/ci.yml` narrows tiers by changed files; CI still runs in
-   full on every PR, and merge gates are unchanged.
-3. If `web/static/` or `tests/web_snapshots/` changed, run `make ui-gallery`;
-   list `summary.json` counts and every `changed`/`added`/`removed` cell with
-   a one-line justification each.
-   (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#ui-branch-scope`)
-4. Get fresh reviewer approval (`.claude/agents/reviewer.md`; `ui-reviewer.md`
-   for UI), or list open questions under "Design questions for the owner".
-   Give the owner only those questions to resolve.
+## Owner rules
 
-Use `/pr-ready` to run this sequence.
+The main session runs Opus, plans/spawns/judges, and writes no feature code bigger than a one-liner.
+1. `codex` writes the code, invoked as `codex exec` with no `-m` flag (configured sol 6.1); fresh context per PR.
+2. Claude agents review/challenge; never the code's author.
+3. Astra writes designs, invoked as `codex exec -m gpt-6-astra`; Fable challenges designs.
+`reviewer` = **Sonnet** (high effort), Opus for `src/` logic; `ui-reviewer` = Sonnet; Explore/triage: Sonnet or Haiku.
+Reviewers: `.claude/agents/reviewer.md` and `ui-reviewer.md`; Fable advises, implements only explicit src escalation after a failed Codex round.
+Apply RULE 1 to doubts/uncertainty/weird results; its narrowed scope supersedes the former blanket adviser instruction.
+Start only accepted-plan or owner-named work. Agreement with a proposal is not “start now”; free capacity authorises nothing.
+One unit, one review round; READY-with-nits ships with nits listed; second review only for a code blocker and recorded as a sizing miss.
+Two strikes: after two failed reviews, rewrite the brief for a fresh implementer; no third correction.
+Cap active implementation at three; no overlapping files/tests; one UI branch at a time (Go-only exempt).
+Use isolated worktrees; retain until PR open. Give a brief path, not duplicated text; report by deadline even if incomplete.
+Validate every brief with `scripts/lead/check-brief.sh`; paste live issue comments and a quoted CONTROLLING SCOPE DECISION.
+`codex-task.sh` requires a recent exact-content pass; on wall-clock expiry it stops Codex, commits/fetches existing work and exits 27 BUDGET_EXCEEDED.
+One background wait for box runs; check once after report deadline, never poll agents/reviewers; agent reports ~15 lines, owner status five unless a decision/plan change.
+On READY arm auto-merge that turn; do not push after READY, watch CI or merge manually. Reuse fresh evidence; rerun only missing/stale/contradictory evidence.
+Read [dispatch/review procedures](docs/agent-procedures/dispatch-review.md) before splitting, spawning, escalation or review; the plan and RULE 1 govern superseded wording.
 
-## Who does what (main session → subagents)
-
-The main interactive agent plans, splits, spawns and judges. It writes no feature
-code bigger than a one-liner.
-
-- **Models** are pinned in `.claude/agents/*.md`, overridden at spawn time.
-  Use the cheapest model that does good work; **spend on review, economise on implementation**.
-  Owner rule 2026-10-28, four operative instructions:
-  1. `codex` writes the code, invoked as `codex exec` with no `-m` flag
-     (`~/.codex/config.toml` already pins `model = "gpt-6.1-sol"`, so the
-     default IS sol 6.1). Every PR gets a NEW `codex` agent with fresh
-     context — never a resumed or reused one.
-  2. Claude agents review and challenge that code. Never the agent that wrote it.
-  3. Astra writes designs, invoked as `codex exec -m gpt-6-astra`. Fable
-     challenges design decisions.
-  4. Any doubt, uncertainty or weird result — the lead's or a coder's — MUST go
-     to both Fable and Astra as advisers/tech leads, not only when it seems
-     worth it.
-  `reviewer` = **Sonnet** (high effort), **Opus for `src/` logic** — that
-  review is where silent-wrong-answer bugs get caught, so it is never
-  downgraded. `ui-reviewer` = Sonnet. `Explore`/triage: Sonnet or Haiku.
-  ONE review round: ship READY-with-nits with nits listed; second round only for
-  a code blocker; no confirmation re-reviews. Wait for box runs with one
-  `run_in_background` wait, then read results; do not loop. Reviewers stop polling agents.
-  Keep agent reports at most ~15 lines.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#models-and-review`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#polling-cost`)
-- **Fable**: use as standing adviser (design-challenge, per Models above), not
-  implementer; leave implementation unused except explicit escalation for a
-  `src/` problem after `codex` has already failed a round. If escalation is not worthwhile, park and report
-  the task to the owner; never silently retry or downgrade. Record it in memory
-  `fable-parked-tasks`. Check the budget before repeating "out of Fable tokens".
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#fable-history`)
-- **Main session model**: run Opus (`/model`), never Fable. Read 15-line reports,
-  decide ready/back, arm auto-merge and spawn. Minimise turns: act on agent reports;
-  check once after a report-by deadline; never on "still running" notifications
-  or mid-flight status checks. Do not read a diff when the reviewer's report
-  answers the question. Return findings touching signal handling, loops,
-  accounting or the fail-safe rule to the implementer regardless of reviewer label.
-  Delegate web searches, `gh api` reads, price lookups and code archaeology to
-  Haiku/Sonnet; get one short report. The orchestrator does not research.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#orchestrator-turns`)
-- **Start only authorised work** (owner, 2026-11-11): the lead starts only work in
-  the accepted plan (`docs/REWORK_PLAN_2026-11-11.md`) or work the owner named. An
-  owner agreeing to a proposal is not a go for building; ask "start now?". A free
-  box or a free agent slot is never a reason to start something. Check capacity
-  (implementers vs cap, boxes via `uptime` plus `fuser /tmp/pgwt-box-check.lock`,
-  open PRs `BEHIND`) when a unit finishes, not every turn. Determine blocking by
-  shared FILES, not phase number: modules run in parallel, wiring serially.
-  (supersedes the former "capacity check every turn" rule; history in
-  `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#idle-capacity`)
-- **Reports to the owner: FIVE LINES at most** — merged / in flight / blocked /
-  needs you. Use long form only for owner decisions or plan-changing findings.
-  Put bug narratives in the issue tracker; link them.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#owner-report-limit`)
-- **Splitting**: one roadmap item = one issue = one branch = one implementer.
-  Split only disjoint files AND disjoint tests; never split a shared file.
-  Cap actively implementing tasks at **three** (writing/running code); exclude
-  agents idling during CI, `box-check` or review. `scripts/check-lock.sh` (`check:`
-  target) serializes Mac `make check` machine-wide. Apply no Mac-derived gate-phase
-  cap (waiting on/running `make check`); do not invent a "two in gate phase" limit.
-  Before spawning, list touched files, compare every in-flight branch and refuse
-  overlap up front.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#splitting-and-gate-capacity`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#shared-file-collision`)
-  Allow at most **ONE** branch touching `web/static/` or `tests/web_snapshots/`
-  at a time; Go-only `web/` changes are exempt. Send work over ~a day to a `Plan`
-  agent first; run steps sequentially unless the plan establishes independence.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#ui-branch-scope`)
-- **Spawning**: always `isolation: "worktree"`. Include issue text, acceptance
-  criteria, required `make` targets, "stop and report, do not open the PR", and
-  "report by T+N minutes even if incomplete" in the contract. Treat absent
-  notifications as the hang signal; check once after the deadline instead of
-  watching the stream. For a contract written to a file, pass only its path;
-  do not paste its text too.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#spawn-contracts`)
-- **Review chain**: (1) `make check`/`box-check`/`ui-gallery` produce binding evidence files;
-  (2) a fresh `reviewer` (+ `ui-reviewer` for `web/`) reads code/evidence and writes
-  the PR body; return blockers via SendMessage; (3) the main agent reads the
-  report, not the diff, and decides ready/back/ask owner. Send only "Design
-  questions for the owner" to the human. On READY, arm auto-merge in the same
-  turn; do not watch CI or merge manually. Do not push after READY.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#auto-merge-and-ready`)
-- **Three evidence guards a reviewer runs before declaring READY**:
-  - Run `scripts/check-test-registration.sh`: it fails and names any merge-base
-    entry missing from `tests/unit_tests.list` or `tests/Makefile`'s `TESTS` list
-    in the current tree (append-only invariant).
-    Mac-side, seconds, no box. Self-tests: `tests/test_check_test_registration.sh`.
-  - Match `scripts/box-check.sh` log-header `commit=<git rev-parse HEAD>` and
-    `tree-hash=<scripts/tree-hash.sh>` against the PR head before trusting the log;
-    these identify the exact tree synced by the immediately following rsync.
-  - Run `scripts/check-runner-registration.sh` (issue #433) against THIS repo
-    manually, like `check-test-registration.sh`; `make check` runs only its
-    synthetic self-test (`tests/test_check_runner_registration.sh`). Mac-side,
-    seconds, no box. The script fails if a test actually invoked by
-    `tests/ci_smoke.sh` is not also invoked by `tests/run_all.sh`. Its orphan scan
-    fails if an on-disk `tests/test_*.py`/`tests/test_*.sh` is invoked by none of
-    `tests/run_all.sh` (directly, `LIVE_TESTS`, or line-by-line
-    `tests/unit_tests.list`), `tests/ci_smoke.sh`, `scripts/check.sh`, or root
-    `Makefile`, unless already named with a reason in
-    `tests/runner_registration_exemptions.list`.
-    Both checks count actual invocations, not comments/mentions; runner globs such as
-    `tests/web_unit/*.test.mjs` register every matching file. Leave live guard
-    execution as a manual reviewer step; let a human judge deliberate manual-only tools.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#evidence-guard-incidents`; `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#runner-registration-gaps`)
-- **Adviser**: Fable via `.claude/agents/adviser.md`, and
-  Astra (`codex exec -m gpt-6-astra`, see Models above), consulted as RULE 1 says:
-  design or contract decisions, failure modes not seen before, and anything that
-  would become an owner question. One written question per adviser, a fresh
-  session each time, one answer; never resume an adviser conversation (owner,
-  2026-11-11: long-lived adviser sessions were the largest single cost).
-  Dispatch both in parallel and do independent work meanwhile. Advisers review
-  reasoning, not code; never edit, commit or create cloud resources. The lead
-  may overrule advice but must say so in the report.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#adviser-incidents`)
-
-## Rules
-
-- Branch `agent/<slug>`; one task per branch; use an isolated git worktree
-  (`EnterWorktree`). Keep the implementer's worktree until its PR is open.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#worktree-retention`)
-- Reviewers must reuse `make box-check`/`make ui-gallery` evidence newer than
-  the last code commit. Re-run only if missing, stale or contradicting the
-  implementer's claim; state which in the PR body.
-- Reuse **one throwaway VM per agent** across rounds (`KEEP=1`); delete it
-  when finished and paste deletion output in the report. Never create one per
-  iteration or leave it for the 6h sweep. Delete by id only:
-  `tests/hetzner-vm.sh delete <id>` (API-confirmed deletion); never use
-  `MAX_AGE_HOURS=0 make hetzner-sweep` or any cutoff to remove a specific VM.
-  `tests/hetzner-sweep.sh` refuses cutoffs below 1h (`--force-all` overrides);
-  even then, the script never deletes VMs younger than a few minutes or of unknown
-  age. The sweep is a janitor for stale VMs, not a tool for removing one specific machine.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#vm-cleanup`)
-- Never harden tests against runner noise with retries, wider tolerances or
-  confirmation loops. If a test is red only on shared runners, say so in the
-  PR; it belongs on the dedicated gate box.
-- Use `tests/run_all.sh`'s `KNOWN_FAILING` (test name → tracking issue number)
-  only for real, filed product bugs being fixed in `src/`, never timing/runner
-  noise; move or investigate noise instead. The runner executes listed tests every
-  time; expected failures and unexpected passes (`UNEXPECTED PASS`) both count as
-  `known-failing` without failing the gate; passes also count as `xpass`. Review
-  every `xpass` against its issue, never assume staleness. Exit 126 (not executable)
-  or 127 (command/file not found) fails the gate even for listed tests.
-  Optional scopes (`name|issue|os@kernel-major.minor|exit=NN`, either predicate may
-  be omitted) match the runner's `/etc/os-release` and `uname -r`; scoped entries
-  require the expected nonzero exit code and any other failure fails the gate;
-  outside that scope the test must pass normally.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#known-failing-invocations`)
-- Never commit locally generated PNGs to `tests/web_snapshots/`; baselines are
-  regenerated only by CI's `snapshots` job.
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#snapshot-provenance`)
-- Add C unit tests to `tests/unit_tests.list` (single source of truth); put UI
-  logic in pure builders with a `tests/web_unit/*.test.mjs` case.
-- Use `[skip ci]` only for docs-only commits.
-- Push only with a passing `make check` stamp; the hook blocks pushes without one.
-  Never bypass the guard (`PGWT_SKIP_PUSH_GUARD` is for humans). `make check`
-  itself queues for a machine-wide lock through `scripts/check-lock.sh`; never
-  bypass it (`PGWT_SKIP_CHECK_LOCK=1` is for humans).
-  (why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#check-serialization`)
+Before creating a VM, check both `pgwt-gate` and `pgwt-gate-2`; use a free box. Ephemeral only if both busy; report why.
+Reuse one throwaway VM per agent across rounds (`KEEP=1`); delete by id with `tests/hetzner-vm.sh delete <id>` and paste deletion output.
+Sweep is only for stale VMs (>6h default): never persistent boxes, very young or unknown-age VMs; cutoffs <1h require human override.
+Never use sweep cutoffs to remove your VM. Never commit local PNGs to `tests/web_snapshots/`; only CI regenerates baselines.
+Never mask runner noise with retries/tolerances/confirmation loops; real filed product bugs alone qualify for KNOWN_FAILING; review every xpass.
+Add C tests to `tests/unit_tests.list`, pure UI builder tests to `tests/web_unit/`; `[skip ci]` is docs-only.
+Push only with a passing make check stamp; never bypass push guard or machine-wide check lock (override variables are human-only).
+Read [testing/push procedures](docs/agent-procedures/testing-and-push.md) for KNOWN_FAILING scopes, evidence reuse, cleanup and guard details.
 
 ## Claude hooks
 
-Registered in `.claude/settings.json` (`*` means no matcher):
+Registered in `.claude/settings.json` (`*` means no matcher); the Stop sweep hook is unregistered by the plan.
 
 | Event | Matcher | Command |
 |---|---|---|
@@ -311,40 +89,16 @@ Registered in `.claude/settings.json` (`*` means no matcher):
 | `SubagentStart` | `*` | `scripts/lead/agent-start-hook.sh` |
 | `SubagentStop` | `*` | `scripts/lead/agent-stop-hook.sh` |
 
-- `PreToolUse`: screens Bash command text; can refuse a push or other command
-  matching the push-guard bypass/tampering denylist.
-- `SubagentStart`: records the agent ID in the shared active-agent ledger;
-  always exits 0 and cannot refuse agent creation.
-- `SubagentStop` ledger hook: removes the agent ID from that ledger;
-  always exits 0 and never refuses a stop.
-
-
 ## Local setup (one-time)
 
-Activate the pre-push stamp guard per clone (covers linked worktrees;
-`make check` activates it if unset). Before setting `core.hooksPath`, back up
-or move personal `.git/hooks/` hooks to `scripts/git-hooks/`.
-(why: see `docs/AGENT_WORKING_AGREEMENT_RATIONALE.md#hook-setup`)
-
-```
-git config core.hooksPath scripts/git-hooks
-```
-
+Back up/move personal .git/hooks before `git config core.hooksPath scripts/git-hooks` (make check sets it if unset).
+Run nothing eBPF-related on macOS.
 ```
 brew install node go
 python3 -m pip install --user playwright==1.60.0 websockets pillow numpy
 python3 -m playwright install chromium
-export PGWT_BOX=root@<gate-box-ip>        # optional: PGWT_BOX_EL8, PGWT_BOX_EL9
+export PGWT_BOX=root@<gate-box-ip> # optional PGWT_BOX_EL8, PGWT_BOX_EL9
 ```
-
-`.python-version` is untracked via `.git/info/exclude`; new worktrees get the
-pyenv pin only from the global default or explicit `PYENV_VERSION`, never checkout.
-
-## Layout
-
-- `src/` daemon + BPF (`src/bpf/`), `src/server.c` = `pgwt-server`
-- `web/` Go bridge; `web/static/` UI — `views/` per-tab, `dev/gallery.html` fixture gallery
-- `tests/` everything: `run_all.sh` (Linux master runner), `ci_smoke.sh` (real-PG
-  capture), `test_web_ui*.py` (Playwright), `web_unit/` (Node), `web_snapshots/` (baselines)
-- `docs/VISUAL_CHECKLIST.md` — the seven words a UI reviewer grades against
-- `.github/workflows/ci.yml` gating; `nightly.yml` OS matrix
+`.python-version` is excluded locally; worktrees use global pyenv default or explicit PYENV_VERSION.
+Read [hooks/setup procedures](docs/agent-procedures/hooks-and-setup.md) when configuring hooks or interpreting hook behavior.
+Read [earlier context](docs/agent-procedures/context.md) only for the old handover, operating-model history or repository layout.
