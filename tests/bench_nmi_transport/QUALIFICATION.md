@@ -168,31 +168,34 @@ these diagnostics can supply certified merge frontiers.
 
 **UNPROVEN / OPEN (excluded):** CPU hotplug and `nohz_full`, including their effects
 on participating-source identity, idle progress and teardown; other producer
-classes; product perf enablement and daemon readers; any product layout/core
+classes; product perf enablement; any product layout/core
 change. The benchmark keeps a fixed CPU population. Its default gates include the
 100 us adversarial arm and controls; none resolves an unproven source claim.
 
-## Product failure-site map prepared for a later reader
+## Product failure-site map and full-provider metrics
 
 The BPF object exports `ringbuf_site_drops` beside the existing `ringbuf_drops` map.
 It is a PERCPU_ARRAY of u64, keyed by the following stable enum slots in
-`src/bpf/pg_wait_tracer.bpf.c`. Read and sum every possible CPU, without resetting
+`src/pg_wait_tracer.h`. The full provider reads and sums every possible CPU, without resetting
 while producers are attached. Both new failures and the retained event aggregate
-use nesting-safe atomic XADD. No daemon/server metric or transport is changed here.
+use nesting-safe atomic XADD. The control socket exposes the totals under the
+stable names below, wherever the full provider already supplies the aggregate.
 
-| Slot | Name suffix (`PGWT_RING_FAIL_`) | Failure site |
+| Slot | Control metric | Failure site |
 |---|---|---|
-| 0 | WAIT_TRANSITION | watchpoint trace output |
-| 1 | EXIT_TRANSITION | terminal backend trace output |
-| 2 | MARKER | execution/plan marker output |
-| 3 | COMMAND_BOUNDARY | command start/end output |
-| 4 | LIFECYCLE_INIT | bootstrap lifecycle reserve |
-| 5 | LIFECYCLE_FORK | fork lifecycle reserve |
-| 6 | LIFECYCLE_EXIT | exit lifecycle reserve |
-| 7 | QUERY_TEXT | PG17+ query-text reserve |
-| 8 | PG13_QUERY_TEXT | PG13 query-text reserve |
+| 0 | ringbuf_wait_transition_drops_total | watchpoint trace output |
+| 1 | ringbuf_exit_transition_drops_total | terminal backend trace output |
+| 2 | ringbuf_marker_drops_total | execution/plan marker output |
+| 3 | ringbuf_command_boundary_drops_total | command start/end output |
+| 4 | ringbuf_lifecycle_init_drops_total | bootstrap lifecycle reserve |
+| 5 | ringbuf_lifecycle_fork_drops_total | fork lifecycle reserve |
+| 6 | ringbuf_lifecycle_exit_drops_total | exit lifecycle reserve |
+| 7 | ringbuf_query_text_drops_total | PG17+ query-text reserve |
+| 8 | ringbuf_pg13_query_text_drops_total | PG13 query-text reserve |
 
 The existing aggregate remains the sum of failed trace-event output attempts;
 lifecycle reservations gain separate accounting. Successful reservations later
 discarded after a query-text read failure are not reserve failures. Counting read
-failures and exposing these maps as daemon metrics belong to subsequent work.
+failures belongs to subsequent work. The aggregate's meaning and provider selection
+are unchanged; site totals also include lifecycle/query-text rings, so their sum
+is not the legacy event-ring aggregate. Live snapshots can race with increments.

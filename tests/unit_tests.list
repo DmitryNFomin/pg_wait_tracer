@@ -1074,3 +1074,4 @@ test_core_merge_contract
 test_merge_tie_count
 test_nmi_transport_reader
 test_nmi_transport_qualification.py
+test_ringbuf_metrics

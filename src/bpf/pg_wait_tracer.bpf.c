@@ -219,24 +219,11 @@ struct {
 } ringbuf_drops SEC(".maps");
 
 /* Refs #871: failure-path-only transport diagnostics. Stable slot names
- * accompany maps.ringbuf_drops for later daemon readers;
- * this change does not enable a new transport or alter daemon metrics.
+ * accompany maps.ringbuf_drops and are exposed by the full provider.
  * PERCPU alone is not nesting-safe: a watchpoint can interrupt a uprobe or
  * tracepoint on the same CPU. Atomic XADD (including the legacy aggregate)
  * prevents lost increments without a shared cross-CPU producer lock.
  * Never reset these counters while producers are attached. */
-enum pgwt_ring_failure_site {
-    PGWT_RING_FAIL_WAIT_TRANSITION,
-    PGWT_RING_FAIL_EXIT_TRANSITION,
-    PGWT_RING_FAIL_MARKER,
-    PGWT_RING_FAIL_COMMAND_BOUNDARY,
-    PGWT_RING_FAIL_LIFECYCLE_INIT,
-    PGWT_RING_FAIL_LIFECYCLE_FORK,
-    PGWT_RING_FAIL_LIFECYCLE_EXIT,
-    PGWT_RING_FAIL_QUERY_TEXT,
-    PGWT_RING_FAIL_PG13_QUERY_TEXT,
-    PGWT_RING_FAIL_SITE_MAX
-};
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, PGWT_RING_FAIL_SITE_MAX);

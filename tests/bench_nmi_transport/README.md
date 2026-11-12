@@ -38,11 +38,14 @@ that cell VOID. These are separate bounded phases in the same protocol invocatio
 so corrupt control records cannot contaminate normal measurements. Controls use
 all-active writers even for an idle measurement cell.
 
-All measurement arms, **including the shared baseline**, must reconcile per CPU
-and site, lose zero records, and have zero seal violations and timestamp
-regressions. Thus the known lossy shared-ring baseline may fail the overall
-protocol; the perf results and failures remain separately visible. Boundary arms
-must advance every CPU's consumed boundary within 100 ms, including startup and
+The perf and perf + 10 ms boundary arms must reconcile per CPU and site and lose
+zero records. Shared-ring loss and reconciliation are measurements, never gate
+failures: the shared arm supplies the CPU-ratio baseline. The 100 us adversarial
+arm is gated on seals and timestamps, without a loss or CPU-cost gate. Runtime,
+framing, CPU/site population and producer-activation checks still apply to all
+arms. All arms must have zero seal violations and timestamp regressions. The
+normal perf boundary arm must advance every CPU's consumed boundary within
+100 ms, including startup and
 final silence, and have fires equal helper-successful outputs. Both consumed-time
 gaps and boundary-stamp gaps are checked. Equality with a strict boundary is legal;
 a repeated boundary stamp does not count as advancement.
@@ -50,10 +53,14 @@ a repeated boundary stamp does not count as advancement.
 The paired perf/shared CPU-ns-per-attempt ratio must be <=1.10 in active cases.
 Idle cases have zero attempts and report a null ratio; they instead measure the
 boundary-only incremental CPU fraction per participating CPU for each boundary
-arm, which must be <=1%.
+arm. Only the 10 ms arm must be <=1%; the adversarial delta is reported as a
+measurement.
 CPU cost uses participating CPUs' `/proc/stat` busy time (user, nice, system, irq,
-softirq, steal; guest is already included in user), including boundary interrupts
-of the idle task. Raw ticks, USER_HZ, elapsed time and process CPU time are retained.
+softirq, steal; guest is already included in user). Boundary interrupts of the
+idle task are accounted for only with `CONFIG_IRQ_TIME_ACCOUNTING=y` in the
+running kernel config. Otherwise the boundary CPU gate is `UNMEASURED`, the idle
+cell is `VOID`, and the gate records the reason; a small measured delta cannot
+produce PASS. Raw ticks, USER_HZ, elapsed time and process CPU time are retained.
 The idle delta is boundary-idle busy-ns/elapsed minus perf-idle busy-ns/elapsed,
 divided by 1e9 and the participating CPU count. Negative deltas are retained. Use
 an otherwise idle box: background work and USER_HZ quantization affect the result;
@@ -109,6 +116,8 @@ CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib \
 ./tests/test_merge_tie_count
 ./tests/test_nmi_transport_reader
 python3 -B tests/test_nmi_transport_qualification.py
+make -C tests test_ringbuf_metrics
+./tests/test_ringbuf_metrics
 make -C tests/bench_nmi_transport test-reader
 bash -n tests/bench_nmi_transport/run.sh tests/bench_nmi_transport/qualify.sh
 ```

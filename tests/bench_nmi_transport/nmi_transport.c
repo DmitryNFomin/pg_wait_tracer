@@ -83,7 +83,8 @@ static uint64_t process_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec;
 }
 /* /proc/stat user+nice+system+irq+softirq+steal (guest already in user).
- * Include hardirq boundary work even when the interrupted task is idle.
+ * Includes idle-task hardirq boundary work only with CONFIG_IRQ_TIME_ACCOUNTING.
+ * Otherwise it is booked as idle; qualify.py marks the idle CPU gate UNMEASURED.
  * Fail closed on unreadable/vanished participating CPUs; hotplug excluded. */
 static int busy_ticks(struct experiment *e, uint64_t *total)
 {

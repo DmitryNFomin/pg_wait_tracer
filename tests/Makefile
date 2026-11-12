@@ -80,7 +80,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_wait_time_contract \
             test_core_evidence_contract \
             test_core_merge_contract \
-            test_merge_tie_count test_nmi_transport_reader
+            test_merge_tie_count test_nmi_transport_reader test_ringbuf_metrics
 
 .PHONY: all clean check
 
@@ -1182,6 +1182,9 @@ test_merge_tie_count: test_merge_tie_count.c $(MERGE_TIE_SRCS) tools/merge_tie_c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -DMERGE_TIE_COUNT_NO_MAIN -o $@ test_merge_tie_count.c $(MERGE_TIE_SRCS) -llz4
 
 test_nmi_transport_reader: bench_nmi_transport/test_reader.c bench_nmi_transport/reader.h bench_nmi_transport/transport.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+test_ringbuf_metrics: test_ringbuf_metrics.c ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<
 
 .PHONY: bench-nmi-transport clean-measurement-tools

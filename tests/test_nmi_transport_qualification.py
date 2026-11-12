@@ -27,7 +27,88 @@ def report():
     }
 
 
+def quartet(case="all"):
+    runs = {arm: report() for arm in qual.ARMS}
+    for arm, run in runs.items():
+        if arm in ("shared", "perf"):
+            run["per_cpu"][0]["sites"][1].update(produced=0, successes=0, delivered=0)
+        if case == "idle":
+            run["hits"] = 0
+            run["per_cpu"][0]["sites"][0].update(produced=0, successes=0, delivered=0)
+        run["attempts"] = sum(s["produced"] for _, s in qual.sites(run))
+    return runs
+
+
 class Gates(unittest.TestCase):
+    def test_shared_loss_is_a_measurement_perf_loss_fails_cell(self):
+        runs = quartet()
+        runs["shared"]["per_cpu"][0]["sites"][0].update(
+            successes=2, failures=1, delivered=2, loss=1, seq_gaps=1)
+        self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "PASS")
+        # Even shared reconciliation/LOST diagnostics cannot become a loss gate.
+        runs["shared"].update(accounting_ok=False, lost_notifications=1)
+        runs["shared"]["per_cpu"][0]["sites"][0].update(reconciled=False, seq_gaps=0)
+        self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "PASS")
+        for arm in ("perf", "perf_boundary"):
+            with self.subTest(arm=arm):
+                broken = copy.deepcopy(runs)
+                broken[arm]["per_cpu"][0]["sites"][0].update(delivered=2, loss=1, seq_gaps=1)
+                result = qual.evaluate_runs(broken, 1, "all", True)
+                self.assertEqual(result["status"], "FAIL")
+                self.assertTrue(any(arm + ": CPU 0 DATA: nonzero loss" == e for e in result["errors"]))
+                broken = copy.deepcopy(runs)
+                broken[arm]["per_cpu"][0]["sites"][0]["reconciled"] = False
+                self.assertTrue(any("loss/sequence mismatch" in e for e in
+                                    qual.evaluate_runs(broken, 1, "all", True)["errors"]))
+        runs["shared"]["bad_records"] = 1
+        self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "FAIL")
+
+    def test_irq_accounting_absent_is_unmeasured_and_void(self):
+        runs = quartet("idle")
+        for config in (b"# CONFIG_IRQ_TIME_ACCOUNTING is not set\n", b"CONFIG_IRQ_TIME_ACCOUNTING=n\n", b""):
+            with self.subTest(config=config):
+                self.assertFalse(qual.irq_time_accounting(config))
+                result = qual.evaluate_runs(runs, 1, "idle", qual.irq_time_accounting(config))
+                self.assertEqual(result["boundary_cpu_gate"]["status"], "UNMEASURED")
+                self.assertIn("CONFIG_IRQ_TIME_ACCOUNTING", result["boundary_cpu_gate"]["reason"])
+                self.assertEqual(result["status"], "VOID")
+        enabled = qual.irq_time_accounting(b"CONFIG_IRQ_TIME_ACCOUNTING=y\n")
+        self.assertTrue(enabled)
+        result = qual.evaluate_runs(runs, 1, "idle", enabled)
+        self.assertEqual(result["boundary_cpu_gate"]["status"], "PASS")
+        self.assertEqual(result["status"], "PASS")
+        # IRQ accounting is required for the idle boundary-cost gate only.
+        self.assertEqual(qual.evaluate_runs(quartet(), 1, "all", False)["status"], "PASS")
+
+    def test_adversarial_cpu_is_measured_but_only_normal_boundary_is_cpu_gated(self):
+        runs = quartet("idle")
+        runs["adversarial"]["busy_cpu_ns"] += 500_000_000
+        result = qual.evaluate_runs(runs, 1, "idle", True)
+        self.assertEqual(result["status"], "PASS")
+        self.assertGreater(result["boundary_increment_core_fraction_per_cpu"]["adversarial"], 0.01)
+        runs["perf_boundary"]["busy_cpu_ns"] += 10_000_000
+        self.assertEqual(qual.evaluate_runs(runs, 1, "idle", True)["status"], "PASS")
+        runs["perf_boundary"]["busy_cpu_ns"] += 1
+        result = qual.evaluate_runs(runs, 1, "idle", True)
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["boundary_cpu_gate"]["status"], "FAIL")
+        self.assertTrue(any("perf_boundary: boundary-only" in e for e in result["errors"]))
+        for field in ("seal_violations", "timestamp_regressions"):
+            broken = quartet("idle")
+            broken["adversarial"][field] = 1
+            self.assertEqual(qual.evaluate_runs(broken, 1, "idle", True)["status"], "FAIL", field)
+
+    def test_adversarial_loss_and_deadline_are_diagnostics_seals_still_fail(self):
+        runs = quartet()
+        adversarial = runs["adversarial"]
+        adversarial.update(accounting_ok=False, lost_notifications=1)
+        adversarial["per_cpu"][0]["sites"][0].update(
+            delivered=2, loss=1, seq_gaps=0, reconciled=False)
+        adversarial["per_cpu"][0]["max_boundary_gap_ns"] += 1
+        self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "PASS")
+        adversarial["per_cpu"][0]["seal_violations"] = 1
+        self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "FAIL")
+
     def test_boundary_deadline_equality_and_one_ns_over(self):
         r = report()
         self.assertEqual(qual.normal_errors(r, 1, "all", True), [])

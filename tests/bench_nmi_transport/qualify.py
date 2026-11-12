@@ -41,6 +41,10 @@ def write_json(path, value):
         f.write("\n")
 
 
+def irq_time_accounting(config):
+    return b"CONFIG_IRQ_TIME_ACCOUNTING=y" in config.splitlines()
+
+
 def metadata(out):
     release = platform.release()
     info = {"kernel_release": release, "uname": list(platform.uname()),
@@ -65,6 +69,7 @@ def metadata(out):
         raise RuntimeError("kernel config unavailable: require /boot/config-KERNEL or /proc/config.gz")
     (out / "kernel.config").write_bytes(config)
     info["kernel_config_sha256"] = hashlib.sha256(config).hexdigest()
+    info["irq_time_accounting"] = irq_time_accounting(config)
     if Path("/usr/bin/rpm").exists():
         package = capture(["rpm", "-q", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\nSOURCERPM=%{SOURCERPM}\n", "-f", "/boot/vmlinuz-" + release])
     else:
@@ -88,18 +93,19 @@ def sites(run):
             yield cpu, site
 
 
-def base_errors(run, cpus, case, boundary):
+def base_errors(run, cpus, case, boundary, reconcile=True):
     errors = []
     if (not run["accepted"] or run["stage"] != "complete" or run["libbpf_error"] or
-            run["bad_records"] or not run["accounting_ok"] or run["seq_reorders"]):
+            run["bad_records"] or (reconcile and not run["accounting_ok"]) or run["seq_reorders"]):
         errors.append("load/runtime/framing/accounting failure")
     rows = run["per_cpu"]
     if len(rows) != cpus or len({c["cpu"] for c in rows}) != cpus:
         errors.append("participating CPU population mismatch")
-    for cpu, site in sites(run):
-        if (not site["reconciled"] or site["produced"] - site["delivered"] != site["loss"] or
-                site["loss"] != site["seq_gaps"]):
-            errors.append(f"CPU {cpu['cpu']} {site['site']}: loss/sequence mismatch")
+    if reconcile:
+        for cpu, site in sites(run):
+            if (not site["reconciled"] or site["produced"] - site["delivered"] != site["loss"] or
+                    site["loss"] != site["seq_gaps"]):
+                errors.append(f"CPU {cpu['cpu']} {site['site']}: loss/sequence mismatch")
     for cpu in rows:
         if [s["site"] for s in cpu["sites"]] != ["DATA", "BOUNDARY"]:
             errors.append(f"CPU {cpu['cpu']}: site population mismatch")
@@ -127,17 +133,21 @@ def base_errors(run, cpus, case, boundary):
     return errors
 
 
-def normal_errors(run, cpus, case, boundary):
-    errors = base_errors(run, cpus, case, boundary)
-    for cpu, site in sites(run):
-        if site["loss"] or site["failures"] or site["successes"] != site["delivered"]:
-            errors.append(f"CPU {cpu['cpu']} {site['site']}: nonzero loss")
+def normal_errors(run, cpus, case, boundary, arm="perf"):
+    # The shared ring is a cost baseline. The adversarial treatment checks
+    # seals/timestamps; only the two normal perf arms must be lossless.
+    loss_gate = arm in ("perf", "perf_boundary")
+    errors = base_errors(run, cpus, case, boundary, reconcile=loss_gate)
+    if loss_gate:
+        for cpu, site in sites(run):
+            if site["loss"] or site["failures"] or site["successes"] != site["delivered"]:
+                errors.append(f"CPU {cpu['cpu']} {site['site']}: nonzero loss")
     if (run["seal_violations"] or run["timestamp_regressions"] or
             any(c.get("seal_violations", 0) or c.get("timestamp_regressions", 0) for c in run["per_cpu"])):
         errors.append("seal violation or timestamp regression")
-    if run["lost_notifications"]:
+    if loss_gate and run["lost_notifications"]:
         errors.append("positive PERF_RECORD_LOST (reported separately)")
-    if boundary:
+    if boundary and loss_gate:
         for cpu in run["per_cpu"]:
             b = cpu["sites"][1]
             if b["produced"] != b["successes"]:
@@ -168,6 +178,35 @@ def cpu_cost_ratio(perf, shared):
 def idle_increment(boundary, perf, cpus):
     return (boundary["busy_cpu_ns"] / boundary["elapsed"] -
             perf["busy_cpu_ns"] / perf["elapsed"]) / 1e9 / cpus
+
+
+def evaluate_runs(runs, cpus, case, irq_accounting):
+    errors = []
+    for arm in ARMS:
+        errors.extend(arm + ": " + e for e in normal_errors(
+            runs[arm], cpus, case, arm in ("perf_boundary", "adversarial"), arm=arm))
+    ratio = cpu_cost_ratio(runs["perf"], runs["shared"])
+    if case != "idle" and (ratio is None or not math.isfinite(ratio) or ratio > 1.10):
+        errors.append("paired perf/shared CPU-ns-per-attempt exceeds 1.10 or unavailable")
+    result = {"perf_shared_cpu_ns_per_attempt_ratio": ratio, "errors": errors}
+    gate = {"arm": "perf_boundary", "status": "NOT_APPLICABLE"}
+    if case == "idle":
+        deltas = {arm: idle_increment(runs[arm], runs["perf"], cpus)
+                  for arm in ("perf_boundary", "adversarial")}
+        result["boundary_increment_core_fraction_per_cpu"] = deltas
+        gate["core_fraction_per_cpu"] = deltas["perf_boundary"]
+        if not irq_accounting:
+            gate.update(status="UNMEASURED", reason=(
+                "CONFIG_IRQ_TIME_ACCOUNTING is not enabled in the running kernel config; "
+                "idle interrupt time is booked as idle, so /proc/stat cannot measure boundary cost"))
+        elif deltas["perf_boundary"] > 0.01:
+            gate["status"] = "FAIL"
+            errors.append("perf_boundary: boundary-only idle-box incremental CPU exceeds 1% per CPU")
+        else:
+            gate["status"] = "PASS"
+    result["boundary_cpu_gate"] = gate
+    result["status"] = "FAIL" if errors else "VOID" if gate["status"] == "UNMEASURED" else "PASS"
+    return result
 
 
 def requested_errors(run, args, cpu_ids):
@@ -275,21 +314,7 @@ def main():
                             command += ["--period-ns", str(args.period_ns if arm == "perf_boundary" else 100_000)]
                         run = run_one(out, label + "-" + arm, command)
                         summary["runs"][arm] = run
-                        summary["errors"].extend(arm + ": " + e for e in
-                                                 normal_errors(run, cpus, case, arm in ("perf_boundary", "adversarial")))
-                    runs = summary["runs"]
-                    ratio = cpu_cost_ratio(runs["perf"], runs["shared"])
-                    summary["perf_shared_cpu_ns_per_attempt_ratio"] = ratio
-                    if case != "idle" and (ratio is None or not math.isfinite(ratio) or ratio > 1.10):
-                        summary["errors"].append("paired perf/shared CPU-ns-per-attempt exceeds 1.10 or unavailable")
-                    if case == "idle":
-                        deltas = {arm: idle_increment(runs[arm], runs["perf"], cpus)
-                                  for arm in ("perf_boundary", "adversarial")}
-                        summary["boundary_increment_core_fraction_per_cpu"] = deltas
-                        for arm, delta in deltas.items():
-                            if delta > 0.01:
-                                summary["errors"].append(arm + ": boundary-only idle-box incremental CPU exceeds 1% per CPU")
-                    summary["status"] = "FAIL" if summary["errors"] else "PASS"
+                    summary.update(evaluate_runs(summary["runs"], cpus, case, info["irq_time_accounting"]))
                 except (OSError, ValueError, KeyError, TypeError, RuntimeError, ZeroDivisionError) as exc:
                     summary["errors"].append(str(exc))
                 write_json(out / (label + ".summary.json"), summary)
