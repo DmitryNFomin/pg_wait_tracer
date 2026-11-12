@@ -4,6 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 exec python3 - <<'PY'
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -27,44 +29,8 @@ def run(command, **kwargs):
     return subprocess.run(command, text=True, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, env=environment, **kwargs)
 
-# (name, original, replacement, intended distinguishing case).
-# M7 clamps only at the double-to-uint64 boundary, avoiding undefined conversion
-# of the rounded 2^64. The accumulation itself deliberately loses precision.
-mutants = [
-    ("M1", "q->from <= w.end && w.end < q->to",
-     "q->from <= w.end && w.end <= q->to", "02"),
-    ("M2", "q->from <= w.end && w.end < q->to",
-     "q->from < w.end && w.end < q->to", "03"),
-    ("M3", "clipped_ns(e->open.start, e->open.as_of, q->from, q->to)",
-     "clipped_ns(e->open.start, q->to, q->from, q->to)", "17"),
-    ("M4", "completion_gap = coverage_gap || !exit_certified(e, q);",
-     "completion_gap = coverage_gap;", "32"),
-    ("M5", "time->value.present = !coverage_gap;",
-     "time->value.present = true;", "08"),
-    ("M6", "if (!same_event(w.event, q->event))",
-     "if (w.start == w.end || !same_event(w.event, q->event))", "19"),
-    ("M7", "closed += clipped_ns(w.start, w.end, q->from, q->to);",
-     "double sum = (double)closed + (double)clipped_ns(w.start, w.end, q->from, q->to);\n"
-     "        closed = sum >= (double)UINT64_MAX ? UINT64_MAX : (uint64_t)sum;", "26"),
-    ("M8", "bool coverage_gap = false;\n    bool completion_gap = false;",
-     "bool coverage_gap = invalid_window;\n    bool completion_gap = invalid_window;", "36"),
-    ("M9", "time->detail_present = time->value.present;",
-     "time->detail_present = true;", "08"),
-    ("M10", "if (e->has_open && s.end > e->open.as_of)",
-     "if (false)", "37"),
-    ("X4", "(i && s.start < e->coverage[i - 1].start)", "false", "diff:X4"),
-    ("X5", "e->life_end >= q->to", "e->life_end > q->to", "diff:X5"),
-    ("X7", "e->open.as_of >= e->life_end", "e->open.as_of > e->life_end", "diff:X7"),
-    ("X8", "(e->has_life_end && w.end > e->life_end)", "false", "diff:X8"),
-    ("X9", "if (s.start < positive_end)", "if (false)", "diff:X9"),
-    ("X10", "e->open.start < e->life_start", "false", "diff:X10"),
-    # Move the time window while preserving full-trace occupation. Saturate
-    # UINT64_MAX endpoints so this is a semantic mutant without wrap/crashes.
-    ("X11", "closed += clipped_ns(w.start, w.end, q->from, q->to);",
-     "closed += clipped_ns(w.start, w.end, "
-     "q->from + (q->from < UINT64_MAX), q->to + (q->to < UINT64_MAX));", "diff:X11"),
-    ("X12", "!valid_event(e->open.event) || ", "", "diff:A1_empty_event"),
-]
+# Mutation sites, replacements and distinguishing inputs belong to the contract.
+mutants = json.loads((root / "contracts/wait_time-v1/mutants.json").read_text())
 
 def build(directory, output):
     return run(compiler + flags + ["-I" + str(directory / "src"),
@@ -93,10 +59,10 @@ try:
             print("core mutants: baseline BUILD_ERROR\n" + built.stdout)
             sys.exit(2)
         baseline = run([str(executable), str(root / "contracts/wait_time-v1/contracts")], timeout=15)
+        print("CORE CONTRACT BEGIN\n" + baseline.stdout.rstrip() + "\nCORE CONTRACT END", flush=True)
         if baseline.returncode != 0 or not summary(baseline.stdout) or has_sanitizer_error(baseline.stdout):
-            print("core mutants: baseline FAILED\n" + baseline.stdout)
+            print("core mutants: baseline FAILED")
             sys.exit(2)
-        print(baseline.stdout.splitlines()[-1], flush=True)
         baseline_diff = run([sys.executable, "-B",
                              str(root / "tests/test_core_wait_time_differential.py"),
                              "--source-root", str(base)], timeout=55)
@@ -107,7 +73,13 @@ try:
 
         failed = False
         killed = 0
-        for name, old, new, case in mutants:
+        for mutant in mutants:
+            name, old, new, case = (mutant[k] for k in
+                                   ("id", "original", "replacement", "intended_case"))
+            # Bind each kill to the actual replacement executed, not just its id.
+            definition_hash = hashlib.sha256(json.dumps(
+                [name, old, new, case], separators=(",", ":")).encode()).hexdigest()
+            case = case if case.startswith("diff:") else case.removeprefix("case:wait_window_").removesuffix(".json")
             directory = work / name
             shutil.copytree(base, directory, ignore=shutil.ignore_patterns("contract-test", "*.dSYM"))
             source = directory / "src/core/wait_metrics.c"
@@ -117,6 +89,7 @@ try:
                 failed = True
                 continue
             source.write_text(text.replace(old, new, 1))
+            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
             try:
                 built = build(directory, directory / "contract-test")
                 if built.returncode != 0:
@@ -145,7 +118,8 @@ try:
                 preserved = name != "X11" or "X11 whole-trace: MATCH" in result.stdout
                 if (result.returncode == 1 and intended and finished and preserved
                         and not has_sanitizer_error(result.stdout)):
-                    print(f"{name} KILLED (differential {case[5:]}, build OK, reference mismatch)", flush=True)
+                    print(f"{name} KILLED (differential {case[5:]}, build OK, reference mismatch) "
+                          f"definition-sha256={definition_hash} source-sha256={source_hash}", flush=True)
                     killed += 1
                 else:
                     print(f"{name} SURVIVED/ERROR (exit {result.returncode}; not an intended reference mismatch)\n"
@@ -156,7 +130,8 @@ try:
                 cases = re.findall(r"^wait_window_\d+\.json (?:PASS|MISMATCH)\b", result.stdout, re.M)
                 if (result.returncode == 1 and intended and summary(result.stdout)
                         and len(cases) >= 48 and not has_sanitizer_error(result.stdout)):
-                    print(f"{name} KILLED (contract wait_window_{case}, build OK, case mismatch)", flush=True)
+                    print(f"{name} KILLED (contract wait_window_{case}, build OK, case mismatch) "
+                          f"definition-sha256={definition_hash} source-sha256={source_hash}", flush=True)
                     killed += 1
                 else:
                     print(f"{name} SURVIVED/ERROR (exit {result.returncode}; not an intended case mismatch)\n"
