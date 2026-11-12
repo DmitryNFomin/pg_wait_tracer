@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic U1 logical replay versus the frozen independent evaluator.
+"""Deterministic U1/U2 logical replay versus the frozen independent evaluator.
 
 Builds only portable C in a temporary directory. CFLAGS selects sanitizers.
 The contract mode runs the C test against both frozen answer files.
@@ -63,7 +63,7 @@ def fixture(prefix):
 
 
 def named_cases():
-    cases = [fixture(v) for v in ("01", "08", "16", "17", "25", "27", "28", "29", "30")]
+    cases = [fixture(v) for v in ("01", "02", "03", "04", "06", "07", "08", "16", "17", "24", "25", "27", "28", "29", "30")]
     ordinary = fixture("01")
     records = ordinary["files"][0]["records"]
     c = copy.deepcopy(ordinary)
@@ -127,9 +127,170 @@ def named_cases():
     return cases
 
 
+def lifecycle_cases():
+    cases = []
+    def add(prefix, name, edit):
+        c = fixture(prefix)
+        c["id"] = name
+        edit(c)
+        cases.append(c)
+    def records(c): return c["files"][-1]["records"]
+    add("02", "reuse_old_target", lambda c: c["target"].update(fork=0))
+    add("02", "reuse_missing_old_exit", lambda c: records(c).pop(-2))
+    add("02", "reuse_missing_new_life", lambda c: records(c).pop(4))
+    add("02", "reuse_bad_old_run", lambda c: records(c)[3].update(duration=4))
+    add("02", "reuse_bad_new_run", lambda c: records(c)[6].update(old="A"))
+    add("02", "reuse_same_exit", lambda c: records(c)[4].update(exit=8, t=12, start=7, fork=7))
+    def late(c):
+        r = records(c)
+        r.append(r.pop(-2))
+    add("02", "reuse_life_after_frontier", late)
+    add("03", "exit_life_after_frontier", late)
+    add("03", "exit_without_terminal", lambda c: records(c).pop(3))
+    def earlier(c):
+        records(c).insert(3, {"kind": "FRONTIER", "t": 7, "counters": [0]*15})
+        records(c).pop(4)
+    add("03", "exit_missing_terminal_fallback", earlier)
+    def late_exit(c):
+        earlier(c)
+        records(c).insert(3, {"kind": "FRONTIER", "t": 9, "counters": [0]*15})
+        records(c).append(records(c).pop(-2))
+    add("03", "exit_late_life_fallback", late_exit)
+    add("03", "exit_at_frontier", lambda c: records(c)[-1].update(t=10))
+    add("03", "exit_after_frontier", lambda c: records(c)[-1].update(t=9))
+    add("03", "exit_unmatched_sentinel", lambda c: records(c)[4].update(exit=11, t=11))
+    add("03", "exit_nonwaiting", lambda c: [records(c).pop(2), records(c)[2].update(old=None)])
+    add("03", "exit_duplicate_terminal", lambda c: records(c).insert(4, copy.deepcopy(records(c)[3])))
+    add("03", "ordinary_edge_at_exit", lambda c: records(c)[3].update(new=None))
+    add("03", "exit_attach_at_exit", lambda c: records(c)[1].update(t=10))
+    add("01", "life_identical_repeat", lambda c: records(c).append(copy.deepcopy(records(c)[0])))
+    add("03", "life_exit_repeat", lambda c: records(c).append(copy.deepcopy(records(c)[4])))
+    add("03", "life_exit_retracted", lambda c: records(c).append(copy.deepcopy(records(c)[0])))
+    add("03", "life_exit_changed", lambda c: records(c).append(dict(records(c)[4], t=11, exit=11)))
+    add("06", "life_lower_bound_changed", lambda c: records(c).append(dict(records(c)[0], start=1)))
+    add("06", "provisional_nonzero_bound", lambda c: records(c)[0].update(start=5))
+    add("06", "provisional_duplicate_discovery", lambda c: records(c).insert(2, dict(records(c)[0], t=19)))
+    add("06", "provisional_edge_before_discovery", lambda c: records(c).insert(1, {
+        "kind":"TRANS", "t":9, "pid":101, "old":None, "new":"A", "duration":0}))
+    add("06", "provisional_edge_at_discovery", lambda c: records(c).insert(1, {
+        "kind":"TRANS", "t":10, "pid":101, "old":None, "new":"A", "duration":0}))
+    add("06", "provisional_life_after_attach", lambda c: records(c).insert(2, records(c).pop(0)))
+    def restart_same_key(c):
+        for r in records(c):
+            if r["kind"] in ("LIFE", "ATTACH_OK"): r["fork"] = 0
+            if r["kind"] == "LIFE": r["start_known"] = True
+        c["target"]["fork"] = 0
+    add("24", "restart_same_generation_key", restart_same_key)
+    add("24", "restart_old_target", lambda c: c["target"].update(capture="A", fork=0))
+    add("24", "restart_reversed_files", lambda c: c["files"].reverse())
+    add("24", "restart_no_fresh_attach", lambda c: records(c).pop(1))
+    add("24", "restart_no_fresh_life", lambda c: records(c).pop(0))
+    add("24", "restart_frontier_resets", lambda c: c["files"][0]["records"][-1].update(t=100))
+    add("24", "restart_bad_old_run", lambda c: c["files"][0]["records"][2].update(old="A"))
+    add("01", "legacy_life_shaped_records", lambda c: c["files"][0].update(version=4))
+    def mixed(c):
+        r = records(c)
+        for v in (r[0], r[1], r[-2]):
+            v["fork"] = None
+            if v["kind"] == "LIFE": v.update(start_known=False, t=max(1, v["t"]))
+        c["target"]["fork"] = None
+    add("02", "reuse_provisional_then_observed", mixed)
+    add("01", "exit_without_life_exit_at_zero", lambda c: records(c).insert(1, {
+        "kind":"TRANS", "t":0, "pid":101, "old":None, "new":"$EXIT", "duration":0}))
+    def invalid_other_life(c):
+        mixed(c)
+        r = records(c)
+        r.insert(-1, dict(r[0], start=1, t=1))
+        c["target"]["fork"] = 12
+    add("02", "reuse_invalid_old_life", invalid_other_life)
+    def invalid_provisional_attach(c):
+        r = records(c)
+        r[0]["start"] = 2
+        r.insert(1, dict(r[0], start=3))
+        r[2]["t"] = 1  # invalid generation must be skipped before attach lifetime validation
+    add("06", "invalid_life_skips_attach", invalid_provisional_attach)
+    def zero_exit_retracted(c):
+        r = records(c)
+        r[:] = [dict(r[0], exit=0), copy.deepcopy(r[0]),
+                {"kind":"FRONTIER", "t":1, "counters":[0]*15}]
+    add("01", "life_zero_exit_retracted", zero_exit_retracted)
+    def distinct_restart_life(c):
+        c["target"].update(capture="A", fork=0)
+        records(c)[0]["start"] = 5
+    add("24", "restart_old_target_distinct_life", distinct_restart_life)
+    add("03", "duplicate_nonwaiting_exit", lambda c: records(c).insert(4, {
+        "kind":"TRANS", "t":10, "pid":101, "old":None, "new":"$EXIT", "duration":0}))
+    def reversed_same_key(c):
+        restart_same_key(c)
+        c["files"].reverse()
+    add("24", "restart_same_key_reversed", reversed_same_key)
+    add("02", "observed_life_delayed_observation", lambda c: records(c)[4].update(t=17))
+    def restart_life_exit(c):
+        restart_same_key(c)
+        records(c)[0].update(t=24, exit=24)
+        c["target"].update(capture="A", fork=0)
+    add("24", "restart_life_exit_isolation", restart_life_exit)
+    def other_terminal(c):
+        c["target"]["fork"] = 0
+        r = records(c)
+        r[4].update(t=18, exit=18)
+        r.insert(-1, {"kind":"TRANS", "t":18, "pid":101, "old":"Lock", "new":"$EXIT", "duration":3})
+    add("02", "reuse_other_generation_terminal", other_terminal)
+    return cases
+
+
+def generated_lifecycles():
+    rng = random.Random(SEED + 2)
+    cases = lifecycle_cases()
+    for i in range(1800):
+        c = fixture(rng.choice(["02", "03", "04", "06", "07", "24"]))
+        c["id"] = f"lifecycle_{i:04d}"
+        scale = rng.randrange(1, 8)
+        offset = rng.choice([0, 100, (1 << 53)+7, (1 << 63), MAX-1000])
+        for f in c["files"]:
+            for r in f["records"]:
+                for k in ("t", "fork", "start", "exit"):
+                    if k in r and r[k] is not None: r[k] = offset + scale*r[k]
+                if "duration" in r: r["duration"] *= scale
+        if c["target"]["fork"] is not None:
+            c["target"]["fork"] = offset + scale*c["target"]["fork"]
+        if i % 6 == 0 and len(c["files"][0]["records"]) == 9:
+            c["target"]["fork"] = offset  # old generation after PID reuse
+        r = c["files"][-1]["records"]
+        fault = i % 19
+        if fault == 0:
+            r.append(r.pop(0))  # LIFE physically after certification
+        elif fault == 1:
+            deps = r[:-1]
+            rng.shuffle(deps)
+            r[:] = deps + r[-1:]
+        elif fault == 2:
+            r[:] = [v for v in r if v["kind"] != "LIFE" or v["exit"] is None]
+        elif fault == 3:
+            r[:] = [v for v in r if v.get("new") != "$EXIT"]
+        elif fault == 4:
+            r.append(copy.deepcopy(next(v for v in r if v["kind"] == "LIFE")))
+        elif fault == 5:
+            next(v for v in r if v["kind"] == "TRANS")["old"] = "bad"
+        elif fault == 6:
+            c["files"][-1]["qualified"] = False
+        elif fault == 7:
+            r.insert(-1, {"kind":"FRONTIER", "t":offset+scale*7, "counters":[0]*15})
+        elif fault == 8:
+            tr = next(v for v in r if v["kind"] == "TRANS")
+            tr["t"] = offset
+            tr["duration"] = 0
+        left, right = sorted(rng.choices(list(range(26)), k=2))
+        if i % 5 == 0: left, right = 10, 12  # query starts at exit
+        c["query"] = {"event":rng.choice(["Lock", "PgSleep", "absent"]),
+                      "from":offset+scale*left, "to":offset+scale*right}
+        cases.append(c)
+    return cases
+
+
 def generate():
     rng = random.Random(SEED)
-    cases = named_cases()
+    cases = named_cases() + generated_lifecycles()
     names = ["PgSleep", "Lock", "A", "other", 'quote"slash\\', "\u2603", "A\0B", "\U0001f600"]
     for i in range(2400):
         offset = rng.choice([0, 0, 100, (1 << 53) + 7, (1 << 63), MAX - 100])
@@ -254,7 +415,9 @@ def refusal_cases():
         r[1]["fork"] = 1
         r.insert(2, {"kind": "TRANS", "t": 0, "pid": 101, "old": None,
                      "new": "Lock", "duration": 0})
-    add("transition_before_fork", transition_before_fork)
+    before_fork = fixture("01")
+    before_fork["id"] = "transition_before_fork"
+    transition_before_fork(before_fork)
     def attach_before_fork(c):
         c["target"]["fork"] = 2
         c["files"][0]["records"][0].update(t=2, fork=2, start=2)
@@ -263,12 +426,25 @@ def refusal_cases():
     for t in (15, 14):
         add(f"nonadvancing_frontier_{t}", lambda c, t=t: c["files"][0]["records"].append({
             "kind": "FRONTIER", "t": t, "counters": [0] * 15}))
+    restart_duplicate = fixture("24")
+    restart_duplicate["id"] = "refuse_restart_duplicate_non_target"
+    restart_duplicate["files"].append(copy.deepcopy(restart_duplicate["files"][0]))
+    cases.append(restart_duplicate)
+    add("target_capture_missing", lambda c: c["target"].update(capture="missing"))
+    add("restart_other_boot", lambda c: [c["files"].append(copy.deepcopy(c["files"][0])),
+        c["files"][1].update(capture="B", boot="boot-2")])
+    add("life_observed_no_fork", lambda c: c["files"][0]["records"][0].update(fork=None))
+    add("life_observed_fork_mismatch", lambda c: c["files"][0]["records"][0].update(start=1, t=1))
+    add("life_provisional_with_fork", lambda c: c["files"][0]["records"][0].update(start_known=False))
+    add("life_exit_before_start", lambda c: c["files"][0]["records"][0].update(start=2, fork=2, t=3, exit=1))
+    add("life_exit_after_observation", lambda c: c["files"][0]["records"][0].update(exit=20))
+    add("transition_empty_new", lambda c: c["files"][0]["records"][-2].update(new=""))
     # A frontier before the attach withholds coverage, rather than invalidating
     # the entire input. Compare these unavailable metrics with the reference.
     unavailable = fixture("01")
     unavailable["id"] = "refuse_last_frontier_before_attach"
     unavailable["files"][0]["records"][1]["t"] = 20
-    return cases, [unavailable]
+    return cases, [unavailable, before_fork]
 
 
 def reference_module():
@@ -289,7 +465,7 @@ def reference_answer(reference, case):
     if len(output) != 3:
         raise RuntimeError(f"reference did not produce all objects for {case['id']}")
     target = case["target"]
-    # The reference handles multiple PIDs; U1 explicitly supports only one.
+    # The reference handles multiple PIDs; U2 explicitly supports only one.
     if any(r["kind"] == "TRANS" and r["pid"] != target["pid"]
            for f in case["files"] for r in f["records"]):
         return {"error": "unsupported"}

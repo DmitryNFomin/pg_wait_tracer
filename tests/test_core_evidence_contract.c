@@ -8,7 +8,7 @@
 
 static bool in_scope(const char *id)
 {
-    const char *prefixes[] = {"01_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_"};
+    const char *prefixes[] = {"01_", "02_", "03_", "04_", "06_", "07_", "24_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_"};
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
         if (!strncmp(id, prefixes[i], 3)) return true;
     return false;
@@ -40,6 +40,39 @@ static int json_cases(int argc, char **argv)
     return 0;
 }
 
+/* Native callers may leave ignored fork storage nonzero for provisional keys.
+ * The has_fork flag, rather than those bytes, defines the capture-local key. */
+static int native_provisional(void)
+{
+    pgwt_core_event capture = {"A", 1}, event = {"wait", 4};
+    pgwt_evidence_record records[] = {
+        {.kind = PGWT_EVIDENCE_LIFE, .pid = 101, .t = 10, .fork = 37},
+        {.kind = PGWT_EVIDENCE_ATTACH_OK, .pid = 101, .t = 12, .fork = 38,
+         .reread = true, .counters = {.known = true}},
+        {.kind = PGWT_EVIDENCE_TRANS, .pid = 101, .t = 14, .new_event = event, .duration = 2},
+        {.kind = PGWT_EVIDENCE_FRONTIER, .t = 20, .counters = {.known = true}}
+    };
+    pgwt_evidence_file file = {.version = 5, .boot = {"boot", 4}, .capture = capture,
+        .present = true, .qualified = true, .baseline = {.known = true},
+        .records = records, .record_count = sizeof(records) / sizeof(records[0])};
+    pgwt_evidence_input input = {.files = &file, .file_count = 1, .capture = capture,
+        .pid = 101, .fork = 39};
+    pgwt_core_query query = {.event = event, .from = 12, .to = 20};
+    pgwt_evidence_output out;
+    pgwt_replay_status status = pgwt_evidence_replay(&input, &query, &out, NULL);
+    bool pass = status == PGWT_REPLAY_OK && !out.projection.invalid_fields &&
+        out.projection.life_start == 0 && !out.projection.has_life_end &&
+        out.projection.coverage_count == 1 && out.coverage.start == 12 && out.coverage.end == 20 &&
+        out.projection.wait_count == 0 && out.projection.has_open &&
+        out.projection.open.start == 14 && out.projection.open.as_of == 20 &&
+        out.wait_time.value.present && out.wait_time.value.value == 6 &&
+        out.completed_waits.value.present && out.completed_waits.value.value == 0;
+    pgwt_evidence_output_free(&out);
+    puts(pass ? "evidence native_provisional_fork_bytes PASS" :
+                "evidence native_provisional_fork_bytes FAIL projection");
+    return !pass;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 3 && !strcmp(argv[1], "--json")) return json_cases(argc, argv);
@@ -55,7 +88,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "evidence harness: need 33 frozen scenarios, found %zu\n", paths.gl_pathc);
         globfree(&paths); return 2;
     }
-    int mismatch = 0, harness_error = 0;
+    int mismatch = native_provisional(), harness_error = 0;
     for (size_t i = 0; i < paths.gl_pathc; ++i) {
         evidence_case input;
         char field[512] = {0};

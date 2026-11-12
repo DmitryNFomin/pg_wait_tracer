@@ -3,15 +3,14 @@
 
 #include "pgwt_core.h"
 
-/* Logical U1 input, not a trace codec. This unit accepts one present, initial
- * file, one target generation with an observed fork and no exit, and at most
- * one reread attachment whose seed/state are nonwaiting. Legacy v2-v4 files
- * retain no exact evidence. Unqualified v5 retains validated LIFE only.
- * END, VOID, other kinds, other generations, provisional LIFE, transition
- * anchors, nonzero seeds, counters other than the intact zero baseline, and
- * file/run chains are explicitly unsupported, even in an uncertified suffix.
- * Strings are length-delimited; {NULL,0} means a nonwaiting state.
- * Native callers supply readable arrays/strings of their stated lengths.
+/* Logical U2 input, not a trace codec. Accepts independent initial files in
+ * one boot, one PID with timestamp-resolved generations (including provisional
+ * LIFE), exits, and one nonwaiting reread attachment per generation. Legacy
+ * v2-v4 files retain no exact evidence; unqualified v5 retains LIFE only.
+ * END, VOID, other kinds/PIDs, transition anchors, nonzero seeds, nonzero loss
+ * counters and same-capture file chains remain explicitly unsupported, even
+ * in an uncertified suffix. Strings are length-delimited; {NULL,0} means a
+ * nonwaiting state. Callers supply readable arrays/strings of stated lengths.
  */
 typedef enum {
     PGWT_EVIDENCE_OTHER, PGWT_EVIDENCE_LIFE, PGWT_EVIDENCE_ATTACH_OK,
@@ -32,7 +31,7 @@ typedef struct {
     /* LIFE */
     uint64_t start, exit;
     bool start_known, has_exit;
-    /* ATTACH_OK: false means a transition anchor (outside U1). */
+    /* ATTACH_OK: false means a transition anchor (outside U2). */
     bool reread;
     pgwt_core_event seed, state;
     /* TRANS */
