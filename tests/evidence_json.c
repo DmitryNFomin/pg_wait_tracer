@@ -427,8 +427,9 @@ static void record(const json_node *n, pgwt_evidence_record *out)
     else if (literal(kind, "TRANS")) out->kind = PGWT_EVIDENCE_TRANS;
     else if (literal(kind, "FRONTIER")) out->kind = PGWT_EVIDENCE_FRONTIER;
     else if (literal(kind, "END")) out->kind = PGWT_EVIDENCE_END;
+    else if (literal(kind, "VOID")) out->kind = PGWT_EVIDENCE_VOID;
     else out->kind = PGWT_EVIDENCE_OTHER;
-    if (out->kind != PGWT_EVIDENCE_FRONTIER && out->kind != PGWT_EVIDENCE_OTHER)
+    if (out->kind != PGWT_EVIDENCE_FRONTIER && out->kind != PGWT_EVIDENCE_VOID && out->kind != PGWT_EVIDENCE_OTHER)
         ok = pid_field(member(n, "pid"), &out->pid) && ok;
     if (out->kind == PGWT_EVIDENCE_LIFE || out->kind == PGWT_EVIDENCE_ATTACH_OK ||
         out->kind == PGWT_EVIDENCE_END)
@@ -462,6 +463,13 @@ static void record(const json_node *n, pgwt_evidence_record *out)
         ok = event_string(member(n, "reason"), &out->end_reason) && ok;
         ok = KEYS(n, "kind", "t", "pid", "fork", "reason") && ok;
         break;
+    case PGWT_EVIDENCE_VOID:
+        counters(member(n, "counters"), &out->counters);
+        ok = (is_null(member(n, "counters")) || out->counters.known) && ok;
+        ok = optional_uint(member(n, "invalid_from"), &out->has_invalid_from, &out->invalid_from) && ok;
+        ok = event_string(member(n, "reason"), &out->void_reason) && ok;
+        ok = KEYS(n, "kind", "t", "counters", "invalid_from", "reason") && ok;
+        break;
     case PGWT_EVIDENCE_OTHER: break; /* Public API must refuse this kind. */
     }
     out->unsupported_shape = !ok;
@@ -493,8 +501,7 @@ int evidence_case_load(const char *path, evidence_case *out, char *error, size_t
         ok = event_string(member(n, "boot"), &f->boot) && ok;
         ok = event_string(member(n, "capture"), &f->capture) && ok;
         ok = integer(member(n, "file_no"), &f->file_no) && ok;
-        uint64_t previous;
-        ok = optional_uint(member(n, "previous"), &f->has_previous, &previous) && ok;
+        ok = optional_uint(member(n, "previous"), &f->has_previous, &f->previous) && ok;
         /* Qualification absence is explicitly unqualified (contract sections 1,5).
          * present is a scenario convenience whose absent value means intact. */
         const json_node *qualified = member(n, "qualified");
@@ -502,7 +509,10 @@ int evidence_case_load(const char *path, evidence_case *out, char *error, size_t
         ok = (!qualified || boolean(qualified, &f->qualified)) && ok;
         f->present = true;
         ok = (!present || boolean(present, &f->present)) && ok;
-        counters(member(n, "loss_baseline"), &f->baseline);
+        const json_node *baseline = member(n, "loss_baseline");
+        counters(baseline, &f->baseline);
+        /* Null/absent means unreadable; malformed vectors are not that state. */
+        ok = (!baseline || is_null(baseline) || f->baseline.known) && ok;
         ok = KEYS(n, "version", "boot", "capture", "file_no", "previous", "qualified",
                   "loss_baseline", "present", "records") && ok;
         const json_node *records = member(n, "records");
