@@ -1,5 +1,9 @@
 /* test_summary_tick_flush.c — one logical second contributes exactly once.
  *
+ * Legacy writer coverage: these tests create their own summary fixtures.
+ * The daemon writer is switched off; test_tick_drain asserts its NULL writer
+ * stays off across event delivery, timer maintenance and raw retention.
+ *
  * THE DEFECT (#277). pgwt_summary_flush ran on EVERY daemon tick, ungated.
  * flush_accum serialised the IN-PROGRESS second, wrote the block and cleared
  * accum_active — but left every counter in place. The next event in that same

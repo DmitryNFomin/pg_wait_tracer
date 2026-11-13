@@ -77,7 +77,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_background_unattributed \
             test_session_rows \
             test_phase_capability test_phase_probe \
-            test_core_wait_time_contract
+            test_core_wait_time_contract \
+            test_core_evidence_contract
 
 .PHONY: all clean check
 
@@ -493,7 +494,9 @@ test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c replay_accum.
 test_trace_closure: test_trace_closure.c $(BUILD)/server_event_writer.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
-test_retention_order: test_retention_order.c $(BUILD)/server_event_writer.o
+test_retention_order: test_retention_order.c $(BUILD)/server_event_writer.o \
+                      $(BUILD)/server_summary_writer.o $(BUILD)/server_wait_event.o \
+                      $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 # test_open_ckpt: #424 deliverable 2 — open-interval checkpoints as one
@@ -1160,4 +1163,8 @@ test_phase_probe: test_phase_probe.c ../src/phase_probe.c ../src/phase_capabilit
 	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
 
 test_core_wait_time_contract: test_core_wait_time_contract.c ../src/core/wait_metrics.c ../src/core/contract_json.c ../src/core/pgwt_core.h ../src/core/contract_json.h
+	$(CC) $(CFLAGS) -std=c11 -o $@ $(filter %.c,$^)
+
+# evidence-v1 U1: portable logical replay, independently frozen projections/results.
+test_core_evidence_contract: test_core_evidence_contract.c evidence_json.c evidence_json.h ../src/core/evidence_replay.c ../src/core/evidence_replay.h ../src/core/wait_metrics.c ../src/core/contract_json.c ../src/core/pgwt_core.h ../src/core/contract_json.h
 	$(CC) $(CFLAGS) -std=c11 -o $@ $(filter %.c,$^)
