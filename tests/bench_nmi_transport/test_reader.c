@@ -47,7 +47,18 @@ static void test_requests(void)
     transport_release(&s, 800, 230);
     assert(s.depth == 0 && s.released == 802 && s.arrived == 802);
     assert(s.max_held_age_ns == 70);
+    assert(s.held_ages.count == s.released);
+    assert(transport_p99(&s.held_ages) == 30); /* 802 ages: 50 at 30, one at 70 */
     transport_staging_free(&s);
+
+    struct transport_samples samples = {0};
+    assert(transport_p99(&samples) == 0);
+    /* 1..100 in descending order: rank 99, not the maximum or an average. */
+    for (uint64_t i = 100; i; --i) assert(transport_sample(&samples, i));
+    assert(transport_p99(&samples) == 99);
+    assert(transport_sample(&samples, 101));
+    assert(transport_p99(&samples) == 100); /* ceil(.99 * 101) == 100 */
+    free(samples.values);
 
     const uint64_t ms = 1000000;
     assert(!transport_request_due(false, 10, 10, 1, 49*ms, 50*ms, 100*ms, 0));

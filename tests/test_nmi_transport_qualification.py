@@ -33,7 +33,7 @@ def report():
                      "helper_tid": 123, "helper_cpu_ns": 100_000,
                      "schedstat_running_ns": {"status": "MEASURED", "start": 100, "end": 150, "delta": 50},
                      "requests": 0, "request_acknowledgements": 0, "request_outstanding": False,
-                     "max_request_to_frontier_ns": 0, "request_outstanding_age_ns": 0, "phase_offset_ns": 0,
+                     "max_request_to_frontier_ns": 0, "request_to_frontier_samples_ns": [], "request_outstanding_age_ns": 0, "phase_offset_ns": 0,
                      "helper_wakeups": 2, "helper_syscalls": 2, "boundary_expected": 100,
                      "hog_tid": 0, "hog_iterations": 0,
                      "frontier_ns": 900_000_000, "frontier_seen_ns": 910_000_000,
@@ -74,6 +74,8 @@ def add_busy(r, value):
 
 
 def quartet(case="all"):
+    if case == "hog_data":
+        return hog_data_runs()
     runs = {arm: report() for arm in qual.ARMS}
     for arm, run in runs.items():
         if arm not in qual.SYSCALL_ARMS:
@@ -94,23 +96,156 @@ def quartet(case="all"):
             run["boundary_source"] = "syscall_request"
             cpu = run["per_cpu"][0]
             cpu.update(boundary_expected=0, requests=2, request_acknowledgements=2,
-                       max_request_to_frontier_ns=1_000_000)
+                       max_request_to_frontier_ns=1_000_000, request_to_frontier_samples_ns=[500_000, 1_000_000])
             data = cpu["sites"][0]["delivered"]
             run["held_data"] = {"arrived": data, "released": data, "queue_depth": 0,
                                 "queue_max_depth": 1 if data else 0, "queue_growth_records": 0,
                                 "max_queue_growth_per_drain": 0, "queue_growth_records_per_second": 0,
-                                "max_held_data_age_ns": 50_000_000 if data else 0, "oldest_pending_age_ns": 0}
+                                "max_held_data_age_ns": 50_000_000 if data else 0, "oldest_pending_age_ns": 0,
+                                "held_age_samples": data, "p99_held_data_age_ns": 50_000_000 if data else 0}
             if case in ("idle", "hog"):
                 cpu.update(helper_wakeups=0, helper_syscalls=0, syscall_fires=0, syscall_outputs=0,
-                           requests=0, request_acknowledgements=0, max_request_to_frontier_ns=0)
+                           requests=0, request_acknowledgements=0, max_request_to_frontier_ns=0,
+                           request_to_frontier_samples_ns=[])
                 cpu["sites"][1].update(produced=0, successes=0, delivered=0)
                 run.update(boundary_fires=0, boundary_outputs=0)
         run["attempts"] = sum(s["produced"] for _, s in qual.sites(run))
     return runs
 
 
+def hog_data_runs(cpus=2):
+    assert cpus >= 2
+    runs = quartet("all")
+    for arm, r in runs.items():
+        first = r["per_cpu"][0]
+        r["per_cpu"] = []
+        for i in range(cpus):
+            c = copy.deepcopy(first)
+            c.update(cpu=2 + 3*i, helper_tid=123+i if first["helper_tid"] else 0)
+            if i >= (cpus + 1) // 2:
+                c.update(hog_tid=321+i, hog_iterations=1000)
+                c["sites"][0].update(produced=0, successes=0, delivered=0)
+            r["per_cpu"].append(c)
+        r["online_cpus"] = cpus
+        r["hits"] = 3 * ((cpus + 1) // 2)
+        r["attempts"] = sum(site["produced"] for _, site in qual.sites(r))
+        r["boundary_fires"] = sum(c["sites"][1]["produced"] for c in r["per_cpu"])
+        r["boundary_outputs"] = r["boundary_fires"]
+        if arm == "syscall_request":
+            r["held_data"].update(arrived=r["hits"], released=r["hits"], held_age_samples=r["hits"])
+        set_busy(r, 50)
+    return runs
+
+
 class Gates(unittest.TestCase):
-    def test_period_grid_runs_all_five_cases_and_each_request_treatment(self):
+    def test_hog_data_roles_every_arm_and_odd_population(self):
+        for cpus in (2, 3, 4, 5):
+            runs = hog_data_runs(cpus)
+            result = qual.evaluate_runs(runs, cpus, "hog_data", True)
+            self.assertEqual(result["status"], "PASS", result["errors"])
+            for arm in qual.ARMS:
+                for i in range(cpus):
+                    broken = copy.deepcopy(runs)
+                    c = broken[arm]["per_cpu"][i]
+                    if i < (cpus + 1) // 2:
+                        c["sites"][0].update(produced=0, successes=0, delivered=0)
+                        message = f"CPU {c['cpu']}: active writer did not fire"
+                    else:
+                        c["sites"][0].update(produced=1, successes=1, delivered=1)
+                        message = f"CPU {c['cpu']}: starved CPU produced DATA"
+                    errors = qual.evaluate_runs(broken, cpus, "hog_data", True)["errors"]
+                    self.assertIn(arm + ": " + message, errors)
+                for i in range((cpus + 1) // 2, cpus):
+                    for field in ("hog_tid", "hog_iterations"):
+                        broken = copy.deepcopy(runs)
+                        c = broken[arm]["per_cpu"][i]
+                        c[field] = 0
+                        self.assertIn(f"{arm}: CPU {c['cpu']}: untraced hog did not run",
+                                      qual.evaluate_runs(broken, cpus, "hog_data", True)["errors"])
+            # Remove a starved CPU's request with all request/boundary counters
+            # still consistent: other CPUs' requests cannot certify this CPU.
+            for i in range((cpus + 1) // 2, cpus):
+                broken = copy.deepcopy(runs)
+                r = broken["syscall_request"]
+                c = r["per_cpu"][i]
+                c.update(requests=0, request_acknowledgements=0, helper_wakeups=0,
+                         helper_syscalls=0, syscall_fires=0, syscall_outputs=0,
+                         request_to_frontier_samples_ns=[], max_request_to_frontier_ns=0)
+                c["sites"][1].update(produced=0, successes=0, delivered=0)
+                r["boundary_fires"] -= 2
+                r["boundary_outputs"] -= 2
+                self.assertIn(f"syscall_request: CPU {c['cpu']}: no request reached starved CPU",
+                              qual.evaluate_runs(broken, cpus, "hog_data", True)["errors"])
+        self.assertIn("syscall_request: hog_data requires at least 2 participating CPUs",
+                      qual.evaluate_runs(quartet(), 1, "hog_data", True)["errors"])
+
+    def test_hog_data_requested_latency_fields_and_pooled_nearest_rank(self):
+        runs = hog_data_runs(4)
+        r = runs["syscall_request"]
+        # 100 starved samples: 99 at 2 ms and one at 9 ms. P99 is 2 ms;
+        # pooling per-CPU maxima or percentiles instead would give 9 ms.
+        for c, samples in zip(r["per_cpu"], ([7, 8], [], [2_000_000]*99, [9_000_000])):
+            n = len(samples)
+            c.update(request_to_frontier_samples_ns=samples, max_request_to_frontier_ns=max(samples, default=0),
+                     requests=n, request_acknowledgements=n, helper_wakeups=n, helper_syscalls=n,
+                     syscall_fires=n, syscall_outputs=n)
+            c["sites"][1].update(produced=n, successes=n, delivered=n)
+        r["boundary_fires"] = r["boundary_outputs"] = 102
+        # 300 released DATA ages: 297 at 40 ms, three at 100 ms.
+        for c in r["per_cpu"][:2]:
+            c["sites"][0].update(produced=150, successes=150, delivered=150)
+        r.update(hits=300, attempts=402)
+        r["held_data"].update(arrived=300, released=300, held_age_samples=300,
+                             max_held_data_age_ns=100_000_000, p99_held_data_age_ns=40_000_000)
+        result = qual.evaluate_runs(runs, 4, "hog_data", True)
+        self.assertEqual(result["status"], "PASS", result["errors"])
+        latency = result["requested_latency"]
+        self.assertEqual(latency["held_data_age_ns"], {"samples": 300, "max": 100_000_000, "p99": 40_000_000})
+        self.assertEqual(latency["request_to_frontier_latency_ns"], {
+            "starved": {"cpus": [8, 11], "samples": 100, "max": 9_000_000, "p99": 2_000_000},
+            "other": {"cpus": [2, 5], "samples": 2, "max": 8, "p99": 8}})
+        self.assertEqual(latency["requests_per_starved_cpu"], {"8": 99, "11": 1})
+        self.assertEqual(qual.latency_summary(list(range(1, 102))), {"samples": 101, "max": 101, "p99": 100})
+        r["held_data"]["max_held_data_age_ns"] += 1
+        result = qual.evaluate_runs(runs, 4, "hog_data", True)
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn("syscall_request: held DATA age exceeds 100 ms", result["errors"])
+        self.assertEqual(result["requested_latency"]["held_data_age_ns"]["max"], 100_000_001)
+
+    def test_new_latency_evidence_fails_closed_and_empty_groups_are_null(self):
+        for field in ("held_age_samples", "p99_held_data_age_ns"):
+            for value in (None, -1, True, 1.5, 100_000_001):
+                runs = hog_data_runs()
+                runs["syscall_request"]["held_data"][field] = value
+                self.assertEqual(qual.evaluate_runs(runs, 2, "hog_data", True)["status"], "FAIL", (field, value))
+            runs = hog_data_runs()
+            del runs["syscall_request"]["held_data"][field]
+            self.assertEqual(qual.evaluate_runs(runs, 2, "hog_data", True)["status"], "FAIL", field)
+        for index in (0, 1):
+            for value in (None, [], [1], [-1, 1_000_000], [True, 1_000_000], [0, 999_999]):
+                runs = hog_data_runs()
+                runs["syscall_request"]["per_cpu"][index]["request_to_frontier_samples_ns"] = value
+                errors = qual.evaluate_runs(runs, 2, "hog_data", True)["errors"]
+                self.assertIn(f"syscall_request: CPU {2 + 3*index}: missing or inconsistent request latency samples", errors)
+            runs = hog_data_runs()
+            del runs["syscall_request"]["per_cpu"][index]["request_to_frontier_samples_ns"]
+            self.assertEqual(qual.evaluate_runs(runs, 2, "hog_data", True)["status"], "FAIL")
+        result = qual.evaluate_runs(quartet("idle"), 1, "idle", True)["requested_latency"]
+        self.assertEqual(result["held_data_age_ns"], {"samples": 0, "max": None, "p99": None})
+        self.assertEqual(result["request_to_frontier_latency_ns"]["starved"],
+                         {"cpus": [], "samples": 0, "max": None, "p99": None})
+        self.assertEqual(result["requests_per_starved_cpu"], {})
+
+    def test_hog_data_one_cpu_skip_is_persisted_and_printed(self):
+        args = qual.parse_args(["--out", "/tmp/unused", "--cases", "hog_data"])
+        for available in (1, 3, 4):
+            plan = qual.plan_cells(args, available)
+            self.assertTrue(all(c["cpus"] >= 2 for c in plan["cells"]))
+            self.assertEqual([c["cpus"] for c in plan["cells"]], [4]*3 + ([] if available == 1 else [available]*3))
+            self.assertEqual([s["population"] for s in plan["skipped"]], ["1", "all"] if available == 1 else ["1"])
+            self.assertTrue(all("at least 2" in s["reason"] for s in plan["skipped"]))
+
+    def test_period_grid_runs_all_six_cases_and_each_request_treatment(self):
         for flags, periods in (([], [10_000_000]), (["--periods", "10000000", "40000000"], [10_000_000, 40_000_000]),
                                (["--period-ns", "20000000"], [20_000_000])):
             with tempfile.TemporaryDirectory() as tmp:
@@ -127,13 +262,20 @@ class Gates(unittest.TestCase):
                      mock.patch.object(qual, "run_one", side_effect=run_one), \
                      mock.patch.object(qual, "control_errors", return_value=[]), \
                      mock.patch.object(qual, "evaluate_runs", return_value={"status": "PASS"}), \
-                     mock.patch("builtins.print"):
+                     mock.patch("builtins.print") as printed:
                     self.assertEqual(qual.main(), 0)
                 cells = json.loads((out / "summary.json").read_text())["cells"]
-                self.assertEqual(len(cells), 3 * 5 * len(periods))
-                self.assertEqual(set(qual.CASES), {"idle", "one", "all", "migrate", "hog"})
+                self.assertIn("Skipped cpu-1-hog_data: hog_data requires at least 2 participating CPUs",
+                              [c.args[0] for c in printed.call_args_list])
+                self.assertEqual(json.loads((out / "plan.json").read_text())["skipped"], [
+                    {"population": "1", "cpus": 1, "case": "hog_data",
+                     "reason": "hog_data requires at least 2 participating CPUs"}])
+                self.assertEqual(len(cells), 17 * len(periods))
+                self.assertEqual(set(qual.CASES), {"idle", "one", "all", "migrate", "hog", "hog_data"})
                 for population in ("1", "4", "all"):
                     for case in qual.CASES:
+                        if case == "hog_data" and population == "1":
+                            continue
                         for period in periods:
                             prefix = f"cpu-{population}-{case}-p{period}-r1"
                             for arm in qual.ARMS:
@@ -233,7 +375,7 @@ class Gates(unittest.TestCase):
         r.update(boundary_fires=0, boundary_outputs=0)
         cpu = r["per_cpu"][0]
         cpu.update(syscall_fires=0, syscall_outputs=0, helper_syscalls=0, helper_wakeups=0,
-                   requests=0, request_acknowledgements=0)
+                   requests=0, request_acknowledgements=0, max_request_to_frontier_ns=0, request_to_frontier_samples_ns=[])
         cpu["sites"][1].update(produced=0, successes=0, delivered=0)
         self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "PASS")
         cpu["helper_syscalls"] = 1
@@ -258,6 +400,7 @@ class Gates(unittest.TestCase):
             if isinstance(r["held_data"], dict):
                 r["held_data"]["arrived"] *= 2
                 r["held_data"]["released"] *= 2
+                r["held_data"]["held_age_samples"] *= 2
             set_busy(r, r["participating_busy_cpu_ns"])
             for field in ("hits", "attempts", "boundary_fires", "boundary_outputs"):
                 r[field] *= 2
@@ -294,6 +437,7 @@ class Gates(unittest.TestCase):
             if isinstance(r["held_data"], dict):
                 r["held_data"]["arrived"] *= 2
                 r["held_data"]["released"] *= 2
+                r["held_data"]["held_age_samples"] *= 2
             set_busy(r, r["participating_busy_cpu_ns"])
             for field in ("attempts", "boundary_fires", "boundary_outputs"):
                 r[field] *= 2
@@ -458,28 +602,30 @@ class Gates(unittest.TestCase):
 
     def test_syscall_boundary_all_cases_each_cpu_deadlines_and_fires(self):
         for case in qual.CASES:
-            # Reuse the one-CPU hand-counted stream. A one-CPU migration is
-            # necessarily pinned. Idle has boundaries but zero DATA.
+            # Reuse the hand-counted streams, with two CPUs for hog_data.
+            # One-CPU migration is pinned; idle has boundaries but zero DATA.
             runs = quartet(case)
-            self.assertEqual(qual.evaluate_runs(runs, 1, case, True)["status"], "PASS", case)
+            self.assertEqual(qual.evaluate_runs(runs, len(runs["perf"]["per_cpu"]), case, True)["status"], "PASS", case)
             for field in ("max_frontier_gap_ns", "max_frontier_stamp_gap_ns"):
                 good = copy.deepcopy(runs)
                 good["syscall_boundary"]["per_cpu"][0][field] = 100_000_000
-                self.assertEqual(qual.evaluate_runs(good, 1, case, True)["status"], "PASS")
+                self.assertEqual(qual.evaluate_runs(good, len(runs["perf"]["per_cpu"]), case, True)["status"], "PASS")
                 good["syscall_boundary"]["per_cpu"][0][field] += 1
-                result = qual.evaluate_runs(good, 1, case, True)
+                result = qual.evaluate_runs(good, len(runs["perf"]["per_cpu"]), case, True)
                 self.assertEqual(result["status"], "FAIL")
-                self.assertIn("syscall_boundary: CPU 0: frontier gap exceeds 100 ms", result["errors"])
+                cpu_id = runs["syscall_boundary"]["per_cpu"][0]["cpu"]
+                self.assertIn(f"syscall_boundary: CPU {cpu_id}: frontier gap exceeds 100 ms", result["errors"])
             broken = copy.deepcopy(runs)
             broken["syscall_boundary"]["per_cpu"][0]["sites"][1].update(
                 successes=1, failures=1, delivered=1, loss=1, seq_gaps=1)
-            result = qual.evaluate_runs(broken, 1, case, True)
-            self.assertIn("syscall_boundary: CPU 0: boundary fires != outputs", result["errors"])
+            result = qual.evaluate_runs(broken, len(runs["perf"]["per_cpu"]), case, True)
+            cpu_id = runs["syscall_boundary"]["per_cpu"][0]["cpu"]
+            self.assertIn(f"syscall_boundary: CPU {cpu_id}: boundary fires != outputs", result["errors"])
             broken = copy.deepcopy(runs)
             broken["syscall_boundary"]["per_cpu"][0]["sites"][1].update(
                 produced=0, successes=0, delivered=0)
             self.assertTrue(any("boundary did not fire" in e for e in
-                                qual.evaluate_runs(broken, 1, case, True)["errors"]))
+                                qual.evaluate_runs(broken, len(runs["perf"]["per_cpu"]), case, True)["errors"]))
 
     def test_syscall_wrong_cpu_and_counter_crosschecks(self):
         runs = quartet()
@@ -511,10 +657,10 @@ class Gates(unittest.TestCase):
                 for local in (False, True):
                     runs = quartet(case)
                     r = runs["syscall_boundary"]
-                    self.assertEqual(qual.evaluate_runs(runs, 1, case, True)["status"], "PASS")
+                    self.assertEqual(qual.evaluate_runs(runs, len(runs["perf"]["per_cpu"]), case, True)["status"], "PASS")
                     (r["per_cpu"][0] if local else r)[field] = 1
                     self.assertIn("syscall_boundary: seal violation or timestamp regression",
-                                  qual.evaluate_runs(runs, 1, case, True)["errors"])
+                                  qual.evaluate_runs(runs, len(runs["perf"]["per_cpu"]), case, True)["errors"])
         runs = quartet()
         runs["syscall_boundary"]["lost_notifications"] = 1
         self.assertIn("syscall_boundary: positive PERF_RECORD_LOST (reported separately)",
@@ -556,6 +702,7 @@ class Gates(unittest.TestCase):
             if isinstance(r["held_data"], dict):
                 r["held_data"]["arrived"] *= 2
                 r["held_data"]["released"] *= 2
+                r["held_data"]["held_age_samples"] *= 2
             set_busy(r, r["participating_busy_cpu_ns"])
             for field in ("attempts", "boundary_fires", "boundary_outputs"):
                 r[field] *= 2
@@ -574,6 +721,7 @@ class Gates(unittest.TestCase):
             if isinstance(r["held_data"], dict):
                 r["held_data"]["arrived"] *= 2
                 r["held_data"]["released"] *= 2
+                r["held_data"]["held_age_samples"] *= 2
             set_busy(r, r["participating_busy_cpu_ns"])
             for field in ("hits", "attempts", "boundary_fires", "boundary_outputs"):
                 r[field] *= 2
@@ -704,6 +852,7 @@ class Gates(unittest.TestCase):
         c.update(max_frontier_gap_ns=2_889_000_000, max_frontier_stamp_gap_ns=996_000_000,
                  max_boundary_gap_ns=2_889_000_000, max_boundary_stamp_gap_ns=996_000_000)
         r['held_data']['max_held_data_age_ns'] = 100_000_000
+        r['held_data']['p99_held_data_age_ns'] = 100_000_000
         result = qual.evaluate_runs(runs, 1, 'all', True)
         self.assertEqual(result['status'], 'PASS', result['errors'])
         self.assertEqual(result['held_data_gate']['limit_ns'], 100_000_000)
@@ -738,7 +887,7 @@ class Gates(unittest.TestCase):
             broken['held_data'][field] = value
             self.assertIn('held DATA/queue accounting mismatch', qual.held_data_errors(broken), field)
         h = base['held_data']
-        h.update(released=2, queue_depth=1, queue_growth_records=1, queue_growth_records_per_second=1,
+        h.update(released=2, held_age_samples=2, queue_depth=1, queue_growth_records=1, queue_growth_records_per_second=1,
                  oldest_pending_age_ns=100_000_001)
         errors = qual.held_data_errors(base)
         self.assertIn('held DATA age exceeds 100 ms', errors)
@@ -769,7 +918,8 @@ class Gates(unittest.TestCase):
             runs = quartet(case)
             r = runs['syscall_request']
             r['per_cpu'][0].update(requests=1, request_acknowledgements=1,
-                                   helper_syscalls=1, helper_wakeups=1, syscall_fires=1, syscall_outputs=1)
+                                   helper_syscalls=1, helper_wakeups=1, syscall_fires=1, syscall_outputs=1,
+                                   max_request_to_frontier_ns=1_000_000, request_to_frontier_samples_ns=[1_000_000])
             r['per_cpu'][0]['sites'][1].update(produced=1, successes=1, delivered=1)
             r.update(boundary_fires=1, boundary_outputs=1)
             self.assertIn('syscall_request: request helper woke without staged DATA or coverage',
@@ -1049,6 +1199,8 @@ class Gates(unittest.TestCase):
         import subprocess
         source = Path(__file__).parent/'bench_nmi_transport'
         mutants = (
+            ('staging.h', 's->count - s->count / 100 - 1', 's->count - 1', 'transport_p99(&s.held_ages) == 30'),
+            ('staging.h', 's->count - s->count / 100 - 1', 's->count - s->count / 100', 'transport_p99(&samples) == 99'),
             ('staging.h', '.stamp < w', '.stamp <= w', 's.released == 0 && s.depth == 2'),
             ('staging.h', 'if (outstanding)', 'if (outstanding && false)', '!transport_request_due(true'),
             ('staging.h', 'frontier == minimum', 'frontier <= minimum + 1', '!transport_request_due(false, 11'),

@@ -46,6 +46,7 @@ struct boundary_helper {
     _Atomic bool completed;
     uint64_t request_ns, request_frontier_ns, requests, acknowledgements;
     uint64_t max_request_to_frontier_ns;
+    struct transport_samples request_latencies;
     struct experiment *experiment;
 };
 struct experiment {
@@ -84,6 +85,11 @@ struct experiment {
 };
 static atomic_int ready, helpers_ready, start_writers, stop_writers;
 static atomic_int interrupted;
+static bool untraced_hog(const struct experiment *e, int index)
+{
+    return !strcmp(e->case_name, "hog") ||
+        (!strcmp(e->case_name, "hog_data") && index >= (e->available + 1) / 2);
+}
 static double writer_deadline;
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal handler needs lock-free int atomics");
 static void on_signal(int sig)
@@ -285,7 +291,7 @@ static void service_requests(struct experiment *e, uint64_t now, bool issue)
 {
     if (!e->syscall_request || !e->began_ns) return;
     uint64_t minimum = minimum_frontier(e);
-    transport_release(&e->staging, minimum, now);
+    if (!transport_release(&e->staging, minimum, now)) { e->error = -ENOMEM; return; }
     uint64_t age = transport_oldest_age(&e->staging, now);
     for (int i = 0; i < e->available; ++i) {
         struct boundary_helper *h = &e->helpers[i];
@@ -294,6 +300,7 @@ static void service_requests(struct experiment *e, uint64_t now, bool issue)
             if (!h->request_frontier_ns) h->request_frontier_ns = c->frontier_seen_ns;
             if (atomic_load_explicit(&h->completed, memory_order_acquire)) {
                 uint64_t latency = h->request_frontier_ns - h->request_ns;
+                if (!transport_sample(&h->request_latencies, latency)) { e->error = -ENOMEM; return; }
                 if (latency > h->max_request_to_frontier_ns) h->max_request_to_frontier_ns = latency;
                 ++h->acknowledgements;
                 h->pending = false;
@@ -594,7 +601,7 @@ static int run(struct experiment *e)
     for (int i = 0; i < e->threads; ++i) {
         struct writer *w = &e->writers[i];
         if (w->error) return -w->error;
-        if (!strcmp(e->case_name, "hog")) continue;
+        if (untraced_hog(e, i)) continue;
         if (!strcmp(e->case_name, "migrate")) {
             for (int j = 0; j < e->available; ++j)
                 e->results[e->cpu_ids[j]].expected_tid = (uint32_t)w->tid;
@@ -759,7 +766,7 @@ static void report(struct experiment *e)
         if (c->max_boundary_gap_ns > boundary_gap) boundary_gap = c->max_boundary_gap_ns;
     }
     for (int i = 0; i < e->threads; ++i) {
-        if (strcmp(e->case_name, "hog")) hits += e->writers[i].iterations;
+        if (!untraced_hog(e, i)) hits += e->writers[i].iterations;
         migrations += e->writers[i].migrations;
     }
     printf("{\"transport\":"); json_string(e->name);
@@ -780,10 +787,12 @@ static void report(struct experiment *e)
                ",\"queue_depth\":%" PRIu64 ",\"queue_max_depth\":%" PRIu64
                ",\"queue_growth_records\":%" PRIu64 ",\"max_queue_growth_per_drain\":%" PRIu64
                ",\"queue_growth_records_per_second\":%.9f,\"max_held_data_age_ns\":%" PRIu64
-               ",\"oldest_pending_age_ns\":%" PRIu64 "}",
+               ",\"oldest_pending_age_ns\":%" PRIu64
+               ",\"held_age_samples\":%zu,\"p99_held_data_age_ns\":%" PRIu64 "}",
                e->staging.arrived, e->staging.released, e->staging.depth, e->staging.max_depth,
                e->staging.arrived - e->staging.released, e->max_queue_growth_per_drain,
-               e->elapsed ? e->staging.depth / e->elapsed : 0, e->staging.max_held_age_ns, pending_age);
+               e->elapsed ? e->staging.depth / e->elapsed : 0, e->staging.max_held_age_ns, pending_age,
+               e->staging.held_ages.count, transport_p99(&e->staging.held_ages));
     } else printf(",\"held_data\":\"UNMEASURED\"");
     printf(",\"cpus\":%d,\"possible_cpus\":%d,\"threads\":%d,\"duration\":%.6f,"
            "\"elapsed\":%.6f,\"buffer_bytes_total\":%zu,\"period_ns\":%" PRIu64
@@ -850,14 +859,18 @@ static void report(struct experiment *e)
                e->syscall_counts[cpu].wrong_cpu, e->helpers[i].tid, e->helpers[i].cpu_ns,
                e->helpers[i].wakeups, e->helpers[i].syscalls,
                e->period_ns && !e->syscall_request ? ((uint64_t)(e->duration * 1e9) - 1) / e->period_ns + 1 : 0,
-               !strcmp(e->case_name, "hog") ? e->writers[i].tid : 0,
-               !strcmp(e->case_name, "hog") ? e->writers[i].iterations : 0);
+               untraced_hog(e, i) ? e->writers[i].tid : 0,
+               untraced_hog(e, i) ? e->writers[i].iterations : 0);
         const struct boundary_helper *h = &e->helpers[i];
         printf(",\"phase_offset_ns\":%" PRIu64 ",\"requests\":%" PRIu64
                ",\"request_acknowledgements\":%" PRIu64 ",\"request_outstanding\":%s"
                ",\"max_request_to_frontier_ns\":%" PRIu64,
                h->phase_offset_ns, h->requests, h->acknowledgements, h->pending ? "true" : "false",
                h->max_request_to_frontier_ns);
+        printf(",\"request_to_frontier_samples_ns\":[");
+        for (size_t j = 0; j < h->request_latencies.count; ++j)
+            printf("%s%" PRIu64, j ? "," : "", h->request_latencies.values[j]);
+        printf("]");
         printf(",\"request_outstanding_age_ns\":%" PRIu64,
                h->pending && e->ended_ns >= h->request_ns ? e->ended_ns - h->request_ns : 0);
         printf(",\"schedstat_running_ns\":");
@@ -903,8 +916,10 @@ static void cleanup(struct experiment *e)
     if (e->ring_fds)
         for (int i = 0; i < e->possible; ++i) if (e->ring_fds[i] >= 0) close(e->ring_fds[i]);
     free(e->cpu_ids); free(e->writers); free(e->results);
-    if (e->helpers) for (int i = 0; i < e->available; ++i)
+    if (e->helpers) for (int i = 0; i < e->available; ++i) {
         transport_request_destroy(&e->helpers[i].channel);
+        free(e->helpers[i].request_latencies.values);
+    }
     free(e->helpers); free(e->syscall_counts);
     transport_staging_free(&e->staging);
     free(e->sched_start); free(e->sched_end);
@@ -924,7 +939,7 @@ static int parse_size(const char *s, size_t *value)
 static void usage(const char *program)
 {
     fprintf(stderr, "usage: %s --transport shared|percpu-ring|perf [--cpus N] "
-            "[--case idle|one|all|migrate|hog] [--duration SECONDS] [--bytes TOTAL] "
+            "[--case idle|one|all|migrate|hog|hog_data] [--duration SECONDS] [--bytes TOTAL] "
             "[--period-ns N] [--syscall-boundary|--syscall-request] [--request-after-ms N] [--coverage-ms N] [--phase-jitter] [--pause-drain] [--mutant-boundary] "
             "[--object transport.bpf.o]\n", program);
 }
@@ -963,7 +978,8 @@ int main(int argc, char **argv)
         case 'n': if (parse_size(optarg, &n) || n > INT_MAX) goto invalid; e.requested_cpus = (int)n; break;
         case 'c':
             if (strcmp(optarg, "idle") && strcmp(optarg, "one") &&
-                strcmp(optarg, "all") && strcmp(optarg, "migrate") && strcmp(optarg, "hog")) goto invalid;
+                strcmp(optarg, "all") && strcmp(optarg, "migrate") && strcmp(optarg, "hog") &&
+                strcmp(optarg, "hog_data")) goto invalid;
             e.case_name = optarg; break;
         case 'd': if (parse_size(optarg, &n) || n > 86400) goto invalid; e.duration = (double)n; break;
         case 'b': if (parse_size(optarg, &e.bytes)) goto invalid; break;
@@ -1010,6 +1026,10 @@ int main(int argc, char **argv)
         if (CPU_ISSET_S(cpu, mask_size, mask)) e.cpu_ids[e.available++] = cpu;
     if (!e.available || e.requested_cpus > e.available) { CPU_FREE(mask); cleanup(&e); goto invalid; }
     if (e.requested_cpus) e.available = e.requested_cpus;
+    if (!strcmp(e.case_name, "hog_data") && e.available < 2) {
+        fprintf(stderr, "hog_data requires at least 2 participating CPUs\n");
+        CPU_FREE(mask); cleanup(&e); return 2;
+    }
     /* Keep reader, writers and hardirq accounting on exactly these CPUs. */
     CPU_ZERO_S(mask_size, mask);
     for (int i = 0; i < e.available; ++i) CPU_SET_S(e.cpu_ids[i], mask_size, mask);
@@ -1017,7 +1037,8 @@ int main(int argc, char **argv)
         perror("sched_setaffinity"); CPU_FREE(mask); cleanup(&e); return 1;
     }
     CPU_FREE(mask);
-    e.threads = !strcmp(e.case_name, "idle") ? 0 : (!strcmp(e.case_name, "all") || !strcmp(e.case_name, "hog")) ? e.available : 1;
+    e.threads = !strcmp(e.case_name, "idle") ? 0 :
+        (!strcmp(e.case_name, "all") || !strcmp(e.case_name, "hog") || !strcmp(e.case_name, "hog_data")) ? e.available : 1;
     size_t writers_size = (size_t)(e.threads ? e.threads : 1) * sizeof(*e.writers);
     e.writers = aligned_alloc(64, writers_size);
     e.results = calloc((size_t)e.possible, sizeof(*e.results));

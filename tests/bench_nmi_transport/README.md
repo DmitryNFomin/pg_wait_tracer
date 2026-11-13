@@ -30,8 +30,14 @@ the caller's allowed online affinity; a missing 4-CPU population is VOID, never 
 silent skip. The named 4 and all cells both run on a four-CPU box. Cases are idle,
 one CPU active, all active, one writer migrating through the participating
 CPUs every 256 stores, and `hog`: one pinned, untraced busy loop per CPU for the
-whole run, with no watchpoints or DATA. This is the three-population × five-case
-grid at each cadence and repeat. Writers run at maximum rate in every active case, including
+whole run, with no watchpoints or DATA. `hog_data` adds writers on the first half
+of the participating CPUs (rounded up), using the `all` workload, and the same
+pinned untraced hog on each remaining CPU, with no watchpoint there. Writer DATA
+waits for those busy CPUs' frontiers. This case requires at least two CPUs;
+one-CPU populations are skipped explicitly in startup output and `plan.json`.
+The default grid retains the five original cases on all three populations and
+adds `hog_data` on the 4 and all populations when they have at least two CPUs.
+Writers run at maximum rate in every active case, including
 the 100 us adversarial arm. Idle cases have no DATA writer; migration on one CPU
 necessarily degenerates to a pinned writer. Other CPUs remain without DATA
 writers in the one-active case; periodic treatments still give them their own boundaries.
@@ -64,6 +70,19 @@ on idle or hog cases with coverage off. Its primary timing gate is held DATA
 age from consumer arrival to release under `W=min(w[c])`, <=100 ms; any final
 unreleased DATA fails. Frontier and BOUNDARY-only gaps remain diagnostics for
 this arm. See the contract line citations in [QUALIFICATION.md](QUALIFICATION.md).
+
+Each requested-arm cell also reports `requested_latency`: held DATA age max and
+p99 in ns, request-to-frontier latency max and p99 pooled separately over
+`starved` and `other` CPUs, and `requests_per_starved_cpu`. The starved group is
+the hog half of `hog_data`; every one must have run its hog, produced no DATA,
+and received at least one request. Every writer CPU must have produced DATA.
+Percentiles use exact nearest rank (`ceil(0.99 * sample count)`), with one age
+sample per released DATA record and one latency sample per acknowledged request.
+Empty populations report null max/p99 and zero samples. Raw per-CPU request
+latency samples reconcile with acknowledgement counts and maxima. Held ages
+are retained in memory (8 bytes per released DATA record, plus allocation
+capacity) and sorted after the timed phase; allocation failure fails the run.
+The 100 ms held-DATA gate and the other timing and CPU gates apply unchanged.
 
 The paired perf/shared CPU-ns-per-attempt ratio must be <=1.10 in DATA-active cases.
 Idle and hog DATA-only baselines have zero attempts and report a null ratio. Idle cases measure the

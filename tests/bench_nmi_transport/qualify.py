@@ -18,7 +18,7 @@ ROOT = HERE.parent.parent
 ARMS = ("shared", "perf", "perf_boundary", "syscall_boundary", "syscall_request", "adversarial")
 SYSCALL_ARMS = ("syscall_boundary", "syscall_request")
 BOUNDARY_ARMS = ("perf_boundary",) + SYSCALL_ARMS
-CASES = ("idle", "one", "all", "migrate", "hog")
+CASES = ("idle", "one", "all", "migrate", "hog", "hog_data")
 CPU_FIELDS = ("user", "nice", "system", "irq", "softirq", "steal", "idle", "iowait")
 BUSY_FIELDS = CPU_FIELDS[:6]
 MAX_GAP_NS = 100_000_000
@@ -235,6 +235,9 @@ def base_errors(run, cpus, case, boundary, reconcile=True, request=False):
     rows = run["per_cpu"]
     if len(rows) != cpus or len({c["cpu"] for c in rows}) != cpus:
         errors.append("participating CPU population mismatch")
+    starved = starved_cpus(rows, case)
+    if case == "hog_data" and cpus < 2:
+        errors.append("hog_data requires at least 2 participating CPUs")
     if reconcile:
         for cpu, site in sites(run):
             if (not site["reconciled"] or site["produced"] - site["delivered"] != site["loss"] or
@@ -247,6 +250,14 @@ def base_errors(run, cpus, case, boundary, reconcile=True, request=False):
         data, b = cpu["sites"]
         if case == "hog" and (not cpu["hog_tid"] or not cpu["hog_iterations"]):
             errors.append(f"CPU {cpu['cpu']}: untraced hog did not run")
+        if case == "hog_data":
+            if cpu["cpu"] in starved:
+                if data["produced"]:
+                    errors.append(f"CPU {cpu['cpu']}: starved CPU produced DATA")
+                if not cpu["hog_tid"] or not cpu["hog_iterations"]:
+                    errors.append(f"CPU {cpu['cpu']}: untraced hog did not run")
+            elif not data["produced"]:
+                errors.append(f"CPU {cpu['cpu']}: active writer did not fire")
         if boundary and not request and (not b["produced"] or not b["delivered"]):
             errors.append(f"CPU {cpu['cpu']}: boundary did not fire and reach reader")
         if not boundary and b["produced"]:
@@ -314,7 +325,11 @@ def normal_errors(run, cpus, case, boundary, arm="perf"):
             errors.append("syscall boundary aggregate/per-CPU counter mismatch")
     if arm == "syscall_request":
         errors.extend(held_data_errors(run))
+        errors.extend(request_latency_errors(run))
+        starved = starved_cpus(run["per_cpu"], case)
         for c in run["per_cpu"]:
+            if c["cpu"] in starved and not c["requests"]:
+                errors.append(f"CPU {c['cpu']}: no request reached starved CPU")
             if (c["request_outstanding"] or c["request_acknowledgements"] > c["requests"] or
                     c["requests"] - c["request_acknowledgements"] != int(c["request_outstanding"]) or
                     c["helper_wakeups"] != c["requests"] or c["helper_syscalls"] != c["requests"]):
@@ -328,11 +343,15 @@ def held_data_errors(run):
     try:
         h = run["held_data"]
         integer_fields = ("arrived", "released", "queue_depth", "queue_max_depth", "queue_growth_records",
-                          "max_queue_growth_per_drain", "max_held_data_age_ns", "oldest_pending_age_ns")
+                          "max_queue_growth_per_drain", "max_held_data_age_ns", "oldest_pending_age_ns",
+                          "held_age_samples", "p99_held_data_age_ns")
         if not all(type(h[k]) is int and h[k] >= 0 for k in integer_fields):
             return ["invalid held DATA evidence"]
         data = sum(c["sites"][0]["delivered"] for c in run["per_cpu"])
-        if (h["arrived"] != data or h["arrived"] - h["released"] != h["queue_depth"] or
+        if (h["held_age_samples"] != h["released"] or
+                h["p99_held_data_age_ns"] > h["max_held_data_age_ns"] or
+                (not h["held_age_samples"] and h["p99_held_data_age_ns"] != 0) or
+                h["arrived"] != data or h["arrived"] - h["released"] != h["queue_depth"] or
                 h["queue_growth_records"] != h["queue_depth"] or h["queue_max_depth"] < h["queue_depth"] or
                 (h["arrived"] > 0 and h["queue_max_depth"] == 0) or
                 h["max_queue_growth_per_drain"] > h["queue_max_depth"] or
@@ -346,6 +365,52 @@ def held_data_errors(run):
         return errors
     except (KeyError, TypeError, ValueError):
         return ["missing or malformed held DATA evidence"]
+
+
+def starved_cpus(rows, case):
+    ordered = sorted(c["cpu"] for c in rows)
+    return ordered[(len(ordered) + 1) // 2:] if case == "hog_data" else []
+
+
+def request_latency_errors(run):
+    errors = []
+    for c in run["per_cpu"]:
+        samples = c.get("request_to_frontier_samples_ns")
+        if (not isinstance(samples, list) or
+                any(type(n) is not int or n < 0 for n in samples) or
+                len(samples) != c["request_acknowledgements"] or
+                max(samples, default=0) != c["max_request_to_frontier_ns"]):
+            errors.append(f"CPU {c['cpu']}: missing or inconsistent request latency samples")
+    return errors
+
+
+def latency_summary(samples):
+    ordered = sorted(samples)
+    return {"samples": len(ordered), "max": ordered[-1] if ordered else None,
+            "p99": ordered[len(ordered) - len(ordered) // 100 - 1] if ordered else None}
+
+
+def requested_latency_summary(run, case):
+    starved = starved_cpus(run["per_cpu"], case)
+    groups = {}
+    for name, rows in (("starved", [c for c in run["per_cpu"] if c["cpu"] in starved]),
+                       ("other", [c for c in run["per_cpu"] if c["cpu"] not in starved])):
+        if request_latency_errors(dict(per_cpu=rows)):
+            groups[name] = {"status": "UNMEASURED", "cpus": [c["cpu"] for c in rows]}
+        else:
+            groups[name] = dict(latency_summary([n for c in rows for n in c["request_to_frontier_samples_ns"]]),
+                                cpus=[c["cpu"] for c in rows])
+    h = run.get("held_data")
+    # Retain measured values when a timing gate fails, as well as when it passes.
+    fields = ("held_age_samples", "max_held_data_age_ns", "p99_held_data_age_ns")
+    held = ({"samples": h["held_age_samples"],
+             "max": h["max_held_data_age_ns"] if h["held_age_samples"] else None,
+             "p99": h["p99_held_data_age_ns"] if h["held_age_samples"] else None}
+            if isinstance(h, dict) and all(type(h.get(k)) is int and h[k] >= 0 for k in fields)
+            else {"status": "UNMEASURED"})
+    return {"percentile_method": "exact nearest rank, ceil(0.99 * sample count)",
+            "held_data_age_ns": held, "request_to_frontier_latency_ns": groups,
+            "requests_per_starved_cpu": {str(c["cpu"]): c["requests"] for c in run["per_cpu"] if c["cpu"] in starved}}
 
 
 def control_errors(loss, mutant, cpus):
@@ -448,6 +513,7 @@ def evaluate_runs(runs, cpus, case, irq_accounting):
         result["held_data_gate"] = dict(evidence) if isinstance(evidence, dict) else {}
         result["held_data_gate"].update(status="FAIL" if held_errors else "PASS", limit_ns=MAX_GAP_NS,
                                         errors=held_errors)
+        result["requested_latency"] = requested_latency_summary(runs["syscall_request"], case)
     result["timing_diagnostics"] = {arm: {
         "consumer_drain_gap_ms": r["max_drain_gap_ms"],
         "per_cpu": {str(c["cpu"]): {
@@ -602,6 +668,7 @@ def parse_args(argv=None):
 
 def plan_cells(args, available):
     cells = []
+    skipped = []
     if args.crossover:
         order = ["perf", "syscall_boundary"]
         random.SystemRandom().shuffle(order)
@@ -611,6 +678,10 @@ def plan_cells(args, available):
     else:
         for population, cpus in (("1", 1), ("4", 4), ("all", available)):
             for case in args.cases:
+                if case == "hog_data" and cpus < 2:
+                    skipped.append({"population": population, "cpus": cpus, "case": case,
+                                    "reason": "hog_data requires at least 2 participating CPUs"})
+                    continue
                 for period in args.periods:
                     for repeat in range(1, args.repeats + 1):
                         rotation = (repeat - 1) % len(args.arms)
@@ -623,7 +694,7 @@ def plan_cells(args, available):
             "planned_control_runs": control_runs,
             "estimated_wall_seconds": arm_runs * args.seconds + control_runs * 2 + (arm_runs + control_runs) * 2,
             "estimate_basis": "requested durations plus 2 seconds setup/teardown per invocation; stalls/build excluded",
-            "cells": cells}
+            "cells": cells, "skipped": skipped}
 
 
 def arm_command(arm, common, case, seconds, period, args):
@@ -655,6 +726,8 @@ def main():
         plan = plan_cells(args, available)
         print(f"Planned cells: {plan['planned_cell_count']}; arm runs: {plan['planned_arm_runs']}; "
               f"estimated wall time: {plan['estimated_wall_seconds'] / 60:.1f} minutes", flush=True)
+        for skipped in plan["skipped"]:
+            print(f"Skipped cpu-{skipped['population']}-{skipped['case']}: {skipped['reason']}", flush=True)
         write_json(out / "plan.json", plan)
         build = capture(["make", "-C", str(HERE.parent), "bench-nmi-transport"])
         write_json(out / "build.json", build)
