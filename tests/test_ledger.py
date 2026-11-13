@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Negative controls for the ledger; all evidence lives in a temporary directory."""
 import copy
+import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.dont_write_bytecode = True
@@ -16,6 +19,7 @@ spec.loader.exec_module(ledger)
 TREE = "a" * 40
 COMMIT = "b" * 40
 OTHER = "c" * 40
+CONTRACT_HASH = "f" * 64
 REFERENCE = "example-v1:C01"
 PROOFS = ["case:edge.json", "mutant:M1", "diff:agreement"]
 DEFINITIONS = {"C01": {"claim": "An independent boundary answer", "proof_ids": PROOFS}}
@@ -37,6 +41,9 @@ def fixture(root):
         "core": {"kind": "core-status", "contract": "example-v1"},
         "binary": {"kind": "box-check", "path": "box.log"},
     }
+    for record in evidence.values():
+        if record["kind"] == "attestation":
+            record.update(contract="example-v1", contract_sha256=CONTRACT_HASH)
     manifest = {"version": 1, "evidence": evidence, "claims": [{
         "id": REFERENCE, "contract_claim": REFERENCE,
         "cells": {column: refs for column, refs in zip(ledger.COLUMNS, [
@@ -65,9 +72,10 @@ def fixture(root):
     return manifest
 
 
-def evaluate(manifest, root, definitions=None):
+def evaluate(manifest, root, definitions=None, load_hash=None):
     result = ledger.evaluate(manifest, OTHER, TREE, root, root,
-                             lambda contract: definitions or DEFINITIONS)
+                             lambda contract: definitions or DEFINITIONS,
+                             load_hash or (lambda contract: CONTRACT_HASH))
     return result["claims"][0]["cells"]
 
 
@@ -171,6 +179,57 @@ def missing_attestations(root, manifest):
         red(cells, column, "missing attestation link")
 
 
+def stale_attestations(root, manifest):
+    cells = evaluate(manifest, root, load_hash=lambda contract: "0" * 64)
+    for column in ledger.ATTESTED:
+        red(cells, column, "stale attestation")
+    assert cells["broken_versions"]["state"] == "PASS"
+
+
+def committed_contract_hash(root, manifest):
+    # Put synthetic Git objects outside .git, without changing refs or checkout.
+    # Changing an expected answer alone must invalidate all three attestations.
+    objects = root / "objects"
+    objects.mkdir()
+    with patch.dict(os.environ, {"GIT_OBJECT_DIRECTORY": str(objects)}):
+        def object_id(kind, content):
+            return subprocess.check_output(
+                ["git", "hash-object", "-w", "-t", kind, "--stdin"],
+                input=content, cwd=ROOT).decode().strip()
+
+        def tree(entries):
+            return object_id("tree", b"".join(
+                mode + b" " + name + b"\0" + bytes.fromhex(ident)
+                for mode, name, ident in entries))
+
+        def commit(answer):
+            # Path ordering differs from sorting flattened path strings here.
+            nested = tree([(b"100644", b"answer", object_id("blob", answer))])
+            contract = tree([
+                (b"100644", b"a-b", object_id("blob", b"constant\n")),
+                (b"40000", b"a", nested),
+            ])
+            contracts = tree([(b"40000", b"example-v1", contract)])
+            top = tree([(b"40000", b"contracts", contracts)])
+            return object_id("commit", (
+                f"tree {top}\nauthor Ledger <ledger@example.invalid> 0 +0000\n"
+                "committer Ledger <ledger@example.invalid> 0 +0000\n\nfixture\n").encode())
+
+        original, changed = commit(b"1\n"), commit(b"2\n")
+        expected = hashlib.sha256(
+            b"a/answer\0" + hashlib.sha256(b"1\n").digest()
+            + b"a-b\0" + hashlib.sha256(b"constant\n").digest()).hexdigest()
+        assert ledger.contract_hash(original, "example-v1") == expected
+        for record in manifest["evidence"].values():
+            if record["kind"] == "attestation":
+                record["contract_sha256"] = expected
+        before = evaluate(manifest, root, load_hash=lambda c: ledger.contract_hash(original, c))
+        after = evaluate(manifest, root, load_hash=lambda c: ledger.contract_hash(changed, c))
+        for column in ledger.ATTESTED:
+            assert before[column]["state"] == "PASS"
+            red(after, column, "stale attestation")
+
+
 def no_producer_override(root, manifest):
     for column in ledger.NO_PRODUCER:
         manifest["claims"][0]["cells"][column] = ["contract"]
@@ -230,6 +289,11 @@ control("malformed attestation", lambda r, m: attestation_control(r, m, lambda e
 control("numeric PR attestation", lambda r, m: (
     m["evidence"]["contract"].update(link=123),
     all_good(r, m)))
+control("stale attestation in each attested column", stale_attestations)
+control("changed committed expected answer", committed_contract_hash)
+control("missing attestation hash", lambda r, m: attestation_control(r, m, lambda e: e.pop("contract_sha256"), "attestation contract hash"))
+control("malformed attestation hash", lambda r, m: attestation_control(r, m, lambda e: e.update(contract_sha256="a" * 40), "attestation contract hash"))
+control("wrong attestation contract", lambda r, m: attestation_control(r, m, lambda e: e.update(contract="other-v1"), "wrong attestation contract"))
 control("no contract", no_contract)
 control("every evidence id required", evidence_ids)
 control("missing link in each attested column", missing_attestations)
