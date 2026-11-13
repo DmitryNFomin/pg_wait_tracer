@@ -465,7 +465,7 @@ int pgwt_codec_decode(const pgwt_codec_buffer *buffers, size_t count, pgwt_codec
         if (hr==PGWT_CODEC_NONE) { file_free(f,info);goto error; }
         if (hr!=PGWT_CODEC_RECORD) {
             file_free(f,info);memset(f,0,sizeof(*f));memset(info,0,sizeof(*info));
-            stop.reason=hr;out->stops[out->stop_count++]=stop;break;
+            stop.reason=hr;out->stops[out->stop_count++]=stop;continue;
         }
         size_t prev=SIZE_MAX;
         for (size_t k=0;k<j;++k) if (equal(out->files[k].capture,f->capture)) prev=k;

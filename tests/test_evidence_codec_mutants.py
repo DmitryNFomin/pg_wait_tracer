@@ -34,6 +34,13 @@ MUTANTS = [
     ("C09_null_certificate_fault", "v->kind=PGWT_EVIDENCE_FRONTIER;counters_read(r,&v->counters);break;",
      "v->kind=PGWT_EVIDENCE_FRONTIER;counters_read(r,&v->counters);if (!v->counters.known) r->bad=true;break;", "row10_null_certificate_r3"),
     ("C10_publish_bad_segment", "if (reason) {\n            *stop=", "if (reason) {\n            if (reason==PGWT_CODEC_CRC) (void)append_rows(f,info,rows,n,off);\n            *stop=", "row5_second_block_atomic"),
+    ("C11_bad_header_ends_input", "stop.reason=hr;out->stops[out->stop_count++]=stop;continue;",
+     "stop.reason=hr;out->stops[out->stop_count++]=stop;break;",
+     ("bad_header_independent_capture", "bad_header_independent_successor")),
+    ("C12_record_faults_off", "v->unsupported_shape=r->bad || r->at!=r->n;",
+     "v->unsupported_shape=false;", ("scenario_36_unknown_kind_prefix_decoded_arrays",
+                                    "scenario_36_unknown_kind_prefix_grouped_decoded_arrays",
+                                    "multi_record_fault_arrays")),
 ]
 
 
@@ -91,6 +98,8 @@ GUARDS = [
     guard("G47_writer_mapping_order", "(i && m->id<=d->mapping[i-1].id)", "writer_mapping_order"),
     guard("G48_sample_tick_weight", "rows[0].r.t==info->last_sample_time && at(bh+32,8)!=info->last_sample_weight", "row6_sample_split_weight"),
     guard("G49_sample_stream_order", "rows[0].r.t<info->last_sample_time", "row6_sample_stream_order"),
+    ("G50_unknown_kind", "default: v->kind=PGWT_EVIDENCE_OTHER;r->bad=true;break;",
+     "default: v->kind=PGWT_EVIDENCE_OTHER;break;", "row7_unknown_kind_eight_bytes"),
 ]
 # These two registry entries include surrounding syntax to select one guard;
 # keep the replacement syntactically valid rather than disabling adjacent code.
@@ -140,9 +149,10 @@ def main():
         if result.returncode or result.stderr:
             raise RuntimeError("baseline failed:\n" + result.stdout + result.stderr)
         for name, before, after, witness in cases:
+            witnesses = (witness,) if isinstance(witness, str) else witness
             if original.count(before) != 1:
                 raise RuntimeError(f"{name}: expected one source anchor, got {original.count(before)}")
-            if f"codec {witness} PASS\n" not in result.stdout:
+            if not all(f"codec {w} PASS\n" in result.stdout for w in witnesses):
                 raise RuntimeError(f"{name}: baseline did not reach witness {witness}")
             source = directory / "codec.c"
             source.write_text(original.replace(before, after, 1))
@@ -152,12 +162,12 @@ def main():
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"{name}: BUILD ERROR, not a kill:\n{exc.stderr}") from exc
             mutated = run(binary, witness)
-            if mutated.returncode != 1 or f"codec {witness} FAIL assertion\n" not in mutated.stdout:
+            if mutated.returncode != 1 or not all(f"codec {w} FAIL assertion\n" in mutated.stdout for w in witnesses):
                 raise RuntimeError(f"{name}: SURVIVED or harness error ({mutated.returncode}); "
                                    f"required witness {witness}\n{mutated.stdout}\n{mutated.stderr}")
             if any(s in mutated.stderr for s in ("Sanitizer", "runtime error:", "ERROR:")):
                 raise RuntimeError(f"{name}: sanitizer error, not a kill:\n{mutated.stderr}")
-            print(f"codec {name} KILLED by {witness} (built; intended assertion failed)", flush=True)
+            print(f"codec {name} KILLED by {', '.join(witnesses)} (built; intended assertion failed)", flush=True)
             binary.unlink()
         label = "guard sweep" if args.guard_sweep else "mutants and guard sweep"
         print(f"codec {label}: {len(cases)}/{len(cases)} killed; 0 survivors PASS")

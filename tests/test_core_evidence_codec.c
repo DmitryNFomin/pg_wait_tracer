@@ -354,6 +354,17 @@ static void compression_samples(pgwt_codec_buffer g)
 
 static void record_shapes(pgwt_codec_buffer g)
 {
+    unsigned char unknown[21]={1,0,0,0,1,0,0,0,99,8,0,0,0};wr(unknown+13,12,8);
+    pgwt_codec_bytes unknown_bytes=block_bytes(g,2,1,unknown,sizeof(unknown),sizeof(unknown),0,0,0,0,0);
+    pgwt_codec_buffer unknown_view=view(unknown_bytes);pgwt_codec_decoded unknown_out;
+    int unknown_status=pgwt_codec_decode(&unknown_view,1,&unknown_out);
+    check("row7_unknown_kind_eight_bytes",unknown_status==1 && unknown_out.file_count==1 &&
+        unknown_out.files[0].record_count==1 && unknown_out.files[0].records[0].kind==PGWT_EVIDENCE_OTHER &&
+        unknown_out.files[0].records[0].t==12 && unknown_out.files[0].records[0].unsupported_shape &&
+        unknown_out.stop_count==1 && unknown_out.stops[0].reason==PGWT_CODEC_RECORD &&
+        unknown_out.stops[0].block_offset==201 && unknown_out.stops[0].record_offset==8 &&
+        unknown_out.stops[0].validated_end==unknown_bytes.size);
+    pgwt_codec_decoded_free(&unknown_out);pgwt_codec_bytes_free(&unknown_bytes);
     /* FRONTIER kind 3 is not the numeric C TRANS enum. A null vector is a
      * readable r3 loss report (§9 row 10 superseded), not unsupported_shape. */
     unsigned char p[256]={1,0,0,0,1,0,0,0,3,9,0,0,0};wr(p+13,12,8);p[21]=0;
@@ -545,17 +556,211 @@ static void map_add(pgwt_codec_mapping *map, size_t *n, pgwt_core_event e)
     if (*n==256) exit(2);
     map[*n]=(pgwt_codec_mapping){(uint32_t)*n+1,1,e};++*n;
 }
-/* Each scenario is built with one record per block to isolate deliberately
+static bool same_event(pgwt_core_event a, pgwt_core_event b)
+{ return a.length==b.length && (!a.length || !memcmp(a.data,b.data,a.length)); }
+static bool same_counters(pgwt_evidence_counters a, pgwt_evidence_counters b)
+{ return a.known==b.known && (!a.known || !memcmp(a.value,b.value,sizeof(a.value))); }
+/* Compare values, never struct padding or borrowed string addresses. Include
+ * every logical field and the adapter's fault bit, before replay can ignore it. */
+static bool same_record(const pgwt_evidence_record *a, const pgwt_evidence_record *b)
+{
+    return a->kind==b->kind && a->t==b->t && a->pid==b->pid &&
+        a->has_fork==b->has_fork && (!a->has_fork || a->fork==b->fork) &&
+        a->start==b->start && a->start_known==b->start_known &&
+        a->has_exit==b->has_exit && (!a->has_exit || a->exit==b->exit) &&
+        a->reread==b->reread && same_event(a->seed,b->seed) && same_event(a->state,b->state) &&
+        same_event(a->old_event,b->old_event) && same_event(a->new_event,b->new_event) &&
+        a->duration==b->duration && same_counters(a->counters,b->counters) &&
+        same_event(a->end_reason,b->end_reason) && same_event(a->void_reason,b->void_reason) &&
+        a->has_invalid_from==b->has_invalid_from && (!a->has_invalid_from || a->invalid_from==b->invalid_from) &&
+        a->unsupported_shape==b->unsupported_shape;
+}
+static bool same_descriptor(const pgwt_evidence_file *a, const pgwt_evidence_file *b)
+{
+    return a->version==b->version && same_event(a->boot,b->boot) && same_event(a->capture,b->capture) &&
+        a->file_no==b->file_no && a->has_previous==b->has_previous &&
+        (!a->has_previous || a->previous==b->previous) && a->present==b->present &&
+        a->qualified==b->qualified && a->unsupported_shape==b->unsupported_shape &&
+        same_counters(a->baseline,b->baseline);
+}
+static bool same_files(const pgwt_evidence_file *a, const pgwt_evidence_file *b, size_t count)
+{
+    for (size_t i=0;i<count;++i) {
+        if (!same_descriptor(&a[i],&b[i]) || a[i].record_count!=b[i].record_count) return false;
+        for (size_t j=0;j<a[i].record_count;++j)
+            if (!same_record(&a[i].records[j],&b[i].records[j])) return false;
+    }
+    return true;
+}
+/* Logical fixtures contain semantic faults too: these remain intact for
+ * replay. Only wire faults bound the decoder's arrays. Missing mandatory TRANS
+ * slots cannot be expressed as a framed logical fault and reject that block.
+ * Unknown kinds are represented by the required common timestamp plus a fault
+ * token; their unrecognized bodies have no logical field interpretation. */
+static bool scenario_files(const evidence_case *c, const pgwt_codec_decoded *decoded, bool grouped)
+{
+    size_t count=c->input.file_count,n=0;
+    pgwt_evidence_file *expected=calloc(count,sizeof(*expected));
+    bool *stopped=calloc(count,sizeof(*stopped));
+    if (!expected || !stopped) exit(2);
+    bool ok=true;
+    for (size_t i=0;i<count;++i) {
+        const pgwt_evidence_file *source=&c->files[i];if (!source->present) continue;
+        size_t prev=SIZE_MAX;
+        for (size_t k=0;k<n;++k) if (same_event(expected[k].capture,source->capture)) prev=k;
+        if (prev!=SIZE_MAX && stopped[prev]) continue;
+        pgwt_evidence_file *f=&expected[n];*f=*source;
+        bool link=prev==SIZE_MAX ? f->file_no!=0 :
+            (!same_event(expected[prev].boot,f->boot) || f->file_no!=expected[prev].file_no+1);
+        if (link) { f->unsupported_shape=true;f->records=NULL;f->record_count=0;stopped[n++]=true;continue; }
+        pgwt_evidence_record *records=calloc(f->record_count ? f->record_count : 1,sizeof(*records));
+        if (!records) exit(2);
+        memcpy(records,f->records,f->record_count*sizeof(*records));f->records=records;
+        size_t fault=SIZE_MAX;
+        for (size_t j=0;j<f->record_count;++j) {
+            pgwt_evidence_record *r=&records[j];
+            if (r->unsupported_shape && r->kind==PGWT_EVIDENCE_TRANS) {
+                f->record_count=j;stopped[n]=true;break;
+            }
+            if (r->kind==PGWT_EVIDENCE_OTHER || (r->has_fork && r->fork>r->t)) {
+                r->unsupported_shape=true;fault=j;stopped[n]=true;
+                /* Grouped 36/37 keeps the entire EVIDENCE block, ending just
+                 * before the following TRANS, including its fault token. */
+                size_t end=j+1;
+                if (grouped) while (end<f->record_count && records[end].kind!=PGWT_EVIDENCE_TRANS) ++end;
+                f->record_count=end;break;
+            }
+        }
+        if (fault!=SIZE_MAX) {
+            /* These fixtures put FRONTIER then the fault in the same grouped
+             * EVIDENCE block (or a single-record block in the standard pass). */
+            size_t block_first=grouped ? fault-1 : fault;
+            if (n>=decoded->file_count || decoded->files[n].record_count!=f->record_count ||
+                decoded->info[n].positions[fault].record_offset!=(grouped ? 142u : 8u) ||
+                decoded->info[n].positions[fault].block_offset!=decoded->info[n].positions[block_first].block_offset)
+                ok=false;
+        }
+        ++n;
+    }
+    ok=ok && n==decoded->file_count && same_files(expected,decoded->files,n);
+    for (size_t i=0;i<n;++i) free((void *)expected[i].records);
+    free(expected);free(stopped);return ok;
+}
+static bool replay_b(const pgwt_codec_decoded *decoded, uint64_t end)
+{
+    pgwt_evidence_input in={.files=decoded->files,.file_count=decoded->file_count,
+        .capture={"B",1},.pid=7,.has_fork=true,.fork=1};
+    pgwt_core_query q={.event={"A",1},.from=1,.to=end};pgwt_evidence_output out={0};
+    bool ok=pgwt_evidence_replay(&in,&q,&out,NULL)==PGWT_REPLAY_OK &&
+        out.projection.coverage_count==1 && out.coverage.start==1 && out.coverage.end==end &&
+        out.wait_time.value.present && out.wait_time.value.value==end-3 &&
+        out.completed_waits.value.present && out.completed_waits.value.value==0;
+    pgwt_evidence_output_free(&out);return ok;
+}
+static void multi_record_fault(void)
+{
+    pgwt_evidence_record records[]={
+        {.kind=PGWT_EVIDENCE_LIFE,.pid=7,.has_fork=true,.start_known=true},
+        {.kind=PGWT_EVIDENCE_ATTACH_OK,.pid=7,.has_fork=true,.t=1,.reread=true,.counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_FRONTIER,.t=8,.counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_FRONTIER,.t=12,.counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_FRONTIER,.t=24,.counters={.known=true}}
+    };
+    pgwt_evidence_file f={.version=5,.boot={"b",1},.capture={"B",1},.present=true,.qualified=true,
+        .baseline={.known=true},.records=records,.record_count=5};
+    pgwt_codec_descriptor d={.block_records=4096};pgwt_codec_bytes b={0};
+    if (pgwt_codec_encode(&f,&d,NULL,&b,NULL)) exit(2);
+    size_t block=(size_t)rd(b.data+40,4),frame=8;
+    size_t positions[5];
+    for (size_t i=0;i<5;++i) {
+        positions[i]=frame;frame+=5+(size_t)rd(b.data+block+64+frame+1,4);
+    }
+    /* Third and fifth records bracket an unknown fourth record. All five
+     * frames must decode, but the fifth cannot reach replay. */
+    unsigned char *p=b.data+block+64+positions[3];size_t remove=(size_t)rd(p+1,4)-8;
+    p[0]=99;wr(p+1,8,4);size_t at=block+64+positions[3]+13;
+    memmove(b.data+at,b.data+at+remove,b.size-at-remove);b.size-=remove;
+    size_t stored=(size_t)rd(b.data+block+20,4)-remove;
+    wr(b.data+block+20,stored,4);wr(b.data+block+24,stored,4);repair(b);
+    positions[4]-=remove;
+    records[3]=(pgwt_evidence_record){.kind=PGWT_EVIDENCE_OTHER,.t=12,.unsupported_shape=true};
+    pgwt_codec_buffer v=view(b);pgwt_codec_decoded out;int status=pgwt_codec_decode(&v,1,&out);
+    bool ok=status==1 && out.file_count==1 && out.info[0].block_count==1 &&
+        out.files[0].record_count==5 && same_files(&f,out.files,1) && out.stop_count==1 &&
+        out.stops[0].reason==PGWT_CODEC_RECORD && out.stops[0].block_offset==block &&
+        out.stops[0].record_offset==positions[3] && out.stops[0].validated_end==b.size;
+    if (ok) for (size_t i=0;i<5;++i)
+        ok=ok && out.info[0].positions[i].block_offset==block && out.info[0].positions[i].record_offset==positions[i];
+    check("multi_record_fault_arrays",ok);
+    pgwt_evidence_input in={.files=out.files,.file_count=out.file_count,.capture={"B",1},.pid=7,.has_fork=true};
+    pgwt_core_query q={.event={"A",1},.from=1,.to=8};pgwt_evidence_output replay={0};
+    check("multi_record_fault_replay",pgwt_evidence_replay(&in,&q,&replay,NULL)==PGWT_REPLAY_OK &&
+        replay.projection.coverage_count==1 && replay.coverage.start==1 && replay.coverage.end==8 &&
+        replay.wait_time.value.present && replay.wait_time.value.value==0);
+    pgwt_evidence_output_free(&replay);pgwt_codec_decoded_free(&out);pgwt_codec_bytes_free(&b);
+}
+static void independent_bad_header(void)
+{
+    pgwt_evidence_record records[]={
+        {.kind=PGWT_EVIDENCE_LIFE,.t=1,.pid=7,.has_fork=true,.fork=1,.start=1,.start_known=true},
+        {.kind=PGWT_EVIDENCE_ATTACH_OK,.pid=7,.has_fork=true,.fork=1,.t=1,.reread=true,.counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_TRANS,.pid=7,.t=3,.new_event={"A",1},.duration=2},
+        {.kind=PGWT_EVIDENCE_FRONTIER,.t=8,.counters={.known=true}}
+    };
+    pgwt_evidence_file f={.version=5,.boot={"b",1},.capture={"A",1},.present=true,.qualified=true,
+        .baseline={.known=true},.records=records,.record_count=4};
+    pgwt_codec_mapping map={1,1,{"A",1}};pgwt_codec_descriptor d={.mapping=&map,.mapping_count=1};
+    pgwt_codec_bytes a={0},b0={0},b1={0},a1={0},a2={0};
+    if (pgwt_codec_encode(&f,&d,NULL,&a,NULL)) exit(2);
+    f.file_no=1;f.has_previous=true;pgwt_codec_buffer prev=view(a);
+    if (pgwt_codec_encode(&f,&d,&prev,&a1,NULL)) exit(2);
+    f.file_no=2;f.previous=1;prev=view(a1);
+    if (pgwt_codec_encode(&f,&d,&prev,&a2,NULL)) exit(2);
+    f.file_no=0;f.has_previous=false;f.previous=0;f.capture=(pgwt_core_event){"B",1};
+    if (pgwt_codec_encode(&f,&d,NULL,&b0,NULL)) exit(2);
+    pgwt_evidence_record frontier={.kind=PGWT_EVIDENCE_FRONTIER,.t=12,.counters={.known=true}};
+    f.file_no=1;f.has_previous=true;f.records=&frontier;f.record_count=1;prev=view(b0);
+    if (pgwt_codec_encode(&f,&d,&prev,&b1,NULL)) exit(2);
+    a.data[rd(a.data+40,4)-4]^=1;
+    pgwt_codec_decoded alone={0},mixed={0};pgwt_codec_buffer single=view(b0);
+    bool baseline=pgwt_codec_decode(&single,1,&alone)==0 && replay_b(&alone,8);
+    pgwt_codec_buffer chain[]={view(a),view(b0)};
+    int status=pgwt_codec_decode(chain,2,&mixed);
+    check("bad_header_independent_capture",baseline && status==1 && mixed.stop_count==1 &&
+        mixed.stops[0].reason==PGWT_CODEC_CRC && mixed.stops[0].input_file==0 &&
+        mixed.stops[0].validated_end==0 && mixed.file_count==alone.file_count &&
+        same_files(mixed.files,alone.files,alone.file_count) && replay_b(&mixed,8));
+    pgwt_codec_decoded_free(&mixed);pgwt_codec_decoded_free(&alone);
+    pgwt_codec_buffer good_chain[]={view(b0),view(b1)};
+    baseline=pgwt_codec_decode(good_chain,2,&alone)==0 && replay_b(&alone,12);
+    pgwt_codec_buffer interleaved[]={view(b0),view(a),view(b1)};
+    status=pgwt_codec_decode(interleaved,3,&mixed);
+    check("bad_header_independent_successor",baseline && status==1 && mixed.stop_count==1 &&
+        mixed.stops[0].reason==PGWT_CODEC_CRC && mixed.stops[0].input_file==1 &&
+        mixed.file_count==alone.file_count && same_files(mixed.files,alone.files,alone.file_count) && replay_b(&mixed,12));
+    pgwt_codec_decoded_free(&mixed);pgwt_codec_decoded_free(&alone);
+    pgwt_codec_buffer stopped[]={view(a),view(a1),view(b0),view(a2)};
+    status=pgwt_codec_decode(stopped,4,&mixed);
+    check("bad_header_same_capture_link_tombstone",status==1 && mixed.stop_count==2 &&
+        mixed.stops[1].input_file==1 && mixed.stops[1].reason==PGWT_CODEC_LINK && mixed.file_count==2 &&
+        mixed.files[0].unsupported_shape && !mixed.files[0].record_count &&
+        same_event(mixed.files[1].capture,(pgwt_core_event){"B",1}) && replay_b(&mixed,8));
+    pgwt_codec_decoded_free(&mixed);
+    pgwt_codec_bytes_free(&a);pgwt_codec_bytes_free(&a1);pgwt_codec_bytes_free(&a2);
+    pgwt_codec_bytes_free(&b0);pgwt_codec_bytes_free(&b1);
+}
+/* The standard pass uses one record per block to isolate deliberately
  * missing JSON fields. Wire fields are mandatory: scenarios 34/35/54 (missing
  * duration) and 52/53 (missing t) cannot be represented as well-framed records.
  * Remove that required varint column slot from their type-0 block instead.
  * The now undecodable columns reject the segment at the same physical boundary;
  * no other record shares this block, so the retained logical prefix is exact.
- * 36/37 use an unknown framed wire kind. No product encoder emits these faults.
+ * 36/37 also run with grouped records and use an unknown framed wire kind.
+ * No product encoder emits these faults.
  * Missing file 23 is encoded for digest construction, then withheld entirely.
  * Legacy scenarios 28–30 deliberately use the logical API without v5 encoding.
  */
-static void scenario(const char *path, const char *expected, const char *projections)
+static void scenario(const char *path, const char *expected, const char *projections, bool grouped)
 {
     evidence_case c;char field[512]={0};
     if (evidence_case_load(path,&c,field,sizeof(field))) { fprintf(stderr,"%s\n",field);exit(2); }
@@ -581,7 +786,7 @@ static void scenario(const char *path, const char *expected, const char *project
             if (records[j].kind==PGWT_EVIDENCE_OTHER) records[j]=(pgwt_evidence_record){.kind=PGWT_EVIDENCE_FRONTIER,.t=records[j].t,.counters={.known=true}};
             if (records[j].has_fork && records[j].fork>records[j].t) records[j].fork=records[j].t;
         }
-        pgwt_codec_descriptor d={.mapping=map,.mapping_count=maps,.block_records=1,.footer=true};
+        pgwt_codec_descriptor d={.mapping=map,.mapping_count=maps,.block_records=grouped ? 4096 : 1,.footer=true};
         pgwt_codec_buffer prev={0};
         if (f.file_no) {
             for (size_t k=0;k<i;++k) if (c.files[k].file_no==f.previous &&
@@ -596,24 +801,39 @@ static void scenario(const char *path, const char *expected, const char *project
         free(records);
     }
     if (id<28 || id>30) for (size_t i=0;i<c.input.file_count && ok;++i) {
-        size_t off=(size_t)rd(bytes[i].data+40,4);
-        for (size_t j=0;j<c.files[i].record_count;++j) {
-            const pgwt_evidence_record *r=&c.files[i].records[j];unsigned char *p=bytes[i].data+off+64;
-            if (r->unsupported_shape) {
-                if (r->kind!=PGWT_EVIDENCE_TRANS) exit(2);
-                size_t column=(id==52 || id==53) ? 0 : varint_length(p)+12;
-                size_t length=varint_length(p+column),at=off+64+column;
-                size_t stored=(size_t)rd(bytes[i].data+off+20,4);
-                memmove(bytes[i].data+at,bytes[i].data+at+length,bytes[i].size-at-length);
-                bytes[i].size-=length;wr(bytes[i].data+off+20,stored-length,4);wr(bytes[i].data+off+24,stored-length,4);
+        size_t off=(size_t)rd(bytes[i].data+40,4),j=0,blocks=0;
+        while (j<c.files[i].record_count) {
+            size_t count=(size_t)rd(bytes[i].data+off+16,4),frame=8;
+            unsigned type=(unsigned)rd(bytes[i].data+off+28,2);
+            for (size_t k=0;k<count;++k,++j) {
+                const pgwt_evidence_record *r=&c.files[i].records[j];unsigned char *p=bytes[i].data+off+64;
+                if (r->unsupported_shape) {
+                    if (r->kind!=PGWT_EVIDENCE_TRANS) exit(2);
+                    size_t column=(id==52 || id==53) ? 0 : varint_length(p)+12;
+                    size_t length=varint_length(p+column),at=off+64+column;
+                    size_t stored=(size_t)rd(bytes[i].data+off+20,4);
+                    memmove(bytes[i].data+at,bytes[i].data+at+length,bytes[i].size-at-length);
+                    bytes[i].size-=length;wr(bytes[i].data+off+20,stored-length,4);wr(bytes[i].data+off+24,stored-length,4);
+                }
+                else if (r->kind==PGWT_EVIDENCE_OTHER) {
+                    /* Keep only the common 8-byte body: disabling the unknown-kind
+                     * guard must not accidentally fail the body-tail check. */
+                    size_t remove=(size_t)rd(p+frame+1,4)-8,at=off+64+frame+13;
+                    p[frame]=99;wr(p+frame+1,8,4);
+                    memmove(bytes[i].data+at,bytes[i].data+at+remove,bytes[i].size-at-remove);
+                    bytes[i].size-=remove;
+                    size_t stored=(size_t)rd(bytes[i].data+off+20,4)-remove;
+                    wr(bytes[i].data+off+20,stored,4);wr(bytes[i].data+off+24,stored,4);
+                }
+                else if (r->has_fork && r->fork>r->t) wr(p+frame+18,r->fork,8);
+                if (type==2) frame+=5+(size_t)rd(p+frame+1,4);
             }
-            else if (r->kind==PGWT_EVIDENCE_OTHER) p[8]=99;
-            else if (r->has_fork && r->fork>r->t) wr(p+26,r->fork,8);
             off+=68+(size_t)rd(bytes[i].data+off+20,4);
+            ++blocks;
         }
         /* Reconstruct physical offsets/footer after a removed column slot. */
         size_t data_end=off;off=(size_t)rd(bytes[i].data+40,4);
-        for (size_t j=0;j<c.files[i].record_count;++j) {
+        for (size_t j=0;j<blocks;++j) {
             wr(bytes[i].data+off+48,off,8);wr(bytes[i].data+data_end+16*j+8,off,8);
             off+=68+(size_t)rd(bytes[i].data+off+20,4);
         }
@@ -623,12 +843,14 @@ static void scenario(const char *path, const char *expected, const char *project
     pgwt_codec_decoded decoded={0};pgwt_evidence_input in=c.input;
     if ((id<28 || id>30) && ok) {
         int status=pgwt_codec_decode(buffers,nb,&decoded);
-        ok=status>=0;in.files=decoded.files;in.file_count=decoded.file_count;
+        ok=status>=0 && scenario_files(&c,&decoded,grouped);
+        char arrays[256];snprintf(arrays,sizeof(arrays),"scenario_%s%s_decoded_arrays",c.id,grouped ? "_grouped" : "");
+        check(arrays,ok);in.files=decoded.files;in.file_count=decoded.file_count;
     }
     pgwt_evidence_output out={0};const char *reason=NULL;
     if (ok) ok=pgwt_evidence_replay(&in,&c.query,&out,&reason)==PGWT_REPLAY_OK;
     if (ok) ok=evidence_compare(&c,&out,expected,projections,field,sizeof(field))==0;
-    char name[256];snprintf(name,sizeof(name),"scenario_%s%s",c.id,id>=28 && id<=30 ? "_legacy_logical" : "_roundtrip");
+    char name[256];snprintf(name,sizeof(name),"scenario_%s%s",c.id,grouped ? "_grouped_roundtrip" : id>=28 && id<=30 ? "_legacy_logical" : "_roundtrip");
     if (!ok) fprintf(stderr,"%s %s %s\n",name,field,reason ? reason : "");
     check(name,ok);pgwt_evidence_output_free(&out);pgwt_codec_decoded_free(&decoded);
     for (size_t i=0;i<c.input.file_count;++i) pgwt_codec_bytes_free(&bytes[i]);
@@ -642,10 +864,14 @@ static void scenarios(const char *root)
         snprintf(expected,sizeof(expected),"%s%s/expected.json",root,rev ? "/r3" : "");
         snprintf(projections,sizeof(projections),"%s%s/projections.json",root,rev ? "/r3" : "");
         glob_t paths={0};if (glob(pattern,0,NULL,&paths) || paths.gl_pathc!=(rev ? 31 : 33)) exit(2);
-        for (size_t i=0;i<paths.gl_pathc;++i) scenario(paths.gl_pathv[i],expected,projections);
+        for (size_t i=0;i<paths.gl_pathc;++i) {
+            scenario(paths.gl_pathv[i],expected,projections,false);
+            if (rev && (strstr(paths.gl_pathv[i],"/36_") || strstr(paths.gl_pathv[i],"/37_")))
+                scenario(paths.gl_pathv[i],expected,projections,true);
+        }
         globfree(&paths);
     }
-    if (!only) puts("codec scenarios: 64 checked (61 v5 byte paths; 3 legacy logical); 34/35/52/53/54 omit their mandatory varint slot, rejecting that single-record segment at the same boundary");
+    if (!only) puts("codec scenarios: 64 checked (61 v5 byte paths; 3 legacy logical), plus 36/37 grouped; 63 decoded-array comparisons before replay; 34/35/52/53/54 omit their mandatory varint slot, rejecting that single-record segment at the same boundary");
 }
 
 int main(int argc, char **argv)
@@ -663,7 +889,7 @@ int main(int argc, char **argv)
         pgwt_codec_bytes_free(&g);return failures ? 1 : 0;
     }
     pgwt_codec_bytes encoded=golden_roundtrip(view(g));
-    refusal_rows(view(g));predecessor_tests(view(g));compression_samples(view(g));sample_stream(view(g));record_shapes(view(g));encoder_validation(view(g));native_boundaries();null_counter_recovery();scenarios(root);
+    refusal_rows(view(g));predecessor_tests(view(g));compression_samples(view(g));sample_stream(view(g));record_shapes(view(g));encoder_validation(view(g));native_boundaries();null_counter_recovery();independent_bad_header();multi_record_fault();scenarios(root);
     if (write_path) {
         FILE *f=fopen(write_path,"wb");if (!f || fwrite(encoded.data,1,encoded.size,f)!=encoded.size || fclose(f)) return 2;
     }

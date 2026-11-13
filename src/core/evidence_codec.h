@@ -60,14 +60,14 @@ typedef struct {
 
 /* Return 0 for complete, 1 for an explicitly bounded prefix, -1 for invalid
  * API arguments/allocation failure. Output must be fresh or freed before reuse.
- * A bad unidentifiable header ends the input; identified failures stop only that
- * capture, allowing independent captures in later buffers. Record bodies are
+ * A bad header rejects that buffer; identified failures stop only that capture,
+ * allowing independent captures in later buffers. Record bodies are
  * validated only after ALL framing/integrity checks for their segment pass.
  * Contract precedence (frozen documents are deliberately unchanged):
  * CODEC.md:479-481,574-577,585-606 call record faults continued global loss;
  * REVISION-r3.md:7-15 and CONTRACT.md:235-254 require a physical chain stop.
- * Thus unsupported_shape marks a stop, never a synthetic VOID. CODEC.md:577
- * also calls null certificate counters a fault; r3:14 and CONTRACT.md:284-288
+ * Thus unsupported_shape marks a stop, never a synthetic VOID. CODEC.md:334-339
+ * (§5) and :577 also call null certificate counters a fault; r3:14 and CONTRACT.md:284-288
  * instead retain their readable loss semantics. Writer refusal still applies.
  * CODEC.md:146-149 repeats the original baseline, whereas CONTRACT.md:22-23
  * requires the running baseline. Replay checks that semantic restatement.
