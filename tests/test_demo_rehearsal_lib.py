@@ -1545,7 +1545,7 @@ def _zero_integrity_metrics():
         "ringbuf_drops_total": 0,
         "state_map_full_total": 0,
         "seen_query_ids_full_total": 0,
-        "ringbuf_lifecycle_init_drops_total": 0,
+        "lifecycle_init_lost_total": 0,
         "ringbuf_lifecycle_fork_drops_total": 0,
         "ringbuf_lifecycle_exit_drops_total": 0,
         "ringbuf_query_text_drops_total": 0,
@@ -1556,6 +1556,13 @@ def _zero_integrity_metrics():
 
 def test_daemon_integrity_all_zero_ok():
     ok, detail = lib.daemon_integrity_ok(_zero_integrity_metrics())
+    assert ok, detail
+
+
+def test_daemon_integrity_init_hint_drops_are_recoverable():
+    metrics = _zero_integrity_metrics()
+    metrics["lifecycle_init_hint_drops_total"] = 17
+    ok, detail = lib.daemon_integrity_ok(metrics)
     assert ok, detail
 
 
@@ -1579,8 +1586,8 @@ def test_daemon_integrity_seen_query_ids_full_fails():
     _assert_integrity_counter_fails("seen_query_ids_full_total", 1)
 
 
-def test_daemon_integrity_lifecycle_init_drops_fails():
-    _assert_integrity_counter_fails("ringbuf_lifecycle_init_drops_total", 1)
+def test_daemon_integrity_lifecycle_init_lost_fails():
+    _assert_integrity_counter_fails("lifecycle_init_lost_total", 1)
 
 
 def test_daemon_integrity_lifecycle_fork_drops_fails():

@@ -20,6 +20,8 @@ struct pgwt_backend {
      * SHARED addresses through one pid; local ones need per-pid reads. */
     int      wp_addr_shared;
     uint64_t attach_ts;        /* monotonic ns when attached */
+    uint64_t init_ts;          /* captured bootstrap time; 0 for direct attach */
+    bool     init_attached;    /* INIT attach completed, retained across tiers */
     bool     is_alive;
     /* meta has been filled by pgwt_parse_cmdline. A zeroed meta reads as
      * backend_type == CLIENT (enum value 0), which is WRONG for an unparsed
@@ -69,7 +71,11 @@ int pgwt_sweep_stale_state(struct pgwt_daemon *d);
 int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid);
 
 /* Handle initialization complete (bootstrap fired). Switch to real watchpoint. */
-int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr);
+int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
+                     uint64_t init_ts);
+
+/* Recover stored INITs for pending bootstrap watchpoints on every tick. */
+int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d);
 
 /* Handle backend exit. Close watchpoint, flush stats, cleanup. */
 int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid);

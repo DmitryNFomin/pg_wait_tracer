@@ -199,7 +199,7 @@ static void detach_all(struct pgwt_daemon *d)
         }
         if (state_fd >= 0 && be->is_alive && be->pid > 0) {
             uint32_t key = (uint32_t)be->pid;
-            struct pgwt_pid_state st;
+            struct pgwt_pid_state st = {0};
             uint64_t qid = 0;
             uint16_t cmd_open = 0;
             if (bpf_map_lookup_elem(state_fd, &key, &st) == 0) {
@@ -216,6 +216,11 @@ static void detach_all(struct pgwt_daemon *d)
                 .last_ts = now,
                 .last_query_id = qid,
                 .wait_event_addr = be->wp_addr,
+                /* Keep bootstrap evidence until EXIT can account for an
+                 * INIT stored just before de-escalation closed bootstrap. */
+                .init_wait_addr = st.init_wait_addr,
+                .init_ts = st.init_ts,
+                .init_stored = st.init_stored,
             };
             bpf_map_update_elem(state_fd, &key, &seed, BPF_ANY);
         }

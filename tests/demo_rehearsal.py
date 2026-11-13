@@ -838,7 +838,8 @@ def main():
         extra_checks["daemon_integrity"] = {
             "ok": integrity_ok, "detail": integrity_detail,
             "note": ("/".join(drlib.DAEMON_INTEGRITY_COUNTERS) +
-                     " == 0 -- BPF map update and read failures without "
+                     " == 0 -- INIT state loss is gated; missed INIT hints "
+                     "are recovered by the tick sweep. BPF map update and read failures without "
                      "counters remain uncovered; sampled/coop tiers report "
                      "the ring-drop counters as 0 because only the full "
                      "provider fills them. A clean result means the reported "

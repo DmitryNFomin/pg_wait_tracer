@@ -81,7 +81,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_evidence_contract \
             test_core_evidence_codec \
             test_core_merge_contract \
-            test_ringbuf_metrics
+            test_ringbuf_metrics test_backend_init
 
 .PHONY: all clean check
 
@@ -105,11 +105,14 @@ check: all
 test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^
 
+test_backend_init: test_backend_init.c ../src/backend_init.c ../src/backend_init.h ../src/backend.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -o $@ test_backend_init.c ../src/backend_init.c
+
 # Exercise the production lifecycle functions, replacing only hardware opens
-# and map deletes. The capture objects exist after the required parent build.
+# and state reads/deletes. Capture objects exist after the parent build.
 LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o))
 test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
+	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=pgwt_watchpoint_enable -Wl,--wrap=bpf_map_delete_elem -Wl,--wrap=bpf_map_lookup_elem -Wl,--wrap=bpf_map_update_elem $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 # #416: drive the REAL pgwt_handle_timer (the defect was the ORDER of the
 # steps inside it), replacing the ring buffer. #779 also observes real writer

@@ -344,6 +344,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "seen_query_ids_full_total",
                      pgwt_read_bpf_fail_counter((struct pgwt_daemon *)d,
                                                 PGWT_BPF_FAIL_SEEN_QIDS));
+    cjson_add_uint64(root, "lifecycle_init_lost_total",
+                     ctr->lifecycle_init_lost_total
+                     + pgwt_read_bpf_fail_counter((struct pgwt_daemon *)d,
+                                                  PGWT_BPF_FAIL_INIT_LOST));
     cjson_add_uint64(root, "invalid_wait_reads_total",
                      ctr->invalid_wait_reads_total);
     cjson_add_uint64(root, "state_reseeds_total",

@@ -1097,7 +1097,7 @@ def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks,
 # controlMetrics() already uses from the UI.
 DAEMON_INTEGRITY_COUNTERS = (
     "ringbuf_drops_total", "state_map_full_total", "seen_query_ids_full_total",
-    "ringbuf_lifecycle_init_drops_total", "ringbuf_lifecycle_fork_drops_total",
+    "lifecycle_init_lost_total", "ringbuf_lifecycle_fork_drops_total",
     "ringbuf_lifecycle_exit_drops_total", "ringbuf_query_text_drops_total",
     "ringbuf_pg13_query_text_drops_total",
 )
@@ -1110,9 +1110,11 @@ def daemon_integrity_ok(metrics):
     value here means data conservation was already violated upstream of
     every other check in this file. state_map_full_total /
     seen_query_ids_full_total are BPF/userspace insert-failure counters
-    (a backend recording nothing, or losing query attribution). The five
-    lifecycle/query-text site counters cover lifecycle_rb reserve failures
-    for backend init, fork and exit, and query text (including PG13).
+    (a backend recording nothing, or losing query attribution). lifecycle_init_lost_total counts INITs that could not be stored, or were
+    stored but never attached before exit. The four lifecycle/query-text
+    site counters cover fork, exit and query-text reserve failures (including
+    PG13). lifecycle_init_hint_drops_total counts missed wake-up hints; the
+    per-tick state sweep recovers them, so it is not an integrity loss.
 
     A missing or non-numeric counter FAILS (a gate that cannot see the
     count must refuse), same as capture_has_events_ok's own contract.

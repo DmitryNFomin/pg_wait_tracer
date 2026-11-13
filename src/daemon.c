@@ -168,7 +168,7 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
         break;
     case PGWT_LIFECYCLE_INIT:
         op = "lifecycle_init";
-        pgwt_handle_init(d, ev->pid, ev->addr);
+        pgwt_handle_init(d, ev->pid, ev->addr, ev->timestamp);
         break;
     case PGWT_LIFECYCLE_EXIT:
         op = "lifecycle_exit";
@@ -402,6 +402,10 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         fprintf(stderr, "STATEDUMP-TIMER: tick=%d mode_uses_wp=%d "
                 "lightweight=%d\n",
                 d->tick, (int)mode_uses_wp, (int)d->lightweight_mode);
+
+    /* INIT records are wake-up hints: recover their durable facts every tick,
+     * before the general address-based recovery can take a direct attach. */
+    pgwt_sweep_bootstrap_backends(d);
 
     /* Straddle-race recovery: re-attach any pre-existing backend the one-shot
      * startup scan missed or left in bootstrap limbo (a transient resolve race,
@@ -1241,6 +1245,14 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         d->skel->rodata->test_no_sched_oncpu = true;
         fprintf(stderr, "WARN: PGWT_TEST_NO_SCHED_ONCPU — sched_switch on_cpu_ts "
                 "open suppressed (deterministic straddle-CPU repro; TEST ONLY)\n");
+    }
+    if (getenv("PGWT_TEST_DROP_INIT_HINT")) {
+        d->skel->rodata->test_drop_init_hint = true;
+        fprintf(stderr, "WARN: PGWT_TEST_DROP_INIT_HINT — INIT ring hints suppressed (TEST ONLY)\n");
+    }
+    if (getenv("PGWT_TEST_SKIP_INIT_STORE")) {
+        d->skel->rodata->test_skip_init_store = true;
+        fprintf(stderr, "WARN: PGWT_TEST_SKIP_INIT_STORE — INIT state stores suppressed (TEST ONLY)\n");
     }
     /* DEBUG HOOK (PGWT_DEBUG_DUMP_STATE): see pgwt_debug_dump_state_map — the
      * final state_map is dumped to stderr at shutdown for the reopened

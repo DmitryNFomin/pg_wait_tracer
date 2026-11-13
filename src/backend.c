@@ -1,5 +1,6 @@
 /* backend.c — Backend lifecycle: scan, fork, init, exit handling */
 #include "backend.h"
+#include "backend_init.h"
 #include "daemon.h"
 #include "perf_event.h"
 #include "discovery.h"
@@ -217,16 +218,16 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
         }
 
         int state_fd = bpf_map__fd(d->skel->maps.state_map);
-        /* Preserve the command-open gate across the (re-)seed: the
+        /* Preserve bootstrap evidence and the command-open gate across the
+         * (re-)seed. Bootstrap is closed before INIT attachment. The
          * on_report_activity uprobe only fires on boundaries, so zeroing
          * cmd_open here would mis-gate the backend until its next command
          * flip (matters on tiered re-escalation mid-command). */
-        uint16_t prev_cmd_open = 0;
+        struct pgwt_pid_state prev = {0};
         {
             uint32_t k = pid;
-            struct pgwt_pid_state prev;
-            if (bpf_map_lookup_elem(state_fd, &k, &prev) == 0)
-                prev_cmd_open = prev.cmd_open;
+            if (bpf_map_lookup_elem(state_fd, &k, &prev) != 0)
+                memset(&prev, 0, sizeof(prev));
         }
         /* Straddle fix (exact tier): a backend already RUNNING a command when
          * we first seed it missed the on_report_activity START edge, so its
@@ -239,7 +240,7 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
          * watchpoint fire; the emitted events then carry CMD_OPEN and the live
          * accumulator counts the CPU. (mem_fd is already open on this backend;
          * the read is against its own process-local global.) */
-        uint16_t seed_cmd_open = prev_cmd_open;
+        uint16_t seed_cmd_open = prev.cmd_open;
         if (!seed_cmd_open && d->debug_query_string_addr) {
             uint64_t dqs = 0;
             if (pread(mem_fd, &dqs, sizeof(dqs),
@@ -253,6 +254,9 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             .last_ts = attach_ts,
             .last_query_id = current_qid,
             .wait_event_addr = addr,
+            .init_wait_addr = prev.init_wait_addr,
+            .init_ts = prev.init_ts,
+            .init_stored = prev.init_stored,
             /* S3: exact CPU is accumulated by the sched_switch program into
              * cpu_ns_total/on_cpu_ts. Seed the base at 0 (deltas count from
              * attach); open the on-CPU stretch here iff the backend is running
@@ -619,7 +623,7 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
         int addr_shared = ptr != 0 ? pgwt_addr_is_shared(pid, ptr) : 0;
         pgwt_debug_block_end(d, "backend_addr_shared", pid, started_ns);
         if (ptr != 0 && addr_shared == 1) {
-            if (pgwt_handle_init(d, pid, ptr) == 0) {
+            if (pgwt_handle_init(d, pid, ptr, 0) == 0) {
                 recovered++;
                 if (d->verbose)
                     fprintf(stderr, "INFO: recovered unattached backend PID %d "
@@ -909,7 +913,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
          * Try direct init path (version-aware address resolution). */
         uint64_t ptr = pgwt_resolve_backend_wait_addr(d, child_pid);
         if (ptr != 0) {
-            return pgwt_handle_init(d, child_pid, ptr);
+            return pgwt_handle_init(d, child_pid, ptr, 0);
         }
         /* Silently skip — process exited before bootstrap attach */
         d->counters.wp_attach_failures_total++;
@@ -945,7 +949,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
         if (d->verbose)
             fprintf(stderr, "INFO: fork PID %d already initialized "
                     "(fork->attach race) — attaching directly\n", child_pid);
-        return pgwt_handle_init(d, child_pid, ptr);
+        return pgwt_handle_init(d, child_pid, ptr, 0);
     }
 
     if (d->verbose)
@@ -954,7 +958,26 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     return 0;
 }
 
-int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
+static int read_init_state(void *ctx, pid_t pid, struct pgwt_pid_state *st)
+{
+    struct pgwt_daemon *d = ctx;
+    uint32_t key = pid;
+    return bpf_map_lookup_elem(bpf_map__fd(d->skel->maps.state_map), &key, st);
+}
+
+static int attach_stored_init(void *ctx, pid_t pid, uint64_t addr, uint64_t ts)
+{
+    return pgwt_handle_init(ctx, pid, addr, ts);
+}
+
+int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d)
+{
+    return pgwt_sweep_stored_inits(&d->backends, d, read_init_state,
+                                   attach_stored_init);
+}
+
+int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
+                     uint64_t init_ts)
 {
     if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions, pid))
         return 0;
@@ -977,12 +1000,21 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
         be->bootstrap_fd = -1;
     }
 
-    /* Close previous watchpoint if re-initializing */
+    /* Closing bootstrap quiesces the producer before reading/reseeding its
+     * facts. Prefer the stored timestamp even on the direct-attach path. */
+    struct pgwt_pid_state st = {0};
+    if (read_init_state(d, pid, &st) == 0 && st.init_stored) {
+        addr = st.init_wait_addr;
+        init_ts = st.init_ts;
+    }
+    if (init_ts != 0)
+        be->init_ts = init_ts;
+
+    /* Ring delivery after a sweep (or the direct-attach race) must not
+     * reopen/reseed an already live watchpoint. */
     if (be->wp_fd >= 0) {
-        uint64_t started_ns = pgwt_debug_block_begin(d);
-        pgwt_close_watchpoint(be->wp_fd);
-        pgwt_debug_block_end(d, "watchpoint_close", pid, started_ns);
-        be->wp_fd = -1;
+        be->init_attached = true;
+        return 0;
     }
 
     /* Runtime offset validation (CAP-2/5) — all versions. Covers the case
@@ -1024,6 +1056,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
         be->pid = 0;
         return -1;
     }
+    be->init_attached = true;
 
     uint64_t started_ns = pgwt_debug_block_begin(d);
     int cmdline_rc = pgwt_parse_cmdline(pid, &be->meta);
@@ -1054,6 +1087,13 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
         be->bootstrap_fd = -1;
         pgwt_debug_block_end(d, "watchpoint_close", pid, started_ns);
     }
+
+    /* The producer has stopped (exit or bootstrap close). Count retained
+     * INIT evidence even if enrollment/attach failed before registry entry.
+     * Deleting the entry below makes repeated EXIT cleanup idempotent. */
+    struct pgwt_pid_state st = {0};
+    if (read_init_state(d, pid, &st) == 0 && pgwt_stored_init_lost(be, &st))
+        d->counters.lifecycle_init_lost_total++;
 
     /* Delete BPF map entries for this PID */
     int state_fd = bpf_map__fd(d->skel->maps.state_map);
