@@ -44,6 +44,13 @@ CHECK_QUERY = '''query($owner:String!, $name:String!, $number:Int!, $endCursor:S
     } } } }
   }
 }'''
+MERGED_QUERY = '''query($search:String!, $endCursor:String) {
+  search(query:$search, type:ISSUE, first:100, after:$endCursor) {
+    issueCount
+    nodes { ... on PullRequest { number mergedAt body } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
 
 
 def command(*args):
@@ -66,12 +73,14 @@ def gh(*args):
     return value
 
 
-def graphql(query, repo, number=None):
+def graphql(query, repo, number=None, search=None):
     owner, name = repo.split('/')
     args = ['api', 'graphql', '--paginate', '--slurp', '-f', f'query={query}',
             '-f', f'owner={owner}', '-f', f'name={name}']
     if number is not None:
         args += ['-F', f'number={number}']
+    if search is not None:
+        args += ['-f', f'search={search}']
     pages = gh(*args)
     for page in pages:
         if not isinstance(page, dict):
@@ -79,6 +88,29 @@ def graphql(query, repo, number=None):
         if page.get('errors'):
             raise RuntimeError(f'gh graphql: {page["errors"]}')
     return pages
+
+
+def merged_prs(repo, cutoff):
+    # Search by merge date, never a creation-ordered bounded PR list. GitHub
+    # caps search at 1000 results; an incomplete traversal must wake the lead.
+    pages = graphql(MERGED_QUERY, repo,
+                    search=f'repo:{repo} is:pr is:merged merged:>={cutoff.date().isoformat()}')
+    prs = []
+    total = None
+    for page in pages:
+        result = page['data']['search']
+        if total is not None and result['issueCount'] != total:
+            raise RuntimeError('merged PR search changed during pagination')
+        total = result['issueCount']
+        prs.extend(result['nodes'])
+    if (not pages or pages[-1]['data']['search']['pageInfo']['hasNextPage']
+            or len(prs) != total or len({pr['number'] for pr in prs}) != total):
+        raise RuntimeError('merged PR search pagination incomplete')
+    return prs
+
+
+def has_cost_record(body):
+    return 'Cost record' in (body or '') and '[FILL IN' not in (body or '')
 
 
 def load():
@@ -167,6 +199,24 @@ def collect(data, now):
         error(exc)
         return items, acted
     try:
+        cutoff_file = STATE / 'cost-cutoff'
+        if cutoff_file.exists():
+            cutoff = datetime.fromisoformat(cutoff_file.read_text().strip().replace('Z', '+00:00'))
+            if cutoff.utcoffset() is None or cutoff.utcoffset().total_seconds() != 0:
+                raise ValueError('cost-cutoff must be an ISO UTC time')
+            merged = merged_prs(repo, cutoff)
+            for pr in merged:
+                merged_at = datetime.fromisoformat(pr['mergedAt'].replace('Z', '+00:00'))
+                if merged_at < cutoff or has_cost_record(pr['body']):
+                    continue
+                pages = gh('api', f'repos/{repo}/issues/{pr["number"]}/comments?per_page=100',
+                           '--paginate', '--slurp')
+                if not any(has_cost_record(comment['body'])
+                           for page in pages for comment in page):
+                    items.append(line(f'cost-{pr["number"]}', 'merged without a cost record'))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
+        error(exc)
+    try:
         prs = [pr for page in graphql(OPEN_QUERY, repo)
                for pr in page['data']['repository']['pullRequests']['nodes']
                if pr['autoMergeRequest'] is not None]
@@ -245,7 +295,7 @@ def once(data):
     now = time.time()
     items, acted = collect(data, now)
     data['seen'] = {item: stamp for item, stamp in data['seen'].items() if item in items}
-    reported = [item for item in items if item.startswith(('NEEDS-LEAD follow-', 'NEEDS-LEAD tick-error '))
+    reported = [item for item in items if item.startswith(('NEEDS-LEAD follow-', 'NEEDS-LEAD tick-error ', 'NEEDS-LEAD cost-'))
                 or item not in data['seen'] or now - data['seen'][item] >= 3600]
     data['reported'] = reported
     save(data)
