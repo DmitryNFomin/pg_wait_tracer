@@ -3,11 +3,15 @@
   "evidence": {
     "wait_time-contract": {
       "kind": "attestation",
-      "link": null
+      "link": null,
+      "contract": "wait_time-v1",
+      "contract_sha256": "4f4d9aedca7e5313f3dc78cd2aba763e286ba9e79d1406ff3c6e6899957f1129"
     },
     "wait_time-independent": {
       "kind": "attestation",
-      "link": null
+      "link": null,
+      "contract": "wait_time-v1",
+      "contract_sha256": "4f4d9aedca7e5313f3dc78cd2aba763e286ba9e79d1406ff3c6e6899957f1129"
     },
     "wait_time-core": {
       "kind": "core-status",
@@ -19,7 +23,9 @@
     },
     "wait_time-cost": {
       "kind": "attestation",
-      "link": null
+      "link": null,
+      "contract": "wait_time-v1",
+      "contract_sha256": "4f4d9aedca7e5313f3dc78cd2aba763e286ba9e79d1406ff3c6e6899957f1129"
     }
   },
   "claims": [
