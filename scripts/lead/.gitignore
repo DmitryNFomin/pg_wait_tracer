@@ -12,3 +12,4 @@
 .briefs-passed
 .brief-gate.lock
 tick-state/
+costs.tsv
