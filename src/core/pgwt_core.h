@@ -6,7 +6,8 @@
  * The computation allocates nothing, borrows all input storage, and does not
  * reorder or modify it. Results own fixed storage for at most four reasons;
  * their string pointers refer to static literals. Preparation is
- * O(waits log waits + coverage); each metric call is O(waits + coverage).
+ * O(waits log waits + coverage + event bytes). A batch checks integrity once in
+ * O(waits + coverage + event bytes), then scans each query in O(waits + coverage).
  * Callers provide two distinct, non-null result objects and readable arrays of
  * the stated lengths. Events are byte strings (UTF-8 for JSON), length delimited
  * so even embedded NULs compare exactly. No other project header is required.
@@ -97,15 +98,30 @@ typedef struct {
     } diagnostic;
 } pgwt_core_result;
 
-/* Prepared handles borrow immutable evidence (including arrays/event strings).
- * Do not modify evidence until all queries are finished; prepare again after
- * any change. Members are implementation state, not caller-settable flags. */
+/* Prepared handles borrow evidence (including arrays/event strings). We use
+ * staged digests plus a tag bound to this handle's address and ALL its state:
+ * this keeps preparation and queries allocation-free without copying evidence.
+ * Queries check the tag before dereferencing evidence, header metadata before
+ * arrays, and array metadata before event bytes. A changed or copied handle,
+ * or changed evidence, reports evidence_invalid with null diagnostics. Prepare
+ * again after any change; handles cannot be copied/moved to another address.
+ * Members are implementation state, not caller-settable flags.
+ *
+ * This detects accidental forgery, copies and mutations; every single changed
+ * byte of a digested field/event is detected. Multiple changes can collide in
+ * the deterministic 64-bit digests. Hostile code in the same process is outside
+ * this guarantee: it can recompute the digests and tag.
+ * Borrowed storage must stay alive/readable, and must not change concurrently
+ * with preparation or an entire batch. Unused invalid input storage is not traversed.
+ */
 typedef struct {
     const pgwt_core_evidence *evidence;
     bool coverage_knowable, evidence_valid;
+    uint64_t header_digest, layout_digest, event_digest, tag;
 } pgwt_core_prepared;
 
-/* Validate once, without allocation or changes to evidence. scratch_len is the
+/* Validate semantics once, without allocation or changes to evidence; queries
+ * recheck integrity in linear time. scratch_len is the
  * number of pgwt_core_wait entries, at least evidence->wait_count; scratch must
  * be distinct from input arrays. It is used for an in-place heapsort and may
  * be freed/reused immediately after preparation. Zero waits need no scratch.
@@ -121,5 +137,18 @@ void pgwt_core_wait_metrics(const pgwt_core_prepared *prepared,
                             const pgwt_core_query *query,
                             pgwt_core_result *wait_time,
                             pgwt_core_result *completed);
+
+/* Check integrity once, then compute k query pairs in order. If integrity
+ * fails, every pair reports evidence_invalid with null diagnostics (query
+ * errors are still reported independently). Changes between calls are checked
+ * again on the next call. The single-query function above is the k=1 case.
+ * Both output arrays must have k writable entries, distinct from each other,
+ * the queries, the handle and borrowed evidence. queries has k readable entries;
+ * NULL queries means k malformed queries. k=0 accesses no inputs or outputs.
+ */
+void pgwt_core_wait_metrics_many(const pgwt_core_prepared *prepared,
+                                 const pgwt_core_query *queries, size_t k,
+                                 pgwt_core_result *wait_times,
+                                 pgwt_core_result *completeds);
 
 #endif

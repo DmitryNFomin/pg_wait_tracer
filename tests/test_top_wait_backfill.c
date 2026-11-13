@@ -466,8 +466,8 @@ static void test_unreadable_reports_absence(uint64_t base_mono)
  * window_too_large refusal BEFORE inspecting the hint: an absent refusal
  * must fail, never make this gate pass vacuously.
  *
- * Events forces raw for a QUERY filter, so its hint says so. Queries is
- * different, and that difference is why the matrix below varies the filter
+ * All requests read raw while summaries are off. Queries additionally
+ * ignores pid filters, which is why the matrix below varies the filter
  * instead of fixing it: handle_top_queries loads with pid 0 and
  * server_load_events_fi_mode has no query pushdown, so NO filter changes
  * the loader's arguments and none can avoid the refusal. Its hint must
@@ -502,13 +502,17 @@ static int child_query_filter_overload_hint(const char *dir, int queries,
     cJSON *hint = cJSON_GetObjectItem(out, "hint");
     int ok = cJSON_IsString(hint) && (queries
         ? strcmp(hint->valuestring,
-                 "narrow the time range; Queries always reads raw events "
+                 "the raw event limit was exceeded; narrow the time range; "
+                 "Queries always reads raw events "
                  "for every pid, because execution statistics need every "
                  "backend's markers, so no filter reduces this load") == 0 &&
           /* The two impossible/irrelevant instructions must both be absent. */
           strstr(hint->valuestring, "pid/query filter") == NULL &&
           strstr(hint->valuestring, "forces the exact path") == NULL
-        : strstr(hint->valuestring, "forces the exact path") != NULL);
+        : strstr(hint->valuestring, "the raw event limit was exceeded") != NULL &&
+          strstr(hint->valuestring, "narrow the time range") != NULL &&
+          strstr(hint->valuestring, "query filter") == NULL &&
+          strstr(hint->valuestring, "forces the exact path") == NULL);
     if (!ok)
         fprintf(stderr, "child: %s (pid=%d qid=%d) has the wrong overload "
                 "hint: %s\n", req.cmd, use_pid, use_qid,
@@ -546,13 +550,14 @@ static int child_queries_overload_absent(const char *dir)
 static void test_query_filter_overload_hints(const char *dir)
 {
     printf("--- 2b. overload hints offer only what can actually help ---\n");
-    /* Queries: all four filter shapes, same hint. Events: the query-filtered
-     * case, which is the one its own guard routes to raw. */
+    /* Queries: all four filter shapes, same hint. Events: both unfiltered
+     * and query-filtered windows read raw and must name the event limit. */
     const struct { int queries, use_pid, use_qid; const char *what; } cases[] = {
         { 1, 0, 0, "top_queries unfiltered" },
         { 1, 1, 0, "top_queries pid-only" },
         { 1, 0, 1, "top_queries query-only" },
         { 1, 1, 1, "top_queries pid+query" },
+        { 0, 0, 0, "top_events unfiltered" },
         { 0, 0, 1, "top_events query-filtered" },
     };
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -569,7 +574,7 @@ static void test_query_filter_overload_hints(const char *dir)
               "%s must reach window_too_large and report the %s hint "
               "(exit %d)", cases[i].what,
               cases[i].queries ? "narrow-the-range-only"
-                               : "query-forces-raw",
+                               : "event-limit",
               WIFEXITED(status) ? WEXITSTATUS(status) : -1);
     }
     fflush(stdout);

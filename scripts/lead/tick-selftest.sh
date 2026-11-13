@@ -39,7 +39,23 @@ elif args[:2] == ['repo', 'view']:
     print(json.dumps({'nameWithOwner': 'owner/repo'}))
 elif args[:2] == ['api', 'graphql']:
     query = next(x for x in args if x.startswith('query='))
-    if 'pullRequests(' in query:
+    if 'search(query:' in query:
+        assert 'search=repo:owner/repo is:pr is:merged merged:>=2026-11-12' in args
+        assert '--paginate' in args and '--slurp' in args
+        if f.get('merged_failure'):
+            if f['merged_failure'] == 'pagination':
+                print('[{"data": {"search": {"nodes": []}}}]')
+            print('injected merged query or pagination failure', file=sys.stderr)
+            sys.exit(5)
+        nodes = f.get('merged', [])
+        pages = [{'data': {'search': {'issueCount': len(nodes), 'nodes': nodes[:30],
+                  'pageInfo': {'hasNextPage': len(nodes) > 30, 'endCursor': 'first'}}}}]
+        if len(nodes) > 30:
+            pages.append({'data': {'search': {'issueCount': len(nodes), 'nodes': nodes[30:],
+                          'pageInfo': {'hasNextPage': False, 'endCursor': 'last'}}}})
+        print(json.dumps(f.get('merged_pages', pages)))
+        sys.exit(0)
+    elif 'pullRequests(' in query:
         nodes = [dict(pr) for pr in f['prs']]
         if 'baseRefName' not in query:
             for pr in nodes:
@@ -53,6 +69,13 @@ elif args[:2] == ['api', 'graphql']:
     print(json.dumps(f.get('graphql_pages', [{'data': {'repository': value}}])))
 elif args[:2] == ['pr', 'update-branch']:
     print('updated')
+elif args[:2] == ['pr', 'list']:
+    assert args == ['pr', 'list', '--repo', 'owner/repo', '--state', 'merged',
+                    '--limit', '30', '--json', 'number,mergedAt,body']
+    print(json.dumps(f.get('merged', [])[:30]))
+elif args[0] == 'api' and '/comments?' in args[1]:
+    assert args[2:] == ['--paginate', '--slurp']
+    print(json.dumps(f.get('comments', [[]])))
 elif args[:2] == ['pr', 'view']:
     print(json.dumps(f.get('follow_pr', {'state': 'OPEN', 'mergeStateStatus': 'CLEAN'})))
 elif args[0] == 'api' and '/compare/' in args[1]:
@@ -252,9 +275,123 @@ CASES = [
      'watch must exit on a new item'),
 ]
 
+
+def cost_setup(f):
+    cutoff = f.base / 'tick-state/cost-cutoff'
+    cutoff.parent.mkdir(parents=True)
+    cutoff.write_text('2026-11-12T19:00:00Z\n')
+    f.data['merged'] = [dict(number=99, mergedAt='2026-11-12T19:00:00Z', body='')]
+
+
+def cost_missing(f):
+    cost_setup(f)
+    needs(f.call('once'), 'NEEDS-LEAD cost-99 merged without a cost record',
+          'missing cost at cutoff must wake the lead')
+
+
+def cost_comment(f):
+    cost_setup(f)
+    f.data['comments'] = [[{'body': 'ordinary comment'}], [{'body': 'Cost record: 123 tokens'}]]
+    assert f.call('once') == (0, ''), 'cost comment on later page must silence the check'
+
+
+def cost_body(f):
+    cost_setup(f)
+    f.data['merged'][0]['body'] = 'Summary\nCost record: 123 tokens'
+    assert f.call('once') == (0, ''), 'cost record in body must silence the check'
+
+
+def cost_before(f):
+    cost_setup(f)
+    f.data['merged'][0]['mergedAt'] = '2026-11-12T18:59:59Z'
+    assert f.call('once') == (0, ''), 'PR before cutoff must be silent'
+
+
+def cost_repeat(f):
+    cost_setup(f)
+    needs(f.call('once'), 'NEEDS-LEAD cost-99', 'missing cost must initially report')
+    assert f.call('ack') == (0, '')
+    needs(f.call('once'), 'NEEDS-LEAD cost-99', 'missing cost must repeat after ack')
+    f.data['comments'] = [[{'body': 'Cost record: now posted'}]]
+    assert f.call('once') == (0, ''), 'posted cost must stop repeats'
+
+
+def cost_off(f):
+    f.data['merged'] = [dict(number=99, mergedAt='2026-11-12T19:00:00Z', body='')]
+    assert f.call('once') == (0, ''), 'absent cutoff must disable cost check'
+    assert not any('search(query:' in arg for row in f.calls() for arg in row), 'disabled cost check must not query merged PRs'
+
+
+def cost_old_creation(f):
+    cost_setup(f)
+    # 30 recently created PRs precede a long-open PR merged at the cutoff.
+    f.data['merged'] = [dict(number=n, mergedAt='2026-11-12T19:01:00Z',
+                             body='Cost record: complete', createdAt='2026-11-12T18:00:00Z')
+                        for n in range(1, 31)] + [dict(f.data['merged'][0], createdAt='2020-01-01T00:00:00Z')]
+    needs(f.call('once'), 'NEEDS-LEAD cost-99', 'long-open PR beyond creation-ordered 30 must report')
+
+
+def cost_unfilled_body(f):
+    cost_setup(f)
+    f.data['merged'][0]['body'] = 'Cost record: 123 tokens\nReviewer: [FILL IN reviewer]'
+    needs(f.call('once'), 'NEEDS-LEAD cost-99', 'unfilled body must remain missing')
+
+
+def cost_unfilled_comment(f):
+    cost_setup(f)
+    f.data['comments'] = [[{'body': 'Cost record: 123 tokens\nBox: [FILL IN hours]'}]]
+    needs(f.call('once'), 'NEEDS-LEAD cost-99', 'unfilled comment must remain missing')
+
+
+def cost_query_error(f):
+    cost_setup(f)
+    for failure in ('query', 'pagination'):
+        f.data['merged_failure'] = failure
+        needs(f.call('once'), 'NEEDS-LEAD tick-error', 'merged query or pagination failure must wake the lead')
+
+
+def cost_incomplete(f):
+    cost_setup(f)
+    for total, nodes, more in ((1, [], False), (1001, [], True), (2, [f.data['merged'][0]] * 2, False)):
+        f.data['merged_pages'] = [{'data': {'search': {'issueCount': total, 'nodes': nodes,
+                                  'pageInfo': {'hasNextPage': more, 'endCursor': 'cursor'}}}}]
+        needs(f.call('once'), 'NEEDS-LEAD tick-error merged PR search pagination incomplete',
+              'incomplete merged pagination must be a tick-error')
+
+
+COST_CASES = [
+    ('cost missing, cutoff inclusive', cost_missing,
+     ("items.append(line(f'cost-{pr[\"number\"]}', 'merged without a cost record'))", 'pass'),
+     'missing cost at cutoff must wake the lead'),
+    ('cost comment', cost_comment,
+     ("if not any(has_cost_record(comment['body'])", "if not any(False and has_cost_record(comment['body'])"),
+     'cost comment on later page must silence the check'),
+    ('cost body', cost_body,
+     ("has_cost_record(pr['body'])", 'False'),
+     'cost record in body must silence the check'),
+    ('cost before cutoff', cost_before,
+     ('merged_at < cutoff', 'False'), 'PR before cutoff must be silent'),
+    ('cost repeat after ack', cost_repeat,
+     (", 'NEEDS-LEAD cost-'", ''), 'missing cost must repeat after ack'),
+    ('cost off without cutoff', cost_off,
+     ('if cutoff_file.exists():', 'if True:'), 'absent cutoff must disable cost check'),
+    ('cost long-open merged PR', cost_old_creation,
+     ('merged = merged_prs(repo, cutoff)', "merged = gh('pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '30', '--json', 'number,mergedAt,body')"),
+     'long-open PR beyond creation-ordered 30 must report'),
+    ('cost unfilled body', cost_unfilled_body,
+     ("and '[FILL IN' not in (body or '')", ''), 'unfilled body must remain missing'),
+    ('cost unfilled comment', cost_unfilled_comment,
+     ("and '[FILL IN' not in (body or '')", ''), 'unfilled comment must remain missing'),
+    ('cost merged query failure', cost_query_error,
+     ("items.append(line('tick-error', exc))", 'pass'), 'merged query or pagination failure must wake the lead'),
+    ('cost merged pagination incomplete', cost_incomplete,
+     ("raise RuntimeError('merged PR search pagination incomplete')", 'pass'),
+     'incomplete merged pagination must be a tick-error'),
+]
+
 with tempfile.TemporaryDirectory(prefix='pgwt-tick-selftest-') as temp:
     root = Path(temp)
-    for index, (name, case, mutation, intended) in enumerate(CASES):
+    for index, (name, case, mutation, intended) in enumerate(CASES + COST_CASES):
         case(Fixture(root / f'case-{index}'))
         try:
             case(Fixture(root / f'mutant-{index}', mutation))
@@ -343,5 +480,6 @@ with tempfile.TemporaryDirectory(prefix='pgwt-tick-selftest-') as temp:
 print('PASS safe-oldest, src-delta, non-master-base, graphql-page, DIRTY, failed-check, stalled, follow-repeat-until-done, gh-error, quiet, 60m-dedup, watch')
 print('PASS negative controls: 12 compiled mutants reached their cases and failed the intended assertions')
 print('PASS extras: run_all/src-rename/truncation; legacy/optional/active/unarmed checks; state-follow/git-error; slots; watch-acked/new')
+print('PASS cost ledger: cutoff inclusive, comment pagination, body, before cutoff, repeats after ack until posted, disabled without cutoff, long-open merge pagination, unfilled body/comment, query/pagination errors; 11 mutants caught')
 print('tick-selftest: PASS (12 required cases with caught mutants; 5 extra groups)')
 PY

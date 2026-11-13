@@ -1054,6 +1054,10 @@ test_box_check_provision_persistent.sh
 # #861: clean builds, synced source identity and concurrent-run isolation.
 test_box_check_build_provenance.sh
 
+# #885: every SSH transport detects dropped connections and reaches cleanup.
+test_box_check_ssh_keepalive.sh
+test_box_check_ssh_disconnect.sh
+
 # #852: session membership at close/open credit, including zero occupancy.
 test_session_rows
 
@@ -1068,3 +1072,4 @@ test_core_wait_time_differential.py
 # evidence-v1 U1: logical replay, frozen projections and independent differential.
 test_core_evidence_contract
 test_core_evidence_differential.py
+test_core_merge_contract
