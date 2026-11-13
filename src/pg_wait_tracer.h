@@ -47,6 +47,21 @@ typedef uint64_t u64;
 #define MAX_EVENTS_PER_PID   256
 #define MAX_CPUS             128
 
+/* Stable keys of ringbuf_site_drops (PERCPU_ARRAY of u64). These are
+ * diagnostics only; they do not alter any transport record layout. */
+enum pgwt_ring_failure_site {
+    PGWT_RING_FAIL_WAIT_TRANSITION,
+    PGWT_RING_FAIL_EXIT_TRANSITION,
+    PGWT_RING_FAIL_MARKER,
+    PGWT_RING_FAIL_COMMAND_BOUNDARY,
+    PGWT_RING_FAIL_LIFECYCLE_INIT,
+    PGWT_RING_FAIL_LIFECYCLE_FORK,
+    PGWT_RING_FAIL_LIFECYCLE_EXIT,
+    PGWT_RING_FAIL_QUERY_TEXT,
+    PGWT_RING_FAIL_PG13_QUERY_TEXT,
+    PGWT_RING_FAIL_SITE_MAX
+};
+
 /* ── BPF Map Structs ──────────────────────────────────────── */
 
 /* Per-PID state in state_map */
