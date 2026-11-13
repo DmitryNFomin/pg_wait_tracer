@@ -23,8 +23,9 @@ merge-v1, the 64 inputs, and the r2 evaluator with its report. It had no answers
 `../reference/REPORT.md` and `REPORT-r3.md` is `reference/REPORT.md`.
 - The lead re-ran it on all 64 inputs. Its results equal `../expected.json` and `expected.json` here (128/128), and
   its target projections equal both `projections.json` files.
-- Control: the r2 evaluator on the same inputs gives 65 differences. One is scenario 63, where r2 rules answer a
-  complete 5 ns that r3 treats as uncertified.
+- Control: the r2 evaluator on the same 64 inputs differs on 22 scenarios, all among 34-64. It abstains (raises
+  Ambiguity) on 20 of them and answers differently on two, 58 and 63. In 63, r2 rules answer a complete 5 ns that r3
+  treats as uncertified.
 - One Ambiguity branch remains (§7: a target capture with no validated descriptor and no unique boot). No scenario
   hits it.
 
