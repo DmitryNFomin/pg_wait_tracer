@@ -33,3 +33,12 @@ CONTRACT.md sections 1 and 3 (FRONTIER barrier, coherent reread, END instant) ar
 
 An implementation change may not edit anything in this directory. Changing the contract is its own
 reviewed change and invalidates the expected answers.
+
+- `codec/`: the byte-level encoding of these records in trace v5 (`CODEC.md`), written by Astra and revised (r2) after an
+  independent challenge by Fable (`CHALLENGE-fable.md`, dispositions in `REVISION-codec-r2.md`). `WORKED.md` gives three
+  hand-worked examples. `fixtures/ex{1,2,3}.bin` are those bytes as produced by an independent encoder written from CODEC.md
+  alone (`oracle/enc.py`, `oracle/values.json`); Fable's independent encoder (`oracle/fable_check.py`) produced the same 646
+  bytes. Caveat: the second writer saw WORKED.md's derived sizes and checksums (not its hex) before writing its encoder.
+  CONTRACT.md is unchanged. Open question, not settled here: CONTRACT.md §5 says a malformed record, unknown kind or
+  unexpected counters act as a global VOID at the preceding frontier with continued replay, while both
+  reference/replay.py (raises Ambiguity) and the C replay refuse the whole input. No scenario pins this case.
