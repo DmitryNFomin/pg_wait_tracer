@@ -17,7 +17,19 @@ How it was made:
   sol projections equal `../projections.json`. The Sonnet projections are prose; compared after parsing, they agree.
 - `expected.json` and `projections.json` here hold scenarios 34-64, extracted mechanically from the two sets.
 
+`reference/` is the r3 reference evaluator. gpt-6.1-sol (codex) updated `../reference/replay.py` in an isolated
+directory, given only `reference/TASK.md` (verbatim) and its inputs: r3 CONTRACT.md, wait_time v1, the clarification,
+merge-v1, the 64 inputs, and the r2 evaluator with its report. It had no answers. In TASK.md, `REPORT-r2.md` is
+`../reference/REPORT.md` and `REPORT-r3.md` is `reference/REPORT.md`.
+- The lead re-ran it on all 64 inputs. Its results equal `../expected.json` and `expected.json` here (128/128), and
+  its target projections equal both `projections.json` files.
+- Control: the r2 evaluator on the same inputs gives 65 differences. One is scenario 63, where r2 rules answer a
+  complete 5 ns that r3 treats as uncertified.
+- One Ambiguity branch remains (§7: a target capture with no validated descriptor and no unique boot). No scenario
+  hits it.
+
 Scenarios 34-64 live here, not in `../scenarios/`, because the current harness requires exactly the 33 frozen
-scenarios. The implementation unit extends the harness to read this directory as well. It does not move or edit
-these files. Until then, the reference evaluator (`../reference/`) and the C replay implement r2, so they abstain or
-refuse on these inputs. That is fail-safe, but it is not yet r3.
+scenarios. For the same reason the r3 evaluator lives here, not in `../reference/`: the differential compares the C
+replay with `../reference/`, and the C replay still implements r2. The implementation unit points the harness and
+the differential at this directory. It does not move or edit these files. Until then, the C replay refuses on these
+inputs, and on r2-only answers such as 63 it can differ from r3. No consumer reads the replay yet.
