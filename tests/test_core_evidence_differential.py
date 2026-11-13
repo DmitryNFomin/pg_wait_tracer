@@ -27,6 +27,7 @@ REFERENCE_AMBIGUITIES = {}
 sys.path.insert(0, str(ROOT / "tests"))
 import evidence_void_inputs as void_inputs
 import evidence_file_inputs as file_inputs
+import evidence_fault_inputs as fault_inputs
 
 
 def environment():
@@ -61,7 +62,7 @@ def build(source_root, binary):
 
 
 def fixture(prefix):
-    paths = list((CONTRACT / "scenarios").glob(prefix + "_*.json"))
+    paths = list((CONTRACT / ("r3/scenarios" if int(prefix) >= 34 else "scenarios")).glob(prefix + "_*.json"))
     if len(paths) != 1:
         raise RuntimeError(f"missing/duplicate fixture {prefix}")
     return json.loads(paths[0].read_text())
@@ -817,10 +818,9 @@ def refusal_cases():
         add(f"counter_{i}", lambda c, i=i: c["files"][0]["records"][-1]["counters"].__setitem__(i, 1))
     add("baseline", lambda c: c["files"][0]["loss_baseline"].__setitem__(14, 1))
     add("unreadable_baseline", lambda c: c["files"][0].__setitem__("loss_baseline", None))
-    for name, value in (("short", [0]*14), ("long", [0]*16),
-                        ("overflow", [MAX+1]+[0]*14), ("boolean", False)):
-        add("malformed_baseline_"+name,
-            lambda c, value=value: c["files"][0].update(loss_baseline=value))
+    # The reference assumes schema-valid container descriptors. Descriptor
+    # corruption is covered by native_chain_descriptor_shape, outside this
+    # logical-record differential (a short baseline crashes the reference).
     add("short_vector", lambda c: c["files"][0]["records"][-1].__setitem__("counters", [0] * 14))
     add("null_vector", lambda c: c["files"][0]["records"][-1].__setitem__("counters", None))
     add("multiple_files", lambda c: c["files"].append(copy.deepcopy(c["files"][0])))
@@ -882,7 +882,7 @@ def refusal_cases():
 
 
 def reference_module():
-    spec = importlib.util.spec_from_file_location("evidence_v1_reference", CONTRACT / "reference/replay.py")
+    spec = importlib.util.spec_from_file_location("evidence_v1_reference", CONTRACT / "r3/reference/replay.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module  # dataclasses resolves its declaring module
     spec.loader.exec_module(module)
@@ -928,7 +928,10 @@ def first_difference(actual, expected, path=""):
 def prepare_corpus(work, selected=None):
     """Freeze this run's reference answers and serialized inputs once per sweep."""
     reference = reference_module()
-    cases = generate() + file_inputs.named(fixture) + file_inputs.generate(fixture)
+    cases = (generate() + file_inputs.named(fixture) + file_inputs.generate(fixture)
+             + fault_inputs.named(fixture) + fault_inputs.generate(fixture))
+    existing = {c["id"] for c in cases}
+    cases.extend(fixture(f"{i:02}") for i in range(1, 65) if fixture(f"{i:02}")["id"] not in existing)
     # U5 review witness: a frozen END must not create a touching-run tie.
     cases.append(json.loads((ROOT / "tests/fixtures/evidence-u5-s16b.json").read_text()))
     refusals, metric_refusals = refusal_cases()
@@ -938,12 +941,12 @@ def prepare_corpus(work, selected=None):
         refusals = [c for c in refusals if c["id"] == selected]
         if len(cases) + len(refusals) != 1:
             raise RuntimeError("unknown/duplicate selected differential case")
-    expected = []
-    for case in cases:
-        answer = reference_answer(reference, case)
-        expected.append(answer)
-    expected += [{"error": "unsupported"} for _ in refusals]
     all_cases = cases + refusals
+    expected = [reference_answer(reference, case) for case in all_cases]
+    # R3 has exactly one normative ambiguity class. All former conservative
+    # refusals now require reference results and projections.
+    cases = [c for c, a in zip(all_cases, expected) if "error" not in a]
+    refusals = [c for c, a in zip(all_cases, expected) if "error" in a]
     paths = []
     for i, case in enumerate(all_cases):
         path = work / f"input-{i}.json"
@@ -968,9 +971,16 @@ def differential(binary, work, selected=None, corpus=None):
     values = 0
     unsafe = 0
     refusal_only = Counter()
+    matched_refusals = Counter()
     for case, actual, want in zip(all_cases, answers, expected):
         refusal_reason = actual.pop("reason", None)
         field = first_difference(actual, want)
+        if not field and "error" in want:
+            expected_reason = REFERENCE_AMBIGUITIES[case["id"]]
+            if refusal_reason != expected_reason:
+                field = "refusal_reason"
+            else:
+                matched_refusals[refusal_reason] += 1
         if field:
             mismatches += 1
             if "error" in actual and "error" not in want:
@@ -988,6 +998,8 @@ def differential(binary, work, selected=None, corpus=None):
                   f"reference={outcome} core={outcome}")
     print(f"evidence differential comparisons: value differences={values}; "
           f"refusal-only differences={sum(refusal_only.values())}; C answers ambiguity={unsafe}")
+    for reason, count in sorted(matched_refusals.items()):
+        print(f"evidence differential matched refusal {count}: {reason}")
     for reason, count in sorted(refusal_only.items()):
         print(f"evidence differential refusal-only {count}: {reason}")
     print(f"evidence differential: {len(cases)} reference cases, {len(refusals)} unsupported cases, "

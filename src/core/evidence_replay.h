@@ -6,7 +6,9 @@
 /* Logical evidence-v1 input, not a trace codec. Validated same-capture file
  * prefixes preserve physical append order; gaps stop that capture. Independent
  * captures never stitch. Legacy v2-v4 retains no exact evidence; unqualified v5
- * retains LIFE only. Malformed records and ambiguous input explicitly refuse.
+ * retains LIFE only. Record/chain faults retain only the validated prefix.
+ * Only an unbound target clock domain returns UNSUPPORTED; invalid API arguments
+ * and allocation failures return ERROR.
  * Strings are length-delimited; {NULL,0} means nonwaiting. Callers supply readable
  * arrays/strings of stated lengths. */
 typedef enum {

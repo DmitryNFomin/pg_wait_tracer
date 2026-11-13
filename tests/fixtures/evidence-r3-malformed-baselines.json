@@ -1,0 +1,12 @@
+{
+  "id": "malformed_descriptor_baselines",
+  "description": "Decoder must distinguish malformed descriptor vectors from null unknown loss state.",
+  "files": [
+    {"version":5,"boot":"b","capture":"short","file_no":0,"previous":null,"loss_baseline":[0],"records":[]},
+    {"version":5,"boot":"b","capture":"long","file_no":0,"previous":null,"loss_baseline":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"records":[]},
+    {"version":5,"boot":"b","capture":"overflow","file_no":0,"previous":null,"loss_baseline":[18446744073709551616,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"records":[]},
+    {"version":5,"boot":"b","capture":"boolean","file_no":0,"previous":null,"loss_baseline":false,"records":[]}
+  ],
+  "target":{"capture":"short","pid":101,"fork":null},
+  "query":{"event":"A","from":0,"to":10}
+}
