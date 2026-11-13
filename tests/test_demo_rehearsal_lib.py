@@ -1539,51 +1539,88 @@ def test_summarize_sweep_offset_coverage_empty_ticks():
 
 # ── daemon_integrity_ok (criteria doc §6) ─────────────────────────────────
 
+def _zero_integrity_metrics():
+    # Literal fixture: omitting a required counter from the gate must go red.
+    return {
+        "ringbuf_drops_total": 0,
+        "state_map_full_total": 0,
+        "seen_query_ids_full_total": 0,
+        "ringbuf_lifecycle_init_drops_total": 0,
+        "ringbuf_lifecycle_fork_drops_total": 0,
+        "ringbuf_lifecycle_exit_drops_total": 0,
+        "ringbuf_query_text_drops_total": 0,
+        "ringbuf_pg13_query_text_drops_total": 0,
+        "some_other_field": 123,
+    }
+
+
 def test_daemon_integrity_all_zero_ok():
-    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 0,
-              "seen_query_ids_full_total": 0, "some_other_field": 123}
+    ok, detail = lib.daemon_integrity_ok(_zero_integrity_metrics())
+    assert ok, detail
+
+
+def _assert_integrity_counter_fails(name, value):
+    metrics = _zero_integrity_metrics()
+    metrics[name] = value
     ok, detail = lib.daemon_integrity_ok(metrics)
-    check(ok, f"all three counters at zero passes ({detail})")
+    assert not ok, detail
+    assert detail.endswith(f"-- NONZERO or missing: {name}={value!r}"), detail
 
 
 def test_daemon_integrity_ringbuf_drops_fails():
-    # BYPASS-SUITE CASE: trace events were dropped -- DB Time is built from
-    # trace events, so this is upstream of every other check in this file.
-    metrics = {"ringbuf_drops_total": 5, "state_map_full_total": 0,
-              "seen_query_ids_full_total": 0}
-    ok, detail = lib.daemon_integrity_ok(metrics)
-    check(not ok, f"nonzero ringbuf_drops_total fails ({detail})")
-    check("ringbuf_drops_total" in detail, f"detail names the offending counter ({detail})")
+    _assert_integrity_counter_fails("ringbuf_drops_total", 5)
 
 
 def test_daemon_integrity_state_map_full_fails():
-    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 2,
-              "seen_query_ids_full_total": 0}
-    ok, detail = lib.daemon_integrity_ok(metrics)
-    check(not ok, f"nonzero state_map_full_total fails ({detail})")
+    _assert_integrity_counter_fails("state_map_full_total", 2)
 
 
 def test_daemon_integrity_seen_query_ids_full_fails():
-    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 0,
-              "seen_query_ids_full_total": 1}
-    ok, detail = lib.daemon_integrity_ok(metrics)
-    check(not ok, f"nonzero seen_query_ids_full_total fails ({detail})")
+    _assert_integrity_counter_fails("seen_query_ids_full_total", 1)
+
+
+def test_daemon_integrity_lifecycle_init_drops_fails():
+    _assert_integrity_counter_fails("ringbuf_lifecycle_init_drops_total", 1)
+
+
+def test_daemon_integrity_lifecycle_fork_drops_fails():
+    _assert_integrity_counter_fails("ringbuf_lifecycle_fork_drops_total", 1)
+
+
+def test_daemon_integrity_lifecycle_exit_drops_fails():
+    _assert_integrity_counter_fails("ringbuf_lifecycle_exit_drops_total", 1)
+
+
+def test_daemon_integrity_query_text_drops_fails():
+    _assert_integrity_counter_fails("ringbuf_query_text_drops_total", 1)
+
+
+def test_daemon_integrity_pg13_query_text_drops_fails():
+    _assert_integrity_counter_fails("ringbuf_pg13_query_text_drops_total", 1)
 
 
 def test_daemon_integrity_missing_counter_fails():
-    # BYPASS-SUITE CASE: an empty/truncated metrics response -- a gate that
-    # cannot see the count must refuse, not assume it is fine.
-    metrics = {"ringbuf_drops_total": 0}
-    ok, detail = lib.daemon_integrity_ok(metrics)
-    check(not ok, f"a missing counter fails rather than being treated as zero ({detail})")
+    for metrics in ({}, {"ringbuf_drops_total": 0}):
+        ok, detail = lib.daemon_integrity_ok(metrics)
+        assert not ok, detail
+    # Removing exactly one field must fail even with every other counter zero.
+    for name in _zero_integrity_metrics().keys() - {"some_other_field"}:
+        metrics = _zero_integrity_metrics()
+        del metrics[name]
+        ok, detail = lib.daemon_integrity_ok(metrics)
+        assert not ok, detail
+        assert detail.endswith(f"-- NONZERO or missing: {name}=None"), detail
+
+
+def test_daemon_integrity_non_numeric_counter_fails():
+    for name in _zero_integrity_metrics().keys() - {"some_other_field"}:
+        for value in (None, "0", True, False, {}, float("nan"), float("inf")):
+            _assert_integrity_counter_fails(name, value)
 
 
 def test_daemon_integrity_non_dict_response_fails():
-    # BYPASS-SUITE CASE: the control/metrics query itself failed (e.g.
-    # {"error": "daemon not running"}) and the caller passed the whole
-    # error response through.
     ok, detail = lib.daemon_integrity_ok(None)
-    check(not ok, f"a non-dict metrics response fails outright ({detail})")
+    assert not ok, detail
 
 
 # ── cmd_markers_observed (#222 review) ────────────────────────────────────

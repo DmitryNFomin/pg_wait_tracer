@@ -1074,3 +1074,5 @@ test_core_evidence_contract
 test_core_evidence_differential.py
 test_core_merge_contract
 test_core_evidence_fuzz.py
+
+test_ringbuf_metrics

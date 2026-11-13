@@ -1089,35 +1089,38 @@ def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks,
 # ── Daemon integrity (criteria doc §6) ────────────────────────────────────
 #
 # "The daemon was alive" (daemon_log_clean, _assert_daemon_alive) is not
-# "the daemon captured everything". These three counters are already in
+# "the daemon captured everything". These counters are in
 # the daemon's own metrics blob (src/control.c, the "metrics" control
 # command), reachable through pgwt-server's control proxy
 # (`{"cmd":"control","request":{"cmd":"metrics"}}`, src/server.c
 # handle_control) -- the SAME mechanism web/static/lib/control.js's
-# controlMetrics() already uses from the UI, so no new src/ instrumentation
-# is needed here.
-DAEMON_INTEGRITY_COUNTERS = ("ringbuf_drops_total", "state_map_full_total",
-                             "seen_query_ids_full_total")
+# controlMetrics() already uses from the UI.
+DAEMON_INTEGRITY_COUNTERS = (
+    "ringbuf_drops_total", "state_map_full_total", "seen_query_ids_full_total",
+    "ringbuf_lifecycle_init_drops_total", "ringbuf_lifecycle_fork_drops_total",
+    "ringbuf_lifecycle_exit_drops_total", "ringbuf_query_text_drops_total",
+    "ringbuf_pg13_query_text_drops_total",
+)
 
 
 def daemon_integrity_ok(metrics):
-    """All three of DAEMON_INTEGRITY_COUNTERS must be exactly 0.
+    """All of DAEMON_INTEGRITY_COUNTERS must be exactly 0.
     ringbuf_drops_total is the full tier's BPF-side event_ringbuf drop
     count -- trace events are what DB Time is built from, so a nonzero
     value here means data conservation was already violated upstream of
     every other check in this file. state_map_full_total /
     seen_query_ids_full_total are BPF/userspace insert-failure counters
-    (a backend recording nothing, or losing query attribution).
+    (a backend recording nothing, or losing query attribution). The five
+    lifecycle/query-text site counters cover lifecycle_rb reserve failures
+    for backend init, fork and exit, and query text (including PG13).
 
     A missing or non-numeric counter FAILS (a gate that cannot see the
     count must refuse), same as capture_has_events_ok's own contract.
 
-    KNOWN BLIND SPOT, stated rather than implied (criteria doc §6): a lost
-    LIFECYCLE event is silent -- lifecycle_rb reserve failures increment no
-    counter, so the symptom is a backend simply absent from the capture,
-    never a nonzero counter here. A clean result means "no TRACE events
-    were dropped", NEVER "nothing was missed" -- closing that blind spot
-    needs src/ work, out of scope for this branch."""
+    The ring-drop counters are read by the full provider; sampled/tiered
+    metrics do not observe those BPF counts. Map update failures without a
+    counter also remain uncovered. A clean result means the reported
+    counters are zero, not that nothing was missed."""
     if not isinstance(metrics, dict):
         return False, f"metrics response is not a dict: {metrics!r}"
     bad = []

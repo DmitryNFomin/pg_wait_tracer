@@ -4,6 +4,7 @@
 #include "daemon.h"
 #include "event_writer.h"
 #include "provider.h"
+#include "ringbuf_metrics.h"
 #include "escalation.h"
 #include "sampler.h"
 #include "map_reader.h"
@@ -753,6 +754,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     /* Provider self-metrics. ringbuf_drops_total is the full tier's BPF-side
      * event_ringbuf drop count (A2 wired this; A0 deliberately omitted it). */
     cjson_add_uint64(root, "ringbuf_drops_total", pm.ringbuf_drops_total);
+    for (int site = 0; site < PGWT_RING_FAIL_SITE_MAX; ++site)
+        cjson_add_uint64(root, pgwt_ringbuf_site_metric_names[site], pm.ringbuf_site_drops[site]);
 
     /* Trace writer stats (0 when recording is disabled) */
     cjson_add_uint64(root, "trace_events_written_total",
