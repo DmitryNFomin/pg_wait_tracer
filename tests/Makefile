@@ -1181,8 +1181,8 @@ tools/merge_tie_count: $(MERGE_TIE_SRCS) tools/merge_tie_count.h
 test_merge_tie_count: test_merge_tie_count.c $(MERGE_TIE_SRCS) tools/merge_tie_count.h
 	$(CC) $(CFLAGS) -DPGWT_SERVER -DMERGE_TIE_COUNT_NO_MAIN -o $@ test_merge_tie_count.c $(MERGE_TIE_SRCS) -llz4
 
-test_nmi_transport_reader: bench_nmi_transport/test_reader.c bench_nmi_transport/reader.h bench_nmi_transport/transport.h bench_nmi_transport/cadence.h bench_nmi_transport/cpu_accounting.h
-	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<
+test_nmi_transport_reader: bench_nmi_transport/test_reader.c bench_nmi_transport/reader.h bench_nmi_transport/transport.h bench_nmi_transport/cadence.h bench_nmi_transport/cpu_accounting.h bench_nmi_transport/staging.h bench_nmi_transport/request.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $< -pthread
 
 test_ringbuf_metrics: test_ringbuf_metrics.c ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<

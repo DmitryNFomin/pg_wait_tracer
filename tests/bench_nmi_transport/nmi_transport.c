@@ -2,6 +2,8 @@
 #include "reader.h"
 #include "cadence.h"
 #include "cpu_accounting.h"
+#include "staging.h"
+#include "request.h"
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <linux/hw_breakpoint.h>
@@ -38,7 +40,12 @@ struct boundary_helper {
     pthread_t thread;
     pid_t tid;
     int cpu, error;
-    uint64_t cpu_ns, wakeups, syscalls;
+    uint64_t cpu_ns, wakeups, syscalls, phase_offset_ns;
+    struct transport_request_channel channel;
+    bool pending;
+    _Atomic bool completed;
+    uint64_t request_ns, request_frontier_ns, requests, acknowledgements;
+    uint64_t max_request_to_frontier_ns;
     struct experiment *experiment;
 };
 struct experiment {
@@ -53,9 +60,14 @@ struct experiment {
     long clock_ticks;
     double duration, elapsed, max_gap_ms;
     bool pause_drain, one_page, accounting_ok;
-    bool syscall_boundary, syscall_demand;
+    bool syscall_boundary, syscall_request, phase_jitter, finishing;
+    uint64_t request_after_ns, coverage_ns;
+    struct transport_staging staging;
+    uint64_t max_queue_growth_per_drain;
+    uint64_t *sched_start, *sched_end;
+    bool sched_start_measured, sched_end_measured;
+    uint64_t stat_start_ns, stat_end_ns, sched_start_ns, sched_end_ns;
     int helpers_started;
-    _Atomic uint64_t *consumed_frontier;
     struct cpu_snapshot *cpu_start, *cpu_end;
     struct boundary_helper *helpers;
     struct syscall_boundary_counts *syscall_counts;
@@ -110,6 +122,21 @@ static int busy_ticks(struct experiment *e, uint64_t *total, struct cpu_snapshot
     fclose(f);
     return rc;
 }
+static bool schedstat(struct experiment *e, uint64_t *snapshot)
+{
+    FILE *enabled = fopen("/proc/sys/kernel/sched_schedstats", "r");
+    if (enabled) {
+        int value = 0;
+        bool ok = fscanf(enabled, "%d", &value) == 1 && value == 1;
+        fclose(enabled);
+        if (!ok) return false;
+    }
+    FILE *f = fopen("/proc/schedstat", "r");
+    if (!f) return false;
+    bool ok = transport_schedstat(f, e->cpu_ids, e->available, e->possible, snapshot);
+    fclose(f);
+    return ok;
+}
 static int pin_cpu(int cpu, int possible)
 {
     cpu_set_t *mask = CPU_ALLOC((size_t)possible);
@@ -161,6 +188,10 @@ static void *boundary_loop(void *arg)
     struct boundary_helper *h = arg;
     struct experiment *e = h->experiment;
     h->error = pin_cpu(h->cpu, e->possible);
+    int policy = -1;
+    struct sched_param scheduling;
+    int scheduling_rc = pthread_getschedparam(pthread_self(), &policy, &scheduling);
+    if (!h->error && (scheduling_rc || policy != SCHED_OTHER)) h->error = scheduling_rc ? scheduling_rc : EINVAL;
     h->tid = (pid_t)syscall(SYS_gettid);
     if (h->tid < 0 && !h->error) h->error = errno;
     atomic_fetch_add_explicit(&helpers_ready, 1, memory_order_release);
@@ -170,28 +201,27 @@ static void *boundary_loop(void *arg)
     uint64_t began = 0;
     h->error = thread_cpu_ns(&began);
     if (h->error) return NULL;
-    uint64_t next = e->began_ns;
+    uint64_t next = transport_first_deadline(e->began_ns, h->phase_offset_ns);
     uint64_t end = e->began_ns + (uint64_t)(e->duration * 1e9);
-    while (!atomic_load_explicit(&stop_writers, memory_order_relaxed) && now_ns() < end) {
-        /* Explicit syscall: never a libc cache or vDSO clock observation. */
-        ++h->wakeups;
-        uint64_t frontier = atomic_load_explicit(&e->consumed_frontier[h->cpu], memory_order_acquire);
-        uint64_t wake = now_ns();
-        if (transport_boundary_due(e->syscall_demand, wake, frontier, e->period_ns)) {
-            if (syscall(SYS_getppid) < 0) { h->error = errno; break; }
-            ++h->syscalls;
+    while (!atomic_load_explicit(&stop_writers, memory_order_relaxed)) {
+        if (e->syscall_request) {
+            if (!transport_request_wait(&h->channel)) break;
+        } else {
+            struct timespec deadline = { .tv_sec = (time_t)(next / 1000000000),
+                                         .tv_nsec = (long)(next % 1000000000) };
+            int sleep_rc;
+            do {
+                sleep_rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
+            } while (sleep_rc == EINTR && !atomic_load_explicit(&stop_writers, memory_order_relaxed));
+            if (sleep_rc && sleep_rc != EINTR) { h->error = sleep_rc; break; }
+            if (atomic_load_explicit(&stop_writers, memory_order_relaxed) || now_ns() >= end) break;
         }
-        uint64_t current = now_ns();
-        /* Skip missed deadlines rather than emitting a catch-up burst. */
-        next = transport_next_deadline(next, current, end, e->period_ns);
-        struct timespec deadline = { .tv_sec = (time_t)(next / 1000000000),
-                                     .tv_nsec = (long)(next % 1000000000) };
-        int sleep_rc;
-        do {
-            sleep_rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
-        } while (sleep_rc == EINTR && !atomic_load_explicit(&stop_writers, memory_order_relaxed));
-        if (sleep_rc && sleep_rc != EINTR) h->error = sleep_rc;
-        if (h->error) break;
+        ++h->wakeups;
+        if (syscall(SYS_getppid) < 0) { h->error = errno; break; }
+        ++h->syscalls;
+        atomic_store_explicit(&h->completed, true, memory_order_release);
+        if (!e->syscall_request)
+            next = transport_next_deadline(next, now_ns(), end, e->period_ns);
     }
     uint64_t ended = began;
     int rc = thread_cpu_ns(&ended);
@@ -242,6 +272,50 @@ static int open_boundary(int cpu, uint64_t period_ns, int program)
     }
     return fd;
 }
+static uint64_t minimum_frontier(const struct experiment *e)
+{
+    uint64_t minimum = UINT64_MAX;
+    for (int i = 0; i < e->available; ++i) {
+        uint64_t w = e->results[e->cpu_ids[i]].frontier_ns;
+        if (w < minimum) minimum = w;
+    }
+    return minimum;
+}
+static void service_requests(struct experiment *e, uint64_t now, bool issue)
+{
+    if (!e->syscall_request || !e->began_ns) return;
+    uint64_t minimum = minimum_frontier(e);
+    transport_release(&e->staging, minimum, now);
+    uint64_t age = transport_oldest_age(&e->staging, now);
+    for (int i = 0; i < e->available; ++i) {
+        struct boundary_helper *h = &e->helpers[i];
+        struct transport_cpu_result *c = &e->results[h->cpu];
+        if (h->pending && c->frontier_ns >= h->request_ns) {
+            if (!h->request_frontier_ns) h->request_frontier_ns = c->frontier_seen_ns;
+            if (atomic_load_explicit(&h->completed, memory_order_acquire)) {
+                uint64_t latency = h->request_frontier_ns - h->request_ns;
+                if (latency > h->max_request_to_frontier_ns) h->max_request_to_frontier_ns = latency;
+                ++h->acknowledgements;
+                h->pending = false;
+            }
+        }
+        uint64_t frontier = c->frontier_ns ? c->frontier_ns : e->began_ns;
+        if (issue && transport_request_due(h->pending, e->staging.depth ? c->frontier_ns : frontier,
+                minimum, e->staging.depth, age, e->request_after_ns, now, e->finishing ? 0 : e->coverage_ns)) {
+            h->pending = true; h->request_ns = now; h->request_frontier_ns = 0;
+            atomic_store_explicit(&h->completed, false, memory_order_relaxed);
+            ++h->requests;
+            transport_request_signal(&h->channel);
+        }
+    }
+}
+
+static bool requests_pending(const struct experiment *e)
+{
+    for (int i = 0; i < e->available; ++i) if (e->helpers[i].pending) return true;
+    return false;
+}
+
 static int receive_record(void *ctx, void *data, size_t size)
 {
     struct experiment *e = ctx;
@@ -254,8 +328,15 @@ static int receive_record(void *ctx, void *data, size_t size)
         (r.site == TRANSPORT_BOUNDARY && !e->period_ns)) {
         ++e->bad_records; return 0;
     }
-    transport_observe(c, &r, now_ns());
-    atomic_store_explicit(&e->consumed_frontier[r.cpu], c->frontier_ns, memory_order_release);
+    uint64_t arrival = now_ns();
+    transport_observe(c, &r, arrival);
+    if (e->syscall_request) {
+        if (r.site == TRANSPORT_DATA && !transport_stage(&e->staging, r.cpu, r.ts, arrival)) {
+            e->error = -ENOMEM;
+            return -ENOMEM;
+        }
+        service_requests(e, arrival, e->helpers_started > 0);
+    }
     return 0;
 }
 static void receive_perf(void *ctx, int cpu, const void *sample, size_t size)
@@ -417,6 +498,7 @@ static int configure_object(struct experiment *e)
 static int drain(struct experiment *e, bool wait)
 {
     int rc, total = 0;
+    uint64_t depth = e->staging.depth;
     if (e->kind != TRANSPORT_PERF) {
         rc = ring_buffer__poll(e->ring, wait ? 10 : 0);
         if (rc < 0 && rc != -EINTR) return rc;
@@ -435,13 +517,18 @@ static int drain(struct experiment *e, bool wait)
             if (rc > 0) total += rc;
         }
     }
-    return total;
+    if (e->staging.depth > depth && e->staging.depth - depth > e->max_queue_growth_per_drain)
+        e->max_queue_growth_per_drain = e->staging.depth - depth;
+    service_requests(e, now_ns(), e->helpers_started > 0);
+    return e->error ? e->error : total;
 }
 static void stop_and_join(struct experiment *e)
 {
     atomic_store_explicit(&stop_writers, 1, memory_order_relaxed);
     for (int i = 0; i < e->started; ++i) pthread_join(e->writers[i].thread, NULL);
     e->started = 0;
+    for (int i = 0; i < e->helpers_started; ++i)
+        transport_request_stop(&e->helpers[i].channel);
     for (int i = 0; i < e->helpers_started; ++i) pthread_join(e->helpers[i].thread, NULL);
     e->helpers_started = 0;
 }
@@ -457,6 +544,18 @@ static int start_syscall_boundary(struct experiment *e)
     for (int i = 0; i < e->available; ++i) {
         struct boundary_helper *h = &e->helpers[i];
         h->cpu = e->cpu_ids[i]; h->experiment = e;
+        rc = transport_request_init(&h->channel);
+        if (rc) return -rc;
+        atomic_init(&h->completed, false);
+        if (e->phase_jitter && !e->syscall_request) {
+            FILE *random = fopen("/dev/urandom", "rb");
+            uint32_t value;
+            if (!random) return -errno;
+            bool ok = fread(&value, sizeof(value), 1, random) == 1;
+            fclose(random);
+            if (!ok) return -EIO;
+            h->phase_offset_ns = value % 1000000;
+        }
         rc = pthread_create(&h->thread, NULL, boundary_loop, h);
         if (rc) return -rc;
         ++e->helpers_started;
@@ -518,8 +617,13 @@ static int run(struct experiment *e)
         }
     }
     e->stage = "measurement";
+    uint64_t snapshot_began = now_ns();
     int rc = busy_ticks(e, &e->busy_start, e->cpu_start);
     if (rc) return rc;
+    e->stat_start_ns = snapshot_began + (now_ns() - snapshot_began) / 2;
+    snapshot_began = now_ns();
+    e->sched_start_measured = schedstat(e, e->sched_start);
+    e->sched_start_ns = snapshot_began + (now_ns() - snapshot_began) / 2;
     uint64_t process_start = process_ns();
     e->began_ns = now_ns();
     for (int i = 0; i < e->available; ++i) {
@@ -547,6 +651,19 @@ static int run(struct experiment *e)
         double gap = (current - last) * 1000;
         if (gap > e->max_gap_ms) e->max_gap_ms = gap;
         last = current;
+    }
+    if (e->syscall_request) {
+        /* Writers naturally finish at writer_deadline; keep helpers available
+         * for the last DATA, including its equal-stamp strict-boundary hold. */
+        for (int i = 0; i < e->started; ++i) pthread_join(e->writers[i].thread, NULL);
+        e->started = 0;
+        e->finishing = true;
+        uint64_t until = now_ns() + 1000000000;
+        do {
+            rc = drain(e, true);
+            if (rc < 0) return rc;
+        } while ((e->staging.depth || requests_pending(e)) && now_ns() < until &&
+                 !atomic_load_explicit(&interrupted, memory_order_relaxed));
     }
     stop_and_join(e);
     e->stage = "quiescence";
@@ -578,7 +695,12 @@ static int run(struct experiment *e)
     e->ended_ns = now_ns();
     e->elapsed = (double)(e->ended_ns - e->began_ns) / 1e9;
     e->process_cpu_ns = process_ns() - process_start;
+    snapshot_began = now_ns();
+    e->sched_end_measured = schedstat(e, e->sched_end);
+    e->sched_end_ns = snapshot_began + (now_ns() - snapshot_began) / 2;
+    snapshot_began = now_ns();
     if ((rc = busy_ticks(e, &e->busy_end, e->cpu_end))) return rc;
+    e->stat_end_ns = snapshot_began + (now_ns() - snapshot_began) / 2;
     if (e->busy_end < e->busy_start) return -ERANGE;
     e->busy_cpu_ns = (uint64_t)((long double)(e->busy_end - e->busy_start) * 1e9L / e->clock_ticks);
     for (int i = 0; i < e->available; ++i) {
@@ -644,8 +766,25 @@ static void report(struct experiment *e)
     printf(",\"case\":"); json_string(e->case_name);
     printf(",\"kernel\":"); json_string(kernel);
     printf(",\"boundary_source\":");
-    json_string(e->syscall_demand ? "syscall_demand" : e->syscall_boundary ? "syscall" : e->period_ns ? "perf" : "none");
+    json_string(e->syscall_request ? "syscall_request" : e->syscall_boundary ? "syscall" : e->period_ns ? "perf" : "none");
+    printf(",\"online_cpus\":%ld", sysconf(_SC_NPROCESSORS_ONLN));
     printf(",\"wrong_cpu_events\":%" PRIu64, wrong_cpu);
+    printf(",\"request_after_ms\":%" PRIu64 ",\"coverage_ms\":%" PRIu64
+           ",\"phase_jitter\":%s,\"cpu_accounting_elapsed_ns\":%" PRIu64,
+           e->request_after_ns / 1000000, e->coverage_ns / 1000000,
+           e->phase_jitter ? "true" : "false", e->stat_end_ns >= e->stat_start_ns ? e->stat_end_ns - e->stat_start_ns : 0);
+    printf(",\"schedstat_elapsed_ns\":%" PRIu64, e->sched_end_ns >= e->sched_start_ns ? e->sched_end_ns - e->sched_start_ns : 0);
+    if (e->syscall_request) {
+        uint64_t pending_age = transport_oldest_age(&e->staging, e->ended_ns);
+        printf(",\"held_data\":{\"arrived\":%" PRIu64 ",\"released\":%" PRIu64
+               ",\"queue_depth\":%" PRIu64 ",\"queue_max_depth\":%" PRIu64
+               ",\"queue_growth_records\":%" PRIu64 ",\"max_queue_growth_per_drain\":%" PRIu64
+               ",\"queue_growth_records_per_second\":%.9f,\"max_held_data_age_ns\":%" PRIu64
+               ",\"oldest_pending_age_ns\":%" PRIu64 "}",
+               e->staging.arrived, e->staging.released, e->staging.depth, e->staging.max_depth,
+               e->staging.arrived - e->staging.released, e->max_queue_growth_per_drain,
+               e->elapsed ? e->staging.depth / e->elapsed : 0, e->staging.max_held_age_ns, pending_age);
+    } else printf(",\"held_data\":\"UNMEASURED\"");
     printf(",\"cpus\":%d,\"possible_cpus\":%d,\"threads\":%d,\"duration\":%.6f,"
            "\"elapsed\":%.6f,\"buffer_bytes_total\":%zu,\"period_ns\":%" PRIu64
            ",\"boundary_offset_ns\":%" PRIu64 ",\"pause_drain\":%s,\"hits\":%" PRIu64
@@ -710,9 +849,22 @@ static void report(struct experiment *e)
                e->syscall_counts[cpu].fires, e->syscall_counts[cpu].outputs,
                e->syscall_counts[cpu].wrong_cpu, e->helpers[i].tid, e->helpers[i].cpu_ns,
                e->helpers[i].wakeups, e->helpers[i].syscalls,
-               e->period_ns ? ((uint64_t)(e->duration * 1e9) - 1) / e->period_ns + 1 : 0,
+               e->period_ns && !e->syscall_request ? ((uint64_t)(e->duration * 1e9) - 1) / e->period_ns + 1 : 0,
                !strcmp(e->case_name, "hog") ? e->writers[i].tid : 0,
                !strcmp(e->case_name, "hog") ? e->writers[i].iterations : 0);
+        const struct boundary_helper *h = &e->helpers[i];
+        printf(",\"phase_offset_ns\":%" PRIu64 ",\"requests\":%" PRIu64
+               ",\"request_acknowledgements\":%" PRIu64 ",\"request_outstanding\":%s"
+               ",\"max_request_to_frontier_ns\":%" PRIu64,
+               h->phase_offset_ns, h->requests, h->acknowledgements, h->pending ? "true" : "false",
+               h->max_request_to_frontier_ns);
+        printf(",\"request_outstanding_age_ns\":%" PRIu64,
+               h->pending && e->ended_ns >= h->request_ns ? e->ended_ns - h->request_ns : 0);
+        printf(",\"schedstat_running_ns\":");
+        if (e->sched_start_measured && e->sched_end_measured && e->sched_end[cpu] >= e->sched_start[cpu])
+            printf("{\"status\":\"MEASURED\",\"start\":%" PRIu64 ",\"end\":%" PRIu64
+                   ",\"delta\":%" PRIu64 "}", e->sched_start[cpu], e->sched_end[cpu], e->sched_end[cpu] - e->sched_start[cpu]);
+        else printf("{\"status\":\"UNMEASURED\",\"start\":null,\"end\":null,\"delta\":null}");
         printf(",\"proc_stat_ticks\":");
         transport_report_cpu_ticks(stdout, &e->cpu_start[cpu], &e->cpu_end[cpu]);
         printf(",\"sites\":[");
@@ -751,8 +903,12 @@ static void cleanup(struct experiment *e)
     if (e->ring_fds)
         for (int i = 0; i < e->possible; ++i) if (e->ring_fds[i] >= 0) close(e->ring_fds[i]);
     free(e->cpu_ids); free(e->writers); free(e->results);
+    if (e->helpers) for (int i = 0; i < e->available; ++i)
+        transport_request_destroy(&e->helpers[i].channel);
     free(e->helpers); free(e->syscall_counts);
-    free(e->consumed_frontier); free(e->cpu_start); free(e->cpu_end);
+    transport_staging_free(&e->staging);
+    free(e->sched_start); free(e->sched_end);
+    free(e->cpu_start); free(e->cpu_end);
     for (int site = 0; site < TRANSPORT_SITES; ++site) free(e->counts[site]);
     free(e->ring_fds); free(e->ring_sizes); free(e->perf_sizes); free(e->perf); free(e->boundary_fds);
 }
@@ -769,14 +925,14 @@ static void usage(const char *program)
 {
     fprintf(stderr, "usage: %s --transport shared|percpu-ring|perf [--cpus N] "
             "[--case idle|one|all|migrate|hog] [--duration SECONDS] [--bytes TOTAL] "
-            "[--period-ns N] [--syscall-boundary|--syscall-demand] [--pause-drain] [--mutant-boundary] "
+            "[--period-ns N] [--syscall-boundary|--syscall-request] [--request-after-ms N] [--coverage-ms N] [--phase-jitter] [--pause-drain] [--mutant-boundary] "
             "[--object transport.bpf.o]\n", program);
 }
 int main(int argc, char **argv)
 {
     struct experiment e = {
         .name = "shared", .object_path = "transport.bpf.o", .stage = "setup",
-        .case_name = "all", .bytes = 64 * 1024 * 1024, .duration = 30
+        .case_name = "all", .bytes = 64 * 1024 * 1024, .duration = 30, .request_after_ns = 50000000
     };
     bool boundary_requested = false;
     static const struct option options[] = {
@@ -786,12 +942,15 @@ int main(int argc, char **argv)
         {"object", required_argument, NULL, 'o'}, {"period-ns", required_argument, NULL, 'p'},
         {"boundary", no_argument, NULL, 'B'}, {"pause-drain", no_argument, NULL, 'P'},
         {"syscall-boundary", no_argument, NULL, 'S'},
-        {"syscall-demand", no_argument, NULL, 'D'},
+        {"syscall-request", no_argument, NULL, 'R'},
+        {"request-after-ms", required_argument, NULL, 'a'},
+        {"coverage-ms", required_argument, NULL, 'v'},
+        {"phase-jitter", no_argument, NULL, 'j'},
         {"mutant-boundary", no_argument, NULL, 'M'}, {"one-page", no_argument, NULL, 'O'},
         {"help", no_argument, NULL, 'h'}, {0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "t:n:c:d:b:o:p:BSDPMOh", options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:n:c:d:b:o:p:BSRPa:v:jMOh", options, NULL)) != -1) {
         size_t n;
         switch (opt) {
         case 't':
@@ -810,8 +969,17 @@ int main(int argc, char **argv)
         case 'b': if (parse_size(optarg, &e.bytes)) goto invalid; break;
         case 'p': if (parse_size(optarg, &n)) goto invalid; e.period_ns = n; boundary_requested = true; break;
         case 'B': boundary_requested = true; break;
-        case 'D': e.syscall_demand = true; e.syscall_boundary = true; boundary_requested = true; break;
+        case 'R': e.syscall_request = true; e.syscall_boundary = true; boundary_requested = true; break;
         case 'S': e.syscall_boundary = true; boundary_requested = true; break;
+        case 'a':
+            if (!strcmp(optarg, "0")) e.request_after_ns = 0;
+            else { if (parse_size(optarg, &n) || n > UINT64_MAX / 1000000) goto invalid; e.request_after_ns = n * 1000000; }
+            break;
+        case 'v':
+            if (!strcmp(optarg, "0")) e.coverage_ns = 0;
+            else { if (parse_size(optarg, &n) || n > UINT64_MAX / 1000000) goto invalid; e.coverage_ns = n * 1000000; }
+            break;
+        case 'j': e.phase_jitter = true; break;
         case 'P': e.pause_drain = true; break;
         case 'O': e.one_page = true; break;
         case 'M': e.boundary_offset_ns = 1000000; boundary_requested = true; break;
@@ -853,7 +1021,10 @@ int main(int argc, char **argv)
     size_t writers_size = (size_t)(e.threads ? e.threads : 1) * sizeof(*e.writers);
     e.writers = aligned_alloc(64, writers_size);
     e.results = calloc((size_t)e.possible, sizeof(*e.results));
-    e.consumed_frontier = calloc((size_t)e.possible, sizeof(*e.consumed_frontier));
+    e.staging.sources = (size_t)e.possible;
+    e.staging.queues = calloc((size_t)e.possible, sizeof(*e.staging.queues));
+    e.sched_start = calloc((size_t)e.possible, sizeof(*e.sched_start));
+    e.sched_end = calloc((size_t)e.possible, sizeof(*e.sched_end));
     e.cpu_start = calloc((size_t)e.possible + 1, sizeof(*e.cpu_start));
     e.cpu_end = calloc((size_t)e.possible + 1, sizeof(*e.cpu_end));
     e.helpers = calloc((size_t)e.available, sizeof(*e.helpers));
@@ -872,12 +1043,11 @@ int main(int argc, char **argv)
         for (int i = 0; i < e.threads; ++i) { e.writers[i].fd = -1; e.writers[i].cpu = e.cpu_ids[i]; }
     }
     if (!e.writers || !e.results || !e.helpers || !e.syscall_counts ||
-        !e.consumed_frontier || !e.cpu_start || !e.cpu_end ||
+        !e.staging.queues || !e.sched_start || !e.sched_end || !e.cpu_start || !e.cpu_end ||
         !e.counts[0] || !e.counts[1] || !e.ring_fds ||
         !e.ring_sizes || !e.perf_sizes || !e.perf || !e.boundary_fds) {
         fprintf(stderr, "allocation failure\n"); cleanup(&e); return 1;
     }
-    for (int cpu = 0; cpu < e.possible; ++cpu) atomic_init(&e.consumed_frontier[cpu], 0);
     for (int i = 0; i < e.available; ++i) {
         e.results[e.cpu_ids[i]].participating = true;
         e.results[e.cpu_ids[i]].qualified_perf = e.kind == TRANSPORT_PERF;

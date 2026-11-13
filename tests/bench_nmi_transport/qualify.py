@@ -8,14 +8,15 @@ import math
 import os
 from pathlib import Path
 import platform
+import random
 import subprocess
 import sys
 import time
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-ARMS = ("shared", "perf", "perf_boundary", "syscall_boundary", "syscall_demand", "adversarial")
-SYSCALL_ARMS = ("syscall_boundary", "syscall_demand")
+ARMS = ("shared", "perf", "perf_boundary", "syscall_boundary", "syscall_request", "adversarial")
+SYSCALL_ARMS = ("syscall_boundary", "syscall_request")
 BOUNDARY_ARMS = ("perf_boundary",) + SYSCALL_ARMS
 CASES = ("idle", "one", "all", "migrate", "hog")
 CPU_FIELDS = ("user", "nice", "system", "irq", "softirq", "steal", "idle", "iowait")
@@ -58,6 +59,7 @@ def metadata(out):
             "online_cpus": Path("/sys/devices/system/cpu/online").read_text().strip(),
             "clocksource": Path("/sys/devices/system/clocksource/clocksource0/current_clocksource").read_text().strip(),
             "available_clocksources": Path("/sys/devices/system/clocksource/clocksource0/available_clocksource").read_text().strip(),
+            "precise_cpu_accounting": "/proc/schedstat v15..17 CPU column 7, task running nanoseconds; absent/disabled is UNMEASURED",
             "cpu_accounting": "/proc/stat participating CPUs: user+nice+system+irq+softirq+steal; guest already in user; USER_HZ granularity",
             "syscall_helper_cpu_accounting": "per-helper CLOCK_THREAD_CPUTIME_ID over production; synchronous syscall/BPF included; wake-up IRQ and other-task scheduling costs not fully included",
             "head": capture(["git", "rev-parse", "HEAD"]),
@@ -170,6 +172,8 @@ def accounting_errors(run):
             errors.append("/proc/stat busy CPU nanoseconds mismatch")
         if (not integer(run["process_cpu_ns"]) or not math.isfinite(run["elapsed"]) or run["elapsed"] <= 0):
             errors.append("invalid bench process CPU time or elapsed time")
+        if not math.isfinite(run["max_drain_gap_ms"]) or run["max_drain_gap_ms"] < 0:
+            errors.append("invalid consumer drain gap")
         for c in rows:
             for field in ("helper_cpu_ns", "helper_wakeups", "helper_syscalls", "boundary_expected",
                           "hog_tid", "hog_iterations", "frontier_ns", "frontier_seen_ns",
@@ -177,9 +181,28 @@ def accounting_errors(run):
                           "max_boundary_gap_ns", "max_boundary_stamp_gap_ns"):
                 if not integer(c[field]):
                     errors.append("invalid " + field)
-            expected = math.ceil(run["duration"] * 1e9 / run["period_ns"]) if run["period_ns"] else 0
+            sched = c["schedstat_running_ns"]
+            if sched["status"] == "UNMEASURED":
+                if any(sched[k] is not None for k in ("start", "end", "delta")):
+                    errors.append("unmeasured schedstat must not report zero")
+            elif (sched["status"] != "MEASURED" or not all(integer(sched[k]) for k in ("start", "end", "delta")) or
+                  sched["end"] - sched["start"] != sched["delta"]):
+                errors.append("invalid schedstat running nanoseconds")
+            for field in ("requests", "request_acknowledgements", "max_request_to_frontier_ns", "request_outstanding_age_ns", "phase_offset_ns"):
+                if not integer(c[field]):
+                    errors.append("invalid " + field)
+            if type(c["request_outstanding"]) is not bool:
+                errors.append("invalid request outstanding flag")
+            if c["phase_offset_ns"] >= 1_000_000 or (not run["phase_jitter"] and c["phase_offset_ns"]):
+                errors.append("invalid periodic helper phase offset")
+            expected = (math.ceil(run["duration"] * 1e9 / run["period_ns"])
+                        if run["period_ns"] and run.get("boundary_source") != "syscall_request" else 0)
             if c["boundary_expected"] != expected:
                 errors.append("boundary expected-period count mismatch")
+        if (not integer(run["cpu_accounting_elapsed_ns"], 1) or not integer(run["schedstat_elapsed_ns"], 1) or not integer(run["online_cpus"], 1) or
+                type(run["phase_jitter"]) is not bool or not integer(run["request_after_ms"]) or
+                not integer(run["coverage_ms"])):
+            errors.append("invalid precise accounting interval or request options")
         processes = run["non_bench_process_cpu"]
         top = processes["top3"]
         if (processes["clock_ticks"] != hz or not integer(processes["bench_pid"], 1) or
@@ -204,7 +227,7 @@ def accounting_errors(run):
     return errors
 
 
-def base_errors(run, cpus, case, boundary, reconcile=True, demand=False):
+def base_errors(run, cpus, case, boundary, reconcile=True, request=False):
     errors = []
     if (not run["accepted"] or run["stage"] != "complete" or run["libbpf_error"] or
             run["bad_records"] or (reconcile and not run["accounting_ok"]) or run["seq_reorders"]):
@@ -224,7 +247,7 @@ def base_errors(run, cpus, case, boundary, reconcile=True, demand=False):
         data, b = cpu["sites"]
         if case == "hog" and (not cpu["hog_tid"] or not cpu["hog_iterations"]):
             errors.append(f"CPU {cpu['cpu']}: untraced hog did not run")
-        if boundary and not (demand and data["produced"]) and (not b["produced"] or not b["delivered"]):
+        if boundary and not request and (not b["produced"] or not b["delivered"]):
             errors.append(f"CPU {cpu['cpu']}: boundary did not fire and reach reader")
         if not boundary and b["produced"]:
             errors.append("unexpected boundary producer")
@@ -253,7 +276,7 @@ def normal_errors(run, cpus, case, boundary, arm="perf"):
     if evidence_errors:
         return evidence_errors
     loss_gate = arm in ("perf",) + BOUNDARY_ARMS
-    errors = base_errors(run, cpus, case, boundary, reconcile=loss_gate, demand=arm == "syscall_demand")
+    errors = base_errors(run, cpus, case, boundary, reconcile=loss_gate, request=arm == "syscall_request")
     if loss_gate:
         for cpu, site in sites(run):
             if site["loss"] or site["failures"] or site["successes"] != site["delivered"]:
@@ -270,7 +293,7 @@ def normal_errors(run, cpus, case, boundary, arm="perf"):
                 errors.append(f"CPU {cpu['cpu']}: boundary fires != outputs")
             if b["successes"] != b["delivered"]:
                 errors.append(f"CPU {cpu['cpu']}: boundary outputs != consumer-delivered BOUNDARY")
-            if cpu["max_frontier_gap_ns"] > MAX_GAP_NS or cpu["max_frontier_stamp_gap_ns"] > MAX_GAP_NS:
+            if arm != "syscall_request" and (cpu["max_frontier_gap_ns"] > MAX_GAP_NS or cpu["max_frontier_stamp_gap_ns"] > MAX_GAP_NS):
                 errors.append(f"CPU {cpu['cpu']}: frontier gap exceeds 100 ms")
     if arm in SYSCALL_ARMS:
         if run["wrong_cpu_events"] or any(c["wrong_cpu_events"] for c in run["per_cpu"]):
@@ -279,7 +302,7 @@ def normal_errors(run, cpus, case, boundary, arm="perf"):
             errors.append("syscall boundary fires != outputs")
         for cpu in run["per_cpu"]:
             b = cpu["sites"][1]
-            if (not cpu["helper_tid"] or not cpu["helper_wakeups"] or
+            if (not cpu["helper_tid"] or (arm != "syscall_request" and not cpu["helper_wakeups"]) or
                     cpu["syscall_fires"] != b["produced"] or
                     cpu["syscall_outputs"] != b["successes"] or
                     cpu["helper_syscalls"] != cpu["syscall_fires"] or
@@ -289,7 +312,40 @@ def normal_errors(run, cpus, case, boundary, arm="perf"):
         if (sum(c["syscall_fires"] for c in run["per_cpu"]) != run["boundary_fires"] or
                 sum(c["syscall_outputs"] for c in run["per_cpu"]) != run["boundary_outputs"]):
             errors.append("syscall boundary aggregate/per-CPU counter mismatch")
+    if arm == "syscall_request":
+        errors.extend(held_data_errors(run))
+        for c in run["per_cpu"]:
+            if (c["request_outstanding"] or c["request_acknowledgements"] > c["requests"] or
+                    c["requests"] - c["request_acknowledgements"] != int(c["request_outstanding"]) or
+                    c["helper_wakeups"] != c["requests"] or c["helper_syscalls"] != c["requests"]):
+                errors.append(f"CPU {c['cpu']}: request/coalescing counter mismatch")
+        if case in ("idle", "hog") and run["coverage_ms"] == 0 and any(c["requests"] for c in run["per_cpu"]):
+            errors.append("request helper woke without staged DATA or coverage")
     return errors
+
+
+def held_data_errors(run):
+    try:
+        h = run["held_data"]
+        integer_fields = ("arrived", "released", "queue_depth", "queue_max_depth", "queue_growth_records",
+                          "max_queue_growth_per_drain", "max_held_data_age_ns", "oldest_pending_age_ns")
+        if not all(type(h[k]) is int and h[k] >= 0 for k in integer_fields):
+            return ["invalid held DATA evidence"]
+        data = sum(c["sites"][0]["delivered"] for c in run["per_cpu"])
+        if (h["arrived"] != data or h["arrived"] - h["released"] != h["queue_depth"] or
+                h["queue_growth_records"] != h["queue_depth"] or h["queue_max_depth"] < h["queue_depth"] or
+                (h["arrived"] > 0 and h["queue_max_depth"] == 0) or
+                h["max_queue_growth_per_drain"] > h["queue_max_depth"] or
+                not math.isclose(h["queue_growth_records_per_second"], h["queue_depth"] / run["elapsed"], abs_tol=1e-8)):
+            return ["held DATA/queue accounting mismatch"]
+        errors = []
+        if h["max_held_data_age_ns"] > MAX_GAP_NS or h["oldest_pending_age_ns"] > MAX_GAP_NS:
+            errors.append("held DATA age exceeds 100 ms")
+        if h["queue_depth"] or h["released"] != data:
+            errors.append("consumed DATA remains held at end of cell")
+        return errors
+    except (KeyError, TypeError, ValueError):
+        return ["missing or malformed held DATA evidence"]
 
 
 def control_errors(loss, mutant, cpus):
@@ -315,40 +371,117 @@ def idle_increment(boundary, perf, cpus):
             perf["participating_busy_cpu_ns"] / perf["elapsed"]) / 1e9 / cpus
 
 
+def accounting_closure(run):
+    elapsed = run["cpu_accounting_elapsed_ns"]
+    def closure(ticks, cpus):
+        observed_scaled = sum(ticks["delta"].values()) * 1_000_000_000
+        expected = cpus * elapsed
+        expected_scaled = expected * run["clock_ticks"]
+        observed = observed_scaled / run["clock_ticks"]
+        difference = (observed_scaled - expected_scaled) / expected_scaled
+        return {"state_sum_ns": observed, "cpus_x_elapsed_ns": expected,
+                "difference_fraction": difference, "status": "SUSPECT" if abs(observed_scaled - expected_scaled) * 200 > expected_scaled else "OK"}
+    return {"participating": closure(run["proc_stat_participating_ticks"], len(run["per_cpu"])),
+            "whole_box": closure(run["proc_stat_whole_box_ticks"], run["online_cpus"]),
+            "per_cpu": {str(c["cpu"]): closure(c["proc_stat_ticks"], 1) for c in run["per_cpu"]}}
+
+
+def schedstat_increment(boundary, perf):
+    if perf is None:
+        return None
+    old = {c["cpu"]: c["schedstat_running_ns"] for c in perf["per_cpu"]}
+    result = {}
+    for c in boundary["per_cpu"]:
+        before = old.get(c["cpu"])
+        after = c["schedstat_running_ns"]
+        if not before or before["status"] != "MEASURED" or after["status"] != "MEASURED":
+            return None
+        result[str(c["cpu"])] = (after["delta"] / boundary["schedstat_elapsed_ns"] -
+                                  before["delta"] / perf["schedstat_elapsed_ns"])
+    return result
+
+
+def schedstat_over_limit(boundary, perf):
+    # Compare the exact rational increment with 1/100; report rounding never
+    # changes a boundary decision, even with unequal observation intervals.
+    old = {c["cpu"]: c["schedstat_running_ns"]["delta"] for c in perf["per_cpu"]}
+    after_ns, before_ns = boundary["schedstat_elapsed_ns"], perf["schedstat_elapsed_ns"]
+    return any((c["schedstat_running_ns"]["delta"] * before_ns - old[c["cpu"]] * after_ns) * 100 >
+               after_ns * before_ns for c in boundary["per_cpu"])
+
+
 def evaluate_runs(runs, cpus, case, irq_accounting):
     errors = []
-    for arm in ARMS:
+    for arm in runs:
         errors.extend(arm + ": " + e for e in accounting_errors(runs[arm]))
     if errors:
         return {"status": "FAIL", "errors": errors}
-    for arm in ARMS:
+    for arm in runs:
         errors.extend(arm + ": " + e for e in normal_errors(
             runs[arm], cpus, case, arm in BOUNDARY_ARMS + ("adversarial",), arm=arm))
-    ratio = cpu_cost_ratio(runs["perf"], runs["shared"])
-    if case not in ("idle", "hog") and (ratio is None or not math.isfinite(ratio) or ratio > 1.10):
+    ratio = cpu_cost_ratio(runs["perf"], runs["shared"]) if "perf" in runs and "shared" in runs else None
+    if "shared" in runs and "perf" in runs and case not in ("idle", "hog") and (ratio is None or not math.isfinite(ratio) or ratio > 1.10):
         errors.append("paired perf/shared CPU-ns-per-attempt exceeds 1.10 or unavailable")
     result = {"perf_shared_cpu_ns_per_attempt_ratio": ratio, "errors": errors}
-    gates = {arm: {"arm": arm, "status": "NOT_APPLICABLE"} for arm in BOUNDARY_ARMS}
+    gates = {arm: {"arm": arm, "status": "NOT_APPLICABLE"} for arm in BOUNDARY_ARMS if arm in runs}
     helper_cpu = {arm: {str(c["cpu"]): c["helper_cpu_ns"] / runs[arm]["elapsed"] / 1e9
-                         for c in runs[arm]["per_cpu"]} for arm in SYSCALL_ARMS}
+                         for c in runs[arm]["per_cpu"]} for arm in SYSCALL_ARMS if arm in runs}
     result["syscall_helper_core_fraction_per_cpu"] = helper_cpu
     result["boundary_cadence_per_cpu"] = {
         arm: {str(c["cpu"]): {"fires": c["sites"][1]["produced"], "expected": c["boundary_expected"],
-                              "fires_per_expected": c["sites"][1]["produced"] / c["boundary_expected"],
+                              "fires_per_expected": (c["sites"][1]["produced"] / c["boundary_expected"] if c["boundary_expected"] else None),
                               "helper_wakeups": c["helper_wakeups"], "helper_syscalls": c["helper_syscalls"]}
-              for c in runs[arm]["per_cpu"]} for arm in BOUNDARY_ARMS + ("adversarial",)}
+              for c in runs[arm]["per_cpu"]} for arm in BOUNDARY_ARMS + ("adversarial",) if arm in runs}
     result["cpu_accounting"] = {arm: {
         "proc_stat_whole_box_ticks": r["proc_stat_whole_box_ticks"],
         "proc_stat_participating_ticks": r["proc_stat_participating_ticks"],
         "proc_stat_ticks_per_cpu": {str(c["cpu"]): c["proc_stat_ticks"] for c in r["per_cpu"]},
         "helper_cpu_ns_per_cpu": {str(c["cpu"]): c["helper_cpu_ns"] for c in r["per_cpu"]},
+        "schedstat_running_ns_per_cpu": {str(c["cpu"]): c["schedstat_running_ns"] for c in r["per_cpu"]},
+        "proc_stat_accounting_closure": accounting_closure(r),
         "bench_process_cpu_ns": r["process_cpu_ns"],
         "non_bench_process_cpu": r["non_bench_process_cpu"]} for arm, r in runs.items()}
+    result["held_data_gate"] = {"status": "NOT_APPLICABLE"}
+    if "syscall_request" in runs:
+        held_errors = held_data_errors(runs["syscall_request"])
+        evidence = runs["syscall_request"].get("held_data")
+        result["held_data_gate"] = dict(evidence) if isinstance(evidence, dict) else {}
+        result["held_data_gate"].update(status="FAIL" if held_errors else "PASS", limit_ns=MAX_GAP_NS,
+                                        errors=held_errors)
+    result["timing_diagnostics"] = {arm: {
+        "consumer_drain_gap_ms": r["max_drain_gap_ms"],
+        "per_cpu": {str(c["cpu"]): {
+            "request_to_frontier_latency_ns": c["max_request_to_frontier_ns"] if c["request_acknowledgements"] else None,
+            "request_outstanding_age_ns": c["request_outstanding_age_ns"],
+            "producer_stamp_gap_ns": c["max_frontier_stamp_gap_ns"],
+            "contract_frontier_gap_ns": c["max_frontier_gap_ns"],
+            "boundary_only_gap_ns": c["max_boundary_gap_ns"],
+            "boundary_only_stamp_gap_ns": c["max_boundary_stamp_gap_ns"]} for c in r["per_cpu"]}}
+        for arm, r in runs.items()}
+    precise_gates = {}
+    result["schedstat_idle_cpu_gates"] = precise_gates
     if case == "idle":
+        for arm in gates:
+            delta = schedstat_increment(runs[arm], runs.get("perf"))
+            gate = {"increment_core_fraction_per_cpu": delta, "limit": 0.01}
+            if delta is None:
+                gate.update(status="UNMEASURED", reason="schedstat or paired perf baseline unavailable")
+            elif schedstat_over_limit(runs[arm], runs["perf"]):
+                gate["status"] = "FAIL"
+                errors.append(arm + ": schedstat idle increment exceeds 1% on a CPU")
+            else:
+                gate["status"] = "PASS"
+            precise_gates[arm] = gate
         deltas = {arm: idle_increment(runs[arm], runs["perf"], cpus)
-                  for arm in BOUNDARY_ARMS + ("adversarial",)}
+                  for arm in BOUNDARY_ARMS + ("adversarial",) if arm in runs and "perf" in runs}
         result["proc_stat_increment_core_fraction_per_participating_cpu"] = deltas
         for arm, gate in gates.items():
+            if arm == "syscall_request":
+                gate.update(precise_gates[arm])
+                continue
+            if arm not in deltas:
+                gate.update(status="UNMEASURED", reason="paired perf baseline unavailable")
+                continue
             gate["proc_stat_increment_core_fraction_per_participating_cpu"] = deltas[arm]
             if not irq_accounting:
                 gate.update(status="UNMEASURED", reason=(
@@ -360,14 +493,16 @@ def evaluate_runs(runs, cpus, case, irq_accounting):
             else:
                 gate["status"] = "PASS"
         for arm in SYSCALL_ARMS:
+            if arm not in runs:
+                continue
             gates[arm]["helper_core_fraction_per_cpu"] = helper_cpu[arm]
             if any(v > 0.01 for v in helper_cpu[arm].values()):
                 gates[arm]["status"] = "FAIL"
                 errors.append(arm + ": helper CPU exceeds 1% on a CPU")
-    result["boundary_cpu_gate"] = gates["perf_boundary"] # retained report field
+    result["boundary_cpu_gate"] = gates.get("perf_boundary", {"status": "NOT_APPLICABLE"}) # retained report field
     result["boundary_cpu_gates"] = gates
     result["status"] = "FAIL" if errors else "VOID" if any(
-        g["status"] == "UNMEASURED" for g in gates.values()) else "PASS"
+        g["status"] == "UNMEASURED" for g in list(gates.values()) + list(precise_gates.values())) else "PASS"
     return result
 
 
@@ -382,7 +517,10 @@ def requested_errors(run, args, cpu_ids):
                 "duration": int(value("--duration")), "period_ns": period,
                 "buffer_bytes_total": total, "pause_drain": "--pause-drain" in args,
                 "boundary_offset_ns": 1_000_000 if "--mutant-boundary" in args else 0}
-    expected["boundary_source"] = ("syscall_demand" if "--syscall-demand" in args else
+    expected.update(request_after_ms=int(value("--request-after-ms")) if "--request-after-ms" in args else 50,
+                    coverage_ms=int(value("--coverage-ms")) if "--coverage-ms" in args else 0,
+                    phase_jitter="--phase-jitter" in args)
+    expected["boundary_source"] = ("syscall_request" if "--syscall-request" in args else
                                    "syscall" if "--syscall-boundary" in args else "perf" if period else "none")
     errors = [f"requested {k}={v!r}, observed {run.get(k)!r}" for k, v in expected.items() if run.get(k) != v]
     if [c["cpu"] for c in run["per_cpu"]] != list(cpu_ids[:cpus]):
@@ -419,10 +557,19 @@ def run_one(out, label, args):
     errors = requested_errors(run, args, sorted(os.sched_getaffinity(0)))
     if errors:
         raise RuntimeError(label + ": " + "; ".join(errors))
+    run["proc_stat_accounting_closure"] = accounting_closure(run)
+    write_json(out / (label + ".json"), run)
     return run
 
 
-def main():
+def nonnegative(value):
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return n
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repeats", type=positive, default=3)
     parser.add_argument("--seconds", type=positive, default=30)
@@ -432,80 +579,130 @@ def main():
     cadence.add_argument("--period-ns", type=positive, help="legacy alias for one --periods value")
     parser.add_argument("--bytes", type=positive, default=67_108_864)
     parser.add_argument("--out", type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--cases", choices=CASES, nargs="+", default=list(CASES))
+    parser.add_argument("--arms", choices=ARMS, nargs="+", default=list(ARMS))
+    parser.add_argument("--request-after-ms", type=nonnegative, default=50)
+    parser.add_argument("--coverage-ms", type=nonnegative, default=0)
+    parser.add_argument("--phase-jitter", action="store_true")
+    parser.add_argument("--crossover", type=positive, metavar="N",
+                        help="N idle/all-CPU perf/syscall_boundary pairs at 10 ms; random starting arm, then alternate")
+    args = parser.parse_args(argv)
     if args.period_ns is not None:
         args.periods = [args.period_ns]
-    if len(set(args.periods)) != len(args.periods):
-        parser.error("--periods must be distinct")
+    for name in ("periods", "cases", "arms"):
+        if len(set(getattr(args, name))) != len(getattr(args, name)):
+            parser.error("--" + name + " must be distinct")
+    if args.request_after_ms > (2**64 - 1) // 1_000_000 or args.coverage_ms > (2**64 - 1) // 1_000_000:
+        parser.error("millisecond option exceeds uint64 nanoseconds")
+    if args.crossover and (args.cases != list(CASES) or args.arms != list(ARMS) or
+                           args.periods != [10_000_000]):
+        parser.error("--crossover fixes cases, arms and periods; omit those filters")
+    return args
+
+
+def plan_cells(args, available):
+    cells = []
+    if args.crossover:
+        order = ["perf", "syscall_boundary"]
+        random.SystemRandom().shuffle(order)
+        for repeat in range(1, args.crossover + 1):
+            cells.append({"cell": f"crossover-r{repeat}", "cpus": available, "case": "idle",
+                          "repeat": repeat, "period_ns": 10_000_000, "arm_order": list(order)})
+    else:
+        for population, cpus in (("1", 1), ("4", 4), ("all", available)):
+            for case in args.cases:
+                for period in args.periods:
+                    for repeat in range(1, args.repeats + 1):
+                        rotation = (repeat - 1) % len(args.arms)
+                        order = args.arms[rotation:] + args.arms[:rotation]
+                        cells.append({"cell": f"cpu-{population}-{case}-p{period}-r{repeat}", "cpus": cpus,
+                                      "case": case, "repeat": repeat, "period_ns": period, "arm_order": order})
+    arm_runs = sum(len(c["arm_order"]) for c in cells)
+    control_runs = 3 * len(cells)
+    return {"planned_cell_count": len(cells), "planned_arm_runs": arm_runs,
+            "planned_control_runs": control_runs,
+            "estimated_wall_seconds": arm_runs * args.seconds + control_runs * 2 + (arm_runs + control_runs) * 2,
+            "estimate_basis": "requested durations plus 2 seconds setup/teardown per invocation; stalls/build excluded",
+            "cells": cells}
+
+
+def arm_command(arm, common, case, seconds, period, args):
+    command = common + ["--case", case, "--duration", str(seconds),
+                        "--transport", "shared" if arm == "shared" else "perf"]
+    if arm in BOUNDARY_ARMS + ("adversarial",):
+        command += ["--period-ns", str(period if arm in BOUNDARY_ARMS else 100_000)]
+    if arm in SYSCALL_ARMS:
+        command += ["--syscall-request" if arm == "syscall_request" else "--syscall-boundary"]
+    if arm == "syscall_request":
+        command += ["--request-after-ms", str(args.request_after_ms), "--coverage-ms", str(args.coverage_ms)]
+    if args.phase_jitter:
+        command += ["--phase-jitter"]
+    return command
+
+
+def main():
+    args = parse_args()
     if platform.system() != "Linux":
-        parser.error("Linux only; never run BPF on macOS")
+        raise SystemExit("Linux only; never run BPF on macOS")
     out = args.out.resolve()
     if out == ROOT or ROOT in out.parents:
-        parser.error("--out must be outside the repository")
+        raise SystemExit("--out must be outside the repository")
     out.mkdir(parents=True, exist_ok=False)
     try:
+        info = None
+        # CPU discovery precedes building so the plan is printed at startup.
+        available = len(os.sched_getaffinity(0))
+        plan = plan_cells(args, available)
+        print(f"Planned cells: {plan['planned_cell_count']}; arm runs: {plan['planned_arm_runs']}; "
+              f"estimated wall time: {plan['estimated_wall_seconds'] / 60:.1f} minutes", flush=True)
+        write_json(out / "plan.json", plan)
         build = capture(["make", "-C", str(HERE.parent), "bench-nmi-transport"])
         write_json(out / "build.json", build)
         if build["exit"]:
             raise RuntimeError("measurement build failed")
         info = metadata(out)
+        if len(info["allowed_cpus"]) != available:
+            raise RuntimeError("CPU population changed after planning")
         info["protocol"] = dict(vars(args), out=str(out))
+        info["plan"] = "plan.json"
         info["claim"] = "measurement only; kernel argument and reviewer judgment still required"
         write_json(out / "metadata.json", info)
     except (OSError, ValueError, RuntimeError) as exc:
         write_json(out / "VOID.json", {"status": "VOID", "error": str(exc)})
         return 1
-    available = len(info["allowed_cpus"])
     any_failure = False
     summaries = []
-    # Keep the named 4 and all populations even on a four-CPU box: these are
-    # distinct scheduled cells, never silently deduplicated or skipped.
-    for population, cpus in (("1", 1), ("4", 4), ("all", available)):
-        for case in CASES:
-            for period in args.periods:
-                for repeat in range(1, args.repeats + 1):
-                    label = f"cpu-{population}-{case}-p{period}-r{repeat}"
-                    summary = {"cell": label, "cpus": cpus, "case": case, "repeat": repeat, "period_ns": period,
-                               "metadata": "metadata.json", "runs": {}, "errors": [], "status": "VOID"}
-                    try:
-                        if cpus > available:
-                            raise RuntimeError(f"required {cpus}-CPU cell unavailable; only {available} online allowed")
-                        common = ["--cpus", str(cpus), "--bytes", str(args.bytes)]
-                        # Controls are fresh for EVERY cell, same binary/object,
-                        # participating CPU set, invocation and output directory.
-                        controls = common + ["--duration", "2", "--transport", "perf", "--case", "all"]
-                        loss = run_one(out, label + "-loss-control", controls + ["--one-page", "--pause-drain"])
-                        mutant = run_one(out, label + "-seal-control", controls + ["--period-ns", "100000", "--mutant-boundary"])
-                        summary["controls"] = {"loss": loss, "seal": mutant}
-                        errors = control_errors(loss, mutant, cpus)
-                        syscall_mutant = run_one(out, label + "-syscall-seal-control", controls + [
-                            "--syscall-boundary", "--period-ns", "100000", "--mutant-boundary"])
-                        summary["controls"]["syscall_seal"] = syscall_mutant
-                        errors += control_errors(loss, syscall_mutant, cpus)
-                        if errors:
-                            raise RuntimeError("control VOID: " + "; ".join(errors))
-                        # Rotate all arms to interleave the paired treatments.
-                        rotation = (repeat - 1) % len(ARMS)
-                        order = ARMS[rotation:] + ARMS[:rotation]
-                        summary["arm_order"] = order
-                        for arm in order:
-                            command = common + ["--case", case, "--duration", str(args.seconds),
-                                                "--transport", "shared" if arm == "shared" else "perf"]
-                            if arm in BOUNDARY_ARMS + ("adversarial",):
-                                command += ["--period-ns", str(period if arm in BOUNDARY_ARMS else 100_000)]
-                            if arm in SYSCALL_ARMS:
-                                command += ["--syscall-demand" if arm == "syscall_demand" else "--syscall-boundary"]
-                            run = run_one(out, label + "-" + arm, command)
-                            summary["runs"][arm] = run
-                        summary.update(evaluate_runs(summary["runs"], cpus, case, info["irq_time_accounting"]))
-                    except (OSError, ValueError, KeyError, TypeError, RuntimeError, ZeroDivisionError) as exc:
-                        summary["errors"].append(str(exc))
-                    write_json(out / (label + ".summary.json"), summary)
-                    summaries.append({"cell": label, "status": summary["status"]})
-                    print(label + ": " + summary["status"], flush=True)
-                    any_failure |= summary["status"] != "PASS"
+    for cell in plan["cells"]:
+        label, cpus, case, period = (cell[k] for k in ("cell", "cpus", "case", "period_ns"))
+        summary = dict(cell, metadata="metadata.json", runs={}, errors=[], status="VOID")
+        try:
+            if cpus > available:
+                raise RuntimeError(f"required {cpus}-CPU cell unavailable; only {available} online allowed")
+            common = ["--cpus", str(cpus), "--bytes", str(args.bytes)]
+            # Preserve fresh controls for every selected cell, including crossover pairs.
+            controls = common + ["--duration", "2", "--transport", "perf", "--case", "all"]
+            loss = run_one(out, label + "-loss-control", controls + ["--one-page", "--pause-drain"])
+            mutant = run_one(out, label + "-seal-control", controls + ["--period-ns", "100000", "--mutant-boundary"])
+            summary["controls"] = {"loss": loss, "seal": mutant}
+            errors = control_errors(loss, mutant, cpus)
+            syscall_mutant = run_one(out, label + "-syscall-seal-control", controls + [
+                "--syscall-boundary", "--period-ns", "100000", "--mutant-boundary"])
+            summary["controls"]["syscall_seal"] = syscall_mutant
+            errors += control_errors(loss, syscall_mutant, cpus)
+            if errors:
+                raise RuntimeError("control VOID: " + "; ".join(errors))
+            for arm in cell["arm_order"]:
+                command = arm_command(arm, common, case, args.seconds, period, args)
+                summary["runs"][arm] = run_one(out, label + "-" + arm, command)
+            summary.update(evaluate_runs(summary["runs"], cpus, case, info["irq_time_accounting"]))
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, ZeroDivisionError) as exc:
+            summary["errors"].append(str(exc))
+        write_json(out / (label + ".summary.json"), summary)
+        summaries.append({"cell": label, "status": summary["status"]})
+        print(label + ": " + summary["status"], flush=True)
+        any_failure |= summary["status"] != "PASS"
     write_json(out / "summary.json", {"status": "FAIL" if any_failure else "PASS", "cells": summaries,
-                                     "qualification_claim": False})
+                                     "plan": "plan.json", "qualification_claim": False})
     return int(any_failure)
 
 

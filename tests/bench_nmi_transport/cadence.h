@@ -4,10 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-static inline bool transport_boundary_due(bool demand, uint64_t now,
-                                          uint64_t frontier, uint64_t period)
+/* A periodic helper's first deadline gets one recorded offset, <1 ms. */
+static inline uint64_t transport_first_deadline(uint64_t start, uint64_t jitter)
 {
-    return !demand || !frontier || (now > frontier && now - frontier > period);
+    return start + jitter;
 }
 
 /* Skip missed periods without a catch-up burst; never sleep past run end. */

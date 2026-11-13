@@ -56,4 +56,28 @@ static inline void transport_report_cpu_ticks(FILE *out, const struct cpu_snapsh
     }
     fputc('}', out);
 }
+/* schedstat v15..17 CPU column 7 is running task nanoseconds.
+ * https://docs.kernel.org/scheduler/sched-stats.html#cpu-statistics
+ * Unsupported versions, missing CPUs and disabled/all-zero counters are unknown. */
+static inline bool transport_schedstat(FILE *f, const int *cpu_ids, int available,
+                                       int possible, uint64_t *snapshot)
+{
+    char line[4096];
+    int version = 0, found = 0;
+    bool nonzero = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "version %d", &version) == 1) continue;
+        unsigned long long v[9];
+        int cpu;
+        if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu %llu", &cpu,
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]) != 10)
+            continue;
+        if (cpu < 0 || cpu >= possible) continue;
+        for (int i = 0; i < available; ++i) if (cpu == cpu_ids[i]) {
+            snapshot[cpu] = (uint64_t)v[6]; ++found;
+            if (v[6]) nonzero = true;
+        }
+    }
+    return !ferror(f) && version >= 15 && version <= 17 && found == available && nonzero;
+}
 #endif
