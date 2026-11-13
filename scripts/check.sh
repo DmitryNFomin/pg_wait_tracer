@@ -63,6 +63,10 @@ run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.p
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py
 run env CFLAGS="$core_cflags" bash tests/evidence_mutants.sh
 
+step "portable v5 evidence codec, independent bytes and mutation checks"
+run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_oracle.py
+run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_mutants.py
+
 step "C11 core merge contract and API safety (ASan/UBSan, Refs #871)"
 if merge_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-core-merge-check.XXXXXX"); then
     if "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
