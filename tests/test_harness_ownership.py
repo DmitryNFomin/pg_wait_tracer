@@ -22,6 +22,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from test_rehearsal_workload_lifetime import HangGuardTestCase, run_wait_control, socket_inspector
+
 HERE = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
 parser.add_argument('--tree', type=Path, default=HERE.parent)
@@ -36,15 +38,16 @@ def executable(path, source):
     path.chmod(0o755)
 
 
-def await_file(path, proc=None):
-    end = time.monotonic() + 5
-    while time.monotonic() < end:
+def await_file(path, proc=None, exited=None):
+    # The per-test outer hang guard bounds this condition wait.
+    while True:
         if path.exists():
             return
         if proc and proc.poll() is not None:
             raise AssertionError(f'fixture exited {proc.returncode} before {path}')
+        if exited is not None and exited.exists():
+            raise AssertionError(f'fixture exited before {path}')
         time.sleep(.01)
-    raise AssertionError(f'timed out waiting for {path}')
 
 
 # The same asset bytes as the tree: even the production served-asset guard
@@ -68,14 +71,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = path.read_bytes()
         self.send_response(200); self.end_headers(); self.wfile.write(body)
 server = http.server.HTTPServer(('127.0.0.1', int(port)), Handler)
-pathlib.Path(ready).write_text(str(os.getpid()))
+# Publish the PID atomically: existence must mean a complete ready signal.
+ready = pathlib.Path(ready)
+pending = ready.with_suffix('.tmp')
+pending.write_text(str(os.getpid()))
+pending.replace(ready)
 server.timeout = .1
 end = time.monotonic() + 30
 while time.monotonic() < end: server.handle_request()
 """
 
 
-class HarnessTests(unittest.TestCase):
+class HarnessTests(HangGuardTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='harness-ownership-')
         self.addCleanup(self.temp.cleanup)
@@ -90,8 +97,10 @@ class HarnessTests(unittest.TestCase):
                 shutil.copy(TREE / 'tests' / name, self.repo / 'tests' / name)
         for name in ('demo-rehearsal.sh', 'demo-rehearsal-remote-run.sh'):
             shutil.copy(TREE / 'scripts' / name, self.repo / 'scripts' / name)
-        # Only PG discovery/provisioning are replaced; readiness, asset
-        # verification, driver flow and cleanup remain production code.
+        # OS listener discovery uses the fixture's real socket + ready PID;
+        # ownership decisions, readiness, assets and teardown stay production.
+        socket_inspector(self.repo / 'tests/bridge_owner.py', self.base / 'http.ready')
+        # PG discovery/provisioning are fixture-only too.
         (self.repo / 'tests/testutil.sh').write_text('find_postmaster() { echo 999999; }\n')
         with (self.repo / 'tests/live_daemon_lib.sh').open('a') as f:
             f.write('\nderive_pgport() { :; }\ncheck_pgbench_provisioned() { :; }\n')
@@ -163,7 +172,12 @@ else:
 """)
         # Small waits keep the integration suite cheap; the bridge's Python
         # delay is deliberately unaffected and remains alive at the walk.
-        executable(self.repo / 'bin/sleep', f'#!{PYTHON}\nimport sys,time\ntime.sleep(min(float(sys.argv[1]), .05))\n')
+        executable(self.repo / 'bin/sleep', f'#!{PYTHON}\n' + r'''
+import os, pathlib, sys, time
+with pathlib.Path(os.environ['SLEEP_CALLS']).open('a') as calls:
+    calls.write(sys.argv[1] + '\n')
+time.sleep(min(float(sys.argv[1]), .05))
+''')
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             self.port = sock.getsockname()[1]
@@ -171,7 +185,8 @@ else:
             PGWT_DEMO_PORT=str(self.port), PGWT_UI_LIVE_PORT=str(self.port),
             BRIDGE_STARTED=str(self.base / 'bridge.started'), HTTP_READY=str(self.base / 'http.ready'),
             HTTP_SCRIPT=str(self.http), STATIC_ROOT=str(self.repo / 'web/static'),
-            WALK_ARGV=str(self.base / 'walk.argv'), DURATION_MIN='35', FIXTURE_TMP=str(self.base))
+            WALK_ARGV=str(self.base / 'walk.argv'), DURATION_MIN='35', FIXTURE_TMP=str(self.base),
+            SLEEP_CALLS=str(self.base / 'sleep.calls'))
         self.env.pop('DIAG_DATA', None)
         # #622: the harness stands in for the provisioner and declares probes.
         self.env['PGWT_EXPECT_PHASE_PROBES'] = '1'
@@ -183,7 +198,7 @@ else:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         def stop():
             if proc.poll() is None: proc.terminate()
-            proc.wait(timeout=5)
+            proc.wait()
         self.addCleanup(stop)
         if not late: await_file(Path(self.env['HTTP_READY']), proc)
         self.env['FOREIGN'] = '1'
@@ -191,7 +206,7 @@ else:
 
     def driver(self, name):
         run = subprocess.run(['bash', f'tests/{name}.sh', '--pid', '999999'],
-            cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
         return run, run.stdout + run.stderr
 
     def exercise_foreign(self, driver, late):
@@ -209,7 +224,8 @@ else:
         self.assertIn('REFUSE', output)
         self.assertIsNone(foreign.poll(), 'must not kill the foreign owner')
         if not late:
-            self.assertLess(elapsed, 2, output)
+            # Preflight refuses before startup or any readiness polling.
+            self.assertFalse(Path(self.env['SLEEP_CALLS']).exists(), output)
             self.assertFalse(Path(self.env['BRIDGE_STARTED']).exists())
         else:
             log = self.repo / f'tests/results/{"demo_rehearsal" if driver == "demo_rehearsal" else "ui_live"}/bridge.log'
@@ -249,12 +265,12 @@ else:
                             self.fail(log.read_text())
                         pid = int(Path(self.env['BRIDGE_STARTED']).read_text())
                         proc.terminate()
-                        self.assertEqual(proc.wait(timeout=15), 143, log.read_text())
+                        self.assertEqual(proc.wait(), 143, log.read_text())
                         with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
                         result = 'demo_rehearsal' if driver == 'demo_rehearsal' else 'ui_live'
                         self.assertTrue((self.repo / f'tests/results/{result}/bridge.log').exists())
                     finally:
-                        if proc.poll() is None: proc.kill(); proc.wait(timeout=5)
+                        if proc.poll() is None: proc.kill(); proc.wait()
                 for name in ('WALK_ARGV', 'BRIDGE_STARTED', 'HTTP_READY'):
                     Path(self.env[name]).unlink()
 
@@ -282,7 +298,7 @@ stop_bridge "$pid"
 """
         try:
             run = subprocess.run(['bash', '-c', command], env=self.env,
-                                 capture_output=True, text=True, timeout=15)
+                                 capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             child = int(child_ready.read_text())
             with self.assertRaises(ProcessLookupError): os.kill(child, 0)
@@ -302,7 +318,9 @@ stop_bridge "$pid"
         remote = self.repo / 'scripts/demo-rehearsal-remote-run.sh'
         # Platform-only probes use local fixture files/tools; the command
         # arguments and every forwarding hop remain production code.
-        remote.write_text(remote.read_text().replace('/sys/kernel/btf/vmlinux', str(self.repo / 'pgwt-server'))
+        exited = self.base / 'runner.exited'
+        remote.write_text(f"trap {shlex.quote('touch ' + shlex.quote(str(exited)))} EXIT\n" +
+                          remote.read_text().replace('/sys/kernel/btf/vmlinux', str(self.repo / 'pgwt-server'))
                           .replace('/tmp/pgwt-box-check.lock', str(self.base / 'fixture.lock')))
         executable(self.repo / 'bin/ssh', '#!/usr/bin/env bash\nexec bash -c "${*: -1}"\n')
         for mode in ('1', '0'):
@@ -314,14 +332,18 @@ remote_dir={shlex.quote(str(self.repo))}; target=local-fixture; ssh_strict=''; l
 {statement}
 """
             run = subprocess.run(['bash', '-c', command], cwd=self.repo, env=self.env,
-                                 capture_output=True, text=True, timeout=10)
-            await_file(self.repo / 'rehearsal.done')
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            await_file(self.repo / 'rehearsal.done', exited=exited)
             self.assertTrue(Path(self.env['WALK_ARGV']).exists(), (self.repo / 'rehearsal.out').read_text() + run.stderr)
             argv = json.loads(Path(self.env['WALK_ARGV']).read_text())
             print(f'DIAG_DATA={mode} executed box argv: {json.dumps(argv)}', flush=True)
             self.assertEqual('--diag-data' in argv, mode == '1')
             self.assertIn('fixture-tag', argv)
             for path in ('rehearsal.done',): (self.repo / path).unlink()
+            # The runner's EXIT signal also proves teardown has completed.
+            await_file(exited)
+            exited.unlink()
             for name in ('WALK_ARGV', 'BRIDGE_STARTED', 'HTTP_READY'):
                 Path(self.env[name]).unlink()
 
@@ -345,7 +367,28 @@ def load_owner():
     return owner
 
 
-class ListenerInspectionTests(unittest.TestCase):
+def real_owner_cli(port, expected, env=None):
+    """Real OS discovery and CLI verdict, with the test's outer hang guard.
+
+    The inspector's 2s subprocess cap is a production hang guard, not the
+    ownership contract exercised here. Inject only its command runner so
+    this integration check waits for lsof/ss completion under our watchdog.
+    """
+    owner = load_owner()
+    run = subprocess.run
+    def to_exit(argv, **kwargs):
+        kwargs.pop('timeout', None)
+        return run(argv, env=env, **kwargs)
+    out, err = io.StringIO(), io.StringIO()
+    argv = ['bridge_owner.py', str(port), str(expected)]
+    with patch.object(owner.sys, 'argv', argv), \
+            patch.object(owner.subprocess, 'run', side_effect=to_exit), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = owner.cli()
+    return subprocess.CompletedProcess(argv, code, out.getvalue(), err.getvalue())
+
+
+class ListenerInspectionTests(HangGuardTestCase):
     def test_linux_ss_ownership_and_fail_closed_paths(self):
         owner = load_owner()
         cases = [
@@ -374,7 +417,7 @@ class ListenerInspectionTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError): owner.main()
 
 
-class ProcFallbackTests(unittest.TestCase):
+class ProcFallbackTests(HangGuardTestCase):
     """The /proc route ss uses internally, used only on a line ss left bare.
 
     A bare line is a race inside ss, not a broken host: ss scans /proc/*/fd
@@ -569,8 +612,8 @@ class ProcFallbackTests(unittest.TestCase):
 
     # Tree-agnostic: runs bridge_owner.py as the real CLI with a stub `ss`
     # that reproduces the gate-snapshot image's bare line, against a real
-    # socket in a real other process. Patches nothing, so `--tree <parent>`
-    # exercises it identically and goes RED there (exit 2, "cannot verify").
+    # socket in a real other process. Only command waiting is injected;
+    # `--tree <parent>` goes RED there (exit 2, "cannot verify").
     @unittest.skipUnless(sys.platform == 'linux', 'needs a real /proc; the box runs it')
     def test_end_to_end_bare_ss_line_over_a_real_foreign_socket(self):
         base = Path(self.temp.name)
@@ -581,7 +624,7 @@ class ProcFallbackTests(unittest.TestCase):
             'open(sys.argv[1], "w").write(str(s.getsockname()[1]))\n'
             'time.sleep(60)\n')
         holder = subprocess.Popen([sys.executable, str(base / 'holdsock.py'), str(ready)])
-        self.addCleanup(lambda: (holder.kill(), holder.wait(timeout=5)))
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
         await_file(ready, holder)
         port = int(ready.read_text())
         stub = base / 'stubbin'
@@ -591,9 +634,7 @@ class ProcFallbackTests(unittest.TestCase):
         env = dict(os.environ, PATH=f'{stub}:{os.environ["PATH"]}')
 
         def cli(expected):
-            return subprocess.run([sys.executable, str(TREE / 'tests/bridge_owner.py'),
-                                   str(port), str(expected)], env=env,
-                                  capture_output=True, text=True, timeout=20)
+            return real_owner_cli(port, expected, env=env)
 
         owned = cli(holder.pid)
         print(f'end-to-end bare ss line, owner={holder.pid}: exit={owned.returncode} '
@@ -644,7 +685,7 @@ TM_WARNING = (
     '      assuming "dev=360000a8" from mount table\n')
 
 
-class LsofStderrTests(unittest.TestCase):
+class LsofStderrTests(HangGuardTestCase):
     """macOS: a mount warning on stderr must not read as an inspection failure.
 
     lsof exits 0 and still enumerates TCP sockets, but writes a WARNING about
@@ -736,8 +777,8 @@ class LsofStderrTests(unittest.TestCase):
         self.assertEqual(code, self.owner.INSPECTION_IMPOSSIBLE, output)
         self.assertIn('without owning PIDs', output)
 
-    # Real lsof, real socket, real mount state: no mocking at all. Runs the
-    # CLI from TREE, so `--tree <parent>` goes RED here on this Mac while the
+    # Real lsof, real socket, real mount state; only waiting is injected.
+    # Uses the CLI from TREE, so `--tree <parent>` goes RED here while the
     # volume is mounted. Skipped on Linux, where the lsof route is unused.
     @unittest.skipUnless(sys.platform == 'darwin', 'lsof route is macOS-only')
     def test_real_lsof_over_a_real_socket_with_the_live_mount_state(self):
@@ -751,17 +792,15 @@ class LsofStderrTests(unittest.TestCase):
             'open(sys.argv[1], "w").write(str(s.getsockname()[1]))\n'
             'time.sleep(60)\n')
         holder = subprocess.Popen([sys.executable, str(base / 'hold.py'), str(ready)])
-        self.addCleanup(lambda: (holder.kill(), holder.wait(timeout=5)))
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
         await_file(ready, holder)
         port = int(ready.read_text())
         bare = subprocess.run(['lsof', '-nP', '-iTCP', '-sTCP:LISTEN'],
-                              capture_output=True, text=True, timeout=20)
+                              capture_output=True, text=True)
         print(f'live lsof stderr: {bare.stderr.strip().splitlines()[:1]}', flush=True)
 
         def cli(expected):
-            return subprocess.run([sys.executable, str(TREE / 'tests/bridge_owner.py'),
-                                   str(port), str(expected)],
-                                  capture_output=True, text=True, timeout=20)
+            return real_owner_cli(port, expected)
 
         owned = cli(holder.pid)
         print(f'real lsof, owner={holder.pid}: exit={owned.returncode} '
@@ -774,7 +813,7 @@ class LsofStderrTests(unittest.TestCase):
         self.assertIn(f'occupied by listener PID(s) [{holder.pid}]', foreign.stderr)
 
 
-class CallerExitCodeTests(unittest.TestCase):
+class CallerExitCodeTests(HangGuardTestCase):
     """The shell wrappers must treat exit 3 as a refusal, not readiness."""
 
     def shell(self, exit_code, script):
@@ -788,9 +827,11 @@ class CallerExitCodeTests(unittest.TestCase):
         log = base / 'bridge.log'
         log.write_text('stub bridge log\n')
         command = (f'set -uo pipefail\nsource {shlex.quote(str(base / "live_daemon_lib.sh"))}\n'
-                   f'log={shlex.quote(str(log))}\n{script}')
+                   f'log={shlex.quote(str(log))}\n'
+                   'sleep() { echo FIXTURE_SLEEP_CALLED >&2; }\n'
+                   f'{script}')
         return subprocess.run(['bash', '-c', command], capture_output=True,
-                              text=True, timeout=30)
+                              text=True)
 
     def test_bridge_port_state_propagates_each_code_unchanged(self):
         for code in (0, 1, 2, 3):
@@ -808,11 +849,117 @@ class CallerExitCodeTests(unittest.TestCase):
         self.assertIn('rc=1', run.stdout, run.stdout + run.stderr)
         # The immediate-refuse branch, not the loop-exhausted one: a caller
         # that treated 3 as retryable would reach the other message after 60
-        # polls. Asserted by message, not only by the clock.
+        # polls. Assert the branch and the absence of any sleep directly.
         self.assertIn('ownership unavailable, foreign listener, or bridge exited',
                       run.stderr)
-        # 60 polls at 0.5s would be ~30s; refusing is immediate.
-        self.assertLess(elapsed, 10, run.stdout + run.stderr)
+        # Refusal must not enter the retry loop, regardless of scheduling.
+        self.assertNotIn('FIXTURE_SLEEP_CALLED', run.stderr)
+
+
+class CompletionWaitControls(HangGuardTestCase):
+    def check_failure(self, action, hanging, timeout=300):
+        result = run_wait_control(action, timeout)
+        self.assertFalse(result.wasSuccessful())
+        self.assertFalse(result.errors, result.errors)
+        failures = '\n'.join(text for _, text in result.failures)
+        if hanging:
+            self.assertIn('outer hang guard expired', failures)
+        else:
+            self.assertNotIn('outer hang guard expired', failures)
+            self.assertIn('AssertionError', failures)
+
+    def test_command_wait_controls(self):
+        real_run = subprocess.run
+        for wait in ('driver', 'caller', 'real-inspector'):
+            for hanging in (True, False):
+                with self.subTest(wait=wait, hanging=hanging), tempfile.TemporaryDirectory() as tmp:
+                    ready = Path(tmp) / 'stub.ready'
+                    stub = ('from pathlib import Path; import os, signal; '
+                            f'Path({str(ready)!r}).touch(); '
+                            'os.kill(os.getppid(), signal.SIGUSR1); ' +
+                            ('signal.pause()' if hanging else 'raise SystemExit(7)'))
+                    def command(*args, **kwargs):
+                        return real_run([PYTHON, '-c', stub], **kwargs)
+                    def exercise(case):
+                        case.repo, case.env = Path(tmp), dict(os.environ)
+                        if wait == 'driver':
+                            run, _ = HarnessTests.driver(case, 'demo_rehearsal')
+                        elif wait == 'caller':
+                            run = CallerExitCodeTests.shell(case, 0, 'exit 0')
+                        else:
+                            run = real_owner_cli(8385, os.getpid())
+                        case.assertEqual(run.returncode, 0, run.stderr)
+                    previous = signal.signal(signal.SIGUSR1, lambda *_:
+                        signal.setitimer(signal.ITIMER_REAL, 1 if hanging else 30))
+                    try:
+                        with patch.object(subprocess, 'run', side_effect=command):
+                            self.check_failure(exercise, hanging)
+                    finally:
+                        signal.signal(signal.SIGUSR1, previous)
+                    self.assertTrue(ready.exists(), 'stub must reach the command wait')
+                    print(f"negative {wait}: {'outer guard caught hang' if hanging else 'wrong exit rejected immediately'}")
+
+    def test_process_exit_and_file_wait_controls(self):
+        # These are the two blocking primitives used by driver completion,
+        # TERM/cleanup/holder reaping, and ready/rehearsal.done polling.
+        for wait in ('process', 'file', 'detached-done'):
+            for hanging in (True, False):
+                with self.subTest(wait=wait, hanging=hanging), tempfile.TemporaryDirectory() as tmp:
+                    ready = Path(tmp) / 'stub.ready'
+                    done = Path(tmp) / 'rehearsal.done'
+                    exited = Path(tmp) / 'runner.exited'
+                    code = ('from pathlib import Path; import signal; '
+                            f'Path({str(ready)!r}).touch(); ' +
+                            ('signal.pause()' if hanging else
+                             f'Path({str(exited)!r}).touch(); raise SystemExit(7)'))
+                    proc = subprocess.Popen([PYTHON, '-c', code])
+                    try:
+                        # Start the reduced watchdog only after the stub ran.
+                        # Startup speed is deliberately outside this control.
+                        await_file(ready, proc)
+                        def exercise(case):
+                            if wait == 'process':
+                                case.assertEqual(proc.wait(), 0)
+                            elif wait == 'file':
+                                await_file(done, proc)
+                            else:
+                                await_file(done, exited=exited)
+                        self.check_failure(exercise, hanging, timeout=1 if hanging else 30)
+                    finally:
+                        if proc.poll() is None: proc.kill()
+                        proc.wait()
+                    self.assertTrue(ready.exists())
+                    print(f"negative {wait}: {'outer guard caught hang' if hanging else 'wrong exit rejected immediately'}")
+
+    def test_socket_ready_wait_controls(self):
+        for hanging in (True, False):
+            with self.subTest(hanging=hanging), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                inspector = base / 'bridge_owner.py'
+                shutil.copy(TREE / 'tests/bridge_owner.py', inspector)
+                ready = base / 'http.ready'
+                socket_inspector(inspector, ready)
+                if not hanging:
+                    ready.write_text(str(os.getpid() + 100000))
+                with socket.socket() as listener:
+                    listener.bind(('127.0.0.1', 0))
+                    listener.listen()
+                    proc = subprocess.Popen([PYTHON, str(inspector),
+                        str(listener.getsockname()[1]), str(os.getpid())],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    try:
+                        # Accept proves the probe reached the real socket;
+                        # only then start the negative-control watchdog.
+                        connection, _ = listener.accept()
+                        connection.close()
+                        def exercise(case):
+                            out, err = proc.communicate()
+                            case.assertEqual(proc.returncode, 0, err)
+                        self.check_failure(exercise, hanging, timeout=1 if hanging else 30)
+                    finally:
+                        if proc.poll() is None: proc.kill()
+                        proc.communicate()
+                print(f"negative socket-ready: {'outer guard caught hang' if hanging else 'foreign PID rejected immediately'}")
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

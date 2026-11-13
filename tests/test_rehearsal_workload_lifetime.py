@@ -11,19 +11,95 @@ import math
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
-
-import demo_rehearsal as dr
-import live_loop_workload as loop
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class WorkloadLifetime(unittest.TestCase):
+class HangGuardTestCase(unittest.TestCase):
+    # Fixture completion is a state, not a performance promise. One outer
+    # watchdog covers the whole test (including setup, loops and cleanup).
+    hang_timeout = 300
+
+    def run(self, result=None):
+        previous = signal.getsignal(signal.SIGALRM)
+        def expired(signum, frame):
+            # subTest normally catches assertions and continues the loop. A
+            # hang must abort that loop too, rather than consume the watchdog.
+            if self._outcome is not None:
+                self._outcome.result.failfast = True
+            raise AssertionError("outer hang guard expired")
+        signal.signal(signal.SIGALRM, expired)
+        started = time.monotonic()
+        timer = signal.setitimer(signal.ITIMER_REAL, self.hang_timeout)
+        try:
+            return super().run(result)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+            if timer[0]:
+                signal.setitimer(signal.ITIMER_REAL,
+                                 max(.000001, timer[0] - (time.monotonic() - started)), timer[1])
+
+
+def run_wait_control(action, timeout):
+    """Run a deliberately broken fixture through the real unittest watchdog."""
+    class Control(HangGuardTestCase):
+        hang_timeout = timeout
+
+        def runTest(self):
+            action(self)
+
+    result = unittest.TestResult()
+    Control().run(result)
+    return result
+
+
+def socket_inspector(path, ready=None):
+    """Replace only OS listener discovery in a disposable fixture copy.
+
+    The drivers still execute the real ownership decision and fail-closed
+    CLI. Fixture HTTP servers publish their PID after listen(); a connect
+    verifies the socket, and that signal identifies its actual owner.
+    The preflight-only fixture needs only occupied versus free.
+    """
+    source = path.read_text()
+    start = source.index('def listeners(port):')
+    end = source.index('\ndef main():', start)
+    probe = r'''
+def listeners(port):
+    import socket
+    from pathlib import Path
+    import time
+    try:
+        with socket.create_connection(('127.0.0.1', port)):
+            pass
+    except ConnectionRefusedError:
+        return []
+    ready = READY
+    if ready is None:
+        return [{os.getpid()}]  # preflight refuses every occupied port
+    ready = Path(ready)
+    while not ready.exists():
+        time.sleep(.01)
+    return [{int(ready.read_text())}]
+
+'''.replace('READY', repr(str(ready)) if ready is not None else 'None')
+    path.write_text(source[:start] + probe + source[end:])
+
+
+class WorkloadLifetime(HangGuardTestCase):
+    def setUp(self):
+        global dr, loop
+        import demo_rehearsal as dr
+        import live_loop_workload as loop
+
     def launch_argv(self, directory):
         # Execute the actual controlled-load block. Commands record their argv
         # instead of connecting to PostgreSQL; shell startup probes are no-ops.
@@ -44,7 +120,7 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
 '''
         run = subprocess.run(["bash", "-c", prelude + block + "\nwait\n"],
                              env=dict(os.environ, CAPTURE=directory),
-                             capture_output=True, text=True, timeout=10)
+                             capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         return [(Path(directory) / name).read_text().splitlines()
                 for name in ("pgbench.args", "loop.args")]
@@ -139,13 +215,24 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
                 workload.stop.assert_called_once_with(keep_table=False)
 
     def test_plan_preflight_before_postgres_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests = root / "tests"
+            tests.mkdir()
+            for name in ("demo_rehearsal.sh", "testutil.sh", "live_daemon_lib.sh",
+                         "bridge_owner.py", "demo_rehearsal_lib.py", "ui_live_smoke_lib.py"):
+                shutil.copy(ROOT / "tests" / name, tests / name)
+            socket_inspector(tests / "bridge_owner.py")
+            self.check_plan_preflight(root)
+
+    def check_plan_preflight(self, root):
         for duration in ("0", "nan", "inf", "nonsense", "0.01", "10", "35"):
             with self.subTest(duration=duration):
                 # An unavailable version bounds even a misplaced preflight to
                 # discovery; this test must never start load on a gate box.
-                run = subprocess.run(["bash", "tests/demo_rehearsal.sh", "--pg-version", "999"], cwd=ROOT,
+                run = subprocess.run(["bash", "tests/demo_rehearsal.sh", "--pg-version", "999"], cwd=root,
                                      env=dict(os.environ, DURATION_MIN=duration),
-                                     capture_output=True, text=True, timeout=10)
+                                     capture_output=True, text=True)
                 self.assertNotEqual(run.returncode, 0)
                 output = run.stdout + run.stderr
                 if duration == "35":
@@ -178,6 +265,45 @@ WORKLOAD_LOG="$CAPTURE/loop.log"
             self.assertEqual(dr.main(), 1)
             self.assertIn("REFUSING rehearsal plan", output.getvalue())
             reset.assert_not_called()
+
+
+class CompletionWaitControls(HangGuardTestCase):
+    def test_shell_completion_waits_reject_hangs_and_fast_wrong_results(self):
+        real_run = subprocess.run
+        for name in ("launch_argv", "check_plan_preflight"):
+            for hanging in (True, False):
+                with self.subTest(wait=name, hanging=hanging), tempfile.TemporaryDirectory() as tmp:
+                    reached = Path(tmp) / "reached"
+                    stub = ("from pathlib import Path; import os, signal; "
+                            f"Path({str(reached)!r}).touch(); "
+                            "os.kill(os.getppid(), signal.SIGUSR1); " +
+                            ("signal.pause()" if hanging else "raise SystemExit(7)"))
+
+                    def command(*args, **kwargs):
+                        return real_run([sys.executable, "-c", stub], **kwargs)
+
+                    def exercise(case):
+                        getattr(WorkloadLifetime, name)(case, tmp)
+
+                    # Arm the shortened control deadline on the child's ready
+                    # event, so a loaded Mac cannot spend it on Python startup.
+                    previous = signal.signal(signal.SIGUSR1, lambda *_:
+                        signal.setitimer(signal.ITIMER_REAL, 1 if hanging else 30))
+                    try:
+                        with patch.object(subprocess, "run", side_effect=command):
+                            result = run_wait_control(exercise, 300)
+                    finally:
+                        signal.signal(signal.SIGUSR1, previous)
+                    self.assertTrue(reached.exists(), "stub must reach the intended wait")
+                    self.assertFalse(result.wasSuccessful())
+                    self.assertFalse(result.errors, result.errors)
+                    failures = "\n".join(text for _, text in result.failures)
+                    if hanging:
+                        self.assertIn("outer hang guard expired", failures)
+                    else:
+                        self.assertNotIn("outer hang guard expired", failures)
+                        self.assertIn("AssertionError", failures)
+                    print(f"negative {name}: {'outer guard caught hang' if hanging else 'wrong exit rejected immediately'}")
 
 
 if __name__ == "__main__":
