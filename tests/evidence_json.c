@@ -426,10 +426,12 @@ static void record(const json_node *n, pgwt_evidence_record *out)
     else if (literal(kind, "ATTACH_OK")) out->kind = PGWT_EVIDENCE_ATTACH_OK;
     else if (literal(kind, "TRANS")) out->kind = PGWT_EVIDENCE_TRANS;
     else if (literal(kind, "FRONTIER")) out->kind = PGWT_EVIDENCE_FRONTIER;
+    else if (literal(kind, "END")) out->kind = PGWT_EVIDENCE_END;
     else out->kind = PGWT_EVIDENCE_OTHER;
     if (out->kind != PGWT_EVIDENCE_FRONTIER && out->kind != PGWT_EVIDENCE_OTHER)
         ok = pid_field(member(n, "pid"), &out->pid) && ok;
-    if (out->kind == PGWT_EVIDENCE_LIFE || out->kind == PGWT_EVIDENCE_ATTACH_OK)
+    if (out->kind == PGWT_EVIDENCE_LIFE || out->kind == PGWT_EVIDENCE_ATTACH_OK ||
+        out->kind == PGWT_EVIDENCE_END)
         ok = optional_uint(member(n, "fork"), &out->has_fork, &out->fork) && ok;
     switch (out->kind) {
     case PGWT_EVIDENCE_LIFE:
@@ -455,6 +457,10 @@ static void record(const json_node *n, pgwt_evidence_record *out)
     case PGWT_EVIDENCE_FRONTIER:
         counters(member(n, "counters"), &out->counters);
         ok = KEYS(n, "kind", "t", "counters") && ok;
+        break;
+    case PGWT_EVIDENCE_END:
+        ok = event_string(member(n, "reason"), &out->end_reason) && ok;
+        ok = KEYS(n, "kind", "t", "pid", "fork", "reason") && ok;
         break;
     case PGWT_EVIDENCE_OTHER: break; /* Public API must refuse this kind. */
     }
