@@ -1,4 +1,4 @@
-"""Physical file-chain perturbations; values come only from reference/replay.py."""
+"""Physical file-chain perturbations; values come only from r3/reference/replay.py."""
 import copy
 import random
 
@@ -11,10 +11,31 @@ def split_capture(case, rng):
         records = original["records"]
         cuts = sorted([0, len(records), rng.randrange(len(records)+1),
                        rng.randrange(len(records)+1)])
+        baseline = copy.deepcopy(original.get("loss_baseline"))
+        highest = None
         for no, (a, b) in enumerate(zip(cuts, cuts[1:])):
             f = dict(original, file_no=no, previous=no-1 if no else None,
-                     records=records[a:b])
+                     loss_baseline=copy.deepcopy(baseline), records=records[a:b])
             files.append(f)
+            for record in records[a:b]:
+                kind = record.get("kind")
+                vector = record.get("counters")
+                if kind == "VOID":
+                    baseline = copy.deepcopy(vector)
+                elif original.get("qualified") is True and kind in ("FRONTIER", "ATTACH_OK"):
+                    if kind == "FRONTIER" and highest is not None and record["t"] <= highest:
+                        break  # This capture already stops at this record.
+                    readable = (isinstance(vector, list) and len(vector) == 15
+                                and all(type(v) is int and 0 <= v < 1 << 64 for v in vector))
+                    if vector is not None and not readable:
+                        break  # Malformed records cannot supply a baseline.
+                    if baseline is None or vector != baseline:
+                        if (readable and baseline is not None
+                                and any(a < b for a, b in zip(vector, baseline))):
+                            vector = None
+                        baseline = copy.deepcopy(vector)
+                    elif kind == "FRONTIER":
+                        highest = record["t"]
     c["files"] = files
     return c
 
@@ -39,7 +60,8 @@ def perturb(case, rng, mode):
     elif mode == 7:
         files[1]["version"] = 6
     elif mode == 8:
-        # Successor descriptors do not reset the capture's initial gates.
+        # Qualification stays capture-local; a changed successor baseline stops
+        # at the descriptor rather than silently resetting loss history.
         files[1]["qualified"] = not files[0]["qualified"]
         files[1]["loss_baseline"] = [7]*15
     return c
@@ -113,8 +135,8 @@ def generate(fixture, count=800, seed=0x868006):
             if f.get("present", True):
                 captures[f["capture"]]["records"].extend(f["records"])
         base["files"] = list(captures.values())
-        # Duplicate a whole file with a frontier: its repeated publication is
-        # an ambiguity, rather than silently deduplicated physical evidence.
+        # Duplicate a whole file with a frontier: r3 stops at the repeated
+        # descriptor, preserving its earlier prefix.
         if i % 9 == 3:
             c = copy.deepcopy(base)
             c["files"].insert(1, copy.deepcopy(c["files"][0]))
