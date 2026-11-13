@@ -8,6 +8,7 @@
 - **DECISION:** Internal breaches require a VOID publication attempt followed by nonzero exit; v2’s normative rule only restricted when exit was allowed.
 - **DECISION:** Check duplicate identity before timestamp faults, and report perf timestamp regression before the overlapping seal violation; this fixes diagnostic precedence.
 - **CLARIFICATION:** Examples now specify CPU membership, generations, timestamps, sequence baselines, fault detection times, counters and starting state; these fill missing inputs.
+- **DECISION:** Direct-attach revision r2 (2026-11-13): replace DECISIONS 25/25a, add 25b/25c, qualified fork-seed input and prior-interval output markings, adapter obligations and rows 32–43. Fable challenged the draft; r2 accepts all six points.
 
 ## 2. Inputs and ordering
 
@@ -50,8 +51,32 @@ Do not declare a gap merely because a higher `q` arrives first.
 During complete eligible-batch validation, each generation’s records, in their prospective output order, must have consecutive values beginning at its `next_q`.
 A missing expected value at that point causes `sequence_gap` → VOID. Advance sequence state only with successful release.
 Validate cross-source tie ambiguity at the same eligible-batch stage.
-For a generation proved newly created during the current epoch by valid FORK and INIT records, those records supply its sequence-initialization proof: initialize its `next_q` to 1 before eligible-batch validation. (DECISION 25, added 2026-11-11 after the P1 review.)
-DECISION 25 applies only to a `(pid,g)` with no sequence state and no earlier lifecycle record in this or any earlier epoch; any other generation of that pid must have its EXIT ordered before this FORK; and the proof takes effect only when FORK and INIT precede the generation's first TRANS/MARKER in validated output order. Otherwise the generation is `unknown_evidence`, in both N and Q modes. (DECISION 25a, lead, 2026-11-11, from Fable's challenge.)
+A generation newly created during the current epoch establishes creation through either valid FORK+INIT records or a valid FORK carrying the qualified fork-seed proof of 25b. Either route initializes Q-mode `next_q=1` before validating that generation’s TRANS/MARKER sequence. First arrival never establishes the sequence baseline. (DECISION 25, revised 2026-11-13 in direct-attach r2.)
+This admission applies only to a `(pid,g)` with no prior sequence state or lifecycle history in this or earlier epochs, apart from the records constituting this creation proof. Every previously known generation of that PID must have EXIT ordered before this FORK. All records required by the selected proof must precede its first TRANS/MARKER in validated output order; otherwise `unknown_evidence` causes VOID in both modes.
+A qualified fork-seed FORK selects 25b even when a genuine INIT also exists. INIT neither reinitializes sequence state nor removes 25c’s coverage restriction. An invalid direct-attachment attempt cannot be laundered into the legacy route by a later INIT. (DECISION 25a, revised 2026-11-13 in direct-attach r2, accepting Fable’s challenge.)
+
+A qualified proof binds the FORK, fork-created state, producing child task and attached task to the same nonzero lifetime cookie `g`. One shared allocation authority serves BPF and daemon allocation paths: `(pid,g)` is never reissued to a different lifetime within retained history, including across REARM; allocator reset, wrap or exhaustion cannot silently reuse it. REARM retains an existing task’s cookie.
+Each `on_fork` installs fresh state and a fresh cookie, replacing stale PID state before child evidence production; failure is counted and disqualifies the proof. Neither inherited state nor state created outside `on_fork` qualifies. Each queued record retains its producing task’s cookie; resolving it from the PID’s current map entry is forbidden.
+Attachment order is: open the watchpoint disabled on a lifetime-bound task → read fork-state cookie → compare with the consumed FORK and target task → seed without overwriting cookie, sequence or concurrent producer updates → enable. Task binding and state identity must remain valid throughout; a later matching read cannot repair an earlier enable.
+Cleanup deletes only the matching lifetime’s state and closes only its attachment. Cookie comparison and deletion must be atomic or serialized against replacement; a userspace lookup followed by unconditional PID deletion is insufficient.
+In Q, allocation starts at 1 and covers every TRANS/MARKER emission attempt across all sources, including failures; attachment, INIT, reseeding and migration cannot reset it. All sources must establish the continuous post-enable observation regime required by 25c. (DECISION 25b, added 2026-11-13 in direct-attach r2.)
+
+Add input `bool fork_seed_proved` to `pgwt_merge_record`, meaningful only on FORK and default false; keep `identity_known` separate.
+Reuse `g` under 25b’s shared allocation rule. Existing attachment proofs continue to govern other routes. No fabricated INIT, new input kind, active-epoch REARM or counter-vector extension is required.
+
+**Adapter truth table:** Each negative case changes only the stated fact from a fully qualified case; unknown facts count as false. A failed attempted direct attachment must additionally report `FAULT(unknown_evidence,d,C)` before trusted release, preventing fallback through a real INIT.
+
+| Producer fact | `fork_seed_proved` | Required mutant |
+|---|---:|---|
+| All 25b/25c obligations proved | true | Force false; row 32’s successful output must fail |
+| State created outside `on_fork` | false | Accept any existing map entry |
+| Enable preceded cookie visibility, later read matches | false | Accept the later matching read |
+| FORK cookie differs from attached task/state | false | Resolve identity using current PID alone |
+| Stale fork entry adopted, cookie reused, or cleanup can delete a replacement | false | Accept `BPF_NOEXIST` fallback or unguarded deletion |
+| Cookie/q overwritten by preseed or INIT | false | Treat reseeded state as preserving provenance |
+| First marker cannot establish fresh post-enable state | false | Treat marker arrival alone as a coverage boundary |
+
+**Producer obligations:** Implement the allocation authority, fresh fork replacement, task-bound attachment order, serialized conditional cleanup, emission-time cookies, preserved sequence allocation and reliable failure accounting. Qualify first-record state establishment across every source; make INIT handling idempotent or report the coverage break. A pure adapter cannot manufacture these facts.
 
 ## 3. Boundary and release rules
 
@@ -91,6 +116,15 @@ Here, an output means successful publication to the designated output sink after
 A rejected writer call is not a DATA output. If an earlier output in the same release attempt succeeded before a later failure, it remains observable but belongs to the uncertified suffix discarded by VOID.
 No frontier certifies a partially failed release.
 
+For a 25b generation, the first successfully released TRANS/MARKER carries `prior_interval_certified=false`. Its old_event, duration and other quantities describing the incoming interval are unavailable for numerical use, including completed-wait counts. Preserve their raw bytes; do not zero, clamp or repair them.
+That record establishes the generation’s coverage lower bound at its semantic timestamp and ordered position. Certification extends forward only; before it, coverage is unavailable. Subsequent TRANS/MARKER records carry `prior_interval_certified=true`, subject to ordinary validity rules. FRONTIER cannot certify time before this lower bound; VOID and REARM retain their existing effects.
+The first record must establish fresh, coherent state for subsequent intervals after observation is enabled. If it is a MARKER, the producer must also refresh the wait-state/time baselines it would otherwise leave stale. Pre-enable markers or stale marker snapshots cannot establish this boundary; without this qualification, the direct route remains unknown evidence. (DECISION 25c, added 2026-11-13 in direct-attach r2.)
+
+A genuine INIT retains its original bootstrap-observation timestamp and is released normally; handling it for an already directly attached generation must be idempotent, with no disable, reattach or state overwrite.
+
+Add output-only `bool prior_interval_certified` to `pgwt_merge_output`, meaningful on TRANS/MARKER. The core computes it in validated release order and commits its first-record state only on successful publication. (Added by the lead after review, 2026-11-13:) Every TRANS/MARKER of a generation not admitted through 25b (an attached generation, or one created by FORK+INIT under 25) carries `prior_interval_certified=true`, so rows 1-31 are unchanged; only a 25b generation's first released TRANS/MARKER carries false.
+Persist the output marking with the record; downstream consumers must retain its lower-bound meaning.
+
 Idle time, an empty buffer, newest observed shared-ring timestamp and elapsed grace periods never substitute for boundaries.
 Failure to establish a boundary means hold, not exit or speculative release.
 
@@ -114,6 +148,8 @@ Use the observed vector, including an increment caused by the failure; use `unkn
 Each separately delivered LOSS/FAULT report causes a VOID even if the epoch is already suspended.
 A counter observation reports a newly observed change once; rereading the same vector does not generate another report. This observation checkpoint does not replace the epoch’s valid baseline.
 While suspended, suppress trusted DATA/TEXT callbacks and FRONTIERs; continue fault reporting.
+
+Any subsequent attachment interruption or destructive reseed is a counted coverage fault, delivered as `FAULT(unknown_evidence,d,C)` before further trusted release; it requires suspension and explicit recovery. Missing FORK, failed identity/provenance checks and unproved attachment ordering remain unknown evidence; reliable loss counters, including INIT loss, still cause VOID independently. Cookies never cancel loss, revive epochs or establish boundaries.
 
 REARM is accepted only while the epoch is suspended. Reject REARM in an active epoch without output or any state change, preserving staged DATA/TEXT, sequence state, boundaries and the counter baseline. (DECISION 28, added 2026-11-11 after the P1 review.)
 A rejected REARM returns a distinct `rearm_rejected` status to the caller and is never silent; its counter observation `C` is still processed as `CHECK(d,C)`. (DECISION 28a, lead, 2026-11-11, from Fable's challenge.)
@@ -192,3 +228,26 @@ All rows keep the daemon alive except row 20.
 | 29 | §5 default start, only A/B attached. `D=(pid=30,g=1)` is new. `D9@P0(Q:q1)`, `FORK_D10@L`, `INIT_D10@L`, `S(10)`, `S(11)`; all observations use `d=12,C=C0`. | `VOID12[C0,unknown_evidence]` in both modes: at W=10 D9 is eligible but D's FORK/INIT (t=10) are not, so no creation proof precedes D's first TRANS (DECISION 25a). The later `S(11)` produces no output (suspended). |
 | 30 | Row 27's start and first three inputs: `S(11)` at `d=14,C=C0`; `LOSS(P0,1,d=15,C=Ce)`; `REARM(d=16,C=Ce,attachment_proofs)` accepted. Then `S(5)` at `d=17,C=Ce`. | `F10 → VOID15[Ce,perf_lost]`; after REARM, release cutoffs are 5 but F4 is at or below the retained F10, so no FRONTIER is emitted (DECISION 27a). |
 | 31 | §5 default start (active, baseline C0). `REARM(d=12,C=Ce,attachment_proofs)`. | REARM rejected with status `rearm_rejected` (DECISION 28/28a); its observation is processed as `CHECK(d=12,C=Ce)`: `VOID12[Ce,counter_change]`. |
+
+Rows 32–43 independently use the §5 defaults, with only A/B initially attached and new `D=(pid=30,g=1)` unless overridden.
+Every observation uses `d=20,C=C0` unless stated otherwise; rows apply to both modes unless distinguished.
+Source positions and `S(w)` expand as above; no additional inputs or outputs are implied. There is no nonzero exit or epoch invalidation.
+`K_D10=FORK_D10@L{fork_seed_proved=true}`; ordinary FORK has `fork_seed_proved=false`.
+All records have `identity_known=true`, ready dependencies and unchanged payloads. Output FORK preserves its input proof bit.
+`[U]` means explicit output `prior_interval_certified=false`; `[T]` means `prior_interval_certified=true`. Listed q values apply only in Q.
+`Ci` is C0 except `lifecycle_init_drop=1`.
+
+| # | Fully specified input / starting state | Expected output |
+|---|---|---|
+| 32 | `K_D10, D12@P0(q1), S(13)` | `FORK_D10 → D12[U] → F12`. |
+| 33 | `FORK_D10@L{fork_seed_proved=false}, D12@P0(q1), S(13)` | `VOID20[C0,unknown_evidence]`. This single core row replaces draft r1 rows 33/36; their producer causes are distinguished by the adapter truth table in §2. |
+| 34 | Override `D=(pid=10,g=2)`; attached A has no EXIT. `K_D10, D12@P0(q1), S(13)` | `VOID20[C0,unknown_evidence]`. |
+| 35 | `D12@P0(q1), S(13)` | `VOID20[C0,unknown_evidence]`; fork-seeded state without a delivered FORK is insufficient even with C0. |
+| 36 | `K_D10, INIT_D11@L, D12@P0(q1), S(13)` | `FORK_D10 → INIT_D11 → D12[U] → F12`. |
+| 37 | `K_D10, D12@P0(q2), S(13)` | N: `FORK_D10 → D12[U] → F12`. Q: `VOID20[C0,sequence_gap]`. |
+| 38 | `D9@P0(q1), K_D10, S(10), S(13)` | `VOID20[C0,unknown_evidence]`. |
+| 39 | `D12@P0(q1), K_D10, S(13)` | `FORK_D10 → D12[U] → F12`. |
+| 40 | `K_D10, D12@P0(q1), S(13), INIT_D14@L, D15@P0(q2), S(16)` | `FORK_D10 → D12[U] → F12 → INIT_D14 → D15[T] → F15`. |
+| 41 | `K_D10, D12@P0(q1), S(13), FAULT(unknown_evidence,20,C0), S(16)` | `FORK_D10 → D12[U] → F12 → VOID20[C0,unknown_evidence]`; models a reported reattachment break. |
+| 42 | `K_D10, MARKER_D12@E(q1), D14@P0(q2), S(15)`; marker satisfies 25c’s fresh-state obligation. | `FORK_D10 → MARKER_D12[U] → D14[T] → F14`. |
+| 43 | Every input observes Ci. `CHECK(20,Ci), K_D10, D12@P0(q1), S(13)` | `VOID20[Ci,counter_change]`. |
