@@ -79,6 +79,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_phase_capability test_phase_probe \
             test_core_wait_time_contract \
             test_core_evidence_contract \
+            test_core_evidence_codec \
             test_core_merge_contract \
             test_ringbuf_metrics
 
@@ -1170,6 +1171,9 @@ test_core_wait_time_contract: test_core_wait_time_contract.c ../src/core/wait_me
 # evidence-v1 U1: portable logical replay, independently frozen projections/results.
 test_core_evidence_contract: test_core_evidence_contract.c evidence_json.c evidence_json.h ../src/core/evidence_replay.c ../src/core/evidence_replay.h ../src/core/wait_metrics.c ../src/core/contract_json.c ../src/core/pgwt_core.h ../src/core/contract_json.h
 	$(CC) $(CFLAGS) -std=c11 -o $@ $(filter %.c,$^)
+
+test_core_evidence_codec: test_core_evidence_codec.c evidence_json.c evidence_json.h ../src/core/evidence_codec.c ../src/core/evidence_codec.h ../src/core/evidence_replay.c ../src/core/evidence_replay.h ../src/core/wait_metrics.c ../src/core/contract_json.c ../src/core/pgwt_core.h ../src/core/contract_json.h
+	$(CC) $(CFLAGS) -I../src -std=c11 -o $@ $(filter %.c,$^)
 test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
 
