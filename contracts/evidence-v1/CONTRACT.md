@@ -19,6 +19,10 @@ ordered file chain. The proposed file descriptor is `{version, boot, capture, fi
 qualified, loss_baseline}`: boot/clock domain and capture IDs; ordinal starting at 0; predecessor
 identity/integrity reference (`null` for 0); qualification boolean; initial 15-counter vector.
 A successor repeats the descriptor and retains capture identity. Restart creates a new capture.
+For a successor, loss_baseline must restate the running baseline at that file boundary (null if
+unknown), never reset it or report loss; a mismatch stops at that descriptor under §6.
+Within one input, a capture ID belongs to the boot named by its first validated descriptor;
+it cannot be reused by another boot. A conflicting descriptor is a chain fault under §6.
 Qualification asserts the capture prerequisites in section 3; absence/false permits no certificates.
 The descriptor and every dependency of a certificate must survive in the same validated prefix.
 A certificate is published only after its dependencies are flushed; power-loss durability additionally
@@ -153,18 +157,21 @@ The fresh fork assigns subsequent transitions to the new generation; a tainted o
 not compete for those timestamps. This establishes no exit time for the old generation.
 Retain previously verified LIFE facts and surviving certified prefixes; do not accept new lifetime
 updates for a tainted old generation. Do not extend its runs. No separate continuity proof exists.
+After §5 schema/counter handling and the recovery-time check below, an ATTACH_OK blocked by
+lifecycle uncertainty is ignored without creating a run or stopping the chain.
 A restart's provisional key is a capture-local handle, NOT proof of a different actual process; do not
 join or sum it with the prior capture's same PID. This version offers no cross-restart identity claim.
 
 LIFE establishes/refines lifetime independently of coverage. An exit without a certified terminal
 transition is still a known exit; it does not create an exit coverage certificate or close a wait.
-ATTACH_OK creates a new tentative run, replacing no earlier run. Overlapping attachments are invalid.
+ATTACH_OK creates a new tentative run, replacing no earlier run. Overlapping attachments as defined
+in §5 rule 2 are invalid and stop that capture's chain; touching runs retain §3's tied-transition rule.
 For reread, state=null gives a known nonwaiting state; state=event has UNKNOWN entry time.
 For a transition anchor, set state=new and entry=t (null if new=null), discarding the anchor's old side.
 Process later genuine transitions in run order: require old=current state; if entry is known, require
 `t-duration=entry` and append `[old,entry,t]` when old is a wait. If entry is unknown, discard that
 old interval, record an unrepresentable close at t, then set new state/entry=t. For null old, no wait
-is appended and its duration is not used to invent a wait. A mismatch invalidates the tentative suffix.
+is appended and its duration is not used to invent a wait. A mismatch stops the chain under §5.
 EXIT requires matching LIFE.exit, closes a known current wait normally, then leaves no open state.
 Unknown-entry EXIT is an unrepresentable close; the exit is not certified for the core.
 
@@ -190,6 +197,8 @@ capture, even when VOID.t lies outside the query. Retract results dependent on r
 Never use VOID.t as b. Replace the baseline with VOID.counters, including null for unknown;
 no recovery while it remains unknown.
 A later readable VOID can establish a baseline. Recovery attach.t must be >= the latest VOID.t.
+After §5 schema/counter handling, a recovery ATTACH_OK with t below the latest VOID.t stops at that
+ATTACH_OK under §5's prefix rule, before checking lifecycle eligibility.
 Only a fresh ATTACH_OK with identity eligible under the lifecycle rule starts each recovered run;
 FRONTIER alone cannot revive old attachments. Only certificates surviving revocation remain usable.
 
@@ -221,10 +230,64 @@ Pass only that candidate's coverage, closed waits, and terminal open to the core
 from this projection, not from storage; diagnostics refer to the projected evidence only.
 With valid LIFE but no candidate, pass coverage=[], waits=[], open=null. Missing/ambiguous LIFE
 sets the adapter's LIFE_INVALID flag (JSON reference equivalent: life=null), never fabricated [0,null].
-Run consistency failure discards the suffix back to its last valid certificate and acts as global VOID;
-contradictory LIFE invalidates that generation. Invalid certificates never certify their dependencies.
-An unexpected counter vector, malformed record, or unsupported evidence kind acts as global VOID
-at the preceding F; if framing/identity cannot be trusted, stop the file chain there instead.
+Contradictory LIFE invalidates that generation. Invalid certificates never certify their dependencies.
+
+A chain fault stops only the affected capture, using §6's prefix rule, without synthesizing a VOID.
+The stop boundary is immediately before the offending record (or descriptor), not its timestamp
+or a later FRONTIER at which validation detects it. Retain only still-valid certificates before
+that boundary, with F the latest of them or absent; prior VOID revocations remain effective.
+Discard uncertified run suffixes and tentative ENDs; reconstruct each retained run from its surviving
+certificates. Retain independently verified LIFE before the boundary, even if F is absent.
+Ignore the offending record and EVERY later record/file with that capture ID, including LIFE,
+VOID, reattachments, and otherwise valid FRONTIERs. No new baseline, uncertainty instant, exit,
+or certificate is inferred. A different capture ID remains readable independently.
+Resolve dependencies by §§1,3 before declaring a semantic fault; physical delay alone is not one.
+For pending END/run checks, use the next FRONTIER's dependency set, or the remaining prefix at EOF;
+if a fault is found, cut at the offending record and reject that FRONTIER, even if detection is later.
+
+The following rules resolve the six questions in reference/REPORT.md ("Ambiguous contract sentences found"); each chain stop retains the certificates just defined.
+Explicit lifecycle-taint, contradictory-LIFE, and ambiguous-assignment rules otherwise remain in force.
+
+1. A malformed logical record (including TRANS with required kind,t,pid,old,new,duration as in §2:
+   missing required field, wrong type/range, invalid field value or combination), an unparseable
+   record, or an unsupported kind stops at that record. No readable t,
+   counters, or per-backend identity is needed to cut a chain already identified by its descriptor.
+   Untrusted framing stops at the corrupt block/file boundary under §6; do not scan for a new record.
+2. An ATTACH_OK that overlaps a run of the same generation (one not ended by END or frozen by VOID
+   after dependency resolution), starts before LIFE.start, or starts at/after known LIFE.exit stops
+   at that ATTACH_OK. An END with e<a stops at that END.
+3. A schema-valid END addressed to a lifecycle-tainted generation is ignored without changing
+   retained evidence or stopping the chain; otherwise an END with zero or multiple addressable
+   runs after dependency resolution stops at that END.
+   Address by its pid/fork and t against eligible runs not ended by another END or frozen by VOID,
+   with a<=t and t<=known exit. The separate touching-run/tied-TRANS ambiguity still only withholds
+   affected certification (§3); it is not itself a chain fault.
+4. A FRONTIER with t<=H stops at that FRONTIER, including after VOID rollback. It does not update
+   F or H. H is the highest ever accepted publication, while only still-valid certificates survive.
+5. A descriptor reusing a capture ID with a different boot stops at that descriptor (§6).
+   The first boot's surviving prefix remains addressable; no record in the conflicting file or
+   any later file with that capture ID is read, even if the original boot reappears.
+6. After dependency resolution, a schema-valid TRANS outside every eligible run's timestamp extent
+   is ignored without a chain fault; frozen runs end at their retained endpoint, and delayed END
+   dependencies and transition anchors still resolve under §3.
+   A TRANS failing old=current state or, for a known wait entry, t-duration=entry stops at that
+   TRANS after timestamp/run resolution. Discard the transition anchor's old side; do not check
+   duration against an unknown entry or use null-old duration to invent a wait (§§3,4).
+   No attachment or frontier after the fault can repair it.
+
+A readable counter difference is a loss report, not by itself a chain fault. After schema validation
+and the FRONTIER t>H check, a FRONTIER or ATTACH_OK whose complete 15-entry uint64 vector differs
+from the baseline (or whose preceding baseline is unknown) is consumed ONLY as a §4 VOID with
+t equal to that record's t, counters equal to its vector, invalid_from=null, and an opaque diagnostic
+reason. It neither publishes a frontier nor creates a run; do this before ATTACH_OK run checks.
+If any component decreased from the known baseline, use counters=null under §2's reset/wrap rule;
+the decreased vector cannot establish a baseline. An explicitly null counter field likewise reports
+unknown loss state; a missing or wrongly shaped/typed field is malformed and stops the chain.
+Freeze at the preceding still-valid F, compare against the old baseline for lifecycle loss, and
+continue with §4's recovery requirements. Lifecycle uncertainty uses the offending record's t,
+never F; a later readable VOID or counter-difference report can restore an unknown baseline.
+No fields are invented for an unreadable record. Ordinary explicit VOID semantics are unchanged.
+
 Without qualification ignore ATTACH_OK/FRONTIER/END certificates; verified LIFE is retained.
 Here verified means an intact v5 LIFE in the validated file chain satisfying §2's field, timestamp,
 immutability and generation rules, with unambiguous identity under §4's lifecycle-loss rule.
@@ -243,6 +306,11 @@ Rotation with a complete validated same-capture chain changes no lifecycle, wait
 END/ATTACH and may split an open wait. Reading a suffix without its predecessor gives no continuity.
 Missing/corrupt/unsupported file or block stops chain replay at the last valid prefix certificate;
 this v1 does not salvage later files of that capture. Independent later captures remain readable.
+The same prefix rule applies to §5 record faults and a descriptor whose boot conflicts with the
+boot already bound to its capture ID. A boot conflict stops before that descriptor's records;
+keep the earlier boot's surviving certificates and ignore all later uses of that capture ID.
+With no surviving FRONTIER there is no exact coverage; independently verified LIFE is still usable.
+Chain termination never rejects unrelated captures and never resumes within the stopped capture.
 Restart always requires LIFE and fresh ATTACH_OK under a new capture, even within the same boot;
 no stitching over downtime, no inherited frontiers, no exit inferred for survivors. A boot change
 creates a different clock domain; windows cannot cross it. Loss history resets only with that new capture.
@@ -259,6 +327,8 @@ Each JSON file contains `id,description,files,target,query`; all are INPUTS, wit
 `files` are ordered descriptors plus `records`; `previous` names the preceding file_no for these
 logical fixtures (a real codec also validates integrity). `present:false` denotes a missing file.
 `qualified` asserts section 3 for a scripted input, not an actual measured platform property.
-Each record has t. `target` is `{capture,pid,fork}`. The query is the unchanged core query and requests
+Each valid record has t. `target` is `{capture,pid,fork}`; capture selects the first validated
+descriptor's boot (§1), never a later conflicting boot. The query is the unchanged core query and requests
 both metrics. TRANS abbreviations above are existing block records, not extra EVIDENCE kinds.
-All fixture records/blocks are intact unless `present:false`; EOF is literal end of the records array.
+Fixture JSON framing is intact; `present:false` denotes an unavailable file. Logical records may violate
+the schema or semantic rules to exercise §5 faults. EOF is literal end of the records array.

@@ -1,0 +1,283 @@
+{
+  "id": "51_capture_boot_conflict_suffix",
+  "description": "A boot-2 descriptor reuses capture A after boot-1 FRONTIER 8; a later boot-1 successor also appears. Windows use the first descriptor clock domain. Query after the fault.",
+  "files": [
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 1,
+          "pid": 101,
+          "fork": 0,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "kind": "TRANS",
+          "t": 3,
+          "pid": 101,
+          "old": null,
+          "new": "PgSleep",
+          "duration": 2
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 8,
+          "counters": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "version": 5,
+      "boot": "boot-2",
+      "capture": "A",
+      "file_no": 0,
+      "previous": null,
+      "qualified": true,
+      "loss_baseline": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "present": true,
+      "records": [
+        {
+          "kind": "LIFE",
+          "t": 0,
+          "pid": 101,
+          "fork": 0,
+          "start": 0,
+          "start_known": true,
+          "exit": null
+        },
+        {
+          "kind": "ATTACH_OK",
+          "t": 1,
+          "pid": 101,
+          "fork": 0,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "kind": "TRANS",
+          "t": 3,
+          "pid": 101,
+          "old": null,
+          "new": "PgSleep",
+          "duration": 2
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 24,
+          "counters": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "version": 5,
+      "boot": "boot-1",
+      "capture": "A",
+      "file_no": 1,
+      "previous": 0,
+      "qualified": true,
+      "loss_baseline": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "present": true,
+      "records": [
+        {
+          "kind": "ATTACH_OK",
+          "t": 16,
+          "pid": 101,
+          "fork": 0,
+          "method": "reread",
+          "seed": null,
+          "state": null,
+          "counters": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "kind": "TRANS",
+          "t": 18,
+          "pid": 101,
+          "old": null,
+          "new": "PgSleep",
+          "duration": 2
+        },
+        {
+          "kind": "FRONTIER",
+          "t": 24,
+          "counters": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    }
+  ],
+  "target": {
+    "capture": "A",
+    "pid": 101,
+    "fork": 0
+  },
+  "query": {
+    "event": "PgSleep",
+    "from": 16,
+    "to": 24
+  }
+}

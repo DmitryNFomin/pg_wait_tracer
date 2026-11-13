@@ -3673,14 +3673,9 @@ static int window_fidelity_ranges(const struct pgwt_server *srv,
  * that web/static/app.js renders verbatim; dump_summary()'s text report uses
  * both fields too.
  *
- * Two WINDOW refusals deliberately carry a MORE SPECIFIC hint instead of the
- * table's: handle_top_queries (#694's sentence, which begins with the table's
- * own "narrow the time range" and then explains why no filter can help) and a
- * query-filtered top_events/top_sessions/heatmap (#526's "a query filter
- * forces the exact path"). Both are merged, separately tested behaviour; they
- * elaborate, they do not contradict, and the test file asserts exactly that.
- * Every other refusal, of every kind, gets the table sentence verbatim in
- * both places.
+ * The top_queries WINDOW refusal adds why no filter reduces its load.
+ * Other WINDOW refusals use the table sentence regardless of query filters:
+ * summaries are disabled, so unfiltered requests also read raw events.
  *
  * A table rather than three switch statements because the defect #728 exists
  * to end is two copies of one sentence drifting apart. Fixing a divergence
@@ -3723,10 +3718,11 @@ static const struct pgwt_overload_arm pgwt_overload_arms[] = {
          * product can honour -- master's line offered it. The three callers
          * that pass 0 unconditionally take the second string instead, via
          * server_load_events_fi_all_pids(). */
-        .with_pid_advice = "narrow the time range, or add a pid filter: this "
+        .with_pid_advice = "the raw event limit was exceeded; narrow the time "
+                           "range, or add a pid filter: this "
                            "load reads every pid and applies the request's "
                            "pid filter while loading",
-        .without_pid_advice = "narrow the time range",
+        .without_pid_advice = "the raw event limit was exceeded; narrow the time range",
     },
     [PGWT_LOAD_PREFIX] = {
         .subject  = "the execution-marker prefix before this window holds",
@@ -5026,60 +5022,11 @@ static int reject_overload(struct pgwt_server *srv,
         cJSON_AddStringToObject(root, "error", "window too large");
         cJSON_AddStringToObject(root, "code", "window_too_large");
         cJSON_AddNumberToObject(root, "max_events", load_max_events());
-        /* #526: only explain a query-forced raw load where that is true.
-         * TRUE: handle_top_events (query_id == 0 guard), handle_top_sessions
-         * (sessions_filter_needs_raw, which includes query_id != 0),
-         * handle_heatmap and -- #684 -- handle_aas and handle_time_model
-         * (the same query_id == 0 conjunct): reject_overload is reached only
-         * from their raw else branches, so there a filter really is what
-         * forced the exact path. All five forward req->filter.pid into the
-         * load, so the table's pid reduction is real on every one of them.
-         *
-         * handle_top_queries gets its OWN arm, chosen WITHOUT looking at the
-         * filter, because for it no filter can help: it calls
-         * server_load_events_fi_all_pids (pid 0 unconditionally), and
-         * server_load_events_fi_mode has no query pushdown at all, so
-         * unfiltered, pid-filtered, query-filtered and both-filtered
-         * requests hand the loader identical arguments. max_events is
-         * enforced during the load, and this refusal precedes the only call
-         * that receives req->filter, so "add a pid/query filter" there is
-         * advice that cannot work -- and web/static/app.js renders the hint
-         * verbatim to the user. The earlier note here claimed Queries "keeps
-         * the original hint" because it loads raw regardless; that was the
-         * reason the hint was WRONG, not a reason to keep it.
-         *
-         * #728: EVERY hint below contains the shared table's sentence
-         * (pgwt_overload_arms) VERBATIM. Two command arms add an explanation
-         * the kind cannot know -- a query-filtered top_events/top_sessions/
-         * heatmap/aas/time_model (#526, #684) and top_queries (#694) -- but
-         * they COMPOSE it
-         * around the table's sentence rather than restating it, so no arm
-         * can say something the stderr line does not. Round 5 changed that:
-         * #526's arm used to be a literal ending "; narrow the time range",
-         * which both diverged from the log and withheld the pid reduction
-         * that is real for those three commands.
-         * tests/test_data_window_bound.py asserts the containment on every
-         * leg, and byte equality wherever no arm composes.
-         *
-         * Round 4 removed the old generic fallback,
-         * "narrow the time range or add a pid/query filter". It was the last
-         * copy of the advice this issue is about, and leaving it made the
-         * commonest path -- a plain window refusal -- say one thing in the
-         * operator's log and another on the user's screen.
-         *
-         * Keyed on the LOAD, never on the command name: executions,
-         * exec_scatter, execution_detail and span_detail each perform a
-         * window load AND a prefix or context load, with a separate
-         * pgwt_load_info for each, and they refuse on either. A
-         * command-keyed prefix hint would be wrong exactly where it looked
-         * right. Scope and pushdown come from the load too
-         * (info->load_pid_scoped, info->load_pid_pushdown): a request
-         * carrying a pid filter can sit behind a load that dropped it, and
-         * three window callers drop it by design.
-         *
-         * This sits INSIDE the window_too_large else-branch, so the #333
-         * unreadable-file and allocation-failure refusals above keep their
-         * precedence: neither is ever reported as a range-size problem. */
+        /* Use the refusing load's sentence, including its pid scope and
+         * pushdown, regardless of query filters. With summaries disabled,
+         * every request reads raw events; a query filter does not cause this
+         * refusal. Keep this inside the size branch so unreadable files and
+         * allocation failures retain their own messages and precedence. */
         const char *sentence =
             overload_sentence(info->load_purpose, info->load_pid_scoped,
                               info->load_pid_pushdown);
@@ -5088,8 +5035,7 @@ static int reject_overload(struct pgwt_server *srv,
             /* #694's sentence, COMPOSED: the table's own sentence, then why
              * no filter helps. Not a literal, so the two cannot drift -- and
              * handle_top_queries loads all pids, so the table gives exactly
-             * "narrow the time range" and this reproduces #694's merged
-             * string byte for byte (tests/test_top_wait_backfill.c pins it).
+             * the all-pids refusal (tests/test_top_wait_backfill.c pins it).
              * If that caller ever started forwarding pid, the sentence would
              * change here and that C test would go red, which is the correct
              * alarm rather than a stale explanation. */
@@ -5098,33 +5044,6 @@ static int reject_overload(struct pgwt_server *srv,
                      "%s; Queries always reads raw events for every pid, "
                      "because execution statistics need every backend's "
                      "markers, so no filter reduces this load", sentence);
-            cJSON_AddStringToObject(root, "hint", hint);
-        } else if (info->load_purpose == PGWT_LOAD_WINDOW &&
-            req->filter.query_id != 0 &&
-            (strcmp(req->cmd, "top_events") == 0 ||
-             strcmp(req->cmd, "top_sessions") == 0 ||
-             strcmp(req->cmd, "heatmap") == 0 ||
-             strcmp(req->cmd, "aas") == 0 ||
-             strcmp(req->cmd, "time_model") == 0)) {
-            /* #526's explanation, then the table's sentence VERBATIM.
-             *
-             * Round 4 left this arm as a literal ending "; narrow the time
-             * range", which made it the one leg where the screen and the log
-             * disagreed -- and the hint withheld the pid reduction, which is
-             * real here: all three of these commands forward req->filter.pid
-             * into a load that discards other pids before counting. Saying
-             * "a query filter forced this" is extra information, not a
-             * reason to drop the reduction that works. Composing means the
-             * log's whole sentence is always present in the hint.
-             *
-             * #684 added `aas` and `time_model` to this arm: both now take
-             * the same query guard, so for them too it really is the filter
-             * that forced the exact path, and both forward req->filter.pid
-             * into their window load. */
-            char hint[512];
-            snprintf(hint, sizeof(hint),
-                     "a query filter forces the exact path, which loads raw "
-                     "events; %s", sentence);
             cJSON_AddStringToObject(root, "hint", hint);
         } else {
             cJSON_AddStringToObject(root, "hint", sentence);

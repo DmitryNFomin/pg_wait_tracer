@@ -1,0 +1,1087 @@
+[
+ {
+  "id": "34_malformed_record_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "35_malformed_record_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "36_unknown_kind_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "37_unknown_kind_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "38_frontier_counter_change_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "39_frontier_counter_change_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 6,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 6
+   },
+   "diagnostic": {
+    "recorded_ns": 6,
+    "covered_ns": 8,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 8,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "40_attach_counter_change_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "41_attach_counter_change_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "42_overlapping_attachment_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "43_overlapping_attachment_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "44_end_without_run_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "45_end_without_run_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "46_nonadvancing_frontier_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "47_nonadvancing_frontier_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 15
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 15
+   }
+  }
+ },
+ {
+  "id": "48_run_state_mismatch_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "49_run_state_mismatch_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "50_capture_boot_conflict_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 5
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 7
+   }
+  }
+ },
+ {
+  "id": "51_capture_boot_conflict_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "52_malformed_before_frontier_prefix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 1
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 1
+   }
+  }
+ },
+ {
+  "id": "53_malformed_before_frontier_suffix",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "54_independent_capture_after_fault",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 8,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 8
+   },
+   "diagnostic": {
+    "recorded_ns": 8,
+    "covered_ns": 8,
+    "required_ns": 8
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 8,
+    "required_ns": 8
+   }
+  }
+ },
+ {
+  "id": "55_run_duration_mismatch",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 23
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 23
+   }
+  }
+ },
+ {
+  "id": "56_attachment_before_life",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 7,
+    "required_ns": 23
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 7,
+    "required_ns": 23
+   }
+  }
+ },
+ {
+  "id": "57_nonadvancing_after_rollback",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "evidence_invalid"
+   ],
+   "diagnostic": {
+    "recorded_ns": null,
+    "covered_ns": null,
+    "required_ns": null
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "evidence_invalid"
+   ],
+   "diagnostic": {
+    "recorded_count": null,
+    "covered_ns": null,
+    "required_ns": null
+   }
+  }
+ },
+ {
+  "id": "58_counter_loss_fresh_fork",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 3,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 0,
+    "open_ns": 3
+   },
+   "diagnostic": {
+    "recorded_ns": 3,
+    "covered_ns": 5,
+    "required_ns": 5
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 0,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 5,
+    "required_ns": 5
+   }
+  }
+ },
+ {
+  "id": "59_frontier_counter_recovery",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 5,
+    "open_ns": 0
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 11,
+    "required_ns": 11
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 1,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 1,
+    "covered_ns": 11,
+    "required_ns": 11
+   }
+  }
+ },
+ {
+  "id": "60_attach_counter_recovery",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 4,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 4,
+    "open_ns": 0
+   },
+   "diagnostic": {
+    "recorded_ns": 4,
+    "covered_ns": 9,
+    "required_ns": 9
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 1,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 1,
+    "covered_ns": 9,
+    "required_ns": 9
+   }
+  }
+ },
+ {
+  "id": "61_blocked_attach_fresh_generation",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 5,
+    "open_ns": 0
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 10,
+    "required_ns": 10
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 1,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 1,
+    "covered_ns": 10,
+    "required_ns": 10
+   }
+  }
+ },
+ {
+  "id": "62_transition_outside_runs",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 5,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 5,
+    "open_ns": 0
+   },
+   "diagnostic": {
+    "recorded_ns": 5,
+    "covered_ns": 10,
+    "required_ns": 10
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 1,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 1,
+    "covered_ns": 10,
+    "required_ns": 10
+   }
+  }
+ },
+ {
+  "id": "63_recovery_before_void_time",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": null,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_ns": 0,
+    "covered_ns": 0,
+    "required_ns": 10
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": null,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "unavailable",
+   "reasons": [
+    "coverage_incomplete"
+   ],
+   "diagnostic": {
+    "recorded_count": 0,
+    "covered_ns": 0,
+    "required_ns": 10
+   }
+  }
+ },
+ {
+  "id": "64_end_after_blocked_attach",
+  "wait_time": {
+   "metric": "wait_time",
+   "version": 1,
+   "value": 4,
+   "unit": "ns",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "detail": {
+    "closed_ns": 4,
+    "open_ns": 0
+   },
+   "diagnostic": {
+    "recorded_ns": 4,
+    "covered_ns": 9,
+    "required_ns": 9
+   }
+  },
+  "completed_waits": {
+   "metric": "completed_waits",
+   "version": 1,
+   "value": 1,
+   "unit": "count",
+   "basis": "observed",
+   "completeness": "complete",
+   "reasons": [],
+   "diagnostic": {
+    "recorded_count": 1,
+    "covered_ns": 9,
+    "required_ns": 9
+   }
+  }
+ }
+]

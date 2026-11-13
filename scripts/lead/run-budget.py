@@ -28,6 +28,12 @@ def main():
     seconds = float(sys.argv[1])
     marker = Path(sys.argv[2])
     process = subprocess.Popen(sys.argv[3:], start_new_session=True)
+
+    def interrupted(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
     try:
         return process.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
