@@ -1,7 +1,8 @@
 # Codec revision r2 — independent challenge dispositions
 
 Reviewed: `fable-challenge.md`, CODEC.md, WORKED.md, the supplied replay source
-and `src/core/evidence_replay.h` at `33d9139e`, and
+and `src/core/evidence_replay.h` at `aa31b588` (master after #903; reviewed as local commit
+33d9139e, byte-identical replay files), and
 `contracts/evidence-v1/{CONTRACT.md,REVISION-r2.md}` on `origin/master` at
 `84779083f2fcf9a4a02e595bf041d14040927e7f`. This revision changes only the codec
 and worked-example design documents plus this disposition record. It does not
@@ -20,7 +21,7 @@ recovery still requires the §4 baseline/identity/attachment protocol. Section 6
 separately stops at a corrupt/unsupported file or block and retains the validated
 prefix. It does not turn a framed logical error into whole-input refusal.
 
-The replay at `33d9139e` contradicts this text: `scope()` rejects malformed
+The replay at `aa31b588` contradicts this text: `scope()` rejects malformed
 records, unknown kinds, and unknown-counter certificates before replay, returning
 PGWT_REPLAY_UNSUPPORTED without any retained result. Several consistency errors
 in `replay_file()` also take a whole-input unsupported path where §5 specifies

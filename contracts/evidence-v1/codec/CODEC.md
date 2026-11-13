@@ -4,7 +4,8 @@ Status: proposed normative byte contract, for `contracts/evidence-v1/CODEC.md`.
 This is a design, not a claim that the daemon emits or qualifies v5. It supplements
 CONTRACT.md and REVISION-r2.md without changing their replay semantics. Source
 baseline: `origin/master` at `84779083f2fcf9a4a02e595bf041d14040927e7f`;
-logical adapter types: local commit `33d9139e`. Revision r2 follows the logical
+logical adapter types: `aa31b588` (master after #903; reviewed as local commit 33d9139e, whose
+`src/core/evidence_replay.{c,h}` are byte-identical). Revision r2 follows the logical
 contract where that replay implementation disagrees; see REVISION-codec-r2.md,
 “CONTRACT vs REPLAY”. This is not a claim of compatibility with its error paths.
 
@@ -476,7 +477,7 @@ Unused C fields are initialized to zero/false. Known=false ignores value[];
 absent optionals ignore their value storage. No `unsupported_shape` bit is
 serialized; it reports an adapter failure. Do not pass partially decoded records
 to replay. Record faults require the ordered loss path in §9; merely setting
-unsupported_shape in the reviewed 33d9139e API would wrongly refuse the whole
+unsupported_shape in the reviewed aa31b588 API would wrongly refuse the whole
 input. That replay error path must change before this behavior is implemented.
 Preserve input string storage for the logical API's borrowed lifetime.
 
@@ -617,7 +618,7 @@ certification. Writers MUST reject all malformed input before emitting its
 block; failure cannot be hidden by silently dropping a record and continuing
 with later certificates.
 
-The reviewed replay at 33d9139e performs whole-input refusal for record faults,
+The reviewed replay at aa31b588 performs whole-input refusal for record faults,
 including unknown certificate counters, and some run consistency errors. That
 contradicts CONTRACT.md §5 and is not this codec's required behavior. The replay
 must gain ordered fault/global-loss handling; passing OTHER or relying on its

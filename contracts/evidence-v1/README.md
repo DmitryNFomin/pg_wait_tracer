@@ -39,6 +39,6 @@ reviewed change and invalidates the expected answers.
   hand-worked examples. `fixtures/ex{1,2,3}.bin` are those bytes as produced by an independent encoder written from CODEC.md
   alone (`oracle/enc.py`, `oracle/values.json`); Fable's independent encoder (`oracle/fable_check.py`) produced the same 646
   bytes. Caveat: the second writer saw WORKED.md's derived sizes and checksums (not its hex) before writing its encoder.
-  CONTRACT.md is unchanged. Open question, not settled here: CONTRACT.md §5 says a malformed record, unknown kind or
-  unexpected counters act as a global VOID at the preceding frontier with continued replay, while both
-  reference/replay.py (raises Ambiguity) and the C replay refuse the whole input. No scenario pins this case.
+  CONTRACT.md is unchanged by the codec. The fault-handling question this codec raised (CONTRACT.md §5 against the
+  reference evaluator and the C replay, which both refused the whole input) is settled by revision r3 (`REVISION-r3.md`,
+  scenarios in `r3/`). The C replay on master still implements r2 and refuses those inputs until its r3 unit lands.
