@@ -122,7 +122,7 @@ The first record must establish fresh, coherent state for subsequent intervals a
 
 A genuine INIT retains its original bootstrap-observation timestamp and is released normally; handling it for an already directly attached generation must be idempotent, with no disable, reattach or state overwrite.
 
-Add output-only `bool prior_interval_certified` to `pgwt_merge_output`, meaningful on TRANS/MARKER. The core computes it in validated release order and commits its first-record state only on successful publication.
+Add output-only `bool prior_interval_certified` to `pgwt_merge_output`, meaningful on TRANS/MARKER. The core computes it in validated release order and commits its first-record state only on successful publication. (Added by the lead after review, 2026-11-13:) Every TRANS/MARKER of a generation not admitted through 25b (an attached generation, or one created by FORK+INIT under 25) carries `prior_interval_certified=true`, so rows 1-31 are unchanged; only a 25b generation's first released TRANS/MARKER carries false.
 Persist the output marking with the record; downstream consumers must retain its lower-bound meaning.
 
 Idle time, an empty buffer, newest observed shared-ring timestamp and elapsed grace periods never substitute for boundaries.
