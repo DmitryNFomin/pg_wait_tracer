@@ -2,8 +2,9 @@
 """Recompute the release ledger from tree-bound evidence (stdlib only)."""
 import argparse
 import csv
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -69,6 +70,33 @@ def contract_claims(commit, contract):
     return result
 
 
+def contract_hash(commit, contract):
+    """Hash committed files using core-status.sh's relative-name/content format."""
+    require(isinstance(contract, str) and re.fullmatch(r"[A-Za-z0-9_-]+", contract),
+            "malformed contract id")
+    directory = f"{commit}:contracts/{contract}"
+    entries = subprocess.check_output(
+        ["git", "ls-tree", "-rz", directory], cwd=ROOT, stderr=subprocess.PIPE)
+    files = []
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, kind, blob = metadata.split()
+        require(kind == b"blob" and mode in (b"100644", b"100755"),
+                "unsupported contract file mode")
+        files.append((PurePosixPath(name.decode("utf-8")), name, blob))
+    require(files, "missing contract files")
+    digest = hashlib.sha256()
+    for _, name, blob in sorted(files):
+        content = subprocess.check_output(
+            ["git", "cat-file", "blob", blob.decode("ascii")], cwd=ROOT,
+            stderr=subprocess.PIPE)
+        digest.update(name + b"\0")
+        digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
 def same_tree(record, tree):
     require(isinstance(record, dict), "malformed record")
     value = record.get("tree_hash")
@@ -76,7 +104,7 @@ def same_tree(record, tree):
     require(value == tree, "stale")
 
 
-def attestation(record):
+def attestation(record, contract, load_hash):
     link = record.get("link")
     if type(link) is int and link > 0:
         link = f"#{link}"
@@ -88,6 +116,12 @@ def attestation(record):
             re.escape(REPOSITORY) + r"/"
             r"(?:pull/[1-9][0-9]*|issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*)", link),
             "malformed attestation link")
+    require(contract is not None, "no contract")
+    require(record.get("contract") == contract, "wrong attestation contract")
+    value = record.get("contract_sha256")
+    require(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value),
+            "missing or malformed attestation contract hash")
+    require(value == load_hash(contract), "stale attestation")
     return [link]
 
 
@@ -186,7 +220,7 @@ def core_status(record, tree, artifact, reference, expected):
     return sources
 
 
-def evaluate(manifest, commit, tree, artifact, base, load_contract):
+def evaluate(manifest, commit, tree, artifact, base, load_contract, load_hash):
     require(isinstance(manifest, dict) and manifest.get("version") == 1,
             "malformed manifest version")
     evidence, claims = manifest.get("evidence"), manifest.get("claims")
@@ -232,7 +266,8 @@ def evaluate(manifest, commit, tree, artifact, base, load_contract):
                             "core-status" if column == "broken_versions" else "box-check")
                     require(record.get("kind") == kind, "wrong evidence kind")
                     if kind == "attestation":
-                        sources = attestation(record)
+                        sources = attestation(record, reference.split(":")[0]
+                                              if reference else None, load_hash)
                     elif kind == "core-status":
                         sources = core_status(record, tree, artifact, reference, expected)
                     else:
@@ -277,15 +312,20 @@ def main():
         commit = git("rev-parse", "--verify", "--end-of-options", args.commit + "^{commit}")
         tree = git("rev-parse", commit + "^{tree}")
         manifest = read_json(ROOT / "ledger/claims.json")
-        cache = {}
+        cache, hashes = {}, {}
 
         def load_contract(contract):
             if contract not in cache:
                 cache[contract] = contract_claims(commit, contract)
             return cache[contract]
 
+        def load_hash(contract):
+            if contract not in hashes:
+                hashes[contract] = contract_hash(commit, contract)
+            return hashes[contract]
+
         ledger = evaluate(manifest, commit, tree, args.artifact_dir.resolve()
-                          if args.artifact_dir else None, ROOT, load_contract)
+                          if args.artifact_dir else None, ROOT, load_contract, load_hash)
         Path("ledger.json").write_text(json.dumps(ledger, indent=2) + "\n", encoding="utf-8")
         print(markdown(ledger))
     except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError) as error:
