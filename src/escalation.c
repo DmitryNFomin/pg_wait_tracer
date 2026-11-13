@@ -11,6 +11,7 @@
 #include "open_interval.h"
 #include "daemon.h"
 #include "backend.h"
+#include "backend_init.h"
 #include "discovery.h"
 #include "event_writer.h"
 #include "summary_writer.h"
@@ -189,6 +190,7 @@ static void detach_all(struct pgwt_daemon *d)
     uint64_t now = mono_ns();
     for (int i = 0; i < d->backends.count; i++) {
         struct pgwt_backend *be = &d->backends.entries[i];
+        pgwt_pending_init_remove(&d->backends, be);
         if (be->wp_fd >= 0) {
             pgwt_close_watchpoint(be->wp_fd);
             be->wp_fd = -1;
@@ -221,6 +223,7 @@ static void detach_all(struct pgwt_daemon *d)
                 .init_wait_addr = st.init_wait_addr,
                 .init_ts = st.init_ts,
                 .init_stored = st.init_stored,
+                .init_store_failed = st.init_store_failed,
             };
             bpf_map_update_elem(state_fd, &key, &seed, BPF_ANY);
         }

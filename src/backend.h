@@ -14,6 +14,7 @@ struct pgwt_backend {
     pid_t    pid;
     int      wp_fd;            /* real watchpoint perf_event fd (-1 if none) */
     int      bootstrap_fd;     /* bootstrap watchpoint fd (-1 if none) */
+    int      pending_init_slot; /* 1-based position in pending_init[], 0 absent */
     uint64_t wp_addr;          /* PGPROC->wait_event_info address */
     /* Is wp_addr in a MAP_SHARED mapping? -1 unknown (not yet checked),
      * 0 process-local, 1 shared. SMP-2: the sampler may only batch-read
@@ -40,6 +41,9 @@ struct pgwt_backend {
 struct pgwt_backend_table {
     struct pgwt_backend entries[MAX_BACKENDS];
     int count;
+    /* Dense pending set: lifecycle batches never scan the attached population. */
+    int pending_init[MAX_BACKENDS];
+    int pending_init_count;
 };
 
 /* Forward declaration */
@@ -74,7 +78,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid);
 int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
                      uint64_t init_ts);
 
-/* Recover stored INITs for pending bootstrap watchpoints on every tick. */
+/* Recover stored INITs after lifecycle batches and on the fallback tick. */
 int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d);
 
 /* Handle backend exit. Close watchpoint, flush stats, cleanup. */

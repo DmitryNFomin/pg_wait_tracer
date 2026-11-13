@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "backend.h"
+#include "backend_init.h"
 #include "daemon.h"
 #include "pg_wait_tracer.skel.h"
 #include <errno.h>
@@ -14,6 +15,7 @@ static int enables, updates;
 static bool open_success;
 static struct pgwt_pid_state stored_state;
 static bool state_present;
+static int ring_batches;
 #define CHECK(x, msg) do { checks++; if (!(x)) { failures++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 int __wrap_pgwt_open_watchpoint(pid_t pid, uint64_t addr, int prog) {
     (void)pid; (void)addr; (void)prog; opens++;
@@ -39,6 +41,14 @@ int __wrap_bpf_map_update_elem(int fd, const void *key, const void *value, uint6
 }
 int __wrap_pgwt_watchpoint_enable(int fd) {
     (void)fd; enables++; return 0;
+}
+int __wrap_ring_buffer__consume(struct ring_buffer *rb) {
+    (void)rb;
+    ring_batches++;
+    /* A bootstrap fires while another lifecycle batch is being delivered;
+     * its hint is absent. Only the post-batch sweep can recover it now. */
+    state_present=true;
+    return 1;
 }
 static struct pgwt_daemon *daemon_fixture(void) {
     struct pgwt_daemon *d=calloc(1,sizeof(*d));
@@ -68,10 +78,13 @@ int main(void) {
     struct pgwt_backend *be=&d->backends.entries[0];
     d->backends.count=1; open_success=true;
     be->pid=child; be->is_alive=true; be->bootstrap_fd=open("/dev/null",O_RDONLY);
+    pgwt_pending_init_add(&d->backends,be);
     CHECK(be->bootstrap_fd>=0,"fake bootstrap fd opened");
     stored_state=(struct pgwt_pid_state){.init_stored=1,
-        .init_wait_addr=(uintptr_t)&wait_value, .init_ts=456}; state_present=true;
-    CHECK(pgwt_sweep_bootstrap_backends(d)==1,"stored INIT recovered by real sweep");
+        .init_wait_addr=(uintptr_t)&wait_value, .init_ts=456};
+    CHECK(pgwt_consume_lifecycle_ring(d)==1,"lifecycle callback batch consumed");
+    CHECK(ring_batches==1 && d->tick==0,"batch recovery happens before any timer tick");
+    CHECK(be->init_attached && d->backends.pending_init_count==0,"batch attaches and retires pending INIT");
     CHECK(opens==1 && enables==1 && updates==1,"sweep runs open/preseed/enable once");
     CHECK(stored_state.init_stored==1 && stored_state.init_ts==456,
           "watchpoint preseed preserves bootstrap evidence");
@@ -91,6 +104,7 @@ int main(void) {
     d=daemon_fixture();
     be=&d->backends.entries[0]; d->backends.count=1;
     be->pid=child; be->is_alive=true; be->bootstrap_fd=open("/dev/null",O_RDONLY);
+    pgwt_pending_init_add(&d->backends,be);
     state_present=true;
     CHECK(pgwt_sweep_bootstrap_backends(d)==0,"failed sweep attach is not success");
     CHECK(opens==1,"stored INIT uses real attach path");
@@ -104,6 +118,21 @@ int main(void) {
     CHECK(pgwt_handle_exit(d,child)==0,"exit before sweep without registry handled");
     CHECK(d->counters.lifecycle_init_lost_total==1,"exit before sweep counts stored INIT");
     CHECK(opens==0,"exit before sweep does not attempt attachment");
+    release(d);
+
+    /* No fork-seeded state: a real delivered INIT can still attach, and its
+     * diagnostic must not become an integrity loss. A failed attach does. */
+    d=daemon_fixture(); open_success=true;
+    CHECK(pgwt_handle_init(d,child,(uintptr_t)&wait_value,789)==0,"hint attaches without seeded state");
+    CHECK(pgwt_handle_exit(d,child)==0,"missing-state hint backend retired");
+    CHECK(d->counters.lifecycle_init_lost_total==0,"successful hint attach is not lost INIT");
+    release(d);
+    d=daemon_fixture();
+    CHECK(pgwt_handle_init(d,child,(uintptr_t)&wait_value,789)==-1,"missing-state hint attach fails");
+    CHECK(pgwt_handle_exit(d,child)==0,"missing-state failed hint backend retired");
+    CHECK(d->counters.lifecycle_init_lost_total==1,"missing state is lost only after failed attachment");
+    CHECK(pgwt_handle_exit(d,child)==0,"missing-state duplicate EXIT handled");
+    CHECK(d->counters.lifecycle_init_lost_total==1,"missing-state loss counted once");
     release(d);
     /* Real, eligible child: ALL failed attempts still count, including ESRCH
      * after eligibility. No errno reclassification and no counter reset. */
@@ -122,6 +151,18 @@ int main(void) {
     }
     CHECK(write(fds[1],"x",1)==1,"child released"); close(fds[1]);
     siginfo_t info={0}; CHECK(waitid(P_PID,child,&info,WEXITED|WNOWAIT)==0,"child exited but not reaped");
+    /* BPF on_exit has no state entry and therefore emits no EXIT. The
+     * pending sweep must still retire the dead pid and count its loss. */
+    d=daemon_fixture();
+    be=&d->backends.entries[0]; d->backends.count=1;
+    be->pid=child; be->is_alive=true; be->bootstrap_fd=open("/dev/null",O_RDONLY);
+    pgwt_pending_init_add(&d->backends,be);
+    CHECK(pgwt_sweep_bootstrap_backends(d)==0,"missing-state dead backend swept without attach");
+    CHECK(d->counters.lifecycle_init_lost_total==1,"missing-state dead backend counts loss on sweep");
+    CHECK(d->backends.pending_init_count==0 && be->pid==0,"missing-state dead backend retired once");
+    CHECK(pgwt_sweep_bootstrap_backends(d)==0 && d->counters.lifecycle_init_lost_total==1,
+          "later batch cannot recount missing-state loss");
+    release(d);
     /* Queue a late INIT for a positively exited process. */
     d=daemon_fixture();
     CHECK(pgwt_handle_init(d,child,0x1234,123)==0,"zombie INIT handled as stale");

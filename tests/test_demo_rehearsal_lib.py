@@ -1566,6 +1566,17 @@ def test_daemon_integrity_init_hint_drops_are_recoverable():
     assert ok, detail
 
 
+def test_daemon_integrity_init_no_state_is_diagnostic():
+    metrics = _zero_integrity_metrics()
+    metrics["lifecycle_init_no_state_total"] = 1
+    metrics["lifecycle_init_hint_drops_total"] = 17
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    assert ok, detail  # missing state still permits a successful hint attach
+    metrics["lifecycle_init_lost_total"] = 1
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    assert not ok and "lifecycle_init_lost_total=1" in detail, detail
+
+
 def _assert_integrity_counter_fails(name, value):
     metrics = _zero_integrity_metrics()
     metrics[name] = value

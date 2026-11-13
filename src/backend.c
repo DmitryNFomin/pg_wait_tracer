@@ -257,6 +257,7 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             .init_wait_addr = prev.init_wait_addr,
             .init_ts = prev.init_ts,
             .init_stored = prev.init_stored,
+            .init_store_failed = prev.init_store_failed,
             /* S3: exact CPU is accumulated by the sched_switch program into
              * cpu_ns_total/on_cpu_ts. Seed the base at 0 (deltas count from
              * attach); open the on-CPU stretch here iff the backend is running
@@ -922,6 +923,8 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
         return -1;
     }
 
+    pgwt_pending_init_add(&d->backends, be);
+
     /* fork→attach race (T4/CAP-8, observed live by the T0 CI smoke job):
      * the sched_process_fork event travels fork → BPF ringbuf → daemon
      * epoll → here, while the child races through InitProcess(). If the
@@ -962,7 +965,9 @@ static int read_init_state(void *ctx, pid_t pid, struct pgwt_pid_state *st)
 {
     struct pgwt_daemon *d = ctx;
     uint32_t key = pid;
-    return bpf_map_lookup_elem(bpf_map__fd(d->skel->maps.state_map), &key, st);
+    if (bpf_map_lookup_elem(bpf_map__fd(d->skel->maps.state_map), &key, st) == 0)
+        return 0;
+    return -errno;
 }
 
 static int attach_stored_init(void *ctx, pid_t pid, uint64_t addr, uint64_t ts)
@@ -970,9 +975,21 @@ static int attach_stored_init(void *ctx, pid_t pid, uint64_t addr, uint64_t ts)
     return pgwt_handle_init(ctx, pid, addr, ts);
 }
 
+static int read_pending_init_state(void *ctx, pid_t pid, struct pgwt_pid_state *st)
+{
+    struct pgwt_daemon *d = ctx;
+    int rc = read_init_state(ctx, pid, st);
+    /* on_exit cannot emit an EXIT without a state entry. Retire an absent
+     * entry only once the process is positively dead; a live backend may
+     * still attach through a delivered hint or the ordinary tick recovery. */
+    if (rc == -ENOENT && pgwt_backend_target_live(pid, d->postmaster_pid) == 0)
+        pgwt_handle_exit(d, pid);
+    return rc;
+}
+
 int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d)
 {
-    return pgwt_sweep_stored_inits(&d->backends, d, read_init_state,
+    return pgwt_sweep_stored_inits(&d->backends, d, read_pending_init_state,
                                    attach_stored_init);
 }
 
@@ -993,6 +1010,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     }
 
     /* Close bootstrap watchpoint if any */
+    pgwt_pending_init_remove(&d->backends, be);
     if (be->bootstrap_fd >= 0) {
         uint64_t started_ns = pgwt_debug_block_begin(d);
         pgwt_close_watchpoint(be->bootstrap_fd);
@@ -1051,9 +1069,8 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     be->wp_addr_shared = -1;   /* address may have changed — re-detect */
     be->attach_ts = 0;         /* stamp attach time fresh in the helper */
     if (pgwt_attach_backend_watchpoint(d, be) != 0) {
-        /* Silently skip — process likely exited before attach */
-        be->is_alive = false;
-        be->pid = 0;
+        /* Retain the pid and any hint timestamp until EXIT can decide loss,
+         * including when no fork-seeded state entry was available. */
         return -1;
     }
     be->init_attached = true;
@@ -1081,19 +1098,20 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     if (be) {
+        pgwt_pending_init_remove(&d->backends, be);
         pgwt_close_watchpoint(be->wp_fd);
         be->wp_fd = -1;
         pgwt_close_watchpoint(be->bootstrap_fd);
-        be->bootstrap_fd = -1;
         pgwt_debug_block_end(d, "watchpoint_close", pid, started_ns);
     }
 
     /* The producer has stopped (exit or bootstrap close). Count retained
      * INIT evidence even if enrollment/attach failed before registry entry.
      * Deleting the entry below makes repeated EXIT cleanup idempotent. */
-    struct pgwt_pid_state st = {0};
-    if (read_init_state(d, pid, &st) == 0 && pgwt_stored_init_lost(be, &st))
+    if (pgwt_exit_init_lost(be, pid, d, read_init_state))
         d->counters.lifecycle_init_lost_total++;
+    if (be)
+        be->bootstrap_fd = -1;
 
     /* Delete BPF map entries for this PID */
     int state_fd = bpf_map__fd(d->skel->maps.state_map);
@@ -1151,6 +1169,7 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
 void pgwt_close_all_backends(struct pgwt_backend_table *bt)
 {
     for (int i = 0; i < bt->count; i++) {
+        pgwt_pending_init_remove(bt, &bt->entries[i]);
         pgwt_close_watchpoint(bt->entries[i].wp_fd);
         bt->entries[i].wp_fd = -1;
         pgwt_close_watchpoint(bt->entries[i].bootstrap_fd);

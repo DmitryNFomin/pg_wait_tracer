@@ -244,7 +244,7 @@ static __always_inline void count_ring_fail(u32 site)
 /* Failure counters (CAP-1/CAP-6 and bootstrap INIT storage). Slots defined in
  * pg_wait_tracer.h (PGWT_BPF_FAIL_*). The daemon sums across CPUs and
  * surfaces state_map_full_total / seen_query_ids_full_total /
- * lifecycle_init_lost_total on the control socket. The NMI INIT slot uses
+ * lifecycle_init_no_state_total on the control socket. The NMI INIT slot uses
  * atomic increments to survive nesting on one CPU.
  * A full map must NEVER be silent: it means backends that record nothing
  * (state_map) or query text that is never captured (seen_query_ids). */
@@ -689,7 +689,11 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
         u64 wait_addr = ptr + pgproc_wait_offset;
         u64 init_ts = bpf_ktime_get_ns();
         struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
-        if (st && !test_skip_init_store) {
+        if (st && test_skip_init_store) {
+            /* Keep the negative test's evidence of an actual bootstrap fire.
+             * Userspace decides loss only after every attach path had a chance. */
+            st->init_store_failed = 1;
+        } else if (st) {
             if (!st->init_stored) {
                 st->init_wait_addr = wait_addr;
                 st->init_ts = init_ts;
@@ -700,10 +704,10 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
             }
             init_ts = st->init_ts;
         } else {
-            u32 slot = PGWT_BPF_FAIL_INIT_LOST;
-            u64 *lost = bpf_map_lookup_elem(&fail_counters, &slot);
-            if (lost)
-                __sync_fetch_and_add(lost, 1);
+            u32 slot = PGWT_BPF_FAIL_INIT_NO_STATE;
+            u64 *missing = bpf_map_lookup_elem(&fail_counters, &slot);
+            if (missing)
+                __sync_fetch_and_add(missing, 1);
         }
         struct pgwt_lifecycle_event *ev;
         ev = test_drop_init_hint ? NULL :

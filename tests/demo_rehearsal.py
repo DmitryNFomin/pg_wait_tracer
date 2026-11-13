@@ -839,7 +839,10 @@ def main():
             "ok": integrity_ok, "detail": integrity_detail,
             "note": ("/".join(drlib.DAEMON_INTEGRITY_COUNTERS) +
                      " == 0 -- INIT state loss is gated; missed INIT hints "
-                     "are recovered by the tick sweep. BPF map update and read failures without "
+                     "can be recovered from stored facts after lifecycle batches "
+                     "or on the fallback tick while the backend is alive; an "
+                     "INIT still unattached at exit is counted as lost. "
+                     "BPF map update and read failures without "
                      "counters remain uncovered; sampled/coop tiers report "
                      "the ring-drop counters as 0 because only the full "
                      "provider fills them. A clean result means the reported "

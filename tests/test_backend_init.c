@@ -1,6 +1,7 @@
 /* The daemon's bootstrap sweep with fake map reads and hardware attachment. */
 #include "backend_init.h"
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -8,17 +9,26 @@ struct fixture {
     struct pgwt_backend_table bt;
     struct pgwt_pid_state state;
     int reads, attaches, read_error, attach_error, torn_first_read, fail_read_at;
+    int unpublished_first_read;
+    int retire_first_read;
     uint64_t addr, ts;
 };
 
 static int read_state(void *ctx, pid_t pid, struct pgwt_pid_state *out)
 {
     struct fixture *f = ctx;
-    assert(pid == 42);
+    assert(pid >= 42 && pid <= 44);
     ++f->reads;
+    if (f->retire_first_read && f->reads == 1) {
+        pgwt_pending_init_remove(&f->bt, &f->bt.entries[0]);
+        f->bt.entries[0].is_alive = false;
+        return -ENOENT;
+    }
     if (f->reads == f->fail_read_at)
         return -1;
     *out = f->state;
+    if (f->unpublished_first_read && f->reads == 1)
+        out->init_stored = 0;
     if (f->torn_first_read && f->reads == 1) {
         out->init_wait_addr = 0;
         out->init_ts = 0;
@@ -29,13 +39,18 @@ static int read_state(void *ctx, pid_t pid, struct pgwt_pid_state *out)
 static int attach(void *ctx, pid_t pid, uint64_t addr, uint64_t ts)
 {
     struct fixture *f = ctx;
-    assert(pid == 42);
+    assert(pid >= 42 && pid <= 44);
     ++f->attaches;
     f->addr = addr;
     f->ts = ts;
     if (f->attach_error)
         return -1;
-    struct pgwt_backend *be = &f->bt.entries[0];
+    struct pgwt_backend *be = NULL;
+    for (int i = 0; i < f->bt.count; ++i)
+        if (f->bt.entries[i].pid == pid)
+            be = &f->bt.entries[i];
+    assert(be);
+    pgwt_pending_init_remove(&f->bt, be);
     be->bootstrap_fd = -1;
     be->wp_fd = 99;
     be->init_ts = ts;
@@ -50,6 +65,7 @@ static void reset(struct fixture *f)
     f->bt.entries[0] = (struct pgwt_backend){
         .pid = 42, .is_alive = true, .bootstrap_fd = 88, .wp_fd = -1,
     };
+    pgwt_pending_init_add(&f->bt, &f->bt.entries[0]);
     f->state = (struct pgwt_pid_state){
         .init_stored = 1, .init_wait_addr = 0x12345678, .init_ts = 123456789,
     };
@@ -121,6 +137,75 @@ int main(void)
     f.bt.entries[0].init_attached = true;
     assert(!pgwt_stored_init_lost(&f.bt.entries[0], &f.state)); /* later tier */
 
-    puts("backend INIT sweep: PASS (stored/pending, timestamp, duplicate, exit, failures)");
+    /* Every lifecycle batch can use the same sweep before any timer fires.
+     * A large attached population adds no map reads to the pending sweep. */
+    reset(&f);
+    f.bt.count = MAX_BACKENDS;
+    assert(sweep(&f) == 1 && f.reads == 2 && f.attaches == 1);
+    assert(f.bt.pending_init_count == 0);
+
+    /* Dense-set removal cannot skip the backend moved into the removed slot. */
+    reset(&f);
+    f.bt.count = 3;
+    for (int i = 1; i < 3; ++i) {
+        f.bt.entries[i] = (struct pgwt_backend){
+            .pid = 42 + i, .is_alive = true, .bootstrap_fd = 88, .wp_fd = -1,
+        };
+        pgwt_pending_init_add(&f.bt, &f.bt.entries[i]);
+    }
+    pgwt_pending_init_remove(&f.bt, &f.bt.entries[1]);
+    assert(f.bt.pending_init_count == 2);
+    assert(f.bt.pending_init[1] == 2 && f.bt.entries[2].pending_init_slot == 2);
+    pgwt_pending_init_remove(&f.bt, &f.bt.entries[2]);
+    pgwt_pending_init_remove(&f.bt, &f.bt.entries[2]); /* idempotent */
+    pgwt_pending_init_add(&f.bt, &f.bt.entries[0]); /* duplicate enrollment */
+    assert(f.bt.pending_init_count == 1);
+    assert(sweep(&f) == 1 && f.bt.pending_init_count == 0);
+
+    reset(&f);
+    f.bt.count = 3;
+    for (int i = 1; i < 3; ++i) {
+        f.bt.entries[i] = (struct pgwt_backend){
+            .pid = 42 + i, .is_alive = true, .bootstrap_fd = 88, .wp_fd = -1,
+        };
+        pgwt_pending_init_add(&f.bt, &f.bt.entries[i]);
+    }
+    f.retire_first_read = 1;
+    assert(sweep(&f) == 2 && f.attaches == 2 && f.reads == 5);
+    assert(f.bt.pending_init_count == 0); /* removing one cannot skip another */
+
+    reset(&f);
+    f.unpublished_first_read = 1;
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+    assert(f.reads == 2 && f.attaches == 0); /* raced EXIT is recognised, not recovered */
+    reset(&f);
+    f.state.init_stored = 0;
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+    f.state.init_store_failed = 1;
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+    assert(attach(&f, 42, 0x12345678, 123) == 0); /* another attach path succeeds */
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+
+    reset(&f);
+    f.read_error = -ENOENT;
+    assert(sweep(&f) == 0 && f.attaches == 0);
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+    /* Missing fork-seeded state plus a delivered hint is not an INIT loss. */
+    assert(attach(&f, 42, 0x12345678, 123) == 0);
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+    assert(!pgwt_exit_init_lost(NULL, 42, &f, read_state)); /* repeated cleanup */
+    reset(&f);
+    f.read_error = -ENOENT;
+    f.bt.entries[0].bootstrap_fd = -1;
+    f.bt.entries[0].init_ts = 123; /* delivered hint, failed real attach */
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+    f.read_error = 0;
+    f.state = (struct pgwt_pid_state){0}; /* failed attach preseed made an entry */
+    assert(pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+    reset(&f);
+    f.read_error = -EIO;
+    assert(!pgwt_exit_init_lost(&f.bt.entries[0], 42, &f, read_state));
+
+    puts("backend INIT sweep: PASS (pending batches, timestamp, duplicate, exit races, missing state)");
     return 0;
 }

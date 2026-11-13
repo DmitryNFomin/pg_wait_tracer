@@ -145,6 +145,15 @@ static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
     return yielded;
 }
 
+/* Consume one lifecycle batch, then recover missed INIT hints while short
+ * lived backends can still be attached. Used for readiness and final drain. */
+int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d)
+{
+    int rc = ring_buffer__consume(d->rb);
+    pgwt_sweep_bootstrap_backends(d);
+    return rc;
+}
+
 /* Ring buffer callback for lifecycle events */
 static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
 {
@@ -1774,7 +1783,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
                 pgwt_debug_block_end(d, "sample_timer_handler", 0, started_ns);
             } else if (events[i].data.fd == rb_fd) {
                 started_ns = pgwt_debug_block_begin(d);
-                ring_buffer__consume(d->rb);
+                pgwt_consume_lifecycle_ring(d);
                 pgwt_debug_block_end(d, "lifecycle_ring_consume", 0, started_ns);
             } else if (events[i].data.fd == event_rb_fd) {
                 /* The common bounded drain below handles this readiness. Doing
@@ -1816,7 +1825,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         consume_event_ring(d, "event_ring_final_drain", false);
     }
     uint64_t started_ns = pgwt_debug_block_begin(d);
-    ring_buffer__consume(d->rb);
+    pgwt_consume_lifecycle_ring(d);
     pgwt_debug_block_end(d, "lifecycle_ring_final_drain", 0, started_ns);
 
     if (d->exit_reason != PGWT_EXIT_PG_DEAD)

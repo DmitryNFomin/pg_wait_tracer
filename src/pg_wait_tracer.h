@@ -106,7 +106,7 @@ struct pgwt_pid_state {
     u64 init_wait_addr;
     u64 init_ts;
     u32 init_stored;
-    u32 init_reserved;
+    u32 init_store_failed; /* test-only store suppression after bootstrap fired */
 };
 
 enum pgwt_query_attribution_quality {
@@ -416,7 +416,7 @@ static inline int pgwt_classify_wei(uint32_t wei)
  * daemon sums across CPUs and surfaces them via the control socket. */
 #define PGWT_BPF_FAIL_STATE_MAP  0  /* state_map insert failed (map full) */
 #define PGWT_BPF_FAIL_SEEN_QIDS  1  /* seen_query_ids insert failed (full) */
-#define PGWT_BPF_FAIL_INIT_LOST  2  /* bootstrap could not store INIT facts */
+#define PGWT_BPF_FAIL_INIT_NO_STATE 2 /* diagnostic; attachment may still succeed */
 #define PGWT_BPF_FAIL_MAX        3
 
 /* Per-query trap counters. These are the Stages 3/4 overhead acceptance

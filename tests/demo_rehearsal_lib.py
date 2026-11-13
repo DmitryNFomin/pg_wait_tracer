@@ -1110,11 +1110,16 @@ def daemon_integrity_ok(metrics):
     value here means data conservation was already violated upstream of
     every other check in this file. state_map_full_total /
     seen_query_ids_full_total are BPF/userspace insert-failure counters
-    (a backend recording nothing, or losing query attribution). lifecycle_init_lost_total counts INITs that could not be stored, or were
-    stored but never attached before exit. The four lifecycle/query-text
+    (a backend recording nothing, or losing query attribution).
+    lifecycle_init_lost_total counts an unattached backend with missing state,
+    or INIT evidence never attached before exit. The four lifecycle/query-text
     site counters cover fork, exit and query-text reserve failures (including
-    PG13). lifecycle_init_hint_drops_total counts missed wake-up hints; the
-    per-tick state sweep recovers them, so it is not an integrity loss.
+    PG13). lifecycle_init_hint_drops_total counts missed wake-up hints, not
+    loss. Stored INITs can attach after a lifecycle callback batch or on the
+    fallback tick, while the backend is alive. The final per-pid exit sweep
+    recognises raced INITs but cannot recover coverage after exit. The BPF
+    lifecycle_init_no_state_total diagnostic alone does not decide loss:
+    a delivered hint or another successful attach path can still attach it.
 
     A missing or non-numeric counter FAILS (a gate that cannot see the
     count must refuse), same as capture_has_events_ok's own contract.
