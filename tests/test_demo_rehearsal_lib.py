@@ -1577,6 +1577,15 @@ def test_daemon_integrity_init_no_state_is_diagnostic():
     assert not ok and "lifecycle_init_lost_total=1" in detail, detail
 
 
+def test_daemon_integrity_no_opportunity_losses_still_gate():
+    metrics = _zero_integrity_metrics()
+    metrics["lifecycle_init_lost_total"] = 1
+    metrics["lifecycle_init_lost_no_opportunity_total"] = 1
+    metrics["lifecycle_init_lost_untraced_ns_total"] = 123
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    assert not ok and "lifecycle_init_lost_total=1" in detail, detail
+
+
 def _assert_integrity_counter_fails(name, value):
     metrics = _zero_integrity_metrics()
     metrics[name] = value

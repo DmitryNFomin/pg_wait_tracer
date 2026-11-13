@@ -16,8 +16,10 @@ bool pgwt_stored_init_lost(const struct pgwt_backend *be,
                            const struct pgwt_pid_state *st);
 /* Final single-pid sweep after the bootstrap producer is quiesced. EXIT
  * cannot recover coverage: this only recognises evidence and decides loss.
- * Readers return -ENOENT for an absent state entry, another error otherwise. */
+ * Readers return -ENOENT for an absent state entry, another error otherwise.
+ * init_ts receives the retained timestamp, or 0 if timing is unavailable. */
 bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
-                         void *ctx, pgwt_init_state_reader read_state);
+                         void *ctx, pgwt_init_state_reader read_state,
+                         uint64_t *init_ts);
 
 #endif

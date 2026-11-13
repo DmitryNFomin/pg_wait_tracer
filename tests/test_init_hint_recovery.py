@@ -40,6 +40,8 @@ def ctl(directory):
     metrics = json.loads(data.splitlines()[0])
     assert metrics.get("ok") is True, metrics
     for key in ("lifecycle_init_hint_drops_total", "lifecycle_init_lost_total",
+                "lifecycle_init_lost_no_opportunity_total",
+                "lifecycle_init_lost_untraced_ns_total",
                 "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
                 "state_map_full_total", "wp_attach_failures_total"):
         assert type(metrics.get(key)) is int and metrics[key] >= 0, (key, metrics)
@@ -155,6 +157,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                 [str(TRACER), "--mode", "full", "--pid", str(pm_pid),
                  "-T", str(directory), "-i", str(TICK_SECONDS), "--duration", "90", "-q", "-v"],
                 stdout=subprocess.DEVNULL, stderr=err, env=env)
+            after = None
             try:
                 wait_for(proc, lambda: (directory / "pgwt.sock").exists(), 45,
                          "daemon control socket did not become ready")
@@ -198,7 +201,16 @@ def run_arm(pm_pid, skip_store, churn=False):
                       f"hint drops +{hint_delta}, INIT lost +{lost_delta}, "
                       f"{len(short_lived & pending)} pending backends shorter than a tick")
             except Exception:
-                print(log.read_text())
+                text = log.read_text()
+                print("INIT loss diagnostics (CLOCK_MONOTONIC):")
+                print("\n".join(line for line in text.splitlines()
+                                if line.startswith("INIT-LOST:")))
+                if after is not None:
+                    print({name: after[name] for name in (
+                        "lifecycle_init_lost_total",
+                        "lifecycle_init_lost_no_opportunity_total",
+                        "lifecycle_init_lost_untraced_ns_total")})
+                print(text)
                 raise
             finally:
                 stop(proc)

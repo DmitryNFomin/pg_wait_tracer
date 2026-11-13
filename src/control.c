@@ -346,6 +346,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                                                 PGWT_BPF_FAIL_SEEN_QIDS));
     cjson_add_uint64(root, "lifecycle_init_lost_total",
                      ctr->lifecycle_init_lost_total);
+    cjson_add_uint64(root, "lifecycle_init_lost_no_opportunity_total",
+                     ctr->lifecycle_init_lost_no_opportunity_total);
+    cjson_add_uint64(root, "lifecycle_init_lost_untraced_ns_total",
+                     ctr->lifecycle_init_lost_untraced_ns_total);
     cjson_add_uint64(root, "lifecycle_init_no_state_total",
                      pgwt_read_bpf_fail_counter((struct pgwt_daemon *)d,
                                                 PGWT_BPF_FAIL_INIT_NO_STATE));

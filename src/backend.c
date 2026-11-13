@@ -989,8 +989,16 @@ static int read_pending_init_state(void *ctx, pid_t pid, struct pgwt_pid_state *
 
 int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d)
 {
-    return pgwt_sweep_stored_inits(&d->backends, d, read_pending_init_state,
-                                   attach_stored_init);
+    if (d->init_sweep_active)
+        return 0;
+    uint64_t start = pgwt_debug_monotonic_ns();
+    d->init_sweep_active = true;
+    int attached = pgwt_sweep_stored_inits(&d->backends, d,
+                                          read_pending_init_state,
+                                          attach_stored_init);
+    d->init_sweep_active = false;
+    d->init_last_sweep_start_ns = start;
+    return attached;
 }
 
 int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
@@ -1093,7 +1101,41 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     return 0;
 }
 
+static void record_init_loss(struct pgwt_daemon *d, pid_t pid,
+                             uint64_t init_ts, uint64_t exit_ts)
+{
+    uint64_t now = pgwt_debug_monotonic_ns();
+    bool no_opportunity = init_ts > d->init_last_sweep_start_ns;
+    d->counters.lifecycle_init_lost_total++;
+    if (no_opportunity) {
+        d->counters.lifecycle_init_lost_no_opportunity_total++;
+        if (exit_ts >= init_ts)
+            d->counters.lifecycle_init_lost_untraced_ns_total += exit_ts - init_ts;
+    }
+    fprintf(stderr,
+            "INIT-LOST: clock=CLOCK_MONOTONIC pid=%d init_ts=%llu exit_ts=%llu "
+            "last_sweep_start_ns=%llu batch_start_ns=%llu batch_records=%llu "
+            "since_epoll_return_ns=%llu no_opportunity=%d exit_ts_source=%s\n",
+            pid, (unsigned long long)init_ts, (unsigned long long)exit_ts,
+            (unsigned long long)d->init_last_sweep_start_ns,
+            (unsigned long long)d->lifecycle_batch_start_ns,
+            (unsigned long long)d->lifecycle_batch_records,
+            (unsigned long long)(d->last_epoll_return_ns && now >= d->last_epoll_return_ns
+                                ? now - d->last_epoll_return_ns : 0),
+            no_opportunity, d->lifecycle_exit_pid == pid ? "record" : "observation");
+}
+
 int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
+{
+    /* A pre-record sweep can retire the very PID whose EXIT is being
+     * handled. Use that record's time; other liveness cleanup can only time
+     * the observation (and labels it in the diagnostic). */
+    uint64_t exit_ts = d->lifecycle_exit_pid == pid
+                     ? d->lifecycle_exit_ts : pgwt_debug_monotonic_ns();
+    return pgwt_handle_exit_at(d, pid, exit_ts);
+}
+
+int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
 {
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
@@ -1108,8 +1150,9 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     /* The producer has stopped (exit or bootstrap close). Count retained
      * INIT evidence even if enrollment/attach failed before registry entry.
      * Deleting the entry below makes repeated EXIT cleanup idempotent. */
-    if (pgwt_exit_init_lost(be, pid, d, read_init_state))
-        d->counters.lifecycle_init_lost_total++;
+    uint64_t init_ts;
+    if (pgwt_exit_init_lost(be, pid, d, read_init_state, &init_ts))
+        record_init_loss(d, pid, init_ts, exit_ts);
     if (be)
         be->bootstrap_fd = -1;
 

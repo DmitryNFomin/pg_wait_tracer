@@ -68,8 +68,10 @@ bool pgwt_stored_init_lost(const struct pgwt_backend *be,
 }
 
 bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
-                         void *ctx, pgwt_init_state_reader read_state)
+                         void *ctx, pgwt_init_state_reader read_state,
+                         uint64_t *init_ts)
 {
+    *init_ts = be ? be->init_ts : 0;
     struct pgwt_pid_state st = {0};
     int rc = read_state(ctx, pid, &st);
     if (rc == -ENOENT)
@@ -81,5 +83,7 @@ bool pgwt_exit_init_lost(const struct pgwt_backend *be, pid_t pid,
      * The caller closed bootstrap first, so the facts are now immutable. */
     if (read_state(ctx, pid, &st) != 0)
         return false;
+    if (st.init_ts)
+        *init_ts = st.init_ts;
     return pgwt_stored_init_lost(be, &st);
 }

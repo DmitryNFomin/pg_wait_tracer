@@ -78,11 +78,13 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid);
 int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
                      uint64_t init_ts);
 
-/* Recover stored INITs after lifecycle batches and on the fallback tick. */
+/* Recover pending INITs before records/fds, after batches and on the tick. */
 int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d);
 
 /* Handle backend exit. Close watchpoint, flush stats, cleanup. */
 int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid);
+/* A lifecycle EXIT carries its actual BPF CLOCK_MONOTONIC timestamp. */
+int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts);
 
 /* Attach a hardware watchpoint to an already-resolved backend (be->wp_addr
  * must be set) and pre-seed its BPF state_map with the current wait state.

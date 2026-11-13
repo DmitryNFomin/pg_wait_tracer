@@ -149,13 +149,38 @@ static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
  * lived backends can still be attached. Used for readiness and final drain. */
 int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d)
 {
+    /* Attach/retire during a sweep must not re-enter lifecycle callbacks. */
+    if (d->init_sweep_active)
+        return -EDEADLK;
+    d->lifecycle_batch_start_ns = pgwt_debug_monotonic_ns();
+    d->lifecycle_batch_records = 0;
     int rc = ring_buffer__consume(d->rb);
+    d->lifecycle_batch_start_ns = 0;
+    d->lifecycle_batch_records = 0;
     pgwt_sweep_bootstrap_backends(d);
     return rc;
 }
 
 /* Ring buffer callback for lifecycle events */
+static int process_lifecycle_event(void *ctx, void *data, size_t data_sz);
+
 static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
+{
+    struct pgwt_daemon *d = ctx;
+    const struct pgwt_lifecycle_event *ev = data;
+    if (ev->type == PGWT_LIFECYCLE_EXIT) {
+        d->lifecycle_exit_pid = ev->pid;
+        d->lifecycle_exit_ts = ev->timestamp;
+    }
+    ++d->lifecycle_batch_records;
+    pgwt_sweep_bootstrap_backends(d);
+    int rc = process_lifecycle_event(ctx, data, data_sz);
+    d->lifecycle_exit_pid = 0;
+    d->lifecycle_exit_ts = 0;
+    return rc;
+}
+
+static int process_lifecycle_event(void *ctx, void *data, size_t data_sz)
 {
     struct pgwt_daemon *d = ctx;
     struct pgwt_lifecycle_event *ev = data;
@@ -181,7 +206,7 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
         break;
     case PGWT_LIFECYCLE_EXIT:
         op = "lifecycle_exit";
-        pgwt_handle_exit(d, ev->pid);
+        pgwt_handle_exit_at(d, ev->pid, ev->timestamp);
         break;
     case PGWT_LIFECYCLE_QUERY_TEXT: {
         op = "lifecycle_query_text";
@@ -1754,6 +1779,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
         uint64_t started_ns = pgwt_debug_block_begin(d);
         int n = epoll_wait(d->epoll_fd, events, 8, timeout_ms);
+        d->last_epoll_return_ns = pgwt_debug_monotonic_ns();
         pgwt_debug_block_end(d, "epoll_wait", 0, started_ns);
         if (n < 0) {
             if (errno == EINTR) {
@@ -1771,6 +1797,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             break;
         }
 
+        pgwt_sweep_bootstrap_backends(d);
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == d->timer_fd) {
                 started_ns = pgwt_debug_block_begin(d);

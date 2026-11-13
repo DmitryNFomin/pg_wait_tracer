@@ -1115,8 +1115,13 @@ def daemon_integrity_ok(metrics):
     or INIT evidence never attached before exit. The four lifecycle/query-text
     site counters cover fork, exit and query-text reserve failures (including
     PG13). lifecycle_init_hint_drops_total counts missed wake-up hints, not
-    loss. Stored INITs can attach after a lifecycle callback batch or on the
-    fallback tick, while the backend is alive. The final per-pid exit sweep
+    loss. Stored INITs can attach before each lifecycle record and epoll wake's
+    fd handling, after each batch, and on the fallback tick while alive.
+    lifecycle_init_lost_no_opportunity_total is the subset whose init_ts is
+    strictly later than the last completed sweep's start before EXIT;
+    lifecycle_init_lost_untraced_ns_total sums exit - init_ts for that subset.
+    All losses, including this subset, still gate via lifecycle_init_lost_total.
+    The final per-pid exit sweep
     recognises raced INITs but cannot recover coverage after exit. The BPF
     lifecycle_init_no_state_total diagnostic alone does not decide loss:
     a delivered hint or another successful attach path can still attach it.
