@@ -14,7 +14,8 @@ import time
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-ARMS = ("shared", "perf", "perf_boundary", "adversarial")
+ARMS = ("shared", "perf", "perf_boundary", "syscall_boundary", "adversarial")
+BOUNDARY_ARMS = ("perf_boundary", "syscall_boundary")
 CASES = ("idle", "one", "all", "migrate")
 MAX_GAP_NS = 100_000_000
 
@@ -55,6 +56,7 @@ def metadata(out):
             "clocksource": Path("/sys/devices/system/clocksource/clocksource0/current_clocksource").read_text().strip(),
             "available_clocksources": Path("/sys/devices/system/clocksource/clocksource0/available_clocksource").read_text().strip(),
             "cpu_accounting": "/proc/stat participating CPUs: user+nice+system+irq+softirq+steal; guest already in user; USER_HZ granularity",
+            "syscall_helper_cpu_accounting": "per-helper CLOCK_THREAD_CPUTIME_ID over production; synchronous syscall/BPF included; wake-up IRQ and other-task scheduling costs not fully included",
             "head": capture(["git", "rev-parse", "HEAD"]),
             "status": capture(["git", "status", "--porcelain"]),
             "compiler": capture([os.environ.get("CC", "cc"), "--version"]),
@@ -135,8 +137,8 @@ def base_errors(run, cpus, case, boundary, reconcile=True):
 
 def normal_errors(run, cpus, case, boundary, arm="perf"):
     # The shared ring is a cost baseline. The adversarial treatment checks
-    # seals/timestamps; only the two normal perf arms must be lossless.
-    loss_gate = arm in ("perf", "perf_boundary")
+    # seals/timestamps; normal perf transport arms must be lossless.
+    loss_gate = arm in ("perf",) + BOUNDARY_ARMS
     errors = base_errors(run, cpus, case, boundary, reconcile=loss_gate)
     if loss_gate:
         for cpu, site in sites(run):
@@ -154,6 +156,20 @@ def normal_errors(run, cpus, case, boundary, arm="perf"):
                 errors.append(f"CPU {cpu['cpu']}: boundary fires != outputs")
             if cpu["max_boundary_gap_ns"] > MAX_GAP_NS or cpu["max_boundary_stamp_gap_ns"] > MAX_GAP_NS:
                 errors.append(f"CPU {cpu['cpu']}: boundary gap exceeds 100 ms")
+    if arm == "syscall_boundary":
+        if run["wrong_cpu_events"] or any(c["wrong_cpu_events"] for c in run["per_cpu"]):
+            errors.append("wrong-CPU syscall boundary event")
+        if run["boundary_fires"] != run["boundary_outputs"]:
+            errors.append("syscall boundary fires != outputs")
+        for cpu in run["per_cpu"]:
+            b = cpu["sites"][1]
+            if (not cpu["helper_tid"] or not cpu["syscall_fires"] or
+                    cpu["syscall_fires"] != b["produced"] or
+                    cpu["syscall_outputs"] != b["successes"]):
+                errors.append(f"CPU {cpu['cpu']}: syscall helper/counter mismatch")
+        if (sum(c["syscall_fires"] for c in run["per_cpu"]) != run["boundary_fires"] or
+                sum(c["syscall_outputs"] for c in run["per_cpu"]) != run["boundary_outputs"]):
+            errors.append("syscall boundary aggregate/per-CPU counter mismatch")
     return errors
 
 
@@ -184,28 +200,43 @@ def evaluate_runs(runs, cpus, case, irq_accounting):
     errors = []
     for arm in ARMS:
         errors.extend(arm + ": " + e for e in normal_errors(
-            runs[arm], cpus, case, arm in ("perf_boundary", "adversarial"), arm=arm))
+            runs[arm], cpus, case, arm in BOUNDARY_ARMS + ("adversarial",), arm=arm))
     ratio = cpu_cost_ratio(runs["perf"], runs["shared"])
     if case != "idle" and (ratio is None or not math.isfinite(ratio) or ratio > 1.10):
         errors.append("paired perf/shared CPU-ns-per-attempt exceeds 1.10 or unavailable")
     result = {"perf_shared_cpu_ns_per_attempt_ratio": ratio, "errors": errors}
-    gate = {"arm": "perf_boundary", "status": "NOT_APPLICABLE"}
+    gates = {arm: {"arm": arm, "status": "NOT_APPLICABLE"} for arm in BOUNDARY_ARMS}
+    # This is measured task CPU, including synchronous syscall/BPF work, not
+    # a replacement for total CPU cost (wake-up IRQ/scheduler work can be outside
+    # the helper). Keep it available even when IRQ time accounting is absent.
+    helper_cpu = {str(c["cpu"]): c["helper_cpu_ns"] / runs["syscall_boundary"]["elapsed"] / 1e9
+                  for c in runs["syscall_boundary"]["per_cpu"]}
+    result["syscall_helper_core_fraction_per_cpu"] = helper_cpu
+    if any(not math.isfinite(v) or v < 0 for v in helper_cpu.values()):
+        errors.append("syscall_boundary: invalid helper CPU time")
     if case == "idle":
         deltas = {arm: idle_increment(runs[arm], runs["perf"], cpus)
-                  for arm in ("perf_boundary", "adversarial")}
+                  for arm in BOUNDARY_ARMS + ("adversarial",)}
         result["boundary_increment_core_fraction_per_cpu"] = deltas
-        gate["core_fraction_per_cpu"] = deltas["perf_boundary"]
-        if not irq_accounting:
-            gate.update(status="UNMEASURED", reason=(
-                "CONFIG_IRQ_TIME_ACCOUNTING is not enabled in the running kernel config; "
-                "idle interrupt time is booked as idle, so /proc/stat cannot measure boundary cost"))
-        elif deltas["perf_boundary"] > 0.01:
-            gate["status"] = "FAIL"
-            errors.append("perf_boundary: boundary-only idle-box incremental CPU exceeds 1% per CPU")
-        else:
-            gate["status"] = "PASS"
-    result["boundary_cpu_gate"] = gate
-    result["status"] = "FAIL" if errors else "VOID" if gate["status"] == "UNMEASURED" else "PASS"
+        for arm, gate in gates.items():
+            gate["core_fraction_per_cpu"] = deltas[arm]
+            if not irq_accounting:
+                gate.update(status="UNMEASURED", reason=(
+                    "CONFIG_IRQ_TIME_ACCOUNTING is not enabled in the running kernel config; "
+                    "idle interrupt time is booked as idle, so /proc/stat cannot measure total boundary cost"))
+            elif not math.isfinite(deltas[arm]) or deltas[arm] > 0.01:
+                gate["status"] = "FAIL"
+                errors.append(arm + ": boundary-only idle-box incremental CPU exceeds 1% per CPU")
+            else:
+                gate["status"] = "PASS"
+        gates["syscall_boundary"]["helper_core_fraction_per_cpu"] = helper_cpu
+        if any(v > 0.01 for v in helper_cpu.values()):
+            gates["syscall_boundary"]["status"] = "FAIL"
+            errors.append("syscall_boundary: helper CPU exceeds 1% on a CPU")
+    result["boundary_cpu_gate"] = gates["perf_boundary"] # retained report field
+    result["boundary_cpu_gates"] = gates
+    result["status"] = "FAIL" if errors else "VOID" if any(
+        g["status"] == "UNMEASURED" for g in gates.values()) else "PASS"
     return result
 
 
@@ -220,6 +251,7 @@ def requested_errors(run, args, cpu_ids):
                 "duration": int(value("--duration")), "period_ns": period,
                 "buffer_bytes_total": total, "pause_drain": "--pause-drain" in args,
                 "boundary_offset_ns": 1_000_000 if "--mutant-boundary" in args else 0}
+    expected["boundary_source"] = "syscall" if "--syscall-boundary" in args else "perf" if period else "none"
     errors = [f"requested {k}={v!r}, observed {run.get(k)!r}" for k, v in expected.items() if run.get(k) != v]
     if [c["cpu"] for c in run["per_cpu"]] != list(cpu_ids[:cpus]):
         errors.append("CPU identities differ from requested online affinity subset")
@@ -294,24 +326,30 @@ def main():
                     if cpus > available:
                         raise RuntimeError(f"required {cpus}-CPU cell unavailable; only {available} online allowed")
                     common = ["--cpus", str(cpus), "--bytes", str(args.bytes)]
-                    # Controls are fresh for EVERY quartet, same binary/object,
+                    # Controls are fresh for EVERY cell, same binary/object,
                     # participating CPU set, invocation and output directory.
                     controls = common + ["--duration", "2", "--transport", "perf", "--case", "all"]
                     loss = run_one(out, label + "-loss-control", controls + ["--one-page", "--pause-drain"])
                     mutant = run_one(out, label + "-seal-control", controls + ["--period-ns", "100000", "--mutant-boundary"])
                     summary["controls"] = {"loss": loss, "seal": mutant}
                     errors = control_errors(loss, mutant, cpus)
+                    syscall_mutant = run_one(out, label + "-syscall-seal-control", controls + [
+                        "--syscall-boundary", "--period-ns", "100000", "--mutant-boundary"])
+                    summary["controls"]["syscall_seal"] = syscall_mutant
+                    errors += control_errors(loss, syscall_mutant, cpus)
                     if errors:
                         raise RuntimeError("control VOID: " + "; ".join(errors))
-                    # Rotate the quartet to interleave paired arms both ways.
+                    # Rotate all arms to interleave the paired treatments.
                     rotation = (repeat - 1) % len(ARMS)
                     order = ARMS[rotation:] + ARMS[:rotation]
                     summary["arm_order"] = order
                     for arm in order:
                         command = common + ["--case", case, "--duration", str(args.seconds),
                                             "--transport", "shared" if arm == "shared" else "perf"]
-                        if arm in ("perf_boundary", "adversarial"):
-                            command += ["--period-ns", str(args.period_ns if arm == "perf_boundary" else 100_000)]
+                        if arm in BOUNDARY_ARMS + ("adversarial",):
+                            command += ["--period-ns", str(args.period_ns if arm in BOUNDARY_ARMS else 100_000)]
+                        if arm == "syscall_boundary":
+                            command += ["--syscall-boundary"]
                         run = run_one(out, label + "-" + arm, command)
                         summary["runs"][arm] = run
                     summary.update(evaluate_runs(summary["runs"], cpus, case, info["irq_time_accounting"]))

@@ -17,9 +17,9 @@ conditionally enables IRQs. The notifier dispatches to the breakpoint handler at
 [hw_breakpoint.c:534–540](https://github.com/torvalds/linux/blob/v4.18/arch/x86/kernel/hw_breakpoint.c#L534-L540),
 which calls `perf_bp_event` at
 [505](https://github.com/torvalds/linux/blob/v4.18/arch/x86/kernel/hw_breakpoint.c#L505).
-In v6.8, [`exc_debug_user`, traps.c:1012–1062](https://github.com/torvalds/linux/blob/v6.8/arch/x86/kernel/traps.c#L1012-L1062)
+In v6.8, [`exc_debug_user`, traps.c:948–1013](https://github.com/torvalds/linux/blob/v6.8/arch/x86/kernel/traps.c#L948-L1013)
 uses user entry handling and calls `notify_debug` before `local_irq_enable`;
-[`notify_debug`:923–935](https://github.com/torvalds/linux/blob/v6.8/arch/x86/kernel/traps.c#L923-L935)
+[`notify_debug`:864–877](https://github.com/torvalds/linux/blob/v6.8/arch/x86/kernel/traps.c#L864-L877)
 calls DIE_DEBUG, and
 [hw_breakpoint.c:555, 580–586](https://github.com/torvalds/linux/blob/v6.8/arch/x86/kernel/hw_breakpoint.c#L550-L586)
 connects it to perf. The v4.18 BPF overflow wrapper invokes the attached program
@@ -66,6 +66,89 @@ on the same CPU even when they write to different perf maps; their absence or
 non-overlap must be established on the actual box. Only DATA and BOUNDARY are
 attached to this bench's output buffers, but that fact alone is insufficient to
 prove exclusive use of the kernel's helper scratch storage.
+
+## Syscall boundary producer (`syscall_boundary`)
+
+**CITED — syscall and tracepoint choice.** `getppid` has no arguments, user
+buffer, or blocking I/O: its body reads the parent's TGID under RCU in
+[v4.18 sys.c:863–872](https://github.com/torvalds/linux/blob/v4.18/kernel/sys.c#L863-L872)
+and [v6.8 sys.c:929–938](https://github.com/torvalds/linux/blob/v6.8/kernel/sys.c#L929-L938).
+The syscall metadata macros generate `sys_enter_getppid` in both
+[v4.18 syscalls.h:125–198](https://github.com/torvalds/linux/blob/v4.18/include/linux/syscalls.h#L125-L198)
+and [v6.8:128–208](https://github.com/torvalds/linux/blob/v6.8/include/linux/syscalls.h#L128-L208),
+conditional on `CONFIG_FTRACE_SYSCALLS`. This makes it a small, named,
+argument-independent trigger across the two upstream versions. The bench calls
+`syscall(SYS_getppid)` explicitly, so no libc caching or vDSO substitution can
+replace the syscall. Tracepoint presence, permissions and seccomp policy on an
+actual box remain **UNPROVEN** until attachment and producer checks succeed.
+
+**CITED — synchronous task-context path.** The syscall entry path invokes
+`trace_sys_enter` after entering the kernel, with IRQs enabled:
+[v4.18 common.c:116–118, 250–271](https://github.com/torvalds/linux/blob/v4.18/arch/x86/entry/common.c#L116-L271)
+and [v6.8 common.c:26–69](https://github.com/torvalds/linux/blob/v6.8/kernel/entry/common.c#L26-L69).
+The syscall tracepoint invokes BPF synchronously before trace-event submission:
+[v4.18 trace_syscalls.c:527–589](https://github.com/torvalds/linux/blob/v4.18/kernel/trace/trace_syscalls.c#L527-L589)
+and [v6.8:517–582](https://github.com/torvalds/linux/blob/v6.8/kernel/trace/trace_syscalls.c#L517-L582).
+It is a syscall execution, not a CPU-clock sampling interrupt. The output helper
+still writes a perf buffer; attaching a tracepoint through libbpf's perf-event
+API does not make the trigger depend on CPU_CLOCK sample timers or their rate.
+
+**INFERENCE — no overlap with the permitted DATA producer.** The bench's DATA
+watchpoint is per writer TID, write-only, with `exclude_kernel=1` (see
+`open_breakpoint` in [nmi_transport.c](nmi_transport.c)). Its only watched stores
+are userspace instructions. **CITED:** `perf_bp_event` applies the privilege
+filter before invoking perf: [v4.18 core.c:8161–8169](https://github.com/torvalds/linux/blob/v4.18/kernel/events/core.c#L8161-L8169)
+and [v6.8:9987–9995](https://github.com/torvalds/linux/blob/v6.8/kernel/events/core.c#L9987-L9995);
+`exclude_kernel` rejects kernel-mode registers in
+[v4.18:7423–7437](https://github.com/torvalds/linux/blob/v4.18/kernel/events/core.c#L7423-L7437)
+and [v6.8:9165–9179](https://github.com/torvalds/linux/blob/v6.8/kernel/events/core.c#L9165-L9179).
+**INFERENCE:** the synchronous #DB BPF handler runs before IRQs
+are enabled: [v4.18 traps.c:734–745](https://github.com/torvalds/linux/blob/v4.18/arch/x86/kernel/traps.c#L734-L745)
+and [v6.8:991–994](https://github.com/torvalds/linux/blob/v6.8/arch/x86/kernel/traps.c#L991-L994),
+with the EL8-specific ordering recorded below. A syscall helper cannot execute
+on that CPU until the unfinished user #DB handler returns. Conversely, a
+userspace watched instruction cannot execute inside the kernel tracepoint.
+Helpers are pinned to singleton CPU masks using `sched_setaffinity`; BPF filters
+by helper TGID and registered TID, checks the actual CPU against the registered
+CPU, and refuses output on a mismatch. One helper runs per participating CPU;
+only this syscall BOUNDARY and user-watchpoint DATA use its output buffer in this
+arm. The CPU-clock boundary program is not loaded in this arm. Thus their
+timestamp-to-output sections cannot overlap on a CPU. In v4.18 the synchronous
+[BPF call disables preemption](https://github.com/torvalds/linux/blob/v4.18/kernel/trace/bpf_trace.c#L38-L78);
+the fixed affinity also prevents a helper's migration to another CPU.
+Other IRQ/NMI BPF programs, vendor changes, RT and actual helper scratch users
+remain **UNPROVEN** under the inventory requirements above.
+
+**INFERENCE — completion and cost.** Each helper waits against absolute
+`CLOCK_MONOTONIC` deadlines, skipping missed periods rather than bursting.
+Stopping broadcasts to the waiting helpers and joins them before detaching the
+tracepoint, draining, and reading counters. A joined helper has returned from
+its synchronous syscall/BPF invocation, including failed outputs. The BPF clock
+read supplies `w`; the helper's userspace clock is only a wakeup scheduler.
+Each period per CPU costs a syscall, a wakeup and scheduling/context switches
+(out to sleep and back in); the tracepoint filter also runs on unrelated
+`getppid` calls. Exact cost is **UNPROVEN** until measured. Per-helper
+`CLOCK_THREAD_CPUTIME_ID` deltas include synchronous task-context kernel work but
+exclude some wakeup IRQ and other-task scheduler work. They are reported per
+CPU in every case and remain measurable without IRQ time accounting. They do
+not certify total overhead: the frozen idle cost gate still uses the paired
+`/proc/stat` delta and stays **UNMEASURED** without IRQ time accounting. A helper
+alone exceeding 1% of a CPU fails even if total cost is unmeasured.
+
+**UNPROVEN — progress and platform limits.** A wakeup is not a scheduling latency
+guarantee: saturation, virtualization or long IRQ-disabled sections may delay
+the helper. Every CPU must pass the same 100 ms consumed-boundary and stamp-gap
+gates in idle, one-active, all-active and migrating cases, with fires equal
+outputs, zero wrong-CPU events, zero loss, seals and timestamp regressions.
+The protocol retains the perf boundary and adversarial arms, and runs a separate
++1 ms syscall-boundary seal control. Cpusets can reject a singleton affinity;
+`isolcpus` and `nohz_full` deployments may restrict or prohibit placing waking
+helpers on those CPUs. The caller's allowed CPUs are recorded, pinning errors
+refuse the run, and successful pinning does not qualify those deployment modes.
+CPU hotplug is excluded: the bench fixes the participating set and provides no
+online/offline reconfiguration. Actual-kernel clock, publication and producer
+inventory claims below still require proof; this alternative is not product
+enablement or completed box qualification.
 
 ## EL8 vendor difference
 

@@ -18,7 +18,10 @@ def report():
         "seal_violations": 0, "timestamp_regressions": 0, "lost_notifications": 0,
         "attempts": 5, "busy_cpu_ns": 50, "elapsed": 1, "hits": 3, "migrations": 0,
         "pause_drain": False, "buffer_bytes": [67108864], "boundary_offset_ns": 0,
+        "boundary_fires": 2, "boundary_outputs": 2, "wrong_cpu_events": 0,
         "per_cpu": [{"cpu": 0, "max_boundary_gap_ns": 100_000_000,
+                     "syscall_fires": 2, "syscall_outputs": 2, "wrong_cpu_events": 0,
+                     "helper_tid": 123, "helper_cpu_ns": 100_000,
                      "max_boundary_stamp_gap_ns": 10_000_000, "sites": [
                          {"site": "DATA", "produced": 3, "successes": 3, "failures": 0,
                           "delivered": 3, "loss": 0, "seq_gaps": 0, "reconciled": True},
@@ -49,7 +52,7 @@ class Gates(unittest.TestCase):
         runs["shared"].update(accounting_ok=False, lost_notifications=1)
         runs["shared"]["per_cpu"][0]["sites"][0].update(reconciled=False, seq_gaps=0)
         self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "PASS")
-        for arm in ("perf", "perf_boundary"):
+        for arm in ("perf", "perf_boundary", "syscall_boundary"):
             with self.subTest(arm=arm):
                 broken = copy.deepcopy(runs)
                 broken[arm]["per_cpu"][0]["sites"][0].update(delivered=2, loss=1, seq_gaps=1)
@@ -79,6 +82,124 @@ class Gates(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         # IRQ accounting is required for the idle boundary-cost gate only.
         self.assertEqual(qual.evaluate_runs(quartet(), 1, "all", False)["status"], "PASS")
+
+    def test_syscall_boundary_all_cases_each_cpu_deadlines_and_fires(self):
+        for case in qual.CASES:
+            # Reuse the one-CPU hand-counted stream. A one-CPU migration is
+            # necessarily pinned. Idle has boundaries but zero DATA.
+            runs = quartet(case)
+            self.assertEqual(qual.evaluate_runs(runs, 1, case, True)["status"], "PASS", case)
+            for field in ("max_boundary_gap_ns", "max_boundary_stamp_gap_ns"):
+                good = copy.deepcopy(runs)
+                good["syscall_boundary"]["per_cpu"][0][field] = 100_000_000
+                self.assertEqual(qual.evaluate_runs(good, 1, case, True)["status"], "PASS")
+                good["syscall_boundary"]["per_cpu"][0][field] += 1
+                result = qual.evaluate_runs(good, 1, case, True)
+                self.assertEqual(result["status"], "FAIL")
+                self.assertIn("syscall_boundary: CPU 0: boundary gap exceeds 100 ms", result["errors"])
+            broken = copy.deepcopy(runs)
+            broken["syscall_boundary"]["per_cpu"][0]["sites"][1].update(
+                successes=1, failures=1, delivered=1, loss=1, seq_gaps=1)
+            result = qual.evaluate_runs(broken, 1, case, True)
+            self.assertIn("syscall_boundary: CPU 0: boundary fires != outputs", result["errors"])
+            broken = copy.deepcopy(runs)
+            broken["syscall_boundary"]["per_cpu"][0]["sites"][1].update(
+                produced=0, successes=0, delivered=0)
+            self.assertTrue(any("boundary did not fire" in e for e in
+                                qual.evaluate_runs(broken, 1, case, True)["errors"]))
+
+    def test_syscall_wrong_cpu_and_counter_crosschecks(self):
+        runs = quartet()
+        self.assertEqual(qual.evaluate_runs(runs, 1, "all", True)["status"], "PASS")
+        for target in ("aggregate", "per_cpu"):
+            broken = copy.deepcopy(runs)
+            r = broken["syscall_boundary"]
+            (r if target == "aggregate" else r["per_cpu"][0])["wrong_cpu_events"] = 1
+            self.assertIn("syscall_boundary: wrong-CPU syscall boundary event",
+                          qual.evaluate_runs(broken, 1, "all", True)["errors"])
+        for field in ("boundary_fires", "boundary_outputs"):
+            broken = copy.deepcopy(runs)
+            broken["syscall_boundary"][field] += 1
+            self.assertIn("syscall_boundary: syscall boundary fires != outputs",
+                          qual.evaluate_runs(broken, 1, "all", True)["errors"])
+        broken = copy.deepcopy(runs)
+        broken["syscall_boundary"].update(boundary_fires=3, boundary_outputs=3)
+        self.assertIn("syscall_boundary: syscall boundary aggregate/per-CPU counter mismatch",
+                      qual.evaluate_runs(broken, 1, "all", True)["errors"])
+        for field in ("helper_tid", "syscall_fires", "syscall_outputs"):
+            broken = copy.deepcopy(runs)
+            broken["syscall_boundary"]["per_cpu"][0][field] = 0
+            self.assertIn("syscall_boundary: CPU 0: syscall helper/counter mismatch",
+                          qual.evaluate_runs(broken, 1, "all", True)["errors"])
+
+    def test_syscall_seals_regressions_and_loss_notifications(self):
+        for case in qual.CASES:
+            for field in ("seal_violations", "timestamp_regressions"):
+                for local in (False, True):
+                    runs = quartet(case)
+                    r = runs["syscall_boundary"]
+                    self.assertEqual(qual.evaluate_runs(runs, 1, case, True)["status"], "PASS")
+                    (r["per_cpu"][0] if local else r)[field] = 1
+                    self.assertIn("syscall_boundary: seal violation or timestamp regression",
+                                  qual.evaluate_runs(runs, 1, case, True)["errors"])
+        runs = quartet()
+        runs["syscall_boundary"]["lost_notifications"] = 1
+        self.assertIn("syscall_boundary: positive PERF_RECORD_LOST (reported separately)",
+                      qual.evaluate_runs(runs, 1, "all", True)["errors"])
+
+    def test_syscall_cost_limit_and_measurable_helper_without_irq_accounting(self):
+        runs = quartet("idle")
+        runs["syscall_boundary"]["busy_cpu_ns"] += 10_000_000
+        runs["syscall_boundary"]["per_cpu"][0]["helper_cpu_ns"] = 10_000_000
+        result = qual.evaluate_runs(runs, 1, "idle", True)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["boundary_cpu_gates"]["syscall_boundary"]["status"], "PASS")
+        result = qual.evaluate_runs(runs, 1, "idle", False)
+        self.assertEqual(result["status"], "VOID")
+        self.assertEqual(result["boundary_cpu_gates"]["syscall_boundary"]["status"], "UNMEASURED")
+        self.assertEqual(result["syscall_helper_core_fraction_per_cpu"], {"0": 0.01})
+        # One nanosecond over either limit fails; the measured helper lower
+        # bound cannot pass by hiding behind missing IRQ accounting.
+        for irq in (True, False):
+            broken = copy.deepcopy(runs)
+            broken["syscall_boundary"]["per_cpu"][0]["helper_cpu_ns"] += 1
+            result = qual.evaluate_runs(broken, 1, "idle", irq)
+            self.assertEqual(result["status"], "FAIL")
+            self.assertIn("syscall_boundary: helper CPU exceeds 1% on a CPU", result["errors"])
+        runs["syscall_boundary"]["busy_cpu_ns"] += 1
+        result = qual.evaluate_runs(runs, 1, "idle", True)
+        self.assertIn("syscall_boundary: boundary-only idle-box incremental CPU exceeds 1% per CPU", result["errors"])
+        runs = quartet("idle")
+        runs["syscall_boundary"]["per_cpu"][0]["helper_cpu_ns"] = -1
+        self.assertIn("syscall_boundary: invalid helper CPU time",
+                      qual.evaluate_runs(runs, 1, "idle", True)["errors"])
+
+    def test_syscall_helper_cost_cannot_be_averaged_away(self):
+        runs = quartet("idle")
+        for r in runs.values():
+            second = copy.deepcopy(r["per_cpu"][0])
+            second.update(cpu=1, helper_tid=124)
+            r["per_cpu"].append(second)
+            for field in ("attempts", "boundary_fires", "boundary_outputs"):
+                r[field] *= 2
+        runs["syscall_boundary"]["per_cpu"][1]["helper_cpu_ns"] = 10_000_000
+        self.assertEqual(qual.evaluate_runs(runs, 2, "idle", True)["status"], "PASS")
+        runs["syscall_boundary"]["per_cpu"][1]["helper_cpu_ns"] += 1
+        self.assertIn("syscall_boundary: helper CPU exceeds 1% on a CPU",
+                      qual.evaluate_runs(runs, 2, "idle", True)["errors"])
+
+    def test_syscall_gates_do_not_hide_a_second_cpu_failure(self):
+        runs = quartet()
+        for r in runs.values():
+            second = copy.deepcopy(r["per_cpu"][0])
+            second.update(cpu=1, helper_tid=124)
+            r["per_cpu"].append(second)
+            for field in ("hits", "attempts", "boundary_fires", "boundary_outputs"):
+                r[field] *= 2
+        self.assertEqual(qual.evaluate_runs(runs, 2, "all", True)["status"], "PASS")
+        runs["syscall_boundary"]["per_cpu"][1]["max_boundary_gap_ns"] += 1
+        self.assertIn("syscall_boundary: CPU 1: boundary gap exceeds 100 ms",
+                      qual.evaluate_runs(runs, 2, "all", True)["errors"])
 
     def test_adversarial_cpu_is_measured_but_only_normal_boundary_is_cpu_gated(self):
         runs = quartet("idle")
@@ -173,7 +294,7 @@ class Gates(unittest.TestCase):
     def test_wrong_treatment_is_void(self):
         r = report()
         r.update(transport="perf", case="all", cpus=1, duration=30,
-                 period_ns=100_000, buffer_bytes_total=67108864)
+                 period_ns=100_000, buffer_bytes_total=67108864, boundary_source="perf")
         args = ["--transport", "perf", "--case", "all", "--cpus", "1", "--duration", "30",
                 "--period-ns", "100000", "--bytes", "67108864"]
         self.assertEqual(qual.requested_errors(r, args, [0]), [])
@@ -183,6 +304,11 @@ class Gates(unittest.TestCase):
         self.assertTrue(any("CPU identities" in e for e in qual.requested_errors(r, args, [1])))
         r["buffer_bytes"] = [4096]
         self.assertTrue(any("capacities" in e for e in qual.requested_errors(r, args, [0])))
+        r["buffer_bytes"] = [67108864]
+        self.assertTrue(any("boundary_source" in e for e in
+                            qual.requested_errors(r, args + ["--syscall-boundary"], [0])))
+        r["boundary_source"] = "syscall"
+        self.assertEqual(qual.requested_errors(r, args + ["--syscall-boundary"], [0]), [])
 
     def test_cpu_population_and_migration(self):
         r = report()

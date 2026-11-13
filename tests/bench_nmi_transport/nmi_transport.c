@@ -32,6 +32,13 @@ struct writer {
     uint64_t iterations, migrations;
     struct experiment *experiment;
 };
+struct boundary_helper {
+    pthread_t thread;
+    pid_t tid;
+    int cpu, error;
+    uint64_t cpu_ns;
+    struct experiment *experiment;
+};
 struct experiment {
     enum transport_kind kind;
     const char *name, *object_path, *stage, *case_name;
@@ -44,6 +51,13 @@ struct experiment {
     long clock_ticks;
     double duration, elapsed, max_gap_ms;
     bool pause_drain, one_page, accounting_ok;
+    bool syscall_boundary, helper_sync_initialized;
+    int helpers_started;
+    pthread_mutex_t helper_lock;
+    pthread_cond_t helper_cond;
+    struct boundary_helper *helpers;
+    struct syscall_boundary_counts *syscall_counts;
+    struct bpf_link *syscall_link;
     struct writer *writers;
     struct transport_cpu_result *results;
     struct transport_counts *counts[TRANSPORT_SITES];
@@ -54,7 +68,7 @@ struct experiment {
     int error, saved_errno;
     bool accepted;
 };
-static atomic_int ready, start_writers, stop_writers;
+static atomic_int ready, helpers_ready, start_writers, stop_writers;
 static atomic_int interrupted;
 static double writer_deadline;
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal handler needs lock-free int atomics");
@@ -117,7 +131,7 @@ static int pin_cpu(int cpu, int possible)
     size_t size = CPU_ALLOC_SIZE((size_t)possible);
     CPU_ZERO_S(size, mask);
     CPU_SET_S(cpu, size, mask);
-    int rc = pthread_setaffinity_np(pthread_self(), size, mask);
+    int rc = sched_setaffinity(0, size, mask) ? errno : 0;
     CPU_FREE(mask);
     return rc;
 }
@@ -146,6 +160,55 @@ static void *write_loop(void *arg)
         w->watched = ++n;
     }
     w->iterations = n;
+    return NULL;
+}
+
+static int thread_cpu_ns(uint64_t *value)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts)) return errno;
+    *value = (uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec;
+    return 0;
+}
+static void *boundary_loop(void *arg)
+{
+    struct boundary_helper *h = arg;
+    struct experiment *e = h->experiment;
+    h->error = pin_cpu(h->cpu, e->possible);
+    h->tid = (pid_t)syscall(SYS_gettid);
+    if (h->tid < 0 && !h->error) h->error = errno;
+    atomic_fetch_add_explicit(&helpers_ready, 1, memory_order_release);
+    while (!atomic_load_explicit(&start_writers, memory_order_acquire) &&
+           !atomic_load_explicit(&stop_writers, memory_order_relaxed)) sched_yield();
+    if (h->error || atomic_load_explicit(&stop_writers, memory_order_relaxed)) return NULL;
+    uint64_t began;
+    h->error = thread_cpu_ns(&began);
+    if (h->error) return NULL;
+    uint64_t next = e->began_ns;
+    uint64_t end = e->began_ns + (uint64_t)(e->duration * 1e9);
+    while (!atomic_load_explicit(&stop_writers, memory_order_relaxed) && now_ns() < end) {
+        /* Explicit syscall: never a libc cache or vDSO clock observation. */
+        if (syscall(SYS_getppid) < 0) { h->error = errno; break; }
+        uint64_t current = now_ns();
+        /* Skip missed deadlines rather than emitting a catch-up burst. */
+        uint64_t periods = current >= next ? (current - next) / e->period_ns + 1 : 1;
+        uint64_t remaining = end - (next < end ? next : end);
+        next = periods > remaining / e->period_ns ? end : next + periods * e->period_ns;
+        struct timespec deadline = { .tv_sec = (time_t)(next / 1000000000),
+                                     .tv_nsec = (long)(next % 1000000000) };
+        pthread_mutex_lock(&e->helper_lock);
+        while (!atomic_load_explicit(&stop_writers, memory_order_relaxed)) {
+            int rc = pthread_cond_timedwait(&e->helper_cond, &e->helper_lock, &deadline);
+            if (rc == ETIMEDOUT) break;
+            if (rc) { h->error = rc; break; }
+        }
+        pthread_mutex_unlock(&e->helper_lock);
+        if (h->error) break;
+    }
+    uint64_t ended;
+    int rc = thread_cpu_ns(&ended);
+    if (rc) h->error = rc;
+    else h->cpu_ns = ended - began;
     return NULL;
 }
 
@@ -267,8 +330,19 @@ static int configure_object(struct experiment *e)
     }
     struct bpf_program *boundary = bpf_object__find_program_by_name(e->object, "on_boundary");
     if (!boundary) return -ENOENT;
-    int boundary_rc = bpf_program__set_autoload(boundary, e->period_ns != 0);
+    int boundary_rc = bpf_program__set_autoload(boundary, e->period_ns && !e->syscall_boundary);
     if (boundary_rc) return boundary_rc;
+    boundary = bpf_object__find_program_by_name(e->object, "on_syscall_boundary");
+    if (!boundary) return -ENOENT;
+    if ((boundary_rc = bpf_program__set_autoload(boundary, e->syscall_boundary))) return boundary_rc;
+    const char *helper_maps[] = {"helper_tgid", "helper_cpus", "syscall_counts"};
+    for (size_t i = 0; i < sizeof(helper_maps) / sizeof(helper_maps[0]); ++i) {
+        struct bpf_map *helper_map = bpf_object__find_map_by_name(e->object, helper_maps[i]);
+        if (!helper_map) return -ENOENT;
+        if ((boundary_rc = bpf_map__set_autocreate(helper_map, e->syscall_boundary))) return boundary_rc;
+        if (i == 1 && e->syscall_boundary &&
+            (boundary_rc = bpf_map__set_max_entries(helper_map, (__u32)e->available))) return boundary_rc;
+    }
     struct bpf_map *shared = bpf_object__find_map_by_name(e->object, "shared_ring");
     struct bpf_map *outer = bpf_object__find_map_by_name(e->object, "cpu_rings");
     struct bpf_map *perf = bpf_object__find_map_by_name(e->object, "perf_events");
@@ -377,8 +451,58 @@ static int drain(struct experiment *e, bool wait)
 static void stop_and_join(struct experiment *e)
 {
     atomic_store_explicit(&stop_writers, 1, memory_order_relaxed);
+    if (e->helper_sync_initialized) {
+        pthread_mutex_lock(&e->helper_lock);
+        pthread_cond_broadcast(&e->helper_cond);
+        pthread_mutex_unlock(&e->helper_lock);
+    }
     for (int i = 0; i < e->started; ++i) pthread_join(e->writers[i].thread, NULL);
     e->started = 0;
+    for (int i = 0; i < e->helpers_started; ++i) pthread_join(e->helpers[i].thread, NULL);
+    e->helpers_started = 0;
+}
+static int start_syscall_boundary(struct experiment *e)
+{
+    e->stage = "helper_start";
+    pthread_condattr_t attr;
+    int rc = pthread_condattr_init(&attr);
+    if (rc) return -rc;
+    rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    if (!rc) rc = pthread_mutex_init(&e->helper_lock, NULL);
+    if (rc) { pthread_condattr_destroy(&attr); return -rc; }
+    rc = pthread_cond_init(&e->helper_cond, &attr);
+    pthread_condattr_destroy(&attr);
+    if (rc) { pthread_mutex_destroy(&e->helper_lock); return -rc; }
+    e->helper_sync_initialized = true;
+    int tgid_fd = bpf_object__find_map_fd_by_name(e->object, "helper_tgid");
+    int cpus_fd = bpf_object__find_map_fd_by_name(e->object, "helper_cpus");
+    if (tgid_fd < 0 || cpus_fd < 0) return -ENOENT;
+    uint32_t zero = 0, tgid = (uint32_t)getpid();
+    if (bpf_map_update_elem(tgid_fd, &zero, &tgid, BPF_ANY)) return -errno;
+    for (int i = 0; i < e->available; ++i) {
+        struct boundary_helper *h = &e->helpers[i];
+        h->cpu = e->cpu_ids[i]; h->experiment = e;
+        rc = pthread_create(&h->thread, NULL, boundary_loop, h);
+        if (rc) return -rc;
+        ++e->helpers_started;
+    }
+    while (atomic_load_explicit(&helpers_ready, memory_order_acquire) < e->available) sched_yield();
+    for (int i = 0; i < e->available; ++i) {
+        struct boundary_helper *h = &e->helpers[i];
+        if (h->error) return -h->error;
+        uint32_t tid = (uint32_t)h->tid, cpu = (uint32_t)h->cpu;
+        if (bpf_map_update_elem(cpus_fd, &tid, &cpu, BPF_ANY)) return -errno;
+    }
+    struct bpf_program *program = bpf_object__find_program_by_name(e->object, "on_syscall_boundary");
+    if (!program) return -ENOENT;
+    e->stage = "syscall_boundary_attach";
+    e->syscall_link = bpf_program__attach_tracepoint(program, "syscalls", "sys_enter_getppid");
+    long error = libbpf_get_error(e->syscall_link);
+    if (!e->syscall_link || error) {
+        e->syscall_link = NULL;
+        return error ? (int)error : -errno;
+    }
+    return 0;
 }
 static int run(struct experiment *e)
 {
@@ -405,7 +529,10 @@ static int run(struct experiment *e)
         if (w->fd < 0) return -errno;
         if (ioctl(w->fd, PERF_EVENT_IOC_ENABLE, 0)) return -errno;
     }
-    if (e->period_ns) {
+    if (e->syscall_boundary) {
+        int rc = start_syscall_boundary(e);
+        if (rc) return rc;
+    } else if (e->period_ns) {
         program = bpf_object__find_program_by_name(e->object, "on_boundary");
         if (!program) return -ENOENT;
         e->stage = "boundary_attach";
@@ -425,7 +552,8 @@ static int run(struct experiment *e)
     /* Start the boundary before permitting user stores; include startup
      * and final silence in the per-CPU consumed-boundary deadline check. */
     for (int i = 0; i < e->available; ++i)
-        if (e->period_ns && ioctl(e->boundary_fds[i], PERF_EVENT_IOC_ENABLE, 0)) return -errno;
+        if (e->period_ns && !e->syscall_boundary &&
+            ioctl(e->boundary_fds[i], PERF_EVENT_IOC_ENABLE, 0)) return -errno;
     atomic_store_explicit(&start_writers, 1, memory_order_release);
     double last = now_seconds();
     while (!atomic_load_explicit(&interrupted, memory_order_relaxed) &&
@@ -452,9 +580,18 @@ static int run(struct experiment *e)
      * waits for its running callback on the target CPU to complete. Close
      * before accounting, so an unfinished failure path cannot be mistaken
      * for quiescence. Joined DATA writers have already returned from #DB. */
-    for (int i = 0; i < e->available; ++i) if (e->period_ns) {
+    for (int i = 0; i < e->available; ++i) if (e->period_ns && !e->syscall_boundary) {
         if (ioctl(e->boundary_fds[i], PERF_EVENT_IOC_DISABLE, 0)) return -errno;
         close(e->boundary_fds[i]); e->boundary_fds[i] = -1;
+    }
+    if (e->syscall_boundary) {
+        for (int i = 0; i < e->available; ++i)
+            if (e->helpers[i].error) return -e->helpers[i].error;
+        bpf_link__destroy(e->syscall_link); e->syscall_link = NULL;
+        int fd = bpf_object__find_map_fd_by_name(e->object, "syscall_counts");
+        uint32_t zero = 0;
+        if (fd < 0) return fd;
+        if (bpf_map_lookup_elem(fd, &zero, e->syscall_counts)) return -errno;
     }
     do { rc = drain(e, false); } while (rc > 0);
     if (rc < 0) return rc;
@@ -500,7 +637,7 @@ static void report(struct experiment *e)
     const char *kernel = uname(&uts) ? "unknown" : uts.release;
     uint64_t hits = 0, migrations = 0, attempts = 0, delivered = 0, failures = 0;
     uint64_t seals = 0, regressions = 0, seq_gaps = 0, reorders = 0;
-    uint64_t boundary_fires = 0, boundary_outputs = 0, boundary_gap = 0;
+    uint64_t boundary_fires = 0, boundary_outputs = 0, boundary_gap = 0, wrong_cpu = 0;
     for (int cpu = 0; cpu < e->possible; ++cpu) {
         struct transport_cpu_result *c = &e->results[cpu];
         for (int site = 0; site < TRANSPORT_SITES; ++site) {
@@ -510,8 +647,11 @@ static void report(struct experiment *e)
             attempts += n->attempts; delivered += c->site[site].delivered;
             failures += n->failures; seq_gaps += gaps; reorders += c->site[site].reorders;
         }
-        boundary_fires += e->counts[TRANSPORT_BOUNDARY][cpu].attempts;
-        boundary_outputs += e->counts[TRANSPORT_BOUNDARY][cpu].successes;
+        boundary_fires += e->syscall_boundary ? e->syscall_counts[cpu].fires :
+            e->counts[TRANSPORT_BOUNDARY][cpu].attempts;
+        boundary_outputs += e->syscall_boundary ? e->syscall_counts[cpu].outputs :
+            e->counts[TRANSPORT_BOUNDARY][cpu].successes;
+        wrong_cpu += e->syscall_counts[cpu].wrong_cpu;
         seals += c->seal_violations; regressions += c->regressions;
         if (c->max_boundary_gap_ns > boundary_gap) boundary_gap = c->max_boundary_gap_ns;
     }
@@ -521,6 +661,9 @@ static void report(struct experiment *e)
     printf("{\"transport\":"); json_string(e->name);
     printf(",\"case\":"); json_string(e->case_name);
     printf(",\"kernel\":"); json_string(kernel);
+    printf(",\"boundary_source\":");
+    json_string(e->syscall_boundary ? "syscall" : e->period_ns ? "perf" : "none");
+    printf(",\"wrong_cpu_events\":%" PRIu64, wrong_cpu);
     printf(",\"cpus\":%d,\"possible_cpus\":%d,\"threads\":%d,\"duration\":%.6f,"
            "\"elapsed\":%.6f,\"buffer_bytes_total\":%zu,\"period_ns\":%" PRIu64
            ",\"boundary_offset_ns\":%" PRIu64 ",\"pause_drain\":%s,\"hits\":%" PRIu64
@@ -561,9 +704,14 @@ static void report(struct experiment *e)
         printf("%s{\"cpu\":%d,\"seal_violations\":%" PRIu64
                ",\"timestamp_regressions\":%" PRIu64
                ",\"max_boundary_gap_ns\":%" PRIu64
-               ",\"max_boundary_stamp_gap_ns\":%" PRIu64 ",\"sites\":[",
+               ",\"max_boundary_stamp_gap_ns\":%" PRIu64
+               ",\"syscall_fires\":%" PRIu64 ",\"syscall_outputs\":%" PRIu64
+               ",\"wrong_cpu_events\":%" PRIu64 ",\"helper_tid\":%d"
+               ",\"helper_cpu_ns\":%" PRIu64 ",\"sites\":[",
                i ? "," : "", cpu, c->seal_violations, c->regressions,
-               c->max_boundary_gap_ns, c->max_boundary_stamp_gap_ns);
+               c->max_boundary_gap_ns, c->max_boundary_stamp_gap_ns,
+               e->syscall_counts[cpu].fires, e->syscall_counts[cpu].outputs,
+               e->syscall_counts[cpu].wrong_cpu, e->helpers[i].tid, e->helpers[i].cpu_ns);
         for (int site = 0; site < TRANSPORT_SITES; ++site) {
             struct transport_counts *v = &e->counts[site][cpu];
             struct transport_site_result *r = &c->site[site];
@@ -587,6 +735,11 @@ static void report(struct experiment *e)
 static void cleanup(struct experiment *e)
 {
     stop_and_join(e);
+    if (e->syscall_link) bpf_link__destroy(e->syscall_link);
+    if (e->helper_sync_initialized) {
+        pthread_cond_destroy(&e->helper_cond);
+        pthread_mutex_destroy(&e->helper_lock);
+    }
     if (e->writers)
         for (int i = 0; i < e->threads; ++i) if (e->writers[i].fd >= 0) close(e->writers[i].fd);
     if (e->boundary_fds)
@@ -598,6 +751,7 @@ static void cleanup(struct experiment *e)
     if (e->ring_fds)
         for (int i = 0; i < e->possible; ++i) if (e->ring_fds[i] >= 0) close(e->ring_fds[i]);
     free(e->cpu_ids); free(e->writers); free(e->results);
+    free(e->helpers); free(e->syscall_counts);
     for (int site = 0; site < TRANSPORT_SITES; ++site) free(e->counts[site]);
     free(e->ring_fds); free(e->ring_sizes); free(e->perf_sizes); free(e->perf); free(e->boundary_fds);
 }
@@ -614,7 +768,7 @@ static void usage(const char *program)
 {
     fprintf(stderr, "usage: %s --transport shared|percpu-ring|perf [--cpus N] "
             "[--case idle|one|all|migrate] [--duration SECONDS] [--bytes TOTAL] "
-            "[--period-ns N] [--pause-drain] [--mutant-boundary] "
+            "[--period-ns N] [--syscall-boundary] [--pause-drain] [--mutant-boundary] "
             "[--object transport.bpf.o]\n", program);
 }
 int main(int argc, char **argv)
@@ -630,11 +784,12 @@ int main(int argc, char **argv)
         {"duration", required_argument, NULL, 'd'}, {"bytes", required_argument, NULL, 'b'},
         {"object", required_argument, NULL, 'o'}, {"period-ns", required_argument, NULL, 'p'},
         {"boundary", no_argument, NULL, 'B'}, {"pause-drain", no_argument, NULL, 'P'},
+        {"syscall-boundary", no_argument, NULL, 'S'},
         {"mutant-boundary", no_argument, NULL, 'M'}, {"one-page", no_argument, NULL, 'O'},
         {"help", no_argument, NULL, 'h'}, {0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "t:n:c:d:b:o:p:BPMOh", options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:n:c:d:b:o:p:BSPMOh", options, NULL)) != -1) {
         size_t n;
         switch (opt) {
         case 't':
@@ -653,6 +808,7 @@ int main(int argc, char **argv)
         case 'b': if (parse_size(optarg, &e.bytes)) goto invalid; break;
         case 'p': if (parse_size(optarg, &n)) goto invalid; e.period_ns = n; boundary_requested = true; break;
         case 'B': boundary_requested = true; break;
+        case 'S': e.syscall_boundary = true; boundary_requested = true; break;
         case 'P': e.pause_drain = true; break;
         case 'O': e.one_page = true; break;
         case 'M': e.boundary_offset_ns = 1000000; boundary_requested = true; break;
@@ -694,6 +850,8 @@ int main(int argc, char **argv)
     size_t writers_size = (size_t)(e.threads ? e.threads : 1) * sizeof(*e.writers);
     e.writers = aligned_alloc(64, writers_size);
     e.results = calloc((size_t)e.possible, sizeof(*e.results));
+    e.helpers = calloc((size_t)e.available, sizeof(*e.helpers));
+    e.syscall_counts = calloc((size_t)e.possible, sizeof(*e.syscall_counts));
     for (int site = 0; site < TRANSPORT_SITES; ++site)
         e.counts[site] = calloc((size_t)e.possible, sizeof(*e.counts[site]));
     e.ring_fds = malloc((size_t)e.possible * sizeof(*e.ring_fds));
@@ -707,7 +865,8 @@ int main(int argc, char **argv)
         memset(e.writers, 0, writers_size);
         for (int i = 0; i < e.threads; ++i) { e.writers[i].fd = -1; e.writers[i].cpu = e.cpu_ids[i]; }
     }
-    if (!e.writers || !e.results || !e.counts[0] || !e.counts[1] || !e.ring_fds ||
+    if (!e.writers || !e.results || !e.helpers || !e.syscall_counts ||
+        !e.counts[0] || !e.counts[1] || !e.ring_fds ||
         !e.ring_sizes || !e.perf_sizes || !e.perf || !e.boundary_fds) {
         fprintf(stderr, "allocation failure\n"); cleanup(&e); return 1;
     }

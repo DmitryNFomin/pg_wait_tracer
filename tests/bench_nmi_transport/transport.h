@@ -26,6 +26,10 @@ struct transport_record {
 struct transport_counts {
     U64 attempts, successes, failures, eagain, enospc, other, reserve_null;
 };
+/* Separate diagnostics; the measurement record and existing counters stay fixed. */
+struct syscall_boundary_counts {
+    U64 fires, outputs, wrong_cpu;
+};
 _Static_assert(sizeof(struct transport_record) == 64, "fixed measurement record");
 _Static_assert(sizeof(struct transport_counts) % 8 == 0, "percpu lookup stride");
 #undef U64
