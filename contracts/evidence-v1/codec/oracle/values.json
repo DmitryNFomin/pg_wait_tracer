@@ -1,0 +1,32 @@
+{
+ "header_len": 201,
+ "header_crc": "0x1e3a7196",
+ "ex1": {
+  "offset": 201,
+  "len": 252,
+  "crc": "0x3b714f39",
+  "self_offset": 201,
+  "rec_offsets": [
+   8,
+   36
+  ]
+ },
+ "ex2": {
+  "offset": 453,
+  "len": 91,
+  "crc": "0x77d5698f",
+  "self_offset": 453
+ },
+ "ex3": {
+  "offset": 544,
+  "len": 102,
+  "crc": "0x7d06bde8",
+  "self_offset": 544,
+  "rec_offsets": [
+   8
+  ]
+ },
+ "total": 646,
+ "D": 646,
+ "predecessor_digest_if_this_were_predecessor": "4c24de25c90c09fe8f9f33b25899eeaa0223eb4d348176c38ae3c2c28edd5463"
+}

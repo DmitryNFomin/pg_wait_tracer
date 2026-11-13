@@ -33,3 +33,12 @@ CONTRACT.md sections 1 and 3 (FRONTIER barrier, coherent reread, END instant) ar
 
 An implementation change may not edit anything in this directory. Changing the contract is its own
 reviewed change and invalidates the expected answers.
+
+- `codec/`: the byte-level encoding of these records in trace v5 (`CODEC.md`), written by Astra and revised (r2) after an
+  independent challenge by Fable (`CHALLENGE-fable.md`, dispositions in `REVISION-codec-r2.md`). `WORKED.md` gives three
+  hand-worked examples. `fixtures/ex{1,2,3}.bin` are those bytes as produced by an independent encoder written from CODEC.md
+  alone (`oracle/enc.py`, `oracle/values.json`); Fable's independent encoder (`oracle/fable_check.py`) produced the same 646
+  bytes. Caveat: the second writer saw WORKED.md's derived sizes and checksums (not its hex) before writing its encoder.
+  CONTRACT.md is unchanged by the codec. The fault-handling question this codec raised (CONTRACT.md §5 against the
+  reference evaluator and the C replay, which both refused the whole input) is settled by revision r3 (`REVISION-r3.md`,
+  scenarios in `r3/`). The C replay on master still implements r2 and refuses those inputs until its r3 unit lands.
