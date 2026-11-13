@@ -837,12 +837,13 @@ def main():
               f"{'PASS' if integrity_ok else 'FAIL'} -- {integrity_detail}")
         extra_checks["daemon_integrity"] = {
             "ok": integrity_ok, "detail": integrity_detail,
-            "note": ("ringbuf_drops_total/state_map_full_total/"
-                    "seen_query_ids_full_total == 0 -- a lost LIFECYCLE "
-                    "event is silent (no counter increments), so this "
-                    "means no TRACE events were dropped, never that "
-                    "nothing was missed; see docs/DEMO_REHEARSAL_CRITERIA.md "
-                    "section 6"),
+            "note": ("/".join(drlib.DAEMON_INTEGRITY_COUNTERS) +
+                     " == 0 -- BPF map update and read failures without "
+                     "counters remain uncovered; sampled/coop tiers report "
+                     "the ring-drop counters as 0 because only the full "
+                     "provider fills them. A clean result means the reported "
+                     "counters are zero, never that nothing was missed; see "
+                     "docs/DEMO_REHEARSAL_CRITERIA.md section 6"),
         }
 
         # #222 review: reported, not gated -- see cmd_markers_observed's own

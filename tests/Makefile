@@ -79,7 +79,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_phase_capability test_phase_probe \
             test_core_wait_time_contract \
             test_core_evidence_contract \
-            test_core_merge_contract
+            test_core_merge_contract \
+            test_ringbuf_metrics
 
 .PHONY: all clean check
 
@@ -1171,3 +1172,6 @@ test_core_evidence_contract: test_core_evidence_contract.c evidence_json.c evide
 	$(CC) $(CFLAGS) -std=c11 -o $@ $(filter %.c,$^)
 test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
+
+test_ringbuf_metrics: test_ringbuf_metrics.c ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<
