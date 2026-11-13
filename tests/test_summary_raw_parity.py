@@ -1,85 +1,12 @@
 #!/usr/bin/env python3
-"""test_summary_raw_parity.py — THE SUMMARY-vs-RAW PARITY GATE.
+"""Summaries-off production gate: one binary and byte-identical captures
+with fresh, missing and stale summary files must all answer long EXACT
+windows from raw events, and refuse at a one-event load limit.
 
-The same capture, the same unfiltered window, answered through fresh-summary,
-missing-summary raw, and stale-version raw arms. See the library for what is
-compared and for every refuse-rather-than-approve rule; this is the live half.
-
-Parity has no ground truth. It catches a value that contradicts its own
-availability declaration, but a fabricator that also flips unavailable to
-false can still agree with raw. Only tests/test_data_summary_honesty.py can
-catch that fabrication (it did: 62/63, "summary utilization is null, never
-measured zero"). XPASS alone is not evidence of a fix.
-
-HOW THE RAW REFERENCE IS OBTAINED, AND WHY THIS WAY
-─────────────────────────────────────────────────────────────────────────────
-There is no supported way to force the raw path for an unfiltered window >=
-120 s: `should_use_summaries` (src/server.c) routes it to summaries. #408 got
-its raw reference by rebuilding with the 120 s constant raised to 86400 s.
-This gate does NOT do that, and deliberately:
-
-  * a second build is a DIFFERENT BINARY. Then every divergence has two
-    candidate explanations — the route, or the patch — and the gate can only
-    be trusted as far as a human trusts that one-line edit. It also cannot run
-    anywhere a compiler and the exact same flags are not available, which is
-    most of where this suite runs.
-  * a test-only hook in src/server.c would be product code added for a test,
-    on a branch whose contract is "tests only"; and an env-var route override
-    is itself untested behaviour in the thing being measured.
-
-Instead: ONE binary, ONE generated capture, and the route is chosen by the
-PRODUCT's OWN supported fallback. The capture is copied; the copy's summary
-files are deleted. src/server.c then refuses the summary path for that window
-("no summary file covers this window -- recomputing from raw events", the
-#402/#403 fix) and answers from raw events. The two dirs hold byte-identical
-trace files, so the raw side's inputs are exactly the summary side's inputs.
-
-A third copy retains its summaries but stamps every file header to
-PGWT_SUMMARY_VERSION - 1, following test_open_cpu_accounting.c's set_version.
-Its long-window route must be raw, with the ACCOUNTING-VERSION PREFLIGHT INFO
-marker (never the no-file marker), and EVERY compared field must equal the
-SUMMARY-LESS RAW REFERENCE -- exactly, with no expected-divergence table and
-no holes. The version refusal puts this arm on the raw path, so the raw answer
-is the one it owes; comparing it against the fresh SUMMARY answer instead would
-re-ask arm one's question, inherit arm one's open #410/straddle divergences as
-NEW ones, and -- the part that matters -- PASS a future bug that made the
-refusal leak the summary path's numbers. The fresh-summary answer is still
-required to route to summaries, which is what proves this window was
-summary-eligible and therefore that the stamping is what forced the fallback.
-
-That premise is not assumed — it is asserted, by the PREMISE CONTROL below:
-at a 59 s window BOTH dirs take the raw path, and their answers must be
-IDENTICAL on every compared field. If deleting the summary files changed the
-raw answer in any way, that control goes red.
-
-PROOF THAT BOTH PATHS ARE ACTUALLY EXERCISED
-─────────────────────────────────────────────────────────────────────────────
-"Two raw answers agreeing" is the exact false negative a sabotage control
-caught on #408, and it is about to get easier: the v6 -> v7 summary format
-bump planned with the #408/#379 fixes makes the server REFUSE old summary
-files and recompute from raw, silently. So each side's route is MEASURED
-(classify_route): an oracle re-run with PGWT_LOAD_MAX_EVENTS=1 (raw must
-refuse with window_too_large, summaries answer anyway) cross-checked against
-the server's own raw-fallback stderr markers. Same route on both sides, or an
-undeterminable route, FAILS the gate before any number is compared. Run with
---sabotage to see that happen: both sides are pointed at the summary-less dir,
-every number then agrees perfectly, and the gate still goes red.
---sabotage-stale-fallback injects an incomplete numeric answer after the REAL
-stale fallback and oracle have run: it zeroes only that answer's measured CPU
-scalar. Routes, preflight markers, rows and DB Time stay intact, so the new
-arm must reject it on numeric completeness rather than refusal or vacuity.
---sabotage-io-worker-value injects #821's exact fabrication after the real
-summary route and oracle have run: utilization becomes 0.0 while its
-unavailable=true declaration and reason stay intact. This must fail without
-XPASS, and --record must refuse.
-
-WHERE THIS RUNS
-─────────────────────────────────────────────────────────────────────────────
-tests/run_all.sh's synthetic-data tier (step 2.5, needs pgwt-server +
-gen_test_traces), i.e. every `make box-check` and the CI Linux job — not
-tests/unit_tests.list, which is C unit binaries plus pure-Python modules and
-would have no server to query. The pure comparison core is separately gated in
-`make check` via tests/test_summary_raw_parity_lib.py.
+The original capture, window shapes, historical pin helpers and their
+anti-vacuity tests remain for the later summary rebuild. Production no
+longer consumes or rewrites expected-divergence pins. Numeric agreement
+here checks summary-file independence; it is not numerical ground truth.
 """
 
 import glob
@@ -89,6 +16,7 @@ import shutil
 import signal
 import struct
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server_harness import (                                    # noqa: E402
@@ -110,9 +38,6 @@ BASE = 10_000_000_000_000          # second-aligned synthetic mono/wall base
 CLIENT_READ = make_event_id(CLASS_CLIENT, 1)
 LOCK_REL = make_event_id(CLASS_LOCK, 0)
 
-RESULT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "results", "summary_raw_parity")
-
 # Seconds (relative to BASE) no ordinary record may overlap, so that every
 # window edge below falls in a data hole. Without this, every window edge
 # creates its own #379 straddle and the per-window expectations would be
@@ -127,7 +52,7 @@ def _quiet(start_s, end_s):
 
 def build_capture():
     """A synthetic EXACT capture: no samples, so every window below is
-    EXACT-covered and therefore eligible for the summary route."""
+    EXACT-covered and long enough to catch accidental summary re-enabling."""
     ev = []
 
     # pid 1000 — a 3 s CPU/IO/LWLock cycle with MEASURED cpu_ns, so the raw
@@ -205,7 +130,7 @@ WINDOWS = {
 CONTROL_WINDOW = ("control_59s_both_raw",
                   (BASE + 200 * S, BASE + 259 * S))
 
-CMDS = ("time_model", "aas", "top_sessions", "top_queries", "top_events")
+CMDS = ("time_model", "aas", "top_sessions", "top_queries", "top_events", "heatmap")
 
 
 def ask(trace_dir, frm, to, stderr_path):
@@ -215,14 +140,11 @@ def ask(trace_dir, frm, to, stderr_path):
         for cmd in CMDS:
             answers[cmd] = srv.query(cmd, from_=frm, to_=to, buckets=10,
                                      limit=100)
-    # Time Model-only route oracle for this dir/window; one event allowed.
-    oracle_err = stderr_path + ".oracle"
-    with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1},
-                       stderr_path=oracle_err) as srv:
-        oracle = srv.query("time_model", from_=frm, to_=to)
-    with open(stderr_path) as f:
-        err = f.read()
-    return answers, oracle, err
+    # Every formerly summary-capable handler must enforce the raw event limit.
+    with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+        oracles = {cmd: srv.query(cmd, from_=frm, to_=to, buckets=10, limit=100)
+                   for cmd in CMDS}
+    return answers, oracles
 
 
 # ── Expected divergences ───────────────────────────────────────────────────
@@ -391,207 +313,76 @@ def set_version(trace_dir, current_version):
 
 
 def main():
-    record = "--record" in sys.argv
-    sabotage = "--sabotage" in sys.argv
-    sabotage_stale = "--sabotage-stale-fallback" in sys.argv
-    sabotage_io = "--sabotage-io-worker-value" in sys.argv
-
-    tool_problems = P.require_tools([SERVER_BIN, GEN_BIN])
-    if tool_problems:
-        for p in tool_problems:
-            print("FAIL dependency: %s" % p)
-        print("=== test_summary_raw_parity: FAIL (the gate could not run; "
-              "that is a failure, not a skip) ===")
+    if "--record" in sys.argv:
+        print("REFUSING to record: summaries are off; historical pins stay frozen")
         return 1
-
-    # Before measuring a capture, prove the stale arm's detectors can still
-    # SEE. A blinded detector must not get the chance to approve a live run.
+    problems = P.require_tools([SERVER_BIN, GEN_BIN])
+    if problems:
+        for problem in problems:
+            print("FAIL dependency: " + problem)
+        return 1
     self_ok, self_lines = run_stale_detector_selftest()
+    for line in self_lines:
+        print(line)
     if not self_ok:
-        for l in self_lines:
-            print(l)
-        print("=== test_summary_raw_parity: FAIL (the stale arm's own "
-              "detectors are blind; refusing to report on a capture) ===")
         return 1
 
-    os.makedirs(RESULT_DIR, exist_ok=True)
-    sum_dir = generate_traces(build_capture())
-    raw_dir = sum_dir + "_rawref"
-    stale_dir = sum_dir + "_stalever"
-    shutil.copytree(sum_dir, raw_dir)
-    removed = sorted(glob.glob(os.path.join(raw_dir, "*.summary*")))
-    for f in removed:
-        os.remove(f)
-    if not removed:
-        print("FAIL: the generated capture had no summary file to remove, so "
-              "there is no summary path to compare against")
-        return 1
-    if sabotage:
-        # The control that proves this gate is not satisfiable by two raw
-        # answers: point the 'summary' side at the summary-less dir too.
-        sum_dir_used = raw_dir
-    else:
-        sum_dir_used = sum_dir
-
-    ok = True
-    report = {"commit_fixture": "synthetic", "sabotage": sabotage,
-              "sabotage_stale_fallback": sabotage_stale,
-              "sabotage_io_worker_value": sabotage_io,
-              "summary_format_version": summary_format_version(),
-              "summary_files_present": sorted(
-                  os.path.basename(p) for p in glob.glob(
-                      os.path.join(sum_dir_used, "*.summary*"))),
-              "windows": {}}
-    expected = load_expected()
-    recorded = {}
-    # The detector self-test's verdict is part of the printed log and the
-    # artifact, so a reader can see it ran rather than trusting that it did.
-    lines = list(self_lines)
-    report["stale_detector_selftest_ok"] = self_ok
-    report["stale_detector_selftest"] = self_lines
+    fresh = generate_traces(build_capture())
     try:
-        version = int(summary_format_version())
-        if version <= 1:
-            raise RuntimeError("summary version must have a predecessor")
-        shutil.copytree(sum_dir, stale_dir)
-        stamped = set_version(stale_dir, version)
-        report["stale_summary_version"] = version - 1
-        report["stale_summary_files"] = stamped
-        for name, (frm, to) in list(WINDOWS.items()) + [CONTROL_WINDOW]:
-            is_control = (name == CONTROL_WINDOW[0])
-            r_ans, r_oracle, r_err = ask(
-                raw_dir, frm, to, os.path.join(RESULT_DIR, "err_%s_raw" % name))
-            s_ans, s_oracle, s_err = ask(
-                sum_dir_used, frm, to,
-                os.path.join(RESULT_DIR, "err_%s_sum" % name))
-            t_ans, t_oracle, t_err = ask(
-                stale_dir, frm, to,
-                os.path.join(RESULT_DIR, "err_%s_stale" % name))
-            if sabotage_stale and not is_control:
-                if t_ans["time_model"].get("cpu_ms", 0) <= 0:
-                    raise RuntimeError("stale sabotage needs nonzero measured CPU")
-                t_ans["time_model"]["cpu_ms"] = 0
-                lines.append("SABOTAGE stale fallback answer: cpu_ms=0")
-            # Below the 120 s threshold the raw path is taken on length alone
-            # and no fallback line is printed, so the control window's routes
-            # are classified by the oracle alone (see classify_route).
-            routes = {"raw": P.classify_route(r_oracle, r_err,
-                                              marker_expected=not is_control),
-                      "summary": P.classify_route(s_oracle, s_err,
-                                                  marker_expected=not is_control)}
-            fallbacks = {"raw": P.fallback_reason(r_err),
-                         "summary": P.fallback_reason(s_err)}
-            if sabotage_io and not is_control:
-                tm = s_ans["time_model"]
-                if tm.get("io_worker_busy_pct_unavailable") is not True:
-                    raise RuntimeError("IO sabotage needs unavailable=true")
-                # #821's exact wrong fix, with the declaration preserved.
-                tm["io_worker_busy_pct"] = 0.0
-                lines.append("SABOTAGE summary IO utilization: 0.0, "
-                             "unavailable=true")
-            r_fields = P.extract_all(r_ans)
-            s_fields = P.extract_all(s_ans)
-
-            if is_control:
-                # Both sides raw: every field must agree exactly, and the
-                # route check is inverted (same route is REQUIRED here).
-                w_ok, w_lines, findings = True, ["--- window %s ---" % name], []
-                w_lines.append("  Time Model dir routes: raw-side=%s summary-side=%s"
-                               % (routes["raw"], routes["summary"]))
-                if routes["raw"] != P.ROUTE_RAW or routes["summary"] != P.ROUTE_RAW:
-                    w_lines.append("  FAIL premise control: a 59 s window must "
-                                   "take the raw path on BOTH dirs")
-                    w_ok = False
-                findings = P.compare(r_fields, s_fields, {})
-                fields_ok = True
-                for f in findings:
-                    if f.status != P.AGREE:
-                        w_lines.append(f.line())
-                        fields_ok = False
-                w_ok = w_ok and fields_ok
-                if not P.vacuity_problems(r_fields, "raw") == []:
-                    w_lines.append("  FAIL premise control: the control "
-                                   "window is vacuous: %s"
-                                   % P.vacuity_problems(r_fields, "raw"))
-                    w_ok = False
-                w_lines.append("  %d fields compared; deleting the summary "
-                               "files %s change the raw answer"
-                               % (len(findings),
-                                  "does NOT" if fields_ok else "DOES"))
-            else:
-                w_ok, w_lines, findings = P.verdict(
-                    name, routes, r_fields, s_fields,
-                    expected.get(name, {}), fallbacks=fallbacks)
-            ok = ok and w_ok
-            lines.extend(w_lines)
-            report["windows"][name] = {
-                "from_ns": frm, "to_ns": to, "ok": w_ok, "routes": routes,
-                "fallbacks": fallbacks,
-                "findings": [f.as_dict() for f in findings
-                             if f.status != P.AGREE],
-                "fields_compared": len(findings),
-            }
-            t_routes = {"raw": P.classify_route(
-                t_oracle, t_err, marker_expected=not is_control),
-                "summary": routes["summary"]}
-            # The stale arm's NUMERIC oracle is the summary-less raw dir, not
-            # the fresh-summary answer: the version refusal puts this arm on
-            # the raw path, so the raw answer is what it owes. s_fields is
-            # still passed, for the one thing only it can prove -- that this
-            # window routes to summaries when the headers are fresh, so the
-            # stamping is what forced the fallback. See P.stale_verdict.
-            t_ok, t_lines, t_findings = P.stale_verdict(
-                name, t_routes, P.extract_all(t_ans), s_fields, t_err,
-                version, len(stamped), is_control=is_control,
-                raw_fields=r_fields)
-            ok = ok and t_ok
-            lines.extend(t_lines)
-            report["windows"][name]["stale"] = {
-                "ok": t_ok, "routes": t_routes,
-                "fallback": P.fallback_reason(t_err),
-                "findings": [f.as_dict() for f in t_findings
-                             if f.status != P.AGREE],
-                "fields_compared": len(t_findings),
-            }
-            if not is_control:
-                tbl = P.record_table(findings)
-                for field, entry in tbl.items():
-                    entry["issue"] = issue_for(field, name)
-                recorded[name] = tbl
+        with tempfile.TemporaryDirectory(prefix="pgwt-summaries-off-") as work:
+            missing = os.path.join(work, "missing")
+            stale = os.path.join(work, "stale")
+            shutil.copytree(fresh, missing)
+            shutil.copytree(fresh, stale)
+            removed = glob.glob(os.path.join(missing, "*.summary*"))
+            if not removed:
+                raise RuntimeError("fresh fixture needs real summary files")
+            for path in removed:
+                os.remove(path)
+            set_version(stale, int(summary_format_version()))
+            dirs = {"fresh": fresh, "missing": missing, "stale": stale}
+            if "--sabotage" in sys.argv:
+                # The fresh-file premise must be proved, never assumed.
+                dirs["fresh"] = missing
+            if not glob.glob(os.path.join(dirs["fresh"], "*.summary")):
+                raise RuntimeError("fresh arm lost its summary-file premise")
+            ok = True
+            for name, (frm, to) in list(WINDOWS.items()) + [CONTROL_WINDOW]:
+                fields_by_arm, routes = {}, {}
+                for arm, trace_dir in dirs.items():
+                    answers, oracles = ask(trace_dir, frm, to,
+                                           os.path.join(work, name + arm + ".log"))
+                    if arm == "stale" and "--sabotage-stale-fallback" in sys.argv:
+                        if answers["time_model"].get("cpu_ms", 0) <= 0:
+                            raise RuntimeError("stale sabotage requires measured CPU")
+                        answers["time_model"]["cpu_ms"] = 0
+                    if arm == "fresh" and "--sabotage-io-worker-value" in sys.argv:
+                        answers["time_model"]["io_worker_busy_pct"] = 0.0
+                        answers["time_model"]["io_worker_busy_pct_unavailable"] = True
+                    for cmd in CMDS:
+                        answer, oracle = answers[cmd], oracles[cmd]
+                        # Raw refusals have max_events=1; a normal summary
+                        # response or any unrelated failure cannot prove raw.
+                        routes[arm + "/" + cmd] = (
+                            P.ROUTE_RAW if oracle.get("code") == "window_too_large"
+                            and oracle.get("max_events") == 1 else P.ROUTE_UNKNOWN)
+                        if "error" in answer or answer.get("fidelity") != "exact":
+                            raise RuntimeError("%s/%s/%s needs a successful EXACT answer"
+                                               % (name, arm, cmd))
+                    fields = P.extract_all(answers)
+                    # Heatmap is outside the historical extractors. Include
+                    # its entire payload, so missing cells cannot pass parity.
+                    fields["heatmap/payload"] = json.dumps(answers["heatmap"], sort_keys=True)
+                    fields_by_arm[arm] = fields
+                passed, lines = P.summaries_off_verdict(name, routes, fields_by_arm, CMDS)
+                for line in lines:
+                    print(line)
+                ok = ok and passed
+            print("=== test_summary_raw_parity (summaries off): %s ==="
+                  % ("PASS" if ok else "FAIL"))
+            return 0 if ok else 1
     finally:
-        cleanup_traces(sum_dir)
-        cleanup_traces(raw_dir)
-        cleanup_traces(stale_dir)
-
-    print("=== test_summary_raw_parity ===")
-    for l in lines:
-        print(l)
-    report["ok"] = ok
-    with open(os.path.join(RESULT_DIR, "summary.json"), "w") as f:
-        json.dump(report, f, indent=1, sort_keys=True)
-    print("artifact: %s" % os.path.join(RESULT_DIR, "summary.json"))
-
-    if record:
-        # Recording may update the historical raw/summary pins, never excuse
-        # a broken third arm (or a failed route/premise control).
-        if not ok:
-            print("REFUSING to record: parity or stale-version proof failed")
-            return 1
-        orphans = unexplained(recorded)
-        if orphans:
-            for w, field in orphans:
-                print("REFUSING to record %s/%s: no issue number and no rule "
-                      "explains it" % (w, field))
-            return 1
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "summary_raw_parity_expected.json"), "w") as f:
-            json.dump(recorded, f, indent=1, sort_keys=True)
-        print("RECORDED expected-divergence table "
-              "(tests/summary_raw_parity_expected.json)")
-        return 0
-
-    print("=== test_summary_raw_parity: %s ===" % ("PASS" if ok else "FAIL"))
-    return 0 if ok else 1
+        cleanup_traces(fresh)
 
 
 if __name__ == "__main__":

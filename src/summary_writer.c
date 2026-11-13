@@ -2242,6 +2242,27 @@ void pgwt_summary_forget_open(struct pgwt_summary_writer *w, uint32_t pid)
 
 /* ── Public API ───────────────────────────────────────────── */
 
+void pgwt_summary_cleanup_disabled(const struct pgwt_summary_writer *w,
+                                    const char *trace_dir)
+{
+    if (w)
+        return;
+
+    const char *names[] = { "current.summary", "current.summary.meta" };
+    int error = 0;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char path[512];
+        int n = snprintf(path, sizeof(path), "%s/%s", trace_dir, names[i]);
+        if (n < 0 || (size_t)n >= sizeof(path))
+            error = ENAMETOOLONG;
+        else if (unlink(path) != 0 && errno != ENOENT)
+            error = errno;
+    }
+    if (error)
+        fprintf(stderr, "WARN: cannot remove disabled current.summary files: %s "
+                "(continuing without summaries)\n", strerror(error));
+}
+
 int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
                                const char *trace_dir,
                                int retention_hours,

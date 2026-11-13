@@ -48,6 +48,16 @@ def require_pids(response, expected):
         raise AssertionError(f"pids {actual}, expected {expected}")
 
 
+def require_raw_route(t, srv, label, **args):
+    # docs/REWORK_PLAN_2026-11-11.md section 8 switches summaries off.
+    # Prove this sessions request loads raw events: with a one-event budget
+    # it must refuse. Summary answers and unrelated errors cannot prove raw;
+    # the old summary-route and version-fallback markers are no longer needed.
+    oracle = srv.query("top_sessions", **args)
+    t.check_eq(parity.classify_route(oracle, "", marker_expected=False),
+               parity.ROUTE_RAW, label + ": route proof")
+
+
 def test_row_routes(t):
     trace_dir = generate_traces(row_scenario())
     try:
@@ -69,15 +79,15 @@ def test_row_routes(t):
 
             windows = (("middle", 60, 180, [1000, 1001]),
                        ("neighbour", 0, 120, [1000, 1001, 9001]))
-            for route, directory, expected_route in (
-                    ("raw", raw_dir, parity.ROUTE_RAW),
-                    ("summary", trace_dir, parity.ROUTE_SUMMARY),
-                    ("v11 fallback", stale_dir, parity.ROUTE_RAW)):
+            for route, directory in (
+                    ("raw", raw_dir),
+                    ("summary", trace_dir),
+                    ("v11", stale_dir)):
                 for window, lo, hi, expected in windows:
                     bounds = {"from_": BASE_TS + lo * S,
                               "to_": BASE_TS + hi * S}
-                    err = os.path.join(scratch, "stderr")
-                    with ServerHarness(directory, stderr_path=err) as srv:
+                    with ServerHarness(directory) as srv, ServerHarness(
+                            directory, env={"PGWT_LOAD_MAX_EVENTS": 1}) as oracle_srv:
                         for limit in (None, 1, 10):
                             args = {} if limit is None else {"limit": limit}
                             answer = srv.query("top_sessions", **bounds, **args)
@@ -90,19 +100,15 @@ def test_row_routes(t):
                                 t.check(False, f"{route}/{window}/limit={limit}: {exc}")
                             else:
                                 t.check(True, f"{route}/{window}/limit={limit}: {expected}")
-                        # A PID filter independently forces raw and tests
-                        # that the excluded pid really has no active row.
+                            require_raw_route(t, oracle_srv,
+                                              f"{route}/{window}/limit={limit}",
+                                              **bounds, **args)
+                        # The excluded pid really has no active row.
                         idle = srv.query("top_sessions", **bounds,
                                          filters={"pid": 9000})
                         t.check_eq(idle.get("rows"), [], f"{route}: idle pid filter")
-                    normal_stderr = Path(err).read_text()
-                    with ServerHarness(directory, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
-                        oracle = srv.query("time_model", **bounds)
-                    actual_route = parity.classify_route(oracle, normal_stderr)
-                    t.check_eq(actual_route, expected_route, f"{route}/{window}: route proof")
-                    if route == "v11 fallback":
-                        t.check("not summary v" in normal_stderr,
-                                "old summaries refused by accounting version")
+                        require_raw_route(t, oracle_srv, f"{route}/{window}/idle",
+                                          **bounds, filters={"pid": 9000})
 
             # Negative controls: each detector must reject the exact shape
             # it is intended to catch, including extra rows at zero DB Time.
@@ -113,6 +119,8 @@ def test_row_routes(t):
                     t.check(True, f"row detector rejects {bad}")
                 else:
                     t.check(False, f"row detector accepted {bad}")
+            # The historical two-route detector still fails closed without
+            # its marker; production checks above explicitly disable it.
             t.check_eq(parity.classify_route(
                 {"code": "window_too_large", "max_events": 1}, ""), parity.ROUTE_UNKNOWN,
                        "route detector rejects missing fallback evidence")
@@ -200,11 +208,8 @@ def test_zero_time_non_idle_row(t):
             for path in Path(raw_dir).glob("*.summary*"):
                 path.unlink()
             route_rows = {}
-            for route, directory, expected_route in (
-                    ("raw", raw_dir, parity.ROUTE_RAW),
-                    ("summary", trace_dir, parity.ROUTE_SUMMARY)):
-                err = os.path.join(scratch, "stderr")
-                with ServerHarness(directory, stderr_path=err) as srv:
+            for route, directory in (("raw", raw_dir), ("summary", trace_dir)):
+                with ServerHarness(directory) as srv:
                     answer = srv.query("top_sessions", **bounds)
                 t.check("error" not in answer,
                         f"zero-time-non-idle/{route}: successful response")
@@ -213,9 +218,7 @@ def test_zero_time_non_idle_row(t):
                 t.check_eq(route_rows[route], expected_rows,
                            f"zero-time-non-idle/{route}: pid 7000 retained at 0ms")
                 with ServerHarness(directory, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
-                    oracle = srv.query("top_sessions", **bounds)
-                t.check_eq(parity.classify_route(oracle, Path(err).read_text()),
-                           expected_route, f"zero-time-non-idle/{route}: route proof")
+                    require_raw_route(t, srv, f"zero-time-non-idle/{route}", **bounds)
             t.check_eq(route_rows["summary"], route_rows["raw"],
                        "zero-time-non-idle: routes have identical row sets and order")
     finally:
@@ -252,6 +255,8 @@ def main():
             if len(rows) >= 2:
                 t.check(rows[0]["db_time_ms"] >= rows[1]["db_time_ms"],
                         "Sessions sorted by DB Time descending")
+        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+            require_raw_route(t, srv, "per-session attribution")
 
     finally:
         cleanup_traces(trace_dir)

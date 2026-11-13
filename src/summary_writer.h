@@ -1265,6 +1265,11 @@ struct pgwt_summary_writer {
 
 /* ── Public API ───────────────────────────────────────────── */
 
+/* Startup with summaries disabled: remove only the legacy live summary and
+ * its meta file. An active writer is left alone; errors warn and continue. */
+void pgwt_summary_cleanup_disabled(const struct pgwt_summary_writer *w,
+                                    const char *trace_dir);
+
 int  pgwt_summary_writer_init(struct pgwt_summary_writer *w,
                                const char *trace_dir,
                                int retention_hours,

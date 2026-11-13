@@ -27,6 +27,7 @@ from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
     CPU, IO_DATA_FILE_READ,
 )
+from summary_raw_parity_lib import classify_route, ROUTE_RAW
 
 BASE = 10_000_000_000_000
 S = 1_000_000_000
@@ -148,15 +149,20 @@ def test_raw_path(t):
         cleanup_traces(trace_dir)
 
 
-def test_summary_path(t):
-    print("\n### 2. Summary path: markers never accumulated ###")
+def test_long_raw_window(t):
+    print("\n### 2. Long raw window: markers never accumulated ###")
     trace_dir = generate_traces(build_scenario())
     try:
         with ServerHarness(trace_dir) as srv:
-            # Force the summary fast path with a >= 120 s window around the
-            # data (the trace is exact-only, so summaries stay authoritative).
+            # docs/REWORK_PLAN_2026-11-11.md section 8 switches summaries
+            # off: even a >= 120 s window with summary files must use raw.
             frm, to = BASE - 100 * S, BASE + 100 * S
-            check_views(t, srv, "summary", frm=frm, to=to)
+            check_views(t, srv, "long raw", frm=frm, to=to)
+        with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": 1}) as srv:
+            for cmd in ("top_events", "top_queries"):
+                oracle = srv.query(cmd, from_=frm, to_=to)
+                t.check_eq(classify_route(oracle, "", marker_expected=False),
+                           ROUTE_RAW, cmd + ": long window raw route proved")
     finally:
         cleanup_traces(trace_dir)
 
@@ -165,7 +171,7 @@ def main():
     t = TestRunner("test_data_markers")
     print(f"=== {t.name} ===")
     test_raw_path(t)
-    test_summary_path(t)
+    test_long_raw_window(t)
     sys.exit(0 if t.summary() else 1)
 
 
