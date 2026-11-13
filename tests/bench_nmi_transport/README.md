@@ -7,7 +7,7 @@ Use the project's bundled libbpf on EL8. Do not run BPF on macOS.
 ```sh
 make -C tests bench-nmi-transport
 sudo tests/bench_nmi_transport/qualify.sh --repeats 3 --seconds 30 \
-  --period-ns 10000000 --bytes 67108864 --out /var/tmp/transport-qualification
+  --periods 10000000 20000000 40000000 --bytes 67108864 --out /var/tmp/transport-qualification
 ```
 
 Supply `LIBBPF_INC`, `LIBBPF_LIB`, `CC` and `CLANG` through the environment when
@@ -19,13 +19,19 @@ CPU-population/case/repeat cell. Missing required provenance makes the run VOID.
 A summary PASS means only that measurement gates passed; see
 [QUALIFICATION.md](QUALIFICATION.md) for the separate kernel argument.
 
-Each cell interleaves shared ring, perf, perf + 10 ms CPU-clock boundary,
-perf + 10 ms syscall boundary (`syscall_boundary`), and perf + 100 us CPU-clock
-boundary. Repeat order rotates the arms. CPU populations are 1, 4 and all CPUs in
+Each cadence cell interleaves shared ring, DATA-only perf, perf + CPU-clock
+boundary, perf + syscall boundary (`syscall_boundary`), perf + demand syscall
+boundary (`syscall_demand`), and perf + fixed 100 us CPU-clock boundary.
+`--periods` runs all three normal boundary arms at every supplied cadence in ns
+(default 10000000); `--period-ns` remains an alias for a single cadence. Each
+cadence reruns both DATA-only baselines and the controls. Filenames include the
+period. Repeat order rotates the arms. CPU populations are 1, 4 and all CPUs in
 the caller's allowed online affinity; a missing 4-CPU population is VOID, never a
 silent skip. The named 4 and all cells both run on a four-CPU box. Cases are idle,
-one CPU active, all active, and one writer migrating through the participating
-CPUs every 256 stores. Writers run at maximum rate in every active case, including
+one CPU active, all active, one writer migrating through the participating
+CPUs every 256 stores, and `hog`: one pinned, untraced busy loop per CPU for the
+whole run, with no watchpoints or DATA. This is the three-population × five-case
+grid at each cadence and repeat. Writers run at maximum rate in every active case, including
 the 100 us adversarial arm. Idle cases have no DATA writer; migration on one CPU
 necessarily degenerates to a pinned writer. Other CPUs remain without DATA
 writers in the one-active case; they still get their own boundaries.
@@ -39,22 +45,26 @@ that cell VOID. These are separate bounded phases in the same protocol invocatio
 so corrupt control records cannot contaminate normal measurements. Controls use
 all-active writers even for an idle measurement cell.
 
-The perf and both perf + 10 ms boundary arms must reconcile per CPU and site and lose
+The DATA-only perf and all three normal boundary arms must reconcile per CPU and site and lose
 zero records. Shared-ring loss and reconciliation are measurements, never gate
 failures: the shared arm supplies the CPU-ratio baseline. The 100 us adversarial
 arm is gated on seals and timestamps, without a loss or CPU-cost gate. Runtime,
 framing, CPU/site population and producer-activation checks still apply to all
 arms. All arms must have zero seal violations and timestamp regressions. The
-normal boundary arms must advance every CPU's consumed boundary within
-100 ms, including startup and
-final silence, and have fires equal helper-successful outputs. Both consumed-time
-gaps and boundary-stamp gaps are checked. Equality with a strict boundary is legal;
-a repeated boundary stamp does not count as advancement.
+normal boundary arms must advance every CPU's consumed contract frontier within
+100 ms, including startup and final silence. Both `max_frontier_gap_ns` (consumer
+arrival) and `max_frontier_stamp_gap_ns` (producer stamp) are gated. Qualified
+perf DATA supplies strict w=t under merge-v1 §3 as well as explicit BOUNDARY;
+`max_boundary_gap_ns` and `max_boundary_stamp_gap_ns` retain BOUNDARY-only spacing
+as diagnostics. Equality with a strict boundary is legal; a repeated stamp does
+not count as advancement. Producer fires must equal helper-successful outputs
+and consumer-delivered BOUNDARY per CPU: fires == outputs alone cannot prove
+4.18 delivery. The demand arm may emit no boundaries on a CPU kept current by DATA.
 
-The paired perf/shared CPU-ns-per-attempt ratio must be <=1.10 in active cases.
-Idle cases have zero attempts and report a null ratio; they instead measure the
+The paired perf/shared CPU-ns-per-attempt ratio must be <=1.10 in DATA-active cases.
+Idle and hog DATA-only baselines have zero attempts and report a null ratio. Idle cases measure the
 boundary-only incremental CPU fraction per participating CPU for each boundary
-arm. Both 10 ms arms must be <=1%; the adversarial delta is reported as a
+arm. All three normal boundary arms must be <=1%; the adversarial delta is reported as a
 measurement.
 CPU cost uses participating CPUs' `/proc/stat` busy time (user, nice, system, irq,
 softirq, steal; guest is already included in user). Boundary interrupts of the
@@ -62,15 +72,24 @@ idle task are accounted for only with `CONFIG_IRQ_TIME_ACCOUNTING=y` in the
 running kernel config. Otherwise the boundary CPU gate is `UNMEASURED`, the idle
 cell is `VOID`, and the gate records the reason; a small measured delta cannot
 produce PASS. Raw ticks, USER_HZ, elapsed time and process CPU time are retained.
-The syscall arm additionally reports each pinned helper's CPU nanoseconds and
+Each syscall arm additionally reports each pinned helper's CPU nanoseconds and
 core fraction using `CLOCK_THREAD_CPUTIME_ID`, even without IRQ time accounting.
 This includes its synchronous syscall/BPF work, but not all wakeup IRQ/scheduler
 costs, so it cannot replace the total-cost gate. Any idle helper above 1% fails;
 without IRQ accounting the total syscall-boundary CPU gate is still UNMEASURED.
-The idle delta is boundary-idle busy-ns/elapsed minus perf-idle busy-ns/elapsed,
+The idle gate field is explicitly named
+`proc_stat_increment_core_fraction_per_participating_cpu`, separate from
+`syscall_helper_core_fraction_per_cpu[arm][cpu]`. Its quantity stays
+boundary-idle busy-ns/elapsed minus perf-idle busy-ns/elapsed,
 divided by 1e9 and the participating CPU count. Negative deltas are retained. Use
 an otherwise idle box: background work and USER_HZ quantization affect the result;
 the script applies the frozen limits without retries or tolerance changes.
+Every arm records `/proc/stat` user/nice/system/irq/softirq/steal/idle/iowait
+start/end/delta, whole-box and participating sums and per CPU; participating busy
+CPU ns, bench process CPU and helper thread CPU; and the top three non-bench
+process CPU deltas from matching PID/starttime snapshots. Process snapshots
+bracket setup/teardown as well as production and exclude new, exited and
+unreadable processes with coverage counts; see [QUALIFICATION.md](QUALIFICATION.md).
 
 An individual run:
 
@@ -96,10 +115,17 @@ then checks the helper's expected CPU before stamping and emitting BOUNDARY via
 `BPF_F_CURRENT_CPU`. Per-CPU `syscall_fires`, `syscall_outputs` and
 `wrong_cpu_events` are retained; any wrong-CPU event fails the cell, including
 one on a nonparticipating CPU through the aggregate counter. `boundary_source`
-records `none`, `perf` or `syscall`, and treatment validation rejects the wrong
+records `none`, `perf`, `syscall` or `syscall_demand`, and treatment validation rejects the wrong
 producer. The record layout is identical for both producers. Helpers stop and
 join before tracepoint detach, final drain and counter reads. Source arguments,
 costs and deployment limits are in [QUALIFICATION.md](QUALIFICATION.md).
+Helpers remain SCHED_OTHER. Each uses its own
+`clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` timer; there is no shared timer
+mutex. Add `--syscall-demand` instead to wake at the same cadence but issue the
+syscall only when that CPU's consumed frontier stamp is older than one period.
+The consumer publishes these stamps in shared atomic storage. Per-CPU
+`boundary_expected`, fires/expected, helper wakeups and actual syscalls appear
+beside `syscall_boundary`; missed periods are skipped, never replayed in bursts.
 
 The bench ABI is a fixed 64-byte record with timestamp, CPU, TID, per-site attempt
 sequence, DATA/BOUNDARY site, and zero padding. A boundary has TID zero. Perf RAW

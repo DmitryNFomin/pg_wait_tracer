@@ -67,7 +67,30 @@ non-overlap must be established on the actual box. Only DATA and BOUNDARY are
 attached to this bench's output buffers, but that fact alone is insufficient to
 prove exclusive use of the kernel's helper scratch storage.
 
-## Syscall boundary producer (`syscall_boundary`)
+## Contract frontier metric
+
+The frozen [merge-v1 contract §3, lines 58–66](../../contracts/merge-v1/CONTRACT.md#L58-L66)
+defines a consumed qualified perf DATA record at `t` as strict boundary `w=t`
+(line 65), and requires consumed same-CPU BOUNDARY output when DATA is absent
+(line 66). [Lines 75–82](../../contracts/merge-v1/CONTRACT.md#L75-L82) require
+fault handling before updating the implicit boundary and accumulate accepted
+boundaries with `max`; [lines 94–95](../../contracts/merge-v1/CONTRACT.md#L94-L95)
+forbid substituting idle time or grace periods for missing evidence.
+
+The per-CPU `frontier_ns` is the greatest non-faulting consumed qualifying
+stamp; `frontier_seen_ns` records its consumer arrival on `CLOCK_MONOTONIC`.
+`max_frontier_stamp_gap_ns` measures producer-stamp progress and
+`max_frontier_gap_ns` measures consumer-arrival progress. Both include startup
+and trailing silence and must be **<=100,000,000 ns** on every participating CPU
+in each normal boundary arm. The startup clock is only a gap-measurement anchor:
+the frontier stays zero until qualifying evidence is consumed. Equal or weaker
+stamps cannot refresh progress. The old `max_boundary_gap_ns` and
+`max_boundary_stamp_gap_ns` still measure explicit BOUNDARY only, under their
+existing names; long BOUNDARY-only gaps remain visible even when DATA keeps the
+contract frontier current. These metrics measure each source's strict boundary,
+not a published merge-stage `FRONTIER(F,C)`.
+
+## Syscall boundary producers (`syscall_boundary`, `syscall_demand`)
 
 **CITED — syscall and tracepoint choice.** `getppid` has no arguments, user
 buffer, or blocking I/O: its body reads the parent's TGID under RCU in
@@ -119,13 +142,15 @@ the fixed affinity also prevents a helper's migration to another CPU.
 Other IRQ/NMI BPF programs, vendor changes, RT and actual helper scratch users
 remain **UNPROVEN** under the inventory requirements above.
 
-**INFERENCE — completion and cost.** Each helper waits against absolute
-`CLOCK_MONOTONIC` deadlines, skipping missed periods rather than bursting.
-Stopping broadcasts to the waiting helpers and joins them before detaching the
+**INFERENCE — completion and cost.** Each SCHED_OTHER helper has its own
+`clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` deadline, skipping missed
+periods rather than bursting. Helpers share no timer mutex or condition variable;
+there is no scheduling-priority change. Stopping joins the helpers (their sleep
+is capped at the run's end) before detaching the
 tracepoint, draining, and reading counters. A joined helper has returned from
 its synchronous syscall/BPF invocation, including failed outputs. The BPF clock
 read supplies `w`; the helper's userspace clock is only a wakeup scheduler.
-Each period per CPU costs a syscall, a wakeup and scheduling/context switches
+In `syscall_boundary`, each period per CPU costs a syscall, a wakeup and scheduling/context switches
 (out to sleep and back in); the tracepoint filter also runs on unrelated
 `getppid` calls. Exact cost is **UNPROVEN** until measured. Per-helper
 `CLOCK_THREAD_CPUTIME_ID` deltas include synchronous task-context kernel work but
@@ -135,11 +160,34 @@ not certify total overhead: the frozen idle cost gate still uses the paired
 `/proc/stat` delta and stays **UNMEASURED** without IRQ time accounting. A helper
 alone exceeding 1% of a CPU fails even if total cost is unmeasured.
 
+`syscall_demand` uses the same tracepoint and timer, but calls `getppid` only
+when the consumed frontier's producer stamp is older than one period. The
+consumer publishes accepted per-CPU frontier stamps in shared userspace C11
+atomic storage (release store, acquire load); helpers never read mutable reader
+state directly. Zero means no consumed boundary yet and requests a syscall at
+the first wake. Consumer lag or a racing DATA arrival can cause an extra syscall;
+neither permits speculative advancement. This arm still wakes every period and
+measures its own helper CPU, so skipped syscalls do not imply free wakeups.
+Its frontier, loss, wrong-CPU and idle cost gates match `syscall_boundary`.
+
+Each CPU reports `boundary_expected = ceil(duration_ns / period_ns)`, actual
+producer fires and consumer-delivered BOUNDARY count. The summary reports
+`fires_per_expected` beside both syscall arms, plus `helper_wakeups` and
+`helper_syscalls`; the latter must reconcile with BPF `syscall_fires`.
+Expected is the nominal number of period slots, starting at run start; missed
+slots are reported without retries or a new tolerance. Demand fires may be
+zero on a busy CPU whose consumed DATA keeps the frontier fresh.
+
 **UNPROVEN — progress and platform limits.** A wakeup is not a scheduling latency
 guarantee: saturation, virtualization or long IRQ-disabled sections may delay
-the helper. Every CPU must pass the same 100 ms consumed-boundary and stamp-gap
-gates in idle, one-active, all-active and migrating cases, with fires equal
-outputs, zero wrong-CPU events, zero loss, seals and timestamp regressions.
+the helper. Every CPU must pass the same 100 ms consumed-frontier and stamp-gap
+gates in idle, one-active, all-active, migrating and `hog` cases, with fires equal
+helper-successful outputs **and consumer-delivered BOUNDARY**, zero wrong-CPU
+events, zero loss, seals and timestamp regressions. `hog` pins one untraced busy
+loop to each participating CPU for the run; no watchpoint is attached to these
+threads and DATA must stay zero. Only the boundary helper can advance the
+frontier in this saturated case. Per-CPU hog TIDs and iteration counts must be
+nonzero, so an absent load cannot silently pass.
 The protocol retains the perf boundary and adversarial arms, and runs a separate
 +1 ms syscall-boundary seal control. Cpusets can reject a singleton affinity;
 `isolcpus` and `nohz_full` deployments may restrict or prohibit placing waking
@@ -197,6 +245,48 @@ compared with sequence gaps, including initial and terminal gaps. Helper failure
 and PERF_RECORD_LOST remain separate diagnostics. The one-page paused-drain
 control must show missing attempts even if the old helper returns zero and no
 LOST callback follows the final drop.
+In particular, **fires == outputs does not prove delivery on 4.18**. The
+consumer-side reconciliation is `per_cpu[].sites[BOUNDARY].delivered`, counted
+only after framing/CPU/record validation. Each normal boundary arm requires
+`produced == successes == delivered` per CPU after quiescence, along with
+zero initial/internal/trailing sequence gaps. Both syscall arms also reconcile
+userspace syscall counts, BPF `syscall_fires`/`syscall_outputs`, and aggregates.
+
+## Cadences and CPU evidence
+
+`qualify.py --periods 10000000 20000000 40000000` runs every normal boundary
+arm at every requested period (default `10000000`). The grid has **three
+populations × five cases**, repeated at each cadence and repeat number. Each
+cadence cell reruns the paired DATA-only baselines and fresh negative controls;
+the adversarial CPU-clock arm retains its fixed 100 us cadence. The old
+`--period-ns` option is a mutually exclusive alias for one requested period.
+Summary filenames include the period to prevent overwrites.
+
+Every arm/cell retains `/proc/stat` field snapshots and signed deltas for
+user, nice, system, irq, softirq, steal, idle and iowait: the whole-box aggregate,
+the sum over participating CPUs, and each participating CPU separately.
+`participating_busy_cpu_ns` converts only user+nice+system+irq+softirq+steal
+ticks; guest time is already included in user. `process_cpu_ns` measures the
+bench process, while `helper_cpu_ns` and the summary's
+`syscall_helper_core_fraction_per_cpu[arm][cpu]` measure individual helpers.
+
+The retained 1% idle gate is now named
+`proc_stat_increment_core_fraction_per_participating_cpu`: boundary-arm busy
+ns/elapsed minus DATA-only perf busy ns/elapsed, divided by 1e9 and participating
+CPU count. Its quantity and 1% limit are unchanged; it is a whole participating
+set increment averaged across CPUs, **not helper CPU**. The gate still requires
+IRQ time accounting and also rejects any individual idle helper above 1%.
+The previously observed EL8 1.266% whole-set increment is not cleared by the
+smaller helper times; new accounting is evidence for the lead's investigation.
+
+The top three non-bench processes are ranked by CPU tick delta using
+`/proc/<pid>/stat` snapshots bracketing each bench invocation. Identity includes
+PID and starttime to exclude PID reuse. Reports retain tick start/end/delta,
+converted CPU ns, USER_HZ, snapshot times and coverage counts. This window
+includes bench setup/teardown, unlike the internal production CPU window.
+Only processes present and readable in both snapshots can be ranked; new,
+exited and unreadable processes are counted as excluded coverage. Missing or
+inconsistent CPU/frontier/cadence evidence fails the normal measurement cell.
 
 ## Publication, consumer ordering and completion
 

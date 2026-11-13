@@ -38,18 +38,34 @@ struct transport_cpu_result {
     struct transport_site_result site[TRANSPORT_SITES];
     uint64_t last_ts, last_data_ts, boundary, seal_violations, regressions;
     uint64_t boundary_seen_ns, max_boundary_gap_ns, max_boundary_stamp_gap_ns;
+    uint64_t frontier_ns, frontier_seen_ns, max_frontier_gap_ns, max_frontier_stamp_gap_ns;
+    uint64_t measurement_start_ns;
     uint32_t expected_tid;
-    bool participating;
+    bool participating, qualified_perf;
 };
 static inline void transport_boundary_gap(struct transport_cpu_result *c, uint64_t now)
 {
     if (now >= c->boundary_seen_ns && now - c->boundary_seen_ns > c->max_boundary_gap_ns)
         c->max_boundary_gap_ns = now - c->boundary_seen_ns;
 }
+static inline void transport_frontier_gap(struct transport_cpu_result *c, uint64_t now)
+{
+    if (now >= c->frontier_seen_ns && now - c->frontier_seen_ns > c->max_frontier_gap_ns)
+        c->max_frontier_gap_ns = now - c->frontier_seen_ns;
+}
+static inline void transport_frontier_end(struct transport_cpu_result *c, uint64_t end)
+{
+    transport_frontier_gap(c, end);
+    uint64_t stamp = c->frontier_ns ? c->frontier_ns : c->measurement_start_ns;
+    if (end >= stamp && end - stamp > c->max_frontier_stamp_gap_ns)
+        c->max_frontier_stamp_gap_ns = end - stamp;
+}
 static inline void transport_observe(struct transport_cpu_result *c,
                                       const struct transport_record *r, uint64_t now)
 {
     struct transport_site_result *s = &c->site[r->site];
+    bool fault = r->seq <= s->last_seq || r->ts < c->last_ts ||
+        (r->site == TRANSPORT_DATA && r->ts < c->boundary);
     ++s->delivered;
     if (r->seq <= s->last_seq) ++s->reorders;
     else { s->gaps += r->seq - s->last_seq - 1; s->last_seq = r->seq; }
@@ -68,6 +84,18 @@ static inline void transport_observe(struct transport_cpu_result *c,
             r->ts - c->boundary > c->max_boundary_stamp_gap_ns)
             c->max_boundary_stamp_gap_ns = r->ts - c->boundary;
         if (r->ts > c->boundary) c->boundary = r->ts;
+    }
+    /* merge-v1 section 3: qualified perf DATA supplies strict w=t too.
+     * Equal/weaker stamps and faulting inputs cannot refresh progress. Keep
+     * the explicit BOUNDARY diagnostics above independent of this frontier. */
+    if (!fault && (r->site == TRANSPORT_BOUNDARY || c->qualified_perf) &&
+        r->ts > c->frontier_ns) {
+        transport_frontier_gap(c, now);
+        uint64_t stamp = c->frontier_ns ? c->frontier_ns : c->measurement_start_ns;
+        if (r->ts >= stamp && r->ts - stamp > c->max_frontier_stamp_gap_ns)
+            c->max_frontier_stamp_gap_ns = r->ts - stamp;
+        c->frontier_ns = r->ts;
+        c->frontier_seen_ns = now;
     }
 }
 /* Include initial and trailing gaps only after ALL producers are stopped

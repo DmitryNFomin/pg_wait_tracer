@@ -15,14 +15,14 @@ all: nmi_transport transport.bpf.o
 transport.bpf.o: transport.bpf.c transport.h
 	$(CLANG) $(BPF_CFLAGS) $(LIBBPF_INC) -I/usr/include/$(MULTIARCH) -c $< -o $@
 
-nmi_transport: nmi_transport.c transport.h reader.h
+nmi_transport: nmi_transport.c transport.h reader.h cadence.h cpu_accounting.h
 	$(CC) $(CFLAGS) $(LIBBPF_INC) -o $@ nmi_transport.c $(LIBBPF_LIB) -lelf -lz -pthread
 else
 all:
 	@echo 'NMI transport experiment requires Linux' >&2; exit 1
 endif
 
-test_reader: test_reader.c reader.h transport.h
+test_reader: test_reader.c reader.h transport.h cadence.h cpu_accounting.h
 	$(CC) $(CFLAGS) -o $@ test_reader.c
 
 test-reader: test_reader
