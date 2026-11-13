@@ -43,5 +43,19 @@ gpt-6.1-sol matched every expected output of rows 24-31 independently, and rows 
 the reviewer's own expected outputs. New fixture fields: `REARM` inputs, identity `D`, and
 per-mode `epoch_invalid` and `statuses` expectations.
 
+Rows 32–43 and direct-attach revision r2 of DECISIONS 25/25a, with new 25b/25c (added
+2026-11-13): M1 (#871 comment 6858126984) found routine fork direct attachment under connection
+churn, which lacked the FORK+INIT creation proof and would therefore suspend the epoch under the
+previous contract. Fable proposed the FORK-plus-cookie route; Astra drafted it; Fable challenged
+it (ACCEPT-WITH-CHANGES, 6 points); r2 accepted all six (`oracle-rows32-43/QUESTION-astra.md`,
+`ANSWER-astra.md`). The increment requires qualified fork-seed proof and marks the first incoming
+interval uncertified. Independent answers (`oracle-rows32-43/`, CONTRACT.md with rows 32–43
+blank, TASK.md): Claude Sonnet and gpt-6.1-sol both matched Astra's expected output on all 12 rows
+in both modes. Sonnet noted three readings that change no output (row 40 INIT idempotence vs a
+coverage-break FAULT; arrival vs batch-validation timing of the VOID in rows 33-35/38; INIT carries
+no prior-interval marking); sol raised none. One phrase in the adapter truth table that hinted at
+row 32's output was neutralised in the oracle copy. `examples.json` transcription follows with the
+implementation unit because the core test reads every row.
+
 After v3 the lead added the closed list of VOID reasons to section 4 (marked in the text). The
 v3 labels the authors guessed differ only in wording from that list.

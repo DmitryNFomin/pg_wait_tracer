@@ -1,0 +1,59 @@
+[Inferred] **Revision r2 — accept all six points.** The increment admits qualified direct attachments; it does not certify their opening interval.
+[Verified] Re-read using `git show origin/master:<path>` at `4e6348187871a7019a6778f88e848895c0bc08c7`. Existing creation admission requires FORK+INIT (`contracts/merge-v1/CONTRACT.md:53`; `src/core/merge.c:245`).
+[Verified] Attachment preseeds before enable (`src/backend.c:287`, `src/backend.c:329`, `src/backend.c:333`); INIT can close an existing watchpoint (`src/backend.c:980`); fork seeding can retain an existing entry (`src/bpf/pg_wait_tracer.bpf.c:694`); deletion is unconditional (`src/backend.c:1064`).
+[Verified] Live [M1 comment 6858126984](https://github.com/DmitryNFomin/pg_wait_tracer/issues/871#issuecomment-6858126984): “The fork direct-attach path fired for 18,872 of 80,603 connections”.
+CONTROLLING SCOPE DECISION: #871 [comment 6858197492](https://github.com/DmitryNFomin/pg_wait_tracer/issues/871#issuecomment-6858197492): “Astra drafts it and Fable challenges, per the owner rules, before the pure adapter is briefed, so the adapter does not freeze VOID-on-direct-attach.”
+
+[Inferred] **§2, DECISION 25 — replacement:** “A generation newly created during the current epoch establishes creation through either valid FORK+INIT records or a valid FORK carrying the qualified fork-seed proof of 25b. Either route initializes Q-mode `next_q=1` before validating that generation’s TRANS/MARKER sequence. First arrival never establishes the sequence baseline.”
+[Inferred] **§2, DECISION 25a — replacement:** “This admission applies only to a `(pid,g)` with no prior sequence state or lifecycle history in this or earlier epochs, apart from the records constituting this creation proof. Every previously known generation of that PID must have EXIT ordered before this FORK. All records required by the selected proof must precede its first TRANS/MARKER in validated output order; otherwise `unknown_evidence` causes VOID in both modes.”
+[Inferred] “A qualified fork-seed FORK selects 25b even when a genuine INIT also exists. INIT neither reinitializes sequence state nor removes 25c’s coverage restriction. An invalid direct-attachment attempt cannot be laundered into the legacy route by a later INIT.”
+[Inferred] **§2, DECISION 25b — new:** “A qualified proof binds the FORK, fork-created state, producing child task and attached task to the same nonzero lifetime cookie `g`. One shared allocation authority serves BPF and daemon allocation paths: `(pid,g)` is never reissued to a different lifetime within retained history, including across REARM; allocator reset, wrap or exhaustion cannot silently reuse it. REARM retains an existing task’s cookie.”
+[Inferred] “Each `on_fork` installs fresh state and a fresh cookie, replacing stale PID state before child evidence production; failure is counted and disqualifies the proof. Neither inherited state nor state created outside `on_fork` qualifies. Each queued record retains its producing task’s cookie; resolving it from the PID’s current map entry is forbidden.”
+[Inferred] “Attachment order is: open the watchpoint disabled on a lifetime-bound task → read fork-state cookie → compare with the consumed FORK and target task → seed without overwriting cookie, sequence or concurrent producer updates → enable. Task binding and state identity must remain valid throughout; a later matching read cannot repair an earlier enable.”
+[Inferred] “Cleanup deletes only the matching lifetime’s state and closes only its attachment. Cookie comparison and deletion must be atomic or serialized against replacement; a userspace lookup followed by unconditional PID deletion is insufficient.”
+[Inferred] “In Q, allocation starts at 1 and covers every TRANS/MARKER emission attempt across all sources, including failures; attachment, INIT, reseeding and migration cannot reset it. All sources must establish the continuous post-enable observation regime required by 25c.”
+[Inferred] **§3, DECISION 25c — new:** “For a 25b generation, the first successfully released TRANS/MARKER carries `prior_interval_certified=false`. Its old_event, duration and other quantities describing the incoming interval are unavailable for numerical use, including completed-wait counts. Preserve their raw bytes; do not zero, clamp or repair them.”
+[Inferred] “That record establishes the generation’s coverage lower bound at its semantic timestamp and ordered position. Certification extends forward only; before it, coverage is unavailable. Subsequent TRANS/MARKER records carry `prior_interval_certified=true`, subject to ordinary validity rules. FRONTIER cannot certify time before this lower bound; VOID and REARM retain their existing effects.”
+[Inferred] “The first record must establish fresh, coherent state for subsequent intervals after observation is enabled. If it is a MARKER, the producer must also refresh the wait-state/time baselines it would otherwise leave stale. Pre-enable markers or stale marker snapshots cannot establish this boundary; without this qualification, the direct route remains unknown evidence.”
+[Inferred] **§3 additional sentence:** “A genuine INIT retains its original bootstrap-observation timestamp and is released normally; handling it for an already directly attached generation must be idempotent, with no disable, reattach or state overwrite.”
+[Inferred] **§4 additional sentences:** “Any subsequent attachment interruption or destructive reseed is a counted coverage fault, delivered as `FAULT(unknown_evidence,d,C)` before further trusted release; it requires suspension and explicit recovery. Missing FORK, failed identity/provenance checks and unproved attachment ordering remain unknown evidence; reliable loss counters, including INIT loss, still cause VOID independently. Cookies never cancel loss, revive epochs or establish boundaries.”
+
+[Inferred] **API replacement:** Add input `bool fork_seed_proved` to `pgwt_merge_record`, meaningful only on FORK and default false; keep `identity_known` separate. Add output-only `bool prior_interval_certified` to `pgwt_merge_output`, meaningful on TRANS/MARKER. The core computes it in validated release order and commits its first-record state only on successful publication.
+[Inferred] Reuse `g` under 25b’s shared allocation rule. Existing attachment proofs continue to govern other routes. No fabricated INIT, new input kind, active-epoch REARM or counter-vector extension is required. Persist the output marking with the record; downstream consumers must retain its lower-bound meaning.
+[Verified] Existing record identity and attachment proofs are distinct (`src/core/pgwt_merge.h:49`, `src/core/pgwt_merge.h:38`); the current output envelope is at `src/core/pgwt_merge.h:75`.
+
+[Inferred] **New `examples.json` row specifications in §5 shorthand:** Every row independently uses §5 defaults, only A/B initially attached, new `D=(30,1)`, every observation `d=20,C=C0`, both modes unless distinguished, no nonzero exit and no epoch invalidation. Source positions and `S(w)` expand exactly as §5 specifies; no additional inputs or outputs are implied.
+[Inferred] `K_D10=FORK_D10@L{fork_seed_proved=true}`; ordinary FORK has that bit false. All records have `identity_known=true`, ready dependencies and unchanged payloads. Output FORK preserves its input proof bit. `U` means explicit output `prior_interval_certified=false`; `T` means true. Listed q values apply only in Q.
+[Inferred] Row 32: `K_D10, D12@P0(q1), S(13)` ⇒ `FORK_D10 → D12[U] → F12`.
+[Inferred] Row 33: `FORK_D10@L{fork_seed_proved=false}, D12@P0(q1), S(13)` ⇒ `VOID20[C0,unknown_evidence]`. This single core row replaces old rows 33/36; their producer causes are distinguished below.
+[Inferred] Row 34: override `D=(10,2)`; attached A has no EXIT. `K_D10, D12@P0(q1), S(13)` ⇒ `VOID20[C0,unknown_evidence]`.
+[Inferred] Row 35: `D12@P0(q1), S(13)` ⇒ `VOID20[C0,unknown_evidence]`; fork-seeded state without a delivered FORK is insufficient even with C0.
+[Inferred] Row 36: `K_D10, INIT_D11@L, D12@P0(q1), S(13)` ⇒ `FORK_D10 → INIT_D11 → D12[U] → F12`.
+[Inferred] Row 37: `K_D10, D12@P0(q2), S(13)` ⇒ N: `FORK_D10 → D12[U] → F12`; Q: `VOID20[C0,sequence_gap]`.
+[Inferred] Row 38: `D9@P0(q1), K_D10, S(10), S(13)` ⇒ `VOID20[C0,unknown_evidence]`.
+[Inferred] Row 39: `D12@P0(q1), K_D10, S(13)` ⇒ `FORK_D10 → D12[U] → F12`.
+[Inferred] Row 40: `K_D10, D12@P0(q1), S(13), INIT_D14@L, D15@P0(q2), S(16)` ⇒ `FORK_D10 → D12[U] → F12 → INIT_D14 → D15[T] → F15`.
+[Inferred] Row 41: `K_D10, D12@P0(q1), S(13), FAULT(unknown_evidence,20,C0), S(16)` ⇒ `FORK_D10 → D12[U] → F12 → VOID20[C0,unknown_evidence]`; models a reported reattachment break.
+[Inferred] Row 42: `K_D10, MARKER_D12@E(q1), D14@P0(q2), S(15)` ⇒ `FORK_D10 → MARKER_D12[U] → D14[T] → F14`; marker satisfies 25c’s fresh-state obligation.
+[Inferred] Row 43: define `Ci=C0` except `lifecycle_init_drop=1`; every input observes Ci. `CHECK(20,Ci), K_D10, D12@P0(q1), S(13)` ⇒ `VOID20[Ci,counter_change]`.
+
+[Inferred] **Adapter truth table:** Each negative case changes only the stated fact from a fully qualified case; unknown facts count as false. A failed attempted direct attachment must additionally report `FAULT(unknown_evidence,d,C)` before trusted release, preventing fallback through a real INIT.
+
+| Producer fact | `fork_seed_proved` | Required mutant |
+|---|---:|---|
+| [Inferred] All 25b/25c obligations proved | true | Force false; row 32’s successful output must fail |
+| [Inferred] State created outside `on_fork` | false | Accept any existing map entry |
+| [Inferred] Enable preceded cookie visibility, later read matches | false | Accept the later matching read |
+| [Inferred] FORK cookie differs from attached task/state | false | Resolve identity using current PID alone |
+| [Inferred] Stale fork entry adopted, cookie reused, or cleanup can delete a replacement | false | Accept `BPF_NOEXIST` fallback or unguarded deletion |
+| [Inferred] Cookie/q overwritten by preseed or INIT | false | Treat reseeded state as preserving provenance |
+| [Inferred] First marker cannot establish fresh post-enable state | false | Treat marker arrival alone as a coverage boundary |
+
+[Inferred] **Producer obligations:** Implement the allocation authority, fresh fork replacement, task-bound attachment order, serialized conditional cleanup, emission-time cookies, preserved sequence allocation and reliable failure accounting. Qualify first-record state establishment across every source; make INIT handling idempotent or report the coverage break. A pure adapter cannot manufacture these facts.
+[Inferred] **Point 1 — ACCEPT:** Explicit U/T output markings and rows 32/39/42 exclude the unobserved incoming interval from numerical claims.
+[Inferred] **Point 2 — ACCEPT:** Rows 36/40 retain genuine INIT; the producer must avoid reattachment or report row 41’s fault.
+[Inferred] **Point 3 — ACCEPT:** Old rows 33/36 collapse into row 33; separate adapter facts and mutants distinguish their causes.
+[Inferred] **Point 4 — ACCEPT:** Row 35 exercises absent FORK with unchanged counters, without a preceding CHECK that masks it.
+[Inferred] **Point 5 — ACCEPT:** One allocation authority prevents BPF/daemon `(pid,g)` collisions; REARM cannot issue a competing lifetime identity.
+[Inferred] **Point 6 — ACCEPT:** Explicit disabled-open/read/compare/enable ordering, fresh fork replacement and atomic or serialized cookie-conditional deletion close the stated races.
+[Inferred] **Remaining VOID:** Until these producer obligations and output marking land, today’s direct attachments cannot assert the proof and remain `unknown_evidence`, causing routine epoch suspension under churn. Even afterward, failed proof, missing FORK, overlapping PID generations, coverage breaks and observed loss still VOID; the first incoming interval always remains uncertified.
