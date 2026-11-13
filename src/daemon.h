@@ -99,8 +99,11 @@ struct pgwt_counters {
      * must know about is happening" — each is paired with a loud log. */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
     uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
+    uint64_t lifecycle_init_lost_with_opportunity_total; /* lost minus no-opportunity; gates integrity */
     uint64_t lifecycle_init_lost_no_opportunity_total; /* init_ts > last sweep start */
-    uint64_t lifecycle_init_lost_untraced_ns_total; /* exit - INIT, no-opportunity only */
+    /* exit - INIT, no-opportunity only; upper bound including daemon delay
+     * when exit_ts_source=observation (no EXIT record timestamp available). */
+    uint64_t lifecycle_init_lost_untraced_ns_total;
     uint64_t invalid_wait_reads_total; /* wait_event_info reads with a garbage class byte (CAP-2/5) */
     uint64_t state_reseeds_total;      /* frozen-stale state_map entries reseeded by
                                         * pgwt_sweep_stale_state (seed→arm race repair) */

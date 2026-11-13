@@ -6,6 +6,9 @@ short-connection loops with discarded hints and production tick recovery ON,
 then a lost control discarding both hints and stores. Only the long-lived arm
 and lost control disable address-based tick recovery to isolate stored INITs.
 Missing stimulus, metrics or attachment fails; no retries of a failed cohort.
+Owner decision #871 comment 6863203475 excludes counted no-opportunity losses
+from integrity; every other loss must be zero in recovery arms. The store-skipped
+control must instead produce a with-opportunity loss and fail the integrity gate.
 Run only on Linux as root: tests/run_all.sh registers this in its live tier.
 """
 import argparse
@@ -21,6 +24,7 @@ import tempfile
 import time
 
 from testutil import find_postmaster
+from demo_rehearsal_lib import daemon_integrity_ok
 
 TRACER = Path(__file__).resolve().parents[1] / "pg_wait_tracer"
 TICK_SECONDS = 1
@@ -40,6 +44,7 @@ def ctl(directory):
     metrics = json.loads(data.splitlines()[0])
     assert metrics.get("ok") is True, metrics
     for key in ("lifecycle_init_hint_drops_total", "lifecycle_init_lost_total",
+                "lifecycle_init_lost_with_opportunity_total",
                 "lifecycle_init_lost_no_opportunity_total",
                 "lifecycle_init_lost_untraced_ns_total",
                 "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
@@ -175,6 +180,11 @@ def run_arm(pm_pid, skip_store, churn=False):
                 assert "PGWT_TEST_DROP_INIT_HINT" in text, text
                 hint_delta = after["lifecycle_init_hint_drops_total"] - before["lifecycle_init_hint_drops_total"]
                 lost_delta = after["lifecycle_init_lost_total"] - before["lifecycle_init_lost_total"]
+                with_opportunity_delta = (after["lifecycle_init_lost_with_opportunity_total"] -
+                                          before["lifecycle_init_lost_with_opportunity_total"])
+                assert after["lifecycle_init_lost_total"] == (
+                    after["lifecycle_init_lost_with_opportunity_total"] +
+                    after["lifecycle_init_lost_no_opportunity_total"]), after
                 assert hint_delta > 0, "no bootstrap INIT hint was actually suppressed"
                 for key in ("ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
                             "state_map_full_total", "wp_attach_failures_total"):
@@ -187,18 +197,28 @@ def run_arm(pm_pid, skip_store, churn=False):
                     assert short_lived & pending, "no pending bootstrap backend lived for less than one tick"
                 if skip_store:
                     assert "PGWT_TEST_SKIP_INIT_STORE" in text, text
-                    assert lost_delta > 0, "skipping INIT stores did not raise the integrity loss counter"
+                    assert with_opportunity_delta > 0, "skipping INIT stores did not raise with-opportunity losses"
+                    ok, detail = daemon_integrity_ok(after)
+                    assert not ok and "lifecycle_init_lost_with_opportunity_total=" in detail, detail
                     assert pids - attached, "control attached everything despite discarding all INIT facts"
                 else:
-                    assert after["lifecycle_init_lost_total"] == 0, after
-                    assert pids <= attached, f"backends not attached: {sorted(pids - attached)}"
-                    # Every member attaches once, including any delayed hint.
-                    for pid in pids:
+                    assert after["lifecycle_init_lost_with_opportunity_total"] == 0, after
+                    no_opportunity = {int(pid) for pid in re.findall(
+                        r"INIT-LOST: [^\n]*pid=(\d+) [^\n]*no_opportunity=1(?: |$)", text)}
+                    assert not (attached & no_opportunity), "attached backend counted lost"
+                    assert pids <= attached | no_opportunity, (
+                        f"backends not attached or counted without opportunity: "
+                        f"{sorted(pids - attached - no_opportunity)}")
+                    # Every attached member attaches once, including delayed hints.
+                    for pid in pids & attached:
                         assert attach_counts[pid] == 1, pid
                 arm = "store skipped" if skip_store else "short churn" if churn else "long-lived recovery"
                 print(f"  {arm}: "
                       f"{len(pids & attached)}/{len(pids)} attached, "
                       f"hint drops +{hint_delta}, INIT lost +{lost_delta}, "
+                      f"with opportunity {after['lifecycle_init_lost_with_opportunity_total']}, "
+                      f"no opportunity {after['lifecycle_init_lost_no_opportunity_total']}, "
+                      f"untraced ns {after['lifecycle_init_lost_untraced_ns_total']}, "
                       f"{len(short_lived & pending)} pending backends shorter than a tick")
             except Exception:
                 text = log.read_text()
@@ -208,6 +228,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                 if after is not None:
                     print({name: after[name] for name in (
                         "lifecycle_init_lost_total",
+                        "lifecycle_init_lost_with_opportunity_total",
                         "lifecycle_init_lost_no_opportunity_total",
                         "lifecycle_init_lost_untraced_ns_total")})
                 print(text)

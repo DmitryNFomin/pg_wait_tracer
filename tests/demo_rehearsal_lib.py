@@ -1097,7 +1097,7 @@ def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks,
 # controlMetrics() already uses from the UI.
 DAEMON_INTEGRITY_COUNTERS = (
     "ringbuf_drops_total", "state_map_full_total", "seen_query_ids_full_total",
-    "lifecycle_init_lost_total", "ringbuf_lifecycle_fork_drops_total",
+    "lifecycle_init_lost_with_opportunity_total", "ringbuf_lifecycle_fork_drops_total",
     "ringbuf_lifecycle_exit_drops_total", "ringbuf_query_text_drops_total",
     "ringbuf_pg13_query_text_drops_total",
 )
@@ -1120,7 +1120,11 @@ def daemon_integrity_ok(metrics):
     lifecycle_init_lost_no_opportunity_total is the subset whose init_ts is
     strictly later than the last completed sweep's start before EXIT;
     lifecycle_init_lost_untraced_ns_total sums exit - init_ts for that subset.
-    All losses, including this subset, still gate via lifecycle_init_lost_total.
+    That duration is an upper bound including daemon delay when
+    exit_ts_source=observation. Owner decision #871 comment 6863203475,
+    "Count, don't fail (Recommended)": total losses, no-opportunity losses
+    and their untraced ns are reported as information; only
+    lifecycle_init_lost_with_opportunity_total gates INIT integrity.
     The final per-pid exit sweep
     recognises raced INITs but cannot recover coverage after exit. The BPF
     lifecycle_init_no_state_total diagnostic alone does not decide loss:

@@ -1111,6 +1111,8 @@ static void record_init_loss(struct pgwt_daemon *d, pid_t pid,
         d->counters.lifecycle_init_lost_no_opportunity_total++;
         if (exit_ts >= init_ts)
             d->counters.lifecycle_init_lost_untraced_ns_total += exit_ts - init_ts;
+    } else {
+        d->counters.lifecycle_init_lost_with_opportunity_total++;
     }
     fprintf(stderr,
             "INIT-LOST: clock=CLOCK_MONOTONIC pid=%d init_ts=%llu exit_ts=%llu "

@@ -1545,7 +1545,7 @@ def _zero_integrity_metrics():
         "ringbuf_drops_total": 0,
         "state_map_full_total": 0,
         "seen_query_ids_full_total": 0,
-        "lifecycle_init_lost_total": 0,
+        "lifecycle_init_lost_with_opportunity_total": 0,
         "ringbuf_lifecycle_fork_drops_total": 0,
         "ringbuf_lifecycle_exit_drops_total": 0,
         "ringbuf_query_text_drops_total": 0,
@@ -1573,17 +1573,18 @@ def test_daemon_integrity_init_no_state_is_diagnostic():
     ok, detail = lib.daemon_integrity_ok(metrics)
     assert ok, detail  # missing state still permits a successful hint attach
     metrics["lifecycle_init_lost_total"] = 1
+    metrics["lifecycle_init_lost_with_opportunity_total"] = 1
     ok, detail = lib.daemon_integrity_ok(metrics)
-    assert not ok and "lifecycle_init_lost_total=1" in detail, detail
+    assert not ok and "lifecycle_init_lost_with_opportunity_total=1" in detail, detail
 
 
-def test_daemon_integrity_no_opportunity_losses_still_gate():
+def test_daemon_integrity_no_opportunity_losses_are_information():
     metrics = _zero_integrity_metrics()
     metrics["lifecycle_init_lost_total"] = 1
     metrics["lifecycle_init_lost_no_opportunity_total"] = 1
     metrics["lifecycle_init_lost_untraced_ns_total"] = 123
     ok, detail = lib.daemon_integrity_ok(metrics)
-    assert not ok and "lifecycle_init_lost_total=1" in detail, detail
+    assert ok, detail
 
 
 def _assert_integrity_counter_fails(name, value):
@@ -1607,7 +1608,19 @@ def test_daemon_integrity_seen_query_ids_full_fails():
 
 
 def test_daemon_integrity_lifecycle_init_lost_fails():
-    _assert_integrity_counter_fails("lifecycle_init_lost_total", 1)
+    _assert_integrity_counter_fails("lifecycle_init_lost_with_opportunity_total", 1)
+
+
+def test_daemon_integrity_missing_opportunity_counter_fails():
+    metrics = _zero_integrity_metrics()
+    del metrics["lifecycle_init_lost_with_opportunity_total"]
+    metrics.update(lifecycle_init_lost_total=0,
+                   lifecycle_init_lost_no_opportunity_total=0,
+                   lifecycle_init_lost_untraced_ns_total=0)
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    assert not ok, detail
+    assert detail.endswith(
+        "-- NONZERO or missing: lifecycle_init_lost_with_opportunity_total=None"), detail
 
 
 def test_daemon_integrity_lifecycle_fork_drops_fails():

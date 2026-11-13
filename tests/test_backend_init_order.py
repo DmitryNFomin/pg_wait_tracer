@@ -30,6 +30,7 @@ HARNESS = r'''
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static struct pgwt_daemon d;
@@ -122,6 +123,23 @@ static void reset(void)
         .pid = 42, .is_alive = true, .bootstrap_fd = 88, .wp_fd = -1};
     pgwt_pending_init_add(&d.backends, &d.backends.entries[0]);
 }
+static void check_loss(pid_t pid, uint64_t init_ts, uint64_t exit_ts,
+                       int expected_with, int expected_without)
+{
+    uint64_t total = d.counters.lifecycle_init_lost_total;
+    uint64_t with = d.counters.lifecycle_init_lost_with_opportunity_total;
+    uint64_t without = d.counters.lifecycle_init_lost_no_opportunity_total;
+    record_init_loss(&d, pid, init_ts, exit_ts);
+    if (d.counters.lifecycle_init_lost_total != total + 1 ||
+        d.counters.lifecycle_init_lost_with_opportunity_total != with + expected_with ||
+        d.counters.lifecycle_init_lost_no_opportunity_total != without + expected_without ||
+        d.counters.lifecycle_init_lost_total !=
+            d.counters.lifecycle_init_lost_with_opportunity_total +
+            d.counters.lifecycle_init_lost_no_opportunity_total) {
+        fputs("FAIL loss partition\n", stderr);
+        exit(1);
+    }
+}
 int main(void)
 {
     for (publish_in_query = 0; publish_in_query <= 1; ++publish_in_query) {
@@ -147,21 +165,27 @@ int main(void)
     d.last_epoll_return_ns = 240;
     now = 400;
     /* Equal and before are NOT no-opportunity. Only strictly after is. */
-    record_init_loss(&d, 42, 200, 300);
-    record_init_loss(&d, 43, 199, 300);
-    record_init_loss(&d, 44, 201, 300);
+    check_loss(42, 200, 300, 1, 0);
+    check_loss(43, 199, 300, 1, 0);
+    check_loss(44, 201, 300, 0, 1);
     if (d.counters.lifecycle_init_lost_total != 3 ||
+        d.counters.lifecycle_init_lost_with_opportunity_total != 2 ||
         d.counters.lifecycle_init_lost_no_opportunity_total != 1 ||
         d.counters.lifecycle_init_lost_untraced_ns_total != 99) {
         fputs("FAIL strict no-opportunity boundary and duration\n", stderr);
         return 1;
     }
     /* Sum across multiple losses; don't replace the previous duration. */
-    record_init_loss(&d, 45, 220, 350);
+    check_loss(45, 220, 350, 0, 1);
     assert(d.counters.lifecycle_init_lost_total == 4);
+    assert(d.counters.lifecycle_init_lost_with_opportunity_total == 2);
     assert(d.counters.lifecycle_init_lost_no_opportunity_total == 2);
     assert(d.counters.lifecycle_init_lost_untraced_ns_total == 229);
     puts("loss split equal/before/after and summed untraced ns: PASS");
+    /* Missing INIT timestamp cannot claim the owner exclusion. */
+    check_loss(46, 0, 350, 1, 0);
+    assert(d.counters.lifecycle_init_lost_untraced_ns_total == 229);
+    puts("every loss in exactly one opportunity class: PASS");
     return 0;
 }
 '''
@@ -182,7 +206,9 @@ def main():
     assert loop.index("pgwt_sweep_bootstrap_backends(d);", wake) < fd_loop
     assert "pgwt_handle_exit_at(d, ev->pid, ev->timestamp);" in function(
         daemon, "process_lifecycle_event")
-    for name in ("lifecycle_init_lost_no_opportunity_total",
+    for name in ("lifecycle_init_lost_total",
+                 "lifecycle_init_lost_with_opportunity_total",
+                 "lifecycle_init_lost_no_opportunity_total",
                  "lifecycle_init_lost_untraced_ns_total"):
         assert f'cjson_add_uint64(root, "{name}",' in (ROOT / "src/control.c").read_text()
     callback = function(daemon, "handle_lifecycle_event")
@@ -200,7 +226,11 @@ def main():
         variants.append(("boundary_includes_equal", functions.replace(
             "init_ts > d->init_last_sweep_start_ns",
             "init_ts >= d->init_last_sweep_start_ns"),
-            "FAIL strict no-opportunity boundary and duration"))
+            "FAIL loss partition"))
+        counted = "d->counters.lifecycle_init_lost_with_opportunity_total++;"
+        assert functions.count(counted) == 1
+        variants.append(("omit_with_opportunity_count", functions.replace(counted, ""),
+                         "FAIL loss partition"))
     with tempfile.TemporaryDirectory(prefix="pgwt-init-order-") as tmp:
         for name, source, intended in variants:
             harness = HARNESS.replace("@FUNCTIONS@", source)
