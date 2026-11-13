@@ -18,10 +18,11 @@ static bool name(pgwt_core_event e)
 }
 static bool state(pgwt_core_event e) { return null_event(e) || name(e); }
 
-static bool zero_counters(const pgwt_evidence_counters *c)
+static bool equal_counters(const pgwt_evidence_counters *a, const pgwt_evidence_counters *b)
 {
-    if (!c->known) return false;
-    for (size_t i = 0; i < 15; ++i) if (c->value[i]) return false;
+    /* Scope validation requires readable certificate vectors (b). */
+    if (!a->known) return false;
+    for (size_t i = 0; i < 15; ++i) if (a->value[i] != b->value[i]) return false;
     return true;
 }
 
@@ -43,11 +44,11 @@ static bool exit_event(pgwt_core_event e)
 
 static bool key(const pgwt_evidence_record *a, const pgwt_evidence_record *b)
 {
-    return a->has_fork == b->has_fork && (!a->has_fork || a->fork == b->fork);
+    return a->pid == b->pid && a->has_fork == b->has_fork && (!a->has_fork || a->fork == b->fork);
 }
 
-/* Validate every capture, including uncertified suffixes. Rotation, loss,
- * and multiple PIDs remain outside U4. */
+/* Validate every capture, including uncertified suffixes. File chains remain
+ * outside this logical adapter. Malformed records refuse the entire input. */
 static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
 {
     if (!in || in->unsupported_shape || !in->files)
@@ -58,7 +59,7 @@ static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
         if (same(f->capture, in->capture)) ++targets;
         if (f->unsupported_shape || !f->present || f->file_no || f->has_previous ||
             !nonempty(f->boot) || !nonempty(f->capture) || !in->pid ||
-            (f->record_count && !f->records) || !zero_counters(&f->baseline) ||
+            (f->record_count && !f->records) ||
             f->version < 2 || f->version > 5)
             return unsupported(why, "unsupported descriptor or counters");
         for (size_t j = 0; j < fno; ++j)
@@ -70,9 +71,9 @@ static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
                 return unsupported(why, "unsupported record shape");
             if (r->kind != PGWT_EVIDENCE_LIFE && r->kind != PGWT_EVIDENCE_ATTACH_OK &&
                 r->kind != PGWT_EVIDENCE_TRANS && r->kind != PGWT_EVIDENCE_FRONTIER &&
-                r->kind != PGWT_EVIDENCE_END)
+                r->kind != PGWT_EVIDENCE_END && r->kind != PGWT_EVIDENCE_VOID)
                 return unsupported(why, "unsupported record kind");
-            if (r->kind != PGWT_EVIDENCE_FRONTIER && r->pid != in->pid)
+            if (r->kind != PGWT_EVIDENCE_FRONTIER && r->kind != PGWT_EVIDENCE_VOID && !r->pid)
                 return unsupported(why, "unsupported generation");
             if (r->kind == PGWT_EVIDENCE_LIFE) {
                 if ((r->start_known ? (!r->has_fork || r->start != r->fork) : r->has_fork) ||
@@ -81,7 +82,7 @@ static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
             } else if (r->kind == PGWT_EVIDENCE_ATTACH_OK) {
                 if (!state(r->seed) || !state(r->state))
                     return unsupported(why, "unsupported attachment");
-                if (!zero_counters(&r->counters))
+                if (!r->counters.known)
                     return unsupported(why, "unsupported attachment counters");
             } else if (r->kind == PGWT_EVIDENCE_END) {
                 if (!same(r->end_reason, (pgwt_core_event){"detach", 6}) &&
@@ -89,8 +90,11 @@ static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
                     !same(r->end_reason, (pgwt_core_event){"stop", 4}))
                     return unsupported(why, "unsupported END reason");
             } else if (r->kind == PGWT_EVIDENCE_FRONTIER) {
-                if (!zero_counters(&r->counters))
+                if (!r->counters.known)
                     return unsupported(why, "unsupported frontier counters");
+            } else if (r->kind == PGWT_EVIDENCE_VOID) {
+                if (!nonempty(r->void_reason))
+                    return unsupported(why, "unsupported VOID reason");
             } else if (!state(r->old_event) || (!state(r->new_event) && !exit_event(r->new_event)) ||
                        same(r->old_event, r->new_event) || r->duration > r->t) {
                 return unsupported(why, "unsupported transition");
@@ -107,7 +111,8 @@ static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
 typedef struct {
     const pgwt_evidence_record *identity, *life;
     uint64_t discovery;
-    bool invalid;
+    size_t life_order;
+    bool invalid, tainted, blocked;
 } generation;
 
 static size_t generation_for(generation *g, size_t *count, const pgwt_evidence_record *r)
@@ -137,6 +142,16 @@ static int transition_order(const void *av, const void *bv)
     return a->order < b->order ? -1 : a->order != b->order;
 }
 
+typedef struct snapshot {
+    struct snapshot *previous;
+    uint64_t frontier;
+    pgwt_core_span coverage;
+    pgwt_core_open_wait open;
+    pgwt_core_wait *waits;
+    size_t wait_count;
+    bool representable, has_open, terminal;
+} snapshot;
+
 typedef struct {
     const pgwt_evidence_record *attach, *end;
     size_t generation;
@@ -144,8 +159,67 @@ typedef struct {
     pgwt_core_open_wait open;
     pgwt_core_wait *waits;
     size_t wait_count;
-    bool has_snapshot, has_open, terminal;
+    bool has_snapshot, has_open, terminal, frozen;
+    snapshot *snapshots;
 } attachment_run;
+
+/* Snapshots own their waits. The run fields are a borrowed view of a selected
+ * snapshot, used by the existing query preference and projection code. */
+static void restore(attachment_run *run, const snapshot *s)
+{
+    run->has_snapshot = s && s->representable;
+    if (!s) {
+        run->coverage = (pgwt_core_span){0};
+        run->open = (pgwt_core_open_wait){0};
+        run->waits = NULL;
+        run->wait_count = 0;
+        run->has_open = run->terminal = false;
+        return;
+    }
+    run->coverage = s->coverage;
+    run->open = s->open;
+    run->waits = s->waits;
+    run->wait_count = s->wait_count;
+    run->has_open = s->has_open;
+    run->terminal = s->terminal;
+}
+
+static void discard_snapshot(attachment_run *run)
+{
+    snapshot *s = run->snapshots;
+    run->snapshots = s->previous;
+    free(s->waits);
+    free(s);
+}
+
+/* VOID is global, including for a mismatch in a certificate on another PID.
+ * Snapshot publication times, not coverage endpoints or detection time, decide
+ * revocation. The publication high-water is deliberately not rolled back. */
+static bool lifecycle_loss(const pgwt_evidence_counters *baseline,
+                           const pgwt_evidence_record *r)
+{
+    if (r->has_invalid_from || !r->counters.known || !baseline->known) return true;
+    const size_t slots[] = {0, 1, 2, 10, 12, 14};
+    for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); ++i)
+        if (r->counters.value[slots[i]] != baseline->value[slots[i]]) return true;
+    return false;
+}
+
+static void freeze(attachment_run *runs, size_t run_count,
+                   const pgwt_evidence_record *r)
+{
+    for (size_t h = 0; h < run_count; ++h) {
+        attachment_run *run = &runs[h];
+        if (r->has_invalid_from)
+            while (run->snapshots && run->snapshots->frontier >= r->invalid_from)
+                discard_snapshot(run);
+        restore(run, run->snapshots);
+        run->frozen = true;
+        /* Frozen bounds live entirely in snapshots. No pending END can affect
+         * them, or compete with an END in a later attachment epoch. */
+        run->end = NULL;
+    }
+}
 
 /* Compare one run at a time. An empty required interval still needs a
  * certified exit when the query includes exit. Malformed queries use time order. */
@@ -205,29 +279,53 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
         if (file->records[i].kind == PGWT_EVIDENCE_TRANS)
             history[count++] = (transition){&file->records[i], i};
     if (count) qsort(history, count, sizeof(*history), transition_order);
-    /* Final LIFE is used only to filter snapshots whose missing terminal close
-     * becomes apparent later. Assignment still uses each frontier's prefix. */
-    generation final = {0};
-    for (size_t i = 0; i < n; ++i) {
-        const pgwt_evidence_record *r = &file->records[i];
-        if (file->version == 5 && r->kind == PGWT_EVIDENCE_LIFE &&
-            r->has_fork == in->has_fork && (!r->has_fork || r->fork == in->fork))
-            lifetime(&final, r);
-    }
-    if (target_capture && final.life && !final.invalid) {
-        e->invalid_fields = 0;
-        e->life_start = final.life->start;
-        e->has_life_end = final.life->has_exit;
-        e->life_end = final.life->exit;
-    }
-    bool has_frontier = false;
-    uint64_t frontier = 0;
+    bool has_frontier = false, identity_uncertain = false;
+    uint64_t frontier = 0, latest_void = 0, identity_void = 0;
+    size_t epoch_start = 0;
+    pgwt_evidence_counters baseline = file->baseline;
     for (size_t i = 0; i < n; ++i) {
         const pgwt_evidence_record *r = &file->records[i];
         if (file->version != 5) continue;
-        if (r->kind == PGWT_EVIDENCE_LIFE)
-            lifetime(&g[generation_for(g, &generations, r)], r);
+        if (r->kind == PGWT_EVIDENCE_LIFE) {
+            generation *life = &g[generation_for(g, &generations, r)];
+            if (life->tainted) continue;
+            if (identity_uncertain &&
+                (!r->start_known || r->fork < identity_void || !baseline.known)) {
+                life->tainted = true;
+                continue;
+            }
+            if (!life->life) life->life_order = i;
+            lifetime(life, r);
+        }
+        bool counter_mismatch = file->qualified &&
+            (r->kind == PGWT_EVIDENCE_ATTACH_OK || r->kind == PGWT_EVIDENCE_FRONTIER) &&
+            !equal_counters(&baseline, &r->counters);
+        if (r->kind == PGWT_EVIDENCE_VOID || counter_mismatch) {
+            /* Certificate mismatches have no explicit invalid_from. Ignore
+             * unrelated storage in native callers' unused record fields. */
+            pgwt_evidence_record loss = *r;
+            if (counter_mismatch) loss.has_invalid_from = false;
+            bool uncertain = lifecycle_loss(&baseline, &loss);
+            if (uncertain) {
+                for (size_t k = 0; k < generations; ++k) g[k].tainted = true;
+                identity_uncertain = true;
+                identity_void = r->t;
+            }
+            freeze(runs, run_count, &loss);
+            for (size_t j = epoch_start; j <= i; ++j) processed[j] = true;
+            epoch_start = i + 1;
+            baseline = r->counters;
+            latest_void = r->t;
+            continue;
+        }
         if (!file->qualified) continue;
+        if (r->kind == PGWT_EVIDENCE_ATTACH_OK || r->kind == PGWT_EVIDENCE_END) {
+            if (r->kind == PGWT_EVIDENCE_ATTACH_OK && r->t < latest_void) {
+                processed[i] = true;
+                continue;
+            }
+            (void)generation_for(g, &generations, r);
+        }
         if (r->kind != PGWT_EVIDENCE_FRONTIER) continue;
         if (has_frontier && r->t <= frontier) {
             status = unsupported(reason, "unsupported nonadvancing frontier"); goto done;
@@ -240,17 +338,19 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
             const pgwt_evidence_record *p = &file->records[j];
             if (processed[j] || (p->kind != PGWT_EVIDENCE_ATTACH_OK && p->kind != PGWT_EVIDENCE_END)) continue;
             size_t k = generation_for(g, &generations, p);
-            if (!g[k].life || g[k].invalid) continue;
+            if (g[k].invalid || g[k].tainted) { processed[j] = true; continue; }
+            if (!g[k].life) continue;
             if (p->kind == PGWT_EVIDENCE_ATTACH_OK) {
+                if (identity_uncertain && j <= g[k].life_order) { processed[j] = true; continue; }
                 for (size_t h = 0; h < run_count; ++h)
-                    if (runs[h].generation == k && (!runs[h].end || runs[h].end->t > p->t)) {
+                    if (runs[h].generation == k && !runs[h].frozen && (!runs[h].end || runs[h].end->t > p->t)) {
                         status = unsupported(reason, "unsupported overlapping attachment"); goto done;
                     }
                 runs[run_count++] = (attachment_run){.attach = p, .generation = k};
             } else {
                 size_t choices = 0, chosen = 0;
                 for (size_t h = 0; h < run_count; ++h)
-                    if (runs[h].generation == k && runs[h].attach->t <= p->t && !runs[h].end) {
+                    if (runs[h].generation == k && !runs[h].frozen && runs[h].attach->t <= p->t && !runs[h].end) {
                         chosen = h; ++choices;
                     }
                 if (choices != 1) {
@@ -262,27 +362,29 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
         }
         /* SIZE_MAX marks zero/multiple possible identities. Such a dependency
          * withholds this PID's certification, preserving prior snapshots. */
-        bool blocked = false;
+        for (size_t k = 0; k < generations; ++k) g[k].blocked = false;
         for (size_t j = 0; j < count; ++j) {
             assigned[j] = SIZE_MAX;
             const pgwt_evidence_record *t = history[j].record;
-            if (history[j].order >= i || t->t > frontier) continue;
+            if (history[j].order >= i || history[j].order < epoch_start || t->t > frontier) continue;
             size_t choices = 0;
             for (size_t k = 0; k < generations; ++k) {
                 const pgwt_evidence_record *life = g[k].life;
-                if (!life || g[k].invalid) continue;
+                if (!life || g[k].invalid || g[k].tainted || life->pid != t->pid) continue;
                 uint64_t start = life->has_fork ? life->fork : g[k].discovery;
                 bool matches = exit_event(t->new_event) ? (life->has_exit && life->exit == t->t) :
                     (start <= t->t && (!life->has_exit || t->t < life->exit));
                 if (matches) { assigned[j] = k; ++choices; }
             }
-            if (choices != 1) blocked = true;
+            if (choices != 1)
+                for (size_t k = 0; k < generations; ++k)
+                    if (g[k].identity->pid == t->pid) g[k].blocked = true;
         }
         for (size_t h = 0; h < run_count; ++h) {
             attachment_run *run = &runs[h];
             size_t k = run->generation;
             const pgwt_evidence_record *life = g[k].life, *attach = run->attach;
-            if (!life || g[k].invalid || !attach) continue;
+            if (!life || g[k].invalid || run->frozen || !attach) continue;
             if (attach->t < life->start || (life->has_exit && attach->t >= life->exit)) {
                 status = unsupported(reason, "unsupported attachment lifetime"); goto done;
             }
@@ -291,12 +393,12 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
              * including its other, separate attachment windows. */
             for (size_t x = 0; x < run_count; ++x)
                 for (size_t y = 0; y < run_count; ++y)
-                    if (x != y && runs[x].generation == k && runs[y].generation == k &&
+                    if (x != y && !runs[y].frozen && runs[x].generation == k && runs[y].generation == k &&
                         runs[x].end && runs[x].end->t == runs[y].attach->t)
                         for (size_t j = 0; j < count; ++j)
                             if (assigned[j] == k && history[j].record->t == runs[y].attach->t) touching = true;
             if (touching) continue;
-            if (blocked || attach->t > frontier) continue;
+            if (g[k].blocked || attach->t > frontier) continue;
             uint64_t endpoint = life->has_exit && life->exit < frontier ? life->exit : frontier;
             if (run->end && run->end->t < endpoint) endpoint = run->end->t;
             pgwt_core_event current = attach->state;
@@ -350,20 +452,23 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
                 entry_known = !null_event(current);
             }
             bool target = target_capture && key(g[k].identity, &(pgwt_evidence_record){
-                .has_fork = in->has_fork, .fork = in->fork});
-            if (!target || final.invalid) continue;
-            if (e->has_life_end && endpoint >= e->life_end && !terminal) continue;
-            if (!anchored || !portion || trimmed > endpoint) {
-                /* CONTRACT.md §§4–5: END caps the candidate endpoint even
-                 * after a prior frontier. An anchored run with no representable
-                 * portion replaces its older snapshot with no candidate. */
-                if (anchored) run->has_snapshot = false;
+                .pid = in->pid, .has_fork = in->has_fork, .fork = in->fork});
+            if (!target) continue;
+            if (!anchored) continue;
+            /* Keep every accepted bound, even a nonrepresentable portion:
+             * later END can retract a formerly representable snapshot. */
+            snapshot *snap = calloc(1, sizeof(*snap));
+            if (!snap) goto allocation_error;
+            snap->previous = run->snapshots;
+            snap->frontier = frontier;
+            run->snapshots = snap;
+            if (!portion || trimmed > endpoint) {
+                snap->coverage.end = endpoint;
                 continue;
             }
             pgwt_core_wait *saved = waits ? malloc(waits * sizeof(*saved)) : NULL;
             if (waits && !saved) goto allocation_error;
             if (waits) memcpy(saved, candidate, waits * sizeof(*candidate));
-            free(run->waits);
             run->waits = saved;
             run->wait_count = waits;
             run->coverage = (pgwt_core_span){trimmed, endpoint};
@@ -371,7 +476,34 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
             run->open = (pgwt_core_open_wait){current, entry, endpoint};
             run->terminal = terminal;
             run->has_snapshot = true;
+            *snap = (snapshot){.previous = snap->previous, .frontier = frontier,
+                .coverage = run->coverage, .open = run->open, .waits = saved,
+                .wait_count = waits, .representable = true,
+                .has_open = run->has_open, .terminal = terminal};
         }
+    }
+    /* LIFE updates after a loss cannot refine a tainted generation. Select
+     * from the retained facts, then fall back to a surviving pre-exit bound. */
+    generation *final = NULL;
+    for (size_t k = 0; k < generations; ++k)
+        if (target_capture && key(g[k].identity, &(pgwt_evidence_record){
+            .pid = in->pid, .has_fork = in->has_fork, .fork = in->fork})) final = &g[k];
+    if (final && final->life && !final->invalid) {
+        e->invalid_fields = 0;
+        e->life_start = final->life->start;
+        e->has_life_end = final->life->has_exit;
+        e->life_end = final->life->exit;
+        for (size_t h = 0; h < run_count; ++h) {
+            attachment_run *run = &runs[h];
+            const snapshot *s = run->snapshots;
+            if (s && e->has_life_end && s->coverage.end >= e->life_end && !s->terminal) {
+                while (s && !(s->frontier < e->life_end && s->coverage.end < e->life_end))
+                    s = s->previous;
+            }
+            restore(run, s);
+        }
+    } else {
+        for (size_t h = 0; h < run_count; ++h) runs[h].has_snapshot = false;
     }
     attachment_run *selected = NULL;
     for (size_t h = 0; h < run_count; ++h)
@@ -390,7 +522,8 @@ allocation_error:
     status = PGWT_REPLAY_ERROR;
     if (reason) *reason = "replay allocation failed";
 done:
-    if (runs) for (size_t h = 0; h < run_count; ++h) free(runs[h].waits);
+    if (runs) for (size_t h = 0; h < run_count; ++h)
+        while (runs[h].snapshots) discard_snapshot(&runs[h]);
     free(runs); free(processed);
     free(history); free(g); free(candidate); free(assigned);
     return status;

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Deterministic U1/U2/U3/U4 logical replay versus the frozen independent evaluator.
+"""Deterministic U1–U5 logical replay versus the frozen independent evaluator.
 
 Builds only portable C in a temporary directory. CFLAGS selects sanitizers.
 The contract mode runs the C test against both frozen answer files.
 """
 import argparse
+from collections import Counter
 import copy
 import importlib.util
 import json
@@ -22,7 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "contracts/evidence-v1"
 MAX = (1 << 64) - 1
 SEED = 0x868001
-SCOPE_REFUSALS = {"guard_attach_nonzero_counter"}
+REFERENCE_AMBIGUITIES = {}
+sys.path.insert(0, str(ROOT / "tests"))
+import evidence_void_inputs as void_inputs
 
 
 def environment():
@@ -64,7 +67,7 @@ def fixture(prefix):
 
 
 def named_cases():
-    cases = [fixture(v) for v in ("01", "02", "03", "04", "06", "07", "08", "09", "10", "11", "16", "17", "24", "25", "27", "28", "29", "30", "33", "18", "19", "20", "21", "32")]
+    cases = [fixture(v) for v in ("01", "02", "03", "04", "06", "07", "08", "09", "10", "11", "16", "17", "24", "25", "27", "28", "29", "30", "33", "18", "19", "20", "21", "32", "05", "12", "13", "14", "15", "26", "31")]
     ordinary = fixture("01")
     records = ordinary["files"][0]["records"]
     c = copy.deepcopy(ordinary)
@@ -711,7 +714,7 @@ def generated_runs():
 
 def generate():
     rng = random.Random(SEED)
-    cases = named_cases() + guard_cases() + generated_lifecycles() + generated_attachments() + generated_runs()
+    cases = named_cases() + guard_cases() + generated_lifecycles() + generated_attachments() + generated_runs() + void_inputs.named(fixture("01")) + void_inputs.generate(fixture("01"))
     names = ["PgSleep", "Lock", "A", "other", 'quote"slash\\', "\u2603", "A\0B", "\U0001f600"]
     for i in range(2400):
         offset = rng.choice([0, 0, 100, (1 << 53) + 7, (1 << 63), MAX - 100])
@@ -813,6 +816,10 @@ def refusal_cases():
         add(f"counter_{i}", lambda c, i=i: c["files"][0]["records"][-1]["counters"].__setitem__(i, 1))
     add("baseline", lambda c: c["files"][0]["loss_baseline"].__setitem__(14, 1))
     add("unreadable_baseline", lambda c: c["files"][0].__setitem__("loss_baseline", None))
+    for name, value in (("short", [0]*14), ("long", [0]*16),
+                        ("overflow", [MAX+1]+[0]*14), ("boolean", False)):
+        add("malformed_baseline_"+name,
+            lambda c, value=value: c["files"][0].update(loss_baseline=value))
     add("short_vector", lambda c: c["files"][0]["records"][-1].__setitem__("counters", [0] * 14))
     add("null_vector", lambda c: c["files"][0]["records"][-1].__setitem__("counters", None))
     add("multiple_files", lambda c: c["files"].append(copy.deepcopy(c["files"][0])))
@@ -865,7 +872,10 @@ def refusal_cases():
     unavailable = fixture("01")
     unavailable["id"] = "refuse_last_frontier_before_attach"
     unavailable["files"][0]["records"][1]["t"] = 20
-    return cases, [unavailable, before_fork]
+    supported = {"refuse_baseline", "refuse_unreadable_baseline", "refuse_other_generation",
+                 "refuse_other_pid_transition"} | {f"refuse_counter_{i}" for i in range(15)}
+    moved = [c for c in cases if c["id"] in supported]
+    return [c for c in cases if c["id"] not in supported], [unavailable, before_fork] + moved
 
 
 def reference_module():
@@ -879,17 +889,14 @@ def reference_module():
 def reference_answer(reference, case):
     try:
         output = reference.section_7_scenario(case)
-    except reference.Ambiguity:
+    except reference.Ambiguity as error:
         # No independent numerical answer exists. Require a whole-input refusal,
         # never a result object (even one whose metrics claim unavailability).
+        REFERENCE_AMBIGUITIES[case["id"]] = str(error)
         return {"error": "unsupported"}
     if len(output) != 3:
         raise RuntimeError(f"reference did not produce all objects for {case['id']}")
     target = case["target"]
-    # The reference handles multiple PIDs; U2 explicitly supports only one.
-    if any(r["kind"] == "TRANS" and r["pid"] != target["pid"]
-           for f in case["files"] for r in f["records"]):
-        return {"error": "unsupported"}
     cores = [p["core"] for p in output[0]["projection"]
              if all(p["generation"][key] == value for key, value in target.items())]
     if len(cores) != 1:
@@ -929,16 +936,6 @@ def prepare_corpus(work, selected=None):
     expected = []
     for case in cases:
         answer = reference_answer(reference, case)
-        if case["id"] in SCOPE_REFUSALS:
-            # The reference supports nonzero attachment counters beyond this
-            # unit's zero-counter public API. Prove the
-            # reference withholds coverage and both values before requiring
-            # the core's documented whole-input refusal for these shapes.
-            if (answer.get("projection", {}).get("coverage") != [] or
-                    any(answer.get(metric, {}).get("completeness") != "unavailable"
-                        for metric in ("wait_time", "completed_waits"))):
-                raise RuntimeError(f"reference did not refuse coverage for {case['id']}")
-            answer = {"error": "unsupported"}
         expected.append(answer)
     expected += [{"error": "unsupported"} for _ in refusals]
     all_cases = cases + refusals
@@ -956,25 +953,38 @@ def differential(binary, work, selected=None, corpus=None):
     cases, refusals, expected, all_cases, paths = corpus if corpus is not None else prepare_corpus(work, selected)
     answers = []
     for start in range(0, len(paths), 250):
-        result = execute([binary, "--json"] + paths[start:start + 250])
+        result = execute([binary, "--json-reasons"] + paths[start:start + 250])
         if result.returncode or sanitizer_error(result.stdout + result.stderr):
             raise RuntimeError(f"driver failed ({result.returncode}):\n{result.stdout}\n{result.stderr}")
         answers.extend(json.loads(line) for line in result.stdout.splitlines())
     if len(answers) != len(all_cases):
         raise RuntimeError(f"driver emitted {len(answers)} answers for {len(all_cases)} inputs")
     mismatches = 0
+    values = 0
+    unsafe = 0
+    refusal_only = Counter()
     for case, actual, want in zip(all_cases, answers, expected):
+        refusal_reason = actual.pop("reason", None)
         field = first_difference(actual, want)
         if field:
             mismatches += 1
+            if "error" in actual and "error" not in want:
+                refusal_only[refusal_reason or "unspecified"] += 1
+            elif "error" in want and "error" not in actual:
+                unsafe += 1
+            else:
+                values += 1
             print(f"evidence differential {case['id']} MISMATCH {field} "
                   f"actual={json.dumps(actual, ensure_ascii=True, separators=(',', ':'))} "
                   f"expected={json.dumps(want, ensure_ascii=True, separators=(',', ':'))}")
         elif case["id"].startswith("guard_"):
             outcome = "unsupported" if "error" in want else want["wait_time"]["completeness"]
-            reference_outcome = "unavailable" if case["id"] in SCOPE_REFUSALS else outcome
             print(f"evidence differential {case['id']} PASS "
-                  f"reference={reference_outcome} core={outcome}")
+                  f"reference={outcome} core={outcome}")
+    print(f"evidence differential comparisons: value differences={values}; "
+          f"refusal-only differences={sum(refusal_only.values())}; C answers ambiguity={unsafe}")
+    for reason, count in sorted(refusal_only.items()):
+        print(f"evidence differential refusal-only {count}: {reason}")
     print(f"evidence differential: {len(cases)} reference cases, {len(refusals)} unsupported cases, "
           f"{mismatches} differences, seed=0x{SEED:x}")
     return 1 if mismatches else 0

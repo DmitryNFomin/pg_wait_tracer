@@ -1065,7 +1065,8 @@ test_phase_probe
 test_core_wait_time_contract
 test_core_wait_time_differential.py
 
-# evidence-v1 U1: logical replay, frozen projections and independent differential.
+# evidence-v1 U1–U5: logical replay, frozen projections and independent differential.
 test_core_evidence_contract
 test_core_evidence_differential.py
 test_core_merge_contract
+test_core_evidence_fuzz.py

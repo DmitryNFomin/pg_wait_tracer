@@ -3,17 +3,18 @@
 
 #include "pgwt_core.h"
 
-/* Logical U4 input, not a trace codec. Accepts independent initial files in
- * one boot, one PID with timestamp-resolved generations (including provisional
- * LIFE), exits, reread/transition attachments, END and query-specific run selection.
+/* Logical U5 input, not a trace codec. Accepts independent initial files in
+ * one boot, timestamp-resolved PIDs/generations (including provisional LIFE),
+ * exits, attachments, END, global VOID/revocation and query-specific run selection.
  * Legacy v2-v4 files retain no exact evidence; unqualified v5 retains LIFE only.
- * VOID, other kinds/PIDs, nonzero loss counters and same-capture file chains
+ * Other kinds and same-capture file chains
  * remain explicitly unsupported, even in an uncertified suffix. Strings are length-delimited; {NULL,0} means a
  * nonwaiting state. Callers supply readable arrays/strings of stated lengths.
  */
 typedef enum {
     PGWT_EVIDENCE_OTHER, PGWT_EVIDENCE_LIFE, PGWT_EVIDENCE_ATTACH_OK,
-    PGWT_EVIDENCE_TRANS, PGWT_EVIDENCE_FRONTIER, PGWT_EVIDENCE_END
+    PGWT_EVIDENCE_TRANS, PGWT_EVIDENCE_FRONTIER, PGWT_EVIDENCE_END,
+    PGWT_EVIDENCE_VOID
 } pgwt_evidence_kind;
 
 typedef struct {
@@ -39,6 +40,11 @@ typedef struct {
     pgwt_evidence_counters counters;
     /* END: exactly detach, deescalate, or stop. */
     pgwt_core_event end_reason;
+    /* VOID: opaque nonempty diagnostic; false means retain prior certificates.
+     * Unknown counters ignore value[] storage. */
+    pgwt_core_event void_reason;
+    bool has_invalid_from;
+    uint64_t invalid_from;
     /* Set by a codec/adapter when the logical shape could not be decoded. */
     bool unsupported_shape;
 } pgwt_evidence_record;
