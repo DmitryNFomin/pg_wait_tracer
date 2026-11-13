@@ -49,6 +49,7 @@
 #include "idle_rule.h"
 
 #include <unistd.h>
+#include <sys/wait.h>
 #include <math.h>
 
 static int checks = 0;
@@ -439,12 +440,34 @@ static void test_queries_avg_gated(struct pgwt_server *srv)
  */
 static void test_queries_avg_summary_route(struct pgwt_server *srv)
 {
-    printf("--- 2b. #441: the summary route has no latency evidence ---\n");
+    printf("--- 2b. summaries off: long Queries windows retain raw latency ---\n");
 
-    /* The raw answer for the SAME window, as the comparison target. A pid
-     * filter is the cheapest way to force the raw route here and nothing
-     * else about it matters: the fixture has exactly one busy pid, so the
-     * pid-filtered and unfiltered answers describe the same records. */
+    /* This section runs before any load in the parent, keeping the child's
+     * load-limit cache unset. Current summaries must never bypass the limit. */
+    fflush(stdout);
+    pid_t child = fork();
+    if (child == 0) {
+        setenv("PGWT_LOAD_MAX_EVENTS", "1", 1);
+        struct pgwt_request limited = {0};
+        limited.from_ns = srv->earliest_wall_ns;
+        limited.to_ns = srv->latest_wall_ns;
+        cJSON *answer = call_handler(handle_top_queries, srv, &limited);
+        cJSON *code = cJSON_GetObjectItem(answer, "code");
+        cJSON *limit = cJSON_GetObjectItem(answer, "max_events");
+        int ok = cJSON_IsString(code) &&
+                 strcmp(code->valuestring, "window_too_large") == 0 &&
+                 cJSON_IsNumber(limit) && limit->valuedouble == 1;
+        cJSON_Delete(answer);
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    int waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    CHECK(child > 0 && waited == child && WIFEXITED(status) &&
+          WEXITSTATUS(status) == 0,
+          "2b. one-event budget refuses the long EXACT window");
+
+    /* Both the PID-filtered and unfiltered windows use raw. The fixture
+     * has exactly one busy pid, so they describe the same records. */
     struct pgwt_request raw_req = {0};
     raw_req.from_ns = srv->earliest_wall_ns;
     raw_req.to_ns   = srv->latest_wall_ns;
@@ -462,10 +485,10 @@ static void test_queries_avg_summary_route(struct pgwt_server *srv)
     req.from_ns = srv->earliest_wall_ns;
     req.to_ns   = srv->latest_wall_ns;
     struct pgwt_wfid wf = {0};
-    CHECK(should_use_summaries(srv, &req, &wf),
-          "2b. the SUMMARY route answers the whole %d s window -- otherwise "
-          "this section tests the raw path twice and proves nothing about "
-          "the summary one", WINDOW_SECS);
+    CHECK(!should_use_summaries(srv, &req, &wf) &&
+          wf.fid == PGWT_FIDELITY_EXACT &&
+          req.to_ns - req.from_ns >= 120 * ONE_SEC,
+          "2b. summaries stay off for the whole EXACT %d s window", WINDOW_SECS);
 
     cJSON *out = call_handler(handle_top_queries, srv, &req);
     CHECK(out != NULL, "2b. parseable JSON");
@@ -984,12 +1007,6 @@ int main(void)
         printf("FATAL: server_init a\n"); return 2;
     }
 
-    test_overview_idle_share_is_null(srv);
-    test_queries_avg_gated(srv);
-    test_exec_stats_scope(srv);
-    test_graph_sampled_time(srv);
-    free(srv);
-
     char dir_c[] = "/tmp/pgwt_semwire_c_XXXXXX";
     if (!mkdtemp(dir_c)) { printf("FATAL: mkdtemp c\n"); return 2; }
     build_fixture_c(dir_c, fixture_base);
@@ -999,6 +1016,12 @@ int main(void)
     }
     test_queries_avg_summary_route(srv_c);
     free(srv_c);
+
+    test_overview_idle_share_is_null(srv);
+    test_queries_avg_gated(srv);
+    test_exec_stats_scope(srv);
+    test_graph_sampled_time(srv);
+    free(srv);
 
     char dir_b[] = "/tmp/pgwt_semwire_b_XXXXXX";
     if (!mkdtemp(dir_b)) { printf("FATAL: mkdtemp b\n"); return 2; }

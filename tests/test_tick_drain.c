@@ -21,8 +21,8 @@
  * ring_buffer__consume is replaced (-Wl,--wrap), by a fake ring that feeds
  * synthetic records through the production callback. The #779 retention
  * leg also observes writer rotation/cleanup through pass-through wrappers:
- * real writers and real pgwt_handle_timer must check summary rotation
- * BEFORE retention, including when the raw block cap forces early rotation.
+ * the real raw writer and pgwt_handle_timer must rotate BEFORE retention,
+ * including when the raw block cap forces early rotation. Summaries are off.
  *
  * ADVERSARIAL QUESTIONS, answered by the BYPASS section at the bottom:
  *   - What input makes this pass while the product is broken? An EMPTY ring:
@@ -83,13 +83,11 @@ static int checks, failures;
  * ------------------------------------------------------------------ */
 #define QUEUE_CAP 512
 static struct pgwt_daemon *g_d;
-/* #779: these wrappers observe calls from daemon.o, never substitute writer
- * behavior. Sequence assertions catch a cleanup-before-summary-check reorder
- * even if the separate live-summary protection still preserves the raw. */
+/* Observe calls from daemon.o without substituting writer behavior. Raw
+ * rotation must precede retention; disabled summary maintenance must not run. */
 static bool observe_retention;
-static int maintenance_seq, raw_rotation_seq, summary_rotation_seq, cleanup_seq;
+static int maintenance_seq, raw_rotation_seq, cleanup_seq;
 static int raw_rotation_calls, summary_rotation_calls, cleanup_calls;
-static uint64_t pending_summary_ns;
 static char raw_archive[512];
 
 int __real_pgwt_writer_check_rotation(struct pgwt_event_writer *w);
@@ -113,12 +111,8 @@ int __real_pgwt_summary_check_rotation(struct pgwt_summary_writer *w);
 int __wrap_pgwt_summary_check_rotation(struct pgwt_summary_writer *w);
 int __wrap_pgwt_summary_check_rotation(struct pgwt_summary_writer *w)
 {
-    if (observe_retention) {
+    if (observe_retention)
         summary_rotation_calls++;
-        summary_rotation_seq = ++maintenance_seq;
-        CHECK(w == g_d->summary_writer && w->fp,
-              "#779: summary is still pending when its rotation is checked");
-    }
     return __real_pgwt_summary_check_rotation(w);
 }
 
@@ -132,12 +126,10 @@ int __wrap_pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
         CHECK(g_d->tick == 60, "#779: retention fires on tick 60");
         CHECK(raw_rotation_seq > 0 && raw_rotation_seq < cleanup_seq,
               "#779: raw rotation precedes retention");
-        CHECK(summary_rotation_seq > 0 && summary_rotation_seq < cleanup_seq,
-              "#779: summary rotation check precedes retention "
-              "(summary=%d, cleanup=%d)", summary_rotation_seq, cleanup_seq);
-        if (g_d->summary_writer->fp)
-            CHECK(w->retention_live_summary_ns == pending_summary_ns,
-                  "#779: daemon supplies the pending summary anchor to retention");
+        CHECK(g_d->summary_writer == NULL,
+              "summaries stay disabled at retention");
+        CHECK(w->retention_live_summary_ns == 0,
+              "disabled summaries clear the live-summary retention anchor");
     }
     return __real_pgwt_writer_cleanup_old_files(w);
 }
@@ -308,90 +300,82 @@ static uint64_t sys_count(const struct pgwt_accumulator *acc, uint32_t we)
     return 0;
 }
 
-/* #779: real forced rotation and retention on the SAME timer tick. Setting
- * force_rotate is the block-cap seam, avoiding a million fabricated blocks.
- * The summary has an open real file, not an archived summary test double.
- * The ordering assertion is primary: raw survival alone would miss a call
- * reorder while retention_live_summary_ns still independently protects it. */
-static void test_retention_rotation_order(void)
+/* Raw block-cap rotation and byte retention on the SAME tick. The archive
+ * belongs to the current hour, so a live summary anchor would hold it until
+ * hourly rotation. Seed a stale anchor to prove the real timer clears it. */
+static void test_retention_without_summaries(void)
 {
-    printf("=== #779: timer summary rotation precedes retention ===\n");
+    printf("=== summaries off: raw byte cap without hourly hold ===\n");
     int failures_before = failures;
     struct fixture f = fixture_new();
     queue_reset();
     char dir[] = "/tmp/pgwt-tick-retention-XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); exit(2); }
     struct pgwt_event_writer *raw = calloc(1, sizeof(*raw));
-    struct pgwt_summary_writer *summary = calloc(1, sizeof(*summary));
-    if (!raw || !summary) exit(2);
-    if (pgwt_writer_init(raw, dir, 180000, 0, NULL) != 0 ||
-        pgwt_summary_writer_init(summary, dir, 0, NULL) != 0) {
-        fprintf(stderr, "#779: cannot initialize real writers\n");
+    if (!raw) exit(2);
+    if (pgwt_writer_init(raw, dir, 180000, 0, NULL) != 0) {
+        fprintf(stderr, "cannot initialize real raw writer\n");
         exit(2);
     }
+    f.d->event_writer = raw;
+    CHECK(f.d->summary_writer == NULL, "summary writer is off before the tick");
+    /* Deliver through the real event producer, with no summary sink. */
+    queue_push(4242, PGSLEEP, MS(1));
     struct timespec mono;
     clock_gettime(CLOCK_MONOTONIC, &mono);
-    struct pgwt_trace_event evt = {
-        .timestamp_ns = (uint64_t)mono.tv_sec * 1000000000ULL + mono.tv_nsec,
-        .pid = 4242, .old_event = PGSLEEP, .duration_ns = MS(1),
-    };
-    CHECK(pgwt_writer_push_event(raw, &evt) == 0 && raw->fp,
-          "#779: real raw file is open before the tick");
-    CHECK(pgwt_summary_push_event(summary, &evt, 0, evt.old_event) == 0 &&
-          summary->fp, "#779: real summary has not rotated before the tick");
-    pending_summary_ns = summary->clock_offset_wall_ns;
-    /* Align the naming anchors even if setup straddles an hour boundary. */
-    raw->file_start_wall_ns = pending_summary_ns;
-    time_t wall_sec = (time_t)(pending_summary_ns / 1000000000ULL);
+    queue[0].timestamp_ns = (uint64_t)mono.tv_sec * 1000000000ULL + mono.tv_nsec;
+    run_tick(&f);
+    CHECK(records_delivered == 1 && raw->fp,
+          "event callback writes raw with summary writer disabled");
+    time_t wall_sec = (time_t)(raw->file_start_wall_ns / 1000000000ULL);
     struct tm hour;
     localtime_r(&wall_sec, &hour);
     if (pgwt_archive_path_nonclobber(dir, &hour, ".trace.lz4",
                                     raw_archive, sizeof(raw_archive)) != 0)
         exit(2);
     CHECK(access(raw_archive, F_OK) != 0,
-          "#779: the raw archive does not already exist");
+          "raw archive will be created by the retention tick");
     raw->force_rotate = true;
-    raw->retention_bytes = 1;  /* any unprotected archive would be evicted */
-    f.d->event_writer = raw;
-    f.d->summary_writer = summary;
+    raw->retention_bytes = 1;  /* any unprotected archive must be evicted */
+    raw->retention_live_summary_ns = raw->file_start_wall_ns;
+    CHECK(raw->retention_live_summary_ns != 0,
+          "a nonzero same-hour anchor would hold the raw archive");
     f.d->tick = 60;
-    maintenance_seq = raw_rotation_seq = summary_rotation_seq = cleanup_seq = 0;
+    maintenance_seq = raw_rotation_seq = cleanup_seq = 0;
     raw_rotation_calls = summary_rotation_calls = cleanup_calls = 0;
     observe_retention = true;
     run_tick(&f);              /* the REAL pgwt_handle_timer */
     observe_retention = false;
 
-    CHECK(f.d->tick == 61, "#779: timer completed the retention tick");
-    CHECK(raw_rotation_calls == 1 && summary_rotation_calls == 1 &&
-          cleanup_calls == 1,
-          "#779: timer reached each maintenance stage exactly once");
-    /* At a real hour boundary summary rotation can publish too; the order
-     * assertion above still applies and retention may then delete the pair. */
-    if (summary->fp)
-        CHECK(access(raw_archive, F_OK) == 0,
-              "#779: raw fallback survives while the summary remains live");
-    printf("#779 timer order: raw=%d summary=%d cleanup=%d\n",
-           raw_rotation_seq, summary_rotation_seq, cleanup_seq);
-    printf("%s: #779 timer retention ordering\n",
+    CHECK(f.d->tick == 61, "timer completed the retention tick");
+    CHECK(raw_rotation_calls == 1 && cleanup_calls == 1,
+          "timer rotated raw and ran retention exactly once");
+    CHECK(f.d->summary_writer == NULL && summary_rotation_calls == 0,
+          "timer leaves the summary writer off and skips its rotation");
+    CHECK(raw->retention_live_summary_ns == 0,
+          "raw retention has zero summary coupling");
+    CHECK(access(raw_archive, F_OK) != 0,
+          "byte cap evicts the newly rotated raw without an hourly hold");
+    printf("%s: summaries off, raw cap acts immediately\n",
            failures == failures_before ? "PASS" : "FAIL");
 
     f.d->event_writer = NULL;
-    f.d->summary_writer = NULL;
-    pgwt_summary_destroy(summary);
     pgwt_writer_destroy(raw);
-    free(summary);
     free(raw);
     fixture_free(&f);
     DIR *dp = opendir(dir);
     if (!dp) { perror("opendir"); exit(2); }
     struct dirent *de;
+    int summary_files = 0;
     while ((de = readdir(dp))) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        if (strstr(de->d_name, ".summary")) summary_files++;
         char path[512];
         snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
         if (unlink(path) != 0) { perror("unlink"); exit(2); }
     }
     closedir(dp);
+    CHECK(summary_files == 0, "event delivery and ticks create no summary files");
     if (rmdir(dir) != 0) { perror("rmdir"); exit(2); }
 }
 
@@ -402,7 +386,7 @@ int main(void)
     setenv("PGWT_TEST_NO_RECOVERY", "1", 1);
     setenv("PGWT_TEST_NO_STALE_SWEEP", "1", 1);
 
-    test_retention_rotation_order();
+    test_retention_without_summaries();
 
     printf("=== #416: the tick contains every emitted record ===\n");
 

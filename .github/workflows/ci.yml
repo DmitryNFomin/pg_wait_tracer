@@ -164,6 +164,95 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+  ledger:
+    name: ledger (report only)
+    needs: core-status
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-24.04   # PINNED, not ubuntu-latest - see RUNNER IMAGE PIN above
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    # Serialize comment creation/update across master pushes.
+    concurrency:
+      group: release-ledger-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download this run's core-status evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: core-status-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ledger-core-status
+
+      - name: Generate ledger and job summary
+        id: generate
+        continue-on-error: true
+        env:
+          LEDGER_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ledger-publish"
+          cd "$RUNNER_TEMP/ledger-publish"
+          if python3 "$GITHUB_WORKSPACE/scripts/ledger.py" --commit "$LEDGER_COMMIT" \
+              --artifact-dir "$RUNNER_TEMP/ledger-core-status" > ledger.md; then
+            cat ledger.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -f ledger.json ledger.md
+            echo 'Ledger generation failed; see this step log. This report does not gate CI.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload ledger report
+        if: steps.generate.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ledger-publish/ledger.json
+            ${{ runner.temp }}/ledger-publish/ledger.md
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Update the dedicated ledger comment
+        if: steps.generate.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const readme = fs.readFileSync('ledger/README.md', 'utf8');
+            const settings = [...readme.matchAll(/^LEDGER_ISSUE=([0-9]+)$/gm)];
+            if (settings.length !== 1) throw new Error('Expected one LEDGER_ISSUE setting');
+            const issue_number = Number(settings[0][1]);
+            if (issue_number === 0) {
+              core.info('LEDGER_ISSUE=0; skipping issue publication');
+              return;
+            }
+            if (!Number.isSafeInteger(issue_number) || issue_number < 1 || issue_number === 850) {
+              throw new Error('Unsafe ledger issue; use a dedicated issue, never the work board');
+            }
+            const target = {...context.repo, issue_number};
+            const {data: issue} = await github.rest.issues.get(target);
+            // Explicit opt-in prevents a typo from updating a work/scope issue.
+            if (issue.pull_request || !(issue.body || '').includes('<!-- pgwt-ledger-issue -->')) {
+              throw new Error('LEDGER_ISSUE must identify the dedicated ledger issue');
+            }
+            const marker = '<!-- pgwt-release-ledger -->';
+            const comments = await github.paginate(github.rest.issues.listComments, target);
+            const matches = comments.filter(c => c.user?.login === 'github-actions[bot]' &&
+              c.user?.type === 'Bot' && (c.body || '').startsWith(marker));
+            if (matches.length > 1) throw new Error('Ambiguous ledger comments; expected at most one');
+            const table = fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'ledger-publish/ledger.md'), 'utf8');
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/attempts/${process.env.GITHUB_RUN_ATTEMPT}`;
+            const body = `${marker}\nLedger for ${context.sha} ([CI evidence](${run})).\n\n${table}`;
+            if (matches.length === 1) {
+              await github.rest.issues.updateComment({...context.repo, comment_id: matches[0].id, body});
+            } else {
+              await github.rest.issues.createComment({...target, body});
+            }
+
   changed_files:
     # Drives how much of the self-hosted gate-box capture matrix runs below.
     # Real numbers that motivated this: 8 open PRs produced ~20 CI runs, each

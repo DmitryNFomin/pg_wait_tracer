@@ -494,7 +494,9 @@ test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c replay_accum.
 test_trace_closure: test_trace_closure.c $(BUILD)/server_event_writer.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
-test_retention_order: test_retention_order.c $(BUILD)/server_event_writer.o
+test_retention_order: test_retention_order.c $(BUILD)/server_event_writer.o \
+                      $(BUILD)/server_summary_writer.o $(BUILD)/server_wait_event.o \
+                      $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 # test_open_ckpt: #424 deliverable 2 — open-interval checkpoints as one

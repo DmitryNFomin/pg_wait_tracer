@@ -200,15 +200,9 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           # #128 follow-up: sampled idle readings that contradict the same
           # tick's cmd_open (never a command boundary).
           'sampled_idle_in_command_total',
-          # #424 / summary v9: the open on-CPU producer. These seven were
-          # behind `#if PGWT_SUMMARY_VERSION >= 9` while the writer and the
-          # producer lived on separate branches; the guard is gone and so is
-          # the excuse for not asserting them. summary_open_cpu_credited_ns
-          # is the one that matters: present-and-numeric here, and NON-ZERO
-          # on a live capture with an in-flight CPU statement. Zero there
-          # with summary_open_cpu_refused_total non-zero is the signature of
-          # a producer that is not wired while every other test passes --
-          # which is exactly why the keys are named rather than globbed.
+          # Keep the v9 metrics present and numeric while summaries are off.
+          # test_v9_open_cpu_wired.sh checks that the writer stays inactive
+          # across a proven CPU stimulus until the core rebuild.
           'summary_open_cpu_credited_ns',
           'summary_open_cpu_measured_ns',
           'summary_open_cpu_unknown_ns',
@@ -229,17 +223,8 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'summary_open_io_worker_refused_total',
           'summary_open_table_full_total',
           'summary_open_notes_expired_total',
-          # The two that make a zero ATTRIBUTABLE rather than one of three
-          # states. summary_open_io_worker_refused_total above counts WAIT
-          # notes too, so on the 2026-10-28 capture it read 39 beside 34
-          # notes and the overlap was unknown; the on-CPU subset ends that
-          # by subtraction. unplaced_total is the outcome no refusal counter
-          # can express -- accepted, then retired with no second written,
-          # which is the CORRECT answer for a gap that ends inside its own
-          # second and indistinguishable from a broken seal without it.
-          # tests/test_v9_open_cpu_wired.sh REFUSES when either is missing,
-          # so dropping them from this response disarms that fixture rather
-          # than failing it.
+          # Preserve the on-CPU refusal diagnostics for the core rebuild;
+          # test_v9_open_cpu_wired.sh still requires these keys to be numeric.
           'summary_open_cpu_io_worker_refused_total',
           'summary_open_cpu_unplaced_total',
           # Without this one, summary_cpu_open_uncredited_ns_total is not

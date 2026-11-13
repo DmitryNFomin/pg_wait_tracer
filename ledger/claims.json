@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "evidence": {
+    "wait_time-contract": {
+      "kind": "attestation",
+      "link": null,
+      "contract": "wait_time-v1",
+      "contract_sha256": "4f4d9aedca7e5313f3dc78cd2aba763e286ba9e79d1406ff3c6e6899957f1129"
+    },
+    "wait_time-independent": {
+      "kind": "attestation",
+      "link": null,
+      "contract": "wait_time-v1",
+      "contract_sha256": "4f4d9aedca7e5313f3dc78cd2aba763e286ba9e79d1406ff3c6e6899957f1129"
+    },
+    "wait_time-core": {
+      "kind": "core-status",
+      "contract": "wait_time-v1"
+    },
+    "wait_time-box": {
+      "kind": "box-check",
+      "path": null
+    },
+    "wait_time-cost": {
+      "kind": "attestation",
+      "link": null,
+      "contract": "wait_time-v1",
+      "contract_sha256": "4f4d9aedca7e5313f3dc78cd2aba763e286ba9e79d1406ff3c6e6899957f1129"
+    }
+  },
+  "claims": [
+    {
+      "id": "wait_time-v1:C01",
+      "contract_claim": "wait_time-v1:C01",
+      "cells": {
+        "contract_accepted": [
+          "wait_time-contract"
+        ],
+        "independent_answer": [
+          "wait_time-independent"
+        ],
+        "real_interface": [],
+        "broken_versions": [
+          "wait_time-core"
+        ],
+        "binary_identified": [
+          "wait_time-box"
+        ],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": [
+          "wait_time-cost"
+        ]
+      }
+    },
+    {
+      "id": "wait_time-v1:C02",
+      "contract_claim": "wait_time-v1:C02",
+      "cells": {
+        "contract_accepted": [
+          "wait_time-contract"
+        ],
+        "independent_answer": [
+          "wait_time-independent"
+        ],
+        "real_interface": [],
+        "broken_versions": [
+          "wait_time-core"
+        ],
+        "binary_identified": [
+          "wait_time-box"
+        ],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": [
+          "wait_time-cost"
+        ]
+      }
+    },
+    {
+      "id": "wait_time-v1:C03",
+      "contract_claim": "wait_time-v1:C03",
+      "cells": {
+        "contract_accepted": [
+          "wait_time-contract"
+        ],
+        "independent_answer": [
+          "wait_time-independent"
+        ],
+        "real_interface": [],
+        "broken_versions": [
+          "wait_time-core"
+        ],
+        "binary_identified": [
+          "wait_time-box"
+        ],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": [
+          "wait_time-cost"
+        ]
+      }
+    },
+    {
+      "id": "wait_time-v1:C04",
+      "contract_claim": "wait_time-v1:C04",
+      "cells": {
+        "contract_accepted": [
+          "wait_time-contract"
+        ],
+        "independent_answer": [
+          "wait_time-independent"
+        ],
+        "real_interface": [],
+        "broken_versions": [
+          "wait_time-core"
+        ],
+        "binary_identified": [
+          "wait_time-box"
+        ],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": [
+          "wait_time-cost"
+        ]
+      }
+    },
+    {
+      "id": "wait_time-v1:C05",
+      "contract_claim": "wait_time-v1:C05",
+      "cells": {
+        "contract_accepted": [
+          "wait_time-contract"
+        ],
+        "independent_answer": [
+          "wait_time-independent"
+        ],
+        "real_interface": [],
+        "broken_versions": [
+          "wait_time-core"
+        ],
+        "binary_identified": [
+          "wait_time-box"
+        ],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": [
+          "wait_time-cost"
+        ]
+      }
+    },
+    {
+      "id": "pg14-16-refusal",
+      "contract_claim": null,
+      "title": "PG 14-16 refuse cleanly",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    },
+    {
+      "id": "sampled-db-time-500",
+      "contract_claim": null,
+      "title": "sampled DB Time within the stated bound at 500 connections",
+      "cells": {
+        "contract_accepted": [],
+        "independent_answer": [],
+        "real_interface": [],
+        "broken_versions": [],
+        "binary_identified": [],
+        "load_platform": [],
+        "old_code_deleted": [],
+        "cost_next": []
+      }
+    }
+  ]
+}

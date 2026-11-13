@@ -1075,6 +1075,9 @@ layouts, the footer, the `current.trace.meta` committed-block protocol, and
 the durability guarantees — lives in
 [docs/TRACE_FORMAT.md](docs/TRACE_FORMAT.md).
 
+Summaries are off until rebuilt from the core. Long windows read raw events
+and refuse with "window too large" past the event limit.
+
 ### File lifecycle
 
 - **Active file**: `current.trace` — being written. Readable while live via
@@ -1099,8 +1102,8 @@ the durability guarantees — lives in
   and `--retention-gb` adds a best-effort target for total directory size.
   Cleanup runs every 60 ticks, evicting oldest hours first and same-hour
   summaries before raw. Live files and `.jsonl` sidecars are protected;
-  pending summaries retain their hour's raw until publication, normally
-  within an hour, even while usage exceeds the cap. Failed unlinks do not
+  the daemon writes no summaries while summaries are off, so the
+  live-summary hold on raw archives does not apply. Failed unlinks do not
   block other hours; a failed summary unlink preserves that hour's raw
   pieces for the pass. Removal or scan failures can also leave usage over
   cap. A WARN reports the actual remaining excess and limiting reason.

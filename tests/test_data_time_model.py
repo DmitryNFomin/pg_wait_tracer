@@ -84,8 +84,8 @@ def build_scenario():
 
 
 def check_cpu_aas_contract(t):
-    # The long unfiltered window uses summaries; the PID-filtered twin uses
-    # raw events. The load-budget oracle proves the long request used summaries.
+    # Both long windows read raw events while summaries are disabled.
+    # The load-budget oracle must refuse even with current summary files.
     events = [{"pid": 42, "ts": BASE_TS + sec * 1_000_000_000 + 10485760,
                "dur": 10485760, "cpu": 10433332, "old": CPU, "new": CPU, "qid": 99}
               for sec in range(140)]
@@ -100,10 +100,10 @@ def check_cpu_aas_contract(t):
         with ServerHarness(trace_dir, env={"PGWT_LOAD_MAX_EVENTS": "1"}) as srv:
             for cmd in ("top_events", "time_model"):
                 oracle = srv.query(cmd, **bounds)
-                t.check("error" not in oracle and oracle.get("rows"),
-                        "757 summary route survives a one-event load budget: " + cmd)
+                t.check_eq(oracle.get("code"), "window_too_large",
+                           "summaries off: one-event budget refuses " + cmd)
         with ServerHarness(trace_dir) as srv:
-            for route, filters in (("summary", {}), ("raw", {"pid": 42})):
+            for route, filters in (("unfiltered raw", {}), ("PID-filtered raw", {"pid": 42})):
                 tm = srv.query("time_model", filters=filters, **bounds)
                 te = srv.query("top_events", filters=filters, **bounds)
                 ts = srv.query("top_sessions", filters=filters, **bounds)
@@ -139,7 +139,7 @@ def check_cpu_aas_contract(t):
                 zero = srv.query("top_events", filters=filters,
                     from_=BASE_TS + 150_000_000_000, to_=BASE_TS + 290_000_000_000)
                 t.check(zero["has_measured_cpu"] and zero["offcpu_aas"] == 0,
-                        "757 raw/summary measured zero AAS remains numeric zero")
+                        "757 raw measured zero AAS remains numeric zero")
             unavailable = srv.query("top_events", filters={"pid": 999}, **bounds)
             t.check(unavailable.get("offcpu_aas", "missing") is None,
                     "757 unmeasured Events AAS emits null, not zero")
