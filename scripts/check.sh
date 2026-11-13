@@ -63,6 +63,24 @@ run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.p
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py
 run env CFLAGS="$core_cflags" bash tests/evidence_mutants.sh
 
+step "C11 core merge contract and API safety (ASan/UBSan, Refs #871)"
+if merge_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-core-merge-check.XXXXXX"); then
+    if "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+        -fno-omit-frame-pointer \
+        tests/test_core_merge_contract.c src/core/merge.c -o "$merge_check_dir/contract"; then
+        run "$merge_check_dir/contract" contracts/merge-v1/examples.json
+    else
+        echo "FAIL: core merge contract compilation"
+        fail=1
+    fi
+    rm -rf "$merge_check_dir"
+else
+    echo "FAIL: core merge contract temporary directory"
+    fail=1
+fi
+step "core merge frozen-fixture mutants (Refs #871)"
+run env CFLAGS="$core_cflags" bash tests/core_merge_mutants.sh
+
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
 # below (see issue #118). --fast doesn't need Playwright at all.
