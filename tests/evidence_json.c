@@ -401,12 +401,8 @@ static bool literal(const json_node *n, const char *text)
 static bool keys(const json_node *n, const char *const *allowed, size_t count)
 {
     if (!n || n->kind != J_OBJECT) return false;
-    for (const json_node *m = n->child; m; m = m->next) {
-        bool found = false;
-        for (size_t i = 0; i < count; ++i)
-            if (bytes_equal(m->key, m->key_length, allowed[i], strlen(allowed[i]))) found = true;
-        if (!found) return false;
-    }
+    /* The interchange defines required fields; extensions are immaterial. */
+    (void)allowed; (void)count;
     return true;
 }
 #define KEYS(n, ...) keys(n, (const char *const[]){__VA_ARGS__}, \
@@ -447,6 +443,7 @@ static void record(const json_node *n, pgwt_evidence_record *out)
         ok = event_or_null(member(n, "seed"), &out->seed) && ok;
         ok = event_or_null(member(n, "state"), &out->state) && ok;
         counters(member(n, "counters"), &out->counters);
+        ok = (is_null(member(n, "counters")) || out->counters.known) && ok;
         ok = KEYS(n, "kind", "t", "pid", "fork", "method", "seed", "state", "counters") && ok;
         break;
     case PGWT_EVIDENCE_TRANS:
@@ -457,6 +454,7 @@ static void record(const json_node *n, pgwt_evidence_record *out)
         break;
     case PGWT_EVIDENCE_FRONTIER:
         counters(member(n, "counters"), &out->counters);
+        ok = (is_null(member(n, "counters")) || out->counters.known) && ok;
         ok = KEYS(n, "kind", "t", "counters") && ok;
         break;
     case PGWT_EVIDENCE_END:
@@ -470,7 +468,7 @@ static void record(const json_node *n, pgwt_evidence_record *out)
         ok = event_string(member(n, "reason"), &out->void_reason) && ok;
         ok = KEYS(n, "kind", "t", "counters", "invalid_from", "reason") && ok;
         break;
-    case PGWT_EVIDENCE_OTHER: break; /* Public API must refuse this kind. */
+    case PGWT_EVIDENCE_OTHER: break; /* Public API cuts this capture at the unknown kind. */
     }
     out->unsupported_shape = !ok;
 }

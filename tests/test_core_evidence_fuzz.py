@@ -2,8 +2,8 @@
 """VOID fuzz and refusal diagnostics for the U4/U5 reviewer scripts.
 
 CFLAGS is passed through to the portable C build. Numerical/projection/diagnostic
-mismatches and answering an ambiguous reference input fail the check. Conservative
-whole-input refusals are counted separately with their public replay reason.
+mismatches, extra refusals and answering an ambiguous reference input fail the check.
+Refusal-only differences are counted separately with their public replay reason.
 """
 import argparse
 from collections import Counter
@@ -62,7 +62,7 @@ def check(binary, work, cases, label):
           f"reference ambiguities={sum(ambiguities.values())}")
     for reason,n in sorted(refusals.items()): print(f"  refusal-only {n}: {reason}")
     for reason,n in sorted(ambiguities.items()): print(f"  reference refusal {n}: {reason}")
-    return bool(values or unsafe)
+    return bool(values or refusals or unsafe)
 
 
 def main():
@@ -95,6 +95,8 @@ def main():
         failed=check(binary,work,cases,label)
         if args.file_chains:
             failed |= check(binary,work,files.extend(cases,args.seed),label+" file chains")
+            failed |= check(binary,work,files.generate(d.fixture,args.cases,args.seed),
+                            f"file generator seed={args.seed}")
         return failed
 
 
