@@ -145,8 +145,42 @@ static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
     return yielded;
 }
 
+/* Consume one lifecycle batch, then recover missed INIT hints while short
+ * lived backends can still be attached. Used for readiness and final drain. */
+int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d)
+{
+    /* Attach/retire during a sweep must not re-enter lifecycle callbacks. */
+    if (d->init_sweep_active)
+        return -EDEADLK;
+    d->lifecycle_batch_start_ns = pgwt_debug_monotonic_ns();
+    d->lifecycle_batch_records = 0;
+    int rc = ring_buffer__consume(d->rb);
+    d->lifecycle_batch_start_ns = 0;
+    d->lifecycle_batch_records = 0;
+    pgwt_sweep_bootstrap_backends(d);
+    return rc;
+}
+
 /* Ring buffer callback for lifecycle events */
+static int process_lifecycle_event(void *ctx, void *data, size_t data_sz);
+
 static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
+{
+    struct pgwt_daemon *d = ctx;
+    const struct pgwt_lifecycle_event *ev = data;
+    if (ev->type == PGWT_LIFECYCLE_EXIT) {
+        d->lifecycle_exit_pid = ev->pid;
+        d->lifecycle_exit_ts = ev->timestamp;
+    }
+    ++d->lifecycle_batch_records;
+    pgwt_sweep_bootstrap_backends(d);
+    int rc = process_lifecycle_event(ctx, data, data_sz);
+    d->lifecycle_exit_pid = 0;
+    d->lifecycle_exit_ts = 0;
+    return rc;
+}
+
+static int process_lifecycle_event(void *ctx, void *data, size_t data_sz)
 {
     struct pgwt_daemon *d = ctx;
     struct pgwt_lifecycle_event *ev = data;
@@ -168,11 +202,11 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
         break;
     case PGWT_LIFECYCLE_INIT:
         op = "lifecycle_init";
-        pgwt_handle_init(d, ev->pid, ev->addr);
+        pgwt_handle_init(d, ev->pid, ev->addr, ev->timestamp);
         break;
     case PGWT_LIFECYCLE_EXIT:
         op = "lifecycle_exit";
-        pgwt_handle_exit(d, ev->pid);
+        pgwt_handle_exit_at(d, ev->pid, ev->timestamp);
         break;
     case PGWT_LIFECYCLE_QUERY_TEXT: {
         op = "lifecycle_query_text";
@@ -402,6 +436,10 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
         fprintf(stderr, "STATEDUMP-TIMER: tick=%d mode_uses_wp=%d "
                 "lightweight=%d\n",
                 d->tick, (int)mode_uses_wp, (int)d->lightweight_mode);
+
+    /* INIT records are wake-up hints: recover their durable facts every tick,
+     * before the general address-based recovery can take a direct attach. */
+    pgwt_sweep_bootstrap_backends(d);
 
     /* Straddle-race recovery: re-attach any pre-existing backend the one-shot
      * startup scan missed or left in bootstrap limbo (a transient resolve race,
@@ -1242,6 +1280,14 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         fprintf(stderr, "WARN: PGWT_TEST_NO_SCHED_ONCPU — sched_switch on_cpu_ts "
                 "open suppressed (deterministic straddle-CPU repro; TEST ONLY)\n");
     }
+    if (getenv("PGWT_TEST_DROP_INIT_HINT")) {
+        d->skel->rodata->test_drop_init_hint = true;
+        fprintf(stderr, "WARN: PGWT_TEST_DROP_INIT_HINT — INIT ring hints suppressed (TEST ONLY)\n");
+    }
+    if (getenv("PGWT_TEST_SKIP_INIT_STORE")) {
+        d->skel->rodata->test_skip_init_store = true;
+        fprintf(stderr, "WARN: PGWT_TEST_SKIP_INIT_STORE — INIT state stores suppressed (TEST ONLY)\n");
+    }
     /* DEBUG HOOK (PGWT_DEBUG_DUMP_STATE): see pgwt_debug_dump_state_map — the
      * final state_map is dumped to stderr at shutdown for the reopened
      * straddle live-CPU investigation. Announced here so the hook can never
@@ -1733,6 +1779,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
         uint64_t started_ns = pgwt_debug_block_begin(d);
         int n = epoll_wait(d->epoll_fd, events, 8, timeout_ms);
+        d->last_epoll_return_ns = pgwt_debug_monotonic_ns();
         pgwt_debug_block_end(d, "epoll_wait", 0, started_ns);
         if (n < 0) {
             if (errno == EINTR) {
@@ -1750,6 +1797,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             break;
         }
 
+        pgwt_sweep_bootstrap_backends(d);
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == d->timer_fd) {
                 started_ns = pgwt_debug_block_begin(d);
@@ -1762,7 +1810,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
                 pgwt_debug_block_end(d, "sample_timer_handler", 0, started_ns);
             } else if (events[i].data.fd == rb_fd) {
                 started_ns = pgwt_debug_block_begin(d);
-                ring_buffer__consume(d->rb);
+                pgwt_consume_lifecycle_ring(d);
                 pgwt_debug_block_end(d, "lifecycle_ring_consume", 0, started_ns);
             } else if (events[i].data.fd == event_rb_fd) {
                 /* The common bounded drain below handles this readiness. Doing
@@ -1804,7 +1852,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         consume_event_ring(d, "event_ring_final_drain", false);
     }
     uint64_t started_ns = pgwt_debug_block_begin(d);
-    ring_buffer__consume(d->rb);
+    pgwt_consume_lifecycle_ring(d);
     pgwt_debug_block_end(d, "lifecycle_ring_final_drain", 0, started_ns);
 
     if (d->exit_reason != PGWT_EXIT_PG_DEAD)

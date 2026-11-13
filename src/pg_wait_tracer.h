@@ -54,7 +54,7 @@ enum pgwt_ring_failure_site {
     PGWT_RING_FAIL_EXIT_TRANSITION,
     PGWT_RING_FAIL_MARKER,
     PGWT_RING_FAIL_COMMAND_BOUNDARY,
-    PGWT_RING_FAIL_LIFECYCLE_INIT,
+    PGWT_RING_FAIL_LIFECYCLE_INIT_HINT,
     PGWT_RING_FAIL_LIFECYCLE_FORK,
     PGWT_RING_FAIL_LIFECYCLE_EXIT,
     PGWT_RING_FAIL_QUERY_TEXT,
@@ -101,6 +101,12 @@ struct pgwt_pid_state {
      * only on an emitted transition (NOT on redundant-write suppression, or
      * CPU between suppressed fires would be lost). 0 = feature off. */
     u64 last_cpu_ns;
+    /* Bootstrap evidence, published in place by the backend's NMI handler.
+     * init_stored is written last; these are not interval/attach timestamps. */
+    u64 init_wait_addr;
+    u64 init_ts;
+    u32 init_stored;
+    u32 init_store_failed; /* test-only store suppression after bootstrap fired */
 };
 
 enum pgwt_query_attribution_quality {
@@ -406,11 +412,12 @@ static inline int pgwt_classify_wei(uint32_t wei)
 
 /* ── BPF-side failure counters (CAP-1/CAP-6) ────────────────────
  * Slots in the fail_counters PERCPU_ARRAY map. The BPF programs bump these
- * when a map insert fails (map full); the daemon sums across CPUs and
- * surfaces them via the control socket so a full map is never silent. */
+ * when a map insert fails or bootstrap cannot store its INIT facts; the
+ * daemon sums across CPUs and surfaces them via the control socket. */
 #define PGWT_BPF_FAIL_STATE_MAP  0  /* state_map insert failed (map full) */
 #define PGWT_BPF_FAIL_SEEN_QIDS  1  /* seen_query_ids insert failed (full) */
-#define PGWT_BPF_FAIL_MAX        2
+#define PGWT_BPF_FAIL_INIT_NO_STATE 2 /* diagnostic; attachment may still succeed */
+#define PGWT_BPF_FAIL_MAX        3
 
 /* Per-query trap counters. These are the Stages 3/4 overhead acceptance
  * signal: both stay exactly zero in de-escalated sampled mode on a validated

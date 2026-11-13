@@ -10,7 +10,7 @@ static const char *const pgwt_ringbuf_site_metric_names[PGWT_RING_FAIL_SITE_MAX]
     [PGWT_RING_FAIL_EXIT_TRANSITION] = "ringbuf_exit_transition_drops_total",
     [PGWT_RING_FAIL_MARKER] = "ringbuf_marker_drops_total",
     [PGWT_RING_FAIL_COMMAND_BOUNDARY] = "ringbuf_command_boundary_drops_total",
-    [PGWT_RING_FAIL_LIFECYCLE_INIT] = "ringbuf_lifecycle_init_drops_total",
+    [PGWT_RING_FAIL_LIFECYCLE_INIT_HINT] = "lifecycle_init_hint_drops_total",
     [PGWT_RING_FAIL_LIFECYCLE_FORK] = "ringbuf_lifecycle_fork_drops_total",
     [PGWT_RING_FAIL_LIFECYCLE_EXIT] = "ringbuf_lifecycle_exit_drops_total",
     [PGWT_RING_FAIL_QUERY_TEXT] = "ringbuf_query_text_drops_total",

@@ -65,6 +65,9 @@ volatile bool exact_cpu_active = false;
  * independent of the scheduler. This isolates exactly that fix. Test-only;
  * never set in production (it disables sched-driven CPU accounting). */
 volatile const bool test_no_sched_oncpu = 0;
+/* Test-only fault injection for the default bootstrap recovery path. */
+volatile const bool test_drop_init_hint = 0;
+volatile const bool test_skip_init_store = 0;
 
 /* Command-open gate (T2, docs/AAS_SEMANTICS_DECISION.md): per-PG-version
  * BackendState enum values for the pgstat_report_activity uprobe. PG13-17:
@@ -238,10 +241,11 @@ static __always_inline void count_ring_fail(u32 site)
         __sync_fetch_and_add(count, 1);
 }
 
-/* Map-insert failure counters (CAP-1/CAP-6). Slots defined in
- * pg_wait_tracer.h (PGWT_BPF_FAIL_*). PERCPU so the hot path stays
- * atomic-free; the daemon sums across CPUs and surfaces them as
- * state_map_full_total / seen_query_ids_full_total on the control socket.
+/* Failure counters (CAP-1/CAP-6 and bootstrap INIT storage). Slots defined in
+ * pg_wait_tracer.h (PGWT_BPF_FAIL_*). The daemon sums across CPUs and
+ * surfaces state_map_full_total / seen_query_ids_full_total /
+ * lifecycle_init_no_state_total on the control socket. The NMI INIT slot uses
+ * atomic increments to survive nesting on one CPU.
  * A full map must NEVER be silent: it means backends that record nothing
  * (state_map) or query text that is never captured (seen_query_ids). */
 struct {
@@ -668,7 +672,8 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
 
 /* ── Program 2: on_bootstrap ──────────────────────────────── */
 /* Fires when InitProcess() writes the my_wait_event_info pointer.
- * Sends {pid, PGPROC->wait_event_info addr} to daemon via ring buffer. */
+ * Stores INIT in the fork-seeded entry without allocating or taking a ring
+ * lock in NMI context. The ring record only wakes userspace sooner. */
 
 SEC("perf_event")
 int on_bootstrap(struct bpf_perf_event_data *ctx)
@@ -682,16 +687,39 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
         /* PG17+: ptr already points at wait_event_info (offset 0).
          * PG<17: ptr is the backend's PGPROC; add the field offset. */
         u64 wait_addr = ptr + pgproc_wait_offset;
+        u64 init_ts = bpf_ktime_get_ns();
+        struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
+        if (st && test_skip_init_store) {
+            /* Keep the negative test's evidence of an actual bootstrap fire.
+             * Userspace decides loss only after every attach path had a chance. */
+            st->init_store_failed = 1;
+        } else if (st) {
+            if (!st->init_stored) {
+                st->init_wait_addr = wait_addr;
+                st->init_ts = init_ts;
+                /* Publish the facts before the flag, including to a map
+                 * lookup racing this handler on another CPU. */
+                asm volatile("" ::: "memory");
+                *(volatile u32 *)&st->init_stored = 1;
+            }
+            init_ts = st->init_ts;
+        } else {
+            u32 slot = PGWT_BPF_FAIL_INIT_NO_STATE;
+            u64 *missing = bpf_map_lookup_elem(&fail_counters, &slot);
+            if (missing)
+                __sync_fetch_and_add(missing, 1);
+        }
         struct pgwt_lifecycle_event *ev;
-        ev = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*ev), 0);
+        ev = test_drop_init_hint ? NULL :
+             bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*ev), 0);
         if (ev) {
             ev->type = PGWT_LIFECYCLE_INIT;
             ev->pid = pid;
             ev->addr = wait_addr;
-            ev->timestamp = bpf_ktime_get_ns();
+            ev->timestamp = init_ts;
             bpf_ringbuf_submit(ev, 0);
         } else {
-            count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_INIT);
+            count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_INIT_HINT);
         }
     }
     return 0;
@@ -714,8 +742,9 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
      * query/activity edges from a fast child can already be generation-tagged
      * while its wait address and watchpoint are still being resolved. */
     struct pgwt_pid_state child_seed = {};
-    if (bpf_map_update_elem(&state_map, &child, &child_seed, BPF_NOEXIST) &&
-        bpf_map_lookup_elem(&state_map, &child) == NULL)
+    /* A reused pid must not inherit an old INIT publication flag. The child
+     * has not run yet, so replacing a stale entry cannot erase its edges. */
+    if (bpf_map_update_elem(&state_map, &child, &child_seed, BPF_ANY))
         count_map_fail(PGWT_BPF_FAIL_STATE_MAP);
 
     struct pgwt_lifecycle_event *ev;

@@ -837,8 +837,24 @@ def main():
               f"{'PASS' if integrity_ok else 'FAIL'} -- {integrity_detail}")
         extra_checks["daemon_integrity"] = {
             "ok": integrity_ok, "detail": integrity_detail,
+            "information": {
+                name: metrics_resp["response"].get(name)
+                if isinstance(metrics_resp.get("response"), dict) else None
+                for name in ("lifecycle_init_lost_total",
+                             "lifecycle_init_lost_no_opportunity_total",
+                             "lifecycle_init_lost_untraced_ns_total")
+            },
             "note": ("/".join(drlib.DAEMON_INTEGRITY_COUNTERS) +
-                     " == 0 -- BPF map update and read failures without "
+                     " == 0 -- INIT losses with attach opportunity gate integrity. "
+                     "Owner decision #871 comment 6863203475, "
+                     "'Count, don't fail (Recommended)': no-opportunity losses "
+                     "are counted and reported with total losses and untraced ns "
+                     "as information. Untraced ns is an upper bound including "
+                     "daemon delay when exit_ts_source=observation. Missed INIT "
+                     "hints can be recovered from stored facts before lifecycle "
+                     "records and epoll fd handling, after batches or on the "
+                     "fallback tick while the backend is alive. "
+                     "BPF map update and read failures without "
                      "counters remain uncovered; sampled/coop tiers report "
                      "the ring-drop counters as 0 because only the full "
                      "provider fills them. A clean result means the reported "

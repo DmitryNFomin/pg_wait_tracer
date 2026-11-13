@@ -1097,7 +1097,7 @@ def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks,
 # controlMetrics() already uses from the UI.
 DAEMON_INTEGRITY_COUNTERS = (
     "ringbuf_drops_total", "state_map_full_total", "seen_query_ids_full_total",
-    "ringbuf_lifecycle_init_drops_total", "ringbuf_lifecycle_fork_drops_total",
+    "lifecycle_init_lost_with_opportunity_total", "ringbuf_lifecycle_fork_drops_total",
     "ringbuf_lifecycle_exit_drops_total", "ringbuf_query_text_drops_total",
     "ringbuf_pg13_query_text_drops_total",
 )
@@ -1110,9 +1110,25 @@ def daemon_integrity_ok(metrics):
     value here means data conservation was already violated upstream of
     every other check in this file. state_map_full_total /
     seen_query_ids_full_total are BPF/userspace insert-failure counters
-    (a backend recording nothing, or losing query attribution). The five
-    lifecycle/query-text site counters cover lifecycle_rb reserve failures
-    for backend init, fork and exit, and query text (including PG13).
+    (a backend recording nothing, or losing query attribution).
+    lifecycle_init_lost_total counts an unattached backend with missing state,
+    or INIT evidence never attached before exit. The four lifecycle/query-text
+    site counters cover fork, exit and query-text reserve failures (including
+    PG13). lifecycle_init_hint_drops_total counts missed wake-up hints, not
+    loss. Stored INITs can attach before each lifecycle record and epoll wake's
+    fd handling, after each batch, and on the fallback tick while alive.
+    lifecycle_init_lost_no_opportunity_total is the subset whose init_ts is
+    strictly later than the last completed sweep's start before EXIT;
+    lifecycle_init_lost_untraced_ns_total sums exit - init_ts for that subset.
+    That duration is an upper bound including daemon delay when
+    exit_ts_source=observation. Owner decision #871 comment 6863203475,
+    "Count, don't fail (Recommended)": total losses, no-opportunity losses
+    and their untraced ns are reported as information; only
+    lifecycle_init_lost_with_opportunity_total gates INIT integrity.
+    The final per-pid exit sweep
+    recognises raced INITs but cannot recover coverage after exit. The BPF
+    lifecycle_init_no_state_total diagnostic alone does not decide loss:
+    a delivered hint or another successful attach path can still attach it.
 
     A missing or non-numeric counter FAILS (a gate that cannot see the
     count must refuse), same as capture_has_events_ok's own contract.

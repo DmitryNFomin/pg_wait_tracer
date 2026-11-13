@@ -98,6 +98,12 @@ struct pgwt_counters {
     /* Capture hardening (T4). All of these mean "something the operator
      * must know about is happening" — each is paired with a loud log. */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
+    uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
+    uint64_t lifecycle_init_lost_with_opportunity_total; /* lost minus no-opportunity; gates integrity */
+    uint64_t lifecycle_init_lost_no_opportunity_total; /* init_ts > last sweep start */
+    /* exit - INIT, no-opportunity only; upper bound including daemon delay
+     * when exit_ts_source=observation (no EXIT record timestamp available). */
+    uint64_t lifecycle_init_lost_untraced_ns_total;
     uint64_t invalid_wait_reads_total; /* wait_event_info reads with a garbage class byte (CAP-2/5) */
     uint64_t state_reseeds_total;      /* frozen-stale state_map entries reseeded by
                                         * pgwt_sweep_stale_state (seed→arm race repair) */
@@ -285,6 +291,16 @@ struct pgwt_daemon {
     const char *event_filter;     /* for histogram view */
     pid_t       pid_filter;       /* for session_event detail */
     bool        verbose;
+    /* INIT diagnostics use CLOCK_MONOTONIC, as do BPF timestamps. The sweep
+     * start is published only on completion; nested cleanup sees the previous
+     * completed sweep. A sweep may attach/retire, never consume lifecycle. */
+    bool        init_sweep_active;
+    uint64_t    init_last_sweep_start_ns;
+    uint64_t    lifecycle_batch_start_ns;
+    uint64_t    lifecycle_batch_records;
+    uint64_t    last_epoll_return_ns;
+    pid_t       lifecycle_exit_pid; /* current EXIT, also during its pre-sweep */
+    uint64_t    lifecycle_exit_ts;
     bool        quiet;               /* suppress view output (record only) */
     int         pg_major_version;   /* 14, 15, 16, 17, or 18 */
     int         st_query_id_offset; /* 0 = not available */
@@ -520,6 +536,7 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
  * (#416): the defect was the ORDER of the steps inside it, so a test that
  * called a narrower seam could not have seen it. */
 void pgwt_handle_timer(struct pgwt_daemon *d);
+int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
 
 /* Run the main event loop. Returns on signal or duration timeout. */
 int pgwt_daemon_run(struct pgwt_daemon *d);

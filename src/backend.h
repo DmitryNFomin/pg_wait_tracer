@@ -14,12 +14,15 @@ struct pgwt_backend {
     pid_t    pid;
     int      wp_fd;            /* real watchpoint perf_event fd (-1 if none) */
     int      bootstrap_fd;     /* bootstrap watchpoint fd (-1 if none) */
+    int      pending_init_slot; /* 1-based position in pending_init[], 0 absent */
     uint64_t wp_addr;          /* PGPROC->wait_event_info address */
     /* Is wp_addr in a MAP_SHARED mapping? -1 unknown (not yet checked),
      * 0 process-local, 1 shared. SMP-2: the sampler may only batch-read
      * SHARED addresses through one pid; local ones need per-pid reads. */
     int      wp_addr_shared;
     uint64_t attach_ts;        /* monotonic ns when attached */
+    uint64_t init_ts;          /* captured bootstrap time; 0 for direct attach */
+    bool     init_attached;    /* INIT attach completed, retained across tiers */
     bool     is_alive;
     /* meta has been filled by pgwt_parse_cmdline. A zeroed meta reads as
      * backend_type == CLIENT (enum value 0), which is WRONG for an unparsed
@@ -38,6 +41,9 @@ struct pgwt_backend {
 struct pgwt_backend_table {
     struct pgwt_backend entries[MAX_BACKENDS];
     int count;
+    /* Dense pending set: lifecycle batches never scan the attached population. */
+    int pending_init[MAX_BACKENDS];
+    int pending_init_count;
 };
 
 /* Forward declaration */
@@ -69,10 +75,16 @@ int pgwt_sweep_stale_state(struct pgwt_daemon *d);
 int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid);
 
 /* Handle initialization complete (bootstrap fired). Switch to real watchpoint. */
-int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr);
+int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
+                     uint64_t init_ts);
+
+/* Recover pending INITs before records/fds, after batches and on the tick. */
+int pgwt_sweep_bootstrap_backends(struct pgwt_daemon *d);
 
 /* Handle backend exit. Close watchpoint, flush stats, cleanup. */
 int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid);
+/* A lifecycle EXIT carries its actual BPF CLOCK_MONOTONIC timestamp. */
+int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts);
 
 /* Attach a hardware watchpoint to an already-resolved backend (be->wp_addr
  * must be set) and pre-seed its BPF state_map with the current wait state.

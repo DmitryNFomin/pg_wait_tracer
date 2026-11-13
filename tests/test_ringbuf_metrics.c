@@ -35,7 +35,7 @@ int main(void)
     const char *const expected_names[] = {
         "ringbuf_wait_transition_drops_total", "ringbuf_exit_transition_drops_total",
         "ringbuf_marker_drops_total", "ringbuf_command_boundary_drops_total",
-        "ringbuf_lifecycle_init_drops_total", "ringbuf_lifecycle_fork_drops_total",
+        "lifecycle_init_hint_drops_total", "ringbuf_lifecycle_fork_drops_total",
         "ringbuf_lifecycle_exit_drops_total", "ringbuf_query_text_drops_total",
         "ringbuf_pg13_query_text_drops_total",
     };
