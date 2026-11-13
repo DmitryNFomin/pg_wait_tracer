@@ -5,6 +5,7 @@
 The stub simulates a tree search; it does not manufacture the wrapper's verdict.
 """
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,18 @@ prompt = args[-1]
 (root / "prompt.txt").write_text(prompt)
 final = (root / "fixture.txt").read_text()
 raw = (root / "raw.txt").read_text()
+if os.environ.get("AUDIT_TEST_CI_CLAIM"):
+    directory = Path(re.search(r"GITHUB_SNAPSHOT_DIR=(.+)", prompt)[1])
+    assert "run-list.json" in prompt
+    record = json.loads((directory / "run-list.json").read_text())
+    assert record["command"][:3] == ["gh", "run", "list"]
+    run = record["data"][0]
+    snapshot = Path(re.search(r"DRAFT_PATH=(.+)", prompt)[1])
+    quote = snapshot.read_text().strip()
+    expected = "failure" if quote.endswith("is red.") else "success"
+    status = "VERIFIED" if run["status"] == "completed" and run["conclusion"] == expected else "WRONG"
+    evidence = f"run-list.json fetched {record['fetched_at_utc']}: run {run['databaseId']} headSha={run['headSha']} status={run['status']} conclusion={run['conclusion']}"
+    final = "CLAIM " + json.dumps(dict(line=1, quote=quote, status=status, evidence=evidence)) + "\nVERDICT: SEND\n"
 if os.environ.get("AUDIT_TEST_SEARCH"):
     # Old harness exposes the source directory. New harness supplies only the
     # private snapshot. Search recursively, including archived transcripts.
@@ -48,6 +61,64 @@ sys.stdout.write(raw + final)
 sys.stderr.write("stub stderr retained\n")
 sys.exit(int(os.environ.get("AUDIT_TEST_RC", "0")))
 '''
+GH_STUB = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+root = Path(os.environ["AUDIT_TEST_CASE"])
+with (root / "gh-calls.jsonl").open("a") as f:
+    f.write(json.dumps(args) + "\n")
+assert sys.stdin.read() == ""
+kind = " ".join(args[:2])
+if kind == "pr view" and args[-1] == "comments,reviews":
+    kind = "pr comments/reviews"
+fields = {
+    "pr view": "number,title,state,isDraft,mergedAt,closedAt,mergeStateStatus,headRefOid,autoMergeRequest,closingIssuesReferences,statusCheckRollup",
+    "pr comments/reviews": "comments,reviews",
+    "issue view": "number,title,state,closedAt,comments",
+    "pr list": "number,title,state,mergedAt,closedAt,headRefName",
+    "run list": "databaseId,headSha,status,conclusion,workflowName,createdAt",
+}
+assert args[-2:] == ["--json", fields[kind]], args
+if os.environ.get("AUDIT_TEST_GH_FAIL") in ("all", kind):
+    sys.stderr.write("error connecting to api.github.com\n")
+    sys.exit(1)
+if os.environ.get("AUDIT_TEST_GH_BAD_JSON") in ("1", kind):
+    sys.stdout.write("not JSON\n")
+    sys.exit(0)
+if os.environ.get("AUDIT_TEST_GH_BAD_SHAPE") == kind:
+    sys.stdout.write("{}\n" if args[1] == "list" else "[]\n")
+    sys.exit(0)
+if kind == "pr view" and args[2] == "850":
+    sys.stderr.write("GraphQL: Could not resolve to a PullRequest with the number of 850. (repository.pullRequest)\n")
+    sys.exit(1)
+if kind == "pr list":
+    assert args == ["pr", "list", "--state", "all", "--limit", "200", "--json", fields[kind]], args
+    data = [dict(number=882, title="CI evidence", state="MERGED", mergedAt="2026-11-12T19:49:00Z",
+                 closedAt="2026-11-12T19:49:00Z", headRefName="ci-evidence")]
+elif kind == "run list":
+    assert args == ["run", "list", "--branch", "master", "--limit", "10", "--json", fields[kind]], args
+    data = [dict(databaseId=12345, headSha="b" * 40, status="completed", conclusion="success",
+                 workflowName="CI", createdAt="2026-11-12T20:00:00Z")]
+elif kind == "pr comments/reviews":
+    data = dict(comments=[dict(body="PR discussion", createdAt="2026-11-12T19:00:00Z")],
+                reviews=[dict(body="Checked", state="APPROVED", submittedAt="2026-11-12T19:01:00Z")])
+elif kind == "issue view":
+    data = dict(number=int(args[2]), title="Rework", state="OPEN", closedAt=None,
+                comments=[dict(body="Owner scope", createdAt="2026-11-12T19:00:00Z")])
+else:
+    data = dict(number=int(args[2]), title="Change", state="OPEN", isDraft=False,
+                mergedAt=None, closedAt=None, mergeStateStatus="CLEAN", headRefOid="a" * 40,
+                autoMergeRequest=None, closingIssuesReferences=[], statusCheckRollup=[])
+if os.environ.get("AUDIT_TEST_SNAPSHOT_WRITE_FAIL"):
+    for directory in Path(os.environ["AUDIT_REPORT_STATE_DIR"]).rglob("github-snapshot-*"):
+        name = (f"{args[0]}-list.json" if args[1] == "list" else
+                f"pr-{args[2]}-comments-reviews.json" if kind == "pr comments/reviews" else
+                f"{args[0]}-{args[2]}.json")
+        if os.environ["AUDIT_TEST_SNAPSHOT_WRITE_FAIL"] in ("1", kind):
+            (directory / name).mkdir(exist_ok=True)
+sys.stdout.write(json.dumps(data) + "\n")
+'''
 
 
 def claim(quote, status="VERIFIED", evidence="checked the named revision", line=1):
@@ -66,6 +137,9 @@ class GateTests(unittest.TestCase):
         stub = bindir / "codex"
         stub.write_text(STUB)
         stub.chmod(0o755)
+        gh = bindir / "gh"
+        gh.write_text(GH_STUB)
+        gh.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
                         AUDIT_TEST_CASE=str(self.case),
                         # The production cache is private and outside the repo.
@@ -206,6 +280,233 @@ class GateTests(unittest.TestCase):
         self.assertIn("VERDICT SEND", console)
         self.assertIn("0 wrong, 1 unverifiable", console)
 
+    def test_unverifiable_github_claim_refuses(self):
+        quotes = ("See #850.", "A pr exists.", "Already MERGED.", "An issue exists.",
+                  "CI passed.", "The check passed.", "The REVIEW approved it.",
+                  "The comment authorised it.", "The PR titled 'Old change' was merged into master.",
+                  "CI on the most recent master commit is red.")
+        for index, quote in enumerate(quotes):
+            with self.subTest(quote=quote):
+                self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
+                self.draft.write_text("Report:\n\n" + quote + "\n")
+                console = self.run_gate(claim(quote, "UNVERIFIABLE", "snapshot lacks evidence", line=3) +
+                                        "VERDICT: SEND\n")
+                self.assertIn("AUDIT INCONCLUSIVE (GitHub claim not checkable from the snapshot: line 3)", console)
+                self.assertNotIn("VERDICT SEND", console)
+                # A repeated completed observation must also withhold SEND.
+                self.assertNotIn("VERDICT SEND", self.run_gate())
+        # Negative control: a checkable GitHub claim may be sent.
+        self.draft.write_text("CI passed.\n")
+        self.assertIn("VERDICT SEND", self.run_gate(claim("CI passed.") + "VERDICT: SEND\n"))
+        prompt = (self.case / "prompt.txt").read_text()
+        self.assertIn("GitHub claim not checkable from the snapshot: line N", prompt)
+        self.assertIn("VERDICT: INCONCLUSIVE", prompt)
+
+    def test_auditor_inconclusive_requires_uncheckable_github_claim(self):
+        self.draft.write_text("The review approved it.\n")
+        console = self.run_gate(claim("The review approved it.", "UNVERIFIABLE", "snapshot lacks review") +
+                                "VERDICT: INCONCLUSIVE\n")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub claim not checkable from the snapshot: line 1)", console)
+        self.assertNotIn("VERDICT SEND", console)
+        # Negative control: INCONCLUSIVE without such a finding is malformed.
+        self.draft.write_text("The process list is unavailable.\n")
+        console = self.run_gate(claim(self.draft.read_text().strip(), "UNVERIFIABLE", "ps permission denied") +
+                                "VERDICT: INCONCLUSIVE\n")
+        self.assertIn("AUDIT MALFORMED (INCONCLUSIVE without an uncheckable GitHub claim)", console)
+
+    def test_non_github_access_failure_in_github_draft_allows_send(self):
+        quote = "The process list is unavailable."
+        self.draft.write_text("PR #882 is open.\n" + quote + "\n")
+        console = self.run_gate(claim("PR #882 is open.") +
+                                claim(quote, "UNVERIFIABLE", "ps permission denied", line=2) +
+                                "VERDICT: SEND\n")
+        self.assertIn("VERDICT SEND", console)
+        # Negative control: the same lack of access on a GitHub quote withholds SEND.
+        self.draft.write_text(quote + "\nPR #882 is open.\n")
+        console = self.run_gate(claim(quote, "UNVERIFIABLE", "ps permission denied") +
+                                claim("PR #882 is open.", "UNVERIFIABLE", "snapshot lacks evidence", line=2) +
+                                "VERDICT: SEND\n")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub claim not checkable from the snapshot: line 2)", console)
+        self.assertNotIn("VERDICT SEND", console)
+
+    def test_legacy_unverifiable_github_claim_refuses(self):
+        quote = "CI on the most recent master commit is red."
+        self.draft.write_text("Report:\n" + quote + "\n")
+        console = self.run_gate(quote + " -> UNVERIFIABLE snapshot lacks evidence\nVERDICT: SEND\n")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub claim not checkable from the snapshot: line 2)", console)
+        self.assertNotIn("VERDICT SEND", console)
+        # Negative control: the compatibility path still permits non-GitHub access failures.
+        self.draft.write_text("The process list is unavailable.\n")
+        self.assertIn("VERDICT SEND", self.run_gate(
+            "The process list is unavailable. -> UNVERIFIABLE ps permission denied\nVERDICT: SEND\n"))
+
+    def test_wrong_overrides_unverifiable_github_claim(self):
+        self.draft.write_text("CI passed.\nThe count is 4.\n")
+        console = self.run_gate(claim("CI passed.", "UNVERIFIABLE", "snapshot lacks evidence") +
+                                claim("The count is 4.", "WRONG", "query returned 5", line=2) +
+                                "VERDICT: SEND\n")
+        self.assertIn("VERDICT BLOCK", console)
+        # Negative control: without the contradiction it withholds SEND as INCONCLUSIVE.
+        self.draft.write_text("CI passed.\nThe count is 5.\n")
+        console = self.run_gate(claim("CI passed.", "UNVERIFIABLE", "snapshot lacks evidence") +
+                                claim("The count is 5.", line=2) + "VERDICT: SEND\n")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub claim not checkable from the snapshot: line 1)", console)
+        self.assertNotIn("VERDICT SEND", console)
+
+    def test_unbound_github_unverifiable_is_contamination(self):
+        console = self.run_gate(claim("The count is 4.") +
+                                claim("CI passed.", "UNVERIFIABLE", "obsolete claim") + "VERDICT: SEND\n")
+        self.assertIn("VERDICT SEND", console)
+        self.assertIn("1 contamination", console)
+        # Negative control: the same quote bound to the current draft withholds SEND.
+        self.draft.write_text("CI passed.\n")
+        console = self.run_gate(claim("CI passed.", "UNVERIFIABLE", "snapshot lacks evidence") + "VERDICT: SEND\n")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub claim not checkable from the snapshot: line 1)", console)
+        self.assertNotIn("VERDICT SEND", console)
+
+    def test_github_snapshot_failure_refuses(self):
+        self.draft.write_text("PR #850 is open.\n")
+        console = self.run_gate(
+            claim("PR #850 is open.", "UNVERIFIABLE", "gh connection failed") +
+            "VERDICT: SEND\n", AUDIT_TEST_GH_FAIL="all")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+        self.assertNotIn("VERDICT SEND", console)
+        self.assertFalse((self.case / "calls.jsonl").exists(),
+                         "failed snapshot must stop before the auditor runs")
+        self.assertFalse(list((self.case / "state").rglob("decision.json")))
+        self.assertEqual(len((self.case / "gh-calls.jsonl").read_text().splitlines()), 1,
+                         "a connection failure must not trigger the issue fallback")
+        # Negative control: success must run the auditor on the same hash.
+        self.assertIn("VERDICT SEND", self.run_gate(
+            claim("PR #850 is open.") + "VERDICT: SEND\n"))
+
+    def test_github_snapshot_success_proceeds(self):
+        self.draft.write_text("PR #882 is merged; issue #850 is open; see #882.\n")
+        console = self.run_gate(claim(self.draft.read_text().strip()) + "VERDICT: SEND\n")
+        self.assertIn("VERDICT SEND", console)
+        snapshots = list((self.case / "state").rglob("github-snapshot-*"))
+        self.assertEqual(len(snapshots), 1)
+        directory = snapshots[0]
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o500)
+        prompt = (self.case / "prompt.txt").read_text()
+        self.assertIn(f"GITHUB_SNAPSHOT_DIR={directory}", prompt)
+        self.assertIn("A claim contradicted by this snapshot is WRONG.", prompt)
+        self.assertEqual({p.name for p in directory.iterdir()},
+                         {"pr-882.json", "pr-882-comments-reviews.json", "issue-850.json",
+                          "pr-list.json", "run-list.json"})
+        for name in ("pr-N.json", "pr-N-comments-reviews.json", "issue-N.json",
+                     "pr-list.json", "run-list.json"):
+            self.assertIn(name, prompt)
+        for path in directory.iterdir():
+            self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+            record = json.loads(path.read_text())
+            timestamp = datetime.fromisoformat(record["fetched_at_utc"].replace("Z", "+00:00"))
+            self.assertEqual(timestamp.utcoffset().total_seconds(), 0)
+            self.assertLess(abs((datetime.now(timezone.utc) - timestamp).total_seconds()), 30)
+            self.assertEqual(record["command"][0], "gh")
+        issue = json.loads((directory / "issue-850.json").read_text())["data"]
+        self.assertEqual(issue["comments"][0]["body"], "Owner scope")
+        self.assertEqual(json.loads((directory / "pr-882.json").read_text())["data"]["number"], 882)
+        self.assertEqual(json.loads((directory / "pr-list.json").read_text())["data"][0]["state"], "MERGED")
+        discussion = json.loads((directory / "pr-882-comments-reviews.json").read_text())["data"]
+        self.assertEqual(discussion["comments"][0]["body"], "PR discussion")
+        self.assertEqual(discussion["reviews"][0]["state"], "APPROVED")
+        run = json.loads((directory / "run-list.json").read_text())["data"][0]
+        self.assertEqual((run["headSha"], run["status"], run["conclusion"]), ("b" * 40, "completed", "success"))
+        gh_calls = [json.loads(line) for line in (self.case / "gh-calls.jsonl").read_text().splitlines()]
+        self.assertEqual([args[:3] for args in gh_calls], [
+            ["pr", "view", "850"], ["issue", "view", "850"],
+            ["pr", "view", "882"], ["pr", "view", "882"],
+            ["pr", "list", "--state"], ["run", "list", "--branch"]])
+        calls = (self.case / "calls.jsonl").read_text().splitlines()
+        self.assertEqual(len(calls), 1)
+        # Negative control: a checked contradiction still BLOCKs with snapshots.
+        self.draft.write_text("PR #882 is open.\n")
+        self.assertIn("VERDICT BLOCK", self.run_gate(
+            claim("PR #882 is open.", "WRONG", "pr-list.json data[0].state=MERGED") + "VERDICT: SEND\n"))
+
+    def test_without_github_claim_skips_snapshot(self):
+        self.draft.write_text("The printer checked merger circuitry.\n")
+        self.assertIn("VERDICT SEND", self.run_gate(
+            claim("The printer checked merger circuitry.") + "VERDICT: SEND\n",
+            AUDIT_TEST_GH_FAIL="all"))
+        self.assertFalse((self.case / "gh-calls.jsonl").exists())
+        self.assertFalse(list((self.case / "state").rglob("github-snapshot-*")))
+        # Negative control: one whole-word GitHub marker requires a snapshot.
+        self.draft.write_text("The check passed.\n")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", self.run_gate(
+            claim("The check passed.") + "VERDICT: SEND\n", AUDIT_TEST_GH_FAIL="all"))
+        self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines()), 1)
+
+    def test_github_claim_detection(self):
+        for index, text in enumerate(("See #850.", "A pr exists.", "Already MERGED.",
+                                      "An issue exists.", "CI passed.", "The check passed.",
+                                      "The review approved it.", "A comment authorised it.")):
+            with self.subTest(text=text):
+                self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
+                self.draft.write_text(text + "\n")
+                console = self.run_gate(claim(text) + "VERDICT: SEND\n",
+                                        AUDIT_TEST_GH_FAIL="all")
+                self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+                self.assertNotIn("VERDICT SEND", console)
+
+    def test_github_partial_snapshot_failure_refuses(self):
+        for index, kind in enumerate(("issue view", "pr list", "run list")):
+            with self.subTest(kind=kind):
+                self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
+                self.draft.write_text("Issue #850 is open.\n")
+                console = self.run_gate(claim("Issue #850 is open.") + "VERDICT: SEND\n",
+                                        AUDIT_TEST_GH_FAIL=kind)
+                self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+                self.assertFalse((self.case / "calls.jsonl").exists())
+                self.assertFalse(list(Path(self.env["AUDIT_REPORT_STATE_DIR"]).rglob("decision.json")))
+        self.assertIn("VERDICT SEND", self.run_gate(claim("Issue #850 is open.") + "VERDICT: SEND\n"))
+
+    def test_new_snapshot_fetches_fail_closed(self):
+        for index, (kind, setting) in enumerate(
+                (kind, setting) for kind in ("pr comments/reviews", "run list")
+                for setting in ("AUDIT_TEST_GH_FAIL", "AUDIT_TEST_GH_BAD_JSON",
+                                "AUDIT_TEST_GH_BAD_SHAPE", "AUDIT_TEST_SNAPSHOT_WRITE_FAIL")):
+            with self.subTest(kind=kind, setting=setting):
+                self.env["AUDIT_REPORT_STATE_DIR"] = str(self.case / f"state-{index}")
+                self.draft.write_text("PR #882 is open.\n")
+                console = self.run_gate(claim("PR #882 is open.") + "VERDICT: SEND\n", **{setting: kind})
+                self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+                self.assertNotIn("VERDICT SEND", console)
+                self.assertEqual(len((self.case / "calls.jsonl").read_text().splitlines())
+                                 if (self.case / "calls.jsonl").exists() else 0, index)
+                self.assertFalse(list(Path(self.env["AUDIT_REPORT_STATE_DIR"]).rglob("decision.json")))
+                # Negative control: the same draft can proceed after a successful fetch.
+                self.assertIn("VERDICT SEND", self.run_gate(claim("PR #882 is open.") + "VERDICT: SEND\n"))
+
+    def test_ci_state_checked_from_run_list(self):
+        self.draft.write_text("CI on the most recent master commit is red.\n")
+        console = self.run_gate(AUDIT_TEST_CI_CLAIM="1")
+        self.assertIn("run-list.json fetched", console)
+        self.assertIn("conclusion=success", console)
+        self.assertIn("VERDICT BLOCK", console)
+        self.assertNotIn("VERDICT SEND", console)
+        # Negative control: the same primary observation supports the true CI claim.
+        self.draft.write_text("CI on the most recent master commit is green.\n")
+        console = self.run_gate(AUDIT_TEST_CI_CLAIM="1")
+        self.assertIn("VERDICT SEND", console)
+        self.assertIn('"status": "VERIFIED"', console)
+
+    def test_github_snapshot_write_failure_refuses(self):
+        self.draft.write_text("PR #882 is open.\n")
+        console = self.run_gate(claim("PR #882 is open.") + "VERDICT: SEND\n",
+                                AUDIT_TEST_SNAPSHOT_WRITE_FAIL="1")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+        self.assertFalse((self.case / "calls.jsonl").exists())
+        self.assertIn("VERDICT SEND", self.run_gate(claim("PR #882 is open.") + "VERDICT: SEND\n"))
+
+    def test_github_invalid_json_refuses(self):
+        self.draft.write_text("CI passed.\n")
+        console = self.run_gate(claim("CI passed.") + "VERDICT: SEND\n", AUDIT_TEST_GH_BAD_JSON="1")
+        self.assertIn("AUDIT INCONCLUSIVE (GitHub snapshot failed:", console)
+        self.assertFalse((self.case / "calls.jsonl").exists())
+        self.assertIn("VERDICT SEND", self.run_gate(claim("CI passed.") + "VERDICT: SEND\n"))
+
     def test_no_verdict(self):
         self.assertIn("AUDIT MALFORMED (no VERDICT line)", self.run_gate(claim("The count is 4.")))
 
@@ -305,6 +606,10 @@ class GateTests(unittest.TestCase):
         args = json.loads((self.case / "calls.jsonl").read_text().splitlines()[0])
         for flag in ("--ephemeral", "--output-last-message"):
             self.assertIn(flag, args)
+        self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
+        self.assertEqual([args[i + 1] for i, arg in enumerate(args) if arg == "-c"],
+                         ['sandbox_mode="read-only"', "memories.use_memories=false",
+                          "memories.generate_memories=false"])
         self.assertIn("memories.use_memories=false", args)
         self.assertIn("memories.generate_memories=false", args)
         self.assertNotIn(str(self.draft), (self.case / "prompt.txt").read_text())
