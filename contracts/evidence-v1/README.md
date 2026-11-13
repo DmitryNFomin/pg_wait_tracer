@@ -5,6 +5,8 @@ CONTRACT.md sections 1 and 3 (FRONTIER barrier, coherent reread, END instant) ar
 
 - `CONTRACT.md`: the contract, written by Astra (design adviser). Revision r2 (`REVISION-r2.md`)
   applies the six findings of an independent challenge by Fable against wait_time v1 and merge-v1.
+  Revision r3 (`REVISION-r3.md`) defines fault handling: a malformed record, an unknown kind or a structural fault
+  stops that capture's chain at the last valid certificate. Its 31 new scenarios and two answer sets are in `r3/`.
 - `wait_time-v1-clarification.md`: the lifetime-start clarification to wait_time v1.
 - `scenarios/*.json`: 33 inputs, no expected values.
 - `oracle-v1/`: two expected-answer sets written independently from the contract files only, in
