@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VOID fuzz, or refusal diagnostics for the supplied U4 reviewer's exact fuzz.
+"""VOID fuzz and refusal diagnostics for the U4/U5 reviewer scripts.
 
 CFLAGS is passed through to the portable C build. Numerical/projection/diagnostic
 mismatches and answering an ambiguous reference input fail the check. Conservative
@@ -19,6 +19,7 @@ import tempfile
 sys.dont_write_bytecode = True
 import test_core_evidence_differential as d
 import evidence_void_inputs as void
+import evidence_file_inputs as files
 
 
 def check(binary, work, cases, label):
@@ -68,15 +69,19 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases",type=int,default=4000)
     parser.add_argument("--seed",type=int,default=1)
-    parser.add_argument("--u4-script",type=Path)
+    scripts=parser.add_mutually_exclusive_group()
+    scripts.add_argument("--u4-script",type=Path)
+    scripts.add_argument("--u5-script",type=Path)
+    parser.add_argument("--file-chains",action="store_true")
     args=parser.parse_args()
     cases=None
-    if args.u4_script:
+    script=args.u4_script or args.u5_script
+    if script:
         # Execute the exact reviewer script, then inspect its same corpus using
         # the public refusal reason. Clean its unscoped mkdtemp on completion.
-        sys.argv=[str(args.u4_script),str(d.ROOT),str(args.cases),str(args.seed)]
+        sys.argv=[str(script),str(d.ROOT),str(args.cases),str(args.seed)]
         with contextlib.redirect_stdout(io.StringIO()) as output:
-            g=runpy.run_path(str(args.u4_script))
+            g=runpy.run_path(str(script))
         print(output.getvalue(),end="")
         cases=g["cases"]
         shutil.rmtree(g["work"])
@@ -86,8 +91,11 @@ def main():
         work=Path(directory)
         binary=work/"replay"
         d.build(d.ROOT,binary)
-        label=("U4" if args.u4_script else "VOID")+f" fuzz seed={args.seed}"
-        return check(binary,work,cases,label)
+        label=("U4" if args.u4_script else "U5" if args.u5_script else "VOID")+f" fuzz seed={args.seed}"
+        failed=check(binary,work,cases,label)
+        if args.file_chains:
+            failed |= check(binary,work,files.extend(cases,args.seed),label+" file chains")
+        return failed
 
 
 if __name__=="__main__":

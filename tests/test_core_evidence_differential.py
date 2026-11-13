@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic U1–U5 logical replay versus the frozen independent evaluator.
+"""Deterministic evidence-v1 logical replay versus the frozen independent evaluator.
 
 Builds only portable C in a temporary directory. CFLAGS selects sanitizers.
 The contract mode runs the C test against both frozen answer files.
@@ -26,6 +26,7 @@ SEED = 0x868001
 REFERENCE_AMBIGUITIES = {}
 sys.path.insert(0, str(ROOT / "tests"))
 import evidence_void_inputs as void_inputs
+import evidence_file_inputs as file_inputs
 
 
 def environment():
@@ -831,6 +832,7 @@ def refusal_cases():
     add("other_generation", lambda c: c["files"][0]["records"].append({
         "kind": "LIFE", "t": 20, "pid": 102, "fork": 20, "start": 20, "start_known": True, "exit": None}))
     add("future_schema", lambda c: c["files"][0].__setitem__("version", 6))
+    add("descriptor_extension", lambda c: c["files"][0].update(extra=True))
     add("record_extension", lambda c: c["files"][0]["records"][-1].__setitem__("run", 2))
     add("invalid_time_token", lambda c: c["files"][0]["records"][-1].__setitem__("t", 15.0))
     add("other_pid_transition", lambda c: c["files"][0]["records"].insert(6, {
@@ -872,7 +874,8 @@ def refusal_cases():
     unavailable = fixture("01")
     unavailable["id"] = "refuse_last_frontier_before_attach"
     unavailable["files"][0]["records"][1]["t"] = 20
-    supported = {"refuse_baseline", "refuse_unreadable_baseline", "refuse_other_generation",
+    supported = {"refuse_rotation", "refuse_previous", "refuse_missing_file", "refuse_future_schema",
+                 "refuse_baseline", "refuse_unreadable_baseline", "refuse_other_generation",
                  "refuse_other_pid_transition"} | {f"refuse_counter_{i}" for i in range(15)}
     moved = [c for c in cases if c["id"] in supported]
     return [c for c in cases if c["id"] not in supported], [unavailable, before_fork] + moved
@@ -925,7 +928,9 @@ def first_difference(actual, expected, path=""):
 def prepare_corpus(work, selected=None):
     """Freeze this run's reference answers and serialized inputs once per sweep."""
     reference = reference_module()
-    cases = generate()
+    cases = generate() + file_inputs.named(fixture) + file_inputs.generate(fixture)
+    # U5 review witness: a frozen END must not create a touching-run tie.
+    cases.append(json.loads((ROOT / "tests/fixtures/evidence-u5-s16b.json").read_text()))
     refusals, metric_refusals = refusal_cases()
     cases.extend(metric_refusals)
     if selected:

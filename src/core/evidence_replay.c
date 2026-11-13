@@ -47,8 +47,86 @@ static bool key(const pgwt_evidence_record *a, const pgwt_evidence_record *b)
     return a->pid == b->pid && a->has_fork == b->has_fork && (!a->has_fork || a->fork == b->fork);
 }
 
-/* Validate every capture, including uncertified suffixes. File chains remain
- * outside this logical adapter. Malformed records refuse the entire input. */
+/* A logical capture is replayed in physical append order across its validated
+ * file prefix. Stop at a gap: later files cannot repair lost dependencies.
+ * Copies own record arrays only; event bytes continue to borrow the input. */
+static void free_chains(pgwt_evidence_input *joined)
+{
+    for (size_t i = 0; i < joined->file_count; ++i)
+        free((void *)joined->files[i].records);
+    free((void *)joined->files);
+}
+
+static pgwt_replay_status join_chains(const pgwt_evidence_input *in,
+                                      pgwt_evidence_input *joined, const char **why)
+{
+    *joined = (pgwt_evidence_input){0};
+    if (!in || in->unsupported_shape || !in->files || !in->file_count)
+        return unsupported(why, "unsupported file/run structure");
+    if (in->file_count > SIZE_MAX / sizeof(pgwt_evidence_file))
+        return PGWT_REPLAY_ERROR;
+    pgwt_evidence_file *files = calloc(in->file_count, sizeof(*files));
+    if (!files) return PGWT_REPLAY_ERROR;
+    *joined = *in;
+    joined->files = files;
+    joined->file_count = 0;
+    for (size_t i = 0; i < in->file_count; ++i) {
+        const pgwt_evidence_file *f = &in->files[i];
+        if (!nonempty(f->boot) || !nonempty(f->capture))
+            return unsupported(why, "unsupported file identity");
+        if (!same(f->boot, in->files[0].boot))
+            return unsupported(why, "unsupported clock domain");
+        bool seen = false;
+        for (size_t j = 0; j < joined->file_count; ++j)
+            if (same(files[j].capture, f->capture)) seen = true;
+        if (seen) continue;
+        pgwt_evidence_file *chain = &files[joined->file_count++];
+        *chain = (pgwt_evidence_file){.version = 5, .boot = f->boot,
+            .capture = f->capture, .present = true};
+        bool started = false;
+        uint64_t last = 0;
+        for (size_t j = i; j < in->file_count; ++j) {
+            const pgwt_evidence_file *part = &in->files[j];
+            if (!same(part->capture, f->capture)) continue;
+            /* Repeated/backward ordinals can make the reference replay the
+             * same frontier twice. Refuse these ambiguous inputs explicitly. */
+            if (started && part->file_no <= last)
+                return unsupported(why, "unsupported duplicate or reordered file");
+            bool linked = !started ? (!part->file_no && !part->has_previous) :
+                (last != UINT64_MAX && part->file_no == last + 1 &&
+                 part->has_previous && part->previous == last);
+            if (part->unsupported_shape)
+                return unsupported(why, "unsupported descriptor shape");
+            if (!part->present || !linked ||
+                part->version < 2 || part->version > 5) break;
+            /* Legacy has no evidence continuity into a v5 successor. */
+            if (started && chain->version != 5) break;
+            if (!started) {
+                chain->version = part->version;
+                chain->qualified = part->qualified;
+                chain->baseline = part->baseline;
+            } else if (part->version != 5) break;
+            if (part->record_count && !part->records)
+                return unsupported(why, "unsupported record array");
+            if (part->record_count > SIZE_MAX / sizeof(pgwt_evidence_record) - chain->record_count)
+                return PGWT_REPLAY_ERROR;
+            size_t total = chain->record_count + part->record_count;
+            if (part->record_count) {
+                pgwt_evidence_record *records = realloc((void *)chain->records, total * sizeof(*records));
+                if (!records) return PGWT_REPLAY_ERROR;
+                memcpy(records + chain->record_count, part->records, part->record_count * sizeof(*records));
+                chain->records = records;
+            }
+            chain->record_count = total;
+            last = part->file_no;
+            started = true;
+        }
+    }
+    return PGWT_REPLAY_OK;
+}
+
+/* Validate every record in the retained prefixes, including uncertified
+ * suffixes within an intact file. Malformed records refuse the whole input. */
 static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
 {
     if (!in || in->unsupported_shape || !in->files)
@@ -62,9 +140,6 @@ static pgwt_replay_status scope(const pgwt_evidence_input *in, const char **why)
             (f->record_count && !f->records) ||
             f->version < 2 || f->version > 5)
             return unsupported(why, "unsupported descriptor or counters");
-        for (size_t j = 0; j < fno; ++j)
-            if (same(in->files[j].capture, f->capture) || !same(in->files[j].boot, f->boot))
-                return unsupported(why, "unsupported rotation or clock domain");
         for (size_t i = 0; i < f->record_count; ++i) {
             const pgwt_evidence_record *r = &f->records[i];
             if (r->unsupported_shape)
@@ -529,7 +604,7 @@ done:
     return status;
 }
 
-pgwt_replay_status pgwt_evidence_replay(const pgwt_evidence_input *in,
+pgwt_replay_status pgwt_evidence_replay(const pgwt_evidence_input *input,
                                        const pgwt_core_query *query,
                                        pgwt_evidence_output *out,
                                        const char **reason)
@@ -537,8 +612,11 @@ pgwt_replay_status pgwt_evidence_replay(const pgwt_evidence_input *in,
     if (reason) *reason = NULL;
     if (!out) { if (reason) *reason = "null output"; return PGWT_REPLAY_ERROR; }
     memset(out, 0, sizeof(*out));
-    pgwt_replay_status status = scope(in, reason);
-    if (status != PGWT_REPLAY_OK) return status;
+    pgwt_evidence_input joined;
+    pgwt_replay_status status = join_chains(input, &joined, reason);
+    if (status == PGWT_REPLAY_OK) status = scope(&joined, reason);
+    if (status != PGWT_REPLAY_OK) { free_chains(&joined); return status; }
+    const pgwt_evidence_input *in = &joined;
     size_t capacity = 0;
     for (size_t i = 0; i < in->file_count; ++i)
         if (same(in->files[i].capture, in->capture)) capacity = in->files[i].record_count;
@@ -565,6 +643,7 @@ allocation_error:
     if (reason) *reason = "replay allocation/preparation failed";
 done:
     free(scratch);
+    free_chains(&joined);
     if (status != PGWT_REPLAY_OK) pgwt_evidence_output_free(out);
     return status;
 }

@@ -3,14 +3,12 @@
 
 #include "pgwt_core.h"
 
-/* Logical U5 input, not a trace codec. Accepts independent initial files in
- * one boot, timestamp-resolved PIDs/generations (including provisional LIFE),
- * exits, attachments, END, global VOID/revocation and query-specific run selection.
- * Legacy v2-v4 files retain no exact evidence; unqualified v5 retains LIFE only.
- * Other kinds and same-capture file chains
- * remain explicitly unsupported, even in an uncertified suffix. Strings are length-delimited; {NULL,0} means a
- * nonwaiting state. Callers supply readable arrays/strings of stated lengths.
- */
+/* Logical evidence-v1 input, not a trace codec. Validated same-capture file
+ * prefixes preserve physical append order; gaps stop that capture. Independent
+ * captures never stitch. Legacy v2-v4 retains no exact evidence; unqualified v5
+ * retains LIFE only. Malformed records and ambiguous input explicitly refuse.
+ * Strings are length-delimited; {NULL,0} means nonwaiting. Callers supply readable
+ * arrays/strings of stated lengths. */
 typedef enum {
     PGWT_EVIDENCE_OTHER, PGWT_EVIDENCE_LIFE, PGWT_EVIDENCE_ATTACH_OK,
     PGWT_EVIDENCE_TRANS, PGWT_EVIDENCE_FRONTIER, PGWT_EVIDENCE_END,
@@ -52,7 +50,7 @@ typedef struct {
 typedef struct {
     unsigned version;
     pgwt_core_event boot, capture;
-    uint64_t file_no;
+    uint64_t file_no, previous; /* previous is used only when has_previous */
     bool has_previous, present, qualified, unsupported_shape;
     pgwt_evidence_counters baseline;
     const pgwt_evidence_record *records;

@@ -8,7 +8,7 @@
 
 static bool in_scope(const char *id)
 {
-    const char *prefixes[] = {"01_", "02_", "03_", "04_", "06_", "07_", "24_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_", "09_", "10_", "11_", "33_", "18_", "19_", "20_", "21_", "32_", "05_", "12_", "13_", "14_", "15_", "26_", "31_"};
+    const char *prefixes[] = {"01_", "02_", "03_", "04_", "06_", "07_", "24_", "08_", "16_", "17_", "25_", "27_", "28_", "29_", "30_", "09_", "10_", "11_", "33_", "18_", "19_", "20_", "21_", "32_", "05_", "12_", "13_", "14_", "15_", "26_", "31_", "22_", "23_"};
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
         if (!strncmp(id, prefixes[i], 3)) return true;
     return false;
@@ -257,6 +257,72 @@ static int native_void(void)
     return !flags || !reason || !opaque || !unknown || !unused || !pid;
 }
 
+/* Descriptor flags and impossible JSON array lengths through the public API. */
+static int native_chains(void)
+{
+    pgwt_evidence_record records[] = {
+        {.kind=PGWT_EVIDENCE_LIFE,.pid=101,.has_fork=true,.start_known=true},
+        {.kind=PGWT_EVIDENCE_ATTACH_OK,.pid=101,.has_fork=true,.t=1,
+         .reread=true,.counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_TRANS,.pid=101,.t=3,.new_event={"A",1}},
+        {.kind=PGWT_EVIDENCE_FRONTIER,.t=8,.counters={.known=true}},
+        {.kind=PGWT_EVIDENCE_TRANS,.pid=101,.t=16,.old_event={"A",1},.duration=13},
+        {.kind=PGWT_EVIDENCE_FRONTIER,.t=20,.counters={.known=true}}
+    };
+    pgwt_evidence_file files[] = {
+        {.version=5,.boot={"b",1},.capture={"A",1},.previous=UINT64_MAX,
+         .present=true,.qualified=true,.baseline={.known=true},.records=records,.record_count=4},
+        {.version=5,.boot={"b",1},.capture={"A",1},.file_no=1,.has_previous=true,
+         .present=true,.qualified=true,.baseline={.known=true},.records=records+4,.record_count=2}
+    };
+    pgwt_evidence_input input={.files=files,.file_count=2,.capture={"A",1},.pid=101,.has_fork=true};
+    pgwt_core_query query={.event={"A",1},.from=3,.to=20};
+    pgwt_evidence_output out;
+    pgwt_replay_status status=pgwt_evidence_replay(&input,&query,&out,NULL);
+    bool flags=status==PGWT_REPLAY_OK && out.projection.coverage_count==1 &&
+        out.coverage.start==1 && out.coverage.end==20 && out.projection.wait_count==1 &&
+        out.wait_time.value.present && out.wait_time.value.value==13 &&
+        out.completed_waits.value.present && out.completed_waits.value.value==1;
+    pgwt_evidence_output_free(&out);
+    puts(flags ? "evidence native_chain_inactive_previous PASS" : "evidence native_chain_inactive_previous FAIL projection");
+    const pgwt_evidence_record *saved=files[1].records;
+    files[1].records=NULL;
+    status=pgwt_evidence_replay(&input,&query,&out,NULL);
+    bool arrays=status==PGWT_REPLAY_UNSUPPORTED && !out.wait_time.metric && !out.completed_waits.metric;
+    pgwt_evidence_output_free(&out);
+    puts(arrays ? "evidence native_chain_null_records PASS" : "evidence native_chain_null_records FAIL validation");
+    // A missing file's unreadable record array is never inspected or salvaged.
+    files[1].present=false;
+    status=pgwt_evidence_replay(&input,&query,&out,NULL);
+    bool gap=status==PGWT_REPLAY_OK && out.projection.coverage_count==1 &&
+        out.coverage.end==8 && out.projection.has_open && out.projection.open.as_of==8;
+    pgwt_evidence_output_free(&out);
+    puts(gap ? "evidence native_chain_gap_ignores_array PASS" : "evidence native_chain_gap_ignores_array FAIL projection");
+    files[1].present=true;
+    files[1].records=saved;
+    files[1].boot=(pgwt_core_event){NULL,1};
+    status=pgwt_evidence_replay(&input,&query,&out,NULL);
+    bool identity=status==PGWT_REPLAY_UNSUPPORTED && !out.wait_time.metric && !out.completed_waits.metric;
+    pgwt_evidence_output_free(&out);
+    files[1].boot=files[0].boot;
+    files[1].capture=(pgwt_core_event){NULL,1};
+    status=pgwt_evidence_replay(&input,&query,&out,NULL);
+    identity &= status==PGWT_REPLAY_UNSUPPORTED && !out.wait_time.metric && !out.completed_waits.metric;
+    pgwt_evidence_output_free(&out);
+    puts(identity ? "evidence native_chain_invalid_identity PASS" : "evidence native_chain_invalid_identity FAIL validation");
+    files[1].capture=files[0].capture;
+    files[1].record_count=SIZE_MAX;
+    status=pgwt_evidence_replay(&input,&query,&out,NULL);
+    bool overflow=status==PGWT_REPLAY_ERROR && !out.wait_time.metric && !out.completed_waits.metric;
+    pgwt_evidence_output_free(&out);
+    input.file_count=SIZE_MAX;
+    status=pgwt_evidence_replay(&input,&query,&out,NULL);
+    overflow &= status==PGWT_REPLAY_ERROR && !out.wait_time.metric && !out.completed_waits.metric;
+    pgwt_evidence_output_free(&out);
+    puts(overflow ? "evidence native_chain_size_overflow PASS" : "evidence native_chain_size_overflow FAIL validation");
+    return !flags || !arrays || !gap || !identity || !overflow;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 3 && (!strcmp(argv[1], "--json") || !strcmp(argv[1], "--json-reasons"))) return json_cases(argc, argv);
@@ -272,7 +338,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "evidence harness: need 33 frozen scenarios, found %zu\n", paths.gl_pathc);
         globfree(&paths); return 2;
     }
-    int mismatch = native_provisional() | native_attachment_validation() | native_end() | native_void(), harness_error = 0;
+    int mismatch = native_provisional() | native_attachment_validation() | native_end() | native_void() | native_chains(), harness_error = 0;
     for (size_t i = 0; i < paths.gl_pathc; ++i) {
         evidence_case input;
         char field[512] = {0};

@@ -501,8 +501,7 @@ int evidence_case_load(const char *path, evidence_case *out, char *error, size_t
         ok = event_string(member(n, "boot"), &f->boot) && ok;
         ok = event_string(member(n, "capture"), &f->capture) && ok;
         ok = integer(member(n, "file_no"), &f->file_no) && ok;
-        uint64_t previous;
-        ok = optional_uint(member(n, "previous"), &f->has_previous, &previous) && ok;
+        ok = optional_uint(member(n, "previous"), &f->has_previous, &f->previous) && ok;
         /* Qualification absence is explicitly unqualified (contract sections 1,5).
          * present is a scenario convenience whose absent value means intact. */
         const json_node *qualified = member(n, "qualified");

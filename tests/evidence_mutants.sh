@@ -59,8 +59,8 @@ differential_mutants = [
 
 guard_mutants = [
     ('G01_target_capture_count', 'if (same(f->capture, in->capture)) ++targets;', '++targets;', '24_restart_same_pid', 'keys'),
-    ('G02_rotation_is_not_restart', 'same(in->files[j].capture, f->capture) || ', '', 'refuse_restart_duplicate_non_target', 'keys'),
-    ('G03_restart_clock_domain', '!same(in->files[j].boot, f->boot)', 'false', 'refuse_restart_other_boot', 'keys'),
+    ('G02_rotation_is_not_restart', 'if (started && part->file_no <= last)', 'if (false)', 'refuse_restart_duplicate_non_target', 'keys'),
+    ('G03_restart_clock_domain', '!same(f->boot, in->files[0].boot)', 'false', 'refuse_restart_other_boot', 'keys'),
     ('G04_observed_requires_fork', '!r->has_fork || r->start != r->fork', 'r->start != r->fork', 'refuse_life_observed_no_fork', 'keys'),
     ('G05_observed_start_is_fork', '!r->has_fork || r->start != r->fork', '!r->has_fork', 'refuse_life_observed_fork_mismatch', 'keys'),
     ('G06_provisional_has_no_fork', ': r->has_fork) ||', ': false) ||', 'refuse_life_provisional_with_fork', 'keys'),
@@ -315,6 +315,37 @@ guard_mutants += [
     ('U579_VOID_validation_dispatch', '} else if (r->kind == PGWT_EVIDENCE_VOID) {', '} else if (false) {', '13_loss_then_recovery_later_window', 'keys'),
 ]
 
+guard_mutants += [
+    ('U580_freeze_discards_END', 'run->end = NULL;', '', 's16b', 'projection.coverage[0][0]'),
+]
+
+# Delete every new semantic file-chain guard independently. Allocation and
+# null-array checks are exercised through native_chain_* before any copy.
+guard_mutants += [
+    ('U601_initial_ordinal', '!part->file_no && ', '', 'refuse_rotation', 'projection.life'),
+    ('U602_initial_predecessor', '!part->file_no && !part->has_previous', '!part->file_no', 'refuse_previous', 'projection.life'),
+    ('U603_consecutive_ordinal', 'part->file_no == last + 1 &&', '', 'chain_skipped_ordinal', 'projection.coverage[0][1]'),
+    ('U604_predecessor_present', 'part->has_previous && ', '', 'chain_absent_previous', 'projection.coverage[0][1]'),
+    ('U605_predecessor_matches', 'part->previous == last', 'true', 'chain_wrong_previous', 'projection.coverage[0][1]'),
+    ('U606_stop_missing_file', '!part->present || ', '', '23_rotation_missing_file', 'projection.coverage[0][1]'),
+    ('U607_file_version_lower', 'part->version < 2 || ', '', 'chain_initial_version_zero', 'keys'),
+    ('U608_file_version_upper', 'part->version > 5', 'false', 'refuse_future_schema', 'keys'),
+    ('U609_stop_after_legacy', 'if (started && chain->version != 5) break;', '', 'chain_legacy_no_salvage', 'keys'),
+    ('U610_stop_legacy_successor', 'else if (part->version != 5) break;', 'else if (false) break;', 'chain_legacy_successor', 'projection.coverage[0][1]'),
+    ('U611_initial_capture_gates', 'if (!started) {', 'if (true) {', 'chain_successor_gates_ignored', 'projection.coverage.length'),
+    ('U612_capture_isolation', 'if (!same(part->capture, f->capture)) continue;', '', 'chain_rotated_24', 'keys'),
+    ('U613_one_replay_per_capture', 'if (seen) continue;', '', '22_rotation_open_wait', 'keys'),
+    ('U614_stop_after_gap', 'part->version < 2 || part->version > 5) break;', 'part->version < 2 || part->version > 5) continue;', 'chain_gap_no_salvage', 'projection.coverage[0][1]'),
+    ('U615_descriptor_shape', 'if (part->unsupported_shape)', 'if (false)', 'refuse_descriptor_extension', 'keys'),
+    ('U616_file_identity_boot', 'if (!nonempty(f->boot) || !nonempty(f->capture))', 'if (!nonempty(f->capture))', 'native_chain_invalid_identity', 'validation'),
+    ('U617_file_identity_capture', 'if (!nonempty(f->boot) || !nonempty(f->capture))', 'if (!nonempty(f->boot))', 'native_chain_invalid_identity', 'validation'),
+    ('U618_prefix_records_retained', 'memcpy(records + chain->record_count, part->records, part->record_count * sizeof(*records));', 'memset(records, 0, total * sizeof(*records)); memcpy(records, part->records, part->record_count * sizeof(*records));', '22_rotation_open_wait', 'keys'),
+    ('U620_ordinal_no_wrap', 'last != UINT64_MAX && ', '', '22_rotation_open_wait', 'projection'),
+    ('U621_seen_capture_key', 'if (same(files[j].capture, f->capture)) seen = true;', 'seen = true;', 'chain_rotated_24', 'keys'),
+    ('U622_initial_link_dispatch', 'bool linked = !started ?', 'bool linked = false ?', '22_rotation_open_wait', 'projection.life'),
+    ('U619_append_order_files', 'chain->records = records;', 'chain->records = records; if (started) { for (size_t k=0; k<part->record_count; ++k) { pgwt_evidence_record tmp=records[k]; records[k]=records[total-1-k]; records[total-1-k]=tmp; } }', '22_rotation_open_wait', 'keys'),
+]
+
 # U433/U434 are killed by void_tie_start/void_tie_end: VOID.t may precede
 # H, so frozen and recovered candidate order can reverse.
 # Each surviving deletion has a concrete reachable-state proof. Both full
@@ -324,6 +355,12 @@ equivalent_deletions = {'U428_query_window': 'from>=to gives zero overlap for ev
 contract_guards = {'R14_kind_check', 'U402_END_reason', 'G80_attachment_seed_state', 'G81_attachment_verified_state', 'G58_key_ignores_absent_fork_bytes'}
 
 contract_guards |= {'U502_VOID_reason', 'U503_positive_pid', 'U513_implicit_VOID_no_revocation', 'U548_revoke_only_when_flagged'}
+
+equivalent_deletions['U616_file_identity_boot'] = 'the clock-domain guard rejects any boot different from the first descriptor. If that first boot is invalid, the normalized descriptor retains it and scope rejects it; deleting only this early check cannot emit metrics.'
+
+equivalent_deletions['U617_file_identity_capture'] = 'an invalid (null or empty) capture cannot equal a valid capture name; joining therefore retains a descriptor with that invalid name, even for an empty or stopped chain, and scope rejects it before metrics. Only the refusal diagnostic text can change.'
+
+equivalent_deletions['U620_ordinal_no_wrap'] = 'a validated prefix starts at ordinal 0 and increments by exactly one per descriptor; last is at most file_count-1, and file_count is bounded by SIZE_MAX/sizeof(pgwt_evidence_file), strictly below UINT64_MAX. The removed overflow condition is unreachable.'
 
 equivalent_deletions['G45_coverage_capture_isolation'] = 'non-target replay has no final target LIFE; final selection clears every run.has_snapshot before projection, so storing non-target snapshots cannot expose them'
 
@@ -354,7 +391,7 @@ def contract(binary):
     result = diff.execute([binary, diff.CONTRACT])
     output = result.stdout + result.stderr
     rows = re.findall(r"^evidence \S+ (?:PASS|UNSUPPORTED-OK|FAIL .+)$", output, re.M)
-    valid = len(rows) == 46 and not diff.sanitizer_error(output) and " ERROR " not in output
+    valid = len(rows) == 51 and not diff.sanitizer_error(output) and " ERROR " not in output
     return result.returncode, output, valid
 
 
