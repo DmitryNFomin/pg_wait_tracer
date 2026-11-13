@@ -1,0 +1,205 @@
+# Per-CPU transport measurements (Refs #871)
+
+Linux only: this standalone bench loads no daemon and needs no PostgreSQL. Build
+with clang's BPF target, Linux headers, libbpf >= 1.0, libelf, zlib and pthreads.
+Use the project's bundled libbpf on EL8. Do not run BPF on macOS.
+
+```sh
+make -C tests bench-nmi-transport
+sudo tests/bench_nmi_transport/qualify.sh --repeats 3 --seconds 30 \
+  --periods 10000000 20000000 40000000 --bytes 67108864 --out /var/tmp/transport-qualification
+```
+
+Supply `LIBBPF_INC`, `LIBBPF_LIB`, `CC` and `CLANG` through the environment when
+using the bundled library; use absolute paths for recursive make. The output
+must be a new directory outside the repository. The protocol saves exact build
+commands/output, source/binary/object hashes, running kernel package, full kernel
+config, clocksource, raw command/stdout/stderr/exit records, and one summary per
+CPU-population/case/repeat cell. Missing required provenance makes the run VOID.
+A summary PASS means only that measurement gates passed; see
+[QUALIFICATION.md](QUALIFICATION.md) for the separate kernel argument.
+
+Each cadence cell interleaves shared ring, DATA-only perf, perf + CPU-clock
+boundary, perf + syscall boundary (`syscall_boundary`), perf + requested syscall
+boundary (`syscall_request`), and perf + fixed 100 us CPU-clock boundary.
+`--periods` runs the normal boundary treatments at every supplied cadence in ns
+(default 10000000); `--period-ns` remains an alias for a single cadence. Each
+cadence reruns both DATA-only baselines and the controls. Filenames include the
+period. Repeat order rotates the arms. CPU populations are 1, 4 and all CPUs in
+the caller's allowed online affinity; a missing 4-CPU population is VOID, never a
+silent skip. The named 4 and all cells both run on a four-CPU box. Cases are idle,
+one CPU active, all active, one writer migrating through the participating
+CPUs every 256 stores, and `hog`: one pinned, untraced busy loop per CPU for the
+whole run, with no watchpoints or DATA. This is the three-population × five-case
+grid at each cadence and repeat. Writers run at maximum rate in every active case, including
+the 100 us adversarial arm. Idle cases have no DATA writer; migration on one CPU
+necessarily degenerates to a pinned writer. Other CPUs remain without DATA
+writers in the one-active case; periodic treatments still give them their own boundaries.
+
+Before **each cell**, fresh two-second controls run on the same participating
+CPUs, binary and BPF object: perf with one page per CPU and draining paused until
+after production, and each boundary producer deliberately stamped +1 ms. The first
+must lose records by attempts minus delivery (a LOST callback is not required);
+the second must reach the seal assertion. A non-firing or malformed control makes
+that cell VOID. These are separate bounded phases in the same protocol invocation,
+so corrupt control records cannot contaminate normal measurements. Controls use
+all-active writers even for an idle measurement cell.
+
+The DATA-only perf and all three normal boundary arms must reconcile per CPU and site and lose
+zero records. Shared-ring loss and reconciliation are measurements, never gate
+failures: the shared arm supplies the CPU-ratio baseline. The 100 us adversarial
+arm is gated on seals and timestamps, without a loss or CPU-cost gate. Runtime,
+framing, CPU/site population and producer-activation checks still apply to all
+arms. All arms must have zero seal violations and timestamp regressions. The
+periodic boundary arms must advance every CPU's consumed contract frontier within
+100 ms, including startup and final silence. Both `max_frontier_gap_ns` (consumer
+arrival) and `max_frontier_stamp_gap_ns` (producer stamp) are gated. Qualified
+perf DATA supplies strict w=t under merge-v1 §3 as well as explicit BOUNDARY;
+`max_boundary_gap_ns` and `max_boundary_stamp_gap_ns` retain BOUNDARY-only spacing
+as diagnostics. Equality with a strict boundary is legal; a repeated stamp does
+not count as advancement. Producer fires must equal helper-successful outputs
+and consumer-delivered BOUNDARY per CPU: fires == outputs alone cannot prove
+4.18 delivery. The request arm may emit no boundaries when DATA stays current, and emits none
+on idle or hog cases with coverage off. Its primary timing gate is held DATA
+age from consumer arrival to release under `W=min(w[c])`, <=100 ms; any final
+unreleased DATA fails. Frontier and BOUNDARY-only gaps remain diagnostics for
+this arm. See the contract line citations in [QUALIFICATION.md](QUALIFICATION.md).
+
+The paired perf/shared CPU-ns-per-attempt ratio must be <=1.10 in DATA-active cases.
+Idle and hog DATA-only baselines have zero attempts and report a null ratio. Idle cases measure the
+boundary-only incremental CPU fraction per participating CPU for each boundary
+arm. The periodic arms retain their existing <=1% gate; the adversarial delta is reported as a
+measurement.
+CPU cost uses participating CPUs' `/proc/stat` busy time (user, nice, system, irq,
+softirq, steal; guest is already included in user). Boundary interrupts of the
+idle task are accounted for only with `CONFIG_IRQ_TIME_ACCOUNTING=y` in the
+running kernel config. Otherwise the periodic arm's boundary CPU gate is
+`UNMEASURED`, the idle cell is `VOID`, and the gate records the reason; a small measured delta cannot
+produce PASS. Raw ticks, USER_HZ, elapsed time and process CPU time are retained.
+Each syscall arm additionally reports each pinned helper's CPU nanoseconds and
+core fraction using `CLOCK_THREAD_CPUTIME_ID`, even without IRQ time accounting.
+This includes its synchronous syscall/BPF work, but not all wakeup IRQ/scheduler
+costs, so it cannot replace the total-cost gate. Any idle helper above 1% fails;
+without IRQ accounting the total syscall-boundary CPU gate is still UNMEASURED.
+Every normal boundary treatment also gates the schedstat running-time increment
+against perf at **1% on each CPU**, using integer-nanosecond snapshot intervals.
+Absent/disabled `/proc/schedstat` is UNMEASURED with null counters. This is the
+request arm's primary idle CPU gate; existing arms retain their prior gates.
+`proc_stat_accounting_closure` compares CPU-state sums with CPUs × elapsed;
+more than 0.5% difference marks those figures SUSPECT. Helper thread and bench
+process CPU remain separately reported. The older idle gate field is named
+`proc_stat_increment_core_fraction_per_participating_cpu`, separate from
+`syscall_helper_core_fraction_per_cpu[arm][cpu]`. Its quantity stays
+boundary-idle busy-ns/elapsed minus perf-idle busy-ns/elapsed,
+divided by 1e9 and the participating CPU count. Negative deltas are retained. Use
+an otherwise idle box: background work and USER_HZ quantization affect the result;
+the script applies the frozen limits without retries or tolerance changes.
+Every arm records `/proc/stat` user/nice/system/irq/softirq/steal/idle/iowait
+start/end/delta, whole-box and participating sums and per CPU; participating busy
+CPU ns, bench process CPU and helper thread CPU; and the top three non-bench
+process CPU deltas from matching PID/starttime snapshots. Process snapshots
+bracket setup/teardown as well as production and exclude new, exited and
+unreadable processes with coverage counts; see [QUALIFICATION.md](QUALIFICATION.md).
+
+An individual run:
+
+```sh
+sudo tests/bench_nmi_transport/nmi_transport --transport perf --cpus 4 \
+  --case one --period-ns 10000000 --duration 30 --bytes 67108864 \
+  --object tests/bench_nmi_transport/transport.bpf.o
+```
+
+`--boundary` enables the default 10 ms period; `--period-ns N` enables a specified
+period. Without either, perf carries DATA only. Only user-mode, 8-byte write
+watchpoints (`exclude_kernel=1`) generate DATA. The boundary is a system-wide,
+same-CPU `SEC("perf_event")` program on CPU-clock software events (`pid=-1`,
+`cpu=i`, `freq=0`, `exclude_idle=0`). It writes BOUNDARY to the same perf map with
+`BPF_F_CURRENT_CPU`. No other records enter these buffers.
+
+Add `--syscall-boundary` to select the new producer (default period 10 ms, or
+`--period-ns N`). It replaces CPU-clock attachment for that run. One helper per
+participating CPU uses a singleton `sched_setaffinity` mask and calls
+`syscall(SYS_getppid)` on absolute monotonic deadlines. BPF on
+`syscalls:sys_enter_getppid` filters the process TGID and registered helper TIDs,
+then checks the helper's expected CPU before stamping and emitting BOUNDARY via
+`BPF_F_CURRENT_CPU`. Per-CPU `syscall_fires`, `syscall_outputs` and
+`wrong_cpu_events` are retained; any wrong-CPU event fails the cell, including
+one on a nonparticipating CPU through the aggregate counter. `boundary_source`
+records `none`, `perf`, `syscall` or `syscall_request`, and treatment validation rejects the wrong
+producer. The record layout is identical for both producers. Helpers stop and
+join before tracepoint detach, final drain and counter reads. Source arguments,
+costs and deployment limits are in [QUALIFICATION.md](QUALIFICATION.md).
+Helpers remain SCHED_OTHER. Periodic helpers each use an absolute
+`clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` deadline, skipping missed
+periods. `--phase-jitter` optionally offsets each first deadline by a recorded
+random value below 1 ms. Add `--syscall-request` instead for an **untimed** parked
+helper per CPU. When staged DATA's oldest consumer-arrival age reaches
+`--request-after-ms` (default 50), the consumer requests only helpers at the
+minimum consumed frontier. At most one request is outstanding per CPU; a wake
+makes one getppid and parks again. `--coverage-ms` defaults to 0 (off); positive
+values also request lagging CPUs at that cadence with nothing staged.
+Per-CPU request counts, acknowledgements, request-to-frontier latency and
+outstanding age accompany wakeups and syscalls. Queue depth, growth and held
+age are reported independently from frontier, producer, drain and BOUNDARY gaps.
+
+Select smaller grids with `--cases idle one --arms perf syscall_request`.
+Every per-arm raw command/stdout/stderr/exit is saved as `.raw.json`, and each
+valid per-arm JSON report as `.json`. Startup prints the planned cell count and
+estimated wall time; `plan.json` retains the complete treatment order and estimate.
+For paired idle CPU evidence, `--crossover N` chooses a random starting arm and
+alternates perf/syscall_boundary at 10 ms, all CPUs, N runs each. It retains both
+accountings per run, with fresh controls per pair. For example:
+
+```sh
+sudo tests/bench_nmi_transport/qualify.sh --seconds 30 --crossover 10 \
+  --phase-jitter --out /var/tmp/transport-crossover
+sudo tests/bench_nmi_transport/qualify.sh --repeats 3 --seconds 30 \
+  --cases idle one all migrate hog --arms perf syscall_request \
+  --request-after-ms 50 --coverage-ms 0 --out /var/tmp/transport-request
+```
+
+The bench ABI is a fixed 64-byte record with timestamp, CPU, TID, per-site attempt
+sequence, DATA/BOUNDARY site, and zero padding. A boundary has TID zero. Perf RAW
+framing is 80 bytes: header 8, raw length 4, payload 64, trailing kernel padding 4;
+the advertised raw length is 68. Payload is unaligned and decoded with `memcpy`.
+Kernel framing padding is unrestricted; bench record padding is checked.
+
+BPF counters are per CPU and site: attempts, helper successes, helper failures and
+error diagnostics. In JSON, **produced means attempts**, including failures. After
+joining writers and helpers, disabling/closing boundary events or detaching the
+syscall tracepoint, and draining to empty, the
+reader includes initial, internal and trailing attempt-sequence gaps and compares
+them with produced minus delivered. The check catches a last failed attempt even
+without a subsequent LOST record. `lost_notifications` and `lost_callbacks` are
+separate and are never added to helper failures. A helper success does not prove
+publication on older kernels (see the kernel argument).
+
+The original `percpu-ring` exploratory arm and `run.sh OUTPUT [REPEATS [SECONDS
+[BYTES]]]` remain available; the latter is a measurement driver with its original
+skip/load-rejection behavior, **not** the frozen qualification protocol. `--threads`
+is retained as an alias for participating `--cpus` with all-active writers. The
+per-CPU ring arm creates rings for every possible CPU; perf budgets only
+participating CPUs. `--bytes` is total data capacity, normally a power of two;
+power-of-two per-buffer capacities sum exactly to it. The `--one-page` control
+instead allocates exactly one page per participating CPU. Metadata pages and
+framing are outside that byte budget. Ring output uses NO_WAKEUP, with a 10 ms
+poll timeout followed by unconditional consume; perf uses a watermark of
+min(64 KiB, capacity/8) and the same timeout. No capacity-equivalence claim is made.
+
+Portable checks (also on macOS):
+
+```sh
+CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib \
+  make -C tests tools/merge_tie_count test_merge_tie_count test_nmi_transport_reader
+./tests/test_merge_tie_count
+./tests/test_nmi_transport_reader
+python3 -B tests/test_nmi_transport_qualification.py
+make -C tests test_ringbuf_metrics
+./tests/test_ringbuf_metrics
+make -C tests/bench_nmi_transport test-reader
+bash -n tests/bench_nmi_transport/run.sh tests/bench_nmi_transport/qualify.sh
+```
+
+The test registrations append to master's lists. Reader/accounting and protocol
+gates have portable tests; Linux builds, verifier acceptance, control activation
+and measurements still require the lead's boxes.

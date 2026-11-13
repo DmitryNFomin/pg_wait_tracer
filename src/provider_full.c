@@ -12,6 +12,7 @@
  */
 #include "provider.h"
 #include "daemon.h"
+#include "ringbuf_metrics.h"
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
@@ -36,27 +37,15 @@ static int full_poll(struct pgwt_daemon *d)
     return 0;
 }
 
-/* Read the BPF-side event_ringbuf drop counter (A2: a per-CPU array map the
- * BPF program bumps when bpf_ringbuf_output() fails). Sum across CPUs. */
+/* Read aggregate event-ring drops and per-site failures across all rings.
+ * Both maps are cumulative per-CPU arrays; sum every possible CPU. */
 static void full_metrics(struct pgwt_daemon *d, struct pgwt_metrics *m)
 {
     if (!d->skel)
         return;
-    int fd = bpf_map__fd(d->skel->maps.ringbuf_drops);
-    if (fd < 0)
-        return;
-
-    int ncpu = libbpf_num_possible_cpus();
-    if (ncpu <= 0)
-        ncpu = 1;
-    uint64_t per_cpu[ncpu];
-    uint32_t key = 0;
-    if (bpf_map_lookup_elem(fd, &key, per_cpu) == 0) {
-        uint64_t total = 0;
-        for (int i = 0; i < ncpu; i++)
-            total += per_cpu[i];
-        m->ringbuf_drops_total = total;
-    }
+    pgwt_read_ringbuf_metrics(m, bpf_map__fd(d->skel->maps.ringbuf_drops),
+                             bpf_map__fd(d->skel->maps.ringbuf_site_drops),
+                             libbpf_num_possible_cpus(), bpf_map_lookup_elem);
 }
 
 const struct pgwt_capture_provider pgwt_provider_full = {

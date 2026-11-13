@@ -79,7 +79,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_phase_capability test_phase_probe \
             test_core_wait_time_contract \
             test_core_evidence_contract \
-            test_core_merge_contract
+            test_core_merge_contract \
+            test_merge_tie_count test_nmi_transport_reader test_ringbuf_metrics
 
 .PHONY: all clean check
 
@@ -1171,3 +1172,31 @@ test_core_evidence_contract: test_core_evidence_contract.c evidence_json.c evide
 	$(CC) $(CFLAGS) -std=c11 -o $@ $(filter %.c,$^)
 test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
+
+# Refs #871: portable measurement tools; regular flags also support test-asan.
+MERGE_TIE_SRCS = tools/merge_tie_count.c ../src/event_reader.c ../src/event_writer.c
+tools/merge_tie_count: $(MERGE_TIE_SRCS) tools/merge_tie_count.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $(MERGE_TIE_SRCS) -llz4
+
+test_merge_tie_count: test_merge_tie_count.c $(MERGE_TIE_SRCS) tools/merge_tie_count.h
+	$(CC) $(CFLAGS) -DPGWT_SERVER -DMERGE_TIE_COUNT_NO_MAIN -o $@ test_merge_tie_count.c $(MERGE_TIE_SRCS) -llz4
+
+test_nmi_transport_reader: bench_nmi_transport/test_reader.c bench_nmi_transport/reader.h bench_nmi_transport/transport.h bench_nmi_transport/cadence.h bench_nmi_transport/cpu_accounting.h bench_nmi_transport/staging.h bench_nmi_transport/request.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $< -pthread
+
+test_ringbuf_metrics: test_ringbuf_metrics.c ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+.PHONY: bench-nmi-transport clean-measurement-tools
+bench-nmi-transport:
+ifeq ($(shell uname -s),Linux)
+	$(MAKE) -C bench_nmi_transport LIBBPF_INC="$(LIBBPF_INC)" LIBBPF_LIB="$(LIBBPF_LIB)"
+else
+	@echo "bench-nmi-transport requires Linux" >&2; exit 1
+endif
+
+clean: clean-measurement-tools
+clean-measurement-tools:
+	rm -f tools/merge_tie_count
+	rm -rf tools/merge_tie_count.dSYM
+	if [ -d bench_nmi_transport ]; then $(MAKE) -C bench_nmi_transport clean; fi
