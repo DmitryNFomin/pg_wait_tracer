@@ -422,24 +422,25 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
     uint64_t started_ns = pgwt_debug_block_begin(d);
     ssize_t r = read(d->timer_fd, &expirations, sizeof(expirations));
     pgwt_debug_block_end(d, "timerfd_read", 0, started_ns);
-    if (d->exact_perf) {
-        /* B's pgwt_merge_capture_tick owns the maintenance skipped by this
-         * early return: PostgreSQL liveness via kill(postmaster_pid, 0),
-         * pgwt_sweep_bootstrap_backends, pgwt_recover_unattached_backends,
-         * pgwt_sweep_stale_state and pgwt_escalation_check_budget. Preserve
-         * the daemon_mode/lightweight/test guards used below. */
-        if (pgwt_merge_capture_tick(d) < 0) {
-            fprintf(stderr, "FATAL: exact per-CPU capture tick failed\n");
-            d->running = false;
-        }
-        return;
-    }
     if (d->debug_dump_state && r == (ssize_t)sizeof(expirations)) {
         d->debug_timer_expirations += expirations;
         if (expirations > d->debug_max_timer_expirations)
             d->debug_max_timer_expirations = expirations;
     }
 
+    if (d->exact_perf) {
+        if (pgwt_merge_capture_tick(d) < 0) {
+            fprintf(stderr, "FATAL: exact per-CPU capture tick failed\n");
+            d->running = false;
+        }
+    } else {
+        pgwt_tick_duties(d);
+    }
+}
+
+void pgwt_tick_duties(struct pgwt_daemon *d)
+{
+    uint64_t started_ns;
     /* Health check: is PostgreSQL still alive? */
     if (d->daemon_mode) {
         started_ns = pgwt_debug_block_begin(d);
@@ -523,7 +524,15 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
     /* #416: the LAST thing before the display is built, so the smallest
      * possible window separates "every emitted record is in event_accum"
      * from the state_map read that supplies the still-open stretches. */
-    drain_event_ring_for_tick(d);
+    if (d->exact_perf) {
+        if (pgwt_percpu_transport_poll(d) < 0) {
+            fprintf(stderr, "FATAL: exact per-CPU capture tick drain failed\n");
+            d->running = false;
+            return;
+        }
+    } else {
+        drain_event_ring_for_tick(d);
+    }
 
     /* Copy cumulative event_accum to display accum,
      * then add open intervals from state_map.

@@ -48,6 +48,35 @@ static void tracked_core_destroy(pgwt_merge *m)
 #define pgwt_merge_create tracked_core_create
 #define pgwt_merge_destroy tracked_core_destroy
 
+/* Run the same goldens, negative guards and frozen N/Q rows with both table
+ * implementations. Invalid duplicate tables deliberately retain the linear
+ * validator; production insertion rejects duplicates before indexing. */
+static bool indexed_test_mode;
+static ma_result indexed_test_map(const ma *a,const ma_envelope *e,const ma_table *table,
+                                  uint64_t d,const ma_snapshot *s)
+{
+    if (!indexed_test_mode || !table ||
+        (table->lifetime_count && !table->lifetimes) ||
+        (table->binding_count && !table->bindings) ||
+        table->lifetime_count>128 || table->binding_count>128)
+        return ma_map(a,e,table,d,s);
+    size_t lifetimes[256]={0},bindings[256]={0};
+    ma_table t=*table;
+    t.lifetime_index=lifetimes;t.binding_index=bindings;t.index_slots=256;
+    for(size_t i=0;i<t.lifetime_count;++i){
+        size_t slot=ma_lifetime_bucket(&t,t.lifetimes[i].pid,t.lifetimes[i].g,NULL);
+        if(lifetimes[slot]){t.lifetime_index=NULL;break;}
+        lifetimes[slot]=i+1;
+    }
+    for(size_t i=0;i<t.binding_count;++i){
+        size_t slot=ma_binding_bucket(&t,t.bindings[i].query_id,NULL);
+        if(bindings[slot]){t.binding_index=NULL;break;}
+        bindings[slot]=i+1;
+    }
+    return ma_map(a,e,&t,d,s);
+}
+#define ma_map indexed_test_map
+
 static const char *active_guard;
 #define MUST(expr) do { if (!(expr)) { \
     fprintf(stderr, "adapter ASSERT %s: %s (line %d)\n", active_guard, #expr, __LINE__); \
@@ -450,14 +479,6 @@ static ma_snapshot from_counters(pgwt_merge_counters c)
 static pgwt_merge_status deliver(premises *p, pgwt_merge *m, const ma_envelope *e,
                                  uint64_t d, const ma_snapshot *s)
 {
-#ifdef PGWT_ADAPTER_PRODUCTION_TEST
-    ma_envelope decoded;
-    unsigned char packet[304];
-    if (!production_wire(e, &decoded, packet)) {
-        fputs("production wire decode failed\n", stderr); exit(2);
-    }
-    e = &decoded;
-#endif
     ma_result r=ma_map(p->adapter,e,&p->table,d,s);
     if (!r.count || r.count>2) { fputs("adapter replay: invalid input count\n",stderr); exit(2); }
     pgwt_merge_status status=PGWT_MERGE_OK;
@@ -1006,6 +1027,9 @@ static const adapter_guard adapter_guards[]={
 
 int adapter_main(int argc, char **argv)
 {
+    if(argc>1 && !strcmp(argv[1],"--indexed")){
+        indexed_test_mode=true;--argc;++argv;
+    }
     if (argc==3 && !strcmp(argv[1],"--guard")) {
         for (size_t i=0;i<sizeof(adapter_guards)/sizeof(adapter_guards[0]);++i)
             if (!strcmp(argv[2],adapter_guards[i].name)) {

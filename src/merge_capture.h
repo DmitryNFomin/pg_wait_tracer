@@ -8,6 +8,11 @@
 struct pgwt_daemon;
 struct pgwt_merge_capture;
 
+/* Identity/proof history is retained until capture teardown. No retirement or
+ * reuse: the next distinct lifetime after this limit pauses exact capture
+ * with VOID(allocation_fail). Query bindings have the same hard capacity. */
+#define PGWT_CAPTURE_LIFETIME_CAPACITY 262144U
+
 /* Userspace attachment facts, NOT a wire record. event is ma_attach_event;
  * known/true use MA_ALLOCATOR through MA_IDEMPOTENT_INIT, in that bit order.
  * A missing known bit is unknown, not evidence. No facts are supplied here. */
@@ -29,6 +34,12 @@ _Static_assert(offsetof(struct pgwt_attach_report, facts_true) == 20, "attach tr
 typedef int (*pgwt_attach_report_fn)(void *ctx,
                                     const struct pgwt_attach_report *report);
 
+/* Full checkpoint: refresh all 15 components, including the 13 BPF-backed
+ * components (0 and 2-13), logical INIT loss (1), daemon state-map failures
+ * added to component 12, and writer rejection (14). Called at open, after
+ * every CPU ack and the completed drain before accepting a round's boundaries,
+ * on faults/LOST, at shutdown, and every 10 ms of transport silence. The sink
+ * refreshes ONLY component 14 after each publication (pgwt_merge.h:84-86). */
 int pgwt_merge_capture_snapshot(struct pgwt_daemon *, ma_snapshot *, uint64_t *);
 
 /* Flat merge output: B's qualification dump is the first consumer; the
@@ -37,11 +48,20 @@ int pgwt_merge_capture_snapshot(struct pgwt_daemon *, ma_snapshot *, uint64_t *)
 struct pgwt_merge_capture_sink {
     pgwt_merge_sink emit;
     void *ctx;
+    /* Optional buffered consumer: finish an output batch after each core
+     * input, even if it emitted TEXT without advancing the frontier. A
+     * FRONTIER/VOID must already be written before emit returns success. */
+    bool (*flush)(void *);
 };
 
 int pgwt_merge_capture_open(struct pgwt_daemon *d);
 int pgwt_merge_capture_poll(struct pgwt_daemon *d);
-/* Display timer has already been read; B owns flagged tick maintenance. */
+/* Calls the SAME tick duties as the default handler, at the same drain point.
+ * Full-only admission makes the lightweight accumulator branch inactive;
+ * summary/escalation maintenance is idle without a writer/open window.
+ * The live view remains the legacy projection (including the state-map read),
+ * not a certification claim: only the qualification sink's FRONTIER certifies
+ * released DATA. Display timer has already been read. */
 int pgwt_merge_capture_tick(struct pgwt_daemon *d);
 /* Final drain/held-data disposition before any capture state is destroyed. */
 int pgwt_merge_capture_finish(struct pgwt_daemon *d);
@@ -61,6 +81,9 @@ struct pgwt_capture_config {
      * the attachment callback may synchronously report BEGIN/COMPLETE. */
     int (*lifecycle)(void *, const void *, size_t);
     int (*trace)(void *, const void *, size_t);
+    /* Publication refresh ONLY: update writer_push_fail (component 14) and
+     * detection time. Preserve components 0-13 and their known state from
+     * the latest completed-round/silence checkpoint. Never read BPF here. */
     int (*observe)(void *, pgwt_merge_observation *);
     void (*writer_failed)(void *);
 };
@@ -78,8 +101,44 @@ ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *);
 pgwt_merge_report pgwt_capture_report(const struct pgwt_merge_capture *);
 int pgwt_capture_finish(struct pgwt_merge_capture *, uint64_t, const ma_snapshot *);
 void pgwt_capture_destroy(struct pgwt_merge_capture *);
-/* Evidence for qualification only; deliberately NOT a product capture format.
- * Append one complete JSON line per output, with payload in hexadecimal. */
-bool pgwt_capture_dump(void *file, const pgwt_merge_output *, pgwt_merge_observation *);
+/* Qualification evidence only, NOT a product capture format. Explicit LE,
+ * no C padding. File header: magic "PGWTQB02" (8), version u32=2, cpu_count
+ * u32, lifetime_capacity u32, TRACE bytes/record u32=88, then cpu_count u32
+ * physical CPU IDs. Each capture appends its own header.
+ * Record prefix: size u16 (including prefix), kind u8 (merge output enum;
+ * 4=END), flags u8, source u32 (VOID: reason enum, others without source: 0).
+ * DATA/TEXT: epoch,o,g,dependency_id (4*u64), then unchanged payload. DATA
+ * flags: bit0 prior_interval_certified, bits1-2 rank, bit3 identity_known,
+ * bit4 fork_seed_proved, bits5-6 dependency. N: q=0, has_q=false. t,pid are
+ * in the unchanged TRACE/LIFECYCLE payload. DATA is 88 bytes for TRACE and
+ * 64 for LIFECYCLE; TEXT is 312 bytes. FRONTIER/VOID: epoch,F,d (3*u64),
+ * 15*u64 counters in merge-v1 order, flag0=known; 152 bytes.
+ * END: max_held_ns,perf_lost_total (2*u64), status u32, reserved u32=0;
+ * flag0=lost_known, flag1=epoch_invalid; 32 bytes.
+ * DATA/TEXT append to preallocated memory. FRONTIER/VOID flush that release
+ * batch in ONE write callback; no per-record stdio/fflush. A failed batch
+ * is discarded, followed by the core's VOID(writer_push_fail) attempt.
+ * A consumer must discard the uncertified suffix on VOID or a partial tail. */
+#define PGWT_CAPTURE_DUMP_TRACE_BYTES 88U
+struct pgwt_capture_dump;
+typedef bool (*pgwt_capture_write_fn)(void *, const void *, size_t);
+struct pgwt_capture_dump *pgwt_capture_dump_create(size_t records,
+                                                  pgwt_capture_write_fn, void *);
+bool pgwt_capture_dump_header(struct pgwt_capture_dump *, const uint32_t *, size_t);
+bool pgwt_capture_dump(void *, const pgwt_merge_output *, pgwt_merge_observation *);
+bool pgwt_capture_dump_flush(void *);
+bool pgwt_capture_dump_end(struct pgwt_capture_dump *, uint64_t age,
+                           bool lost_known, uint64_t lost, pgwt_merge_report);
+void pgwt_capture_dump_destroy(struct pgwt_capture_dump *);
+
+#ifdef PGWT_TRANSPORT_HOST_TEST
+/* Frozen corpus supplies initial attached generations, dependency premises,
+ * and explicit REARMs. These fixture seams are absent from the Linux daemon;
+ * the ordinary create/received/envelope/sink paths are still exercised. */
+struct pgwt_merge_capture *pgwt_capture_replay_create(
+    const struct pgwt_capture_config *, const pgwt_merge_config *, const ma_table *);
+pgwt_merge_status pgwt_capture_replay_control(struct pgwt_merge_capture *, const pgwt_merge_input *);
+ma_table pgwt_capture_replay_table(struct pgwt_merge_capture *);
+#endif
 
 #endif

@@ -551,6 +551,9 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
  * (#416): the defect was the ORDER of the steps inside it, so a test that
  * called a narrower seam could not have seen it. */
 void pgwt_handle_timer(struct pgwt_daemon *d);
+/* Shared timer duties, preserving the default order around its display drain.
+ * The timerfd and expiration diagnostics have already been handled. */
+void pgwt_tick_duties(struct pgwt_daemon *d);
 int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
 /* Process one decoded L payload (FORK/INIT/EXIT or QUERY_TEXT), after wire
  * validation. Shared by the default ring callback and B; never dispatches

@@ -53,7 +53,17 @@ typedef struct {
     const ma_lifetime *lifetimes; size_t lifetime_count;
     const ma_binding *bindings; size_t binding_count;
     const ma_envelope *const *held; size_t source_count;
+    /* Optional append-only indexes. Buckets contain array index + 1 (0 is
+     * empty). At most half full; no deletion, retirement or slot reuse.
+     * The unindexed pure-fixture path retains duplicate/alias validation. */
+    size_t *lifetime_index, *binding_index;
+    size_t index_slots;
 } ma_table;
+/* Probe returns a bucket in an indexed table, SIZE_MAX without an index.
+ * Optional cost counts visited buckets, including an empty insertion bucket.
+ * Insert only after checking the key; identities and bindings never change. */
+size_t ma_lifetime_bucket(const ma_table *, uint64_t pid, uint64_t g, size_t *cost);
+size_t ma_binding_bucket(const ma_table *, uint64_t query_id, size_t *cost);
 typedef struct {
     ma_mechanism mechanism;
     bool qualification_complete;

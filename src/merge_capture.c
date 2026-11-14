@@ -19,17 +19,19 @@ struct arrival {
     size_t prev, next;
 };
 struct pgwt_merge_capture {
-    FILE *dump;
+    struct pgwt_capture_dump *dump;
+    int dump_fd;
     ma *adapter;
     pgwt_merge *core;
     struct pgwt_capture_config config;
     ma_lifetime *lifetimes;
     ma_binding *bindings;
+    size_t *lifetime_index, *binding_index;
     const ma_envelope **held;
     struct retained **heads, **tails, *storage, *free;
     size_t lifetime_count, binding_count, source_count, retained_count;
     size_t staged;
-    uint64_t local_writer_fail, max_held;
+    uint64_t local_writer_fail, max_held, last_checkpoint_at;
     struct arrival *arrivals;
     size_t arrival_slots, oldest, newest, arrival_free;
     size_t *arrival_buckets;
@@ -129,6 +131,9 @@ static bool capture_sink(void *ctx, const pgwt_merge_output *out,
                                           out->record.payload_size) < 0) ok = false;
     if (ok && c->config.sink.emit)
         ok = c->config.sink.emit(c->config.sink.ctx, out, post);
+    if (ok && c->config.sink.flush &&
+        (out->kind == PGWT_MERGE_OUT_FRONTIER || out->kind == PGWT_MERGE_OUT_VOID))
+        ok = c->config.sink.flush(c->config.sink.ctx);
     if (c->config.observe) refresh(c, post);
     if (!ok) {
         /* The existing trace handler already counts its writer rejection.
@@ -138,7 +143,7 @@ static bool capture_sink(void *ctx, const pgwt_merge_output *out,
                 c->config.writer_failed(c->config.ctx);
                 if (c->config.observe) refresh(c, post);
             }
-        } else {
+        } else if (post->counters.value[14] == before) {
             if (c->local_writer_fail == UINT64_MAX || post->counters.value[14] == UINT64_MAX)
                 post->counters.known = false;
             else { ++c->local_writer_fail; ++post->counters.value[14]; }
@@ -157,27 +162,54 @@ static bool capture_sink(void *ctx, const pgwt_merge_output *out,
     return ok;
 }
 
-struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *cfg)
+/* Normally the FRONTIER callback commits the batch inside the core's
+ * publication checkpoint. TEXT may publish without advancing F; finish that
+ * batch here. A failed append leaves only an uncertified suffix and must
+ * still reach the same writer-failure/VOID path. */
+static int flush_outputs(struct pgwt_merge_capture *c)
+{
+    if (!c->config.sink.flush || c->config.sink.flush(c->config.sink.ctx)) return 0;
+    pgwt_merge_observation o = c->observation;
+    if (c->config.writer_failed) {
+        c->config.writer_failed(c->config.ctx);
+        refresh(c, &o);
+    } else if (c->local_writer_fail == UINT64_MAX || o.counters.value[14] == UINT64_MAX) {
+        o.counters.known = false;
+    } else { ++c->local_writer_fail; ++o.counters.value[14]; }
+    c->observation = o;
+    pgwt_merge_input in = {.kind = PGWT_MERGE_WRITER_REJECTED, .observation = o};
+    pgwt_merge_status status = pgwt_merge_feed(c->core, &in);
+    return status == PGWT_MERGE_EXIT_REQUIRED || pgwt_merge_get_report(c->core).void_failed ? -EIO : 0;
+}
+
+static struct pgwt_merge_capture *capture_create(const struct pgwt_capture_config *cfg,
+                                                const pgwt_merge_config *initial,
+                                                const ma_table *premises)
 {
     if (!cfg || !cfg->cpu_count || cfg->cpu_count > 65536 || !cfg->capacity ||
+        cfg->capacity > PGWT_CAPTURE_LIFETIME_CAPACITY ||
         cfg->capacity > SIZE_MAX / sizeof(struct retained) ||
         cfg->capacity > SIZE_MAX / 2 / sizeof(struct arrival)) return NULL;
     struct pgwt_merge_capture *c = calloc(1, sizeof(*c));
     if (!c) return NULL;
+    c->dump_fd = -1;
     c->oldest = c->newest = SIZE_MAX;
     c->arrival_slots = cfg->capacity * 2;
     c->arrivals = calloc(cfg->capacity, sizeof(*c->arrivals));
     c->arrival_buckets = calloc(c->arrival_slots, sizeof(*c->arrival_buckets));
     c->config = *cfg; c->source_count = cfg->cpu_count + 2;
     c->observation = cfg->baseline;
+    c->last_checkpoint_at = cfg->baseline.d;
     c->lifetimes = calloc(cfg->capacity, sizeof(*c->lifetimes));
     c->bindings = calloc(cfg->capacity, sizeof(*c->bindings));
+    c->lifetime_index = calloc(c->arrival_slots, sizeof(*c->lifetime_index));
+    c->binding_index = calloc(c->arrival_slots, sizeof(*c->binding_index));
     c->held = calloc(c->source_count, sizeof(*c->held));
     c->heads = calloc(c->source_count, sizeof(*c->heads));
     c->tails = calloc(c->source_count, sizeof(*c->tails));
     c->storage = calloc(cfg->capacity, sizeof(*c->storage));
     ma_source_decl *sources = calloc(c->source_count, sizeof(*sources));
-    if (!c->arrival_buckets || !c->arrivals || !c->lifetimes || !c->bindings || !c->held || !c->heads || !c->tails || !c->storage || !sources)
+    if (!c->lifetime_index || !c->binding_index || !c->arrival_buckets || !c->arrivals || !c->lifetimes || !c->bindings || !c->held || !c->heads || !c->tails || !c->storage || !sources)
         goto fail;
     arrival_reset(c);
     for (size_t i = 0; i < cfg->capacity; ++i) {
@@ -185,7 +217,7 @@ struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config 
     }
     for (size_t i = 0; i < c->source_count; ++i)
         sources[i] = (ma_source_decl){.mechanism = i < cfg->cpu_count ? MA_WATCHPOINT_PERF : MA_ORDERED_RING,
-                                      .qualification_complete = true};
+            .qualification_complete = true, .initial_cutoff = initial ? initial->sources[i].cutoff : 0};
     ma_config mc = {.mode = PGWT_MERGE_N, .synthetic_premises = false,
                    .sources = sources, .source_count = c->source_count};
     c->adapter = ma_create_production(&mc, NULL);
@@ -195,6 +227,29 @@ struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config 
         .attachment_capacity = cfg->capacity, .frontier_capacity = cfg->capacity,
         .dependency_capacity = cfg->capacity, .sink = capture_sink, .sink_context = c,
         .observation = cfg->baseline, .last_observed = cfg->baseline.counters}, core_config;
+    if (initial) {
+        base = *initial; base.sources = NULL;
+        base.sink = capture_sink; base.sink_context = c;
+    }
+    if (premises) {
+        if (premises->lifetime_count > cfg->capacity || premises->binding_count > cfg->capacity) goto fail;
+        memcpy(c->lifetimes, premises->lifetimes, premises->lifetime_count * sizeof(*c->lifetimes));
+        memcpy(c->bindings, premises->bindings, premises->binding_count * sizeof(*c->bindings));
+        ma_table t = {.lifetimes = c->lifetimes, .bindings = c->bindings,
+            .lifetime_index = c->lifetime_index, .binding_index = c->binding_index,
+            .index_slots = c->arrival_slots};
+        for (size_t i = 0; i < premises->lifetime_count; ++i) {
+            size_t slot = ma_lifetime_bucket(&t, c->lifetimes[i].pid, c->lifetimes[i].g, NULL);
+            if (c->lifetime_index[slot]) goto fail;
+            c->lifetime_index[slot] = i + 1;
+        }
+        for (size_t i = 0; i < premises->binding_count; ++i) {
+            size_t slot = ma_binding_bucket(&t, c->bindings[i].query_id, NULL);
+            if (c->binding_index[slot]) goto fail;
+            c->binding_index[slot] = i + 1;
+        }
+        c->lifetime_count = premises->lifetime_count; c->binding_count = premises->binding_count;
+    }
     if (!ma_core_config(c->adapter, &base, &core_config)) goto fail;
     pgwt_merge_status status;
     c->core = pgwt_merge_create(&core_config, &status);
@@ -203,12 +258,32 @@ struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config 
 fail:
     free(sources); pgwt_capture_destroy(c); return NULL;
 }
+struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *cfg)
+{
+    return capture_create(cfg, NULL, NULL);
+}
 static ma_table table(struct pgwt_merge_capture *c)
 {
     return (ma_table){.lifetimes = c->lifetimes, .lifetime_count = c->lifetime_count,
         .bindings = c->bindings, .binding_count = c->binding_count,
-        .held = c->held, .source_count = c->source_count};
+        .held = c->held, .source_count = c->source_count,
+        .lifetime_index = c->lifetime_index, .binding_index = c->binding_index,
+        .index_slots = c->arrival_slots};
 }
+#ifdef PGWT_TRANSPORT_HOST_TEST
+struct pgwt_merge_capture *pgwt_capture_replay_create(const struct pgwt_capture_config *cfg,
+                                                      const pgwt_merge_config *initial,
+                                                      const ma_table *premises)
+{
+    if (!initial || !initial->sources || initial->source_count != cfg->cpu_count + 2) return NULL;
+    return capture_create(cfg, initial, premises);
+}
+pgwt_merge_status pgwt_capture_replay_control(struct pgwt_merge_capture *c, const pgwt_merge_input *in)
+{
+    return pgwt_merge_feed(c->core, in);
+}
+ma_table pgwt_capture_replay_table(struct pgwt_merge_capture *c) { return table(c); }
+#endif
 int pgwt_capture_fault(struct pgwt_merge_capture *c, pgwt_merge_reason reason,
                         uint64_t d, const ma_snapshot *s)
 {
@@ -227,7 +302,10 @@ int pgwt_capture_received(struct pgwt_merge_capture *c, const ma_envelope *e, ui
     if (pgwt_capture_report(c).status == PGWT_MERGE_OK) {
         size_t slot = arrival_slot(c, e->source, e->position);
         if (c->arrival_free == SIZE_MAX) return -ENOMEM;
-        if (c->arrival_buckets[slot]) return -EINVAL;
+        if (c->arrival_buckets[slot]) {
+            ma_snapshot snap = pgwt_capture_last_snapshot(c);
+            return pgwt_capture_fault(c, PGWT_MERGE_DUPLICATE_IDENTITY, now, &snap);
+        }
         size_t index = c->arrival_free;
         c->arrival_free = c->arrivals[index].next;
         c->arrivals[index] = (struct arrival){.source = e->source, .position = e->position,
@@ -239,24 +317,24 @@ int pgwt_capture_received(struct pgwt_merge_capture *c, const ma_envelope *e, ui
     }
     if (e->kind == MA_LIFECYCLE && get_le(e->bytes, 4) == 1 && e->cookie_present && e->cookie) {
         uint64_t pid = get_le(e->bytes + 4, 4);
-        bool found = false;
-        for (size_t i = 0; i < c->lifetime_count; ++i)
-            if (c->lifetimes[i].pid == pid && c->lifetimes[i].g == e->cookie) found = true;
-        if (!found) {
+        ma_table t = table(c);
+        size_t slot = ma_lifetime_bucket(&t, pid, e->cookie, NULL);
+        if (!c->lifetime_index[slot]) {
             if (c->lifetime_count == c->config.capacity) return -ENOMEM;
             c->lifetimes[c->lifetime_count++] = (ma_lifetime){.pid = pid,
                 .g = e->cookie, .identity_bound = true, .proof = MA_NOT_ATTEMPTED};
+            c->lifetime_index[slot] = c->lifetime_count;
         }
     }
     uint64_t query = e->kind == MA_TRACE ? get_le(e->bytes + 32, 8) :
                      e->kind == MA_TEXT ? get_le(e->bytes + 8, 8) : 0;
     if (query) {
-        bool found = false;
-        for (size_t i = 0; i < c->binding_count; ++i)
-            if (c->bindings[i].query_id == query) found = true;
-        if (!found) {
+        ma_table t = table(c);
+        size_t slot = ma_binding_bucket(&t, query, NULL);
+        if (!c->binding_index[slot]) {
             if (c->binding_count == c->config.capacity) return -ENOMEM;
             c->bindings[c->binding_count++] = (ma_binding){.query_id = query, .kind = MA_NOT_REQUIRED};
+            c->binding_index[slot] = c->binding_count;
         }
     }
     if ((e->kind == MA_LIFECYCLE || e->kind == MA_TEXT) && c->config.lifecycle) {
@@ -301,10 +379,13 @@ static int mapped(struct pgwt_merge_capture *c, const ma_envelope *e,
         if (r.input[i].kind == PGWT_MERGE_DATA || r.input[i].kind == PGWT_MERGE_TEXT) ++c->staged;
         if (pgwt_merge_feed(c->core, &r.input[i]) == PGWT_MERGE_EXIT_REQUIRED ||
             pgwt_merge_get_report(c->core).void_failed) return -EIO;
+        if (flush_outputs(c) < 0) return -EIO;
     }
-    if (r.has_lifetime_update) for (size_t i = 0; i < c->lifetime_count; ++i)
-        if (c->lifetimes[i].pid == r.next_lifetime.pid && c->lifetimes[i].g == r.next_lifetime.g)
-            c->lifetimes[i] = r.next_lifetime;
+    if (r.has_lifetime_update) {
+        size_t slot = ma_lifetime_bucket(&t, r.next_lifetime.pid, r.next_lifetime.g, NULL);
+        if (c->lifetime_index[slot])
+            c->lifetimes[c->lifetime_index[slot] - 1] = r.next_lifetime;
+    }
     *s = pgwt_capture_last_snapshot(c);
     return 0;
 }
@@ -372,13 +453,20 @@ bool pgwt_capture_waiting(const struct pgwt_merge_capture *c)
 { return c && (c->retained_count || c->staged) && pgwt_capture_report(c).status == PGWT_MERGE_OK; }
 pgwt_merge_report pgwt_capture_report(const struct pgwt_merge_capture *c)
 { return pgwt_merge_get_report(c ? c->core : NULL); }
-int pgwt_capture_finish(struct pgwt_merge_capture *c, uint64_t d, const ma_snapshot *s)
+static int finish_capture(struct pgwt_merge_capture *c, uint64_t d, const ma_snapshot *s)
 {
     if (!c) return -EINVAL;
     if (c->finished) return 0;
-    int rc = 0;
+    ma_envelope check = {.version = 1, .kind = MA_CHECK};
+    int rc = pgwt_capture_envelope(c, &check, d, s);
+    if (rc < 0) return rc;
     if (pgwt_capture_waiting(c)) rc = pgwt_capture_fault(c, PGWT_MERGE_UNKNOWN_EVIDENCE, d, s);
-    c->finished = true;
+    return rc;
+}
+int pgwt_capture_finish(struct pgwt_merge_capture *c, uint64_t d, const ma_snapshot *s)
+{
+    int rc = finish_capture(c, d, s);
+    if (c) c->finished = true;
     return rc;
 }
 void pgwt_capture_destroy(struct pgwt_merge_capture *c)
@@ -386,34 +474,101 @@ void pgwt_capture_destroy(struct pgwt_merge_capture *c)
     if (!c) return;
     pgwt_merge_destroy(c->core); ma_destroy(c->adapter);
     free(c->lifetimes); free(c->bindings); free(c->held); free(c->heads); free(c->tails);
+    free(c->lifetime_index); free(c->binding_index);
     free(c->storage); free(c->arrivals); free(c->arrival_buckets); free(c);
+}
+/* One allocation at open; no record-path allocation, formatting or stdio. */
+struct pgwt_capture_dump {
+    unsigned char *bytes;
+    size_t used, capacity;
+    pgwt_capture_write_fn write;
+    void *ctx;
+};
+static void put_le(unsigned char *p, uint64_t v, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) p[i] = (unsigned char)(v >> (8 * i));
+}
+struct pgwt_capture_dump *pgwt_capture_dump_create(size_t records,
+                                                  pgwt_capture_write_fn write, void *ctx)
+{
+    if (!records || !write || records > (SIZE_MAX - 152) / 312) return NULL;
+    struct pgwt_capture_dump *dump = calloc(1, sizeof(*dump));
+    if (!dump) return NULL;
+    dump->capacity = records * 312 + 152;
+    dump->bytes = malloc(dump->capacity);
+    if (!dump->bytes) { free(dump); return NULL; }
+    dump->write = write; dump->ctx = ctx;
+    return dump;
+}
+bool pgwt_capture_dump_flush(void *ctx)
+{
+    struct pgwt_capture_dump *dump = ctx;
+    if (!dump) return false;
+    if (!dump->used) return true;
+    bool ok = dump->write(dump->ctx, dump->bytes, dump->used);
+    /* Failed suffixes must not be retried as valid DATA along with the VOID.
+     * A partial physical append is explicitly an uncertified tail. */
+    dump->used = 0;
+    return ok;
+}
+bool pgwt_capture_dump_header(struct pgwt_capture_dump *dump, const uint32_t *cpus, size_t n)
+{
+    if (!dump || !cpus || !n || n > 65536 || dump->used ||
+        n > (dump->capacity - 24) / 4) return false;
+    unsigned char *p = dump->bytes;
+    memcpy(p, "PGWTQB02", 8);
+    put_le(p + 8, 2, 4); put_le(p + 12, n, 4);
+    put_le(p + 16, PGWT_CAPTURE_LIFETIME_CAPACITY, 4);
+    put_le(p + 20, PGWT_CAPTURE_DUMP_TRACE_BYTES, 4);
+    for (size_t i = 0; i < n; ++i) put_le(p + 24 + i * 4, cpus[i], 4);
+    dump->used = 24 + n * 4;
+    return pgwt_capture_dump_flush(dump);
 }
 bool pgwt_capture_dump(void *ctx, const pgwt_merge_output *out, pgwt_merge_observation *post)
 {
     (void)post;
-    FILE *f = ctx;
-    if (!f || !out || (unsigned)out->kind > PGWT_MERGE_OUT_VOID ||
-        (out->record.payload_size && !out->record.payload)) return false;
-    const char *reason = out->kind == PGWT_MERGE_OUT_VOID ? pgwt_merge_reason_name(out->reason) : "";
-    if (!reason) return false;
-    const char *kind = out->kind == PGWT_MERGE_OUT_DATA ? "DATA" :
-        out->kind == PGWT_MERGE_OUT_TEXT ? "TEXT" : out->kind == PGWT_MERGE_OUT_FRONTIER ? "FRONTIER" : "VOID";
-    if (fprintf(f, "{\"kind\":\"%s\",\"epoch\":%" PRIu64 ",\"F\":%" PRIu64
-        ",\"d\":%" PRIu64 ",\"reason\":\"%s\",\"known\":%s,\"counters\":[",
-        kind, out->epoch, out->F, out->d, reason,
-        out->counters.known ? "true" : "false") < 0) return false;
-    for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i)
-        if (fprintf(f, "%s%" PRIu64, i ? "," : "", out->counters.value[i]) < 0) return false;
+    struct pgwt_capture_dump *dump = ctx;
+    if (!dump || !out || (unsigned)out->kind > PGWT_MERGE_OUT_VOID) return false;
+    bool data = out->kind == PGWT_MERGE_OUT_DATA || out->kind == PGWT_MERGE_OUT_TEXT;
     const pgwt_merge_record *r = &out->record;
-    if (fprintf(f, "],\"prior_interval_certified\":%s,\"source\":%zu,\"o\":%" PRIu64
-        ",\"t\":%" PRIu64 ",\"pid\":%" PRIu64 ",\"g\":%" PRIu64 ",\"q\":%" PRIu64
-        ",\"rank\":%u,\"identity_known\":%s,\"fork_seed_proved\":%s,\"has_q\":%s,\"dependency\":%u,\"dependency_id\":%" PRIu64 ",\"payload\":\"",
-        out->prior_interval_certified ? "true" : "false", r->source, r->o, r->t, r->pid, r->g, r->q,
-        (unsigned)r->rank, r->identity_known ? "true" : "false", r->fork_seed_proved ? "true" : "false",
-        r->has_q ? "true" : "false", (unsigned)r->dependency, r->dependency_id) < 0) return false;
-    const unsigned char *p = r->payload;
-    for (size_t i = 0; i < r->payload_size; ++i) if (fprintf(f, "%02x", p[i]) < 0) return false;
-    return fputs("\"}\n", f) >= 0 && fflush(f) == 0;
+    if (data && (r->payload_size > 272 || (r->payload_size && !r->payload) ||
+        r->source > UINT32_MAX || r->q || r->has_q)) return false;
+    size_t n = data ? 40 + r->payload_size : 152;
+    if (n > dump->capacity - dump->used) return false;
+    unsigned char *p = dump->bytes + dump->used;
+    memset(p, 0, data ? 40 : n);
+    put_le(p, n, 2); p[2] = (unsigned char)out->kind;
+    put_le(p + 8, out->epoch, 8);
+    if (data) {
+        p[3] = (unsigned char)(out->prior_interval_certified | ((unsigned)r->rank << 1) |
+            (r->identity_known << 3) | (r->fork_seed_proved << 4) | ((unsigned)r->dependency << 5));
+        put_le(p + 4, r->source, 4); put_le(p + 16, r->o, 8);
+        put_le(p + 24, r->g, 8); put_le(p + 32, r->dependency_id, 8);
+        if (r->payload_size) memcpy(p + 40, r->payload, r->payload_size);
+    } else {
+        p[3] = out->counters.known;
+        if (out->kind == PGWT_MERGE_OUT_VOID) put_le(p + 4, out->reason, 4);
+        put_le(p + 16, out->F, 8); put_le(p + 24, out->d, 8);
+        for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i)
+            put_le(p + 32 + i * 8, out->counters.value[i], 8);
+    }
+    dump->used += n;
+    return data || pgwt_capture_dump_flush(dump);
+}
+bool pgwt_capture_dump_end(struct pgwt_capture_dump *dump, uint64_t age,
+                           bool known, uint64_t lost, pgwt_merge_report report)
+{
+    if (!dump || dump->capacity - dump->used < 32) return false;
+    unsigned char *p = dump->bytes + dump->used;
+    memset(p, 0, 32); put_le(p, 32, 2); p[2] = 4;
+    p[3] = (unsigned char)(known | (report.epoch_invalid << 1));
+    put_le(p + 8, age, 8); put_le(p + 16, lost, 8); put_le(p + 24, report.status, 4);
+    dump->used += 32;
+    return pgwt_capture_dump_flush(dump);
+}
+void pgwt_capture_dump_destroy(struct pgwt_capture_dump *dump)
+{
+    if (dump) { free(dump->bytes); free(dump); }
 }
 
 #if defined(__linux__) && !defined(PGWT_TRANSPORT_HOST_TEST)
@@ -421,7 +576,7 @@ bool pgwt_capture_dump(void *ctx, const pgwt_merge_output *out, pgwt_merge_obser
 #include "daemon.h"
 #include "capture_counters.h"
 #include "event_stream.h"
-#include <signal.h>
+#include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -437,19 +592,29 @@ int pgwt_merge_capture_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t 
     for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i) {
         s->value[i] = v.components[i].value; s->component_valid[i] = v.components[i].valid;
     }
+    if (d->merge_capture) d->merge_capture->last_checkpoint_at = *now;
     return 0;
 }
 static int daemon_observe(void *ctx, pgwt_merge_observation *o)
 {
-    ma_snapshot s;
-    int rc = pgwt_merge_capture_snapshot(ctx, &s, &o->d);
-    if (rc < 0) return rc;
-    o->counters.known = s.valid;
-    for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i) {
-        o->counters.value[i] = s.value[i];
-        o->counters.known = o->counters.known && s.component_valid[i];
-    }
+    struct pgwt_daemon *d = ctx;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return -errno;
+    o->d = (uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec;
+    /* The other 14 components are the completed-round snapshot. Only this
+     * component can change synchronously in a publication callback. */
+    o->counters.value[PGWT_C_WRITER_PUSH_FAIL] = d->counters.writer_push_fail_total;
     return 0;
+}
+static bool daemon_write(void *ctx, const void *bytes, size_t n)
+{
+    return write((int)(intptr_t)ctx, bytes, n) == (ssize_t)n;
+}
+static bool daemon_flush(void *ctx)
+{
+    struct pgwt_daemon *d = ctx;
+    if (d->merge_sink.flush && !d->merge_sink.flush(d->merge_sink.ctx)) return false;
+    return d->merge_capture && pgwt_capture_dump_flush(d->merge_capture->dump);
 }
 static int daemon_lifecycle(void *ctx, const void *p, size_t n)
 {
@@ -478,6 +643,10 @@ static bool daemon_sink(void *ctx, const pgwt_merge_output *out, pgwt_merge_obse
     struct pgwt_daemon *d = ctx;
     /* Another consumer (the later capture writer) can register here. */
     bool ok = !d->merge_sink.emit || d->merge_sink.emit(d->merge_sink.ctx, out, post);
+    /* Required consumers commit before the dump can expose a FRONTIER. */
+    if (ok && d->merge_sink.flush &&
+        (out->kind == PGWT_MERGE_OUT_FRONTIER || out->kind == PGWT_MERGE_OUT_VOID))
+        ok = d->merge_sink.flush(d->merge_sink.ctx);
     if (ok) ok = d->merge_capture && pgwt_capture_dump(d->merge_capture->dump, out, post);
     if (out->kind == PGWT_MERGE_OUT_VOID) {
         fprintf(stderr, "exact-perf: suspended: %s at %llu; automatic REARM disabled\n",
@@ -501,34 +670,46 @@ int pgwt_merge_capture_open(struct pgwt_daemon *d)
     size_t ncpu = pgwt_percpu_transport_cpu_count(d);
     if (!ncpu) return -EINVAL;
     pgwt_merge_observation baseline = {0};
-    if (daemon_observe(d, &baseline) < 0 || !baseline.counters.known) return -EIO;
-    struct pgwt_capture_config cfg = {.cpu_count = ncpu, .capacity = 262144,
+    ma_snapshot initial;
+    if (pgwt_percpu_transport_snapshot(d, &initial, &baseline.d) < 0) return -EIO;
+    baseline.counters.known = initial.valid;
+    for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i) {
+        baseline.counters.value[i] = initial.value[i];
+        baseline.counters.known &= initial.component_valid[i];
+    }
+    if (!baseline.counters.known) return -EIO;
+    struct pgwt_capture_config cfg = {.cpu_count = ncpu, .capacity = PGWT_CAPTURE_LIFETIME_CAPACITY,
         .baseline = baseline, .ctx = d, .lifecycle = daemon_lifecycle,
         .trace = daemon_trace, .observe = daemon_observe, .writer_failed = daemon_writer_failed,
-        .sink = {.emit = daemon_sink, .ctx = d}};
+        .sink = {.emit = daemon_sink, .ctx = d, .flush = daemon_flush}};
     /* Create the dump first: creation can report a VOID through the sink. */
     size_t len = strlen(d->trace_dir);
     if (len > SIZE_MAX - 40) return -ENAMETOOLONG;
     char *path = malloc(len + 40);
     if (!path) return -ENOMEM;
-    snprintf(path, len + 40, "%s/merge-qualification.jsonl", d->trace_dir);
-    FILE *dump = fopen(path, "a"); free(path);
-    if (!dump) return -errno;
-    bool header_ok = fputs("{\"format\":\"qualification evidence only; not a product capture format\","
-        "\"version\":1,\"mode\":\"N\",\"counter_order\":\"merge-v1 section 4\",\"cpus\":[", dump) >= 0;
-    for (size_t i = 0; i < ncpu && header_ok; ++i)
-        header_ok = fprintf(dump, "%s%u", i ? "," : "", pgwt_percpu_transport_cpu_id(d, i)) >= 0;
-    if (!header_ok || fputs("]}\n", dump) < 0 || fflush(dump)) {
-        fclose(dump); return -EIO;
+    snprintf(path, len + 40, "%s/merge-qualification.bin", d->trace_dir);
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600); free(path);
+    if (fd < 0) return -errno;
+    struct pgwt_capture_dump *dump = pgwt_capture_dump_create(cfg.capacity, daemon_write, (void *)(intptr_t)fd);
+    uint32_t *cpus = malloc(ncpu * sizeof(*cpus));
+    if (!dump || !cpus) {
+        free(cpus); pgwt_capture_dump_destroy(dump); close(fd); return -ENOMEM;
     }
+    for (size_t i = 0; i < ncpu; ++i) cpus[i] = pgwt_percpu_transport_cpu_id(d, i);
+    bool header_ok = pgwt_capture_dump_header(dump, cpus, ncpu);
+    free(cpus);
+    if (!header_ok) { pgwt_capture_dump_destroy(dump); close(fd); return -EIO; }
     /* Validated baseline and fixed capacities make ordinary construction
      * silent; a creation failure is reported out of band, never half-wired. */
     d->merge_capture = pgwt_capture_create(&cfg);
     if (!d->merge_capture) {
         fprintf(stderr, "exact-perf: production merge creation failed; capture stopped\n");
-        fclose(dump); return -ENOMEM;
+        pgwt_capture_dump_destroy(dump); close(fd); return -ENOMEM;
     }
-    d->merge_capture->dump = dump;
+    d->merge_capture->dump = dump; d->merge_capture->dump_fd = fd;
+    fprintf(stderr, "exact-perf: retaining up to %u lifetimes until capture teardown; "
+        "exact capture pauses with VOID(allocation_fail) at capacity; no retirement\n",
+        PGWT_CAPTURE_LIFETIME_CAPACITY);
     d->attach_report = daemon_attach; d->attach_report_ctx = d;
     return 0;
 }
@@ -536,10 +717,23 @@ int pgwt_merge_capture_poll(struct pgwt_daemon *d)
 {
     if (!d) return -EINVAL;
     if (!d->exact_perf) return 0;
-    ma_snapshot s; uint64_t now;
     if (!d->merge_capture) return -EINVAL;
-    int rc = pgwt_merge_capture_snapshot(d, &s, &now);
-    if (rc < 0) { memset(&s, 0, sizeof(s)); now = 0; }
+    ma_snapshot s = pgwt_capture_last_snapshot(d->merge_capture);
+    pgwt_merge_observation o = d->merge_capture->observation;
+    int rc = daemon_observe(d, &o);
+    uint64_t now = o.d;
+    s.value[PGWT_C_WRITER_PUSH_FAIL] = o.counters.value[PGWT_C_WRITER_PUSH_FAIL];
+    if (rc < 0) s.valid = false;
+    /* A full vector is read at open, after the completion fence, on faults,
+     * at shutdown, and every 10 ms of transport silence. Never reread maps
+     * just because the main loop or a publication callback ran. A missing
+     * helper cannot block silence checks indefinitely. */
+    const uint64_t silence_ns = UINT64_C(10000000);
+    if (now < d->merge_capture->last_checkpoint_at ||
+        (now - d->merge_capture->last_checkpoint_at >= silence_ns &&
+         pgwt_transport_silent(d->percpu_transport, now, silence_ns))) {
+        if (pgwt_percpu_transport_snapshot(d, &s, &now) < 0) s.valid = false;
+    }
     ma_envelope e = {.version = 1, .kind = MA_CHECK};
     return pgwt_capture_envelope(d->merge_capture, &e, now, &s);
 }
@@ -547,14 +741,8 @@ int pgwt_merge_capture_tick(struct pgwt_daemon *d)
 {
     if (!d) return -EINVAL;
     if (!d->exact_perf) return 0;
-    if (d->daemon_mode && kill(d->postmaster_pid, 0) != 0) {
-        fprintf(stderr, "\npg_wait_tracer: PostgreSQL (PID %d) stopped\n", d->postmaster_pid);
-        d->exit_reason = PGWT_EXIT_PG_DEAD; d->running = false; return 0;
-    }
-    pgwt_sweep_bootstrap_backends(d);
-    if (!d->lightweight_mode && !getenv("PGWT_TEST_NO_RECOVERY")) pgwt_recover_unattached_backends(d);
-    if (!d->lightweight_mode && !getenv("PGWT_TEST_NO_STALE_SWEEP")) pgwt_sweep_stale_state(d);
-    pgwt_escalation_check_budget(d);
+    pgwt_tick_duties(d);
+    if (!d->running) return 0;
     return pgwt_merge_capture_poll(d);
 }
 int pgwt_merge_capture_finish(struct pgwt_daemon *d)
@@ -564,20 +752,20 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
     if (!d->merge_capture || !d->percpu_transport) return -EINVAL;
     int rc = pgwt_transport_finish(d->percpu_transport);
     ma_snapshot s = {0}; uint64_t now = 0;
-    pgwt_merge_capture_snapshot(d, &s, &now);
-    int end = pgwt_capture_finish(d->merge_capture, now, &s);
+    pgwt_percpu_transport_snapshot(d, &s, &now);
+    int end = finish_capture(d->merge_capture, now, &s);
     uint64_t age = pgwt_capture_max_held_ns(d->merge_capture, now), lost = 0;
     bool lost_known = pgwt_transport_lost_total(d->percpu_transport, &lost);
     pgwt_merge_report report = pgwt_capture_report(d->merge_capture);
-    FILE *dump = d->merge_capture->dump;
-    int saved = fprintf(dump, "{\"kind\":\"QUALIFICATION_END\",\"max_held_ns\":%llu,"
-        "\"perf_lost_known\":%s,\"perf_lost_total\":%llu,\"status\":%u,\"epoch_invalid\":%s}\n",
-        (unsigned long long)age, lost_known ? "true" : "false", (unsigned long long)lost,
-        (unsigned)report.status, report.epoch_invalid ? "true" : "false");
-    if (saved < 0 || fflush(dump)) {
+    if (!pgwt_capture_dump_end(d->merge_capture->dump, age, lost_known, lost, report)) {
+        ++d->counters.writer_push_fail_total;
+        s.value[PGWT_C_WRITER_PUSH_FAIL] = d->counters.writer_push_fail_total;
+        end = pgwt_capture_fault(d->merge_capture, PGWT_MERGE_WRITER_PUSH_FAIL, now, &s);
         fprintf(stderr, "exact-perf: qualification summary could not be written\n");
-        ++d->counters.writer_push_fail_total; end = -EIO;
+        if (!end) end = -EIO;
     }
+    d->merge_capture->finished = true;
+    report = pgwt_capture_report(d->merge_capture);
     fprintf(stderr, "exact-perf: max held age ns=%llu; status=%u; perf LOST=%llu%s\n",
         (unsigned long long)age, (unsigned)report.status, (unsigned long long)lost,
         lost_known ? "" : " (unknown overflow)");
@@ -597,17 +785,24 @@ int pgwt_merge_capture_attach(struct pgwt_daemon *d, const struct pgwt_attach_re
 {
     if (!d) return -EINVAL;
     if (!d->exact_perf) return 0;
-    ma_snapshot s = {0}; uint64_t now = 0;
-    pgwt_merge_capture_snapshot(d, &s, &now);
-    return pgwt_capture_attach(d->merge_capture, r, now, &s);
+    if (!d->merge_capture) return -EINVAL;
+    /* Attachment reports are per lifetime, not a counter-map checkpoint. */
+    pgwt_merge_observation o = d->merge_capture->observation;
+    if (daemon_observe(d, &o) < 0) o.counters.known = false;
+    ma_snapshot s = pgwt_capture_last_snapshot(d->merge_capture);
+    s.value[PGWT_C_WRITER_PUSH_FAIL] = o.counters.value[PGWT_C_WRITER_PUSH_FAIL];
+    s.valid &= o.counters.known;
+    return pgwt_capture_attach(d->merge_capture, r, o.d, &s);
 }
 void pgwt_merge_capture_close(struct pgwt_daemon *d)
 {
     if (!d || !d->merge_capture) return;
-    FILE *dump = d->merge_capture->dump;
+    struct pgwt_capture_dump *dump = d->merge_capture->dump;
+    int fd = d->merge_capture->dump_fd;
     d->attach_report = NULL; d->attach_report_ctx = NULL;
     pgwt_capture_destroy(d->merge_capture); d->merge_capture = NULL;
-    if (dump && fclose(dump)) fprintf(stderr, "exact-perf: qualification sink close failed\n");
+    pgwt_capture_dump_destroy(dump);
+    if (fd >= 0 && close(fd)) fprintf(stderr, "exact-perf: qualification sink close failed\n");
 }
 
 #else
