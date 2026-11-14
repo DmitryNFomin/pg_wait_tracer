@@ -110,6 +110,30 @@ bool pgwt_pgbs_exclusion_contains(const struct pgwt_pgbs_exclusion_set *set, pid
 { (void)set; (void)pid; return false; }
 int pgwt_handle_exit(struct pgwt_daemon *ctx, pid_t pid)
 { (void)ctx; (void)pid; return 0; }
+/* Sampler identity is independent of the retained watchpoint-target handle.
+ * Model successful enrollment without /proc I/O, so it cannot change the
+ * injected hardware errno, liveness state, or attach/race counters. The
+ * finder below always returns NULL: duplicate-fork identity/reset are not
+ * reached by these attach scenarios. */
+bool pgwt_pgbs_pid_is_original(pid_t pid, uint64_t start_time)
+{ return pid == 42 && start_time == 1; }
+void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader)
+{
+    free(reader->target_maps);
+    free(reader->reader_maps);
+    memset(reader, 0, sizeof(*reader));
+}
+int pgwt_sampler_enroll_backend(struct pgwt_backend *be, uint64_t tick_ts)
+{
+    (void)tick_ts;
+    if (be->pid <= 0) return -1;
+    if (!be->sampled_reader.pid) {
+        be->sampled_reader.pid = be->pid;
+        be->sampled_reader.start_time = 1;
+    }
+    return be->sampled_reader.pid == be->pid &&
+           be->sampled_reader.start_time != 0 ? 0 : -1;
+}
 static struct pgwt_backend *alloc_backend(struct pgwt_backend_table *bt, pid_t pid, bool pg13)
 {
     (void)pg13;

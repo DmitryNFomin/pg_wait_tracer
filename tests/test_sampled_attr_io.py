@@ -219,8 +219,14 @@ def main():
     source = (ROOT / "src/backend_status_layout.c").read_text()
     backend = (ROOT / "src/backend.c").read_text()
     sampler = (ROOT / "src/sampler.c").read_text()
-    lifecycle = "\n".join(function(backend, name) for name in
-                          ("alloc_backend", "pgwt_sampler_enroll_backend", "pgwt_scan_existing_backends", "pgwt_handle_fork", "pgwt_handle_init"))
+    # Keep the merged attach failure classification in the compiled lifecycle,
+    # including its real retained-fd liveness parser; only libc I/O is injected.
+    cmdline = (ROOT / "src/cmdline.c").read_text()
+    lifecycle = function(cmdline, "pgwt_backend_target_live_fd") + "\n" + "\n".join(
+        function(backend, name) for name in (
+            "open_watchpoint_target", "record_watchpoint_failure", "alloc_backend",
+            "pgwt_sampler_enroll_backend", "pgwt_scan_existing_backends",
+            "pgwt_handle_fork", "pgwt_handle_init"))
     policy = "\n".join(function(sampler, name) for name in
                        ("resolve_sampled_attr", "finish_sampled_attr", "note_idle_attr_sample"))
     # Compile the real registry paths and the actual target-building loop.

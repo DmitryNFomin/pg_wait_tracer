@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -469,12 +470,18 @@ static int scan_closedir(DIR *dir) { (void)dir; return 0; }
 #define readdir scan_readdir
 #define closedir scan_closedir
 #define fopen io_fopen
+#define open io_open
+#define close io_close
+#define pread io_pread
 #include PGWT_LIFECYCLE_SOURCE
 
 #undef opendir
 #undef readdir
 #undef closedir
 #undef fopen
+#undef open
+#undef close
+#undef pread
 
 static struct pgwt_daemon *new_daemon(int major)
 {
