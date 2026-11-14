@@ -222,6 +222,10 @@ def start_tracer(pm_pid, escalation_fail_at=None):
     trace_dir = tempfile.mkdtemp(prefix="pgwt_exact_lifecycle_")
     os.chmod(trace_dir, 0o755)
     env = os.environ.copy()
+    # The rehearsal switch belongs to the harness; the daemon reads the
+    # low-level seam, including when probes attach later during escalation.
+    if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1":
+        env["PGWT_TEST_NO_USDT_SEMA_REFCNT"] = "1"
     if escalation_fail_at is not None:
         env["PGWT_TEST_EXACT_PROBE_ESCALATION_FAIL_AT"] = str(
             escalation_fail_at)
@@ -370,6 +374,8 @@ def run_cycles(pm_pid, pg_major, expected_phase):
             generation = int(active.get("exact_probe_generation", 0))
             mask_ok, mask_why = exact_window_mask_ok(
                 active.get("exact_probe_attached_mask"), expected_phase)
+            # Unlike marker-derived artifact tests, this lifecycle test keeps
+            # exercising attribution, generations and rollback with phase=0.
             check(active.get("tier") == "escalated" and mask_ok and
                   active.get("exact_cpu_active") is True,
                   f"cycle {cycle}: exact window carries the required "
