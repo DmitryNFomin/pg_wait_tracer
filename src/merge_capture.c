@@ -41,7 +41,8 @@ struct pgwt_merge_capture {
     /* Measurements only. Ages in PGWT_CAPTURE_AGE_BUCKET_NS buckets; the
      * last bucket collects everything at or beyond the range. */
     uint64_t released_data, released_text, frontiers, voids;
-    uint64_t held_max, event_max;
+    uint64_t held_max, event_max, event_max_pid;
+    unsigned event_max_rank, event_max_source;
     uint32_t *held_hist, *event_hist;
 };
 #define PGWT_CAPTURE_AGE_BUCKET_NS UINT64_C(100000)
@@ -186,7 +187,16 @@ static bool capture_sink(void *ctx, const pgwt_merge_output *out,
     if (ok && out->kind == PGWT_MERGE_OUT_DATA) {
         ++c->released_data;
         /* Semantic event time to publication: includes kernel-buffer time. */
-        if (post->d >= out->record.t) age_add(c->event_hist, &c->event_max, post->d - out->record.t);
+        if (post->d >= out->record.t) {
+            uint64_t before = c->event_max;
+            age_add(c->event_hist, &c->event_max, post->d - out->record.t);
+            if (c->event_max > before) {
+                /* Which record it was: its kind explains a large maximum. */
+                c->event_max_rank = (unsigned)out->record.rank;
+                c->event_max_source = (unsigned)out->record.source;
+                c->event_max_pid = out->record.pid;
+            }
+        }
     }
     if (ok && out->kind == PGWT_MERGE_OUT_TEXT) ++c->released_text;
     if (ok && out->kind == PGWT_MERGE_OUT_FRONTIER) ++c->frontiers;
@@ -554,6 +564,8 @@ struct pgwt_capture_stats pgwt_capture_stats(const struct pgwt_merge_capture *c)
     s.held_max_ns = c->held_max; s.event_max_ns = c->event_max;
     s.held_p50_ns = age_quantile(c->held_hist, 5000); s.held_p99_ns = age_quantile(c->held_hist, 9900);
     s.event_p50_ns = age_quantile(c->event_hist, 5000); s.event_p99_ns = age_quantile(c->event_hist, 9900);
+    s.event_max_rank = c->event_max_rank; s.event_max_source = c->event_max_source;
+    s.event_max_pid = c->event_max_pid;
     return s;
 }
 /* One allocation at open; no record-path allocation, formatting or stdio. */
@@ -875,6 +887,7 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
         "released_data=%llu released_text=%llu frontiers=%llu voids=%llu "
         "held_us_p50=%llu held_us_p99=%llu held_us_max=%llu "
         "event_us_p50=%llu event_us_p99=%llu event_us_max=%llu "
+        "event_max_rank=%u event_max_source=%u event_max_pid=%llu "
         "seal_violation=%llu sequence_gap=%llu unknown_evidence=%llu perf_lost=%llu status=%u\n",
         U(ts.rounds_requested), U(ts.rounds_completed), U(ts.rounds_completed_nonempty),
         U(ts.holds), U(ts.cuts), U(ts.terminal_discards), U(ts.skipped), U(ts.uncovered),
@@ -884,7 +897,8 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
         U(ts.acks_at_completion), U(ts.acks_before_fence), U(cs.released_data), U(cs.released_text),
         U(cs.frontiers), U(cs.voids), U(cs.held_p50_ns / 1000), U(cs.held_p99_ns / 1000),
         U(cs.held_max_ns / 1000), U(cs.event_p50_ns / 1000), U(cs.event_p99_ns / 1000),
-        U(cs.event_max_ns / 1000), U(report.faults[PGWT_MERGE_SEAL_VIOLATION]),
+        U(cs.event_max_ns / 1000), cs.event_max_rank, cs.event_max_source, U(cs.event_max_pid),
+        U(report.faults[PGWT_MERGE_SEAL_VIOLATION]),
         U(report.faults[PGWT_MERGE_SEQUENCE_GAP]), U(report.faults[PGWT_MERGE_UNKNOWN_EVIDENCE]),
         U(lost), (unsigned)report.status);
     static const char *const names[3] = {"CPU", "E", "L"};

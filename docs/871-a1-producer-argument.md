@@ -776,8 +776,10 @@ the reader.
   connections/s, on 21227d96 and on this tree) and counts them as
   no-opportunity. Under the mode the state is already retired by BPF when the
   daemon handles the EXIT, so the loss cannot be classified, and each one is
-  `VOID(counter_change, lifecycle_init_drop)`: 39 in 8 s. Connections that
-  hold for 100 ms are attached and run clean. PG18 `-C` ran clean.
+  `VOID(counter_change, lifecycle_init_drop)`: 39 in 8 s. On PG18, where
+  attaching is cheap, a plain `-C` run lost a backend in 1 of 8 runs.
+  Connections that hold for 100 ms are attached and run clean on both, so
+  the registered live test's `-C` arm holds each connection for 100 ms.
 - A backend that exits before it ever reaches `InitProcess` is also counted
   as an INIT loss under the mode, for the same reason (state already
   retired). How often that happens was not measured.
@@ -788,7 +790,10 @@ the reader.
   fail on a clean live run: a stale boundary arriving while fencing and a
   sequence hole both need a stimulus the box does not produce. Host mutants
   cover them (`accept_stale_round`, `ignore_terminal_hole`,
-  `uncounted_skip_accepted`). The four live mutants are the three defects
-  that kept rounds from completing, and completion without acknowledgements.
+  `uncounted_skip_accepted`). The three live mutants are the three defects
+  that kept rounds from completing. Completion without acknowledgements was
+  tried as a fourth: the sequence check stops it at or before its first
+  round, at one of two assertions depending on timing, so it stays a host
+  mutant (`skip_cpu_ack`).
 
 Evidence: `tests/results/session-20261114/b-integration/` (git-ignored).

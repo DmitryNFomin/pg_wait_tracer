@@ -17,11 +17,10 @@ pgbench load, lets the last rounds finish, stops the daemon and checks the
 named assertions below against the daemon's final measurements AND against
 the qualification file it wrote.
   clean -c16:  pgbench -S -c 16 -j 4 [-R rate]
-  clean -C:    pgbench -S -C -c 16 -j 4 [-R rate]            (PG17/18)
-               pgbench -C -c 16 -j 4 [-R rate] -f hold.sql   (PG13, see below)
-  four live mutants of src/percpu_transport.c, rebuilt here and required to
-  go red at one named assertion each. The first three are the defects that
-  kept the daemon from ever completing a round on Linux.
+  clean -C:    pgbench -C -c 16 -j 4 [-R rate] -f hold.sql   (see below)
+  three live mutants of src/percpu_transport.c, rebuilt here and required to
+  go red at one named assertion each. They are the three defects that kept
+  the daemon from ever completing a round on Linux.
 
 TEST PREMISES, stated so nobody reads this as certification:
   * PGWT_TEST_EXACT_ATTACH_PREMISE=1: unit A2 (the attachment proof) does not
@@ -33,15 +32,16 @@ TEST PREMISES, stated so nobody reads this as certification:
     the records of a round; unthrottled select-only pgbench -c16 on a 4-vCPU
     box outruns it and the capture ends in VOID(allocation_fail). Pass 0 to
     run unthrottled and see it.
-  * PG13, -C arm: each connection holds for --churn-hold-ms (default 100 on
-    PG13, 0 elsewhere) before its query. Measured on EL8 4.18: on PG13 the
-    daemon needs milliseconds of /proc/<pid>/mem reads to attach a backend,
-    and a plain `pgbench -S -C` backend lives a few milliseconds, so some
-    exit unattached. The default transport loses them too and counts them
-    (lifecycle_init_lost_total, 15 and 20 in two 8 s runs at 200 conn/s);
-    under this mode each one is VOID(counter_change, lifecycle_init_drop).
-    That is not a transport defect and this test does not hide it: run
-    --churn-hold-ms 0 on PG13 to see it.
+  * -C arm: each connection holds for --churn-hold-ms (default 100) before
+    its query. A plain `pgbench -S -C` backend lives a few milliseconds and
+    can exit before the daemon has attached to it. Measured on EL8 4.18: on
+    PG13, where attaching costs milliseconds of /proc/<pid>/mem reads, that
+    happens in every run (the default transport loses them too and counts
+    them: lifecycle_init_lost_total 15 and 20 in two 8 s runs at 200
+    connections/s); on PG18 it happened in 1 of 8 runs. Under this mode each
+    such backend is VOID(counter_change, lifecycle_init_drop). That is the
+    attachment race, not the transport, and this test does not hide it: run
+    --churn-hold-ms 0 to see it.
 The 100 ms budget is NOT asserted: held age and event-to-release age are
 printed. A round completed on a non-empty pass is required; none is REFUSED
 (exit 78), never PASS. All scratch lives in a TemporaryDirectory.
@@ -86,11 +86,12 @@ MUTANTS = (
     ('constant-el-token',
      [('.el_request = fence ? 0 : t->el_token};', '.el_request = fence ? 0 : 1};')],
      'rounds complete repeatedly'),
-    ('completion-without-acknowledgements',
-     [('    if (!t->fencing) return 0;\n    for (size_t i = 0; i < t->ncpu; ++i) if (!t->acks[i]) return 0;\n',
-       '    if (!t->fencing) return 0;\n')],
-     "every completed round had every CPU's acknowledgement"),
 )
+# Not a live mutant: completion without the acknowledgements. On the box it
+# is stopped by the sequence check before or after its first round, so it
+# goes red at one of two assertions depending on timing. The host mutant
+# skip_cpu_ack kills it at one. The acknowledgement assertions below still
+# hold on every clean run.
 
 
 def qualification(path):
@@ -246,6 +247,7 @@ def report(label, row):
     # Measurements for the overhead screen. None of these is asserted.
     print(f"MEASURED {label} held_age_ms p50={ms('held_us_p50')} p99={ms('held_us_p99')} max={ms('held_us_max')} "
           f"event_to_release_ms p50={ms('event_us_p50')} p99={ms('event_us_p99')} max={ms('event_us_max')} "
+          f"(oldest: rank={stats.get('event_max_rank')} source={stats.get('event_max_source')}) "
           f"round_ms mean={ms('round_us_mean')} max={ms('round_us_max')} "
           f"records_per_s={stats.get('released_data', 0) / wall:.0f} "
           f"wire_records_per_s={stats.get('wire_records', 0) / wall:.0f} "
@@ -296,7 +298,7 @@ def main():
     parser.add_argument('--rate-c16', type=int, default=2000, help='pgbench -R for the -c16 arm; 0 = unthrottled')
     parser.add_argument('--rate-churn', type=int, default=200, help='pgbench -R for the -C arm; 0 = unthrottled')
     parser.add_argument('--churn-hold-ms', type=int, default=None,
-                        help='-C arm: hold each connection this long before its query (default: 100 on PG13, else 0)')
+                        help='-C arm: hold each connection this long before its query (default 100; 0 = plain -S -C)')
     parser.add_argument('--only', choices=('c16', 'churn'), help='measurement runs: one load only')
     parser.add_argument('--no-mutants', action='store_true', help='measurement runs only')
     options = parser.parse_args()
@@ -323,7 +325,7 @@ def main():
           f'rates c16={options.rate_c16 or "unthrottled"} churn={options.rate_churn or "unthrottled"}',
           flush=True)
     kernel = 'el8-4.18' if not uncertified else release
-    hold = options.churn_hold_ms if options.churn_hold_ms is not None else (100 if major == 13 else 0)
+    hold = 100 if options.churn_hold_ms is None else options.churn_hold_ms
     with tempfile.TemporaryDirectory(prefix='pgwt-b-live-') as tmp:
         directory = Path(tmp)
         db = f'pgwt_b_{os.getpid()}'

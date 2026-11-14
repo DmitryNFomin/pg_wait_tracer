@@ -118,6 +118,10 @@ struct pgwt_capture_stats {
     uint64_t released_data, released_text, frontiers, voids;
     uint64_t held_p50_ns, held_p99_ns, held_max_ns;
     uint64_t event_p50_ns, event_p99_ns, event_max_ns;
+    /* The record with the largest event age: merge rank (0 FORK, 1 INIT,
+     * 2 TRANS/MARKER, 3 EXIT), source index (CPUs, then E, L) and pid. */
+    unsigned event_max_rank, event_max_source;
+    uint64_t event_max_pid;
 };
 struct pgwt_capture_stats pgwt_capture_stats(const struct pgwt_merge_capture *);
 bool pgwt_capture_waiting(const struct pgwt_merge_capture *);

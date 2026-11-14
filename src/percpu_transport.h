@@ -190,7 +190,9 @@ struct pgwt_transport_stats {
     uint64_t rounds_completed_nonempty; /* completed on a pass that consumed something */
     uint64_t holds;              /* completion checks with every ack and an unreached target */
     uint64_t cuts;               /* rounds that needed the producer-position cut */
-    uint64_t terminal_discards;  /* attempts missing at a cut, all counted discards */
+    uint64_t terminal_discards;  /* attempts missing at a cut, all counted discards; summed
+                                  * over rounds, so one trailing discard counts once per round
+                                  * until a later record of its key arrives */
     uint64_t skipped;            /* skipped sequence numbers explained by discards */
     uint64_t uncovered;          /* cookie-less records consumed, not merge input */
     uint64_t records, queue_high, round_ns_total, round_ns_max;
