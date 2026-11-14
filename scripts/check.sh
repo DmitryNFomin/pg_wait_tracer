@@ -47,6 +47,9 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+step "watchpoint attach exit races (portable backend C harness)"
+run python3 -B tests/test_backend_attach_race.py --mutants
+
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;
 # every numerical mutant must then fail its intended distinguishing case.
