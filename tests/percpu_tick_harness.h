@@ -13,9 +13,33 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <stdarg.h>
 static char calls[1024];
 static size_t used;
 static bool dead, bad_drain;
+static uint64_t pending_records = 7;
+static unsigned backlog_warnings;
+static int tick_fprintf(FILE *stream,const char *format,...)
+{
+    if(stream==stderr && strstr(format,"WARN: exact-perf per-tick drain left ")==format)++backlog_warnings;
+    va_list args;va_start(args,format);int rc=vfprintf(stream,format,args);va_end(args);return rc;
+}
+#define fprintf tick_fprintf
+static uint64_t service_now = 1;
+static int tick_clock_gettime(clockid_t clock, struct timespec *ts)
+{
+    (void)clock;ts->tv_sec=(time_t)(service_now/1000000000);
+    ts->tv_nsec=(long)(service_now%1000000000);return 0;
+}
+#define clock_gettime tick_clock_gettime
+/* Only the fields used by the verbatim capture poll body below. */
+struct pgwt_merge_capture {
+    pgwt_merge_observation observation;
+    uint64_t last_checkpoint_at,last_service_at;
+    bool serviced;
+};
+static unsigned core_checks;
+static bool transport_silent;
 static void called(const char *name)
 { size_t n=strlen(name);if(used+n+2>=sizeof(calls))abort();memcpy(calls+used,name,n);used+=n;calls[used++]=' ';calls[used]=0; }
 #define TICK(expr) do {if(!(expr)){fprintf(stderr,"transport ASSERT tick_duties: %s (line %d)\n",#expr,__LINE__);return false;}}while(0)
@@ -31,7 +55,11 @@ int pgwt_sweep_stale_state(struct pgwt_daemon *d){(void)d;called("stale");return
 void pgwt_escalation_check_budget(struct pgwt_daemon *d){(void)d;called("budget");}
 void pgwt_read_accum_map(struct pgwt_daemon *d){(void)d;called("accum_read");}
 static void drain_event_ring_for_tick(struct pgwt_daemon *d){called("drain");d->event_accum->tm.db_time_ns+=7;}
-int pgwt_percpu_transport_poll(struct pgwt_daemon *d){if(!bad_drain)drain_event_ring_for_tick(d);return bad_drain?-1:0;}
+/* Production consumes into the transport/coordinator, not event_accum. */
+int pgwt_percpu_transport_poll(struct pgwt_daemon *d){(void)d;called("transport_drain");return bad_drain?-1:0;}
+uint64_t pgwt_merge_capture_pending_records(const struct pgwt_daemon *d)
+{(void)d;called("backlog");return pending_records;}
+int pgwt_merge_capture_poll(struct pgwt_daemon *d){(void)d;called("check");return 0;}
 void pgwt_accum_copy_used(struct pgwt_accumulator *dst,const struct pgwt_accumulator *src)
 {called("copy");dst->tm=src->tm;}
 void pgwt_read_state_map(struct pgwt_daemon *d){called("state");d->accum.tm.db_time_ns+=3;}
@@ -51,9 +79,37 @@ static int daemon_observe(void *,pgwt_merge_observation *);
 static unsigned publication_lookups;
 int pgwt_merge_capture_snapshot(struct pgwt_daemon *d,ma_snapshot *s,uint64_t *now)
 {
-    (void)d;publication_lookups+=13;memset(s,0,sizeof(*s));s->valid=true;*now=1;
+    publication_lookups+=13;memset(s,0,sizeof(*s));s->valid=true;*now=service_now;
+    if(d->merge_capture)d->merge_capture->last_checkpoint_at=*now;
     for(size_t i=0;i<15;++i)s->component_valid[i]=true;
     return 0;
+}
+int pgwt_percpu_transport_snapshot(struct pgwt_daemon *d,ma_snapshot *s,uint64_t *now)
+{return pgwt_merge_capture_snapshot(d,s,now);}
+ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *c)
+{(void)c;ma_snapshot s={.valid=true};for(size_t i=0;i<15;++i)s.component_valid[i]=true;return s;}
+int pgwt_capture_envelope(struct pgwt_merge_capture *c,const ma_envelope *e,uint64_t now,const ma_snapshot *s)
+{(void)c;(void)now;(void)s;if(e->kind!=MA_CHECK)abort();++core_checks;return 0;}
+bool pgwt_transport_silent(const struct pgwt_percpu_transport *t,uint64_t now,uint64_t interval)
+{(void)t;(void)now;(void)interval;return transport_silent;}
+static int capture_poll_under_test(struct pgwt_daemon *);
+static bool cadence_cases(void)
+{
+    struct pgwt_daemon *d=calloc(1,sizeof(*d));TICK(d);
+    struct pgwt_merge_capture c={.observation={.counters={.known=true}}};
+    d->exact_perf=true;d->merge_capture=&c;core_checks=publication_lookups=0;
+    /* Continuous DATA/watermark readiness: standalone core CHECK is once
+     * per clock slot, with full counter reads reserved for silence. */
+    for(unsigned pass=0;pass<100000;++pass){service_now=pass*100;TICK(capture_poll_under_test(d)==0);}
+    TICK(core_checks==1 && publication_lookups==0);
+    service_now=10000000;TICK(capture_poll_under_test(d)==0 && core_checks==2 && publication_lookups==0);
+    transport_silent=true;service_now=20000000;
+    TICK(capture_poll_under_test(d)==0 && core_checks==3 && publication_lookups==13 && c.last_checkpoint_at==service_now);
+    service_now++;TICK(capture_poll_under_test(d)==0 && core_checks==3 && publication_lookups==13);
+    service_now=30000000;TICK(capture_poll_under_test(d)==0 && core_checks==4 && publication_lookups==26);
+    transport_silent=false;free(d);
+    puts("actual capture poll: 100000 early calls, 1 core CHECK; silent full vector once/10 ms PASS");
+    return true;
 }
 static bool publication_counters(void)
 {
@@ -118,25 +174,51 @@ static bool tick_cases(void)
         d->accum.tm.db_time_ns=4;d->event_accum->tm.db_time_ns=9;
         d->counters.events_total=40;d->counters.prev_events_total=10;
         d->counters.samples_total=12;d->counters.prev_samples_total=2;
-        used=0;calls[0]=0;pgwt_tick_duties(d);
-        TICK(!strcmp(calls,"health capacity init recovery stale budget drain copy state snapshot view gc_probe exit rotate_raw summary_flush rotate_summary retain_raw retain_summary fail_read "));
+        used=0;calls[0]=0;backlog_warnings=0;
+        if(flag)TICK(pgwt_merge_capture_tick(d)==0);else pgwt_tick_duties(d);
+        TICK(!strcmp(calls,flag
+            ? "health capacity init recovery stale budget transport_drain backlog copy state snapshot view gc_probe exit rotate_raw summary_flush rotate_summary retain_raw retain_summary fail_read "
+            : "health capacity init recovery stale budget drain copy state snapshot view gc_probe exit rotate_raw summary_flush rotate_summary retain_raw retain_summary fail_read "));
         TICK(d->tick==61 && !d->running && d->counters.events_per_sec==15 && d->counters.samples_per_sec==5);
-        TICK(d->accum.tm.db_time_ns==19 && d->accum.prev_tm.db_time_ns==4);
+        TICK(d->accum.tm.db_time_ns==(flag?12U:19U) && d->accum.prev_tm.db_time_ns==4);
+        TICK(d->counters.tick_drain_pending_records==(flag?7U:0U) &&
+             d->counters.tick_drain_truncated_total==flag && d->tick_drain_truncated_logged==(bool)flag);
+        TICK(backlog_warnings==flag);
+        if(flag)TICK(d->counters.tick_drain_last_bound==PGWT_TICK_DRAIN_BOUND_MERGE);
         TICK(w->retention_live_summary_ns==91);
         /* Guard preservation: lightweight reads its accumulator, skips
          * recovery/sweep; sampled mode skips open state-map intervals. */
         d->tick=1;d->count=0;d->running=true;d->lightweight_mode=true;d->mode=PGWT_MODE_SAMPLED;
         d->quiet=true;d->ring.slots=NULL;d->event_writer=NULL;d->summary_writer=NULL;
-        used=0;calls[0]=0;pgwt_tick_duties(d);
-        TICK(!strcmp(calls,"health capacity init budget accum_read drain copy fail_read "));
+        used=0;calls[0]=0;
+        if(flag)TICK(pgwt_merge_capture_tick(d)==0);else pgwt_tick_duties(d);
+        TICK(!strcmp(calls,flag ? "health capacity init budget accum_read transport_drain backlog copy fail_read check "
+                               : "health capacity init budget accum_read drain copy fail_read "));
         TICK(d->tick==2 && d->running);
+        TICK(backlog_warnings==flag);
         d->lightweight_mode=false;d->mode=PGWT_MODE_FULL;
         setenv("PGWT_TEST_NO_RECOVERY","1",1);setenv("PGWT_TEST_NO_STALE_SWEEP","1",1);
-        used=0;calls[0]=0;pgwt_tick_duties(d);
-        TICK(!strcmp(calls,"health capacity init budget drain copy state fail_read "));
+        used=0;calls[0]=0;
+        if(flag)TICK(pgwt_merge_capture_tick(d)==0);else pgwt_tick_duties(d);
+        TICK(!strcmp(calls,flag ? "health capacity init budget transport_drain backlog copy state fail_read check "
+                               : "health capacity init budget drain copy state fail_read "));
+        TICK(backlog_warnings==flag);
         unsetenv("PGWT_TEST_NO_RECOVERY");unsetenv("PGWT_TEST_NO_STALE_SWEEP");
         dead=true;used=0;calls[0]=0;int before=d->tick;pgwt_tick_duties(d);dead=false;
         TICK(!strcmp(calls,"health ") && d->tick==before && !d->running && d->exit_reason==PGWT_EXIT_PG_DEAD);
+        if(flag){
+            /* The gauge clears on a later empty copy. A successful tick
+             * drains without inventing publication into event_accum. */
+            pending_records=0;d->running=true;used=0;calls[0]=0;
+            TICK(pgwt_merge_capture_tick(d)==0 && d->counters.tick_drain_pending_records==0 &&
+                 d->counters.tick_drain_truncated_total==3 && d->tick_drain_truncated_logged);
+            before=d->tick;uint64_t saved=d->accum.tm.db_time_ns;
+            bad_drain=true;d->running=true;used=0;calls[0]=0;
+            TICK(pgwt_merge_capture_tick(d)==0);bad_drain=false;
+            TICK(!d->running && d->tick==before && d->accum.tm.db_time_ns==saved);
+            TICK(!strcmp(calls,"health capacity init recovery stale budget transport_drain "));
+            pending_records=7;
+        }
         free(sw);free(w);free(d->event_accum);free(d);
     }
     return true;
@@ -145,7 +227,7 @@ int main(void)
 {
     puts("REACHED tick_duties");fflush(stdout);
     unsetenv("PGWT_TEST_NO_RECOVERY");unsetenv("PGWT_TEST_NO_STALE_SWEEP");
-    if(!publication_counters() || !drain_cases() || !tick_cases())return 1;
+    if(!publication_counters() || !cadence_cases() || !drain_cases() || !tick_cases())return 1;
     puts("shared tick: full duty order, 6 views, rates/count, GC, rotations/retention, lightweight/test/death guards PASS");
     return 0;
 }

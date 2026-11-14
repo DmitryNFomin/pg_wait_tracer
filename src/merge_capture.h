@@ -59,10 +59,17 @@ int pgwt_merge_capture_poll(struct pgwt_daemon *d);
 /* Calls the SAME tick duties as the default handler, at the same drain point.
  * Full-only admission makes the lightweight accumulator branch inactive;
  * summary/escalation maintenance is idle without a writer/open window.
- * The live view remains the legacy projection (including the state-map read),
- * not a certification claim: only the qualification sink's FRONTIER certifies
- * released DATA. Display timer has already been read. */
+ * The live view contains only released DATA plus the legacy state-map open
+ * intervals. Queued/held records can appear on a later tick; the tick reports
+ * their count at the copy. It is not a certification claim: only the
+ * qualification sink's FRONTIER certifies released DATA. Display timer has
+ * already been read. */
 int pgwt_merge_capture_tick(struct pgwt_daemon *d);
+/* All queued/held envelopes, including boundaries/lifecycle/TEXT, counted
+ * once across transport, adapter and core. This is a backlog gauge, not a
+ * missing-duration estimate or a count of unconsumed kernel records. */
+uint64_t pgwt_merge_capture_pending_records(const struct pgwt_daemon *d);
+size_t pgwt_capture_pending_records(const struct pgwt_merge_capture *);
 /* Final drain/held-data disposition before any capture state is destroyed. */
 int pgwt_merge_capture_finish(struct pgwt_daemon *d);
 int pgwt_merge_capture_record(struct pgwt_daemon *d, size_t source,

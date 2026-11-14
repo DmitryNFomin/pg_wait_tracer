@@ -10,6 +10,27 @@
 struct pgwt_daemon;
 struct pgwt_percpu_transport;
 
+/* Portable perf_event_attr values (Linux UAPI numbers). The Linux binding
+ * copies these into the real attr; the host test pins the same policy. */
+struct pgwt_transport_perf_attributes {
+    uint32_t type, wakeup_events, wakeup_watermark;
+    uint64_t config, sample_type, sample_period;
+    bool watermark;
+};
+struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t buffer_bytes);
+/* The daemon's existing epoll timeout is 10 ms. Protocol/topology/helper
+ * health and the standalone core CHECK run at most once per 10 ms slot,
+ * even with continuous watermark/control readiness. Drain on every call.
+ * Keep slots anchored to the clock: early wakes must not reset the deadline.
+ * With helpers completing before the next service, a record needs at most
+ * two three-service rounds (the second covers DATA newer than the first
+ * E/L cutoff): <=60 ms of slots + <=10 ms poll lateness, leaving 30 ms of
+ * the 100 ms budget for helper scheduling and processing. OS stalls/BUSY
+ * producers are unbounded; the box must still qualify measured held age.
+ * Time is NEVER completeness evidence or permission to release DATA. */
+uint64_t pgwt_transport_service_interval_ns(void);
+bool pgwt_transport_service_due(uint64_t now, uint64_t previous, bool serviced);
+
 /* Callback dispatch keeps existing isolated lifecycle tests linkable without
  * transport I/O. Daemon init installs the production functions below. */
 struct pgwt_transport_callbacks {
@@ -124,6 +145,7 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *);
 void pgwt_transport_destroy(struct pgwt_percpu_transport *);
 bool pgwt_transport_lost_total(const struct pgwt_percpu_transport *, uint64_t *);
 uint64_t pgwt_transport_max_held_ns(const struct pgwt_percpu_transport *);
+size_t pgwt_transport_pending_records(const struct pgwt_percpu_transport *);
 bool pgwt_transport_silent(const struct pgwt_percpu_transport *, uint64_t now, uint64_t interval);
 
 #ifdef PGWT_TRANSPORT_HOST_TEST

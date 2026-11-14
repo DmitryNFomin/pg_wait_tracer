@@ -34,6 +34,19 @@ mutations = [
     ('forget_historical_proof', 'lifetime_history', 'src/merge_capture.c',
      [('if (!c->lifetime_index[slot]) {',
        'if (c->lifetime_index[slot]) c->lifetimes[c->lifetime_index[slot]-1].proof = MA_NOT_ATTEMPTED;\n        if (!c->lifetime_index[slot]) {')]),
+    ('per_record_wakeup', 'cadence', 'src/percpu_transport.c',
+     [('.sample_period = 1, .watermark = true,', '.sample_period = 1, .watermark = false, .wakeup_events = 1,')]),
+    ('per_pass_topology', 'cadence', 'src/percpu_transport.c',
+     [('if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced))',
+       'if (false && !pgwt_transport_service_due(now, t->last_service_at, t->serviced))')]),
+    ('skip_terminal_attempts', 'terminal_attempts', 'src/percpu_transport.c',
+     [('if (done && !t->suspended) {', 'if (false && done && !t->suspended) {')]),
+    ('skip_tick_entry', 'pending', 'src/merge_capture.c',
+     [('    pgwt_tick_duties(d);', '    if (0) pgwt_tick_duties(d);')]),
+    ('omit_core_backlog', 'core_held_age', 'src/merge_capture.c',
+     [('return c ? c->retained_count + c->staged : 0;', 'return c ? c->retained_count : 0;')]),
+    ('omit_adapter_backlog', 'pending', 'src/merge_capture.c',
+     [('return c ? c->retained_count + c->staged : 0;', 'return c ? c->staged : 0;')]),
 ]
 flags = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-DPGWT_TRANSPORT_HOST_TEST']
 flags += shlex.split(os.environ.get('CFLAGS', ''))
@@ -67,7 +80,8 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     for line in p.stdout.splitlines():
         if line.startswith(('transport all_acks ', 'transport missing_ack ', 'transport stale_ack ',
                             'transport counter_timing ', 'transport post_snapshot ', 'shutdown:',
-                            'binary sink:', 'counter cost:', 'indexed lookups ', 'lifetime history:')):
+                            'binary sink:', 'counter cost:', 'indexed lookups ', 'lifetime history:',
+                            'perf cadence:', 'poll budget:', 'terminal attempts:')):
             print(line)
     for name, guard, path, edits in mutations:
         original = (work / path).read_text()
@@ -100,24 +114,25 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     end = capture.index('static bool daemon_write(', start)
     observe = capture[start:end]
     normalized = tick[tick.index('    /* Health check:'):]
-    transport_drain = '''    if (d->exact_perf) {
-        if (pgwt_percpu_transport_poll(d) < 0) {
-            fprintf(stderr, "FATAL: exact per-CPU capture tick drain failed\\n");
-            d->running = false;
-            return;
-        }
-    } else {
-        drain_event_ring_for_tick(d);
-    }'''
+    # Match only for the migration comparison. Mutants below are compiled
+    # and must fail behavior; these anchors do not classify a mutant kill.
+    drain_start = normalized.index('    if (d->exact_perf) {')
+    drain_end = normalized.index('\n\n    /* Copy cumulative', drain_start)
+    transport_drain = normalized[drain_start:drain_end]
     if normalized.count(transport_drain) != 1:
         raise SystemExit('ERROR: shared tick drain dispatch changed')
     normalized = normalized.replace(transport_drain, '    drain_event_ring_for_tick(d);')
+    normalized = normalized.replace(
+        '''    /* #416: the LAST thing before the display is built. The default ring
+     * drains into event_accum; exact-perf can still hold records for proof
+     * or a frontier. Report that backlog without changing release order. */''',
+        '''    /* #416: the LAST thing before the display is built, so the smallest
+     * possible window separates "every emitted record is in event_accum"
+     * from the state_map read that supplies the still-open stretches. */''')
     # Migration check of every original statement/comment/log line, fe519c9e
     # daemon.c:443-677. This is behavior compatibility, not a numerical oracle.
     if hashlib.sha256(normalized.encode()).hexdigest() != '93f3ad6f6ce781839a162ef8e3459845bfc9f88a2152e35a00e3be2efb0dfff3':
         raise SystemExit('ERROR: default tick body changed beyond the shared drain dispatch')
-    if 'pgwt_tick_duties(d);' not in capture[capture.index('int pgwt_merge_capture_tick('):]:
-        raise SystemExit('ERROR: transport tick bypassed shared duties')
     if 'rodata->exact_perf_mode' in (repo / 'src/percpu_transport.c').read_text():
         raise SystemExit('ERROR: tautological rodata support check returned')
     print('default tick: fe519c9e lines 443-677 byte-identical after substituting default drain; order/logs PASS')
@@ -128,10 +143,19 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     start = transport.index('int pgwt_transport_ring_result(')
     end = transport.index('int pgwt_transport_perf(', start)
     ring_result = transport[start:end]
+    start = capture.index('int pgwt_merge_capture_tick(')
+    end = capture.index('uint64_t pgwt_merge_capture_pending_records(', start)
+    tick_entry = capture[start:end]
+    start = capture.index('int pgwt_merge_capture_poll(')
+    end = capture.index('int pgwt_merge_capture_tick(', start)
+    capture_poll = capture[start:end].replace('int pgwt_merge_capture_poll(', 'static int capture_poll_under_test(')
+    start = transport.index('uint64_t pgwt_transport_service_interval_ns(')
+    end = transport.index('static uint64_t read_le(', start)
+    cadence = transport[start:end]
     harness = work / 'tick.c'
     tick_binary = work / 'tick-test'
-    def tick_build(tick_body, observer, drain_body=drain):
-        harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + observer + ring_result + drain_body)
+    def tick_build(tick_body, observer, drain_body=drain, poll_body=capture_poll):
+        harness.write_text('#include "percpu_tick_harness.h"\n' + tick_body + observer + ring_result + drain_body + tick_entry + cadence + poll_body)
         p = subprocess.run(cc + flags + ['-I' + str(repo / 'tests'), '-I' + str(repo / 'src'),
             str(harness), '-o', str(tick_binary)], capture_output=True, text=True, env=env)
         if p.returncode:
@@ -140,6 +164,8 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     p = subprocess.run([str(tick_binary)], capture_output=True, text=True, env=env)
     if p.returncode:
         raise SystemExit('ERROR: shared tick/publication baseline failed\n' + p.stdout + p.stderr)
+    if p.stderr.count('WARN: exact-perf per-tick drain left ') != 6:
+        raise SystemExit('ERROR: tick backlog warning must be one-shot per daemon\n' + p.stderr)
     print(p.stdout, end='')
     full_observe = observe.replace(
         'o->counters.value[PGWT_C_WRITER_PUSH_FAIL] = d->counters.writer_push_fail_total;',
@@ -147,18 +173,29 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
     if (pgwt_merge_capture_snapshot(d, &s, &now) < 0) return -1;
     o->counters.known = s.valid;
     for (size_t i = 0; i < PGWT_MERGE_COUNTERS; ++i) o->counters.value[i] = s.value[i];''')
-    for name, body, observer, drain_body in [
-        ('skip_tick_count', tick.replace('d->tick++;', '/* skip tick */'), observe, drain),
-        ('per_record_map_reads', tick, full_observe, drain),
-        ('ignore_perf_receipts', tick, observe, drain.replace('if (l->d->percpu_transport->positions[i] != before)', 'if (n || before > l->d->percpu_transport->positions[i])')),
+    for name, body, observer, drain_body, poll_body in [
+        ('skip_tick_count', tick.replace('d->tick++;', '/* skip tick */'), observe, drain, capture_poll),
+        ('per_record_map_reads', tick, full_observe, drain, capture_poll),
+        ('ignore_perf_receipts', tick, observe, drain.replace('if (l->d->percpu_transport->positions[i] != before)', 'if (n || before > l->d->percpu_transport->positions[i])'), capture_poll),
+        ('continue_failed_tick_drain', tick.replace(
+            'd->running = false;\n            return;\n        }\n        d->counters.tick_drain_pending_records',
+            '/* continue after failure */\n            return;\n        }\n        d->counters.tick_drain_pending_records'), observe, drain, capture_poll),
+        ('omit_tick_backlog', tick.replace(
+            'd->counters.tick_drain_pending_records = pgwt_merge_capture_pending_records(d);',
+            'd->counters.tick_drain_pending_records = 0;'), observe, drain, capture_poll),
+        ('per_pass_core_checks', tick, observe, drain, capture_poll.replace(
+            'if (rc >= 0 && !pgwt_transport_service_due(',
+            'if (false && rc >= 0 && !pgwt_transport_service_due(')),
+        ('repeat_backlog_warning', tick.replace('if (!d->tick_drain_truncated_logged)',
+                                                'if (true || !d->tick_drain_truncated_logged)'), observe, drain, capture_poll),
     ]:
-        if body == tick and observer == observe and drain_body == drain:
+        if body == tick and observer == observe and drain_body == drain and poll_body == capture_poll:
             raise SystemExit('ERROR: missing tick/publication mutant anchor')
-        tick_build(body, observer, drain_body)
+        tick_build(body, observer, drain_body, poll_body)
         p = subprocess.run([str(tick_binary)], capture_output=True, text=True, env=env)
         if (p.returncode != 1 or 'REACHED tick_duties\n' not in p.stdout or
             'transport ASSERT tick_duties:' not in p.stderr or
             any(s in p.stderr for s in ('AddressSanitizer', 'runtime error:', 'UndefinedBehaviorSanitizer'))):
             raise SystemExit(f'ERROR: {name}: survived or failed elsewhere\n' + p.stdout + p.stderr)
         print(f'{name}: KILLED at tick_duties')
-    print(f'transport + tick/publication/drain mutants: {len(mutations)+3}/{len(mutations)+3} killed at intended assertions')
+    print(f'transport + tick/publication/drain/cadence mutants: {len(mutations)+7}/{len(mutations)+7} killed at intended assertions')

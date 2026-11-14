@@ -132,7 +132,9 @@ struct pgwt_counters {
      * drain's pass cap was ever reached — the latter means a tick WAS short. */
     uint64_t tick_drain_records_total;   /* records recovered by tick drains */
     uint64_t tick_drain_max_records;     /* deepest single-tick backlog seen */
-    uint64_t tick_drain_truncated_total; /* ticks whose drain hit a bound */
+    uint64_t tick_drain_truncated_total; /* ticks bounded or still merge-held */
+    uint64_t tick_drain_pending_records; /* latest copy: queued/held envelopes;
+                                         * exact-perf only, not kernel backlog */
     /* Which bound the LAST truncated tick drain hit. Exists so the loud
      * WARN's reported bound is ASSERTABLE (tests/test_tick_drain.c B7)
      * rather than merely plausible: the message and this field are set from
@@ -141,6 +143,7 @@ struct pgwt_counters {
         PGWT_TICK_DRAIN_BOUND_NONE = 0,
         PGWT_TICK_DRAIN_BOUND_RECORDS,
         PGWT_TICK_DRAIN_BOUND_TIME,
+        PGWT_TICK_DRAIN_BOUND_MERGE,
     } tick_drain_last_bound;
 
     /* T8 measured-CPU observability (docs/ROADMAP_AND_STATUS.md).

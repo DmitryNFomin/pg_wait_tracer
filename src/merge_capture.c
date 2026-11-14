@@ -36,7 +36,8 @@ struct pgwt_merge_capture {
     size_t arrival_slots, oldest, newest, arrival_free;
     size_t *arrival_buckets;
     pgwt_merge_observation observation;
-    bool finished;
+    bool finished, serviced;
+    uint64_t last_service_at;
 };
 static uint64_t get_le(const unsigned char *p, size_t n)
 {
@@ -451,6 +452,8 @@ uint64_t pgwt_capture_max_held_ns(const struct pgwt_merge_capture *c, uint64_t n
 }
 bool pgwt_capture_waiting(const struct pgwt_merge_capture *c)
 { return c && (c->retained_count || c->staged) && pgwt_capture_report(c).status == PGWT_MERGE_OK; }
+size_t pgwt_capture_pending_records(const struct pgwt_merge_capture *c)
+{ return c ? c->retained_count + c->staged : 0; }
 pgwt_merge_report pgwt_capture_report(const struct pgwt_merge_capture *c)
 { return pgwt_merge_get_report(c ? c->core : NULL); }
 static int finish_capture(struct pgwt_merge_capture *c, uint64_t d, const ma_snapshot *s)
@@ -571,8 +574,8 @@ void pgwt_capture_dump_destroy(struct pgwt_capture_dump *dump)
     if (dump) { free(dump->bytes); free(dump); }
 }
 
-#if defined(__linux__) && !defined(PGWT_TRANSPORT_HOST_TEST)
-/* Linux daemon binding; portable feed above remains free of kernel access. */
+/* POSIX daemon binding: compile this on the Mac as well. Kernel transport
+ * access remains behind percpu_transport's injectable interface. */
 #include "daemon.h"
 #include "capture_counters.h"
 #include "event_stream.h"
@@ -722,6 +725,9 @@ int pgwt_merge_capture_poll(struct pgwt_daemon *d)
     pgwt_merge_observation o = d->merge_capture->observation;
     int rc = daemon_observe(d, &o);
     uint64_t now = o.d;
+    if (rc >= 0 && !pgwt_transport_service_due(now, d->merge_capture->last_service_at,
+                                             d->merge_capture->serviced)) return 0;
+    d->merge_capture->last_service_at = now; d->merge_capture->serviced = true;
     s.value[PGWT_C_WRITER_PUSH_FAIL] = o.counters.value[PGWT_C_WRITER_PUSH_FAIL];
     if (rc < 0) s.valid = false;
     /* A full vector is read at open, after the completion fence, on faults,
@@ -744,6 +750,12 @@ int pgwt_merge_capture_tick(struct pgwt_daemon *d)
     pgwt_tick_duties(d);
     if (!d->running) return 0;
     return pgwt_merge_capture_poll(d);
+}
+uint64_t pgwt_merge_capture_pending_records(const struct pgwt_daemon *d)
+{
+    if (!d || !d->exact_perf) return 0;
+    return (uint64_t)pgwt_transport_pending_records(d->percpu_transport) +
+           pgwt_capture_pending_records(d->merge_capture);
 }
 int pgwt_merge_capture_finish(struct pgwt_daemon *d)
 {
@@ -804,18 +816,3 @@ void pgwt_merge_capture_close(struct pgwt_daemon *d)
     pgwt_capture_dump_destroy(dump);
     if (fd >= 0 && close(fd)) fprintf(stderr, "exact-perf: qualification sink close failed\n");
 }
-
-#else
-#include "daemon.h"
-int pgwt_merge_capture_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t *now)
-{ (void)d; (void)s; (void)now; return -ENOTSUP; }
-int pgwt_merge_capture_open(struct pgwt_daemon *d) { return !d ? -EINVAL : d->exact_perf ? -ENOTSUP : 0; }
-int pgwt_merge_capture_poll(struct pgwt_daemon *d) { return !d ? -EINVAL : d->exact_perf ? -ENOTSUP : 0; }
-int pgwt_merge_capture_tick(struct pgwt_daemon *d) { return !d ? -EINVAL : d->exact_perf ? -ENOTSUP : 0; }
-int pgwt_merge_capture_finish(struct pgwt_daemon *d) { return !d ? -EINVAL : d->exact_perf ? -ENOTSUP : 0; }
-int pgwt_merge_capture_record(struct pgwt_daemon *d, size_t s, const void *p, size_t n)
-{ (void)s; (void)p; (void)n; return !d ? -EINVAL : d->exact_perf ? -ENOTSUP : 0; }
-int pgwt_merge_capture_attach(struct pgwt_daemon *d, const struct pgwt_attach_report *r)
-{ (void)r; return !d ? -EINVAL : d->exact_perf ? -ENOTSUP : 0; }
-void pgwt_merge_capture_close(struct pgwt_daemon *d) { (void)d; }
-#endif

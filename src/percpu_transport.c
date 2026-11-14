@@ -23,13 +23,27 @@ struct pgwt_percpu_transport {
     struct queued_wire *queue;
     bool *acks;
     bool requested, fencing, suspended, finished, draining;
-    bool prepared, configured, opened;
+    bool prepared, configured, opened, serviced;
     bool e_seen, l_seen;
     uint32_t round;
     ma_snapshot snapshot;
-    uint64_t max_held, lost_total, last_record_at;
+    uint64_t max_held, lost_total, last_record_at, last_service_at;
     bool lost_valid;
 };
+struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t bytes)
+{
+    size_t threshold = bytes / 8;
+    return (struct pgwt_transport_perf_attributes){
+        .type = 1, .config = 10, .sample_type = UINT64_C(1) << 10,
+        .sample_period = 1, .watermark = true,
+        .wakeup_watermark = (uint32_t)(threshold > 65536 ? 65536 : threshold)};
+}
+uint64_t pgwt_transport_service_interval_ns(void) { return UINT64_C(10000000); }
+bool pgwt_transport_service_due(uint64_t now, uint64_t previous, bool serviced)
+{
+    uint64_t interval = pgwt_transport_service_interval_ns();
+    return !serviced || now < previous || now / interval != previous / interval;
+}
 static uint64_t read_le(const unsigned char *p, size_t n)
 {
     uint64_t v = 0;
@@ -344,6 +358,8 @@ bool pgwt_transport_lost_total(const struct pgwt_percpu_transport *t, uint64_t *
 }
 uint64_t pgwt_transport_max_held_ns(const struct pgwt_percpu_transport *t)
 { return t ? t->max_held : 0; }
+size_t pgwt_transport_pending_records(const struct pgwt_percpu_transport *t)
+{ return t ? t->count : 0; }
 bool pgwt_transport_silent(const struct pgwt_percpu_transport *t, uint64_t now, uint64_t interval)
 { return t && now >= t->last_record_at && now - t->last_record_at >= interval; }
 void pgwt_transport_destroy(struct pgwt_percpu_transport *t)
@@ -734,15 +750,22 @@ static int linux_open_io(void *ctx)
     l->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (l->epoll_fd < 0) return -errno;
     /* One raw perf buffer per online CPU. 64 MiB total, rounded down to a
-     * power of two per CPU, at least one page; no threshold delays draining. */
+     * power of two per CPU, at least one page. Match the bench watermark;
+     * the daemon's 10 ms poll also drains buffers below that threshold. */
     size_t pages = 1, per_cpu = (64U * 1024U * 1024U) / l->ncpu / (size_t)sysconf(_SC_PAGESIZE);
     while (pages <= per_cpu / 2) pages *= 2;
     for (size_t i = 0; i < l->ncpu; ++i) {
         int cpu = (int)d->percpu_transport->cpus[i];
         struct perf_buffer_raw_opts opts = {.sz = sizeof(opts), .cpu_cnt = 1, .cpus = &cpu, .map_keys = &cpu};
-        struct perf_event_attr attr = {.size = sizeof(attr), .type = PERF_TYPE_SOFTWARE,
-            .config = PERF_COUNT_SW_BPF_OUTPUT, .sample_type = PERF_SAMPLE_RAW,
-            .sample_period = 1, .wakeup_events = 1};
+        _Static_assert(PERF_TYPE_SOFTWARE == 1 && PERF_COUNT_SW_BPF_OUTPUT == 10 &&
+                       PERF_SAMPLE_RAW == (1U << 10), "portable perf UAPI values");
+        struct pgwt_transport_perf_attributes policy = pgwt_transport_perf_attributes(
+            pages * (size_t)sysconf(_SC_PAGESIZE));
+        struct perf_event_attr attr = {.size = sizeof(attr), .type = policy.type,
+            .config = policy.config, .sample_type = policy.sample_type,
+            .sample_period = policy.sample_period, .watermark = policy.watermark};
+        if (policy.watermark) attr.wakeup_watermark = policy.wakeup_watermark;
+        else attr.wakeup_events = policy.wakeup_events;
         l->perf[i] = perf_buffer__new_raw(perf_fd, pages, &attr, receive_perf, l, &opts);
         long err = libbpf_get_error(l->perf[i]);
         if (!l->perf[i] || err) { l->perf[i] = NULL; return err ? (int)err : -errno; }
@@ -870,7 +893,11 @@ int pgwt_percpu_transport_poll(struct pgwt_daemon *d)
     struct pgwt_percpu_transport *t = d->percpu_transport;
     if (!t || !t->opened) return -EINVAL;
     int rc = t->io.drain(t->io.ctx);
-    return rc < 0 ? rc : pgwt_transport_poll(t, pgwt_capture_waiting(d->merge_capture));
+    if (rc < 0) return rc;
+    uint64_t now = observed(t);
+    if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced)) return 0;
+    t->last_service_at = now; t->serviced = true;
+    return pgwt_transport_poll(t, pgwt_capture_waiting(d->merge_capture));
 }
 int pgwt_percpu_transport_snapshot(struct pgwt_daemon *d, ma_snapshot *s, uint64_t *now)
 {

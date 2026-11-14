@@ -39,7 +39,7 @@ struct tb_driver {
     struct pgwt_merge_capture *capture;
     ma_snapshot snapshot;
     uint64_t attempts[6], seq[6], now, trace_t;
-    unsigned controls, wakes, reads, drains, lifecycle, traces;
+    unsigned controls, wakes, reads, drains, lifecycle, traces, topology_reads;
     struct pgwt_transport_ctl ctl;
     pgwt_merge_output outputs[64];
     unsigned char payloads[64][272];
@@ -62,7 +62,8 @@ static void tb_close(void *ctx){++((struct tb_driver *)ctx)->closed;}
 static int tb_consume(void *ctx,uint32_t dest,bool bounded)
 {(void)bounded;if(dest>2)return -EINVAL;++((struct tb_driver *)ctx)->consumed;return 0;}
 static uint64_t tb_now(void *ctx) { return ((struct tb_driver *)ctx)->now; }
-static int tb_topology(void *ctx) { return ((struct tb_driver *)ctx)->topology ? 1:0; }
+static int tb_topology(void *ctx)
+{ struct tb_driver *d=ctx;++d->topology_reads;return d->topology ? 1:0; }
 static int tb_control(void *ctx,const struct pgwt_transport_ctl *c)
 { struct tb_driver *d=ctx; ++d->controls; d->ctl=*c; return 0; }
 static int tb_wake(void *ctx,uint32_t cpu)
@@ -98,7 +99,7 @@ static int tb_drain(void *ctx)
          * Model a held perf buffer plus its lifecycle ring. */
         unsigned char fork[24]={0},trace[48];
         tb_le(fork,1,4);tb_le(fork+4,30,4);tb_le(fork+16,10,8);
-        memcpy(trace,golden_T,48);tb_le(trace,12,8);tb_le(trace+8,30,4);
+        memcpy(trace,golden_T,48);tb_le(trace,d->trace_t,8);tb_le(trace+8,30,4);
         if(tb_emit(d,0,2,PGWT_WIRE_LIFECYCLE,123,fork,24)<0 ||
             tb_emit(d,0,0,PGWT_WIRE_TRACE,123,trace,48)<0)return -EIO;
         d->shutdown_phase=2;return 0;
@@ -286,6 +287,12 @@ static bool tb_core_held_age(void)
     TB(d.count==2 && d.outputs[0].record.rank==PGWT_MERGE_FORK &&
        d.outputs[1].kind==PGWT_MERGE_OUT_FRONTIER && d.outputs[1].F==12 && !d.traces);
     TB(pgwt_capture_waiting(d.capture) && pgwt_capture_max_held_ns(d.capture,100)==80);
+    struct pgwt_daemon *daemon=calloc(1,sizeof(*daemon));TB(daemon);
+    daemon->exact_perf=true;daemon->percpu_transport=d.transport;daemon->merge_capture=d.capture;
+    /* Queue has emptied, but the core still holds the one TRANS at t=F+1. */
+    TB(pgwt_transport_pending_records(d.transport)==0 && pgwt_capture_pending_records(d.capture)==1 &&
+       pgwt_merge_capture_pending_records(daemon)==1);
+    free(daemon);
     TB(pgwt_capture_finish(d.capture,100,&d.snapshot)==0 && d.count==3 &&
        d.outputs[2].kind==PGWT_MERGE_OUT_VOID && pgwt_capture_max_held_ns(d.capture,100)==80);
     tb_cleanup(&d);return true;
@@ -659,6 +666,116 @@ static bool tb_counter_cost(void)
     printf("counter cost: 41 released DATA, 13 map lookups at 1 completion checkpoint; 0 map lookups/DATA\n");
     tb_cleanup(&d);return true;
 }
+static bool tb_terminal_attempts(void)
+{
+    for(unsigned fail=0;fail<2;++fail)for(size_t slot=0;slot<6;++slot){
+        struct tb_driver d;TB(tb_setup(&d));
+        /* A failed last publication has no following sequence number to
+         * expose its gap. All destinations are empty, with no pending round. */
+        if(fail)d.attempts[slot]=1;
+        TB(pgwt_transport_finish(d.transport)==0 && d.drains==1);
+        TB(d.count==(fail?1U:0U));
+        if(fail)TB(d.outputs[0].kind==PGWT_MERGE_OUT_VOID &&
+                   d.outputs[0].reason==PGWT_MERGE_SEQUENCE_GAP &&
+                   pgwt_capture_report(d.capture).status==PGWT_MERGE_SUSPENDED);
+        tb_cleanup(&d);
+    }
+    puts("terminal attempts: empty CPU/E/L with last publication missing => VOID(sequence_gap) PASS");
+    return true;
+}
+static bool tb_cadence(void)
+{
+    struct pgwt_transport_perf_attributes a=pgwt_transport_perf_attributes(16U*1024U*1024U);
+    TB(a.type==1 && a.config==10 && a.sample_type==(1U<<10) && a.sample_period==1 &&
+       a.watermark && a.wakeup_events==0 && a.wakeup_watermark==65536);
+    a=pgwt_transport_perf_attributes(4096);
+    TB(a.watermark && a.wakeup_events==0 && a.wakeup_watermark==512);
+    TB(pgwt_transport_service_interval_ns()==10000000);
+    TB(pgwt_transport_service_due(0,0,false) && !pgwt_transport_service_due(9999999,0,true) &&
+       pgwt_transport_service_due(10000000,9999999,true) &&
+       !pgwt_transport_service_due(19999999,10000000,true) &&
+       pgwt_transport_service_due(1,20000000,true));
+    struct tb_driver driver;TB(tb_setup(&driver));
+    struct pgwt_daemon *d=calloc(1,sizeof(*d));TB(d);
+    d->exact_perf=true;d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
+    TB(pgwt_percpu_transport_prepare(d)==0 && pgwt_percpu_transport_configure(d)==0 &&
+       pgwt_percpu_transport_open(d)==0);
+    /* Continuous early readiness drains promptly, but does not multiply
+     * topology sysfs/helper-health work or request helpers on an idle box. */
+    for(unsigned i=0;i<100000;++i){driver.now=i*100;TB(pgwt_percpu_transport_poll(d)==0);}
+    TB(driver.drains==100000 && driver.topology_reads==1 && !driver.wakes);
+    driver.now=10000000;TB(pgwt_percpu_transport_poll(d)==0 && driver.topology_reads==2);
+    driver.now=10000001;TB(pgwt_percpu_transport_poll(d)==0 && driver.topology_reads==2);
+    /* A clock-anchored cadence does not accumulate delay from early wakes. */
+    driver.now=29999999;TB(pgwt_percpu_transport_poll(d)==0 && driver.topology_reads==3);
+    driver.now=30000000;TB(pgwt_percpu_transport_poll(d)==0 && driver.topology_reads==4);
+    tb_cleanup(&driver);free(d);
+    puts("perf cadence: byte watermark min(buffer/8,65536), poll 10 ms; 100000 early wakes, 1 topology service PASS");
+    return true;
+}
+static bool tb_pending(void)
+{
+    struct tb_driver driver;TB(tb_setup(&driver));
+    struct pgwt_daemon *d=calloc(1,sizeof(*d));TB(d);
+    d->exact_perf=true;d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
+    TB(pgwt_merge_capture_pending_records(d)==0);
+    TB(tb_begin(&driver));
+    TB(pgwt_transport_pending_records(driver.transport)==4 && pgwt_capture_pending_records(driver.capture)==0 &&
+       pgwt_merge_capture_pending_records(d)==4);
+    TB(tb_boundary(&driver,0,0,2,14)==0 && tb_boundary(&driver,1,0,2,14)==0);
+    TB(pgwt_merge_capture_pending_records(d)==6);
+    TB(pgwt_transport_poll(driver.transport,false)==0 && driver.traces==1 &&
+       pgwt_merge_capture_pending_records(d)==0);
+    /* The real, now portable tick entry must delegate even when its own
+     * post-duty poll is skipped by --count/shutdown. */
+    d->running=false;d->tick=0;
+    TB(pgwt_merge_capture_tick(d)==0 && d->tick==1);
+    tb_cleanup(&driver);
+    TB(tb_setup(&driver));driver.prove=false;
+    d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
+    TB(tb_begin(&driver));
+    struct pgwt_attach_report r={.pid=30,.cookie=123,.event=MA_BEGIN};
+    TB(pgwt_capture_attach(driver.capture,&r,driver.now,&driver.snapshot)==0);
+    TB(tb_boundary(&driver,0,0,2,14)==0 && tb_boundary(&driver,1,0,2,14)==0);
+    TB(pgwt_transport_poll(driver.transport,false)==0 && !driver.traces);
+    /* Transport empty; adapter holds FORK and its following L boundary,
+     * while the core stages TRANS. Do not lose or double-count either tier. */
+    TB(pgwt_transport_pending_records(driver.transport)==0 && pgwt_capture_pending_records(driver.capture)==3 &&
+       pgwt_merge_capture_pending_records(d)==3);
+    r.event=MA_COMPLETE;r.facts_known=r.facts_true=MA_ALL_FACTS;
+    TB(pgwt_capture_attach(driver.capture,&r,driver.now,&driver.snapshot)==0 && driver.traces==1 &&
+       pgwt_merge_capture_pending_records(d)==0);
+    tb_cleanup(&driver);free(d);return true;
+}
+static bool tb_poll_budget(void)
+{
+    struct tb_driver driver;TB(tb_setup(&driver));
+    struct pgwt_daemon *d=calloc(1,sizeof(*d));TB(d);
+    d->exact_perf=true;d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
+    TB(pgwt_percpu_transport_prepare(d)==0 && pgwt_percpu_transport_configure(d)==0 &&
+       pgwt_percpu_transport_open(d)==0);
+    const uint64_t interval=pgwt_transport_service_interval_ns();
+    driver.now=0;TB(pgwt_percpu_transport_poll(d)==0 && !driver.wakes);
+    /* Model DATA emitted just after that poll, below the watermark. First
+     * consume at 10 ms. t=13 is newer than round one's certified cutoff 12,
+     * so it must wait for round two; the timer is not permission to publish. */
+    uint64_t emitted=1;
+    driver.shutdown_phase=1;driver.trace_t=13;
+    for(unsigned slot=1;slot<=3;++slot){
+        driver.now=slot*interval;
+        TB(pgwt_percpu_transport_poll(d)==0 && !driver.traces);
+    }
+    TB(driver.shutdown_phase==4 && pgwt_capture_pending_records(driver.capture)==1);
+    driver.now=4*interval;TB(pgwt_percpu_transport_poll(d)==0 && driver.ctl.round==2 && driver.ctl.el_request);
+    TB(tb_boundary(&driver,0,1,2,14)==0 && tb_boundary(&driver,1,2,2,14)==0);
+    driver.now=5*interval;TB(pgwt_percpu_transport_poll(d)==0 && !driver.traces);
+    TB(tb_boundary(&driver,0,0,3,15)==0 && tb_boundary(&driver,1,0,3,15)==0);
+    driver.now=6*interval;TB(pgwt_percpu_transport_poll(d)==0 && driver.traces==1 &&
+       pgwt_merge_capture_pending_records(d)==0 && driver.now-emitted<70000000);
+    printf("poll budget: below-watermark DATA + two completion rounds, release by 60 ms; "
+           "poll/slot allowance <=70 ms, helper/processing allowance 30 ms (box qualification required) PASS\n");
+    tb_cleanup(&driver);free(d);return true;
+}
 #ifdef PGWT_TRANSPORT_HOST_TEST
 static bool tb_index_cost(struct pgwt_merge_capture *capture,size_t n)
 {
@@ -814,7 +931,8 @@ static const struct {const char *name;bool(*run)(void);} tb_guards[]={
     {"stale_ack",tb_stale_ack},{"counter_timing",tb_counter_timing},{"post_snapshot",tb_post_snapshot},{"core_held_age",tb_core_held_age},
     {"attempt_window",tb_attempt_window},{"late_fork",tb_late_fork},{"unknown_init",tb_unknown_init},{"unknown",tb_unknown},
     {"gaps",tb_gaps},{"writer",tb_writer},{"decode_lost",tb_decode_and_lost},
-    {"shutdown_topology",tb_shutdown_and_topology},{"shutdown_raw",tb_shutdown_raw},{"flag_off",tb_off},{"injected_kernel",tb_injected_kernel},{"dump",tb_dump},{"dump_failure",tb_dump_failure},{"bounded_ring",tb_bound},{"counter_cost",tb_counter_cost},
+    {"shutdown_topology",tb_shutdown_and_topology},{"shutdown_raw",tb_shutdown_raw},{"terminal_attempts",tb_terminal_attempts},
+    {"cadence",tb_cadence},{"pending",tb_pending},{"poll_budget",tb_poll_budget},{"flag_off",tb_off},{"injected_kernel",tb_injected_kernel},{"dump",tb_dump},{"dump_failure",tb_dump_failure},{"bounded_ring",tb_bound},{"counter_cost",tb_counter_cost},
 #ifdef PGWT_TRANSPORT_HOST_TEST
     {"lifetime_history",tb_lifetime_history},
 #endif
@@ -864,17 +982,15 @@ int main(int argc,char **argv)
     return rc;
 }
 
-#if defined(__linux__) && !defined(PGWT_TRANSPORT_HOST_TEST)
-/* Isolated Linux unit target links readers/libbpf, not the daemon. These
- * side effects are never invoked by portable schedules or flag-off tests. */
+/* Portable binding tests link the real capture binding, with daemon effects
+ * supplied here. The shared-duty body has its own compiled host harness. */
 struct pgwt_counter_vector pgwt_daemon_counter_vector(struct pgwt_daemon *d)
 {(void)d;return (struct pgwt_counter_vector){0};}
 int pgwt_process_lifecycle_payload(struct pgwt_daemon *d,void *p,size_t n)
 {(void)d;(void)p;(void)n;return -ENOSYS;}
 int pgwt_process_trace_payload(struct pgwt_daemon *d,void *p,size_t n)
 {(void)d;(void)p;(void)n;return -ENOSYS;}
-void pgwt_tick_duties(struct pgwt_daemon *d){(void)d;}
+void pgwt_tick_duties(struct pgwt_daemon *d){++d->tick;}
 int pgwt_recover_unattached_backends(struct pgwt_daemon *d){(void)d;return 0;}
 int pgwt_sweep_stale_state(struct pgwt_daemon *d){(void)d;return 0;}
 void pgwt_escalation_check_budget(struct pgwt_daemon *d){(void)d;}
-#endif

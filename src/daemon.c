@@ -521,14 +521,28 @@ void pgwt_tick_duties(struct pgwt_daemon *d)
         pgwt_debug_block_end(d, "accum_map_read", 0, started_ns);
     }
 
-    /* #416: the LAST thing before the display is built, so the smallest
-     * possible window separates "every emitted record is in event_accum"
-     * from the state_map read that supplies the still-open stretches. */
+    /* #416: the LAST thing before the display is built. The default ring
+     * drains into event_accum; exact-perf can still hold records for proof
+     * or a frontier. Report that backlog without changing release order. */
     if (d->exact_perf) {
         if (pgwt_percpu_transport_poll(d) < 0) {
             fprintf(stderr, "FATAL: exact per-CPU capture tick drain failed\n");
             d->running = false;
             return;
+        }
+        d->counters.tick_drain_pending_records = pgwt_merge_capture_pending_records(d);
+        if (d->counters.tick_drain_pending_records) {
+            ++d->counters.tick_drain_truncated_total;
+            d->counters.tick_drain_last_bound = PGWT_TICK_DRAIN_BOUND_MERGE;
+            if (!d->tick_drain_truncated_logged) {
+                d->tick_drain_truncated_logged = true;
+                fprintf(stderr, "WARN: exact-perf per-tick drain left %llu queued/held "
+                    "envelopes at the accumulator copy; this live view contains only "
+                    "released DATA plus state-map open intervals; "
+                    "tick_drain_pending_records reports the latest backlog, "
+                    "tick_drain_truncated_total counts these ticks\n",
+                    (unsigned long long)d->counters.tick_drain_pending_records);
+            }
         }
     } else {
         drain_event_ring_for_tick(d);
@@ -2021,7 +2035,7 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
             "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
             "tick_drain_records_total=%llu tick_drain_max_records=%llu "
-            "tick_drain_truncated_total=%llu\n",
+            "tick_drain_truncated_total=%llu tick_drain_pending_records=%llu\n",
             d->cpu_accounting ? 1 : 0, backends_tracked,
             (unsigned long long)d->debug_loop_iterations,
             (unsigned long long)d->debug_timer_entries,
@@ -2048,7 +2062,8 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.wait_gap_cpu_ns_total,
             (unsigned long long)d->counters.tick_drain_records_total,
             (unsigned long long)d->counters.tick_drain_max_records,
-            (unsigned long long)d->counters.tick_drain_truncated_total);
+            (unsigned long long)d->counters.tick_drain_truncated_total,
+            (unsigned long long)d->counters.tick_drain_pending_records);
 
     uint32_t key = 0, next;
     struct pgwt_pid_state st;
