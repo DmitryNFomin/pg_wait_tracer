@@ -11,7 +11,8 @@ struct source_state {
 struct generation_state {
     pgwt_merge_attachment proof;
     bool lifecycle_seen, sequence_seen, exited;
-    unsigned creation;             /* 1: FORK proved, 2: INIT also proved */
+    bool fork_seed_admitted, first_released;
+    unsigned creation;             /* 1: FORK awaiting INIT, 2: creation admitted */
     pgwt_merge_record exit_record;
 };
 struct frontier_state {
@@ -239,6 +240,13 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
             }
             a->identity_proved = true;
             generation->creation = 1;
+            if (r->fork_seed_proved) {
+                generation->fork_seed_admitted = true;
+                generation->creation = 2;
+                generation->sequence_seen = true;
+                a->sequence_proved = true;
+                a->next_q = 1;
+            }
         } else if (generation->creation && r->rank == PGWT_MERGE_FORK) {
             return fault(m, PGWT_MERGE_UNKNOWN_EVIDENCE, obs);
         }
@@ -293,9 +301,24 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         struct staged *v = &m->queue[i];
         pgwt_merge_output out = {.kind = v->text ? PGWT_MERGE_OUT_TEXT : PGWT_MERGE_OUT_DATA,
             .record = v->record, .epoch = m->report.epoch};
+        struct generation_state *published = v->text ? NULL :
+            attachment(m->attachments, m->attachment_count, &v->record);
+        struct generation_state *planned = v->text ? NULL :
+            attachment(m->prospective, m->attachment_count, &v->record);
+        bool transition = !v->text && v->record.rank == PGWT_MERGE_TRANS;
+        if (transition)
+            out.prior_interval_certified = !planned->fork_seed_admitted || published->first_released;
         /* contract §3/§4: rejection is not output; post carries failure C,d. */
         if (!m->config.sink(m->config.sink_context, &out, &obs))
             return fault(m, PGWT_MERGE_WRITER_PUSH_FAIL, obs);
+        /* DECISION 25c: retain the successful prefix even when a later
+         * publication or counter checkpoint suspends this release. */
+        if (published && v->record.rank == PGWT_MERGE_FORK)
+            published->fork_seed_admitted = planned->fork_seed_admitted;
+        if (transition) {
+            published->first_released = true;
+            planned->first_released = true;
+        }
         if (!obs.counters.known) return fault(m, PGWT_MERGE_COUNTER_UNKNOWN, obs);
         if (!same_counters(obs.counters, m->baseline))
             return fault(m, counter_fault(obs.counters, m->observed), obs);
