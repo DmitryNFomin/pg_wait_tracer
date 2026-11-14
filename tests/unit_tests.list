@@ -1080,6 +1080,9 @@ test_evidence_codec_mutants.py
 test_core_evidence_differential.py
 test_core_merge_contract
 test_core_merge_adapter
+test_transport_wire
+test_transport_producers
+test_percpu_transport
 core_merge_adapter_mutants.sh
 test_core_evidence_fuzz.py
 
