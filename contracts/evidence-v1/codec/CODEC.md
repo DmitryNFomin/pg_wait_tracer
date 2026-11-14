@@ -23,6 +23,11 @@ batch. It cannot establish file identity or integrity on its own. Writers MUST
 refuse to serialize malformed records or unsupported kinds; reader fault handling
 is not an alternative encoding available to a writer.
 
+> **Redelivery precedence:** The wording identified by original line number in
+> [REDELIVERY.md, “Superseded CODEC.md wording”](REDELIVERY.md#superseded-codecmd-wording)
+> is superseded in the respects listed there. REDELIVERY.md governs reconciliation
+> and the codec/replay stop boundary; byte-format requirements remain unchanged.
+
 ## 1. Representation and limits
 
 All fixed-width integers are unsigned, little-endian, with exactly the stated
@@ -461,6 +466,8 @@ bytes at that position are an error. Copying records into a successor is
 forbidden. Repacking creates a different physical artifact, not a continuation
 or deduplication identity for an existing capture.
 
+Reconciliation of several deliveries of one physical file is governed by [REDELIVERY.md](REDELIVERY.md), which takes precedence where they differ.
+
 Deduplication MUST occur in the codec before building the logical record array:
 pgwt_evidence_record has no physical-position field. Codec conformance tests
 must cover repeated delivery of one position (emitted once), identical rows at
@@ -536,6 +543,7 @@ the link fails; rebuilding only the footer or changing flags leaves it valid.
 The same ordinal with conflicting physical files is ambiguous and must not be
 chosen by timestamp. Re-delivery of the identical validated file is not a new
 chain member.
+Reconciliation of several deliveries of one physical file is governed by [REDELIVERY.md](REDELIVERY.md), which takes precedence where they differ.
 
 Start each capture at file 0. A missing, corrupt, unsupported or mismatched file
 stops that capture; no later same-capture file can repair it or be read as an
