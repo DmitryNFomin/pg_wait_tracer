@@ -67,6 +67,7 @@ step "core evidence contract, differential and mutation checks"
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py --contract-only
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py
 run env CFLAGS="$core_cflags" bash tests/evidence_mutants.sh
+run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_report.py
 
 step "portable v5 evidence codec, independent bytes and mutation checks"
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_oracle.py

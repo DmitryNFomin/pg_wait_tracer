@@ -80,6 +80,80 @@ typedef struct {
     pgwt_core_result wait_time, completed_waits;
 } pgwt_evidence_output;
 
+/* Diagnostic identifiers are NOT a normative vocabulary. This table maps
+ * them to redelivery-ref/replay_effects.py labels where that bounded reference
+ * implements the check; the other labels name existing full-replay checks.
+ * NONE                         (no stop)
+ * BASELINE_MISMATCH            baseline_mismatch
+ * NONADVANCING_FRONTIER        nonadvancing_frontier
+ * RECOVERY_BEFORE_VOID         recovery_before_void
+ * OVERLAPPING_ATTACHMENT       overlapping_attachment
+ * ATTACHMENT_OUTSIDE_LIFE      attachment_outside_life
+ * MALFORMED_RECORD             malformed_record (outside bounded reference)
+ * END_WITHOUT_RUN              end_without_run (outside bounded reference)
+ * ANCHOR_MISMATCH              anchor_mismatch (outside bounded reference)
+ * RUN_STATE_MISMATCH           run_state_mismatch (outside bounded reference)
+ * RUN_DURATION_MISMATCH        run_duration_mismatch (outside bounded reference)
+ * FILE_CHAIN                   file_chain (outside bounded reference)
+ * CAPTURE_BOOT_CONFLICT        capture_boot_conflict (outside bounded reference)
+ */
+typedef enum {
+    PGWT_REPLAY_STOP_NONE, PGWT_REPLAY_STOP_BASELINE_MISMATCH,
+    PGWT_REPLAY_STOP_NONADVANCING_FRONTIER, PGWT_REPLAY_STOP_RECOVERY_BEFORE_VOID,
+    PGWT_REPLAY_STOP_OVERLAPPING_ATTACHMENT, PGWT_REPLAY_STOP_ATTACHMENT_OUTSIDE_LIFE,
+    PGWT_REPLAY_STOP_MALFORMED_RECORD, PGWT_REPLAY_STOP_END_WITHOUT_RUN,
+    PGWT_REPLAY_STOP_ANCHOR_MISMATCH, PGWT_REPLAY_STOP_RUN_STATE_MISMATCH,
+    PGWT_REPLAY_STOP_RUN_DURATION_MISMATCH, PGWT_REPLAY_STOP_FILE_CHAIN,
+    PGWT_REPLAY_STOP_CAPTURE_BOOT_CONFLICT
+} pgwt_replay_stop_reason;
+
+typedef struct {
+    bool stopped, descriptor;
+    size_t file_index, record_index; /* input indices; record_index only if !descriptor */
+    pgwt_replay_stop_reason reason;
+    /* Only BASELINE_MISMATCH uses these; known=false represents null. */
+    pgwt_evidence_counters expected_baseline, declared_baseline;
+} pgwt_evidence_stop;
+
+typedef struct {
+    pgwt_core_event boot, capture; /* borrow input strings */
+    pgwt_evidence_stop stop;       /* final cutoff, after ALL truncation passes */
+    bool has_frontier, has_high_water;
+    uint64_t frontier, high_water; /* F and H; zero is a valid value */
+    uint64_t *frontiers, *revoked_frontiers; /* owned, increasing, distinct */
+    size_t frontier_count, revoked_frontier_count;
+    pgwt_evidence_counters baseline;
+    /* Nullable latest lifecycle-uncertainty instant, matching the reference's
+     * lifecycle_uncertainty field (the flag says whether uncertainty is set).
+     * Retained old generations remain tainted; a fresh fork can be eligible. */
+    bool has_lifecycle_uncertainty;
+    uint64_t lifecycle_uncertainty;
+} pgwt_evidence_capture_report;
+
+typedef struct {
+    pgwt_evidence_capture_report *captures; /* owned, first-descriptor input order */
+    size_t capture_count;
+} pgwt_evidence_report;
+
+/* Additive report API. Same projection/metrics as pgwt_evidence_replay.
+ * report is required, fresh or freed before reuse, and zeroed on non-OK status.
+ * Each joined capture has one entry, including a chain stopped at a descriptor.
+ * Stop indices name the original input arrays, never the joined pseudo-records.
+ * A descriptor stop has no record index. Only stopped entries carry a reason.
+ * State describes the retained prefix before the final cutoff, including VOID
+ * revocations; H retains accepted publications even when their F is revoked.
+ * This API does not reconcile unordered codec deliveries or report codec stops.
+ * The caller supplies validated logical file prefixes in chain order as before.
+ * Report arrays live until report_free; input strings obey output's lifetime.
+ */
+pgwt_replay_status pgwt_evidence_replay_report(const pgwt_evidence_input *input,
+                                              const pgwt_core_query *query,
+                                              pgwt_evidence_output *output,
+                                              pgwt_evidence_report *report,
+                                              const char **reason);
+void pgwt_evidence_report_free(pgwt_evidence_report *report);
+const char *pgwt_evidence_stop_label(pgwt_replay_stop_reason reason);
+
 /* No result objects are emitted on non-OK status; output is zeroed. Reason is
  * an optional static error string. Output must be fresh or freed before reuse.
  * On success, projection and result storage live until output_free; input
