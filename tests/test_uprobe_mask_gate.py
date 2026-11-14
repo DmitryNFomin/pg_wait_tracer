@@ -403,8 +403,29 @@ def shell_forces_absence(source, seam):
 
 
 for file in ("test_execution_cardinality.py", "test_execution_span_live.py",
-             "test_escalation.sh", "ui_live_smoke.sh"):
+             "test_escalation.sh", "ui_live_smoke.sh", "test_counter_vector_phase_live.py"):
     source = io.open(os.path.join(SCRIPT_DIR, file), encoding="utf-8").read()
+    if file == "test_counter_vector_phase_live.py":
+        tree = ast.parse(source)
+        report(any(isinstance(node, ast.ImportFrom)
+                   and node.module == "test_counter_vector_live"
+                   and any(alias.name == "run_arm" and alias.asname is None
+                           for alias in node.names) for node in ast.walk(tree))
+               and any(is_helper_call(node, "run_arm")
+                       and any(kw.arg == "expected_phase" and isinstance(kw.value, ast.Name)
+                               and kw.value.id == "expected_phase" for kw in node.keywords)
+                       for node in ast.walk(tree)),
+               "%s delegates to the shared phase arm" % file)
+        # This entry point delegates daemon startup and environment sanitising.
+        source += "\n" + io.open(os.path.join(SCRIPT_DIR, "test_counter_vector_live.py"),
+                                 encoding="utf-8").read()
+        forwarding = ast.parse('''
+if expected_phase is not None and "PGWT_TEST_FORCE_NO_PHASE_PROBES" in os.environ:
+    env["PGWT_TEST_FORCE_NO_PHASE_PROBES"] = os.environ["PGWT_TEST_FORCE_NO_PHASE_PROBES"]
+''').body[0]
+        report(any(isinstance(node, ast.If) and ast.dump(node) == ast.dump(forwarding)
+                   for node in ast.walk(ast.parse(source))),
+               "%s forwards the rehearsal switch only for its phase arm" % file)
     report("--skip-usdt" not in source,
            "%s no longer passes the policy-level proxy" % file)
     if file.endswith(".py"):
