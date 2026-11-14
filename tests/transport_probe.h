@@ -30,6 +30,7 @@ struct probe_identity {
 struct probe_pid_cookie { u32 pid; u64 cookie; };
 struct probe_backend {
     u32 pid; u64 cookie; int boot, wait;
+    bool init_seen;
     struct bpf_link *activity, *query;
 };
 struct probe_helper {
@@ -47,10 +48,11 @@ struct probe {
     int possible, online, main_cpu, helpers_started, failed;
     u64 *delivered, *last_seq, *acks, *snapshot;
     u64 boundary_w[3]; u32 boundary_round[3];
-    u64 *helper_stamps; size_t helper_stamps_len, helper_stamps_cap;
-    u64 records[5], lost, forks, reuses, attached;
+    struct probe_stamp *helper_stamps, *requests;
+    size_t helper_stamps_len, helper_stamps_cap, requests_len, requests_cap;
+    u64 records[5], lost, forks, reuses, attached, init_records, init_stored;
     u64 activity_offset, query_offset, ptr; u32 wait_offset;
-    const char *exe; bool self, spinning, stopping; u64 spin_ns;
+    const char *exe, *cohort_db; bool self, spinning, stopping; u64 spin_ns;
 };
 static volatile sig_atomic_t probe_stop;
 static volatile u32 probe_wait;
@@ -103,9 +105,28 @@ static struct probe_identity *probe_identity(struct probe *p, u64 cookie, u32 pi
     if (id->pid && id->pid != pid) probe_fail(p, "cookie reissued to another PID");
     id->pid = pid; return id;
 }
+static void probe_observe_stored_init(struct probe *p, struct probe_backend *b)
+{
+    if (b->init_seen || !p->cohort_db) return;
+    u32 key=b->pid; struct pgwt_pid_state st;
+    if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.state_map), &key, &st) ||
+        st.cookie != b->cookie || !st.init_stored) return;
+    /* The driver owns a unique database. Bind the nonvacuity count to its
+     * cohort, rather than unrelated postmaster children. PostgreSQL updates
+     * this title after startup, so keep observing already attached backends. */
+    char name[64], title[512], needle[128];
+    snprintf(name,sizeof(name),"/proc/%u/cmdline",b->pid);
+    int fd=open(name,O_RDONLY|O_CLOEXEC); if (fd<0) return;
+    ssize_t n=read(fd,title,sizeof(title)-1); close(fd); if (n<=0) return;
+    for (ssize_t i=0;i<n;++i) if (!title[i]) title[i]=' ';
+    title[n]='\0'; snprintf(needle,sizeof(needle)," %s ",p->cohort_db);
+    if (strstr(title,needle)) { b->init_seen=true; ++p->init_stored; }
+}
 static void probe_try_attach(struct probe *p, struct probe_backend *b)
 {
-    if (!b->pid || b->wait >= 0 || p->self || p->stopping) return;
+    if (!b->pid || p->self || p->stopping) return;
+    probe_observe_stored_init(p,b);
+    if (b->wait >= 0) return;
     char name[64]; snprintf(name, sizeof(name), "/proc/%u/mem", b->pid);
     int mem = open(name, O_RDONLY | O_CLOEXEC);
     if (mem < 0) return; /* exited before instrumentation: no A2 coverage claim */
@@ -180,14 +201,14 @@ static int probe_record(struct probe *p, int dest, const void *data, size_t size
         else {
             p->acks[hdr.cpu] = cut.round;
             if (p->spinning) {
-                if (p->helper_stamps_len+2 > p->helper_stamps_cap) {
+                if (p->helper_stamps_len == p->helper_stamps_cap) {
                     size_t cap=p->helper_stamps_cap ? p->helper_stamps_cap*2 : 1024;
-                    void *next=realloc(p->helper_stamps, cap*sizeof(u64));
+                    void *next=realloc(p->helper_stamps, cap*sizeof(*p->helper_stamps));
                     if (!next) { probe_fail(p,"falsifier stamp allocation"); return 0; }
                     p->helper_stamps=next; p->helper_stamps_cap=cap;
                 }
-                p->helper_stamps[p->helper_stamps_len++]=hdr.cpu;
-                p->helper_stamps[p->helper_stamps_len++]=cut.w;
+                p->helper_stamps[p->helper_stamps_len++]=(struct probe_stamp){
+                    .cpu=hdr.cpu, .round=cut.round, .stamp=cut.w};
             }
         }
         return 0;
@@ -222,8 +243,11 @@ static int probe_record(struct probe *p, int dest, const void *data, size_t size
             if (id->exit_seen) probe_fail(p,"duplicate lifetime EXIT");
             id->exit_seen=true; id->exit_ts=ev.timestamp;
         }
-        if (ev.type == PGWT_LIFECYCLE_INIT) for (int i=0; i<MAX_BACKENDS; ++i)
-            if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) probe_try_attach(p, &p->backends[i]);
+        if (ev.type == PGWT_LIFECYCLE_INIT) {
+            ++p->init_records;
+            for (int i=0; i<MAX_BACKENDS; ++i)
+                if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) probe_try_attach(p, &p->backends[i]);
+        }
         if (ev.type == PGWT_LIFECYCLE_EXIT) for (int i=0; i<MAX_BACKENDS; ++i)
             if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) probe_close_backend(&p->backends[i]);
     } else if (hdr.kind == PGWT_WIRE_TEXT && hdr.payload_len == sizeof(struct pgwt_query_text_event) && dest == 2) {
@@ -281,7 +305,20 @@ static int probe_round(struct probe *p, bool el)
     if (bpf_map_lookup_elem(fd, &zero, &ctl)) return -1;
     ++ctl.round; if (el) ++ctl.el_request;
     if (bpf_map_update_elem(fd, &zero, &ctl, BPF_ANY)) return -1;
-    for (int i=0; i<p->helpers_started; ++i) transport_request_signal(&p->helpers[i].channel);
+    for (int i=0; i<p->helpers_started; ++i) {
+        transport_request_signal(&p->helpers[i].channel);
+        if (p->spinning) {
+            if (p->requests_len == p->requests_cap) {
+                size_t cap=p->requests_cap ? p->requests_cap*2 : 1024;
+                void *next=realloc(p->requests,cap*sizeof(*p->requests));
+                if (!next) return -1;
+                p->requests=next; p->requests_cap=cap;
+            }
+            /* Stamp after signal: this request was issued by this time. */
+            p->requests[p->requests_len++]=(struct probe_stamp){
+                .cpu=(u32)p->helpers[i].cpu, .round=ctl.round, .stamp=probe_now()};
+        }
+    }
     syscall(SYS_getppid); /* registered process leader publishes E/L */
     return 0;
 }
@@ -409,6 +446,7 @@ static int probe_reconcile(struct probe *p)
     if (!p->records[PGWT_WIRE_TRACE] || !p->forks || p->lost || (!p->spinning && failed)) ok=false;
     bool spun=false; u64 minimum_spin=~(u64)0;
     if (p->spinning) {
+#ifdef PGWT_TRANSPORT_FALSIFIER
         u32 zero=0;
         if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.test_spin), &zero, p->snapshot)) ok=false;
         else {
@@ -417,11 +455,15 @@ static int probe_reconcile(struct probe *p)
                 spun=true;
                 u64 duration=spins[cpu].ended-spins[cpu].started;
                 if (duration<minimum_spin) minimum_spin=duration;
-                for (size_t i=0;i<p->helper_stamps_len;i+=2)
-                    if (p->helper_stamps[i] == (u64)cpu && p->helper_stamps[i+1] >= spins[cpu].started &&
-                        p->helper_stamps[i+1] <= spins[cpu].ended) {
-                        probe_fail(p,"helper timestamp overtook failure completion"); ok=false;
-                    }
+                int evidence=probe_spin_evidence((u32)cpu, spins[cpu].started, spins[cpu].ended,
+                    p->requests,p->requests_len,p->helper_stamps,p->helper_stamps_len);
+                if (evidence < 0) { probe_fail(p,"helper timestamp overtook failure completion"); ok=false; }
+                if (!evidence) {
+                    fprintf(stderr,"PROBE-REFUSED: no matched request during spin and later helper boundary on CPU %d\n",cpu);
+                    refused=true; ok=false;
+                }
+                fprintf(stderr,"SPIN-EVIDENCE cpu=%d start=%"PRIu64" end=%"PRIu64" completed=%"PRIu64" matched=%d\n",
+                    cpu,spins[cpu].started,spins[cpu].ended,spins[cpu].completed,evidence);
                 if (spins[cpu].ended-spins[cpu].started < 1000000) {
                     fprintf(stderr,"PROBE-REFUSED: measured forced-failure spin under 1ms on CPU %d\n",cpu);
                     refused=true; ok=false;
@@ -431,9 +473,12 @@ static int probe_reconcile(struct probe *p)
         }
         if (!spun) { fprintf(stderr,"PROBE-REFUSED: no forced spin observed\n"); refused=true; ok=false; }
         if (!failed) ok=false;
+#else
+        fprintf(stderr,"PROBE-REFUSED: production object has no falsifier\n"); refused=true; ok=false;
+#endif
     }
-    printf("],\"ok\":%s,\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"certified\":false}\n", ok?"true":"false",total,failed,p->lost,p->forks,p->reuses,p->attached,p->records[1],spun&&!refused?"true":"false",spun?minimum_spin:0);
-    free(counts); free(fail_counts); return refused?78:(ok?0:1);
+    printf("],\"ok\":%s,\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"init_records\":%"PRIu64",\"init_stored\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"certified\":false}\n", ok?"true":"false",total,failed,p->lost,p->forks,p->reuses,p->attached,p->records[1],p->init_records,p->init_stored,spun&&!refused?"true":"false",spun?minimum_spin:0);
+    free(counts); free(fail_counts); return p->failed?1:(refused?78:(ok?0:1));
 }
 static int transport_probe(int argc, char **argv)
 {
@@ -448,6 +493,7 @@ static int transport_probe(int argc, char **argv)
         else if (!strcmp(key,"--ptr")) p.ptr=n;
         else if (!strcmp(key,"--offset")) p.wait_offset=(u32)n;
         else if (!strcmp(key,"--exe")) p.exe=value;
+        else if (!strcmp(key,"--cohort-db")) p.cohort_db=value;
         else if (!strcmp(key,"--activity")) p.activity_offset=n;
         else if (!strcmp(key,"--query")) p.query_offset=n;
         else if (!strcmp(key,"--pg13")) pg13=(u32)n;
@@ -459,7 +505,7 @@ static int transport_probe(int argc, char **argv)
         else if (!strcmp(key,"--spin-ns")) p.spin_ns=n;
         else return 2;
     }
-    if (!p.self && (!pm || !p.ptr || !p.exe)) return 2;
+    if (!p.self && (!pm || !p.ptr || !p.exe || !p.cohort_db)) return 2;
     if (geteuid()) { fprintf(stderr,"PROBE-REFUSED: root required\n"); return 78; }
     p.spinning=p.spin_ns != 0;
     struct rlimit limit={RLIM_INFINITY,RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK,&limit);
@@ -478,7 +524,11 @@ static int transport_probe(int argc, char **argv)
     p.skel->rodata->debug_query_string_addr=debug_text;
     p.skel->rodata->pg13_query_attr=pg13; p.skel->rodata->pg13_qd_plannedstmt_off=qd;
     p.skel->rodata->pg13_ps_queryid_off=ps; p.skel->rodata->pg13_qd_sourcetext_off=source;
+#ifdef PGWT_TRANSPORT_FALSIFIER
     p.skel->rodata->test_fail_spin_ns=p.spin_ns;
+#else
+    if (p.spinning) { fprintf(stderr,"PROBE-REFUSED: production object has no falsifier\n"); result=78; goto cleanup; }
+#endif
     if (pg_wait_tracer_bpf__load(p.skel)) {
         if (p.spinning) { fprintf(stderr,"PROBE-REFUSED: test spin BPF load/verifier failed; retain verifier log\n"); result=78; }
         goto cleanup;
@@ -507,7 +557,7 @@ static int transport_probe(int argc, char **argv)
         while (!probe_stop && !p.failed) {
             probe_drain(&p);
             for (int i=0;i<MAX_BACKENDS;++i) probe_try_attach(&p,&p.backends[i]);
-            if (probe_now() >= next) { if (probe_round(&p,true)) { p.failed=1; break; } next=probe_now()+20000000; }
+            if (probe_now() >= next) { if (probe_round(&p,true)) { p.failed=1; break; } next=probe_now()+(p.spinning?1000000:20000000); }
             struct pollfd input={.fd=STDIN_FILENO,.events=POLLIN};
             if (poll(&input,1,1)>0 && (input.revents&(POLLIN|POLLHUP))) {
                 char line[32]; if (!fgets(line,sizeof(line),stdin) || !strncmp(line,"STOP",4)) break;
@@ -541,6 +591,7 @@ cleanup:
     probe_finish(&p);
     ring_buffer__free(p.rings); perf_buffer__free(p.perf); pg_wait_tracer_bpf__destroy(p.skel);
     free(p.identities); free(p.delivered); free(p.last_seq); free(p.acks); free(p.snapshot); free(p.helpers); free(p.helper_stamps); free(p.pid_lifetimes);
+    free(p.requests);
     return result;
 }
 #endif

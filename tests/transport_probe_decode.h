@@ -6,6 +6,29 @@
 #include <stddef.h>
 #include <string.h>
 #include "../src/pgwt_transport_wire.h"
+struct probe_stamp { __u32 cpu, round; __u64 stamp; };
+/* -1: helper passed an unfinished producer, 0: no challenge evidence (refuse),
+ * 1: a request actually issued during the spin has its own later boundary.
+ * Round matching prevents a stale or unrelated acknowledgement from passing. */
+static inline int probe_spin_evidence(__u32 cpu, __u64 started, __u64 ended,
+    const struct probe_stamp *requests, size_t nr,
+    const struct probe_stamp *boundaries, size_t nb)
+{
+    for (size_t i = 0; i < nb; ++i) {
+        const struct probe_stamp *b = &boundaries[i];
+        if (b->cpu != cpu) continue;
+        if (b->stamp >= started && b->stamp <= ended) return -1;
+    }
+    for (size_t j = 0; j < nr; ++j) {
+        const struct probe_stamp *r = &requests[j];
+        if (r->cpu != cpu || r->stamp < started || r->stamp >= ended) continue;
+        for (size_t i = 0; i < nb; ++i) {
+            const struct probe_stamp *b = &boundaries[i];
+            if (b->cpu == cpu && b->round == r->round && b->stamp > ended) return 1;
+        }
+    }
+    return 0;
+}
 static inline size_t probe_perf_wire_size(const void *data, size_t raw_size)
 {
     struct pgwt_wire_hdr hdr;

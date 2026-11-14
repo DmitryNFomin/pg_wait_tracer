@@ -21,7 +21,7 @@ before publication; a reader must never replace them using today's PID entry.
 | `on_report_activity` command flip | E ring | TRACE / 48 / 80 | producing state cookie |
 | `on_exit` terminal transition | E ring | TRACE / 48 / 80 | exiting state cookie |
 | `on_fork` | L ring | LIFECYCLE / 24 / 56 | **new child's** cookie, not postmaster's |
-| `on_bootstrap` genuine INIT | L ring | LIFECYCLE / 24 / 56 | producing state cookie |
+| `on_bootstrap` | state only | **no envelope, reservation or attempt** | preserves fork-seeded cookie |
 | `on_exit` lifecycle EXIT | L ring | LIFECYCLE / 24 / 56 | exiting state cookie |
 | `on_report_query_id` query text | L ring | TEXT / 272 / 304 | producing state cookie |
 | `on_executor_start` PG13 text | L ring | TEXT / 272 / 304 | producing state cookie |
@@ -48,6 +48,10 @@ preseed change is copying `prev.cookie` under `d->exact_perf`; mode zero writes
 zero. This **does not** prove task-bound attachment, concurrent preseed safety,
 idempotent directly-attached INIT, or lifetime-bound userspace fd closure. Those
 remain A2. Recovered stored INITs are not turned into wire INIT records.
+Under the mode every new backend uses the 25b fork-seed route; FORK+INIT
+admission is unreachable and its first interval remains uncertified. An early
+marker without the completed proof VOIDs. This follows the accepted INIT
+decision in issue 871 comment 6874906593, not an A1 certification claim.
 
 ## Reservation and failure paths
 
@@ -57,17 +61,21 @@ phase-edge update with the fresh `now`. Command flips likewise reserve first
 when a boundary is needed, then update command/query attribution at `now` even
 if reservation failed. No old attribution edge is silently kept because its
 publication failed. A successful reservation that becomes unusable at the
-admission recheck is discarded and counted once.
+admission recheck is discarded and reconciled in `transport_failures` only;
+it does not increment the logical ring aggregate or site counter. The command
+producer snapshots its boundary condition once so a userspace state replacement
+cannot strand a reservation or create an unreserved boundary.
 
 EXIT reserves E (when an exact terminal transition is required) and L before
 one shared timestamp. If either fails, both outputs are suppressed: the failed
 reservation is counted, and its successful partner is discarded and counted
 at its own destination/site. It always retires task state afterwards. FORK
-already reserved before timestamp and now reserves the enveloped size. A genuine
-INIT reserves L before its original observation stamp. Its in-place facts are
-stored even on reserve failure, but repeated bootstrap fires never replay that
-old stamp after a boundary. Its counted transport loss cannot be cancelled by
-later recovery. The default bootstrap hint/recovery path is separate and unchanged.
+already reserved before timestamp and now reserves the enveloped size.
+`on_bootstrap` stamps/stores INIT facts in the existing fork-seeded entry once,
+publishing `init_stored` after those facts. It does not touch L or consume a
+transport attempt, even when L cannot reserve. Missing state still increments
+`INIT_NO_STATE`. Mode zero retains its existing raw hint publication and failure
+accounting. Stored INITs never become synthetic wire records.
 
 Text reservations precede reading/copying the string. Unreadable or empty text
 is discarded and counts a transport failure, including an empty but valid
@@ -79,10 +87,54 @@ failure. Helper and E/L boundary failures count the destination transport slot.
 
 B must read **both** `transport_attempts` and `transport_failures`
 (PERCPU_ARRAY[3], u64, CPU/E/L keys 0/1/2). They supplement, not replace, the
-fifteen logical counters. In particular an INIT wire loss or a failed boundary
-cannot disappear because an INIT hint is logically recoverable. A helper's
+fifteen logical counters. A failed boundary cannot disappear. INIT has no wire
+attempt under the mode; the logical `lifecycle_init_drop` component still counts
+bootstrap observations that were never attached, including no-opportunity loss
+for merge certification. A helper's
 return zero is not delivery evidence on old perf implementations. Reconcile
 attempts against consumed records after completion, including the terminal gap.
+
+### Complete reserve-site audit (round 2)
+
+Command used: `rg -n 'bpf_ringbuf_(reserve|submit|discard|output)' src/bpf/pg_wait_tracer.bpf.c`.
+These are all eleven explicit reserve expressions in that file. NULL never
+owns a reservation. The portable shim rejects double-submit/discard and checks
+that every successful reservation has been released before resetting a case.
+
+| Reserve expression | Every successful-reserve path |
+| --- | --- |
+| `transport_reserve_trace`, E | Returns ownership to `transport_exit`, `emit_marker`, or `on_report_activity`; their paths are below. NULL counts aggregate/site/transport failure. |
+| `transport_reserve_lifecycle`, L | Returns ownership to `on_fork` or `transport_exit`; their paths are below. NULL counts site/transport failure. Bootstrap no longer calls it. |
+| `transport_boundary`, E branch | Fills boundary, submits once; no subsequent branch/return before submit. |
+| `transport_boundary`, L branch | Same as E; the destination branches are exclusive. |
+| `on_bootstrap`, raw L | Mode zero only: fills raw INIT and submits once. NULL counts hint drop; stored facts remain. |
+| `on_fork`, raw L | Mode zero only: fills FORK and submits once. NULL counts fork-site drop. |
+| `on_exit`, raw L | Mode zero only: fills EXIT and submits once. NULL counts exit-site drop. |
+| `on_report_query_id`, enveloped L | On unreadable/empty text, discards once and returns; otherwise submits once before dedup update. |
+| `on_report_query_id`, raw L | Same exclusive text branches, using the raw reservation pointer. |
+| `on_executor_start`, enveloped L | On unreadable/empty text, discards once and returns; otherwise submits once before dedup update. |
+| `on_executor_start`, raw L | Same exclusive text branches, using the raw reservation pointer. |
+
+Wrapper ownership paths:
+
+- `on_fork`: successful enveloped L always fills/submits once. The separate
+  test-only forced-failure branch reserves nothing.
+- `transport_exit`: when all required reservations succeed, submits E if
+  required and then L, each once. If either required destination fails,
+  discards each successful partner once and reconciles its loss; no publication
+  survives a partial pair. With no live watchpoint only L is required.
+- `emit_marker`: after E success, a missing state or closed admission discards
+  once and returns, accounting only the transport attempt. Otherwise submits
+  once. Reserve failure still updates attribution and never submits NULL.
+- `on_report_activity`: only a saved true boundary condition reserves. Thus
+  the unchanged-command early return cannot own a reservation. The same saved
+  condition enters the emission block despite concurrent `wp_live` replacement;
+  open admission submits once, closed admission discards once. A saved false
+  condition reserves/publishes nothing even if userspace later sets `wp_live`.
+
+`emit_event` uses the atomic `bpf_ringbuf_output` helper in mode zero, which
+does not transfer a reservation reference to the BPF program. Perf DATA and
+CPU boundaries use `bpf_perf_event_output`, also without explicit ring ownership.
 
 ## On-demand helper protocol for B
 
@@ -125,7 +177,8 @@ map, perf, timekeeping or JIT source. Upstream v4.18/v6.8 references below are
    103,174-178` defines the NMI/preemption mask and preemption disable. This
    supports excluding task scheduling during watchpoint DATA and bootstrap.
    Actual `kernel/bpf/ringbuf.c:322-326` confirms the try-once NMI lock that the
-   perf route removes from DATA (INIT still uses L and can fail).
+   perf route removes from DATA. Bootstrap stores facts without taking a ring
+   lock under the mode; this removes its NMI ring reservation too.
 
    The remaining permitted producers are USDT/uprobe markers, activity and query
    uprobes, sched FORK/EXIT, and the helper syscall tracepoint. Upstream
@@ -158,8 +211,13 @@ map, perf, timekeeping or JIT source. Upstream v4.18/v6.8 references below are
    [include/linux/bpf.h:2009-2045](https://github.com/torvalds/linux/blob/v6.8/include/linux/bpf.h#L2009-L2045));
    preemption disable below that call does not protect the BPF invocation.
    Task-context helper exclusion must **not** be asserted under `preempt=full`.
-   The driver records the dynamic mode, command line and available boot config,
-   and refuses the completion claim in full mode. Ubuntu runs remain mechanism
+   The driver records the dynamic mode, command line and available boot config.
+   [v6.8 kernel/sched/debug.c:232-250](https://github.com/torvalds/linux/blob/v6.8/kernel/sched/debug.c#L232-L250)
+   prints the active dynamic mode in parentheses: `none voluntary (full)`.
+   The driver reads that selection, including runtime changes. If debugfs is
+   missing/unreadable it uses boot config only for a static kernel; a dynamic
+   kernel without a readable selection is **unknown**, regardless of cmdline.
+   It refuses the completion claim for full or unknown. Ubuntu runs remain mechanism
    and mode-zero controls; they are not an Ubuntu certification claim.
 
 3. **Publication and counter visibility.** Actual EL8 ringbuf
@@ -197,21 +255,32 @@ map, perf, timekeeping or JIT source. Upstream v4.18/v6.8 references below are
 
 ## Falsifier and live probe
 
-`test_fail_spin_ns` is test-only rodata. A nonzero value forces one L FORK
+`test_fail_spin_ns` exists only in the separately compiled
+`tests/transport_falsifier.bpf.c` object (`PGWT_TRANSPORT_FALSIFIER`). The
+production translation unit excludes the knob, test map, spin function and
+FORK injection block at preprocessing time; it contains no falsifier back-edge
+even when the runtime mode is enabled. A nonzero test value forces one L FORK
 reservation failure per producing CPU (the reserve is deliberately bypassed),
 consumes its attempt, reads a would-be timestamp into `test_spin.started`,
 loops for the requested interval, then counts the failure and publishes
 `test_spin.completed`. No wire record is invented for the failed publication.
-The loop has a hard 65,536-iteration bound. Normal loads use zero, letting
-verification prune the loop completely.
+The loop has a hard 65,536-iteration bound; the test requests 20 ms and measures
+the actual duration. The live driver builds this object and its own skeleton
+and loader in an external temporary directory using the project's resolved
+compiler/libbpf/bpftool settings. Clean arms load the normal production object.
 
-The probe records all helper boundary stamps. During the falsifier it keeps
-helpers runnable on demand long enough to challenge the delayed section. A CPU
+The probe records helper boundaries and per-CPU requests with their round.
+Request timestamps are taken after signalling the pinned helper. For every
+CPU with a spin, it requires a request issued **during** that spin and a consumed
+boundary on that CPU with that exact round and `w > ended`. Missing requests,
+missing boundaries and unrelated CPU/round evidence refuse. During this test
+requests are issued every millisecond as stimulus, not as a production timer. A CPU
 boundary with `started <= w <= ended` proves the helper passed the unfinished
 spin and fails the test, even if the consumer only reads it after completion.
 This avoids falsely failing a safe acknowledgement between the actual increment
 and the later completion instrumentation store. It also checks completion and
-transport conservation after stop. A measured spin under 1 ms, missing stimulus,
+transport conservation after stop. An observed overtake fails even if another
+CPU lacks evidence. A measured spin under 1 ms, missing stimulus,
 or a verifier rejection is exit 78 / REFUSED, never PASS. **The EL8 loop has not
 been verified on this Mac.** If that kernel rejects the bounded loop, the
 smallest alternative is a separately built test object with a straight-line,
@@ -231,7 +300,10 @@ The Python driver obtains offsets from the running server's installed headers
 and resolves ELF symbol/file offsets independently. It runs PG13 when that is
 the selected server (and supports provisioned PG17/18). It creates/drops a
 private pgbench database, runs `-c16 -j4` and `-C -c16 -j4`, each for 20 seconds,
-then runs the delayed-failure arm. The standalone loader owns both rings and
+then runs the INIT restoration mutant and delayed-failure arm (five seconds
+each). PG14-16 are excluded by `run_all.sh` using its existing `exclude_test`
+matrix convention; unsupported PG is not a new exit status.
+The standalone loader owns both rings and
 the perf reader; it prints a per-CPU/destination attempted/delivered matrix.
 The libbpf RAW callback includes alignment padding: 80-byte DATA arrives as
 84 raw bytes, 48-byte boundaries as 52; the portable test pins both lengths.
@@ -239,7 +311,10 @@ The libbpf RAW callback includes alignment padding: 80-byte DATA arrives as
 The clean arms assert load success, framing, zero q/flags, lifetime FORK-cookie
 bindings, strict attempt sequences, zero LOST/failures, exact attempted/delivered
 conservation after stop, no later E/L timestamp below w, and a higher-round CPU
-ack from every online CPU after consuming E/L. The self-reuse arm deliberately
+ack from every online CPU after consuming E/L. Each clean PG arm also asserts
+`init_records == 0` on L, `init_stored > 0` in the cohort, `attached > 0` and
+`trace > 0`. Every CPU/destination has zero failures/LOST and attempted equals
+delivered, including the `-C` arm. The self-reuse arm deliberately
 holds both lifetimes' records until the second child has overwritten/retired its
 PID state. It moves `ns_last_pid` on the disposable box, requires the same
 initial-namespace PID to be reused, and checks both different FORK cookies.
@@ -251,10 +326,14 @@ record sizes and retained-state behavior.
 
 The probe's simplified watchpoint attachment is stimulus only, not an A2 proof.
 An already-exited or too-short task can be uninstrumented; its FORK/EXIT transport
-still participates in reconciliation. The clean run must produce actual DATA.
-L INIT can still lose a reservation in NMI context, so a churn run may honestly
-fail this acceptance gate. Such a failure must not be relabelled successful
-because attachment later recovered.
+still participates in reconciliation. INIT storage is sampled from the matching
+backend/cookie state, including after attachment, and counted once only when
+the backend's `/proc/PID/cmdline` title identifies the driver's unique database
+cohort. Unrelated postmaster children cannot satisfy this count. This makes
+the no-publication assertion nonvacuous. No assertion certifies attachment or
+merge coverage. The restoration mutant must build/load, produce INIT records,
+and fail exactly `zero INIT records on L under exact_perf_mode`; every other
+clean transport and stimulus assertion must pass or it is not a killed mutant.
 
 ## Portable checks and deliberately broken variants
 
@@ -275,6 +354,9 @@ Each mutant is compiled successfully and must reach its named failing assertion:
 | Reused PID's DATA keeps cookie 1 | `DATA cookie across PID reuse` |
 | E attempt increment only after reserve success | `marker fail attribution coherent` (includes consumed attempt) |
 | Helper ignores expected CPU | `helper wrong CPU refused` |
+| Command re-reads `wp_live` after a userspace map-entry replacement | `command saved admission releases reservation` |
+| Bootstrap restores the L reservation/publication | `zero INIT records on L under exact_perf_mode` (host and live) |
+| Command admission discard increments logical ring losses | `command admission discard is not a ring drop` |
 
 The retained-record box test is the read-time/current-PID-resolution control:
 it defers drain across real initial-namespace reuse and requires records to lie
@@ -282,90 +364,101 @@ in their own cookie's FORK/EXIT interval (L metadata is also checked by FIFO
 lifetime position). Resolving the old records from the current or deleted PID
 entry cannot satisfy those checks. This box control is supplied, not run here.
 
-## Dispatch evidence and handoff (Mac, 2026-11-14)
+## Round-2 validation and handoff (Mac, 2026-11-14)
 
-Required head:
+Required head and exact brief gate:
 
 ```text
 $ git log --oneline -1
-e063f456 Freeze the exact per-CPU wire interface and daemon hooks
-$ scripts/lead/check-brief.sh /private/tmp/pgwt-codex/agent%2F871-a1-producers.lock/brief.b8081b
+8927d916 Add flagged BPF transport producers and lifetime cookies
+$ scripts/lead/check-brief.sh /private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-tracer/27cc85b4-040d-47d2-ba40-e0c59ac54ec1/scratchpad/m871/brief-a1-r2.md
 CHECK BRIEF: covered #871
 ```
 
-Portable producer command/output:
+Portable validation (no BPF compilation or loading):
 
 ```text
-$ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -DPGWT_TRANSPORT_HOST_TEST tests/test_transport_producers.c -o /private/tmp/a1-host
-$ /private/tmp/a1-host
+$ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -DPGWT_TRANSPORT_HOST_TEST tests/test_transport_producers.c -o /private/tmp/pgwt-a1-r2.nb42H6/host
+$ /private/tmp/pgwt-a1-r2.nb42H6/host
+falsifier evidence: PASS (request during spin, matching CPU/round, later boundary; missing evidence refuses)
 transport pure pieces: PASS (golden envelope, attempts, allocation, cookie, CPU binding)
+live driver host checks: PASS (active preemption, missing evidence, INIT assertions, PG13-18 exclusion matrix)
 production producer bodies: PASS (identity, reservation order, accounting, helper, mode zero)
 mutant timestamp-before-reserve: KILLED (timestamp after reserve)
 mutant seq-only-on-success: KILLED (marker fail attribution coherent)
 mutant unpinned-helper: KILLED (helper wrong CPU refused)
 mutant current-pid-cookie: KILLED (queued cookie survives pid reuse)
 mutant stale-cookie-on-reused-pid: KILLED (DATA cookie across PID reuse)
-```
-
-The existing mode-zero failure harness was also run:
-
-```text
+mutant command-double-read: KILLED (command saved admission releases reservation)
+mutant INIT-publication-restored: KILLED (zero INIT records on L under exact_perf_mode)
+mutant admission-discard-counts-drop: KILLED (command admission discard is not a ring drop)
 $ python3 -B tests/test_counter_failures.py
 BPF failure paths (host C): PASS (natural errors, silent paths, success, once-only knobs)
 $ scripts/check-test-registration.sh
 OK: test-registration guard (base 8cafdcb2b5a3893c7d24dde9b9b934cdc701af83) — append-only invariant holds
 $ scripts/check-runner-registration.sh
 OK: runner-registration guard -- every tests/ci_smoke.sh invocation (5) is also invoked by tests/run_all.sh (209 invocations total, including tests/unit_tests.list entries); every candidate test file on disk (192 scanned: tests/test_*.{py,sh} plus tests/web_unit/*.test.mjs) is invoked by a runner or covered by a glob; or is a documented exemption (2 listed, 2 currently invoke no runner).
+$ bash -n tests/run_all.sh
+(exit 0)
+$ python3 -B -c 'import ast; from pathlib import Path; [ast.parse(Path(p).read_text(), filename=p) for p in ("tests/transport_producers_host.py", "tests/test_transport_producers_live.py")]; print("Python syntax: PASS")'
+Python syntax: PASS
 $ git diff --check
 (exit 0)
 ```
 
-`make check` was attempted with the normal machine-wide lock. It remained in
-that queue behind another worktree. It was cancelled (exit 130) after the
-required report auditor failed, under the brief's failed-check stop rule.
-This is **not a passing full Mac gate**. The actual last lines were:
+The initial mode-zero counter harness compilation found three obsolete
+falsifier shims unused after the compile-time exclusion. Those declarations
+were removed; the counter harness passes above. No check was loosened.
+`make check` is reserved to the lead by this round's brief and was not invoked.
+
+UNVERIFIED here: Linux C/BPF builds, production and test-object verifier
+acceptance, live INIT restoration mutant, real-PG cohort storage/attachment,
+PID reuse, preemption detection against a running kernel, measured spin and
+positive helper challenge on EL8/Ubuntu. The live command and its strict
+assertions are above; the lead runs those checks. The kernel argument still
+leaves vendor dispatch/visibility and cross-CPU clock ordering open for U2.
+
+Round 2 changes no backend attachment code. The existing round-1 changes copy
+`prev.cookie` during flagged preseed and skip delayed userspace map deletion
+under the flag; A2 remains separate. Cost: one authorised correction round,
+no gate-box use; token totals come from the dispatch wrapper.
+
+Requested diff snapshot (before adding this evidence block; the new test object
+source is listed separately because `git diff --stat` omits untracked files):
 
 ```text
-check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-tracer/27cc85b4-040d-47d2-ba40-e0c59ac54ec1/scratchpad/wt-915 (HEAD) (pid 82257, dmitryfomin@mac.home) for 977s; re-checking every 5s...
-make: *** [check] Error 130
+$ git diff --stat 8927d916
+ docs/871-a1-producer-argument.md       | 225 ++++++++++++++++++++-------------
+ src/bpf/pg_wait_tracer.bpf.c           |  40 +++---
+ tests/counter_bpf_harness.c            |   4 +-
+ tests/run_all.sh                       |   7 +
+ tests/test_transport_producers.c       |  14 ++
+ tests/test_transport_producers_live.py | 138 +++++++++++++++++---
+ tests/transport_bpf_harness.h          |  81 +++++++++++-
+ tests/transport_probe.h                |  91 ++++++++++---
+ tests/transport_probe_decode.h         |  23 ++++
+ tests/transport_producers_host.py      |  73 +++++++++++
+ 10 files changed, 545 insertions(+), 151 deletions(-)
+$ git ls-files --others --exclude-standard
+tests/transport_falsifier.bpf.c
+$ git diff --exit-code 8927d916 -- 'src/daemon.*' src/event_stream.c src/pg_wait_tracer.c 'src/percpu_transport.*' 'src/merge_capture.*' src/core/ Makefile tests/Makefile tests/unit_tests.list scripts/check.sh src/backend.c src/backend.h contracts/ web/
+(exit 0)
 ```
 
-Report-audit command/result:
+SEARCHED: tracked changes against 8927d916 in every excluded path plus backend.c/.h.
+NOT SEARCHED: other branches and ignored artifacts produced by other worktrees.
+
+Required report audit reached its prepass, then failed to initialize its
+independent auditor subprocess. Under the brief's failed-check stop rule this
+ends the round; it is not a SEND verdict or a readiness claim.
 
 ```text
-$ scripts/lead/audit-report.sh /private/tmp/a1-progress-report.txt
-AUDIT INCONCLUSIVE (auditor exit 1) -- do not send.
-$ cat /private/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-report-audits-501/a71dbed920564a59822d6393dee80e777d04574261842b66646328dc3e9d3665/1c70030b589d261990e55e8f80279cf47b33692ca971e895ee31addb6d5661bb/transcript.txt
+$ scripts/lead/audit-report.sh /private/tmp/pgwt-a1-r2.nb42H6/report.txt
+PREPASS: no unevidenced absence claim found
+AUDIT INCONCLUSIVE (auditor exit 1) -- do not send. draft=2d995b316dbc4692293eb72da38da3afd3c75f90d7287c0d7cf18cc42e4b11d3
+(exit 2)
+$ cat /private/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-report-audits-501/a71dbed920564a59822d6393dee80e777d04574261842b66646328dc3e9d3665/2d995b316dbc4692293eb72da38da3afd3c75f90d7287c0d7cf18cc42e4b11d3/transcript.txt
 WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)
 Reading additional input from stdin...
 Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)
-```
-
-Remaining validation: full `make check`, the Linux C/BPF build and verifier,
-both live kernels, measured spin duration/fence falsifier, real PID reuse and
-flag-off live suite. These are UNVERIFIED in this handoff. The box test is
-complete source for the lead to run; its assertions are described above.
-There is no certification claim. One implementation round; token accounting
-comes from the dispatch wrapper; gate-box hours in this round: 0.
-
-Requested diff (tracked changes; the wrapper stages the new files as well):
-
-```text
-$ git diff --stat e063f456
- src/backend.c                    |  12 +-
- src/bpf/pg_wait_tracer.bpf.c     | 331 +++++++++++++++++++++++++++++++++++++--
- src/pg_wait_tracer.h             |   1 +
- tests/counter_bpf_harness.c      |  15 ++
- tests/run_all.sh                 |   1 +
- tests/test_transport_producers.c |  81 ++++++++--
- 6 files changed, 415 insertions(+), 26 deletions(-)
-$ git ls-files --others --exclude-standard
-docs/871-a1-producer-argument.md
-src/bpf/transport_producer.h
-tests/test_transport_producers_live.py
-tests/transport_bpf_harness.h
-tests/transport_probe.h
-tests/transport_probe_decode.h
-tests/transport_probe_request.h
-tests/transport_producers_host.py
 ```

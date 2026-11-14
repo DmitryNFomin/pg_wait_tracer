@@ -15,6 +15,7 @@
 #define BPF_RB_NO_WAKEUP 1
 #define BPF_F_CURRENT_CPU 0xffffffffULL
 #define PT_REGS_PARM1(ctx) ((ctx)->arg1)
+#define PGWT_TRANSPORT_FALSIFIER 1
 struct pt_regs { u64 arg1; };
 struct bpf_perf_event_data { int unused; };
 struct trace_event_raw_sched_process_fork { u32 parent_pid, child_pid; };
@@ -35,6 +36,8 @@ static u32 cpu, expected_cpu, exact_perf_mode = 1, helper_tgid = 100;
 static u64 current_id = (u64)42 << 32 | 42, test_fail_spin_ns;
 static u32 target_postmaster_pid = 1, test_counter_failure;
 static bool state_present, registered, claimed, admission = true;
+static int rewrite_wp_live = -1;
+static bool close_on_edge, remove_on_clock;
 static bool test_skip_init_store, test_drop_init_hint, test_no_sched_oncpu;
 static u32 lightweight_mode, skip_query_id, pgproc_wait_offset;
 static u64 my_wait_ptr_addr, debug_query_string_addr;
@@ -77,7 +80,8 @@ static int bpf_map_delete_elem(void *map, const void *key)
     if (map == &state_map) state_present = false;
     return 0;
 }
-static u64 bpf_ktime_get_ns(void) { tick += 1000000; return tick; }
+static u64 bpf_ktime_get_ns(void)
+{ tick += 1000000; if (remove_on_clock) state_present = false; return tick; }
 static u64 bpf_get_current_pid_tgid(void) { return current_id; }
 static u32 bpf_get_smp_processor_id(void) { return cpu; }
 static void *bpf_ringbuf_reserve(void *map, size_t len, int flags)
@@ -89,6 +93,13 @@ static void *bpf_ringbuf_reserve(void *map, size_t len, int flags)
     CHECK("reservation capacity", reservations < 64 && len <= 512);
     struct record *r = &records[reservations++];
     r->dest = dest; r->reserved_at = tick; r->length = len;
+    if (rewrite_wp_live >= 0) {
+        /* Reproduce the review: userspace replaces the whole map entry
+         * between the reservation condition and the publication condition. */
+        struct pgwt_pid_state replacement = state;
+        replacement.wp_live = (u32)rewrite_wp_live;
+        state = replacement;
+    }
     return r->bytes;
 }
 static struct record *find_record(void *ptr)
@@ -97,9 +108,9 @@ static struct record *find_record(void *ptr)
     abort();
 }
 static void bpf_ringbuf_submit(void *ptr, int flags)
-{ (void)flags; find_record(ptr)->done = 1; ++outputs; }
+{ (void)flags; CHECK("submit owns live reservation", !find_record(ptr)->done); find_record(ptr)->done = 1; ++outputs; }
 static void bpf_ringbuf_discard(void *ptr, int flags)
-{ (void)flags; find_record(ptr)->done = -1; ++discards; }
+{ (void)flags; CHECK("discard owns live reservation", !find_record(ptr)->done); find_record(ptr)->done = -1; ++discards; }
 static long bpf_ringbuf_output(void *map, void *ptr, size_t len, int flags)
 {
     void *p = bpf_ringbuf_reserve(map, len, flags);
@@ -122,8 +133,18 @@ static u64 read_task_cpu_ns_for(struct pgwt_pid_state *s, u64 now)
 { (void)s; (void)now; return 0; }
 static void resolve_exact_attr(u32 pid, u64 *qid, u16 *open, u16 *quality)
 { (void)pid; *qid = state.last_query_id; *open = state.cmd_open; *quality = 0; }
-static void note_phase_edge(u32 p, u32 m, u64 now) { (void)p; (void)m; edge_stamp = now; }
-static void note_cmd_edge(u32 p, u16 open, u64 now) { (void)p; state.cmd_open = open; edge_stamp = now; }
+static void note_phase_edge(u32 p, u32 m, u64 now)
+{ (void)p; (void)m; edge_stamp = now; if (close_on_edge) admission = false; }
+static void note_cmd_edge(u32 p, u16 open, u64 now)
+{
+    (void)p; state.cmd_open = open; edge_stamp = now;
+    if (rewrite_wp_live >= 0) {
+        struct pgwt_pid_state replacement = state;
+        replacement.wp_live = (u32)rewrite_wp_live;
+        state = replacement;
+    }
+    if (close_on_edge) admission = false;
+}
 static void note_query_edge(u32 p, u64 qid, u64 now) { (void)p; state.last_query_id = qid; edge_stamp = now; }
 static void count_uprobe_fire(u32 slot) { (void)slot; }
 static u32 read_wait_event_direct(u64 addr) { (void)addr; return new_wait; }
@@ -137,6 +158,8 @@ static long bpf_probe_read_user_str(void *out, size_t len, const void *addr)
 /* PRODUCTION_FUNCTIONS */
 static void reset(void)
 {
+    for (int i = 0; i < reservations; ++i)
+        CHECK("every reservation released exactly once", records[i].done == 1 || records[i].done == -1);
     memset(&state, 0, sizeof(state)); state.cookie = 9; state.wp_live = 1;
     memset(attempts, 0, sizeof(attempts)); memset(failures, 0, sizeof(failures));
     memset(sites, 0, sizeof(sites)); memset(map_failures, 0, sizeof(map_failures));
@@ -146,11 +169,13 @@ static void reset(void)
     fail_dest = -1; outputs = reservations = discards = update_error = 0; text_result = 9;
     drops = tick = edge_stamp = allocator = 0; cpu = expected_cpu = 0;
     exact_perf_mode = 1; test_fail_spin_ns = 0; current_id = (u64)42 << 32 | 42;
+    rewrite_wp_live = -1; close_on_edge = remove_on_clock = false;
 }
 static void timestamp_order(void)
 {
     for (int i = 0; i < reservations; ++i) {
         struct record *r = &records[i];
+        CHECK("every reservation released exactly once", r->done == 1 || r->done == -1);
         if (r->done != 1) continue;
         struct pgwt_wire_hdr *h = (void *)r->bytes;
         u64 stamp = 0;
@@ -186,6 +211,20 @@ static void tests(void)
     fail_dest = -1; emit_marker(PGWT_MARKER_PLAN_START);
     CHECK("failed attempt consumes seq", attempts[1] == 2 && ((struct pgwt_wire_hdr *)records[0].bytes)->seq == 2);
     reset(); struct pt_regs cmd = {.arg1=2}; on_report_activity(&cmd); timestamp_order();
+    reset(); rewrite_wp_live = 0; on_report_activity(&cmd);
+    CHECK("command saved admission releases reservation", reservations == 1 && outputs == 1 &&
+        records[0].done == 1 && !discards && attempts[1] == 1 && !failures[1]);
+    reset(); state.wp_live = 0; rewrite_wp_live = 1; on_report_activity(&cmd);
+    CHECK("command saved admission avoids unreserved output", !reservations && !attempts[1] && !outputs);
+    reset(); close_on_edge = true; on_report_activity(&cmd); timestamp_order();
+    CHECK("command admission discard is not a ring drop", discards == 1 && !outputs &&
+        attempts[1] == 1 && failures[1] == 1 && !drops && !sites[PGWT_RING_FAIL_COMMAND_BOUNDARY]);
+    reset(); close_on_edge = true; emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
+    CHECK("marker admission discard is not a ring drop", discards == 1 && !outputs &&
+        attempts[1] == 1 && failures[1] == 1 && !drops && !sites[PGWT_RING_FAIL_MARKER]);
+    reset(); remove_on_clock = true; emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
+    CHECK("marker vanished state releases reservation", discards == 1 && !outputs &&
+        failures[1] == 1 && !drops && !sites[PGWT_RING_FAIL_MARKER]);
     reset(); fail_dest = 1; on_report_activity(&cmd);
     CHECK("command fail attribution coherent", edge_stamp && state.cmd_open == 1 && attempts[1] == 1 && failures[1] == 1);
     reset(); transport_exit(42, &state); timestamp_order();
@@ -196,9 +235,25 @@ static void tests(void)
         reset(); fail_dest = dest; transport_exit(42, &state);
         CHECK("partial exit discarded and counted", !outputs && discards == 1 && failures[1] == 1 && failures[2] == 1 && drops == 1 && !state_present);
     }
+    reset(); state.wp_live=0; transport_exit(42, &state);
+    CHECK("unattached exit submits lifecycle only", outputs==1 && !attempts[1] && attempts[2]==1 &&
+        records[0].done==1 && !state_present);
+    reset(); state.wp_live=0; fail_dest=2; transport_exit(42, &state);
+    CHECK("unattached failed exit has no reservation to release", !reservations && !attempts[1] &&
+        attempts[2]==1 && failures[2]==1 && !state_present);
     reset(); u64 addr = 1234; my_wait_ptr_addr = (u64)(uintptr_t)&addr;
-    on_bootstrap(NULL); timestamp_order(); on_bootstrap(NULL);
-    CHECK("genuine init once", outputs == 1 && attempts[2] == 1);
+    on_bootstrap(NULL);
+    u64 init_ts = state.init_ts;
+    CHECK("bootstrap stores INIT facts", state.init_stored && state.init_wait_addr == addr && init_ts);
+    on_bootstrap(NULL);
+    CHECK("bootstrap stores INIT once", state.init_ts == init_ts);
+    CHECK("zero INIT records on L under exact_perf_mode", !reservations && !outputs && !attempts[2] && !failures[2]);
+    reset(); fail_dest = 2; on_bootstrap(NULL);
+    CHECK("INIT storage independent of ring availability", state.init_stored && state.init_ts &&
+        !reservations && !attempts[2] && !failures[2] && !sites[PGWT_RING_FAIL_LIFECYCLE_INIT_HINT]);
+    reset(); state_present = false; on_bootstrap(NULL);
+    CHECK("INIT missing state counted without publication", map_failures[PGWT_BPF_FAIL_INIT_NO_STATE] == 1 &&
+        !reservations && !attempts[2] && !failures[2]);
     reset(); on_watchpoint(NULL);
     CHECK("watchpoint perf only", outputs == 1 && attempts[0] == 1 && !attempts[1] && records[0].dest == 0);
     reset(); fail_dest = 0; on_watchpoint(NULL);
@@ -210,6 +265,12 @@ static void tests(void)
     CHECK("boundary read before reserve", w < records[0].reserved_at);
     current_id = (u64)42 << 32 | 42; emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
     CHECK("nothing older after boundary", ((struct pgwt_wire_trace *)records[3].bytes)->payload.timestamp_ns >= w);
+    for (int dest=0; dest<3; ++dest) {
+        reset(); current_id=(u64)100<<32|100; ctl.el_request=1; fail_dest=dest;
+        on_transport_helper(NULL); timestamp_order();
+        CHECK("boundary failure reconciles only its destination", outputs==2 && !discards &&
+            failures[dest]==1 && attempts[0]==1 && attempts[1]==1 && attempts[2]==1 && !drops);
+    }
     reset(); current_id = (u64)100 << 32 | 100; expected_cpu = cpu + 1;
     on_transport_helper(NULL); CHECK("helper wrong CPU refused", !outputs && !attempts[0]);
     expected_cpu = cpu; current_id = (u64)101 << 32 | 100;
@@ -240,6 +301,12 @@ static void tests(void)
     CHECK("mode zero raw fork", records[0].length==sizeof(struct pgwt_lifecycle_event) && !allocator && !attempts[2]);
     reset(); exact_perf_mode=0; on_bootstrap(NULL);
     CHECK("mode zero raw init", records[0].length==sizeof(struct pgwt_lifecycle_event) && !attempts[2]);
+    init_ts = state.init_ts; on_bootstrap(NULL);
+    CHECK("mode zero repeated hints keep stored timestamp", outputs==2 && state.init_ts==init_ts &&
+        ((struct pgwt_lifecycle_event *)records[1].bytes)->timestamp==init_ts);
+    reset(); exact_perf_mode=0; fail_dest=2; on_bootstrap(NULL);
+    CHECK("mode zero INIT reserve failure keeps facts and hint drop", state.init_stored && state.init_ts &&
+        !outputs && !attempts[2] && !failures[2] && sites[PGWT_RING_FAIL_LIFECYCLE_INIT_HINT]==1);
     reset(); exact_perf_mode=0;
     struct trace_event_raw_sched_process_template exit_context={.pid=42}; on_exit(&exit_context);
     CHECK("mode zero raw exit and retained state", outputs==2 && state_present && !attempts[1] && !attempts[2] && records[0].length==sizeof(struct pgwt_trace_event) && records[1].length==sizeof(struct pgwt_lifecycle_event));

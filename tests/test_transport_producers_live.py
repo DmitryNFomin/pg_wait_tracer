@@ -15,7 +15,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import selectors
+import shlex
 import struct
 import subprocess
 import sys
@@ -23,6 +25,7 @@ import tempfile
 import time
 
 from testutil import find_postmaster
+from transport_producers_host import restore_init_publication
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'tests/test_transport_producers'
@@ -30,6 +33,91 @@ BINARY = ROOT / 'tests/test_transport_producers'
 
 class Refused(RuntimeError):
     pass
+
+
+def preemption_mode(dynamic, config):
+    """v6.8 kernel/sched/debug.c:232-250 brackets the active mode in ().
+
+    debugfs is authoritative on a dynamic kernel: a boot argument can have
+    been changed at runtime. Boot config is sufficient only for static mode.
+    Missing/unreadable dynamic evidence is unknown, never silently 'none'.
+    """
+    active = re.findall(r'\((none|voluntary|full)\)', dynamic)
+    if len(active) == 1:
+        return active[0]
+    flags = dict(line.split('=', 1) for line in config.splitlines()
+                 if line.startswith('CONFIG_') and '=' in line)
+    if flags.get('CONFIG_PREEMPT_DYNAMIC') == 'y':
+        return 'unknown'
+    if flags.get('CONFIG_PREEMPT') == 'y' or flags.get('CONFIG_PREEMPT_RT') == 'y':
+        return 'full'
+    if flags.get('CONFIG_PREEMPT_VOLUNTARY') == 'y':
+        return 'voluntary'
+    if flags.get('CONFIG_PREEMPT_NONE') == 'y':
+        return 'none'
+    return 'unknown'
+
+
+def readable(path):
+    try:
+        return path.read_text().strip()
+    except OSError as error:
+        print(f'UNREADABLE {path}: {error}', flush=True)
+        return ''
+
+
+def build_variant(directory, variant):
+    """Linux only. Read existing recipe variables without editing build files.
+
+    Build artifacts, skeleton and loader stay together outside the repository.
+    Production clean arms always use the normal project-built binary.
+    """
+    if sys.platform != 'linux':
+        raise Refused('variant BPF builds require Linux')
+    directory = directory / variant
+    directory.mkdir()
+    variables = ('CLANG', 'BPF_CFLAGS', 'BPFTOOL', 'CC', 'CFLAGS', 'LIBBPF_LIB')
+    recipe = '.PHONY: pgwt-a1-print-config\npgwt-a1-print-config:\n\t@:\n'
+    recipe += ''.join(f'$(info PGWT_CONFIG_{key}=$({key}))\n' for key in variables)
+    output = checked(['make', '-s', '--no-print-directory', '-f', 'Makefile', '-f', '-',
+                      'pgwt-a1-print-config'], input=recipe, cwd=ROOT)
+    config = {}
+    for line in output.splitlines():
+        if line.startswith('PGWT_CONFIG_'):
+            key, value = line[len('PGWT_CONFIG_'):].split('=', 1)
+            config[key] = shlex.split(value)
+    assert set(config) == set(variables), output
+    if variant == 'falsifier':
+        source = ROOT / 'tests/transport_falsifier.bpf.c'
+        defines = ['-DPGWT_TRANSPORT_FALSIFIER=1']
+    elif variant == 'init-publication-mutant':
+        source = directory / 'mutant.bpf.c'
+        source.write_text(restore_init_publication((ROOT / 'src/bpf/pg_wait_tracer.bpf.c').read_text()))
+        defines = []
+    else:
+        raise ValueError(variant)
+    obj = directory / 'pg_wait_tracer.bpf.o'
+    binary = directory / 'probe'
+    checked([*config['CLANG'], *config['BPF_CFLAGS'], '-I', str(ROOT / 'src/bpf'),
+             '-c', str(source), '-o', str(obj)], cwd=ROOT)
+    # The basename pins the skeleton API to pg_wait_tracer_bpf, just as in
+    # the project recipe. The temporary include directory must come first.
+    skeleton = checked([*config['BPFTOOL'], 'gen', 'skeleton', str(obj)], cwd=ROOT)
+    (directory / 'pg_wait_tracer.skel.h').write_text(skeleton + '\n')
+    checked([*config['CC'], '-I', str(directory), *config['CFLAGS'], *defines,
+             '-std=c11', '-Werror', '-o', str(binary), str(ROOT / 'tests/test_transport_producers.c'),
+             *config['LIBBPF_LIB'], '-lelf', '-lz', '-pthread'], cwd=ROOT)
+    print(f'BUILT {variant}: {binary}', flush=True)
+    return binary
+
+
+def assert_clean_pg(row):
+    # Check this exact assertion first; the built restoration mutant must
+    # reach it with an otherwise healthy clean transport/stored-INIT cohort.
+    assert row['init_records'] == 0, 'zero INIT records on L under exact_perf_mode'
+    assert row['init_stored'] > 0, 'at least one cohort pid has INIT stored'
+    assert row['attached'] > 0 and row['trace'] > 0 and row['failures'] == 0 and row['lost'] == 0, row
+    assert all(cell['attempted'] == cell['delivered'] and cell['failed'] == 0 for cell in row['cells']), row
 
 
 def checked(command, **kwargs):
@@ -153,6 +241,9 @@ def summary(proc, log):
         raise Refused(log.read_text())
     rows = [json.loads(line) for line in out.splitlines() if line.startswith('{')]
     assert proc.returncode == 0 and len(rows) == 1 and rows[0]['ok'], (proc.returncode, out, log.read_text())
+    for line in log.read_text().splitlines():
+        if line.startswith('SPIN-EVIDENCE '):
+            print(line, flush=True)
     print(json.dumps(rows[0], sort_keys=True), flush=True)
     return rows[0]
 
@@ -167,10 +258,10 @@ def stop(proc):
         proc.communicate(timeout=5)
 
 
-def run_pg(args, directory, db, seconds, churn, spin=0):
-    log = directory / f'probe-{churn}-{spin}.stderr'
+def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY):
+    log = directory / f'probe-{binary.parent.name}-{churn}-{spin}.stderr'
     with log.open('w') as error:
-        proc = subprocess.Popen([str(BINARY), '--probe', *args, '--spin-ns', str(spin)],
+        proc = subprocess.Popen([str(binary), '--probe', *args, '--cohort-db', db, '--spin-ns', str(spin)],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error, text=True)
         try:
             await_ready(proc, log)
@@ -222,13 +313,12 @@ def main():
         raise Refused('running PostgreSQL required')
     print('KERNEL ' + checked(['uname', '-a']), flush=True)
     print('CMDLINE ' + Path('/proc/cmdline').read_text().strip(), flush=True)
-    preempt = Path('/sys/kernel/debug/sched/preempt')
-    mode = preempt.read_text().strip() if preempt.exists() else 'unreadable: inspect /boot/config-$(uname -r)'
-    print('PREEMPT ' + mode, flush=True)
-    config = Path('/boot') / ('config-' + os.uname().release)
-    if config.exists():
-        print('KERNEL_CONFIG ' + ' '.join(line for line in config.read_text().splitlines()
-              if line.startswith(('CONFIG_PREEMPT', 'CONFIG_HZ='))), flush=True)
+    dynamic = readable(Path('/sys/kernel/debug/sched/preempt'))
+    config = readable(Path('/boot') / ('config-' + os.uname().release))
+    mode = preemption_mode(dynamic, config)
+    print(f'PREEMPT active={mode} dynamic={dynamic!r}', flush=True)
+    print('KERNEL_CONFIG ' + ' '.join(line for line in config.splitlines()
+          if line.startswith(('CONFIG_PREEMPT', 'CONFIG_HZ='))), flush=True)
     with tempfile.TemporaryDirectory(prefix='pgwt-a1-probe-') as tmp:
         directory = Path(tmp)
         major, args = settings(pm, directory)
@@ -239,17 +329,31 @@ def main():
             checked(['pgbench', '-U', 'postgres', '-i', '-s', '1', db])
             for churn in (False, True):
                 row = run_pg(args, directory, db, options.seconds, churn)
-                assert row['attached'] > 0 and row['trace'] > 0 and row['failures'] == 0 and row['lost'] == 0, row
-                assert all(cell['attempted'] == cell['delivered'] for cell in row['cells']), row
+                assert_clean_pg(row)
             run_reuse(directory)
-            # One real failed reservation plus a measured >=1ms spin. A loop
-            # rejection (EL8 backports vary) is a refusal with verifier log.
-            row = run_pg(args, directory, db, 5, True, spin=2000000)
+            mutant = build_variant(directory, 'init-publication-mutant')
+            row = run_pg(args, directory, db, 5, True, binary=mutant)
+            # Other clean-arm assertions must remain green. Neither a load
+            # failure nor another assertion counts as killing this mutant.
+            assert row['init_stored'] > 0 and row['init_records'] > 0, row
+            assert row['attached'] > 0 and row['trace'] > 0 and row['failures'] == 0 and row['lost'] == 0, row
+            assert all(cell['attempted'] == cell['delivered'] and cell['failed'] == 0 for cell in row['cells']), row
+            try:
+                assert_clean_pg(row)
+            except AssertionError as error:
+                assert str(error) == 'zero INIT records on L under exact_perf_mode', error
+                print(f'mutant INIT-publication-restored: KILLED ({error})', flush=True)
+            else:
+                raise AssertionError('INIT publication mutant survived')
+            # Production clean arms above load the normal object. Only this
+            # standalone test build contains the back-edge, even at knob zero.
+            falsifier = build_variant(directory, 'falsifier')
+            row = run_pg(args, directory, db, 5, True, spin=20000000, binary=falsifier)
             assert row['spun_at_least_1ms'] and row['spin_min_ns'] >= 1000000 and row['failures'] > 0, row
         finally:
             checked(['dropdb', '-U', 'postgres', '--if-exists', db])
-    if '[full]' in mode or 'preempt=full' in Path('/proc/cmdline').read_text():
-        raise Refused('preempt=full: completion fence is not qualified; mechanism results above only')
+    if mode in ('full', 'unknown'):
+        raise Refused(f'preemption mode {mode}: completion fence is not qualified; mechanism results above only')
     print('A1 PROBE PASS: loads, lifetime cookies including retained PID reuse, all attempts delivered, E/L ordering, same-CPU helper, delayed failure; certification=false')
     return 0
 

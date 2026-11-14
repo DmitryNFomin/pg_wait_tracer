@@ -32,6 +32,24 @@ def function(source, name):
     return source[start:end]
 
 
+def restore_init_publication(source):
+    """The same built mutant is exercised by the host and real-PG drivers."""
+    old = '            if (st && st->init_stored) return 0;\n            u64 stamp = bpf_ktime_get_ns();'
+    new = '            if (st && st->init_stored) return 0;\n            struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(pid,\n                pgwt_producer_cookie(st), PGWT_RING_FAIL_LIFECYCLE_INIT_HINT);\n            u64 stamp = bpf_ktime_get_ns();'
+    assert source.count(old) == 1
+    source = source.replace(old, new)
+    old = '            } else count_map_fail(PGWT_BPF_FAIL_INIT_NO_STATE);\n            return 0;'
+    new = '''            } else count_map_fail(PGWT_BPF_FAIL_INIT_NO_STATE);
+            if (wire) {
+                wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_INIT,
+                    .pid = pid, .addr = wait_addr, .timestamp = stamp };
+                bpf_ringbuf_submit(wire, 0);
+            }
+            return 0;'''
+    assert source.count(old) == 1
+    return source.replace(old, new)
+
+
 def run(source, directory, header=None):
     bodies = '\n\n'.join(function(source, name) for name in FUNCTIONS)
     harness = (ROOT / 'tests/transport_bpf_harness.h').read_text()
@@ -51,6 +69,50 @@ def run(source, directory, header=None):
 
 
 def main():
+    # Pure live-driver checks run on the Mac too; no BPF tools are invoked.
+    from test_transport_producers_live import preemption_mode, assert_clean_pg
+    for dynamic, config, expected in (
+            ('none voluntary (full)', '', 'full'),
+            ('none (voluntary) full', 'CONFIG_PREEMPT=y\nCONFIG_PREEMPT_DYNAMIC=y', 'voluntary'),
+            ('(none) voluntary full', '', 'none'),
+            ('', 'CONFIG_PREEMPT_DYNAMIC=y\nCONFIG_PREEMPT_NONE=y', 'unknown'),
+            ('unreadable', '', 'unknown'),
+            ('none voluntary [full]', 'CONFIG_PREEMPT_DYNAMIC=y', 'unknown'),
+            ('', 'CONFIG_PREEMPT=y', 'full'),
+            ('', 'CONFIG_PREEMPT_VOLUNTARY=y', 'voluntary'),
+            ('', 'CONFIG_PREEMPT_NONE=y', 'none')):
+        assert preemption_mode(dynamic, config) == expected, (dynamic, config)
+    clean = dict(init_records=0, init_stored=1, attached=1, trace=1, failures=0, lost=0,
+                 cells=[dict(attempted=3, delivered=3, failed=0)])
+    assert_clean_pg(clean)
+    for key, value, assertion in (
+            ('init_records', 1, 'zero INIT records on L under exact_perf_mode'),
+            ('init_stored', 0, 'at least one cohort pid has INIT stored')):
+        try:
+            assert_clean_pg({**clean, key: value})
+        except AssertionError as error:
+            assert str(error) == assertion, error
+        else:
+            raise AssertionError(f'live assertion did not reject {key}={value}')
+    # Execute the actual runner exclusion block in a tiny shell matrix. Its
+    # continue must use exclude_test, just like the adjacent min_pg branch.
+    runner = (ROOT / 'tests/run_all.sh').read_text()
+    start = runner.index('        if [[ "$name" == "test_transport_producers_live" &&')
+    end = runner.index('\n        fi', start) + len('\n        fi')
+    block = runner[start:end]
+    script = '''exclude_test() { printf 'EXCLUDED %s PG%s\\n' "$1" "$PG_VERSION"; }
+for PG_VERSION in 13 14 15 16 17 18; do
+    name=test_transport_producers_live
+''' + block + '''
+    printf 'RUN PG%s\\n' "$PG_VERSION"
+done
+'''
+    matrix = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=True)
+    assert matrix.stdout.splitlines() == [
+        'RUN PG13', 'EXCLUDED test_transport_producers_live PG14',
+        'EXCLUDED test_transport_producers_live PG15', 'EXCLUDED test_transport_producers_live PG16',
+        'RUN PG17', 'RUN PG18'], matrix.stdout
+    print('live driver host checks: PASS (active preemption, missing evidence, INIT assertions, PG13-18 exclusion matrix)')
     source = (ROOT / 'src/bpf/pg_wait_tracer.bpf.c').read_text()
     with tempfile.TemporaryDirectory(prefix='pgwt-producers-host-') as tmp:
         directory = Path(tmp)
@@ -81,6 +143,17 @@ def main():
                                     'transport_attempt(PGWT_WIRE_DEST_CPU), 1);')
         assert stale_data != source
         mutants.append(('stale-cookie-on-reused-pid', stale_data, None, 'DATA cookie across PID reuse'))
+        old = '    if (exact_perf_mode ? emit_boundary : (!lightweight_mode && st->wp_live)) {'
+        assert source.count(old) == 1
+        mutants.append(('command-double-read', source.replace(old, '    if (!lightweight_mode && st->wp_live) {'),
+                        None, 'command saved admission releases reservation'))
+        mutants.append(('INIT-publication-restored', restore_init_publication(source), None,
+                        'zero INIT records on L under exact_perf_mode'))
+        old = '                    transport_failure(PGWT_WIRE_DEST_E); }'
+        assert source.count(old) == 1
+        mutants.append(('admission-discard-counts-drop', source.replace(old,
+                        '                    transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_COMMAND_BOUNDARY); }'),
+                        None, 'command admission discard is not a ring drop'))
         for name, mutated, mutated_header, assertion in mutants:
             result = run(mutated, directory, mutated_header)
             assert result.returncode != 0 and 'FAIL ' + assertion in result.stderr, (name, result.stdout, result.stderr)

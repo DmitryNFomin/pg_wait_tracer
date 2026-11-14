@@ -33,6 +33,20 @@ static int portable(void)
     memcpy(perf_raw, &hdr, sizeof(hdr));
     REQUIRE(probe_perf_wire_size(perf_raw, 52) == 48);
     REQUIRE(probe_perf_wire_size(perf_raw, 48) == 0);
+    struct probe_stamp request = {.cpu=2, .round=3, .stamp=150};
+    struct probe_stamp boundary = {.cpu=2, .round=3, .stamp=201};
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 1);
+    REQUIRE(probe_spin_evidence(2, 100, 200, NULL, 0, &boundary, 1) == 0);
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, NULL, 0) == 0);
+    boundary.round=4;
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
+    boundary.round=3; boundary.cpu=1;
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
+    boundary.cpu=2; boundary.stamp=175;
+    REQUIRE(probe_spin_evidence(2, 100, 200, NULL, 0, &boundary, 1) == -1);
+    boundary.stamp=201; request.stamp=99;
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
+    puts("falsifier evidence: PASS (request during spin, matching CPU/round, later boundary; missing evidence refuses)");
     u64 attempts[3] = {0};
     REQUIRE(pgwt_producer_attempt(&attempts[0]) == 1);
     /* Failed publication consumes the first attempt, another dest is separate. */
