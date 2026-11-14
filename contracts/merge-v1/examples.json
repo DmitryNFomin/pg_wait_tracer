@@ -1,5 +1,5 @@
 {
- "notation_version": 1,
+ "notation_version": 2,
  "sources": [
   "P0",
   "P1",
@@ -75,6 +75,23 @@
    0,
    0,
    1
+  ],
+  "Ci": [
+   0,
+   1,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
   ]
  },
  "identities": {
@@ -89,7 +106,17 @@
   "D": {
    "pid": 30,
    "g": 1
+  },
+  "D2": {
+   "pid": 10,
+   "g": 2
   }
+ },
+ "notation": {
+  "fork_seed_proved": "Boolean on FORK inputs and preserved on FORK outputs; omitted means false. K_D10 is FORK_D10@L with fork_seed_proved=true.",
+  "prior_interval_certified": "Boolean on TRANS/MARKER outputs: [U] is false and [T] is true. Omitted means true for rows 1-31 (non-25b generations); those rows are byte-identical to notation_version 1.",
+  "identity_aliases": "D2 denotes row 34's override D=(pid=10,g=2); labels retain the contract's D spelling. Other rows use D=(pid=30,g=1).",
+  "defaults_rows32_43": "Section 5 defaults: only A/B initially attached, all identities known, dependencies ready, payloads unchanged; every observation d=20,C=C0 unless explicit. q applies only in Q. Source positions count DATA and BOUNDARY consumption independently per source."
  },
  "rows": [
   {
@@ -3194,6 +3221,1533 @@
    },
    "transcription_notes": [
     "Row gives no proof values; used next_q A=1,B=1 as a placeholder (irrelevant, rejected). VOID is from the CHECK treatment of the REARM observation."
+   ]
+  },
+  {
+   "id": 32,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 33,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": false,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 34,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": {
+    "note": "D is overridden to (pid=10,g=2), encoded by identity alias D2; attached A has no EXIT."
+   },
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D2",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D2",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 35,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 36,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 2,
+     "t": 11,
+     "who": "D",
+     "rec": "INIT",
+     "label": "INIT_D11",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 3,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "INIT_D11",
+       "who": "D",
+       "t": 11
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "INIT_D11",
+       "who": "D",
+       "t": 11
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 37,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 2,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "sequence_gap"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 38,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 9,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D9",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 10,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 10,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 10,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 10,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 3,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 3,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 39,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 40,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 3,
+     "t": 14,
+     "who": "D",
+     "rec": "INIT",
+     "label": "INIT_D14",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 3,
+     "t": 15,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 2,
+     "label": "TRANS_D15",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 16,
+     "pos": 4,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 16,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 16,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 16,
+     "pos": 4,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      },
+      {
+       "kind": "DATA",
+       "label": "INIT_D14",
+       "who": "D",
+       "t": 14
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D15",
+       "who": "D",
+       "t": 15,
+       "prior_interval_certified": true
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 15,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      },
+      {
+       "kind": "DATA",
+       "label": "INIT_D14",
+       "who": "D",
+       "t": 14
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D15",
+       "who": "D",
+       "t": 15,
+       "prior_interval_certified": true
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 15,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 41,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "FAULT",
+     "d": 20,
+     "C": "C0",
+     "reason": "unknown_evidence"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 16,
+     "pos": 3,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 16,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 16,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 16,
+     "pos": 3,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 12,
+       "C": "C0"
+      },
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "C0",
+       "reason": "unknown_evidence"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0."
+   ]
+  },
+  {
+   "id": 42,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "E",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "MARKER",
+     "q": 1,
+     "label": "MARKER_D12",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 14,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 2,
+     "label": "TRANS_D14",
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 15,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 15,
+     "pos": 1,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 15,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 15,
+     "pos": 2,
+     "d": 20,
+     "C": "C0"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "MARKER_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D14",
+       "who": "D",
+       "t": 14,
+       "prior_interval_certified": true
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 14,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "DATA",
+       "label": "FORK_D10",
+       "who": "D",
+       "t": 10,
+       "fork_seed_proved": true
+      },
+      {
+       "kind": "DATA",
+       "label": "MARKER_D12",
+       "who": "D",
+       "t": 12,
+       "prior_interval_certified": false
+      },
+      {
+       "kind": "DATA",
+       "label": "TRANS_D14",
+       "who": "D",
+       "t": 14,
+       "prior_interval_certified": true
+      },
+      {
+       "kind": "FRONTIER",
+       "F": 14,
+       "C": "C0"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=C0.",
+    "MARKER_D12 satisfies DECISION 25c's fresh-state obligation."
+   ]
+  },
+  {
+   "id": 43,
+   "modes": [
+    "N",
+    "Q"
+   ],
+   "start": null,
+   "inputs": [
+    {
+     "kind": "CHECK",
+     "d": 20,
+     "C": "Ci"
+    },
+    {
+     "kind": "DATA",
+     "source": "L",
+     "pos": 1,
+     "t": 10,
+     "who": "D",
+     "rec": "FORK",
+     "label": "FORK_D10",
+     "fork_seed_proved": true,
+     "d": 20,
+     "C": "Ci"
+    },
+    {
+     "kind": "DATA",
+     "source": "P0",
+     "pos": 1,
+     "t": 12,
+     "who": "D",
+     "rec": "TRANS",
+     "q": 1,
+     "label": "TRANS_D12",
+     "d": 20,
+     "C": "Ci"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P0",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "Ci"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "P1",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "Ci"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "E",
+     "w": 13,
+     "pos": 1,
+     "d": 20,
+     "C": "Ci"
+    },
+    {
+     "kind": "BOUNDARY",
+     "source": "L",
+     "w": 13,
+     "pos": 2,
+     "d": 20,
+     "C": "Ci"
+    }
+   ],
+   "expected": {
+    "N": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "Ci",
+       "reason": "counter_change"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    },
+    "Q": {
+     "outputs": [
+      {
+       "kind": "VOID",
+       "d": 20,
+       "C": "Ci",
+       "reason": "counter_change"
+      }
+     ],
+     "exit_nonzero": false,
+     "notes": ""
+    }
+   },
+   "transcription_notes": [
+    "Copied from CONTRACT.md rows 32-43; §5 defaults, only A/B attached; every observation d=20,C=Ci."
    ]
   }
  ]
