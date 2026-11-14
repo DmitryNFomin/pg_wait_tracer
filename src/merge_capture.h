@@ -29,6 +29,8 @@ _Static_assert(offsetof(struct pgwt_attach_report, facts_true) == 20, "attach tr
 typedef int (*pgwt_attach_report_fn)(void *ctx,
                                     const struct pgwt_attach_report *report);
 
+int pgwt_merge_capture_snapshot(struct pgwt_daemon *, ma_snapshot *, uint64_t *);
+
 /* Flat merge output: B's qualification dump is the first consumer; the
  * later capture writer can supply a second sink without changing daemon.c.
  * Callback borrows the output for this call and returns false on rejection. */
@@ -48,5 +50,36 @@ int pgwt_merge_capture_record(struct pgwt_daemon *d, size_t source,
 int pgwt_merge_capture_attach(struct pgwt_daemon *d,
                              const struct pgwt_attach_report *report);
 void pgwt_merge_capture_close(struct pgwt_daemon *d);
+
+/* Portable production feed, also used by the injected reader tests. */
+struct pgwt_capture_config {
+    size_t cpu_count, capacity;
+    pgwt_merge_observation baseline;
+    struct pgwt_merge_capture_sink sink;
+    void *ctx;
+    /* Lifecycle side effects run once at wire consumption, before admission;
+     * the attachment callback may synchronously report BEGIN/COMPLETE. */
+    int (*lifecycle)(void *, const void *, size_t);
+    int (*trace)(void *, const void *, size_t);
+    int (*observe)(void *, pgwt_merge_observation *);
+    void (*writer_failed)(void *);
+};
+struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
+int pgwt_capture_received(struct pgwt_merge_capture *, const ma_envelope *, uint64_t);
+int pgwt_capture_envelope(struct pgwt_merge_capture *, const ma_envelope *,
+                           uint64_t, const ma_snapshot *);
+int pgwt_capture_fault(struct pgwt_merge_capture *, pgwt_merge_reason,
+                        uint64_t, const ma_snapshot *);
+int pgwt_capture_attach(struct pgwt_merge_capture *, const struct pgwt_attach_report *,
+                         uint64_t, const ma_snapshot *);
+uint64_t pgwt_capture_max_held_ns(const struct pgwt_merge_capture *, uint64_t now);
+bool pgwt_capture_waiting(const struct pgwt_merge_capture *);
+ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *);
+pgwt_merge_report pgwt_capture_report(const struct pgwt_merge_capture *);
+int pgwt_capture_finish(struct pgwt_merge_capture *, uint64_t, const ma_snapshot *);
+void pgwt_capture_destroy(struct pgwt_merge_capture *);
+/* Evidence for qualification only; deliberately NOT a product capture format.
+ * Append one complete JSON line per output, with payload in hexadecimal. */
+bool pgwt_capture_dump(void *file, const pgwt_merge_output *, pgwt_merge_observation *);
 
 #endif

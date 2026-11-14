@@ -125,4 +125,7 @@ with tempfile.TemporaryDirectory(prefix='pgwt-merge-adapter-mutants-') as tmp:
         print(f'{name}: KILLED at {guard}')
         killed += 1
     print(f'adapter mutants: {killed}/{len(mutations)} killed; guard sweep 31/31 PASS')
+# B uses this existing registered mutation entry point; registration files are
+# frozen during the parallel A1/B units.
+subprocess.run([sys.executable, str(repo / 'tests/percpu_transport_mutants.py')], check=True)
 PY

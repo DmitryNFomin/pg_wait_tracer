@@ -13,7 +13,11 @@ static ma *live_adapters[64];
 static pgwt_merge *live_cores[64];
 static ma *tracked_adapter_create(const ma_config *config, pgwt_merge_reason *error)
 {
+#ifdef PGWT_ADAPTER_PRODUCTION_TEST
+    ma *a=ma_create_production(config,error);
+#else
     ma *a=ma_create(config,error);
+#endif
     if (a) {
         for (size_t i=0;i<64;++i) if (!live_adapters[i]) { live_adapters[i]=a; return a; }
         ma_destroy(a); fputs("adapter test registry exhausted\n",stderr); exit(2);
@@ -101,7 +105,12 @@ static bool setup(premises *p, pgwt_merge_mode mode)
     for (size_t s = 0; s < 4; ++s)
         p->sources[s] = (ma_source_decl){.mechanism = s < 2 ? MA_WATCHPOINT_PERF : MA_ORDERED_RING,
                                         .qualification_complete = true};
-    p->config = (ma_config){.mode = mode, .synthetic_premises = true,
+    p->config = (ma_config){.mode = mode, .synthetic_premises =
+#ifdef PGWT_ADAPTER_PRODUCTION_TEST
+                            false,
+#else
+                            true,
+#endif
                             .sources = p->sources, .source_count = 4};
     pgwt_merge_reason error;
     p->adapter = ma_create(&p->config, &error);
@@ -441,6 +450,14 @@ static ma_snapshot from_counters(pgwt_merge_counters c)
 static pgwt_merge_status deliver(premises *p, pgwt_merge *m, const ma_envelope *e,
                                  uint64_t d, const ma_snapshot *s)
 {
+#ifdef PGWT_ADAPTER_PRODUCTION_TEST
+    ma_envelope decoded;
+    unsigned char packet[304];
+    if (!production_wire(e, &decoded, packet)) {
+        fputs("production wire decode failed\n", stderr); exit(2);
+    }
+    e = &decoded;
+#endif
     ma_result r=ma_map(p->adapter,e,&p->table,d,s);
     if (!r.count || r.count>2) { fputs("adapter replay: invalid input count\n",stderr); exit(2); }
     pgwt_merge_status status=PGWT_MERGE_OK;
@@ -581,9 +598,26 @@ static bool adapter_row(const json_node *root, const json_node *row, const char 
             /* Only row41 is adapter-driven: a concrete coverage interruption. */
             MUST(number(member(row,"id"))==41);
             e.kind=MA_ATTACH_EVENT; e.attach_event=MA_INTERRUPTED; e.control_pid=30;
-        } else MUST(string_is(kind,"CHECK"));
+        } else MUST(string_is(kind,"CHECK") || string_is(kind,"REARM"));
         ma_snapshot s=from_counters(member(n,"C") ? counters(&c.f,member(n,"C")) : named_counters(&c.f,"C0"));
-        status=deliver(&p,m,&e,optional_number(member(n,"d"),0),&s);
+        if (string_is(kind,"REARM")) {
+            /* Explicit contract-fixture control, never a daemon wire input. */
+            pgwt_merge_attachment fresh[32]; size_t nf=0;
+            const json_node *ps=member(n,"proofs");
+            MUST(ps && ps->kind==J_OBJECT);
+            for (const json_node *q=ps->child;q;q=q->next) {
+                MUST(nf<32);
+                const json_node *id=identity(&c.f,q->key);
+                fresh[nf++]=(pgwt_merge_attachment){.pid=number(member(id,"pid")),
+                    .g=number(member(id,"g")),.next_q=number(member(q,"next_q")),
+                    .identity_proved=true,.sequence_proved=true};
+            }
+            pgwt_merge_input in={.kind=PGWT_MERGE_REARM,
+                .observation={.d=optional_number(member(n,"d"),0),.counters={.known=s.valid}},
+                .attachments=fresh,.attachment_count=nf,.attachment_proofs_fresh=true,.identity_repaired=true};
+            memcpy(in.observation.counters.value,s.value,sizeof(s.value));
+            status=pgwt_merge_feed(m,&in);
+        } else status=deliver(&p,m,&e,optional_number(member(n,"d"),0),&s);
         statuses[index]=status; processed[index]=true;
         if (status==PGWT_MERGE_EXIT_REQUIRED) break;
     }
@@ -970,7 +1004,7 @@ static const adapter_guard adapter_guards[]={
     {"escalation_markers",escalation_markers}
 };
 
-static int adapter_main(int argc, char **argv)
+int adapter_main(int argc, char **argv)
 {
     if (argc==3 && !strcmp(argv[1],"--guard")) {
         for (size_t i=0;i<sizeof(adapter_guards)/sizeof(adapter_guards[0]);++i)
@@ -1023,6 +1057,7 @@ static int adapter_main(int argc, char **argv)
     free_document(d); return 0;
 }
 
+#ifndef PGWT_ADAPTER_EMBEDDED
 int main(int argc, char **argv)
 {
     int result=adapter_main(argc,argv);
@@ -1032,3 +1067,5 @@ int main(int argc, char **argv)
     }
     return result;
 }
+
+#endif

@@ -9,7 +9,7 @@ struct ma {
     pgwt_merge_source *sources;
 };
 
-ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
+static ma *create(const ma_config *c, bool production, pgwt_merge_reason *error)
 {
     pgwt_merge_reason reason = PGWT_MERGE_MALFORMED_ENVELOPE;
     if (!c || !c->sources || c->source_count < 2 ||
@@ -17,7 +17,7 @@ ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
         c->source_count > SIZE_MAX / sizeof(ma_source_decl) ||
         c->source_count > SIZE_MAX / sizeof(pgwt_merge_source)) goto fail;
     reason = PGWT_MERGE_UNKNOWN_EVIDENCE;
-    if (!c->synthetic_premises) goto fail;
+    if (c->synthetic_premises == production) goto fail;
     for (size_t s = 0; s < c->source_count; ++s) {
         ma_mechanism expected = s < c->source_count - 2 ?
             MA_WATCHPOINT_PERF : MA_ORDERED_RING;
@@ -44,6 +44,16 @@ ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
 fail:
     if (error) *error = reason;
     return NULL;
+}
+
+ma *ma_create(const ma_config *c, pgwt_merge_reason *error)
+{
+    return create(c, false, error);
+}
+
+ma *ma_create_production(const ma_config *c, pgwt_merge_reason *error)
+{
+    return create(c, true, error);
 }
 
 void ma_destroy(ma *a)

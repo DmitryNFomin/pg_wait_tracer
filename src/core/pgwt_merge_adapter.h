@@ -3,7 +3,7 @@
 
 #include "pgwt_merge.h"
 
-/* U1a: synthetic premises only. No daemon, transport or production proof path.
+/* Explicit synthetic and production construction paths share the pure reducer.
  * Source indices are CPU numeric order, then E,L. Payloads use explicit LE v1. */
 typedef enum { MA_NOT_ATTEMPTED, MA_PENDING, MA_PROVED, MA_FAILED } ma_proof;
 typedef enum { MA_TRACE, MA_LIFECYCLE, MA_TEXT, MA_BOUNDARY, MA_LOSS,
@@ -73,6 +73,10 @@ typedef struct {
 } ma_result;
 
 ma *ma_create(const ma_config *, pgwt_merge_reason *error);
+/* Production declarations must come from the transport protocol, including
+ * its completed failure fence. synthetic_premises MUST be false. This API
+ * does not establish kernel or attachment proof: callers supply those facts. */
+ma *ma_create_production(const ma_config *, pgwt_merge_reason *error);
 void ma_destroy(ma *);
 const pgwt_merge_source *ma_sources(const ma *, size_t *count);
 bool ma_core_config(const ma *, const pgwt_merge_config *base,
