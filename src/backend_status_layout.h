@@ -248,8 +248,18 @@ int pgwt_pgbs_derive_cmd_gate(
     struct pgwt_pgbs_cmd_gate *out);
 
 struct pgwt_pgbs_mapping;
+/* One resolver-loop snapshot. Zero-initialize and reset at the end of each
+ * tick, including failed reads. Never reuse it across ticks or postmasters. */
+struct pgwt_pgbs_maps_cache {
+    struct pgwt_pgbs_mapping *maps;
+    size_t count;
+    pid_t pid;
+    bool attempted;
+};
+void pgwt_pgbs_maps_cache_reset(struct pgwt_pgbs_maps_cache *cache);
 /* Cached candidate/proof, scoped to one registry enrollment. No retained fd.
- * start_time is captured at enrollment and compared on duplicate FORK delivery.
+ * start_time is captured at enrollment and compared on lifecycle delivery and
+ * when the batch first accepts each resolved candidate (never per attempt).
  * Only the coherent batch accepts row identity; liveness stays on lifecycle
  * events. Mapping snapshots are loaded once per enrollment/postmaster pair. */
 struct pgwt_pgbs_reader {
@@ -269,7 +279,8 @@ int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid);
 void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader);
 int pgwt_pgbs_reader_resolve(
     struct pgwt_pgbs_reader *reader, pid_t postmaster_pid,
-    uint64_t my_be_entry_addr, const struct PgBackendStatusLayout *layout);
+    uint64_t my_be_entry_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_maps_cache *maps_cache);
 
 #define PGWT_PGBS_IOV_MAX 1024
 #define PGWT_PGBS_BATCH_MAX 1024

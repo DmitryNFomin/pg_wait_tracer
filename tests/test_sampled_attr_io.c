@@ -17,6 +17,7 @@ static int io_open(const char *, int, ...);
 static int io_openat(int, const char *, int, ...);
 static int io_close(int);
 static ssize_t io_pread(int, void *, size_t, off_t);
+static ssize_t io_read(int, void *, size_t);
 static ssize_t io_readv(pid_t, const struct iovec *, unsigned long,
                         const struct iovec *, unsigned long, unsigned long);
 #define fopen io_fopen
@@ -24,6 +25,7 @@ static ssize_t io_readv(pid_t, const struct iovec *, unsigned long,
 #define openat io_openat
 #define close io_close
 #define pread io_pread
+#define read io_read
 #define process_vm_readv io_readv
 #define PGWT_PGBS_INJECT_VM_READV 1
 #ifndef PGWT_PGBS_SOURCE
@@ -35,10 +37,15 @@ static ssize_t io_readv(pid_t, const struct iovec *, unsigned long,
 #undef openat
 #undef close
 #undef pread
+#undef read
 #undef process_vm_readv
 
 static int checks, failures, opens, openats, closes, reads, calls, fopens;
 static int own_calls, stat_reads, map_reads, stat_fail, own_short;
+static int proc_opens, proc_reads, proc_closes, reader_map_reads, maps_fail, wait_calls;
+static int maps_prefix_lines;
+static uint32_t wait_words[1024];
+static FILE *proc_file;
 static int private_target, private_reader, incarnation = 1;
 static int tear_row = -1, transient_tear, short_row = -1, fault_row = -1;
 static int reader_gone, mutate_on_span, max_iovs, after_copy[1024], visits[1024];
@@ -69,9 +76,15 @@ static FILE *io_fopen(const char *path, const char *mode)
         fprintf(fp, " %d\n", incarnation);
     } else {
         map_reads++;
+        if (strstr(path, "/42/maps")) {
+            reader_map_reads++;
+            if (maps_fail) { fclose(fp); errno = EACCES; return NULL; }
+        }
         int pid = 0;
         (void)sscanf(path, "/proc/%d/maps", &pid);
         const char *perms = (pid == 42 ? private_reader : private_target) ? "rw-p" : "rw-s";
+        for (int i = 0; i < maps_prefix_lines; i++)
+            fputs("00001000-00002000 rw-p 00000000 00:00 0 /padding\n", fp);
         fprintf(fp, "%llx-%llx %s 00000000 00:00 1\n",
             (unsigned long long)(uintptr_t)storage,
             (unsigned long long)(uintptr_t)(storage + population * layout.struct_size), perms);
@@ -83,10 +96,25 @@ static FILE *io_fopen(const char *path, const char *mode)
     return fp;
 }
 static int io_open(const char *path, int flags, ...)
-{ (void)path; (void)flags; opens++; return 101; }
+{
+    (void)flags;
+    if (strstr(path, "/stat") || strstr(path, "/maps")) {
+        proc_opens++; proc_file = io_fopen(path, "r"); fopens--;
+        return proc_file ? 103 : -1;
+    }
+    opens++; return 101;
+}
 static int io_openat(int fd, const char *path, int flags, ...)
 { (void)fd; (void)path; (void)flags; openats++; return 101; }
-static int io_close(int fd) { (void)fd; closes++; return 0; }
+static int io_close(int fd) {
+    if (fd == 103) { proc_closes++; fclose(proc_file); proc_file = NULL; return 0; }
+    closes++; return 0;
+}
+static ssize_t io_read(int fd, void *buf, size_t size)
+{
+    if (fd != 103) { errno = EBADF; return -1; }
+    proc_reads++; return (ssize_t)fread(buf, 1, size, proc_file);
+}
 static ssize_t io_pread(int fd, void *buf, size_t size, off_t offset)
 {
     (void)fd; reads++;
@@ -159,10 +187,25 @@ static ssize_t io_readv(pid_t pid, const struct iovec *local, unsigned long nl,
     }
     return (ssize_t)total;
 }
+ssize_t pgwt_test_wait_readv(pid_t pid, const struct iovec *local, unsigned long nl,
+    const struct iovec *remote, unsigned long nr, unsigned long flags)
+{
+    wait_calls++;
+    CHECK(pid == 1000 && nl == nr && flags == 0, "wait batch uses one eligible reader");
+    size_t copied = 0;
+    for (size_t i = 0; i < nr; i++) {
+        CHECK(remote[i].iov_base == &wait_words[i] && remote[i].iov_len == 4,
+              "wait batch reads successor-independent shared wait slots");
+        memcpy(local[i].iov_base, remote[i].iov_base, remote[i].iov_len);
+        copied += remote[i].iov_len;
+    }
+    return (ssize_t)copied;
+}
 static void reset_counts(void)
 {
     opens = openats = closes = reads = calls = max_iovs = 0;
     tick_failures = 0; fopens = own_calls = stat_reads = map_reads = 0;
+    proc_opens = proc_reads = proc_closes = reader_map_reads = wait_calls = 0;
     memset(visits, 0, sizeof(visits)); memset(after_copy, 0, sizeof(after_copy));
 }
 static void fixture(int major, size_t n)
@@ -199,7 +242,8 @@ static void fixture(int major, size_t n)
         targets[i].rc = -1;
     }
     private_target = private_reader = reader_gone = mutate_on_span = transient_tear = 0;
-    incarnation = 1; stat_fail = own_short = 0; tear_row = short_row = fault_row = -1;
+    incarnation = 1; stat_fail = own_short = maps_fail = maps_prefix_lines = 0;
+    tear_row = short_row = fault_row = -1;
     reset_counts();
 }
 static void batch(void) { pgwt_pgbs_read_batch(42, &layout, targets, population, false, &tick_failures); }
@@ -248,7 +292,7 @@ static void test_faults(int major)
     CHECK(targets[2].rc == -1 && !cache[2].status_addr && !cache[2].shared,
           "slot reuse rejects PID and drops cached address");
     put(2, &layout.st_procpid, 1002);
-    CHECK(pgwt_pgbs_reader_resolve(&cache[2], 42, (uintptr_t)&entries[2], &layout) == 0,
+    CHECK(pgwt_pgbs_reader_resolve(&cache[2], 42, (uintptr_t)&entries[2], &layout, NULL) == 0,
           "slot reuse re-resolves through own pid");
     batch(); CHECK(targets[2].rc == 0, "re-resolved slot is usable");
     fixture(major, 5); targets[1].reader = &cache[2]; targets[2].reader = &cache[1]; batch();
@@ -296,7 +340,7 @@ static void test_resolve(int major)
     struct pgwt_pgbs_reader r = {0};
     CHECK(pgwt_pgbs_reader_enroll(&r, 1001) == 0 && r.start_time == 1 && stat_reads == 1,
           "enrollment stores start time without descriptor");
-    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == 0 &&
+    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout, NULL) == 0 &&
           r.shared && r.status_addr == entries[1] && own_calls == 1 &&
           !opens && !closes && !reads && stat_reads == 1 && map_reads == 2,
           "one own-pid VM call caches candidate without re-reading stat");
@@ -307,12 +351,12 @@ static void test_resolve(int major)
           "only the shared batch accepts candidate PID identity");
     put(1, &layout.st_procpid, 1001);
     reset_counts();
-    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == 0 &&
+    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout, NULL) == 0 &&
           own_calls == 1 && !stat_reads && !map_reads,
           "invalidated candidate reuses mapping snapshots");
     reset_counts();
     for (int tick = 0; tick < 500; tick++)
-        CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == 0,
+        CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout, NULL) == 0,
               "cached row resolver succeeds");
     CHECK(!own_calls && !map_reads && !stat_reads,
           "cached-address return prevents re-resolution on every tick");
@@ -321,14 +365,14 @@ static void test_resolve(int major)
     for (int reader_private = 0; reader_private < 2; reader_private++) {
         CHECK(pgwt_pgbs_reader_enroll(&r, 1001) == 0, "mapping fixture enrolls");
         private_target = !reader_private; private_reader = reader_private;
-        CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == -1 &&
+        CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout, NULL) == -1 &&
               !r.shared && !r.status_addr, "both mappings must prove shared");
         pgwt_pgbs_reader_reset(&r);
     }
     private_target = private_reader = 0;
     CHECK(pgwt_pgbs_reader_enroll(&r, 1001) == 0, "short-pointer fixture enrolls");
     own_short = 1;
-    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == -1 &&
+    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout, NULL) == -1 &&
           !r.status_addr, "short own-pid read never supplies a candidate");
     own_short = 0;
     pgwt_pgbs_reader_reset(&r); CHECK(!r.pid && !r.target_maps, "retirement clears row and mapping proof");
@@ -347,6 +391,7 @@ static void test_resolve(int major)
 #include "backend_init.h"
 #include "idle_rule.h"
 #include "discovery.h"
+static struct pgwt_sample_target recorded_samples[MAX_BACKENDS];
 struct pg_wait_tracer_bpf { struct { void *on_bootstrap; } progs;
                             struct { void *state_map; } maps; };
 static uint64_t clock_ns = UINT64_C(10000000000);
@@ -497,10 +542,10 @@ static void test_registry_paths(int major)
         CHECK(sample_registry(d, clock_ns + UINT64_C(100000000)) == 1,
               "first sampleable tick builds one target");
         batch();
-        finish_sampled_attr(be, targets[0].rc);
+        finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
         CHECK(be->sampled_reader.pid == be->pid && be->sampled_reader.start_time == 1 &&
               targets[0].rc == 0 && targets[0].attr.databaseid == 16384 &&
-              own_calls == 1 && stat_reads == 1,
+              own_calls == 1 && stat_reads == 2,
               "first sampled tick enrolls every registry path");
         printf("PG%d registry: %s -> first sampled tick enrolled and attributed\n", major, paths[path]);
         release_daemon(d);
@@ -546,7 +591,7 @@ static void test_lifecycle_identity(int major)
         }
         CHECK(pgwt_handle_fork(d, 1000) == 0, "identity fixture fork");
         struct pgwt_backend *be = &d->backends.entries[0];
-        resolve_sampled_attr(d, be, clock_ns);
+        resolve_sampled_attr(d, be, clock_ns, NULL);
         uint64_t address = be->sampled_reader.status_addr;
         reset_counts();
         be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
@@ -560,6 +605,7 @@ static void test_lifecycle_identity(int major)
         be->wp_fd = 17; be->bootstrap_fd = 18;
         be->attach_ts = 1234; be->init_ts = 1235;
         be->databaseid = 9999; be->userid = 8888;
+        be->meta.backend_type = PGWT_BT_AUTOVAC_WORKER; be->meta_parsed = true;
         incarnation = 2;
         CHECK(pgwt_handle_fork(d, 1000) == 0 && be->sampled_reader.start_time == 2 &&
               !be->sampled_reader.status_addr && exit_calls == (exact ? 0 : 1),
@@ -584,6 +630,8 @@ static void test_lifecycle_identity(int major)
         if (exact) CHECK(be->wp_addr == 2345 && !be->sampled_cache_stale &&
                          be->databaseid == 0 && be->userid == 0,
                          "replacement resolves its own wait slot and discards old sampled context");
+        CHECK(recorded_samples[0].backend_type == PGWT_BT_CLIENT,
+              "replacement reparses metadata instead of inheriting predecessor type");
         batch();
         CHECK(targets[0].rc == 0 && be->sampled_reader.start_time == 2,
               "replacement during exact window resumes with new sampled identity");
@@ -598,44 +646,216 @@ static void test_candidate_rejection(int major)
     CHECK(pgwt_sampler_enroll_backend(be, clock_ns) == 0, "candidate fixture enrolls");
     put(0, &layout.st_state, layout.state_max + 1); /* false row hint */
     put(1, &layout.st_procpid, 1000); /* the real row */
-    resolve_sampled_attr(d, be, clock_ns);
+    resolve_sampled_attr(d, be, clock_ns, NULL);
     targets[0].reader = &be->sampled_reader; batch();
-    finish_sampled_attr(be, targets[0].rc);
-    CHECK(targets[0].rc == -1 && !be->sampled_reader.status_addr,
+    finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
+    CHECK(targets[0].rc == -1 && !be->sampled_reader.status_addr && stat_reads == 1,
           "an initially rejected candidate never becomes a cached row");
     entries[0] = entries[1];
-    resolve_sampled_attr(d, be, clock_ns + UINT64_C(100000000));
-    batch(); finish_sampled_attr(be, targets[0].rc);
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(100000000), NULL);
+    batch(); finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
     CHECK(targets[0].rc == 0 && be->sampled_reader.status_addr == entries[1] &&
-          !be->sampled_reader.candidate && !be->pgbs_resolve_fast_until_ns,
+          !be->sampled_reader.candidate && !be->pgbs_resolve_fast_until_ns && stat_reads == 2,
           "candidate rejection continues search past a false PID hint");
+    release_daemon(d);
+}
+static void test_reuse_without_events(int major)
+{
+    /* Reviewer's scenario: EXIT and the successor's FORK are both dropped.
+     * The replacement has the same pid, a different start time and row, and
+     * a different wait slot. No lifecycle callback repairs the registry. */
+    struct pgwt_daemon *d = new_daemon(major);
+    fixture(major, 2); d->backend_status_layout = layout;
+    CHECK(pgwt_handle_fork(d, 1000) == 0, "reuse fixture fork");
+    struct pgwt_backend *be = &d->backends.entries[0];
+    be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+    wait_addr = 1234;
+    put(1, &layout.st_procpid, 0);
+    CHECK(sample_registry(d, clock_ns) == 1, "reuse original target");
+    batch(); finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
+    CHECK(targets[0].rc == 0 && be->sampled_reader.start_time == 1,
+          "reuse original accepted before unseen exit");
+    incarnation = 2;
+    put(0, &layout.st_procpid, 0);
+    put(1, &layout.st_procpid, 1000); put(1, &layout.st_databaseid, 7777);
+    entries[0] = (uintptr_t)row_at(1);
+    wait_addr = 2345;
+    be->meta.backend_type = PGWT_BT_PARALLEL_WORKER;
+    uint64_t t = clock_ns + UINT64_C(1000000);
+    sample_registry(d, t); batch();
+    finish_sampled_attr(be, targets[0].rc, targets[0].error, t);
+    CHECK(targets[0].rc == -1 && !be->sampled_reader.status_addr,
+          "reuse invalidates predecessor row before re-resolution");
+    reset_counts();
+    sample_registry(d, t + UINT64_C(100000000)); batch();
+    finish_sampled_attr(be, targets[0].rc, targets[0].error, t + UINT64_C(100000000));
+    CHECK(targets[0].rc == -1 && targets[0].error == ESTALE && tick_failures == 1 &&
+          !targets[0].attr.databaseid && !targets[0].attr.cmd_open &&
+          !targets[0].gate.cmd_open && !be->sampled_reader.pid &&
+          be->sampled_cache_stale && stat_reads == 1,
+          "unseen pid reuse is refused at first candidate acceptance");
+    printf("PG%d REUSE: +100ms successor refused; enrollment retired, failure=1\n", major);
+    sample_registry(d, t + UINT64_C(200000000)); batch();
+    finish_sampled_attr(be, targets[0].rc, targets[0].error, t + UINT64_C(200000000));
+    CHECK(targets[0].rc == 0 && be->sampled_reader.start_time == 2 &&
+          targets[0].attr.databaseid == 7777 && be->wp_addr == 2345 &&
+          recorded_samples[0].wait_event_addr == 2345 &&
+          recorded_samples[0].backend_type == PGWT_BT_CLIENT &&
+          !be->sampled_cache_stale && stat_reads == 3,
+          "successor is sampled only with its own enrollment wait slot and type");
+    printf("PG%d REUSE: +200ms new enrollment start_time=%llu, process start_time=%d, databaseid=%u, wait_addr=%llu\n",
+           major, (unsigned long long)be->sampled_reader.start_time, incarnation,
+           targets[0].attr.databaseid, (unsigned long long)be->wp_addr);
+    reset_counts();
+    for (int i = 0; i < 100; i++) { sample_registry(d, t + UINT64_C(300000000)); batch(); }
+    CHECK(!stat_reads && !own_calls, "accepted successor has no per-tick identity I/O");
+    release_daemon(d);
+}
+static void test_init_reuse(int major)
+{
+    for (int exact = 0; exact < 2; exact++) {
+        struct pgwt_daemon *d = new_daemon(major);
+        CHECK(pgwt_handle_fork(d, 1000) == 0, "INIT reuse fork");
+        struct pgwt_backend *be = &d->backends.entries[0];
+        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+        sample_registry(d, clock_ns); batch();
+        finish_sampled_attr(be, targets[0].rc, targets[0].error, clock_ns);
+        be->wp_fd = 17; be->bootstrap_fd = -1;
+        incarnation = 2;
+        d->mode = exact ? PGWT_MODE_FULL : PGWT_MODE_TIERED;
+        reset_counts();
+        int init_rc = pgwt_handle_init(d, 1000, 2345, 55);
+        CHECK(init_rc == 0 &&
+              be->sampled_reader.start_time == 2 && !be->sampled_reader.status_addr &&
+              be->sampled_cache_stale && be->wp_fd == 17 && !exit_calls && stat_reads == 3,
+              "INIT checks existing identity before the already-attached return");
+        release_daemon(d);
+    }
+}
+static void test_rejected_backoff(int major)
+{
+    /* Drive the production target loop AND production post-batch policy. The
+     * earlier harness called only finish(), omitting poll's deadline reset. */
+    const int expected[] = {0,100,200,300,400,500,600,700,800,900,1000,1100,
+                            1200,1400,1800,2600,4200,7400,10600};
+    struct pgwt_daemon *d = new_daemon(major);
+    CHECK(pgwt_handle_fork(d, 1000) == 0, "rejected backoff fork");
+    struct pgwt_backend *be = &d->backends.entries[0];
+    be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+    put(0, &layout.st_state, layout.state_max + 1);
+    int attempts = 0;
+    reset_counts();
+    printf("PG%d rejected-candidate attempt ms:", major);
+    for (int ms = 0; ms <= 10600; ms++) {
+        uint64_t t = clock_ns + (uint64_t)ms * UINT64_C(1000000);
+        /* PG13's scan cursor wraps while retaining the same rejected row. */
+        if (major == 13) be->sampled_reader.scan_cursor = 0;
+        int before = own_calls;
+        sample_registry(d, t); batch();
+        finish_sampled_attr(be, targets[0].rc, targets[0].error, t);
+        if (own_calls == before) continue;
+        CHECK(own_calls == before + 1 && attempts < (int)(sizeof(expected)/sizeof(*expected)) &&
+              ms == expected[attempts], "rejected candidates preserve exponential attempt times");
+        attempts++;
+        printf(" %d", ms);
+    }
+    puts("");
+    CHECK(attempts == (int)(sizeof(expected)/sizeof(*expected)) && !stat_reads,
+          "rejected candidates do no acceptance stat reads and cap at 3200ms");
     release_daemon(d);
 }
 static void test_first_tick_budget(int major)
 {
+    /* Already-proven wait slots and process titles, as in the reviewer's
+     * setup count. This includes ALL attribution setup and the real wait
+     * batch, with no hidden stdio fstat/buffering calls in the product.
+     * For general maps files let R be the sum of map read calls (including
+     * EOF): total = 4505 + R. Here each of 501 maps files fits one 4096-byte
+     * read plus EOF, so R=1002 and total=5507. Larger maps add read calls,
+     * never opens; interrupted syscalls are outside this successful-I/O bound. */
     struct pgwt_daemon *d = new_daemon(major);
     fixture(major, 500); d->backend_status_layout = layout;
     d->my_be_entry_addr = UINT64_C(0x1234000);
     for (int i = 0; i < 500; i++) {
         struct pgwt_backend *be = alloc_backend(&d->backends, 1000+i, major == 13);
-        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+        be->wp_addr = (uintptr_t)&wait_words[i]; be->wp_addr_shared = 1; be->meta_parsed = true;
     }
     CHECK(sample_registry(d, clock_ns) == 500, "500 first-tick registry targets");
     batch();
     for (int i = 0; i < 500; i++) {
         CHECK(targets[i].rc == 0, "all first-tick candidates pass batch identity");
-        finish_sampled_attr(&d->backends.entries[i], targets[i].rc);
+        finish_sampled_attr(&d->backends.entries[i], targets[i].rc, targets[i].error, clock_ns);
     }
-    CHECK(own_calls == 500 && calls == 2 && stat_reads == 500 && map_reads == 1000 &&
+    uint32_t vals[500]; uint8_t valid[500]; uint64_t faults = 0;
+    CHECK(pgwt_sampler_read_targets(recorded_samples, 500, vals, valid, &faults) == 500 &&
+          wait_calls == 1 && !faults, "first tick includes one real wait batch");
+    CHECK(own_calls + calls + wait_calls + proc_opens + proc_reads + proc_closes == 5507,
+          "N=500 complete first-tick syscall bound includes file setup and wait batch");
+    CHECK(own_calls == 500 && calls == 2 && stat_reads == 1000 && map_reads == 501 &&
+          reader_map_reads == 1 && proc_opens == 1501 && proc_reads == 2002 &&
+          proc_closes == 1501 &&
           !opens && !openats && !reads && !closes,
-          "N=500 first tick is 500 candidate calls plus two status calls and one-time setup");
-    printf("PG%d first tick N=500: candidate VM=500 status VM=2; setup stat=500 maps=1000; mem open/pread/close=0\n", major);
+          "N=500 first tick includes enrollment, acceptance and both mapping proofs");
+    printf("PG%d first tick N=500 (maps <=4096 bytes): own VM=500 status VM=2 + wait VM=1; stat=1000 maps=501 (reader=1); open/read/close=1501/2002/1501; total=5507 (general: 4505 + maps read calls)\n", major);
     reset_counts();
     CHECK(sample_registry(d, clock_ns + UINT64_C(1000000)) == 500, "500 cached targets");
     batch();
-    CHECK(!own_calls && !stat_reads && !map_reads && calls == 2,
+    CHECK(pgwt_sampler_read_targets(recorded_samples, 500, vals, valid, &faults) == 500 &&
+          wait_calls == 1 && !faults, "steady tick includes one wait batch");
+    CHECK(!own_calls && !stat_reads && !map_reads && calls == 2 && wait_calls == 1 &&
+          !proc_opens && !proc_reads && !proc_closes,
           "N=500 resolved second tick does no enrollment or resolution I/O");
     release_daemon(d);
+}
+static void test_tick_maps_cache(int major)
+{
+    for (int outcome = 0; outcome < 3; outcome++) {
+        fixture(major, 3);
+        struct pgwt_pgbs_maps_cache maps_cache = {0};
+        struct pgwt_pgbs_reader readers[3] = {0};
+        maps_fail = outcome == 1;
+        private_reader = outcome == 2;
+        for (int i = 0; i < 3; i++) {
+            CHECK(pgwt_pgbs_reader_enroll(&readers[i], 1000+i) == 0,
+                  "tick mapping fixture enrolls");
+            int rc = pgwt_pgbs_reader_resolve(&readers[i], 42,
+                         (uintptr_t)&entries[i], &layout, &maps_cache);
+            CHECK((rc == 0) == (outcome == 0),
+                  "shared tick snapshot keeps failed and private reader proofs closed");
+        }
+        CHECK(reader_map_reads == 1 && map_reads == 4,
+              "postmaster maps are opened at most once per tick even after failure");
+        pgwt_pgbs_maps_cache_reset(&maps_cache);
+        for (int i = 0; i < 3; i++) pgwt_pgbs_reader_reset(&readers[i]);
+        /* Next tick: a fresh snapshot must see the changed reader proof. */
+        maps_fail = 0; private_reader = !private_reader;
+        CHECK(pgwt_pgbs_reader_enroll(&readers[0], 1000) == 0,
+              "next tick mapping fixture enrolls");
+        int rc = pgwt_pgbs_reader_resolve(&readers[0], 42,
+                     (uintptr_t)&entries[0], &layout, &maps_cache);
+        CHECK(reader_map_reads == 2 && (rc == 0) == !private_reader,
+              "tick cache invalidation observes the next reader mapping snapshot");
+        pgwt_pgbs_reader_reset(&readers[0]);
+        pgwt_pgbs_maps_cache_reset(&maps_cache);
+    }
+    fixture(major, 3);
+    maps_prefix_lines = 128; /* shared lines follow the 4096-byte read boundary */
+    struct pgwt_pgbs_maps_cache maps_cache = {0};
+    struct pgwt_pgbs_reader readers[3] = {0};
+    for (int i = 0; i < 3; i++) {
+        CHECK(pgwt_pgbs_reader_enroll(&readers[i], 1000+i) == 0 &&
+              pgwt_pgbs_reader_resolve(&readers[i], 42, (uintptr_t)&entries[i],
+                                       &layout, &maps_cache) == 0,
+              "mapping proof reads shared lines beyond the first file chunk");
+        targets[i].reader = &readers[i];
+    }
+    batch();
+    CHECK(map_reads == 4 && reader_map_reads == 1 && stat_reads == 6 &&
+          proc_opens == 10 && proc_reads == 18 && proc_closes == 10 &&
+          targets[0].rc == 0 && targets[1].rc == 0 && targets[2].rc == 0,
+          "complete setup count includes extra maps read chunks and acceptance stat");
+    for (int i = 0; i < 3; i++) pgwt_pgbs_reader_reset(&readers[i]);
+    pgwt_pgbs_maps_cache_reset(&maps_cache);
 }
 static void test_pending_budget(int major)
 {
@@ -644,6 +864,7 @@ static void test_pending_budget(int major)
      * recurring work; the next one second is replayed at 10 and 1000 Hz. */
     fixture(major, 500); d->backend_status_layout = layout;
     for (int hz = 10; hz <= 1000; hz *= 100) {
+        struct pgwt_pgbs_maps_cache maps_cache = {0};
         for (int i = 0; i < 500; i++) {
             struct pgwt_backend *be = alloc_backend(&d->backends, 1000+i, major == 13);
             CHECK(be != NULL, "pending registry entry");
@@ -651,10 +872,13 @@ static void test_pending_budget(int major)
             if (major == 13) put(i, &layout.st_procpid, 0);
             else entries[i] = 0;
             d->my_be_entry_addr = (uintptr_t)&entries[i];
-            resolve_sampled_attr(d, be, clock_ns);
+            resolve_sampled_attr(d, be, clock_ns, &maps_cache);
         }
-        CHECK(stat_reads == 500 && map_reads == 1000 && own_calls == 500 && !opens && !reads && !closes,
-              "pending setup reads identity and mapping pair once");
+        pgwt_pgbs_maps_cache_reset(&maps_cache);
+        CHECK(stat_reads == 500 && map_reads == 501 && reader_map_reads == 1 &&
+              own_calls == 500 && proc_opens == 1001 && proc_reads == 1502 &&
+              proc_closes == 1001 && !opens && !reads && !closes,
+              "pending setup reads identity and shared reader maps once");
         reset_counts();
         int max_due = 0;
         for (int tick = 1; tick <= hz; tick++) {
@@ -662,12 +886,12 @@ static void test_pending_budget(int major)
             for (int i = 0; i < 500; i++) {
                 d->my_be_entry_addr = (uintptr_t)&entries[i];
                 resolve_sampled_attr(d, &d->backends.entries[i],
-                    clock_ns + (uint64_t)tick * UINT64_C(1000000000) / (unsigned)hz);
+                    clock_ns + (uint64_t)tick * UINT64_C(1000000000) / (unsigned)hz, NULL);
             }
             if (own_calls - before > max_due) max_due = own_calls - before;
         }
         CHECK(own_calls == 5000 && max_due == 500 && !stat_reads && !map_reads &&
-              !opens && !openats && !reads && !closes,
+              !opens && !openats && !reads && !closes && !proc_opens && !proc_reads && !proc_closes,
               "N=500 pending cost is one VM per due backend independent of tick rate");
         printf("PG%d pending N=500 Hz=%d: max VM/tick=%d, VM/second=%d, stat=0 maps=0 mem open/pread/close=0 (after setup)\n",
                major, hz, max_due, own_calls);
@@ -686,24 +910,24 @@ static void test_retry_and_idle(int major)
     struct pgwt_backend *be = &d->backends.entries[0];
     uint64_t original = entries[0];
     if (major == 13) put(0, &layout.st_procpid, 0); else entries[0] = 0;
-    for (int i = 0; i < 5; i++) resolve_sampled_attr(d, be, clock_ns + (uint64_t)i * 100000000);
+    for (int i = 0; i < 5; i++) resolve_sampled_attr(d, be, clock_ns + (uint64_t)i * 100000000, NULL);
     CHECK(own_calls == 5 && !be->sampled_reader.status_addr,
           "startup attempts follow 100 ms cadence");
     if (major == 13) put(0, &layout.st_procpid, 1000); else entries[0] = original;
-    resolve_sampled_attr(d, be, clock_ns + UINT64_C(450000000));
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(450000000), NULL);
     CHECK(own_calls == 5, "late row waits for time deadline rather than next tick");
-    resolve_sampled_attr(d, be, clock_ns + UINT64_C(500000000));
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(500000000), NULL);
     targets[0].reader = &be->sampled_reader; batch();
     CHECK(targets[0].rc == 0, "late status row resolves at next 100 ms deadline");
     /* Drop the candidate as the batch would after slot reuse. */
     be->sampled_reader.status_addr = 0;
     if (major == 13) put(0, &layout.st_procpid, 0); else entries[0] = 0;
-    for (int i = 6; i <= 12; i++) resolve_sampled_attr(d, be, clock_ns + (uint64_t)i * 100000000);
+    for (int i = 6; i <= 12; i++) resolve_sampled_attr(d, be, clock_ns + (uint64_t)i * 100000000, NULL);
     CHECK(be->pgbs_resolve_retry_ns == clock_ns + UINT64_C(1400000000),
           "one-second startup window transitions to exponential backoff");
     for (int i = 0; i < 10; i++) {
         uint64_t tick = be->pgbs_resolve_retry_ns;
-        resolve_sampled_attr(d, be, tick);
+        resolve_sampled_attr(d, be, tick, NULL);
         CHECK(be->pgbs_resolve_retry_ns - tick <= UINT64_C(3200000000),
               "mature unreadable target backoff stays capped");
     }
@@ -733,6 +957,10 @@ int main(int argc, char **argv)
 #ifdef PGWT_LIFECYCLE_SOURCE
         else if (!strcmp(argv[1], "registry")) { test_registry_paths(18); test_enrollment_without_attr(18); }
         else if (!strcmp(argv[1], "identity")) test_lifecycle_identity(18);
+        else if (!strcmp(argv[1], "reuse")) test_reuse_without_events(18);
+        else if (!strcmp(argv[1], "init-reuse")) test_init_reuse(18);
+        else if (!strcmp(argv[1], "rejected-backoff")) test_rejected_backoff(18);
+        else if (!strcmp(argv[1], "first-tick")) test_first_tick_budget(18);
         else if (!strcmp(argv[1], "pending")) test_pending_budget(18);
         else if (!strcmp(argv[1], "retry")) test_retry_and_idle(18);
 #endif
@@ -747,7 +975,11 @@ int main(int argc, char **argv)
         test_enrollment_without_attr(major[i]);
         test_lifecycle_identity(major[i]);
         test_candidate_rejection(major[i]);
+        test_reuse_without_events(major[i]);
+        test_init_reuse(major[i]);
+        test_rejected_backoff(major[i]);
         test_first_tick_budget(major[i]);
+        test_tick_maps_cache(major[i]);
         test_pending_budget(major[i]);
         test_retry_and_idle(major[i]);
 #endif

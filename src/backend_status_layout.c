@@ -1441,29 +1441,51 @@ void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader)
 
 struct pgwt_pgbs_mapping { uint64_t lo, hi; };
 
+void pgwt_pgbs_maps_cache_reset(struct pgwt_pgbs_maps_cache *cache)
+{
+    if (!cache) return;
+    free(cache->maps);
+    memset(cache, 0, sizeof(*cache));
+}
+
 /* PostgreSQL inherits these shared mappings at fork; they do not move/detach
  * during the enrollment. Load each maps file once, including the empty set.
  * Failed setup is retried only on the caller's time cadence. */
 static struct pgwt_pgbs_mapping *read_shared_maps(pid_t pid, size_t *count)
 {
-    char path[64], line[1024];
+    char path[64], line[1024], buffer[4096];
     snprintf(path, sizeof(path), "/proc/%d/maps", pid);
-    FILE *fp = fopen(path, "r");
-    if (!fp) return NULL;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
     struct pgwt_pgbs_mapping *maps = calloc(1, sizeof(*maps));
-    size_t n = 0;
-    while (maps && fgets(line, sizeof(line), fp)) {
-        unsigned long long lo, hi;
-        char perms[5] = "";
-        if (sscanf(line, "%llx-%llx %4s", &lo, &hi, perms) != 3 ||
-            lo >= hi || perms[0] != 'r' || perms[3] != 's') continue;
-        struct pgwt_pgbs_mapping *more = realloc(maps, (n + 1) * sizeof(*maps));
-        if (!more) { free(maps); maps = NULL; break; }
-        maps = more;
-        maps[n++] = (struct pgwt_pgbs_mapping){lo, hi};
+    size_t n = 0, used = 0;
+    bool overflow = false;
+    while (maps) {
+        ssize_t got = read(fd, buffer, sizeof(buffer));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) { free(maps); maps = NULL; break; }
+        if (!got) break;
+        for (ssize_t i = 0; i < got; i++) {
+            if (buffer[i] != '\n') {
+                if (used + 1 < sizeof(line)) line[used++] = buffer[i];
+                else overflow = true;
+                continue;
+            }
+            line[used] = '\0';
+            unsigned long long lo, hi;
+            char perms[5] = "";
+            bool shared = !overflow &&
+                sscanf(line, "%llx-%llx %4s", &lo, &hi, perms) == 3 &&
+                lo < hi && perms[0] == 'r' && perms[3] == 's';
+            used = 0; overflow = false;
+            if (!shared) continue;
+            struct pgwt_pgbs_mapping *more = realloc(maps, (n + 1) * sizeof(*maps));
+            if (!more) { free(maps); maps = NULL; break; }
+            maps = more;
+            maps[n++] = (struct pgwt_pgbs_mapping){lo, hi};
+        }
     }
-    if (ferror(fp)) { free(maps); maps = NULL; }
-    fclose(fp);
+    close(fd);
     if (maps) *count = n;
     return maps;
 }
@@ -1567,7 +1589,8 @@ static uint64_t reader_pg13_candidate(struct pgwt_pgbs_reader *r,
 
 int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
     pid_t postmaster_pid, uint64_t my_be_entry_addr,
-    const struct PgBackendStatusLayout *layout)
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_maps_cache *maps_cache)
 {
     uint32_t lo, hi;
     if (!reader || reader->pid <= 0 || !reader->start_time ||
@@ -1584,8 +1607,29 @@ int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
     if (reader->status_addr) return 0;
     if (!reader->target_maps)
         reader->target_maps = read_shared_maps(reader->pid, &reader->target_map_count);
-    if (!reader->reader_maps)
-        reader->reader_maps = read_shared_maps(postmaster_pid, &reader->reader_map_count);
+    if (!reader->reader_maps) {
+        if (!maps_cache) {
+            reader->reader_maps = read_shared_maps(postmaster_pid, &reader->reader_map_count);
+        } else {
+            if (maps_cache->pid != postmaster_pid) {
+                pgwt_pgbs_maps_cache_reset(maps_cache);
+                maps_cache->pid = postmaster_pid;
+            }
+            if (!maps_cache->attempted) {
+                maps_cache->attempted = true;
+                maps_cache->maps = read_shared_maps(postmaster_pid, &maps_cache->count);
+            }
+            if (maps_cache->maps) {
+                size_t size = (maps_cache->count ? maps_cache->count : 1) *
+                              sizeof(*reader->reader_maps);
+                reader->reader_maps = malloc(size);
+                if (reader->reader_maps) {
+                    memcpy(reader->reader_maps, maps_cache->maps, size);
+                    reader->reader_map_count = maps_cache->count;
+                }
+            }
+        }
+    }
     if (!reader->target_maps || !reader->reader_maps) return -1;
     uint64_t base = 0, activity_addr = 0;
     if (pgwt_pgbs_sampled_activity_enabled(layout)) {
@@ -1802,6 +1846,22 @@ void pgwt_pgbs_read_batch(pid_t postmaster_pid,
                 targets[i].reader->status_addr = 0;
                 targets[i].reader->activity_addr = 0;
                 targets[i].reader->shared = false;
+            }
+            if (targets[i].rc >= 0 && targets[i].reader->candidate) {
+                struct pgwt_pgbs_reader *r = targets[i].reader;
+                /* The row's pid alone cannot distinguish an unseen reuse.
+                 * Check once at acceptance, after the coherent copy, so a
+                 * successor cannot join its context to an old wait address.
+                 * Rejected/torn hints do not incur a stat read. */
+                if (!pgwt_pgbs_pid_is_original(r->pid, r->start_time)) {
+                    pgwt_pgbs_reader_reset(r);
+                    memset(&targets[i].attr, 0, sizeof(targets[i].attr));
+                    memset(&targets[i].gate, 0, sizeof(targets[i].gate));
+                    targets[i].rc = -1;
+                    targets[i].error = ESTALE;
+                    continue;
+                }
+                r->candidate = false;
             }
             if (targets[i].rc >= 0) targets[i].error = 0;
         }
@@ -2159,13 +2219,14 @@ int pgwt_pgbs_pid_start_time(pid_t pid, uint64_t *start_time)
 
     char path[64], line[4096];
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-    FILE *fp = fopen(path, "r");
-    if (!fp)
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t got;
+    do { got = read(fd, line, sizeof(line) - 1); } while (got < 0 && errno == EINTR);
+    close(fd);
+    if (got <= 0 || got == (ssize_t)sizeof(line) - 1)
         return -1;
-    bool got = fgets(line, sizeof(line), fp) != NULL;
-    fclose(fp);
-    if (!got)
-        return -1;
+    line[got] = '\0';
 
     /* comm (field 2) may contain spaces and parentheses.  Field 3 starts
      * after the final ')'; walk tokens through field 22 (starttime). */

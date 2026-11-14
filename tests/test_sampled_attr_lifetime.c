@@ -58,7 +58,7 @@ static void test_version(int major)
     struct pgwt_pgbs_reader reader = {0};
     CHECK(pgwt_pgbs_reader_enroll(&reader, pid) == 0 && reader.start_time,
           "enrollment retains starttime without descriptor");
-    CHECK(pgwt_pgbs_reader_resolve(&reader, getpid(), (uintptr_t)&entry, &layout) == 0,
+    CHECK(pgwt_pgbs_reader_resolve(&reader, getpid(), (uintptr_t)&entry, &layout, NULL) == 0,
           "own-pid pointer resolves to a row shared in target and reader");
     struct pgwt_pgbs_batch_target target = {.reader = &reader, .pid = pid};
     pgwt_pgbs_read_batch(getpid(), &layout, &target, 1, false, NULL);

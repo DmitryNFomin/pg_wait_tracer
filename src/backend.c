@@ -1060,6 +1060,18 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     if (live <= 0) return live < 0 ? -1 : 0;
 
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+    if (be && be->sampled_reader.pid &&
+        !pgwt_pgbs_pid_is_original(pid, be->sampled_reader.start_time)) {
+        /* INIT can be the only delivered event for a reused pid. Preserve
+         * exact-tier resources, but retire every predecessor sampled proof
+         * before either the already-attached return or new enrollment. */
+        pgwt_pgbs_reader_reset(&be->sampled_reader);
+        be->sampled_cache_stale = true;
+        be->pgbs_addr = 0;
+        be->pgbs_resolve_retry_ns = 0;
+        be->pgbs_resolve_fast_until_ns = 0;
+        be->pgbs_resolve_attempts = 0;
+    }
     if (!be) {
         /* Unknown PID — might have been forked before daemon started */
         be = alloc_backend(&d->backends, pid, d->pg_major_version == 13);

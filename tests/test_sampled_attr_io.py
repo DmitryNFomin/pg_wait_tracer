@@ -228,8 +228,8 @@ def main():
     for name in ("pgwt_scan_existing_backends", "pgwt_handle_init", "pgwt_handle_fork"):
         assert "pgwt_sampler_enroll_backend(be, now_ns());" in function(backend, name), name
     poll = function(sampler, "pgwt_sampler_poll")
-    assert "resolve_sampled_attr(d, be, tick_ts);" in poll
-    assert "finish_sampled_attr(be, attr_rows[n].rc);" in poll
+    assert "resolve_sampled_attr(d, be, tick_ts, &maps_cache);" in poll
+    assert "finish_sampled_attr(be, attr_rows[n].rc, attr_rows[n].error, tick_ts);" in poll
     assert "note_idle_attr_sample(d, &targets[i], tick_enabled[i] && attr_valid[i]," in poll
     assert "getenv" not in function(sampler, "note_idle_attr_sample")
     assert sampler.count('getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW")') == 1
@@ -244,7 +244,9 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
     struct pgwt_backend *backend_rows[MAX_BACKENDS];
 """ + target_loop.replace("targets[", "sample_targets[") + """
     (void)tick_enabled; (void)backend_rows; (void)attr_errno; (void)attr_no_context;
+    memset(targets, 0, sizeof(targets));
     memcpy(targets, attr_rows, (size_t)n * sizeof(*targets));
+    memcpy(recorded_samples, sample_targets, (size_t)n * sizeof(*sample_targets));
     return n;
 }
 """
@@ -258,7 +260,11 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
             injected = tmp / f"{label}-lifecycle.h"
             injected.write_text(enrollment + "\n" + resolution + registry_source)
             portable_sampler = tmp / f"{label}-sampler.c"
-            portable_sampler.write_text(sampler_source)
+            portable_sampler.write_text(sampler_source.replace(
+                "#include <sys/uio.h>", "#include <sys/uio.h>\n"
+                "extern ssize_t pgwt_test_wait_readv(pid_t, const struct iovec *, unsigned long, "
+                "const struct iovec *, unsigned long, unsigned long);\n"
+                "#define process_vm_readv pgwt_test_wait_readv"))
             binary = tmp / label
             result = run(cc + flags + [
                 "-DPGWT_SERVER",
@@ -279,7 +285,10 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
                         "restore_exit_during_exact_duplicate": "identity", "drop_lazy_enrollment": "registry",
                         "drop_retry_deadline": "pending", "backoff_during_startup": "retry",
                         "gate_lazy_on_layout": "registry", "drop_deferred_cache_reset": "identity",
-                        "reset_before_exact_drain": "identity"}
+                        "reset_before_exact_drain": "identity", "drop_meta_reset": "identity",
+                        "drop_acceptance_identity": "reuse", "drop_init_identity": "init-reuse",
+                        "restart_rejected_backoff": "rejected-backoff",
+                        "drop_tick_maps_cache": "first-tick"}
         mutations = [
             ("drop_pid_compare",
              "snapshot->procpid == (uint32_t)expected_pid &&",
@@ -318,6 +327,10 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
              "if (!r || !r->shared || !r->status_addr ||",
              "if (!r || !r->status_addr ||",
              "unproven shared address is never batched"),
+            ("drop_acceptance_identity",
+             "if (!pgwt_pgbs_pid_is_original(r->pid, r->start_time)) {",
+             "if (false && !pgwt_pgbs_pid_is_original(r->pid, r->start_time)) {",
+             "unseen pid reuse is refused at first candidate acceptance"),
         ]
         for label, before, after, assertion in mutations:
             assert source.count(before) == 1, (label, "mutation anchor changed")
@@ -327,6 +340,21 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
             assert f"FAIL: {assertion}" in result.stderr, (label, result.stderr)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
         other_mutations = [
+            ("drop_meta_reset", registry,
+             "memset(&be->meta, 0, sizeof(be->meta));\n            be->meta_parsed = false;",
+             "/* retain predecessor metadata */",
+             "replacement reparses metadata instead of inheriting predecessor type"),
+            ("drop_init_identity", lifecycle,
+             "if (be && be->sampled_reader.pid &&",
+             "if (false && be && be->sampled_reader.pid &&",
+             "INIT checks existing identity before the already-attached return"),
+            ("restart_rejected_backoff", policy,
+             "if (!candidate) {", "if (candidate || be->pgbs_addr == 0) {",
+             "rejected candidates preserve exponential attempt times"),
+            ("drop_tick_maps_cache", registry,
+             "resolve_sampled_attr(d, be, tick_ts, &maps_cache);",
+             "resolve_sampled_attr(d, be, tick_ts, NULL);",
+             "N=500 first tick includes enrollment, acceptance and both mapping proofs"),
             ("drop_pid_zero_guard", lifecycle,
              "if (be->sampled_reader.pid == 0) {", "if (true) {",
              "pid-zero guard preserves identity and cached row across sampled ticks"),

@@ -1004,9 +1004,11 @@ static int sampler_live_cmd_gate(void *ctx, int idx,
  * the shared batch below is the sole row validator. After enrollment/maps
  * setup, N pending backends add <=N VM syscalls on a due tick, zero between
  * deadlines (500 at N=500); neither stat nor /proc/pid/mem is read per attempt.
+ * A candidate that passes the row checks adds one stat read at acceptance.
  * Status/wait batches keep their separate existing bounds. */
 static void resolve_sampled_attr(struct pgwt_daemon *d, struct pgwt_backend *be,
-                                 uint64_t tick_ts)
+                                 uint64_t tick_ts,
+                                 struct pgwt_pgbs_maps_cache *maps_cache)
 {
     bool early = be->pgbs_resolve_fast_until_ns &&
         tick_ts <= be->pgbs_resolve_fast_until_ns;
@@ -1023,11 +1025,23 @@ static void resolve_sampled_attr(struct pgwt_daemon *d, struct pgwt_backend *be,
             (UINT64_C(100000000) << shift);
     }
     (void)pgwt_pgbs_reader_resolve(&be->sampled_reader, d->postmaster_pid,
-            d->my_be_entry_addr, &d->backend_status_layout);
+            d->my_be_entry_addr, &d->backend_status_layout, maps_cache);
 }
 
-static void finish_sampled_attr(struct pgwt_backend *be, int rc)
+static void finish_sampled_attr(struct pgwt_backend *be, int rc, int error,
+                                uint64_t tick_ts)
 {
+    bool candidate = be->sampled_reader.candidate;
+    if (rc < 0 && error == ESTALE && !be->sampled_reader.pid) {
+        /* The batch retired an enrollment belonging to an older incarnation.
+         * Clear its wait/context/type caches before lazy enrollment resumes. */
+        be->sampled_cache_stale = true;
+        be->pgbs_addr = 0;
+        be->pgbs_resolve_fast_until_ns = 0;
+        be->pgbs_resolve_attempts = 0;
+        be->pgbs_resolve_retry_ns = 0;
+        return;
+    }
     if (rc >= 0) {
         be->sampled_reader.candidate = false;
         be->pgbs_resolve_fast_until_ns = 0;
@@ -1041,6 +1055,16 @@ static void finish_sampled_attr(struct pgwt_backend *be, int rc)
         be->sampled_reader.activity_addr = 0;
         be->sampled_reader.shared = false;
         be->sampled_reader.candidate = false;
+    }
+    if (be->pgbs_addr && !be->sampled_reader.status_addr) {
+        be->pgbs_addr = 0;
+        /* Rejection of a pending hint preserves the deadline/attempt count
+         * set by resolve_sampled_attr. Only loss of an accepted row starts
+         * a new retry sequence. */
+        if (!candidate) {
+            be->pgbs_resolve_retry_ns = tick_ts + UINT64_C(100000000);
+            be->pgbs_resolve_attempts = 1;
+        }
     }
 }
 
@@ -1111,6 +1135,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     int n = 0;
     int attr_errno = 0;
     int attr_no_context = 0;
+    struct pgwt_pgbs_maps_cache maps_cache = {0};
     for (int i = 0; i < d->backends.count && n < MAX_BACKENDS; i++) {
         struct pgwt_backend *be = &d->backends.entries[i];
         if (!be->is_alive || be->pid <= 0)
@@ -1212,10 +1237,11 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         attr_rows[n].reader = target_tick_enabled ? &be->sampled_reader : NULL;
         attr_rows[n].pid = be->pid;
         if (target_tick_enabled)
-            resolve_sampled_attr(d, be, tick_ts);
+            resolve_sampled_attr(d, be, tick_ts, &maps_cache);
         be->pgbs_addr = be->sampled_reader.status_addr;
         n++;
     }
+    pgwt_pgbs_maps_cache_reset(&maps_cache);
     int target_count = n;
     if (tick_source_enabled)
         pgwt_pgbs_read_batch(d->postmaster_pid, &d->backend_status_layout,
@@ -1224,15 +1250,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     for (n = 0; n < target_count; n++) {
         struct pgwt_backend *be = backend_rows[n];
         const bool target_tick_enabled = tick_enabled[n];
-        if (target_tick_enabled) finish_sampled_attr(be, attr_rows[n].rc);
-        /* A mismatched row has lost its proof. Re-resolution uses the same
-         * own-pid exponential backoff as initial enrollment. */
-        if (target_tick_enabled && be->pgbs_addr &&
-            !be->sampled_reader.status_addr) {
-            be->pgbs_addr = 0;
-            be->pgbs_resolve_retry_ns = tick_ts + UINT64_C(100000000);
-            be->pgbs_resolve_attempts = 1;
-        }
+        if (target_tick_enabled)
+            finish_sampled_attr(be, attr_rows[n].rc, attr_rows[n].error, tick_ts);
         struct pgwt_sampled_attr_value uprobe_attr = {0};
         bool uprobe_shadow_valid = false;
         if (qidx_n >= 0) {
@@ -1467,13 +1486,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                 s->read_valid[i] = 0;
                 got--;
                 if (!attr_errno) attr_errno = attr_rows[i].error;
-                if (backend_rows[i]->pgbs_addr &&
-                    !targets[i].attr_reader->status_addr) {
-                    backend_rows[i]->pgbs_addr = 0;
-                    backend_rows[i]->pgbs_resolve_retry_ns = tick_ts +
-                        UINT64_C(100000000);
-                    backend_rows[i]->pgbs_resolve_attempts = 1;
-                }
+                finish_sampled_attr(backend_rows[i], attr_rows[i].rc,
+                                      attr_rows[i].error, tick_ts);
             }
         }
         d->counters.cmd_gate_order_at_risk_total += rs.at_risk;
