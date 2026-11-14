@@ -56,42 +56,14 @@ run python3 -B tests/test_counter_vector_portable.py
 run python3 -B tests/test_counter_failures.py
 run python3 -B tests/counter_vector_mutants.py --guard-sweep
 
-step "core wait_time contract and mutation checks"
+step "core wait_time, merge and evidence contract status and mutation checks"
 core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
 run env CFLAGS="$core_cflags" bash scripts/core-status.sh
 run bash tests/test_core_status.sh
 run python3 -B tests/test_ledger.py
 
-# evidence-v1 U1 logical replay, alongside the existing portable core gate.
-step "core evidence contract, differential and mutation checks"
-run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py --contract-only
-run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py
-run env CFLAGS="$core_cflags" bash tests/evidence_mutants.sh
-run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_report.py
-
-step "portable v5 evidence codec, independent bytes and mutation checks"
-run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_oracle.py
-run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_redelivery.py
-run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_mutants.py
-
-step "C11 core merge contract and API safety (ASan/UBSan, Refs #871)"
-if merge_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-core-merge-check.XXXXXX"); then
-    if "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-        -fno-omit-frame-pointer \
-        tests/test_core_merge_contract.c src/core/merge.c -o "$merge_check_dir/contract"; then
-        run "$merge_check_dir/contract" contracts/merge-v1/examples.json
-    else
-        echo "FAIL: core merge contract compilation"
-        fail=1
-    fi
-    rm -rf "$merge_check_dir"
-else
-    echo "FAIL: core merge contract temporary directory"
-    fail=1
-fi
-step "core merge frozen-fixture mutants (Refs #871)"
-run env CFLAGS="$core_cflags" bash tests/core_merge_mutants.sh
-
+# core-status runs the portable merge/evidence contract, differential, codec,
+# redelivery and report suites (including their mutants) once in this run.
 step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh
 

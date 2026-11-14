@@ -52,7 +52,8 @@ Evidence kinds:
   These cells say **attested**: the generator checks link syntax and the hash,
   not the link's contents or approval. The initial manifest leaves links unset
   for human review; hashes alone cannot turn a cell green.
-- `core-status`: `contract` names the record to read in both artifact modes.
+- `core-status`: `contract` names the record to read in both artifact modes
+  (`wait_time-v1.json`, `merge-v1.json`, or `evidence-v1.json`).
   The overall state, every claim row, and every required proof must pass,
   with an empty errors list and matching tree hashes in status and provenance.
   Proof ids must match the frozen claim. At least one independent `case:`
@@ -75,3 +76,23 @@ state, reason, evidence ids, and source paths or links; it stores no colours.
 
 Run `python3 -B tests/test_ledger.py` for the self-test. It is also registered
 in the normal deterministic runner, `scripts/check.sh`.
+
+The merge and evidence manifests add contract claim rows without changing the
+existing release claims. Only their `broken_versions` cells have a producer;
+empty attestation, platform, interface and retirement requirements remain red.
+Their status files use the same claim/proof/run/provenance structure as wait_time.
+Each per-id record must have its exact pass spelling; duplicate records fail,
+missing records are NOT-RUN, and a changed tree discards all three contracts'
+evidence. Mutation records bind the registered definition and actually compiled
+source hashes and name their intended proof. Equivalent guard deletions are
+reported separately and cannot satisfy the killed-mutant requirement.
+
+`scripts/core-status.sh` runs all portable proof suites once. The regular proof stage in `scripts/check.sh`
+uses these runs instead of repeating the merge, replay, codec, redelivery and
+report commands. Evidence is never reused across invocations. Set
+`PGWT_CORE_STATUS_DIR=/absolute/scratch/directory` to redirect this run's JSON
+and logs outside the default `tests/results/core_status/` directory; this is an
+output destination only, never an evidence input. The status self-test makes
+its own fresh real baseline, then uses only that invocation's raw transcripts
+as parser fixtures; this additional baseline is part of its cost. The two CI modes already
+move and upload every top-level output file.

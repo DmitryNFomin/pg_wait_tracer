@@ -197,6 +197,7 @@ static int r3_metrics(const char *root)
             pgwt_evidence_output_free(&out);
             if (compared<0) return 2;
         }
+        printf("report r3_%s %s\n", input.id, pass ? "PASS" : "FAIL");
         if (pass) ++matched; else failed=1;
         evidence_case_free(&input);
     }

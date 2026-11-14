@@ -526,6 +526,7 @@ def run(binary, table_only=False):
                     compare(accumulated,('case incremental',c['case'],order[:k]))
                     counts['case_incremental_prefixes']+=1
             counts['cases']+=1
+            print(f"codec redelivery_case_{c['case']} PASS", flush=True)
         print(f"codec redelivery cases {counts['cases']}/50; permutations {counts['case_permutations']}; incremental prefixes {counts['case_incremental_prefixes']}; 0 disagreements",flush=True)
         if not table_only:
             for tag,names in multisets(REF): exercise([db['deliveries'][n] for n in names],tag)
@@ -535,6 +536,7 @@ def run(binary, table_only=False):
                     m.header_recipes.setdefault(d['header']['content_id'],d)
                 exercise(ds,tag)
                 if tag=='every_byte_cut': counts['every_cut']+=1
+            print('codec redelivery_generated PASS', flush=True)
             print('codec redelivery differential '+json.dumps(dict(counts),sort_keys=True)+'; 0 disagreements',flush=True)
     finally: driver.close()
     return counts

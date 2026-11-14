@@ -140,7 +140,7 @@ def box_log(record, tree, base):
     return [str(path.resolve())]
 
 
-def passing_proof(proofs, ident):
+def passing_proof(proofs, ident, contract=None):
     proof = proofs.get(ident)
     require(isinstance(proof, dict) and proof.get("state") == "PASS",
             f"missing or non-PASS proof: {ident}")
@@ -148,6 +148,8 @@ def passing_proof(proofs, ident):
     require(isinstance(lines, list) and len(lines) == 1 and isinstance(lines[0], str),
             f"malformed proof: {ident}")
     line = lines[0]
+    if contract in ("merge-v1", "evidence-v1"):
+        return passing_contract_proof(proofs, ident, line, contract)
     if ident.startswith("case:"):
         require(line == ident[5:] + " PASS", f"malformed case proof: {ident}")
     elif ident.startswith("diff:"):
@@ -164,6 +166,86 @@ def passing_proof(proofs, ident):
                 else "diff:" + match[2])
     else:
         raise EvidenceError(f"unknown proof type: {ident}")
+    return None
+
+
+def passing_contract_proof(proofs, ident, line, contract):
+    """Validate the new runners' per-id lines, including intended witnesses.
+
+    Mutation records bind the built source and definition and explicitly name
+    the reached proof. Equivalent deletions are never counted as killed mutants.
+    """
+    if ident.startswith("mutant:"):
+        match = re.fullmatch(
+            r"(.+) definition-sha256=[0-9a-f]{64} source-sha256=[0-9a-f]{64} "
+            r"intended-proof=((?:case|diff):\S+)", line)
+        require(match is not None, f"malformed mutant proof: {ident}")
+        detail, target = match.groups()
+        name = ident[7:]
+        if contract == "merge-v1":
+            row = re.fullmatch(re.escape(name) + r" KILLED: row ([0-9]+/[NQ]) MISMATCH .+", detail)
+            guard = re.fullmatch(re.escape(name) + r" KILLED: guard (\S+) MISMATCH .+", detail)
+            require((row and target == 'case:row-' + row[1]) or
+                    (guard and target == 'case:guard/' + guard[1]), f"malformed mutant proof: {ident}")
+        elif name.startswith('replay/'):
+            reached = re.fullmatch(re.escape(name[7:]) + r" KILLED \((\S+), .+, build OK(?:; both result objects unchanged)?\)", detail)
+            require(reached and target in ('case:' + reached[1], 'diff:' + reached[1]),
+                    f"malformed mutant proof: {ident}")
+        elif name.startswith('codec/'):
+            reached = re.fullmatch(re.escape('codec ' + name[6:]) +
+                                  r" KILLED by (.+) \(built; intended (independent )?assertion failed\)", detail)
+            require(reached, f"malformed mutant proof: {ident}")
+            if reached[2]:
+                witness = reached[1]
+                require(witness.startswith('redelivery_'), f"malformed mutant proof: {ident}")
+                witness = witness[11:]
+                expected = 'case:redelivery/' + witness[5:] if witness.startswith('case_') else 'case:probe/' + name[6:]
+            else:
+                expected = 'case:codec/' + reached[1].split(', ')[0]
+            require(target == expected, f"malformed mutant proof: {ident}")
+        elif name.startswith('report/'):
+            reached = re.fullmatch(re.escape('report mutant ' + name[7:]) + r": KILLED case=(\S+) assertion=.+", detail)
+            require(reached and target == 'case:report/' + reached[1], f"malformed mutant proof: {ident}")
+        else:
+            raise EvidenceError(f"unknown proof type: {ident}")
+        return target
+    if ident.startswith('equivalent:'):
+        require(re.fullmatch(re.escape(ident[11:]) +
+                r" \| [0-9]+ \| contract=0 differential=0 \| SURVIVED \(cannot change an answer\): .+ "
+                r"definition-sha256=[0-9a-f]{64} source-sha256=[0-9a-f]{64} intended-proof=(?:case|diff):\S+", line),
+                f"malformed equivalent proof: {ident}")
+        return None
+    require(ident.startswith(('case:', 'diff:')), f'unknown proof type: {ident}')
+    name = ident.split(':', 1)[1]
+    if contract == 'merge-v1':
+        expected = ('row ' + name[4:] + ' PASS' if name.startswith('row-') else
+                    'guard ' + name[6:] + ' PASS' if name.startswith('guard/') else
+                    'core merge ' + name + ': passed')
+        valid = ident.startswith('case:') and line == expected
+    elif ident.startswith('diff:'):
+        valid = (line == 'codec redelivery_generated PASS' if name == 'redelivery-generated' else
+                 re.fullmatch(re.escape('evidence differential ' + name + ' PASS ') + r'reference=(MATCH|complete|unavailable|unsupported) core=\1', line))
+    else:
+        if name.startswith('codec/'):
+            expected = 'codec ' + name[6:] + ' PASS'
+        elif name.startswith('oracle/'):
+            expected = 'codec ' + name[7:] + ' PASS'
+        elif name == 'golden-bytes':
+            expected = 'codec independent_golden_bytes PASS'
+        elif name.startswith('probe/'):
+            expected = 'codec probe_' + name[6:] + ' PASS'
+        elif name.startswith('redelivery/'):
+            expected = 'codec redelivery_case_' + name[11:] + ' PASS'
+        elif name.startswith('report/'):
+            witness = name[7:]
+            expected = ('report case_' + witness + ' PASS' if witness.isdigit() else
+                        'report r3_' + witness + ' PASS' if re.match(r'[0-9]+_', witness) else
+                        'report two_faults PASS final=file[2].record[0] first=file[2].record[1]; independent x F=H=10' if witness == 'two_faults' else
+                        'report ' + witness + ' PASS')
+        else:
+            expected = 'evidence ' + name + ' PASS'
+        valid = ident.startswith('case:') and line == expected
+    require(valid, f"malformed proof: {ident}")
     return None
 
 
@@ -208,9 +290,9 @@ def core_status(record, tree, artifact, reference, expected):
         require(set(refs) == set(expected["proof_ids"]), "claim proof ids differ from contract")
         targets = []
         for ref in refs:
-            target = passing_proof(proofs, ref)
+            target = passing_proof(proofs, ref, contract)
             if target is not None:
-                passing_proof(proofs, target)
+                passing_proof(proofs, target, contract)
                 targets.append(target)
         require(any(ref.startswith("case:") for ref in refs), "diff-only claim")
         require(any(target.startswith("case:") for target in targets),

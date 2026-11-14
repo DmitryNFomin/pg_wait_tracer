@@ -2,7 +2,9 @@
 # Status is regenerated from this run's per-id evidence; old JSON is never input.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-rm -f tests/results/core_status/wait_time-v1.json
+for contract in wait_time-v1 merge-v1 evidence-v1; do
+    rm -f "${PGWT_CORE_STATUS_DIR:-tests/results/core_status}/$contract.json"
+done
 exec python3 -B - <<'PY'
 import csv
 import hashlib
@@ -16,7 +18,7 @@ import tempfile
 
 ROOT = Path.cwd()
 CONTRACT = ROOT / "contracts/wait_time-v1"
-OUT = ROOT / "tests/results/core_status"
+OUT = Path(os.environ.get("PGWT_CORE_STATUS_DIR", ROOT / "tests/results/core_status"))
 OUT.mkdir(parents=True, exist_ok=True)
 errors = []
 claims = []
@@ -184,12 +186,30 @@ try:
             observe('mutant:' + ident, state, line)
         if in_baseline or baseline_count != 1:
             errors.append('missing, duplicate or unfinished contract baseline')
-        if identify() != provenance:
-            errors.append('tree changed during proof run; discarding evidence')
-            for proof in proofs.values():
-                proof['state'] = 'NOT-RUN'
 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
     errors.append(str(error))
+
+sys.path.insert(0, str(ROOT / 'scripts'))
+from core_status_contracts import run_contracts, finish, contract_hash as other_contract_hash
+try:
+    other_reports = run_contracts(ROOT, OUT, provenance)
+except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    other_reports = [{'contract': contract, **{key: value for key, value in provenance.items() if key != 'contract_sha256'},
+                      'contract_sha256': other_contract_hash(ROOT / 'contracts' / contract),
+                      'claims': [], 'proofs': {}, 'runs': [], 'errors': [str(error)]} for contract in ('merge-v1', 'evidence-v1')]
+try:
+    unchanged = identify() == provenance
+except (OSError, ValueError, subprocess.SubprocessError):
+    unchanged = False
+if not unchanged:
+    error = 'tree changed during proof run; discarding evidence'
+    errors.append(error)
+    for proof in proofs.values():
+        proof['state'] = 'NOT-RUN'
+    for report in other_reports:
+        report['errors'].append(error)
+        for proof in report['proofs'].values():
+            proof['state'] = 'NOT-RUN'
 
 for claim in claims:
     states = [proofs.get(ref, {'state': 'NOT-RUN'})['state'] for ref in claim['proof_ids']]
@@ -205,5 +225,6 @@ temporary.write_text(json.dumps(report, indent=2) + '\n')
 temporary.replace(OUT / 'wait_time-v1.json')
 for error in errors:
     print('CORE-STATUS ERROR ' + error, file=sys.stderr)
-sys.exit(0 if state == 'PASS' else 1)
+other_pass = [finish(report, OUT) for report in other_reports]
+sys.exit(0 if state == 'PASS' and all(other_pass) else 1)
 PY
