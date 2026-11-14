@@ -92,6 +92,11 @@ volatile const u32 pg13_qd_plannedstmt_off = 0;  /* offsetof(QueryDesc, planneds
 volatile const u32 pg13_ps_queryid_off = 0;      /* offsetof(PlannedStmt, queryId) */
 volatile const u32 pg13_qd_sourcetext_off = 0;   /* offsetof(QueryDesc, sourceText) */
 
+/* U1b-0 interface declarations only: deliberately unused by every program.
+ * Append to rodata so existing constant offsets and instructions stay put. */
+volatile const u32 exact_perf_mode = 0;
+volatile const u32 helper_tgid = 0; /* B's pinned helper process; 0 = absent */
+
 /* ── Maps ─────────────────────────────────────────────────── */
 
 /* Per-PID state: last event + timestamp for duration computation.
