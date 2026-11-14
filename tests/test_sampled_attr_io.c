@@ -299,6 +299,159 @@ static void test_resolve(int major)
           targets[1].gate.query_id_valid == (major != 13) && !opens && !reads,
           "command recheck uses one foreign-pid batch and same predicate");
 }
+
+#ifdef PGWT_LIFECYCLE_SOURCE
+/* Only hardware/BPF boundaries are fakes. The Python runner extracts and
+ * compiles the production allocation, FORK, enrollment and retry functions;
+ * /proc and VM reads still use the same injection layer above. */
+#include "daemon.h"
+#include "backend_init.h"
+#include "idle_rule.h"
+struct pg_wait_tracer_bpf { struct { void *on_bootstrap; } progs; };
+static uint64_t clock_ns = UINT64_C(10000000000);
+static uint64_t now_ns(void) { return clock_ns; }
+uint64_t pgwt_debug_monotonic_ns(void) { return clock_ns; }
+void pgwt_debug_block_report(const char *op, pid_t pid, uint64_t ts)
+{ (void)op; (void)pid; (void)ts; }
+static int lifecycle_target(struct pgwt_daemon *d, pid_t pid)
+{ (void)d; return pid == 1000 ? 1 : -1; }
+static int bpf_program__fd(void *p) { (void)p; return 7; }
+int pgwt_open_watchpoint(pid_t pid, uint64_t addr, int prog)
+{ (void)pid; (void)addr; (void)prog; return 8; }
+uint64_t pgwt_resolve_backend_wait_addr(struct pgwt_daemon *d, pid_t pid)
+{ (void)d; (void)pid; return 0; }
+int pgwt_addr_is_shared(pid_t pid, uint64_t addr)
+{ (void)pid; (void)addr; return 1; }
+int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr, uint64_t ts)
+{ (void)d; (void)pid; (void)addr; (void)ts; return 0; }
+struct pgwt_backend *pgwt_find_backend(struct pgwt_backend_table *bt, pid_t pid)
+{
+    for (int i = 0; i < bt->count; i++)
+        if (bt->entries[i].pid == pid) return &bt->entries[i];
+    return NULL;
+}
+int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
+{
+    struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+    if (be) { be->is_alive = false; be->pid = 0; }
+    return 0;
+}
+#include PGWT_LIFECYCLE_SOURCE
+
+static struct pgwt_daemon *fork_while_escalated(int major)
+{
+    fixture(major, 1);
+    struct pgwt_daemon *d = calloc(1, sizeof(*d));
+    if (!d) abort();
+    d->skel = calloc(1, sizeof(*d->skel));
+    if (!d->skel) abort();
+    d->backend_status_layout = layout;
+    d->postmaster_pid = 42;
+    d->my_be_entry_addr = (uintptr_t)&entries[0];
+    d->mode = PGWT_MODE_TIERED;
+    d->pg_major_version = major;
+    d->escalation.active = d->escalation.admitting = true;
+    CHECK(pgwt_mode_uses_watchpoints(d), "fixture is admitting exact backends");
+    CHECK(pgwt_handle_fork(d, 1000) == 0, "production FORK during escalation succeeds");
+    d->escalation.active = d->escalation.admitting = false;
+    return d;
+}
+static void release_daemon(struct pgwt_daemon *d)
+{
+    for (int i = 0; i < d->backends.count; i++) free(d->backends.entries[i].pg13_synthetic_cache);
+    free(d->skel); free(d);
+}
+static void test_enrollment_and_startup(int major)
+{
+    struct pgwt_daemon *d = fork_while_escalated(major);
+    struct pgwt_backend *be = &d->backends.entries[0];
+    put(0, &layout.st_state, major == 18 ? 2 : 1); /* idle */
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(100000000));
+    targets[0].reader = &be->sampled_reader;
+    batch();
+    struct pgwt_sampled_attr_value tick = {.query_id = targets[0].attr.query_id,
+        .cmd_open = targets[0].attr.cmd_open, .last_query_id = targets[0].attr.last_query_id};
+    struct pgwt_sampled_attr_value edge = {0};
+    struct pgwt_sample_target target = {.pid = 1000, .backend_type = PGWT_BT_CLIENT,
+        .databaseid = targets[0].attr.databaseid, .userid = targets[0].attr.userid};
+    enum pgwt_sampled_attr_source source = pgwt_sampler_select_attr(
+        true, targets[0].rc == 0, &tick, &edge, &target);
+    uint8_t valid = source != PGWT_SAMPLED_ATTR_DROP;
+    uint32_t wait = WEI(PG_WAIT_CLIENT, 0);
+    struct pgwt_trace_event sample;
+    CHECK(valid && pgwt_sampler_build_batch(&target, &wait, &valid, 1, clock_ns,
+          &sample, NULL, NULL) == 1 && sample.pid == 1000 &&
+          target.databaseid == 16384 && target.userid == 10,
+          "escalation-born backend is attributed after de-escalation");
+    note_idle_attr_sample(d, &target, valid, true, wait);
+    CHECK(d->counters.sampled_attr_tick_idle_samples_total == 1,
+          "idle attribution success counter proves a valid observation");
+    note_idle_attr_sample(d, &target, false, true, wait);
+    note_idle_attr_sample(d, &target, true, false, wait);
+    note_idle_attr_sample(d, &target, true, true, 0);
+    CHECK(d->counters.sampled_attr_tick_idle_samples_total == 1,
+          "missing status or wait reads cannot manufacture idle attribution");
+    reset_counts();
+    CHECK(setenv("PGWT_TEST_DISABLE_STATUS_BATCH", "1", 1) == 0,
+          "disabled-batch control enabled");
+    batch();
+    CHECK(unsetenv("PGWT_TEST_DISABLE_STATUS_BATCH") == 0,
+          "disabled-batch control cleared");
+    CHECK(calls == 0 && targets[0].rc == -1 && tick_failures == 1,
+          "disabled status batch issues no calls and leaves attribution unread");
+    source = pgwt_sampler_select_attr(true, targets[0].rc == 0, &tick, &edge, &target);
+    note_idle_attr_sample(d, &target, source == PGWT_SAMPLED_ATTR_TICK, true, wait);
+    CHECK(source == PGWT_SAMPLED_ATTR_DROP &&
+          d->counters.sampled_attr_tick_idle_samples_total == 1,
+          "disabled status batch cannot add idle attribution successes");
+    /* Duplicate lifecycle delivery cannot reset original identity. */
+    uint64_t address = be->sampled_reader.status_addr;
+    CHECK(pgwt_handle_fork(d, 1000) == 0 && be->sampled_reader.status_addr == address,
+          "duplicate fork preserves enrolled row");
+    release_daemon(d);
+
+    d = fork_while_escalated(major); be = &d->backends.entries[0];
+    incarnation = 2; reset_counts();
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(100000000));
+    CHECK(!be->sampled_reader.status_addr && !opens,
+          "escalation-born backend never resolves replacement incarnation");
+    release_daemon(d);
+
+    d = fork_while_escalated(major); be = &d->backends.entries[0];
+    put(0, &layout.st_procpid, 0); reset_counts();
+    for (int i = 0; i < 5; i++)
+        resolve_sampled_attr(d, be, clock_ns + (uint64_t)i * UINT64_C(100000000));
+    CHECK(opens == 5 && !be->sampled_reader.status_addr,
+          "each startup tick attempts the unreadable row");
+    put(0, &layout.st_procpid, 1000);
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(500000000));
+    CHECK(be->sampled_reader.status_addr == entries[0] && !be->pgbs_resolve_fast_until_ns,
+          "late status row resolves on the next tick during first second");
+    be->sampled_reader.status_addr = 0; put(0, &layout.st_procpid, 0);
+    reset_counts();
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(600000000));
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(650000000));
+    CHECK(opens == 1, "first success ends fast startup retries even if proof is later invalidated");
+    release_daemon(d);
+
+    d = fork_while_escalated(major); be = &d->backends.entries[0];
+    put(0, &layout.st_procpid, 0); reset_counts();
+    for (int i = 0; i <= 11; i++)
+        resolve_sampled_attr(d, be, clock_ns + (uint64_t)i * UINT64_C(100000000));
+    CHECK(opens == 12, "startup retries include the one-second boundary");
+    resolve_sampled_attr(d, be, clock_ns + UINT64_C(1200000000));
+    CHECK(opens == 13 && be->pgbs_resolve_retry_ns == clock_ns + UINT64_C(1400000000),
+          "one-second startup window transitions to exponential backoff");
+    for (int i = 0; i < 10; i++) {
+        uint64_t tick = be->pgbs_resolve_retry_ns;
+        resolve_sampled_attr(d, be, tick);
+        CHECK(be->pgbs_resolve_retry_ns - tick <= UINT64_C(3200000000),
+              "mature unreadable target backoff stays capped");
+    }
+    release_daemon(d);
+    printf("PG%d lifecycle escalation/resume, incarnation, 1s startup retry cases reached\n", major);
+}
+#endif
 int main(void)
 {
     (void)io_openat; /* catches an accidentally reintroduced openat */
@@ -307,6 +460,9 @@ int main(void)
         test_budget(major[i], 512, 2);
         test_budget(major[i], 1024, major[i] == 13 ? 4 : 3);
         test_faults(major[i]); test_resolve(major[i]);
+#ifdef PGWT_LIFECYCLE_SOURCE
+        test_enrollment_and_startup(major[i]);
+#endif
     }
     printf("sampled_attr_io: %d/%d checks passed\n", checks-failures, checks);
     return failures ? 1 : 0;

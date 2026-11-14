@@ -86,6 +86,18 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+/* Capture lifecycle identity even during a tiered escalation. Sampling resumes
+ * using this original start time, never by enrolling a possibly reused pid at
+ * the first sampled tick. Duplicate INIT/FORK delivery preserves the proof. */
+static void enroll_sampled_reader(struct pgwt_daemon *d, struct pgwt_backend *be)
+{
+    if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout) &&
+        be->sampled_reader.pid == 0) {
+        pgwt_pgbs_reader_enroll(&be->sampled_reader, be->pid);
+        be->pgbs_resolve_fast_until_ns = now_ns() + UINT64_C(1000000000);
+    }
+}
+
 /* Resolve a backend's wait_event_info address using the version-appropriate
  * path. PG17+: my_wait_ptr_addr is the my_wait_event_info global (a uint32*
  * that already points at the field). PG<17 (use_myproc): my_wait_ptr_addr is
@@ -484,14 +496,13 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
         if (!be) continue;
 
         be->wp_addr = ptr;
+        enroll_sampled_reader(d, be);
 
         /* Sampled mode: register the backend (address + metadata) but arm
          * NO watchpoint. The sampler reads wp_addr directly each tick. Keep a
          * state_map entry for a degraded uprobe fallback and for a
          * future exact generation's watchpoint enrollment. */
         if (!pgwt_mode_uses_watchpoints(d)) {
-            if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout))
-                pgwt_pgbs_reader_enroll(&be->sampled_reader, pid);
             be->attach_ts = now_ns();
             if (pgwt_parse_cmdline(pid, &be->meta) == 0)
                 be->meta_parsed = true;
@@ -889,7 +900,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
      * Identity checks happen on lifecycle delivery, never per steady tick. */
     struct pgwt_backend *existing = pgwt_find_backend(&d->backends, child_pid);
     if (existing) {
-        if (!pgwt_mode_uses_watchpoints(d) && existing->sampled_reader.pid != 0 &&
+        if (existing->sampled_reader.pid != 0 &&
             !pgwt_pgbs_pid_is_original(child_pid,
                                        existing->sampled_reader.start_time))
             pgwt_handle_exit(d, child_pid);
@@ -901,11 +912,11 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
                                             d->pg_major_version == 13);
     if (!be) return -1;
 
+    enroll_sampled_reader(d, be);
+
     /* Sampled mode: no bootstrap watchpoint. Register the backend now; the
      * sampler lazily resolves wp_addr once the backend sets the pointer. */
     if (!pgwt_mode_uses_watchpoints(d)) {
-        if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout))
-            pgwt_pgbs_reader_enroll(&be->sampled_reader, child_pid);
         if (d->verbose)
             fprintf(stderr, "INFO: fork detected PID %d (sampled, no watchpoint)\n",
                     child_pid);
@@ -1034,6 +1045,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
         be = alloc_backend(&d->backends, pid, d->pg_major_version == 13);
         if (!be) return -1;
     }
+    enroll_sampled_reader(d, be);
 
     /* Close bootstrap watchpoint if any */
     pgwt_pending_init_remove(&d->backends, be);

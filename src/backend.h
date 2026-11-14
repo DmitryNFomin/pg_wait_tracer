@@ -36,6 +36,7 @@ struct pgwt_backend {
     struct pgwt_pgbs_reader sampled_reader;
     uint64_t pgbs_addr;        /* cached shared PgBackendStatus row (also metadata path) */
     uint64_t pgbs_resolve_retry_ns;
+    uint64_t pgbs_resolve_fast_until_ns; /* every tick for first 1s, until resolved */
     uint8_t  pgbs_resolve_attempts;
     struct pgwt_pg13_synthetic_cache *pg13_synthetic_cache;
 };

@@ -256,6 +256,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->pgbackend_layout_fallbacks_total);
     cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",
                      ctr->sampled_attr_tick_read_failures_total);
+    cjson_add_uint64(root, "sampled_attr_tick_idle_samples_total",
+                     ctr->sampled_attr_tick_idle_samples_total);
     cjson_add_uint64(root, "sampled_attr_tick_no_context_total",
                      ctr->sampled_attr_tick_no_context_total);
     /* SCOPE (#294), repeated here because a metrics scrape sees these keys and

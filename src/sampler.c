@@ -996,6 +996,49 @@ static int sampler_live_cmd_gate(void *ctx, int idx,
     return 1;
 }
 
+/* Until first success, try each tick for one second after lifecycle enrollment.
+ * A row becoming readable in that window loses at most one sample period.
+ * Mature/unreadable targets and invalidated proofs retain the bounded backoff. */
+static void resolve_sampled_attr(struct pgwt_daemon *d, struct pgwt_backend *be,
+                                 uint64_t tick_ts)
+{
+    bool early = be->pgbs_resolve_fast_until_ns &&
+        tick_ts <= be->pgbs_resolve_fast_until_ns;
+    if (be->sampled_reader.status_addr ||
+        (!early && tick_ts < be->pgbs_resolve_retry_ns))
+        return;
+    if (pgwt_pgbs_reader_resolve(&be->sampled_reader, d->postmaster_pid,
+            d->my_be_entry_addr, &d->backend_status_layout) == 0) {
+        be->pgbs_resolve_attempts = 0;
+        be->pgbs_resolve_retry_ns = 0;
+        be->pgbs_resolve_fast_until_ns = 0;
+    } else if (early) {
+        be->pgbs_resolve_attempts = 0;
+        be->pgbs_resolve_retry_ns = 0;
+    } else {
+        unsigned shift = be->pgbs_resolve_attempts < 5
+            ? be->pgbs_resolve_attempts++ : 5;
+        be->pgbs_resolve_retry_ns = tick_ts +
+            (UINT64_C(100000000) << shift);
+    }
+}
+
+/* Positive evidence for the idle-client cohort: both attribution and wait
+ * reads succeeded, with a connected db/user context. These idle waits always
+ * produce a sample in build_batch. Diagnostic output permits per-pid checks. */
+static void note_idle_attr_sample(struct pgwt_daemon *d,
+                                  const struct pgwt_sample_target *target,
+                                  bool tick_valid, bool wait_valid, uint32_t we)
+{
+    if (!tick_valid || !wait_valid || target->backend_type != PGWT_BT_CLIENT ||
+        !target->databaseid || !target->userid || !pgwt_is_session_idle_event(we))
+        return;
+    d->counters.sampled_attr_tick_idle_samples_total++;
+    if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+        fprintf(stderr, "SAMPLED-ATTR-IDLE: pid=%d databaseid=%u userid=%u\n",
+                target->pid, target->databaseid, target->userid);
+}
+
 /* One sampling tick. Build the target list from the live registry, read all
  * wait_event_info (shared-memory batch + per-pid fallbacks), encode wait
  * readings AND policy-gated on-CPU readings (T2: we==0 is a first-class CPU
@@ -1127,19 +1170,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         tick_enabled[n] = target_tick_enabled;
         attr_rows[n].reader = target_tick_enabled ? &be->sampled_reader : NULL;
         attr_rows[n].pid = be->pid;
-        if (target_tick_enabled && !be->sampled_reader.status_addr &&
-            tick_ts >= be->pgbs_resolve_retry_ns) {
-            if (pgwt_pgbs_reader_resolve(&be->sampled_reader, d->postmaster_pid,
-                    d->my_be_entry_addr, &d->backend_status_layout) == 0) {
-                be->pgbs_resolve_attempts = 0;
-                be->pgbs_resolve_retry_ns = 0;
-            } else {
-                unsigned shift = be->pgbs_resolve_attempts < 5
-                    ? be->pgbs_resolve_attempts++ : 5;
-                be->pgbs_resolve_retry_ns = tick_ts +
-                    (UINT64_C(100000000) << shift);
-            }
-        }
+        if (target_tick_enabled)
+            resolve_sampled_attr(d, be, tick_ts);
         be->pgbs_addr = be->sampled_reader.status_addr;
         n++;
     }
@@ -1356,6 +1388,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             s->read_valid[i] = 0;
             got--;
         }
+        note_idle_attr_sample(d, &targets[i], tick_enabled[i] && attr_valid[i],
+                              s->read_valid[i], s->read_vals[i]);
     }
     /* #294 — the read-ORDER window, closed with the authoritative predicate.
      *

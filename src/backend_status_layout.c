@@ -1603,6 +1603,12 @@ void pgwt_pgbs_read_batch(pid_t postmaster_pid,
         memset(&targets[i].gate, 0, sizeof(targets[i].gate));
         targets[i].rc = -1; targets[i].error = EAGAIN;
     }
+    /* Live negative control: leave every target unread and issue no status
+     * syscall. Both the volume floor and positive-attribution gate must fail. */
+    if (getenv("PGWT_TEST_DISABLE_STATUS_BATCH")) {
+        batch_count_failures(targets, n, failures_total);
+        return;
+    }
     uint32_t lo, hi;
     if (!n || n > PGWT_PGBS_BATCH_MAX || postmaster_pid <= 0 ||
         batch_span(layout, &lo, &hi) != 0) {

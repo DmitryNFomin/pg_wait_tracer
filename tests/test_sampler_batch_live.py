@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Status-row syscall gate: 500 idle + 4 pgbench sessions, >=200 traced ticks.
 
-Registered in run_all.sh's live tier. Requires Linux/root, perf, libpq, trust
-connections, and max_connections >= 520. Does not restart/reconfigure PG.
+Registered in run_all.sh's live tier. Requires Linux/root, perf and libpq.
+Starts a private cluster (540 connections) using the selected runner's PG
+binary, leaving its provisioned cluster untouched. N=500 idle + 4 active
+proves two status batch calls on all supported versions.
 The lead supplies --master-tracer (master 8cafdcb2 at dispatch) to prove the
 SAME assertion goes red on the SAME VM; --require-negative-control enforces it.
 Use --require-huge-pages for the additional huge_pages=on qualification.
@@ -17,6 +19,7 @@ import ctypes.util
 import hashlib
 import json
 import os
+import pwd
 from pathlib import Path
 import re
 import signal
@@ -35,11 +38,11 @@ SHADOW = ("sampled_attr_shadow_total", "sampled_attr_shadow_mismatch_total",
           "sampled_attr_shadow_query_id_mismatch_total")
 
 
-def metrics(directory):
+def control(directory, request, timeout=5):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(5)
+        client.settimeout(timeout)
         client.connect(str(directory / "pgwt.sock"))
-        client.sendall(b'{"cmd":"metrics"}\n')
+        client.sendall(json.dumps(request).encode() + b"\n")
         data = b""
         while b"\n" not in data:
             part = client.recv(65536)
@@ -48,6 +51,59 @@ def metrics(directory):
     result = json.loads(data.splitlines()[0])
     assert result.get("ok") is True, result
     return result
+
+
+def metrics(directory):
+    return control(directory, {"cmd": "metrics"})
+
+
+@contextlib.contextmanager
+def private_cluster(source_pid, require_huge_pages):
+    """Use that runner's exact PG binary, a private socket and owned data dir."""
+    bindir = Path(os.readlink(f"/proc/{source_pid}/exe")).parent
+    postgres = pwd.getpwnam("postgres")
+    saved = {key: os.environ.get(key) for key in ("PGHOST", "PGPORT", "PATH")}
+    # Short Unix socket path even when --evidence-dir is a long pathname.
+    with tempfile.TemporaryDirectory(prefix="pgwt866-pg-", dir="/tmp") as tmp:
+        directory = Path(tmp)
+        os.chown(directory, postgres.pw_uid, postgres.pw_gid)
+        data = directory / "data"
+        log = directory / "postgres.log"
+        as_postgres = ["runuser", "-u", "postgres", "--"]
+        subprocess.run(as_postgres + [str(bindir / "initdb"), "-D", str(data),
+                       "-U", "postgres", "-A", "trust", "--no-locale"],
+                       check=True, stdout=subprocess.DEVNULL, timeout=60)
+        version = subprocess.check_output([str(bindir / "postgres"), "--version"], text=True)
+        major = int(re.search(r"PostgreSQL\)\s+(\d+)", version)[1])
+        settings = (f"\nmax_connections=540\nshared_buffers='32MB'\n"
+                    f"unix_socket_directories='{directory}'\nlisten_addresses=''\nport=55486\n"
+                    f"autovacuum=off\nhuge_pages={'on' if require_huge_pages else 'try'}\n")
+        if major >= 14:
+            settings += "compute_query_id=on\n"
+        with (data / "postgresql.conf").open("a") as config:
+            config.write(settings)
+        os.environ.update(PGHOST=str(directory), PGPORT="55486",
+                          PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+        try:
+            subprocess.run(as_postgres + [str(bindir / "pg_ctl"), "-D", str(data),
+                           "-l", str(log), "-w", "-t", "60", "start"],
+                           check=True, stdout=subprocess.DEVNULL, timeout=70)
+            pid = int((data / "postmaster.pid").read_text().splitlines()[0])
+            assert int(psql("SHOW max_connections")) == 540
+            assert int(psql("SHOW server_version_num")) // 10000 == major
+            yield pid, major
+        finally:
+            try:
+                if (data / "postmaster.pid").exists():
+                    subprocess.run(as_postgres + [str(bindir / "pg_ctl"), "-D", str(data),
+                                   "-m", "immediate", "-w", "-t", "30", "stop"],
+                                   check=True, stdout=subprocess.DEVNULL, timeout=40)
+            finally:
+                for key, value in saved.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
 
 
 def psql(sql):
@@ -93,14 +149,19 @@ class IdleConnections:
         self.lib.PQerrorMessage.argtypes = [ctypes.c_void_p]
         self.lib.PQerrorMessage.restype = ctypes.c_char_p
         self.lib.PQfinish.argtypes = [ctypes.c_void_p]
+        self.lib.PQbackendPID.argtypes = [ctypes.c_void_p]
+        self.lib.PQbackendPID.restype = ctypes.c_int
 
-    def open(self):
-        for _ in range(500):
+    def open(self, count=500, application="pgwt866_idle"):
+        for _ in range(count):
             handle = self.lib.PQconnectdb(
-                b"user=postgres dbname=postgres application_name=pgwt866_idle connect_timeout=10")
+                f"user=postgres dbname=postgres application_name={application} connect_timeout=10".encode())
             assert handle, "PQconnectdb allocation failed"
             self.handles.append(handle)
             assert self.lib.PQstatus(handle) == 0, self.lib.PQerrorMessage(handle)
+
+    def pids(self):
+        return {self.lib.PQbackendPID(handle) for handle in self.handles}
 
     def close(self):
         for handle in self.handles:
@@ -108,7 +169,53 @@ class IdleConnections:
         self.handles.clear()
 
 
-def run_arm(binary, pm_pid, major, directory, label):
+def run_escalation_arm(binary, pm_pid, directory):
+    """Fork a named cohort while exact admission is open; prove each resumes."""
+    trace = directory / "escalation-born"
+    trace.mkdir()
+    daemon = None
+    cohort = IdleConnections()
+    with (trace / "daemon.stderr").open("w") as err:
+        try:
+            env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+            env["PGWT_DEBUG_SAMPLED_ATTR_SHADOW"] = "1"
+            daemon = subprocess.Popen(
+                [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", "10",
+                 "--escalation-budget", "120", "-i", "1", "-q", "-T", str(trace)],
+                stdout=subprocess.DEVNULL, stderr=err, env=env)
+            wait_until(daemon, lambda: (trace / "pgwt.sock").exists(), 90, "escalation socket not ready")
+            wait_until(daemon, lambda: metrics(trace).get("sampler_ticks_total", 0) > 0,
+                       30, "escalation sampler not ready")
+            control(trace, {"cmd": "escalate", "duration_s": 90, "reason": "manual"}, timeout=30)
+            before = wait_until(daemon, lambda: (m if (m := metrics(trace)).get("tier") == "escalated"
+                                  and m.get("exact_probe_attached_mask", 0) & 3 == 3 else None),
+                                30, "exact window did not open")
+            cohort.open(4, "pgwt866_escalation_born")
+            pids = cohort.pids()
+            assert len(pids) == 4 and all(pid > 0 for pid in pids), pids
+            wait_until(daemon, lambda: metrics(trace)["backends_tracked"] >= before["backends_tracked"] + 4,
+                       30, "escalation-born cohort never entered registry")
+            assert metrics(trace)["tier"] == "escalated", "cohort was not forked inside exact window"
+            control(trace, {"cmd": "deescalate"}, timeout=30)
+            sampled = wait_until(daemon, lambda: (m if (m := metrics(trace)).get("tier") == "sampled"
+                                   and m.get("exact_probe_generation") == 0 else None),
+                                 30, "de-escalation did not finish")
+            offset = (trace / "daemon.stderr").stat().st_size
+            def observed():
+                text = (trace / "daemon.stderr").read_text()[offset:]
+                return pids <= {int(pid) for pid in re.findall(
+                    r"SAMPLED-ATTR-IDLE: pid=(\d+) databaseid=[1-9]\d* userid=[1-9]\d*", text)}
+            wait_until(daemon, observed, 15, "escalation-born cohort lacks attributed samples after de-escalation")
+            assert metrics(trace)["sampled_attr_tick_idle_samples_total"] > sampled["sampled_attr_tick_idle_samples_total"]
+            print(f"escalation-born cohort: PASS pids={sorted(pids)} attributed after de-escalation", flush=True)
+        finally:
+            try:
+                stop(daemon)
+            finally:
+                cohort.close()
+
+
+def run_arm(binary, pm_pid, major, directory, label, disable_status_batch=False):
     trace = directory / label
     trace.mkdir()
     perf = daemon = None
@@ -116,6 +223,8 @@ def run_arm(binary, pm_pid, major, directory, label):
         try:
             # Do not let another test's injection alter this production arm.
             env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+            if disable_status_batch:
+                env["PGWT_TEST_DISABLE_STATUS_BATCH"] = "1"
             daemon = subprocess.Popen(
                 [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", "10",
                  "--escalation-budget", "0", "-i", "1", "-q", "-T", str(trace)],
@@ -143,8 +252,8 @@ def run_arm(binary, pm_pid, major, directory, label):
             # Require actual trace data before opening the measured window.
             wait_until(perf, lambda: perf_path.exists() and perf_path.stat().st_size > 0,
                        15, "perf produced no trace")
-            before = metrics(trace)
             start_ms = time.monotonic_ns() / 1e6
+            before = metrics(trace)
             target_ticks = before["sampler_ticks_total"] + 210
             after = wait_until(daemon, lambda: (m if (m := metrics(trace))["sampler_ticks_total"]
                                                >= target_ticks else None),
@@ -156,22 +265,36 @@ def run_arm(binary, pm_pid, major, directory, label):
             assert perf.returncode in (0, -signal.SIGINT), (trace / "perf.stderr").read_text()
             ticks = after["sampler_ticks_total"] - before["sampler_ticks_total"]
             population = min(before["sample_read_targets"], after["sample_read_targets"])
+            assert population >= 504, "500 idle + 4 active targets must remain enrolled"
             failures = (after["sampled_attr_tick_read_failures_total"] -
                         before["sampled_attr_tick_read_failures_total"])
+            idle_samples = (after.get("sampled_attr_tick_idle_samples_total", 0) -
+                            before.get("sampled_attr_tick_idle_samples_total", 0))
             assert before["sample_read_targets"] == after["sample_read_targets"], "population changed"
+            assert idle_samples >= 0, "idle success counter moved backwards"
+            # Even if EVERY other target were an idle client on EVERY tick,
+            # successes above that ceiling must come from our 500 idle pids.
+            # This proves cohort success without per-pid logging under perf.
+            cohort_idle_samples = max(0, idle_samples - (population - 500) * ticks)
             assert after["pgbackend_layout_validation"] == "validated", after
             counts = parse_trace(perf_path.read_text(), start_ms, end_ms, initial_fds)
-            result = assess(counts, major, population, ticks, failures)
+            # Use the guaranteed cohort N, excluding version-dependent aux
+            # populations with no attribution row (notably PG13).
+            result = assess(counts, major, 504, ticks, failures, cohort_idle_samples)
             result.update(label=label, binary=str(binary),
                           binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                           population=population, ticks=ticks, calls=counts,
+                          idle_samples_total=idle_samples,
+                          idle_cohort_samples_lower_bound=cohort_idle_samples,
                           shadow_delta={key: after[key] - before[key] for key in SHADOW})
             (trace / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
             print(json.dumps(result, sort_keys=True), flush=True)
             return result
         finally:
-            stop(perf, signal.SIGINT)
-            stop(daemon)
+            try:
+                stop(perf, signal.SIGINT)
+            finally:
+                stop(daemon)
 
 
 def main():
@@ -184,16 +307,8 @@ def main():
     args = parser.parse_args()
     assert sys.platform == "linux" and os.geteuid() == 0, "Linux/root live test only"
     assert not args.require_negative_control or args.master_tracer, "supply --master-tracer"
-    pid = args.pid or find_postmaster()
-    assert pid, "no postmaster"
-    major = int(psql("SHOW server_version_num")) // 10000
-    assert major in (13, 17, 18), major
-    pgdata = Path(psql("SHOW data_directory"))
-    assert int((pgdata / "postmaster.pid").read_text().splitlines()[0]) == pid, "wrong PG port/PID"
-    assert int(psql("SHOW max_connections")) >= 520, "provision max_connections >= 520 first"
-    huge_pages = psql("SHOW huge_pages")
-    assert not args.require_huge_pages or huge_pages == "on", huge_pages
-    print(f"PG{major} kernel={os.uname().release} huge_pages={huge_pages}", flush=True)
+    source_pid = args.pid or find_postmaster()
+    assert source_pid, "no runner postmaster from which to select the PG binary"
     idle = IdleConnections()
     load = None
     # Deliberately not tests/results/: no product/repository artifacts.
@@ -204,11 +319,16 @@ def main():
         args.evidence_dir.mkdir(parents=True, exist_ok=False)
     evidence_context = (contextlib.nullcontext(str(args.evidence_dir)) if args.evidence_dir else
                         tempfile.TemporaryDirectory(prefix="pgwt866-live-"))
-    with evidence_context as tmp:
+    with evidence_context as tmp, private_cluster(source_pid, args.require_huge_pages) as (pid, major):
+        assert major in (13, 17, 18), major
+        huge_pages = psql("SHOW huge_pages")
+        print(f"private PG{major} pid={pid} kernel={os.uname().release} "
+              f"max_connections=540 huge_pages={huge_pages} N=504 (500 idle + 4 active)", flush=True)
         directory = Path(tmp)
         script = directory / "workload.sql"
         script.write_text("SELECT sum(i) FROM generate_series(1, 10000) AS i;\n")
         try:
+            run_escalation_arm(ROOT / "pg_wait_tracer", pid, directory)
             idle.open()
             assert int(psql("SELECT count(*) FROM pg_stat_activity WHERE "
                             "application_name='pgwt866_idle' AND state='idle'")) == 500
@@ -222,6 +342,11 @@ def main():
                            30, "four pgbench sessions not ready")
                 candidate = run_arm(ROOT / "pg_wait_tracer", pid, major, directory, "candidate")
                 assert not candidate["errors"], candidate["errors"]
+                disabled = run_arm(ROOT / "pg_wait_tracer", pid, major, directory,
+                                   "status-disabled-negative", disable_status_batch=True)
+                assert any(" < " in e for e in disabled["errors"]), disabled
+                assert any("idle attributed samples=0" in e for e in disabled["errors"]), disabled
+                print("status batch disabled: RED at both syscall floor and attribution floor", flush=True)
                 if args.master_tracer:
                     master = run_arm(args.master_tracer.resolve(), pid, major, directory, "master-negative")
                     assert master["errors"] and (master["calls"]["mem_open"] > 0 or
@@ -241,8 +366,10 @@ def main():
                 assert re.search(r"number of transactions actually processed:\s*[1-9]", workload), workload
                 print("status-row syscall candidate gate: PASS (>=200 ticks, 500 idle + 4 pgbench)")
         finally:
-            stop(load, signal.SIGINT)
-            idle.close()
+            try:
+                stop(load, signal.SIGINT)
+            finally:
+                idle.close()
 
 
 if __name__ == "__main__":

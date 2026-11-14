@@ -87,13 +87,14 @@ def parse_trace(text, start_ms, end_ms, initial_fds=None):
     return counts
 
 
-def assess(counts, major, population, ticks, read_failures):
+def assess(counts, major, population, ticks, read_failures, idle_samples):
     assert major in (13, 17, 18) and population >= 504 and ticks >= 200
-    assert read_failures >= 0
+    assert read_failures >= 0 and idle_samples >= 0
     # One wait-word batch, at most two torn-row retries and one gate recheck.
     ranges = 4 if major == 13 else 3
     row_calls = (ranges * population + 1023) // 1024
     bound = row_calls + 3
+    minimum = row_calls + 1  # status rows in addition to the wait-word call
     failure_rate = read_failures / (population * ticks)
     errors = []
     for key in ("mem_open", "mem_pread", "mem_close"):
@@ -105,10 +106,15 @@ def assess(counts, major, population, ticks, read_failures):
         errors.append(f"pread64={counts['pread64']} (required zero in steady state)")
     if counts["process_vm_readv"] > bound * ticks:
         errors.append(f"vm/tick={counts['process_vm_readv']/ticks:.3f} > {bound}")
+    if counts["process_vm_readv"] < minimum * ticks:
+        errors.append(f"vm/tick={counts['process_vm_readv']/ticks:.3f} < {minimum}")
+    if idle_samples == 0:
+        errors.append("idle attributed samples=0 (required positive)")
     # At 504+ targets this permits transient tears but no structurally unread
     # fixed population. Bound decided here, not fitted from box output.
     if failure_rate > 0.001:
         errors.append(f"read-failure rate={failure_rate:.6f} > 0.001")
     return {"ranges_per_row": ranges, "row_calls_per_tick": row_calls,
+            "vm_calls_per_tick_minimum": minimum, "idle_attributed_samples": idle_samples,
             "vm_calls_per_tick_bound": bound, "read_failure_rate": failure_rate,
             "read_failure_rate_bound": 0.001, "errors": errors}
