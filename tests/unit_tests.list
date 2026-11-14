@@ -1093,3 +1093,7 @@ test_counter_vector
 test_writer_failure
 test_counter_failures.py
 test_counter_vector_portable.py
+
+# Stateless evidence-v1 fixture-to-screen pilot and consumer boundary.
+test_pilot_route.py
+test_consumer_boundary.sh

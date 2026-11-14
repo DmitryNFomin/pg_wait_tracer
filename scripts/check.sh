@@ -74,6 +74,11 @@ run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_oracle.py
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_redelivery.py
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_mutants.py
 
+step "stateless evidence-v1 pilot route, browser, uint64 and mutations"
+run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py
+run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --mutants
+run bash tests/test_consumer_boundary.sh --self-test
+
 step "C11 core merge contract and API safety (ASan/UBSan, Refs #871)"
 if merge_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-core-merge-check.XXXXXX"); then
     if "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \

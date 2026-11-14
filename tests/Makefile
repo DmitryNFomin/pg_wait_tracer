@@ -1197,3 +1197,9 @@ test_counter_vector: test_counter_vector.c ../src/counter_vector.c ../src/counte
 
 test_writer_failure: test_writer_failure.c $(BUILD)/event_writer.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
+
+# Pilot helpers are built in an external temporary directory by the registered
+# Python route test; no generated fixtures or helper binaries enter the tree.
+.PHONY: pilot-route
+pilot-route:
+	python3 -B test_pilot_route.py
