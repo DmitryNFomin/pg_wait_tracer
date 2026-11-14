@@ -29,7 +29,9 @@ static void require(bool condition, const char *field)
 #include "core_merge_work.h"
 /* Fixed budgets for this one-record release workload, not timing tolerances.
  * Real maxima are reported below. Even the 1,000-slot scan/copy is far above
- * these bounds; a half-full hash index and two single-slot copies fit easily. */
+ * these bounds; a half-full hash index and two single-slot copies fit easily.
+ * The counts cover only the sites that call MERGE_WORK. A new loop with no
+ * counter call is not seen here; the --cost step's timeout is its backstop. */
 enum { LOOKUP_LIMIT = 64, INPUT_LIMIT = 256, COPY_LIMIT = 16 };
 static bool measure_work;
 static size_t lookup_visits, input_visits, input_copies;
