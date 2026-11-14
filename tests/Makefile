@@ -931,12 +931,29 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
 # Exercise the actual server gate/loader/response against reader-decoded
 # block aggregates from the same two-block file (command state crosses blocks).
 # EVERY target including server.c needs the product's complete link closure.
-# Derive it from SERVER_SRCS; server.c itself is already included in the test.
-# No top-level make evaluation here: that would probe Linux/BPF on macOS.
-TRANSITIONS_LOADER_OBJS := $(shell python3 -B server_build.py --objects $(BUILD))
-ifeq ($(strip $(TRANSITIONS_LOADER_OBJS)),)
-$(error could not derive the server test objects from SERVER_SRCS)
-endif
+# Keep this plain list in sync with SERVER_SRCS, excluding server.c itself
+# (already included in the test). check_server_test_links.py compares every
+# expanded link recipe with the product list in the Mac gate. Parsing this
+# Makefile must also work when it is copied alone, including without Python.
+TRANSITIONS_LOADER_OBJS = $(BUILD)/server_core/evidence_query.o \
+                          $(BUILD)/server_core/evidence_codec.o \
+                          $(BUILD)/server_core/evidence_replay.o \
+                          $(BUILD)/server_core/wait_metrics.o \
+                          $(BUILD)/server_phase_capability.o \
+                          $(BUILD)/server_compute.o \
+                          $(BUILD)/server_backend_span.o \
+                          $(BUILD)/server_open_overlay.o \
+                          $(BUILD)/server_block_agg.o \
+                          $(BUILD)/server_event_reader.o \
+                          $(BUILD)/server_event_writer.o \
+                          $(BUILD)/server_summary_writer.o \
+                          $(BUILD)/server_summary_reader.o \
+                          $(BUILD)/server_wait_event.o \
+                          $(BUILD)/server_idle_rule.o \
+                          $(BUILD)/server_spawn.o \
+                          $(BUILD)/server_cmdline.o \
+                          $(BUILD)/server_backend_meta.o \
+                          $(BUILD)/server_cJSON.o
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
