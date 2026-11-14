@@ -39,6 +39,9 @@ mutations = [
     ('per_pass_topology', 'cadence', 'src/percpu_transport.c',
      [('if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced))',
        'if (false && !pgwt_transport_service_due(now, t->last_service_at, t->serviced))')]),
+    ('slot_gated_completion', 'completion_retry', 'src/percpu_transport.c',
+     [('if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced))\n        return complete_round(t);',
+       'if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced))\n        return 0;')]),
     ('skip_terminal_attempts', 'terminal_attempts', 'src/percpu_transport.c',
      [('if (done && !t->suspended) {', 'if (false && done && !t->suspended) {')]),
     ('skip_tick_entry', 'pending', 'src/merge_capture.c',
@@ -81,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix='pgwt-percpu-mutants-') as temp:
         if line.startswith(('transport all_acks ', 'transport missing_ack ', 'transport stale_ack ',
                             'transport counter_timing ', 'transport post_snapshot ', 'shutdown:',
                             'binary sink:', 'counter cost:', 'indexed lookups ', 'lifetime history:',
-                            'perf cadence:', 'poll budget:', 'terminal attempts:')):
+                            'perf cadence:', 'poll budget:', 'completion retry:', 'terminal attempts:')):
             print(line)
     for name, guard, path, edits in mutations:
         original = (work / path).read_text()

@@ -18,15 +18,24 @@ struct pgwt_transport_perf_attributes {
     bool watermark;
 };
 struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t buffer_bytes);
-/* The daemon's existing epoll timeout is 10 ms. Protocol/topology/helper
- * health and the standalone core CHECK run at most once per 10 ms slot,
+/* The daemon's existing epoll timeout is 10 ms. Round requests, topology,
+ * helper health and the standalone core CHECK run at most once per 10 ms slot,
  * even with continuous watermark/control readiness. Drain on every call.
  * Keep slots anchored to the clock: early wakes must not reset the deadline.
- * With helpers completing before the next service, a record needs at most
- * two three-service rounds (the second covers DATA newer than the first
- * E/L cutoff): <=60 ms of slots + <=10 ms poll lateness, leaving 30 ms of
- * the 100 ms budget for helper scheduling and processing. OS stalls/BUSY
- * producers are unbounded; the box must still qualify measured held age.
+ * Once fencing has every CPU ack, completion retries on EVERY loop pass.
+ * If at least one completion drain in every K consecutive passes is empty,
+ * release from the transport takes <=K further passes, or <=K*P time for
+ * passes at most P apart (including processing). A percentage of empty
+ * passes alone gives no worst-case bound: the maximum gap must be bounded.
+ * DATA newer than an E/L cutoff can need two rounds: their completion-drain
+ * waits add <=2*K passes to ingress, slot and helper delays. Kernel-buffer
+ * residence is <=10 ms + one pass. Helpers, OS stalls and attachment proof
+ * need their own bounds; there is no unconditional 70 ms/100 ms guarantee.
+ * If no completion drain is ever empty, completion CAN starve. The daemon
+ * keeps draining and holding, reports pending records and maximum held age,
+ * and suspends with VOID(allocation_fail) if the 262144-entry queue fills.
+ * Shutdown bounds the unfinished drain to 256 passes/100 ms, then VOIDs
+ * unknown_evidence. The box must qualify measured held age <=100 ms.
  * Time is NEVER completeness evidence or permission to release DATA. */
 uint64_t pgwt_transport_service_interval_ns(void);
 bool pgwt_transport_service_due(uint64_t now, uint64_t previous, bool serviced);

@@ -7,6 +7,7 @@
 #include "../src/counter_vector.c"
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -772,9 +773,95 @@ static bool tb_poll_budget(void)
     TB(tb_boundary(&driver,0,0,3,15)==0 && tb_boundary(&driver,1,0,3,15)==0);
     driver.now=6*interval;TB(pgwt_percpu_transport_poll(d)==0 && driver.traces==1 &&
        pgwt_merge_capture_pending_records(d)==0 && driver.now-emitted<70000000);
-    printf("poll budget: below-watermark DATA + two completion rounds, release by 60 ms; "
-           "poll/slot allowance <=70 ms, helper/processing allowance 30 ms (box qualification required) PASS\n");
+    printf("poll budget: empty drains and prompt helpers only: below-watermark DATA + two rounds, "
+           "release by 60 ms; <=70 ms with poll lateness (not a sustained-load bound) PASS\n");
     tb_cleanup(&driver);free(d);return true;
+}
+static uint32_t tb_script_random(uint32_t *state)
+{
+    *state ^= *state << 13; *state ^= *state >> 17; *state ^= *state << 5;
+    return *state;
+}
+static bool tb_completion_retry(void)
+{
+    /* Script the drain's complete/not-complete result, not wall-clock time
+     * or a throughput claim. Each 100-pass block has exactly share empty
+     * passes, shuffled with a fixed seed. Starting at different offsets
+     * exercises block crossings: an empty completion drain is guaranteed
+     * within K=200 passes, regardless of the 10 ms service-slot phase.
+     * Ingress and completion drains see the same result within each pass. */
+    const unsigned shares[]={2,10,30};
+    unsigned violations=0;
+    for(size_t cell=0;cell<sizeof(shares)/sizeof(*shares);++cell){
+        uint64_t total=0;unsigned longest=0;
+        for(unsigned run=0;run<200;++run){
+            struct tb_driver driver;TB(tb_setup(&driver));TB(tb_begin(&driver));
+            struct pgwt_daemon *d=calloc(1,sizeof(*d));TB(d);
+            d->exact_perf=true;d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
+            TB(pgwt_percpu_transport_prepare(d)==0 && pgwt_percpu_transport_configure(d)==0 &&
+               pgwt_percpu_transport_open(d)==0);
+            /* Service the slot before the acknowledgements arrive. */
+            TB(pgwt_percpu_transport_poll(d)==0);
+            TB(tb_boundary(&driver,0,0,2,14)==0 && tb_boundary(&driver,1,0,2,14)==0);
+            uint32_t random=UINT32_C(0x871b1234)+run;
+            unsigned block=UINT_MAX,first_empty=0,released=0;
+            bool empty[100];
+            for(unsigned pass=1;pass<=100000;++pass){
+                unsigned index=run%100+pass-1;
+                if(block!=index/100){
+                    block=index/100;
+                    for(unsigned i=0;i<100;++i)empty[i]=i<shares[cell];
+                    for(unsigned i=99;i>0;--i){
+                        unsigned j=tb_script_random(&random)%(i+1);
+                        bool swap=empty[i];empty[i]=empty[j];empty[j]=swap;
+                    }
+                }
+                driver.drained=empty[index%100];
+                if(driver.drained && !first_empty)first_empty=pass;
+                driver.now=20+UINT64_C(100000)*pass; /* 100 us per loop pass */
+                TB(pgwt_percpu_transport_poll(d)==0);
+                if(!pgwt_transport_pending_records(driver.transport)){released=pass;break;}
+                TB(driver.reads==1); /* no counter checkpoint before completion */
+            }
+            TB(released && first_empty && first_empty<=200);
+            /* Collect all three baseline measurements before failing.
+             * Require publication through the real adapter/core too. */
+            if(released!=first_empty || released>200)++violations;
+            TB(driver.traces==1 && pgwt_capture_report(driver.capture).status==PGWT_MERGE_OK);
+            TB(driver.reads==2 && driver.controls==2 && driver.wakes==4);
+            TB(driver.topology_reads==3+released/100);
+            TB(pgwt_transport_max_held_ns(driver.transport)==UINT64_C(100000)*released);
+            total+=released;if(released>longest)longest=released;
+            tb_cleanup(&driver);free(d);
+        }
+        printf("completion retry: %u%% empty, 200 scripts: mean %.3f passes (%.4f ms at 100 us/pass), max %u passes; K=200\n",
+               shares[cell],(double)total/200,(double)total/2000,longest);
+    }
+    TB(violations==0);
+    puts("completion retry: first empty pass releases DATA, <=200 passes/20 ms after all acks; slot duties unchanged PASS");
+    /* With no empty pass there is no finite release promise. Keep the
+     * pending suffix visible; shutdown must VOID it instead of certifying. */
+    struct tb_driver driver;TB(tb_setup(&driver));TB(tb_begin(&driver));
+    struct pgwt_daemon *d=calloc(1,sizeof(*d));TB(d);
+    d->exact_perf=true;d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
+    TB(pgwt_percpu_transport_prepare(d)==0 && pgwt_percpu_transport_configure(d)==0 &&
+       pgwt_percpu_transport_open(d)==0 && pgwt_percpu_transport_poll(d)==0);
+    TB(tb_boundary(&driver,0,0,2,14)==0 && tb_boundary(&driver,1,0,2,14)==0);
+    driver.drained=false;
+    for(unsigned pass=1;pass<=200;++pass){
+        driver.now=20+UINT64_C(100000)*pass;TB(pgwt_percpu_transport_poll(d)==0);
+    }
+    TB(driver.drains==401 && driver.reads==1 && driver.topology_reads==5 &&
+       driver.controls==2 && driver.wakes==4 && !driver.traces &&
+       pgwt_merge_capture_pending_records(d)==6 &&
+       pgwt_transport_max_held_ns(driver.transport)==20000000 &&
+       pgwt_capture_max_held_ns(driver.capture,driver.now)==20000000);
+    TB(pgwt_transport_finish(driver.transport)==0 && driver.count==1 &&
+       driver.outputs[0].kind==PGWT_MERGE_OUT_VOID &&
+       driver.outputs[0].reason==PGWT_MERGE_UNKNOWN_EVIDENCE);
+    tb_cleanup(&driver);free(d);
+    puts("completion retry: never-empty drains keep DATA pending; shutdown VOID(unknown_evidence) PASS");
+    return true;
 }
 #ifdef PGWT_TRANSPORT_HOST_TEST
 static bool tb_index_cost(struct pgwt_merge_capture *capture,size_t n)
@@ -932,7 +1019,7 @@ static const struct {const char *name;bool(*run)(void);} tb_guards[]={
     {"attempt_window",tb_attempt_window},{"late_fork",tb_late_fork},{"unknown_init",tb_unknown_init},{"unknown",tb_unknown},
     {"gaps",tb_gaps},{"writer",tb_writer},{"decode_lost",tb_decode_and_lost},
     {"shutdown_topology",tb_shutdown_and_topology},{"shutdown_raw",tb_shutdown_raw},{"terminal_attempts",tb_terminal_attempts},
-    {"cadence",tb_cadence},{"pending",tb_pending},{"poll_budget",tb_poll_budget},{"flag_off",tb_off},{"injected_kernel",tb_injected_kernel},{"dump",tb_dump},{"dump_failure",tb_dump_failure},{"bounded_ring",tb_bound},{"counter_cost",tb_counter_cost},
+    {"cadence",tb_cadence},{"pending",tb_pending},{"poll_budget",tb_poll_budget},{"completion_retry",tb_completion_retry},{"flag_off",tb_off},{"injected_kernel",tb_injected_kernel},{"dump",tb_dump},{"dump_failure",tb_dump_failure},{"bounded_ring",tb_bound},{"counter_cost",tb_counter_cost},
 #ifdef PGWT_TRANSPORT_HOST_TEST
     {"lifetime_history",tb_lifetime_history},
 #endif

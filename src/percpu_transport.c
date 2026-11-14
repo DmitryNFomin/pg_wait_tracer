@@ -245,11 +245,42 @@ static int release_queue(struct pgwt_percpu_transport *t, bool checkpoint)
     if (rc < 0) return rc;
     size_t n = t->count;
     for (size_t j = 0; j < n; ++j) {
-        rc = t->io.envelope(t->io.ctx, &t->queue[j].record.envelope, observed(t), &t->snapshot);
+        uint64_t now = observed(t);
+        if (now >= t->queue[j].arrived && now - t->queue[j].arrived > t->max_held)
+            t->max_held = now - t->queue[j].arrived;
+        rc = t->io.envelope(t->io.ctx, &t->queue[j].record.envelope, now, &t->snapshot);
         if (rc < 0) return rc;
     }
     /* Callbacks cannot reenter the transport reader. */
     t->count = 0;
+    return 0;
+}
+/* Completion is progress work, not a periodic duty. After the CPU acks,
+ * retry every loop pass: a non-empty bounded drain proves nothing, and
+ * waiting another service slot can multiply its delay under sustained load. */
+static int complete_round(struct pgwt_percpu_transport *t)
+{
+    if (t->suspended || t->draining) return 0;
+    if (t->io.suspended && t->io.suspended(t->io.ctx)) {
+        t->suspended = true;
+        return 0;
+    }
+    if (!t->fencing) return 0;
+    for (size_t i = 0; i < t->ncpu; ++i) if (!t->acks[i]) return 0;
+    t->draining = true;
+    int drained = t->io.drain(t->io.ctx);
+    t->draining = false;
+    if (drained < 0) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    if (!drained) return 0;
+    for (size_t k = 0; k < t->ncpu * 3; ++k)
+        if (t->seq[k] < t->targets[k]) return fault(t, PGWT_MERGE_SEQUENCE_GAP);
+    /* Completion fence: this reread MUST follow every CPU's consumed ack. */
+    counters(t);
+    int rc = release_queue(t, true);
+    if (rc < 0) return rc;
+    t->requested = t->fencing = t->e_seen = t->l_seen = false;
+    memset(t->acks, 0, t->ncpu * sizeof(bool));
+    ++t->round;
     return 0;
 }
 int pgwt_transport_poll(struct pgwt_percpu_transport *t, bool waiting)
@@ -284,24 +315,9 @@ int pgwt_transport_poll(struct pgwt_percpu_transport *t, bool waiting)
         int rc = request(t, true);
         if (rc < 0 || t->suspended) return rc;
     }
-    if (!t->fencing) return 0;
-    for (size_t i = 0; i < t->ncpu; ++i) if (!t->acks[i]) return 0;
-    t->draining = true;
-    int drained = t->io.drain(t->io.ctx);
-    t->draining = false;
-    if (drained < 0) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
-    if (!drained) return 0;
-    for (size_t k = 0; k < t->ncpu * 3; ++k)
-        if (t->seq[k] < t->targets[k]) return fault(t, PGWT_MERGE_SEQUENCE_GAP);
-    /* Completion fence: this reread MUST follow every CPU's consumed ack. */
-    counters(t);
-    int rc = release_queue(t, true);
-    if (rc < 0) return rc;
-    t->requested = t->fencing = t->e_seen = t->l_seen = false;
-    memset(t->acks, 0, t->ncpu * sizeof(bool));
-    ++t->round;
-    return 0;
+    return complete_round(t);
 }
+
 int pgwt_transport_finish(struct pgwt_percpu_transport *t)
 {
     if (!t) return -EINVAL;
@@ -895,7 +911,8 @@ int pgwt_percpu_transport_poll(struct pgwt_daemon *d)
     int rc = t->io.drain(t->io.ctx);
     if (rc < 0) return rc;
     uint64_t now = observed(t);
-    if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced)) return 0;
+    if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced))
+        return complete_round(t);
     t->last_service_at = now; t->serviced = true;
     return pgwt_transport_poll(t, pgwt_capture_waiting(d->merge_capture));
 }
