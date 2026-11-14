@@ -161,7 +161,9 @@ def legacy_v4(directory):
         if path.is_file():
             data = path.read_bytes()
             if data[:6] == b'PGWT\x04\x00':
-                (directory / 'legacy.trace').write_bytes(data)
+                # Use the legacy scanner's current-file name so this case
+                # exercises a readable v4 trace, including startup admission.
+                (directory / 'current.trace').write_bytes(data)
                 return
     raise AssertionError('real v4 fixture required')
 
@@ -226,6 +228,47 @@ def strict_parsing(build, directory, case):
     print('strict uint64 parser: PASS', flush=True)
 
 
+def startup_refusals(build, tmp, data, expected):
+    for name, filename in (('empty current.trace', 'current.trace'),
+                           ('sidecar only', 'current.trace.meta')):
+        directory = tmp / filename
+        directory.mkdir()
+        (directory / filename).write_bytes(b'')
+        result = subprocess.run([str(build.server), str(directory)],
+                                input='{"id":7,"cmd":"info"}\n',
+                                capture_output=True, text=True, timeout=20)
+        assert result.returncode != 0, (name, result.stdout, result.stderr)
+        assert 'no trace files found' in result.stderr, result.stderr
+        assert not result.stdout, result.stdout
+        print(f'startup {name}: no trace files found PASS', flush=True)
+
+    directory = tmp / 'v5-only'
+    assert fixture(build, data[1][0], directory, 1).returncode == 0
+    files = list(directory.iterdir())
+    assert len(files) == 1 and files[0].read_bytes()[:6] == b'PGWT\x05\x00'
+    request = wire_request(data[1][1])
+    result = command([build.server, directory],
+                     input='{"id":6,"cmd":"info"}\n' + json.dumps(request) + '\n',
+                     timeout=20)
+    info, response = map(json.loads, result.stdout.splitlines())
+    assert info['id'] == 6 and 'error' not in info, info
+    compare(response, expected[1], request)
+    print('startup v5 only: info and pilot_wait_metrics PASS', flush=True)
+
+
+def gallery_fixtures(build, tmp, data):
+    import mock_server
+
+    assert [f['scenario'] for f in mock_server.PILOT_FIXTURES] == [data[i][1]['id'] for i in (1, 5)]
+    for fixture_data in mock_server.PILOT_FIXTURES:
+        i = int(fixture_data['scenario'][:2])
+        request = wire_request(data[i][1])
+        assert fixture_data['request'] == {key: request[key] for key in ('target', 'query')}
+        _, real = route(build.server, tmp / f'1-{i}', request)
+        assert mock_server.handle_request(request) == real, fixture_data['name']
+        print(f'gallery {fixture_data["name"]}: mock fixture equals real route PASS', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mutants', action='store_true')
@@ -238,7 +281,9 @@ def main():
         if args.mutants:
             mutants(build, tmp, data, expected)
         else:
+            startup_refusals(build, tmp, data, expected)
             baseline(build, tmp, data, expected)
+            gallery_fixtures(build, tmp, data)
             serializer_identity(build, tmp)
             if not args.no_browser: browser(build, tmp, data, expected)
 
@@ -333,9 +378,9 @@ def browser(build, tmp, data, expected):
                 sent = active['requests'][-1]
                 assert sent['target'] == req['target'] and sent['query'] == req['query']
                 assert not errors, errors
-                print(f'browser {i:02}: wire digits, null/reasons and legacy refusal PASS', flush=True)
                 page.locator('[data-tab="sessions"]').click()
-                assert page.locator('#events-pilot').count() == 0, 'panel survived leave'
+                panel.wait_for(state='detached')
+                print(f'browser {i:02}: wire digits, null/reasons, legacy refusal and leave PASS', flush=True)
             # Feature gate leaves the existing page free of a pilot panel.
             page.goto(f'http://127.0.0.1:{http.server_port}/?ws=ws://127.0.0.1:{ws_state["port"]}/ws')
             page.locator('[data-tab="events"]').click()

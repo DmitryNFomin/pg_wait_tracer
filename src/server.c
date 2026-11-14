@@ -4783,7 +4783,25 @@ static int server_init(struct pgwt_server *srv, const char *trace_dir)
         glob_t pilot_paths={0};
         char pilot_pattern[PATH_MAX];
         snprintf(pilot_pattern,sizeof(pilot_pattern),"%s/*.trace*",trace_dir);
-        int pilot_found=glob(pilot_pattern,0,NULL,&pilot_paths)==0 && pilot_paths.gl_pathc>0;
+        int pilot_found=0;
+        if (glob(pilot_pattern,0,NULL,&pilot_paths)==0) {
+            for (size_t i=0;i<pilot_paths.gl_pathc && !pilot_found;++i) {
+                const char *path=pilot_paths.gl_pathv[i];
+                size_t len=strlen(path);
+                /* A sidecar or an unreadable/empty trace cannot admit a
+                 * server with no legacy files. Only readable v5 bytes can. */
+                if (!((len>=6 && !strcmp(path+len-6,".trace")) ||
+                      (len>=10 && !strcmp(path+len-10,".trace.lz4")))) continue;
+                struct stat st;
+                if (stat(path,&st) || !S_ISREG(st.st_mode)) continue;
+                FILE *fp=fopen(path,"rb");
+                if (!fp) continue;
+                unsigned char magic[6];
+                pilot_found=fread(magic,1,sizeof(magic),fp)==sizeof(magic) &&
+                            !memcmp(magic,"PGWT\005\000",sizeof(magic));
+                fclose(fp);
+            }
+        }
         globfree(&pilot_paths);
         if (!pilot_found) {
             fprintf(stderr, "pgwt-server: no trace files found in %s\n", trace_dir);
