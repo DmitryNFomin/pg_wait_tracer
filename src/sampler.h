@@ -117,6 +117,7 @@ struct pgwt_sample_target {
      * (PG13 resolves and caches it); 0 = resolve via MyBEEntry. Used only by
      * the post-read command-gate recheck (#294). */
     uint64_t status_addr;
+    struct pgwt_pgbs_reader *attr_reader; /* pinned enrollment, no registry search */
 };
 
 enum pgwt_sampled_attr_tick_outcome {

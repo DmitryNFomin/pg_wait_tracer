@@ -62,6 +62,19 @@ static struct pgwt_daemon *daemon_fixture(void) {
     return d;
 }
 static void release(struct pgwt_daemon *d) { free(d->skel); free(d); }
+static struct pgwt_daemon *sampled_fixture(void) {
+    struct pgwt_daemon *d=daemon_fixture();
+    d->mode=PGWT_MODE_SAMPLED;
+    struct PgBackendStatusLayout *l=&d->backend_status_layout;
+    CHECK(pgwt_pgbs_hard_table_lookup(18,PGWT_PGBS_ARCH_X86_64,8,
+          PGWT_PGBS_ABI_SYSV_LP64,l)==0,"sampled layout fixture");
+    l->validation=PGWT_PGBS_VALIDATION_VALIDATED;
+    struct pgwt_pgbs_field *fields[]={&l->st_changecount,&l->st_procpid,
+        &l->st_databaseid,&l->st_userid,&l->st_state,&l->st_query_id};
+    for (size_t i=0;i<sizeof(fields)/sizeof(fields[0]);i++)
+        fields[i]->validation=PGWT_PGBS_FIELD_VALIDATED;
+    return d;
+}
 int main(void) {
     /* The child inherits this address; the real preseed reads it through
      * /proc/<child>/mem while only map/hardware operations are substituted. */
@@ -149,8 +162,60 @@ int main(void) {
         CHECK(d->counters.wp_attach_failures_total==1,"EVERY real-watchpoint failure remains counted");
         release(d);
     }
+    /* Cached sampled readers follow registry lifetime, including a missed
+     * EXIT followed by a replacement FORK. A matching duplicate keeps its fd. */
+    d=sampled_fixture();
+    CHECK(pgwt_handle_fork(d,child)==0,"sampled fork enrolls reader");
+    be=pgwt_find_backend(&d->backends,child);
+    CHECK(be && be->sampled_reader.opened && be->sampled_reader.mem_fd>=0,
+          "sampled registry owns cached descriptor");
+    int mem_fd=be->sampled_reader.mem_fd;
+    CHECK(pgwt_handle_fork(d,child)==0 && be->sampled_reader.mem_fd==mem_fd &&
+          deletions==0,"same-starttime duplicate keeps enrollment");
+    be->sampled_reader.start_time--; /* deterministic old incarnation */
+    be->sampled_reader.status_addr=123;
+    CHECK(pgwt_handle_fork(d,child)==0 && deletions==3 &&
+          be->sampled_reader.status_addr==0 &&
+          pgwt_pgbs_pid_is_original(child,be->sampled_reader.start_time),
+          "replacement fork retires stale incarnation and reenrolls");
+    mem_fd=be->sampled_reader.mem_fd;
+    CHECK(pgwt_handle_exit(d,child)==0 && fcntl(mem_fd,F_GETFD)==-1 && errno==EBADF,
+          "sampled EXIT closes cached descriptor");
+    CHECK(pgwt_handle_fork(d,child)==0,"sampled dead slot reenrolls");
+    mem_fd=pgwt_find_backend(&d->backends,child)->sampled_reader.mem_fd;
+    pgwt_close_all_backends(&d->backends);
+    CHECK(fcntl(mem_fd,F_GETFD)==-1 && errno==EBADF,
+          "sampled shutdown closes cached descriptor");
+    release(d);
+
+    /* Retain an entry through child exit, then drive the REAL sampling poll.
+     * Its first counter read sees EOF and must retire it without a delivered
+     * EXIT or a periodic kill(pid,0) sweep. No sample is emitted. */
+    struct pgwt_daemon *lost_exit=sampled_fixture();
+    CHECK(pgwt_handle_fork(lost_exit,child)==0,"lost-EXIT fixture enrolls live child");
+    struct pgwt_backend *lost_be=pgwt_find_backend(&lost_exit->backends,child);
+    lost_be->wp_addr=(uintptr_t)&wait_value;
+    lost_be->wp_addr_shared=1;
+    lost_be->meta_parsed=true;
+    lost_be->meta.backend_type=PGWT_BT_CLIENT;
+    lost_be->sampled_reader.status_addr=(uintptr_t)&wait_value;
+    mem_fd=lost_be->sampled_reader.mem_fd;
+    /* The fixture's empty skeleton has no map object whose capacity can be
+     * queried. Start with the portable default capacity, then restore it for
+     * the poll's wrapped map reads. */
+    struct pg_wait_tracer_bpf *empty_skel=lost_exit->skel;
+    lost_exit->skel=NULL;
+    CHECK(pgwt_sampler_start(lost_exit)==0,"lost-EXIT sampler starts");
+    lost_exit->skel=empty_skel;
     CHECK(write(fds[1],"x",1)==1,"child released"); close(fds[1]);
     siginfo_t info={0}; CHECK(waitid(P_PID,child,&info,WEXITED|WNOWAIT)==0,"child exited but not reaped");
+    CHECK(pgwt_sampler_poll(lost_exit)==0 && lost_be->pid==0 &&
+          lost_exit->counters.sampled_attr_tick_read_failures_total==1,
+          "sampling EOF retires missed EXIT and counts failed attribution");
+    CHECK(fcntl(mem_fd,F_GETFD)==-1 && errno==EBADF,
+          "sampling EOF closes original mm descriptor");
+    pgwt_sampler_stop(lost_exit);
+    release(lost_exit);
     /* BPF on_exit has no state entry and therefore emits no EXIT. The
      * pending sweep must still retire the dead pid and count its loss. */
     d=daemon_fixture();

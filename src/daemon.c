@@ -774,13 +774,15 @@ static void handle_sample_timer(struct pgwt_daemon *d)
 }
 
 /* CAP-12: raise RLIMIT_NOFILE to what MAX_BACKENDS needs. Full/tiered mode
- * holds up to two perf fds per backend (watchpoint + bootstrap) plus BPF
+ * holds up to two perf fds per backend (watchpoint + bootstrap). Sampled/
+ * tiered also retains one attribution mem fd per backend. Add room for BPF
  * maps/ringbufs, trace files and the control socket; the common default of
  * 1024 is below that, and hitting it turns every further attach into a
  * quiet EMFILE failure (now also loudly reported in perf_event.c). */
 static void bump_rlimit_nofile(struct pgwt_daemon *d)
 {
-    const rlim_t need = MAX_BACKENDS * 2 + 512;
+    const rlim_t need = MAX_BACKENDS *
+        (d->mode == PGWT_MODE_FULL ? 2 : 3) + 512;
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
         return;

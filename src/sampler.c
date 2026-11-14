@@ -979,8 +979,9 @@ static int sampler_live_cmd_gate(void *ctx, int idx,
     (void)idx;
     struct pgwt_pgbs_cmd_gate gate;
     if (!d || !t ||
-        pgwt_pgbs_read_cmd_gate(t->pid, d->my_be_entry_addr, t->status_addr,
-                                &d->backend_status_layout, &gate) != 0)
+        pgwt_pgbs_reader_cmd_gate(t->attr_reader, t->pid,
+                                  d->my_be_entry_addr, t->status_addr,
+                                  &d->backend_status_layout, &gate) != 0)
         return 0;
     *cmd_open = gate.cmd_open ? 1 : 0;
     if (gate.query_id_valid) {
@@ -1108,6 +1109,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         /* 0 = the #294 recheck resolves the row through MyBEEntry; the PG13
          * branch below fills in the row it already cached. */
         targets[n].status_addr = 0;
+        targets[n].attr_reader = &be->sampled_reader;
         /* The syslogger is not a PostgreSQL backend: it has no MyBEEntry or
          * PgBackendStatus slot, and its on-CPU samples are already excluded
          * by policy.  Keep its irrelevant zero attribution on the legacy
@@ -1146,6 +1148,13 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         int tick_ok = 0;
         if (target_tick_enabled) {
             errno = 0;
+            /* Retry only failed enrollment opens, with the original starttime
+             * and bounded backoff. Successful descriptors never reopen. */
+            if (be->sampled_reader.opened && be->sampled_reader.mem_fd < 0 &&
+                !be->sampled_reader.dead && tick_ts >= be->sampled_reader_retry_ns) {
+                pgwt_pgbs_reader_open(&be->sampled_reader, be->pid);
+                be->sampled_reader_retry_ns = tick_ts + UINT64_C(3200000000);
+            }
             if (pgwt_pgbs_sampled_activity_enabled(
                     &d->backend_status_layout)) {
                 /* PG13 does not export MyBEEntry. Resolve its shared status
@@ -1155,8 +1164,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                 uint64_t resolve_now = mono_ns();
                 if (be->pgbs_addr == 0 &&
                     resolve_now >= be->pgbs_resolve_retry_ns) {
-                    be->pgbs_addr = pgwt_pgbs_resolve_entry(
-                        be->pid, &d->backend_status_layout);
+                    be->pgbs_addr = pgwt_pgbs_reader_resolve_entry(
+                        &be->sampled_reader, &d->backend_status_layout);
                     if (be->pgbs_addr) {
                         be->pgbs_resolve_attempts = 0;
                         be->pgbs_resolve_retry_ns = 0;
@@ -1168,13 +1177,12 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                     }
                 }
                 targets[n].status_addr = be->pgbs_addr;
-                if (be->pgbs_addr != 0)
-                    tick_rc = pgwt_pgbs_read_sampled_attr_at(
-                        be->pid, be->pgbs_addr,
-                        &d->backend_status_layout, &tick_raw);
+                tick_rc = pgwt_pgbs_reader_attr(
+                    &be->sampled_reader, be->pid, 0, be->pgbs_addr,
+                    &d->backend_status_layout, &tick_raw);
             } else {
-                tick_rc = pgwt_pgbs_read_sampled_attr(
-                    be->pid, d->my_be_entry_addr,
+                tick_rc = pgwt_pgbs_reader_attr(
+                    &be->sampled_reader, be->pid, d->my_be_entry_addr, 0,
                     &d->backend_status_layout, &tick_raw);
             }
             tick_ok = (tick_rc == 0);
@@ -1326,6 +1334,12 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             target_tick_enabled, tick_ok,
             &tick_attr, &uprobe_attr, &targets[n]);
         attr_valid[n] = source != PGWT_SAMPLED_ATTR_DROP;
+        if (target_tick_enabled && be->sampled_reader.dead) {
+            /* EOF proves that the original mm has exited, even if its EXIT
+             * was lost and kill(numeric_pid, 0) sees a replacement process. */
+            attr_valid[n] = 0;
+            pgwt_handle_exit(d, be->pid);
+        }
         n++;
     }
     if (n == 0) {

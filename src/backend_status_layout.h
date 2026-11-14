@@ -247,6 +247,32 @@ int pgwt_pgbs_derive_cmd_gate(
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
     struct pgwt_pgbs_cmd_gate *out);
 
+/* Sampled-reader lifetime is one registry enrollment. Open once, including
+ * failures: retries require the original starttime. /proc/PID/mem pins
+ * that incarnation's mm; reads after exit fail instead of following PID reuse.
+ * Zero initialization is safe; close is idempotent. */
+struct pgwt_pgbs_reader {
+    int mem_fd;
+    pid_t pid;
+    bool opened;
+    bool dead;              /* EOF on the pinned mm, never reopened */
+    int open_error;
+    uint64_t start_time;    /* enrollment identity for failed-open retries */
+    uint64_t status_addr;
+};
+int pgwt_pgbs_reader_open(struct pgwt_pgbs_reader *reader, pid_t pid);
+void pgwt_pgbs_reader_close(struct pgwt_pgbs_reader *reader);
+uint64_t pgwt_pgbs_reader_resolve_entry(
+    struct pgwt_pgbs_reader *reader, const struct PgBackendStatusLayout *layout);
+int pgwt_pgbs_reader_attr(
+    struct pgwt_pgbs_reader *reader, pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t backend_status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out);
+int pgwt_pgbs_reader_cmd_gate(
+    struct pgwt_pgbs_reader *reader, pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t backend_status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_cmd_gate *out);
+
 /* Re-read the command gate for ONE backend, now. backend_status_addr is the
  * caller's cached PgBackendStatus row when it has one (PG13 path); 0 means
  * resolve it through the backend's own MyBEEntry pointer. Returns 0 only on a

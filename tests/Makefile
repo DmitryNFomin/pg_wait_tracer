@@ -25,7 +25,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_exact_probe \
             test_effective_cores \
             test_coop test_bucket \
-            test_backend_status_layout \
+            test_backend_status_layout test_sampled_attr_io test_sampled_attr_lifetime \
             test_synthetic_query \
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
@@ -455,6 +455,14 @@ test_effective_cores: test_effective_cores.c ../src/effective_cores.c
 # tables plus the pure coherency/degrade validator.
 test_backend_status_layout: test_backend_status_layout.c \
                             ../src/backend_status_layout.c ../src/spawn.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# Production I/O is injected by the test's translation-unit include, so this
+# syscall budget runs on macOS as well as Linux without touching /proc.
+test_sampled_attr_io: test_sampled_attr_io.c ../src/backend_status_layout.c ../src/spawn.c
+	$(CC) $(CFLAGS) -o $@ test_sampled_attr_io.c ../src/spawn.c
+
+test_sampled_attr_lifetime: test_sampled_attr_lifetime.c ../src/backend_status_layout.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_synthetic_query: test_synthetic_query.c ../src/synthetic_query.c

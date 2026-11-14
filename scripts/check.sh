@@ -47,6 +47,10 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+# Sampled attribution: deterministic syscall budget and caught regressions.
+step "sampled attribution I/O budget and mutants"
+run python3 -B tests/test_sampled_attr_io.py
+
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;
 # every numerical mutant must then fail its intended distinguishing case.

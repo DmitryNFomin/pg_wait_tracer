@@ -1412,6 +1412,248 @@ int pgwt_pgbs_read_cmd_gate(
     return rc;
 }
 
+/* A proc directory descriptor binds the two opens to one PID incarnation.
+ * Starttime brackets allow retrying a failed open only for that enrollment.
+ * A successful descriptor is never reopened, even after EOF or PID reuse. */
+int pgwt_pgbs_reader_open(struct pgwt_pgbs_reader *reader, pid_t pid)
+{
+    if (!reader || pid <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (reader->opened) {
+        if (reader->pid != pid || reader->dead) {
+            errno = ESRCH;
+            return -1;
+        }
+        if (reader->mem_fd >= 0)
+            return 0;
+        if (!pgwt_pgbs_pid_is_original(pid, reader->start_time)) {
+            reader->dead = true;
+            reader->open_error = errno = ESRCH;
+            return -1;
+        }
+    }
+    if (!reader->opened) {
+        reader->opened = true;
+        reader->pid = pid;
+        reader->mem_fd = -1;
+        if (pgwt_pgbs_pid_start_time(pid, &reader->start_time) != 0) {
+            reader->dead = true;
+            reader->open_error = errno ? errno : ESRCH;
+            return -1;
+        }
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d", pid);
+    int dir_fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0) {
+        reader->open_error = errno;
+        return -1;
+    }
+    int fd = openat(dir_fd, "mem", O_RDONLY | O_CLOEXEC);
+    int saved = errno;
+    close(dir_fd);
+    if (fd >= 0 && !pgwt_pgbs_pid_is_original(pid, reader->start_time)) {
+        close(fd);
+        fd = -1;
+        saved = ESRCH;
+        reader->dead = true;
+    }
+    reader->mem_fd = fd;
+    reader->open_error = fd < 0 ? saved : 0;
+    errno = reader->open_error;
+    return fd < 0 ? -1 : 0;
+}
+
+void pgwt_pgbs_reader_close(struct pgwt_pgbs_reader *reader)
+{
+    if (!reader)
+        return;
+    if (reader->opened && reader->mem_fd >= 0)
+        close(reader->mem_fd);
+    memset(reader, 0, sizeof(*reader));
+}
+
+static ssize_t reader_pread(struct pgwt_pgbs_reader *reader, void *buf,
+                             size_t size, uint64_t addr)
+{
+    ssize_t n;
+    do {
+        n = pread(reader->mem_fd, buf, size, (off_t)addr);
+    } while (n < 0 && errno == EINTR);
+    if (n == 0) {
+        reader->dead = true;
+        errno = ESRCH;
+    }
+    return n;
+}
+
+static int reader_field(struct pgwt_pgbs_reader *reader, uint64_t base,
+                         const struct pgwt_pgbs_field *field, uint64_t *value)
+{
+    *value = 0;
+    if (!field->present || !field->width || field->width > sizeof(*value))
+        return -1;
+    return reader_pread(reader, value, field->width, base + field->offset) ==
+           field->width ? 0 : -1;
+}
+
+/* Same counter protocol as read_snapshot_fd, with the fields copied by one
+ * bounded pread. Separate counter reads are intentional: copying a struct
+ * does not guarantee that its counter is fetched before its other fields.
+ * No idle-state shortcut: every backend gets fresh fields on every tick. */
+static int read_snapshot_bulk_fd(
+    struct pgwt_pgbs_reader *reader, uint64_t base,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_snapshot *snapshot, char *activity, size_t activity_sz)
+{
+    uint8_t row[65536]; /* same maximum as the validated DWARF layout */
+    if (!layout->struct_size || layout->struct_size > sizeof(row) ||
+        base > (uint64_t)INT64_MAX - layout->struct_size)
+        return -1;
+    /* Read only the required field span, including on the final array row.
+     * PG13 needs no query-id tail; unused layout padding costs no copy. */
+    const struct pgwt_pgbs_field *fields[] = {
+        &layout->st_procpid, &layout->st_databaseid, &layout->st_userid,
+        &layout->st_state, pgwt_pgbs_sampled_query_id_enabled(layout)
+            ? &layout->st_query_id : &layout->st_activity_raw,
+    };
+    uint32_t lo = layout->struct_size, hi = 0;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        const struct pgwt_pgbs_field *f = fields[i];
+        if (!f->present || !f->width || f->width > 8 ||
+            f->offset > layout->struct_size ||
+            f->width > layout->struct_size - f->offset)
+            return -1;
+        if (f->offset < lo) lo = f->offset;
+        if (f->offset + f->width > hi) hi = f->offset + f->width;
+    }
+    for (int attempt = 0; attempt < 32; attempt++) {
+        memset(snapshot, 0, sizeof(*snapshot));
+        if (activity && activity_sz)
+            activity[0] = '\0';
+        uint64_t value;
+        if (reader_field(reader, base, &layout->st_changecount, &value) != 0)
+            return -1;
+        snapshot->changecount_before = (uint32_t)value;
+        if (snapshot->changecount_before & 1u)
+            continue;
+        if (reader_pread(reader, row + lo, hi - lo, base + lo) != hi - lo)
+            return -1;
+        snapshot->read_mask = PGWT_PGBS_READ_CHANGECOUNT;
+#define COPY_VALUE(field_, member_, bit_) do { \
+        const struct pgwt_pgbs_field *f = &layout->field_; \
+        if (f->present && f->width && f->width <= sizeof(snapshot->member_) && \
+            f->offset <= layout->struct_size && \
+            f->width <= layout->struct_size - f->offset) { \
+            snapshot->member_ = 0; \
+            memcpy(&snapshot->member_, row + f->offset, f->width); \
+            snapshot->read_mask |= (bit_); \
+        } \
+    } while (0)
+        COPY_VALUE(st_procpid, procpid, PGWT_PGBS_READ_PROCPID);
+        COPY_VALUE(st_databaseid, databaseid, PGWT_PGBS_READ_DATABASEID);
+        COPY_VALUE(st_userid, userid, PGWT_PGBS_READ_USERID);
+        COPY_VALUE(st_state, state, PGWT_PGBS_READ_STATE);
+        if (pgwt_pgbs_sampled_query_id_enabled(layout))
+            COPY_VALUE(st_query_id, query_id, PGWT_PGBS_READ_QUERY_ID);
+        if (pgwt_pgbs_sampled_activity_enabled(layout))
+            COPY_VALUE(st_activity_raw, activity_raw, PGWT_PGBS_READ_ACTIVITY);
+#undef COPY_VALUE
+        /* PG13 activity remains inside the same counter interval. A failed
+         * activity read preserves the existing coherent-but-unattributed rule. */
+        if (snapshot->activity_raw && activity && activity_sz) {
+            size_t want = activity_sz - 1;
+            if (want > layout->activity_buffer_size)
+                want = layout->activity_buffer_size;
+            ssize_t n = reader_pread(reader, activity, want, snapshot->activity_raw);
+            if (n > 0) {
+                activity[n] = '\0';
+                snapshot->activity_readable = true;
+                size_t len = strnlen(activity, (size_t)n);
+                snapshot->activity_truncated = len == (size_t)n ||
+                    len + 1 >= layout->activity_buffer_size;
+            }
+        }
+        if (reader_field(reader, base, &layout->st_changecount, &value) != 0)
+            return -1;
+        snapshot->changecount_after = (uint32_t)value;
+        if (snapshot->changecount_before == snapshot->changecount_after &&
+            !(snapshot->changecount_after & 1u))
+            return 0;
+    }
+    errno = EAGAIN;
+    return -1;
+}
+
+static int reader_snapshot(
+    struct pgwt_pgbs_reader *reader, pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t backend_status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_snapshot *snapshot, char *activity, size_t activity_sz,
+    uint64_t *base)
+{
+    if (!reader || !reader->opened || reader->mem_fd < 0 ||
+        reader->dead || reader->pid != pid || !pgwt_pgbs_sampled_attr_enabled(layout)) {
+        errno = reader && reader->open_error ? reader->open_error : ESRCH;
+        return -1;
+    }
+    *base = reader->status_addr ? reader->status_addr : backend_status_addr;
+    if (!*base && my_be_entry_addr &&
+        reader_pread(reader, base, sizeof(*base), my_be_entry_addr) !=
+            sizeof(*base))
+        return -1;
+    if (!*base)
+        return -1;
+    return read_snapshot_bulk_fd(reader, *base, layout, snapshot,
+                                 activity, activity_sz);
+}
+
+int pgwt_pgbs_reader_attr(
+    struct pgwt_pgbs_reader *reader, pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t backend_status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out)
+{
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    struct pgwt_pgbs_snapshot snapshot;
+    char activity[PGWT_PGBS_ACTIVITY_MAX + 1];
+    uint64_t base = 0;
+    if (reader_snapshot(reader, pid, my_be_entry_addr, backend_status_addr,
+                         layout, &snapshot, activity, sizeof(activity),
+                         &base) != 0)
+        return -1;
+    int rc = pgwt_pgbs_sampled_query_id_enabled(layout)
+        ? pgwt_pgbs_derive_sampled_attr(layout, &snapshot, pid, out)
+        : pgwt_pgbs_derive_sampled_activity(layout, &snapshot, pid, activity,
+                                           snapshot.activity_truncated, out);
+    if (rc >= 0)
+        reader->status_addr = base; /* cache only after coherent identity proof */
+    else if (snapshot.procpid != (uint32_t)pid)
+        reader->status_addr = 0;
+    return rc;
+}
+
+int pgwt_pgbs_reader_cmd_gate(
+    struct pgwt_pgbs_reader *reader, pid_t pid, uint64_t my_be_entry_addr,
+    uint64_t backend_status_addr, const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_cmd_gate *out)
+{
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    struct pgwt_pgbs_snapshot snapshot;
+    uint64_t base = 0;
+    if (reader_snapshot(reader, pid, my_be_entry_addr, backend_status_addr,
+                         layout, &snapshot, NULL, 0, &base) != 0)
+        return -1;
+    int rc = pgwt_pgbs_derive_cmd_gate(layout, &snapshot, pid, out);
+    if (rc == 0)
+        reader->status_addr = base;
+    return rc;
+}
+
 static uint64_t scan_shared_for_entry(pid_t pid,
                                       const struct PgBackendStatusLayout *layout,
                                       const struct pgwt_pgbs_expected *expected,
@@ -1479,8 +1721,8 @@ static uint64_t scan_shared_for_entry(pid_t pid,
     return matches == 1 ? found : 0;
 }
 
-uint64_t pgwt_pgbs_resolve_entry(
-    pid_t backend_pid, const struct PgBackendStatusLayout *layout)
+static uint64_t resolve_entry_fd(
+    pid_t backend_pid, int mem_fd, const struct PgBackendStatusLayout *layout)
 {
     if (!layout || backend_pid <= 0 ||
         !pgwt_pgbs_sampled_activity_enabled(layout))
@@ -1511,7 +1753,9 @@ uint64_t pgwt_pgbs_resolve_entry(
     if (!map_start || !map_end || !layout->struct_size)
         return 0;
 
-    int mem_fd = open_mem(backend_pid);
+    bool owns_fd = mem_fd < 0;
+    if (owns_fd)
+        mem_fd = open_mem(backend_pid);
     if (mem_fd < 0)
         return 0;
     struct pgwt_pgbs_expected expected = {.pid = backend_pid};
@@ -1545,8 +1789,25 @@ uint64_t pgwt_pgbs_resolve_entry(
             }
         }
     }
-    close(mem_fd);
+    if (owns_fd)
+        close(mem_fd);
     return found;
+}
+
+uint64_t pgwt_pgbs_resolve_entry(
+    pid_t backend_pid, const struct PgBackendStatusLayout *layout)
+{
+    return resolve_entry_fd(backend_pid, -1, layout);
+}
+
+uint64_t pgwt_pgbs_reader_resolve_entry(
+    struct pgwt_pgbs_reader *reader, const struct PgBackendStatusLayout *layout)
+{
+    if (!reader || !reader->opened || reader->mem_fd < 0 || reader->dead)
+        return 0;
+    /* maps supplies candidate addresses only. All identity/content proofs
+     * use the pinned original mm, so replacement PID maps cannot admit a row. */
+    return resolve_entry_fd(reader->pid, reader->mem_fd, layout);
 }
 
 static int postmaster_connection(pid_t postmaster_pid, int *port,

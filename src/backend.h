@@ -5,6 +5,7 @@
 #include "pg_wait_tracer.h"
 #include "cmdline.h"
 #include "synthetic_query.h"
+#include "backend_status_layout.h"
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -32,6 +33,8 @@ struct pgwt_backend {
     struct pgwt_metadata meta;
     uint32_t databaseid;      /* PgBackendStatus context, 0 until observed */
     uint32_t userid;
+    struct pgwt_pgbs_reader sampled_reader;
+    uint64_t sampled_reader_retry_ns;
     uint64_t pgbs_addr;        /* PG13 cached shared PgBackendStatus row */
     uint64_t pgbs_resolve_retry_ns;
     uint8_t  pgbs_resolve_attempts;

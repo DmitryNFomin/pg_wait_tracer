@@ -25,6 +25,9 @@ test_wp_attr
 test_exact_probe
 test_effective_cores
 test_backend_status_layout
+test_sampled_attr_io
+test_sampled_attr_lifetime
+test_sampled_attr_io.py
 test_synthetic_query
 test_pgss_resolver
 test_coop
