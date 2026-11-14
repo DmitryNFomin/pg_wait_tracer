@@ -1,7 +1,12 @@
 """Fail-closed parser/assertions for the status-row batch live test.
 
-Input is `perf trace -T --no-comm` (timestamps are monotonic milliseconds).
-The format and interrupted/continued pairs follow tools/perf/builtin-trace.c.
+The live test counts syscalls from the summary that `perf trace -S` prints at
+its end (`parse_summary` / `assess_counts`): it needs no path names, which
+neither the Ubuntu 24.04 (perf 6.8) nor the EL8 (perf 4.18, no BPF skeletons)
+image can resolve (`filename: 0x...`). `parse_trace` / `assess` are the older
+form that read per-event text lines and path names; they are kept unchanged
+because tests/test_sampled_attr_io.py still exercises them, and the live test
+no longer calls them.
 No product-derived expected values: the syscall bound is the accepted design.
 """
 import re
@@ -121,3 +126,105 @@ def assess(counts, major, population, ticks, read_failures, idle_samples):
             "vm_calls_per_tick_minimum": minimum, "idle_attributed_samples": idle_samples,
             "vm_calls_per_tick_bound": bound, "read_failure_rate": failure_rate,
             "read_failure_rate_bound": 0.001, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Summary form (what the live test uses).
+# ---------------------------------------------------------------------------
+# Per-backend file I/O (open, pread, close) per sampler tick. The steady state
+# of the batched build is a few calls per tick (wait-address resolution and the
+# CPU-capacity refresh: a constant, independent of the number of backends);
+# master makes one of each per backend per tick (about 500 opens and 4000
+# preads at 504 targets). 64 is far from both and does not scale with N.
+FILE_IO_PER_TICK_BOUND = 64
+FILE_IO_CALLS = ("open", "openat", "pread64", "close")
+SUMMARY_HEADER = re.compile(r"^\s*Summary of events:\s*$", re.M)
+SUMMARY_COLUMNS = re.compile(r"^\s*syscall\s+calls\s+errors\b", re.M)
+SUMMARY_ROW = re.compile(r"^\s+([a-z_][a-z0-9_]*)\s+(\d+)\s+(\d+)\s+\d+(?:\.\d+)?\s+"
+                         r"\d+(?:\.\d+)?\s+\d+(?:\.\d+)?\s+\d+(?:\.\d+)?\s+\d+(?:\.\d+)?%\s*$")
+LOST = re.compile(r"\bLOST\s+[1-9]\d*\s+events|\blost\s+[1-9]\d*", re.I)
+
+
+def parse_summary(text, extra_streams=()):
+    """Total calls by syscall name over every thread in a `perf trace -S/-s` summary.
+
+    Fail closed: no summary, no column header, an unparsable row for a counted
+    syscall, or lost events (`extra_streams` carries perf's stderr) all raise.
+    """
+    for stream in (text, *extra_streams):
+        if LOST.search(stream):
+            raise AssertionError("perf lost events; syscall absence is unproven")
+    header = SUMMARY_HEADER.search(text)
+    if not header:
+        raise AssertionError("perf printed no syscall summary")
+    summary = text[header.end():]
+    if not SUMMARY_COLUMNS.search(summary):
+        raise AssertionError("perf summary has no syscall/calls/errors table")
+    counts = dict.fromkeys(CALLS.split(","), 0)
+    threads = 0
+    for line in summary.splitlines():
+        if re.match(r"^\s*\S.*\(\d+\),\s+\d+ events", line):
+            threads += 1
+            continue
+        first = line.split()[:1]
+        if not first or first[0] not in counts:
+            continue
+        row = SUMMARY_ROW.match(line)
+        if not row:
+            raise AssertionError(f"unparseable perf summary row: {line}")
+        counts[row[1]] += int(row[2])
+    if not threads:
+        raise AssertionError("perf summary names no traced thread")
+    counts["threads"] = threads
+    return counts
+
+
+def assess_counts(counts, major, population, ticks_inside, ticks_spanning,
+                  read_failures, idle_samples):
+    """Assertions over summary counts.
+
+    `ticks_inside` are sampler ticks that certainly ran inside perf's window,
+    `ticks_spanning` ticks of a window that certainly contains it. Each bound
+    divides by the one of them that cannot create a false RED: the upper
+    bounds by the larger count, the lower bound by the smaller.
+    """
+    if major not in SUPPORTED_MAJORS:
+        raise ValueError(f"PG{major} is outside the status-batch qualification matrix")
+    assert population >= 504 and ticks_inside >= 200 and ticks_spanning >= ticks_inside
+    assert read_failures >= 0 and idle_samples >= 0
+    # One wait-word batch, at most two torn-row retries and one gate recheck.
+    ranges = 4 if major == 13 else 3
+    row_calls = (ranges * population + 1023) // 1024
+    bound = row_calls + 3
+    minimum = row_calls + 1  # status rows in addition to the wait-word call
+    per_tick = {"openat": (counts["open"] + counts["openat"]) / ticks_spanning,
+                "pread64": counts["pread64"] / ticks_spanning,
+                "close": counts["close"] / ticks_spanning,
+                "process_vm_readv_max": counts["process_vm_readv"] / ticks_spanning,
+                "process_vm_readv_min": counts["process_vm_readv"] / ticks_inside}
+    errors = []
+    for name in ("openat", "pread64", "close"):
+        if per_tick[name] > FILE_IO_PER_TICK_BOUND:
+            errors.append(f"{name}/tick={per_tick[name]:.1f} > {FILE_IO_PER_TICK_BOUND} "
+                          "(per-backend file I/O must be absent in steady state)")
+    if per_tick["process_vm_readv_max"] > bound:
+        errors.append(f"vm/tick={per_tick['process_vm_readv_max']:.3f} > {bound}")
+    if per_tick["process_vm_readv_min"] < minimum:
+        errors.append(f"vm/tick={per_tick['process_vm_readv_min']:.3f} < {minimum}")
+    if idle_samples == 0:
+        errors.append("idle attributed samples=0 (required positive)")
+    failure_rate = read_failures / (population * ticks_inside)
+    # At 504+ targets this permits transient tears but no structurally unread
+    # fixed population. Bound decided here, not fitted from box output.
+    if failure_rate > 0.001:
+        errors.append(f"read-failure rate={failure_rate:.6f} > 0.001")
+    return {"ranges_per_row": ranges, "row_calls_per_tick": row_calls,
+            "vm_calls_per_tick_minimum": minimum, "vm_calls_per_tick_bound": bound,
+            "file_io_per_tick_bound": FILE_IO_PER_TICK_BOUND, "per_tick": per_tick,
+            "idle_attributed_samples": idle_samples, "read_failure_rate": failure_rate,
+            "read_failure_rate_bound": 0.001, "errors": errors}
+
+
+def file_io_reds(errors):
+    """The per-backend file I/O assertions among `assess_counts` errors."""
+    return [e for e in errors if re.match(r"(?:openat|pread64|close)/tick=", e)]

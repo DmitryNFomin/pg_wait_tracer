@@ -50,6 +50,9 @@ need node; need go; need python3
 # Sampled attribution: deterministic syscall budget and caught regressions.
 step "sampled attribution I/O budget and mutants"
 run python3 -B tests/test_sampled_attr_io.py
+# The live status-batch test's pure parts (perf summary parser, bounds) on outputs
+# recorded on the Ubuntu and EL8 gate images; the recorded master must assess RED.
+run python3 -B tests/test_sampler_batch_summary.py
 
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;

@@ -5,12 +5,18 @@ Registered in run_all.sh's live tier. Requires Linux/root, perf and libpq.
 Starts a private cluster (540 connections) using the selected runner's PG
 binary, leaving its provisioned cluster untouched. N=500 idle + 4 active
 proves two status batch calls on all supported versions.
-The lead supplies --master-tracer (master 8cafdcb2 at dispatch) to prove the
-SAME assertion goes red on the SAME VM; --require-negative-control enforces it.
+The syscall evidence is the per-syscall summary of `perf trace -S` over the
+daemon (counts by name per sampler tick, tests/sampler_batch_perf.py); it
+needs no path names, which neither gate image's perf can resolve.
+Master negative control: pass --master-tracer (or set PGWT_866_MASTER_TRACER)
+to a tracer built from master on the SAME VM; the SAME assertions must then go
+RED at the per-backend file I/O counts, and the test prints which ones.
+--require-negative-control enforces that it was supplied.
 Use --require-huge-pages for the additional huge_pages=on qualification.
-All captures/evidence go to a temporary directory outside the repository.
-Example: sudo python3 tests/test_sampler_batch_live.py --pid PID \
-  --master-tracer /tmp/master/pg_wait_tracer --require-negative-control
+All captures/evidence go to a temporary directory outside the repository
+(or --evidence-dir). Example:
+  sudo python3 tests/test_sampler_batch_live.py --pid PID \
+    --master-tracer /tmp/master/pg_wait_tracer --require-negative-control
 """
 import argparse
 import ctypes
@@ -29,7 +35,7 @@ import sys
 import tempfile
 import time
 
-from sampler_batch_perf import CALLS, SUPPORTED_MAJORS, assess, parse_trace
+from sampler_batch_perf import CALLS, SUPPORTED_MAJORS, assess_counts, file_io_reds, parse_summary
 from testutil import find_postmaster
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,8 +59,21 @@ def control(directory, request, timeout=5):
     return result
 
 
-def metrics(directory):
-    return control(directory, {"cmd": "metrics"})
+def metrics(directory, cmd="metrics"):
+    """A control reply. Counters are in `metrics`; layout fields such as
+    pgbackend_layout_validation are only in the `status` reply."""
+    return control(directory, {"cmd": cmd})
+
+
+def spawn(command, **kwargs):
+    """Popen with SIGINT back at its default action.
+
+    A test launched from a background job (nohup, `&`, a CI step) inherits
+    SIGINT as ignored, and an ignored signal survives exec: pgbench then
+    never stopped on the SIGINT sent to end it ("child failed to stop").
+    """
+    return subprocess.Popen(command, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+                            **kwargs)
 
 
 @contextlib.contextmanager
@@ -80,6 +99,11 @@ def private_cluster(source_pid, require_huge_pages):
                     f"autovacuum=off\nhuge_pages={'on' if require_huge_pages else 'try'}\n")
         if major >= 14:
             settings += "compute_query_id=on\n"
+        else:
+            # PG13 has no core query id: the exact tier needs pg_stat_statements
+            # loaded (as the provisioned runner clusters do), or an escalation
+            # is refused ("exact probe bundle attach failed").
+            settings += "shared_preload_libraries='pg_stat_statements'\n"
         with (data / "postgresql.conf").open("a") as config:
             config.write(settings)
         os.environ.update(PGHOST=str(directory), PGPORT="55486",
@@ -179,7 +203,7 @@ def run_escalation_arm(binary, pm_pid, directory):
         try:
             env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
             env["PGWT_DEBUG_SAMPLED_ATTR_SHADOW"] = "1"
-            daemon = subprocess.Popen(
+            daemon = spawn(
                 [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", "10",
                  "--escalation-budget", "120", "-i", "1", "-q", "-T", str(trace)],
                 stdout=subprocess.DEVNULL, stderr=err, env=env)
@@ -235,16 +259,16 @@ def run_late_promotion_arm(binary, pm_pid, directory):
             cohort.open(4, "pgwt866_before_promotion")
             pids = cohort.pids()
             assert len(pids) == 4 and all(pid > 0 for pid in pids), pids
-            load = subprocess.Popen(
-                ["pgbench", "-n", "-U", "postgres", "-d", "postgres", "-c", "4", "-j", "4",
-                 "-T", "120", "-f", str(script)], stdout=out, stderr=load_err,
+            load = spawn(
+                ["pgbench", "-n", "-U", "postgres", "-c", "4", "-j", "4",
+                 "-T", "120", "-f", str(script), "postgres"], stdout=out, stderr=load_err,
                 env={**os.environ, "PGAPPNAME": "pgwt866_promotion_load"})
             wait_until(load, lambda: int(psql("SELECT count(*) FROM pg_stat_activity WHERE "
                             "application_name='pgwt866_promotion_load'")) == 4,
                        30, "promotion workload must precede daemon startup")
             env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
             env.update(PGWT_TEST_PGBS_VALIDATION_FAIL="1", PGWT_DEBUG_SAMPLED_ATTR_SHADOW="1")
-            daemon = subprocess.Popen(
+            daemon = spawn(
                 [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", "10",
                  "--escalation-budget", "0", "-i", "1", "-q", "-T", str(trace)],
                 stdout=subprocess.DEVNULL, stderr=err, env=env)
@@ -255,11 +279,11 @@ def run_late_promotion_arm(binary, pm_pid, directory):
                 return pids <= {int(pid) for pid in re.findall(
                     r"SAMPLED-ATTR-IDLE: pid=(\d+) databaseid=[1-9]\d* userid=[1-9]\d*", text)}
             wait_until(daemon, observed, 15, "pre-promotion cohort lacks attributed samples")
-            status = metrics(trace)
+            layout = metrics(trace, "status")
             text = (trace / "daemon.stderr").read_text()
             assert "forced validation failure (test hook)" in text, text
             assert "bounded uprobe shadow validation completed" in text, text
-            assert status["pgbackend_layout_validation"] == "validated", status
+            assert layout["pgbackend_layout_validation"] == "validated", layout
             assert load.poll() is None, "promotion workload stopped before verification"
             print(f"late layout promotion: PASS pre-existing pids={sorted(pids)} attributed", flush=True)
         finally:
@@ -282,7 +306,7 @@ def run_arm(binary, pm_pid, major, directory, label, disable_status_batch=False)
             env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
             if disable_status_batch:
                 env["PGWT_TEST_DISABLE_STATUS_BATCH"] = "1"
-            daemon = subprocess.Popen(
+            daemon = spawn(
                 [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", "10",
                  "--escalation-budget", "0", "-i", "1", "-q", "-T", str(trace)],
                 stdout=subprocess.DEVNULL, stderr=err, env=env)
@@ -295,32 +319,35 @@ def run_arm(binary, pm_pid, major, directory, label, disable_status_batch=False)
             warm = metrics(trace)["sampler_ticks_total"]
             wait_until(daemon, lambda: metrics(trace)["sampler_ticks_total"] >= warm + 50,
                        30, "warmup did not advance")
-            initial_fds = {}
-            for path in Path(f"/proc/{daemon.pid}/fd").iterdir():
-                try:
-                    initial_fds[int(path.name)] = os.readlink(path)
-                except FileNotFoundError:
-                    pass
+            # Sampler ticks bracket perf from both sides. `spanning` starts before
+            # perf is launched and ends after it exited, so it contains every tick
+            # perf could have seen; `inside` runs between two reads that both fall
+            # inside perf's window. Calls are divided by the count that cannot
+            # redden a bound by window misalignment (see assess_counts).
+            spanning_start = metrics(trace)["sampler_ticks_total"]
             perf_path = trace / "perf.trace"
-            perf = subprocess.Popen(
-                ["perf", "trace", "-T", "--no-comm", "-m", "1024", "-p", str(daemon.pid),
+            # -S: the events as they happen (their arrival proves perf is attached)
+            # and, at the end, the per-syscall summary that is the evidence. The
+            # summary needs no path names, which neither gate image can resolve.
+            perf = spawn(
+                ["perf", "trace", "-S", "--no-comm", "-m", "1024", "-p", str(daemon.pid),
                  "-e", CALLS, "-o", str(perf_path)],
                 stdout=subprocess.DEVNULL, stderr=perr)
             # Require actual trace data before opening the measured window.
             wait_until(perf, lambda: perf_path.exists() and perf_path.stat().st_size > 0,
                        15, "perf produced no trace")
-            start_ms = time.monotonic_ns() / 1e6
             before = metrics(trace)
             target_ticks = before["sampler_ticks_total"] + 210
             after = wait_until(daemon, lambda: (m if (m := metrics(trace))["sampler_ticks_total"]
                                                >= target_ticks else None),
                                90, "fewer than 210 sampler ticks")
-            end_ms = time.monotonic_ns() / 1e6
             assert perf.poll() is None, "perf exited during measurement"
             time.sleep(1)  # drain exits for syscalls entered inside the window
             stop(perf, signal.SIGINT)
             assert perf.returncode in (0, -signal.SIGINT), (trace / "perf.stderr").read_text()
+            spanning_end = metrics(trace)["sampler_ticks_total"]
             ticks = after["sampler_ticks_total"] - before["sampler_ticks_total"]
+            spanning = spanning_end - spanning_start
             population = min(before["sample_read_targets"], after["sample_read_targets"])
             assert population >= 504, "500 idle + 4 active targets must remain enrolled"
             failures = (after["sampled_attr_tick_read_failures_total"] -
@@ -333,15 +360,16 @@ def run_arm(binary, pm_pid, major, directory, label, disable_status_batch=False)
             # successes above that ceiling must come from our 500 idle pids.
             # This proves cohort success without per-pid logging under perf.
             cohort_idle_samples = max(0, idle_samples - (population - 500) * ticks)
-            assert after["pgbackend_layout_validation"] == "validated", after
-            counts = parse_trace(perf_path.read_text(), start_ms, end_ms, initial_fds)
+            layout = metrics(trace, "status")
+            assert layout["pgbackend_layout_validation"] == "validated", layout
+            counts = parse_summary(perf_path.read_text(), (str((trace / "perf.stderr").read_text()),))
             # Use the guaranteed cohort N, excluding version-dependent aux
             # populations with no attribution row (notably PG13).
-            result = assess(counts, major, 504, ticks, failures, cohort_idle_samples)
-            result.update(label=label, binary=str(binary),
+            result = assess_counts(counts, major, 504, ticks, spanning, failures, cohort_idle_samples)
+            result.update(label=label, major=major, read_failures=failures, binary=str(binary),
                           binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
-                          population=population, ticks=ticks, calls=counts,
-                          idle_samples_total=idle_samples,
+                          population=population, ticks=ticks, ticks_spanning=spanning,
+                          calls=counts, idle_samples_total=idle_samples,
                           idle_cohort_samples_lower_bound=cohort_idle_samples,
                           shadow_delta={key: after[key] - before[key] for key in SHADOW})
             (trace / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -403,9 +431,9 @@ def main():
             assert int(psql("SELECT count(*) FROM pg_stat_activity WHERE "
                             "application_name='pgwt866_idle' AND state='idle'")) == 500
             with (directory / "pgbench.stdout").open("w") as out, (directory / "pgbench.stderr").open("w") as err:
-                load = subprocess.Popen(
-                    ["pgbench", "-n", "-U", "postgres", "-d", "postgres", "-c", "4", "-j", "4",
-                     "-R", "100", "-T", "600", "-f", str(script)], stdout=out, stderr=err,
+                load = spawn(
+                    ["pgbench", "-n", "-U", "postgres", "-c", "4", "-j", "4",
+                     "-R", "100", "-T", "600", "-f", str(script), "postgres"], stdout=out, stderr=err,
                     env={**os.environ, "PGAPPNAME": "pgwt866_active"})
                 wait_until(load, lambda: int(psql("SELECT count(*) FROM pg_stat_activity WHERE "
                                "application_name='pgwt866_active'")) == 4,
@@ -414,24 +442,35 @@ def main():
                 assert not candidate["errors"], candidate["errors"]
                 disabled = run_arm(ROOT / "pg_wait_tracer", pid, major, directory,
                                    "status-disabled-negative", disable_status_batch=True)
-                assert any(" < " in e for e in disabled["errors"]), disabled
+                # With the batch disabled no row is read, so every unread backend keeps
+                # retrying its address resolution: measured 16.7 process_vm_readv per
+                # tick (EL8, PG13), above the upper bound rather than below the floor.
+                # Either direction is a RED at the process_vm_readv assertion; the
+                # floor itself is proven live by the master arm (1 per tick).
+                assert any(e.startswith("vm/tick=") for e in disabled["errors"]), disabled
                 assert any("idle attributed samples=0" in e for e in disabled["errors"]), disabled
-                print("status batch disabled: RED at both syscall floor and attribution floor", flush=True)
+                print("status batch disabled: RED at the syscall assertion and the attribution floor: "
+                      + "; ".join(disabled["errors"]), flush=True)
                 if args.master_tracer:
                     master = run_arm(args.master_tracer.resolve(), pid, major, directory, "master-negative")
-                    assert master["errors"] and (master["calls"]["mem_open"] > 0 or
-                                                  master["calls"]["pread64"] > 0), \
-                        "master negative control did not redden the memory-file assertion"
+                    # The per-backend file I/O assertion itself must fire, not just
+                    # some other bound.
+                    file_io = file_io_reds(master["errors"])
+                    assert file_io, ("master negative control did not redden the per-backend "
+                                     f"file I/O assertion: {master['errors']} per_tick={master['per_tick']}")
                     for key in SHADOW[1:]:
                         assert candidate["shadow_delta"][key] <= master["shadow_delta"][key], \
                             (key, candidate["shadow_delta"], master["shadow_delta"])
-                    print("master negative control: RED at the same assertion; shadow deltas no worse")
+                    print("master negative control: RED at " + "; ".join(master["errors"]) +
+                          "; shadow deltas no worse")
                     if not master["shadow_delta"][SHADOW[0]]:
                         print("shadow comparison has zero observations (no attribute uprobes in baseline)")
                 else:
                     print("PENDING: lead-run master negative control; pass --master-tracer")
                 assert load.poll() is None, "pgbench stopped before measurement completed"
-                stop(load, signal.SIGINT)
+                # SIGINT kills pgbench without its report; SIGALRM is the signal -T
+                # itself uses, so it ends the run normally and prints the summary.
+                stop(load, signal.SIGALRM)
                 workload = (directory / "pgbench.stdout").read_text()
                 assert re.search(r"number of transactions actually processed:\s*[1-9]", workload), workload
                 print("status-row syscall candidate gate: PASS (>=200 ticks, 500 idle + 4 pgbench)")

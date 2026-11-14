@@ -1,0 +1,18 @@
+     0.000 ( 0.344 ms): 13534 process_vm_readv(pid: 12765 (postgres), lvec: 0x5e4d2ccaedc0, liovcnt: 511, rvec: 0x5e4d2ccb0dc0, riovcnt: 511) = 2044
+     0.394 ( 0.040 ms): 13534 openat(dfd: CWD, filename: 0x74bd3f30, flags: RDONLY|CLOEXEC)         = 52
+     0.453 ( 0.013 ms): 13534 close(fd: 52)                                                         = 0
+     0.484 ( 0.017 ms): 13534 openat(dfd: CWD, filename: 0x79d7b070, flags: RDONLY|CLOEXEC)         = 52
+     0.525 ( 0.014 ms): 13534 close(fd: 52)                                                         = 0
+     0.556 ( 0.056 ms): 13534 openat(dfd: CWD, filename: 0x79d7d070, flags: RDONLY|CLOEXEC)         = -1 ENOENT (No such file or directory)
+ Summary of events:
+
+ pg_wait_tracer (13534), 10362 events, 100.0%
+
+   syscall            calls  errors  total       min       avg       max       stddev
+                                     (msec)    (msec)    (msec)    (msec)        (%)
+   --------------- --------  ------ -------- --------- --------- ---------     ------
+   process_vm_readv     3803      0   143.020     0.007     0.038     0.881      3.75%
+   openat               698    226    25.763     0.011     0.037     0.182      1.81%
+   close                680      0    18.419     0.007     0.027     0.095      1.94%
+
+
