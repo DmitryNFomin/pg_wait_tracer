@@ -241,9 +241,11 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "lifecycle_events_total",
                      ctr->lifecycle_events_total);
 
-    /* Watchpoint attach failures (incremented in backend.c) */
+    /* Watchpoint failures partitioned by target liveness (backend.c). */
     cjson_add_uint64(root, "wp_attach_failures_total",
                      ctr->wp_attach_failures_total);
+    cjson_add_uint64(root, "wp_attach_exit_race_total",
+                     ctr->wp_attach_exit_race_total);
 
     cJSON_AddNumberToObject(root, "backends_tracked", count_backends(d));
 

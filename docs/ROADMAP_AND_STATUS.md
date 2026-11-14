@@ -275,6 +275,15 @@ The existing watchpoint path becomes the `full` provider with **no behavioral ch
 
 **Phase A0 — Control socket + self-metrics (groundwork)  [DONE v0.10]** (2026-06-13, merge b1ef3c4, PR #7; rebased onto B1). *Evidence:* `src/control.c/h`, `src/server.c`, `src/daemon.c`, `tests/test_control.sh`. Scope: D4 socket with `status`/`metrics` only; daemon metrics counters; pgwt-server `control` proxy; `--dump` prints daemon status if socket present. **Live-validated `test_control.sh` 16/16** (socket, status/metrics JSON, counters rising under load, error handling, concurrent clients + disconnect survival, pgwt-server proxy, `--dump` block, SIGTERM clean unlink). Metrics shipped: `events_total`, `events_per_sec`, `lifecycle_events_total`, `wp_attach_failures_total`, `trace_events_written_total`, `trace_bytes_written_total`, `backends_tracked`. **Ringbuf drops intentionally NOT reported** (no BPF-side drop map until A2; `control.h` documents this; A2 must add + surface it). Wiring `test_control.sh` into `run_all.sh` deferred at merge → done in Track E (E3).
 
+The watchpoint metrics now distinguish failed attach/enable attempts (including
+bootstrap) on live targets, counted in `wp_attach_failures_total`, from attempts
+whose original target is confirmed gone, counted in `wp_attach_exit_race_total`.
+Unknown liveness and lifecycle validation refusals remain real failures.
+A retained `/proc/<pid>/stat` handle pins identity before each hardware attempt,
+so the post-failure check cannot inspect a reused PID instead. Both counters
+are lifetime totals exported by the control socket metrics response.
+Exit races do not change the separate INIT opportunity accounting.
+
 **Phase A1 — Trace format v2  [DONE v0.10]** (PR #12). *Evidence:* `src/event_writer.c/h`, `src/event_reader.c/h`, `src/summary_*.c`, `tests/gen_test_traces`. Scope (as planned): D2 typed blocks, v1-compat reader, writer emits v2, `gen_test_traces` emits both, pgwt-server + replay read both; round-trip unit tests; old traces replay identically. **Delivered variant (SUPERSEDES the planned v1-compat reader):** trace format is **v2-only** (decision 2026-06-15) — no deployed installs, so A1 drops v1 reader compatibility; version field retained for a future v3. *(Forward note: T8/v0.13 later added trace format v3 for measured-CPU — see Trust Milestone chapter.)*
 
 **Phase A2 — Sampled provider  [DONE v0.10]** (PR #13). *Evidence:* `src/sampler.c/h`, `src/provider.h`, `src/provider_full.c`, `src/daemon.c`, `src/backend.c`. Scope: D1 sampler behind the provider interface; extract the existing watchpoint path into the `full` provider (mechanical, no behavior change); `--mode sampled|full|tiered` flag (default `full` = then-current behavior). Tests: sampler unit test vs a fake registry; live `--mode sampled` vs pgbench (sane sample rates); daemon CPU at 100 Hz × N backends below budget. Acceptance: `--mode sampled` runs without watchpoints, writes sample blocks; `--mode full` byte-identical to prior behavior.
