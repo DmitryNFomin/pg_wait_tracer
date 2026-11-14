@@ -52,9 +52,21 @@ static FILE *proc_file;
 static int private_target, private_reader, incarnation = 1;
 static int tear_row = -1, transient_tear, short_row = -1, fault_row = -1;
 static int reader_gone, mutate_on_span, max_iovs, after_copy[1024], visits[1024];
-static uint8_t storage[1024 * 440];
-static uint64_t entries[1024];
-static char activity[1024][64];
+/* One arena with a fixed order: the PG13 candidate scan probes rows on BOTH
+ * sides of the status anchor and counts every address inside any shared map as
+ * a hint (the first 512 per attempt). If the activity buffers were separate
+ * statics, a linker could place them just below the status rows (Linux does),
+ * spend part of the 512-hint budget on those bytes and leave the last rows
+ * unresolved on the first tick. Keep everything mapped above the rows. */
+#define STORAGE_BYTES (1024 * 440)
+static struct {
+    uint8_t storage[STORAGE_BYTES];
+    uint64_t entries[1024];
+    char activity[1024][64];
+} arena;
+static uint8_t *const storage = arena.storage;
+static uint64_t *const entries = arena.entries;
+static char (*const activity)[64] = arena.activity;
 static struct PgBackendStatusLayout layout;
 static struct pgwt_pgbs_reader cache[1024];
 static struct pgwt_pgbs_batch_target targets[1024];
@@ -122,7 +134,7 @@ static ssize_t io_pread(int fd, void *buf, size_t size, off_t offset)
 {
     (void)fd; reads++;
     uintptr_t addr = (uintptr_t)offset;
-    if ((addr >= (uintptr_t)storage && addr + size <= (uintptr_t)(storage + sizeof(storage))) ||
+    if ((addr >= (uintptr_t)storage && addr + size <= (uintptr_t)(storage + STORAGE_BYTES)) ||
         (addr >= (uintptr_t)entries && addr + size <= (uintptr_t)(entries + 1024)) ||
         (addr >= (uintptr_t)activity && addr + size <= (uintptr_t)(activity + 1024))) {
         memcpy(buf, (void *)addr, size); return (ssize_t)size;
@@ -153,7 +165,7 @@ static ssize_t io_readv(pid_t pid, const struct iovec *local, unsigned long nl,
         uintptr_t addr = (uintptr_t)remote[j].iov_base;
         size_t len = remote[j].iov_len;
         CHECK(len == local[j].iov_len, "matching local and remote ranges");
-        if (addr >= (uintptr_t)storage && addr < (uintptr_t)(storage + sizeof(storage))) {
+        if (addr >= (uintptr_t)storage && addr < (uintptr_t)(storage + STORAGE_BYTES)) {
             size_t i = (addr - (uintptr_t)storage) / layout.struct_size;
             uintptr_t offset = addr - (uintptr_t)row_at(i);
             /* Keep round one's guard: unused row padding is unreadable.
@@ -231,9 +243,12 @@ static void fixture(int major, size_t n)
         &layout.st_activity_raw, &layout.st_query_id};
     for (size_t i = 0; i < sizeof(fields)/sizeof(fields[0]); i++)
         if (fields[i]->present) fields[i]->validation = PGWT_PGBS_FIELD_VALIDATED;
-    memset(storage, 0, sizeof(storage)); memset(targets, 0, sizeof(targets));
+    memset(storage, 0, STORAGE_BYTES); memset(targets, 0, sizeof(targets));
     layout.activity_buffer_size = sizeof(activity[0]);
     layout.status_anchor = (uintptr_t)storage;
+    CHECK((uintptr_t)entries >= (uintptr_t)(storage + STORAGE_BYTES) &&
+          (uintptr_t)activity >= (uintptr_t)(storage + STORAGE_BYTES),
+          "fixture maps nothing below the status rows (PG13 hint budget)");
     for (size_t i = 0; i < n; i++) {
         snprintf(activity[i], sizeof(activity[i]), "SELECT %zu", i);
         entries[i] = (uintptr_t)row_at(i);
