@@ -382,7 +382,7 @@ def check_bounded_failure_output():
     text = output.getvalue()
     assert "unrelated daemon noise" not in text and diagnostic in text, text
     assert "'wp_attach_failures_unknown_total': 1" in text, text
-    assert len(text.splitlines()) <= 7, text
+    assert len(text.splitlines()) <= 9, text  # three titled sections, one line, counters, error
     print("Forced churn failure output (23,000 unrelated log lines excluded):")
     print(text, end="")
     # Bound both selected streams, including pathological line width.
@@ -390,9 +390,10 @@ def check_bounded_failure_output():
     with redirect_stdout(output):
         print_failure_diagnostics("\n".join(
             prefix + str(i) + "x" * 1000
-            for prefix in ("INIT-LOST:", "WP-ATTACH-FAIL:") for i in range(100)), after)
+            for prefix in ("INIT-LOST:", "WP-ATTACH-FAIL:", "ERROR: cannot validate lifecycle target")
+            for i in range(100)), after)
     lines = output.getvalue().splitlines()
-    assert len(lines) == 83 and sum("last 40 of 100" in line for line in lines) == 2
+    assert len(lines) == 124 and sum("last 40 of 100" in line for line in lines) == 3
     assert all(len(line) <= 512 for line in lines[:-1])
     print("bounded failure streams: last 40 each, 512 chars/line: PASS")
 
