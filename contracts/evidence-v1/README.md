@@ -52,3 +52,12 @@ revision is [codec/REDELIVERY.md](codec/REDELIVERY.md), with the source question
 answer, challenge and blank oracle inputs in
 [codec/redelivery-oracle/](codec/redelivery-oracle/); independent answers follow.
 See [Refs #868, comment 6868500311](https://github.com/DmitryNFomin/pg_wait_tracer/issues/868#issuecomment-6868500311).
+
+The reference evaluator found the cross-boot capture reuse and successor-baseline
+contract gaps (Refs #913, #914); both advisers agreed. Astra drafted the fix,
+Fable challenged it (**ACCEPT-WITH-CHANGES**, D1–D5 plus missing cases), and r3b
+accepted all of them. The revised rules are in
+[codec/REDELIVERY.md](codec/REDELIVERY.md); the source tasks, accepted answer,
+challenge and input-only oracle materials are in
+[codec/redelivery-oracle-r3/](codec/redelivery-oracle-r3/). Independent answers
+follow in the same PR.
