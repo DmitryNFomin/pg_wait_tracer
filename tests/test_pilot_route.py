@@ -482,7 +482,7 @@ def mutants(build, tmp, data, expected):
     # output UINT64_MAX identity assertions from the committed node test.
     root = tmp / 'node-mutant'
     for relative in ('web/static/lib/builders/pilot-evidence.js', 'web/static/lib/format.js',
-                     'tests/web_unit/pilot-evidence.test.mjs'):
+                     'tests/web_unit/pilot-evidence.test.mjs', 'tests/fixtures/pilot-responses.json'):
         dest = root / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text((ROOT / relative).read_text())
