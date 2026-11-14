@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Real runners in temporary checkout copies: no edits to the invoking tree.
+# Real proofs build in temporary directories; controls edit checkout copies.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec python3 -B - <<'PY'
+exec python3 -B - "$@" <<'PY'
+import hashlib
 import json
 import os
 import re
@@ -10,11 +11,64 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import sys
+import time
 
 ROOT = Path.cwd()
 GITDIR = subprocess.check_output(['git', 'rev-parse', '--absolute-git-dir'], text=True).strip()
+sys.path.insert(0, str(ROOT / 'scripts'))
+from core_status_contracts import contract_hash, inventories, tree_hash
+
+
+def transcripts(directory, expected_tree):
+    """Admit only complete, current-tree logs, never saved claim states.
+
+    The JSON is a provenance/completeness envelope. The returned values are
+    raw runner output; every state is derived again by the fixture runs.
+    """
+    definitions, commands = inventories(ROOT)
+    wait = ROOT / 'contracts/wait_time-v1'
+    expected_proofs = {contract: set(proofs) for contract, proofs in definitions.items()}
+    expected_proofs['wait_time-v1'] = (
+        {'case:' + p.name for p in (wait / 'contracts/examples').glob('*.json')} |
+        {'mutant:' + row['id'] for row in json.loads((wait / 'mutants.json').read_text())} |
+        {'diff:' + row['id'] for row in json.loads((wait / 'differential_cases.json').read_text())})
+    commands = {'wait_time-v1': [('differential', ['python3', '-B', 'tests/test_core_wait_time_differential.py']),
+                               ('mutants', ['bash', 'tests/core_mutants.sh'])], **commands}
+    fixtures = {}
+    for contract, runners in commands.items():
+        report = json.loads((directory / (contract + '.json')).read_text())
+        if report['tree_hash'] != expected_tree:
+            raise ValueError('transcript tree mismatch: ' + contract)
+        expected = [(argv, ('' if contract == 'wait_time-v1' else contract + '-') + label + '.log')
+                    for label, argv in runners]
+        actual = [(run['command'], run['log']) for run in report['runs']]
+        if (report['contract'] != contract or report['state'] != 'PASS' or report['errors'] or
+                not report['claims'] or set(report['proofs']) != expected_proofs[contract] or
+                any(p['state'] != 'PASS' for p in report['proofs'].values()) or actual != expected or
+                report['contract_sha256'] != contract_hash(ROOT / 'contracts' / contract)):
+            raise ValueError('incomplete transcript run: ' + contract)
+        for run in report['runs']:
+            raw = (directory / run['log']).read_text()
+            if run['exit_code'] != 0 or hashlib.sha256(raw.encode()).hexdigest() != run['log_sha256']:
+                raise ValueError('incomplete or changed transcript: ' + run['log'])
+            fixtures[json.dumps(run['command'])] = {'code': run['exit_code'], 'stdout': raw}
+    return fixtures
+
+
+if len(sys.argv) > 2:
+    raise SystemExit('usage: test_core_status.sh [this-invocation-status-directory]')
+# Validate before starting any runner, including the wait-time controls.
+supplied = Path(sys.argv[1]).resolve() if len(sys.argv) == 2 else None
+expected_tree = tree_hash(ROOT)
+try:
+    supplied_fixtures = transcripts(supplied, expected_tree) if supplied else None
+except (OSError, ValueError, KeyError, TypeError) as error:
+    raise SystemExit('core-status self-test REFUSED: ' + str(error))
+
+
 def output(root):
-    return root.parent / (root.name + '-results')
+    return (root.parent / (root.name + '-results')).resolve()
 
 
 def report_path(root, contract='wait_time-v1'):
@@ -28,13 +82,24 @@ def edit(root, path, old, new):
     target.write_text(text.replace(old, new, 1))
 
 
-def run(root):
+def run(root, destination=None):
+    directory = destination if destination is not None else output(root)
+    if root == ROOT:
+        print('core-status self-test own plain baseline uptime before: ' +
+              subprocess.check_output(['uptime'], text=True).strip(), flush=True)
+    started = time.monotonic()
     result = subprocess.run(['bash', 'scripts/core-status.sh'], cwd=root,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, timeout=1800,
-                            env=dict(os.environ, PGWT_CORE_STATUS_DIR=str(output(root))))
-    assert report_path(root).is_file(), result.stdout
-    report = json.loads(report_path(root).read_text())
+                            env=dict(os.environ, PGWT_CORE_STATUS_DIR=str(directory)))
+    if root == ROOT:
+        print(f'core-status self-test own plain baseline seconds: {time.monotonic() - started:.3f}', flush=True)
+        print('core-status self-test own plain baseline uptime after: ' +
+              subprocess.check_output(['uptime'], text=True).strip(), flush=True)
+        print(result.stdout, end='', flush=True)
+    path = directory / 'wait_time-v1.json'
+    assert path.is_file(), result.stdout
+    report = json.loads(path.read_text())
     return result, report
 
 
@@ -95,6 +160,8 @@ with tempfile.TemporaryDirectory(prefix='pgwt-core-status-') as tmp:
         if name == 'renamed-diff':
             assert report['proofs']['diff:A1_missing']['state'] == 'NOT-RUN', report
             assert report['runs'][0]['exit_code'] == 0, report
+            assert 'CORE-STATUS PROOF wait_time-v1:diff:A1_missing NOT-RUN claims=' in result.stdout
+            assert 'log=' + str(output(target) / 'differential.log') in result.stdout
         elif name == 'changed-mutant':
             assert report['proofs']['mutant:M1']['state'] == 'FAIL', report
             assert 'M1 KILLED (contract wait_window_02,' in (output(target) / 'mutants.log').read_text()
@@ -123,12 +190,43 @@ with tempfile.TemporaryDirectory(prefix='pgwt-core-status-') as tmp:
         for path in (ROOT / 'tests').glob(pattern):
             shutil.copy2(path, complete / 'tests' / path.name)
     (complete / '.git').write_text('gitdir: ' + GITDIR + '\n')
-    result, _ = run(complete)
-    assert result.returncode == 0, result.stdout
-    reports = {contract: json.loads(report_path(complete, contract).read_text())
+    if supplied is None:
+        # This is also the exact plain CI command, on the invoking tree;
+        # only its output goes to temporary storage. No product code is edited.
+        result, _ = run(ROOT, output(complete))
+        assert result.returncode == 0, result.stdout
+        source = output(complete)
+        fixtures = transcripts(source, expected_tree)
+        print('core-status self-test all contracts: own real baseline PASS', flush=True)
+    else:
+        if tree_hash(ROOT) != expected_tree:
+            raise SystemExit('core-status self-test REFUSED: tree changed before replay')
+        source, fixtures = supplied, supplied_fixtures
+        print('core-status self-test all contracts: this invocation baseline accepted', flush=True)
+    reports = {contract: json.loads((source / (contract + '.json')).read_text())
                for contract in ('wait_time-v1', 'merge-v1', 'evidence-v1')}
-    assert all(r['state'] == 'PASS' and r['errors'] == [] for r in reports.values()), result.stdout
-    print('core-status self-test all contracts: real baseline PASS', flush=True)
+
+    # Refusal happens before fixture injection/replay. Cover both provenance
+    # and completeness independently, plus a log truncated after JSON write.
+    source_tree = reports['wait_time-v1']['tree_hash']
+    for name in ('other-tree', 'missing-contract', 'missing-proof', 'missing-runner', 'failed-runner', 'truncated-log'):
+        rejected = work / ('refused-' + name)
+        shutil.copytree(source, rejected)
+        path = rejected / 'wait_time-v1.json'
+        envelope = json.loads(path.read_text())
+        if name == 'other-tree': envelope['tree_hash'] = '0' * 40
+        elif name == 'missing-contract': (rejected / 'evidence-v1.json').unlink()
+        elif name == 'missing-proof': envelope['proofs'].pop(next(iter(envelope['proofs'])))
+        elif name == 'missing-runner': envelope['runs'].pop()
+        elif name == 'failed-runner': envelope['runs'][0]['exit_code'] = 1
+        else: (rejected / envelope['runs'][0]['log']).write_text('truncated\n')
+        path.write_text(json.dumps(envelope))
+        try:
+            transcripts(rejected, source_tree)
+        except (OSError, ValueError) as error:
+            print(f'core-status self-test {name}: REFUSED before replay ({error})', flush=True)
+        else:
+            raise AssertionError(name + ' transcripts were accepted')
 
     # Exercise real failing C baselines too: their records must be exposed
     # exactly once before a harness refuses to run mutants.
@@ -164,12 +262,6 @@ with tempfile.TemporaryDirectory(prefix='pgwt-core-status-') as tmp:
     # parser/derivation controls. They are not saved status inputs and are
     # never used to certify product behavior. This avoids recompiling hundreds
     # of identical mutants for each status-parser negative control.
-    fixtures = {}
-    for report in reports.values():
-        for executed in report['runs']:
-            fixtures[json.dumps(executed['command'])] = {
-                'code': executed['exit_code'],
-                'stdout': (output(complete) / executed['log']).read_text()}
     fixture_path = work / 'runner-fixtures.json'
     fixture_path.write_text(json.dumps(fixtures))
     injected = """
@@ -208,7 +300,7 @@ subprocess.run = _fixture_run
     for contract, proof_id in [('merge-v1', 'case:row-3/N'),
                                ('evidence-v1', 'case:08_attach_failure')]:
         line = baseline[contract]['proofs'][proof_id]['lines'][0]
-        for name in ('failed-proof', 'malformed-proof', 'bare-proof', 'bad-then-pass', 'missing-proof', 'outside-baseline', 'duplicate-proof', 'unknown-output'):
+        for name in ('failed-proof', 'malformed-proof', 'bare-proof', 'bad-then-pass', 'bare-then-pass', 'missing-proof', 'runner-failed', 'outside-baseline', 'duplicate-proof', 'unknown-output'):
             responses = json.loads(json.dumps(fixtures))
             matched = [item for item in responses.values() if line + '\n' in item['stdout']]
             assert len(matched) == 1
@@ -217,12 +309,16 @@ subprocess.run = _fixture_run
             elif name == 'malformed-proof': replacement = line.replace(' PASS', ' WRONG')
             elif name == 'bare-proof': replacement = line.rsplit(' PASS', 1)[0]
             elif name == 'bad-then-pass': replacement = line.replace(' PASS', ' WRONG') + '\n' + line
-            elif name in ('missing-proof', 'outside-baseline'): replacement = ''
+            elif name == 'bare-then-pass': replacement = line.rsplit(' PASS', 1)[0] + '\n' + line
+            elif name in ('missing-proof', 'runner-failed', 'outside-baseline'): replacement = ''
             elif name == 'duplicate-proof': replacement = line + '\n' + line
             else: replacement = line.replace(proof_id.split(':', 1)[1].removeprefix('row-'), 'UNKNOWN_PROOF')
             item['stdout'] = item['stdout'].replace(line + '\n', replacement + '\n' if replacement else '')
             if name == 'outside-baseline':
                 item['stdout'] += line + '\n'
+            if name == 'runner-failed':
+                item['code'] = 1
+                item['stdout'] += 'ERROR injected runner failure\n'
             # Seed old green JSON; the next invocation must replace it.
             output(complete).mkdir(exist_ok=True)
             report_path(complete, contract).write_text(json.dumps(baseline[contract]))
@@ -230,16 +326,30 @@ subprocess.run = _fixture_run
             report = got[contract]
             assert result.returncode != 0 and report['state'] != 'PASS', (name, result.stdout)
             states_from_proofs(report)
-            if name in ('failed-proof', 'malformed-proof', 'bare-proof', 'bad-then-pass', 'duplicate-proof'):
+            if name in ('failed-proof', 'malformed-proof', 'bare-proof', 'bad-then-pass', 'bare-then-pass', 'duplicate-proof'):
                 assert report['proofs'][proof_id]['state'] == 'FAIL'
                 affected = {c['id'] for c in baseline[contract]['claims'] if proof_id in c['proof_ids']}
                 assert {c['id'] for c in report['claims'] if c['state'] == 'FAIL'} == affected
                 assert all(c['state'] == 'PASS' for c in report['claims'] if c['id'] not in affected)
-            elif name in ('missing-proof', 'outside-baseline'):
+            elif name in ('missing-proof', 'runner-failed', 'outside-baseline'):
                 assert report['proofs'][proof_id]['state'] == 'NOT-RUN'
             else:
                 assert any('unknown proof id in output:' in error for error in report['errors'])
             assert all(r['state'] == 'PASS' for c, r in got.items() if c != contract)
+            if name == 'bare-then-pass':
+                assert 'CORE-STATUS FIRST ' + replacement.splitlines()[0] + '\n' in result.stdout, result.stdout
+            if name in ('failed-proof', 'missing-proof', 'runner-failed'):
+                affected = [c['id'] for c in report['claims'] if proof_id in c['proof_ids']]
+                label = 'merge' if contract == 'merge-v1' else 'evidence'
+                diagnostic = (f'CORE-STATUS PROOF {contract}:{proof_id} '
+                              f"{report['proofs'][proof_id]['state']} claims={','.join(affected)} "
+                              f'log={output(complete) / (contract + "-" + label + ".log")}')
+                assert diagnostic in result.stdout, result.stdout
+                if name == 'failed-proof':
+                    assert 'CORE-STATUS FIRST ' + replacement in result.stdout, result.stdout
+                    print(diagnostic + '\nCORE-STATUS FIRST ' + replacement, flush=True)
+                if name == 'runner-failed':
+                    assert 'CORE-STATUS FIRST ERROR injected runner failure' in result.stdout, result.stdout
             print(f'core-status self-test {contract} {name}: caught', flush=True)
 
         mutation_id = 'mutant:M1' if contract == 'merge-v1' else 'mutant:codec/C01_crc_polynomial'

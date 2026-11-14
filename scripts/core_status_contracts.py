@@ -9,11 +9,63 @@ import csv
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+
+
+def tree_hash(root):
+    # tree-hash uses a disposable index; isolate its objects too so this is
+    # read-only with respect to the checkout's Git metadata.
+    objects = subprocess.check_output(['git', 'rev-parse', '--git-path', 'objects'],
+                                      cwd=root, text=True).strip()
+    with tempfile.TemporaryDirectory(prefix='pgwt-status-objects-') as temporary:
+        environment = os.environ.copy()
+        environment['GIT_OBJECT_DIRECTORY'] = temporary
+        alternates = environment.get('GIT_ALTERNATE_OBJECT_DIRECTORIES', '')
+        environment['GIT_ALTERNATE_OBJECT_DIRECTORIES'] = str((root / objects).resolve()) + (
+            ':' + alternates if alternates else '')
+        tree = subprocess.check_output(['bash', 'scripts/tree-hash.sh'], cwd=root,
+                                       text=True, env=environment).strip()
+    if not re.fullmatch(r'[0-9a-f]{40,64}', tree):
+        raise ValueError('invalid tree-hash output')
+    return tree
+
+
+def print_failed_proofs(report, out, logs, failed_lines):
+    """Console diagnostics only; proof and claim states are already derived."""
+    executed = {run['log'] for run in report['runs']}
+    failed_logs = {run['log'] for run in report['runs'] if run['exit_code'] != 0}
+    # Hundreds of proofs share a runner. Resolve/write/read its log once,
+    # while still printing every failing proof and its own claim mapping.
+    paths = {name: (out / name).resolve() for name in set(logs.values()) | executed}
+    first_errors = {}
+    for name, path in paths.items():
+        if name not in executed:
+            path.write_text('Runner did not run.\n' + '\n'.join(report['errors']) + '\n')
+        if name in failed_logs:
+            first_errors[name] = next((line for line in path.read_text().splitlines()
+                                      if ' KILLED' not in line and re.search(
+                                          r'FAIL|MISMATCH|ERROR|Traceback|AssertionError|error:|Sanitizer|Segmentation fault|Abort trap',
+                                          line)), None)
+    for run in report['runs']:
+        if run['exit_code'] != 0:
+            print(f"CORE-STATUS RUNNER {report['contract']} exit={run['exit_code']} "
+                  f"command={' '.join(run['command'])} log={paths[run['log']]}", file=sys.stderr)
+    for ident, proof in report['proofs'].items():
+        if proof['state'] == 'PASS':
+            continue
+        claims = [c['id'] for c in report['claims'] if ident in c['proof_ids']]
+        path = paths[logs[ident]]
+        print(f"CORE-STATUS PROOF {report['contract']}:{ident} {proof['state']} "
+              f"claims={','.join(claims) or '(unreferenced)'} log={path}", file=sys.stderr)
+        if ident in failed_lines:
+            print('CORE-STATUS FIRST ' + failed_lines[ident][0], file=sys.stderr)
+        elif first_errors.get(logs[ident]):
+            print('CORE-STATUS FIRST ' + first_errors[logs[ident]], file=sys.stderr)
 
 
 def digest(value):
@@ -270,6 +322,7 @@ def run_contracts(root, out, provenance):
     reports = []
     for contract, vocabulary in definitions.items():
         errors, claims, runs = [], [], []
+        failed_lines = {}
         proofs = {ident: {'state': 'NOT-RUN', 'lines': []} for ident in vocabulary}
         try:
             claims = read_claims(root / 'contracts' / contract / 'CLAIMS.tsv', proofs, errors)
@@ -312,6 +365,8 @@ def run_contracts(root, out, provenance):
                             continue
                         proof = proofs[ident]
                         proof['state'] = 'PASS' if not proof['lines'] and re.fullmatch(vocabulary[ident]['pass_pattern'], line) else 'FAIL'
+                        if proof['state'] == 'FAIL':
+                            failed_lines.setdefault(ident, []).append(line)
                         proof['lines'].append(line)
                     if frame and (inside or begins != 1 or ends != 1):
                         errors.append('missing, duplicate or unfinished contract baseline: ' + label)
@@ -319,11 +374,16 @@ def run_contracts(root, out, provenance):
             errors.append(str(error))
         reports.append({'contract': contract, 'commit': provenance['commit'], 'tree_hash': provenance['tree_hash'],
                         'contract_sha256': contract_hash(root / 'contracts' / contract),
-                        'claims': claims, 'proofs': proofs, 'runs': runs, 'errors': errors})
+                        'claims': claims, 'proofs': proofs, 'runs': runs, 'errors': errors,
+                        '_failed_lines': failed_lines,
+                        '_proof_logs': {ident: contract + '-' + spec['runner'] + '.log'
+                                        for ident, spec in vocabulary.items()}})
     return reports
 
 
 def finish(report, out):
+    logs = report.pop('_proof_logs', {})
+    failed_lines = report.pop('_failed_lines', {})
     for claim in report['claims']:
         states = [report['proofs'].get(ref, {'state': 'NOT-RUN'})['state'] for ref in claim['proof_ids']]
         claim['state'] = 'FAIL' if 'FAIL' in states else 'NOT-RUN' if 'NOT-RUN' in states else 'PASS'
@@ -336,4 +396,5 @@ def finish(report, out):
     temporary.replace(path)
     for error in report['errors']:
         print('CORE-STATUS ERROR ' + report['contract'] + ': ' + error, file=sys.stderr)
+    print_failed_proofs(report, out, logs, failed_lines)
     return report['state'] == 'PASS'

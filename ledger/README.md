@@ -89,10 +89,33 @@ reported separately and cannot satisfy the killed-mutant requirement.
 
 `scripts/core-status.sh` runs all portable proof suites once. The regular proof stage in `scripts/check.sh`
 uses these runs instead of repeating the merge, replay, codec, redelivery and
-report commands. Evidence is never reused across invocations. Set
+report commands. Proof suites are never skipped using stored status. Set
 `PGWT_CORE_STATUS_DIR=/absolute/scratch/directory` to redirect this run's JSON
 and logs outside the default `tests/results/core_status/` directory; this is an
-output destination only, never an evidence input. The status self-test makes
-its own fresh real baseline, then uses only that invocation's raw transcripts
-as parser fixtures; this additional baseline is part of its cost. The two CI modes already
-move and upload every top-level output file.
+output destination only, never an evidence input to the status producer.
+`scripts/check.sh` creates a fresh output directory for its status step and
+passes it to `bash tests/test_core_status.sh /absolute/output/directory`.
+Before replay, the self-test requires all three reports to match the current
+tree and contract hashes, contain the complete proof and runner inventories,
+and have successful runs with intact logs matching their recorded SHA256s.
+A different tree, missing report/proof/runner, unsuccessful run or changed log
+is refused before replay. Only raw runner transcripts become parser fixtures;
+the machinery derives proof and claim states again, including the controls
+that remove or corrupt evidence and seed falsely green claim derivation.
+Standalone `bash tests/test_core_status.sh` still makes its own real baseline.
+The real wait-time controls and failing C baseline checks run in either mode.
+The two CI status modes move and upload every top-level output file.
+
+A failing or missing proof prints its id, affected claim ids and runner log
+path on the console, followed by its first failing record when available.
+The gate retains its temporary output directory so those paths can be read
+after failure. If a runner could not start, its log explains that it did not run.
+
+Local macOS measurements on 2026-11-14 of the commands in the CI `core-status`
+job: **plain 588.8 s**, **ASan/UBSan 1260.2 s**, **1849.0 s serial total**
+(checkout and artifact upload excluded). The sanitizer mode uses
+`CFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'`.
+The gate self-test took 308.1 s using its preceding status run; standalone,
+including its own real plain baseline, it took 918.1 s. The plain timing
+was measured around that standalone baseline subprocess on the invoking tree,
+with output redirected to temporary storage. Hosted runner timings may differ.

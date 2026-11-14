@@ -58,8 +58,16 @@ run python3 -B tests/counter_vector_mutants.py --guard-sweep
 
 step "core wait_time, merge and evidence contract status and mutation checks"
 core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
-run env CFLAGS="$core_cflags" bash scripts/core-status.sh
-run bash tests/test_core_status.sh
+# A fresh directory binds the self-test's transcripts to this invocation.
+# Retain it so a red gate's printed runner-log paths remain usable.
+if core_status_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-check-core-status.XXXXXX"); then
+    echo "core status logs: $core_status_dir"
+    run env PGWT_CORE_STATUS_DIR="$core_status_dir" CFLAGS="$core_cflags" bash scripts/core-status.sh
+    run bash tests/test_core_status.sh "$core_status_dir"
+else
+    echo "FAIL: core status temporary directory"
+    fail=1
+fi
 run python3 -B tests/test_ledger.py
 
 # core-status runs the portable merge/evidence contract, differential, codec,
