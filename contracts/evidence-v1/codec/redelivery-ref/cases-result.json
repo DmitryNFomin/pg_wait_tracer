@@ -1,0 +1,9 @@
+{
+  "cases_passed": 50,
+  "cases_total": 50,
+  "permutations": 160,
+  "incremental_prefix_checks": 606,
+  "unique_accumulated_submultisets": 128,
+  "failures": [],
+  "expected_basis": "REDELIVERY r3b table transcribed in build_cases.py plus manually declared independent link/replay facts; no product output"
+}
