@@ -372,9 +372,29 @@ def browser(build, tmp, data, expected):
                     frozen = expected[i][metric]
                     assert cell.locator('[data-value]').inner_text() == ('unavailable' if frozen['value'] is None else str(frozen['value']))
                     assert cell.locator('[data-completeness]').inner_text() == frozen['completeness']
-                    assert cell.locator('[data-reasons]').inner_text() == ', '.join(frozen['reasons'])
+                    assert cell.locator('[data-reason-token]').all_inner_texts() == frozen['reasons']
+                    label = 'Wait time' if metric == 'wait_time' else 'Completed waits'
+                    assert cell.locator('h3').inner_text() == (label + ': ' + (
+                        'unavailable' if frozen['value'] is None else str(frozen['value']) + ' ' + frozen['unit']))
+                    if frozen['value'] is None:
+                        assert cell.locator('.pilot-diagnostics h4').inner_text() == 'Recorded so far (incomplete, not a result)'
+                        assert cell.locator('[data-unit]').count() == 0
                     for key, value in frozen['diagnostic'].items():
                         assert cell.locator(f'[data-diagnostic="{key}"]').inner_text() == ('unavailable' if value is None else str(value))
+                if i in (1, 5):
+                    fixture_data = next(cell for cell in mock_server.PILOT_FIXTURES if cell['scenario'].startswith(f'{i:02}_'))
+                    rendered = panel.locator('.pilot-result').inner_text()
+                    assert [line for line in rendered.splitlines() if line] == fixture_data['rendered_result_lines'], repr(rendered)
+                    print(f'DOM {fixture_data["name"]}: {json.dumps(rendered)}', flush=True)
+                    # Each diagnostic column is aligned by the browser's grid layout.
+                    for metric in METRICS:
+                        values = panel.locator(f'[data-metric="{metric}"] dd').evaluate_all(
+                            'cells => cells.map(cell => cell.getBoundingClientRect().right)')
+                        assert len(set(values)) == 1, values
+                if i in (5, 30):
+                    sentence = ('Some required exact evidence is missing.' if i == 5 else
+                                'The evidence is invalid, so this result cannot be computed.')
+                    assert panel.locator('[data-reason-sentence]').all_inner_texts() == [sentence, sentence]
                 sent = active['requests'][-1]
                 assert sent['target'] == req['target'] and sent['query'] == req['query']
                 assert not errors, errors

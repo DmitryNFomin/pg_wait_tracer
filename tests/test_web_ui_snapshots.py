@@ -632,7 +632,9 @@ def snap_pilot_suite(page):
             assert metric.locator('[data-value]').inner_text() == (
                 'unavailable' if expected['value'] is None else expected['value'])
             assert metric.locator('[data-completeness]').inner_text() == expected['completeness']
-            assert metric.locator('[data-reasons]').inner_text() == ', '.join(expected['reasons'])
+            assert metric.locator('[data-reason-token]').all_inner_texts() == expected['reasons']
+        rendered = panel.locator('.pilot-result').inner_text()
+        assert [line for line in rendered.splitlines() if line] == cell['rendered_result_lines'], repr(rendered)
         snapshot(page, cell["name"], "#events-pilot",
                  pixel_threshold=GALLERY_PIXEL_THRESHOLD,
                  max_diff_ratio=GALLERY_MAX_DIFF_RATIO)

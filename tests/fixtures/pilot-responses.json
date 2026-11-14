@@ -66,7 +66,30 @@
         "replay_stop": null,
         "capture_ambiguous": false
       }
-    }
+    },
+    "rendered_result_lines": [
+      "Wait time: 4 ns",
+      "complete",
+      "Closed: 4 ns; open: 0 ns",
+      "Diagnostics",
+      "recorded_ns",
+      "4",
+      "covered_ns",
+      "14",
+      "required_ns",
+      "14",
+      "Completed waits: 1 count",
+      "complete",
+      "Diagnostics",
+      "recorded_count",
+      "1",
+      "covered_ns",
+      "14",
+      "required_ns",
+      "14",
+      "Diagnostics: recorded is matching wait time or closes; covered is certified window time; required is window time within this backend's lifetime.",
+      "Storage diagnostics"
+    ]
   },
   {
     "name": "pilot_unavailable",
@@ -135,6 +158,27 @@
         "replay_stop": null,
         "capture_ambiguous": false
       }
-    }
+    },
+    "rendered_result_lines": [
+      "Wait time: unavailable",
+      "Some required exact evidence is missing. coverage_incomplete",
+      "Recorded so far (incomplete, not a result)",
+      "recorded_ns",
+      "2",
+      "covered_ns",
+      "2",
+      "required_ns",
+      "6",
+      "Completed waits: unavailable",
+      "Some required exact evidence is missing. coverage_incomplete",
+      "Recorded so far (incomplete, not a result)",
+      "recorded_count",
+      "0",
+      "covered_ns",
+      "2",
+      "required_ns",
+      "6",
+      "Storage diagnostics"
+    ]
   }
 ]

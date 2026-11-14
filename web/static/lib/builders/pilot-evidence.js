@@ -26,24 +26,45 @@ function wire(value) {
     return decimal(value, 'Response');
 }
 
+const reasonSentences = new Map([
+    ['coverage_incomplete', 'Some required exact evidence is missing.'],
+    ['evidence_invalid', 'The evidence is invalid, so this result cannot be computed.'],
+    ['invalid_query', 'The query has a missing or invalid event or time.'],
+    ['invalid_window', 'The window start must be earlier than its end.'],
+]);
+
 export function pilotEvidenceHtml(response) {
     if (response.error) return '<p role="alert">' + esc(response.error) + '</p>';
-    let html = '';
+    let html = '<div class="pilot-metrics">';
+    let hasValue = false;
     for (const key of ['wait_time', 'completed_waits']) {
         const metric = response[key];
         const value = wire(metric.value);
-        html += '<div class="pilot-metric" data-metric="' + key + '"><strong>' +
-            (key === 'wait_time' ? 'Wait time' : 'Completed waits') + '</strong> ' +
-            '<output data-value>' + esc(value) + '</output> ' + esc(metric.unit) +
-            ' <span data-completeness>' + esc(metric.completeness) + '</span>' +
-            '<span data-reasons>' + esc(metric.reasons.join(', ')) + '</span>';
+        const unavailable = metric.value === null;
+        if (!unavailable) hasValue = true;
+        html += '<div class="pilot-metric" data-metric="' + key + '"><h3>' +
+            (key === 'wait_time' ? 'Wait time' : 'Completed waits') + ': ' +
+            '<output data-value' + (unavailable ? ' data-completeness' : '') + '>' + esc(value) + '</output>' +
+            (unavailable ? '' : ' <span data-unit>' + esc(metric.unit) + '</span>') + '</h3>';
+        if (!unavailable) html += '<span class="pilot-status" data-completeness>' + esc(metric.completeness) + '</span>';
+        html += '<div class="pilot-reasons" data-reasons>';
+        for (const reason of metric.reasons) {
+            const sentence = reasonSentences.get(reason);
+            html += '<p>' + (sentence ? '<span data-reason-sentence>' + esc(sentence) + '</span> ' : '') +
+                '<code data-reason-token>' + esc(reason) + '</code></p>';
+        }
+        html += '</div>';
         if (metric.detail) html += '<p>Closed: <span data-closed>' + esc(wire(metric.detail.closed_ns)) +
             '</span> ns; open: <span data-open>' + esc(wire(metric.detail.open_ns)) + '</span> ns</p>';
-        html += '<dl>';
+        html += '<section class="pilot-diagnostics' + (unavailable ? ' pilot-incomplete' : '') + '"><h4>' +
+            (unavailable ? 'Recorded so far (incomplete, not a result)' : 'Diagnostics') + '</h4><dl>';
         for (const [name, number] of Object.entries(metric.diagnostic))
             html += '<dt>' + esc(name) + '</dt><dd data-diagnostic="' + esc(name) + '">' + esc(wire(number)) + '</dd>';
-        html += '</dl></div>';
+        html += '</dl></section></div>';
     }
+    html += '</div>';
+    if (hasValue) html += '<p class="pilot-diagnostic-hint">Diagnostics: recorded is matching wait time or closes; ' +
+        'covered is certified window time; required is window time within this backend\'s lifetime.</p>';
     html += '<details><summary>Storage diagnostics</summary><pre>' + esc(JSON.stringify(response.storage, null, 2)) + '</pre></details>';
     return html;
 }
