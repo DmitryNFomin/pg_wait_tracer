@@ -32,6 +32,20 @@ struct staged {
     pgwt_merge_record record;
     unsigned char *bytes;
 };
+#ifdef PGWT_MERGE_TEST_WORK
+/* Count literal memory moves too: a regression must not supply its own work
+ * hook to be caught. Round bytes up to staged-envelope equivalents and call
+ * the hook before the move can damage indexed slots. Production has neither
+ * the wrapper nor the macro. New traversals still need node-visit hooks. */
+static inline __attribute__((unused)) void *
+queue_work_memmove(void *to, const void *from, size_t bytes)
+{
+    MERGE_WORK(QMOVE, bytes / sizeof(struct staged) + (bytes % sizeof(struct staged) != 0));
+    return memmove(to, from, bytes);
+}
+#undef memmove
+#define memmove(to, from, bytes) queue_work_memmove((to), (from), (bytes))
+#endif
 struct queue_node {
     size_t left, right, next;
     unsigned height;
@@ -189,6 +203,7 @@ static pgwt_merge_status fault(pgwt_merge *m, pgwt_merge_reason reason,
     /* Discarded lifecycle evidence can never bootstrap a "new" generation
      * in a later epoch (DECISION 25a). Positions already remain consumed. */
     for (size_t i = m->first; i != SIZE_MAX;) {
+        MERGE_WORK(QVISIT, 1);
         struct staged *v = &m->queue[i];
         if (!v->text && v->record.rank != PGWT_MERGE_TRANS) {
             struct generation_state *a = attachment(m, &v->record);
@@ -300,8 +315,10 @@ static void remember_dependency(pgwt_merge *m, uint64_t id)
 
 static void reset_waiting(pgwt_merge *m)
 {
-    for (size_t i = 0; i < m->waiting_slot_count; ++i)
+    for (size_t i = 0; i < m->waiting_slot_count; ++i) {
+        MERGE_WORK(QVISIT, 1);
         m->waiting_index[m->waiting_slots[i]].used = false;
+    }
     m->waiting_slot_count = m->waiting_count = 0;
 }
 
@@ -402,6 +419,7 @@ static size_t queue_insert(pgwt_merge *m, size_t root, size_t slot,
 
 static size_t queue_remove_min(pgwt_merge *m, size_t root)
 {
+    MERGE_WORK(QVISIT, 1);
     if (m->queue_nodes[root].left == SIZE_MAX) return m->queue_nodes[root].right;
     m->queue_nodes[root].left = queue_remove_min(m, m->queue_nodes[root].left);
     return queue_balance(m, root);
@@ -455,6 +473,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         prior_count = m->held_count;
         tail = m->held_tail;
         previous_slot = m->held_transition;
+        MERGE_WORK(QVISIT, begin == SIZE_MAX ? 0 : 1);
         MERGE_WORK(QCOMPARE, begin == SIZE_MAX ? 0 : 1);
         if (begin == SIZE_MAX || m->queue[begin].record.t >= W)
             return m->report.status;
@@ -466,18 +485,23 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
     size_t eligible = begin, eligible_count = prior_count;
     while (eligible != SIZE_MAX && (m->queue[eligible].text ||
            m->queue[eligible].record.t < W)) {
+        MERGE_WORK(QVISIT, 1);
         MERGE_WORK(QCOMPARE, 1);
         ++eligible_count;
         tail = eligible;
         eligible = m->queue_nodes[eligible].next;
     } /* contract §3 strict t<W */
-    if (eligible != SIZE_MAX) MERGE_WORK(QCOMPARE, 1);
+    if (eligible != SIZE_MAX) {
+        MERGE_WORK(QVISIT, 1);
+        MERGE_WORK(QCOMPARE, 1);
+    }
     size_t end = eligible;
     eligible = eligible_count;
     bool held = m->waiting_count != 0;
     const pgwt_merge_record *previous_transition = previous_slot == SIZE_MAX ?
         NULL : &m->queue[previous_slot].record;
     for (size_t i = begin; i != end; i = m->queue_nodes[i].next) {
+        MERGE_WORK(QVISIT, 1);
         const struct staged *v = &m->queue[i];
         if (v->text) continue;
         const pgwt_merge_record *r = &v->record;
@@ -579,6 +603,7 @@ static pgwt_merge_status release(pgwt_merge *m, pgwt_merge_observation obs)
         new_frontier_epoch && m->frontier_count == m->config.frontier_capacity)
         return fault(m, PGWT_MERGE_ALLOCATION_FAIL, obs);
     for (size_t i = m->first; i != end; i = m->queue_nodes[i].next) {
+        MERGE_WORK(QVISIT, 1);
         struct staged *v = &m->queue[i];
         pgwt_merge_output out = {.kind = v->text ? PGWT_MERGE_OUT_TEXT : PGWT_MERGE_OUT_DATA,
             .record = v->record, .epoch = m->report.epoch};

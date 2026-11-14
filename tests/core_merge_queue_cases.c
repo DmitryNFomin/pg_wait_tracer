@@ -35,8 +35,7 @@ static bool records_equal(pgwt_merge_record a, pgwt_merge_record b)
         a.g == b.g && a.q == b.q && a.rank == b.rank &&
         a.identity_known == b.identity_known && a.has_q == b.has_q &&
         a.fork_seed_proved == b.fork_seed_proved && a.dependency == b.dependency &&
-        a.dependency_id == b.dependency_id && a.payload_size == b.payload_size &&
-        (!a.payload_size || !memcmp(a.payload, b.payload, a.payload_size));
+        a.dependency_id == b.dependency_id && a.payload_size == b.payload_size;
 }
 
 static bool outputs_equal(pgwt_merge_output a, pgwt_merge_output b)
@@ -101,6 +100,9 @@ static void compare(struct pair *p, pgwt_merge_status a, pgwt_merge_status b)
     for (size_t i = 0; i < p->a.count; ++i) {
         struct captured *x = &p->a.attempted[i], *y = &p->b.attempted[i];
         require(x->accepted == y->accepted && outputs_equal(x->out, y->out), "output");
+        require(!x->out.record.payload_size ||
+                !memcmp(x->out.record.payload, y->out.record.payload,
+                        x->out.record.payload_size), "payload bytes");
         require(x->post.d == y->post.d && counters_equal(x->post.counters, y->post.counters),
                 "post observation");
         if (x->accepted) {
@@ -155,14 +157,28 @@ static void finish(struct pair *p)
 static pgwt_merge_status feed(struct pair *p, pgwt_merge_input in)
 {
     ++inputs;
+    /* Every DATA and TEXT, including partial-publication families, owns a
+     * distinct binary payload. Encode the full input identity, not a byte
+     * pattern that repeats after 256 records. Reuse caller storage below. */
+    unsigned char payload[32];
     in.observation = p->obs;
     in.observation.d = inputs;
     p->a.count = p->b.count = 0;
-    if (in.kind == PGWT_MERGE_DATA || in.kind == PGWT_MERGE_TEXT)
+    if (in.kind == PGWT_MERGE_DATA || in.kind == PGWT_MERGE_TEXT) {
         in.record.o = ++p->positions[in.record.source];
+        for (size_t j = 0; j < 8; ++j)
+            payload[j] = (unsigned char)((uint64_t)inputs >> (8 * j));
+        for (size_t j = 8; j < sizeof(payload); ++j)
+            payload[j] = (unsigned char)(j * 17 + in.record.source);
+        payload[8] = 0;
+        payload[9] = 255;
+        in.record.payload = payload;
+        in.record.payload_size = 16 + inputs % 17;
+    }
     if (in.kind == PGWT_MERGE_BOUNDARY) in.p = ++p->positions[in.source];
     pgwt_merge_status a = old_pgwt_merge_feed(p->old, &in);
     pgwt_merge_status b = pgwt_merge_feed(p->now, &in);
+    memset(payload, 0xa5, sizeof(payload));
     compare(p, a, b);
     if (in.kind == PGWT_MERGE_REARM && a == PGWT_MERGE_OK) ++rearms;
     return a;
@@ -176,10 +192,9 @@ static void seal(struct pair *p, uint64_t w)
 
 static pgwt_merge_input data(uint64_t pid, uint64_t g, uint64_t t, pgwt_merge_rank rank)
 {
-    static const unsigned char payload[] = {0, 1, 255, 0, 42};
     return (pgwt_merge_input){.kind = PGWT_MERGE_DATA, .record = {
         .source = 2, .pid = pid, .g = g, .t = t, .rank = rank, .identity_known = true,
-        .has_q = true, .q = 1, .payload = payload, .payload_size = sizeof(payload)}};
+        .has_q = true, .q = 1}};
 }
 
 static void rearm(struct pair *p, const pgwt_merge_attachment *attachments, size_t n)
@@ -222,19 +237,13 @@ static void backlog(pgwt_merge_mode mode, unsigned action)
         for (size_t i = 0; i < 3000; ++i) {
             pgwt_merge_input in = data(mode == PGWT_MERGE_Q ? 1 : 4 - source,
                                       1, 100 + i / 4, PGWT_MERGE_TRANS);
-            unsigned char payload[16];
-            for (size_t j = 0; j < sizeof(payload); ++j)
-                payload[j] = (unsigned char)(i * 13 + source * 17 + j);
             in.record.source = source;
             in.record.q = (i / 4) * 16 + (3 - source) * 4 + i % 4 + 1;
-            in.record.payload = payload;
-            in.record.payload_size = sizeof(payload);
             if (action >= 5 && source == 3 && i == 0) {
                 in.record.dependency = PGWT_MERGE_WAIT;
                 in.record.dependency_id = 7;
             }
             feed(p, in);
-            memset(payload, 0xa5, sizeof(payload)); /* caller storage is reused */
         }
     }
     require(pgwt_merge_get_report(p->now).status == PGWT_MERGE_OK, "backlog setup");
@@ -375,14 +384,83 @@ static void lifecycle_backlog(unsigned action)
     free(p);
 }
 
+static uint64_t random_word(uint64_t *state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
+
+static size_t captured_data(const struct sink_state *s)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < s->count; ++i)
+        if (s->attempted[i].out.kind == PGWT_MERGE_OUT_DATA) ++count;
+    return count;
+}
+
+/* Bounded seeded slot-reuse differential: 16 seeds x N/Q x four cycles.
+ * Each cycle publishes 32 of 64 records, refills the 32 freed slots while
+ * the other 32 remain held, then publishes all 64. Source-local timestamps
+ * and q stay monotone; interleaving varies by seed, with equal-time PID order
+ * opposite source order. */
+static void payload_reuse(void)
+{
+    uint64_t began = nanoseconds();
+    size_t before = inputs;
+    const char *saved_case = case_name;
+    case_name = "payload_reuse";
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        for (uint64_t seed = 1; seed <= 16; ++seed) {
+            struct pair *p = calloc(1, sizeof(*p));
+            require(p != NULL, "payload reuse allocation");
+            pgwt_merge_attachment proofs[4];
+            for (size_t s = 0; s < 4; ++s)
+                proofs[s] = (pgwt_merge_attachment){.pid = s + 1, .g = 1,
+                    .identity_proved = true, .sequence_proved = true, .next_q = 1};
+            start(p, (pgwt_merge_mode)mode, 4, proofs, 4);
+            uint64_t state = seed;
+            for (size_t cycle = 0; cycle < 4; ++cycle) {
+                uint64_t base = 100 + cycle * 128;
+                for (unsigned batch = 0; batch < 2; ++batch) {
+                    size_t used[4] = {0}, per_source = batch ? 8 : 16;
+                    for (size_t i = 0; i < 4 * per_source; ++i) {
+                        size_t s = random_word(&state) % 4;
+                        while (used[s] == per_source) s = (s + 1) % 4;
+                        size_t j = used[s]++;
+                        pgwt_merge_input in = data(4 - s, 1,
+                            base + (batch ? 64 : 0) + j * 4, PGWT_MERGE_TRANS);
+                        in.record.source = s;
+                        in.record.q = cycle * 24 + (batch ? 16 : 0) + j + 1;
+                        require(feed(p, in) == PGWT_MERGE_OK, "payload reuse feed");
+                    }
+                    seal(p, base + (batch ? 128 : 32));
+                    require(captured_data(&p->a) == (batch ? 64 : 32),
+                            "partial publication count");
+                    if (!batch && cycle == 0)
+                        printf("queue payload_reuse REACHED mode=%c seed=%" PRIu64
+                               " held=32 refill=32\n", mode ? 'Q' : 'N', seed);
+                }
+            }
+            finish(p);
+            free(p);
+        }
+    }
+    printf("queue payload reuse: seeds=16 modes=2 cycles=4 inputs=%zu time=%.3fs\n",
+           inputs - before, (nanoseconds() - began) / 1e9);
+    case_name = saved_case;
+}
+
 #ifdef PGWT_MERGE_TEST_WORK
 #include "core_merge_work.h"
-static size_t comparisons, moves, published;
+static size_t comparisons, moves, visits, published;
 static bool measuring;
 void pgwt_merge_test_work(enum pgwt_merge_work kind, size_t count)
 {
     if (!measuring) return;
     if (kind == PGWT_WORK_QCOMPARE) comparisons += count;
+    if (kind == PGWT_WORK_QVISIT) visits += count;
     if (kind == PGWT_WORK_QMOVE) {
         moves += count;
         /* Fail before a restored memmove can corrupt the indexed slots. */
@@ -421,19 +499,23 @@ static void queue_cost(size_t held)
     /* At 100 held, the old pass needs >=99 comparisons and the old pop
      * moves 99 envelopes. At 50,000 those costs are >=49,999 each. */
     size_t comparison_limit = held == 100 ? 24 : 64;
+    /* AVL removal depth plus three eligible-prefix passes and a fixed
+     * four-visit allowance per input. A linear removal visits >= held-1. */
+    size_t visit_limit = held == 100 ? 24 : 64;
     size_t max_comparisons = 0, max_moves = 0;
     uint64_t start_time = nanoseconds();
     for (size_t i = 0; i < held; ++i) {
         in.record.o = i + 1;
         in.record.t = 100 + (i * UINT64_C(104729)) % held;
 #ifdef PGWT_MERGE_TEST_WORK
-        comparisons = moves = published = 0;
+        comparisons = moves = visits = published = 0;
         measuring = true;
 #endif
         require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "cost populate");
 #ifdef PGWT_MERGE_TEST_WORK
         require(comparisons <= comparison_limit, "input queue comparisons <= log bound");
         require(moves <= 4, "input queue moves <= 4");
+        require(visits <= 4, "input queue visits <= 4");
         if (comparisons > max_comparisons) max_comparisons = comparisons;
         if (moves > max_moves) max_moves = moves;
 #endif
@@ -443,12 +525,13 @@ static void queue_cost(size_t held)
     start_time = nanoseconds();
     for (size_t i = 0; i < 100; ++i) {
 #ifdef PGWT_MERGE_TEST_WORK
-        comparisons = moves = published = 0;
+        comparisons = moves = visits = published = 0;
 #endif
         require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "cost CHECK");
 #ifdef PGWT_MERGE_TEST_WORK
         require(comparisons <= 4, "held queue comparisons <= 4");
         require(moves == 0, "held queue moves == 0");
+        require(visits <= 4, "held queue visits <= 4");
 #endif
     }
     double check_cost = (double)(nanoseconds() - start_time) / 100;
@@ -459,19 +542,25 @@ static void queue_cost(size_t held)
         in.source = source;
         in.p = source == 2 ? held + 1 : 1;
 #ifdef PGWT_MERGE_TEST_WORK
-        comparisons = moves = published = 0;
+        comparisons = moves = visits = published = 0;
 #endif
         require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "cost single publish");
 #ifdef PGWT_MERGE_TEST_WORK
         require(comparisons <= 64 * (published + 1), "publication queue comparisons <= 64/record");
         require(moves <= 4 * (published + 1), "publication queue moves <= 4/record");
+        require(visits <= visit_limit * published + 4,
+                "publication queue visits <= log bound/record");
 #endif
     }
 #ifdef PGWT_MERGE_TEST_WORK
     printf("queue work held=%zu input comparisons=%zu/%zu moves=%zu/4; "
            "single-publish comparisons=%zu/128 moves=%zu/8 outputs=%zu\n",
            held, max_comparisons, comparison_limit, max_moves, comparisons, moves, published);
-    comparisons = moves = published = 0;
+    require(published == 1, "single published coverage");
+    printf("queue visits held=%zu real=%zu asserted=%zu old=%zu "
+           "bound=%zu*published+4\n", held, visits, visit_limit * published + 4,
+           held - 1, visit_limit);
+    comparisons = moves = visits = published = 0;
 #endif
     start_time = nanoseconds();
     in.w = UINT64_MAX;
@@ -484,12 +573,16 @@ static void queue_cost(size_t held)
 #ifdef PGWT_MERGE_TEST_WORK
     require(comparisons <= 64 * (published + 4), "batch queue comparisons <= 64/record");
     require(moves <= 4 * (published + 4), "batch queue moves <= 4/record");
+    require(visits <= visit_limit * published + 16, "batch queue visits <= log bound/record");
     require(published == held - 1, "published coverage");
+    printf("queue batch visits held=%zu real=%zu asserted=%zu\n",
+           held, visits, visit_limit * published + 16);
     printf("queue batch held=%zu comparisons=%zu/%zu moves=%zu/%zu published=%zu\n",
            held, comparisons, 64 * (published + 4), moves, 4 * (published + 4), published);
     measuring = false;
 #else
     (void)comparison_limit;
+    (void)visit_limit;
     (void)max_comparisons;
     (void)max_moves;
 #endif
@@ -532,7 +625,7 @@ static void dependency_cost(size_t held)
     size_t maximum = 0;
     measuring = true;
     for (unsigned step = 0; step < 105; ++step) {
-        comparisons = moves = published = 0;
+        comparisons = moves = visits = published = 0;
         in.kind = PGWT_MERGE_CHECK;
         if (step == 100) {
             in.kind = PGWT_MERGE_TEXT;
@@ -547,14 +640,16 @@ static void dependency_cost(size_t held)
         require(published == 0, "dependency still holds publication");
         require(comparisons <= 64, "dependency held queue comparisons <= 64");
         require(moves <= 1, "dependency held queue moves <= 1");
+        require(visits <= 4, "dependency held queue visits <= 4");
         if (comparisons > maximum) maximum = comparisons;
     }
-    comparisons = moves = published = 0;
+    comparisons = moves = visits = published = 0;
     in.kind = PGWT_MERGE_TEXT;
     in.record = (pgwt_merge_record){.source = 3, .o = 4, .dependency_id = 2};
     require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "dependency unlock");
     require(published == held / 2 + 1, "dependency published prefix");
     require(comparisons <= 64 * (published + 1), "dependency unlock comparisons <= 64/record");
+    require(visits <= 64 * published + 4, "dependency unlock visits <= 64/record");
     printf("queue dependency held=%zu max_input_comparisons=%zu/64 "
            "unlock_comparisons=%zu/%zu published=%zu\n", held, maximum,
            comparisons, 64 * (published + 1), published);
@@ -596,21 +691,23 @@ static void distinct_dependency_cost(size_t held)
     in.kind = PGWT_MERGE_TEXT;
     in.record = (pgwt_merge_record){.source = 3};
     for (size_t i = 1; i < held; ++i) {
-        comparisons = moves = published = 0;
+        comparisons = moves = visits = published = 0;
         in.record.o = i + 1;
         in.record.dependency_id = i;
         require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "distinct dependency input");
         require(published == 0, "distinct dependency still held");
         require(comparisons <= limit, "distinct dependency queue comparisons <= bound");
         require(moves == 1, "distinct dependency queue moves == 1");
+        require(visits <= 4, "distinct dependency queue visits <= 4");
         if (comparisons > maximum) maximum = comparisons;
     }
-    comparisons = moves = published = 0;
+    comparisons = moves = visits = published = 0;
     in.record.o = held + 1;
     in.record.dependency_id = held;
     require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "distinct dependency unlock");
     require(published == held, "distinct dependency published count");
     require(comparisons <= 64 * (published + 1), "distinct dependency unlock comparisons <= 64/record");
+    require(visits <= 64 * published + 4, "distinct dependency unlock visits <= 64/record");
     measuring = false;
     /* Capacity is still the public distinct-ID capacity, even after release. */
     in.record.o = held + 2;
@@ -630,6 +727,10 @@ static void distinct_dependency_cost(size_t held)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--payload-reuse")) {
+        payload_reuse();
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--cost")) {
         case_name = "work";
         puts("queue work REACHED");
@@ -655,6 +756,7 @@ int main(int argc, char **argv)
     incremental_backlog(true);
     lifecycle_backlog(0);
     lifecycle_backlog(1);
+    payload_reuse();
     printf("queue differential: %zu inputs, %zu scenarios, %zu outputs, "
            "%zu VOIDs, %zu rejections, %zu REARMs; identical to a95a214c\n",
            inputs, scenarios, outputs, voids, rejections, rearms);

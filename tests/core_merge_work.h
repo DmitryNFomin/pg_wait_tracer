@@ -6,6 +6,6 @@
 #endif
 #include <stddef.h>
 enum pgwt_merge_work { PGWT_WORK_LOOKUP, PGWT_WORK_INDEX, PGWT_WORK_STATE, PGWT_WORK_COPY,
-    PGWT_WORK_QCOMPARE, PGWT_WORK_QMOVE };
+    PGWT_WORK_QCOMPARE, PGWT_WORK_QMOVE, PGWT_WORK_QVISIT };
 void pgwt_merge_test_work(enum pgwt_merge_work, size_t);
 #endif

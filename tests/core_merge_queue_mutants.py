@@ -22,7 +22,6 @@ def main():
          "    size_t begin = m->first, prior_count = 0, tail = SIZE_MAX;",
          "input queue comparisons <= log bound"),
         ("whole_queue_move", True, "    size_t slot = m->first;",
-         "    MERGE_WORK(QMOVE, m->count - 1);\n"
          "    memmove(m->queue, m->queue + 1, (m->count - 1) * sizeof(*m->queue));\n"
          "    size_t slot = m->first;", "publication queue moves <= 4/record"),
         ("revalidate_held_prefix", True,
@@ -81,7 +80,30 @@ def main():
                     r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
             raise RuntimeError(f"skipped_suffix: not an intended kill\n{log}")
         print(f"skipped_suffix KILLED in {time.monotonic() - start:.3f}s: {intended[0]}", flush=True)
-    print("core merge queue mutants: 4/4 counted cost, 1/1 tie-break, 1/1 held suffix killed")
+        before = "    m->first = m->queue_nodes[slot].next;\n"
+        after = before + """    if (m->first != SIZE_MAX) {
+        unsigned char *bytes = m->queue[slot].bytes;
+        m->queue[slot].bytes = m->queue[m->first].bytes;
+        m->queue[m->first].bytes = bytes;
+    }
+"""
+        if source.count(before) != 1:
+            raise RuntimeError("payload_swap_on_recycle: anchor must occur exactly once")
+        mutant.write_text(source.replace(before, after, 1))
+        binary = queue.build(work, base, mutant)
+        start = time.monotonic()
+        result = subprocess.run([str(binary), "--payload-reuse"], cwd=checks.ROOT,
+                                text=True, capture_output=True, timeout=20)
+        log = result.stdout + result.stderr
+        intended = re.findall(r"^queue payload_reuse MISMATCH payload bytes at input [0-9]+$", log, re.M)
+        if (result.returncode != 1 or
+                "queue payload_reuse REACHED mode=N seed=1 held=32 refill=32" not in log or
+                len(intended) != 1 or log.count("MISMATCH") != 1 or re.search(
+                    r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
+            raise RuntimeError(f"payload_swap_on_recycle: not an intended kill\n{log}")
+        print(f"payload_swap_on_recycle KILLED in {time.monotonic() - start:.3f}s: {intended[0]}", flush=True)
+    print("core merge queue mutants: 4/4 work assertions, 1/1 tie-break, "
+          "1/1 held suffix, 1/1 payload pairing killed")
 
 
 if __name__ == "__main__":
