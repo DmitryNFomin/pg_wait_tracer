@@ -19,6 +19,8 @@
 #include "exact_probe.h"
 #include "phase_capability.h"
 #include "pgss_resolver.h"
+#include "merge_capture.h"
+#include "percpu_transport.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -29,6 +31,7 @@ struct pg_wait_tracer_bpf;
 struct ring_buffer;
 struct pgwt_control;
 struct pgwt_sampler;
+struct pgwt_percpu_transport;
 
 /* Self-observability counters (D6). Plain uint64 increments on the
  * single-threaded event path — exposed via the control socket
@@ -262,6 +265,14 @@ struct pgwt_daemon {
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rb;          /* lifecycle ringbuf consumer */
     struct ring_buffer *event_rb;    /* trace event ringbuf consumer */
+    /* U1b: B owns the opaque state; calloc keeps the route off by default. */
+    bool exact_perf;                /* --exact-perf, experimental opt-in */
+    struct pgwt_percpu_transport *percpu_transport;
+    struct pgwt_transport_callbacks transport;
+    struct pgwt_merge_capture *merge_capture;
+    pgwt_attach_report_fn attach_report;
+    void *attach_report_ctx;
+    struct pgwt_merge_capture_sink merge_sink;
 
     /* epoll */
     int epoll_fd;
@@ -541,6 +552,14 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
  * called a narrower seam could not have seen it. */
 void pgwt_handle_timer(struct pgwt_daemon *d);
 int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
+/* Process one decoded L payload (FORK/INIT/EXIT or QUERY_TEXT), after wire
+ * validation. Shared by the default ring callback and B; never dispatches
+ * back into transport. Includes exit bookkeeping and the per-record sweep. */
+int pgwt_process_lifecycle_payload(struct pgwt_daemon *d,
+                                  void *data, size_t data_sz);
+/* Single dispatch for every raw event-ring drain (including provider,
+ * escalation and open-snapshot callers). Keeps B out of those files. */
+int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded);
 
 /* Run the main event loop. Returns on signal or duration timeout. */
 int pgwt_daemon_run(struct pgwt_daemon *d);

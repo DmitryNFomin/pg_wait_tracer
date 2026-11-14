@@ -211,9 +211,10 @@ def main():
                  "lifecycle_init_lost_no_opportunity_total",
                  "lifecycle_init_lost_untraced_ns_total"):
         assert f'cjson_add_uint64(root, "{name}",' in (ROOT / "src/control.c").read_text()
-    callback = function(daemon, "handle_lifecycle_event")
+    callback = function(daemon, "pgwt_process_lifecycle_payload")
     functions = "\n".join((function(backend, "pgwt_sweep_bootstrap_backends"),
                             function(daemon, "pgwt_consume_lifecycle_ring"),
+                            function(daemon, "handle_lifecycle_event"),
                             callback, function(backend, "record_init_loss")))
     variants = [("baseline", functions, None)]
     if args.mutants:
