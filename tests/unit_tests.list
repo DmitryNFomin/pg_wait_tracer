@@ -1079,6 +1079,8 @@ test_evidence_codec_redelivery.py
 test_evidence_codec_mutants.py
 test_core_evidence_differential.py
 test_core_merge_contract
+test_core_merge_adapter
+core_merge_adapter_mutants.sh
 test_core_evidence_fuzz.py
 
 # Lifecycle and query-text ring-drop metrics aggregate every CPU. Refs #871.

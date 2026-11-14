@@ -82,6 +82,18 @@ mutations = [
                "        if (false) {\n"
                "            if (check(m, obs) == PGWT_MERGE_EXIT_REQUIRED) return m->report.status;")],
      "REARM accepted while active; needs rows 28/31"),
+    ("M30", [("if (r->fork_seed_proved) {", "if (false && r->fork_seed_proved) {")],
+     "DECISION 25b admission removed"),
+    ("M31", [("out.prior_interval_certified = !planned->fork_seed_admitted || published->first_released;",
+               "out.prior_interval_certified = false;")], "legacy intervals marked unavailable"),
+    ("M32", [("out.prior_interval_certified = !planned->fork_seed_admitted || published->first_released;",
+               "out.prior_interval_certified = true;")], "first direct interval certified"),
+    ("M34", [("                a->next_q = 1;", "                a->next_q = 0;")],
+     "direct admission sequence starts at zero"),
+    ("M35", [("if (r->fork_seed_proved) {", "if (true) {")], "unproved FORK admitted directly"),
+    ("M36", [("            .record = v->record, .epoch = m->report.epoch};",
+               "            .record = v->record, .epoch = m->report.epoch};\n"
+               "        out.record.fork_seed_proved = false;")], "output loses FORK proof"),
 ]
 # New mutants run only their named direct API case. Each match requires a
 # successful build, the REACHED marker and the exact intended assertion.
@@ -123,7 +135,28 @@ guard_mutations = [
     ('M29', [('        if (m->report.status != PGWT_MERGE_OK && r->rank != PGWT_MERGE_TRANS)\n'
               '                a->lifecycle_seen = true;', '')],
      'suspended_lifecycle', 'invalid creation proof VOID before lifecycle DATA'),
+    ('M33', [('        if (transition) {\n'
+              '            published->first_released = true;\n'
+              '            planned->first_released = true;\n'
+              '        }', ''),
+             ('        /* contract §3/§4: rejection is not output; post carries failure C,d. */',
+              '        if (transition) {\n'
+              '            published->first_released = true;\n'
+              '            planned->first_released = true;\n'
+              '        }\n'
+              '        /* contract §3/§4: rejection is not output; post carries failure C,d. */')],
+     'first_publication', 'first interval state changes only after successful publication'),
 ]
+# New fixture mutants must fail the named row, mode and field; a different
+# mismatch, build failure or sanitizer error is not an intended kill.
+fixture_targets = {
+    'M30': (32, 'N', 'output count'),
+    'M31': (1, 'N', 'prior_interval_certified'),
+    'M32': (32, 'N', 'prior_interval_certified'),
+    'M34': (32, 'Q', 'output count'),
+    'M35': (33, 'N', 'output count'),
+    'M36': (32, 'N', 'fork_seed_proved'),
+}
 compiler = shlex.split(os.environ.get("CC", "cc"))
 flags = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-g"]
 flags += shlex.split(os.environ.get("CFLAGS", ""))
@@ -136,7 +169,7 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
     (work / "src/core").mkdir(parents=True)
     (work / "tests").mkdir()
     shutil.copy2(repo / "src/core/pgwt_merge.h", work / "src/core/pgwt_merge.h")
-    def build_and_run(source, test_source=original_test, guard=None, baseline=False):
+    def build_and_run(source, test_source=original_test, guard=None, baseline=False, target=None):
         (work / "tests/test_core_merge_contract.c").write_text(test_source)
         (work / "src/core/merge.c").write_text(source)
         build = subprocess.run(compiler + flags + ["tests/test_core_merge_contract.c", "src/core/merge.c",
@@ -163,6 +196,13 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
                 return "SURVIVED", log
             return "RUNTIME_ERROR", log
         if run.returncode == 1 and re.search(r"^row [0-9]+/[NQ] MISMATCH .+", run.stdout, re.M):
+            if target:
+                row, mode, field = target
+                intended = re.search(rf"^row {row}/{mode} MISMATCH {re.escape(field)} at output .+",
+                                     run.stdout, re.M)
+                if not intended:
+                    return "WRONG_ASSERTION", log
+                return "KILLED", intended.group(0)
             return "KILLED", re.search(r"^row .+ MISMATCH .+", run.stdout, re.M).group(0)
         if run.returncode == 0 and re.search(r"core merge contract: (\d+)/\1 passed", run.stdout):
             return "SURVIVED", log
@@ -186,7 +226,8 @@ with tempfile.TemporaryDirectory(prefix="pgwt-core-merge-mutants-") as tmp:
                     raise ValueError("mutation anchor must occur exactly once")
                 source = source.replace(before, after, 1)
             result, detail = (build_and_run(original, source) if name == "M10"
-                              else build_and_run(source, guard=targets.get(name)))
+                              else build_and_run(source, guard=targets.get(name),
+                                                 target=fixture_targets.get(name)))
         except subprocess.TimeoutExpired:
             result, detail = "TIMEOUT", "build or execution timed out"
         except (OSError, ValueError) as exc:

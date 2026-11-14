@@ -47,6 +47,7 @@ typedef struct {
     uint64_t o, t, pid, g, q;
     pgwt_merge_rank rank;
     bool identity_known, has_q;
+    bool fork_seed_proved;          /* FORK only: qualified DECISION 25b proof */
     pgwt_merge_dependency dependency;
     /* Nonzero stable metadata identity: DATA WAIT requires this ID; TEXT
      * supplies it. Availability survives TEXT publication within an epoch. */
@@ -75,6 +76,7 @@ typedef enum { PGWT_MERGE_OUT_TEXT, PGWT_MERGE_OUT_DATA,
 typedef struct {
     pgwt_merge_output_kind kind;
     pgwt_merge_record record;
+    bool prior_interval_certified;  /* TRANS/MARKER: incoming interval usable */
     uint64_t F, d, epoch;
     pgwt_merge_counters counters;
     pgwt_merge_reason reason;

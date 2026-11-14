@@ -359,6 +359,7 @@ typedef struct {
     pgwt_merge_output out;
     char payload[256];
 } captured;
+static size_t legacy_interval_assertions;
 typedef struct {
     const json_node *root, *row, *reject;
     captured outputs[256];
@@ -486,6 +487,20 @@ static bool equal_output(const fixture *f, const captured *a, const json_node *e
         REQUIRE(a->out.record.pid == number(member(id, "pid")) &&
                 a->out.record.g == number(member(id, "g")), "who");
         REQUIRE(a->out.record.t == number(member(e, "t")), "t");
+        const json_node *seed = member(e, "fork_seed_proved");
+        if (a->out.record.rank == PGWT_MERGE_FORK)
+            REQUIRE(a->out.record.fork_seed_proved == (seed ? boolean(seed) : false),
+                    "fork_seed_proved");
+        const json_node *prior = member(e, "prior_interval_certified");
+        if (a->out.record.rank == PGWT_MERGE_TRANS) {
+            bool legacy = number(member(f->row, "id")) <= 31;
+            if (legacy) ++legacy_interval_assertions;
+            if (!legacy && !prior) {
+                fputs("fixture: missing prior_interval_certified\n", stderr); exit(2);
+            }
+            REQUIRE(a->out.prior_interval_certified == (legacy ? true : boolean(prior)),
+                    "prior_interval_certified");
+        }
     } else if (string_is(kind, "TEXT")) {
         REQUIRE(a->out.kind == PGWT_MERGE_OUT_TEXT, "kind");
         REQUIRE(!strcmp(a->payload, string_value(member(e, "name"))), "name");
@@ -575,6 +590,8 @@ static bool run_case(const json_node *root, const json_node *row, const char *mo
                 in.record.identity_known = true;
                 in.record.t = number(member(n, "t"));
                 in.record.rank = rank_of(member(n, "rec"));
+                if (member(n, "fork_seed_proved"))
+                    in.record.fork_seed_proved = boolean(member(n, "fork_seed_proved"));
                 if (member(n, "requires")) {
                     in.record.dependency = PGWT_MERGE_WAIT;
                     in.record.dependency_id = dependency_id(&f, member(n, "requires"));
@@ -666,6 +683,8 @@ typedef struct {
     pgwt_merge_output outputs[32];
     size_t count;
     bool reject_void;
+    size_t reject_transition_at, transition_attempts;
+    bool rejected_prior_interval;
     bool refresh_post;
     pgwt_merge_output_kind refresh_kind;
     size_t refresh_after, refresh_seen;
@@ -677,6 +696,11 @@ static bool safety_sink(void *context, const pgwt_merge_output *out,
 {
     safety_capture *c = context;
     if (out->kind == PGWT_MERGE_OUT_VOID && c->reject_void) return false;
+    if (out->kind == PGWT_MERGE_OUT_DATA && out->record.rank == PGWT_MERGE_TRANS &&
+        ++c->transition_attempts == c->reject_transition_at) {
+        c->rejected_prior_interval = out->prior_interval_certified;
+        return false;
+    }
     if (c->count >= 32) return false;
     c->outputs[c->count++] = *out;
     if (c->refresh_post && out->kind == c->refresh_kind &&
@@ -1037,12 +1061,13 @@ static const char *const guard_names[] = {
     "dependency_lost", "older_epochs", "counter_before_batch",
     "counter_after_data", "counter_after_frontier", "sequence_reuse",
     "sequence_missing", "unqualified_source", "rearm_fresh_proofs",
-    "fork_requires_init", "fork_twice", "suspended_lifecycle"
+    "fork_requires_init", "fork_twice", "suspended_lifecycle", "first_publication"
 };
 
 enum {
     G_DEPENDENCY, G_EPOCHS, G_COUNTER_BEFORE, G_COUNTER_DATA, G_COUNTER_FRONTIER,
-    G_REUSE, G_SEQUENCE, G_UNQUALIFIED, G_FRESH, G_INIT, G_FORK, G_SUSPENDED
+    G_REUSE, G_SEQUENCE, G_UNQUALIFIED, G_FRESH, G_INIT, G_FORK, G_SUSPENDED,
+    G_FIRST_PUBLICATION
 };
 
 static int guard_case(size_t which)
@@ -1062,6 +1087,7 @@ static int guard_case(size_t which)
     /* Readable changed and unreadable vectors exercise both branches at each
      * counter checkpoint. DATA checks cover a failure after either record. */
     unsigned variants = counter_case ? (which == G_COUNTER_DATA ? 4 : 2) : 1;
+    if (which == G_FIRST_PUBLICATION) variants = 6;
     for (unsigned variant = 0; variant < variants; ++variant) {
         pgwt_merge *m = NULL;
         safety_capture c = {0};
@@ -1077,8 +1103,10 @@ static int guard_case(size_t which)
             .attachments = &a, .attachment_count = 1, .observation = obs,
             .last_observed = obs.counters, .sink = safety_sink, .sink_context = &c};
         if (which == G_REUSE || which == G_SEQUENCE) config.mode = PGWT_MERGE_Q;
+        if (which == G_FIRST_PUBLICATION) config.mode = variant % 2 ? PGWT_MERGE_Q : PGWT_MERGE_N;
         if (which == G_UNQUALIFIED) sources[1].qualified = false;
-        if (which == G_INIT || which == G_FORK || which == G_SUSPENDED)
+        if (which == G_INIT || which == G_FORK || which == G_SUSPENDED ||
+            which == G_FIRST_PUBLICATION)
             config.attachment_count = 0;
         pgwt_merge_status status;
         m = pgwt_merge_create(&config, &status);
@@ -1092,6 +1120,58 @@ static int guard_case(size_t which)
             .attachments = &a, .attachment_count = config.attachment_count,
             .attachment_proofs_fresh = true, .identity_repaired = true};
         switch (which) {
+        case G_FIRST_PUBLICATION: {
+            /* 25c: a rejected first record leaves the next publication first.
+             * A successful first record stays first across a later failure,
+             * including failure of its post-publication counter checkpoint. */
+            bool first_succeeded = variant >= 2;
+            data.record.source = 3;
+            data.record.rank = PGWT_MERGE_FORK;
+            data.record.fork_seed_proved = true;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            data.record.source = 2;
+            data.record.rank = PGWT_MERGE_TRANS;
+            data.record.fork_seed_proved = false;
+            data.record.t = 12;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            data.record.t = 14;
+            data.record.q = 2;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            if (variant < 4) c.reject_transition_at = first_succeeded ? 2 : 1;
+            else {
+                c.refresh_post = true;
+                c.refresh_kind = PGWT_MERGE_OUT_DATA;
+                c.refresh_after = 2; /* FORK, then successful first TRANS */
+                c.refreshed = obs;
+                c.refreshed.counters.value[11] = 1;
+            }
+            status = safety_seal(m, positions, 15, obs);
+            size_t prefix = first_succeeded ? 2 : 1;
+            SETUP(status == PGWT_MERGE_SUSPENDED && c.count == prefix + 1 &&
+                  c.outputs[prefix].kind == PGWT_MERGE_OUT_VOID &&
+                  !pgwt_merge_get_report(m).has_frontier);
+            bool marking_ok = (!first_succeeded || !c.outputs[1].prior_interval_certified) &&
+                (variant >= 4 || c.rejected_prior_interval == first_succeeded);
+            c.refresh_post = false;
+            c.reject_transition_at = 0;
+            obs.counters = c.outputs[prefix].counters;
+            a.next_q = first_succeeded ? 2 : 1;
+            rearm.observation = obs;
+            rearm.attachment_count = 1;
+            SETUP(safety_feed(m, positions, rearm) == PGWT_MERGE_OK);
+            size_t before = c.count;
+            data.observation = obs;
+            data.record.t = 16;
+            data.record.q = a.next_q;
+            SETUP(safety_feed(m, positions, data) == PGWT_MERGE_OK);
+            status = safety_seal(m, positions, 17, obs);
+            EXPECT(marking_ok && status == PGWT_MERGE_OK && c.count == before + 2 &&
+                   c.outputs[before].kind == PGWT_MERGE_OUT_DATA &&
+                   c.outputs[before].prior_interval_certified == first_succeeded &&
+                   c.outputs[before + 1].kind == PGWT_MERGE_OUT_FRONTIER,
+                   "first interval state changes only after successful publication");
+            break;
+        }
         case G_DEPENDENCY:
             /* §3: validate the COMPLETE eligible batch before output; a lost
              * dependency causes VOID. §4 fixes the reason and detection d. */
@@ -1294,6 +1374,10 @@ int main(int argc, char **argv)
     json_document *d = read_document(path, error, sizeof(error));
     if (!d && argc <= path_arg) d = read_document("../contracts/merge-v1/examples.json", error, sizeof(error));
     if (!d) { fprintf(stderr, "fixture: %s\n", error); return 2; }
+    if (number(member(d->root, "notation_version")) != 2) {
+        fputs("fixture: expected notation_version 2\n", stderr);
+        free_document(d); return 2;
+    }
     const json_node *rows = member(d->root, "rows");
     size_t row_count = list_length(rows);
     if (!rows || rows->kind != J_ARRAY || !row_count || row_count > SIZE_MAX / 2) {
@@ -1345,6 +1429,7 @@ int main(int argc, char **argv)
             complete = false;
         }
     printf("core merge contract: %zu/%zu passed\n", passed + guard_passed, total + guard_passed);
+    printf("rows 1-31 prior_interval_certified=true assertions: %zu\n", legacy_interval_assertions);
     free(cases);
     free_document(d);
     return complete && total == passed ? 0 : 1;
