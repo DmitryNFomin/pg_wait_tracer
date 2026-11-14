@@ -118,6 +118,10 @@ def assert_clean_pg(row):
     assert row['init_records'] == 0, 'zero INIT records on L under exact_perf_mode'
     assert row['init_stored'] > 0, 'at least one cohort pid has INIT stored'
     assert row['attached'] > 0 and row['trace'] > 0 and row['failures'] == 0 and row['lost'] == 0, row
+    # A backend that exits before or during instrumentation is an exit race:
+    # counted (attach_exit_races) and reported, never a failure. An attach
+    # error on a backend that was still live is one, and the probe names it.
+    assert row['attach_failures'] == 0, ('attach failed on a live backend', row['attach_failures'])
     # A discard is an attempt withdrawn by design with nothing lost; it is
     # counted apart from failures (transport_discards) and reported.
     assert all(cell['attempted'] == cell['delivered'] + cell['discarded'] and cell['failed'] == 0
@@ -380,7 +384,14 @@ def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY, extra=())
             print('RUN ' + ' '.join(command), flush=True)
             workload = checked(command)
             print(workload, flush=True)
-            assert proc.poll() is None, log.read_text()
+            if proc.poll() is not None:
+                # The probe ends its loop on its first PROBE-FAIL. Show why:
+                # its own lines (not libbpf's per-attach warnings) and the
+                # per-destination summary it printed on the way out.
+                own = [line for line in log.read_text().splitlines() if not line.startswith('libbpf: ')]
+                raise AssertionError('the probe exited during the workload, exit='
+                                     f'{proc.returncode}\n' + '\n'.join(own[-80:]) + '\n' +
+                                     (proc.stdout.read() or '')[-6000:])
             # Held backends stay connected until the probe has stopped, so
             # each one's stored INIT and title are there to be observed.
             proc.stdin.write('STOP\n')
@@ -393,7 +404,9 @@ def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY, extra=())
             missing = sorted({pid for _, pid in held} - stored)
             assert not missing, ('held backends without an observed stored INIT', missing, sorted(stored))
             print(f"ARM binary={binary.parent.name} churn={int(churn)} spin_ns={spin} ok={row['ok']} "
-                  f"forks={row['forks']} attached={row['attached']} held={row['held']} "
+                  f"forks={row['forks']} attached={row['attached']} "
+                  f"attach_exit_races={row['attach_exit_races']} attach_failures={row['attach_failures']} "
+                  f"held={row['held']} "
                   f"init_stored={row['init_stored']} init_records_on_L={row['init_records']} "
                   f"init_reserve_failures={row['init_reserve_failures']} trace={row['trace']} text={row['text']} "
                   f"attempted={row['attempted']} delivered={sum(c['delivered'] for c in row['cells'])} "

@@ -138,8 +138,17 @@ def main():
             ('', 'CONFIG_PREEMPT_NONE=y', 'none')):
         assert preemption_mode(dynamic, config) == expected, (dynamic, config)
     clean = dict(init_records=0, init_stored=1, attached=1, trace=1, failures=0, lost=0,
+                 attach_exit_races=7, attach_failures=0,
                  cells=[dict(attempted=3, delivered=3, failed=0, discarded=0)])
     assert_clean_pg(clean)
+    # Exit races are reported, not failures; an attach failure on a live
+    # backend is.
+    try:
+        assert_clean_pg({**clean, 'attach_failures': 1})
+    except AssertionError as error:
+        assert error.args[0][0] == 'attach failed on a live backend', error
+    else:
+        raise AssertionError('live assertion accepted an attach failure on a live backend')
     # A counted discard is accepted; an uncounted hole or a failure is not.
     assert_clean_pg({**clean, 'cells': [dict(attempted=4, delivered=3, failed=0, discarded=1)]})
     for cell in (dict(attempted=4, delivered=3, failed=0, discarded=0),

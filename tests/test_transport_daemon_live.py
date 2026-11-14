@@ -42,6 +42,11 @@ TEST PREMISES, stated so nobody reads this as certification:
     such backend is VOID(counter_change, lifecycle_init_drop). That is the
     attachment race, not the transport, and this test does not hide it: run
     --churn-hold-ms 0 to see it.
+This test attaches nothing per pid itself: the daemon does, and counts a
+backend that exits during its attach apart from a failure on a live one
+(wp_attach_exit_race_total, wp_attach_failures_total). Both are printed with
+each arm. Neither is hidden: a backend the daemon never attached is an INIT
+loss, which is a VOID, which fails the arm.
 The 100 ms budget is NOT asserted: held age and event-to-release age are
 printed. A round completed on a non-empty pass is required; none is REFUSED
 (exit 78), never PASS. All scratch lives in a TemporaryDirectory.
@@ -218,6 +223,7 @@ def run_arm(binary, pm, db, churn, seconds, rate, directory, uncertified, hold_m
             'stderr': text, 'wall': wall, 'cpu': cpu, 'tps': float(tps.group(1)) if tps else 0.0,
             'init_lost': metrics['lifecycle_init_lost_total'],
             'attach_failures': metrics['wp_attach_failures_total'],
+            'attach_exit_races': metrics['wp_attach_exit_race_total'],
             'premise': 'TEST PREMISE (PGWT_TEST_EXACT_ATTACH_PREMISE=1)' in text}
 
 
@@ -239,7 +245,8 @@ def report(label, row):
           f"seal_violation={stats.get('seal_violation')} sequence_gap={stats.get('sequence_gap')} "
           f"perf_lost={stats.get('perf_lost')} uncovered={stats.get('uncovered')} "
           f"skipped={stats.get('skipped')} terminal_discards={stats.get('terminal_discards')} "
-          f"init_lost={row['init_lost']} attach_failures={row['attach_failures']}", flush=True)
+          f"init_lost={row['init_lost']} attach_failures={row['attach_failures']} "
+          f"attach_exit_races={row['attach_exit_races']}", flush=True)
     for name in ('CPU', 'E', 'L'):
         cell = cells.get(name, {})
         print(f"ARM {label} dest={name} attempted={cell.get('attempted')} delivered={cell.get('delivered')} "
@@ -336,9 +343,8 @@ def main():
                 if options.only and (options.only == 'churn') != churn:
                     continue
                 for run in range(1, options.runs + 1):
-                    label = (f"kernel={kernel} pg={major} load={'-C' if churn else '-c16'}"
-                             f"{f'(hold {hold} ms)' if churn and hold else ''} "
-                             f"rate={rate or 'unthrottled'} run={run}")
+                    label = (f"kernel={kernel} pg={major} load={'-C' if churn else '-c16'} "
+                             f"hold_ms={hold if churn else 0} rate={rate or 'unthrottled'} run={run}")
                     row = run_arm(TRACER, pm, db, churn, options.seconds, rate, directory, uncertified,
                                   hold if churn else 0)
                     report(label, row)

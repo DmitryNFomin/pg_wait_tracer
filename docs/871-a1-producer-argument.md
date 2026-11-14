@@ -749,6 +749,26 @@ the reader.
   a second) was `VOID(unknown_evidence)`. A FRONTIER says nothing about an
   uncovered backend.
 
+- **The standalone probe under `pgbench -C`.** A box-check of 85102df2 on
+  Ubuntu 6.8 failed the producers' live test in its `-C` arm: the probe had
+  exited. Read in its log (`boxcheck-a1g-ubuntu.log`): 16 `attempt sequence
+  gap/reorder` and 35 `L record outside its own FORK/EXIT positions`, among
+  10,309 libbpf "failed to create uprobe ... No such process" lines against
+  10 backends with a stored INIT. The uprobe errors were not what ended it:
+  the probe ignored every attach error, of any kind. It ended because any
+  `PROBE-FAIL` ends its loop, and the failures were lost records on L. Read
+  in its source: it opened a watchpoint and attached two per-pid uprobes for
+  every FORK **inside the lifecycle ring's consume callback**, so under churn
+  the reader stayed away from the 64 KiB ring for milliseconds per
+  connection and reservations were refused. Changed: FORK consumption only
+  registers the backend; the main loop instruments it between drains. Every
+  attach error is classified by errno and liveness: ESRCH, or a task that is
+  gone, a zombie or exiting, is an exit race, counted once per backend and
+  printed (`attach_exit_races`); any other error on a live backend is
+  printed with its errno and fails the probe (`attach_failures`), where
+  before it was silently ignored. The cause above is read from the log and
+  the source; the box runs that follow test it.
+
 ### What is still unproven, and what was found
 
 - The kernel premises 1, 3 and 5 above are as open as before. The cut adds no

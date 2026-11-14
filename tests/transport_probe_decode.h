@@ -4,6 +4,7 @@
 #ifndef PGWT_TRANSPORT_PROBE_DECODE_H
 #define PGWT_TRANSPORT_PROBE_DECODE_H
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include "../src/pgwt_transport_wire.h"
 /* A request: `issued` is read before the helper is woken and `stamp` after
@@ -41,6 +42,32 @@ static inline int probe_spin_evidence(__u32 cpu, __u64 started, __u64 ended,
         }
     }
     return 0;
+}
+/* Per-pid instrumentation under connection churn. A backend can exit before
+ * or during any attach step; that is an exit race, counted and reported, and
+ * it must neither end the probe nor be mistaken for an attach failure.
+ *
+ * Liveness from /proc/<pid>/stat text: a task that is gone (no text), a
+ * zombie or dead state, or one already exiting (PF_EXITING, flags bit 0x4:
+ * the kernel refuses a perf event on it) is not live. The command name can
+ * contain spaces and parentheses, so fields are read after the LAST ')'. */
+static inline int probe_stat_live(const char *stat)
+{
+    if (!stat) return 0;
+    const char *end = strrchr(stat, ')');
+    if (!end) return 0;
+    char state = 0; unsigned long flags = 0; int field[5];
+    if (sscanf(end + 1, " %c %d %d %d %d %d %lu", &state, &field[0], &field[1],
+               &field[2], &field[3], &field[4], &flags) != 7) return 0;
+    return state != 'Z' && state != 'X' && state != 'x' && !(flags & 0x4UL);
+}
+/* 1: exit race. 0: a real failure on a live backend, which must fail the
+ * probe. ESRCH (3) is the kernel itself reporting that the task is gone or
+ * exiting. Any other error is the race only if the task is no longer live;
+ * errno alone never excuses a failure on a live task. */
+static inline int probe_attach_is_exit_race(int error, int live)
+{
+    return error == 3 /* ESRCH */ || !live;
 }
 static inline size_t probe_perf_wire_size(const void *data, size_t raw_size)
 {

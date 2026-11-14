@@ -60,6 +60,20 @@ static int portable(void)
     request.stamp=199;
     REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 1);
     puts("falsifier evidence: PASS (wake inside the spin, same CPU, a boundary of that round or later after it; every missing piece refuses)");
+    /* Per-pid attach under churn: errno and liveness decide. */
+    REQUIRE(probe_stat_live("4242 (postgres) S 100 4242 4242 0 -1 4194560 1 2") == 1);
+    REQUIRE(probe_stat_live("4242 (postgres: a (b) c) R 100 4242 4242 0 -1 4194304 1 2") == 1);
+    REQUIRE(probe_stat_live("4242 (postgres) Z 100 4242 4242 0 -1 4228364 1 2") == 0);  /* zombie */
+    REQUIRE(probe_stat_live("4242 (postgres) X 100 4242 4242 0 -1 4194304 1 2") == 0);
+    REQUIRE(probe_stat_live("4242 (postgres) S 100 4242 4242 0 -1 4194564 1 2") == 0);  /* PF_EXITING */
+    REQUIRE(probe_stat_live(NULL) == 0 && probe_stat_live("") == 0 && probe_stat_live("4242 (postgres) S") == 0);
+    REQUIRE(probe_attach_is_exit_race(3 /* ESRCH */, 1) == 1);   /* the kernel says the task is gone */
+    REQUIRE(probe_attach_is_exit_race(3, 0) == 1);
+    REQUIRE(probe_attach_is_exit_race(13 /* EACCES */, 0) == 1);  /* another error, task gone */
+    REQUIRE(probe_attach_is_exit_race(13, 1) == 0);               /* a real failure on a live task */
+    REQUIRE(probe_attach_is_exit_race(22 /* EINVAL */, 1) == 0);
+    REQUIRE(probe_attach_is_exit_race(28 /* ENOSPC: no free debug register */, 1) == 0);
+    puts("per-pid attach verdict: PASS (ESRCH or a task that is gone, a zombie or exiting is an exit race; any other error on a live task fails)");
     u64 attempts[3] = {0};
     REQUIRE(pgwt_producer_attempt(&attempts[0]) == 1);
     /* Failed publication consumes the first attempt, another dest is separate. */
