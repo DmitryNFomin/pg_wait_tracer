@@ -96,6 +96,8 @@ step "core merge frozen-fixture mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_mutants.sh
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_index.py
 run env CFLAGS="$core_cflags" python3 -B tests/core_merge_index_mutants.py
+run env CFLAGS="$core_cflags" python3 -B tests/test_core_merge_queue.py
+run env CFLAGS="$core_cflags" python3 -B tests/core_merge_queue_mutants.py
 
 step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh

@@ -1099,3 +1099,5 @@ test_counter_vector
 test_writer_failure
 test_counter_failures.py
 test_counter_vector_portable.py
+test_core_merge_queue.py
+core_merge_queue_mutants.py
