@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Fixture bytes -> real server -> frozen independent metrics, with no skips.
+"""Fixture bytes -> real server -> frozen independent metrics.
 
 Default: portable build and all 64 scenarios, both block sizes, strict parsing,
-shifted clocks, UINT64_MAX serializer, v4 and real Chromium panel. --mutants
+shifted clocks, UINT64_MAX serializer, v4 and, when installed, real Chromium.
+The unit tier reports missing browser modules; --require-browser makes their
+absence fatal in the dedicated browser gates. --mutants
 builds each broken variant separately and requires its intended assertion red.
 Generated sources, binaries, trace bytes and browser artifacts stay in /tmp.
 """
 import argparse
 import copy
+import importlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 
 from server_build import server_sources
@@ -273,7 +277,9 @@ def gallery_fixtures(build, tmp, data):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mutants', action='store_true')
-    parser.add_argument('--no-browser', action='store_true', help='route-only diagnostic run; not acceptance')
+    browser_mode = parser.add_mutually_exclusive_group()
+    browser_mode.add_argument('--no-browser', action='store_true', help='route-only diagnostic run; not acceptance')
+    browser_mode.add_argument('--require-browser', action='store_true', help='browser gate: missing dependencies fail')
     args = parser.parse_args()
     data, expected = cases()
     with tempfile.TemporaryDirectory(prefix='pgwt-pilot-route-') as work:
@@ -281,12 +287,95 @@ def main():
         build = Build(tmp)
         if args.mutants:
             mutants(build, tmp, data, expected)
+            browser_split(tmp)
         else:
             startup_refusals(build, tmp, data, expected)
             baseline(build, tmp, data, expected)
             gallery_fixtures(build, tmp, data)
             serializer_identity(build, tmp)
-            if not args.no_browser: browser(build, tmp, data, expected)
+            if args.no_browser:
+                print('browser arm NOT RUN: --no-browser diagnostic', flush=True)
+            elif browser_available(args.require_browser):
+                browser(build, tmp, data, expected)
+
+
+def browser_available(required):
+    # Probe only the two optional imports. Browser/runtime/assertion failures
+    # happen outside this handler and always fail, as in the other UI suites.
+    for module in ('websockets', 'playwright.sync_api'):
+        try:
+            importlib.import_module(module)
+        except ImportError as exc:
+            # An installed dependency with a broken transitive import is a
+            # failure, not evidence that the optional dependency is absent.
+            if exc.name not in (module, module.split('.')[0]):
+                raise
+            if required:
+                raise
+            print(f'browser arm NOT RUN: missing {module.split(".")[0]}', flush=True)
+            return False
+    return True
+
+
+def browser_split(tmp):
+    """Exercise the real unit/browser invocations, including a skip mutant."""
+    script = ROOT / 'tests/test_pilot_route.py'
+    route_markers = ('startup v5 only: info and pilot_wait_metrics PASS',
+                     'block_records=1: 50 compared, 2 ambiguous, 12 refused, 0 skipped',
+                     'block_records=4096: 50 compared, 2 ambiguous, 12 refused, 0 skipped',
+                     'gallery pilot_complete: mock fixture equals real route PASS',
+                     'C serializer UINT64_MAX identity: PASS')
+    browser_markers = tuple(f'browser {i:02}: wire digits, null/reasons, legacy refusal and leave PASS'
+                            for i in (1, 25, 5, 30))
+
+    def invoke(args, env=None):
+        return subprocess.run([sys.executable, '-B', *map(str, args)], cwd=ROOT / 'tests',
+                              env=env, capture_output=True, text=True, timeout=300)
+
+    def require_browser_output(result):
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert all(marker in result.stdout for marker in browser_markers), 'browser arm did not run'
+        assert 'browser arm NOT RUN' not in result.stdout, result.stdout
+
+    for module in ('websockets', 'playwright'):
+        stub = tmp / ('missing-' + module)
+        stub.mkdir()
+        (stub / (module + '.py')).write_text(
+            f'raise ImportError("deliberately unavailable", name="{module}")\n')
+        env = {**os.environ, 'PYTHONPATH': str(stub) + os.pathsep + os.environ.get('PYTHONPATH', '')}
+        result = invoke([script], env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert all(marker in result.stdout for marker in route_markers), result.stdout
+        assert result.stdout.count(f'browser arm NOT RUN: missing {module}') == 1, result.stdout
+        assert not any(marker in result.stdout for marker in browser_markers), result.stdout
+        required = invoke([script, '--require-browser'], env)
+        assert required.returncode != 0 and 'deliberately unavailable' in required.stderr, required
+        print(f'browser split missing {module}: unit route PASS; NOT RUN reported; required gate RED', flush=True)
+
+    original = script.read_text()
+    old = '                browser(build, tmp, data, expected)\n'
+    assert original.count(old) == 1
+    changed = original.replace(old, '                print("MUTANT_REACHED:unconditional_browser_skip", flush=True)\n')
+    compile(changed, str(script), 'exec')
+    # Execute the modified script outside the tree with the original __file__
+    # so the test still reads the real, unmodified fixtures and source files.
+    mutant = tmp / 'browser-skip.py'
+    mutant.write_text('import sys\n' +
+                      f'sys.path.insert(0, {str(script.parent)!r})\n' +
+                      f'exec(compile({changed!r}, {str(script)!r}, "exec"), '
+                      f'{{"__file__": {str(script)!r}, "__name__": "__main__"}})\n')
+    result = invoke([mutant, '--require-browser'])
+    assert result.returncode == 0 and 'MUTANT_REACHED:unconditional_browser_skip' in result.stdout, result
+    try:
+        require_browser_output(result)
+    except AssertionError as exc:
+        assert str(exc) == 'browser arm did not run', exc
+        print('mutant unconditional_browser_skip: BUILT; REACHED; RED browser arm did not run', flush=True)
+    else:
+        raise AssertionError('unconditional_browser_skip SURVIVED')
+
+    require_browser_output(invoke([script, '--require-browser']))
+    print('browser split dependencies present: required browser 01,25,05,30 PASS', flush=True)
 
 
 
