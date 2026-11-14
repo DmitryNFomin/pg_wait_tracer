@@ -400,6 +400,19 @@ spin under 1 ms, missing stimulus, or a verifier rejection of the test object
 is exit 78 / REFUSED, never PASS. No sleepable helper or grace period may
 substitute for this section.
 
+With the usual 1 MiB perf buffer per CPU this arm passed on EL8 4.18 and
+failed on Ubuntu 6.8 with
+`PERF_RECORD_LOST` on every CPU: 148,731 wakes in 5 s there against 36,903 to
+50,745 in eight EL8 runs, about 17,300 to 17,800 records delivered per CPU
+(one full buffer) and 60,626 lost. On 6.8 this loader drains slowly under connection
+churn; it attached 264 of 8,837 backends in the clean `-C` arm. The likely
+reason, not measured, is that its main thread stays in the lifecycle-ring
+consume loop while forks keep arriving. The falsifier arm therefore uses a
+16 MiB buffer per CPU (262,144 boundary records; the busiest CPU produced
+41,781 in that failed arm), which the arm cannot fill even if the main thread
+never drains. The cadence is unchanged, so on EL8 the only difference from
+the measured runs is the larger buffer.
+
 Build on the box with the normal project and test recipes, then run:
 
 ```sh

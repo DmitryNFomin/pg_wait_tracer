@@ -362,6 +362,9 @@ static void *probe_requester_loop(void *arg)
                 pthread_mutex_unlock(&p->request_lock);
             }
         }
+        /* Dense on purpose: a spin lasts 8 ms or more and many challenges
+         * must fall inside it. The boundaries this produces are why the
+         * falsifier arm has a large perf buffer (see transport_probe). */
         usleep(100);
     }
     return NULL;
@@ -704,7 +707,13 @@ static int transport_probe(int argc, char **argv)
     }
     struct pgwt_exact_config config={.generation=1,.admitting=1}; u32 zero=0;
     if (bpf_map_update_elem(bpf_map__fd(p.skel->maps.exact_config_map), &zero, &config,BPF_ANY)) goto cleanup;
-    p.perf=perf_buffer__new(bpf_map__fd(p.skel->maps.perf_events), 256, probe_sample, probe_lost, &p, NULL);
+    /* The falsifier arm gets 16 MiB per CPU (262,144 boundary records). On
+     * Ubuntu 6.8 this thread drains slowly under connection churn, and with
+     * the usual 1 MiB the helpers' boundaries were lost (PERF_RECORD_LOST;
+     * one CPU produced 41,781 in the arm). 16 MiB is several times what the
+     * challenges can produce in the whole arm even with no drain at all. */
+    p.perf=perf_buffer__new(bpf_map__fd(p.skel->maps.perf_events), p.spinning ? 4096 : 256,
+        probe_sample, probe_lost, &p, NULL);
     if (libbpf_get_error(p.perf)) { p.perf=NULL; goto cleanup; }
     p.rings=ring_buffer__new(bpf_map__fd(p.skel->maps.event_ringbuf), probe_e, &p, NULL);
     if (!p.perf || !p.rings || ring_buffer__add(p.rings,bpf_map__fd(p.skel->maps.lifecycle_rb),probe_l,&p)) goto cleanup;
