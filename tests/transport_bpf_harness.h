@@ -202,6 +202,7 @@ static void tests(void)
         ((struct pgwt_wire_lifecycle *)records[0].bytes)->hdr.cookie == saved.hdr.cookie);
     reset(); allocator=~(u64)0; on_fork(&fork);
     CHECK("cookie exhaustion counted", !outputs && !attempts[2] && map_failures[PGWT_BPF_FAIL_FORK_STATE_UPDATE]==1);
+    reset(); allocator = 8; on_fork(&fork); timestamp_order();
     reset(); on_fork(&fork); state.wp_live=1; on_watchpoint(NULL);
     struct pgwt_wire_trace first_data=*(struct pgwt_wire_trace *)records[1].bytes;
     on_fork(&fork); state.wp_live=1; on_watchpoint(NULL);
@@ -294,6 +295,9 @@ static void tests(void)
         reset(); text_result=-1;
         if (pg13) on_executor_start(&q); else on_report_query_id(&q);
         CHECK("text discarded read failure", !outputs && discards==1 && attempts[2]==1 && failures[2]==1 && sites[pg13?8:7]==1);
+        reset(); text_result=1;
+        if (pg13) on_executor_start(&q); else on_report_query_id(&q);
+        CHECK("text discarded when empty", !outputs && discards==1 && attempts[2]==1 && failures[2]==1 && sites[pg13?8:7]==0);
     }
     reset(); test_fail_spin_ns = 1000000; on_fork(&fork);
     CHECK("falsifier counted after measured spin", spin.ended-spin.started >= 1000000 && spin.completed >= spin.ended && failures[2] == 1 && attempts[2] == 1 && !outputs);
