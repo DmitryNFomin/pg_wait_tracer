@@ -1501,7 +1501,6 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             d->event_writer = NULL;
             goto fail;
         }
-        d->evidence_capture = pgwt_evidence_capture_init(d->trace_dir, d->pg_major_version);
         if (d->event_writer && getenv("PGWT_TEST_WRITER_FAIL")) {
             d->event_writer->test_fail_push = true;
             fprintf(stderr, "WARN: PGWT_TEST_WRITER_FAIL (TEST ONLY)\n");
@@ -1825,6 +1824,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
 
     if (!d->quiet)
         pgwt_print_header(d);
+    /* Set up the optional writer only after every fatal initialisation step.
+     * Failed daemon startup must never publish an empty evidence capture.
+     * Call even without -T so an explicit opt-in explains why it is off. */
+    d->evidence_capture = pgwt_evidence_capture_init(d->trace_dir, d->pg_major_version);
     return 0;
 
 fail:

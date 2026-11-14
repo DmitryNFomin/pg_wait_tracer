@@ -86,12 +86,12 @@ def metric_refusal(response, expected):
     assert storage["replay_stop"] is None and storage["capture_ambiguous"] is False, response
 
 
-def v4_readable(directory):
+def v4_readable(directory, pid):
     path = directory / "current.trace"
     header = path.read_bytes()[:6]
     assert header[:4] == b"PGWT" and int.from_bytes(header[4:6], "little") == 4, path
     with ServerHarness(str(directory)) as server:
-        response = server.query("top_events", timeout=10)
+        response = server.query("top_events", filters={"pid": pid}, timeout=10)
         assert "error" not in response and response.get("rows"), response
         assert any("PgSleep" in row.get("name", "") for row in response["rows"]), response
     print("same-run v4 header/reader/PgSleep: PASS", flush=True)
@@ -102,13 +102,16 @@ def run_arm(pm_pid, unknown_pid, label):
     with tempfile.TemporaryDirectory(prefix="pgwt-evidence-live-") as temporary:
         base = Path(temporary)
         directory = base / "trace"  # The legacy writer must create it first.
-        read_directory = directory
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("PGWT_EVIDENCE_CAPTURE", "PGWT_TEST_"))}
         if label != "optout":
             env["PGWT_EVIDENCE_CAPTURE"] = "1"
         if label == "tiny":
             env["PGWT_EVIDENCE_CAPTURE_MAX_BYTES"] = "1"
+        if label == "unwritable":
+            # Root cannot create arbitrary files in procfs. Only evidence uses
+            # this path; never rename or redirect the live v4 directory/meta.
+            env["PGWT_EVIDENCE_CAPTURE_DIR"] = "/proc/self"
         log = base / "daemon.stderr"
         command = [str(TRACER), "--mode", "full", "--pid", str(pm_pid),
                    "-T", str(directory), "-i", "1", "--duration", str(duration), "-q"]
@@ -119,22 +122,13 @@ def run_arm(pm_pid, unknown_pid, label):
                 wait_for(daemon, lambda: (directory / "pgwt.sock").exists(), 45,
                          "capture live control socket not ready")
                 pid, from_ns, to_ns = sleeping_backend(label, daemon, env)
-                if label == "unwritable":
-                    # Root bypasses chmod(0555). Redirect the publication path
-                    # to a real unwritable procfs directory instead. Existing
-                    # v4 descriptors still point to the captured file below.
-                    read_directory = base / "preserved-v4"
-                    directory.rename(read_directory)
-                    directory.symlink_to("/proc/self", target_is_directory=True)
                 daemon.wait(timeout=duration + 15)
                 assert daemon.returncode == 0, (daemon.returncode, log.read_text())
             finally:
                 stop(daemon)
-                if directory.is_symlink():
-                    directory.unlink()
         text = log.read_text()
-        evidence = sorted(read_directory.glob("evidence-*.trace"))
-        assert not list(read_directory.glob(".evidence-*")), "partial temporary capture leaked"
+        evidence = sorted(directory.glob("evidence-*.trace"))
+        assert not list(directory.glob(".evidence-*")), "partial temporary capture leaked"
         if label == "optin":
             assert "EVIDENCE CAPTURE REFUSED" not in text, text
             assert len(evidence) == 1, (evidence, text)
@@ -145,7 +139,7 @@ def run_arm(pm_pid, unknown_pid, label):
             assert int(report["fork"]) <= from_ns < to_ns <= int(report["exit"]), report
             print("capture live decoded: " + inspected.strip(), flush=True)
             query = {"event": "PgSleep", "from": str(from_ns), "to": str(to_ns)}
-            with ServerHarness(str(read_directory)) as server:
+            with ServerHarness(str(directory)) as server:
                 for target, expected in (
                     ({"capture": report["capture"], "pid": pid, "fork": report["fork"]},
                      "coverage_incomplete"),
@@ -160,10 +154,10 @@ def run_arm(pm_pid, unknown_pid, label):
             if label == "optout":
                 assert "EVIDENCE CAPTURE REFUSED" not in text, text
             else:
-                reason = "size cap reached" if label == "tiny" else "trace directory unwritable"
+                reason = "size cap reached" if label == "tiny" else "evidence output directory unwritable"
                 assert "EVIDENCE CAPTURE REFUSED: " + reason in text, text
                 print("capture live explicit refusal: " + reason, flush=True)
-        v4_readable(read_directory)
+        v4_readable(directory, pid)
         print(f"capture live {label}: PASS", flush=True)
 
 

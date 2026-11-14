@@ -3,7 +3,7 @@
 set -eu
 root=${1:-$(cd "$(dirname "$0")/.." && pwd)}
 status=0
-grep -nE 'PGWT_EVIDENCE_(ATTACH_OK|FRONTIER|END)([^[:alnum:]_]|$)' \
+grep -nE 'PGWT_EVIDENCE_(ATTACH_OK|FRONTIER|END|TRANS)([^[:alnum:]_]|$)|\.kind[[:space:]]*=[[:space:]]*[0-9]' \
     "$root/src/evidence_capture.c" "$root/src/daemon.c" && status=1 || {
         result=$?
         if [ "$result" -ne 1 ]; then exit "$result"; fi
