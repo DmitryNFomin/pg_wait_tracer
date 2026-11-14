@@ -7,6 +7,7 @@
 #include "event_writer.h"
 #include "map_reader.h"
 #include "capture_counters.h"
+#include "evidence_capture.h"
 #include "output.h"
 #include "perf_event.h"
 #include "provider_coop.h"
@@ -208,7 +209,7 @@ static int process_lifecycle_event(void *ctx, void *data, size_t data_sz)
     struct pgwt_daemon *d = ctx;
     struct pgwt_lifecycle_event *ev = data;
 
-    (void)data_sz;
+    pgwt_evidence_capture_observe(d->evidence_capture, data, data_sz);
 
     d->counters.lifecycle_events_total++;
 
@@ -1500,6 +1501,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             d->event_writer = NULL;
             goto fail;
         }
+        d->evidence_capture = pgwt_evidence_capture_init(d->trace_dir, d->pg_major_version);
         if (d->event_writer && getenv("PGWT_TEST_WRITER_FAIL")) {
             d->event_writer->test_fail_push = true;
             fprintf(stderr, "WARN: PGWT_TEST_WRITER_FAIL (TEST ONLY)\n");
@@ -2141,6 +2143,8 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
         free(d->event_writer);
         d->event_writer = NULL;
     }
+    if (d->evidence_capture)
+        pgwt_evidence_capture_close(&d->evidence_capture, pgwt_daemon_counter_vector(d));
 
     pgwt_ring_free(&d->ring);
     pgwt_close_all_backends(&d->backends);

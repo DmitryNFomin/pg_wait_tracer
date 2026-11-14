@@ -19,6 +19,7 @@ LIBBPF_INC ?=
 LIBBPF_LIB ?= -lbpf
 
 TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
+            test_evidence_capture \
             test_trace_v2 test_sampler test_sample_weight bench_sample_weight test_anomaly test_escalation_budget \
             test_wp_attr \
             test_trace_perms \
@@ -1236,3 +1237,6 @@ test_writer_failure: test_writer_failure.c $(BUILD)/event_writer.o
 .PHONY: pilot-route
 pilot-route:
 	python3 -B test_pilot_route.py
+
+test_evidence_capture: test_evidence_capture.c ../src/evidence_capture.c ../src/evidence_capture.h ../src/counter_vector.h ../src/core/evidence_codec.c ../src/core/evidence_codec.h ../src/core/evidence_replay.c ../src/core/evidence_replay.h ../src/core/wait_metrics.c ../src/core/pgwt_core.h
+	$(CC) $(CFLAGS) -I../src -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
