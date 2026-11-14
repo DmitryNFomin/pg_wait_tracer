@@ -10,6 +10,7 @@ CALLS = "open,openat,pread64,close,process_vm_readv"
 HEADER = re.compile(r"^\s*(\d+\.\d+)\s+\([^)]*\):\s*(?:(\d+)\s+)?(.*)$")
 CALL = re.compile(r"\b(open|openat|pread64|close|process_vm_readv)\((.*)\)\s*(.*)$")
 MEM = re.compile(r"/proc/(?:\d+|self)/mem\b")
+SUPPORTED_MAJORS = (13, 17, 18)
 
 
 def parse_trace(text, start_ms, end_ms, initial_fds=None):
@@ -88,7 +89,9 @@ def parse_trace(text, start_ms, end_ms, initial_fds=None):
 
 
 def assess(counts, major, population, ticks, read_failures, idle_samples):
-    assert major in (13, 17, 18) and population >= 504 and ticks >= 200
+    if major not in SUPPORTED_MAJORS:
+        raise ValueError(f"PG{major} is outside the status-batch qualification matrix")
+    assert population >= 504 and ticks >= 200
     assert read_failures >= 0 and idle_samples >= 0
     # One wait-word batch, at most two torn-row retries and one gate recheck.
     ranges = 4 if major == 13 else 3

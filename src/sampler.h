@@ -201,6 +201,7 @@ struct pgwt_sampler {
      * deflate sample weight vs wall time). */
     uint64_t sample_period_ns;
     uint64_t last_tick_ns;        /* previous tick timestamp (0 = first) */
+    bool debug_sampled_attr;      /* environment is read once at start */
 
     /* Scratch buffers sized for MAX_BACKENDS, allocated once. */
     uint32_t     *read_vals;     /* MAX_BACKENDS — wait_event_info per target */

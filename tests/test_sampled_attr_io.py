@@ -117,9 +117,99 @@ def live_setup_cases():
     print("private cluster: PG13/17/18 default-100 runner, own 540 config, cleanup/environment restore PASS")
 
 
+def late_promotion_setup_case():
+    """Run the real arm with only libpq/process/SQL boundaries replaced."""
+    import test_sampler_batch_live as live
+    events, children = [], []
+    cohort = mock.Mock()
+    cohort.open.side_effect = lambda *args: events.append("idle")
+    cohort.pids.return_value = {2000, 2001, 2002, 2003}
+
+    class Child:
+        returncode = None
+        def poll(self):
+            return self.returncode
+        def send_signal(self, sig):
+            self.returncode = 0
+        def wait(self, timeout):
+            return self.returncode
+        def kill(self):
+            raise AssertionError("arm failed to stop child")
+
+    def popen(command, **kwargs):
+        child = Child()
+        children.append(child)
+        if command[0] == "pgbench":
+            assert events == ["idle"]
+            events.append("workload")
+            script = Path(command[command.index("-f") + 1]).read_text()
+            assert "\\if :shape" in script and "\\sleep 20 ms" in script
+            assert "SELECT pg_sleep(0.02), 42" in script
+        else:
+            assert events == ["idle", "workload"]
+            events.append("daemon")
+            assert kwargs["env"]["PGWT_TEST_PGBS_VALIDATION_FAIL"] == "1"
+            trace = Path(command[command.index("-T") + 1])
+            (trace / "pgwt.sock").touch()
+            kwargs["stderr"].write("forced validation failure (test hook)\n"
+                                   "bounded uprobe shadow validation completed\n" +
+                "".join(f"SAMPLED-ATTR-IDLE: pid={pid} databaseid=1 userid=1\n"
+                        for pid in cohort.pids.return_value))
+            kwargs["stderr"].flush()
+        return child
+
+    with tempfile.TemporaryDirectory(prefix="pgwt866-promotion-unit-") as tmp, \
+         mock.patch.object(live, "IdleConnections", return_value=cohort), \
+         mock.patch.object(live.subprocess, "Popen", side_effect=popen), \
+         mock.patch.object(live, "psql", return_value="4"), \
+         mock.patch.object(live, "metrics", return_value={"pgbackend_layout_validation": "validated"}):
+        live.run_late_promotion_arm(Path("/candidate"), 42, Path(tmp))
+    assert all(child.returncode == 0 for child in children) and len(children) == 2
+    cohort.close.assert_called_once()
+    print("late-promotion arm: sessions/workload precede daemon, validation hook, per-pid proof and cleanup PASS")
+
+
+def unsupported_version_cases():
+    """Exercise the runner's actual exclusion branch, including require-live.
+    Direct invocation also exits before opening a cluster or needing libpq.
+    """
+    import test_sampler_batch_live as live
+    from sampler_batch_perf import assess
+    runner = (ROOT / "tests/run_all.sh").read_text()
+    start = runner.index('        if [[ "$name" == "test_sampler_batch_live" && "$PG_VERSION" =~')
+    end = runner.index('        fi', start) + len('        fi')
+    guard = runner[start:end]
+    for major in (13, 14, 15, 16, 17, 18):
+        body = ('exclude_test() { echo "EXCLUDED: $1 $2"; }; REQUIRE_LIVE=1; '
+                f'PG_VERSION={major}; for name in test_sampler_batch_live test_other; do\n' +
+                guard + '\necho "RUN: $name"; done')
+        result = run(["bash", "-c", body])
+        assert result.returncode == 0, result.stderr
+        assert ("EXCLUDED: test_sampler_batch_live" in result.stdout) == (14 <= major <= 16)
+        assert "RUN: test_other" in result.stdout
+        if major in (14, 15, 16):
+            with mock.patch.object(live.sys, "argv", ["test_sampler_batch_live.py", "--pid", "99"]), \
+                 mock.patch.object(live.sys, "platform", "linux"), \
+                 mock.patch.object(live.os, "geteuid", return_value=0), \
+                 mock.patch.object(live.os, "readlink", return_value="/runner/bin/postgres"), \
+                 mock.patch.object(live.subprocess, "check_output", return_value=f"postgres (PostgreSQL) {major}.6"), \
+                 mock.patch.object(live, "private_cluster", side_effect=AssertionError("unsupported cluster started")), \
+                 mock.patch.object(live, "IdleConnections", side_effect=AssertionError("unsupported libpq loaded")):
+                live.main()
+            try:
+                assess({}, major, 504, 200, 0, 1)
+            except ValueError as error:
+                assert "qualification matrix" in str(error)
+            else:
+                raise AssertionError("unsupported version was qualified")
+    print("PG14-16: real runner branch EXCLUDED under --require-live; direct test exits before cluster/libpq")
+
+
 def main():
     perf_gate_cases()
     live_setup_cases()
+    late_promotion_setup_case()
+    unsupported_version_cases()
     cc = shlex.split(os.environ.get("CC", "cc"))
     flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
              f"-I{ROOT / 'src'}"] + shlex.split(os.environ.get("CFLAGS", ""))
@@ -130,25 +220,45 @@ def main():
     backend = (ROOT / "src/backend.c").read_text()
     sampler = (ROOT / "src/sampler.c").read_text()
     lifecycle = "\n".join(function(backend, name) for name in
-                          ("alloc_backend", "enroll_sampled_reader", "pgwt_handle_fork"))
+                          ("alloc_backend", "pgwt_sampler_enroll_backend", "pgwt_scan_existing_backends", "pgwt_handle_fork", "pgwt_handle_init"))
     policy = "\n".join(function(sampler, name) for name in
-                       ("resolve_sampled_attr", "note_idle_attr_sample"))
-    # The scan, direct INIT, and fork paths must all call the tested enrollment
-    # helper. Runtime coverage below drives the actual fork during escalation.
+                       ("resolve_sampled_attr", "finish_sampled_attr", "note_idle_attr_sample"))
+    # Compile the real registry paths and the actual target-building loop.
+    # Hardware, directory enumeration, maps and stat are injected by the C harness.
     for name in ("pgwt_scan_existing_backends", "pgwt_handle_init", "pgwt_handle_fork"):
-        assert "enroll_sampled_reader(d, be);" in function(backend, name), name
+        assert "pgwt_sampler_enroll_backend(be, now_ns());" in function(backend, name), name
     poll = function(sampler, "pgwt_sampler_poll")
     assert "resolve_sampled_attr(d, be, tick_ts);" in poll
+    assert "finish_sampled_attr(be, attr_rows[n].rc);" in poll
     assert "note_idle_attr_sample(d, &targets[i], tick_enabled[i] && attr_valid[i]," in poll
+    assert "getenv" not in function(sampler, "note_idle_attr_sample")
+    assert sampler.count('getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW")') == 1
+    target_loop = poll[poll.index("    int n = 0;"):poll.index("    int target_count = n;")]
+    registry = """
+static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
+{
+    const bool tick_source_enabled = pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
+    struct pgwt_sample_target sample_targets[MAX_BACKENDS];
+    struct pgwt_pgbs_batch_target attr_rows[MAX_BACKENDS];
+    uint8_t tick_enabled[MAX_BACKENDS];
+    struct pgwt_backend *backend_rows[MAX_BACKENDS];
+""" + target_loop.replace("targets[", "sample_targets[") + """
+    (void)tick_enabled; (void)backend_rows; (void)attr_errno; (void)attr_no_context;
+    memcpy(targets, attr_rows, (size_t)n * sizeof(*targets));
+    return n;
+}
+"""
     assert 'cjson_add_uint64(root, "sampled_attr_tick_idle_samples_total",' in (ROOT / "src/control.c").read_text()
     with tempfile.TemporaryDirectory(prefix="pgwt-sampled-io-") as directory:
         tmp = Path(directory)
 
-        def build(label, text, enrollment=lifecycle, resolution=policy):
+        def build(label, text, enrollment=lifecycle, resolution=policy, sampler_source=sampler, registry_source=registry):
             implementation = tmp / f"{label}.c"
             implementation.write_text(text)
             injected = tmp / f"{label}-lifecycle.h"
-            injected.write_text(enrollment + "\n" + resolution)
+            injected.write_text(enrollment + "\n" + resolution + registry_source)
+            portable_sampler = tmp / f"{label}-sampler.c"
+            portable_sampler.write_text(sampler_source)
             binary = tmp / label
             result = run(cc + flags + [
                 "-DPGWT_SERVER",
@@ -156,7 +266,7 @@ def main():
                 f'-DPGWT_LIFECYCLE_SOURCE="{injected}"',
                 str(ROOT / "tests/test_sampled_attr_io.c"),
                 str(ROOT / "src/spawn.c"), str(ROOT / "src/backend_init.c"),
-                str(ROOT / "src/sampler.c"), str(ROOT / "src/anomaly.c"),
+                str(portable_sampler), str(ROOT / "src/anomaly.c"),
                 str(ROOT / "src/idle_rule.c"), "-o", str(binary)])
             assert result.returncode == 0, result.stdout + result.stderr
             return binary
@@ -164,6 +274,12 @@ def main():
         result = run([str(build("baseline", source))])
         assert result.returncode == 0, result.stdout + result.stderr
         print(result.stdout, end="")
+        mutant_cases = {"no_iov_max_chunking": "budget", "drop_cached_address_return": "resolve",
+                        "drop_pid_zero_guard": "identity", "drop_existing_entry_identity_check": "identity",
+                        "restore_exit_during_exact_duplicate": "identity", "drop_lazy_enrollment": "registry",
+                        "drop_retry_deadline": "pending", "backoff_during_startup": "retry",
+                        "gate_lazy_on_layout": "registry", "drop_deferred_cache_reset": "identity",
+                        "reset_before_exact_drain": "identity"}
         mutations = [
             ("drop_pid_compare",
              "snapshot->procpid == (uint32_t)expected_pid &&",
@@ -206,27 +322,59 @@ def main():
         for label, before, after, assertion in mutations:
             assert source.count(before) == 1, (label, "mutation anchor changed")
             binary = build(label, source.replace(before, after))
-            result = run([str(binary)])
+            result = run([str(binary), mutant_cases.get(label, "faults")])
             assert result.returncode == 1, (label, result.returncode, result.stdout, result.stderr)
             assert f"FAIL: {assertion}" in result.stderr, (label, result.stderr)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
-        for label, original, before, after, assertion in [
-            ("restore_mode_guard", lifecycle,
-             "if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout) &&",
-             "if (!pgwt_mode_uses_watchpoints(d) && pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout) &&",
-             "escalation-born backend is attributed after de-escalation"),
+        other_mutations = [
+            ("drop_pid_zero_guard", lifecycle,
+             "if (be->sampled_reader.pid == 0) {", "if (true) {",
+             "pid-zero guard preserves identity and cached row across sampled ticks"),
+            ("drop_cached_address_return", source,
+             "if (reader->status_addr) return 0;", "/* always resolve */",
+             "cached-address return prevents re-resolution on every tick"),
+            ("drop_existing_entry_identity_check", lifecycle,
+             "if (existing->sampled_reader.pid != 0 &&",
+             "if (false && existing->sampled_reader.pid != 0 &&",
+             "existing-entry identity check replaces stale enrollment"),
+            ("restore_exit_during_exact_duplicate", lifecycle,
+             "if (d->mode == PGWT_MODE_FULL || d->escalation.active) {", "if (false) {",
+             "exact duplicate fork preserves new child state-map seed"),
+            ("drop_lazy_enrollment", registry,
+             "if (pgwt_sampler_enroll_backend(be, tick_ts) != 0)\n            continue;",
+             "/* no lazy enrollment */",
+             "first sampled tick enrolls every registry path"),
             ("backoff_during_startup", policy,
              "bool early = be->pgbs_resolve_fast_until_ns &&",
              "bool early = false && be->pgbs_resolve_fast_until_ns &&",
-             "late status row resolves on the next tick during first second"),
-        ]:
-            assert original.count(before) == 1, label
+             "startup attempts follow 100 ms cadence"),
+            ("gate_lazy_on_layout", registry,
+             "if (pgwt_sampler_enroll_backend(be, tick_ts) != 0)\n            continue;",
+             "if (tick_source_enabled && pgwt_sampler_enroll_backend(be, tick_ts) != 0)\n            continue;",
+             "enrollment precedes sampling even without a tick attribution source"),
+            ("drop_deferred_cache_reset", registry,
+             "if (be->sampled_cache_stale) {", "if (false && be->sampled_cache_stale) {",
+             "replacement cannot sample predecessor wait slot during exact capture"),
+            ("reset_before_exact_drain", registry,
+             "if (d->mode == PGWT_MODE_FULL || d->escalation.active)",
+             "if (pgwt_mode_uses_watchpoints(d))",
+             "deferred sampled cache invalidation waits through exact drain"),
+            ("drop_retry_deadline", policy,
+             "tick_ts < be->pgbs_resolve_retry_ns)", "false)",
+             "N=500 pending cost is one VM per due backend independent of tick rate"),
+        ]
+        for label, original, before, after, assertion in other_mutations:
+            assert original.count(before) == 1, (label, "mutation anchor changed")
             changed = original.replace(before, after)
-            binary = (build(label, source, enrollment=changed) if original == lifecycle else
-                      build(label, source, resolution=changed))
-            result = run([str(binary)])
+            kwargs = ({"enrollment": changed} if original == lifecycle else
+                      {"registry_source": changed} if original == registry else
+                      {"resolution": changed} if original == policy else
+                      {"sampler_source": changed} if original == sampler else {})
+            binary = build(label, changed if original == source else source, **kwargs)
+            result = run([str(binary), mutant_cases.get(label, "faults")])
             assert result.returncode == 1 and f"FAIL: {assertion}" in result.stderr, (label, result)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
+
 
 
 if __name__ == "__main__":

@@ -34,12 +34,17 @@ struct pgwt_backend {
     uint32_t databaseid;      /* PgBackendStatus context, 0 until observed */
     uint32_t userid;
     struct pgwt_pgbs_reader sampled_reader;
+    bool sampled_cache_stale; /* replacement during exact capture; reset after drain */
     uint64_t pgbs_addr;        /* cached shared PgBackendStatus row (also metadata path) */
     uint64_t pgbs_resolve_retry_ns;
-    uint64_t pgbs_resolve_fast_until_ns; /* every tick for first 1s, until resolved */
+    uint64_t pgbs_resolve_fast_until_ns; /* 100 ms cadence for first 1s */
     uint8_t  pgbs_resolve_attempts;
     struct pgwt_pg13_synthetic_cache *pg13_synthetic_cache;
 };
+
+/* Idempotent, independent of layout and capture tier. Failed identity reads
+ * retry no faster than 100 ms; successful enrollment never rereads stat. */
+int pgwt_sampler_enroll_backend(struct pgwt_backend *be, uint64_t tick_ts);
 
 struct pgwt_backend_table {
     struct pgwt_backend entries[MAX_BACKENDS];

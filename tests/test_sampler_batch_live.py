@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 
-from sampler_batch_perf import CALLS, assess, parse_trace
+from sampler_batch_perf import CALLS, SUPPORTED_MAJORS, assess, parse_trace
 from testutil import find_postmaster
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,6 +215,63 @@ def run_escalation_arm(binary, pm_pid, directory):
                 cohort.close()
 
 
+def run_late_promotion_arm(binary, pm_pid, directory):
+    """Existing sessions are scanned while the layout is degraded. The existing
+    validation-failure hook forces the auth-free warmup to be the promoter.
+    Both varying query ids and active/idle states are present before startup.
+    """
+    trace = directory / "late-promotion"
+    trace.mkdir()
+    script = trace / "vary.sql"
+    script.write_text("\\set shape random(0, 1)\n\\if :shape\n"
+                      "SELECT pg_sleep(0.02);\n\\else\n"
+                      "SELECT pg_sleep(0.02), 42;\n\\endif\n\\sleep 20 ms\n")
+    daemon = load = None
+    cohort = IdleConnections()
+    with (trace / "daemon.stderr").open("w") as err, \
+         (trace / "pgbench.stdout").open("w") as out, \
+         (trace / "pgbench.stderr").open("w") as load_err:
+        try:
+            cohort.open(4, "pgwt866_before_promotion")
+            pids = cohort.pids()
+            assert len(pids) == 4 and all(pid > 0 for pid in pids), pids
+            load = subprocess.Popen(
+                ["pgbench", "-n", "-U", "postgres", "-d", "postgres", "-c", "4", "-j", "4",
+                 "-T", "120", "-f", str(script)], stdout=out, stderr=load_err,
+                env={**os.environ, "PGAPPNAME": "pgwt866_promotion_load"})
+            wait_until(load, lambda: int(psql("SELECT count(*) FROM pg_stat_activity WHERE "
+                            "application_name='pgwt866_promotion_load'")) == 4,
+                       30, "promotion workload must precede daemon startup")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+            env.update(PGWT_TEST_PGBS_VALIDATION_FAIL="1", PGWT_DEBUG_SAMPLED_ATTR_SHADOW="1")
+            daemon = subprocess.Popen(
+                [str(binary), "--pid", str(pm_pid), "--mode", "tiered", "--sample-rate", "10",
+                 "--escalation-budget", "0", "-i", "1", "-q", "-T", str(trace)],
+                stdout=subprocess.DEVNULL, stderr=err, env=env)
+            wait_until(daemon, lambda: (trace / "pgwt.sock").exists(), 90,
+                       "late-promotion control socket not ready")
+            def observed():
+                text = (trace / "daemon.stderr").read_text()
+                return pids <= {int(pid) for pid in re.findall(
+                    r"SAMPLED-ATTR-IDLE: pid=(\d+) databaseid=[1-9]\d* userid=[1-9]\d*", text)}
+            wait_until(daemon, observed, 15, "pre-promotion cohort lacks attributed samples")
+            status = metrics(trace)
+            text = (trace / "daemon.stderr").read_text()
+            assert "forced validation failure (test hook)" in text, text
+            assert "bounded uprobe shadow validation completed" in text, text
+            assert status["pgbackend_layout_validation"] == "validated", status
+            assert load.poll() is None, "promotion workload stopped before verification"
+            print(f"late layout promotion: PASS pre-existing pids={sorted(pids)} attributed", flush=True)
+        finally:
+            try:
+                stop(daemon)
+            finally:
+                try:
+                    stop(load, signal.SIGINT)
+                finally:
+                    cohort.close()
+
+
 def run_arm(binary, pm_pid, major, directory, label, disable_status_batch=False):
     trace = directory / label
     trace.mkdir()
@@ -309,6 +366,11 @@ def main():
     assert not args.require_negative_control or args.master_tracer, "supply --master-tracer"
     source_pid = args.pid or find_postmaster()
     assert source_pid, "no runner postmaster from which to select the PG binary"
+    version = subprocess.check_output([os.readlink(f"/proc/{source_pid}/exe"), "--version"], text=True)
+    major = int(re.search(r"PostgreSQL\)\s+(\d+)", version)[1])
+    if major not in SUPPORTED_MAJORS:
+        print(f"EXCLUDED: PG{major}; status batch needs PostgreSQL 13, 17 or 18")
+        return
     idle = IdleConnections()
     load = None
     # Deliberately not tests/results/: no product/repository artifacts.
@@ -320,7 +382,6 @@ def main():
     evidence_context = (contextlib.nullcontext(str(args.evidence_dir)) if args.evidence_dir else
                         tempfile.TemporaryDirectory(prefix="pgwt866-live-"))
     with evidence_context as tmp, private_cluster(source_pid, args.require_huge_pages) as (pid, major):
-        assert major in (13, 17, 18), major
         huge_pages = psql("SHOW huge_pages")
         print(f"private PG{major} pid={pid} kernel={os.uname().release} "
               f"max_connections=540 huge_pages={huge_pages} N=504 (500 idle + 4 active)", flush=True)
@@ -329,6 +390,15 @@ def main():
         script.write_text("SELECT sum(i) FROM generate_series(1, 10000) AS i;\n")
         try:
             run_escalation_arm(ROOT / "pg_wait_tracer", pid, directory)
+            if major >= 17:
+                run_late_promotion_arm(ROOT / "pg_wait_tracer", pid, directory)
+            else:
+                # The existing hook returns before PG13's activity-buffer
+                # size is discovered. Warmup cannot enable its tick source
+                # with that size unset; the injected registry test covers
+                # late promotion for PG13 without changing validation rules.
+                print("PG13 late promotion: unit-covered; forced validation failure "
+                      "precedes activity-buffer size discovery", flush=True)
             idle.open()
             assert int(psql("SELECT count(*) FROM pg_stat_activity WHERE "
                             "application_name='pgwt866_idle' AND state='idle'")) == 500

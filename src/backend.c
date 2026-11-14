@@ -86,16 +86,22 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-/* Capture lifecycle identity even during a tiered escalation. Sampling resumes
- * using this original start time, never by enrolling a possibly reused pid at
- * the first sampled tick. Duplicate INIT/FORK delivery preserves the proof. */
-static void enroll_sampled_reader(struct pgwt_daemon *d, struct pgwt_backend *be)
+int pgwt_sampler_enroll_backend(struct pgwt_backend *be, uint64_t tick_ts)
 {
-    if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout) &&
-        be->sampled_reader.pid == 0) {
-        pgwt_pgbs_reader_enroll(&be->sampled_reader, be->pid);
-        be->pgbs_resolve_fast_until_ns = now_ns() + UINT64_C(1000000000);
+    if (be->pid <= 0) return -1;
+    if (be->sampled_reader.pid == 0) {
+        if (tick_ts < be->pgbs_resolve_retry_ns) return -1;
+        if (!be->pgbs_resolve_fast_until_ns)
+            be->pgbs_resolve_fast_until_ns = tick_ts + UINT64_C(1000000000);
+        if (pgwt_pgbs_reader_enroll(&be->sampled_reader, be->pid) != 0) {
+            unsigned shift = tick_ts <= be->pgbs_resolve_fast_until_ns ? 0 :
+                (be->pgbs_resolve_attempts < 5 ? be->pgbs_resolve_attempts++ : 5);
+            be->pgbs_resolve_retry_ns = tick_ts + (UINT64_C(100000000) << shift);
+            return -1;
+        }
     }
+    return be->sampled_reader.pid == be->pid &&
+           be->sampled_reader.start_time != 0 ? 0 : -1;
 }
 
 /* Resolve a backend's wait_event_info address using the version-appropriate
@@ -496,7 +502,7 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
         if (!be) continue;
 
         be->wp_addr = ptr;
-        enroll_sampled_reader(d, be);
+        pgwt_sampler_enroll_backend(be, now_ns());
 
         /* Sampled mode: register the backend (address + metadata) but arm
          * NO watchpoint. The sampler reads wp_addr directly each tick. Keep a
@@ -902,8 +908,22 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     if (existing) {
         if (existing->sampled_reader.pid != 0 &&
             !pgwt_pgbs_pid_is_original(child_pid,
-                                       existing->sampled_reader.start_time))
+                                       existing->sampled_reader.start_time)) {
+            if (d->mode == PGWT_MODE_FULL || d->escalation.active) {
+                /* Preserve the exact tier's duplicate-fork behavior and the
+                 * NEW child's fork-seeded BPF state. Only retire the stale
+                 * sampled proof before sampling can resume. */
+                pgwt_pgbs_reader_reset(&existing->sampled_reader);
+                existing->sampled_cache_stale = true;
+                existing->pgbs_addr = 0;
+                existing->pgbs_resolve_retry_ns = 0;
+                existing->pgbs_resolve_fast_until_ns = 0;
+                existing->pgbs_resolve_attempts = 0;
+                pgwt_sampler_enroll_backend(existing, now_ns());
+                return 0;
+            }
             pgwt_handle_exit(d, child_pid);
+        }
         else
             return 0;
     }
@@ -912,7 +932,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
                                             d->pg_major_version == 13);
     if (!be) return -1;
 
-    enroll_sampled_reader(d, be);
+    pgwt_sampler_enroll_backend(be, now_ns());
 
     /* Sampled mode: no bootstrap watchpoint. Register the backend now; the
      * sampler lazily resolves wp_addr once the backend sets the pointer. */
@@ -1045,7 +1065,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
         be = alloc_backend(&d->backends, pid, d->pg_major_version == 13);
         if (!be) return -1;
     }
-    enroll_sampled_reader(d, be);
+    pgwt_sampler_enroll_backend(be, now_ns());
 
     /* Close bootstrap watchpoint if any */
     pgwt_pending_init_remove(&d->backends, be);

@@ -1417,43 +1417,73 @@ int pgwt_pgbs_read_cmd_gate(
     return rc;
 }
 
-/* Enrollment keeps only the lifecycle identity. The only own-pid mem fd is
- * temporary during resolution, never on the steady-state sampler path. */
+/* Identity is committed only after a successful read, so a transient stat
+ * failure remains retryable. Callers preserve an existing enrollment. */
 int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid)
 {
     if (!reader || pid <= 0) { errno = EINVAL; return -1; }
-    memset(reader, 0, sizeof(*reader));
+    uint64_t start_time = 0;
+    if (pgwt_pgbs_pid_start_time(pid, &start_time) != 0 || !start_time)
+        return -1;
+    pgwt_pgbs_reader_reset(reader);
     reader->pid = pid;
-    return pgwt_pgbs_pid_start_time(pid, &reader->start_time);
+    reader->start_time = start_time;
+    return 0;
 }
 
 void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader)
 {
-    if (reader) memset(reader, 0, sizeof(*reader));
+    if (!reader) return;
+    free(reader->target_maps);
+    free(reader->reader_maps);
+    memset(reader, 0, sizeof(*reader));
 }
 
-/* Prove the WHOLE range in each process, not just its first byte. Proofs are
- * cached for this enrollment/reader pair; PostgreSQL's shared allocations do
- * not move or detach during the postmaster's lifetime. */
-static bool shared_range(pid_t pid, uint64_t addr, size_t len)
+struct pgwt_pgbs_mapping { uint64_t lo, hi; };
+
+/* PostgreSQL inherits these shared mappings at fork; they do not move/detach
+ * during the enrollment. Load each maps file once, including the empty set.
+ * Failed setup is retried only on the caller's time cadence. */
+static struct pgwt_pgbs_mapping *read_shared_maps(pid_t pid, size_t *count)
 {
-    if (!addr || !len || addr > UINT64_MAX - len) return false;
     char path[64], line[1024];
     snprintf(path, sizeof(path), "/proc/%d/maps", pid);
     FILE *fp = fopen(path, "r");
-    if (!fp) return false;
-    bool found = false;
-    while (fgets(line, sizeof(line), fp)) {
+    if (!fp) return NULL;
+    struct pgwt_pgbs_mapping *maps = calloc(1, sizeof(*maps));
+    size_t n = 0;
+    while (maps && fgets(line, sizeof(line), fp)) {
         unsigned long long lo, hi;
         char perms[5] = "";
-        if (sscanf(line, "%llx-%llx %4s", &lo, &hi, perms) == 3 &&
-            addr >= lo && addr < hi) {
-            found = perms[0] == 'r' && perms[3] == 's' && len <= hi - addr;
-            break;
-        }
+        if (sscanf(line, "%llx-%llx %4s", &lo, &hi, perms) != 3 ||
+            lo >= hi || perms[0] != 'r' || perms[3] != 's') continue;
+        struct pgwt_pgbs_mapping *more = realloc(maps, (n + 1) * sizeof(*maps));
+        if (!more) { free(maps); maps = NULL; break; }
+        maps = more;
+        maps[n++] = (struct pgwt_pgbs_mapping){lo, hi};
     }
+    if (ferror(fp)) { free(maps); maps = NULL; }
     fclose(fp);
-    return found;
+    if (maps) *count = n;
+    return maps;
+}
+
+/* Prove the WHOLE range in both snapshots. No maps I/O per candidate. */
+static bool shared_range(const struct pgwt_pgbs_mapping *maps, size_t count,
+                           uint64_t addr, size_t len)
+{
+    if (!addr || !len || addr > UINT64_MAX - len) return false;
+    for (size_t i = 0; i < count; i++)
+        if (addr >= maps[i].lo && addr < maps[i].hi && len <= maps[i].hi - addr)
+            return true;
+    return false;
+}
+
+static bool reader_shared_range(const struct pgwt_pgbs_reader *r,
+                                  uint64_t addr, size_t len)
+{
+    return shared_range(r->target_maps, r->target_map_count, addr, len) &&
+           shared_range(r->reader_maps, r->reader_map_count, addr, len);
 }
 
 /* Round one's bounded field-span copy, now an iovec rather than a pread. */
@@ -1481,55 +1511,97 @@ static int batch_span(const struct PgBackendStatusLayout *layout,
         layout->st_changecount.offset <= layout->struct_size - 4 ? 0 : -1;
 }
 
-static uint64_t resolve_entry_fd(pid_t, int, const struct PgBackendStatusLayout *);
+static ssize_t batch_readv(pid_t, struct iovec *, struct iovec *, size_t);
+
+/* PG13 has no exported MyBEEntry. Search at most 512 fixed-stride row hints
+ * per attempt, in ONE own-pid VM call (pid + activity pointer only). Keep the
+ * cursor even after finding a candidate: a coincidental pid in non-row shared
+ * bytes must not trap resolution forever after the coherent batch rejects it.
+ * Neither these pid hints nor the pointer read below accept row identity. */
+static uint64_t reader_pg13_candidate(struct pgwt_pgbs_reader *r,
+    const struct PgBackendStatusLayout *layout, uint64_t *activity_addr)
+{
+    enum { HINTS = 512, SCAN_ROWS = 32769 };
+    uint32_t pids[HINTS], cursors[HINTS];
+    uint64_t activity_ptrs[HINTS], addresses[HINTS];
+    struct iovec local[HINTS * 2], remote[HINTS * 2];
+    size_t n = 0;
+    for (unsigned checked = 0; checked < SCAN_ROWS && n < HINTS; checked++) {
+        uint32_t cursor = r->scan_cursor++;
+        if (r->scan_cursor == SCAN_ROWS) r->scan_cursor = 0;
+        uint64_t distance = (cursor + 1) / 2;
+        uint64_t delta = distance * layout->struct_size;
+        uint64_t base;
+        if (cursor & 1u) {
+            if (delta > layout->status_anchor) continue;
+            base = layout->status_anchor - delta;
+        } else {
+            if (delta > UINT64_MAX - layout->status_anchor) continue;
+            base = layout->status_anchor + delta;
+        }
+        if (!reader_shared_range(r, base, layout->struct_size)) continue;
+        cursors[n] = r->scan_cursor;
+        addresses[n] = base;
+        local[2*n] = (struct iovec){&pids[n], sizeof(pids[n])};
+        remote[2*n] = (struct iovec){(void *)(uintptr_t)(base + layout->st_procpid.offset), 4};
+        local[2*n+1] = (struct iovec){&activity_ptrs[n], sizeof(activity_ptrs[n])};
+        remote[2*n+1] = (struct iovec){(void *)(uintptr_t)(base + layout->st_activity_raw.offset), 8};
+        n++;
+    }
+    if (!n) return 0;
+    ssize_t transferred = batch_readv(r->pid, local, remote, 2*n);
+    size_t complete = transferred > 0 ? (size_t)transferred / 12 : 0;
+    if (complete > n) return 0;
+    size_t text_len = layout->activity_buffer_size;
+    if (text_len > PGWT_PGBS_ACTIVITY_MAX) text_len = PGWT_PGBS_ACTIVITY_MAX;
+    for (size_t i = 0; i < complete; i++) {
+        if (pids[i] == (uint32_t)r->pid &&
+            reader_shared_range(r, activity_ptrs[i], text_len)) {
+            *activity_addr = activity_ptrs[i];
+            r->scan_cursor = cursors[i];
+            return addresses[i];
+        }
+    }
+    return 0;
+}
 
 int pgwt_pgbs_reader_resolve(struct pgwt_pgbs_reader *reader,
     pid_t postmaster_pid, uint64_t my_be_entry_addr,
     const struct PgBackendStatusLayout *layout)
 {
     uint32_t lo, hi;
-    if (!reader || postmaster_pid <= 0 || batch_span(layout, &lo, &hi) != 0)
+    if (!reader || reader->pid <= 0 || !reader->start_time ||
+        postmaster_pid <= 0 || batch_span(layout, &lo, &hi) != 0)
         return -1;
-    reader->status_addr = reader->activity_addr = 0;
-    reader->shared = false;
-    if (!pgwt_pgbs_pid_is_original(reader->pid, reader->start_time)) {
-        errno = ESRCH; return -1;
+    if (reader->shared_reader_pid != postmaster_pid) {
+        free(reader->reader_maps);
+        reader->reader_maps = NULL;
+        reader->reader_map_count = 0;
+        reader->shared_reader_pid = postmaster_pid;
+        reader->status_addr = reader->activity_addr = 0;
+        reader->shared = false;
     }
-    int fd = open_mem(reader->pid);
-    if (fd < 0) return -1;
-    uint64_t base = 0;
-    bool pg13 = pgwt_pgbs_sampled_activity_enabled(layout);
-    if (pg13)
-        base = resolve_entry_fd(reader->pid, fd, layout);
-    else if (my_be_entry_addr)
-        (void)pread_exact(fd, &base, sizeof(base), my_be_entry_addr);
-    struct pgwt_pgbs_snapshot snapshot = {0};
-    uint32_t wanted = PGWT_PGBS_READ_PROCPID | PGWT_PGBS_READ_DATABASEID |
-        PGWT_PGBS_READ_USERID | PGWT_PGBS_READ_STATE |
-        (pg13 ? PGWT_PGBS_READ_ACTIVITY : PGWT_PGBS_READ_QUERY_ID);
-    int rc = -1;
-    if (base && base <= UINT64_MAX - layout->struct_size &&
-        read_snapshot_fd(fd, base, layout, wanted, &snapshot, NULL, 0) == 0 &&
-        snapshot_coherent_identity(layout, &snapshot, reader->pid,
-                                    wanted | PGWT_PGBS_READ_CHANGECOUNT) &&
-        shared_range(reader->pid, base, layout->struct_size) &&
-        shared_range(postmaster_pid, base, layout->struct_size)) {
-        size_t text_len = layout->activity_buffer_size;
-        if (text_len > PGWT_PGBS_ACTIVITY_MAX) text_len = PGWT_PGBS_ACTIVITY_MAX;
-        if ((!pg13 || (shared_range(reader->pid, snapshot.activity_raw, text_len) &&
-                       shared_range(postmaster_pid, snapshot.activity_raw, text_len))) &&
-            pgwt_pgbs_pid_is_original(reader->pid, reader->start_time)) {
-            reader->status_addr = base;
-            reader->activity_addr = snapshot.activity_raw;
-            reader->shared_reader_pid = postmaster_pid;
-            reader->shared = true;
-            rc = 0;
-        }
+    if (reader->status_addr) return 0;
+    if (!reader->target_maps)
+        reader->target_maps = read_shared_maps(reader->pid, &reader->target_map_count);
+    if (!reader->reader_maps)
+        reader->reader_maps = read_shared_maps(postmaster_pid, &reader->reader_map_count);
+    if (!reader->target_maps || !reader->reader_maps) return -1;
+    uint64_t base = 0, activity_addr = 0;
+    if (pgwt_pgbs_sampled_activity_enabled(layout)) {
+        base = reader_pg13_candidate(reader, layout, &activity_addr);
+    } else if (my_be_entry_addr) {
+        struct iovec local = {&base, sizeof(base)};
+        struct iovec remote = {(void *)(uintptr_t)my_be_entry_addr, sizeof(base)};
+        if (batch_readv(reader->pid, &local, &remote, 1) != (ssize_t)sizeof(base))
+            base = 0;
     }
-    int saved = errno;
-    close(fd);
-    errno = rc ? (saved ? saved : EAGAIN) : 0;
-    return rc;
+    if (!reader_shared_range(reader, base, layout->struct_size)) return -1;
+    reader->status_addr = base;
+    reader->activity_addr = activity_addr;
+    reader->shared = true;
+    reader->candidate = true;
+    return 0;
 }
 
 struct batch_row {

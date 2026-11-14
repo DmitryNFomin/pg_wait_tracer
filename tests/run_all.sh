@@ -719,6 +719,13 @@ if [[ $(id -u) -eq 0 ]] && pgrep -x postgres > /dev/null 2>&1; then
             exclude_test "$name" "needs PostgreSQL >= $min_pg, running PG$PG_VERSION"
             continue
         fi
+        # Status batching is qualified on PG13/17/18. Keep the unsupported
+        # PG14-16 cells outside this test's matrix, like the minimum-version
+        # exclusions above; they are not missing required-live coverage.
+        if [[ "$name" == "test_sampler_batch_live" && "$PG_VERSION" =~ ^(14|15|16)$ ]]; then
+            exclude_test "$name" "status batch needs PostgreSQL 13, 17 or 18; running PG$PG_VERSION"
+            continue
+        fi
         if [[ "$name" == "test_capture_smoke_full" ]]; then
             watchpoints=$(probe_watchpoints)
             echo "Watchpoint probe: $watchpoints"

@@ -247,9 +247,11 @@ int pgwt_pgbs_derive_cmd_gate(
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
     struct pgwt_pgbs_cmd_gate *out);
 
-/* Cached row proof, scoped to one registry enrollment. No retained fd.
- * start_time is checked on fork delivery and before/after own-pid resolution;
- * coherent shared rows prove identity, never process liveness. */
+struct pgwt_pgbs_mapping;
+/* Cached candidate/proof, scoped to one registry enrollment. No retained fd.
+ * start_time is captured at enrollment and compared on duplicate FORK delivery.
+ * Only the coherent batch accepts row identity; liveness stays on lifecycle
+ * events. Mapping snapshots are loaded once per enrollment/postmaster pair. */
 struct pgwt_pgbs_reader {
     pid_t pid;
     uint64_t start_time;
@@ -257,7 +259,12 @@ struct pgwt_pgbs_reader {
     uint64_t activity_addr; /* PG13 fixed per-slot BackendActivityBuffer */
     pid_t shared_reader_pid;
     bool shared;
+    bool candidate; /* not yet accepted by the coherent shared batch */
+    struct pgwt_pgbs_mapping *target_maps, *reader_maps;
+    size_t target_map_count, reader_map_count;
+    uint32_t scan_cursor; /* PG13 fixed-stride candidate scan, across attempts */
 };
+/* Readers must be zero-initialized before first enrollment. */
 int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid);
 void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader);
 int pgwt_pgbs_reader_resolve(

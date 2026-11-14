@@ -798,6 +798,7 @@ int pgwt_sampler_start(struct pgwt_daemon *d)
     s->sample_period_ns = 1000000000ULL / (uint64_t)hz;
     s->health.healthy = 1;
     s->qid_batch_supported = -1;
+    s->debug_sampled_attr = getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW") != NULL;
 
     /* qid dump buffers sized to the loaded exact_attr_map capacity.
      * shrunk via PGWT_STATE_MAP_ENTRIES in test builds). */
@@ -996,30 +997,50 @@ static int sampler_live_cmd_gate(void *ctx, int idx,
     return 1;
 }
 
-/* Until first success, try each tick for one second after lifecycle enrollment.
- * A row becoming readable in that window loses at most one sample period.
- * Mature/unreadable targets and invalidated proofs retain the bounded backoff. */
+/* The sampler owns enrollment: no registry entry can reach an attribution read
+ * without this idempotent safeguard, regardless of how/when it was registered.
+ * Attempts are >=100 ms apart for the first second, then 100/200/.../3200 ms.
+ * No catch-up after a stalled tick. Candidate reads do not accept identity;
+ * the shared batch below is the sole row validator. After enrollment/maps
+ * setup, N pending backends add <=N VM syscalls on a due tick, zero between
+ * deadlines (500 at N=500); neither stat nor /proc/pid/mem is read per attempt.
+ * Status/wait batches keep their separate existing bounds. */
 static void resolve_sampled_attr(struct pgwt_daemon *d, struct pgwt_backend *be,
                                  uint64_t tick_ts)
 {
     bool early = be->pgbs_resolve_fast_until_ns &&
         tick_ts <= be->pgbs_resolve_fast_until_ns;
     if (be->sampled_reader.status_addr ||
-        (!early && tick_ts < be->pgbs_resolve_retry_ns))
+        tick_ts < be->pgbs_resolve_retry_ns)
         return;
-    if (pgwt_pgbs_reader_resolve(&be->sampled_reader, d->postmaster_pid,
-            d->my_be_entry_addr, &d->backend_status_layout) == 0) {
+    if (early) {
         be->pgbs_resolve_attempts = 0;
-        be->pgbs_resolve_retry_ns = 0;
-        be->pgbs_resolve_fast_until_ns = 0;
-    } else if (early) {
-        be->pgbs_resolve_attempts = 0;
-        be->pgbs_resolve_retry_ns = 0;
+        be->pgbs_resolve_retry_ns = tick_ts + UINT64_C(100000000);
     } else {
         unsigned shift = be->pgbs_resolve_attempts < 5
             ? be->pgbs_resolve_attempts++ : 5;
         be->pgbs_resolve_retry_ns = tick_ts +
             (UINT64_C(100000000) << shift);
+    }
+    (void)pgwt_pgbs_reader_resolve(&be->sampled_reader, d->postmaster_pid,
+            d->my_be_entry_addr, &d->backend_status_layout);
+}
+
+static void finish_sampled_attr(struct pgwt_backend *be, int rc)
+{
+    if (rc >= 0) {
+        be->sampled_reader.candidate = false;
+        be->pgbs_resolve_fast_until_ns = 0;
+        be->pgbs_resolve_attempts = 0;
+        be->pgbs_resolve_retry_ns = 0;
+    } else if (be->sampled_reader.candidate) {
+        /* A PG13 hint can accidentally match a pid outside the array. Only
+         * the batch can promote it; any initial rejection must continue the
+         * candidate search on the already scheduled cadence. */
+        be->sampled_reader.status_addr = 0;
+        be->sampled_reader.activity_addr = 0;
+        be->sampled_reader.shared = false;
+        be->sampled_reader.candidate = false;
     }
 }
 
@@ -1034,7 +1055,7 @@ static void note_idle_attr_sample(struct pgwt_daemon *d,
         !target->databaseid || !target->userid || !pgwt_is_session_idle_event(we))
         return;
     d->counters.sampled_attr_tick_idle_samples_total++;
-    if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+    if (d->sampler->debug_sampled_attr)
         fprintf(stderr, "SAMPLED-ATTR-IDLE: pid=%d databaseid=%u userid=%u\n",
                 target->pid, target->databaseid, target->userid);
 }
@@ -1093,6 +1114,26 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     for (int i = 0; i < d->backends.count && n < MAX_BACKENDS; i++) {
         struct pgwt_backend *be = &d->backends.entries[i];
         if (!be->is_alive || be->pid <= 0)
+            continue;
+        if (be->sampled_cache_stale) {
+            /* The replacement's fork-seeded BPF state and exact fields must
+             * survive through teardown (admitting clears before active).
+             * Never join its new status row to the predecessor's wait slot. */
+            if (d->mode == PGWT_MODE_FULL || d->escalation.active)
+                continue;
+            be->wp_addr = 0;
+            be->wp_addr_shared = -1;
+            memset(&be->meta, 0, sizeof(be->meta));
+            be->meta_parsed = false;
+            be->databaseid = be->userid = 0;
+            if (be->pg13_synthetic_cache)
+                memset(be->pg13_synthetic_cache, 0, sizeof(*be->pg13_synthetic_cache));
+            be->sampled_cache_stale = false;
+        }
+        /* Registry membership, capture tier and layout promotion order cannot
+         * bypass identity enrollment. Even targets using the degraded source
+         * or lacking a status row pass here before becoming sampled targets. */
+        if (pgwt_sampler_enroll_backend(be, tick_ts) != 0)
             continue;
         /* In sampled mode no bootstrap watchpoint resolves wp_addr, so a
          * freshly-forked backend arrives with wp_addr == 0. Lazily resolve
@@ -1183,6 +1224,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     for (n = 0; n < target_count; n++) {
         struct pgwt_backend *be = backend_rows[n];
         const bool target_tick_enabled = tick_enabled[n];
+        if (target_tick_enabled) finish_sampled_attr(be, attr_rows[n].rc);
         /* A mismatched row has lost its proof. Re-resolution uses the same
          * own-pid exponential backoff as initial enrollment. */
         if (target_tick_enabled && be->pgbs_addr &&
@@ -1297,7 +1339,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                         if (mismatch & PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID)
                             d->counters
                                 .sampled_attr_shadow_query_id_mismatch_total++;
-                        if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+                        if (s->debug_sampled_attr)
                             fprintf(stderr,
                                 "SAMPLED-ATTR-SHADOW-MISMATCH: pid=%d "
                                 "active=%d fields=%s%s "
@@ -1343,7 +1385,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                      * checkpointer, bgwriter, walwriter and the two
                      * launchers), plus any autovacuum worker while it runs,
                      * every tick, by design (#693). */
-                    if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+                    if (s->debug_sampled_attr)
                         fprintf(stderr,
                                 "SAMPLED-ATTR-TICK-NO-CONTEXT: pid=%d\n",
                                 be->pid);
@@ -1351,7 +1393,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                 case PGWT_TICK_ATTR_READ_FAILED:
                     if (!attr_errno)
                         attr_errno = errno ? errno : EAGAIN;
-                    if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+                    if (s->debug_sampled_attr)
                         fprintf(stderr,
                                 "SAMPLED-ATTR-TICK-INVALID: pid=%d error=%s\n",
                                 be->pid, strerror(errno ? errno : EAGAIN));
