@@ -39,7 +39,9 @@ struct pgwt_percpu_transport;
 struct pgwt_counters {
     uint64_t events_total;             /* trace events consumed from event_ringbuf */
     uint64_t lifecycle_events_total;   /* fork/init/exit/query_text events */
-    uint64_t wp_attach_failures_total; /* watchpoint attach failures (incl. bootstrap) */
+    uint64_t wp_attach_failures_total; /* attach/enable failure on live or unknown target;
+                                      * includes bootstrap and validation refusals */
+    uint64_t wp_attach_exit_race_total; /* attach/enable failure with original target gone */
     uint64_t prev_events_total;        /* events_total at previous timer tick */
     double   events_per_sec;           /* recent rate, refreshed each tick */
 
