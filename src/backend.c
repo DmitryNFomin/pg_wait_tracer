@@ -258,6 +258,7 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             .init_ts = prev.init_ts,
             .init_stored = prev.init_stored,
             .init_store_failed = prev.init_store_failed,
+            .cookie = d->exact_perf ? prev.cookie : 0,
             /* S3: exact CPU is accumulated by the sched_switch program into
              * cpu_ns_total/on_cpu_ts. Seed the base at 0 (deltas count from
              * attach); open the on-CPU stretch here iff the backend is running
@@ -1195,9 +1196,14 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
     int seed_fd = bpf_map__fd(d->skel->maps.exact_seed_map);
     uint32_t key = pid;
     started_ns = pgwt_debug_block_begin(d);
-    bpf_map_delete_elem(state_fd, &key);
-    bpf_map_delete_elem(attr_fd, &key);
-    bpf_map_delete_elem(seed_fd, &key);
+    /* Flagged producer retirement is synchronous in on_exit. A delayed
+     * userspace EXIT must not delete state belonging to a reused PID. A2
+     * owns lifetime-bound attachment retirement; no proof is asserted here. */
+    if (!d->exact_perf) {
+        bpf_map_delete_elem(state_fd, &key);
+        bpf_map_delete_elem(attr_fd, &key);
+        bpf_map_delete_elem(seed_fd, &key);
+    }
     pgwt_debug_block_end(d, "backend_state_delete", pid, started_ns);
 
     /* #379: the pid's state_map entry is gone, so pgwt_read_state_map will

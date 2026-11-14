@@ -2,6 +2,7 @@
  * verifier substitute. The Python driver inserts unchanged function bodies. */
 #include "pg_wait_tracer.h"
 #include <stdbool.h>
+#include "bpf/transport_producer.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +32,9 @@ static bool lose_relookup, reserve_fail;
 static int update_error, read_error_at, read_calls, text_result;
 static int submits, discards;
 static u32 test_counter_failure;
+static const u32 exact_perf_mode = 0;
+static const u64 test_fail_spin_ns = 0;
+static int lifetime_allocator, test_spin;
 static u64 my_wait_ptr_addr, debug_query_string_addr;
 static u32 target_postmaster_pid = 1, pgproc_wait_offset, lightweight_mode, skip_query_id;
 static bool test_skip_init_store, test_drop_init_hint;
@@ -90,6 +94,17 @@ static u64 bpf_ktime_get_ns(void) { return 1000; }
 static struct pgwt_exact_config *exact_config(void) { return &config; }
 static bool exact_admission_open(void) { return true; }
 static void count_uprobe_fire(u32 slot) { (void)slot; }
+
+/* These are unreachable in this mode-zero migration harness. The A1 host
+ * harness executes the actual flagged helpers and producer bodies. */
+static u64 transport_attempt(u32 dest) { (void)dest; abort(); }
+static u64 transport_cookie(u32 pid) { (void)pid; abort(); }
+static void transport_header(struct pgwt_wire_hdr *h, u8 k, u16 n, u64 s, u64 c)
+{ (void)h; (void)k; (void)n; (void)s; (void)c; abort(); }
+static void transport_failure(u32 dest) { (void)dest; abort(); }
+static void transport_spin_failure(void) { abort(); }
+static struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u32 pid, u64 c, u32 site)
+{ (void)pid; (void)c; (void)site; abort(); }
 
 /* PRODUCTION_FUNCTIONS */
 

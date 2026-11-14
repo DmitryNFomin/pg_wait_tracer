@@ -107,6 +107,7 @@ struct pgwt_pid_state {
     u64 init_ts;
     u32 init_stored;
     u32 init_store_failed; /* test-only store suppression after bootstrap fired */
+    u64 cookie;         /* fork lifetime; 0 = not allocated by on_fork */
 };
 
 enum pgwt_query_attribution_quality {

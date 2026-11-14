@@ -19,6 +19,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/usdt.bpf.h>
+#include "transport_producer.h"
 
 /* ringbuf submit flags (may not be in all header versions) */
 #ifndef BPF_RB_NO_WAKEUP
@@ -92,10 +93,11 @@ volatile const u32 pg13_qd_plannedstmt_off = 0;  /* offsetof(QueryDesc, planneds
 volatile const u32 pg13_ps_queryid_off = 0;      /* offsetof(PlannedStmt, queryId) */
 volatile const u32 pg13_qd_sourcetext_off = 0;   /* offsetof(QueryDesc, sourceText) */
 
-/* U1b-0 interface declarations only: deliberately unused by every program.
- * Append to rodata so existing constant offsets and instructions stay put. */
+/* Experimental producer protocol; zero preserves all legacy paths. */
 volatile const u32 exact_perf_mode = 0;
 volatile const u32 helper_tgid = 0; /* B's pinned helper process; 0 = absent */
+/* Test only: force one FORK reservation failure, then delay its accounting. */
+volatile const u64 test_fail_spin_ns = 0;
 
 /* ── Maps ─────────────────────────────────────────────────── */
 
@@ -117,6 +119,43 @@ struct {
     __type(key, u32);
     __type(value, struct pgwt_pid_state);
 } state_map SEC(".maps");
+
+/* Transport interface for B. CPU IDs, not a dense CPU count, index perf. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, u32); __type(value, u32);
+} perf_events SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1);
+    __type(key, u32); __type(value, struct pgwt_transport_ctl);
+} transport_ctl SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 3);
+    __type(key, u32); __type(value, u64);
+} transport_attempts SEC(".maps");
+/* Includes discarded publications and boundary failures. Separate from the
+ * existing logical/site counters; never cancels a counted failure on retry. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 3);
+    __type(key, u32); __type(value, u64);
+} transport_failures SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1);
+    __type(key, u32); __type(value, u64);
+} lifetime_allocator SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, MAX_CPUS + 1);
+    __type(key, u32); __type(value, u32); /* helper TID -> pinned CPU */
+} helper_cpus SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 1);
+    __type(key, u32); __type(value, struct pgwt_helper_progress);
+} helper_progress SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 1);
+    __type(key, u32); __type(value, struct pgwt_fail_spin);
+} test_spin SEC(".maps");
 
 /* Stage 3 exact attribution is split by writer ownership. exact_attr_map is
  * BPF-only edge state; exact_seed_map is userspace-only coherent window-start
@@ -283,6 +322,110 @@ static __always_inline bool test_fail_once(u32 slot)
         return false;
     u32 one = 1;
     return bpf_map_update_elem(&test_failure_claims, &slot, &one, BPF_NOEXIST) == 0;
+}
+
+static __always_inline u64 transport_cookie(u32 pid)
+{
+    return pgwt_producer_cookie(bpf_map_lookup_elem(&state_map, &pid));
+}
+static __always_inline u64 transport_attempt(u32 dest)
+{
+    return pgwt_producer_attempt(bpf_map_lookup_elem(&transport_attempts, &dest));
+}
+static __always_inline void transport_header(struct pgwt_wire_hdr *hdr, u8 kind,
+                                             u16 size, u64 seq, u64 cookie)
+{
+    pgwt_producer_header(hdr, kind, size, bpf_get_smp_processor_id(), seq, cookie);
+}
+static __always_inline void transport_failure(u32 dest)
+{
+    u64 *c = bpf_map_lookup_elem(&transport_failures, &dest);
+    if (c) __sync_fetch_and_add(c, 1);
+}
+static __always_inline void transport_trace_failure(u32 dest, u32 site)
+{
+    transport_failure(dest);
+    count_ring_fail(site);
+    u32 zero = 0;
+    u64 *c = bpf_map_lookup_elem(&ringbuf_drops, &zero);
+    if (c) __sync_fetch_and_add(c, 1);
+}
+static __always_inline struct pgwt_wire_trace *transport_reserve_trace(u32 pid, u32 site)
+{
+    u64 seq = transport_attempt(PGWT_WIRE_DEST_E);
+    struct pgwt_wire_trace *ev = bpf_ringbuf_reserve(&event_ringbuf, sizeof(*ev), 0);
+    if (!ev) transport_trace_failure(PGWT_WIRE_DEST_E, site);
+    else transport_header(&ev->hdr, PGWT_WIRE_TRACE, sizeof(ev->payload), seq, transport_cookie(pid));
+    return ev;
+}
+static __always_inline struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u32 pid, u64 cookie, u32 site)
+{
+    u64 seq = transport_attempt(PGWT_WIRE_DEST_L);
+    struct pgwt_wire_lifecycle *ev = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*ev), 0);
+    if (!ev) { transport_failure(PGWT_WIRE_DEST_L); count_ring_fail(site); }
+    else transport_header(&ev->hdr, PGWT_WIRE_LIFECYCLE, sizeof(ev->payload), seq, cookie);
+    return ev;
+}
+/* Bounded test loop is pruned when rodata is zero. If the actual EL8 verifier
+ * refuses it, the falsifier is REFUSED, never silently skipped or passed. */
+static __always_inline void transport_spin_failure(void)
+{
+    u32 zero = 0;
+    struct pgwt_fail_spin *s = bpf_map_lookup_elem(&test_spin, &zero);
+    if (!s || s->started) return;
+    s->started = bpf_ktime_get_ns();
+    for (u32 i = 0; i < 65536; ++i) {
+        s->ended = bpf_ktime_get_ns();
+        if (s->ended - s->started >= test_fail_spin_ns) break;
+    }
+}
+static __always_inline void transport_boundary(void *ctx, u32 dest, u32 round)
+{
+    u64 w = bpf_ktime_get_ns();
+    u64 seq = transport_attempt(dest);
+    if (dest == PGWT_WIRE_DEST_CPU) {
+        struct pgwt_wire_cut cut = {};
+        transport_header(&cut.hdr, PGWT_WIRE_BOUNDARY, sizeof(cut.payload), seq, 0);
+        cut.payload = (struct pgwt_wire_boundary){ .w = w, .round = round, .dest = dest };
+        if (bpf_perf_event_output(ctx, &perf_events, BPF_F_CURRENT_CPU, &cut, sizeof(cut)))
+            transport_failure(dest);
+    } else {
+        struct pgwt_wire_cut *cut;
+        if (dest == PGWT_WIRE_DEST_E)
+            cut = bpf_ringbuf_reserve(&event_ringbuf, sizeof(*cut), 0);
+        else
+            cut = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*cut), 0);
+        if (!cut) { transport_failure(dest); return; }
+        transport_header(&cut->hdr, PGWT_WIRE_BOUNDARY, sizeof(cut->payload), seq, 0);
+        cut->payload = (struct pgwt_wire_boundary){ .w = w, .round = round, .dest = dest };
+        bpf_ringbuf_submit(cut, 0);
+    }
+}
+/* One parked helper per online CPU calls getppid ONLY on demand. Register
+ * TID->CPU before waking. The process leader also publishes requested E/L
+ * candidates; el_request must change for each request (0 means none). */
+SEC("tracepoint/syscalls/sys_enter_getppid")
+int on_transport_helper(void *ctx)
+{
+    if (!exact_perf_mode) return 0;
+    u64 id = bpf_get_current_pid_tgid();
+    if (!helper_tgid || (u32)(id >> 32) != helper_tgid) return 0;
+    u32 tid = (u32)id, cpu = bpf_get_smp_processor_id(), zero = 0;
+    u32 *expected = bpf_map_lookup_elem(&helper_cpus, &tid);
+    if (!pgwt_producer_helper(id, helper_tgid, expected, cpu)) return 0;
+    struct pgwt_transport_ctl *ctl = bpf_map_lookup_elem(&transport_ctl, &zero);
+    if (!ctl) return 0;
+    struct pgwt_transport_ctl control = *ctl;
+    u32 round = control.round, request = control.el_request;
+    if (!round) return 0;
+    struct pgwt_helper_progress *progress = bpf_map_lookup_elem(&helper_progress, &zero);
+    if (tid == helper_tgid && progress && request && progress->el_request != request) {
+        transport_boundary(ctx, PGWT_WIRE_DEST_E, round);
+        transport_boundary(ctx, PGWT_WIRE_DEST_L, round);
+        progress->el_request = request;
+    }
+    transport_boundary(ctx, PGWT_WIRE_DEST_CPU, round);
+    return 0;
 }
 
 /* Emit a trace event to event_ringbuf, counting drops on failure.
@@ -655,7 +798,13 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
                 .query_id = query_id,
                 .cpu_ns = cpu_delta,
             };
-            emit_event(&evt, PGWT_RING_FAIL_WAIT_TRANSITION);
+            if (exact_perf_mode) {
+                struct pgwt_wire_trace wire = { .payload = evt };
+                transport_header(&wire.hdr, PGWT_WIRE_TRACE, sizeof(evt),
+                    transport_attempt(PGWT_WIRE_DEST_CPU), st->cookie);
+                if (bpf_perf_event_output(ctx, &perf_events, BPF_F_CURRENT_CPU, &wire, sizeof(wire)))
+                    transport_trace_failure(PGWT_WIRE_DEST_CPU, PGWT_RING_FAIL_WAIT_TRANSITION);
+            } else emit_event(&evt, PGWT_RING_FAIL_WAIT_TRANSITION);
         }
 
         /* Transition to new state */
@@ -730,6 +879,27 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
         /* PG17+: ptr already points at wait_event_info (offset 0).
          * PG<17: ptr is the backend's PGPROC; add the field offset. */
         u64 wait_addr = ptr + pgproc_wait_offset;
+        if (exact_perf_mode) {
+            struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
+            /* One genuine observation only; a later wake must not replay an
+             * old timestamp after an L boundary. Stored evidence is A2's job. */
+            if (st && st->init_stored) return 0;
+            struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(pid,
+                pgwt_producer_cookie(st), PGWT_RING_FAIL_LIFECYCLE_INIT_HINT);
+            u64 stamp = bpf_ktime_get_ns();
+            if (st) {
+                st->init_wait_addr = wait_addr;
+                st->init_ts = stamp;
+                asm volatile("" ::: "memory");
+                st->init_stored = 1;
+            } else count_map_fail(PGWT_BPF_FAIL_INIT_NO_STATE);
+            if (wire) {
+                wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_INIT,
+                    .pid = pid, .addr = wait_addr, .timestamp = stamp };
+                bpf_ringbuf_submit(wire, 0);
+            }
+            return 0;
+        }
         u64 init_ts = bpf_ktime_get_ns();
         struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
         if (st && test_skip_init_store) {
@@ -785,12 +955,43 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
      * query/activity edges from a fast child can already be generation-tagged
      * while its wait address and watchpoint are still being resolved. */
     struct pgwt_pid_state child_seed = {};
+    if (exact_perf_mode) {
+        u32 zero = 0;
+        child_seed.cookie = pgwt_producer_allocate(bpf_map_lookup_elem(&lifetime_allocator, &zero));
+        if (!child_seed.cookie) {
+            count_map_fail(PGWT_BPF_FAIL_FORK_STATE_UPDATE);
+            return 0;
+        }
+    }
     /* A reused pid must not inherit an old INIT publication flag. The child
      * has not run yet, so replacing a stale entry cannot erase its edges. */
     if (test_fail_once(PGWT_BPF_FAIL_FORK_STATE_UPDATE) ||
         bpf_map_update_elem(&state_map, &child, &child_seed, BPF_ANY))
         count_map_fail(PGWT_BPF_FAIL_FORK_STATE_UPDATE);
 
+    if (exact_perf_mode) {
+        /* FORK belongs to the child lifetime, not the emitting postmaster. */
+        if (test_fail_spin_ns) {
+            u32 zero = 0;
+            struct pgwt_fail_spin *spin = bpf_map_lookup_elem(&test_spin, &zero);
+            if (spin && !spin->started) {
+                transport_attempt(PGWT_WIRE_DEST_L);
+                transport_spin_failure();
+                transport_failure(PGWT_WIRE_DEST_L);
+                count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_FORK);
+                spin->completed = bpf_ktime_get_ns();
+                return 0;
+            }
+        }
+        struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(child,
+            child_seed.cookie, PGWT_RING_FAIL_LIFECYCLE_FORK);
+        if (wire) {
+            wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_FORK,
+                .pid = child, .timestamp = bpf_ktime_get_ns() };
+            bpf_ringbuf_submit(wire, 0);
+        }
+        return 0;
+    }
     struct pgwt_lifecycle_event *ev;
     ev = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*ev), 0);
     if (ev) {
@@ -805,6 +1006,53 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
     return 0;
 }
 
+/* The task still owns its PID here: sched_process_exit precedes release_task
+ * and PID reuse. Retire producer state here, never in a delayed L callback. */
+static __always_inline int transport_exit(u32 pid, struct pgwt_pid_state *st)
+{
+    bool trace = st->wp_live && !lightweight_mode && exact_admission_open();
+    struct pgwt_wire_trace *out = NULL;
+    if (trace) out = transport_reserve_trace(pid, PGWT_RING_FAIL_EXIT_TRANSITION);
+    struct pgwt_wire_lifecycle *life = transport_reserve_lifecycle(pid, st->cookie,
+        PGWT_RING_FAIL_LIFECYCLE_EXIT);
+    /* Both required reservations precede the one semantic timestamp. */
+    u64 now = bpf_ktime_get_ns();
+    if ((!trace || out) && life) {
+        if (out) {
+            u64 qid = 0; u16 open = 0, quality = 0;
+            resolve_exact_attr(pid, &qid, &open, &quality);
+            u64 cpu_now = read_task_cpu_ns_for(st, now);
+            out->payload = (struct pgwt_trace_event){ .timestamp_ns = now, .pid = pid,
+                .old_event = st->last_event, .new_event = PGWT_EVENT_EXIT,
+                .duration_ns = now - st->last_ts, .query_id = qid,
+                .flags = (open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
+                    (quality == PGWT_QUERY_QUALITY_PG13_SYNTH ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
+                .cpu_ns = (cpu_now && st->last_cpu_ns && cpu_now >= st->last_cpu_ns)
+                    ? cpu_now - st->last_cpu_ns : 0 };
+            bpf_ringbuf_submit(out, 0);
+        }
+        life->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_EXIT,
+            .pid = pid, .timestamp = now };
+        bpf_ringbuf_submit(life, 0);
+    } else {
+        /* Failed destinations already counted by reserve; count every
+         * otherwise-successful reservation discarded with its paired output. */
+        if (out) {
+            bpf_ringbuf_discard(out, 0);
+            transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_EXIT_TRANSITION);
+        }
+        if (life) {
+            bpf_ringbuf_discard(life, 0);
+            transport_failure(PGWT_WIRE_DEST_L);
+            count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_EXIT);
+        }
+    }
+    bpf_map_delete_elem(&state_map, &pid);
+    bpf_map_delete_elem(&exact_attr_map, &pid);
+    bpf_map_delete_elem(&exact_seed_map, &pid);
+    return 0;
+}
+
 /* ── Program 4: on_exit ───────────────────────────────────── */
 /* Detects exiting backends. Closes last open interval first. */
 
@@ -816,6 +1064,8 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
     struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
     if (!st)
         return 0;
+
+    if (exact_perf_mode) return transport_exit(pid, st);
 
     u64 now = bpf_ktime_get_ns();
 
@@ -931,17 +1181,30 @@ static __always_inline void emit_marker(u32 marker)
         return;
 
     u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct pgwt_wire_trace *wire = NULL;
+    if (exact_perf_mode && !bpf_map_lookup_elem(&state_map, &pid)) return;
+    if (exact_perf_mode) wire = transport_reserve_trace(pid, PGWT_RING_FAIL_MARKER);
     u64 now = bpf_ktime_get_ns();
 
     u64 qid = 0;
     u16 cmd_open = 0;
     u16 query_quality = 0;
-    if (!bpf_map_lookup_elem(&state_map, &pid))
+    if (!bpf_map_lookup_elem(&state_map, &pid)) {
+        if (wire) {
+            bpf_ringbuf_discard(wire, 0);
+            transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_MARKER);
+        }
         return;
+    }
     resolve_exact_attr(pid, &qid, &cmd_open, &query_quality);
     note_phase_edge(pid, marker, now);
-    if (!exact_admission_open())
+    if (!exact_admission_open()) {
+        if (wire) {
+            bpf_ringbuf_discard(wire, 0);
+            transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_MARKER);
+        }
         return;
+    }
 
     struct pgwt_trace_event evt = {
         .timestamp_ns = now,
@@ -953,7 +1216,9 @@ static __always_inline void emit_marker(u32 marker)
         .duration_ns = 0,
         .query_id = qid,
     };
-    emit_event(&evt, PGWT_RING_FAIL_MARKER);
+    if (exact_perf_mode) {
+        if (wire) { wire->payload = evt; bpf_ringbuf_submit(wire, 0); }
+    } else emit_event(&evt, PGWT_RING_FAIL_MARKER);
 }
 
 /* #464: is THIS firing site an admitted canonical execution boundary?
@@ -1065,8 +1330,22 @@ int on_report_query_id(struct pt_regs *ctx)
         return 0;
 
     struct pgwt_query_text_event *evt;
-    evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
+    void *reservation;
+    if (exact_perf_mode) {
+        u64 seq = transport_attempt(PGWT_WIRE_DEST_L);
+        struct pgwt_wire_text *wire = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*wire), 0);
+        reservation = wire;
+        if (wire) {
+            transport_header(&wire->hdr, PGWT_WIRE_TEXT, sizeof(wire->payload), seq,
+                transport_cookie(pid));
+            evt = &wire->payload;
+        } else evt = NULL;
+    } else {
+        evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
+        reservation = evt;
+    }
     if (!evt) {
+        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
         count_ring_fail(PGWT_RING_FAIL_QUERY_TEXT);
         return 0; /* leave unseen: a later execution retries raw capture */
     }
@@ -1078,10 +1357,11 @@ int on_report_query_id(struct pt_regs *ctx)
     if (text_len < 0)
         count_ring_fail(PGWT_RING_FAIL_QUERY_TEXT);
     if (text_len <= 1) {
-        bpf_ringbuf_discard(evt, 0);
+        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
+        bpf_ringbuf_discard(reservation, 0);
         return 0; /* unreadable/empty is not a successful first-seen */
     }
-    bpf_ringbuf_submit(evt, 0);
+    bpf_ringbuf_submit(reservation, 0);
 
     /* Mark as seen. CAP-6: when the map is full the insert fails and text
      * for NEW query_ids is never captured again — count it (the daemon
@@ -1134,6 +1414,9 @@ int on_report_activity(struct pt_regs *ctx)
     u16 old_open = 0;
     u16 old_quality = 0;
     resolve_exact_attr(pid, &old_query_id, &old_open, &old_quality);
+    struct pgwt_wire_trace *wire = NULL;
+    if (exact_perf_mode && old_open != open && !lightweight_mode && st->wp_live)
+        wire = transport_reserve_trace(pid, PGWT_RING_FAIL_COMMAND_BOUNDARY);
     u64 now = bpf_ktime_get_ns();
     note_cmd_edge(pid, open, now);
     st->cmd_open = open;
@@ -1163,8 +1446,13 @@ int on_report_activity(struct pt_regs *ctx)
             .duration_ns = 0,
             .query_id = query_id,
         };
-        if (exact_admission_open())
-            emit_event(&evt, PGWT_RING_FAIL_COMMAND_BOUNDARY);
+        if (exact_perf_mode) {
+            if (wire) {
+                if (exact_admission_open()) { wire->payload = evt; bpf_ringbuf_submit(wire, 0); }
+                else { bpf_ringbuf_discard(wire, 0);
+                    transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_COMMAND_BOUNDARY); }
+            }
+        } else if (exact_admission_open()) emit_event(&evt, PGWT_RING_FAIL_COMMAND_BOUNDARY);
     }
     if ((pg13_synthetic_attr || pg13_query_attr) && !open)
         note_query_edge(pid, 0, now);
@@ -1246,8 +1534,22 @@ int on_executor_start(struct pt_regs *ctx)
         return 0;
 
     struct pgwt_query_text_event *evt;
-    evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
+    void *reservation;
+    if (exact_perf_mode) {
+        u64 seq = transport_attempt(PGWT_WIRE_DEST_L);
+        struct pgwt_wire_text *wire = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*wire), 0);
+        reservation = wire;
+        if (wire) {
+            transport_header(&wire->hdr, PGWT_WIRE_TEXT, sizeof(wire->payload), seq,
+                transport_cookie(pid));
+            evt = &wire->payload;
+        } else evt = NULL;
+    } else {
+        evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
+        reservation = evt;
+    }
     if (!evt) {
+        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
         count_ring_fail(PGWT_RING_FAIL_PG13_QUERY_TEXT);
         return 0; /* leave unseen: a later execution retries raw capture */
     }
@@ -1259,10 +1561,11 @@ int on_executor_start(struct pt_regs *ctx)
     if (text_len < 0)
         count_ring_fail(PGWT_RING_FAIL_PG13_QUERY_TEXT);
     if (text_len <= 1) {
-        bpf_ringbuf_discard(evt, 0);
+        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
+        bpf_ringbuf_discard(reservation, 0);
         return 0;
     }
-    bpf_ringbuf_submit(evt, 0);
+    bpf_ringbuf_submit(reservation, 0);
 
     u8 one = 1;
     if (bpf_map_update_elem(&seen_query_ids, &seen_key, &one, BPF_ANY))
