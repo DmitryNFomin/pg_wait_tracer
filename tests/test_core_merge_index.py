@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migration differential against the pinned base, plus retained-history cost.
+"""Migration differential, deterministic retained-history work, and timing report.
 
 This checks compatibility, not numerical truth; frozen merge-v1 rows remain the
 authority. All build products (including the base source) live outside the tree.
@@ -52,19 +52,41 @@ def build_base(work):
     return obj
 
 
-def build(work, base, source):
+def build(work, base, source, *, instrument=False):
     binary = work / "index-check"
-    run(flags() + [str(ROOT / "tests/core_merge_index_cases.c"), str(source), str(base),
+    instrumentation = (["-DPGWT_MERGE_TEST_WORK", "-I" + str(ROOT / "tests")]
+                       if instrument else [])
+    run(flags() + instrumentation + [str(ROOT / "tests/core_merge_index_cases.c"), str(source), str(base),
                    "-o", str(binary)])
     return binary
+
+
+def verify_instrumentation(work):
+    obj = work / "merge-production.o"
+    run(flags() + ["-c", str(ROOT / "src/core/merge.c"), "-o", str(obj)])
+    symbols = run(["nm", str(obj)])
+    if "pgwt_merge_test_work" in symbols:
+        raise RuntimeError("production object contains the work hook")
+    # A positive control prevents a broken symbol probe from passing vacuously.
+    run(flags() + ["-DPGWT_MERGE_TEST_WORK", "-I" + str(ROOT / "tests"),
+                   "-c", str(ROOT / "src/core/merge.c"), "-o", str(obj)])
+    symbols = run(["nm", str(obj)])
+    if not re.search(r"\bU _?pgwt_merge_test_work$", symbols, re.M):
+        raise RuntimeError("instrumented object lacks the work hook")
+    print("nm: production object has no pgwt_merge_test_work; "
+          "instrumented object has U pgwt_merge_test_work", flush=True)
 
 
 def main():
     with tempfile.TemporaryDirectory(prefix="pgwt-merge-index-") as directory:
         work = Path(directory)
-        binary = build(work, build_base(work), ROOT / "src/core/merge.c")
+        verify_instrumentation(work)
+        base = build_base(work)
+        binary = build(work, base, ROOT / "src/core/merge.c")
         print(run([str(binary)]), end="", flush=True)
         print(run([str(binary), "--cost"]), end="", flush=True)
+        binary = build(work, base, ROOT / "src/core/merge.c", instrument=True)
+        print(run([str(binary), "--work"]), end="", flush=True)
 
 
 if __name__ == "__main__":

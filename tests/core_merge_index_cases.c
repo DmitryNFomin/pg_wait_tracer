@@ -25,6 +25,50 @@ static void require(bool condition, const char *field)
     }
 }
 
+#ifdef PGWT_MERGE_TEST_WORK
+#include "core_merge_work.h"
+/* Fixed budgets for this one-record release workload, not timing tolerances.
+ * Real maxima are reported below. Even the 1,000-slot scan/copy is far above
+ * these bounds; a half-full hash index and two single-slot copies fit easily. */
+enum { LOOKUP_LIMIT = 64, INPUT_LIMIT = 256, COPY_LIMIT = 16 };
+static bool measure_work;
+static size_t lookup_visits, input_visits, input_copies;
+static size_t max_lookup, max_visits, max_copies, total_visits, total_copies;
+static size_t measured_inputs;
+void pgwt_merge_test_work(enum pgwt_merge_work kind, size_t count)
+{
+    if (!measure_work) return;
+    if (kind == PGWT_WORK_LOOKUP) lookup_visits = 0;
+    if (kind == PGWT_WORK_INDEX) {
+        lookup_visits += count;
+        if (lookup_visits > max_lookup) max_lookup = lookup_visits;
+        require(lookup_visits <= LOOKUP_LIMIT, "work lookup visits <= 64");
+    }
+    if (kind == PGWT_WORK_INDEX || kind == PGWT_WORK_STATE) {
+        input_visits += count;
+        require(input_visits <= INPUT_LIMIT, "work input slots <= 256");
+    }
+    if (kind == PGWT_WORK_COPY) {
+        input_copies += count;
+        require(input_copies <= COPY_LIMIT, "work copied slots <= 16");
+    }
+}
+
+static void reset_work(void)
+{
+    lookup_visits = input_visits = input_copies = 0;
+}
+
+static void record_work(void)
+{
+    if (input_visits > max_visits) max_visits = input_visits;
+    if (input_copies > max_copies) max_copies = input_copies;
+    total_visits += input_visits;
+    total_copies += input_copies;
+    ++measured_inputs;
+}
+#endif
+
 static uint64_t random_value(void)
 {
     random_state ^= random_state << 13;
@@ -443,31 +487,62 @@ static double cost(size_t retained)
         ++in.record.o;
         require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "cost populate EXIT");
     }
+#ifdef PGWT_MERGE_TEST_WORK
+    max_lookup = max_visits = max_copies = total_visits = total_copies = measured_inputs = 0;
+    measure_work = true;
+    /* Exercise every retained key, starting with the end of a linear scan. */
+    const size_t iterations = retained;
+#else
     const size_t iterations = 1000000;
+#endif
     size_t before = emitted;
     in.record.rank = PGWT_MERGE_TRANS;
     uint64_t start_time = nanoseconds();
     for (size_t i = 0; i < iterations; ++i) {
         /* Walk the entire retained table in a deterministic permuted order. */
-        in.record.pid = (i * UINT64_C(104729)) % retained;
+        in.record.pid = (retained - 1 + i * UINT64_C(104729)) % retained;
         in.record.g = in.record.pid ^ UINT64_MAX;
         ++in.record.t;
         ++in.record.o;
+#ifdef PGWT_MERGE_TEST_WORK
+        reset_work();
+#endif
         require(pgwt_merge_feed(m, &in) == PGWT_MERGE_OK, "cost feed");
+#ifdef PGWT_MERGE_TEST_WORK
+        record_work();
+#endif
     }
     uint64_t elapsed = nanoseconds() - start_time;
     require(emitted - before == 2 * iterations, "cost output count");
+#ifdef PGWT_MERGE_TEST_WORK
+    measure_work = false;
+    require(measured_inputs == retained && max_lookup && max_copies == 2,
+            "work coverage");
+    printf("core merge work: retained=%zu inputs=%zu max_lookup=%zu/64 "
+           "max_input_slots=%zu/256 max_copied_slots=%zu/16 "
+           "total_slots=%zu total_copied=%zu\n", retained, measured_inputs,
+           max_lookup, max_visits, max_copies, total_visits, total_copies);
+#endif
     pgwt_merge_destroy(m);
     return (double)elapsed / iterations;
 }
 
 int main(int argc, char **argv)
 {
+#ifdef PGWT_MERGE_TEST_WORK
+    if (argc == 2 && (!strcmp(argv[1], "--work") || !strcmp(argv[1], "--work-small"))) {
+        case_name = "work";
+        printf("index work REACHED\n");
+        (void)cost(1000);
+        if (!strcmp(argv[1], "--work")) (void)cost(200000);
+        printf("index work PASS\n");
+        return 0;
+    }
+#endif
     if (argc == 2 && !strcmp(argv[1], "--cost")) {
         double small = cost(1000), large = cost(200000);
-        printf("core merge cost: 1000=%.2f ns/feed, 200000=%.2f ns/feed, ratio=%.2fx (limit 4x)\n",
+        printf("core merge cost: 1000=%.2f ns/feed, 200000=%.2f ns/feed, ratio=%.2fx (informational)\n",
                small, large, large / small);
-        require(large <= 4 * small, "cost ratio <= 4x");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "--case")) {

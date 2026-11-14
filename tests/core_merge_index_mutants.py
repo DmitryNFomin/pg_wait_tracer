@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Each index mutant must build and fail its intended differential case cleanly."""
+"""Mutants must build, reach their case, and fail only the intended assertion."""
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.dont_write_bytecode = True
 import test_core_merge_index as checks
@@ -45,7 +46,58 @@ def main():
                     re.search(r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
                 raise RuntimeError(f"{name}: not an intended kill (exit {result.returncode})\n{log}")
             print(f"{name} KILLED: {intended[0]}", flush=True)
-    print("core merge index mutants: 3/3 killed")
+        # Keep the differential mutants above unchanged. Cost mutants use
+        # 1,000 retained generations: a scan still exceeds 64 visits by a wide
+        # margin, while quadratic population finishes quickly.
+        attachment = source[source.index("static struct generation_state *attachment("):
+                            source.index("/* touched[plan slot]")]
+        scan = """static struct generation_state *attachment(pgwt_merge *m, const pgwt_merge_record *r)
+{
+    MERGE_WORK(LOOKUP, 0);
+    for (size_t i = 0; i < m->attachment_count; ++i) {
+        MERGE_WORK(INDEX, 1);
+        if (m->attachments[i].proof.pid == r->pid && m->attachments[i].proof.g == r->g)
+            return &m->attachments[i];
+    }
+    return NULL;
+}
+
+"""
+        cost_mutations = (
+            ("linear_scan", [(attachment, scan)], "work lookup visits <= 64"),
+            ("whole_table_copy", [
+                ("size_t plan_capacity = c->attachment_capacity < c->staged_capacity ?\n"
+                 "            c->attachment_capacity : c->staged_capacity;",
+                 "size_t plan_capacity = c->attachment_capacity;"),
+                ("    m->touched_count = 0;", "    m->touched_count = 0;\n"
+                 "    copy_generations(m->prospective, m->attachments, m->attachment_count);")],
+             "work copied slots <= 16"),
+        )
+        binary = checks.build(work, base, checks.ROOT / "src/core/merge.c", instrument=True)
+        log = checks.run([str(binary), "--work-small"], env=env)
+        if "index work PASS" not in log:
+            raise RuntimeError("baseline did not pass cost case")
+        for name, edits, assertion in cost_mutations:
+            mutated = source
+            for before, after in edits:
+                if mutated.count(before) != 1:
+                    raise RuntimeError(f"{name}: mutation anchor must occur exactly once")
+                mutated = mutated.replace(before, after, 1)
+            mutant = work / "mutant.c"
+            mutant.write_text(mutated)
+            binary = checks.build(work, base, mutant, instrument=True)
+            start = time.monotonic()
+            result = subprocess.run([str(binary), "--work-small"], cwd=checks.ROOT,
+                                    env=env, text=True, capture_output=True, timeout=10)
+            elapsed = time.monotonic() - start
+            log = result.stdout + result.stderr
+            intended = f"index work MISMATCH {assertion} at input 0"
+            if (result.returncode != 1 or "index work REACHED\n" not in log or
+                    log.splitlines().count(intended) != 1 or log.count("MISMATCH") != 1 or
+                    re.search(r"AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:", log)):
+                raise RuntimeError(f"{name}: not an intended kill (exit {result.returncode})\n{log}")
+            print(f"{name} KILLED: retained=1000, {elapsed:.3f}s, {intended}", flush=True)
+    print("core merge index mutants: 3/3 differential, 2/2 deterministic cost killed")
 
 
 if __name__ == "__main__":
