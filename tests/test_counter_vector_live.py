@@ -38,6 +38,11 @@ def run_arm(pm_pid, fault, target=None, *, expected_phase=None, mode="full"):
     with tempfile.TemporaryDirectory(prefix="pgwt-counter-live-") as tmp:
         directory = Path(tmp)
         env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+        # Only the phase arm participates in the forced-absence rehearsal.
+        if expected_phase is not None and "PGWT_TEST_FORCE_NO_PHASE_PROBES" in os.environ:
+            env["PGWT_TEST_FORCE_NO_PHASE_PROBES"] = os.environ["PGWT_TEST_FORCE_NO_PHASE_PROBES"]
+        if env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == "1":
+            env["PGWT_TEST_NO_USDT_SEMA_REFCNT"] = "1"
         if fault == "writer":
             env["PGWT_TEST_WRITER_FAIL"] = "1"
         elif fault:

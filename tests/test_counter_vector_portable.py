@@ -62,22 +62,31 @@ def run_phase_routing():
     def start_daemon(argv, *, stderr, env, **kwargs):
         assert argv[argv.index("--mode") + 1] == "full"
         assert env["PGWT_TEST_COUNTER_FAILURE"] == "exact_phase"
+        assert env.get("PGWT_TEST_FORCE_NO_PHASE_PROBES") == forced
+        assert env.get("PGWT_TEST_NO_USDT_SEMA_REFCNT") == ("1" if forced == "1" else None)
+        assert "PGWT_TEST_UNRELATED" not in env
         stderr.write("WARN: PGWT_TEST_COUNTER_FAILURE=exact_phase (TEST ONLY)\n")
         stderr.flush()
         return object()
 
-    for declared, mask, failures, exit_code in (
-        ("0", 3, 0, 78), ("0", 15, 0, 1), ("0", 3, 1, 1),
-        ("1", 15, 1, 0), ("1", 3, 0, 1), ("1", 15, 0, 1),
-        ("0", None, 0, 1),
+    for declared, forced, mask, failures, exit_code in (
+        ("0", None, 3, 0, 78), ("0", None, 15, 0, 1), ("0", None, 3, 1, 1),
+        ("1", None, 15, 1, 0), ("1", None, 3, 0, 1), ("1", None, 15, 0, 1),
+        ("0", None, None, 0, 1),
+        ("0", "1", 3, 0, 78), ("0", "1", 15, 0, 1), ("0", "1", 3, 1, 1),
+        ("0", "0", 3, 0, 78),
     ):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
+        env.update(PGWT_EXPECT_PHASE_PROBES=declared, PGWT_TEST_UNRELATED="1")
+        if forced is not None:
+            env["PGWT_TEST_FORCE_NO_PHASE_PROBES"] = forced
         metrics = dict.fromkeys(DAEMON_INTEGRITY_COUNTERS, 0)
         metrics.update(counter_vector_valid=True, exact_probe_attached_mask=mask,
                        exact_phase_update_fail_total=failures)
         output = io.StringIO()
         load = type("Load", (), {"returncode": 0, "stderr": "",
                     "stdout": "number of transactions actually processed: 100"})()
-        with (patch.dict(os.environ, {"PGWT_EXPECT_PHASE_PROBES": declared}),
+        with (patch.dict(os.environ, env, clear=True),
               patch.object(sys, "argv", ["test_counter_vector_phase_live.py", "--pid", "42"]),
               patch.object(live.subprocess, "Popen", start_daemon),
               patch.object(live.subprocess, "run", return_value=load),
@@ -89,10 +98,28 @@ def run_phase_routing():
                 phase.main()
             except SystemExit as exc:
                 actual = exc.code
-            assert actual == exit_code, (declared, mask, failures, output.getvalue())
+            assert actual == exit_code, (declared, forced, mask, failures, output.getvalue())
             assert (PHASE_REFUSED_MARKER in output.getvalue()) == (exit_code == 78)
             stop.assert_called_once()
-    print("live phase routing (mock process/metrics): PASS (pass, refusal, contradictory/missing evidence)")
+    def start_non_phase_daemon(argv, *, env, **kwargs):
+        assert not any(k.startswith("PGWT_TEST_") for k in env), env
+        return object()
+
+    metrics = dict.fromkeys(DAEMON_INTEGRITY_COUNTERS, 0)
+    metrics.update(counter_vector_valid=True)
+    with (patch.dict(os.environ, {"PGWT_TEST_FORCE_NO_PHASE_PROBES": "1",
+                                  "PGWT_TEST_NO_USDT_SEMA_REFCNT": "1",
+                                  "PGWT_TEST_UNRELATED": "1"}),
+          patch.object(live.subprocess, "Popen", start_non_phase_daemon),
+          patch.object(live.subprocess, "run", return_value=load),
+          patch.object(live, "wait_for"), patch.object(live, "stop") as stop,
+          patch.object(live, "ctl", return_value=metrics),
+          contextlib.redirect_stdout(io.StringIO())):
+        live.run_arm(42, None)
+        stop.assert_called_once()
+    print("live phase routing (mock process/metrics): PASS "
+          "(pass, refusal, forced-no-phase rehearsal exit 78 + marker, "
+          "contradictory/missing evidence, non-phase environment isolation)")
 
 
 def main():
