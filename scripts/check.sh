@@ -90,6 +90,9 @@ fi
 step "core merge frozen-fixture mutants (Refs #871)"
 run env CFLAGS="$core_cflags" bash tests/core_merge_mutants.sh
 
+step "C11 synthetic merge adapter: wire goldens, contract replay and rule mutants (Refs #871)"
+run env CFLAGS="$core_cflags" bash tests/core_merge_adapter_mutants.sh
+
 # Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
 # pin mismatch is reported clearly instead of the UI suite silently skipping
 # below (see issue #118). --fast doesn't need Playwright at all.
