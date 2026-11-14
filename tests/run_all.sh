@@ -343,10 +343,10 @@ skip_live_test() {
     fi
 }
 
-# #622: only these four tests may report an executed phase refusal (78).
+# Only these phase-dependent tests may report an executed refusal (78).
 phase_dependent_test() {
     case "$1" in
-        test_execution_cardinality|test_execution_span_live|test_escalation|test_ui_live_smoke) return 0 ;;
+        test_execution_cardinality|test_execution_span_live|test_escalation|test_ui_live_smoke|test_counter_vector_phase_live) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -612,6 +612,8 @@ EOF
 LIVE_TESTS=(
     "test_lifecycle|bash|test_lifecycle.sh"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"
+    "test_counter_vector_live|python3|test_counter_vector_live.py"
+    "test_counter_vector_phase_live|python3|test_counter_vector_phase_live.py"
     "test_capture_smoke_tiered|python3|test_capture_smoke.py||--mode tiered"
     "test_capture_smoke_full|python3|test_capture_smoke.py||--mode full"
     "test_uprobe_fired|python3|test_uprobe_fired.py"

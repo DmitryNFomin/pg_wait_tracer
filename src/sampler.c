@@ -1516,8 +1516,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         return 0;
 
     if (d->event_writer)
-        pgwt_writer_push_samples(d->event_writer, s->samples, count,
-                                 period_ns);
+        pgwt_writer_push_samples_counted(d->event_writer, s->samples, count,
+                                         period_ns,
+                                         &d->counters.writer_push_fail_total);
 
     s->samples_total += (uint64_t)count;
     d->counters.samples_total += (uint64_t)count;

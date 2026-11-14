@@ -51,6 +51,11 @@ need node; need go; need python3
 # directory. The differential compares against the independent reference;
 # every numerical mutant must then fail its intended distinguishing case.
 # Keep ASan/UBSan coverage in this gate; standalone runs select it via CFLAGS.
+step "capture counter vector, validity and sticky writer (host C, Refs #871)"
+run python3 -B tests/test_counter_vector_portable.py
+run python3 -B tests/test_counter_failures.py
+run python3 -B tests/counter_vector_mutants.py --guard-sweep
+
 step "core wait_time contract and mutation checks"
 core_cflags="${CFLAGS:-} -fsanitize=address,undefined -fno-omit-frame-pointer"
 run env CFLAGS="$core_cflags" bash scripts/core-status.sh

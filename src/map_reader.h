@@ -167,10 +167,6 @@ const char *pgwt_live_cpu_gate_name(const struct pgwt_daemon *d);
 /* Read BPF accum_map (lightweight mode) and merge into event_accum. */
 void pgwt_read_accum_map(struct pgwt_daemon *d);
 
-/* Sum one BPF fail_counters slot (PGWT_BPF_FAIL_*) across CPUs (CAP-1/6).
- * Returns 0 when the skeleton/map is unavailable. */
-uint64_t pgwt_read_bpf_fail_counter(struct pgwt_daemon *d, uint32_t slot);
-
 /* Find per-PID accumulator. Returns NULL if not found. */
 struct pgwt_pid_accum *pgwt_find_pid_accum(struct pgwt_accumulator *acc, uint32_t pid);
 

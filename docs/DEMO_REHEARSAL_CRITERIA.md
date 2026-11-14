@@ -1034,9 +1034,22 @@ assertion unchanged.
   `seen_query_ids_full_total` = 0 (`src/control.c`), plus
   `lifecycle_init_lost_with_opportunity_total`, `ringbuf_lifecycle_fork_drops_total`,
   `ringbuf_lifecycle_exit_drops_total`, `ringbuf_query_text_drops_total` and
-  `ringbuf_pg13_query_text_drops_total` = 0. These are the counters in
+  `ringbuf_pg13_query_text_drops_total` = 0. Also required at zero:
+  `wait_read_fail_total`, `exact_query_update_fail_total`,
+  `exact_cmd_update_fail_total`, `exact_phase_update_fail_total`,
+  `accum_update_fail_total`, `fork_state_update_fail_total`,
+  `writer_push_fail_total`, `init_state_read_fail_total`. `counter_vector_valid` must be the boolean true;
+  a missing key, null/unreadable count or false validity fails. INIT state
+  reconciliation errors increment `init_state_read_fail_total` and invalidate
+  the INIT component and vector. These are the keys in
   `demo_rehearsal_lib.DAEMON_INTEGRITY_COUNTERS`, reachable through pgwt-server's
-  control proxy. `lifecycle_init_lost_total` counts an unattached backend with
+  control proxy. The existing `state_map_full_total` includes fork-state
+  insertion failures; the merge-v1 vector separates them into its dedicated
+  fork component to avoid counting one failure in two components.
+  `writer_push_fail_total` counts rejected calls for both events and sample
+  batches, including every later push after an open or flush failure.
+  Intentional no-recording remains a successful no-op.
+  `lifecycle_init_lost_total` counts an unattached backend with
   missing state, or INIT evidence never attached before backend exit. A missing
   state entry at bootstrap is only diagnostic (`lifecycle_init_no_state_total`):
   a delivered hint or another attach path can still succeed without a loss.
@@ -1060,7 +1073,9 @@ assertion unchanged.
   loss must be zero: the daemon maintains
   `lifecycle_init_lost_with_opportunity_total` (total minus no-opportunity)
   as its own counter, and that counter gates integrity. This is an explicit
-  owner exclusion, with no bound on the no-opportunity class. Each loss emits an
+  owner exclusion, with no bound on the no-opportunity class. It applies only
+  to daemon integrity: merge-v1 §4's vector retains every INIT loss, including
+  the no-opportunity class, for certification. Each loss emits an
   `INIT-LOST:` stderr line with CLOCK_MONOTONIC INIT/EXIT times, the last
   completed sweep's start, the current batch's start and record count, and
   time since the last epoll return. Liveness cleanup without an EXIT record
@@ -1068,10 +1083,11 @@ assertion unchanged.
   the untraced-ns sum is then an upper bound including the daemon's own delay.
   A current EXIT record, including its pre-record sweep, uses
   `exit_ts_source=record`.
-  The other lifecycle and query-text counters count reserve failures.
+  The other lifecycle counters count reserve failures; query-text counters
+  also count unreadable text.
 - **Known blind spot, stated rather than implied:** BPF map update and read
-  failures without counters remain uncovered. Sampled/coop tiers report the
-  ring-drop counters as 0 because only the full provider fills them. So a clean
+  failures without counters remain uncovered. Capture loss counters are read
+  in every mode, with unreadable components invalidating the vector. A clean
   result means the reported counters are zero, never "nothing was missed";
   §3's conservation identity cannot detect missing backend attribution either.
 - "The daemon was alive" is not "the daemon captured everything".
@@ -1149,7 +1165,7 @@ left to be discovered.
 | §4 blink measured fraction ≥ 0.5 | yes — positive attempted count is also required, and each tab sweep refuses early-window absence (no tick with a valid first sample before 500 ms); every per-tick miss remains visible, with strictness deferred under #397; landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
 | §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈3.4x margin** (worst observed: transitions at 893 ms) — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) now gates every automated tab/navigation at the registered <= 3000 ms bound; absence refuses, and failure detail names the tab/value. This is the VM regression detector; the Mac-side measurement remains separate. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
 | §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: per-class attribution yes (mandatory `cross_tab_class_attribution`, `class_rows_vs_top_events_ok`, same recent window); the redundant total-only `cross_tab_db_time_agreement` gate was retired under #258 (helper retained only as a diagnostic for regression proof); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside per-class attribution. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
-| §6 lost-event counters, overhead envelope | lost-event counters: yes (`daemon_integrity_ok` gates all of `demo_rehearsal_lib.DAEMON_INTEGRITY_COUNTERS`, listed in §6 above, via pgwt-server's control proxy; INIT losses with attach opportunity are gated via lifecycle_init_lost_with_opportunity_total; stored INITs can attach before each lifecycle record and epoll fd handling, after batches, or on the tick while alive; owner decision #871 comment 6863203475 excludes the counted no-opportunity subset (init_ts strictly later than the last completed sweep start), with total losses, no-opportunity losses and untraced ns reported as information; exit − init_ts is an upper bound including daemon delay when exit_ts_source=observation, and the other lifecycle and query-text counters count reserve failures). Remaining blind spots: BPF map update and read failures without counters, and sampled/coop tiers reporting the ring-drop counters as 0 because only the full provider fills them. A clean result means the reported counters are zero, never that nothing was missed. Overhead envelope: **measured 2026-10-13** — 30.31% ± 0.58pp (n=3, 4 clients, unthrottled, gate-1, inside the registered band), see §6's own paragraph above and `tests/results/overhead-envelope/ENVELOPE.md`. Every box-check also still runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh` as an ongoing regression check (default pgbench load, `--mode full`, appends to `tests/results/overhead_trend.csv` on the box, not synced back or committed) — that is a different, continuous measurement and does not substitute for this one-time demo-workload figure, which is now recorded separately |
+| §6 lost-event counters, overhead envelope | lost-event counters: yes (`daemon_integrity_ok` gates all of `demo_rehearsal_lib.DAEMON_INTEGRITY_COUNTERS`, listed in §6 above, via pgwt-server's control proxy; INIT losses with attach opportunity are gated via lifecycle_init_lost_with_opportunity_total; stored INITs can attach before each lifecycle record and epoll fd handling, after batches, or on the tick while alive; owner decision #871 comment 6863203475 excludes the counted no-opportunity subset (init_ts strictly later than the last completed sweep start), with total losses, no-opportunity losses and untraced ns reported as information; exit − init_ts is an upper bound including daemon delay when exit_ts_source=observation, and the other lifecycle and query-text counters count reserve/read failures). The six additional BPF read/map failure counters and writer rejection counter gate at zero; `counter_vector_valid` gates at true. BPF counters are observed in every capture mode, and unknown reads fail the gate. A clean result means the reported counters are zero, never that nothing was missed. Overhead envelope: **measured 2026-10-13** — 30.31% ± 0.58pp (n=3, 4 clients, unthrottled, gate-1, inside the registered band), see §6's own paragraph above and `tests/results/overhead-envelope/ENVELOPE.md`. Every box-check also still runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh` as an ongoing regression check (default pgbench load, `--mode full`, appends to `tests/results/overhead_trend.csv` on the box, not synced back or committed) — that is a different, continuous measurement and does not substitute for this one-time demo-workload figure, which is now recorded separately |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
 | §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
 

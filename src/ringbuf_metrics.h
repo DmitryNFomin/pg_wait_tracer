@@ -4,6 +4,7 @@
 #define PGWT_RINGBUF_METRICS_H
 
 #include "provider.h"
+#include "counter_vector.h"
 
 static const char *const pgwt_ringbuf_site_metric_names[PGWT_RING_FAIL_SITE_MAX] = {
     [PGWT_RING_FAIL_WAIT_TRANSITION] = "ringbuf_wait_transition_drops_total",
@@ -17,34 +18,19 @@ static const char *const pgwt_ringbuf_site_metric_names[PGWT_RING_FAIL_SITE_MAX]
     [PGWT_RING_FAIL_PG13_QUERY_TEXT] = "ringbuf_pg13_query_text_drops_total",
 };
 
-typedef int (*pgwt_ringbuf_lookup_fn)(int fd, const void *key, void *value);
-
-/* Preserve the aggregate's event-ring-only meaning. Site slots also include
- * lifecycle/query-text reserve failures, so their sum is a different count.
- * Never reset a live counter. A failed lookup leaves that metric untouched. */
+/* Preserve the aggregate's event-ring-only meaning. Unknown is explicit;
+ * callers must not present either zero or a previous successful read. */
 static inline void pgwt_read_ringbuf_metrics(struct pgwt_metrics *m,
                                              int aggregate_fd, int site_fd,
-                                             int ncpu, pgwt_ringbuf_lookup_fn lookup)
+                                             int ncpu, pgwt_counter_lookup_fn lookup)
 {
-    if (ncpu <= 0)
-        ncpu = 1;
-    uint64_t per_cpu[ncpu];
-    uint32_t key = 0;
-    if (aggregate_fd >= 0 && lookup(aggregate_fd, &key, per_cpu) == 0) {
-        uint64_t total = 0;
-        for (int cpu = 0; cpu < ncpu; ++cpu)
-            total += per_cpu[cpu];
-        m->ringbuf_drops_total = total;
-    }
-    if (site_fd < 0)
-        return;
-    for (key = 0; key < PGWT_RING_FAIL_SITE_MAX; ++key) {
-        if (lookup(site_fd, &key, per_cpu) != 0)
-            continue;
-        uint64_t total = 0;
-        for (int cpu = 0; cpu < ncpu; ++cpu)
-            total += per_cpu[cpu];
-        m->ringbuf_site_drops[key] = total;
+    struct pgwt_counter_value c = pgwt_read_percpu_counter(aggregate_fd, 0, ncpu, lookup);
+    m->ringbuf_drops_total = c.value;
+    m->ringbuf_drops_valid = c.valid;
+    for (uint32_t site = 0; site < PGWT_RING_FAIL_SITE_MAX; ++site) {
+        c = pgwt_read_percpu_counter(site_fd, site, ncpu, lookup);
+        m->ringbuf_site_drops[site] = c.value;
+        m->ringbuf_site_valid[site] = c.valid;
     }
 }
 
