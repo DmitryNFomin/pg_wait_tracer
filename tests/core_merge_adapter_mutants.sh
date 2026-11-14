@@ -47,6 +47,11 @@ mutations = [
     ('R11', 'G11', [('r.input[0].kind = PGWT_MERGE_WRITER_REJECTED;',
                      'r.input[0].kind = PGWT_MERGE_WRITER_REJECTED;\n            r.input[0].observation.counters.value[14] = 0;')]),
     ('R12', 'G12', [('case MA_INTERRUPTED:', 'case MA_INTERRUPTED: return r;')]),
+    ('FAILED_begin', 'failed_terminal', [('case MA_BEGIN:\n        if (l->proof == MA_FAILED) break; /* terminal; never launder */',
+                                        'case MA_BEGIN:')]),
+    ('identity_unbound', 'identity_unbound', [('return found && found->identity_bound ? found : NULL;',
+                                            'return found;')]),
+    ('ESCALATE_END', 'escalation_markers', [(' || old == 0xfffffff5', '')]),
 ]
 # Each mutation accepts a forbidden producer premise by omitting its obligation.
 # Stale adopted state shares the fresh-fork bit; reuse and unsafe cleanup have
@@ -97,10 +102,10 @@ with tempfile.TemporaryDirectory(prefix='pgwt-merge-adapter-mutants-') as tmp:
     if base.returncode:
         print(base.stdout + base.stderr)
         raise SystemExit('ERROR: baseline/guard sweep failed')
-    expected_sweep = 'adapter goldens: 12/12; guard sweep: 28/28'
+    expected_sweep = 'adapter goldens: 12/12; guard sweep: 31/31'
     if expected_sweep not in base.stdout:
         raise SystemExit('ERROR: baseline did not reach every registered guard')
-    print('adapter baseline: golden 12/12, guard sweep 28/28, end-to-end 78/78 PASS')
+    print('adapter baseline: golden 12/12, guard sweep 31/31, end-to-end 78/78 PASS')
     killed = 0
     for name, guard, replacements in mutations:
         changed = original
@@ -119,5 +124,5 @@ with tempfile.TemporaryDirectory(prefix='pgwt-merge-adapter-mutants-') as tmp:
             raise SystemExit(f'ERROR: {name}: survived or failed outside intended assertion')
         print(f'{name}: KILLED at {guard}')
         killed += 1
-    print(f'adapter mutants: {killed}/{len(mutations)} killed; guard sweep 28/28 PASS')
+    print(f'adapter mutants: {killed}/{len(mutations)} killed; guard sweep 31/31 PASS')
 PY

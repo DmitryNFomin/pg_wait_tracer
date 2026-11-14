@@ -48,7 +48,8 @@ def ctl(directory):
                 "lifecycle_init_lost_no_opportunity_total",
                 "lifecycle_init_lost_untraced_ns_total",
                 "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
-                "state_map_full_total", "wp_attach_failures_total"):
+                "state_map_full_total", "wp_attach_failures_total",
+                "wp_attach_exit_race_total"):
         assert type(metrics.get(key)) is int and metrics[key] >= 0, (key, metrics)
     return metrics
 
@@ -216,6 +217,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                 print(f"  {arm}: "
                       f"{len(pids & attached)}/{len(pids)} attached, "
                       f"hint drops +{hint_delta}, INIT lost +{lost_delta}, "
+                      f"attach exit races {after['wp_attach_exit_race_total']}, "
                       f"with opportunity {after['lifecycle_init_lost_with_opportunity_total']}, "
                       f"no opportunity {after['lifecycle_init_lost_no_opportunity_total']}, "
                       f"untraced ns {after['lifecycle_init_lost_untraced_ns_total']}, "
@@ -230,7 +232,8 @@ def run_arm(pm_pid, skip_store, churn=False):
                         "lifecycle_init_lost_total",
                         "lifecycle_init_lost_with_opportunity_total",
                         "lifecycle_init_lost_no_opportunity_total",
-                        "lifecycle_init_lost_untraced_ns_total")})
+                        "lifecycle_init_lost_untraced_ns_total",
+                        "wp_attach_failures_total", "wp_attach_exit_race_total")})
                 print(text)
                 raise
             finally:

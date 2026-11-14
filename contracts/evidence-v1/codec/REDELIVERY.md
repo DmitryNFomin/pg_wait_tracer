@@ -1,6 +1,6 @@
 # Evidence-v1 codec redelivery revision r3b.
 
-Normative reconciliation rule for CODEC.md; this revision takes precedence in the respects specified here. CONTRACT §1 explicitly delegates unordered cross-boot capture ambiguity to clause 2a; other logical replay rules remain controlling. The byte layout is unchanged. The previously published independent answers for cases 1–31 are recorded in redelivery-oracle/RESULT.md. Those answers cover the pre-r3b cells; the aggregate-status amendment and new cases require fresh independent answers. Refs #868, controlling scope decision comment 6868500311; Refs #913, #914.
+Normative reconciliation rule for CODEC.md; this revision takes precedence in the respects specified here. CONTRACT §1 explicitly delegates unordered cross-boot capture ambiguity to clause 2a; other logical replay rules remain controlling. The byte layout is unchanged. The previously published independent answers for cases 1–31 are recorded in redelivery-oracle/RESULT.md. Those answers cover the pre-r3b cells; the independent answers for the aggregate-status amendment and cases 32–50 are recorded in redelivery-oracle-r3/RESULT.md, and an independent reference evaluator reproducing all 50 cases is in redelivery-ref/. Refs #868, controlling scope decision comment 6868500311; Refs #913, #914.
 
 ## Superseded CODEC.md wording
 

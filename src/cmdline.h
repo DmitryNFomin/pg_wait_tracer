@@ -40,6 +40,11 @@ int pgwt_parse_cmdline(pid_t pid, struct pgwt_metadata *meta);
  * -1 = unavailable/invalid (never treat -1 as a true/live result). */
 int pgwt_backend_target_live(pid_t pid, pid_t parent);
 
+/* Same validation on a /proc/<pid>/stat fd opened BEFORE an operation.
+ * The fd pins the original proc entry across PID reuse. Negative fd values
+ * encode -errno from open: only ENOENT/ESRCH prove the target is gone. */
+int pgwt_backend_target_live_fd(int fd, pid_t parent);
+
 /* Human-readable name for a backend type. */
 const char *pgwt_backend_type_name(enum pgwt_backend_type bt);
 

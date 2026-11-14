@@ -47,6 +47,9 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+step "watchpoint attach exit races (portable backend C harness)"
+run python3 -B tests/test_backend_attach_race.py --mutants
+
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;
 # every numerical mutant must then fail its intended distinguishing case.
@@ -67,9 +70,11 @@ step "core evidence contract, differential and mutation checks"
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py --contract-only
 run env CFLAGS="$core_cflags" python3 -B tests/test_core_evidence_differential.py
 run env CFLAGS="$core_cflags" bash tests/evidence_mutants.sh
+run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_report.py
 
 step "portable v5 evidence codec, independent bytes and mutation checks"
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_oracle.py
+run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_redelivery.py
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_mutants.py
 
 step "C11 core merge contract and API safety (ASan/UBSan, Refs #871)"

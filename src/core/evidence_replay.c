@@ -3,6 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int frontier_order(const void *av, const void *bv)
+{
+    uint64_t a = *(const uint64_t *)av, b = *(const uint64_t *)bv;
+    return a < b ? -1 : a != b;
+}
+
 static bool same(pgwt_core_event a, pgwt_core_event b)
 {
     return a.length == b.length &&
@@ -53,6 +59,8 @@ static bool key(const pgwt_evidence_record *a, const pgwt_evidence_record *b)
 typedef struct {
     pgwt_evidence_input input;
     bool **descriptors; /* Private boundary markers, never taken from record fields. */
+    struct record_position { size_t file_index, record_index; } **positions;
+    pgwt_evidence_stop *stops; /* descriptor/chain cutoffs discovered while joining */
 } joined_input;
 
 static void free_chains(joined_input *joined_data)
@@ -61,8 +69,11 @@ static void free_chains(joined_input *joined_data)
     for (size_t i = 0; i < joined->file_count; ++i) {
         free((void *)joined->files[i].records);
         free(joined_data->descriptors[i]);
+        free(joined_data->positions[i]);
     }
     free(joined_data->descriptors);
+    free(joined_data->positions);
+    free(joined_data->stops);
     free((void *)joined->files);
 }
 
@@ -79,7 +90,11 @@ static pgwt_replay_status join_chains(const pgwt_evidence_input *in,
     pgwt_evidence_file *files = calloc(in->file_count + 1, sizeof(*files));
     if (!files) return PGWT_REPLAY_ERROR;
     joined_data->descriptors = calloc(in->file_count + 1, sizeof(bool *));
-    if (!joined_data->descriptors) { free(files); return PGWT_REPLAY_ERROR; }
+    joined_data->positions = calloc(in->file_count + 1, sizeof(*joined_data->positions));
+    joined_data->stops = calloc(in->file_count + 1, sizeof(*joined_data->stops));
+    if (!joined_data->descriptors || !joined_data->positions || !joined_data->stops) {
+        free(files); return PGWT_REPLAY_ERROR;
+    }
     *joined = *in;
     joined->files = files;
     joined->file_count = 0;
@@ -94,11 +109,15 @@ static pgwt_replay_status join_chains(const pgwt_evidence_input *in,
         pgwt_evidence_file *chain = &files[joined->file_count++];
         *chain = (pgwt_evidence_file){.version = 5, .boot = f->boot,
             .capture = f->capture, .present = true};
+        pgwt_evidence_stop *stop = &joined_data->stops[joined->file_count - 1];
         bool started = false;
         uint64_t last = 0;
         for (size_t j = i; j < in->file_count; ++j) {
             const pgwt_evidence_file *part = &in->files[j];
             if (!same(part->capture, f->capture)) continue;
+            *stop = (pgwt_evidence_stop){.stopped = true, .descriptor = true,
+                .file_index = j, .reason = started && !same(part->boot, chain->boot) ?
+                    PGWT_REPLAY_STOP_CAPTURE_BOOT_CONFLICT : PGWT_REPLAY_STOP_FILE_CHAIN};
             if (started && !same(part->boot, chain->boot)) break;
             bool linked = !started ? (!part->file_no && !part->has_previous) :
                 (last != UINT64_MAX && part->file_no == last + 1 &&
@@ -126,6 +145,12 @@ static pgwt_replay_status join_chains(const pgwt_evidence_input *in,
                 pgwt_evidence_record *records = realloc((void *)chain->records, total * sizeof(*records));
                 if (!records) return PGWT_REPLAY_ERROR;
                 chain->records = records;
+                struct record_position **map = &joined_data->positions[joined->file_count - 1];
+                struct record_position *mapped = realloc(*map, total * sizeof(*mapped));
+                if (!mapped) return PGWT_REPLAY_ERROR;
+                *map = mapped;
+                for (size_t k = 0; k < extra + part->record_count; ++k)
+                    mapped[chain->record_count + k] = (struct record_position){j, k - extra};
                 bool **markers = &joined_data->descriptors[joined->file_count - 1];
                 bool *resized = realloc(*markers, total * sizeof(*resized));
                 if (!resized) return PGWT_REPLAY_ERROR;
@@ -138,6 +163,7 @@ static pgwt_replay_status join_chains(const pgwt_evidence_input *in,
                 if (part->record_count)
                     memcpy(records + chain->record_count + extra, part->records, part->record_count * sizeof(*records));
             }
+            *stop = (pgwt_evidence_stop){0};
             chain->record_count = total;
             last = part->file_no;
             started = true;
@@ -340,11 +366,19 @@ static bool prefer(const attachment_run *a, const attachment_run *b,
  * earlier prefix. Even non-target generations must pass run consistency. */
 static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
                                       const bool *descriptors, const pgwt_evidence_input *in, const pgwt_core_query *query,
-                                      pgwt_evidence_output *out, size_t *fault, const char **reason)
+                                      pgwt_evidence_output *out, size_t *fault, pgwt_evidence_stop *stop,
+                                      pgwt_evidence_capture_report *report, const char **reason)
 {
     pgwt_replay_status status = PGWT_REPLAY_OK;
     *fault = SIZE_MAX;
-#define FAULT(pos) do { size_t at = (pos); if (at < *fault) *fault = at; } while (0)
+    pgwt_replay_stop_reason fault_reason = PGWT_REPLAY_STOP_NONE;
+#define FAULT(pos) do { size_t at = (pos); if (at < *fault) { \
+    *stop = (pgwt_evidence_stop){.stopped = true, .reason = fault_reason}; \
+    if (fault_reason == PGWT_REPLAY_STOP_BASELINE_MISMATCH) { \
+        stop->expected_baseline = baseline; \
+        stop->declared_baseline = file->records[at].counters; \
+    } \
+} if (at < *fault) *fault = at; } while (0)
     size_t n = file->record_count, count = 0, generations = 0, run_count = 0;
     attachment_run *runs = NULL;
     bool *processed = NULL;
@@ -373,18 +407,26 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
     bool has_frontier = false, identity_uncertain = false;
     uint64_t frontier = 0, latest_void = 0, identity_void = 0;
     size_t epoch_start = 0;
+    if (report) {
+        report->frontier_count = report->revoked_frontier_count = 0;
+        report->has_frontier = report->has_high_water = false;
+        report->has_lifecycle_uncertainty = false;
+    }
     pgwt_evidence_counters baseline = file->baseline;
     for (size_t i = 0; i <= n; ++i) {
         bool eof = i == n;
         const pgwt_evidence_record *r = eof ? NULL : &file->records[i];
         if (file->version != 5) continue;
+        fault_reason = PGWT_REPLAY_STOP_BASELINE_MISMATCH;
         if (!eof && descriptors[i]) {
             bool restated = baseline.known == r->counters.known &&
                 (!baseline.known || equal_counters(&baseline, &r->counters));
             if (!restated) { FAULT(i); goto done; }
             continue;
         }
+        fault_reason = PGWT_REPLAY_STOP_MALFORMED_RECORD;
         if (!eof && !valid_record(r)) { FAULT(i); goto done; }
+        fault_reason = PGWT_REPLAY_STOP_NONADVANCING_FRONTIER;
         if (!eof && file->qualified && r->kind == PGWT_EVIDENCE_FRONTIER &&
             has_frontier && r->t <= frontier) { FAULT(i); goto done; }
         if (!eof) {
@@ -418,6 +460,11 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
                     identity_uncertain = true;
                     identity_void = r->t;
                 }
+                if (report && loss.has_invalid_from)
+                    while (report->frontier_count &&
+                           report->frontiers[report->frontier_count - 1] >= loss.invalid_from)
+                        report->revoked_frontiers[report->revoked_frontier_count++] =
+                            report->frontiers[--report->frontier_count];
                 freeze(runs, run_count, &loss);
                 for (size_t j = epoch_start; j <= i; ++j) processed[j] = true;
                 epoch_start = i + 1;
@@ -427,6 +474,7 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
             }
             if (!file->qualified) continue;
             if (r->kind == PGWT_EVIDENCE_ATTACH_OK || r->kind == PGWT_EVIDENCE_END) {
+                fault_reason = PGWT_REPLAY_STOP_RECOVERY_BEFORE_VOID;
                 if (r->kind == PGWT_EVIDENCE_ATTACH_OK && r->t < latest_void) {
                     FAULT(i); goto done;
                 }
@@ -435,6 +483,7 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
             if (r->kind != PGWT_EVIDENCE_FRONTIER) continue;
             has_frontier = true;
             frontier = r->t;
+            if (report) report->frontiers[report->frontier_count++] = frontier;
         } else if (!file->qualified) { continue; }
         uint64_t cutoff = eof ? UINT64_MAX : frontier;
         /* Resolve all delayed attachments before addressing ENDs. Then check
@@ -462,6 +511,7 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
                         if (!preceding && before) { preceding = true; choices = 0; }
                         chosen = h; ++choices;
                     }
+                fault_reason = PGWT_REPLAY_STOP_END_WITHOUT_RUN;
                 if (choices != 1) { FAULT(j); }
                 else runs[chosen].end = p;
             }
@@ -472,10 +522,12 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
             size_t k = run->generation;
             if (g[k].invalid || g[k].tainted || !g[k].life) continue;
             const pgwt_evidence_record *attach = run->attach, *life = g[k].life;
+            fault_reason = PGWT_REPLAY_STOP_ATTACHMENT_OUTSIDE_LIFE;
             if (attach->t < life->start || (life->has_exit && attach->t >= life->exit)) {
                 FAULT((size_t)(attach - file->records));
             }
             if (run->frozen) continue;
+            fault_reason = PGWT_REPLAY_STOP_OVERLAPPING_ATTACHMENT;
             for (size_t x = h + 1; x < run_count; ++x) {
                 if (runs[x].generation != k || runs[x].frozen) continue;
                 attachment_run *earlier = run, *later = &runs[x];
@@ -539,6 +591,7 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
             uint64_t trimmed = attach->t;
             bool entry_known = false, portion = null_event(current);
             bool anchored = attach->reread;
+            fault_reason = PGWT_REPLAY_STOP_ANCHOR_MISMATCH;
             if (attach->reread && !same(attach->seed, current)) {
                 FAULT((size_t)(attach - file->records)); continue;
             }
@@ -551,6 +604,7 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
                 /* Timestamp order, not append position relative to ATTACH_OK,
                  * selects the first transition at the anchor, including ties. */
                 if (t->t < attach->t) continue;
+                fault_reason = PGWT_REPLAY_STOP_ANCHOR_MISMATCH;
                 if (!anchored) {
                     if (t->t != attach->t) break;
                     if (!same(t->new_event, current)) {
@@ -568,6 +622,8 @@ static pgwt_replay_status replay_file(const pgwt_evidence_file *file,
                 }
                 /* A reread reconciles transitions THROUGH its anchor. */
                 if (attach->reread && t->t == attach->t) continue;
+                fault_reason = same(t->old_event, current) && !terminal ?
+                    PGWT_REPLAY_STOP_RUN_DURATION_MISMATCH : PGWT_REPLAY_STOP_RUN_STATE_MISMATCH;
                 if (terminal || !same(t->old_event, current) ||
                     (entry_known && t->t - t->duration != entry)) {
                     FAULT(history[j].order); break;
@@ -656,6 +712,15 @@ allocation_error:
     status = PGWT_REPLAY_ERROR;
     if (reason) *reason = "replay allocation failed";
 done:
+    if (report && status == PGWT_REPLAY_OK) {
+        report->has_frontier = report->frontier_count != 0;
+        report->frontier = report->has_frontier ? report->frontiers[report->frontier_count - 1] : 0;
+        report->has_high_water = has_frontier;
+        report->high_water = frontier;
+        report->baseline = baseline;
+        report->has_lifecycle_uncertainty = identity_uncertain;
+        report->lifecycle_uncertainty = identity_void;
+    }
     if (runs) for (size_t h = 0; h < run_count; ++h)
         while (runs[h].snapshots) discard_snapshot(&runs[h]);
     free(runs); free(processed);
@@ -664,11 +729,12 @@ done:
 #undef FAULT
 }
 
-pgwt_replay_status pgwt_evidence_replay(const pgwt_evidence_input *input,
+static pgwt_replay_status replay(const pgwt_evidence_input *input,
                                        const pgwt_core_query *query,
                                        pgwt_evidence_output *out,
-                                       const char **reason)
+                                       pgwt_evidence_report *report, const char **reason)
 {
+    if (report) memset(report, 0, sizeof(*report));
     if (reason) *reason = NULL;
     if (!out) { if (reason) *reason = "null output"; return PGWT_REPLAY_ERROR; }
     memset(out, 0, sizeof(*out));
@@ -687,15 +753,42 @@ pgwt_replay_status pgwt_evidence_replay(const pgwt_evidence_input *input,
         scratch = calloc(capacity, sizeof(*scratch));
         if (!out->waits || !scratch) goto allocation_error;
     }
+    if (report) {
+        report->captures = calloc(in->file_count + 1, sizeof(*report->captures));
+        if (!report->captures) goto allocation_error;
+        report->capture_count = in->file_count;
+        for (size_t i = 0; i < in->file_count; ++i) {
+            pgwt_evidence_capture_report *r = &report->captures[i];
+            r->boot = in->files[i].boot;
+            r->capture = in->files[i].capture;
+            r->stop = joined.stops[i];
+            size_t n = in->files[i].record_count;
+            r->frontiers = n ? calloc(n, sizeof(*r->frontiers)) : NULL;
+            r->revoked_frontiers = n ? calloc(n, sizeof(*r->revoked_frontiers)) : NULL;
+            if (n && (!r->frontiers || !r->revoked_frontiers)) goto allocation_error;
+        }
+    }
     out->projection.invalid_fields = PGWT_CORE_LIFE_INVALID;
     for (size_t i = 0; i < in->file_count; ++i) {
         pgwt_evidence_file prefix = in->files[i];
         size_t fault;
+        pgwt_evidence_stop stop;
+        pgwt_evidence_capture_report *r = report ? &report->captures[i] : NULL;
         do {
-            status = replay_file(&prefix, joined.descriptors[i], in, query, out, &fault, reason);
+            status = replay_file(&prefix, joined.descriptors[i], in, query, out, &fault, &stop, r, reason);
             if (status != PGWT_REPLAY_OK) goto done;
+            if (fault != SIZE_MAX && r) {
+                struct record_position p = joined.positions[i][fault];
+                stop.file_index = p.file_index;
+                stop.descriptor = joined.descriptors[i][fault];
+                stop.record_index = stop.descriptor ? 0 : p.record_index;
+                r->stop = stop;
+            }
             if (fault != SIZE_MAX) prefix.record_count = fault;
         } while (fault != SIZE_MAX);
+        if (r && r->revoked_frontier_count)
+            qsort(r->revoked_frontiers, r->revoked_frontier_count,
+                  sizeof(*r->revoked_frontiers), frontier_order);
     }
     out->projection.waits = out->waits;
     pgwt_core_prepared prepared;
@@ -709,6 +802,61 @@ allocation_error:
 done:
     free(scratch);
     free_chains(&joined);
-    if (status != PGWT_REPLAY_OK) pgwt_evidence_output_free(out);
+    if (status != PGWT_REPLAY_OK) {
+        pgwt_evidence_output_free(out);
+        pgwt_evidence_report_free(report);
+    }
     return status;
+}
+
+pgwt_replay_status pgwt_evidence_replay(const pgwt_evidence_input *input,
+                                       const pgwt_core_query *query,
+                                       pgwt_evidence_output *out, const char **reason)
+{
+    return replay(input, query, out, NULL, reason);
+}
+
+pgwt_replay_status pgwt_evidence_replay_report(const pgwt_evidence_input *input,
+                                              const pgwt_core_query *query,
+                                              pgwt_evidence_output *out,
+                                              pgwt_evidence_report *report,
+                                              const char **reason)
+{
+    if (!report) {
+        if (out) memset(out, 0, sizeof(*out));
+        if (reason) *reason = "null report";
+        return PGWT_REPLAY_ERROR;
+    }
+    return replay(input, query, out, report, reason);
+}
+
+void pgwt_evidence_report_free(pgwt_evidence_report *report)
+{
+    if (!report) return;
+    for (size_t i = 0; i < report->capture_count; ++i) {
+        free(report->captures[i].frontiers);
+        free(report->captures[i].revoked_frontiers);
+    }
+    free(report->captures);
+    memset(report, 0, sizeof(*report));
+}
+
+const char *pgwt_evidence_stop_label(pgwt_replay_stop_reason reason)
+{
+    switch (reason) {
+    case PGWT_REPLAY_STOP_NONE: return NULL;
+    case PGWT_REPLAY_STOP_BASELINE_MISMATCH: return "baseline_mismatch";
+    case PGWT_REPLAY_STOP_NONADVANCING_FRONTIER: return "nonadvancing_frontier";
+    case PGWT_REPLAY_STOP_RECOVERY_BEFORE_VOID: return "recovery_before_void";
+    case PGWT_REPLAY_STOP_OVERLAPPING_ATTACHMENT: return "overlapping_attachment";
+    case PGWT_REPLAY_STOP_ATTACHMENT_OUTSIDE_LIFE: return "attachment_outside_life";
+    case PGWT_REPLAY_STOP_MALFORMED_RECORD: return "malformed_record";
+    case PGWT_REPLAY_STOP_END_WITHOUT_RUN: return "end_without_run";
+    case PGWT_REPLAY_STOP_ANCHOR_MISMATCH: return "anchor_mismatch";
+    case PGWT_REPLAY_STOP_RUN_STATE_MISMATCH: return "run_state_mismatch";
+    case PGWT_REPLAY_STOP_RUN_DURATION_MISMATCH: return "run_duration_mismatch";
+    case PGWT_REPLAY_STOP_FILE_CHAIN: return "file_chain";
+    case PGWT_REPLAY_STOP_CAPTURE_BOOT_CONFLICT: return "capture_boot_conflict";
+    }
+    return NULL;
 }

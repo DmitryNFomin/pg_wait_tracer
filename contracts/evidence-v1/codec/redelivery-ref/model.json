@@ -1,0 +1,531 @@
+{
+  "format": "abstract-redelivery-v1",
+  "deliveries": [
+    {
+      "header": {
+        "valid": true,
+        "physical": [
+          "b",
+          "a",
+          0
+        ],
+        "H": 193,
+        "flags": 0,
+        "qualified": true,
+        "baseline": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "mapping": [],
+        "creation": 0,
+        "previous": null,
+        "content_id": "sym:520264c1d2fce21fdbf9b26be8e60505764c71de740f1060ca7e01f401ae534b"
+      },
+      "blocks": [
+        {
+          "start": 193,
+          "end": 305,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:2093b7937cfa38dba16f8ec9da2d6a371f0c1847b812d8b386b8f2c4502467f5",
+              "value": {
+                "kind": "LIFE",
+                "t": 0,
+                "pid": 1,
+                "fork": 0,
+                "start": 0,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:0804daadbf5786441493c9c9cab34a16dd4a7f82edb9835475a73ffc21061869"
+        },
+        {
+          "start": 305,
+          "end": 537,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:06ba77d79ae080b4f87dc8648e2f275ab4a37a576fc67353bf3fb636e0a4adfd",
+              "value": {
+                "kind": "ATTACH_OK",
+                "t": 0,
+                "pid": 1,
+                "fork": 0,
+                "counters": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "method": "reread",
+                "seed": null,
+                "state": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:613116d724579845d06a7cfe1ea84546f0addf40cc1e9e17ac18f325592c6fe4"
+        },
+        {
+          "start": 537,
+          "end": 747,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:fa36f30e5e60a49aa73009915cff190188d2dda529215f54118779725a2ce1d8",
+              "value": {
+                "kind": "FRONTIER",
+                "t": 10,
+                "counters": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ]
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:62f1a7a2e3af63adcf6039c9b7381278673db593e4607aca4ab3babb23fb2999"
+        },
+        {
+          "start": 747,
+          "end": 957,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:7cfaeb73bcc52c34ab950e85b8b60f0e1cefa95eba8364eba1668884c5ed7e35",
+              "value": {
+                "kind": "FRONTIER",
+                "t": 20,
+                "counters": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ]
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:b544706b37bae1047ed57a147698b5664b2cd65f7c356562a21147f06599e2e9"
+        },
+        {
+          "start": 957,
+          "end": 1179,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:2ef600ccb86db4a083f90008aff82594f567fd0db0a5b19bf7b8147b18cded18",
+              "value": {
+                "kind": "VOID",
+                "t": 30,
+                "reason": "x",
+                "invalid_from": 20,
+                "counters": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ]
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:f0243d39fa0c6d51a47cb220f3e3b3cd88d18f7c91106029c48ea41e5ed764f6"
+        }
+      ],
+      "tail": {
+        "kind": "eof",
+        "length": 0,
+        "content_id": ""
+      }
+    },
+    {
+      "header": {
+        "valid": true,
+        "physical": [
+          "b",
+          "a",
+          1
+        ],
+        "H": 241,
+        "flags": 0,
+        "qualified": true,
+        "baseline": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "mapping": [],
+        "creation": 0,
+        "previous": {
+          "file_no": 0,
+          "D": 1179,
+          "digest": {
+            "kind": "prefix",
+            "header": "sym:520264c1d2fce21fdbf9b26be8e60505764c71de740f1060ca7e01f401ae534b",
+            "D": 1179,
+            "blocks": [
+              [
+                193,
+                305,
+                "sym:0804daadbf5786441493c9c9cab34a16dd4a7f82edb9835475a73ffc21061869"
+              ],
+              [
+                305,
+                537,
+                "sym:613116d724579845d06a7cfe1ea84546f0addf40cc1e9e17ac18f325592c6fe4"
+              ],
+              [
+                537,
+                747,
+                "sym:62f1a7a2e3af63adcf6039c9b7381278673db593e4607aca4ab3babb23fb2999"
+              ],
+              [
+                747,
+                957,
+                "sym:b544706b37bae1047ed57a147698b5664b2cd65f7c356562a21147f06599e2e9"
+              ],
+              [
+                957,
+                1179,
+                "sym:f0243d39fa0c6d51a47cb220f3e3b3cd88d18f7c91106029c48ea41e5ed764f6"
+              ]
+            ],
+            "partial": null
+          }
+        },
+        "content_id": "sym:a49c7381a073ba6f2443b464f7a401c36684e6f70335f78670c4dd3fe4788fec"
+      },
+      "blocks": [
+        {
+          "start": 241,
+          "end": 353,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:e507969bf3710c86f096319226341b84ee2505dcf677a5b228c667abc98d8bac",
+              "value": {
+                "kind": "LIFE",
+                "t": 40,
+                "pid": 2,
+                "fork": 40,
+                "start": 40,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:35f7eddd1af45786902f7651a2592a5a2b3222ae95bba86511bcaacf27f6d9ee"
+        },
+        {
+          "start": 353,
+          "end": 465,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:634359fa0e1fe98245708901114adfefab37b5e77823689c8a299a8d240bda5c",
+              "value": {
+                "kind": "LIFE",
+                "t": 40,
+                "pid": 3,
+                "fork": 40,
+                "start": 40,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:39cc64434b2d1a3b6146d539e2c1c168e77b73278c8438d66d5c7bfd3c297fb1"
+        },
+        {
+          "start": 465,
+          "end": 577,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:a13c4c8c0e9128fb66834b73f347b468459c771a682ebeffec236f62622cf022",
+              "value": {
+                "kind": "LIFE",
+                "t": 40,
+                "pid": 4,
+                "fork": 40,
+                "start": 40,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:11fb4a2cf199dc7a61de3521110bbe86f5243b9f6e8cfa0a9bcb74114b2a309e"
+        },
+        {
+          "start": 577,
+          "end": 689,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:3d9feda5241497d3290c692ad906f9ba69ea3713f54e5541b22732273670cc04",
+              "value": {
+                "kind": "LIFE",
+                "t": 40,
+                "pid": 5,
+                "fork": 40,
+                "start": 40,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:a3cdbd550254061cf65f4252a5846bafe8acf44e2ea1e40a66bb5d69452ed4d0"
+        }
+      ],
+      "tail": {
+        "kind": "eof",
+        "length": 0,
+        "content_id": ""
+      }
+    },
+    {
+      "header": {
+        "valid": true,
+        "physical": [
+          "b",
+          "x",
+          0
+        ],
+        "H": 193,
+        "flags": 0,
+        "qualified": true,
+        "baseline": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "mapping": [],
+        "creation": 0,
+        "previous": null,
+        "content_id": "sym:782887855829772e6dbfdc5de01e87f3b552592d0cd18df50c4e8e39c516940d"
+      },
+      "blocks": [
+        {
+          "start": 193,
+          "end": 305,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:218d7474ef9e75e6fffa175547bd59fc4191b6024f04e50f8872f0554ca6855a",
+              "value": {
+                "kind": "LIFE",
+                "t": 0,
+                "pid": 10,
+                "fork": 0,
+                "start": 0,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:52c3cd2fa4d4070b8c0aecb79740384d719ada68aaf486c8a762cfbe87e4a145"
+        },
+        {
+          "start": 305,
+          "end": 417,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:7f537c1c367a56c825c0cbf119811c2b75cf8d55dda404e61058f288256eeac9",
+              "value": {
+                "kind": "LIFE",
+                "t": 0,
+                "pid": 11,
+                "fork": 0,
+                "start": 0,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:4ac599c3ad2cf5aac33337e02304a1a2db05666210fe6c44ade4c6fca4ac6951"
+        },
+        {
+          "start": 417,
+          "end": 529,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:74ca3547c16d1b4a734e72f9aa0fdb78ebf2ab3a67e22336b10011de70da4f5d",
+              "value": {
+                "kind": "LIFE",
+                "t": 0,
+                "pid": 12,
+                "fork": 0,
+                "start": 0,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:60f11f52519a4a8d0aa1549ec9cfb4842971f0e52768ca7c2bbadc364d424500"
+        },
+        {
+          "start": 529,
+          "end": 641,
+          "type": 2,
+          "codec": 0,
+          "checks": {},
+          "records": [
+            {
+              "offset": 8,
+              "content_id": "sym:6428b48b94bd647cdf5a3615d383cf3da1e31e3456a9b3dee4c302aade659030",
+              "value": {
+                "kind": "LIFE",
+                "t": 0,
+                "pid": 13,
+                "fork": 0,
+                "start": 0,
+                "start_known": true,
+                "exit": null
+              },
+              "fault": null
+            }
+          ],
+          "content_id": "sym:a5ebd96810a4b1aebd99b78bd4135dbc0458bf4a60126815b884b6f2143a78c3"
+        }
+      ],
+      "tail": {
+        "kind": "eof",
+        "length": 0,
+        "content_id": ""
+      }
+    }
+  ]
+}

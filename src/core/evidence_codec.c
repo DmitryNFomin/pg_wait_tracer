@@ -362,8 +362,7 @@ static int append_rows(pgwt_evidence_file *f, pgwt_codec_file_info *info, row *r
     }
     return 0;
 }
-/* Scan one file; record faults are retained with their precise positions for
- * r3 replay. They do not turn any decoded suffix into certified evidence. */
+/* Independent scan: structural faults do not end byte validation. */
 static int scan(pgwt_evidence_file *f, pgwt_codec_file_info *info, pgwt_codec_stop *stop)
 {
     pgwt_codec_buffer b=info->bytes;size_t off=info->header_size;
@@ -382,12 +381,14 @@ static int scan(pgwt_evidence_file *f, pgwt_codec_file_info *info, pgwt_codec_st
             type=(unsigned)at(bh+28,2);codec=bh[60];
             if (!n || n>RECORD_MAX || !s || s>PAYLOAD_MAX || !u || u>PAYLOAD_MAX || info->block_count>=BLOCK_MAX)
                 reason=PGWT_CODEC_BOUNDS;
-            else if (s>remaining-64 || remaining-64-s<4) reason=PGWT_CODEC_FRAMING;
-            else if (pgwt_codec_crc32(bh,64+s)!=at(bh+64+s,4)) reason=PGWT_CODEC_CRC;
             else if (at(bh+48,8)!=off || at(bh+56,4)!=preceding) reason=PGWT_CODEC_LINK;
             else if (type>2 || codec>1 || (type==2 && codec) || at(bh+30,2) || bh[61] || bh[62] || bh[63]) reason=PGWT_CODEC_SCHEMA;
+            else if (s>remaining-64 || remaining-64-s<4) reason=PGWT_CODEC_FRAMING;
+            else if (pgwt_codec_crc32(bh,64+s)!=at(bh+64+s,4)) reason=PGWT_CODEC_CRC;
             else if ((codec==0 && s!=u) || (type!=1 && (at(bh+32,8) || at(bh+40,8)))) reason=PGWT_CODEC_ENCODING;
         }
+        pgwt_codec_code terminal_code=reason==PGWT_CODEC_CRC ? PGWT_CODEC_BAD_CRC :
+            reason==PGWT_CODEC_FRAMING ? PGWT_CODEC_TRUNCATED : PGWT_CODEC_INVALID_BLOCK;
         unsigned char *decoded=NULL;
         if (!reason && codec) {
             decoded=malloc(u);
@@ -404,7 +405,8 @@ static int scan(pgwt_evidence_file *f, pgwt_codec_file_info *info, pgwt_codec_st
         }
         free(decoded);
         if (reason) {
-            *stop=(pgwt_codec_stop){stop->input_file,off,0,info->data_end,reason};
+            *stop=(pgwt_codec_stop){.input_file=stop->input_file,.block_offset=off,
+                .validated_end=info->data_end,.reason=reason,.code=terminal_code};
             free(index);free(rows);return 1;
         }
         if (!fault) for (size_t i=0;i<n;++i) if (rows[i].r.unsupported_shape) {
@@ -423,10 +425,11 @@ static int scan(pgwt_evidence_file *f, pgwt_codec_file_info *info, pgwt_codec_st
         if (!grown) { free(index);free(rows);return -1; }index=grown;
         index[info->block_count++]=(index_entry){at(bh,8),off};
         preceding=(uint32_t)at(bh+64+s,4);off+=68+s;info->data_end=off;
-        if (fault) break;
+
     }
     free(index);free(rows);
-    if (fault) { *stop=(pgwt_codec_stop){stop->input_file,fault_block,fault_record,info->data_end,fault};return 1; }
+    if (fault) { *stop=(pgwt_codec_stop){.input_file=stop->input_file,.block_offset=fault_block,
+        .record_offset=fault_record,.validated_end=info->data_end,.reason=fault,.code=PGWT_CODEC_RF,.has_record_offset=true};return 1; }
     return 0;
 }
 
@@ -440,7 +443,17 @@ void pgwt_codec_decoded_free(pgwt_codec_decoded *out)
     if (!out) return;
     if (out->files && out->info)
         for (size_t i=0;i<out->file_count;++i) file_free(&out->files[i],&out->info[i]);
-    free(out->files);free(out->info);free(out->stops);memset(out,0,sizeof(*out));
+    for (size_t i=0;i<out->stop_count;++i) free(out->stops[i].witnesses);
+    for (size_t i=0;i<out->diagnostic_count;++i) free(out->diagnostics[i].witnesses);
+    for (size_t i=0;i<out->delivery_count;++i) free(out->deliveries[i].checks);
+    for (size_t i=0;i<out->group_count;++i) free(out->groups[i].sources);
+    for (size_t i=0;i<out->capture_count;++i) {
+        pgwt_codec_capture *c=&out->captures[i];
+        free(c->boots);free(c->witnesses);
+        free(c->replay.frontiers);free(c->replay.revoked_frontiers);
+    }
+    free(out->files);free(out->info);free(out->stops);free(out->diagnostics);
+    free(out->deliveries);free(out->groups);free(out->captures);memset(out,0,sizeof(*out));
 }
 static bool same_mapping(const pgwt_codec_descriptor *a, const pgwt_codec_descriptor *b)
 {
@@ -449,56 +462,374 @@ static bool same_mapping(const pgwt_codec_descriptor *a, const pgwt_codec_descri
         if (a->mapping[i].id!=b->mapping[i].id || a->mapping[i].role!=b->mapping[i].role || !equal(a->mapping[i].name,b->mapping[i].name)) return false;
     return true;
 }
+typedef struct { pgwt_evidence_file file; pgwt_codec_file_info info; pgwt_codec_stop terminal; } copy_state;
+
+static int event_order(pgwt_core_event a, pgwt_core_event b)
+{
+    size_t n=a.length<b.length ? a.length : b.length;
+    int c=n ? memcmp(a.data,b.data,n) : 0;
+    return c ? c : (a.length>b.length)-(a.length<b.length);
+}
+static int identity_order(pgwt_codec_identity a, pgwt_codec_identity b)
+{
+    int c=event_order(a.boot,b.boot);if (c) return c;
+    c=event_order(a.capture,b.capture);if (c) return c;
+    return (a.file_no>b.file_no)-(a.file_no<b.file_no);
+}
+static pgwt_codec_identity identity(const pgwt_evidence_file *f)
+{ return (pgwt_codec_identity){f->boot,f->capture,f->file_no}; }
+static int group_order(const void *a, const void *b)
+{ return identity_order(((const pgwt_codec_group *)a)->identity,((const pgwt_codec_group *)b)->identity); }
+static int delivery_order(const void *a, const void *b)
+{
+    const pgwt_codec_delivery *x=a,*y=b;
+    if (x->bytes.size!=y->bytes.size) return x->bytes.size<y->bytes.size ? -1 : 1;
+    int c=memcmp(x->sha256,y->sha256,32);
+    return c ? c : (x->bytes.size ? memcmp(x->bytes.data,y->bytes.data,x->bytes.size) : 0);
+}
+static int point_order(const pgwt_codec_stop *a, const pgwt_codec_stop *b)
+{
+    if (a->block_offset!=b->block_offset) return a->block_offset<b->block_offset ? -1 : 1;
+    if (a->has_record_offset!=b->has_record_offset) return a->has_record_offset ? 1 : -1;
+    if (a->has_record_offset && a->record_offset!=b->record_offset) return a->record_offset<b->record_offset ? -1 : 1;
+    return 0;
+}
+static int failure_order(const void *a, const void *b)
+{
+    const pgwt_codec_stop *x=a,*y=b;
+    if (x->group!=y->group) {
+        if (x->group==SIZE_MAX) return -1;
+        if (y->group==SIZE_MAX) return 1;
+        return x->group<y->group ? -1 : 1;
+    }
+    int c=point_order(x,y);if (c) return c;
+    return (x->code>y->code)-(x->code<y->code);
+}
+static int witness_order(const void *a, const void *b)
+{
+    const pgwt_codec_witness *x=a,*y=b;
+    if (x->first!=y->first) return x->first<y->first ? -1 : 1;
+    return (x->second>y->second)-(x->second<y->second);
+}
+static int add_index(size_t **array, size_t *count, size_t value)
+{
+    void *p=array_grow(*array,*count+1,sizeof(**array));if (!p) return -1;
+    *array=p;(*array)[(*count)++]=value;return 0;
+}
+static int add_failure(pgwt_codec_stop **array, size_t *count, pgwt_codec_stop s, pgwt_codec_witness w)
+{
+    size_t i=0;
+    for (;i<*count;++i) if (!failure_order(&(*array)[i],&s)) break;
+    if (i==*count) {
+        void *p=array_grow(*array,*count+1,sizeof(**array));if (!p) return -1;
+        *array=p;s.witnesses=NULL;s.witness_count=0;(*array)[(*count)++]=s;
+    }
+    pgwt_codec_stop *v=&(*array)[i];
+    for (size_t j=0;j<v->witness_count;++j)
+        if (!witness_order(&v->witnesses[j],&w)) return 0;
+    void *p=array_grow(v->witnesses,v->witness_count+1,sizeof(w));if (!p) return -1;
+    v->witnesses=p;v->witnesses[v->witness_count++]=w;
+    qsort(v->witnesses,v->witness_count,sizeof(w),witness_order);return 0;
+}
+static int observe(pgwt_codec_decoded *out, pgwt_codec_stop **cs, size_t *nc,
+                   pgwt_codec_stop s, pgwt_codec_witness w, bool eligible)
+{
+    if (add_failure(&out->diagnostics,&out->diagnostic_count,s,w)) return -1;
+    return eligible ? add_failure(cs,nc,s,w) : 0;
+}
+static bool same_header(const copy_state *a, const copy_state *b)
+{
+    size_t h=a->info.header_size;
+    return h==b->info.header_size && !memcmp(a->info.bytes.data,b->info.bytes.data,6) &&
+        !memcmp(a->info.bytes.data+8,b->info.bytes.data+8,h-8);
+}
+static pgwt_codec_link_check check_link(size_t predecessor, const copy_state *p, const copy_state *s, bool clean)
+{
+    const pgwt_codec_file_info *info=&s->info;
+    uint64_t D=info->previous_data_end;
+    pgwt_codec_link_check c={.predecessor=predecessor,.validated_end=p->info.data_end,.clean=clean};
+    c.static_match=equal(p->file.boot,s->file.boot) && equal(p->file.capture,s->file.capture) &&
+        p->file.file_no==s->file.previous && p->file.qualified==s->file.qualified &&
+        same_mapping(&p->info.descriptor,&info->descriptor);
+    size_t off=p->info.header_size;c.boundary=D==off;
+    while (off<p->info.data_end) {
+        off+=68+(size_t)at(p->info.bytes.data+off+20,4);
+        if (D==off) c.boundary=true;
+    }
+    if (c.boundary) {
+        unsigned char digest[32];predecessor_hash(p->info.bytes,(size_t)D,digest);
+        c.digest_match=memcmp(digest,info->previous_sha256,32)==0;
+    }
+    c.exact_end=D==p->info.data_end;c.extension=c.boundary && D<p->info.data_end;
+    c.witness=c.static_match && c.boundary && c.digest_match && clean && c.exact_end;
+    c.seal_proof=c.static_match && c.boundary && c.digest_match && c.extension;
+    return c;
+}
+static bool ignored_certificate(const pgwt_evidence_file *f, const pgwt_evidence_record *r)
+{
+    return !f->qualified && (r->kind==PGWT_EVIDENCE_ATTACH_OK ||
+        r->kind==PGWT_EVIDENCE_FRONTIER || r->kind==PGWT_EVIDENCE_END);
+}
+/* The codec owns physical reconciliation and byte positions. Replay alone owns
+ * semantic decisions, including the running baseline at successor descriptors. */
+static int capture_replay(pgwt_codec_decoded *out)
+{
+    if (!out->file_count) return 0;
+    pgwt_evidence_input in={.files=out->files,.file_count=out->file_count,
+        .capture=out->files[0].capture,.pid=1};
+    pgwt_core_query q={.event={"codec-report",12},.from=0,.to=1};
+    pgwt_evidence_output output={0};pgwt_evidence_report report={0};
+    if (pgwt_evidence_replay_report(&in,&q,&output,&report,NULL)!=PGWT_REPLAY_OK) return -1;
+    pgwt_evidence_output_free(&output);
+    for (size_t i=0;i<report.capture_count;++i) {
+        pgwt_evidence_capture_report *r=&report.captures[i];
+        for (size_t j=0;j<out->capture_count;++j) if (equal(out->captures[j].capture,r->capture)) {
+            pgwt_codec_capture *c=&out->captures[j];c->has_replay=true;c->replay=*r;
+            r->frontiers=NULL;r->revoked_frontiers=NULL;
+            if (c->replay.stop.stopped) {
+                c->failed=true;size_t f=c->replay.stop.file_index;
+                for (size_t g=0;g<out->group_count;++g)
+                    if (out->groups[g].file_index==f) c->replay_group=g;
+                if (!c->replay.stop.descriptor)
+                    c->replay_position=out->info[f].positions[c->replay.stop.record_index];
+            }
+        }
+    }
+    pgwt_evidence_report_free(&report);return 0;
+}
 int pgwt_codec_decode(const pgwt_codec_buffer *buffers, size_t count, pgwt_codec_decoded *out)
 {
     if (!out) return -1;
     memset(out,0,sizeof(*out));
-    if ((count && !buffers) || count>SIZE_MAX/sizeof(*out->files) || count>SIZE_MAX/sizeof(*out->info) || count>SIZE_MAX/sizeof(*out->stops)) return -1;
+    if ((count && !buffers) || count>SIZE_MAX/sizeof(copy_state) ||
+        count>SIZE_MAX/sizeof(pgwt_codec_delivery) || count>SIZE_MAX/sizeof(pgwt_codec_group) ||
+        count>SIZE_MAX/sizeof(pgwt_codec_capture)) return -1;
     if (!count) return 0;
-    out->files=calloc(count,sizeof(*out->files));out->info=calloc(count,sizeof(*out->info));out->stops=calloc(count,sizeof(*out->stops));
-    bool *stopped=calloc(count,sizeof(*stopped));
-    if (!out->files || !out->info || !out->stops || !stopped) goto error;
+    copy_state *states=NULL;pgwt_codec_stop *candidates=NULL;size_t candidate_count=0;
+    out->deliveries=calloc(count,sizeof(*out->deliveries));
+    out->groups=calloc(count,sizeof(*out->groups));out->captures=calloc(count,sizeof(*out->captures));
+    out->files=calloc(count,sizeof(*out->files));out->info=calloc(count,sizeof(*out->info));
+    if (!out->deliveries || !out->groups || !out->captures || !out->files || !out->info) goto error;
     for (size_t i=0;i<count;++i) {
-        size_t j=out->file_count;pgwt_evidence_file *f=&out->files[j];pgwt_codec_file_info *info=&out->info[j];
-        pgwt_codec_stop stop={.input_file=i};
-        pgwt_codec_reason hr=header(buffers[i],f,info);
-        if (hr==PGWT_CODEC_NONE) { file_free(f,info);goto error; }
-        if (hr!=PGWT_CODEC_RECORD) {
-            file_free(f,info);memset(f,0,sizeof(*f));memset(info,0,sizeof(*info));
-            stop.reason=hr;out->stops[out->stop_count++]=stop;continue;
-        }
-        size_t prev=SIZE_MAX;
-        for (size_t k=0;k<j;++k) if (equal(out->files[k].capture,f->capture)) prev=k;
-        if (prev!=SIZE_MAX && stopped[prev]) { file_free(f,info);memset(f,0,sizeof(*f));memset(info,0,sizeof(*info));continue; }
-        bool link_bad=prev==SIZE_MAX ? f->file_no!=0 :
-            (!equal(out->files[prev].boot,f->boot) || out->files[prev].file_no==UINT64_MAX || f->file_no!=out->files[prev].file_no+1 ||
-             out->files[prev].qualified!=f->qualified || !same_mapping(&out->info[prev].descriptor,&info->descriptor) ||
-             info->previous_data_end!=out->info[prev].data_end);
-        if (!link_bad && prev!=SIZE_MAX) {
-            unsigned char digest[32];predecessor_hash(out->info[prev].bytes,out->info[prev].data_end,digest);
-            link_bad=memcmp(digest,info->previous_sha256,32)!=0;
-        }
-        if (link_bad) {
-            stop.reason=PGWT_CODEC_LINK;out->stops[out->stop_count++]=stop;
-            if (prev!=SIZE_MAX) stopped[prev]=true;
-            /* Keep a rejected, identified descriptor as a tombstone for this
-             * capture; replay stops before it, including when it is the root. */
-            f->unsupported_shape=true;stopped[j]=true;++out->file_count;continue;
-        }
-        if (prev!=SIZE_MAX) {
-            info->has_samples=out->info[prev].has_samples;
-            info->last_sample_time=out->info[prev].last_sample_time;
-            info->last_sample_weight=out->info[prev].last_sample_weight;
-        }
-        int status=scan(f,info,&stop);
-        if (status<0) { ++out->file_count;goto error; }
-        if (status) { out->stops[out->stop_count++]=stop;stopped[j]=true; }
-        ++out->file_count;
+        if (buffers[i].size && !buffers[i].data) goto error;
+        out->deliveries[i].bytes=buffers[i];out->deliveries[i].group=SIZE_MAX;
+        pgwt_codec_sha256(buffers[i].data,buffers[i].size,out->deliveries[i].sha256);
     }
-    free(stopped);return out->stop_count ? 1 : 0;
+    qsort(out->deliveries,count,sizeof(*out->deliveries),delivery_order);
+    for (size_t i=0;i<count;++i) {
+        if (i && !delivery_order(&out->deliveries[i],&out->deliveries[i-1])) continue;
+        out->deliveries[out->delivery_count++]=out->deliveries[i];
+    }
+    size_t n=out->delivery_count;
+    states=calloc(n,sizeof(*states));if (!states) goto error;
+    for (size_t i=0;i<n;++i) {
+        copy_state *s=&states[i];pgwt_codec_delivery *d=&out->deliveries[i];
+        pgwt_codec_reason hr=header(d->bytes,&s->file,&s->info);
+        if (hr==PGWT_CODEC_NONE) goto error;
+        if (hr!=PGWT_CODEC_RECORD) {
+            pgwt_codec_stop stop={.input_file=i,.reason=hr,.code=PGWT_CODEC_INVALID_HEADER,.group=SIZE_MAX};
+            if (observe(out,&candidates,&candidate_count,stop,(pgwt_codec_witness){i,SIZE_MAX},false)) goto error;
+            out->unassigned_header_failure=true;continue;
+        }
+        if (scan(&s->file,&s->info,&s->terminal)<0) goto error;
+        d->validated_end=s->info.data_end;
+        d->clean=!s->terminal.reason || s->terminal.reason==PGWT_CODEC_RECORD;
+        d->previous_data_end=s->info.previous_data_end;memcpy(d->previous_sha256,s->info.previous_sha256,32);
+        pgwt_codec_identity key=identity(&s->file);size_t g=0;
+        for (;g<out->group_count;++g) if (!identity_order(out->groups[g].identity,key)) break;
+        if (g==out->group_count) { out->groups[g].identity=key;out->groups[g].file_index=SIZE_MAX;++out->group_count; }
+    }
+    qsort(out->groups,out->group_count,sizeof(*out->groups),group_order);
+    for (size_t i=0;i<n;++i) if (states[i].info.header_size) {
+        for (size_t g=0;g<out->group_count;++g)
+            if (!identity_order(out->groups[g].identity,identity(&states[i].file))) out->deliveries[i].group=g;
+    }
+    /* Sample ticks are a stream even across rotation (CODEC §6). Carry
+     * their state only through an independently clean, exact digest witness,
+     * never a chosen arrival or a union assembled from partial deliveries.
+     * Groups are in ordinal order, so empty intervening files carry it too. */
+    for (size_t g=0;g<out->group_count;++g) for (size_t i=0;i<n;++i) {
+        pgwt_codec_delivery *d=&out->deliveries[i];copy_state *s=&states[i];
+        if (d->group!=g || !s->file.file_no) continue;
+        for (size_t j=0;j<n;++j) {
+            if (out->deliveries[j].group==SIZE_MAX || !states[j].info.has_samples ||
+                !equal(s->file.boot,states[j].file.boot) || !equal(s->file.capture,states[j].file.capture) ||
+                states[j].file.file_no!=s->file.file_no-1) continue;
+            pgwt_codec_link_check c=check_link(j,&states[j],s,out->deliveries[j].clean);
+            if (!c.witness) continue;
+            free((void *)s->file.records);s->file.records=NULL;s->file.record_count=0;
+            free(s->info.positions);s->info.positions=NULL;
+            free((void *)s->info.descriptor.transitions);s->info.descriptor.transitions=NULL;
+            s->info.block_count=0;s->info.data_end=s->info.header_size;s->info.descriptor.footer=false;
+            s->info.has_samples=true;s->info.last_sample_time=states[j].info.last_sample_time;
+            s->info.last_sample_weight=states[j].info.last_sample_weight;
+            memset(&s->terminal,0,sizeof(s->terminal));
+            if (scan(&s->file,&s->info,&s->terminal)<0) goto error;
+            d->validated_end=s->info.data_end;d->clean=!s->terminal.reason || s->terminal.reason==PGWT_CODEC_RECORD;
+            break;
+        }
+    }
+    /* All headers, not just reachable roots, establish the capture's boot set. */
+    for (size_t g=0;g<out->group_count;++g) {
+        pgwt_codec_identity id=out->groups[g].identity;size_t c=0;
+        for (;c<out->capture_count;++c) if (equal(out->captures[c].capture,id.capture)) break;
+        if (c==out->capture_count) {
+            out->captures[c].capture=id.capture;out->captures[c].replay_group=SIZE_MAX;++out->capture_count;
+        }
+        pgwt_codec_capture *cap=&out->captures[c];bool seen=false;
+        for (size_t j=0;j<cap->boot_count;++j) if (equal(cap->boots[j],id.boot)) seen=true;
+        if (!seen) {
+            void *p=array_grow(cap->boots,cap->boot_count+1,sizeof(*cap->boots));if (!p) goto error;
+            cap->boots=p;cap->boots[cap->boot_count++]=id.boot;
+        }
+    }
+    /* Insertion sort capture IDs; boot order already follows canonical groups. */
+    for (size_t i=1;i<out->capture_count;++i) {
+        pgwt_codec_capture c=out->captures[i];size_t j=i;
+        while (j && event_order(out->captures[j-1].capture,c.capture)>0) { out->captures[j]=out->captures[j-1];--j; }
+        out->captures[j]=c;
+    }
+    for (size_t c=0;c<out->capture_count;++c) {
+        pgwt_codec_capture *cap=&out->captures[c];cap->ambiguous=cap->boot_count>1;cap->failed=cap->ambiguous;
+        for (size_t i=0;i<n;++i) if (out->deliveries[i].group!=SIZE_MAX && equal(states[i].file.capture,cap->capture))
+            if (add_index(&cap->witnesses,&cap->witness_count,i)) goto error;
+    }
+    for (size_t i=0;i<n;++i) {
+        copy_state *s=&states[i];pgwt_codec_delivery *d=&out->deliveries[i];if (d->group==SIZE_MAX) continue;
+        pgwt_codec_witness w={i,SIZE_MAX};
+        if (!d->clean) {
+            pgwt_codec_stop stop=s->terminal;stop.input_file=i;stop.group=d->group;
+            if (observe(out,&candidates,&candidate_count,stop,w,false)) goto error;
+        }
+        for (size_t r=0;r<s->file.record_count;++r) if (s->file.records[r].unsupported_shape) {
+            pgwt_codec_position p=s->info.positions[r];
+            pgwt_codec_stop stop={.input_file=i,.block_offset=p.block_offset,.record_offset=p.record_offset,
+                .validated_end=d->validated_end,.reason=PGWT_CODEC_RECORD,.code=PGWT_CODEC_RF,
+                .has_record_offset=true,.group=d->group};
+            if (observe(out,&candidates,&candidate_count,stop,w,!ignored_certificate(&s->file,&s->file.records[r]))) goto error;
+        }
+    }
+    for (size_t g=0;g<out->group_count;++g) {
+        size_t E=0;bool hc=false,clean=false;
+        for (size_t i=0;i<n;++i) if (out->deliveries[i].group==g) {
+            if (out->deliveries[i].validated_end>E) E=out->deliveries[i].validated_end;
+            for (size_t j=i+1;j<n;++j) if (out->deliveries[j].group==g) {
+                pgwt_codec_stop stop={.input_file=i,.group=g,.reason=PGWT_CODEC_CRC,.code=PGWT_CODEC_BC};
+                bool conflict=false;
+                if (!same_header(&states[i],&states[j])) { hc=true;stop.code=PGWT_CODEC_HC;stop.reason=PGWT_CODEC_HEADER;conflict=true; }
+                else {
+                    size_t off=states[i].info.header_size;
+                    while (off<states[i].info.data_end && off<states[j].info.data_end) {
+                        size_t a=68+(size_t)at(states[i].info.bytes.data+off+20,4);
+                        size_t b=68+(size_t)at(states[j].info.bytes.data+off+20,4);
+                        if (a!=b || memcmp(states[i].info.bytes.data+off,states[j].info.bytes.data+off,a)) {
+                            stop.block_offset=off;stop.validated_end=off;conflict=true;break;
+                        }
+                        off+=a;
+                    }
+                }
+                if (conflict && observe(out,&candidates,&candidate_count,stop,(pgwt_codec_witness){i,j},true)) goto error;
+            }
+        }
+        pgwt_codec_group *group=&out->groups[g];
+        for (size_t i=0;i<n;++i) if (out->deliveries[i].group==g && out->deliveries[i].validated_end==E) {
+            if (!hc && add_index(&group->sources,&group->source_count,i)) goto error;
+            if (out->deliveries[i].clean) clean=true;
+        }
+        if (!clean) {
+            pgwt_codec_code code=PGWT_CODEC_RF;
+            for (size_t i=0;i<n;++i) if (out->deliveries[i].group==g && out->deliveries[i].validated_end==E && states[i].terminal.code<code) code=states[i].terminal.code;
+            for (size_t i=0;i<n;++i) if (out->deliveries[i].group==g && out->deliveries[i].validated_end==E && states[i].terminal.code==code) {
+                pgwt_codec_stop stop=states[i].terminal;stop.input_file=i;stop.group=g;
+                if (add_failure(&candidates,&candidate_count,stop,(pgwt_codec_witness){i,SIZE_MAX})) goto error;
+            }
+        }
+    }
+    /* Local linkage is independent of any earlier capture cutoff/ambiguity. */
+    for (size_t i=0;i<n;++i) {
+        pgwt_codec_delivery *d=&out->deliveries[i];copy_state *s=&states[i];
+        if (d->group==SIZE_MAX || !s->file.file_no) continue;
+        bool witnessed=false,sealed=false;
+        for (size_t j=0;j<n;++j) if (out->deliveries[j].group!=SIZE_MAX &&
+            equal(s->file.boot,states[j].file.boot) && equal(s->file.capture,states[j].file.capture) &&
+            states[j].file.file_no==s->file.file_no-1) {
+            pgwt_codec_link_check c=check_link(j,&states[j],s,out->deliveries[j].clean);
+            void *p=array_grow(d->checks,d->check_count+1,sizeof(c));if (!p) goto error;
+            d->checks=p;d->checks[d->check_count++]=c;witnessed|=c.witness;sealed|=c.seal_proof;
+            if (c.seal_proof) {
+                pgwt_codec_stop stop={.input_file=j,.block_offset=(size_t)d->previous_data_end,
+                    .validated_end=(size_t)d->previous_data_end,.reason=PGWT_CODEC_LINK,.code=PGWT_CODEC_SC,.group=out->deliveries[j].group};
+                if (observe(out,&candidates,&candidate_count,stop,(pgwt_codec_witness){j,i},true)) goto error;
+            }
+        }
+        d->link=sealed ? PGWT_CODEC_SEAL_CONFLICT : witnessed ? PGWT_CODEC_WITNESSED : PGWT_CODEC_UNAVAILABLE;
+        if (!sealed && !witnessed) {
+            pgwt_codec_stop stop={.input_file=i,.reason=PGWT_CODEC_LINK,.code=PGWT_CODEC_PU,.group=d->group};
+            if (observe(out,&candidates,&candidate_count,stop,(pgwt_codec_witness){i,SIZE_MAX},true)) goto error;
+        }
+    }
+    if (candidate_count) qsort(candidates,candidate_count,sizeof(*candidates),failure_order);
+    for (size_t i=0;i<candidate_count;++i) {
+        if (i && candidates[i].group==candidates[i-1].group) continue;
+        for (size_t w=0;w<candidates[i].witness_count;++w)
+            if (add_failure(&out->stops,&out->stop_count,candidates[i],candidates[i].witnesses[w])) goto error;
+    }
+    if (out->diagnostic_count) qsort(out->diagnostics,out->diagnostic_count,sizeof(*out->diagnostics),failure_order);
+    for (size_t g=0;g<out->group_count;++g) {
+        pgwt_codec_group *group=&out->groups[g];pgwt_codec_identity id=group->identity;
+        pgwt_codec_capture *cap=NULL;
+        for (size_t c=0;c<out->capture_count;++c) if (equal(out->captures[c].capture,id.capture)) cap=&out->captures[c];
+        bool reachable=group->source_count>0 && !cap->ambiguous;
+        uint64_t cursor=0;
+        for (size_t k=0;k<=g;++k) if (equal(out->groups[k].identity.boot,id.boot) && equal(out->groups[k].identity.capture,id.capture)) {
+            if (out->groups[k].identity.file_no!=cursor) reachable=false;
+            if (cursor!=UINT64_MAX) ++cursor;
+        }
+        const pgwt_codec_stop *cut=NULL;
+        for (size_t t=0;t<out->stop_count;++t) {
+            const pgwt_codec_stop *stop=&out->stops[t];pgwt_codec_identity f=out->groups[stop->group].identity;
+            if (!equal(f.boot,id.boot) || !equal(f.capture,id.capture)) continue;
+            cap->failed=true;
+            if (!cut || f.file_no<out->groups[cut->group].identity.file_no ||
+                (f.file_no==out->groups[cut->group].identity.file_no && point_order(stop,cut)<0)) cut=stop;
+        }
+        if (cut && (out->groups[cut->group].identity.file_no<id.file_no ||
+            (out->groups[cut->group].identity.file_no==id.file_no && !cut->block_offset && !cut->has_record_offset))) reachable=false;
+        group->admitted=reachable;if (!reachable) continue;
+        size_t src=group->sources[0],f=out->file_count++;
+        group->file_index=f;out->files[f]=states[src].file;out->info[f]=states[src].info;
+        memset(&states[src].file,0,sizeof(states[src].file));memset(&states[src].info,0,sizeof(states[src].info));
+        pgwt_evidence_file *file=&out->files[f];pgwt_codec_file_info *info=&out->info[f];size_t retained=0;
+        for (size_t r=0;r<file->record_count;++r) {
+            pgwt_codec_position pos=info->positions[r];
+            pgwt_codec_stop here={.block_offset=pos.block_offset,.record_offset=pos.record_offset,.has_record_offset=true};
+            if (cut && out->groups[cut->group].identity.file_no==id.file_no && point_order(&here,cut)>=0) continue;
+            if (file->records[r].unsupported_shape) continue;
+            ((pgwt_evidence_record *)file->records)[retained]=file->records[r];
+            info->positions[retained]=pos;
+            ((pgwt_codec_transition *)info->descriptor.transitions)[retained]=info->descriptor.transitions[r];++retained;
+        }
+        file->record_count=retained;
+    }
+    if (capture_replay(out)) goto error;
+    out->failed=out->unassigned_header_failure;
+    for (size_t c=0;c<out->capture_count;++c) out->failed|=out->captures[c].failed;
+    for (size_t i=0;i<n;++i) file_free(&states[i].file,&states[i].info);
+    free(states);
+    for (size_t i=0;i<candidate_count;++i) free(candidates[i].witnesses);
+    free(candidates);return out->failed ? 1 : 0;
 error:
-    free(stopped);pgwt_codec_decoded_free(out);return -1;
+    if (states) for (size_t i=0;i<out->delivery_count;++i) file_free(&states[i].file,&states[i].info);
+    free(states);
+    for (size_t i=0;i<candidate_count;++i) free(candidates[i].witnesses);
+    free(candidates);pgwt_codec_decoded_free(out);return -1;
 }
+const char *pgwt_codec_code_name(pgwt_codec_code code)
+{
+    static const char *const names[]={"HC","BC","SC","PU","CRC","T","IH","IB","RF"};
+    return (unsigned)code<sizeof(names)/sizeof(*names) ? names[code] : NULL;
+}
+
 
 static bool valid_record(const pgwt_evidence_record *r, const pgwt_codec_descriptor *d)
 {
