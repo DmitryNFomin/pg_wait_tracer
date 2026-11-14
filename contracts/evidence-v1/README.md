@@ -42,3 +42,13 @@ reviewed change and invalidates the expected answers.
   CONTRACT.md is unchanged by the codec. The fault-handling question this codec raised (CONTRACT.md §5 against the
   reference evaluator and the C replay, which both refused the whole input) is settled by revision r3 (`REVISION-r3.md`,
   scenarios in `r3/`). The C replay on master still implements r2 and refuses those inputs until its r3 unit lands.
+
+Two U7b review strikes exposed the redelivery gap. Both advisers agreed it was
+a contract gap but differed on the rule; the lead resolved it for **prefix union**
+from CODEC.md:554–556 (at `03694b8b`), requiring later published blocks, including
+retroactive VOID, to be incorporated. Astra drafted the rule, Fable challenged it
+(**ACCEPT-WITH-CHANGES**, seven points), and r2 accepted all seven. The accepted
+revision is [codec/REDELIVERY.md](codec/REDELIVERY.md), with the source question,
+answer, challenge and blank oracle inputs in
+[codec/redelivery-oracle/](codec/redelivery-oracle/); independent answers follow.
+See [Refs #868, comment 6868500311](https://github.com/DmitryNFomin/pg_wait_tracer/issues/868#issuecomment-6868500311).
