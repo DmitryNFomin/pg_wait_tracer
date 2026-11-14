@@ -21,8 +21,7 @@ identity/integrity reference (`null` for 0); qualification boolean; initial 15-c
 A successor repeats the descriptor and retains capture identity. Restart creates a new capture.
 For a successor, loss_baseline must restate the running baseline at that file boundary (null if
 unknown), never reset it or report loss; a mismatch stops at that descriptor under §6.
-Within one input, a capture ID belongs to the boot named by its first validated descriptor;
-it cannot be reused by another boot. A conflicting descriptor is a chain fault under §6.
+Within one ordered logical input, a capture ID belongs to the boot named by its first validated descriptor; reuse by another boot is a chain fault under §6. The first-boot/prefix rules in §§5–7 and REVISION-r3 Q5 apply to ordered logical fixtures. A codec delivery multiset instead follows REDELIVERY.md clause 2a, irrespective of the order in which deliveries were supplied. For an ambiguously reused capture ID, clause 2a’s whole-capture withholding overrides ordinary prefix, LIFE and certificate retention, including §§4–6 and §7’s first-descriptor target binding. For unambiguous captures, this contract continues to govern logical replay.
 Qualification asserts the capture prerequisites in section 3; absence/false permits no certificates.
 The descriptor and every dependency of a certificate must survive in the same validated prefix.
 A certificate is published only after its dependencies are flushed; power-loss durability additionally
@@ -294,6 +293,9 @@ immutability and generation rules, with unambiguous identity under §4's lifecyc
 This check is independent of exact-capture qualification; PREEMPT_RT alone does not invalidate LIFE.
 Such a target projects its retained life with coverage=[], waits=[], open=null; failed LIFE validation
 uses LIFE_INVALID. Certificate-shaped records in an unqualified capture cannot alter this choice.
+
+Qualification does not exempt descriptor continuity checks. Every capture initializes its running baseline from file 0, updates it through applicable explicit VOID records, and checks each reachable successor descriptor against it. In an unqualified capture, ignored ATTACH_OK, FRONTIER and END records neither update the baseline nor become counter-loss VOID records. Explicit VOID retains its ordinary baseline and lifecycle effects. A successor-baseline mismatch stops the capture even when qualification is false; ignoring certificates never creates coverage.
+
 The unchanged core computes both metrics; two escalation windows cannot be combined into a falsely
 complete answer. No event-specific projection optimization: unknown waits impair every event query.
 
