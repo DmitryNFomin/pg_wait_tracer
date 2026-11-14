@@ -96,13 +96,13 @@ static void count_uprobe_fire(u32 slot) { (void)slot; }
 
 /* These are unreachable in this mode-zero migration harness. The A1 host
  * harness executes the actual flagged helpers and producer bodies. */
-static u64 transport_attempt(u32 dest) { (void)dest; abort(); }
-static u64 transport_cookie(u32 pid) { (void)pid; abort(); }
 static void transport_header(struct pgwt_wire_hdr *h, u8 k, u16 n, u64 s, u64 c)
 { (void)h; (void)k; (void)n; (void)s; (void)c; abort(); }
-static void transport_failure(u32 dest) { (void)dest; abort(); }
-static struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u32 pid, u64 c, u32 site)
-{ (void)pid; (void)c; (void)site; abort(); }
+static void transport_lifecycle_failure(u32 site) { (void)site; abort(); }
+static struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u64 *seq)
+{ (void)seq; abort(); }
+static bool transport_text(u32 pid, u64 query_id, u64 text, u32 site, u32 slot)
+{ (void)pid; (void)query_id; (void)text; (void)site; (void)slot; abort(); }
 
 /* PRODUCTION_FUNCTIONS */
 

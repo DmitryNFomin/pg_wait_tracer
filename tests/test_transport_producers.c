@@ -33,20 +33,33 @@ static int portable(void)
     memcpy(perf_raw, &hdr, sizeof(hdr));
     REQUIRE(probe_perf_wire_size(perf_raw, 52) == 48);
     REQUIRE(probe_perf_wire_size(perf_raw, 48) == 0);
-    struct probe_stamp request = {.cpu=2, .round=3, .stamp=150};
+    struct probe_stamp request = {.cpu=2, .round=3, .issued=120, .stamp=150};
     struct probe_stamp boundary = {.cpu=2, .round=3, .stamp=201};
     REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 1);
+    /* Every missing piece refuses (0); none of them passes. */
     REQUIRE(probe_spin_evidence(2, 100, 200, NULL, 0, &boundary, 1) == 0);
     REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, NULL, 0) == 0);
+    /* The round advanced between the wake and the helper's run: still the
+     * helper's own later run. An OLDER round is stale and refuses. */
     boundary.round=4;
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 1);
+    boundary.round=2;
     REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
     boundary.round=3; boundary.cpu=1;
     REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
-    boundary.cpu=2; boundary.stamp=175;
-    REQUIRE(probe_spin_evidence(2, 100, 200, NULL, 0, &boundary, 1) == -1);
-    boundary.stamp=201; request.stamp=99;
+    boundary.cpu=2; request.cpu=1;
     REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
-    puts("falsifier evidence: PASS (request during spin, matching CPU/round, later boundary; missing evidence refuses)");
+    request.cpu=2; boundary.stamp=200; /* not after the section */
+    REQUIRE(probe_spin_evidence(2, 100, 200, NULL, 0, &boundary, 1) == -1);
+    boundary.stamp=175;
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == -1);
+    boundary.stamp=201; request.issued=99; /* wake began before the section */
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
+    request.issued=120; request.stamp=200; /* wake returned after the section */
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 0);
+    request.stamp=199;
+    REQUIRE(probe_spin_evidence(2, 100, 200, &request, 1, &boundary, 1) == 1);
+    puts("falsifier evidence: PASS (wake inside the spin, same CPU, a boundary of that round or later after it; every missing piece refuses)");
     u64 attempts[3] = {0};
     REQUIRE(pgwt_producer_attempt(&attempts[0]) == 1);
     /* Failed publication consumes the first attempt, another dest is separate. */

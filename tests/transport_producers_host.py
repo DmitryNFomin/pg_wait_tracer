@@ -13,11 +13,13 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FUNCTIONS = ('count_ring_fail', 'count_map_fail', 'test_fail_once',
              'transport_cookie', 'transport_attempt', 'transport_header',
-             'transport_failure', 'transport_trace_failure', 'transport_reserve_trace',
-             'transport_reserve_lifecycle', 'transport_spin_failure',
+             'transport_failure', 'transport_trace_failure', 'transport_lifecycle_failure',
+             'transport_reserve_trace', 'transport_reserve_lifecycle', 'transport_spin_failure',
              'transport_boundary', 'on_transport_helper', 'emit_event',
              'on_watchpoint', 'on_bootstrap', 'on_fork', 'transport_exit', 'on_exit',
-             'emit_marker', 'on_report_activity', 'on_report_query_id', 'on_executor_start')
+             'marker_edge', 'transport_marker', 'emit_marker', 'transport_text',
+             'transport_activity', 'on_report_activity', 'on_report_query_id',
+             'on_executor_start')
 
 
 def function(source, name):
@@ -32,22 +34,53 @@ def function(source, name):
     return source[start:end]
 
 
-def restore_init_publication(source):
-    """The same built mutant is exercised by the host and real-PG drivers."""
-    old = '            if (st && st->init_stored) return 0;\n            u64 stamp = bpf_ktime_get_ns();'
-    new = '            if (st && st->init_stored) return 0;\n            struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(pid,\n                pgwt_producer_cookie(st), PGWT_RING_FAIL_LIFECYCLE_INIT_HINT);\n            u64 stamp = bpf_ktime_get_ns();'
-    assert source.count(old) == 1
-    source = source.replace(old, new)
-    old = '            } else count_map_fail(PGWT_BPF_FAIL_INIT_NO_STATE);\n            return 0;'
-    new = '''            } else count_map_fail(PGWT_BPF_FAIL_INIT_NO_STATE);
-            if (wire) {
-                wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_INIT,
-                    .pid = pid, .addr = wait_addr, .timestamp = stamp };
-                bpf_ringbuf_submit(wire, 0);
-            }
-            return 0;'''
-    assert source.count(old) == 1
+def replace_once(source, old, new):
+    assert source.count(old) == 1, (old, source.count(old))
     return source.replace(old, new)
+
+
+def restore_init_publication(source):
+    """The same built mutant is exercised by the host and real-PG drivers.
+
+    It puts the INIT publication on L back into on_bootstrap under the mode.
+    It keeps the production reservation shape (reserve before the timestamp,
+    one NULL test, the release inside the non-NULL arm), so the 4.18 verifier
+    loads it and the only thing that differs from production is the record.
+
+    On EL8 4.18 this reservation is taken in NMI context and is refused when
+    the ring lock is contended, which is rare and load-dependent. So that
+    every run of the mutant arm meets a refusal, on every kernel, the mutant
+    also gives up the reservation for odd PIDs and counts it exactly as a
+    refused one is counted (attempt consumed, nothing delivered, L failure,
+    INIT site). The live arm must tolerate those and still reach its kill
+    assertion; it asserts that it saw both a published and a refused INIT.
+    """
+    source = replace_once(source,
+        '            if (st->init_stored) return 0;\n            u64 stamp = bpf_ktime_get_ns();',
+        '            if (st->init_stored) return 0;\n            u64 seq;\n'
+        '            struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(&seq);\n'
+        '            u64 stamp = bpf_ktime_get_ns();')
+    return replace_once(source,
+        '            *(volatile u32 *)&st->init_stored = 1;\n            return 0;\n        }\n'
+        '        u64 init_ts = bpf_ktime_get_ns();',
+        '''            *(volatile u32 *)&st->init_stored = 1;
+            if (!wire) {
+                transport_lifecycle_failure(PGWT_RING_FAIL_LIFECYCLE_INIT_HINT);
+                return 0;
+            }
+            if (pid & 1) {
+                bpf_ringbuf_discard(wire, 0);
+                transport_lifecycle_failure(PGWT_RING_FAIL_LIFECYCLE_INIT_HINT);
+                return 0;
+            }
+            transport_header(&wire->hdr, PGWT_WIRE_LIFECYCLE, sizeof(wire->payload),
+                seq, st->cookie);
+            wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_INIT,
+                .pid = pid, .addr = wait_addr, .timestamp = stamp };
+            bpf_ringbuf_submit(wire, 0);
+            return 0;
+        }
+        u64 init_ts = bpf_ktime_get_ns();''')
 
 
 def run(source, directory, header=None):
@@ -70,7 +103,28 @@ def run(source, directory, header=None):
 
 def main():
     # Pure live-driver checks run on the Mac too; no BPF tools are invoked.
-    from test_transport_producers_live import preemption_mode, assert_clean_pg
+    from test_transport_producers_live import (PG13_LAYOUT, Refused, assert_clean_pg, layout,
+                                               preemption_mode)
+    # The live driver takes PostgreSQL offsets from the daemon's validated
+    # table rather than from server headers. Pin its copy to that table.
+    discovery = (ROOT / 'src/discovery.c').read_text()
+    found = re.findall(r'case 13:\s*return (\d+);', function(discovery, 'pgwt_detect_pgproc_wait_offset'))
+    assert found == [str(PG13_LAYOUT['pgproc_wait_event_info'])], found
+    query = function(discovery, 'pgwt_detect_pg13_query_offsets')
+    query = query[query.index('case 13:'):]
+    for field in ('querydesc_plannedstmt', 'plannedstmt_queryid', 'querydesc_sourcetext'):
+        found = re.findall(r'out->%s\s*=\s*(\d+);' % field, query)
+        assert found == [str(PG13_LAYOUT[field])], (field, found)
+    assert layout(13, 'x86_64') == (684, 8, 8, 16) and layout(17, 'x86_64') == (0, 0, 0, 0)
+    assert layout(18, 'aarch64') == (0, 0, 0, 0)
+    for major, machine in ((13, 'aarch64'), (16, 'x86_64'), (14, 'x86_64')):
+        try:
+            layout(major, machine)
+        except Refused:
+            pass
+        else:
+            raise AssertionError(f'layout accepted PG{major} on {machine}')
+    print('live driver layout: PASS (PG13 offsets equal src/discovery.c; PG17+ direct pointer; unknown layouts refused)')
     for dynamic, config, expected in (
             ('none voluntary (full)', '', 'full'),
             ('none (voluntary) full', 'CONFIG_PREEMPT=y\nCONFIG_PREEMPT_DYNAMIC=y', 'voluntary'),
@@ -119,41 +173,57 @@ done
         result = run(source, directory)
         assert result.returncode == 0, result.stdout + result.stderr
         print(result.stdout, end='')
-        # Move marker's actual timestamp before its reservation. It compiles,
+        # Take the marker's timestamp before its reservation. It compiles,
         # reaches a successful marker and fails the timestamp ordering check.
-        old = '    if (exact_perf_mode) wire = transport_reserve_trace(pid, PGWT_RING_FAIL_MARKER);\n    u64 now = bpf_ktime_get_ns();'
-        new = '    u64 now = bpf_ktime_get_ns();\n    if (exact_perf_mode) wire = transport_reserve_trace(pid, PGWT_RING_FAIL_MARKER);'
-        assert source.count(old) == 1
-        mutants = [('timestamp-before-reserve', source.replace(old, new), None, 'timestamp after reserve')]
-        old = '    u64 seq = transport_attempt(PGWT_WIRE_DEST_E);\n    struct pgwt_wire_trace *ev = bpf_ringbuf_reserve(&event_ringbuf, sizeof(*ev), 0);'
-        new = '    struct pgwt_wire_trace *ev = bpf_ringbuf_reserve(&event_ringbuf, sizeof(*ev), 0);\n    u64 seq = ev ? transport_attempt(PGWT_WIRE_DEST_E) : 0;'
-        assert source.count(old) == 1
-        mutants.append(('seq-only-on-success', source.replace(old, new), None, 'marker fail attribution coherent'))
+        early = replace_once(source,
+            '    struct pgwt_trace_event evt = {};\n    u64 seq;\n'
+            '    struct pgwt_wire_trace *wire = transport_reserve_trace(&seq);\n    if (!wire) {\n'
+            '        transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_MARKER);',
+            '    struct pgwt_trace_event evt = {};\n    u64 seq;\n    u64 early = bpf_ktime_get_ns();\n'
+            '    struct pgwt_wire_trace *wire = transport_reserve_trace(&seq);\n    if (!wire) {\n'
+            '        transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_MARKER);')
+        early = replace_once(early, '    if (marker_edge(pid, marker, bpf_ktime_get_ns(), &evt)) {',
+                             '    if (marker_edge(pid, marker, early, &evt)) {')
+        mutants = [('timestamp-before-reserve', early, None, 'timestamp after reserve')]
+        # Take the attempt number only when the reservation succeeded.
+        mutants.append(('seq-only-on-success', replace_once(source,
+            '    *seq = transport_attempt(PGWT_WIRE_DEST_E);\n'
+            '    return bpf_ringbuf_reserve(&event_ringbuf, sizeof(struct pgwt_wire_trace), 0);',
+            '    struct pgwt_wire_trace *ev = bpf_ringbuf_reserve(&event_ringbuf, sizeof(struct pgwt_wire_trace), 0);\n'
+            '    *seq = ev ? transport_attempt(PGWT_WIRE_DEST_E) : 0;\n    return ev;'),
+            None, 'marker fail attribution coherent'))
         header = (ROOT / 'src/bpf/transport_producer.h').read_text()
         # Inline the mutated production pure helper after resolving relative includes.
         header = header.replace('"../pgwt_transport_wire.h"', '"pgwt_transport_wire.h"').replace('"../pg_wait_tracer.h"', '"pg_wait_tracer.h"')
-        mutants.append(('unpinned-helper', source, header.replace('&& *expected == cpu', '&& cpu < MAX_CPUS'), 'helper wrong CPU refused'))
+        mutants.append(('unpinned-helper', source, replace_once(header, '&& *expected == cpu', '&& cpu < MAX_CPUS'), 'helper wrong CPU refused'))
         # FORK must carry the child's saved lifetime, never the current
         # emitting task's (postmaster) PID entry. The retention check also
         # inspects the first envelope after the child PID has been reused.
-        cookie_source = source.replace('child_seed.cookie, PGWT_RING_FAIL_LIFECYCLE_FORK);', 'transport_cookie(parent), PGWT_RING_FAIL_LIFECYCLE_FORK);')
-        assert cookie_source != source
-        mutants.append(('current-pid-cookie', cookie_source, None, 'queued cookie survives pid reuse'))
-        stale_data = source.replace('transport_attempt(PGWT_WIRE_DEST_CPU), st->cookie);',
-                                    'transport_attempt(PGWT_WIRE_DEST_CPU), 1);')
-        assert stale_data != source
-        mutants.append(('stale-cookie-on-reused-pid', stale_data, None, 'DATA cookie across PID reuse'))
-        old = '    if (exact_perf_mode ? emit_boundary : (!lightweight_mode && st->wp_live)) {'
-        assert source.count(old) == 1
-        mutants.append(('command-double-read', source.replace(old, '    if (!lightweight_mode && st->wp_live) {'),
-                        None, 'command saved admission releases reservation'))
+        mutants.append(('current-pid-cookie', replace_once(source,
+            '            seq, child_seed.cookie);', '            seq, transport_cookie(parent));'),
+            None, 'queued cookie survives pid reuse'))
+        mutants.append(('stale-cookie-on-reused-pid', replace_once(source,
+            'transport_attempt(PGWT_WIRE_DEST_CPU), st->cookie);',
+            'transport_attempt(PGWT_WIRE_DEST_CPU), 1);'), None, 'DATA cookie across PID reuse'))
+        # Publication reads the entry again after the reservation, instead of
+        # following the admission condition the caller read once.
+        mutants.append(('command-double-read', replace_once(source,
+            '    if (exact_admission_open()) {\n        wire->payload = (struct pgwt_trace_event){',
+            '    if (exact_admission_open() && st->wp_live) {\n        wire->payload = (struct pgwt_trace_event){'),
+            None, 'command saved admission releases reservation'))
         mutants.append(('INIT-publication-restored', restore_init_publication(source), None,
                         'zero INIT records on L under exact_perf_mode'))
-        old = '                    transport_failure(PGWT_WIRE_DEST_E); }'
-        assert source.count(old) == 1
-        mutants.append(('admission-discard-counts-drop', source.replace(old,
-                        '                    transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_COMMAND_BOUNDARY); }'),
-                        None, 'command admission discard is not a ring drop'))
+        mutants.append(('admission-discard-counts-drop', replace_once(source,
+            '        bpf_ringbuf_discard(wire, 0);\n        transport_failure(PGWT_WIRE_DEST_E);\n    }\n'
+            '    if (pg13 && !open)',
+            '        bpf_ringbuf_discard(wire, 0);\n'
+            '        transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_COMMAND_BOUNDARY);\n    }\n'
+            '    if (pg13 && !open)'), None, 'command admission discard is not a ring drop'))
+        # EXIT with E refused: the L reservation taken afterwards is unused
+        # and must be released, not left held.
+        mutants.append(('exit-partial-leak', replace_once(source,
+            '            if (unused) bpf_ringbuf_discard(unused, 0);\n', ''),
+            None, 'partial exit discarded and counted'))
         for name, mutated, mutated_header, assertion in mutants:
             result = run(mutated, directory, mutated_header)
             assert result.returncode != 0 and 'FAIL ' + assertion in result.stderr, (name, result.stdout, result.stderr)

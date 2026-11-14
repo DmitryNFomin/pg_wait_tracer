@@ -37,6 +37,13 @@ struct probe_helper {
     pthread_t thread; struct transport_request_channel channel;
     int cpu, error; atomic_int tid; struct probe *probe;
 };
+/* Falsifier only. A requester wakes the helpers of the OTHER CPUs and stamps
+ * each wake. Two requesters are pinned to two different CPUs, so whichever
+ * CPU a forced-failure spin occupies (the probe leader's included), at least
+ * one requester is free to challenge that CPU's helper during the spin. */
+struct probe_requester {
+    pthread_t thread; int cpu, error; atomic_int ready; struct probe *probe;
+};
 struct probe {
     struct pg_wait_tracer_bpf *skel;
     struct ring_buffer *rings; struct perf_buffer *perf;
@@ -45,6 +52,15 @@ struct probe {
     struct probe_pid_cookie *pid_lifetimes;
     struct probe_backend backends[MAX_BACKENDS];
     struct probe_helper *helpers;
+    struct probe_requester requesters[2];
+    int requesters_started; atomic_int requesters_stop;
+    pthread_mutex_t request_lock;
+    /* The INIT-publication mutant's own failed NMI reservations on L are
+     * expected there; nothing else is tolerated (see probe_reconcile). */
+    bool init_mutant;
+    /* Control only: spin without the stamped challenges. The result must be
+     * a refusal, which shows the evidence requirement can fire. */
+    bool no_challenge;
     int possible, online, main_cpu, helpers_started, failed;
     u64 *delivered, *last_seq, *acks, *snapshot;
     u64 boundary_w[3]; u32 boundary_round[3];
@@ -120,7 +136,30 @@ static void probe_observe_stored_init(struct probe *p, struct probe_backend *b)
     ssize_t n=read(fd,title,sizeof(title)-1); close(fd); if (n<=0) return;
     for (ssize_t i=0;i<n;++i) if (!title[i]) title[i]=' ';
     title[n]='\0'; snprintf(needle,sizeof(needle)," %s ",p->cohort_db);
-    if (strstr(title,needle)) { b->init_seen=true; ++p->init_stored; }
+    if (strstr(title,needle)) {
+        b->init_seen=true; ++p->init_stored;
+        fprintf(stderr,"INIT-STORED pid=%u cookie=%"PRIu64"\n",b->pid,b->cookie);
+    }
+}
+/* The daemon's own predicate (src/discovery.c pgwt_addr_is_shared, used by
+ * src/backend.c for a direct attach): the wait pointer counts only when it
+ * targets a MAP_SHARED mapping. On PG17+ my_wait_event_info is non-zero from
+ * the first instruction, pointing at a process-local placeholder until
+ * InitProcess() switches it to the PGPROC field in shared memory, so a
+ * non-zero value alone proves nothing. Returns 1 only for a shared target. */
+static int probe_addr_is_shared(u32 pid, u64 addr)
+{
+    char name[64], line[512]; snprintf(name, sizeof(name), "/proc/%u/maps", pid);
+    FILE *maps=fopen(name, "r"); if (!maps) return -1;
+    int result=0;
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long long start=0, end=0; char perms[8]="";
+        if (sscanf(line, "%llx-%llx %7s", &start, &end, perms) != 3) continue;
+        if (addr < start) break;
+        if (addr >= end) continue;
+        result=perms[3] == 's'; break;
+    }
+    fclose(maps); return result;
 }
 static void probe_try_attach(struct probe *p, struct probe_backend *b)
 {
@@ -133,6 +172,8 @@ static void probe_try_attach(struct probe *p, struct probe_backend *b)
     u64 ptr = 0;
     ssize_t n = pread(mem, &ptr, sizeof(ptr), (off_t)p->ptr);
     if (n != sizeof(ptr) || !ptr) { close(mem); return; }
+    /* Not initialised yet: leave the armed bootstrap watchpoint in place. */
+    if (probe_addr_is_shared(b->pid, ptr) != 1) { close(mem); return; }
     u64 addr = ptr + p->wait_offset;
     u32 wait = 0;
     n = pread(mem, &wait, sizeof(wait), (off_t)addr); close(mem);
@@ -184,7 +225,10 @@ static int probe_record(struct probe *p, int dest, const void *data, size_t size
         probe_fail(p, "wire framing / CPU / N mode"); return 0;
     }
     size_t index = (size_t)dest * p->possible + hdr.cpu;
-    if (hdr.seq != p->last_seq[index]+1 && !p->spinning) probe_fail(p, "attempt sequence gap/reorder");
+    /* A failed attempt consumes a number, so the arms that expect failures
+     * see gaps; the reconcile step accounts for every one of them. */
+    bool gaps_expected = p->spinning || (p->init_mutant && dest == PGWT_WIRE_DEST_L);
+    if (hdr.seq != p->last_seq[index]+1 && !gaps_expected) probe_fail(p, "attempt sequence gap/reorder");
     if (hdr.seq <= p->last_seq[index]) probe_fail(p, "duplicate/nonincreasing attempt");
     p->last_seq[index] = hdr.seq; ++p->delivered[index]; ++p->records[hdr.kind];
     const unsigned char *payload = (const unsigned char *)data + sizeof(hdr);
@@ -284,11 +328,41 @@ static void *probe_helper_loop(void *arg)
     int scheduling_rc=pthread_getschedparam(pthread_self(),&policy,&scheduling);
     if (!h->error && (scheduling_rc || policy != SCHED_OTHER)) h->error=scheduling_rc?scheduling_rc:EINVAL;
     atomic_store(&h->tid, (int)syscall(SYS_gettid));
-    while (transport_request_wait(&h->channel)) {
-        if (!h->error) {
-            u64 until=probe_now() + (h->probe->spinning ? 20000000 : 0);
-            do { syscall(SYS_getppid); } while (h->probe->spinning && probe_now()<until);
+    /* One syscall per wake, in every arm. The falsifier's requesters wake
+     * this thread many times per millisecond, so it is runnable on its CPU
+     * throughout a spin there without flooding the perf buffer. */
+    while (transport_request_wait(&h->channel))
+        if (!h->error) syscall(SYS_getppid);
+    return NULL;
+}
+static void *probe_requester_loop(void *arg)
+{
+    struct probe_requester *r = arg; struct probe *p = r->probe;
+    r->error = probe_pin(r->cpu) ? errno : 0;
+    atomic_store(&r->ready, 1);
+    u32 zero = 0; int fd = bpf_map__fd(p->skel->maps.transport_ctl);
+    while (!atomic_load(&p->requesters_stop) && !r->error) {
+        struct pgwt_transport_ctl ctl;
+        if (!bpf_map_lookup_elem(fd, &zero, &ctl) && ctl.round) {
+            for (int i = 0; i < p->helpers_started; ++i) {
+                /* While this thread runs, its own CPU is not spinning. */
+                if (p->helpers[i].cpu == r->cpu) continue;
+                struct probe_stamp stamp = { .cpu = (u32)p->helpers[i].cpu, .round = ctl.round };
+                stamp.issued = probe_now();
+                transport_request_signal(&p->helpers[i].channel);
+                stamp.stamp = probe_now();
+                pthread_mutex_lock(&p->request_lock);
+                if (p->requests_len == p->requests_cap) {
+                    size_t cap = p->requests_cap ? p->requests_cap * 2 : 4096;
+                    void *next = realloc(p->requests, cap * sizeof(*p->requests));
+                    if (next) { p->requests = next; p->requests_cap = cap; }
+                    else r->error = ENOMEM;
+                }
+                if (!r->error) p->requests[p->requests_len++] = stamp;
+                pthread_mutex_unlock(&p->request_lock);
+            }
         }
+        usleep(100);
     }
     return NULL;
 }
@@ -305,20 +379,11 @@ static int probe_round(struct probe *p, bool el)
     if (bpf_map_lookup_elem(fd, &zero, &ctl)) return -1;
     ++ctl.round; if (el) ++ctl.el_request;
     if (bpf_map_update_elem(fd, &zero, &ctl, BPF_ANY)) return -1;
-    for (int i=0; i<p->helpers_started; ++i) {
+    /* The falsifier's stamped challenges come from probe_requester_loop, not
+     * from this thread: it is pinned to one CPU and cannot run while a spin
+     * occupies that CPU. */
+    for (int i=0; i<p->helpers_started; ++i)
         transport_request_signal(&p->helpers[i].channel);
-        if (p->spinning) {
-            if (p->requests_len == p->requests_cap) {
-                size_t cap=p->requests_cap ? p->requests_cap*2 : 1024;
-                void *next=realloc(p->requests,cap*sizeof(*p->requests));
-                if (!next) return -1;
-                p->requests=next; p->requests_cap=cap;
-            }
-            /* Stamp after signal: this request was issued by this time. */
-            p->requests[p->requests_len++]=(struct probe_stamp){
-                .cpu=(u32)p->helpers[i].cpu, .round=ctl.round, .stamp=probe_now()};
-        }
-    }
     syscall(SYS_getppid); /* registered process leader publishes E/L */
     return 0;
 }
@@ -402,11 +467,32 @@ static int probe_start_helpers(struct probe *p)
         tid=(u32)atomic_load(&h->tid); cpu=(u32)i;
         if (bpf_map_update_elem(bpf_map__fd(p->skel->maps.helper_cpus), &tid, &cpu, BPF_ANY)) return -1;
     }
+    if (!p->spinning || p->no_challenge) return 0;
+    /* Two requesters on two different CPUs: see struct probe_requester. With
+     * one CPU a spin could never be challenged, so that is a refusal. */
+    if (p->helpers_started < 2) {
+        fprintf(stderr, "PROBE-REFUSED: the falsifier needs two online CPUs to challenge a spin\n"); return 78;
+    }
+    for (int i=0; i<2; ++i) {
+        struct probe_requester *r=&p->requesters[i]; r->cpu=p->helpers[i].cpu; r->probe=p;
+        atomic_init(&r->ready, 0);
+        if (pthread_create(&r->thread, NULL, probe_requester_loop, r)) return -1;
+        ++p->requesters_started;
+        u64 limit=probe_now()+5000000000ULL;
+        while (!atomic_load(&r->ready) && probe_now()<limit) sched_yield();
+        if (!atomic_load(&r->ready) || r->error) return -1;
+    }
     return 0;
 }
 static void probe_finish(struct probe *p)
 {
     p->stopping=true;
+    atomic_store(&p->requesters_stop, 1);
+    for (int i=0; i<p->requesters_started; ++i) {
+        pthread_join(p->requesters[i].thread, NULL);
+        if (p->requesters[i].error) probe_fail(p, "falsifier requester");
+    }
+    p->requesters_started=0;
     for (int i=0; i<p->helpers_started; ++i) transport_request_stop(&p->helpers[i].channel);
     for (int i=0; i<p->helpers_started; ++i) { pthread_join(p->helpers[i].thread, NULL); transport_request_destroy(&p->helpers[i].channel); }
     p->helpers_started=0;
@@ -421,21 +507,34 @@ static int probe_reconcile(struct probe *p)
     u64 *counts=calloc((size_t)p->possible, sizeof(u64)); if (!counts) return -1;
     bool ok=!p->failed, refused=false; u64 total=0, failed=0;
     u64 *fail_counts=calloc((size_t)p->possible,sizeof(u64)); if (!fail_counts) { free(counts); return 1; }
+    /* The INIT-publication mutant reserves on L in NMI context, where the
+     * 4.18 ring lock is try-once, so some of ITS reservations fail. Each one
+     * is counted at the INIT site on the CPU where it failed. Under
+     * --init-mutant exactly those are accepted on L, per CPU; any other
+     * failure, on any destination, still fails the run. */
+    u64 *init_site=calloc((size_t)p->possible,sizeof(u64)), init_failures=0;
+    u32 init_slot=PGWT_RING_FAIL_LIFECYCLE_INIT_HINT;
+    if (!init_site) { free(counts); free(fail_counts); return 1; }
+    if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.ringbuf_site_drops), &init_slot, init_site)) ok=false;
     printf("{\"cells\":[");
     for (u32 dest=0; dest<3; ++dest) {
         if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.transport_attempts), &dest, counts)) { ok=false; break; }
         if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.transport_failures), &dest, fail_counts)) { ok=false; break; }
+        bool tolerated=p->init_mutant && dest == PGWT_WIRE_DEST_L;
         for (int cpu=0; cpu<p->possible; ++cpu) {
             size_t index=(size_t)dest*p->possible+cpu;
             u64 delivered=p->delivered[index]; total+=counts[cpu];
-            u64 expected_missing=p->spinning ? fail_counts[cpu] : 0;
+            u64 expected_missing=(p->spinning || tolerated) ? fail_counts[cpu] : 0;
             if (counts[cpu] != delivered+expected_missing || p->last_seq[index]>counts[cpu]) ok=false;
-            if (!p->spinning && counts[cpu] != p->last_seq[index]) ok=false;
+            if (!p->spinning && !tolerated && counts[cpu] != p->last_seq[index]) ok=false;
+            if (tolerated) {
+                if (fail_counts[cpu] != init_site[cpu]) ok=false;
+                init_failures+=fail_counts[cpu];
+            } else failed+=fail_counts[cpu];
             printf("%s{\"dest\":%u,\"cpu\":%d,\"attempted\":%"PRIu64",\"delivered\":%"PRIu64",\"failed\":%"PRIu64",\"last_seq\":%"PRIu64"}", dest||cpu?",":"", dest, cpu, counts[cpu], delivered, fail_counts[cpu], p->last_seq[index]);
         }
-        if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.transport_failures), &dest, counts)) ok=false;
-        else for (int cpu=0; cpu<p->possible; ++cpu) failed+=counts[cpu];
     }
+    free(init_site);
     for (size_t i=1; i<p->identities_cap; ++i) if (p->identities[i].records && !p->spinning) {
         struct probe_identity *id=&p->identities[i];
         if (!id->fork_seen || (id->min_ts && id->min_ts<id->fork_ts) ||
@@ -444,7 +543,7 @@ static int probe_reconcile(struct probe *p)
         }
     }
     if (!p->records[PGWT_WIRE_TRACE] || !p->forks || p->lost || (!p->spinning && failed)) ok=false;
-    bool spun=false; u64 minimum_spin=~(u64)0;
+    bool spun=false; u64 minimum_spin=~(u64)0; int spin_cpus=0;
     if (p->spinning) {
 #ifdef PGWT_TRANSPORT_FALSIFIER
         u32 zero=0;
@@ -452,7 +551,7 @@ static int probe_reconcile(struct probe *p)
         else {
             struct pgwt_fail_spin *spins=(void *)p->snapshot;
             for (int cpu=0; cpu<p->possible; ++cpu) if (spins[cpu].started) {
-                spun=true;
+                spun=true; ++spin_cpus;
                 u64 duration=spins[cpu].ended-spins[cpu].started;
                 if (duration<minimum_spin) minimum_spin=duration;
                 int evidence=probe_spin_evidence((u32)cpu, spins[cpu].started, spins[cpu].ended,
@@ -462,8 +561,8 @@ static int probe_reconcile(struct probe *p)
                     fprintf(stderr,"PROBE-REFUSED: no matched request during spin and later helper boundary on CPU %d\n",cpu);
                     refused=true; ok=false;
                 }
-                fprintf(stderr,"SPIN-EVIDENCE cpu=%d start=%"PRIu64" end=%"PRIu64" completed=%"PRIu64" matched=%d\n",
-                    cpu,spins[cpu].started,spins[cpu].ended,spins[cpu].completed,evidence);
+                fprintf(stderr,"SPIN-EVIDENCE cpu=%d leader_cpu=%d spin_ns=%"PRIu64" start=%"PRIu64" end=%"PRIu64" completed=%"PRIu64" matched=%d\n",
+                    cpu,p->main_cpu,duration,spins[cpu].started,spins[cpu].ended,spins[cpu].completed,evidence);
                 if (spins[cpu].ended-spins[cpu].started < 1000000) {
                     fprintf(stderr,"PROBE-REFUSED: measured forced-failure spin under 1ms on CPU %d\n",cpu);
                     refused=true; ok=false;
@@ -477,15 +576,84 @@ static int probe_reconcile(struct probe *p)
         fprintf(stderr,"PROBE-REFUSED: production object has no falsifier\n"); refused=true; ok=false;
 #endif
     }
-    printf("],\"ok\":%s,\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"init_records\":%"PRIu64",\"init_stored\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"certified\":false}\n", ok?"true":"false",total,failed,p->lost,p->forks,p->reuses,p->attached,p->records[1],p->init_records,p->init_stored,spun&&!refused?"true":"false",spun?minimum_spin:0);
+    printf("],\"ok\":%s,\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"init_reserve_failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"text\":%"PRIu64",\"init_records\":%"PRIu64",\"init_stored\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"spin_cpus\":%d,\"requests\":%zu,\"certified\":false}\n", ok?"true":"false",total,failed,init_failures,p->lost,p->forks,p->reuses,p->attached,p->records[PGWT_WIRE_TRACE],p->records[PGWT_WIRE_TEXT],p->init_records,p->init_stored,spun&&!refused?"true":"false",spun?minimum_spin:0,spin_cpus,p->requests_len);
     free(counts); free(fail_counts); return p->failed?1:(refused?78:(ok?0:1));
+}
+/* One load per program and per mode. libbpf stops at the first program the
+ * verifier rejects, so a whole-object load cannot say anything about the
+ * programs after it; here every program gets its own verdict, with the mode
+ * off and on. Nothing is attached. A rejection prints libbpf's verifier log
+ * on stderr and makes the exit status nonzero. */
+static int probe_verifier_matrix(void)
+{
+    struct rlimit limit={RLIM_INFINITY,RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK,&limit);
+    int loads=0, rejected=0;
+    for (u32 mode=0; mode<2; ++mode) {
+        for (int target=0; ; ++target) {
+            struct pg_wait_tracer_bpf *skel=pg_wait_tracer_bpf__open();
+            if (!skel) { fprintf(stderr,"PROBE-FAIL: skeleton open\n"); return 1; }
+            struct bpf_program *program, *chosen=NULL; int index=0;
+            bpf_object__for_each_program(program, skel->obj) {
+                bpf_program__set_autoload(program, index == target);
+                if (index == target) chosen=program;
+                ++index;
+            }
+            if (!chosen) { pg_wait_tracer_bpf__destroy(skel); break; }
+            /* The verifier folds these constants and never walks code they
+             * switch off. Turn every gate on, so that the command boundary,
+             * both query-text routes, the PG13 edges and CPU accounting are
+             * all live code in this load. Nothing is attached, so the
+             * addresses are never dereferenced. */
+            skel->rodata->target_postmaster_pid=1;
+            skel->rodata->my_wait_ptr_addr=4096; skel->rodata->pgproc_wait_offset=684;
+            skel->rodata->my_be_entry_addr=4096; skel->rodata->st_query_id_offset=8;
+            skel->rodata->debug_query_string_addr=4096;
+            skel->rodata->cpu_accounting=access("/sys/kernel/btf/vmlinux", R_OK) == 0;
+            skel->rodata->bs_state_running=2; skel->rodata->bs_state_fastpath=4;
+            skel->rodata->pg13_query_attr=1; skel->rodata->pg13_synthetic_attr=1;
+            skel->rodata->pg13_qd_plannedstmt_off=8; skel->rodata->pg13_ps_queryid_off=8;
+            skel->rodata->pg13_qd_sourcetext_off=16;
+            skel->rodata->exact_perf_mode=mode;
+            skel->rodata->helper_tgid=mode ? (u32)getpid() : 0;
+#ifdef PGWT_TRANSPORT_FALSIFIER
+            /* Nonzero, so the delayed-failure loop is live code to verify. */
+            skel->rodata->test_fail_spin_ns=mode ? 20000000 : 0;
+#endif
+            if (!skel->rodata->cpu_accounting && chosen == skel->progs.on_sched_switch) {
+                /* tp_btf needs kernel BTF; the daemon does not load it either. */
+                printf("VERIFIER mode=%u prog=%s SKIPPED-NO-BTF xlated_insns=0\n", mode, bpf_program__name(chosen));
+                pg_wait_tracer_bpf__destroy(skel); continue;
+            }
+            int rc=pg_wait_tracer_bpf__load(skel);
+            u32 instructions=0;
+            if (!rc) {
+                struct bpf_prog_info info; u32 size=sizeof(info);
+                memset(&info, 0, sizeof(info));
+                if (!bpf_obj_get_info_by_fd(bpf_program__fd(chosen), &info, &size))
+                    instructions=info.xlated_prog_len/8;
+            }
+            printf("VERIFIER mode=%u prog=%s %s xlated_insns=%u\n", mode,
+                bpf_program__name(chosen), rc ? "REJECTED" : "ACCEPTED", instructions);
+            fflush(stdout);
+            ++loads; rejected+=rc != 0;
+            pg_wait_tracer_bpf__destroy(skel);
+        }
+    }
+    printf("VERIFIER-MATRIX loads=%d rejected=%d\n", loads, rejected);
+    return rejected || !loads ? 1 : 0;
 }
 static int transport_probe(int argc, char **argv)
 {
     struct probe p={0}; int result=1; u32 pm=0, pg13=0, qd=0, ps=0, source=0, running=2; u64 debug_text=0;
     for (int i=0; i<MAX_BACKENDS; ++i) p.backends[i].boot=p.backends[i].wait=-1;
     for (int i=1; i<argc; ++i) {
+        if (!strcmp(argv[i], "--verifier-matrix")) {
+            if (geteuid()) { fprintf(stderr,"PROBE-REFUSED: root required\n"); return 78; }
+            return probe_verifier_matrix();
+        }
         if (!strcmp(argv[i], "--self-reuse")) { p.self=true; continue; }
+        if (!strcmp(argv[i], "--init-mutant")) { p.init_mutant=true; continue; }
+        if (!strcmp(argv[i], "--no-challenge")) { p.no_challenge=true; continue; }
         if (i+1>=argc) return 2;
         const char *key=argv[i++], *value=argv[i];
         u64 n=strtoull(value, NULL, 0);
@@ -508,6 +676,7 @@ static int transport_probe(int argc, char **argv)
     if (!p.self && (!pm || !p.ptr || !p.exe || !p.cohort_db)) return 2;
     if (geteuid()) { fprintf(stderr,"PROBE-REFUSED: root required\n"); return 78; }
     p.spinning=p.spin_ns != 0;
+    if (pthread_mutex_init(&p.request_lock, NULL)) return 1;
     struct rlimit limit={RLIM_INFINITY,RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK,&limit);
     p.possible=libbpf_num_possible_cpus(); p.online=(int)sysconf(_SC_NPROCESSORS_ONLN);
     if (p.possible <= 0 || p.possible > MAX_CPUS) { fprintf(stderr,"PROBE-REFUSED: CPU count\n"); return 78; }

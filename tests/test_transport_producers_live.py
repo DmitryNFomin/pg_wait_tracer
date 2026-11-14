@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import selectors
 import shlex
+import socket
 import struct
 import subprocess
 import sys
@@ -158,19 +159,35 @@ def elf(exe):
     return kind, segments
 
 
-def settings(pm, scratch):
+# The layout the daemon itself uses, so this test needs no PostgreSQL server
+# headers (the gate image has none, and no other live test compiles against
+# them). PG17+ publishes a pointer straight to wait_event_info, so there is no
+# offset; PG13 uses the validated x86_64 table in src/discovery.c:
+#   pgwt_detect_pgproc_wait_offset()   -> offsetof(PGPROC, wait_event_info)
+#   pgwt_detect_pg13_query_offsets()   -> QueryDesc / PlannedStmt offsets
+# transport_producers_host.py checks on every `make check` that these numbers
+# are the ones in that file, so the two cannot drift apart silently.
+PG13_LAYOUT = {'pgproc_wait_event_info': 684, 'querydesc_plannedstmt': 8,
+               'plannedstmt_queryid': 8, 'querydesc_sourcetext': 16}
+
+
+def layout(major, machine):
+    """(wait offset, QueryDesc.plannedstmt, PlannedStmt.queryId, QueryDesc.sourceText)."""
+    if major >= 17:
+        return 0, 0, 0, 0
+    if major == 13 and machine == 'x86_64':
+        return (PG13_LAYOUT['pgproc_wait_event_info'], PG13_LAYOUT['querydesc_plannedstmt'],
+                PG13_LAYOUT['plannedstmt_queryid'], PG13_LAYOUT['querydesc_sourcetext'])
+    raise Refused(f'PG{major} on {machine} has no validated layout in src/discovery.c')
+
+
+def settings(pm):
     exe = str(Path(f'/proc/{pm}/exe').resolve())
     version = checked([exe, '--version'])
     major = int(version.split()[-1].split('.')[0])
     if major not in (13, 17, 18):
         raise Refused(f'PG{major} has no authorised layout here')
-    pg_config = str(Path(exe).with_name('pg_config'))
-    include = checked([pg_config, '--includedir-server'])
-    code = '#include <stdio.h>\n#include <stddef.h>\n#include "postgres.h"\n#include "storage/proc.h"\n#include "executor/execdesc.h"\n#include "nodes/plannodes.h"\n#undef printf\nint main(void) { printf("%zu %zu %zu %zu\\n", offsetof(PGPROC, wait_event_info), offsetof(QueryDesc, plannedstmt), offsetof(PlannedStmt, queryId), offsetof(QueryDesc, sourceText)); return 0; }\n'
-    unit, layout = scratch / 'layout.c', scratch / 'layout'
-    unit.write_text(code)
-    checked([os.environ.get('CC', 'cc'), '-std=gnu11', '-I', include, str(unit), '-o', str(layout)])
-    wait, qd, ps, source = map(int, checked([str(layout)]).split())
+    wait, qd, ps, source = layout(major, os.uname().machine)
     names = symbols(exe)
     pointer = 'MyProc' if major == 13 else 'my_wait_event_info'
     required = [pointer, 'pgstat_report_activity']
@@ -258,13 +275,102 @@ def stop(proc):
         proc.communicate(timeout=5)
 
 
-def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY):
+def verifier_matrix(binary, label):
+    """Every program of the object, loaded alone, with the mode off and on."""
+    result = subprocess.run([str(binary), '--probe', '--verifier-matrix'],
+                            capture_output=True, text=True, timeout=300)
+    lines = [line for line in result.stdout.splitlines() if line.startswith('VERIFIER')]
+    for line in lines:
+        print(f'{label} {line}', flush=True)
+    verdicts = [line.split() for line in lines if line.startswith('VERIFIER mode=')]
+    rejected = [fields for fields in verdicts if fields[3] not in ('ACCEPTED', 'SKIPPED-NO-BTF')]
+    modes = {fields[1] for fields in verdicts}
+    return result, verdicts, rejected, modes
+
+
+def receive(sock, size):
+    data = b''
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise RuntimeError('PostgreSQL closed a held connection')
+        data += chunk
+    return data
+
+
+def held_backend(db, delay=0.3):
+    """One backend whose INIT the probe is certain to be watching.
+
+    The postmaster forks a backend when the client connects, and that backend
+    reads the startup packet before InitProcess() publishes its wait pointer.
+    Withholding the packet for `delay` gives the probe time to consume the
+    FORK and arm the bootstrap watchpoint, so on_bootstrap fires for this
+    backend by construction instead of by winning a race. Without this, the
+    probe saw INIT for 1 of 18 backends in one 16-client run and for none in
+    the next. Returns the open socket and the backend PID.
+    """
+    directory, port = checked(['psql', '-U', 'postgres', '-d', db, '-AtF', '|', '-c',
+                               "select split_part(current_setting('unix_socket_directories'), ',', 1), "
+                               "current_setting('port')"]).split('|')
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(15)
+    sock.connect(f'{directory.strip()}/.s.PGSQL.{port.strip()}')
+    time.sleep(delay)
+    body = struct.pack('!I', 196608) + b'user\0postgres\0database\0' + db.encode() + b'\0\0'
+    sock.sendall(struct.pack('!I', len(body) + 4) + body)
+    pid = None
+    while True:
+        kind = receive(sock, 1)
+        payload = receive(sock, struct.unpack('!I', receive(sock, 4))[0] - 4)
+        if kind == b'R' and struct.unpack('!I', payload[:4])[0] != 0:
+            raise Refused('the held-startup stimulus needs local trust authentication for postgres')
+        if kind == b'E':
+            raise RuntimeError(f'held connection refused: {payload!r}')
+        if kind == b'K':
+            pid = struct.unpack('!I', payload[:4])[0]
+        if kind == b'Z':
+            break
+    if not pid:
+        raise RuntimeError('held connection reported no backend PID')
+    return sock, pid
+
+
+def hold_backends(db, both_parities):
+    """Four held backends; for the INIT mutant, until an odd and an even PID."""
+    held = []
+    try:
+        while len(held) < 4 or (both_parities and len({pid & 1 for _, pid in held}) < 2):
+            if len(held) >= 40:
+                raise Refused('no odd and even backend PID among 40 held connections')
+            held.append(held_backend(db))
+    except BaseException:
+        release_backends(held)
+        raise
+    print('HELD-STARTUP backends (INIT watched by construction): ' +
+          ' '.join(str(pid) for _, pid in held), flush=True)
+    return held
+
+
+def release_backends(held):
+    for sock, _ in held:
+        try:
+            sock.sendall(b'X\x00\x00\x00\x04')
+        except OSError:
+            pass
+        sock.close()
+
+
+def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY, extra=()):
     log = directory / f'probe-{binary.parent.name}-{churn}-{spin}.stderr'
     with log.open('w') as error:
-        proc = subprocess.Popen([str(binary), '--probe', *args, '--cohort-db', db, '--spin-ns', str(spin)],
+        proc = subprocess.Popen([str(binary), '--probe', *args, '--cohort-db', db, '--spin-ns', str(spin), *extra],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error, text=True)
+        held = []
         try:
             await_ready(proc, log)
+            # Not in the falsifier arm: it turns the first fork on each CPU
+            # into a forced failure, so that backend has no FORK record.
+            held = [] if spin else hold_backends(db, '--init-mutant' in extra)
             command = ['pgbench', '-U', 'postgres', '-S', '-c', '16', '-j', '4', '-T', str(seconds), db]
             if churn:
                 command.insert(1, '-C')
@@ -272,10 +378,27 @@ def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY):
             workload = checked(command)
             print(workload, flush=True)
             assert proc.poll() is None, log.read_text()
+            # Held backends stay connected until the probe has stopped, so
+            # each one's stored INIT and title are there to be observed.
             proc.stdin.write('STOP\n')
             proc.stdin.flush()
-            return summary(proc, log)
+            row = summary(proc, log)
+            row['held'] = len(held)
+            # Non-vacuity, by construction rather than by luck: the probe
+            # must have observed the stored INIT of every held backend.
+            stored = {int(pid) for pid in re.findall(r'^INIT-STORED pid=(\d+)', log.read_text(), re.M)}
+            missing = sorted({pid for _, pid in held} - stored)
+            assert not missing, ('held backends without an observed stored INIT', missing, sorted(stored))
+            print(f"ARM binary={binary.parent.name} churn={int(churn)} spin_ns={spin} ok={row['ok']} "
+                  f"forks={row['forks']} attached={row['attached']} held={row['held']} "
+                  f"init_stored={row['init_stored']} init_records_on_L={row['init_records']} "
+                  f"init_reserve_failures={row['init_reserve_failures']} trace={row['trace']} text={row['text']} "
+                  f"attempted={row['attempted']} delivered={sum(c['delivered'] for c in row['cells'])} "
+                  f"failures={row['failures']} lost={row['lost']} spin_cpus={row['spin_cpus']} "
+                  f"spin_min_ns={row['spin_min_ns']} requests={row['requests']}", flush=True)
+            return row
         finally:
+            release_backends(held)
             stop(proc)
 
 
@@ -299,6 +422,8 @@ def main():
     parser.add_argument('--pid', type=int)
     parser.add_argument('--seconds', type=int, default=20)
     parser.add_argument('--pg-version', type=int)
+    parser.add_argument('--churn-only', type=int, metavar='N',
+                        help='run only the clean pgbench -C arm, N times in a row; every one must pass')
     options = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise Refused('Linux root required; no BPF on the Mac')
@@ -321,23 +446,52 @@ def main():
           if line.startswith(('CONFIG_PREEMPT', 'CONFIG_HZ='))), flush=True)
     with tempfile.TemporaryDirectory(prefix='pgwt-a1-probe-') as tmp:
         directory = Path(tmp)
-        major, args = settings(pm, directory)
+        major, args = settings(pm)
         print(f'PG{major} PROBE ' + ' '.join([str(BINARY), '--probe', *args]), flush=True)
+        # The production object: every program must pass the verifier on its
+        # own, with exact_perf_mode off and on. A whole-object load reports
+        # only the first rejection.
+        result, verdicts, rejected, modes = verifier_matrix(BINARY, 'PRODUCTION')
+        assert result.returncode == 0 and verdicts and not rejected and modes == {'mode=0', 'mode=1'}, (
+            'every production program loads with the mode off and on',
+            result.returncode, rejected, result.stderr[-6000:])
         db = f'pgwt_a1_{os.getpid()}'
         checked(['createdb', '-U', 'postgres', db])
         try:
             checked(['pgbench', '-U', 'postgres', '-i', '-s', '1', db])
+            if options.churn_only:
+                # The same arm and the same assertions as the full test,
+                # repeated; the first failure ends the run.
+                for attempt in range(1, options.churn_only + 1):
+                    assert_clean_pg(run_pg(args, directory, db, options.seconds, True))
+                    print(f'CLEAN -C ARM {attempt} of {options.churn_only}: PASS', flush=True)
+                print(f'A1 CLEAN -C ARM: {options.churn_only} of {options.churn_only} passed in a row; '
+                      'the other arms were not run')
+                return 0
             for churn in (False, True):
                 row = run_pg(args, directory, db, options.seconds, churn)
                 assert_clean_pg(row)
             run_reuse(directory)
             mutant = build_variant(directory, 'init-publication-mutant')
-            row = run_pg(args, directory, db, 5, True, binary=mutant)
+            # The mutant reserves on L from NMI context, where 4.18 refuses a
+            # contended reservation, and it gives up every odd PID's
+            # reservation the same way so that each run meets refusals.
+            # --init-mutant accepts exactly those failures (counted at the
+            # INIT site, per CPU) and nothing else, so the arm reaches its
+            # kill assertion instead of aborting on them.
+            row = run_pg(args, directory, db, 5, True, binary=mutant, extra=('--init-mutant',))
+            # The second number cannot separate a reservation the kernel
+            # refused from one the mutant gave up on purpose (odd PIDs).
+            print(f"mutant INIT-publication-restored: INIT records on L={row['init_records']}, "
+                  f"INIT reservations refused or given up on L={row['init_reserve_failures']}", flush=True)
             # Other clean-arm assertions must remain green. Neither a load
             # failure nor another assertion counts as killing this mutant.
             assert row['init_stored'] > 0 and row['init_records'] > 0, row
+            assert row['init_reserve_failures'] > 0, ('the mutant arm met no refused INIT reservation', row)
             assert row['attached'] > 0 and row['trace'] > 0 and row['failures'] == 0 and row['lost'] == 0, row
-            assert all(cell['attempted'] == cell['delivered'] and cell['failed'] == 0 for cell in row['cells']), row
+            assert all(cell['attempted'] == cell['delivered'] + cell['failed'] and
+                       (cell['dest'] == 2 or cell['failed'] == 0) for cell in row['cells']), row
+            assert sum(cell['failed'] for cell in row['cells']) == row['init_reserve_failures'], row
             try:
                 assert_clean_pg(row)
             except AssertionError as error:
@@ -348,8 +502,23 @@ def main():
             # Production clean arms above load the normal object. Only this
             # standalone test build contains the back-edge, even at knob zero.
             falsifier = build_variant(directory, 'falsifier')
+            result, verdicts, rejected, modes = verifier_matrix(falsifier, 'FALSIFIER')
+            if result.returncode or rejected or not verdicts:
+                raise Refused('the verifier rejected the falsifier object; its log:\n' + result.stderr[-6000:])
             row = run_pg(args, directory, db, 5, True, spin=20000000, binary=falsifier)
             assert row['spun_at_least_1ms'] and row['spin_min_ns'] >= 1000000 and row['failures'] > 0, row
+            # Control: the same spins with no stamped challenge. The helper
+            # still runs after each spin, so only the missing evidence
+            # differs, and the result must be a refusal, never a pass.
+            try:
+                run_pg(args, directory, db, 5, True, spin=20000000, binary=falsifier,
+                       extra=('--no-challenge',))
+            except Refused as refusal:
+                assert 'no matched request during spin' in str(refusal), refusal
+                print('control falsifier-without-challenge: REFUSED as required '
+                      '(no matched request during spin)', flush=True)
+            else:
+                raise AssertionError('the falsifier passed without challenge evidence')
         finally:
             checked(['dropdb', '-U', 'postgres', '--if-exists', db])
     if mode in ('full', 'unknown'):

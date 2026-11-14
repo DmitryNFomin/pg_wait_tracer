@@ -94,47 +94,141 @@ for merge certification. A helper's
 return zero is not delivery evidence on old perf implementations. Reconcile
 attempts against consumed records after completion, including the terminal gap.
 
-### Complete reserve-site audit (round 2)
+### What the 4.18 verifier needs (measured on EL8)
 
-Command used: `rg -n 'bpf_ringbuf_(reserve|submit|discard|output)' src/bpf/pg_wait_tracer.bpf.c`.
-These are all eleven explicit reserve expressions in that file. NULL never
-owns a reservation. The portable shim rejects double-submit/discard and checks
-that every successful reservation has been released before resetting a case.
+Measured on Rocky 8.10, kernel `4.18.0-553.157.1.el8_10`, clang 21.1.8, with
+the two earlier rounds of this unit (ab9886d7). With `exact_perf_mode` on the
+object did not load; libbpf stopped at the first rejected program:
 
-| Reserve expression | Every successful-reserve path |
+```text
+libbpf: prog 'on_exit': BPF program load failed: Invalid argument
+196: (85) call bpf_ringbuf_reserve#131          ; transport_reserve_lifecycle, L
+197: (bf) r8 = r0
+198: (55) if r8 != 0x0 goto pc+22               ; the first NULL test of `life`
+from 198 to 221: ... R8=mem(id=0,ref_obj_id=11,off=0,imm=0) ... refs=11
+...
+313: (15) if r8 == 0x0 goto pc+152              ; `if (life)` again, in the failure arm
+from 313 to 466: ... R8=mem(id=0,ref_obj_id=11,off=0,imm=0) ... refs=11
+468-479: three bpf_map_delete_elem calls
+636: (95) exit
+Unreleased reference id=11 alloc_insn=196
+processed 220 insns (limit 1000000) ...
+```
+
+At 198 the verifier has already refined `r8` from "pointer or NULL" to a
+non-NULL `mem` that owns reference 11. At 313 the compiled code tests the same
+register against zero a second time. This verifier does not decide that test:
+it also walks the `r8 == 0` side, with `r8` still typed `mem` and reference 11
+still held, and that side skips the submit and the discard and reaches `exit`.
+The source had `if ((!trace || out) && life) {...} else { if (out) ...; if
+(life) ... }`: a pointer kept in a variable across a merge of paths and tested
+again. The first test is what releases the reference on the NULL side; a second
+test on a pointer already known non-NULL releases nothing on either side.
+
+What was read and what was not: the verdict and the register states above are
+the kernel's own log (`tests/results/session-20261114/a1-fresh/el8/
+r0-baseline-modeon-verifier.log`, reproduced before any change). The reason
+this verifier walks that branch was **not** read in its source:
+`kernel/bpf/verifier.c` of this vendor kernel is not among the extracted files.
+Upstream decides such a test only for the pointer types its `is_branch_taken`
+knows to be non-NULL, and a ring-buffer `mem` pointer joined that set late;
+that is an inference about the vendor kernel, not an observation of it. Ubuntu
+6.8 was not shown the old shape, so nothing is claimed about whether it would
+have rejected it.
+
+**The rule this file now follows.** A reservation pointer is tested against
+NULL exactly once, immediately, by the function that reserved it. Everything
+that fills, submits or discards the reservation is lexically inside the
+non-NULL arm of that one test, and every path of that arm ends in exactly one
+submit or one discard. The pointer is never stored in a variable that another
+path sets to NULL, and it is never tested again. `transport_reserve_trace` and
+`transport_reserve_lifecycle` therefore take the attempt number and reserve
+but do not test; their callers do. Code that both outcomes need (the marker's
+attribution edge, the command gate's edges) is an inline function called from
+each arm, so no path merges while a reservation is held. Because there is no
+second test, there is no branch for the verifier to walk with the reference
+held; this does not depend on the compiler removing a redundant test.
+
+The same cause was present in three more places that the first rejection
+hid: `emit_marker` (`wire` tested again at each of three exits),
+`on_report_activity` (`if (wire)` inside the emission block) and both query
+text producers (`evt` derived from `wire` and tested after the merge with the
+mode-zero reservation). All were rewritten to the rule, not only `on_exit`.
+The mode-zero code is 2f2c211d's text, unchanged: against that commit the
+only lines removed from this file are one comment and `on_watchpoint`'s single
+`emit_event` call, which is now the `else` of the mode branch.
+
+A second verifier limit was found in the test-only object. The falsifier's
+delay loop was `for (i < 65536) { ended = ktime(); if (ended - started >=
+spin) break; }`. The 4.18 verifier accepts a bounded loop, but rejected this
+one:
+
+```text
+libbpf: prog 'on_fork': BPF program load failed
+The sequence of 8193 jumps is too complex.
+processed 81950 insns (limit 1000000) max_states_per_insn 4 total_states 1240 ...
+```
+
+An exit that depends on data leaves one pending verifier state per iteration,
+and the limit is 8192. The loop now reads the clock in fixed blocks (64 blocks
+of 500 rounds of eight reads, trip counts the verifier knows) and compares
+once per block, so at most 64 states are pending. It loads on 4.18.
+
+Because the verifier folds the read-only configuration constants and never
+walks code they switch off, a load says nothing about code behind a gate that
+was off. `tests/test_transport_producers --probe --verifier-matrix` therefore
+loads every program of the object alone, with the mode off and on, with every
+gate turned on (command boundary, both text routes, PG13 edges, CPU
+accounting), and prints one verdict per program. The live test runs it for
+the production object and requires 26 loads and no rejection; it runs it for
+the falsifier object too and refuses if that object is rejected.
+
+### Complete reserve-site audit
+
+Command: `grep -n 'bpf_ringbuf_\(reserve\|submit\|discard\|output\)' src/bpf/pg_wait_tracer.bpf.c`.
+There are ten reserve expressions. The portable shim rejects a double
+submit/discard and checks that every successful reservation was released
+before it resets a case.
+
+| Reserve expression | Owner, its one NULL test, and every path after a successful reserve |
 | --- | --- |
-| `transport_reserve_trace`, E | Returns ownership to `transport_exit`, `emit_marker`, or `on_report_activity`; their paths are below. NULL counts aggregate/site/transport failure. |
-| `transport_reserve_lifecycle`, L | Returns ownership to `on_fork` or `transport_exit`; their paths are below. NULL counts site/transport failure. Bootstrap no longer calls it. |
-| `transport_boundary`, E branch | Fills boundary, submits once; no subsequent branch/return before submit. |
-| `transport_boundary`, L branch | Same as E; the destination branches are exclusive. |
-| `on_bootstrap`, raw L | Mode zero only: fills raw INIT and submits once. NULL counts hint drop; stored facts remain. |
-| `on_fork`, raw L | Mode zero only: fills FORK and submits once. NULL counts fork-site drop. |
-| `on_exit`, raw L | Mode zero only: fills EXIT and submits once. NULL counts exit-site drop. |
-| `on_report_query_id`, enveloped L | On unreadable/empty text, discards once and returns; otherwise submits once before dedup update. |
-| `on_report_query_id`, raw L | Same exclusive text branches, using the raw reservation pointer. |
-| `on_executor_start`, enveloped L | On unreadable/empty text, discards once and returns; otherwise submits once before dedup update. |
-| `on_executor_start`, raw L | Same exclusive text branches, using the raw reservation pointer. |
+| `transport_reserve_trace`, E | Does not test. Owners: `transport_marker`, `transport_activity`, `transport_exit` (below). |
+| `transport_reserve_lifecycle`, L | Does not test. Owners: `on_fork`, `transport_exit` at three sites (below). |
+| `transport_boundary`, E branch | Tested once (`if (!cut) { count; return; }`); then fills and submits once. |
+| `transport_boundary`, L branch | Same; the destination branches are exclusive. |
+| `transport_text`, enveloped L | Tested once; unreadable or empty text discards once, otherwise submits once. Used by both text producers under the mode. |
+| `on_bootstrap`, raw L | Mode zero only, unchanged: fills raw INIT and submits once; NULL counts the hint drop. |
+| `on_fork`, raw L | Mode zero only, unchanged: fills FORK and submits once. |
+| `on_exit`, raw L | Mode zero only, unchanged: fills EXIT and submits once. |
+| `on_report_query_id`, raw L | Mode zero only, unchanged: discard on unreadable/empty text, otherwise submit. |
+| `on_executor_start`, raw L | Mode zero only, unchanged: same two exclusive branches. |
 
-Wrapper ownership paths:
+Owners under the mode:
 
-- `on_fork`: successful enveloped L always fills/submits once. The separate
-  test-only forced-failure branch reserves nothing.
-- `transport_exit`: when all required reservations succeed, submits E if
-  required and then L, each once. If either required destination fails,
-  discards each successful partner once and reconciles its loss; no publication
-  survives a partial pair. With no live watchpoint only L is required.
-- `emit_marker`: after E success, a missing state or closed admission discards
-  once and returns, accounting only the transport attempt. Otherwise submits
-  once. Reserve failure still updates attribution and never submits NULL.
-- `on_report_activity`: only a saved true boundary condition reserves. Thus
-  the unchanged-command early return cannot own a reservation. The same saved
-  condition enters the emission block despite concurrent `wp_live` replacement;
-  open admission submits once, closed admission discards once. A saved false
-  condition reserves/publishes nothing even if userspace later sets `wp_live`.
+- `on_fork`: L tested once; NULL counts the site and the transport failure
+  and returns; otherwise header, payload, one submit. The test-only
+  forced-failure branch reserves nothing.
+- `transport_exit`, four outcomes, each ending at `retire` with nothing held:
+  1. terminal transition required, E refused: E failure counted; L is still
+     attempted, tested once, discarded if it was granted, and counted;
+  2. E granted, L refused: L failure counted, E discarded once and counted;
+  3. both granted: one timestamp after both reservations, E submitted once,
+     then L submitted once;
+  4. no terminal transition: L tested once; NULL counts, otherwise one submit.
+- `transport_marker`: E tested once. NULL counts the site, the aggregate and
+  the transport failure, then runs the attribution edge with a fresh
+  timestamp and returns. Non-NULL: the same edge decides between one submit
+  and one discard (state gone or admission closed; the discard reconciles the
+  attempt only and is not a ring drop).
+- `transport_activity`: reserves only when the caller's saved admission
+  condition is true. NULL counts and still runs the command and query edges.
+  Non-NULL: open admission submits once, closed admission discards once. The
+  entry's `wp_live` is not read again after the reservation.
+- `on_bootstrap` under the mode reserves nothing.
 
-`emit_event` uses the atomic `bpf_ringbuf_output` helper in mode zero, which
-does not transfer a reservation reference to the BPF program. Perf DATA and
-CPU boundaries use `bpf_perf_event_output`, also without explicit ring ownership.
+`emit_event` uses `bpf_ringbuf_output` in mode zero, which hands no
+reservation to the program. Perf DATA and CPU boundaries use
+`bpf_perf_event_output`, also without ring ownership.
 
 ## On-demand helper protocol for B
 
@@ -257,38 +351,56 @@ map, perf, timekeeping or JIT source. Upstream v4.18/v6.8 references below are
 
 `test_fail_spin_ns` exists only in the separately compiled
 `tests/transport_falsifier.bpf.c` object (`PGWT_TRANSPORT_FALSIFIER`). The
-production translation unit excludes the knob, test map, spin function and
-FORK injection block at preprocessing time; it contains no falsifier back-edge
-even when the runtime mode is enabled. A nonzero test value forces one L FORK
-reservation failure per producing CPU (the reserve is deliberately bypassed),
-consumes its attempt, reads a would-be timestamp into `test_spin.started`,
-loops for the requested interval, then counts the failure and publishes
-`test_spin.completed`. No wire record is invented for the failed publication.
-The loop has a hard 65,536-iteration bound; the test requests 20 ms and measures
-the actual duration. The live driver builds this object and its own skeleton
-and loader in an external temporary directory using the project's resolved
-compiler/libbpf/bpftool settings. Clean arms load the normal production object.
+production translation unit excludes the knob, the test map, the spin function
+and the FORK injection block at preprocessing time, so it contains no test
+loop. A nonzero value forces one L FORK reservation failure per producing CPU
+(the reserve is deliberately bypassed), consumes its attempt, reads a would-be
+timestamp into `test_spin.started`, spins, then counts the failure and
+publishes `test_spin.completed`. No wire record is invented for the failed
+publication. The spin reads the clock in fixed blocks and stops at the first
+block boundary at or past the requested time, or after the last block (see
+"What the 4.18 verifier needs" for why it is not compared on every read). The
+test requests 20 ms; the loader measures what it got and refuses less than
+1 ms. The live driver builds this object with its own skeleton and loader in
+a temporary directory, using the project's resolved compiler, libbpf and
+bpftool. Clean arms load the normal production object.
 
-The probe records helper boundaries and per-CPU requests with their round.
-Request timestamps are taken after signalling the pinned helper. For every
-CPU with a spin, it requires a request issued **during** that spin and a consumed
-boundary on that CPU with that exact round and `w > ended`. Missing requests,
-missing boundaries and unrelated CPU/round evidence refuse. During this test
-requests are issued every millisecond as stimulus, not as a production timer. A CPU
-boundary with `started <= w <= ended` proves the helper passed the unfinished
-spin and fails the test, even if the consumer only reads it after completion.
-This avoids falsely failing a safe acknowledgement between the actual increment
-and the later completion instrumentation store. It also checks completion and
-transport conservation after stop. An observed overtake fails even if another
-CPU lacks evidence. A measured spin under 1 ms, missing stimulus,
-or a verifier rejection is exit 78 / REFUSED, never PASS. **The EL8 loop has not
-been verified on this Mac.** If that kernel rejects the bounded loop, the
-smallest alternative is a separately built test object with a straight-line,
-unrolled chain of clock reads, measuring the delay and refusing it unless >=1 ms;
-its instruction limits must themselves be checked on the real EL8 verifier.
-No sleepable helper or grace period may substitute for this section.
+**What counts as evidence.** For each CPU that spun, the loader requires:
 
-Build on the box with the normal project/test recipes, then run:
+1. no boundary of that CPU's helper with `started <= w <= ended` (one such
+   boundary means the helper ran inside an unfinished producer: the fence is
+   falsified and the test fails, whatever the other CPUs show);
+2. a wake of that CPU's helper that began and returned inside the spin (the
+   clock is read before and after the wake call), so the helper was runnable
+   on that CPU while the producer was unfinished; and
+3. a boundary of that CPU, carrying that request's round or a later one,
+   with `w > ended`, so the helper did run, its records do arrive, and it ran
+   only afterwards.
+
+Without (2) and (3) the result is a refusal (exit 78), never a pass. A
+boundary from an older round than the request is stale and does not count.
+The identical round is not required: rounds only grow and the round is read
+by the helper's program when it runs, so a later round is still that helper's
+later run. Requiring equality refused correct runs whenever the round
+advanced between the wake and the helper's first run, which is routine when
+a requester shares the helper's CPU.
+
+**Who issues the wakes.** The loader's main thread is pinned to one CPU and
+cannot run while a spin occupies that CPU, so it cannot be the source of the
+wakes. Two requester threads are pinned to two different CPUs. Each wakes the
+helpers of all the *other* CPUs about every 100 microseconds and stamps each
+wake. Forks come from one postmaster, so one CPU spins at a time, and
+whichever CPU that is (the loader's own included) at least one requester is
+free to challenge it. With fewer than two online CPUs the arm refuses. A
+helper makes one `getppid` call per wake in every arm. These wakes are test
+stimulus, not a proposed daemon timer.
+
+It also checks completion and transport conservation after stop. A measured
+spin under 1 ms, missing stimulus, or a verifier rejection of the test object
+is exit 78 / REFUSED, never PASS. No sleepable helper or grace period may
+substitute for this section.
+
+Build on the box with the normal project and test recipes, then run:
 
 ```sh
 make build-tests
@@ -296,44 +408,84 @@ sudo python3 tests/test_transport_producers_live.py --pid POSTMASTER_PID --secon
 # Same test is in tests/run_all.sh's live tier.
 ```
 
-The Python driver obtains offsets from the running server's installed headers
-and resolves ELF symbol/file offsets independently. It runs PG13 when that is
-the selected server (and supports provisioned PG17/18). It creates/drops a
-private pgbench database, runs `-c16 -j4` and `-C -c16 -j4`, each for 20 seconds,
-then runs the INIT restoration mutant and delayed-failure arm (five seconds
-each). PG14-16 are excluded by `run_all.sh` using its existing `exclude_test`
-matrix convention; unsupported PG is not a new exit status.
-The standalone loader owns both rings and
-the perf reader; it prints a per-CPU/destination attempted/delivered matrix.
-The libbpf RAW callback includes alignment padding: 80-byte DATA arrives as
-84 raw bytes, 48-byte boundaries as 52; the portable test pins both lengths.
+The driver needs no PostgreSQL server headers. PG17+ publishes a pointer
+straight to `wait_event_info`; for PG13 it uses the daemon's own validated
+x86_64 offsets (`src/discovery.c`, `pgwt_detect_pgproc_wait_offset` and
+`pgwt_detect_pg13_query_offsets`), and the portable test fails if the copy in
+the driver stops matching that file. ELF symbol and file offsets are resolved
+from the running binary. It creates and drops a private pgbench database and
+runs, in order:
 
-The clean arms assert load success, framing, zero q/flags, lifetime FORK-cookie
-bindings, strict attempt sequences, zero LOST/failures, exact attempted/delivered
-conservation after stop, no later E/L timestamp below w, and a higher-round CPU
-ack from every online CPU after consuming E/L. Each clean PG arm also asserts
+1. the verifier matrix of the production object (26 loads, none rejected);
+2. `pgbench -c16 -j4`, 20 s, clean;
+3. `pgbench -C -c16 -j4`, 20 s, clean;
+4. real initial-namespace PID reuse with both lifetimes' records retained;
+5. the INIT-publication mutant under `pgbench -C`, 5 s;
+6. the verifier matrix of the falsifier object, then the delayed-failure arm
+   under `pgbench -C`, 5 s;
+7. a control: the same arm with the stamped challenges switched off
+   (`--no-challenge`), which must end in a refusal.
+
+PG14-16 are excluded by `run_all.sh` using its existing `exclude_test` matrix
+convention; unsupported PG is not a new exit status. The standalone loader
+owns both rings and the perf reader and prints a per-CPU/destination
+attempted/delivered matrix. The libbpf RAW callback includes alignment
+padding: 80-byte DATA arrives as 84 raw bytes, 48-byte boundaries as 52; the
+portable test pins both lengths.
+
+The clean arms assert load success, framing, zero q/flags, lifetime
+FORK-cookie bindings, strict attempt sequences, zero LOST and zero failures on
+every destination, attempted equal to delivered per CPU and destination after
+stop, no later E/L timestamp below w, and a higher-round CPU ack from every
+online CPU after consuming E/L. Each clean PG arm also asserts
 `init_records == 0` on L, `init_stored > 0` in the cohort, `attached > 0` and
-`trace > 0`. Every CPU/destination has zero failures/LOST and attempted equals
-delivered, including the `-C` arm. The self-reuse arm deliberately
-holds both lifetimes' records until the second child has overwritten/retired its
-PID state. It moves `ns_last_pid` on the disposable box, requires the same
-initial-namespace PID to be reused, and checks both different FORK cookies.
-A nested PID namespace or inability to move that cursor is a refusal, not a
-vacuous reuse pass. This changes the allocation cursor only, not pid_max or an
-existing task. Default-path real-PG regression evidence still comes from the
-ordinary flag-off box suite; the host harness additionally pins raw mode-zero
-record sizes and retained-state behavior.
+`trace > 0`. The self-reuse arm deliberately holds both lifetimes' records
+until the second child has overwritten and retired its PID state. It moves
+`ns_last_pid` on the disposable box, requires the same initial-namespace PID
+to be reused, and checks both different FORK cookies. A nested PID namespace
+or inability to move that cursor is a refusal, not a vacuous reuse pass.
+Default-path real-PG regression evidence still comes from the ordinary
+flag-off box suite; the host harness additionally pins raw mode-zero record
+sizes and retained-state behaviour.
 
-The probe's simplified watchpoint attachment is stimulus only, not an A2 proof.
-An already-exited or too-short task can be uninstrumented; its FORK/EXIT transport
-still participates in reconciliation. INIT storage is sampled from the matching
-backend/cookie state, including after attachment, and counted once only when
-the backend's `/proc/PID/cmdline` title identifies the driver's unique database
-cohort. Unrelated postmaster children cannot satisfy this count. This makes
-the no-publication assertion nonvacuous. No assertion certifies attachment or
-merge coverage. The restoration mutant must build/load, produce INIT records,
-and fail exactly `zero INIT records on L under exact_perf_mode`; every other
-clean transport and stimulus assertion must pass or it is not a killed mutant.
+**Non-vacuity of "zero INIT records on L".** That assertion says something
+only if `on_bootstrap` fired. The loader arms a bootstrap watchpoint when it
+consumes a backend's FORK, and a backend normally publishes its wait pointer
+sooner than that: in one EL8 run the loader saw a stored INIT for 1 of 18
+backends in the 16-client arm and for 5 of 10,351 under `-C`, and in the next
+run for none of 17, which failed the arm. The driver therefore creates four
+*held* backends per PG arm: it connects and withholds the startup packet for
+300 ms. The postmaster forks the backend at connect, and the backend reads the
+startup packet before `InitProcess()` publishes the pointer, so the watchpoint
+is armed first by construction. The loader prints each backend whose stored
+INIT it observed, and the arm requires every held backend among them. The
+falsifier arm holds none, because it turns the first fork on each CPU into a
+forced failure and that backend has no FORK record.
+
+**The loader's attach predicate.** The loader attaches a wait watchpoint only
+when the backend's pointer targets a shared mapping, which is the daemon's own
+rule (`pgwt_addr_is_shared`): on PG17+ the pointer is non-zero from the first
+instruction and targets a process-local placeholder until `InitProcess()`.
+Attaching on non-zero alone put the watchpoint on the placeholder and closed
+the bootstrap watchpoint early. The attachment is still stimulus only, not an
+A2 proof: an already-exited or too-short task can be uninstrumented, and its
+FORK/EXIT transport still participates in reconciliation. INIT storage is
+counted once per backend, only when its `/proc/PID/cmdline` title names the
+driver's own database, so unrelated postmaster children cannot satisfy it.
+
+**The INIT-publication mutant.** It puts the L publication back into
+`on_bootstrap`, in the production reservation shape so that it loads on 4.18.
+That reservation is taken in NMI context, where 4.18 refuses it when the ring
+lock is contended (11 to 33 per 120 s under `-C` in the issue's measurement),
+and each refusal is an attempt with no delivery. So that every run meets
+refusals, on every kernel, the mutant also gives up the reservation for odd
+PIDs and counts it exactly as a refused one. The driver holds backends until
+it has an odd and an even PID. The loader's `--init-mutant` option accepts on
+L exactly the failures counted at the INIT site, per CPU, and still fails on
+any other failure on any destination. The arm must then show a published INIT
+and a refused one, every other clean assertion green, and fail exactly
+`zero INIT records on L under exact_perf_mode`. A load failure or any other
+assertion is not a killed mutant.
 
 ## Portable checks and deliberately broken variants
 
@@ -349,116 +501,100 @@ Each mutant is compiled successfully and must reach its named failing assertion:
 
 | Mutant | Distinguishing assertion |
 | --- | --- |
-| Marker timestamp moved ahead of reserve | `timestamp after reserve` |
+| Marker timestamp taken ahead of its reservation | `timestamp after reserve` |
 | FORK cookie selected from the current emitting PID entry rather than the child lifetime | `queued cookie survives pid reuse` |
 | Reused PID's DATA keeps cookie 1 | `DATA cookie across PID reuse` |
-| E attempt increment only after reserve success | `marker fail attribution coherent` (includes consumed attempt) |
+| E attempt number taken only after the reservation succeeded | `marker fail attribution coherent` (includes consumed attempt) |
 | Helper ignores expected CPU | `helper wrong CPU refused` |
-| Command re-reads `wp_live` after a userspace map-entry replacement | `command saved admission releases reservation` |
+| Command publication reads `wp_live` again after the reservation | `command saved admission releases reservation` |
 | Bootstrap restores the L reservation/publication | `zero INIT records on L under exact_perf_mode` (host and live) |
 | Command admission discard increments logical ring losses | `command admission discard is not a ring drop` |
+| EXIT with E refused leaves its unused L reservation held | `partial exit discarded and counted` |
 
 The retained-record box test is the read-time/current-PID-resolution control:
 it defers drain across real initial-namespace reuse and requires records to lie
 in their own cookie's FORK/EXIT interval (L metadata is also checked by FIFO
 lifetime position). Resolving the old records from the current or deleted PID
-entry cannot satisfy those checks. This box control is supplied, not run here.
+entry cannot satisfy those checks.
 
-## Round-2 validation and handoff (Mac, 2026-11-14)
+## Box validation (2026-11-14)
 
-Required head and exact brief gate:
+Evidence folder (on the lead's Mac, git-ignored):
+`tests/results/session-20261114/a1-fresh/{el8,ubuntu,mac}/`. Each live log
+starts with the kernel, the PostgreSQL major, the postmaster pid and port, and
+the tree it was built from.
 
-```text
-$ git log --oneline -1
-8927d916 Add flagged BPF transport producers and lifetime cookies
-$ scripts/lead/check-brief.sh /private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-tracer/27cc85b4-040d-47d2-ba40-e0c59ac54ec1/scratchpad/m871/brief-a1-r2.md
-CHECK BRIEF: covered #871
-```
+What was measured while this shape was being built, on a throwaway Rocky 8.10
+VM (kernel `4.18.0-553.157.1.el8_10`, 4 vCPU, the gate snapshot image as it
+is, no package added):
 
-Portable validation (no BPF compilation or loading):
+| Step | Tree | Result |
+| --- | --- | --- |
+| Baseline, mode on | ab9886d7 (the two earlier rounds) | rejected at `on_exit`, `Unreleased reference id=11 alloc_insn=196`, as in the smoke run |
+| Producers rewritten to the reservation rule | work in progress | whole object loads with the mode on |
+| Verifier matrix, every gate on | work in progress | 13 programs x 2 modes = 26 loads, 0 rejected |
+| Falsifier object, per-read exit | work in progress | `on_fork` rejected, `The sequence of 8193 jumps is too complex` |
+| Falsifier object, block loop | work in progress | 26 loads, 0 rejected; measured spins 11.7 to 17.3 ms for 20 ms requested (the loop ends after its last block) |
+| Image without server headers | gate image 451329433 | `ls /usr/pgsql-*/include/server/postgres.h`: no such file; the driver no longer needs one |
 
-```text
-$ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -DPGWT_TRANSPORT_HOST_TEST tests/test_transport_producers.c -o /private/tmp/pgwt-a1-r2.nb42H6/host
-$ /private/tmp/pgwt-a1-r2.nb42H6/host
-falsifier evidence: PASS (request during spin, matching CPU/round, later boundary; missing evidence refuses)
-transport pure pieces: PASS (golden envelope, attempts, allocation, cookie, CPU binding)
-live driver host checks: PASS (active preemption, missing evidence, INIT assertions, PG13-18 exclusion matrix)
-production producer bodies: PASS (identity, reservation order, accounting, helper, mode zero)
-mutant timestamp-before-reserve: KILLED (timestamp after reserve)
-mutant seq-only-on-success: KILLED (marker fail attribution coherent)
-mutant unpinned-helper: KILLED (helper wrong CPU refused)
-mutant current-pid-cookie: KILLED (queued cookie survives pid reuse)
-mutant stale-cookie-on-reused-pid: KILLED (DATA cookie across PID reuse)
-mutant command-double-read: KILLED (command saved admission releases reservation)
-mutant INIT-publication-restored: KILLED (zero INIT records on L under exact_perf_mode)
-mutant admission-discard-counts-drop: KILLED (command admission discard is not a ring drop)
-$ python3 -B tests/test_counter_failures.py
-BPF failure paths (host C): PASS (natural errors, silent paths, success, once-only knobs)
-$ scripts/check-test-registration.sh
-OK: test-registration guard (base 8cafdcb2b5a3893c7d24dde9b9b934cdc701af83) — append-only invariant holds
-$ scripts/check-runner-registration.sh
-OK: runner-registration guard -- every tests/ci_smoke.sh invocation (5) is also invoked by tests/run_all.sh (209 invocations total, including tests/unit_tests.list entries); every candidate test file on disk (192 scanned: tests/test_*.{py,sh} plus tests/web_unit/*.test.mjs) is invoked by a runner or covered by a glob; or is a documented exemption (2 listed, 2 currently invoke no runner).
-$ bash -n tests/run_all.sh
-(exit 0)
-$ python3 -B -c 'import ast; from pathlib import Path; [ast.parse(Path(p).read_text(), filename=p) for p in ("tests/transport_producers_host.py", "tests/test_transport_producers_live.py")]; print("Python syntax: PASS")'
-Python syntax: PASS
-$ git diff --check
-(exit 0)
-```
+**Mode off, compared with 2f2c211d on the kernel.** The daemon of each tree
+was run in `--mode full` (the mode is off by default) against PG18 and PG13,
+and every loaded program was dumped as the kernel holds it after verification
+(`bpftool prog dump xlated`; dumps and `SUMMARY.txt` are in
+`el8/modeoff-xlated/`). For all twelve programs of 2f2c211d, on both
+PostgreSQL versions, the multiset of kernel helper calls is identical in the
+two trees. The instruction counts are not:
 
-The initial mode-zero counter harness compilation found three obsolete
-falsifier shims unused after the compile-time exclusion. Those declarations
-were removed; the counter harness passes above. No check was loosened.
-`make check` is reserved to the lead by this round's brief and was not invoked.
+| Program | 2f2c211d | this unit | What the difference is |
+| --- | ---: | ---: | --- |
+| `on_sched_switch` | 56 | 56 | none |
+| `on_bootstrap`, `on_exit`, `on_exec_start`, `on_exec_done` | 84, 220, 236, 237 | +2 each | the load of the `exact_perf_mode` constant; the branch itself is removed |
+| `on_plan_start`, `on_plan_done` | 224, 225 | +3 each | the same load, and one more move |
+| `on_executor_start` (PG13) | 266 | 268 | the same load |
+| `on_report_query_id` | 234 | 238 | the same load, and register moves |
+| `on_fork` | 68 | 73 | two such loads and one store zeroing the new `cookie` field |
+| `on_watchpoint` | 415 (PG18), 407 (PG13) | +7 | the load, the context pointer kept in a register, renumbered stack slots |
+| `on_report_activity` | 294 (PG18), 416 (PG13) | 331, 454 | the compiler no longer inlines `pgwt_exact_merge_attr` there and calls it as a BPF subprogram, as 2f2c211d's `on_watchpoint` already does |
 
-UNVERIFIED here: Linux C/BPF builds, production and test-object verifier
-acceptance, live INIT restoration mutant, real-PG cohort storage/attachment,
-PID reuse, preemption detection against a running kernel, measured spin and
-positive helper challenge on EL8/Ubuntu. The live command and its strict
-assertions are above; the lead runs those checks. The kernel argument still
-leaves vendor dispatch/visibility and cross-CPU clock ordering open for U2.
+`on_transport_helper` is new; with the mode off it is five instructions and
+the daemon never attaches it. So the mode-off programs are not
+instruction-identical to 2f2c211d: they make the same helper calls, and the
+one change in code generation beyond a constant load is the out-of-line
+function in `on_report_activity`. This was measured on EL8 only. The legacy
+source text itself is unchanged (see "What the 4.18 verifier needs").
 
-Round 2 changes no backend attachment code. The existing round-1 changes copy
-`prev.cookie` during flagged preseed and skip delayed userspace map deletion
-under the flag; A2 remains separate. Cost: one authorised correction round,
-no gate-box use; token totals come from the dispatch wrapper.
+Things the box showed that the Mac could not:
 
-Requested diff snapshot (before adding this evidence block; the new test object
-source is listed separately because `git diff --stat` omits untracked files):
+- `clang` 21.1.8 compiles `__sync_fetch_and_add` in this file to
+  `atomic64_fetch_add`, and this kernel's verifier accepts it. The comment in
+  `transport_producer.h` about kernels lacking the fetching form describes
+  older kernels, not this one.
+- The registered portable test (`test_transport_producers`, no arguments)
+  did not compile on Linux: glibc's `<stdlib.h>` declares its own
+  `on_exit()`, and the harness compiles the production program of that name
+  as host C (`conflicting types for 'on_exit'`, gcc 8.5). It had only ever
+  been run on the Mac. The harness now compiles it under another name, and
+  the test passes on the box with every mutant killed.
+- The 16-client arm's non-vacuity assertion depended on a race (see
+  "Non-vacuity" above), and the loader attached to PG17+'s placeholder
+  address. Both are fixed in the loader and driver, not in the producers.
+- On this image the PG13 service starts through the `postmaster` symlink, so
+  the process is named `postmaster` and `find_postmaster` (shell and Python,
+  both `pgrep -x postgres`) does not find it. `run_all.sh --pid` works. This
+  unit does not change those resolvers.
+- `tests/Makefile` rebuilds `test_transport_producers` only when the `.c`
+  file, the wire header or the skeleton changes, not when
+  `tests/transport_probe*.h` or `src/bpf/transport_producer.h` does. A box
+  check always cleans first, so it is unaffected; an incremental build after
+  editing only those headers runs a stale loader. `tests/Makefile` is outside
+  this unit.
 
-```text
-$ git diff --stat 8927d916
- docs/871-a1-producer-argument.md       | 225 ++++++++++++++++++++-------------
- src/bpf/pg_wait_tracer.bpf.c           |  40 +++---
- tests/counter_bpf_harness.c            |   4 +-
- tests/run_all.sh                       |   7 +
- tests/test_transport_producers.c       |  14 ++
- tests/test_transport_producers_live.py | 138 +++++++++++++++++---
- tests/transport_bpf_harness.h          |  81 +++++++++++-
- tests/transport_probe.h                |  91 ++++++++++---
- tests/transport_probe_decode.h         |  23 ++++
- tests/transport_producers_host.py      |  73 +++++++++++
- 10 files changed, 545 insertions(+), 151 deletions(-)
-$ git ls-files --others --exclude-standard
-tests/transport_falsifier.bpf.c
-$ git diff --exit-code 8927d916 -- 'src/daemon.*' src/event_stream.c src/pg_wait_tracer.c 'src/percpu_transport.*' 'src/merge_capture.*' src/core/ Makefile tests/Makefile tests/unit_tests.list scripts/check.sh src/backend.c src/backend.h contracts/ web/
-(exit 0)
-```
+Not exercised on a box by this unit: the phase markers (`emit_marker` through
+the USDT programs). The loader attaches no USDT probe, so the marker path is
+verified to load (matrix) and checked for ordering and accounting only by the
+portable harness. The cross-CPU clock premise of point 5 and the vendor
+dispatch and visibility points of 1 and 3 above remain open for U2.
 
-SEARCHED: tracked changes against 8927d916 in every excluded path plus backend.c/.h.
-NOT SEARCHED: other branches and ignored artifacts produced by other worktrees.
-
-Required report audit reached its prepass, then failed to initialize its
-independent auditor subprocess. Under the brief's failed-check stop rule this
-ends the round; it is not a SEND verdict or a readiness claim.
-
-```text
-$ scripts/lead/audit-report.sh /private/tmp/pgwt-a1-r2.nb42H6/report.txt
-PREPASS: no unevidenced absence claim found
-AUDIT INCONCLUSIVE (auditor exit 1) -- do not send. draft=2d995b316dbc4692293eb72da38da3afd3c75f90d7287c0d7cf18cc42e4b11d3
-(exit 2)
-$ cat /private/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-report-audits-501/a71dbed920564a59822d6393dee80e777d04574261842b66646328dc3e9d3665/2d995b316dbc4692293eb72da38da3afd3c75f90d7287c0d7cf18cc42e4b11d3/transcript.txt
-WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)
-Reading additional input from stdin...
-Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)
-```
+The A2 boundary is unchanged: the earlier rounds copy `prev.cookie` during
+flagged preseed and skip the delayed userspace map deletion under the flag;
+this round changes no backend attachment code in `src/`.

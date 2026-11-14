@@ -354,35 +354,59 @@ static __always_inline void transport_trace_failure(u32 dest, u32 site)
     u64 *c = bpf_map_lookup_elem(&ringbuf_drops, &zero);
     if (c) __sync_fetch_and_add(c, 1);
 }
-static __always_inline struct pgwt_wire_trace *transport_reserve_trace(u32 pid, u32 site)
+static __always_inline void transport_lifecycle_failure(u32 site)
 {
-    u64 seq = transport_attempt(PGWT_WIRE_DEST_E);
-    struct pgwt_wire_trace *ev = bpf_ringbuf_reserve(&event_ringbuf, sizeof(*ev), 0);
-    if (!ev) transport_trace_failure(PGWT_WIRE_DEST_E, site);
-    else transport_header(&ev->hdr, PGWT_WIRE_TRACE, sizeof(ev->payload), seq, transport_cookie(pid));
-    return ev;
+    transport_failure(PGWT_WIRE_DEST_L);
+    count_ring_fail(site);
 }
-static __always_inline struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u32 pid, u64 cookie, u32 site)
+/* RESERVATION SHAPE (docs/871-a1-producer-argument.md, "What the 4.18
+ * verifier needs"). These two take the attempt number and reserve; they do
+ * NOT test the result. The caller tests the pointer against NULL exactly
+ * once, immediately, and everything that uses or releases the reservation is
+ * lexically inside the non-NULL arm of that one test. Never keep the pointer
+ * in a variable that another path sets to NULL, and never test it again: the
+ * EL8 4.18 verifier follows the NULL side of a second test with the reference
+ * still held and rejects the program ("Unreleased reference"). */
+static __always_inline struct pgwt_wire_trace *transport_reserve_trace(u64 *seq)
 {
-    u64 seq = transport_attempt(PGWT_WIRE_DEST_L);
-    struct pgwt_wire_lifecycle *ev = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*ev), 0);
-    if (!ev) { transport_failure(PGWT_WIRE_DEST_L); count_ring_fail(site); }
-    else transport_header(&ev->hdr, PGWT_WIRE_LIFECYCLE, sizeof(ev->payload), seq, cookie);
-    return ev;
+    *seq = transport_attempt(PGWT_WIRE_DEST_E);
+    return bpf_ringbuf_reserve(&event_ringbuf, sizeof(struct pgwt_wire_trace), 0);
+}
+static __always_inline struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u64 *seq)
+{
+    *seq = transport_attempt(PGWT_WIRE_DEST_L);
+    return bpf_ringbuf_reserve(&lifecycle_rb, sizeof(struct pgwt_wire_lifecycle), 0);
 }
 #ifdef PGWT_TRANSPORT_FALSIFIER
 /* This back-edge is absent from the production translation unit. A verifier
  * rejection of the separate test object is REFUSED, never a passing test. */
+/* Loop shape, measured on EL8 4.18: the verifier accepts a bounded loop, but
+ * an exit that depends on data leaves one pending state per iteration and the
+ * limit is 8192 ("The sequence of 8193 jumps is too complex"). So the clock
+ * is not compared on every read: it is read in fixed blocks, whose trip count
+ * the verifier knows, and compared once per block. That is at most
+ * PGWT_SPIN_BLOCKS pending states, and the whole walk stays well under the
+ * 1,000,000-instruction limit. The spin therefore ends at the first block
+ * boundary at or past test_fail_spin_ns, or after the last block. The loader
+ * measures it and refuses a spin shorter than 1 ms. */
 static __always_inline void transport_spin_failure(void)
 {
+    enum { PGWT_SPIN_BLOCKS = 64, PGWT_SPIN_BLOCK_ROUNDS = 500 /* x8 clock reads */ };
     u32 zero = 0;
     struct pgwt_fail_spin *s = bpf_map_lookup_elem(&test_spin, &zero);
     if (!s || s->started) return;
-    s->started = bpf_ktime_get_ns();
-    for (u32 i = 0; i < 65536; ++i) {
-        s->ended = bpf_ktime_get_ns();
-        if (s->ended - s->started >= test_fail_spin_ns) break;
+    u64 started = bpf_ktime_get_ns(), ended = started;
+    s->started = started;
+    for (u32 block = 0; block < PGWT_SPIN_BLOCKS; ++block) {
+        for (u32 i = 0; i < PGWT_SPIN_BLOCK_ROUNDS; ++i) {
+            bpf_ktime_get_ns(); bpf_ktime_get_ns(); bpf_ktime_get_ns();
+            bpf_ktime_get_ns(); bpf_ktime_get_ns(); bpf_ktime_get_ns();
+            bpf_ktime_get_ns();
+            ended = bpf_ktime_get_ns();
+        }
+        if (ended - started >= test_fail_spin_ns) break;
     }
+    s->ended = ended;
 }
 #endif
 static __always_inline void transport_boundary(void *ctx, u32 dest, u32 round)
@@ -889,14 +913,16 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
             struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
             /* Store once, without attempting a ring publication in NMI.
              * Admission uses fork-seed proof (25b); attachment is A2's job. */
-            if (st && st->init_stored) return 0;
+            if (!st) {
+                count_map_fail(PGWT_BPF_FAIL_INIT_NO_STATE);
+                return 0;
+            }
+            if (st->init_stored) return 0;
             u64 stamp = bpf_ktime_get_ns();
-            if (st) {
-                st->init_wait_addr = wait_addr;
-                st->init_ts = stamp;
-                asm volatile("" ::: "memory");
-                *(volatile u32 *)&st->init_stored = 1;
-            } else count_map_fail(PGWT_BPF_FAIL_INIT_NO_STATE);
+            st->init_wait_addr = wait_addr;
+            st->init_ts = stamp;
+            asm volatile("" ::: "memory");
+            *(volatile u32 *)&st->init_stored = 1;
             return 0;
         }
         u64 init_ts = bpf_ktime_get_ns();
@@ -984,13 +1010,17 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
             }
         }
 #endif
-        struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(child,
-            child_seed.cookie, PGWT_RING_FAIL_LIFECYCLE_FORK);
-        if (wire) {
-            wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_FORK,
-                .pid = child, .timestamp = bpf_ktime_get_ns() };
-            bpf_ringbuf_submit(wire, 0);
+        u64 seq;
+        struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(&seq);
+        if (!wire) {
+            transport_lifecycle_failure(PGWT_RING_FAIL_LIFECYCLE_FORK);
+            return 0;
         }
+        transport_header(&wire->hdr, PGWT_WIRE_LIFECYCLE, sizeof(wire->payload),
+            seq, child_seed.cookie);
+        wire->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_FORK,
+            .pid = child, .timestamp = bpf_ktime_get_ns() };
+        bpf_ringbuf_submit(wire, 0);
         return 0;
     }
     struct pgwt_lifecycle_event *ev;
@@ -1012,42 +1042,60 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
 static __always_inline int transport_exit(u32 pid, struct pgwt_pid_state *st)
 {
     bool trace = st->wp_live && !lightweight_mode && exact_admission_open();
-    struct pgwt_wire_trace *out = NULL;
-    if (trace) out = transport_reserve_trace(pid, PGWT_RING_FAIL_EXIT_TRANSITION);
-    struct pgwt_wire_lifecycle *life = transport_reserve_lifecycle(pid, st->cookie,
-        PGWT_RING_FAIL_LIFECYCLE_EXIT);
-    /* Both required reservations precede the one semantic timestamp. */
-    u64 now = bpf_ktime_get_ns();
-    if ((!trace || out) && life) {
-        if (out) {
-            u64 qid = 0; u16 open = 0, quality = 0;
-            resolve_exact_attr(pid, &qid, &open, &quality);
-            u64 cpu_now = read_task_cpu_ns_for(st, now);
-            out->payload = (struct pgwt_trace_event){ .timestamp_ns = now, .pid = pid,
-                .old_event = st->last_event, .new_event = PGWT_EVENT_EXIT,
-                .duration_ns = now - st->last_ts, .query_id = qid,
-                .flags = (open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
-                    (quality == PGWT_QUERY_QUALITY_PG13_SYNTH ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
-                .cpu_ns = (cpu_now && st->last_cpu_ns && cpu_now >= st->last_cpu_ns)
-                    ? cpu_now - st->last_cpu_ns : 0 };
-            bpf_ringbuf_submit(out, 0);
+    u64 seq_e, seq_l;
+    /* One NULL test per reservation, nested; no pointer outlives its arm.
+     * Each of the four outcomes ends at `retire` with nothing held. */
+    if (trace) {
+        struct pgwt_wire_trace *out = transport_reserve_trace(&seq_e);
+        if (!out) {
+            transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_EXIT_TRANSITION);
+            /* L is still attempted: its attempt is consumed and the unused
+             * reservation is discarded and counted with its failed pair. */
+            struct pgwt_wire_lifecycle *unused = transport_reserve_lifecycle(&seq_l);
+            if (unused) bpf_ringbuf_discard(unused, 0);
+            transport_lifecycle_failure(PGWT_RING_FAIL_LIFECYCLE_EXIT);
+            goto retire;
         }
+        transport_header(&out->hdr, PGWT_WIRE_TRACE, sizeof(out->payload), seq_e,
+            transport_cookie(pid));
+        struct pgwt_wire_lifecycle *life = transport_reserve_lifecycle(&seq_l);
+        if (!life) {
+            transport_lifecycle_failure(PGWT_RING_FAIL_LIFECYCLE_EXIT);
+            bpf_ringbuf_discard(out, 0);
+            transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_EXIT_TRANSITION);
+            goto retire;
+        }
+        transport_header(&life->hdr, PGWT_WIRE_LIFECYCLE, sizeof(life->payload), seq_l,
+            st->cookie);
+        /* Both required reservations precede the one semantic timestamp. */
+        u64 now = bpf_ktime_get_ns();
+        u64 qid = 0; u16 open = 0, quality = 0;
+        resolve_exact_attr(pid, &qid, &open, &quality);
+        u64 cpu_now = read_task_cpu_ns_for(st, now);
+        out->payload = (struct pgwt_trace_event){ .timestamp_ns = now, .pid = pid,
+            .old_event = st->last_event, .new_event = PGWT_EVENT_EXIT,
+            .duration_ns = now - st->last_ts, .query_id = qid,
+            .flags = (open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
+                (quality == PGWT_QUERY_QUALITY_PG13_SYNTH ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
+            .cpu_ns = (cpu_now && st->last_cpu_ns && cpu_now >= st->last_cpu_ns)
+                ? cpu_now - st->last_cpu_ns : 0 };
+        bpf_ringbuf_submit(out, 0);
         life->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_EXIT,
             .pid = pid, .timestamp = now };
         bpf_ringbuf_submit(life, 0);
     } else {
-        /* Failed destinations already counted by reserve; count every
-         * otherwise-successful reservation discarded with its paired output. */
-        if (out) {
-            bpf_ringbuf_discard(out, 0);
-            transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_EXIT_TRANSITION);
+        struct pgwt_wire_lifecycle *life = transport_reserve_lifecycle(&seq_l);
+        if (!life) {
+            transport_lifecycle_failure(PGWT_RING_FAIL_LIFECYCLE_EXIT);
+            goto retire;
         }
-        if (life) {
-            bpf_ringbuf_discard(life, 0);
-            transport_failure(PGWT_WIRE_DEST_L);
-            count_ring_fail(PGWT_RING_FAIL_LIFECYCLE_EXIT);
-        }
+        transport_header(&life->hdr, PGWT_WIRE_LIFECYCLE, sizeof(life->payload), seq_l,
+            st->cookie);
+        life->payload = (struct pgwt_lifecycle_event){ .type = PGWT_LIFECYCLE_EXIT,
+            .pid = pid, .timestamp = bpf_ktime_get_ns() };
+        bpf_ringbuf_submit(life, 0);
     }
+retire:
     bpf_map_delete_elem(&state_map, &pid);
     bpf_map_delete_elem(&exact_attr_map, &pid);
     bpf_map_delete_elem(&exact_seed_map, &pid);
@@ -1176,36 +1224,80 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
  * Uses bpf_ktime_get_ns() — same clock as on_watchpoint.
  * Only active in full trace mode (checked at emit time). */
 
+/* The attribution edge of a marker under the mode, run by BOTH arms of the
+ * one reservation test with the timestamp taken after that reservation. A
+ * failed reservation therefore leaves attribution exactly where a published
+ * marker would. Returns true when the marker must be published. */
+static __always_inline bool marker_edge(u32 pid, u32 marker, u64 now,
+                                        struct pgwt_trace_event *evt)
+{
+    u64 qid = 0;
+    u16 cmd_open = 0;
+    u16 query_quality = 0;
+    if (!bpf_map_lookup_elem(&state_map, &pid))
+        return false;
+    resolve_exact_attr(pid, &qid, &cmd_open, &query_quality);
+    note_phase_edge(pid, marker, now);
+    if (!exact_admission_open())
+        return false;
+    *evt = (struct pgwt_trace_event){
+        .timestamp_ns = now,
+        .pid = pid,
+        .old_event = marker,
+        .new_event = marker,
+        .flags = query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+               ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0,
+        .duration_ns = 0,
+        .query_id = qid,
+    };
+    return true;
+}
+
+static __always_inline void transport_marker(u32 pid, u32 marker)
+{
+    if (!bpf_map_lookup_elem(&state_map, &pid)) return;
+    struct pgwt_trace_event evt = {};
+    u64 seq;
+    struct pgwt_wire_trace *wire = transport_reserve_trace(&seq);
+    if (!wire) {
+        transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_MARKER);
+        marker_edge(pid, marker, bpf_ktime_get_ns(), &evt);
+        return;
+    }
+    transport_header(&wire->hdr, PGWT_WIRE_TRACE, sizeof(wire->payload), seq,
+        transport_cookie(pid));
+    if (marker_edge(pid, marker, bpf_ktime_get_ns(), &evt)) {
+        wire->payload = evt;
+        bpf_ringbuf_submit(wire, 0);
+    } else {
+        /* State vanished or admission closed: release, reconcile the
+         * attempt, and count no ring drop (flag-off never counts one). */
+        bpf_ringbuf_discard(wire, 0);
+        transport_failure(PGWT_WIRE_DEST_E);
+    }
+}
+
 static __always_inline void emit_marker(u32 marker)
 {
     if (lightweight_mode || !exact_admission_open())
         return;
 
     u32 pid = bpf_get_current_pid_tgid() >> 32;
-    struct pgwt_wire_trace *wire = NULL;
-    if (exact_perf_mode && !bpf_map_lookup_elem(&state_map, &pid)) return;
-    if (exact_perf_mode) wire = transport_reserve_trace(pid, PGWT_RING_FAIL_MARKER);
+    if (exact_perf_mode) {
+        transport_marker(pid, marker);
+        return;
+    }
     u64 now = bpf_ktime_get_ns();
 
     u64 qid = 0;
     u16 cmd_open = 0;
     u16 query_quality = 0;
-    if (!bpf_map_lookup_elem(&state_map, &pid)) {
-        if (wire) {
-            bpf_ringbuf_discard(wire, 0);
-            transport_failure(PGWT_WIRE_DEST_E);
-        }
+    if (!bpf_map_lookup_elem(&state_map, &pid))
         return;
-    }
     resolve_exact_attr(pid, &qid, &cmd_open, &query_quality);
     note_phase_edge(pid, marker, now);
-    if (!exact_admission_open()) {
-        if (wire) {
-            bpf_ringbuf_discard(wire, 0);
-            transport_failure(PGWT_WIRE_DEST_E);
-        }
+    if (!exact_admission_open())
         return;
-    }
 
     struct pgwt_trace_event evt = {
         .timestamp_ns = now,
@@ -1217,9 +1309,7 @@ static __always_inline void emit_marker(u32 marker)
         .duration_ns = 0,
         .query_id = qid,
     };
-    if (exact_perf_mode) {
-        if (wire) { wire->payload = evt; bpf_ringbuf_submit(wire, 0); }
-    } else emit_event(&evt, PGWT_RING_FAIL_MARKER);
+    emit_event(&evt, PGWT_RING_FAIL_MARKER);
 }
 
 /* #464: is THIS firing site an admitted canonical execution boundary?
@@ -1277,6 +1367,102 @@ int BPF_USDT(on_plan_done)
     return 0;
 }
 
+/* Query TEXT on L under the mode: one reservation, one NULL test, and every
+ * path of the non-NULL arm ends in exactly one submit or one discard.
+ * Returns true when the text was published (the caller then marks it seen). */
+static __always_inline bool transport_text(u32 pid, u64 query_id, u64 text_ptr,
+                                           u32 site, u32 test_slot)
+{
+    u64 seq = transport_attempt(PGWT_WIRE_DEST_L);
+    struct pgwt_wire_text *wire = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*wire), 0);
+    if (!wire) {
+        transport_lifecycle_failure(site);
+        return false; /* leave unseen: a later execution retries raw capture */
+    }
+    transport_header(&wire->hdr, PGWT_WIRE_TEXT, sizeof(wire->payload), seq,
+        transport_cookie(pid));
+    wire->payload.type = PGWT_LIFECYCLE_QUERY_TEXT;
+    wire->payload.pid = pid;
+    wire->payload.query_id = query_id;
+    long text_len = test_fail_once(test_slot) ? -1 :
+        bpf_probe_read_user_str(wire->payload.text, sizeof(wire->payload.text),
+                                (void *)text_ptr);
+    if (text_len < 0)
+        count_ring_fail(site);
+    if (text_len <= 1) {
+        /* unreadable/empty is not a successful first-seen */
+        bpf_ringbuf_discard(wire, 0);
+        transport_failure(PGWT_WIRE_DEST_L);
+        return false;
+    }
+    bpf_ringbuf_submit(wire, 0);
+    return true;
+}
+
+/* The command-open gate under the mode. `emit` is the admission condition
+ * the caller read once (crossing, full mode, live watchpoint); the entry may
+ * be replaced by userspace afterwards, so it is never read again here. The
+ * attribution edges run identically whether or not the reservation succeeds,
+ * with the timestamp taken after it. */
+static __always_inline int transport_activity(u32 pid, struct pgwt_pid_state *st,
+                                              u16 open, bool crossed, bool emit)
+{
+    bool pg13 = pg13_synthetic_attr || pg13_query_attr;
+    if (!emit) {
+        u64 now = bpf_ktime_get_ns();
+        note_cmd_edge(pid, open, now);
+        st->cmd_open = open;
+        if (crossed && pg13)
+            note_query_edge(pid, 0, now);
+        return 0;
+    }
+    /* emit implies crossed */
+    u64 seq;
+    struct pgwt_wire_trace *wire = transport_reserve_trace(&seq);
+    if (!wire) {
+        transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_COMMAND_BOUNDARY);
+        u64 now = bpf_ktime_get_ns();
+        note_cmd_edge(pid, open, now);
+        st->cmd_open = open;
+        if (pg13)
+            note_query_edge(pid, 0, now);
+        return 0;
+    }
+    transport_header(&wire->hdr, PGWT_WIRE_TRACE, sizeof(wire->payload), seq,
+        transport_cookie(pid));
+    u64 now = bpf_ktime_get_ns();
+    note_cmd_edge(pid, open, now);
+    st->cmd_open = open;
+    if (pg13 && open)
+        note_query_edge(pid, 0, now);
+    u64 query_id = 0;
+    u16 current_open = 0;
+    u16 query_quality = 0;
+    resolve_exact_attr(pid, &query_id, &current_open, &query_quality);
+    u32 marker = open ? PGWT_MARKER_CMD_START : PGWT_MARKER_CMD_END;
+    if (exact_admission_open()) {
+        wire->payload = (struct pgwt_trace_event){
+            .timestamp_ns = now,
+            .pid = pid,
+            .old_event = marker,
+            .new_event = marker,
+            .flags = query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+                   ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0,
+            .duration_ns = 0,
+            .query_id = query_id,
+        };
+        bpf_ringbuf_submit(wire, 0);
+    } else {
+        /* Admission closed: release and reconcile the attempt; not a ring
+         * drop (flag-off never counts one here). */
+        bpf_ringbuf_discard(wire, 0);
+        transport_failure(PGWT_WIRE_DEST_E);
+    }
+    if (pg13 && !open)
+        note_query_edge(pid, 0, now);
+    return 0;
+}
+
 /* ── Program 9: uprobe on pgstat_report_query_id ─────────── */
 /* Captures query_id directly from the function argument,
  * bypassing shared memory. Also captures query text from
@@ -1330,23 +1516,18 @@ int on_report_query_id(struct pt_regs *ctx)
     if (!str_ptr)
         return 0;
 
-    struct pgwt_query_text_event *evt;
-    void *reservation;
     if (exact_perf_mode) {
-        u64 seq = transport_attempt(PGWT_WIRE_DEST_L);
-        struct pgwt_wire_text *wire = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*wire), 0);
-        reservation = wire;
-        if (wire) {
-            transport_header(&wire->hdr, PGWT_WIRE_TEXT, sizeof(wire->payload), seq,
-                transport_cookie(pid));
-            evt = &wire->payload;
-        } else evt = NULL;
-    } else {
-        evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
-        reservation = evt;
+        if (transport_text(pid, query_id, str_ptr, PGWT_RING_FAIL_QUERY_TEXT,
+                           PGWT_TEST_FAIL_QUERY_TEXT)) {
+            u8 seen = 1;
+            if (bpf_map_update_elem(&seen_query_ids, &seen_key, &seen, BPF_ANY))
+                count_map_fail(PGWT_BPF_FAIL_SEEN_QIDS);
+        }
+        return 0;
     }
+    struct pgwt_query_text_event *evt;
+    evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
     if (!evt) {
-        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
         count_ring_fail(PGWT_RING_FAIL_QUERY_TEXT);
         return 0; /* leave unseen: a later execution retries raw capture */
     }
@@ -1358,11 +1539,10 @@ int on_report_query_id(struct pt_regs *ctx)
     if (text_len < 0)
         count_ring_fail(PGWT_RING_FAIL_QUERY_TEXT);
     if (text_len <= 1) {
-        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
-        bpf_ringbuf_discard(reservation, 0);
+        bpf_ringbuf_discard(evt, 0);
         return 0; /* unreadable/empty is not a successful first-seen */
     }
-    bpf_ringbuf_submit(reservation, 0);
+    bpf_ringbuf_submit(evt, 0);
 
     /* Mark as seen. CAP-6: when the map is full the insert fails and text
      * for NEW query_ids is never captured again — count it (the daemon
@@ -1415,12 +1595,13 @@ int on_report_activity(struct pt_regs *ctx)
     u16 old_open = 0;
     u16 old_quality = 0;
     resolve_exact_attr(pid, &old_query_id, &old_open, &old_quality);
-    struct pgwt_wire_trace *wire = NULL;
-    /* Userspace can replace the entry during the helper calls below. Keep
-     * reservation ownership and publication on the same saved condition. */
-    bool emit_boundary = old_open != open && !lightweight_mode && st->wp_live;
-    if (exact_perf_mode && emit_boundary)
-        wire = transport_reserve_trace(pid, PGWT_RING_FAIL_COMMAND_BOUNDARY);
+    if (exact_perf_mode) {
+        /* Userspace can replace the entry during later helper calls. Read
+         * the admission condition ONCE; reservation and publication both
+         * follow from this saved value (see transport_activity). */
+        bool emit_boundary = old_open != open && !lightweight_mode && st->wp_live;
+        return transport_activity(pid, st, open, old_open != open, emit_boundary);
+    }
     u64 now = bpf_ktime_get_ns();
     note_cmd_edge(pid, open, now);
     st->cmd_open = open;
@@ -1434,7 +1615,7 @@ int on_report_activity(struct pt_regs *ctx)
     if ((pg13_synthetic_attr || pg13_query_attr) && open)
         note_query_edge(pid, 0, now);
 
-    if (exact_perf_mode ? emit_boundary : (!lightweight_mode && st->wp_live)) {
+    if (!lightweight_mode && st->wp_live) {
         u64 query_id = 0;
         u16 current_open = 0;
         u16 query_quality = 0;
@@ -1450,13 +1631,8 @@ int on_report_activity(struct pt_regs *ctx)
             .duration_ns = 0,
             .query_id = query_id,
         };
-        if (exact_perf_mode) {
-            if (wire) {
-                if (exact_admission_open()) { wire->payload = evt; bpf_ringbuf_submit(wire, 0); }
-                else { bpf_ringbuf_discard(wire, 0);
-                    transport_failure(PGWT_WIRE_DEST_E); }
-            }
-        } else if (exact_admission_open()) emit_event(&evt, PGWT_RING_FAIL_COMMAND_BOUNDARY);
+        if (exact_admission_open())
+            emit_event(&evt, PGWT_RING_FAIL_COMMAND_BOUNDARY);
     }
     if ((pg13_synthetic_attr || pg13_query_attr) && !open)
         note_query_edge(pid, 0, now);
@@ -1537,23 +1713,18 @@ int on_executor_start(struct pt_regs *ctx)
     if (!src_ptr)
         return 0;
 
-    struct pgwt_query_text_event *evt;
-    void *reservation;
     if (exact_perf_mode) {
-        u64 seq = transport_attempt(PGWT_WIRE_DEST_L);
-        struct pgwt_wire_text *wire = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*wire), 0);
-        reservation = wire;
-        if (wire) {
-            transport_header(&wire->hdr, PGWT_WIRE_TEXT, sizeof(wire->payload), seq,
-                transport_cookie(pid));
-            evt = &wire->payload;
-        } else evt = NULL;
-    } else {
-        evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
-        reservation = evt;
+        if (transport_text(pid, query_id, src_ptr, PGWT_RING_FAIL_PG13_QUERY_TEXT,
+                           PGWT_TEST_FAIL_PG13_QUERY_TEXT)) {
+            u8 seen = 1;
+            if (bpf_map_update_elem(&seen_query_ids, &seen_key, &seen, BPF_ANY))
+                count_map_fail(PGWT_BPF_FAIL_SEEN_QIDS);
+        }
+        return 0;
     }
+    struct pgwt_query_text_event *evt;
+    evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
     if (!evt) {
-        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
         count_ring_fail(PGWT_RING_FAIL_PG13_QUERY_TEXT);
         return 0; /* leave unseen: a later execution retries raw capture */
     }
@@ -1565,11 +1736,10 @@ int on_executor_start(struct pt_regs *ctx)
     if (text_len < 0)
         count_ring_fail(PGWT_RING_FAIL_PG13_QUERY_TEXT);
     if (text_len <= 1) {
-        if (exact_perf_mode) transport_failure(PGWT_WIRE_DEST_L);
-        bpf_ringbuf_discard(reservation, 0);
+        bpf_ringbuf_discard(evt, 0);
         return 0;
     }
-    bpf_ringbuf_submit(reservation, 0);
+    bpf_ringbuf_submit(evt, 0);
 
     u8 one = 1;
     if (bpf_map_update_elem(&seen_query_ids, &seen_key, &one, BPF_ANY))

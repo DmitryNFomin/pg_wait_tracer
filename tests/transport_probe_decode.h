@@ -6,10 +6,23 @@
 #include <stddef.h>
 #include <string.h>
 #include "../src/pgwt_transport_wire.h"
-struct probe_stamp { __u32 cpu, round; __u64 stamp; };
-/* -1: helper passed an unfinished producer, 0: no challenge evidence (refuse),
- * 1: a request actually issued during the spin has its own later boundary.
- * Round matching prevents a stale or unrelated acknowledgement from passing. */
+/* A request: `issued` is read before the helper is woken and `stamp` after
+ * the wake call returned. A boundary: `stamp` is its w; `issued` is unused. */
+struct probe_stamp { __u32 cpu, round; __u64 issued, stamp; };
+/* -1: a boundary of this CPU's helper lies inside the unfinished producer's
+ *     section, so the fence is falsified.
+ *  0: no challenge evidence: refuse, never pass.
+ *  1: the wake of this CPU's helper began and returned inside the section
+ *     (so the helper was runnable on that CPU while the producer was still
+ *     unfinished), and a boundary of this CPU carrying that request's round
+ *     or a later one was stamped after the section ended (so the helper did
+ *     run, its records do arrive, and it ran only afterwards).
+ * A boundary from an OLDER round than the request is stale: it can have been
+ * requested before the section and proves nothing. A later round is not
+ * stale: rounds only grow, and the round is read by the helper's program
+ * when it runs. Requiring the identical round would refuse correct runs
+ * whenever the round advances between the wake and the helper's first run,
+ * which is routine when the requester shares the helper's CPU. */
 static inline int probe_spin_evidence(__u32 cpu, __u64 started, __u64 ended,
     const struct probe_stamp *requests, size_t nr,
     const struct probe_stamp *boundaries, size_t nb)
@@ -21,10 +34,10 @@ static inline int probe_spin_evidence(__u32 cpu, __u64 started, __u64 ended,
     }
     for (size_t j = 0; j < nr; ++j) {
         const struct probe_stamp *r = &requests[j];
-        if (r->cpu != cpu || r->stamp < started || r->stamp >= ended) continue;
+        if (r->cpu != cpu || r->issued < started || r->stamp >= ended) continue;
         for (size_t i = 0; i < nb; ++i) {
             const struct probe_stamp *b = &boundaries[i];
-            if (b->cpu == cpu && b->round == r->round && b->stamp > ended) return 1;
+            if (b->cpu == cpu && b->round >= r->round && b->stamp > ended) return 1;
         }
     }
     return 0;

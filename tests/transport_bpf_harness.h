@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "bpf/transport_producer.h"
+/* glibc's <stdlib.h> declares its own on_exit(); the production program of
+ * that name is compiled here under another one. (Found on the EL8 box: the
+ * Mac's libc has no such declaration, so only a Linux build fails.) */
+#define on_exit pgwt_program_on_exit
 #define CHECK(label, condition) do { if (!(condition)) { \
     fprintf(stderr, "FAIL %s\n", label); exit(1); } } while (0)
 #undef __always_inline
