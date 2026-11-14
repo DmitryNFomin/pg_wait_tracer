@@ -16,6 +16,8 @@ import shlex
 import subprocess
 import tempfile
 
+from server_build import server_sources
+
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / 'contracts/evidence-v1'
 COMPARED = tuple(list(range(1, 23)) + list(range(24, 28)) + list(range(31, 34)) +
@@ -44,8 +46,7 @@ class Build:
         command(self.cc + self.flags + [ROOT / 'tests/pilot_fixture_writer.c',
                 ROOT / 'tests/evidence_json.c', ROOT / 'src/core/contract_json.c'] + self.core[1:] +
                 ['-o', self.writer])
-        text = (ROOT / 'Makefile').read_text().split('SERVER_SRCS = ', 1)[1].split('SERVER_OBJS', 1)[0]
-        self.sources = [ROOT / p.replace('$(SRC_DIR)', 'src') for p in text.replace('\\', '').split()]
+        self.sources = server_sources()
         self.server_flags = self.flags + ['-DPGWT_SERVER', '-include', str(ROOT / 'demos/replay-compat.h')]
         self.libs = ['-lz', '-llz4', '-lm']
         if os.uname().sysname == 'Darwin':

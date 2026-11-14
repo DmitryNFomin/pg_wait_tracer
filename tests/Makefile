@@ -930,14 +930,13 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
 
 # Exercise the actual server gate/loader/response against reader-decoded
 # block aggregates from the same two-block file (command state crosses blocks).
-# backend_span.o is in this list because src/server.c calls pgwt_span_* since
-# #455: EVERY target that includes ../src/server.c links it, so leaving it out
-# breaks test_transitions_loader / test_top_wait_backfill / test_window_overlap
-# / test_semantics_wire / test_backend_span at link time, not at run time.
-TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
-    backend_span.o \
-    event_reader.o event_writer.o summary_writer.o summary_reader.o \
-    wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
+# EVERY target including server.c needs the product's complete link closure.
+# Derive it from SERVER_SRCS; server.c itself is already included in the test.
+# No top-level make evaluation here: that would probe Linux/BPF on macOS.
+TRANSITIONS_LOADER_OBJS := $(shell python3 -B server_build.py --objects $(BUILD))
+ifeq ($(strip $(TRANSITIONS_LOADER_OBJS)),)
+$(error could not derive the server test objects from SERVER_SRCS)
+endif
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 

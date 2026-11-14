@@ -75,6 +75,7 @@ run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_redelivery.py
 run env CFLAGS="$core_cflags" python3 -B tests/test_evidence_codec_mutants.py
 
 step "stateless evidence-v1 pilot route, browser, uint64 and mutations"
+run python3 -B tests/check_server_test_links.py --self-test
 run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py
 run env CFLAGS="$core_cflags" python3 -B tests/test_pilot_route.py --mutants
 run bash tests/test_consumer_boundary.sh --self-test
