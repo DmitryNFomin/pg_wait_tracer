@@ -1941,7 +1941,7 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "test_delays_left=%u "
             "timer_settime_rc=%d timer_epoll_rc=%d "
             "state_reseeds_total=%llu invalid_wait_reads_total=%llu "
-            "wp_attach_failures_total=%llu state_map_full_total=%llu "
+            "wp_attach_failures_total=%llu wp_attach_exit_race_total=%llu state_map_full_total=%llu "
             "cpu_ns_total=%llu offcpu_ns_total=%llu "
             "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu "
             "tick_drain_records_total=%llu tick_drain_max_records=%llu "
@@ -1964,6 +1964,7 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->counters.state_reseeds_total,
             (unsigned long long)d->counters.invalid_wait_reads_total,
             (unsigned long long)d->counters.wp_attach_failures_total,
+            (unsigned long long)d->counters.wp_attach_exit_race_total,
             (unsigned long long)d->counters.state_map_full_total,
             (unsigned long long)d->counters.cpu_ns_total,
             (unsigned long long)d->counters.offcpu_ns_total,

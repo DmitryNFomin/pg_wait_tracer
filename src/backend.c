@@ -298,6 +298,27 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
     return rc;
 }
 
+/* Pin proc identity before opening hardware. Reopening by PID after a
+ * failure could inspect a replacement child of the same postmaster. */
+static int open_watchpoint_target(pid_t pid)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    return fd >= 0 ? fd : -errno;
+}
+
+static void record_watchpoint_failure(struct pgwt_daemon *d, int target_fd)
+{
+    int error = errno;
+    if (pgwt_backend_target_live_fd(target_fd, d->postmaster_pid) == 0)
+        d->counters.wp_attach_exit_race_total++;
+    else
+        d->counters.wp_attach_failures_total++;
+    if (target_fd >= 0) close(target_fd);
+    errno = error;
+}
+
 int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
                                    struct pgwt_backend *be)
 {
@@ -309,14 +330,15 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
      * an unseeded (or stale, on re-escalation) state entry and the opening
      * interval was mis-timed. */
     int wp_prog_fd = bpf_program__fd(d->skel->progs.on_watchpoint);
+    int target_fd = open_watchpoint_target(be->pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->wp_fd = pgwt_open_watchpoint_disabled(be->pid, be->wp_addr, wp_prog_fd);
     pgwt_debug_block_end(d, be->wp_fd < 0 ? "watchpoint_open_failed"
                                           : "watchpoint_open",
                          be->pid, started_ns);
     if (be->wp_fd < 0) {
-        /* Process likely exited before attach — caller decides on cleanup. */
-        d->counters.wp_attach_failures_total++;
+        /* Caller decides on cleanup; only a confirmed exit is a race. */
+        record_watchpoint_failure(d, target_fd);
         return -1;
     }
 
@@ -340,13 +362,14 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
                                            : "watchpoint_enable",
                          be->pid, started_ns);
     if (enable_rc != 0) {
+        record_watchpoint_failure(d, target_fd);
         started_ns = pgwt_debug_block_begin(d);
         pgwt_close_watchpoint(be->wp_fd);
         pgwt_debug_block_end(d, "watchpoint_close", be->pid, started_ns);
         be->wp_fd = -1;
-        d->counters.wp_attach_failures_total++;
         return -1;
     }
+    if (target_fd >= 0) close(target_fd);
     return 0;
 }
 
@@ -853,7 +876,7 @@ int pgwt_confirm_wait_offset(struct pgwt_daemon *d)
 
 /* A queued FORK/INIT can outlive its process. Do not allocate or attach a
  * stale target. Unknown eligibility is a refusal, not an expired target.
- * Failed hardware attempts after this check remain counted without exception. */
+ * Hardware failures are classified separately after the attempted operation. */
 static int lifecycle_target(struct pgwt_daemon *d, pid_t pid)
 {
     int live = pgwt_backend_target_live(pid, d->postmaster_pid);
@@ -901,6 +924,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
 
     /* Attach bootstrap watchpoint on my_wait_event_info pointer address */
     int bootstrap_prog_fd = bpf_program__fd(d->skel->progs.on_bootstrap);
+    int target_fd = open_watchpoint_target(child_pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->bootstrap_fd = pgwt_open_watchpoint(child_pid, d->my_wait_ptr_addr,
                                              bootstrap_prog_fd);
@@ -914,14 +938,16 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
          * Try direct init path (version-aware address resolution). */
         uint64_t ptr = pgwt_resolve_backend_wait_addr(d, child_pid);
         if (ptr != 0) {
+            if (target_fd >= 0) close(target_fd);
             return pgwt_handle_init(d, child_pid, ptr, 0);
         }
-        /* Silently skip — process exited before bootstrap attach */
-        d->counters.wp_attach_failures_total++;
+        /* Resolution alone cannot distinguish exit from a live failure. */
+        record_watchpoint_failure(d, target_fd);
         be->is_alive = false;
         be->pid = 0;
         return -1;
     }
+    if (target_fd >= 0) close(target_fd);
 
     pgwt_pending_init_add(&d->backends, be);
 

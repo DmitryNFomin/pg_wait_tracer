@@ -152,18 +152,26 @@ int pgwt_parse_cmdline(pid_t pid, struct pgwt_metadata *meta)
 int pgwt_backend_target_live(pid_t pid, pid_t parent)
 {
     if (pid <= 0 || parent <= 0) { errno = EINVAL; return -1; }
-    char path[64], line[512];
+    char path[64];
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-    FILE *file = fopen(path, "r");
-    if (!file)
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int live = pgwt_backend_target_live_fd(fd >= 0 ? fd : -errno, parent);
+    int error = errno;
+    if (fd >= 0) close(fd);
+    errno = error;
+    return live;
+}
+
+int pgwt_backend_target_live_fd(int fd, pid_t parent)
+{
+    if (parent <= 0) { errno = EINVAL; return -1; }
+    char line[512];
+    ssize_t got = fd >= 0 ? pread(fd, line, sizeof(line) - 1, 0) : -1;
+    if (fd < 0) errno = -fd;
+    if (got < 0)
         return errno == ENOENT || errno == ESRCH ? 0 : -1;
-    if (!fgets(line, sizeof(line), file)) {
-        int error = ferror(file) ? errno : EIO;
-        fclose(file);
-        errno = error;
-        return -1;
-    }
-    fclose(file);
+    if (got == 0) { errno = EIO; return -1; }
+    line[got] = '\0';
     char *end = strrchr(line, ')');
     char state;
     long ppid;
