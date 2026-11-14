@@ -12,6 +12,8 @@
 #include "provider_coop.h"
 #include "sampler.h"
 #include "wait_event.h"
+#include "percpu_transport.h"
+#include "merge_capture.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,6 +103,14 @@ void pgwt_debug_block_report(const char *op, pid_t pid, uint64_t started_ns)
  * short callbacks whose aggregate time fills the whole block are an
  * unbounded drain, while one slow callback stage is reported by the finer
  * probes in event_stream.c. */
+int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded)
+{
+    if (d->exact_perf)
+        return d->transport.consume
+            ? d->transport.consume(d, PGWT_WIRE_DEST_E, bounded) : -ENOSYS;
+    return ring_buffer__consume(d->event_rb);
+}
+
 static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
                                bool bounded)
 {
@@ -113,7 +123,7 @@ static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
     d->event_drain_callback_limit =
         bounded && !d->test_no_event_drain_budget
         ? PGWT_EVENT_DRAIN_CALLBACK_BUDGET : 0;
-    int rc = ring_buffer__consume(d->event_rb);
+    int rc = pgwt_consume_event_ring(d, bounded);
     bool yielded = d->event_drain_callback_limit != 0
                 && d->event_drain_callbacks_current
                    >= d->event_drain_callback_limit
@@ -155,7 +165,10 @@ int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d)
         return -EDEADLK;
     d->lifecycle_batch_start_ns = pgwt_debug_monotonic_ns();
     d->lifecycle_batch_records = 0;
-    int rc = ring_buffer__consume(d->rb);
+    int rc = d->exact_perf
+           ? (d->transport.consume
+              ? d->transport.consume(d, PGWT_WIRE_DEST_L, true) : -ENOSYS)
+           : ring_buffer__consume(d->rb);
     d->lifecycle_batch_start_ns = 0;
     d->lifecycle_batch_records = 0;
     pgwt_sweep_bootstrap_backends(d);
@@ -168,6 +181,9 @@ static int process_lifecycle_event(void *ctx, void *data, size_t data_sz);
 static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
 {
     struct pgwt_daemon *d = ctx;
+    if (d->exact_perf)
+        return d->transport.record
+            ? d->transport.record(d, PGWT_WIRE_DEST_L, data, data_sz) : -ENOSYS;
     const struct pgwt_lifecycle_event *ev = data;
     if (ev->type == PGWT_LIFECYCLE_EXIT) {
         d->lifecycle_exit_pid = ev->pid;
@@ -329,7 +345,7 @@ static int process_lifecycle_event(void *ctx, void *data, size_t data_sz)
  * checks. */
 static void drain_event_ring_for_tick(struct pgwt_daemon *d)
 {
-    if (!d->event_rb)
+    if (!d->event_rb && !d->exact_perf)
         return;
 
     uint64_t before = d->counters.events_total;
@@ -400,6 +416,13 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
     uint64_t started_ns = pgwt_debug_block_begin(d);
     ssize_t r = read(d->timer_fd, &expirations, sizeof(expirations));
     pgwt_debug_block_end(d, "timerfd_read", 0, started_ns);
+    if (d->exact_perf) {
+        if (pgwt_merge_capture_tick(d) < 0) {
+            fprintf(stderr, "FATAL: exact per-CPU capture tick failed\n");
+            d->running = false;
+        }
+        return;
+    }
     if (d->debug_dump_state && r == (ssize_t)sizeof(expirations)) {
         d->debug_timer_expirations += expirations;
         if (expirations > d->debug_max_timer_expirations)
@@ -1038,6 +1061,13 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
 {
     int err;
 
+    if (d->exact_perf) {
+        d->transport.consume = pgwt_percpu_transport_consume;
+        d->transport.record = pgwt_percpu_transport_record;
+        if (pgwt_percpu_transport_prepare(d) != 0)
+            return -1;
+    }
+
     /* Capability evidence starts with this capture, also after re-attach to
      * a restarted PostgreSQL. It never gates capture or probe attachment. */
     struct timespec phase_start;
@@ -1188,6 +1218,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     d->skel->rodata->st_query_id_offset = d->st_query_id_offset;
     d->skel->rodata->lightweight_mode = d->lightweight_mode;
     d->skel->rodata->skip_query_id = d->skip_query_id;
+    d->skel->rodata->exact_perf_mode = d->exact_perf ? 1 : 0;
+    d->skel->rodata->helper_tgid = d->exact_perf
+        ? pgwt_percpu_transport_helper_tgid(d) : 0;
 
     /* Command-open gate (T2): BackendState enum values for this PG version.
      * PG13-17: STATE_RUNNING=2, STATE_FASTPATH=4. PG18 inserted
@@ -1335,6 +1368,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                 "Off-CPU* is unavailable and trace cpu_ns carries UNKNOWN.\n");
     }
 
+    if (d->exact_perf && pgwt_percpu_transport_configure(d) != 0)
+        goto fail;
+
     /* Load BPF programs (runs verifier) */
     err = pg_wait_tracer_bpf__load(d->skel);
     if (err) {
@@ -1342,6 +1378,13 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         pg_wait_tracer_bpf__destroy(d->skel);
         d->skel = NULL;
         return -1;
+    }
+
+    /* B opens all readers before any producer can attach. */
+    if (d->exact_perf) {
+        if (pgwt_merge_capture_open(d) != 0 ||
+            pgwt_percpu_transport_open(d) != 0)
+            goto fail;
     }
 
     /* Attach tracepoints (fork/exit — auto-attach) */
@@ -1393,12 +1436,14 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * moved into the EXEC member's attach with them. */
 
     /* Set up lifecycle ring buffer consumer */
-    int rb_map_fd = bpf_map__fd(d->skel->maps.lifecycle_rb);
-    d->rb = ring_buffer__new(rb_map_fd, handle_lifecycle_event, d, NULL);
-    if (!d->rb) {
-        fprintf(stderr, "FATAL: cannot create ring buffer: %s\n",
-                strerror(errno));
-        goto fail;
+    if (!d->exact_perf) {
+        int rb_map_fd = bpf_map__fd(d->skel->maps.lifecycle_rb);
+        d->rb = ring_buffer__new(rb_map_fd, handle_lifecycle_event, d, NULL);
+        if (!d->rb) {
+            fprintf(stderr, "FATAL: cannot create ring buffer: %s\n",
+                    strerror(errno));
+            goto fail;
+        }
     }
 
     /* Set up event ring buffer consumer */
@@ -1418,7 +1463,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * consuming. An idle ringbuf costs nothing. */
     bool needs_event_rb = !d->lightweight_mode
         && (pgwt_mode_uses_watchpoints(d) || d->mode == PGWT_MODE_TIERED);
-    if (needs_event_rb) {
+    if (needs_event_rb && !d->exact_perf) {
         int event_rb_map_fd = bpf_map__fd(d->skel->maps.event_ringbuf);
         d->event_rb = ring_buffer__new(event_rb_map_fd, pgwt_handle_trace_event, d, NULL);
         if (!d->event_rb) {
@@ -1624,7 +1669,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     struct epoll_event ev;
 
     /* Add lifecycle ring buffer fd */
-    int rb_fd = ring_buffer__epoll_fd(d->rb);
+    int rb_fd = d->exact_perf ? pgwt_percpu_transport_epoll_fd(d)
+                              : ring_buffer__epoll_fd(d->rb);
+    if (d->exact_perf && rb_fd < 0)
+        goto fail;
     ev.events = EPOLLIN;
     ev.data.fd = rb_fd;
     epoll_ctl(d->epoll_fd, EPOLL_CTL_ADD, rb_fd, &ev);
@@ -1774,7 +1822,8 @@ fail:
 int pgwt_daemon_run(struct pgwt_daemon *d)
 {
     struct epoll_event events[8];
-    int rb_fd = ring_buffer__epoll_fd(d->rb);
+    int rb_fd = d->exact_perf ? pgwt_percpu_transport_epoll_fd(d)
+                              : ring_buffer__epoll_fd(d->rb);
     int event_rb_fd = d->event_rb ? ring_buffer__epoll_fd(d->event_rb) : -1;
     bool event_ring_backlog = false;
 
@@ -1787,7 +1836,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
     /* BPF uses BPF_RB_NO_WAKEUP for event_ringbuf to avoid per-event
      * eventfd_signal overhead. We poll the ringbuf at 10ms intervals. */
-    int poll_ms = d->event_rb ? 10 : -1;
+    int poll_ms = (d->event_rb || d->exact_perf) ? 10 : -1;
 
     /* Baseline for the first completed-pass gap. Subsequent timestamps are
      * updated exactly once at the end of each main-loop pass. */
@@ -1828,6 +1877,11 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
             break;
         }
 
+        if (d->exact_perf && (pgwt_percpu_transport_poll(d) < 0 ||
+                              pgwt_merge_capture_poll(d) < 0)) {
+            fprintf(stderr, "FATAL: exact per-CPU transport poll failed\n");
+            return -1;
+        }
         pgwt_sweep_bootstrap_backends(d);
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == d->timer_fd) {
@@ -1863,7 +1917,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         }
 
         /* Drain event ringbuf on every iteration (poll-based with NO_WAKEUP) */
-        if (d->event_rb) {
+        if (d->event_rb || d->exact_perf) {
             event_ring_backlog = consume_event_ring(
                 d, "event_ring_drain", true);
         }
@@ -1879,12 +1933,14 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     }
 
     /* Drain remaining events before cleanup */
-    if (d->event_rb) {
+    if (d->event_rb || d->exact_perf) {
         consume_event_ring(d, "event_ring_final_drain", false);
     }
     uint64_t started_ns = pgwt_debug_block_begin(d);
     pgwt_consume_lifecycle_ring(d);
     pgwt_debug_block_end(d, "lifecycle_ring_final_drain", 0, started_ns);
+    if (d->exact_perf && pgwt_merge_capture_finish(d) < 0)
+        return -1;
 
     if (d->exit_reason != PGWT_EXIT_PG_DEAD)
         fprintf(stderr, "\npg_wait_tracer: shutting down\n");
@@ -2080,6 +2136,11 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
     /* Exact links are owned by the Stage 3 bundle, not by skeleton teardown:
      * destroy them once and null the generated skeleton slots first. */
     pgwt_exact_probe_cleanup(d);
+
+    if (d->exact_perf) {
+        pgwt_percpu_transport_close(d);
+        pgwt_merge_capture_close(d);
+    }
 
     if (d->event_rb) {
         ring_buffer__free(d->event_rb);

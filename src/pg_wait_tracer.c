@@ -4,6 +4,7 @@
 #include "event_writer.h"
 #include "replay.h"
 #include "wait_event.h"
+#include "percpu_transport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,9 @@ static void usage(const char *prog)
         "Target (auto-detect if omitted for single instance):\n"
         "  -p, --pid <PID>       Postmaster PID\n"
         "  -D, --pgdata <DIR>    PGDATA directory (reads postmaster.pid)\n"
+        "\n"
+        "Experimental transport:\n"
+        "      --exact-perf     Exact per-CPU transport (experimental; default off)\n"
         "\n"
         "Output control:\n"
         "  -V, --view <VIEW>     time_model (default), system_event, session_event,\n"
@@ -245,8 +249,10 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ANOM_CPU_MIN_AAS 279
 #define OPT_ANOM_CPU_MARGIN 280
 #define OPT_ANOM_CPU_COVERAGE_GAP 281
+#define OPT_EXACT_PERF 282
 
 static struct option long_opts[] = {
+    {"exact-perf", no_argument, NULL, OPT_EXACT_PERF},
     {"pid",        required_argument, NULL, 'p'},
     {"pgdata",     required_argument, NULL, 'D'},
     {"interval",   required_argument, NULL, 'i'},
@@ -375,6 +381,7 @@ int main(int argc, char **argv)
         case OPT_SKIP_QID:    d->skip_query_id = 1; break;
         case OPT_SKIP_USDT:   d->skip_usdt = 1; break;
         case OPT_MODE:        d->mode = parse_mode(optarg); break;
+        case OPT_EXACT_PERF:  d->exact_perf = true; break;
         case OPT_SAMPLE_RATE: d->sample_rate_hz = atoi(optarg); break;
         case OPT_ESC_BUDGET:
             /* ESC-6: "unlimited" (or a negative value) = no cap; 0 = deny-all;
@@ -496,6 +503,13 @@ int main(int argc, char **argv)
         case 'h': usage(argv[0]); free(d); return 0;
         default:  usage(argv[0]); free(d); return 1;
         }
+    }
+
+    /* Refuse before discovery, privilege checks or any BPF side effects.
+     * B fills prepare(), so no later unit needs to edit this CLI again. */
+    if (d->exact_perf && pgwt_percpu_transport_prepare(d) != 0) {
+        free(d);
+        return 1;
     }
 
     /* #500: the default used to be the literal group "dba", which exists on

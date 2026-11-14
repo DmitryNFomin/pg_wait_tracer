@@ -123,6 +123,10 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/map_reader.c \
              $(SRC_DIR)/counter_vector.c \
              $(SRC_DIR)/capture_counters.c \
+             $(SRC_DIR)/percpu_transport.c \
+             $(SRC_DIR)/merge_capture.c \
+             $(SRC_DIR)/core/merge.c \
+             $(SRC_DIR)/core/merge_adapter.c \
              $(SRC_DIR)/open_snapshot.c \
              $(SRC_DIR)/event_stream.c \
              $(SRC_DIR)/output.c \
@@ -245,6 +249,7 @@ $(INC_DIR)/vmlinux.h: $(BPFTOOL_DEP)
 $(BUILD_DIR)/pg_wait_tracer.bpf.o: $(BPF_DIR)/pg_wait_tracer.bpf.c \
                                     $(INC_DIR)/vmlinux.h \
                                     $(LIBBPF_DEP) \
+                                    $(SRC_DIR)/pgwt_transport_wire.h \
                                     $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
 	@echo "  BPF      $@"
 	@$(CLANG) $(BPF_CFLAGS) -c $< -o $@
@@ -260,6 +265,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(INC_DIR)/pg_wait_tracer.skel.h \
                   $(LIBBPF_DEP) \
                   $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
 	@echo "  CC       $@"
+	@mkdir -p $(dir $@)
 	@$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Step 5: Link

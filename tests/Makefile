@@ -83,6 +83,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_evidence_codec \
             test_core_merge_contract \
             test_core_merge_adapter \
+            test_transport_wire test_transport_producers test_percpu_transport \
             test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure
 
 .PHONY: all clean check
@@ -1188,6 +1189,22 @@ test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/
 # U1a adapter: wire goldens, then unchanged merge-v1 rows (synthetic only).
 test_core_merge_adapter: test_core_merge_adapter.c test_core_merge_contract.c merge_adapter_goldens.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ test_core_merge_adapter.c ../src/core/merge_adapter.c ../src/core/merge.c
+
+# U1b-0: frozen wire bytes, A1 producer placeholder, B transport seams.
+test_transport_wire: test_transport_wire.c ../src/pgwt_transport_wire.h ../src/merge_capture.h ../src/core/pgwt_merge_adapter.h ../src/core/pgwt_merge.h
+	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_transport_wire.c
+
+# A1's same-file standalone probe loader will use --probe on Linux. Keep
+# portable cases runnable on the Mac without linking or invoking BPF there.
+ifeq ($(shell uname -s),Linux)
+TRANSPORT_PRODUCER_DEPS = ../include/pg_wait_tracer.skel.h
+TRANSPORT_PRODUCER_LIBS = $(LIBBPF_LIB) -lelf -lz -pthread
+endif
+test_transport_producers: test_transport_producers.c ../src/pgwt_transport_wire.h $(TRANSPORT_PRODUCER_DEPS)
+	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_transport_producers.c $(TRANSPORT_PRODUCER_LIBS)
+
+test_percpu_transport: test_percpu_transport.c ../src/percpu_transport.c ../src/percpu_transport.h ../src/merge_capture.c ../src/merge_capture.h ../src/pgwt_transport_wire.h ../src/core/merge_adapter.c ../src/core/pgwt_merge_adapter.h ../src/core/merge.c ../src/core/pgwt_merge.h $(TRANSPORT_PRODUCER_DEPS)
+	$(CC) $(CFLAGS) -std=c11 -Wextra -Werror -o $@ test_percpu_transport.c ../src/percpu_transport.c ../src/merge_capture.c ../src/core/merge_adapter.c ../src/core/merge.c $(TRANSPORT_PRODUCER_LIBS)
 
 test_ringbuf_metrics: test_ringbuf_metrics.c ../src/counter_vector.c ../src/counter_vector.h ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
