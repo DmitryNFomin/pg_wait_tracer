@@ -37,7 +37,8 @@ DIAGNOSTIC_WIDTH = 512
 def print_failure_diagnostics(text, after):
     # Bound both line count and width, even under an attach-failure storm.
     for prefix, title in (("INIT-LOST:", "INIT loss diagnostics (CLOCK_MONOTONIC)"),
-                          ("WP-ATTACH-FAIL:", "Watchpoint attach diagnostics")):
+                          ("WP-ATTACH-FAIL:", "Watchpoint attach diagnostics"),
+                          ("ERROR: cannot validate lifecycle target", "Lifecycle target refusals")):
         lines = deque(maxlen=DIAGNOSTIC_LINES)
         total = 0
         for line in text.splitlines():
