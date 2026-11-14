@@ -405,6 +405,7 @@ def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY, extra=())
             assert not missing, ('held backends without an observed stored INIT', missing, sorted(stored))
             print(f"ARM binary={binary.parent.name} churn={int(churn)} spin_ns={spin} ok={row['ok']} "
                   f"forks={row['forks']} attached={row['attached']} "
+                  f"exited_before_attach={row['exited_before_attach']} "
                   f"attach_exit_races={row['attach_exit_races']} attach_failures={row['attach_failures']} "
                   f"held={row['held']} "
                   f"init_stored={row['init_stored']} init_records_on_L={row['init_records']} "

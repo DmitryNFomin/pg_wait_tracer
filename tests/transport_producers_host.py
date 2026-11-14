@@ -138,7 +138,7 @@ def main():
             ('', 'CONFIG_PREEMPT_NONE=y', 'none')):
         assert preemption_mode(dynamic, config) == expected, (dynamic, config)
     clean = dict(init_records=0, init_stored=1, attached=1, trace=1, failures=0, lost=0,
-                 attach_exit_races=7, attach_failures=0,
+                 exited_before_attach=9, attach_exit_races=7, attach_failures=0,
                  cells=[dict(attempted=3, delivered=3, failed=0, discarded=0)])
     assert_clean_pg(clean)
     # Exit races are reported, not failures; an attach failure on a live

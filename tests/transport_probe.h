@@ -73,6 +73,9 @@ struct probe {
     /* Backends that exited before or during instrumentation (counted once
      * each), and attach errors on a backend that was still live. */
     u64 attach_exit_races, attach_failures;
+    /* Backends whose EXIT record was consumed before the main loop reached
+     * them: gone before any attach was attempted. */
+    u64 exited_before_attach;
     u64 *skipped, *discard_scratch;
     u64 activity_offset, query_offset, ptr; u32 wait_offset;
     const char *exe, *cohort_db; bool self, spinning, stopping; u64 spin_ns;
@@ -370,7 +373,10 @@ static int probe_record(struct probe *p, int dest, const void *data, size_t size
                 if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) probe_try_attach(p, &p->backends[i]);
         }
         if (ev.type == PGWT_LIFECYCLE_EXIT) for (int i=0; i<MAX_BACKENDS; ++i)
-            if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) probe_close_backend(&p->backends[i]);
+            if (p->backends[i].pid == pid && p->backends[i].cookie == hdr.cookie) {
+                if (p->backends[i].pending) ++p->exited_before_attach;
+                probe_close_backend(&p->backends[i]);
+            }
     } else if (hdr.kind == PGWT_WIRE_TEXT && hdr.payload_len == sizeof(struct pgwt_query_text_event) && dest == 2) {
         struct pgwt_query_text_event ev; memcpy(&ev, payload, sizeof(ev)); pid = ev.pid;
     } else { probe_fail(p, "wrong kind/payload/destination"); return 0; }
@@ -662,7 +668,7 @@ static int probe_reconcile(struct probe *p)
         fprintf(stderr,"PROBE-REFUSED: production object has no falsifier\n"); refused=true; ok=false;
 #endif
     }
-    printf("],\"ok\":%s,\"attach_exit_races\":%"PRIu64",\"attach_failures\":%"PRIu64",\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"discards\":%"PRIu64",\"init_reserve_failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"text\":%"PRIu64",\"init_records\":%"PRIu64",\"init_stored\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"spin_cpus\":%d,\"requests\":%zu,\"certified\":false}\n", ok?"true":"false",p->attach_exit_races,p->attach_failures,total,failed,discarded,init_failures,p->lost,p->forks,p->reuses,p->attached,p->records[PGWT_WIRE_TRACE],p->records[PGWT_WIRE_TEXT],p->init_records,p->init_stored,spun&&!refused?"true":"false",spun?minimum_spin:0,spin_cpus,p->requests_len);
+    printf("],\"ok\":%s,\"exited_before_attach\":%"PRIu64",\"attach_exit_races\":%"PRIu64",\"attach_failures\":%"PRIu64",\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"discards\":%"PRIu64",\"init_reserve_failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"text\":%"PRIu64",\"init_records\":%"PRIu64",\"init_stored\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"spin_cpus\":%d,\"requests\":%zu,\"certified\":false}\n", ok?"true":"false",p->exited_before_attach,p->attach_exit_races,p->attach_failures,total,failed,discarded,init_failures,p->lost,p->forks,p->reuses,p->attached,p->records[PGWT_WIRE_TRACE],p->records[PGWT_WIRE_TEXT],p->init_records,p->init_stored,spun&&!refused?"true":"false",spun?minimum_spin:0,spin_cpus,p->requests_len);
     free(counts); free(fail_counts); free(disc_counts); return p->failed?1:(refused?78:(ok?0:1));
 }
 /* One load per program and per mode. libbpf stops at the first program the
