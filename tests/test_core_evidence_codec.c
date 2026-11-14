@@ -65,9 +65,15 @@ static void repair(pgwt_codec_bytes b)
 static bool stop_is(pgwt_codec_buffer b, pgwt_codec_reason why, size_t block, size_t end, size_t records, size_t rec)
 {
     pgwt_codec_decoded out;int status=pgwt_codec_decode(&b,1,&out);
-    bool ok=status==1 && out.stop_count==1 && out.stops[0].input_file==0 &&
-        out.stops[0].reason==why && out.stops[0].block_offset==block &&
-        out.stops[0].validated_end==end && out.stops[0].record_offset==rec &&
+    /* REDELIVERY 2/17: untrusted headers cannot create normalized stops.
+     * Clause 5/7 scans beyond RF; clause 18 excludes the offending record. */
+    const pgwt_codec_stop *stop=block ? (out.stop_count ? &out.stops[0] : NULL) :
+        (out.diagnostic_count ? &out.diagnostics[0] : NULL);
+    if (why==PGWT_CODEC_RECORD) end=b.size;
+    bool ok=status==1 && stop && stop->input_file==0 &&
+        (block ? out.stop_count==1 : out.stop_count==0) &&
+        stop->reason==why && stop->block_offset==block &&
+        stop->validated_end==end && stop->record_offset==rec &&
         (out.file_count ? out.files[0].record_count : 0)==records;
     if (!ok && !only) fprintf(stderr,"stop expected %s block=%zu end=%zu records=%zu rec=%zu; status=%d files=%zu stops=%zu actual=%s/%zu/%zu/%zu/%zu\n",
         pgwt_codec_reason_name(why),block,end,records,rec,status,out.file_count,out.stop_count,
@@ -179,17 +185,17 @@ static void refusal_rows(pgwt_codec_buffer g)
     mutate(g,"row6_type2_weights",241,1,8,true,PGWT_CODEC_ENCODING,201,201,0,0);
     /* §9 rows 7–9: intact framing exposes an ordered unsupported_shape, r3
      * stops at that position. The other record of this block remains valid. */
-    mutate(g,"row7_unknown_kind",301,99,1,true,PGWT_CODEC_RECORD,201,453,2,36);
-    mutate(g,"row7_unknown_method",319,2,1,true,PGWT_CODEC_RECORD,201,453,2,36);
-    mutate(g,"row8_bad_optional",290,2,1,true,PGWT_CODEC_RECORD,201,453,2,8);
-    mutate(g,"row8_bad_pid",286,0,4,true,PGWT_CODEC_RECORD,201,453,2,8);
-    mutate(g,"row8_bad_start_known",299,2,1,true,PGWT_CODEC_RECORD,201,453,2,8);
-    mutate(g,"row8_bad_life_start",291,2,8,true,PGWT_CODEC_RECORD,201,453,2,8);
-    mutate(g,"row8_bad_void_reason",630,0,2,true,PGWT_CODEC_RECORD,544,646,4,8);
-    mutate(g,"row9_unresolved_event",324,99,4,true,PGWT_CODEC_RECORD,201,453,2,36);
-    mutate(g,"row9_duration_gt_t",530,6,1,true,PGWT_CODEC_RECORD,453,544,3,0);
-    mutate(g,"row9_same_event",522,0,4,true,PGWT_CODEC_RECORD,453,544,3,0);
-    mutate(g,"row9_unmapped_old",522,99,4,true,PGWT_CODEC_RECORD,453,544,3,0);
+    mutate(g,"row7_unknown_kind",301,99,1,true,PGWT_CODEC_RECORD,201,453,1,36);
+    mutate(g,"row7_unknown_method",319,2,1,true,PGWT_CODEC_RECORD,201,453,1,36);
+    mutate(g,"row8_bad_optional",290,2,1,true,PGWT_CODEC_RECORD,201,453,0,8);
+    mutate(g,"row8_bad_pid",286,0,4,true,PGWT_CODEC_RECORD,201,453,0,8);
+    mutate(g,"row8_bad_start_known",299,2,1,true,PGWT_CODEC_RECORD,201,453,0,8);
+    mutate(g,"row8_bad_life_start",291,2,8,true,PGWT_CODEC_RECORD,201,453,0,8);
+    mutate(g,"row8_bad_void_reason",630,0,2,true,PGWT_CODEC_RECORD,544,646,3,8);
+    mutate(g,"row9_unresolved_event",324,99,4,true,PGWT_CODEC_RECORD,201,453,1,36);
+    mutate(g,"row9_duration_gt_t",530,6,1,true,PGWT_CODEC_RECORD,453,544,2,0);
+    mutate(g,"row9_same_event",522,0,4,true,PGWT_CODEC_RECORD,453,544,2,0);
+    mutate(g,"row9_unmapped_old",522,99,4,true,PGWT_CODEC_RECORD,453,544,2,0);
     /* Hints and flags cannot change validation or replay. */
     if (selected("type2_hints_flags")) {
         pgwt_codec_bytes b=copy(g);wr(b.data+6,65535,2);wr(b.data+201,UINT64_MAX,8);wr(b.data+209,1,8);repair(b);
@@ -203,7 +209,7 @@ static void predecessor_tests(pgwt_codec_buffer g)
 {
     pgwt_codec_decoded a;pgwt_codec_bytes next={0};
     if (pgwt_codec_decode(&g,1,&a)) exit(2);
-    pgwt_evidence_file f=a.files[0];f.file_no=1;f.has_previous=true;f.previous=0;f.record_count=0;
+    pgwt_evidence_file f=a.files[0];f.file_no=1;f.has_previous=true;f.previous=0;f.record_count=0;f.baseline=a.captures[0].replay.baseline;
     pgwt_codec_descriptor d=a.info[0].descriptor;d.footer=true;
     if (pgwt_codec_encode(&f,&d,&g,&next,NULL)) exit(2);
     pgwt_codec_buffer chain[]={g,view(next)};pgwt_codec_decoded out;
@@ -214,9 +220,14 @@ static void predecessor_tests(pgwt_codec_buffer g)
     for (size_t i=0;i<3;++i) {
         pgwt_codec_bytes b=copy(view(next));b.data[offsets[i]]^=1;header_crc(b);chain[1]=view(b);
         int status=pgwt_codec_decode(chain,2,&out);
-        check(names[i],status==1 && out.stop_count==1 && out.stops[0].input_file==1 &&
-            out.stops[0].block_offset==0 && out.stops[0].validated_end==0 &&
-            out.stops[0].reason==(i==2 ? PGWT_CODEC_HEADER : PGWT_CODEC_LINK) && out.files[0].record_count==4 &&
+        const pgwt_codec_stop *fault=i==2 ? (out.diagnostic_count ? &out.diagnostics[0] : NULL) :
+            (out.stop_count ? &out.stops[0] : NULL);
+        bool exact_detail=i!=1 || (fault && out.deliveries[fault->input_file].check_count==1 &&
+            !out.deliveries[fault->input_file].checks[0].exact_end);
+        check(names[i],exact_detail && status==1 && fault && out.stop_count==(i==2 ? 0u : 1u) &&
+            out.deliveries[fault->input_file].bytes.data==b.data &&
+            fault->block_offset==0 && fault->validated_end==0 &&
+            fault->reason==(i==2 ? PGWT_CODEC_HEADER : PGWT_CODEC_LINK) && out.files[0].record_count==4 &&
             (out.file_count<2 || !out.files[1].record_count));
         pgwt_codec_decoded_free(&out);pgwt_codec_bytes_free(&b);
     }
@@ -281,7 +292,7 @@ static void sample_stream(pgwt_codec_buffer g)
     pgwt_codec_bytes linked=join_blocks(view(successor),view(next));
     pgwt_codec_buffer chain[]={view(first),view(linked)};pgwt_codec_decoded decoded;int status=pgwt_codec_decode(chain,2,&decoded);
     check("row6_sample_rotation_weight",status==1 && decoded.file_count==2 && decoded.stop_count==1 &&
-        decoded.stops[0].input_file==1 && decoded.stops[0].reason==PGWT_CODEC_ENCODING &&
+        decoded.deliveries[decoded.stops[0].input_file].bytes.data==linked.data && decoded.stops[0].reason==PGWT_CODEC_ENCODING &&
         decoded.stops[0].block_offset==successor.size && decoded.stops[0].validated_end==successor.size &&
         !decoded.files[0].record_count && !decoded.files[1].record_count);
     pgwt_codec_decoded_free(&decoded);pgwt_codec_bytes_free(&linked);pgwt_codec_bytes_free(&successor);pgwt_codec_decoded_free(&out);
@@ -338,17 +349,17 @@ static void compression_samples(pgwt_codec_buffer g)
     b=block_bytes(g,1,1,sample,sizeof(sample),sizeof(sample),0,5,5,3,3);
     check("sample_omitted",complete_records(view(b),0));
     mutate(view(b),"row6_sample_weight",241,4,8,true,PGWT_CODEC_ENCODING,201,201,0,0);
-    mutate(view(b),"row9_sample_pid",266,0,4,true,PGWT_CODEC_RECORD,201,b.size,1,0);
-    mutate(view(b),"row9_sample_event",270,99,4,true,PGWT_CODEC_RECORD,201,b.size,1,0);
+    mutate(view(b),"row9_sample_pid",266,0,4,true,PGWT_CODEC_RECORD,201,b.size,0,0);
+    mutate(view(b),"row9_sample_event",270,99,4,true,PGWT_CODEC_RECORD,201,b.size,0,0);
     pgwt_codec_bytes_free(&b);
     unsigned char marker[23];memcpy(marker,raw,23);wr(marker+1,0,4);wr(marker+9,1,4);marker[13]=0;
     b=block_bytes(g,0,1,marker,23,23,0,5,5,0,0);b.data[193]=2;repair(b);
     check("marker_pid_zero_omitted",complete_records(view(b),0));
-    mutate(view(b),"row9_marker_duration",278,1,1,true,PGWT_CODEC_RECORD,201,b.size,1,0);
+    mutate(view(b),"row9_marker_duration",278,1,1,true,PGWT_CODEC_RECORD,201,b.size,0,0);
     pgwt_codec_bytes_free(&b);
     /* Column layout is trustworthy even when an ordinary row has pid=0. */
     b=block_bytes(g,0,1,raw,23,23,0,5,5,0,0);
-    mutate(view(b),"row9_trans_pid",266,0,4,true,PGWT_CODEC_RECORD,201,b.size,1,0);
+    mutate(view(b),"row9_trans_pid",266,0,4,true,PGWT_CODEC_RECORD,201,b.size,0,0);
     pgwt_codec_bytes_free(&b);
 }
 
@@ -359,8 +370,7 @@ static void record_shapes(pgwt_codec_buffer g)
     pgwt_codec_buffer unknown_view=view(unknown_bytes);pgwt_codec_decoded unknown_out;
     int unknown_status=pgwt_codec_decode(&unknown_view,1,&unknown_out);
     check("row7_unknown_kind_eight_bytes",unknown_status==1 && unknown_out.file_count==1 &&
-        unknown_out.files[0].record_count==1 && unknown_out.files[0].records[0].kind==PGWT_EVIDENCE_OTHER &&
-        unknown_out.files[0].records[0].t==12 && unknown_out.files[0].records[0].unsupported_shape &&
+        unknown_out.files[0].record_count==0 &&
         unknown_out.stop_count==1 && unknown_out.stops[0].reason==PGWT_CODEC_RECORD &&
         unknown_out.stops[0].block_offset==201 && unknown_out.stops[0].record_offset==8 &&
         unknown_out.stops[0].validated_end==unknown_bytes.size);
@@ -375,16 +385,16 @@ static void record_shapes(pgwt_codec_buffer g)
         !out.files[0].records[0].unsupported_shape && !out.files[0].records[0].counters.known &&
         pgwt_codec_encode(&out.files[0],&out.info[0].descriptor,NULL,&refused,&reason)==-1 && !refused.data && !refused.size;
     check("row10_null_certificate_r3",ok);pgwt_codec_bytes_free(&refused);pgwt_codec_decoded_free(&out);
-    mutate(v,"row8_bad_counter_bool",286,2,1,true,PGWT_CODEC_RECORD,201,b.size,1,8);
+    mutate(v,"row8_bad_counter_bool",286,2,1,true,PGWT_CODEC_RECORD,201,b.size,0,8);
     /* Extra tail in a bounded record is a record fault, whereas an outer
      * suffix and a frame without a common t reject the whole block. */
     p[22]=99;wr(p+9,10,4);pgwt_codec_bytes tail=block_bytes(g,2,1,p,23,23,0,0,0,0,0);
-    check("row8_body_tail",stop_is(view(tail),PGWT_CODEC_RECORD,201,tail.size,1,8));pgwt_codec_bytes_free(&tail);
+    check("row8_body_tail",stop_is(view(tail),PGWT_CODEC_RECORD,201,tail.size,0,8));pgwt_codec_bytes_free(&tail);
     pgwt_codec_bytes_free(&b);
     /* END generation: t=12, pid=7, absent fork, reason=9. */
     memset(p,0,sizeof(p));p[0]=1;p[4]=1;p[8]=4;wr(p+9,14,4);wr(p+13,12,8);wr(p+21,7,4);p[26]=9;
     b=block_bytes(g,2,1,p,27,27,0,0,0,0,0);
-    check("row7_unknown_end",stop_is(view(b),PGWT_CODEC_RECORD,201,b.size,1,8));pgwt_codec_bytes_free(&b);
+    check("row7_unknown_end",stop_is(view(b),PGWT_CODEC_RECORD,201,b.size,0,8));pgwt_codec_bytes_free(&b);
     /* All framing must pass, including frames AFTER an otherwise readable
      * unknown record. No LIFE from the block may escape the bad second frame. */
     b=copy(g);b.data[273]=99;wr(b.data+302,65535,4);repair(b);
@@ -396,7 +406,7 @@ static void record_shapes(pgwt_codec_buffer g)
     memset(p,0,sizeof(p));p[0]=1;p[4]=1;p[8]=1;wr(p+9,31,4);wr(p+13,1,8);wr(p+21,7,4);p[25]=1;wr(p+26,2,8);
     wr(p+34,2,8);p[42]=1;p[43]=0;
     b=block_bytes(g,2,1,p,44,44,0,0,0,0,0);
-    check("row8_future_fork",stop_is(view(b),PGWT_CODEC_RECORD,201,b.size,1,8));pgwt_codec_bytes_free(&b);
+    check("row8_future_fork",stop_is(view(b),PGWT_CODEC_RECORD,201,b.size,0,8));pgwt_codec_bytes_free(&b);
 }
 
 static void encoder_validation(pgwt_codec_buffer g)
@@ -595,8 +605,8 @@ static bool same_files(const pgwt_evidence_file *a, const pgwt_evidence_file *b,
 /* Logical fixtures contain semantic faults too: these remain intact for
  * replay. Only wire faults bound the decoder's arrays. Missing mandatory TRANS
  * slots cannot be expressed as a framed logical fault and reject that block.
- * Unknown kinds are represented by the required common timestamp plus a fault
- * token; their unrecognized bodies have no logical field interpretation. */
+ * Unknown kinds retain the required common timestamp in their bounded wire
+ * body; REDELIVERY excludes the malformed record and its later suffix. */
 static bool scenario_files(const evidence_case *c, const pgwt_codec_decoded *decoded, bool grouped)
 {
     size_t count=c->input.file_count,n=0;
@@ -612,7 +622,7 @@ static bool scenario_files(const evidence_case *c, const pgwt_codec_decoded *dec
         pgwt_evidence_file *f=&expected[n];*f=*source;
         bool link=prev==SIZE_MAX ? f->file_no!=0 :
             (!same_event(expected[prev].boot,f->boot) || f->file_no!=expected[prev].file_no+1);
-        if (link) { f->unsupported_shape=true;f->records=NULL;f->record_count=0;stopped[n++]=true;continue; }
+        if (link) continue;
         pgwt_evidence_record *records=calloc(f->record_count ? f->record_count : 1,sizeof(*records));
         if (!records) exit(2);
         memcpy(records,f->records,f->record_count*sizeof(*records));f->records=records;
@@ -623,23 +633,12 @@ static bool scenario_files(const evidence_case *c, const pgwt_codec_decoded *dec
                 f->record_count=j;stopped[n]=true;break;
             }
             if (r->kind==PGWT_EVIDENCE_OTHER || (r->has_fork && r->fork>r->t)) {
-                r->unsupported_shape=true;fault=j;stopped[n]=true;
-                /* Grouped 36/37 keeps the entire EVIDENCE block, ending just
-                 * before the following TRANS, including its fault token. */
-                size_t end=j+1;
-                if (grouped) while (end<f->record_count && records[end].kind!=PGWT_EVIDENCE_TRANS) ++end;
-                f->record_count=end;break;
+                fault=j;stopped[n]=true;f->record_count=j;break;
             }
         }
-        if (fault!=SIZE_MAX) {
-            /* These fixtures put FRONTIER then the fault in the same grouped
-             * EVIDENCE block (or a single-record block in the standard pass). */
-            size_t block_first=grouped ? fault-1 : fault;
-            if (n>=decoded->file_count || decoded->files[n].record_count!=f->record_count ||
-                decoded->info[n].positions[fault].record_offset!=(grouped ? 142u : 8u) ||
-                decoded->info[n].positions[fault].block_offset!=decoded->info[n].positions[block_first].block_offset)
-                ok=false;
-        }
+        /* Structural RF now withholds its record and suffix. The committed
+         * redelivery differential checks the byte offset and full diagnostics. */
+        (void)fault;(void)grouped;
         ++n;
     }
     ok=ok && n==decoded->file_count && same_files(expected,decoded->files,n);
@@ -685,11 +684,12 @@ static void multi_record_fault(void)
     positions[4]-=remove;
     records[3]=(pgwt_evidence_record){.kind=PGWT_EVIDENCE_OTHER,.t=12,.unsupported_shape=true};
     pgwt_codec_buffer v=view(b);pgwt_codec_decoded out;int status=pgwt_codec_decode(&v,1,&out);
+    f.record_count=3;
     bool ok=status==1 && out.file_count==1 && out.info[0].block_count==1 &&
-        out.files[0].record_count==5 && same_files(&f,out.files,1) && out.stop_count==1 &&
+        out.files[0].record_count==3 && same_files(&f,out.files,1) && out.stop_count==1 &&
         out.stops[0].reason==PGWT_CODEC_RECORD && out.stops[0].block_offset==block &&
         out.stops[0].record_offset==positions[3] && out.stops[0].validated_end==b.size;
-    if (ok) for (size_t i=0;i<5;++i)
+    if (ok) for (size_t i=0;i<3;++i)
         ok=ok && out.info[0].positions[i].block_offset==block && out.info[0].positions[i].record_offset==positions[i];
     check("multi_record_fault_arrays",ok);
     pgwt_evidence_input in={.files=out.files,.file_count=out.file_count,.capture={"B",1},.pid=7,.has_fork=true};
@@ -726,25 +726,33 @@ static void independent_bad_header(void)
     bool baseline=pgwt_codec_decode(&single,1,&alone)==0 && replay_b(&alone,8);
     pgwt_codec_buffer chain[]={view(a),view(b0)};
     int status=pgwt_codec_decode(chain,2,&mixed);
-    check("bad_header_independent_capture",baseline && status==1 && mixed.stop_count==1 &&
-        mixed.stops[0].reason==PGWT_CODEC_CRC && mixed.stops[0].input_file==0 &&
-        mixed.stops[0].validated_end==0 && mixed.file_count==alone.file_count &&
+    check("bad_header_independent_capture",baseline && status==1 && mixed.stop_count==0 && mixed.diagnostic_count==1 &&
+        mixed.diagnostics[0].code==PGWT_CODEC_INVALID_HEADER &&
+        mixed.deliveries[mixed.diagnostics[0].input_file].bytes.data==a.data &&
+        mixed.diagnostics[0].validated_end==0 && mixed.file_count==alone.file_count &&
         same_files(mixed.files,alone.files,alone.file_count) && replay_b(&mixed,8));
     pgwt_codec_decoded_free(&mixed);pgwt_codec_decoded_free(&alone);
+    /* The zero-length delivery sorts first by byte identity, so this also
+     * distinguishes complete inspection from stopping after a bad header. */
+    pgwt_codec_buffer empty_first[]={{a.data,0},view(b0)};
+    status=pgwt_codec_decode(empty_first,2,&mixed);
+    check("empty_header_independent_capture",status==1 && mixed.unassigned_header_failure &&
+        mixed.file_count==1 && mixed.diagnostic_count==1 && replay_b(&mixed,8));
+    pgwt_codec_decoded_free(&mixed);
     pgwt_codec_buffer good_chain[]={view(b0),view(b1)};
     baseline=pgwt_codec_decode(good_chain,2,&alone)==0 && replay_b(&alone,12);
     pgwt_codec_buffer interleaved[]={view(b0),view(a),view(b1)};
     status=pgwt_codec_decode(interleaved,3,&mixed);
-    check("bad_header_independent_successor",baseline && status==1 && mixed.stop_count==1 &&
-        mixed.stops[0].reason==PGWT_CODEC_CRC && mixed.stops[0].input_file==1 &&
+    check("bad_header_independent_successor",baseline && status==1 && mixed.stop_count==0 && mixed.diagnostic_count==1 &&
+        mixed.diagnostics[0].code==PGWT_CODEC_INVALID_HEADER &&
+        mixed.deliveries[mixed.diagnostics[0].input_file].bytes.data==a.data &&
         mixed.file_count==alone.file_count && same_files(mixed.files,alone.files,alone.file_count) && replay_b(&mixed,12));
     pgwt_codec_decoded_free(&mixed);pgwt_codec_decoded_free(&alone);
     pgwt_codec_buffer stopped[]={view(a),view(a1),view(b0),view(a2)};
     status=pgwt_codec_decode(stopped,4,&mixed);
-    check("bad_header_same_capture_link_tombstone",status==1 && mixed.stop_count==2 &&
-        mixed.stops[1].input_file==1 && mixed.stops[1].reason==PGWT_CODEC_LINK && mixed.file_count==2 &&
-        mixed.files[0].unsupported_shape && !mixed.files[0].record_count &&
-        same_event(mixed.files[1].capture,(pgwt_core_event){"B",1}) && replay_b(&mixed,8));
+    check("bad_header_same_capture_link_tombstone",status==1 && mixed.stop_count==1 &&
+        mixed.stops[0].code==PGWT_CODEC_PU && mixed.file_count==1 &&
+        same_event(mixed.files[0].capture,(pgwt_core_event){"B",1}) && replay_b(&mixed,8));
     pgwt_codec_decoded_free(&mixed);
     pgwt_codec_bytes_free(&a);pgwt_codec_bytes_free(&a1);pgwt_codec_bytes_free(&a2);
     pgwt_codec_bytes_free(&b0);pgwt_codec_bytes_free(&b1);
@@ -843,14 +851,17 @@ static void scenario(const char *path, const char *expected, const char *project
     pgwt_codec_decoded decoded={0};pgwt_evidence_input in=c.input;
     if ((id<28 || id>30) && ok) {
         int status=pgwt_codec_decode(buffers,nb,&decoded);
-        ok=status>=0 && scenario_files(&c,&decoded,grouped);
+        if (id==50 || id==51) {
+            ok=status==1 && !decoded.file_count && decoded.capture_count==1 && decoded.captures[0].ambiguous;
+        } else ok=status>=0 && scenario_files(&c,&decoded,grouped);
         char arrays[256];snprintf(arrays,sizeof(arrays),"scenario_%s%s_decoded_arrays",c.id,grouped ? "_grouped" : "");
-        check(arrays,ok);in.files=decoded.files;in.file_count=decoded.file_count;
+        check(arrays,ok);
+        if (id!=50 && id!=51) { in.files=decoded.files;in.file_count=decoded.file_count; }
     }
     pgwt_evidence_output out={0};const char *reason=NULL;
     if (ok) ok=pgwt_evidence_replay(&in,&c.query,&out,&reason)==PGWT_REPLAY_OK;
     if (ok) ok=evidence_compare(&c,&out,expected,projections,field,sizeof(field))==0;
-    char name[256];snprintf(name,sizeof(name),"scenario_%s%s",c.id,grouped ? "_grouped_roundtrip" : id>=28 && id<=30 ? "_legacy_logical" : "_roundtrip");
+    char name[256];snprintf(name,sizeof(name),"scenario_%s%s",c.id,grouped ? "_grouped_roundtrip" : id>=28 && id<=30 ? "_legacy_logical" : id==50 || id==51 ? "_2a_then_legacy_logical" : "_roundtrip");
     if (!ok) fprintf(stderr,"%s %s %s\n",name,field,reason ? reason : "");
     check(name,ok);pgwt_evidence_output_free(&out);pgwt_codec_decoded_free(&decoded);
     for (size_t i=0;i<c.input.file_count;++i) pgwt_codec_bytes_free(&bytes[i]);
@@ -871,7 +882,32 @@ static void scenarios(const char *root)
         }
         globfree(&paths);
     }
-    if (!only) puts("codec scenarios: 64 checked (61 v5 byte paths; 3 legacy logical), plus 36/37 grouped; 63 decoded-array comparisons before replay; 34/35/52/53/54 omit their mandatory varint slot, rejecting that single-record segment at the same boundary");
+    if (!only) puts("codec scenarios: 64 checked (59 v5 replay roundtrips; 2 codec-2a checks plus legacy logical replay; 3 legacy logical), plus 36/37 grouped; 63 decoded-array comparisons before replay; 34/35/52/53/54 omit their mandatory varint slot, rejecting that single-record segment at the same boundary");
+}
+
+/* Independent physical boundaries from CODEC's 646-byte known-answer file.
+ * Try every single byte cut: header, block header, payload and CRC. */
+static void every_cut_partitions(pgwt_codec_buffer g)
+{
+    static const size_t ends[]={201,453,544,646},counts[]={0,2,3,4};
+    bool ok=true;
+    for (size_t cut=0;cut<=g.size;++cut) {
+        pgwt_codec_buffer b={g.data,cut};pgwt_codec_decoded out={0};
+        int rc=pgwt_codec_decode(&b,1,&out);
+        if (cut<201) {
+            ok=ok && rc==1 && !out.file_count && !out.stop_count && out.diagnostic_count==1 &&
+                out.diagnostics[0].code==PGWT_CODEC_INVALID_HEADER && out.unassigned_header_failure;
+        } else {
+            size_t k=0;while (k+1<4 && ends[k+1]<=cut) ++k;
+            bool clean=cut==ends[k] || cut==205; /* exact empty footer: four zero hint bytes */
+            ok=ok && rc==(clean ? 0 : 1) && out.file_count==1 && out.files[0].record_count==counts[k] &&
+                out.info[0].data_end==ends[k] && out.info[0].block_count==k && out.stop_count==(clean ? 0u : 1u);
+            if (!clean) ok=ok && out.stops[0].code==PGWT_CODEC_TRUNCATED && out.stops[0].block_offset==ends[k];
+        }
+        pgwt_codec_decoded_free(&out);
+    }
+    check("every_cut_partitions",ok);
+    if (!only && ok) puts("codec U7a every-cut partitions: 647/647 (5 legal cuts including an exact empty footer, 642 illegal cuts) PASS");
 }
 
 int main(int argc, char **argv)
@@ -888,7 +924,7 @@ int main(int argc, char **argv)
     if (only && (!strcmp(only,"crc_known_answers") || !strcmp(only,"sha256_known_answers"))) {
         pgwt_codec_bytes_free(&g);return failures ? 1 : 0;
     }
-    pgwt_codec_bytes encoded=golden_roundtrip(view(g));
+    pgwt_codec_bytes encoded=golden_roundtrip(view(g));every_cut_partitions(view(g));
     refusal_rows(view(g));predecessor_tests(view(g));compression_samples(view(g));sample_stream(view(g));record_shapes(view(g));encoder_validation(view(g));native_boundaries();null_counter_recovery();independent_bad_header();multi_record_fault();scenarios(root);
     if (write_path) {
         FILE *f=fopen(write_path,"wb");if (!f || fwrite(encoded.data,1,encoded.size,f)!=encoded.size || fclose(f)) return 2;

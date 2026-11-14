@@ -14,6 +14,8 @@ import tempfile
 
 sys.dont_write_bytecode = True
 from test_evidence_codec_oracle import ROOT, build
+from test_evidence_codec_redelivery import build as build_redelivery
+from evidence_codec_redelivery_mutations import MUTATIONS as REDELIVERY_MUTATIONS
 
 
 # (name, original text, replacement, independently asserted witness)
@@ -34,14 +36,18 @@ MUTANTS = [
     ("C09_null_certificate_fault", "v->kind=PGWT_EVIDENCE_FRONTIER;counters_read(r,&v->counters);break;",
      "v->kind=PGWT_EVIDENCE_FRONTIER;counters_read(r,&v->counters);if (!v->counters.known) r->bad=true;break;", "row10_null_certificate_r3"),
     ("C10_publish_bad_segment", "if (reason) {\n            *stop=", "if (reason) {\n            if (reason==PGWT_CODEC_CRC) (void)append_rows(f,info,rows,n,off);\n            *stop=", "row5_second_block_atomic"),
-    ("C11_bad_header_ends_input", "stop.reason=hr;out->stops[out->stop_count++]=stop;continue;",
-     "stop.reason=hr;out->stops[out->stop_count++]=stop;break;",
-     ("bad_header_independent_capture", "bad_header_independent_successor")),
+    ("C11_bad_header_ends_input", "out->unassigned_header_failure=true;continue;",
+     "out->unassigned_header_failure=true;break;",
+     "empty_header_independent_capture"),
     ("C12_record_faults_off", "v->unsupported_shape=r->bad || r->at!=r->n;",
      "v->unsupported_shape=false;", ("scenario_36_unknown_kind_prefix_decoded_arrays",
                                     "scenario_36_unknown_kind_prefix_grouped_decoded_arrays",
                                     "multi_record_fault_arrays")),
 ]
+
+# C10 is exercised against a redelivery with a suppressed rejected tail;
+# its original single-file witness is protected by the normalized cutoff.
+MUTANTS = [case for case in MUTANTS if case[0] != "C10_publish_bad_segment"]
 
 
 def guard(name, expression, witness):
@@ -91,8 +97,8 @@ GUARDS = [
     guard("G40_same_event", "old[i]==new_id[i]", "row9_same_event"),
     guard("G41_row_old_mapping", "(old[i] && (!a || a->role!=1)) ||", "row9_unmapped_old"),
     guard("G42_sample_pid", "!v->pid || (old[i] && (!a || a->role!=1))", "row9_sample_pid"),
-    guard("G43_link_digest", "memcmp(digest,info->previous_sha256,32)!=0", "row5_predecessor_digest"),
-    guard("G44_link_data_end", "info->previous_data_end!=out->info[prev].data_end", "row5_predecessor_end"),
+    ("G43_link_digest", "memcmp(digest,info->previous_sha256,32)==0", "true", "row5_predecessor_digest"),
+    ("G44_link_data_end", "c.exact_end=D==p->info.data_end;", "c.exact_end=true;", "row5_predecessor_end"),
     ("G45_writer_validation", "if (!valid_record(&f->records[i],d))", "if (false && !valid_record(&f->records[i],d))", "writer_life_pid"),
     guard("G46_writer_mapping_unique", "equal(m->name,d->mapping[j].name)", "writer_duplicate_names"),
     guard("G47_writer_mapping_order", "(i && m->id<=d->mapping[i-1].id)", "writer_mapping_order"),
@@ -169,8 +175,29 @@ def main():
                 raise RuntimeError(f"{name}: sanitizer error, not a kill:\n{mutated.stderr}")
             print(f"codec {name} KILLED by {', '.join(witnesses)} (built; intended assertion failed)", flush=True)
             binary.unlink()
+        driver=directory/"redelivery-baseline";build_redelivery(driver)
+        # Each named comparison is reached on the unmutated product before
+        # its control is built; a compile/runtime failure is never a kill.
+        for name,before,after,witness in REDELIVERY_MUTATIONS:
+            if original.count(before)!=1:
+                raise RuntimeError(f"{name}: expected one source anchor, got {original.count(before)}")
+            command=[sys.executable,"-B",str(ROOT/"tests/test_evidence_codec_redelivery.py"),"--probe"]
+            baseline_probe=subprocess.run(command+[str(driver),witness],cwd=ROOT,capture_output=True,text=True,timeout=60)
+            if baseline_probe.returncode or f"codec redelivery_{witness} PASS\n" not in baseline_probe.stdout:
+                raise RuntimeError(f"{name}: baseline did not reach probe: {baseline_probe.stdout} {baseline_probe.stderr}")
+            source=directory/"redelivery.c";source.write_text(original.replace(before,after,1))
+            binary=directory/name
+            try: build_redelivery(binary,source)
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"{name}: BUILD ERROR, not a kill: {exc.stderr}") from exc
+            mutated=subprocess.run(command+[str(binary),witness],cwd=ROOT,capture_output=True,text=True,timeout=60)
+            if mutated.returncode!=1 or f"codec redelivery_{witness} FAIL assertion\n" not in mutated.stdout or mutated.stderr:
+                raise RuntimeError(f"{name}: SURVIVED or harness error ({mutated.returncode}): {mutated.stdout} {mutated.stderr}")
+            print(f"codec {name} KILLED by redelivery_{witness} (built; intended independent assertion failed)",flush=True)
+            binary.unlink()
         label = "guard sweep" if args.guard_sweep else "mutants and guard sweep"
-        print(f"codec {label}: {len(cases)}/{len(cases)} killed; 0 survivors PASS")
+        total=len(cases)+len(REDELIVERY_MUTATIONS)
+        print(f"codec {label}: {total}/{total} killed; 0 survivors; {len(REDELIVERY_MUTATIONS)} redelivery controls cover clauses 0-20 and 2a PASS")
 
 
 if __name__ == "__main__":

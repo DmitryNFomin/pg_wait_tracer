@@ -1,0 +1,491 @@
+{
+  "mutants": 51,
+  "built": 51,
+  "reached": 51,
+  "killed": 51,
+  "numbered_clauses_covered": [
+    0,
+    1,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    2,
+    20,
+    "2a",
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "results": [
+    {
+      "clause": 1,
+      "mutant": "arrival_order",
+      "case": 21,
+      "intended_assertion": "permutation",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 2,
+      "mutant": "duplicate_deliveries",
+      "case": 12,
+      "intended_assertion": "sources",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 3,
+      "mutant": "reason_rank",
+      "case": 13,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 4,
+      "mutant": "null_position_order",
+      "case": 6,
+      "intended_assertion": "records",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 5,
+      "mutant": "skip_sample_validation",
+      "case": 15,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 6,
+      "mutant": "bounds_before_truncation",
+      "case": null,
+      "intended_assertion": "terminal_precedence",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 6,
+      "mutant": "crc_before_decode",
+      "case": null,
+      "intended_assertion": "crc_precedence",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 7,
+      "mutant": "RF_is_diagnostic_only",
+      "case": 29,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 7,
+      "mutant": "null_counter_becomes_RF",
+      "case": null,
+      "intended_assertion": "null_counter_exception",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 8,
+      "mutant": "ignore_header_conflict",
+      "case": 7,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 9,
+      "mutant": "ignore_block_conflict",
+      "case": 6,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 10,
+      "mutant": "shortest_source",
+      "case": 1,
+      "intended_assertion": "records",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 11,
+      "mutant": "emit_samples",
+      "case": 14,
+      "intended_assertion": "records",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 12,
+      "mutant": "short_terminal_witness",
+      "case": 1,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 13,
+      "mutant": "dirty_predecessor_witness",
+      "case": 19,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 13,
+      "mutant": "digest_not_checked",
+      "case": 27,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 14,
+      "mutant": "require_exact_end_for_SC",
+      "case": 18,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 14,
+      "mutant": "SC_in_successor",
+      "case": 18,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 15,
+      "mutant": "SC_requires_clean_witness",
+      "case": 18,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 16,
+      "mutant": "ignore_later_files",
+      "case": 20,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 16,
+      "mutant": "drop_terminal_tie_witness",
+      "case": 21,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 17,
+      "mutant": "last_stop_wins",
+      "case": 29,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 18,
+      "mutant": "no_capture_cutoff",
+      "case": 9,
+      "intended_assertion": "records",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "skip_VOID_revocation",
+      "case": 22,
+      "intended_assertion": "explicit_replay_effect",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 20,
+      "mutant": "drop_suppressed_diagnostics",
+      "case": 2,
+      "intended_assertion": "diagnostics",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 20,
+      "mutant": "invalid_header_empty_success",
+      "case": 31,
+      "intended_assertion": "unassigned_header_failure",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 20,
+      "mutant": "PU_without_evidence",
+      "case": 9,
+      "intended_assertion": "PU_evidence",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 0,
+      "mutant": "suppressed_delivery_fails_aggregate",
+      "case": 2,
+      "intended_assertion": "aggregate_status",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 0,
+      "mutant": "unassigned_does_not_fail_aggregate",
+      "case": 17,
+      "intended_assertion": "aggregate_status",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 0,
+      "mutant": "replay_failure_not_capture_failure",
+      "case": 41,
+      "intended_assertion": "capture_status",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 0,
+      "mutant": "ambiguity_not_capture_failure",
+      "case": 32,
+      "intended_assertion": "capture_status",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 0,
+      "mutant": "delivery_level_misclassified",
+      "case": 2,
+      "intended_assertion": "delivery_failure_levels",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 0,
+      "mutant": "codec_failure_not_capture_failure",
+      "case": 1,
+      "intended_assertion": "capture_status",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": "2a",
+      "mutant": "root_only_boot_observation",
+      "case": 33,
+      "intended_assertion": "ambiguities",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": "2a",
+      "mutant": "invalid_header_proves_reuse",
+      "case": 42,
+      "intended_assertion": "ambiguities",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": "2a",
+      "mutant": "emit_ambiguous_capture_prefix",
+      "case": 32,
+      "intended_assertion": "records",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": "2a",
+      "mutant": "withhold_independent_capture",
+      "case": 34,
+      "intended_assertion": "records",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": "2a",
+      "mutant": "drop_nonroot_ambiguity_witness",
+      "case": 33,
+      "intended_assertion": "ambiguities",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": "2a",
+      "mutant": "drop_codec_stop_under_ambiguity",
+      "case": 47,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 13,
+      "mutant": "baseline_in_static_link",
+      "case": 36,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 13,
+      "mutant": "cross_boot_predecessor_candidates",
+      "case": 33,
+      "intended_assertion": "local_link_witnesses_and_admission",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 14,
+      "mutant": "baseline_required_for_seal_proof",
+      "case": 40,
+      "intended_assertion": "stops",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "skip_successor_baseline_check",
+      "case": 41,
+      "intended_assertion": "replay.stop",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "unknown_equals_zero_baseline",
+      "case": 44,
+      "intended_assertion": "replay.stop",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "unqualified_skips_descriptor_check",
+      "case": 49,
+      "intended_assertion": "replay.stop",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "ignored_certificate_moves_baseline",
+      "case": 48,
+      "intended_assertion": "replay.baseline",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "explicit_VOID_ignored_unqualified",
+      "case": 50,
+      "intended_assertion": "replay.baseline",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "frontier_loss_does_not_move_baseline",
+      "case": 45,
+      "intended_assertion": "replay.baseline",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "skip_VOID_baseline_update",
+      "case": 36,
+      "intended_assertion": "replay.baseline",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "baseline_check_before_VOID",
+      "case": 37,
+      "intended_assertion": "replay.stop",
+      "build": true,
+      "reached": true,
+      "killed": true
+    },
+    {
+      "clause": 19,
+      "mutant": "stop_forgets_prior_revocations",
+      "case": 37,
+      "intended_assertion": "replay.revoked",
+      "build": true,
+      "reached": true,
+      "killed": true
+    }
+  ]
+}
