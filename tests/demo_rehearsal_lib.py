@@ -1100,11 +1100,20 @@ DAEMON_INTEGRITY_COUNTERS = (
     "lifecycle_init_lost_with_opportunity_total", "ringbuf_lifecycle_fork_drops_total",
     "ringbuf_lifecycle_exit_drops_total", "ringbuf_query_text_drops_total",
     "ringbuf_pg13_query_text_drops_total",
+    "wait_read_fail_total",
+    "exact_query_update_fail_total",
+    "exact_cmd_update_fail_total",
+    "exact_phase_update_fail_total",
+    "accum_update_fail_total",
+    "fork_state_update_fail_total",
+    "writer_push_fail_total",
+    "init_state_read_fail_total",
+    "counter_vector_valid",
 )
 
 
 def daemon_integrity_ok(metrics):
-    """All of DAEMON_INTEGRITY_COUNTERS must be exactly 0.
+    """All loss counters must be exactly 0; counter_vector_valid must be True.
     ringbuf_drops_total is the full tier's BPF-side event_ringbuf drop
     count -- trace events are what DB Time is built from, so a nonzero
     value here means data conservation was already violated upstream of
@@ -1133,10 +1142,10 @@ def daemon_integrity_ok(metrics):
     A missing or non-numeric counter FAILS (a gate that cannot see the
     count must refuse), same as capture_has_events_ok's own contract.
 
-    The ring-drop counters are read by the full provider; sampled/tiered
-    metrics do not observe those BPF counts. Map update failures without a
-    counter also remain uncovered. A clean result means the reported
-    counters are zero, not that nothing was missed."""
+    Read/map/writer failures are counted. BPF counters are read in every
+    capture mode. An unreadable component is null and counter_vector_valid
+    is false. The vector includes ALL INIT losses for merge certification;
+    the owner exclusion above applies only to this integrity gate."""
     if not isinstance(metrics, dict):
         return False, f"metrics response is not a dict: {metrics!r}"
     bad = []
@@ -1144,7 +1153,11 @@ def daemon_integrity_ok(metrics):
     for name in DAEMON_INTEGRITY_COUNTERS:
         v = metrics.get(name)
         parts.append(f"{name}={v!r}")
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != 0:
+        if name == "counter_vector_valid":
+            failed = v is not True
+        else:
+            failed = isinstance(v, bool) or not isinstance(v, (int, float)) or v != 0
+        if failed:
             bad.append(f"{name}={v!r}")
     ok = len(bad) == 0
     detail = ", ".join(parts)

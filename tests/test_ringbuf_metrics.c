@@ -45,9 +45,11 @@ int main(void)
     const uint64_t expected_total = UINT64_C(9007199254740996);
     pgwt_read_ringbuf_metrics(&m, AGGREGATE_FD, SITE_FD, 3, lookup);
     assert(aggregate_calls == 1);
+    assert(m.ringbuf_drops_valid);
     assert(m.ringbuf_drops_total == expected_total);
     for (int site = 0; site < PGWT_RING_FAIL_SITE_MAX; ++site) {
         assert(site_calls[site] == 1);
+        assert(m.ringbuf_site_valid[site]);
         assert(m.ringbuf_site_drops[site] == (site + 1) * expected_total);
         assert(strcmp(pgwt_ringbuf_site_metric_names[site], expected_names[site]) == 0);
     }
@@ -58,18 +60,27 @@ int main(void)
     /* A missing/failed aggregate must not suppress per-site observations. */
     m = (struct pgwt_metrics){0};
     pgwt_read_ringbuf_metrics(&m, -1, SITE_FD, 3, lookup);
-    assert(m.ringbuf_drops_total == 0);
+    assert(m.ringbuf_drops_total == 0 && !m.ringbuf_drops_valid);
     assert(m.ringbuf_site_drops[0] == expected_total);
     failed_fd = AGGREGATE_FD; failed_key = 0;
     pgwt_read_ringbuf_metrics(&m, AGGREGATE_FD, SITE_FD, 3, lookup);
-    assert(m.ringbuf_drops_total == 0);
+    assert(m.ringbuf_drops_total == 0 && !m.ringbuf_drops_valid);
     assert(m.ringbuf_site_drops[8] == 9 * expected_total);
+    /* A failed read must also invalidate and erase a previous successful
+     * value, so consumers cannot silently keep stale metrics. */
+    failed_fd = -1;
+    pgwt_read_ringbuf_metrics(&m, AGGREGATE_FD, SITE_FD, 3, lookup);
+    assert(m.ringbuf_drops_valid && m.ringbuf_drops_total == expected_total);
+    failed_fd = AGGREGATE_FD; failed_key = 0;
+    pgwt_read_ringbuf_metrics(&m, AGGREGATE_FD, SITE_FD, 3, lookup);
+    assert(!m.ringbuf_drops_valid && m.ringbuf_drops_total == 0);
     /* A failed site affects neither the aggregate nor the other slots. */
     m = (struct pgwt_metrics){0};
     failed_fd = SITE_FD; failed_key = PGWT_RING_FAIL_MARKER;
     pgwt_read_ringbuf_metrics(&m, AGGREGATE_FD, SITE_FD, 3, lookup);
     assert(m.ringbuf_drops_total == expected_total);
     assert(m.ringbuf_site_drops[PGWT_RING_FAIL_MARKER] == 0);
+    assert(!m.ringbuf_site_valid[PGWT_RING_FAIL_MARKER]);
     assert(m.ringbuf_site_drops[PGWT_RING_FAIL_COMMAND_BOUNDARY] == 4 * expected_total);
     /* Missing site map keeps the legacy aggregate path intact. */
     m = (struct pgwt_metrics){0};
@@ -78,7 +89,9 @@ int main(void)
     assert(m.ringbuf_site_drops[0] == 0);
     failed_fd = -1; possible_cpus = 1;
     pgwt_read_ringbuf_metrics(&m, AGGREGATE_FD, SITE_FD, 0, lookup);
-    assert(m.ringbuf_drops_total == 1 && m.ringbuf_site_drops[8] == 9);
+    assert(!m.ringbuf_drops_valid && !m.ringbuf_site_valid[8]);
+    pgwt_read_ringbuf_metrics(&m, AGGREGATE_FD, SITE_FD, 1, lookup);
+    assert(m.ringbuf_drops_valid && m.ringbuf_drops_total == 1 && m.ringbuf_site_drops[8] == 9);
     puts("ringbuf metrics: PASS (all sites/CPUs, stable names, cumulative reads, lookup failures)");
     return 0;
 }

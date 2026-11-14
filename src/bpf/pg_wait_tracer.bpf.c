@@ -68,6 +68,9 @@ volatile const bool test_no_sched_oncpu = 0;
 /* Test-only fault injection for the default bootstrap recovery path. */
 volatile const bool test_drop_init_hint = 0;
 volatile const bool test_skip_init_store = 0;
+/* TEST ONLY: fail one eligible operation per load, claimed atomically by a
+ * BPF_NOEXIST insert. Zero leaves the production route unchanged. */
+volatile const u32 test_counter_failure = 0;
 
 /* Command-open gate (T2, docs/AAS_SEMANTICS_DECISION.md): per-PG-version
  * BackendState enum values for the pgstat_report_activity uprobe. PG13-17:
@@ -259,7 +262,22 @@ static __always_inline void count_map_fail(u32 slot)
 {
     u64 *c = bpf_map_lookup_elem(&fail_counters, &slot);
     if (c)
-        (*c)++;
+        __sync_fetch_and_add(c, 1);
+}
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} test_failure_claims SEC(".maps");
+
+static __always_inline bool test_fail_once(u32 slot)
+{
+    if (!test_counter_failure || test_counter_failure != slot)
+        return false;
+    u32 one = 1;
+    return bpf_map_update_elem(&test_failure_claims, &slot, &one, BPF_NOEXIST) == 0;
 }
 
 /* Emit a trace event to event_ringbuf, counting drops on failure.
@@ -356,7 +374,8 @@ static __always_inline void note_query_edge(u32 pid, u64 query_id, u64 now)
 {
     struct pgwt_exact_config *cfg = exact_config();
     u64 generation = cfg ? cfg->generation : 0;
-    struct pgwt_exact_attr *edge =
+    bool forced = test_fail_once(PGWT_BPF_FAIL_EXACT_QUERY_UPDATE);
+    struct pgwt_exact_attr *edge = forced ? NULL :
         bpf_map_lookup_elem(&exact_attr_map, &pid);
     if (edge) {
         edge->query_generation = generation;
@@ -373,14 +392,16 @@ static __always_inline void note_query_edge(u32 pid, u64 query_id, u64 now)
         .query_quality = query_id ? PGWT_QUERY_QUALITY_REAL
                                   : PGWT_QUERY_QUALITY_NONE,
     };
-    bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY);
+    if (forced || bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY))
+        count_map_fail(PGWT_BPF_FAIL_EXACT_QUERY_UPDATE);
 }
 
 static __always_inline void note_cmd_edge(u32 pid, u16 cmd_open, u64 now)
 {
     struct pgwt_exact_config *cfg = exact_config();
     u64 generation = cfg ? cfg->generation : 0;
-    struct pgwt_exact_attr *edge =
+    bool forced = test_fail_once(PGWT_BPF_FAIL_EXACT_CMD_UPDATE);
+    struct pgwt_exact_attr *edge = forced ? NULL :
         bpf_map_lookup_elem(&exact_attr_map, &pid);
     if (edge) {
         edge->cmd_generation = generation;
@@ -393,23 +414,30 @@ static __always_inline void note_cmd_edge(u32 pid, u16 cmd_open, u64 now)
         .cmd_edge_ts = now,
         .cmd_open = cmd_open,
     };
-    bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY);
+    if (forced || bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY))
+        count_map_fail(PGWT_BPF_FAIL_EXACT_CMD_UPDATE);
 }
 
 static __always_inline void note_phase_edge(u32 pid, u32 marker, u64 now)
 {
     struct pgwt_exact_config *cfg = exact_config();
     u64 generation = cfg ? cfg->generation : 0;
-    struct pgwt_exact_attr *edge =
+    bool forced = test_fail_once(PGWT_BPF_FAIL_EXACT_PHASE_UPDATE);
+    struct pgwt_exact_attr *edge = forced ? NULL :
         bpf_map_lookup_elem(&exact_attr_map, &pid);
     if (!edge) {
         struct pgwt_exact_attr initial = {
             .phase_generation = generation,
         };
-        bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY);
-        edge = bpf_map_lookup_elem(&exact_attr_map, &pid);
-        if (!edge)
+        if (forced || bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY)) {
+            count_map_fail(PGWT_BPF_FAIL_EXACT_PHASE_UPDATE);
             return;
+        }
+        edge = bpf_map_lookup_elem(&exact_attr_map, &pid);
+        if (!edge) {
+            count_map_fail(PGWT_BPF_FAIL_EXACT_PHASE_UPDATE);
+            return;
+        }
     }
     if (edge->phase_generation != generation) {
         edge->phase_generation = generation;
@@ -437,8 +465,14 @@ static __always_inline void note_phase_edge(u32 pid, u32 marker, u64 now)
 static __always_inline u32 read_wait_event_direct(u64 addr)
 {
     u32 val = 0;
-    if (addr)
-        bpf_probe_read_user(&val, 4, (void *)addr);
+    if (test_fail_once(PGWT_BPF_FAIL_WAIT_READ))
+        addr = 0;
+    if (addr) {
+        if (bpf_probe_read_user(&val, 4, (void *)addr))
+            count_map_fail(PGWT_BPF_FAIL_WAIT_READ);
+    } else {
+        count_map_fail(PGWT_BPF_FAIL_WAIT_READ);
+    }
     return val;
 }
 
@@ -450,11 +484,12 @@ static __always_inline u32 read_wait_event(u64 *out_addr)
     u32 val = 0;
     u64 ptr = 0;
 
-    bpf_probe_read_user(&ptr, sizeof(ptr), (void *)my_wait_ptr_addr);
+    if (bpf_probe_read_user(&ptr, sizeof(ptr), (void *)my_wait_ptr_addr))
+        count_map_fail(PGWT_BPF_FAIL_WAIT_READ);
     if (out_addr)
         *out_addr = ptr;
-    if (ptr)
-        bpf_probe_read_user(&val, 4, (void *)ptr);
+    if (ptr && bpf_probe_read_user(&val, 4, (void *)ptr))
+        count_map_fail(PGWT_BPF_FAIL_WAIT_READ);
     return val;
 }
 
@@ -517,13 +552,15 @@ int BPF_PROG(on_sched_switch, bool preempt,
 /* Accumulate duration for a wait event into accum_map (PERCPU — no atomics). */
 static __always_inline void accum_add(u32 event, u64 duration)
 {
-    struct pgwt_accum_val *av = bpf_map_lookup_elem(&accum_map, &event);
+    bool forced = test_fail_once(PGWT_BPF_FAIL_ACCUM_UPDATE);
+    struct pgwt_accum_val *av = forced ? NULL : bpf_map_lookup_elem(&accum_map, &event);
     if (av) {
         av->total_ns += duration;
         av->count += 1;
     } else {
         struct pgwt_accum_val new_av = { .total_ns = duration, .count = 1 };
-        bpf_map_update_elem(&accum_map, &event, &new_av, BPF_NOEXIST);
+        if (forced || bpf_map_update_elem(&accum_map, &event, &new_av, BPF_NOEXIST))
+            count_map_fail(PGWT_BPF_FAIL_ACCUM_UPDATE);
     }
 }
 
@@ -681,7 +718,8 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
     u32 pid = bpf_get_current_pid_tgid() >> 32;
 
     u64 ptr = 0;
-    bpf_probe_read_user(&ptr, sizeof(ptr), (void *)my_wait_ptr_addr);
+    if (bpf_probe_read_user(&ptr, sizeof(ptr), (void *)my_wait_ptr_addr))
+        count_map_fail(PGWT_BPF_FAIL_WAIT_READ);
 
     if (ptr != 0) {
         /* PG17+: ptr already points at wait_event_info (offset 0).
@@ -744,8 +782,9 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
     struct pgwt_pid_state child_seed = {};
     /* A reused pid must not inherit an old INIT publication flag. The child
      * has not run yet, so replacing a stale entry cannot erase its edges. */
-    if (bpf_map_update_elem(&state_map, &child, &child_seed, BPF_ANY))
-        count_map_fail(PGWT_BPF_FAIL_STATE_MAP);
+    if (test_fail_once(PGWT_BPF_FAIL_FORK_STATE_UPDATE) ||
+        bpf_map_update_elem(&state_map, &child, &child_seed, BPF_ANY))
+        count_map_fail(PGWT_BPF_FAIL_FORK_STATE_UPDATE);
 
     struct pgwt_lifecycle_event *ev;
     ev = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*ev), 0);
@@ -1029,8 +1068,10 @@ int on_report_query_id(struct pt_regs *ctx)
     evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
     evt->pid = pid;
     evt->query_id = query_id;
-    long text_len = bpf_probe_read_user_str(evt->text, sizeof(evt->text),
-                                            (void *)str_ptr);
+    long text_len = test_fail_once(PGWT_TEST_FAIL_QUERY_TEXT) ? -1 :
+        bpf_probe_read_user_str(evt->text, sizeof(evt->text), (void *)str_ptr);
+    if (text_len < 0)
+        count_ring_fail(PGWT_RING_FAIL_QUERY_TEXT);
     if (text_len <= 1) {
         bpf_ringbuf_discard(evt, 0);
         return 0; /* unreadable/empty is not a successful first-seen */
@@ -1208,8 +1249,10 @@ int on_executor_start(struct pt_regs *ctx)
     evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
     evt->pid = pid;
     evt->query_id = query_id;
-    long text_len = bpf_probe_read_user_str(evt->text, sizeof(evt->text),
-                                            (void *)src_ptr);
+    long text_len = test_fail_once(PGWT_TEST_FAIL_PG13_QUERY_TEXT) ? -1 :
+        bpf_probe_read_user_str(evt->text, sizeof(evt->text), (void *)src_ptr);
+    if (text_len < 0)
+        count_ring_fail(PGWT_RING_FAIL_PG13_QUERY_TEXT);
     if (text_len <= 1) {
         bpf_ringbuf_discard(evt, 0);
         return 0;

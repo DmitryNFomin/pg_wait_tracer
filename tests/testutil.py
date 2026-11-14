@@ -196,7 +196,8 @@ def exact_window_mask_ok(mask, expected_phase):
 PHASE_REFUSED_EXIT = 78
 PHASE_REFUSED_MARKER = "PHASE-CONTRACT-REFUSED"
 PHASE_DEPENDENT_TESTS = ("test_execution_cardinality", "test_execution_span_live",
-                         "test_escalation", "test_ui_live_smoke")
+                         "test_escalation", "test_ui_live_smoke",
+                         "test_counter_vector_phase_live")
 
 
 def resolve_declared_phase_mask(env=None):

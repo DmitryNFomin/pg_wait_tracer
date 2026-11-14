@@ -967,7 +967,12 @@ static int read_init_state(void *ctx, pid_t pid, struct pgwt_pid_state *st)
     uint32_t key = pid;
     if (bpf_map_lookup_elem(bpf_map__fd(d->skel->maps.state_map), &key, st) == 0)
         return 0;
-    return -errno;
+    int error = errno;
+    /* ENOENT has a defined reconciliation path (missing state); other read
+     * errors leave INIT loss accounting unknown for this capture. */
+    if (error != ENOENT)
+        d->counters.init_state_read_fail_total++;
+    return -error;
 }
 
 static int attach_stored_init(void *ctx, pid_t pid, uint64_t addr, uint64_t ts)

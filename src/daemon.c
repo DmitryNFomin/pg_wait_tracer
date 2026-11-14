@@ -6,6 +6,7 @@
 #include "event_stream.h"
 #include "event_writer.h"
 #include "map_reader.h"
+#include "capture_counters.h"
 #include "output.h"
 #include "perf_event.h"
 #include "provider_coop.h"
@@ -600,10 +601,11 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
      * possible under churn; any failure still means a raw metadata record was
      * lost and must be loud. */
     started_ns = pgwt_debug_block_begin(d);
-    uint64_t seen_qids_failures = d->seen_qids_full_logged ? 0
+    struct pgwt_counter_value seen_qids_failures = d->seen_qids_full_logged
+        ? (struct pgwt_counter_value){0, true}
         : pgwt_read_bpf_fail_counter(d, PGWT_BPF_FAIL_SEEN_QIDS);
     pgwt_debug_block_end(d, "bpf_fail_counter_read", 0, started_ns);
-    if (!d->seen_qids_full_logged && seen_qids_failures > 0) {
+    if (!d->seen_qids_full_logged && seen_qids_failures.valid && seen_qids_failures.value > 0) {
         d->seen_qids_full_logged = true;
         fprintf(stderr,
                 "WARN: BPF raw first-seen dedup insert failed — query TEXT "
@@ -1280,6 +1282,31 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         fprintf(stderr, "WARN: PGWT_TEST_NO_SCHED_ONCPU — sched_switch on_cpu_ts "
                 "open suppressed (deterministic straddle-CPU repro; TEST ONLY)\n");
     }
+    const char *counter_fault = getenv("PGWT_TEST_COUNTER_FAILURE");
+    if (counter_fault) {
+        static const struct { const char *name; uint32_t slot; } faults[] = {
+            {"wait_read", PGWT_BPF_FAIL_WAIT_READ},
+            {"exact_query", PGWT_BPF_FAIL_EXACT_QUERY_UPDATE},
+            {"exact_cmd", PGWT_BPF_FAIL_EXACT_CMD_UPDATE},
+            {"exact_phase", PGWT_BPF_FAIL_EXACT_PHASE_UPDATE},
+            {"accum", PGWT_BPF_FAIL_ACCUM_UPDATE},
+            {"fork_state", PGWT_BPF_FAIL_FORK_STATE_UPDATE},
+            {"query_text", PGWT_TEST_FAIL_QUERY_TEXT},
+            {"pg13_query_text", PGWT_TEST_FAIL_PG13_QUERY_TEXT},
+        };
+        for (unsigned i = 0; i < sizeof(faults) / sizeof(*faults); ++i)
+            if (strcmp(counter_fault, faults[i].name) == 0)
+                d->skel->rodata->test_counter_failure = faults[i].slot;
+        if (!d->skel->rodata->test_counter_failure) {
+            fprintf(stderr, "ERROR: unknown PGWT_TEST_COUNTER_FAILURE=%s\n", counter_fault);
+            goto fail;
+        }
+        /* accum_map is used only by lightweight capture. Exercise its actual
+         * insert path while retaining full-mode watchpoint admission. */
+        if (d->skel->rodata->test_counter_failure == PGWT_BPF_FAIL_ACCUM_UPDATE)
+            d->skel->rodata->lightweight_mode = 1;
+        fprintf(stderr, "WARN: PGWT_TEST_COUNTER_FAILURE=%s (TEST ONLY)\n", counter_fault);
+    }
     if (getenv("PGWT_TEST_DROP_INIT_HINT")) {
         d->skel->rodata->test_drop_init_hint = true;
         fprintf(stderr, "WARN: PGWT_TEST_DROP_INIT_HINT — INIT ring hints suppressed (TEST ONLY)\n");
@@ -1416,6 +1443,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             free(d->event_writer);
             d->event_writer = NULL;
             goto fail;
+        }
+        if (d->event_writer && getenv("PGWT_TEST_WRITER_FAIL")) {
+            d->event_writer->test_fail_push = true;
+            fprintf(stderr, "WARN: PGWT_TEST_WRITER_FAIL (TEST ONLY)\n");
         }
         d->event_writer->verbose = d->verbose;
         d->event_writer->nominal_sample_period_ns = 1000000000ULL /

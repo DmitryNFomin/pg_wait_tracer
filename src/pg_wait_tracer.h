@@ -417,7 +417,15 @@ static inline int pgwt_classify_wei(uint32_t wei)
 #define PGWT_BPF_FAIL_STATE_MAP  0  /* state_map insert failed (map full) */
 #define PGWT_BPF_FAIL_SEEN_QIDS  1  /* seen_query_ids insert failed (full) */
 #define PGWT_BPF_FAIL_INIT_NO_STATE 2 /* diagnostic; attachment may still succeed */
-#define PGWT_BPF_FAIL_MAX        3
+#define PGWT_BPF_FAIL_WAIT_READ  3
+#define PGWT_BPF_FAIL_EXACT_QUERY_UPDATE 4
+#define PGWT_BPF_FAIL_EXACT_CMD_UPDATE 5
+#define PGWT_BPF_FAIL_EXACT_PHASE_UPDATE 6
+#define PGWT_BPF_FAIL_ACCUM_UPDATE 7
+#define PGWT_BPF_FAIL_FORK_STATE_UPDATE 8
+#define PGWT_BPF_FAIL_MAX        9
+#define PGWT_TEST_FAIL_QUERY_TEXT 9
+#define PGWT_TEST_FAIL_PG13_QUERY_TEXT 10
 
 /* Per-query trap counters. These are the Stages 3/4 overhead acceptance
  * signal: both stay exactly zero in de-escalated sampled mode on a validated
