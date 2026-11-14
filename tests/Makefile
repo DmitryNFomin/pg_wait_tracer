@@ -81,7 +81,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_core_evidence_contract \
             test_core_evidence_codec \
             test_core_merge_contract \
-            test_ringbuf_metrics test_backend_init
+            test_ringbuf_metrics test_backend_init test_counter_vector test_writer_failure
 
 .PHONY: all clean check
 
@@ -1180,5 +1180,11 @@ test_core_evidence_codec: test_core_evidence_codec.c evidence_json.c evidence_js
 test_core_merge_contract: test_core_merge_contract.c ../src/core/merge.c ../src/core/pgwt_merge.h ../contracts/merge-v1/examples.json
 	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
 
-test_ringbuf_metrics: test_ringbuf_metrics.c ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
-	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $<
+test_ringbuf_metrics: test_ringbuf_metrics.c ../src/counter_vector.c ../src/counter_vector.h ../src/ringbuf_metrics.h ../src/provider.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
+
+test_counter_vector: test_counter_vector.c ../src/counter_vector.c ../src/counter_vector.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -o $@ $(filter %.c,$^)
+
+test_writer_failure: test_writer_failure.c $(BUILD)/event_writer.o
+	$(CC) $(CFLAGS) -o $@ $^ -llz4

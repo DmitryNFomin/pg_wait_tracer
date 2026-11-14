@@ -900,28 +900,4 @@ void pgwt_read_accum_map(struct pgwt_daemon *d)
 }
 
 
-/* Sum one BPF fail_counters slot across CPUs (CAP-1/CAP-6). The BPF programs
- * bump these when a map insert fails or bootstrap cannot store INIT; the
- * control socket surfaces these integrity failures. */
-uint64_t pgwt_read_bpf_fail_counter(struct pgwt_daemon *d, uint32_t slot)
-{
-    if (!d->skel || slot >= PGWT_BPF_FAIL_MAX)
-        return 0;
-    int fd = bpf_map__fd(d->skel->maps.fail_counters);
-    if (fd < 0)
-        return 0;
-
-    int num_cpus = libbpf_num_possible_cpus();
-    if (num_cpus <= 0)
-        num_cpus = 1;
-    uint64_t per_cpu[num_cpus];
-    if (bpf_map_lookup_elem(fd, &slot, per_cpu) != 0)
-        return 0;
-
-    uint64_t total = 0;
-    for (int i = 0; i < num_cpus; i++)
-        total += per_cpu[i];
-    return total;
-}
-
 #endif /* !PGWT_SERVER */

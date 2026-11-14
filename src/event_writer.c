@@ -931,6 +931,7 @@ static int write_typed_block(struct pgwt_event_writer *w,
         if (!new_idx) {
             fprintf(stderr, "WARN: cannot grow block index\n");
             w->enabled = false;
+            w->failed = true;
             return -1;
         }
         w->block_index = new_idx;
@@ -962,6 +963,7 @@ static int write_typed_block(struct pgwt_event_writer *w,
         fwrite(w->compress_buf, 1, compressed_size, w->fp) != (size_t)compressed_size) {
         fprintf(stderr, "WARN: trace file write failed: %s\n", strerror(errno));
         w->enabled = false;
+        w->failed = true;
         return -1;
     }
 
@@ -1261,12 +1263,20 @@ int pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
 int pgwt_writer_push_event(struct pgwt_event_writer *w,
                            const struct pgwt_trace_event *evt)
 {
+    if (w->failed) return -1;
     if (!w->enabled) return 0;
+    if (w->test_fail_push) {
+        w->test_fail_push = false;
+        w->enabled = false;
+        w->failed = true;
+        return -1;
+    }
 
     /* Lazy file open on first event */
     if (!w->fp) {
         if (open_trace_file(w, evt->timestamp_ns) != 0) {
             w->enabled = false;
+            w->failed = true;
             return -1;
         }
     }
@@ -1281,10 +1291,26 @@ int pgwt_writer_push_event(struct pgwt_event_writer *w,
     if (!w->cpu_measured)
         dst->cpu_ns = PGWT_CPU_NS_UNKNOWN;
 
-    if (w->num_events >= PGWT_BLOCK_EVENTS)
-        return flush_block(w);
+    if (w->num_events >= PGWT_BLOCK_EVENTS) {
+        int rc = flush_block(w);
+        if (rc != 0) {
+            w->enabled = false;
+            w->failed = true;
+        }
+        return rc;
+    }
 
     return 0;
+}
+
+int pgwt_writer_push_event_counted(struct pgwt_event_writer *w,
+                                    const struct pgwt_trace_event *evt,
+                                    uint64_t *writer_push_fail_total)
+{
+    int rc = pgwt_writer_push_event(w, evt);
+    if (rc != 0)
+        ++*writer_push_fail_total;
+    return rc;
 }
 
 int pgwt_writer_push_samples(struct pgwt_event_writer *w,
@@ -1298,6 +1324,7 @@ int pgwt_writer_push_samples(struct pgwt_event_writer *w,
     if (!w->fp) {
         if (open_trace_file(w, samples[0].timestamp_ns) != 0) {
             w->enabled = false;
+            w->failed = true;
             return -1;
         }
     }

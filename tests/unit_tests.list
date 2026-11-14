@@ -1082,3 +1082,9 @@ test_core_evidence_fuzz.py
 test_ringbuf_metrics
 test_backend_init
 test_backend_init_order.py
+
+# Refs #871: explicit loss-vector validity and sticky writer rejection.
+test_counter_vector
+test_writer_failure
+test_counter_failures.py
+test_counter_vector_portable.py

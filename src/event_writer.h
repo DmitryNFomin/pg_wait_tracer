@@ -131,6 +131,8 @@ struct pgwt_event_writer {
     uint64_t      retention_live_summary_ns;
     gid_t         trace_gid;      /* group for trace files, (gid_t)-1 = no chown */
     bool          enabled;
+    bool          failed;       /* sticky failure; distinct from intentional disable */
+    bool          test_fail_push; /* PGWT_TEST_WRITER_FAIL, consumed on first push */
     bool          verbose;
     /* T8: when false (legacy capability — no measured CPU), every TRANSITIONS
      * record is written with cpu_ns = PGWT_CPU_NS_UNKNOWN so the compute layer
@@ -232,6 +234,10 @@ const char *pgwt_default_trace_group(void);
 int  pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
                       int pg_version, int retention_hours,
                       const char *group_name);
+/* All daemon event producers use this rejection-accounting wrapper. */
+int  pgwt_writer_push_event_counted(struct pgwt_event_writer *w,
+                                    const struct pgwt_trace_event *evt,
+                                    uint64_t *writer_push_fail_total);
 int  pgwt_writer_push_event(struct pgwt_event_writer *w,
                             const struct pgwt_trace_event *evt);
 

@@ -82,7 +82,8 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
     /* Write to trace file if recording is enabled (including markers) */
     if (d->event_writer) {
         stage_started_ns = pgwt_debug_block_begin(d);
-        pgwt_writer_push_event(d->event_writer, evt);
+        pgwt_writer_push_event_counted(d->event_writer, evt,
+                                       &d->counters.writer_push_fail_total);
         pgwt_debug_block_end(d, "event_callback_trace_writer", evt->pid,
                              stage_started_ns);
     }

@@ -8,6 +8,7 @@
 #include "escalation.h"
 #include "sampler.h"
 #include "map_reader.h"
+#include "capture_counters.h"
 #include "open_snapshot.h"
 #include "cJSON.h"
 
@@ -37,6 +38,15 @@ static void cjson_add_uint64(cJSON *obj, const char *name, uint64_t val)
     char buf[32];
     snprintf(buf, sizeof(buf), "%llu", (unsigned long long)val);
     cJSON_AddRawToObject(obj, name, buf);
+}
+/* An unreadable counter is JSON null, never a measured zero. */
+static void cjson_add_counter(cJSON *obj, const char *name,
+                              struct pgwt_counter_value c)
+{
+    if (c.valid)
+        cjson_add_uint64(obj, name, c.value);
+    else
+        cJSON_AddNullToObject(obj, name);
 }
 
 /* Lowercase token for an escalation reason ("manual"|"anomaly"|...). Used so
@@ -191,6 +201,17 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     return root;
 }
 
+/* Preserve the legacy metric's population: every failed state_map insert,
+ * including fork seeding. The certification vector deliberately separates
+ * fork-state failures so one failed operation feeds only one component. */
+static struct pgwt_counter_value legacy_state_map_full(const struct pgwt_counter_vector *v)
+{
+    struct pgwt_counter_value fork = v->components[PGWT_C_FORK_STATE_UPDATE_FAIL];
+    if (!fork.valid)
+        return (struct pgwt_counter_value){0, false};
+    return pgwt_counter_add(v->components[PGWT_C_STATE_MAP_UPDATE_FAIL], fork.value);
+}
+
 static cJSON *build_metrics(const struct pgwt_daemon *d)
 {
     const struct pgwt_counters *ctr = &d->counters;
@@ -199,7 +220,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     if (d->provider && d->provider->self_metrics)
         d->provider->self_metrics((struct pgwt_daemon *)d, &pm);
 
+    struct pgwt_counter_vector cv = pgwt_daemon_counter_vector((struct pgwt_daemon *)d);
     cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "counter_vector_valid", cv.valid);
     cJSON_AddBoolToObject(root, "ok", 1);
     cJSON_AddNumberToObject(root, "uptime_s",
                             (double)(now_mono_ns() - d->start_ts) / 1e9);
@@ -337,13 +360,20 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * garbage class-byte readings dropped (wrong offset backstop, CAP-2/5).
      * state_reseeds_total = frozen-stale entries reseeded by the per-tick
      * sweep (seed→arm race repair, one INFO line each). */
-    cjson_add_uint64(root, "state_map_full_total",
-                     ctr->state_map_full_total
-                     + pgwt_read_bpf_fail_counter((struct pgwt_daemon *)d,
-                                                  PGWT_BPF_FAIL_STATE_MAP));
-    cjson_add_uint64(root, "seen_query_ids_full_total",
-                     pgwt_read_bpf_fail_counter((struct pgwt_daemon *)d,
-                                                PGWT_BPF_FAIL_SEEN_QIDS));
+    cjson_add_counter(root, "state_map_full_total", legacy_state_map_full(&cv));
+    cjson_add_counter(root, "seen_query_ids_full_total", cv.components[PGWT_C_SEEN_QUERY_IDS_UPDATE_FAIL]);
+    static const struct { const char *name; int component; } new_counters[] = {
+        {"wait_read_fail_total", PGWT_C_WAIT_READ_FAIL},
+        {"exact_query_update_fail_total", PGWT_C_EXACT_QUERY_UPDATE_FAIL},
+        {"exact_cmd_update_fail_total", PGWT_C_EXACT_CMD_UPDATE_FAIL},
+        {"exact_phase_update_fail_total", PGWT_C_EXACT_PHASE_UPDATE_FAIL},
+        {"accum_update_fail_total", PGWT_C_ACCUM_UPDATE_FAIL},
+        {"fork_state_update_fail_total", PGWT_C_FORK_STATE_UPDATE_FAIL},
+        {"writer_push_fail_total", PGWT_C_WRITER_PUSH_FAIL},
+    };
+    for (unsigned i = 0; i < sizeof(new_counters) / sizeof(*new_counters); ++i)
+        cjson_add_counter(root, new_counters[i].name, cv.components[new_counters[i].component]);
+    cjson_add_uint64(root, "init_state_read_fail_total", ctr->init_state_read_fail_total);
     cjson_add_uint64(root, "lifecycle_init_lost_total",
                      ctr->lifecycle_init_lost_total);
     cjson_add_uint64(root, "lifecycle_init_lost_with_opportunity_total",
@@ -352,7 +382,7 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->lifecycle_init_lost_no_opportunity_total);
     cjson_add_uint64(root, "lifecycle_init_lost_untraced_ns_total",
                      ctr->lifecycle_init_lost_untraced_ns_total);
-    cjson_add_uint64(root, "lifecycle_init_no_state_total",
+    cjson_add_counter(root, "lifecycle_init_no_state_total",
                      pgwt_read_bpf_fail_counter((struct pgwt_daemon *)d,
                                                 PGWT_BPF_FAIL_INIT_NO_STATE));
     cjson_add_uint64(root, "invalid_wait_reads_total",
@@ -762,11 +792,19 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "cmd_gate_recovered_total",
                      ctr->cmd_gate_recovered_total);
 
-    /* Provider self-metrics. ringbuf_drops_total is the full tier's BPF-side
-     * event_ringbuf drop count (A2 wired this; A0 deliberately omitted it). */
-    cjson_add_uint64(root, "ringbuf_drops_total", pm.ringbuf_drops_total);
-    for (int site = 0; site < PGWT_RING_FAIL_SITE_MAX; ++site)
-        cjson_add_uint64(root, pgwt_ringbuf_site_metric_names[site], pm.ringbuf_site_drops[site]);
+    /* Read capture loss in every mode, including tiered outside escalation.
+     * Use the same vector snapshot for its aggregate and lifecycle sites. */
+    cjson_add_counter(root, "ringbuf_drops_total", cv.components[PGWT_C_EVENT_RING_DROP]);
+    const int site_components[PGWT_RING_FAIL_SITE_MAX] = {
+        -1, -1, -1, -1, -1, PGWT_C_LIFECYCLE_FORK_DROP,
+        PGWT_C_LIFECYCLE_EXIT_DROP, PGWT_C_QUERY_TEXT_DROP, PGWT_C_PG13_QUERY_TEXT_DROP,
+    };
+    for (int site = 0; site < PGWT_RING_FAIL_SITE_MAX; ++site) {
+        struct pgwt_counter_value c = site_components[site] >= 0
+            ? cv.components[site_components[site]]
+            : pgwt_read_daemon_ring_site((struct pgwt_daemon *)d, site);
+        cjson_add_counter(root, pgwt_ringbuf_site_metric_names[site], c);
+    }
 
     /* Trace writer stats (0 when recording is disabled) */
     cjson_add_uint64(root, "trace_events_written_total",

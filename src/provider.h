@@ -26,6 +26,7 @@
 #define PGWT_PROVIDER_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "pg_wait_tracer.h"
 
 struct pgwt_daemon;
@@ -52,6 +53,8 @@ struct pgwt_metrics {
     uint32_t sample_read_targets; /* targets attempted on the latest tick */
     uint32_t sample_read_valid;   /* successful target reads on latest tick */
     uint32_t sample_read_invalid; /* failed target reads on latest tick */
+    bool ringbuf_drops_valid;
+    bool ringbuf_site_valid[PGWT_RING_FAIL_SITE_MAX];
     uint64_t ringbuf_drops_total; /* event_ringbuf drops (full tier, BPF-side) */
     uint64_t ringbuf_site_drops[PGWT_RING_FAIL_SITE_MAX]; /* full tier, all rings */
 };

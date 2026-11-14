@@ -612,6 +612,7 @@ EOF
 LIVE_TESTS=(
     "test_lifecycle|bash|test_lifecycle.sh"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"
+    "test_counter_vector_live|python3|test_counter_vector_live.py"
     "test_capture_smoke_tiered|python3|test_capture_smoke.py||--mode tiered"
     "test_capture_smoke_full|python3|test_capture_smoke.py||--mode full"
     "test_uprobe_fired|python3|test_uprobe_fired.py"

@@ -65,7 +65,8 @@ static void write_marker_at(struct pgwt_daemon *d, uint32_t marker_type,
         .duration_ns  = 0,
         .query_id     = PGWT_ESC_PACK(window_s, reason),
     };
-    pgwt_writer_push_event(d->event_writer, &ev);
+    pgwt_writer_push_event_counted(d->event_writer, &ev,
+                                   &d->counters.writer_push_fail_total);
     /* cat_flag 0: this record is pid-LESS (pid = 0) and a marker, which the
      * writer drops in accum_event. Resolving a T2 category for pid 0 would
      * be meaningless and would scan the backend registry for nothing.
@@ -96,7 +97,8 @@ static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
         .duration_ns = 0,
         .query_id = query_id,
     };
-    pgwt_writer_push_event(d->event_writer, &ev);
+    pgwt_writer_push_event_counted(d->event_writer, &ev,
+                                   &d->counters.writer_push_fail_total);
     /* cat_flag 0, and NOT just because accum_event drops markers: a marker
      * still drives summary_qattr_step, the #128 deferred per-query
      * attribution, and v6 SKIPS that step for an io_worker cat_flag. So
@@ -287,7 +289,8 @@ static void flush_open_intervals(struct pgwt_daemon *d, uint64_t now)
             != PGWT_OPEN_STRETCH_BUILT)
             continue;
         uint32_t we = ev.old_event;
-        pgwt_writer_push_event(d->event_writer, &ev);
+        pgwt_writer_push_event_counted(d->event_writer, &ev,
+                                   &d->counters.writer_push_fail_total);
         /* v6 (#315/#376): THE path where the io_worker divergence peaked. An
          * io_worker sits in one Activity:IoWorkerMain wait for the whole
          * capture, so its only record is the one THIS loop synthesizes at

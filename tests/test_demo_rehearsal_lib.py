@@ -1545,6 +1545,15 @@ def _zero_integrity_metrics():
         "ringbuf_drops_total": 0,
         "state_map_full_total": 0,
         "seen_query_ids_full_total": 0,
+        "wait_read_fail_total": 0,
+        "exact_query_update_fail_total": 0,
+        "exact_cmd_update_fail_total": 0,
+        "exact_phase_update_fail_total": 0,
+        "accum_update_fail_total": 0,
+        "fork_state_update_fail_total": 0,
+        "writer_push_fail_total": 0,
+        "init_state_read_fail_total": 0,
+        "counter_vector_valid": True,
         "lifecycle_init_lost_with_opportunity_total": 0,
         "ringbuf_lifecycle_fork_drops_total": 0,
         "ringbuf_lifecycle_exit_drops_total": 0,
@@ -1653,9 +1662,29 @@ def test_daemon_integrity_missing_counter_fails():
 
 
 def test_daemon_integrity_non_numeric_counter_fails():
-    for name in _zero_integrity_metrics().keys() - {"some_other_field"}:
+    for name in _zero_integrity_metrics().keys() - {"some_other_field", "counter_vector_valid"}:
         for value in (None, "0", True, False, {}, float("nan"), float("inf")):
             _assert_integrity_counter_fails(name, value)
+
+
+def test_daemon_integrity_new_counters_fail():
+    # Literal list keeps this test sensitive to a deregistered integrity key.
+    for key in (
+        "wait_read_fail_total",
+        "exact_query_update_fail_total",
+        "exact_cmd_update_fail_total",
+        "exact_phase_update_fail_total",
+        "accum_update_fail_total",
+        "fork_state_update_fail_total",
+        "writer_push_fail_total",
+        "init_state_read_fail_total",
+    ):
+        _assert_integrity_counter_fails(key, 1)
+
+
+def test_daemon_integrity_vector_validity_fails_closed():
+    for value in (False, None, 0, 1, "true", {}, float("nan")):
+        _assert_integrity_counter_fails("counter_vector_valid", value)
 
 
 def test_daemon_integrity_non_dict_response_fails():
