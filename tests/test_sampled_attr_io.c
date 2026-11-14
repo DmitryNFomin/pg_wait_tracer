@@ -45,6 +45,8 @@ static int own_calls, stat_reads, map_reads, stat_fail, own_short;
 static int proc_opens, proc_reads, proc_closes, reader_map_reads, maps_fail, wait_calls;
 static int maps_prefix_lines;
 static uint32_t wait_words[1024];
+static uint64_t refusal_wait_addr;
+static uint32_t refusal_wait_value;
 static FILE *proc_file;
 static int private_target, private_reader, incarnation = 1;
 static int tear_row = -1, transient_tear, short_row = -1, fault_row = -1;
@@ -194,6 +196,14 @@ ssize_t pgwt_test_wait_readv(pid_t pid, const struct iovec *local, unsigned long
     CHECK(pid == 1000 && nl == nr && flags == 0, "wait batch uses one eligible reader");
     size_t copied = 0;
     for (size_t i = 0; i < nr; i++) {
+        if (refusal_wait_addr) {
+            CHECK((uintptr_t)remote[i].iov_base == refusal_wait_addr &&
+                  remote[i].iov_len == 4,
+                  "refusal probe reads the expected incarnation's wait slot");
+            memcpy(local[i].iov_base, &refusal_wait_value, 4);
+            copied += 4;
+            continue;
+        }
         CHECK(remote[i].iov_base == &wait_words[i] && remote[i].iov_len == 4,
               "wait batch reads successor-independent shared wait slots");
         memcpy(local[i].iov_base, remote[i].iov_base, remote[i].iov_len);
@@ -243,6 +253,7 @@ static void fixture(int major, size_t n)
     }
     private_target = private_reader = reader_gone = mutate_on_span = transient_tear = 0;
     incarnation = 1; stat_fail = own_short = maps_fail = maps_prefix_lines = 0;
+    refusal_wait_addr = 0;
     tear_row = short_row = fault_row = -1;
     reset_counts();
 }
@@ -711,6 +722,57 @@ static void test_reuse_without_events(int major)
     CHECK(!stat_reads && !own_calls, "accepted successor has no per-tick identity I/O");
     release_daemon(d);
 }
+static void test_refusal_tick(int major)
+{
+    const enum pgwt_backend_type types[] = {PGWT_BT_PARALLEL_WORKER, PGWT_BT_CLIENT};
+    const uint32_t waits[] = {0, 0x0a000001}; /* CPU and IO:DataFileRead */
+    for (size_t type = 0; type < sizeof(types)/sizeof(types[0]); type++)
+    for (int tier = 0; tier < 4; tier++)
+    for (size_t w = 0; w < sizeof(waits)/sizeof(waits[0]); w++) {
+        struct pgwt_daemon *d = new_daemon(major);
+        fixture(major, 2); d->backend_status_layout = layout;
+        d->mode = tier == 0 ? PGWT_MODE_SAMPLED :
+                  tier == 1 ? PGWT_MODE_FULL : PGWT_MODE_TIERED;
+        d->escalation.active = tier == 3;
+        CHECK(pgwt_handle_fork(d, 1000) == 0, "refusal recording fixture fork");
+        struct pgwt_backend *be = &d->backends.entries[0];
+        be->wp_addr = 1234; be->wp_addr_shared = 1; be->meta_parsed = true;
+        be->meta.backend_type = types[type];
+        wait_addr = refusal_wait_addr = 1234; refusal_wait_value = waits[w];
+        put(1, &layout.st_procpid, 0);
+        CHECK(record_registry_tick(d, clock_ns) == 1,
+              "original incarnation records before unseen exit");
+        incarnation = 2;
+        put(0, &layout.st_procpid, 0);
+        put(1, &layout.st_procpid, 1000);
+        entries[0] = (uintptr_t)row_at(1);
+        wait_addr = 2345;
+        uint64_t t = clock_ns + UINT64_C(1000000);
+        (void)record_registry_tick(d, t); /* cached row rejected; next tick resolves */
+        reset_counts();
+        int count = record_registry_tick(d, t + UINT64_C(100000000));
+        printf("PG%d type=%d tier=%d we=%u refusal: rc=%d err=%s recorded=%s wait_addr=%llu\n",
+               major, types[type], tier, waits[w], targets[0].rc,
+               targets[0].error == ESTALE ? "ESTALE" : "OTHER",
+               count ? "YES" : "NO",
+               (unsigned long long)recorded_samples[0].wait_event_addr);
+        CHECK(targets[0].rc == -1 && targets[0].error == ESTALE && tick_failures == 1,
+              "recording probe refuses stale identity exactly once");
+        CHECK(count == 0 && !d->sampler->read_valid[0],
+              "stale identity refusal records zero samples for every type and tier");
+        /* Exact capture defers cache replacement until teardown completes. */
+        d->mode = PGWT_MODE_SAMPLED; d->escalation.active = false;
+        refusal_wait_addr = 2345;
+        count = record_registry_tick(d, t + UINT64_C(200000000));
+        CHECK(count == 1 && d->sampler->samples[0].pid == 1000 &&
+              d->sampler->samples[0].new_event == waits[w] &&
+              recorded_samples[0].wait_event_addr == 2345 &&
+              be->sampled_reader.start_time == 2 && tick_failures == 1,
+              "next accepted tick records successor with its own wait slot");
+        release_daemon(d);
+    }
+    refusal_wait_addr = 0;
+}
 static void test_init_reuse(int major)
 {
     for (int exact = 0; exact < 2; exact++) {
@@ -958,6 +1020,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[1], "registry")) { test_registry_paths(18); test_enrollment_without_attr(18); }
         else if (!strcmp(argv[1], "identity")) test_lifecycle_identity(18);
         else if (!strcmp(argv[1], "reuse")) test_reuse_without_events(18);
+        else if (!strcmp(argv[1], "refusal")) test_refusal_tick(18);
         else if (!strcmp(argv[1], "init-reuse")) test_init_reuse(18);
         else if (!strcmp(argv[1], "rejected-backoff")) test_rejected_backoff(18);
         else if (!strcmp(argv[1], "first-tick")) test_first_tick_budget(18);
@@ -976,6 +1039,7 @@ int main(int argc, char **argv)
         test_lifecycle_identity(major[i]);
         test_candidate_rejection(major[i]);
         test_reuse_without_events(major[i]);
+        test_refusal_tick(major[i]);
         test_init_reuse(major[i]);
         test_rejected_backoff(major[i]);
         test_first_tick_budget(major[i]);

@@ -1425,6 +1425,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             target_tick_enabled, tick_ok,
             &tick_attr, &uprobe_attr, &targets[n]);
         attr_valid[n] = source != PGWT_SAMPLED_ATTR_DROP;
+        /* Identity refusal invalidates even query-less targets: their wait
+         * address was copied before the predecessor's enrollment was retired. */
+        if (target_tick_enabled && attr_rows[n].error == ESTALE) attr_valid[n] = 0;
     }
     if (n == 0) {
         pgwt_sampler_note_coverage(s, 0, 0);

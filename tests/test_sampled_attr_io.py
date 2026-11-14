@@ -250,15 +250,58 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
     return n;
 }
 """
+    # Exercise the poll's real refusal/selection and validity-mask statements,
+    # followed by the production wait reader and batch builder. Only the
+    # successful row's value conversion is supplied here (no PG13 text hash).
+    finish = poll[poll.index("        if (target_tick_enabled)\n            finish_sampled_attr"):
+                  poll.index("        struct pgwt_sampled_attr_value uprobe_attr")]
+    selection = poll[poll.index("        enum pgwt_sampled_attr_source source ="):
+                     poll.index("    if (n == 0) {")]
+    selection = selection[:selection.rfind("    }")]
+    validity = poll[poll.index("    for (int i = 0; i < n; i++) {\n        if (!attr_valid[i]"):
+                    poll.index("    /* #294")]
+    recording = """
+static int record_registry_tick(struct pgwt_daemon *d, uint64_t tick_ts)
+{
+    struct pgwt_sampler *s = d->sampler;
+    int target_count = sample_registry(d, tick_ts);
+    uint8_t attr_valid[MAX_BACKENDS], tick_enabled[MAX_BACKENDS];
+    pgwt_pgbs_read_batch(d->postmaster_pid, &d->backend_status_layout,
+                        targets, (size_t)target_count, false, &tick_failures);
+    int n;
+    for (n = 0; n < target_count; n++) {
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, targets[n].pid);
+        const bool target_tick_enabled = targets[n].reader != NULL;
+        tick_enabled[n] = target_tick_enabled;
+""" + finish.replace("attr_rows[", "targets[") + """
+        const int tick_ok = targets[n].rc == 0;
+        struct pgwt_sampled_attr_value tick_attr = {
+            .query_id = targets[n].attr.query_id,
+            .last_query_id = targets[n].attr.last_query_id,
+            .cmd_open = targets[n].attr.cmd_open,
+        };
+        struct pgwt_sampled_attr_value uprobe_attr = {.cmd_open = 1};
+""" + selection.replace("targets[", "recorded_samples[").replace("attr_rows[", "targets[") + """
+    }
+    int got = pgwt_sampler_read_targets(recorded_samples, n, s->read_vals,
+                                        s->read_valid, &s->read_faults_total);
+""" + validity.replace("targets[", "recorded_samples[") + """
+    (void)got;
+    return pgwt_sampler_build_batch(recorded_samples, s->read_vals, s->read_valid,
+        n, tick_ts, s->samples, &d->counters.invalid_wait_reads_total,
+        &d->counters.noncmd_cpu_samples_total);
+}
+"""
     assert 'cjson_add_uint64(root, "sampled_attr_tick_idle_samples_total",' in (ROOT / "src/control.c").read_text()
     with tempfile.TemporaryDirectory(prefix="pgwt-sampled-io-") as directory:
         tmp = Path(directory)
 
-        def build(label, text, enrollment=lifecycle, resolution=policy, sampler_source=sampler, registry_source=registry):
+        def build(label, text, enrollment=lifecycle, resolution=policy, sampler_source=sampler,
+                  registry_source=registry, recording_source=recording):
             implementation = tmp / f"{label}.c"
             implementation.write_text(text)
             injected = tmp / f"{label}-lifecycle.h"
-            injected.write_text(enrollment + "\n" + resolution + registry_source)
+            injected.write_text(enrollment + "\n" + resolution + registry_source + recording_source)
             portable_sampler = tmp / f"{label}-sampler.c"
             portable_sampler.write_text(sampler_source.replace(
                 "#include <sys/uio.h>", "#include <sys/uio.h>\n"
@@ -288,6 +331,7 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
                         "reset_before_exact_drain": "identity", "drop_meta_reset": "identity",
                         "drop_acceptance_identity": "reuse", "drop_init_identity": "init-reuse",
                         "restart_rejected_backoff": "rejected-backoff",
+                        "drop_refusal_invalidation": "refusal",
                         "drop_tick_maps_cache": "first-tick"}
         mutations = [
             ("drop_pid_compare",
@@ -340,6 +384,10 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
             assert f"FAIL: {assertion}" in result.stderr, (label, result.stderr)
             print(f"MUTANT {label}: built, reached case, rejected by '{assertion}'")
         other_mutations = [
+            ("drop_refusal_invalidation", recording,
+             "if (target_tick_enabled && targets[n].error == ESTALE) attr_valid[n] = 0;",
+             "/* retain predecessor sample on identity refusal */",
+             "stale identity refusal records zero samples for every type and tier"),
             ("drop_meta_reset", registry,
              "memset(&be->meta, 0, sizeof(be->meta));\n            be->meta_parsed = false;",
              "/* retain predecessor metadata */",
@@ -396,6 +444,7 @@ static int sample_registry(struct pgwt_daemon *d, uint64_t tick_ts)
             changed = original.replace(before, after)
             kwargs = ({"enrollment": changed} if original == lifecycle else
                       {"registry_source": changed} if original == registry else
+                      {"recording_source": changed} if original == recording else
                       {"resolution": changed} if original == policy else
                       {"sampler_source": changed} if original == sampler else {})
             binary = build(label, changed if original == source else source, **kwargs)
