@@ -247,31 +247,43 @@ int pgwt_pgbs_derive_cmd_gate(
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
     struct pgwt_pgbs_cmd_gate *out);
 
-/* Sampled-reader lifetime is one registry enrollment. Open once, including
- * failures: retries require the original starttime. /proc/PID/mem pins
- * that incarnation's mm; reads after exit fail instead of following PID reuse.
- * Zero initialization is safe; close is idempotent. */
+/* Cached row proof, scoped to one registry enrollment. No retained fd.
+ * start_time is checked on fork delivery and before/after own-pid resolution;
+ * coherent shared rows prove identity, never process liveness. */
 struct pgwt_pgbs_reader {
-    int mem_fd;
     pid_t pid;
-    bool opened;
-    bool dead;              /* EOF on the pinned mm, never reopened */
-    int open_error;
-    uint64_t start_time;    /* enrollment identity for failed-open retries */
+    uint64_t start_time;
     uint64_t status_addr;
+    uint64_t activity_addr; /* PG13 fixed per-slot BackendActivityBuffer */
+    pid_t shared_reader_pid;
+    bool shared;
 };
-int pgwt_pgbs_reader_open(struct pgwt_pgbs_reader *reader, pid_t pid);
-void pgwt_pgbs_reader_close(struct pgwt_pgbs_reader *reader);
-uint64_t pgwt_pgbs_reader_resolve_entry(
-    struct pgwt_pgbs_reader *reader, const struct PgBackendStatusLayout *layout);
-int pgwt_pgbs_reader_attr(
-    struct pgwt_pgbs_reader *reader, pid_t pid, uint64_t my_be_entry_addr,
-    uint64_t backend_status_addr, const struct PgBackendStatusLayout *layout,
-    struct pgwt_pgbs_sampled_attr *out);
-int pgwt_pgbs_reader_cmd_gate(
-    struct pgwt_pgbs_reader *reader, pid_t pid, uint64_t my_be_entry_addr,
-    uint64_t backend_status_addr, const struct PgBackendStatusLayout *layout,
-    struct pgwt_pgbs_cmd_gate *out);
+int pgwt_pgbs_reader_enroll(struct pgwt_pgbs_reader *reader, pid_t pid);
+void pgwt_pgbs_reader_reset(struct pgwt_pgbs_reader *reader);
+int pgwt_pgbs_reader_resolve(
+    struct pgwt_pgbs_reader *reader, pid_t postmaster_pid,
+    uint64_t my_be_entry_addr, const struct PgBackendStatusLayout *layout);
+
+#define PGWT_PGBS_IOV_MAX 1024
+#define PGWT_PGBS_BATCH_MAX 1024
+struct pgwt_pgbs_batch_target {
+    struct pgwt_pgbs_reader *reader; /* NULL excludes non-attribution targets */
+    pid_t pid;                     /* buffer is wired to THIS target */
+    struct pgwt_pgbs_sampled_attr attr;
+    struct pgwt_pgbs_cmd_gate gate;
+    int rc;                        /* 0, NO_CONTEXT, or -1 (unread/invalid) */
+    int error;
+};
+/* Ordered per-row counter/span/[PG13 text]/counter ranges. Completed ranges
+ * are determined from the returned BYTE count. Only torn rows are retried,
+ * with at most two extra syscalls. gate_only omits PG13 text for the recheck.
+ * Each failed enabled target increments failures_total once, after all retries;
+ * the caller invalidates that target's sample.
+ * This routine never resolves addresses or falls back to own-pid reads. */
+void pgwt_pgbs_read_batch(pid_t postmaster_pid,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_batch_target *targets, size_t n, bool gate_only,
+    uint64_t *failures_total);
 
 /* Re-read the command gate for ONE backend, now. backend_status_addr is the
  * caller's cached PgBackendStatus row when it has one (PG13 path); 0 means

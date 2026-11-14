@@ -46,7 +46,7 @@ static struct pgwt_backend *alloc_backend(struct pgwt_backend_table *bt,
     /* Reuse dead slot */
     for (int i = 0; i < bt->count; i++) {
         if (!bt->entries[i].is_alive && bt->entries[i].pid == 0) {
-            pgwt_pgbs_reader_close(&bt->entries[i].sampled_reader);
+            pgwt_pgbs_reader_reset(&bt->entries[i].sampled_reader);
             free(bt->entries[i].pg13_synthetic_cache);
             memset(&bt->entries[i], 0, sizeof(bt->entries[i]));
             bt->entries[i].wp_fd = -1;
@@ -491,7 +491,7 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
          * future exact generation's watchpoint enrollment. */
         if (!pgwt_mode_uses_watchpoints(d)) {
             if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout))
-                pgwt_pgbs_reader_open(&be->sampled_reader, pid);
+                pgwt_pgbs_reader_enroll(&be->sampled_reader, pid);
             be->attach_ts = now_ns();
             if (pgwt_parse_cmdline(pid, &be->meta) == 0)
                 be->meta_parsed = true;
@@ -885,11 +885,11 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     int live = lifecycle_target(d, child_pid);
     if (live <= 0) return live < 0 ? -1 : 0;
 
-    /* A lost EXIT must not make a replacement PID inherit a dead mm.
+    /* A lost EXIT must not make a replacement PID inherit a stale row.
      * Identity checks happen on lifecycle delivery, never per steady tick. */
     struct pgwt_backend *existing = pgwt_find_backend(&d->backends, child_pid);
     if (existing) {
-        if (!pgwt_mode_uses_watchpoints(d) && existing->sampled_reader.opened &&
+        if (!pgwt_mode_uses_watchpoints(d) && existing->sampled_reader.pid != 0 &&
             !pgwt_pgbs_pid_is_original(child_pid,
                                        existing->sampled_reader.start_time))
             pgwt_handle_exit(d, child_pid);
@@ -905,7 +905,7 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
      * sampler lazily resolves wp_addr once the backend sets the pointer. */
     if (!pgwt_mode_uses_watchpoints(d)) {
         if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout))
-            pgwt_pgbs_reader_open(&be->sampled_reader, child_pid);
+            pgwt_pgbs_reader_enroll(&be->sampled_reader, child_pid);
         if (d->verbose)
             fprintf(stderr, "INFO: fork detected PID %d (sampled, no watchpoint)\n",
                     child_pid);
@@ -1216,7 +1216,7 @@ int pgwt_handle_exit_at(struct pgwt_daemon *d, pid_t pid, uint64_t exit_ts)
     /* BPF enrolls at fork, before a userspace registry entry exists. Even
      * a retired-before-enrollment target must have those maps cleaned. */
     if (!be) return 0;
-    pgwt_pgbs_reader_close(&be->sampled_reader);
+    pgwt_pgbs_reader_reset(&be->sampled_reader);
     be->is_alive = false;
 
     if (d->verbose)
@@ -1238,7 +1238,7 @@ void pgwt_close_all_backends(struct pgwt_backend_table *bt)
         bt->entries[i].wp_fd = -1;
         pgwt_close_watchpoint(bt->entries[i].bootstrap_fd);
         bt->entries[i].bootstrap_fd = -1;
-        pgwt_pgbs_reader_close(&bt->entries[i].sampled_reader);
+        pgwt_pgbs_reader_reset(&bt->entries[i].sampled_reader);
         free(bt->entries[i].pg13_synthetic_cache);
         bt->entries[i].pg13_synthetic_cache = NULL;
     }

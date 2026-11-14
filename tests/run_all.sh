@@ -611,6 +611,7 @@ EOF
 # a bash array without eval; shell quoting/expansion inside it is unsupported.
 LIVE_TESTS=(
     "test_lifecycle|bash|test_lifecycle.sh"
+    "test_sampler_batch_live|python3|test_sampler_batch_live.py"
     "test_init_hint_recovery|python3|test_init_hint_recovery.py"
     "test_counter_vector_live|python3|test_counter_vector_live.py"
     "test_counter_vector_phase_live|python3|test_counter_vector_phase_live.py"

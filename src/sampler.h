@@ -113,11 +113,7 @@ struct pgwt_sample_target {
      * whether a CLIENT backend's we==0 reading is a CPU sample. */
     enum pgwt_backend_type backend_type;
     int      cmd_open;
-    /* Cached PgBackendStatus row for this backend, when the caller has one
-     * (PG13 resolves and caches it); 0 = resolve via MyBEEntry. Used only by
-     * the post-read command-gate recheck (#294). */
-    uint64_t status_addr;
-    struct pgwt_pgbs_reader *attr_reader; /* pinned enrollment, no registry search */
+    struct pgwt_pgbs_reader *attr_reader; /* enrollment row proof, no registry search */
 };
 
 enum pgwt_sampled_attr_tick_outcome {

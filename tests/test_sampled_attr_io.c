@@ -1,6 +1,5 @@
-/* Compile-time I/O injection counts the actual libc calls in the production
- * translation unit, including any open accidentally added outside a helper.
- * No /proc, BPF, PostgreSQL or timing assumptions: runnable on macOS. */
+/* Inject libc and process_vm_readv into the production translation unit.
+ * Runs on macOS: no /proc, PostgreSQL, BPF, timing, or kernel assumptions. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -9,19 +8,23 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include "pg_wait_tracer.h"
-
 static FILE *io_fopen(const char *, const char *);
 static int io_open(const char *, int, ...);
 static int io_openat(int, const char *, int, ...);
 static int io_close(int);
 static ssize_t io_pread(int, void *, size_t, off_t);
+static ssize_t io_readv(pid_t, const struct iovec *, unsigned long,
+                        const struct iovec *, unsigned long, unsigned long);
 #define fopen io_fopen
 #define open io_open
 #define openat io_openat
 #define close io_close
 #define pread io_pread
+#define process_vm_readv io_readv
+#define PGWT_PGBS_INJECT_VM_READV 1
 #ifndef PGWT_PGBS_SOURCE
 #define PGWT_PGBS_SOURCE "../src/backend_status_layout.c"
 #endif
@@ -31,261 +34,280 @@ static ssize_t io_pread(int, void *, size_t, off_t);
 #undef openat
 #undef close
 #undef pread
+#undef process_vm_readv
 
-static int checks, failures, opens, openats, closes, reads;
-static int incarnation = 1, pinned, directory_incarnation, live = 1;
-static int fail_open, replace_during_open, torn, odd, short_row, unread_activity;
-static uint8_t row[440];
-static uint64_t entry;
-static char activity[64] = "SELECT 42";
+static int checks, failures, opens, openats, closes, reads, calls, fopens;
+static int private_target, private_reader, incarnation = 1;
+static int tear_row = -1, transient_tear, short_row = -1, fault_row = -1;
+static int reader_gone, mutate_on_span, max_iovs, after_copy[1024], visits[1024];
+static uint8_t storage[1024 * 440];
+static uint64_t entries[1024];
+static char activity[1024][64];
 static struct PgBackendStatusLayout layout;
+static struct pgwt_pgbs_reader cache[1024];
+static struct pgwt_pgbs_batch_target targets[1024];
+static size_t population;
+static uint64_t tick_failures;
+static uint8_t *row_at(size_t i) { return storage + i * layout.struct_size; }
 #define CHECK(c, msg) do { checks++; if (!(c)) { failures++; \
-    fprintf(stderr, "FAIL: %s (open=%d openat=%d pread=%d close=%d)\n", \
-            msg, opens, openats, reads, closes); } } while (0)
+    fprintf(stderr, "FAIL: %s (open=%d openat=%d pread=%d close=%d vm=%d)\n", \
+            msg, opens, openats, reads, closes, calls); } } while (0)
 
-/* Only enrollment/retry uses stat. Keep the real parser, injecting its
- * /proc file contents so starttime/PID reuse are exercised on macOS too. */
 static FILE *io_fopen(const char *path, const char *mode)
 {
-    if (!strstr(path, "/stat")) return fopen(path, mode);
-    if (!live) { errno = ESRCH; return NULL; }
+    fopens++;
+    if (!strstr(path, "/stat") && !strstr(path, "/maps")) return fopen(path, mode);
     FILE *fp = tmpfile();
     if (!fp) abort();
-    fputs("42 (postgres) S", fp);
-    for (int field = 4; field < 22; field++) fputs(" 0", fp);
-    fprintf(fp, " %d\n", incarnation);
+    if (strstr(path, "/stat")) {
+        fputs("1000 (postgres) S", fp);
+        for (int field = 4; field < 22; field++) fputs(" 0", fp);
+        fprintf(fp, " %d\n", incarnation);
+    } else {
+        int pid = 0;
+        (void)sscanf(path, "/proc/%d/maps", &pid);
+        const char *perms = (pid == 42 ? private_reader : private_target) ? "rw-p" : "rw-s";
+        fprintf(fp, "%llx-%llx %s 00000000 00:00 1\n",
+            (unsigned long long)(uintptr_t)storage,
+            (unsigned long long)(uintptr_t)(storage + population * layout.struct_size), perms);
+        fprintf(fp, "%llx-%llx %s 00000000 00:00 2\n",
+            (unsigned long long)(uintptr_t)activity,
+            (unsigned long long)(uintptr_t)(activity + population), perms);
+    }
     rewind(fp);
     return fp;
 }
 static int io_open(const char *path, int flags, ...)
-{
-    (void)flags;
-    opens++;
-    if (fail_open) { errno = EACCES; return -1; }
-    if (strstr(path, "/mem")) {
-        pinned = incarnation;
-        return 101;
-    }
-    directory_incarnation = incarnation;
-    if (replace_during_open) { incarnation++; live = 1; }
-    return 100;
-}
+{ (void)path; (void)flags; opens++; return 101; }
 static int io_openat(int fd, const char *path, int flags, ...)
-{
-    (void)path; (void)flags;
-    openats++;
-    if (fd != 100 || directory_incarnation != incarnation || !live) {
-        errno = ESRCH;
-        return -1;
-    }
-    pinned = directory_incarnation;
-    return 101;
-}
-static int io_close(int fd)
-{
-    CHECK(fd == 100 || fd == 101, "close owns only its descriptor");
-    closes++;
-    return 0;
-}
+{ (void)fd; (void)path; (void)flags; openats++; return 101; }
+static int io_close(int fd) { (void)fd; closes++; return 0; }
 static ssize_t io_pread(int fd, void *buf, size_t size, off_t offset)
 {
-    reads++;
-    if (fd != 101 || !live || pinned != incarnation) return 0;
+    (void)fd; reads++;
     uintptr_t addr = (uintptr_t)offset;
-    if (addr >= (uintptr_t)row && addr < (uintptr_t)row + sizeof(row) &&
-        size > 8 && short_row)
-        return (ssize_t)size - 1;
-    if (addr == (uintptr_t)activity && unread_activity) return -1;
-    /* Fault immediately beyond the required field span, even when unused
-     * struct padding is larger. The production bulk read must not need it. */
-    uint32_t end = layout.major == 13
-        ? layout.st_activity_raw.offset + layout.st_activity_raw.width
-        : layout.st_query_id.offset + layout.st_query_id.width;
-    if (addr >= (uintptr_t)row && addr < (uintptr_t)row + sizeof(row) &&
-        addr + size > (uintptr_t)row + end) { errno = EFAULT; return -1; }
-    if (addr == (uintptr_t)row + layout.st_changecount.offset && size == 4) {
-        uint32_t count;
-        memcpy(&count, row + layout.st_changecount.offset, 4);
-        if (torn) { count += 2; memcpy(row + layout.st_changecount.offset, &count, 4); }
-        if (odd) count |= 1u;
-        memcpy(buf, &count, 4);
-        return 4;
+    if ((addr >= (uintptr_t)storage && addr + size <= (uintptr_t)(storage + sizeof(storage))) ||
+        (addr >= (uintptr_t)entries && addr + size <= (uintptr_t)(entries + 1024)) ||
+        (addr >= (uintptr_t)activity && addr + size <= (uintptr_t)(activity + 1024))) {
+        memcpy(buf, (void *)addr, size); return (ssize_t)size;
     }
-    if (!((addr >= (uintptr_t)row && addr + size <= (uintptr_t)row + sizeof(row)) ||
-          (addr == (uintptr_t)&entry && size == sizeof(entry)) ||
-          (addr == (uintptr_t)activity && size <= sizeof(activity)))) {
-        errno = EFAULT;
-        return -1;
+    errno = EFAULT; return -1;
+}
+static void put(size_t i, const struct pgwt_pgbs_field *field, uint64_t value)
+{ memcpy(row_at(i) + field->offset, &value, field->width); }
+static ssize_t io_readv(pid_t pid, const struct iovec *local, unsigned long nl,
+                        const struct iovec *remote, unsigned long nr, unsigned long flags)
+{
+    calls++;
+    CHECK(pid == 42 && flags == 0 && nl == nr, "postmaster is the only reader");
+    if ((int)nr > max_iovs) max_iovs = (int)nr;
+    if (nr > 1024) { errno = EINVAL; return -1; }
+    if (reader_gone) { errno = ESRCH; return -1; }
+    size_t total = 0;
+    for (size_t j = 0; j < nr; j++) {
+        uintptr_t addr = (uintptr_t)remote[j].iov_base;
+        size_t len = remote[j].iov_len;
+        CHECK(len == local[j].iov_len, "matching local and remote ranges");
+        if (addr >= (uintptr_t)storage && addr < (uintptr_t)(storage + sizeof(storage))) {
+            size_t i = (addr - (uintptr_t)storage) / layout.struct_size;
+            uintptr_t offset = addr - (uintptr_t)row_at(i);
+            /* Keep round one's guard: unused row padding is unreadable.
+             * A whole-struct copy must not replace the required field span. */
+            const struct pgwt_pgbs_field *last = layout.major == 13
+                ? &layout.st_activity_raw : &layout.st_query_id;
+            if (offset + len > last->offset + last->width) {
+                if (total) return (ssize_t)total;
+                errno = EFAULT; return -1;
+            }
+            if ((int)i == fault_row || ((int)i == short_row && len > 4)) {
+                if (total) return (ssize_t)(total + ((int)i == short_row ? len - 1 : 0));
+                errno = EFAULT; return -1;
+            }
+            if (offset == layout.st_changecount.offset && len == 4) {
+                visits[i]++;
+                uint32_t value;
+                memcpy(&value, (void *)addr, 4);
+                if ((int)i == tear_row && (!transient_tear || after_copy[i] < 2)) {
+                    value += 2;
+                    memcpy((void *)addr, &value, 4);
+                    after_copy[i]++;
+                }
+            } else if (len > 4 && mutate_on_span) {
+                /* A real writer begins/finishes while payload is copied. A
+                 * misplaced counter-after before the span cannot catch it. */
+                uint32_t value;
+                memcpy(&value, row_at(i) + layout.st_changecount.offset, 4);
+                put(i, &layout.st_changecount, value + 2);
+            }
+        }
+        memcpy(local[j].iov_base, remote[j].iov_base, len);
+        total += len;
     }
-    memcpy(buf, (const void *)addr, size);
-    return (ssize_t)size;
+    return (ssize_t)total;
 }
-static void reset_counts(void) { opens = openats = closes = reads = 0; }
-static void put(const struct pgwt_pgbs_field *field, uint64_t value)
+static void reset_counts(void)
 {
-    memcpy(row + field->offset, &value, field->width);
+    opens = openats = closes = reads = calls = max_iovs = 0;
+    tick_failures = 0; fopens = 0;
+    memset(visits, 0, sizeof(visits)); memset(after_copy, 0, sizeof(after_copy));
 }
-static void fixture(int major)
+static void fixture(int major, size_t n)
 {
+    population = n;
     CHECK(pgwt_pgbs_hard_table_lookup(major, PGWT_PGBS_ARCH_X86_64, 8,
           PGWT_PGBS_ABI_SYSV_LP64, &layout) == 0, "fixture layout exists");
     layout.validation = PGWT_PGBS_VALIDATION_VALIDATED;
-    struct pgwt_pgbs_field *fields[] = {&layout.st_changecount,
-        &layout.st_procpid, &layout.st_databaseid, &layout.st_userid,
-        &layout.st_state, &layout.st_activity_raw, &layout.st_query_id};
+    struct pgwt_pgbs_field *fields[] = {&layout.st_changecount, &layout.st_procpid,
+        &layout.st_databaseid, &layout.st_userid, &layout.st_state,
+        &layout.st_activity_raw, &layout.st_query_id};
     for (size_t i = 0; i < sizeof(fields)/sizeof(fields[0]); i++)
         if (fields[i]->present) fields[i]->validation = PGWT_PGBS_FIELD_VALIDATED;
-    memset(row, 0, sizeof(row));
-    layout.activity_buffer_size = sizeof(activity);
-    layout.status_anchor = entry = (uintptr_t)row;
-    put(&layout.st_changecount, 20);
-    put(&layout.st_procpid, 42);
-    put(&layout.st_databaseid, 16384);
-    put(&layout.st_userid, 10);
-    put(&layout.st_state, layout.state_running);
-    put(&layout.st_activity_raw, (uintptr_t)activity);
-    if (major != 13) put(&layout.st_query_id, 0xf123456789abcdefULL);
-    live = 1;
-    torn = odd = short_row = unread_activity = fail_open = replace_during_open = 0;
+    memset(storage, 0, sizeof(storage)); memset(targets, 0, sizeof(targets));
+    layout.activity_buffer_size = sizeof(activity[0]);
+    layout.status_anchor = (uintptr_t)storage;
+    for (size_t i = 0; i < n; i++) {
+        snprintf(activity[i], sizeof(activity[i]), "SELECT %zu", i);
+        entries[i] = (uintptr_t)row_at(i);
+        put(i, &layout.st_changecount, 20);
+        put(i, &layout.st_procpid, 1000 + i);
+        put(i, &layout.st_databaseid, 16384);
+        put(i, &layout.st_userid, 10);
+        put(i, &layout.st_state, layout.state_running);
+        put(i, &layout.st_activity_raw, (uintptr_t)activity[i]);
+        if (major != 13) put(i, &layout.st_query_id, 0xf123456789abcdefULL + i);
+        /* Budget fixture starts AFTER enrollment. Separate tests exercise
+         * the production own-pid resolver and both mapping proofs. */
+        cache[i] = (struct pgwt_pgbs_reader){.pid = (pid_t)(1000 + i), .start_time = 1,
+            .status_addr = entries[i], .activity_addr = (uintptr_t)activity[i],
+            .shared_reader_pid = 42, .shared = true};
+        targets[i].pid = (pid_t)(1000 + i); targets[i].reader = &cache[i];
+        targets[i].rc = -1;
+    }
+    private_target = private_reader = reader_gone = mutate_on_span = transient_tear = 0;
+    incarnation = 1; tear_row = short_row = fault_row = -1;
     reset_counts();
 }
-static int attr(struct pgwt_pgbs_reader *reader, struct pgwt_pgbs_sampled_attr *out)
+static void batch(void) { pgwt_pgbs_read_batch(42, &layout, targets, population, false, &tick_failures); }
+static void test_budget(int major, size_t n, int expected)
 {
-    return pgwt_pgbs_reader_attr(reader, 42, (uintptr_t)&entry,
-                                layout.major == 13 ? entry : 0, &layout, out);
+    fixture(major, n);
+    for (int tick = 0; tick < 500; tick++) {
+        batch();
+        for (size_t i = 0; i < n; i++)
+            CHECK(targets[i].rc == 0 && targets[i].attr.cmd_open &&
+                  targets[i].attr.databaseid == 16384 && targets[i].attr.userid == 10 &&
+                  (major == 13 ? strcmp(targets[i].attr.activity, activity[i]) == 0 :
+                   targets[i].attr.query_id == 0xf123456789abcdefULL + i),
+                  "every budget row retains its context and query");
+    }
+    CHECK(calls == 500 * expected && max_iovs <= 1024 &&
+          !opens && !openats && !reads && !closes && !fopens, "batched syscall budget over 500 ticks");
+    printf("PG%d N=%zu ticks=500: vm/tick=%d expected=%d open=0 pread=0 close=0\n",
+           major, n, calls/500, expected);
 }
-static void test_version(int major)
+static void test_faults(int major)
 {
-    fixture(major);
-    struct pgwt_pgbs_sampled_attr out;
-    int rc = major == 13
-        ? pgwt_pgbs_read_sampled_attr_at(42, entry, &layout, &out)
-        : pgwt_pgbs_read_sampled_attr(42, (uintptr_t)&entry, &layout, &out);
-    CHECK(rc == 0 && out.cmd_open, "baseline reaches command case");
-    CHECK(opens == 1 && openats == 0 && reads == 8 && closes == 1,
-          "baseline attribution is ten syscalls");
-    printf("PG%d baseline: open=1 pread=8 close=1 total=10\n", major);
-
-    struct pgwt_pgbs_reader reader = {0};
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == 0, "enrollment opens pinned reader");
-    CHECK(attr(&reader, &out) == 0 && out.cmd_open && out.databaseid == 16384 &&
-          out.userid == 10, "first cached read preserves command/context");
-    CHECK(reader.status_addr == entry, "coherent identity caches row");
-    uint64_t saved_entry = entry;
+    fixture(major, 5);
+    tear_row = 2; batch();
+    CHECK(targets[2].rc == -1 && !targets[2].attr.cmd_open && calls == 3 && visits[2] == 6 && tick_failures == 1,
+          "persistent tear fails once after two retry calls");
+    CHECK(targets[0].rc == 0 && targets[4].rc == 0 && visits[0] == 2 && visits[4] == 2,
+          "only the torn row is retried");
+    fixture(major, 5); tear_row = 2; transient_tear = 1; batch();
+    CHECK(targets[2].rc == 0 && calls == 2, "transient tear recovers coherently");
+    fixture(major, 5); short_row = 2; batch();
+    CHECK(targets[0].rc == 0 && targets[1].rc == 0 && targets[2].rc == -1 &&
+          !targets[2].attr.cmd_open && targets[3].rc == 0 && targets[4].rc == 0 &&
+          visits[2] == 1 && tick_failures == 1, "short byte count rejects partial row and resumes later rows");
+    fixture(major, 5); fault_row = 2; batch();
+    CHECK(targets[1].rc == 0 && targets[2].rc == -1 && targets[3].rc == 0,
+          "faulted row is final while neighbours survive");
+    fixture(major, 5); reader_gone = 1; batch();
+    CHECK(calls == 1 && !opens && !openats && !reads && !closes && tick_failures == 5,
+          "reader ESRCH is bounded without own-pid fallback");
+    for (size_t i = 0; i < population; i++)
+        CHECK(targets[i].rc == -1 && !targets[i].attr.cmd_open,
+              "untransferred rows cannot be parsed as valid");
+    fixture(major, 5); put(2, &layout.st_procpid, 9999); batch();
+    CHECK(targets[2].rc == -1 && !cache[2].status_addr && !cache[2].shared,
+          "slot reuse rejects PID and drops cached address");
+    put(2, &layout.st_procpid, 1002);
+    CHECK(pgwt_pgbs_reader_resolve(&cache[2], 42, (uintptr_t)&entries[2], &layout) == 0,
+          "slot reuse re-resolves through own pid");
+    batch(); CHECK(targets[2].rc == 0, "re-resolved slot is usable");
+    fixture(major, 5); targets[1].reader = &cache[2]; targets[2].reader = &cache[1]; batch();
+    CHECK(targets[1].rc == -1 && targets[2].rc == -1 && targets[0].rc == 0,
+          "cross-wired cache enrollments fail closed");
+    fixture(major, 5); cache[1].status_addr = entries[2]; cache[2].status_addr = entries[1]; batch();
+    CHECK(targets[1].rc == -1 && targets[2].rc == -1,
+          "cross-wired row buffers fail PID identity");
+    fixture(major, 5); put(2, &layout.st_state, major == 18 ? 2 : 1); batch();
+    CHECK(targets[2].rc == 0 && !targets[2].attr.cmd_open, "idle row is observed");
+    put(2, &layout.st_state, layout.state_running);
+    strcpy(activity[2], "SELECT 'next'");
+    if (major != 13) put(2, &layout.st_query_id, 9876);
+    batch();
+    CHECK(targets[2].rc == 0 && targets[2].attr.cmd_open && visits[2] == 4 &&
+          (major == 13 ? strcmp(targets[2].attr.activity, "SELECT 'next'") == 0 :
+           targets[2].attr.query_id == 9876),
+          "idle row changes on the next tick");
+    fixture(major, 5); mutate_on_span = 1; batch();
+    CHECK(targets[2].rc == -1 && calls == 3, "counter after payload detects concurrent writer");
+    fixture(major, 5); cache[2].shared = false; batch();
+    CHECK(targets[2].rc == -1 && visits[2] == 0 && targets[1].rc == 0,
+          "unproven shared address is never batched");
+    fixture(major, 5); put(2, &layout.st_state, layout.state_max + 1); batch();
+    CHECK(targets[2].rc == -1, "invalid state fails closed");
     if (major != 13) {
-        reader.status_addr = 0; entry = 0;
-        CHECK(attr(&reader, &out) == -1 && !reader.status_addr && !reader.dead,
-              "early null MyBEEntry remains retryable on pinned mm");
-        entry = saved_entry;
-        CHECK(attr(&reader, &out) == 0 && reader.status_addr == entry,
-              "initialized MyBEEntry is discovered without reopening");
+        fixture(major, 5); put(2, &layout.st_databaseid, 0); batch();
+        CHECK(targets[2].rc == PGWT_PGBS_ATTR_NO_CONTEXT, "NO_CONTEXT stays distinct");
     }
-    reset_counts();
-    for (int i = 0; i < 500; i++) CHECK(attr(&reader, &out) == 0, "steady tick succeeds");
-    int per_tick = major == 13 ? 4 : 3;
-    CHECK(opens == 0 && openats == 0 && closes == 0 && reads == 500 * per_tick,
-          "steady attribution syscall budget and no opens");
-    printf("PG%d cached: open=0 pread=%d close=0 total=%d per backend/tick (500 ticks)\n",
-           major, per_tick, per_tick);
-    if (major == 13) CHECK(strcmp(out.activity, activity) == 0, "PG13 activity preserved");
-    else CHECK(out.query_id == 0xf123456789abcdefULL, "all query id bits preserved");
-
-    put(&layout.st_state, major == 18 ? 2 : 1); /* PostgreSQL STATE_IDLE */
-    reset_counts();
-    CHECK(attr(&reader, &out) == 0 && !out.cmd_open && !out.query_id && !out.activity[0],
-          "fresh idle state closes gate");
-    CHECK(reads == per_tick, "idle backend receives full fresh snapshot");
-    put(&layout.st_state, layout.state_running);
-    CHECK(attr(&reader, &out) == 0 && out.cmd_open, "idle-to-active never skipped");
-    struct pgwt_pgbs_cmd_gate gate;
-    reset_counts();
-    CHECK(pgwt_pgbs_reader_cmd_gate(&reader, 42, (uintptr_t)&entry, entry,
-          &layout, &gate) == 0 && gate.cmd_open, "fresh command gate succeeds");
-    CHECK(reads == 3 && !opens && !openats && !closes, "fresh gate has no open/close");
-
-    torn = 1; reset_counts();
-    CHECK(attr(&reader, &out) == -1 && !out.cmd_open, "torn snapshot fails closed");
-    CHECK(reads == 32 * per_tick, "all 32 torn-read attempts remain bounded");
-    torn = 0; odd = 1; reset_counts();
-    CHECK(attr(&reader, &out) == -1 && reads == 32, "odd counter refuses before fields");
-    odd = 0; short_row = 1;
-    CHECK(attr(&reader, &out) == -1 && !out.query_id, "short bulk copy fails closed");
-    short_row = 0;
-    put(&layout.st_procpid, 99);
-    CHECK(attr(&reader, &out) == -1 && !out.cmd_open, "wrong row PID refuses");
-    CHECK(reader.status_addr == 0, "identity mismatch invalidates row cache");
-    put(&layout.st_procpid, 42);
-    if (major != 13) {
-        put(&layout.st_databaseid, 0);
-        CHECK(attr(&reader, &out) == PGWT_PGBS_ATTR_NO_CONTEXT && !out.cmd_open,
-              "context-less coherent row retains distinct positive outcome");
-        put(&layout.st_databaseid, 16384);
-    }
-    if (major == 13) {
-        unread_activity = 1;
-        CHECK(attr(&reader, &out) == 0 && out.cmd_open && !out.activity[0],
-              "unreadable activity keeps coherent command unattributed");
-        unread_activity = 0;
-    }
-    live = 0; reset_counts();
-    CHECK(attr(&reader, &out) == -1, "exit between ticks refuses old mm");
-    incarnation++; live = 1; /* same numeric PID/address/content, new process */
-    CHECK(attr(&reader, &out) == -1 && !out.cmd_open, "PID reuse never redirects cached mm");
-    CHECK(!opens && !openats && !closes, "dead reader is never reopened on tick");
-    pgwt_pgbs_reader_close(&reader);
-    reset_counts(); pgwt_pgbs_reader_close(&reader);
-    CHECK(!closes, "retirement close is idempotent");
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == 0 && attr(&reader, &out) == 0,
-          "fresh enrollment can bind replacement PID");
-    pgwt_pgbs_reader_close(&reader);
-
-    fixture(major); reader = (struct pgwt_pgbs_reader){0};
-    replace_during_open = 1;
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == -1,
-          "proc directory prevents PID replacement during enrollment");
-    replace_during_open = 0; reset_counts();
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == -1 && !opens && !openats,
-          "failed enrollment cannot retry against replacement");
-    CHECK(attr(&reader, &out) == -1 && !reads, "failed enrollment refuses samples");
-    pgwt_pgbs_reader_close(&reader);
-
-    fixture(major); reader = (struct pgwt_pgbs_reader){0};
-    fail_open = 1;
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == -1 && reader.open_error == EACCES,
-          "open failure retains errno and original identity");
-    fail_open = 0;
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == 0 && attr(&reader, &out) == 0,
-          "transient open failure retries original incarnation");
-    reset_counts();
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == 0 && !opens && !openats,
-          "same enrollment never opens a second descriptor");
-    CHECK(pgwt_pgbs_reader_attr(&reader, 99, (uintptr_t)&entry, entry,
-          &layout, &out) == -1 && !reads, "foreign enrollment PID refuses before I/O");
-    pgwt_pgbs_reader_close(&reader);
-
-    fixture(major); reader = (struct pgwt_pgbs_reader){0};
-    fail_open = 1;
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == -1, "failed enrollment retains identity");
-    fail_open = 0; incarnation++; reset_counts();
-    CHECK(pgwt_pgbs_reader_open(&reader, 42) == -1 && !opens && !openats,
-          "retry cannot open a replacement PID");
-    pgwt_pgbs_reader_close(&reader);
+    /* Partial transfers on both sides of the 1024-iovec chunk boundary. */
+    fixture(major, 1024); short_row = major == 13 ? 256 : 341; batch();
+    CHECK(targets[short_row-1].rc == 0 && targets[short_row].rc == -1 &&
+          targets[short_row+1].rc == 0 && targets[1023].rc == 0,
+          "short row at chunk boundary never borrows previous bytes");
+    fixture(major, 1024);
+    for (size_t i = 0; i < population; i++) put(i, &layout.st_changecount, 21);
+    batch();
+    CHECK(calls == (major == 13 ? 6 : 5) && tick_failures == 1024 && visits[1023] == 2,
+          "large torn set has at most two retry calls and one failure per backend");
+    printf("PG%d fault/identity/idle/chunk cases reached\n", major);
 }
-static void test_churn(void)
+static void test_resolve(int major)
 {
-    fixture(18);
-    struct pgwt_pgbs_reader reader = {0};
-    for (int i = 0; i < MAX_BACKENDS + 1; i++) {
-        CHECK(pgwt_pgbs_reader_open(&reader, 42) == 0, "churn enrolls");
-        pgwt_pgbs_reader_close(&reader);
-    }
-    CHECK(opens + openats == closes, "churn closes every enrollment descriptor");
-    printf("descriptor churn: %d enrollments, %d opens, %d closes\n",
-           MAX_BACKENDS + 1, opens + openats, closes);
+    fixture(major, 3);
+    struct pgwt_pgbs_reader r;
+    CHECK(pgwt_pgbs_reader_enroll(&r, 1001) == 0 && r.start_time == 1 && !opens,
+          "enrollment stores start time without descriptor");
+    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == 0 &&
+          r.shared && r.status_addr == entries[1] && opens == closes,
+          "own-pid resolution caches coherent shared row and closes mem");
+    private_target = 1;
+    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == -1 && !r.shared,
+          "private target mapping refuses proof");
+    private_target = 0; private_reader = 1;
+    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == -1 && !r.shared,
+          "private postmaster mapping refuses proof");
+    private_reader = 0; incarnation = 2; reset_counts();
+    CHECK(pgwt_pgbs_reader_resolve(&r, 42, (uintptr_t)&entries[1], &layout) == -1 && !opens,
+          "own-pid resolution refuses replacement incarnation");
+    pgwt_pgbs_reader_reset(&r); CHECK(!r.pid && !r.status_addr, "retirement clears row proof");
+    fixture(major, 3); reset_counts();
+    pgwt_pgbs_read_batch(42, &layout, targets, population, true, &tick_failures);
+    CHECK(calls == 1 && targets[1].rc == 0 && targets[1].gate.cmd_open &&
+          targets[1].gate.query_id_valid == (major != 13) && !opens && !reads,
+          "command recheck uses one foreign-pid batch and same predicate");
 }
 int main(void)
 {
-    test_version(18); test_version(17); test_version(13); test_churn();
-    printf("sampled_attr_io: %d/%d checks passed\n", checks - failures, checks);
+    (void)io_openat; /* catches an accidentally reintroduced openat */
+    for (int i = 0; i < 3; i++) {
+        const int major[] = {13,17,18};
+        test_budget(major[i], 512, 2);
+        test_budget(major[i], 1024, major[i] == 13 ? 4 : 3);
+        test_faults(major[i]); test_resolve(major[i]);
+    }
+    printf("sampled_attr_io: %d/%d checks passed\n", checks-failures, checks);
     return failures ? 1 : 0;
 }

@@ -966,32 +966,29 @@ void pgwt_sampler_accumulate(struct pgwt_daemon *d,
 
 #ifndef PGWT_SERVER
 
-/* #294: the live fresh-gate read behind pgwt_sampler_recheck_cmd_gate. One
- * coherent PgBackendStatus snapshot for one backend, taken AFTER this tick's
- * wait_event_info read, decided by the SAME predicate the tick source used
- * (pgwt_pgbs_state_is_cmd_open). Returns 0 on any failure without writing. */
+/* The recheck callback consumes a foreign-pid batch taken AFTER the wait
+ * words. It performs no I/O and uses the same validated command predicate. */
+struct sampler_gate_batch {
+    struct pgwt_daemon *daemon;
+    struct pgwt_pgbs_batch_target *rows;
+};
 static int sampler_live_cmd_gate(void *ctx, int idx,
                                  const struct pgwt_sample_target *t,
                                  int *cmd_open, uint64_t *query_id,
                                  int *query_id_valid)
 {
-    struct pgwt_daemon *d = ctx;
-    (void)idx;
-    struct pgwt_pgbs_cmd_gate gate;
-    if (!d || !t ||
-        pgwt_pgbs_reader_cmd_gate(t->attr_reader, t->pid,
-                                  d->my_be_entry_addr, t->status_addr,
-                                  &d->backend_status_layout, &gate) != 0)
-        return 0;
-    *cmd_open = gate.cmd_open ? 1 : 0;
-    if (gate.query_id_valid) {
-        *query_id = gate.query_id;
+    struct sampler_gate_batch *batch = ctx;
+    struct pgwt_daemon *d = batch->daemon;
+    if (batch->rows[idx].rc != 0) return 0;
+    const struct pgwt_pgbs_cmd_gate *gate = &batch->rows[idx].gate;
+    *cmd_open = gate->cmd_open ? 1 : 0;
+    if (gate->query_id_valid) {
+        *query_id = gate->query_id;
         *query_id_valid = 1;
-        if (gate.cmd_open && gate.query_id != 0 && d->pgss_resolver) {
+        if (gate->cmd_open && gate->query_id != 0 && d->pgss_resolver) {
             struct pgwt_query_text_key key = {
-                .databaseid = t->databaseid,
-                .userid = t->userid,
-                .query_id = gate.query_id,
+                .databaseid = t->databaseid, .userid = t->userid,
+                .query_id = gate->query_id,
             };
             pgwt_pgss_resolver_queue(d->pgss_resolver, &key);
         }
@@ -1044,6 +1041,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     /* Reuse a stack target array sized to the live count; MAX_BACKENDS cap. */
     static struct pgwt_sample_target targets[MAX_BACKENDS];
     static uint8_t attr_valid[MAX_BACKENDS];
+    static uint8_t tick_enabled[MAX_BACKENDS];
+    static struct pgwt_backend *backend_rows[MAX_BACKENDS];
+    static struct pgwt_pgbs_batch_target attr_rows[MAX_BACKENDS];
     int n = 0;
     int attr_errno = 0;
     int attr_no_context = 0;
@@ -1106,9 +1106,6 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         targets[n].userid = be->userid;
         targets[n].query_quality = PGWT_QUERY_QUALITY_NONE;
         targets[n].last_query_id = 0;   /* rewritten by select_attr below */
-        /* 0 = the #294 recheck resolves the row through MyBEEntry; the PG13
-         * branch below fills in the row it already cached. */
-        targets[n].status_addr = 0;
         targets[n].attr_reader = &be->sampled_reader;
         /* The syslogger is not a PostgreSQL backend: it has no MyBEEntry or
          * PgBackendStatus slot, and its on-CPU samples are already excluded
@@ -1126,6 +1123,42 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         const bool target_tick_enabled = tick_source_enabled &&
             targets[n].backend_type != PGWT_BT_LOGGER &&
             (!activity_tick_source || activity_target);
+        backend_rows[n] = be;
+        tick_enabled[n] = target_tick_enabled;
+        attr_rows[n].reader = target_tick_enabled ? &be->sampled_reader : NULL;
+        attr_rows[n].pid = be->pid;
+        if (target_tick_enabled && !be->sampled_reader.status_addr &&
+            tick_ts >= be->pgbs_resolve_retry_ns) {
+            if (pgwt_pgbs_reader_resolve(&be->sampled_reader, d->postmaster_pid,
+                    d->my_be_entry_addr, &d->backend_status_layout) == 0) {
+                be->pgbs_resolve_attempts = 0;
+                be->pgbs_resolve_retry_ns = 0;
+            } else {
+                unsigned shift = be->pgbs_resolve_attempts < 5
+                    ? be->pgbs_resolve_attempts++ : 5;
+                be->pgbs_resolve_retry_ns = tick_ts +
+                    (UINT64_C(100000000) << shift);
+            }
+        }
+        be->pgbs_addr = be->sampled_reader.status_addr;
+        n++;
+    }
+    int target_count = n;
+    if (tick_source_enabled)
+        pgwt_pgbs_read_batch(d->postmaster_pid, &d->backend_status_layout,
+                              attr_rows, (size_t)n, false,
+                              &d->counters.sampled_attr_tick_read_failures_total);
+    for (n = 0; n < target_count; n++) {
+        struct pgwt_backend *be = backend_rows[n];
+        const bool target_tick_enabled = tick_enabled[n];
+        /* A mismatched row has lost its proof. Re-resolution uses the same
+         * own-pid exponential backoff as initial enrollment. */
+        if (target_tick_enabled && be->pgbs_addr &&
+            !be->sampled_reader.status_addr) {
+            be->pgbs_addr = 0;
+            be->pgbs_resolve_retry_ns = tick_ts + UINT64_C(100000000);
+            be->pgbs_resolve_attempts = 1;
+        }
         struct pgwt_sampled_attr_value uprobe_attr = {0};
         bool uprobe_shadow_valid = false;
         if (qidx_n >= 0) {
@@ -1148,43 +1181,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         int tick_ok = 0;
         if (target_tick_enabled) {
             errno = 0;
-            /* Retry only failed enrollment opens, with the original starttime
-             * and bounded backoff. Successful descriptors never reopen. */
-            if (be->sampled_reader.opened && be->sampled_reader.mem_fd < 0 &&
-                !be->sampled_reader.dead && tick_ts >= be->sampled_reader_retry_ns) {
-                pgwt_pgbs_reader_open(&be->sampled_reader, be->pid);
-                be->sampled_reader_retry_ns = tick_ts + UINT64_C(3200000000);
-            }
-            if (pgwt_pgbs_sampled_activity_enabled(
-                    &d->backend_status_layout)) {
-                /* PG13 does not export MyBEEntry. Resolve its shared status
-                 * row once, then keep the 10 Hz path to one coherent read.
-                 * Failed new-backend resolution is backed off so connection
-                 * churn cannot trigger an array scan on every tick. */
-                uint64_t resolve_now = mono_ns();
-                if (be->pgbs_addr == 0 &&
-                    resolve_now >= be->pgbs_resolve_retry_ns) {
-                    be->pgbs_addr = pgwt_pgbs_reader_resolve_entry(
-                        &be->sampled_reader, &d->backend_status_layout);
-                    if (be->pgbs_addr) {
-                        be->pgbs_resolve_attempts = 0;
-                        be->pgbs_resolve_retry_ns = 0;
-                    } else {
-                        unsigned shift = be->pgbs_resolve_attempts < 5
-                            ? be->pgbs_resolve_attempts++ : 5;
-                        be->pgbs_resolve_retry_ns = resolve_now +
-                            (UINT64_C(100000000) << shift);
-                    }
-                }
-                targets[n].status_addr = be->pgbs_addr;
-                tick_rc = pgwt_pgbs_reader_attr(
-                    &be->sampled_reader, be->pid, 0, be->pgbs_addr,
-                    &d->backend_status_layout, &tick_raw);
-            } else {
-                tick_rc = pgwt_pgbs_reader_attr(
-                    &be->sampled_reader, be->pid, d->my_be_entry_addr, 0,
-                    &d->backend_status_layout, &tick_raw);
-            }
+            tick_rc = attr_rows[n].rc;
+            tick_raw = attr_rows[n].attr;
+            errno = attr_rows[n].error;
             tick_ok = (tick_rc == 0);
             if (tick_ok) {
                 tick_attr.query_id = tick_raw.query_id;
@@ -1318,7 +1317,6 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                                 be->pid);
                     break;
                 case PGWT_TICK_ATTR_READ_FAILED:
-                    d->counters.sampled_attr_tick_read_failures_total++;
                     if (!attr_errno)
                         attr_errno = errno ? errno : EAGAIN;
                     if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
@@ -1334,13 +1332,6 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             target_tick_enabled, tick_ok,
             &tick_attr, &uprobe_attr, &targets[n]);
         attr_valid[n] = source != PGWT_SAMPLED_ATTR_DROP;
-        if (target_tick_enabled && be->sampled_reader.dead) {
-            /* EOF proves that the original mm has exited, even if its EXIT
-             * was lost and kill(numeric_pid, 0) sees a replacement process. */
-            attr_valid[n] = 0;
-            pgwt_handle_exit(d, be->pid);
-        }
-        n++;
     }
     if (n == 0) {
         pgwt_sampler_note_coverage(s, 0, 0);
@@ -1366,6 +1357,76 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             got--;
         }
     }
+    /* #294 — the read-ORDER window, closed with the authoritative predicate.
+     *
+     * cmd_open above came from the status-row batch; wait_event_info was read in
+     * the batch just now. A command that OPENED in between reads as "on CPU,
+     * no command" and would be dropped. Re-read the gate NOW, for the at-risk
+     * set only, through the SAME derivation the tick source uses — not
+     * debug_query_string, which is a DIFFERENT definition of "in a command"
+     * (it clears before PostgreSQL reports STATE_IDLE, so it under-counts the
+     * post-command window the exact tier does attribute).
+     *
+     * Only the tick source needs this: the at-risk set is CLIENT/UNKNOWN,
+     * for which target_tick_enabled == tick_source_enabled always (they are
+     * activity_targets and not LOGGER). The edge-source fallback below keeps
+     * its own debug_query_string recovery, which is all it has. */
+    if (tick_source_enabled) {
+        for (int i = 0; i < n; i++) {
+            attr_rows[i].reader = s->read_valid[i] && s->read_vals[i] == 0 &&
+                targets[i].backend_type != PGWT_BT_LOGGER &&
+                !pgwt_cpu_sample_recordable(targets[i].backend_type,
+                                             targets[i].cmd_open)
+                ? targets[i].attr_reader : NULL;
+        }
+        pgwt_pgbs_read_batch(d->postmaster_pid, &d->backend_status_layout,
+                              attr_rows, (size_t)n, true,
+                              &d->counters.sampled_attr_tick_read_failures_total);
+        struct sampler_gate_batch gate_batch = {d, attr_rows};
+        struct pgwt_sampler_recheck_stats rs;
+        pgwt_sampler_recheck_cmd_gate(targets, s->read_vals, s->read_valid, n,
+                                      sampler_live_cmd_gate, &gate_batch, &rs);
+        for (int i = 0; i < n; i++) {
+            if (attr_rows[i].reader && attr_rows[i].rc < 0) {
+                s->read_valid[i] = 0;
+                got--;
+                if (!attr_errno) attr_errno = attr_rows[i].error;
+                if (backend_rows[i]->pgbs_addr &&
+                    !targets[i].attr_reader->status_addr) {
+                    backend_rows[i]->pgbs_addr = 0;
+                    backend_rows[i]->pgbs_resolve_retry_ns = tick_ts +
+                        UINT64_C(100000000);
+                    backend_rows[i]->pgbs_resolve_attempts = 1;
+                }
+            }
+        }
+        d->counters.cmd_gate_order_at_risk_total += rs.at_risk;
+        d->counters.cmd_gate_order_recovered_total += rs.recovered;
+        d->counters.cmd_gate_order_read_failed_total += rs.read_failed;
+        /* A fresh gate read that cannot be taken fails CLOSED, which means the
+         * sample is dropped — correct, but indistinguishable in the data from a
+         * backend that genuinely was not in a command. On a host that blocks
+         * process_vm_readv (hardened kernel, restricted ptrace scope) this would
+         * be EVERY at-risk sample, i.e. the whole #294 under-count silently
+         * back. Say it once, out of band. WARNING, not ERROR: unlike the
+         * invalid-class-byte backstop below this is a degradation that fails
+         * safe, not a wrong reading. */
+        if (rs.read_failed && !d->cmd_gate_order_read_failed_logged) {
+            d->cmd_gate_order_read_failed_logged = true;
+            fprintf(stderr,
+                    "WARNING: sampler could not re-read the command gate for "
+                    "%llu on-CPU sample(s) this tick; those samples were "
+                    "DROPPED, not counted as CPU.\n"
+                    "  The gate fails closed, so this under-counts CPU rather "
+                    "than inventing it (cmd_gate_order_read_failed_total "
+                    "counts them; compare cmd_gate_order_at_risk_total).\n"
+                    "  A persistently growing count means shared-memory "
+                    "reads are being refused — check ptrace_scope and any "
+                    "kernel hardening.\n",
+                    (unsigned long long)rs.read_failed);
+        }
+    }
+
     if (got == 0)
         read_errno = pgwt_sampler_tick_read_errno(read_errno, attr_errno,
                                                   attr_no_context);
@@ -1421,62 +1482,6 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         uint32_t we = s->read_vals[i];
         if (we == 0 || !pgwt_is_idle_event(we))
             d->counters.io_worker_busy_total++;
-    }
-
-    /* T2 command-gate ground truth (EL9 fix). The state_map cmd_open the
-     * targets carry is transition-edge maintained: it is correct for a backend
-     * whose entry existed before its command began, but stuck at 0 for a
-     * command already in flight when the entry was created (attach straddle /
-     * new-backend seed race). That would drop the command's every on-CPU
-     * sample. Verify against the backend's OWN debug_query_string for exactly
-     * the samples at risk — an on-CPU (we==0) reading from a command-gated type
-     * (client/unknown) whose edge-gate is closed. This is the buggy set only;
-     * the common steady state (edge already open, or not on CPU) does zero
-     * extra reads. When ground truth says "in a command", also refresh the
-     * query_id the edge-uprobe likewise missed. */
-    /* #294 — the read-ORDER window, closed with the authoritative predicate.
-     *
-     * cmd_open above was read in the target loop; wait_event_info was read in
-     * the batch just now. A command that OPENED in between reads as "on CPU,
-     * no command" and would be dropped. Re-read the gate NOW, for the at-risk
-     * set only, through the SAME derivation the tick source uses — not
-     * debug_query_string, which is a DIFFERENT definition of "in a command"
-     * (it clears before PostgreSQL reports STATE_IDLE, so it under-counts the
-     * post-command window the exact tier does attribute).
-     *
-     * Only the tick source needs this: the at-risk set is CLIENT/UNKNOWN,
-     * for which target_tick_enabled == tick_source_enabled always (they are
-     * activity_targets and not LOGGER). The edge-source fallback below keeps
-     * its own debug_query_string recovery, which is all it has. */
-    if (tick_source_enabled) {
-        struct pgwt_sampler_recheck_stats rs;
-        pgwt_sampler_recheck_cmd_gate(targets, s->read_vals, s->read_valid, n,
-                                      sampler_live_cmd_gate, d, &rs);
-        d->counters.cmd_gate_order_at_risk_total += rs.at_risk;
-        d->counters.cmd_gate_order_recovered_total += rs.recovered;
-        d->counters.cmd_gate_order_read_failed_total += rs.read_failed;
-        /* A fresh gate read that cannot be taken fails CLOSED, which means the
-         * sample is dropped — correct, but indistinguishable in the data from a
-         * backend that genuinely was not in a command. On a host that blocks
-         * /proc/<pid>/mem (hardened kernel, restricted ptrace scope) this would
-         * be EVERY at-risk sample, i.e. the whole #294 under-count silently
-         * back. Say it once, out of band. WARNING, not ERROR: unlike the
-         * invalid-class-byte backstop below this is a degradation that fails
-         * safe, not a wrong reading. */
-        if (rs.read_failed && !d->cmd_gate_order_read_failed_logged) {
-            d->cmd_gate_order_read_failed_logged = true;
-            fprintf(stderr,
-                    "WARNING: sampler could not re-read the command gate for "
-                    "%llu on-CPU sample(s) this tick; those samples were "
-                    "DROPPED, not counted as CPU.\n"
-                    "  The gate fails closed, so this under-counts CPU rather "
-                    "than inventing it (cmd_gate_order_read_failed_total "
-                    "counts them; compare cmd_gate_order_at_risk_total).\n"
-                    "  A persistently growing count means /proc/<pid>/mem "
-                    "reads are being refused — check ptrace_scope and any "
-                    "kernel hardening.\n",
-                    (unsigned long long)rs.read_failed);
-        }
     }
 
     if (!tick_source_enabled && d->debug_query_string_addr) {
