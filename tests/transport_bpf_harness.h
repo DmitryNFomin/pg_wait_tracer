@@ -25,18 +25,20 @@ struct bpf_perf_event_data { int unused; };
 struct trace_event_raw_sched_process_fork { u32 parent_pid, child_pid; };
 struct trace_event_raw_sched_process_template { u32 pid; };
 struct pgwt_seen_query_key { u32 pid, reserved; u64 query_id; };
-static int state_map, transport_ctl, transport_attempts, transport_failures;
+static int state_map, transport_ctl, transport_attempts, transport_failures, transport_discards;
 static int lifetime_allocator, helper_cpus, helper_progress, test_spin;
 static int event_ringbuf, lifecycle_rb, ringbuf_drops, ringbuf_site_drops;
 static int fail_counters, test_failure_claims, perf_events, exact_attr_map, exact_seed_map;
+static int init_wake, wakes; /* the INIT wake-up hint: counted, never a record */
 static int seen_query_ids;
 static struct pgwt_pid_state state;
 static struct pgwt_transport_ctl ctl;
 static struct pgwt_helper_progress progress;
 static struct pgwt_fail_spin spin;
-static u64 attempts[3], failures[3], drops, sites[PGWT_RING_FAIL_SITE_MAX];
+/* withdrawn[] is the transport_discards map; `discards` counts release calls. */
+static u64 attempts[3], failures[3], withdrawn[3], drops, sites[PGWT_RING_FAIL_SITE_MAX];
 static u64 map_failures[PGWT_BPF_FAIL_MAX], allocator, tick;
-static u32 cpu, expected_cpu, exact_perf_mode = 1, helper_tgid = 100;
+static u32 cpu, expected_cpu, exact_perf_mode = 1, helper_tgid = 100, helper_el_tid;
 static u64 current_id = (u64)42 << 32 | 42, test_fail_spin_ns;
 static u32 target_postmaster_pid = 1, test_counter_failure;
 static bool state_present, registered, claimed, admission = true;
@@ -59,6 +61,7 @@ static void *bpf_map_lookup_elem(void *map, const void *key)
     if (map == &transport_ctl) return &ctl;
     if (map == &transport_attempts) return &attempts[k];
     if (map == &transport_failures) return &failures[k];
+    if (map == &transport_discards) return &withdrawn[k];
     if (map == &lifetime_allocator) return &allocator;
     if (map == &helper_cpus) return registered ? &expected_cpu : NULL;
     if (map == &helper_progress) return &progress;
@@ -123,8 +126,10 @@ static long bpf_ringbuf_output(void *map, void *ptr, size_t len, int flags)
 }
 static long bpf_perf_event_output(void *ctx, void *map, u64 flags, void *ptr, size_t len)
 {
-    (void)ctx; (void)map;
+    (void)ctx;
     CHECK("perf always current CPU", flags == BPF_F_CURRENT_CPU);
+    if (map == &init_wake) { CHECK("hint carries only a pid", len == 4); ++wakes; return 0; }
+    CHECK("transport perf destination", map == &perf_events);
     CHECK("perf capacity", reservations < 64 && len <= 512);
     if (fail_dest == PGWT_WIRE_DEST_CPU) return -1;
     struct record *r = &records[reservations++];
@@ -166,11 +171,12 @@ static void reset(void)
         CHECK("every reservation released exactly once", records[i].done == 1 || records[i].done == -1);
     memset(&state, 0, sizeof(state)); state.cookie = 9; state.wp_live = 1;
     memset(attempts, 0, sizeof(attempts)); memset(failures, 0, sizeof(failures));
+    memset(withdrawn, 0, sizeof(withdrawn)); helper_el_tid = 0;
     memset(sites, 0, sizeof(sites)); memset(map_failures, 0, sizeof(map_failures));
     memset(records, 0, sizeof(records)); memset(&spin, 0, sizeof(spin));
     memset(&progress, 0, sizeof(progress)); ctl = (struct pgwt_transport_ctl){.round=1};
     state_present = true; registered = true; claimed = false; admission = true;
-    fail_dest = -1; outputs = reservations = discards = update_error = 0; text_result = 9;
+    fail_dest = -1; outputs = reservations = discards = update_error = wakes = 0; text_result = 9;
     drops = tick = edge_stamp = allocator = 0; cpu = expected_cpu = 0;
     exact_perf_mode = 1; test_fail_spin_ns = 0; current_id = (u64)42 << 32 | 42;
     rewrite_wp_live = -1; close_on_edge = remove_on_clock = false;
@@ -223,13 +229,13 @@ static void tests(void)
     CHECK("command saved admission avoids unreserved output", !reservations && !attempts[1] && !outputs);
     reset(); close_on_edge = true; on_report_activity(&cmd); timestamp_order();
     CHECK("command admission discard is not a ring drop", discards == 1 && !outputs &&
-        attempts[1] == 1 && failures[1] == 1 && !drops && !sites[PGWT_RING_FAIL_COMMAND_BOUNDARY]);
+        attempts[1] == 1 && withdrawn[1] == 1 && !failures[1] && !drops && !sites[PGWT_RING_FAIL_COMMAND_BOUNDARY]);
     reset(); close_on_edge = true; emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
     CHECK("marker admission discard is not a ring drop", discards == 1 && !outputs &&
-        attempts[1] == 1 && failures[1] == 1 && !drops && !sites[PGWT_RING_FAIL_MARKER]);
+        attempts[1] == 1 && withdrawn[1] == 1 && !failures[1] && !drops && !sites[PGWT_RING_FAIL_MARKER]);
     reset(); remove_on_clock = true; emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
     CHECK("marker vanished state releases reservation", discards == 1 && !outputs &&
-        failures[1] == 1 && !drops && !sites[PGWT_RING_FAIL_MARKER]);
+        withdrawn[1] == 1 && !failures[1] && !drops && !sites[PGWT_RING_FAIL_MARKER]);
     reset(); fail_dest = 1; on_report_activity(&cmd);
     CHECK("command fail attribution coherent", edge_stamp && state.cmd_open == 1 && attempts[1] == 1 && failures[1] == 1);
     reset(); transport_exit(42, &state); timestamp_order();
@@ -238,7 +244,8 @@ static void tests(void)
         ((struct pgwt_wire_lifecycle *)records[1].bytes)->payload.timestamp);
     for (int dest = 1; dest <= 2; ++dest) {
         reset(); fail_dest = dest; transport_exit(42, &state);
-        CHECK("partial exit discarded and counted", !outputs && discards == 1 && failures[1] == 1 && failures[2] == 1 && drops == 1 && !state_present);
+        CHECK("partial exit discarded and counted", !outputs && discards == 1 && failures[1] == 1 && failures[2] == 1 && drops == 1 && !state_present &&
+            !withdrawn[1] && !withdrawn[2]);
     }
     reset(); state.wp_live=0; transport_exit(42, &state);
     CHECK("unattached exit submits lifecycle only", outputs==1 && !attempts[1] && attempts[2]==1 &&
@@ -253,12 +260,15 @@ static void tests(void)
     on_bootstrap(NULL);
     CHECK("bootstrap stores INIT once", state.init_ts == init_ts);
     CHECK("zero INIT records on L under exact_perf_mode", !reservations && !outputs && !attempts[2] && !failures[2]);
+    /* One wake-up per stored INIT, and no transport attempt on any key. */
+    CHECK("stored INIT wakes the sweep once, with no attempt", wakes == 1 && !attempts[0] && !attempts[1] && !attempts[2] &&
+        !failures[0] && !withdrawn[0]);
     reset(); fail_dest = 2; on_bootstrap(NULL);
     CHECK("INIT storage independent of ring availability", state.init_stored && state.init_ts &&
         !reservations && !attempts[2] && !failures[2] && !sites[PGWT_RING_FAIL_LIFECYCLE_INIT_HINT]);
     reset(); state_present = false; on_bootstrap(NULL);
     CHECK("INIT missing state counted without publication", map_failures[PGWT_BPF_FAIL_INIT_NO_STATE] == 1 &&
-        !reservations && !attempts[2] && !failures[2]);
+        !reservations && !attempts[2] && !failures[2] && !wakes);
     reset(); on_watchpoint(NULL);
     CHECK("watchpoint perf only", outputs == 1 && attempts[0] == 1 && !attempts[1] && records[0].dest == 0);
     reset(); fail_dest = 0; on_watchpoint(NULL);
@@ -270,6 +280,18 @@ static void tests(void)
     CHECK("boundary read before reserve", w < records[0].reserved_at);
     current_id = (u64)42 << 32 | 42; emit_marker(PGWT_MARKER_PLAN_START); timestamp_order();
     CHECK("nothing older after boundary", ((struct pgwt_wire_trace *)records[3].bytes)->payload.timestamp_ns >= w);
+    /* The daemon's leader is its event loop: a named helper thread issues E/L. */
+    reset(); helper_el_tid = 77; ctl.el_request = 1;
+    current_id = (u64)100 << 32 | 100; on_transport_helper(NULL);
+    CHECK("only the configured helper thread issues E/L", outputs == 1 && attempts[0] == 1 && !attempts[1] && !attempts[2]);
+    current_id = (u64)100 << 32 | 78; on_transport_helper(NULL);
+    CHECK("only the configured helper thread issues E/L", outputs == 2 && attempts[0] == 2 && !attempts[1] && !attempts[2]);
+    current_id = (u64)100 << 32 | 77; on_transport_helper(NULL);
+    CHECK("only the configured helper thread issues E/L", outputs == 5 && attempts[1] == 1 && attempts[2] == 1);
+    on_transport_helper(NULL);
+    CHECK("one E/L pair per request token", outputs == 6 && attempts[1] == 1 && attempts[2] == 1);
+    ctl.el_request = 2; on_transport_helper(NULL);
+    CHECK("a new token issues a new E/L pair", outputs == 9 && attempts[1] == 2 && attempts[2] == 2);
     for (int dest=0; dest<3; ++dest) {
         reset(); current_id=(u64)100<<32|100; ctl.el_request=1; fail_dest=dest;
         on_transport_helper(NULL); timestamp_order();
@@ -294,10 +316,10 @@ static void tests(void)
         CHECK("text failed reserve", !outputs && attempts[2]==1 && failures[2]==1 && sites[pg13?8:7]==1);
         reset(); text_result=-1;
         if (pg13) on_executor_start(&q); else on_report_query_id(&q);
-        CHECK("text discarded read failure", !outputs && discards==1 && attempts[2]==1 && failures[2]==1 && sites[pg13?8:7]==1);
+        CHECK("text discarded read failure", !outputs && discards==1 && attempts[2]==1 && failures[2]==1 && !withdrawn[2] && sites[pg13?8:7]==1);
         reset(); text_result=1;
         if (pg13) on_executor_start(&q); else on_report_query_id(&q);
-        CHECK("text discarded when empty", !outputs && discards==1 && attempts[2]==1 && failures[2]==1 && sites[pg13?8:7]==0);
+        CHECK("empty text is a discard, not a failure", !outputs && discards==1 && attempts[2]==1 && withdrawn[2]==1 && !failures[2] && sites[pg13?8:7]==0);
     }
     reset(); test_fail_spin_ns = 1000000; on_fork(&fork);
     CHECK("falsifier counted after measured spin", spin.ended-spin.started >= 1000000 && spin.completed >= spin.ended && failures[2] == 1 && attempts[2] == 1 && !outputs);

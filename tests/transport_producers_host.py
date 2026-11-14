@@ -13,7 +13,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FUNCTIONS = ('count_ring_fail', 'count_map_fail', 'test_fail_once',
              'transport_cookie', 'transport_attempt', 'transport_header',
-             'transport_failure', 'transport_trace_failure', 'transport_lifecycle_failure',
+             'transport_failure', 'transport_discard', 'transport_trace_failure', 'transport_lifecycle_failure',
              'transport_reserve_trace', 'transport_reserve_lifecycle', 'transport_spin_failure',
              'transport_boundary', 'on_transport_helper', 'emit_event',
              'on_watchpoint', 'on_bootstrap', 'on_fork', 'transport_exit', 'on_exit',
@@ -61,9 +61,10 @@ def restore_init_publication(source):
         '            struct pgwt_wire_lifecycle *wire = transport_reserve_lifecycle(&seq);\n'
         '            u64 stamp = bpf_ktime_get_ns();')
     return replace_once(source,
-        '            *(volatile u32 *)&st->init_stored = 1;\n            return 0;\n        }\n'
+        '            bpf_perf_event_output(ctx, &init_wake, BPF_F_CURRENT_CPU, &pid, sizeof(pid));\n'
+        '            return 0;\n        }\n'
         '        u64 init_ts = bpf_ktime_get_ns();',
-        '''            *(volatile u32 *)&st->init_stored = 1;
+        '''            bpf_perf_event_output(ctx, &init_wake, BPF_F_CURRENT_CPU, &pid, sizeof(pid));
             if (!wire) {
                 transport_lifecycle_failure(PGWT_RING_FAIL_LIFECYCLE_INIT_HINT);
                 return 0;
@@ -137,8 +138,18 @@ def main():
             ('', 'CONFIG_PREEMPT_NONE=y', 'none')):
         assert preemption_mode(dynamic, config) == expected, (dynamic, config)
     clean = dict(init_records=0, init_stored=1, attached=1, trace=1, failures=0, lost=0,
-                 cells=[dict(attempted=3, delivered=3, failed=0)])
+                 cells=[dict(attempted=3, delivered=3, failed=0, discarded=0)])
     assert_clean_pg(clean)
+    # A counted discard is accepted; an uncounted hole or a failure is not.
+    assert_clean_pg({**clean, 'cells': [dict(attempted=4, delivered=3, failed=0, discarded=1)]})
+    for cell in (dict(attempted=4, delivered=3, failed=0, discarded=0),
+                 dict(attempted=4, delivered=3, failed=1, discarded=0)):
+        try:
+            assert_clean_pg({**clean, 'cells': [cell]})
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f'live assertion accepted {cell}')
     for key, value, assertion in (
             ('init_records', 1, 'zero INIT records on L under exact_perf_mode'),
             ('init_stored', 0, 'at least one cohort pid has INIT stored')):
@@ -151,21 +162,23 @@ def main():
     # Execute the actual runner exclusion block in a tiny shell matrix. Its
     # continue must use exclude_test, just like the adjacent min_pg branch.
     runner = (ROOT / 'tests/run_all.sh').read_text()
-    start = runner.index('        if [[ "$name" == "test_transport_producers_live" &&')
-    end = runner.index('\n        fi', start) + len('\n        fi')
-    block = runner[start:end]
-    script = '''exclude_test() { printf 'EXCLUDED %s PG%s\\n' "$1" "$PG_VERSION"; }
+    # Both transport live tests: the producers' probe and the daemon path.
+    for live in ('test_transport_producers_live', 'test_transport_daemon_live'):
+        assert f'"{live}|python3|{live}.py"' in runner, live
+        start = runner.index(f'        if [[ "$name" == "{live}" &&')
+        end = runner.index('\n        fi', start) + len('\n        fi')
+        block = runner[start:end]
+        script = '''exclude_test() { printf 'EXCLUDED %s PG%s\\n' "$1" "$PG_VERSION"; }
 for PG_VERSION in 13 14 15 16 17 18; do
-    name=test_transport_producers_live
+    name=''' + live + '''
 ''' + block + '''
     printf 'RUN PG%s\\n' "$PG_VERSION"
 done
 '''
-    matrix = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=True)
-    assert matrix.stdout.splitlines() == [
-        'RUN PG13', 'EXCLUDED test_transport_producers_live PG14',
-        'EXCLUDED test_transport_producers_live PG15', 'EXCLUDED test_transport_producers_live PG16',
-        'RUN PG17', 'RUN PG18'], matrix.stdout
+        matrix = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=True)
+        assert matrix.stdout.splitlines() == [
+            'RUN PG13', f'EXCLUDED {live} PG14', f'EXCLUDED {live} PG15', f'EXCLUDED {live} PG16',
+            'RUN PG17', 'RUN PG18'], matrix.stdout
     print('live driver host checks: PASS (active preemption, missing evidence, INIT assertions, PG13-18 exclusion matrix)')
     source = (ROOT / 'src/bpf/pg_wait_tracer.bpf.c').read_text()
     with tempfile.TemporaryDirectory(prefix='pgwt-producers-host-') as tmp:
@@ -214,11 +227,36 @@ done
         mutants.append(('INIT-publication-restored', restore_init_publication(source), None,
                         'zero INIT records on L under exact_perf_mode'))
         mutants.append(('admission-discard-counts-drop', replace_once(source,
-            '        bpf_ringbuf_discard(wire, 0);\n        transport_failure(PGWT_WIRE_DEST_E);\n    }\n'
+            '        transport_discard(PGWT_WIRE_DEST_E);\n        bpf_ringbuf_discard(wire, 0);\n    }\n'
             '    if (pg13 && !open)',
-            '        bpf_ringbuf_discard(wire, 0);\n'
-            '        transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_COMMAND_BOUNDARY);\n    }\n'
+            '        transport_trace_failure(PGWT_WIRE_DEST_E, PGWT_RING_FAIL_COMMAND_BOUNDARY);\n'
+            '        bpf_ringbuf_discard(wire, 0);\n    }\n'
             '    if (pg13 && !open)'), None, 'command admission discard is not a ring drop'))
+        # A by-design discard counted as a failure: the daemon would VOID a
+        # run in which nothing was lost.
+        mutants.append(('discard-counted-as-failure', replace_once(source,
+            '        transport_discard(PGWT_WIRE_DEST_E);\n        bpf_ringbuf_discard(wire, 0);\n    }\n}\n',
+            '        transport_failure(PGWT_WIRE_DEST_E);\n        bpf_ringbuf_discard(wire, 0);\n    }\n}\n'),
+            None, 'marker admission discard is not a ring drop'))
+        # An empty text counted as a failure, and an unreadable one as a
+        # discard: both directions of the same confusion.
+        mutants.append(('empty-text-counted-as-failure', replace_once(source,
+            '        if (text_len < 0)\n            transport_failure(PGWT_WIRE_DEST_L);',
+            '        if (text_len <= 1)\n            transport_failure(PGWT_WIRE_DEST_L);'),
+            None, 'empty text is a discard, not a failure'))
+        mutants.append(('unreadable-text-counted-as-discard', replace_once(source,
+            '        if (text_len < 0)\n            transport_failure(PGWT_WIRE_DEST_L);',
+            '        if (text_len < -1)\n            transport_failure(PGWT_WIRE_DEST_L);'),
+            None, 'text discarded read failure'))
+        # Under the mode nothing else wakes the daemon for a stored INIT.
+        mutants.append(('INIT-wake-removed', replace_once(source,
+            '            bpf_perf_event_output(ctx, &init_wake, BPF_F_CURRENT_CPU, &pid, sizeof(pid));\n', ''),
+            None, 'stored INIT wakes the sweep once, with no attempt'))
+        # The E/L issuer is the configured helper thread, not whoever asks.
+        mutants.append(('any-helper-issues-el', replace_once(source,
+            'if (tid == el_tid && progress && request && progress->el_request != request) {',
+            'if (progress && request && progress->el_request != request) {'),
+            None, 'only the configured helper thread issues E/L'))
         # EXIT with E refused: the L reservation taken afterwards is unused
         # and must be released, not left held.
         mutants.append(('exit-partial-leak', replace_once(source,

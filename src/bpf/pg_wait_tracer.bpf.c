@@ -96,6 +96,10 @@ volatile const u32 pg13_qd_sourcetext_off = 0;   /* offsetof(QueryDesc, sourceTe
 /* Experimental producer protocol; zero preserves all legacy paths. */
 volatile const u32 exact_perf_mode = 0;
 volatile const u32 helper_tgid = 0; /* B's pinned helper process; 0 = absent */
+/* The one registered, pinned helper thread that publishes the requested E/L
+ * boundaries. 0 selects the process leader (the standalone probe's layout);
+ * the daemon's leader is its event loop, so it names a helper thread here. */
+volatile const u32 helper_el_tid = 0;
 /* Only the standalone falsifier object contains the delayed failure path. */
 #ifdef PGWT_TRANSPORT_FALSIFIER
 volatile const u64 test_fail_spin_ns = 0;
@@ -128,6 +132,18 @@ struct {
     __uint(max_entries, MAX_CPUS);
     __type(key, u32); __type(value, u32);
 } perf_events SEC(".maps");
+/* Wake-up ONLY, never evidence. Under the mode INIT is stored in state and
+ * published nowhere, so nothing else tells the daemon to sweep for it: an
+ * isolated short backend would exit unattached. on_bootstrap puts one sample
+ * on this CPU's hint buffer (per-CPU and lock-free in NMI context, exactly
+ * like wait DATA). It has no envelope, no sequence number, no attempt and no
+ * accounting: a refused output only delays the sweep to the daemon's next
+ * pass. The daemon discards the bytes. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, u32); __type(value, u32);
+} init_wake SEC(".maps");
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1);
     __type(key, u32); __type(value, struct pgwt_transport_ctl);
@@ -136,12 +152,26 @@ struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 3);
     __type(key, u32); __type(value, u64);
 } transport_attempts SEC(".maps");
-/* Includes discarded publications and boundary failures. Separate from the
- * existing logical/site counters; never cancels a counted failure on retry. */
+/* Attempts that failed to publish: refused reservations, refused perf
+ * output (DATA or boundary), an unreadable query text, and the granted half of
+ * a failed EXIT pair. Each one is evidence that did not arrive. Separate from
+ * the existing logical/site counters; never cancels a counted failure on
+ * retry. A reader must treat any nonzero value as a loss on that key. */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 3);
     __type(key, u32); __type(value, u64);
 } transport_failures SEC(".maps");
+/* Attempts withdrawn BY DESIGN after a successful reservation, with nothing
+ * lost: a marker or command boundary whose backend state vanished or whose
+ * admission closed between the reservation and the recheck (the default path
+ * emits nothing there either), and an EMPTY query text (not a first-seen
+ * text). Each consumed a sequence number and delivered no record. Per
+ * (CPU,destination): attempts = delivered + failures + discards. Never
+ * counted in transport_failures or in any logical counter. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 3);
+    __type(key, u32); __type(value, u64);
+} transport_discards SEC(".maps");
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1);
     __type(key, u32); __type(value, u64);
@@ -346,6 +376,13 @@ static __always_inline void transport_failure(u32 dest)
     u64 *c = bpf_map_lookup_elem(&transport_failures, &dest);
     if (c) __sync_fetch_and_add(c, 1);
 }
+/* Count BEFORE releasing the reservation: a reader that has consumed a later
+ * record of this (CPU,destination) then always finds the discard counted. */
+static __always_inline void transport_discard(u32 dest)
+{
+    u64 *c = bpf_map_lookup_elem(&transport_discards, &dest);
+    if (c) __sync_fetch_and_add(c, 1);
+}
 static __always_inline void transport_trace_failure(u32 dest, u32 site)
 {
     transport_failure(dest);
@@ -432,8 +469,9 @@ static __always_inline void transport_boundary(void *ctx, u32 dest, u32 round)
     }
 }
 /* One parked helper per online CPU calls getppid ONLY on demand. Register
- * TID->CPU before waking. The process leader also publishes requested E/L
- * candidates; el_request must change for each request (0 means none). */
+ * TID->CPU before waking. One registered thread (helper_el_tid, or the process
+ * leader when that is 0) also publishes requested E/L candidates; el_request
+ * must change for each request (0 means none). */
 SEC("tracepoint/syscalls/sys_enter_getppid")
 int on_transport_helper(void *ctx)
 {
@@ -449,7 +487,8 @@ int on_transport_helper(void *ctx)
     u32 round = control.round, request = control.el_request;
     if (!round) return 0;
     struct pgwt_helper_progress *progress = bpf_map_lookup_elem(&helper_progress, &zero);
-    if (tid == helper_tgid && progress && request && progress->el_request != request) {
+    u32 el_tid = helper_el_tid ? helper_el_tid : helper_tgid;
+    if (tid == el_tid && progress && request && progress->el_request != request) {
         transport_boundary(ctx, PGWT_WIRE_DEST_E, round);
         transport_boundary(ctx, PGWT_WIRE_DEST_L, round);
         progress->el_request = request;
@@ -923,6 +962,8 @@ int on_bootstrap(struct bpf_perf_event_data *ctx)
             st->init_ts = stamp;
             asm volatile("" ::: "memory");
             *(volatile u32 *)&st->init_stored = 1;
+            /* After the facts are stored: wake the daemon's sweep. */
+            bpf_perf_event_output(ctx, &init_wake, BPF_F_CURRENT_CPU, &pid, sizeof(pid));
             return 0;
         }
         u64 init_ts = bpf_ktime_get_ns();
@@ -1270,10 +1311,11 @@ static __always_inline void transport_marker(u32 pid, u32 marker)
         wire->payload = evt;
         bpf_ringbuf_submit(wire, 0);
     } else {
-        /* State vanished or admission closed: release, reconcile the
-         * attempt, and count no ring drop (flag-off never counts one). */
+        /* State vanished or admission closed: nothing to publish, exactly
+         * as flag-off publishes nothing. Count the withdrawn attempt as a
+         * discard (not a failure, not a ring drop), then release. */
+        transport_discard(PGWT_WIRE_DEST_E);
         bpf_ringbuf_discard(wire, 0);
-        transport_failure(PGWT_WIRE_DEST_E);
     }
 }
 
@@ -1390,9 +1432,14 @@ static __always_inline bool transport_text(u32 pid, u64 query_id, u64 text_ptr,
     if (text_len < 0)
         count_ring_fail(site);
     if (text_len <= 1) {
-        /* unreadable/empty is not a successful first-seen */
+        /* unreadable/empty is not a successful first-seen. Unreadable is a
+         * lost text (site counter above, and a transport failure); an empty
+         * string is a withdrawn attempt with nothing lost (a discard). */
+        if (text_len < 0)
+            transport_failure(PGWT_WIRE_DEST_L);
+        else
+            transport_discard(PGWT_WIRE_DEST_L);
         bpf_ringbuf_discard(wire, 0);
-        transport_failure(PGWT_WIRE_DEST_L);
         return false;
     }
     bpf_ringbuf_submit(wire, 0);
@@ -1453,10 +1500,10 @@ static __always_inline int transport_activity(u32 pid, struct pgwt_pid_state *st
         };
         bpf_ringbuf_submit(wire, 0);
     } else {
-        /* Admission closed: release and reconcile the attempt; not a ring
-         * drop (flag-off never counts one here). */
+        /* Admission closed: nothing to publish, as with flag-off. A
+         * discard (not a failure, not a ring drop), counted before release. */
+        transport_discard(PGWT_WIRE_DEST_E);
         bpf_ringbuf_discard(wire, 0);
-        transport_failure(PGWT_WIRE_DEST_E);
     }
     if (pg13 && !open)
         note_query_edge(pid, 0, now);

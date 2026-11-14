@@ -118,7 +118,10 @@ def assert_clean_pg(row):
     assert row['init_records'] == 0, 'zero INIT records on L under exact_perf_mode'
     assert row['init_stored'] > 0, 'at least one cohort pid has INIT stored'
     assert row['attached'] > 0 and row['trace'] > 0 and row['failures'] == 0 and row['lost'] == 0, row
-    assert all(cell['attempted'] == cell['delivered'] and cell['failed'] == 0 for cell in row['cells']), row
+    # A discard is an attempt withdrawn by design with nothing lost; it is
+    # counted apart from failures (transport_discards) and reported.
+    assert all(cell['attempted'] == cell['delivered'] + cell['discarded'] and cell['failed'] == 0
+               for cell in row['cells']), row
 
 
 def checked(command, **kwargs):
@@ -394,7 +397,7 @@ def run_pg(args, directory, db, seconds, churn, spin=0, binary=BINARY, extra=())
                   f"init_stored={row['init_stored']} init_records_on_L={row['init_records']} "
                   f"init_reserve_failures={row['init_reserve_failures']} trace={row['trace']} text={row['text']} "
                   f"attempted={row['attempted']} delivered={sum(c['delivered'] for c in row['cells'])} "
-                  f"failures={row['failures']} lost={row['lost']} spin_cpus={row['spin_cpus']} "
+                  f"failures={row['failures']} discards={row['discards']} lost={row['lost']} spin_cpus={row['spin_cpus']} "
                   f"spin_min_ns={row['spin_min_ns']} requests={row['requests']}", flush=True)
             return row
         finally:
@@ -489,7 +492,7 @@ def main():
             assert row['init_stored'] > 0 and row['init_records'] > 0, row
             assert row['init_reserve_failures'] > 0, ('the mutant arm met no refused INIT reservation', row)
             assert row['attached'] > 0 and row['trace'] > 0 and row['failures'] == 0 and row['lost'] == 0, row
-            assert all(cell['attempted'] == cell['delivered'] + cell['failed'] and
+            assert all(cell['attempted'] == cell['delivered'] + cell['failed'] + cell['discarded'] and
                        (cell['dest'] == 2 or cell['failed'] == 0) for cell in row['cells']), row
             assert sum(cell['failed'] for cell in row['cells']) == row['init_reserve_failures'], row
             try:

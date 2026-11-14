@@ -18,25 +18,40 @@ struct pgwt_transport_perf_attributes {
     bool watermark;
 };
 struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t buffer_bytes);
-/* The daemon's existing epoll timeout is 10 ms. Round requests, topology,
- * helper health and the standalone core CHECK run at most once per 10 ms slot,
- * even with continuous watermark/control readiness. Drain on every call.
- * Keep slots anchored to the clock: early wakes must not reset the deadline.
- * Once fencing has every CPU ack, completion retries on EVERY loop pass.
- * If at least one completion drain in every K consecutive passes is empty,
- * release from the transport takes <=K further passes, or <=K*P time for
- * passes at most P apart (including processing). A percentage of empty
- * passes alone gives no worst-case bound: the maximum gap must be bounded.
- * DATA newer than an E/L cutoff can need two rounds: their completion-drain
- * waits add <=2*K passes to ingress, slot and helper delays. Kernel-buffer
- * residence is <=10 ms + one pass. Helpers, OS stalls and attachment proof
- * need their own bounds; there is no unconditional 70 ms/100 ms guarantee.
- * If no completion drain is ever empty, completion CAN starve. The daemon
- * keeps draining and holding, reports pending records and maximum held age,
- * and suspends with VOID(allocation_fail) if the 262144-entry queue fills.
- * Shutdown bounds the unfinished drain to 256 passes/100 ms, then VOIDs
- * unknown_evidence. The box must qualify measured held age <=100 ms.
+/* The daemon's existing epoll timeout is 10 ms. NEW round requests, topology,
+ * helper health, the open round's failure poll and the standalone core CHECK
+ * run at most once per 10 ms slot, even with continuous watermark/control
+ * readiness. Drain on every call. Keep slots anchored to the clock: early
+ * wakes must not reset the deadline. The fence (after the round's E and L
+ * boundaries) and completion are progress work: retried on EVERY loop pass.
+ *
+ * COMPLETION RULE. A round completes when (a) its E and L boundaries were
+ * consumed, (b) every CPU's higher-round acknowledgement was consumed, and
+ * (c) consumption reached the frozen target on every (CPU,destination), with
+ * every skipped sequence number a counted discard and no failure counted.
+ * An empty pass is NOT required: emptiness is not evidence (CONTRACT.md:128)
+ * and a busy box may never produce one. With prompt helpers the round
+ * completes in the pass that consumes the last acknowledgement.
+ * A target not reached is a HOLD, not a fault, while its records can still
+ * arrive. It is decided in a bounded number of passes even if no pass is
+ * ever empty: the E/L producer positions are read once after every ack (the
+ * cut); the reader reaches it in at most backlog/(4096 records) + 1 passes,
+ * not counting passes that stop at an unfinished reservation (never
+ * skipped; those end when that producer does, and after
+ * PGWT_TRANSPORT_CUT_STALL_PASSES of them the round VOIDs unknown_evidence).
+ * Past the cut, a still-missing attempt must be a counted discard, else
+ * VOID(sequence_gap). A failed attempt is diagnosed without any pass, from
+ * the failure counters read after the acks and on every service slot.
+ * DATA newer than an E/L cutoff can need two rounds. Kernel-buffer residence
+ * is <=10 ms + one pass. Helpers, OS stalls and attachment proof need their
+ * own bounds; there is no unconditional 70 ms/100 ms guarantee: the box
+ * measures held age and event-to-release age, and the daemon reports both.
+ * The daemon suspends with VOID(allocation_fail) if the 262144-entry queue
+ * fills. Shutdown bounds the unfinished drain to 256 passes/100 ms, then
+ * VOIDs unknown_evidence.
  * Time is NEVER completeness evidence or permission to release DATA. */
+#define PGWT_TRANSPORT_MIN_RING_RECORD 56U   /* 48-byte boundary + 8-byte ring header */
+#define PGWT_TRANSPORT_CUT_STALL_PASSES 4096U
 uint64_t pgwt_transport_service_interval_ns(void);
 bool pgwt_transport_service_due(uint64_t now, uint64_t previous, bool serviced);
 
@@ -110,14 +125,29 @@ struct pgwt_transport_io {
     int (*wake)(void *, uint32_t cpu);
     /* cpu-major triples, CPU/E/L, across exactly the participating CPUs. */
     int (*attempts)(void *, uint64_t *, size_t);
+    /* Same shape. failures: attempts whose record did not arrive (any
+     * nonzero value is a loss). discards: attempts withdrawn by design
+     * after a successful reservation, nothing lost. Per key:
+     * attempts = delivered + failures + discards. */
+    int (*failures)(void *, uint64_t *, size_t);
+    int (*discards)(void *, uint64_t *, size_t);
+    /* Shared-ring byte positions, [0]=E and [1]=L: how far producers have
+     * reserved, and how far this reader has consumed. Reservations are
+     * ordered, and an unfinished one stops the reader. */
+    int (*positions)(void *, uint64_t produced[2], uint64_t consumed[2]);
     int (*counters)(void *, ma_snapshot *);
-    /* Drain each destination until empty after acknowledgements; BUSY or a
-     * bounded drain returns 0, complete returns 1, negative errno on error. */
+    /* One bounded pass over every destination. Returns 1 if the pass
+     * consumed nothing, 0 if it consumed something, negative errno on error.
+     * The result feeds a statistic and the shutdown loop only; it is never
+     * a completion condition. */
     int (*drain)(void *);
     /* Shutdown only: allow a requested helper to run between bounded passes.
      * wait returns negative errno on failure; production waits at most 1 ms. */
     int (*wait)(void *);
     bool (*waiting)(void *);
+    /* Legacy side effects at wire consumption. Returns 1 when the record is
+     * outside the covered population (no lifetime cookie): it was consumed
+     * and accounted but is not merge input. */
     int (*received)(void *, const ma_envelope *, uint64_t);
     /* Return the latest post-publication snapshot through the last argument;
      * a later queued envelope must never replay a pre-callback observation. */
@@ -154,6 +184,22 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *);
 void pgwt_transport_destroy(struct pgwt_percpu_transport *);
 bool pgwt_transport_lost_total(const struct pgwt_percpu_transport *, uint64_t *);
 uint64_t pgwt_transport_max_held_ns(const struct pgwt_percpu_transport *);
+/* Measurements, not gates. Index 0/1/2 of the final_ arrays is CPU/E/L. */
+struct pgwt_transport_stats {
+    uint64_t rounds_requested, rounds_completed;
+    uint64_t rounds_completed_nonempty; /* completed on a pass that consumed something */
+    uint64_t holds;              /* completion checks with every ack and an unreached target */
+    uint64_t cuts;               /* rounds that needed the producer-position cut */
+    uint64_t terminal_discards;  /* attempts missing at a cut, all counted discards */
+    uint64_t skipped;            /* skipped sequence numbers explained by discards */
+    uint64_t uncovered;          /* cookie-less records consumed, not merge input */
+    uint64_t records, queue_high, round_ns_total, round_ns_max;
+    uint64_t acks_at_completion; /* CPUs whose higher-round boundary was consumed, summed over completed rounds */
+    uint64_t acks_before_fence;  /* accepted acks whose cutoff precedes their fence request */
+    uint64_t final_attempts[3], final_delivered[3], final_failures[3], final_discards[3];
+    bool final_read, final_reconciled;
+};
+struct pgwt_transport_stats pgwt_transport_stats(const struct pgwt_percpu_transport *);
 size_t pgwt_transport_pending_records(const struct pgwt_percpu_transport *);
 bool pgwt_transport_silent(const struct pgwt_percpu_transport *, uint64_t now, uint64_t interval);
 

@@ -37,7 +37,7 @@ typedef int (*pgwt_attach_report_fn)(void *ctx,
 /* Full checkpoint: refresh all 15 components, including the 13 BPF-backed
  * components (0 and 2-13), logical INIT loss (1), daemon state-map failures
  * added to component 12, and writer rejection (14). Called at open, after
- * every CPU ack and the completed drain before accepting a round's boundaries,
+ * every CPU ack and reached target before accepting a round's boundaries,
  * on faults/LOST, at shutdown, and every 10 ms of transport silence. The sink
  * refreshes ONLY component 14 after each publication (pgwt_merge.h:84-86). */
 int pgwt_merge_capture_snapshot(struct pgwt_daemon *, ma_snapshot *, uint64_t *);
@@ -93,8 +93,15 @@ struct pgwt_capture_config {
      * the latest completed-round/silence checkpoint. Never read BPF here. */
     int (*observe)(void *, pgwt_merge_observation *);
     void (*writer_failed)(void *);
+    /* TEST ONLY (daemon: PGWT_TEST_EXACT_ATTACH_PREMISE=1). Assume the
+     * attachment proof of every fork-seeded lifetime at FORK consumption.
+     * Without unit A2 no proof exists and every such generation VOIDs. */
+    bool test_attach_premise;
 };
 struct pgwt_merge_capture *pgwt_capture_create(const struct pgwt_capture_config *);
+/* Returns 1 for a record outside the covered population (TRACE/lifecycle
+ * with no lifetime cookie): its legacy side effect ran, but it must not be
+ * passed to pgwt_capture_envelope. 0 otherwise; negative errno on failure. */
 int pgwt_capture_received(struct pgwt_merge_capture *, const ma_envelope *, uint64_t);
 int pgwt_capture_envelope(struct pgwt_merge_capture *, const ma_envelope *,
                            uint64_t, const ma_snapshot *);
@@ -103,6 +110,16 @@ int pgwt_capture_fault(struct pgwt_merge_capture *, pgwt_merge_reason,
 int pgwt_capture_attach(struct pgwt_merge_capture *, const struct pgwt_attach_report *,
                          uint64_t, const ma_snapshot *);
 uint64_t pgwt_capture_max_held_ns(const struct pgwt_merge_capture *, uint64_t now);
+/* Measurements, not gates. held: wire consumption to publication, per
+ * published DATA/TEXT. event: semantic timestamp to publication, per
+ * published DATA (includes kernel-buffer residence). Quantiles are bucket
+ * upper edges, 100 us resolution, saturating at 2 s. */
+struct pgwt_capture_stats {
+    uint64_t released_data, released_text, frontiers, voids;
+    uint64_t held_p50_ns, held_p99_ns, held_max_ns;
+    uint64_t event_p50_ns, event_p99_ns, event_max_ns;
+};
+struct pgwt_capture_stats pgwt_capture_stats(const struct pgwt_merge_capture *);
 bool pgwt_capture_waiting(const struct pgwt_merge_capture *);
 ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *);
 pgwt_merge_report pgwt_capture_report(const struct pgwt_merge_capture *);

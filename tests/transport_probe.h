@@ -510,6 +510,10 @@ static int probe_reconcile(struct probe *p)
     u64 *counts=calloc((size_t)p->possible, sizeof(u64)); if (!counts) return -1;
     bool ok=!p->failed, refused=false; u64 total=0, failed=0;
     u64 *fail_counts=calloc((size_t)p->possible,sizeof(u64)); if (!fail_counts) { free(counts); return 1; }
+    /* Attempts withdrawn by design (transport_discards): nothing was lost, so
+     * every arm accepts them. attempts = delivered + failures + discards. */
+    u64 *disc_counts=calloc((size_t)p->possible,sizeof(u64)), discarded=0;
+    if (!disc_counts) { free(counts); free(fail_counts); return 1; }
     /* The INIT-publication mutant reserves on L in NMI context, where the
      * 4.18 ring lock is try-once, so some of ITS reservations fail. Each one
      * is counted at the INIT site on the CPU where it failed. Under
@@ -517,24 +521,26 @@ static int probe_reconcile(struct probe *p)
      * failure, on any destination, still fails the run. */
     u64 *init_site=calloc((size_t)p->possible,sizeof(u64)), init_failures=0;
     u32 init_slot=PGWT_RING_FAIL_LIFECYCLE_INIT_HINT;
-    if (!init_site) { free(counts); free(fail_counts); return 1; }
+    if (!init_site) { free(counts); free(fail_counts); free(disc_counts); return 1; }
     if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.ringbuf_site_drops), &init_slot, init_site)) ok=false;
     printf("{\"cells\":[");
     for (u32 dest=0; dest<3; ++dest) {
         if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.transport_attempts), &dest, counts)) { ok=false; break; }
         if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.transport_failures), &dest, fail_counts)) { ok=false; break; }
+        if (bpf_map_lookup_elem(bpf_map__fd(p->skel->maps.transport_discards), &dest, disc_counts)) { ok=false; break; }
         bool tolerated=p->init_mutant && dest == PGWT_WIRE_DEST_L;
         for (int cpu=0; cpu<p->possible; ++cpu) {
             size_t index=(size_t)dest*p->possible+cpu;
             u64 delivered=p->delivered[index]; total+=counts[cpu];
-            u64 expected_missing=(p->spinning || tolerated) ? fail_counts[cpu] : 0;
+            u64 expected_missing=disc_counts[cpu] + ((p->spinning || tolerated) ? fail_counts[cpu] : 0);
             if (counts[cpu] != delivered+expected_missing || p->last_seq[index]>counts[cpu]) ok=false;
-            if (!p->spinning && !tolerated && counts[cpu] != p->last_seq[index]) ok=false;
+            if (!p->spinning && !tolerated && counts[cpu]-p->last_seq[index] > disc_counts[cpu]) ok=false;
+            discarded+=disc_counts[cpu];
             if (tolerated) {
                 if (fail_counts[cpu] != init_site[cpu]) ok=false;
                 init_failures+=fail_counts[cpu];
             } else failed+=fail_counts[cpu];
-            printf("%s{\"dest\":%u,\"cpu\":%d,\"attempted\":%"PRIu64",\"delivered\":%"PRIu64",\"failed\":%"PRIu64",\"last_seq\":%"PRIu64"}", dest||cpu?",":"", dest, cpu, counts[cpu], delivered, fail_counts[cpu], p->last_seq[index]);
+            printf("%s{\"dest\":%u,\"cpu\":%d,\"attempted\":%"PRIu64",\"delivered\":%"PRIu64",\"failed\":%"PRIu64",\"discarded\":%"PRIu64",\"last_seq\":%"PRIu64"}", dest||cpu?",":"", dest, cpu, counts[cpu], delivered, fail_counts[cpu], disc_counts[cpu], p->last_seq[index]);
         }
     }
     free(init_site);
@@ -579,8 +585,8 @@ static int probe_reconcile(struct probe *p)
         fprintf(stderr,"PROBE-REFUSED: production object has no falsifier\n"); refused=true; ok=false;
 #endif
     }
-    printf("],\"ok\":%s,\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"init_reserve_failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"text\":%"PRIu64",\"init_records\":%"PRIu64",\"init_stored\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"spin_cpus\":%d,\"requests\":%zu,\"certified\":false}\n", ok?"true":"false",total,failed,init_failures,p->lost,p->forks,p->reuses,p->attached,p->records[PGWT_WIRE_TRACE],p->records[PGWT_WIRE_TEXT],p->init_records,p->init_stored,spun&&!refused?"true":"false",spun?minimum_spin:0,spin_cpus,p->requests_len);
-    free(counts); free(fail_counts); return p->failed?1:(refused?78:(ok?0:1));
+    printf("],\"ok\":%s,\"attempted\":%"PRIu64",\"failures\":%"PRIu64",\"discards\":%"PRIu64",\"init_reserve_failures\":%"PRIu64",\"lost\":%"PRIu64",\"forks\":%"PRIu64",\"pid_reuses\":%"PRIu64",\"attached\":%"PRIu64",\"trace\":%"PRIu64",\"text\":%"PRIu64",\"init_records\":%"PRIu64",\"init_stored\":%"PRIu64",\"spun_at_least_1ms\":%s,\"spin_min_ns\":%"PRIu64",\"spin_cpus\":%d,\"requests\":%zu,\"certified\":false}\n", ok?"true":"false",total,failed,discarded,init_failures,p->lost,p->forks,p->reuses,p->attached,p->records[PGWT_WIRE_TRACE],p->records[PGWT_WIRE_TEXT],p->init_records,p->init_stored,spun&&!refused?"true":"false",spun?minimum_spin:0,spin_cpus,p->requests_len);
+    free(counts); free(fail_counts); free(disc_counts); return p->failed?1:(refused?78:(ok?0:1));
 }
 /* One load per program and per mode. libbpf stops at the first program the
  * verifier rejects, so a whole-object load cannot say anything about the

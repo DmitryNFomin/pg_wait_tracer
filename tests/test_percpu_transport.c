@@ -40,6 +40,11 @@ struct tb_driver {
     struct pgwt_merge_capture *capture;
     ma_snapshot snapshot;
     uint64_t attempts[6], seq[6], now, trace_t;
+    /* Producer accounting and shared-ring byte positions ([0]=E, [1]=L) as
+     * the kernel would report them; every schedule sets them explicitly. */
+    uint64_t failures[6], discards[6], ring_produced[2], ring_consumed[2];
+    unsigned failure_reads, position_reads;
+    bool position_error, accounting_error;
     unsigned controls, wakes, reads, drains, lifecycle, traces, topology_reads;
     struct pgwt_transport_ctl ctl;
     pgwt_merge_output outputs[64];
@@ -71,6 +76,17 @@ static int tb_wake(void *ctx,uint32_t cpu)
 { struct tb_driver *d=ctx; if(cpu>1) return -EINVAL; ++d->wakes; return 0; }
 static int tb_attempts(void *ctx,uint64_t *v,size_t n)
 { if(n!=6)return -EINVAL; memcpy(v,((struct tb_driver *)ctx)->attempts,sizeof(uint64_t)*6);return 0; }
+static int tb_failures(void *ctx,uint64_t *v,size_t n)
+{ struct tb_driver *d=ctx;if(n!=6)return -EINVAL;++d->failure_reads;if(d->accounting_error)return -EIO;
+  memcpy(v,d->failures,sizeof(uint64_t)*6);return 0; }
+static int tb_discards(void *ctx,uint64_t *v,size_t n)
+{ if(n!=6)return -EINVAL; memcpy(v,((struct tb_driver *)ctx)->discards,sizeof(uint64_t)*6);return 0; }
+static int tb_positions(void *ctx,uint64_t produced[2],uint64_t consumed[2])
+{
+    struct tb_driver *d=ctx;++d->position_reads;
+    if(d->position_error)return -EIO;
+    memcpy(produced,d->ring_produced,sizeof(d->ring_produced));memcpy(consumed,d->ring_consumed,sizeof(d->ring_consumed));return 0;
+}
 static struct tb_driver *tb_lookup_driver;
 static int tb_map_lookup(int fd,const void *key,void *out)
 {
@@ -179,7 +195,8 @@ static bool tb_setup(struct tb_driver *d)
     d->capture=pgwt_capture_create(&cfg);TB(d->capture);
     struct pgwt_transport_io io={.ctx=d,.prepare=tb_prepare,.configure=tb_configure,.open=tb_open,
         .epoll_fd=tb_epoll,.helper_tgid=tb_tgid,.close=tb_close,.consume=tb_consume,.now=tb_now,.cpu_set_unchanged=tb_topology,
-        .control=tb_control,.wake=tb_wake,.attempts=tb_attempts,.counters=tb_counters,
+        .control=tb_control,.wake=tb_wake,.attempts=tb_attempts,.failures=tb_failures,
+        .discards=tb_discards,.positions=tb_positions,.counters=tb_counters,
         .drain=tb_drain,.received=tb_received,.envelope=tb_envelope,.fault=tb_fault};
     uint32_t cpus[]={0,1};
     d->transport=pgwt_transport_create(cpus,2,128,&io);
@@ -199,6 +216,12 @@ static int tb_emit(struct tb_driver *d,unsigned cpu,unsigned dest,unsigned kind,
     size_t len=tb_packet(packet,kind,cpu,seq,cookie,p,n);
     return pgwt_transport_record(d->transport,dest,packet,len);
 }
+/* FABRICATED: no kernel produced this boundary. On Linux only a registered,
+ * pinned helper thread's getppid tracepoint publishes one, and only the
+ * configured issuer thread publishes E/L, once per new request token. The Mac
+ * cannot show that the daemon makes that happen; the registered live test
+ * tests/test_transport_daemon_live.py runs the real path (helper registration,
+ * issuer thread, token, both boundaries, every CPU's acknowledgement). */
 static int tb_boundary(struct tb_driver *d,unsigned cpu,unsigned dest,unsigned round,uint64_t w)
 {
     unsigned char p[16]={0};tb_le(p,w,8);tb_le(p+8,round,4);tb_le(p+12,dest,4);
@@ -223,7 +246,8 @@ static bool tb_all_acks(void)
     struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
     TB(tb_boundary(&d,0,0,2,14)==0);TB(tb_boundary(&d,1,0,2,14)==0);
     d.now=40;TB(pgwt_transport_poll(d.transport,false)==0);
-    TB(d.reads==2 && d.drains==1 && d.count==3);
+    /* Completion needs no drain of its own and no position read. */
+    TB(d.reads==2 && d.drains==0 && !d.position_reads && d.count==3);
     TB(d.outputs[0].record.rank==PGWT_MERGE_FORK);
     TB(d.outputs[1].kind==PGWT_MERGE_OUT_DATA && d.outputs[1].record.g==123 &&
        d.outputs[1].record.pid==30 && !d.outputs[1].prior_interval_certified);
@@ -251,6 +275,10 @@ static bool tb_stale_ack(void)
     TB(tb_boundary(&d,0,0,2,14)==0);TB(tb_boundary(&d,1,0,1,14)==0);
     TB(pgwt_transport_poll(d.transport,false)==0);
     TB(d.reads==1 && d.drains==0 && d.count==0);
+    /* A second acknowledgement from the same CPU is not the other CPU's. */
+    TB(tb_boundary(&d,0,0,2,15)==0);
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.reads==1 && d.count==0);
     TB(tb_boundary(&d,1,0,2,15)==0);
     TB(pgwt_transport_poll(d.transport,false)==0 && d.outputs[d.count-1].F==12);
     tb_cleanup(&d);return true;
@@ -537,7 +565,8 @@ static bool tb_production_row(const json_node *root, const json_node *row, const
         .sink={.emit=wire_sink,.ctx=&c}};
     driver.capture=pgwt_capture_replay_create(&cfg,&config,&p.table);MUST(driver.capture);
     struct pgwt_transport_io io={.ctx=&driver,.now=tb_now,.cpu_set_unchanged=tb_topology,
-        .control=tb_control,.wake=tb_wake,.attempts=tb_attempts,.counters=tb_counters,
+        .control=tb_control,.wake=tb_wake,.attempts=tb_attempts,.failures=tb_failures,
+        .discards=tb_discards,.positions=tb_positions,.counters=tb_counters,
         .drain=tb_drain,.received=tb_received,.envelope=tb_envelope,.fault=tb_fault};
     uint32_t cpus[]={0,1};driver.transport=pgwt_transport_create(cpus,2,128,&io);MUST(driver.transport);
     for(size_t i=0;i<64;++i)if(!tb_live[i].capture){
@@ -777,90 +806,282 @@ static bool tb_poll_budget(void)
            "release by 60 ms; <=70 ms with poll lateness (not a sustained-load bound) PASS\n");
     tb_cleanup(&driver);free(d);return true;
 }
-static uint32_t tb_script_random(uint32_t *state)
+static bool tb_bind(struct tb_driver *driver,struct pgwt_daemon **out)
 {
-    *state ^= *state << 13; *state ^= *state >> 17; *state ^= *state << 5;
-    return *state;
-}
-static bool tb_completion_retry(void)
-{
-    /* Script the drain's complete/not-complete result, not wall-clock time
-     * or a throughput claim. Each 100-pass block has exactly share empty
-     * passes, shuffled with a fixed seed. Starting at different offsets
-     * exercises block crossings: an empty completion drain is guaranteed
-     * within K=200 passes, regardless of the 10 ms service-slot phase.
-     * Ingress and completion drains see the same result within each pass. */
-    const unsigned shares[]={2,10,30};
-    unsigned violations=0;
-    for(size_t cell=0;cell<sizeof(shares)/sizeof(*shares);++cell){
-        uint64_t total=0;unsigned longest=0;
-        for(unsigned run=0;run<200;++run){
-            struct tb_driver driver;TB(tb_setup(&driver));TB(tb_begin(&driver));
-            struct pgwt_daemon *d=calloc(1,sizeof(*d));TB(d);
-            d->exact_perf=true;d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
-            TB(pgwt_percpu_transport_prepare(d)==0 && pgwt_percpu_transport_configure(d)==0 &&
-               pgwt_percpu_transport_open(d)==0);
-            /* Service the slot before the acknowledgements arrive. */
-            TB(pgwt_percpu_transport_poll(d)==0);
-            TB(tb_boundary(&driver,0,0,2,14)==0 && tb_boundary(&driver,1,0,2,14)==0);
-            uint32_t random=UINT32_C(0x871b1234)+run;
-            unsigned block=UINT_MAX,first_empty=0,released=0;
-            bool empty[100];
-            for(unsigned pass=1;pass<=100000;++pass){
-                unsigned index=run%100+pass-1;
-                if(block!=index/100){
-                    block=index/100;
-                    for(unsigned i=0;i<100;++i)empty[i]=i<shares[cell];
-                    for(unsigned i=99;i>0;--i){
-                        unsigned j=tb_script_random(&random)%(i+1);
-                        bool swap=empty[i];empty[i]=empty[j];empty[j]=swap;
-                    }
-                }
-                driver.drained=empty[index%100];
-                if(driver.drained && !first_empty)first_empty=pass;
-                driver.now=20+UINT64_C(100000)*pass; /* 100 us per loop pass */
-                TB(pgwt_percpu_transport_poll(d)==0);
-                if(!pgwt_transport_pending_records(driver.transport)){released=pass;break;}
-                TB(driver.reads==1); /* no counter checkpoint before completion */
-            }
-            TB(released && first_empty && first_empty<=200);
-            /* Collect all three baseline measurements before failing.
-             * Require publication through the real adapter/core too. */
-            if(released!=first_empty || released>200)++violations;
-            TB(driver.traces==1 && pgwt_capture_report(driver.capture).status==PGWT_MERGE_OK);
-            TB(driver.reads==2 && driver.controls==2 && driver.wakes==4);
-            TB(driver.topology_reads==3+released/100);
-            TB(pgwt_transport_max_held_ns(driver.transport)==UINT64_C(100000)*released);
-            total+=released;if(released>longest)longest=released;
-            tb_cleanup(&driver);free(d);
-        }
-        printf("completion retry: %u%% empty, 200 scripts: mean %.3f passes (%.4f ms at 100 us/pass), max %u passes; K=200\n",
-               shares[cell],(double)total/200,(double)total/2000,longest);
-    }
-    TB(violations==0);
-    puts("completion retry: first empty pass releases DATA, <=200 passes/20 ms after all acks; slot duties unchanged PASS");
-    /* With no empty pass there is no finite release promise. Keep the
-     * pending suffix visible; shutdown must VOID it instead of certifying. */
-    struct tb_driver driver;TB(tb_setup(&driver));TB(tb_begin(&driver));
     struct pgwt_daemon *d=calloc(1,sizeof(*d));TB(d);
-    d->exact_perf=true;d->percpu_transport=driver.transport;d->merge_capture=driver.capture;
+    d->exact_perf=true;d->percpu_transport=driver->transport;d->merge_capture=driver->capture;
     TB(pgwt_percpu_transport_prepare(d)==0 && pgwt_percpu_transport_configure(d)==0 &&
-       pgwt_percpu_transport_open(d)==0 && pgwt_percpu_transport_poll(d)==0);
-    TB(tb_boundary(&driver,0,0,2,14)==0 && tb_boundary(&driver,1,0,2,14)==0);
-    driver.drained=false;
-    for(unsigned pass=1;pass<=200;++pass){
+       pgwt_percpu_transport_open(d)==0);
+    *out=d;return true;
+}
+/* A round opened by hand, so a schedule can place attempts between the E/L
+ * boundaries and the frozen targets. Ends before the fence request. */
+static bool tb_open_round(struct tb_driver *d)
+{
+    unsigned char fork[24]={0};tb_le(fork,1,4);tb_le(fork+4,30,4);tb_le(fork+16,10,8);
+    TB(tb_emit(d,0,2,PGWT_WIRE_LIFECYCLE,123,fork,24)==0);
+    unsigned char trace[48];memcpy(trace,golden_T,48);tb_le(trace,12,8);tb_le(trace+8,30,4);
+    TB(tb_emit(d,0,0,PGWT_WIRE_TRACE,123,trace,48)==0);
+    TB(pgwt_transport_poll(d->transport,false)==0 && d->controls==1);
+    TB(tb_boundary(d,0,1,1,13)==0);TB(tb_boundary(d,1,2,1,13)==0);
+    return true;
+}
+static bool tb_acks(struct tb_driver *d,unsigned round,uint64_t w)
+{ TB(tb_boundary(d,0,0,round,w)==0);TB(tb_boundary(d,1,0,round,w)==0);return true; }
+static bool tb_void(const struct tb_driver *d,size_t at,pgwt_merge_reason reason)
+{ return d->count>at && d->outputs[at].kind==PGWT_MERGE_OUT_VOID && d->outputs[at].reason==reason; }
+
+/* T1 and T4: the completion rule under passes that are NEVER empty. */
+static bool tb_never_empty(void)
+{
+    struct tb_driver driver;struct pgwt_daemon *d;
+    TB(tb_setup(&driver));TB(tb_begin(&driver));TB(tb_bind(&driver,&d));
+    driver.drained=false; /* every pass consumes something, from here on */
+    /* T4: with one acknowledgement missing, no number of passes releases. */
+    TB(tb_boundary(&driver,0,0,2,14)==0);
+    for(unsigned pass=1;pass<=300;++pass){
         driver.now=20+UINT64_C(100000)*pass;TB(pgwt_percpu_transport_poll(d)==0);
     }
-    TB(driver.drains==401 && driver.reads==1 && driver.topology_reads==5 &&
-       driver.controls==2 && driver.wakes==4 && !driver.traces &&
-       pgwt_merge_capture_pending_records(d)==6 &&
-       pgwt_transport_max_held_ns(driver.transport)==20000000 &&
-       pgwt_capture_max_held_ns(driver.capture,driver.now)==20000000);
-    TB(pgwt_transport_finish(driver.transport)==0 && driver.count==1 &&
-       driver.outputs[0].kind==PGWT_MERGE_OUT_VOID &&
-       driver.outputs[0].reason==PGWT_MERGE_UNKNOWN_EVIDENCE);
+    TB(!driver.traces && !driver.count && driver.reads==1 && pgwt_merge_capture_pending_records(d)==5);
+    /* T1: the pass that consumes the last acknowledgement completes the
+     * round. No empty pass, no further drain, no position read. */
+    TB(tb_boundary(&driver,1,0,2,14)==0);
+    driver.now+=100000;TB(pgwt_percpu_transport_poll(d)==0);
+    TB(driver.traces==1 && driver.count==3 && driver.outputs[2].kind==PGWT_MERGE_OUT_FRONTIER &&
+       driver.outputs[2].F==12 && pgwt_capture_report(driver.capture).status==PGWT_MERGE_OK);
+    TB(driver.reads==2 && !driver.position_reads && pgwt_merge_capture_pending_records(d)==0);
+    struct pgwt_transport_stats s=pgwt_transport_stats(driver.transport);
+    TB(s.rounds_requested==1 && s.rounds_completed==1 && s.rounds_completed_nonempty==1 && !s.holds && !s.cuts);
+    /* The next round: a NEW nonzero E/L token (the producer serves a token
+     * once), the fence on a pass that is not a service slot, and completion
+     * on an empty pass, which the non-empty count must not include. */
+    unsigned char trace[48];memcpy(trace,golden_T,48);tb_le(trace,20,8);tb_le(trace+8,30,4);
+    TB(tb_emit(&driver,0,0,PGWT_WIRE_TRACE,123,trace,48)==0);
+    driver.drained=true;
+    driver.now=UINT64_C(40000000);TB(pgwt_percpu_transport_poll(d)==0);
+    TB(driver.ctl.round==2 && driver.ctl.el_request==2 && driver.controls==3);
+    TB(tb_boundary(&driver,0,1,2,30)==0 && tb_boundary(&driver,1,2,2,30)==0);
+    driver.now+=100000;TB(pgwt_percpu_transport_poll(d)==0);
+    TB(driver.ctl.round==3 && !driver.ctl.el_request && driver.controls==4);
+    TB(tb_acks(&driver,3,31));
+    driver.now+=100000;TB(pgwt_percpu_transport_poll(d)==0);
+    TB(driver.traces==2 && pgwt_capture_report(driver.capture).status==PGWT_MERGE_OK);
+    s=pgwt_transport_stats(driver.transport);
+    TB(s.rounds_requested==2 && s.rounds_completed==2 && s.rounds_completed_nonempty==1);
     tb_cleanup(&driver);free(d);
-    puts("completion retry: never-empty drains keep DATA pending; shutdown VOID(unknown_evidence) PASS");
+    puts("completion: never-empty passes hold without every ack (300 passes) and release on the pass that consumes the last ack PASS");
+    return true;
+}
+/* T2: a snapshot-era record not yet consumed when the last ack arrives. */
+static bool tb_snapshot_hold(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_open_round(&d));
+    /* CPU 1 reserved an E record after the E boundary and before the targets
+     * were frozen. The reader has not reached it. */
+    d.attempts[4]=1;d.ring_produced[0]=88;
+    TB(pgwt_transport_poll(d.transport,false)==0 && d.controls==2);
+    TB(tb_acks(&d,2,14));
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    /* Every ack is in and one target is unreached: a hold, not a fault. */
+    TB(!d.count && !d.traces && d.position_reads==1 &&
+       pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    /* Later traffic on the same key keeps arriving and is never consumed
+     * here. Neither the cut nor the target may follow it. */
+    d.attempts[4]=11;d.ring_produced[0]=88+10*88;
+    for(unsigned pass=0;pass<50;++pass)TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(!d.count && pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    struct pgwt_transport_stats s=pgwt_transport_stats(d.transport);
+    TB(s.holds==51 && s.cuts==1 && !s.rounds_completed);
+    /* The reader consumes that one record (seq 1, t=13: not below the E
+     * boundary) and stands exactly at the cut, with more behind it. */
+    unsigned char trace[48],packet[304];memcpy(trace,golden_T,48);tb_le(trace,13,8);tb_le(trace+8,30,4);
+    size_t len=tb_packet(packet,PGWT_WIRE_TRACE,1,1,123,trace,48);
+    TB(pgwt_transport_record(d.transport,PGWT_WIRE_DEST_E,packet,len)==0);
+    d.ring_consumed[0]=88;
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==3 && d.outputs[2].kind==PGWT_MERGE_OUT_FRONTIER && d.outputs[2].F==12 && d.traces==1);
+    s=pgwt_transport_stats(d.transport);
+    TB(s.rounds_completed==1 && !s.terminal_discards && !s.skipped);
+    tb_cleanup(&d);
+    puts("completion: an unconsumed snapshot-era record holds without a fault; the cut and the target stay frozen under later traffic PASS");
+    return true;
+}
+/* T3: an attempt that failed is never delivered. */
+static bool tb_terminal_failure(void)
+{
+    /* (a) Counted on any key while the fence is open: VOID as soon as every
+     * ack is consumed, with no pass and no position read. */
+    for(size_t k=0;k<6;++k){
+        struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
+        ++d.attempts[k];d.failures[k]=1;
+        if(k!=0)TB(tb_boundary(&d,0,0,2,14)==0);
+        if(k!=3)TB(tb_boundary(&d,1,0,2,14)==0);
+        /* k==0 / k==3: that CPU's own acknowledgement is the failed attempt. */
+        TB(pgwt_transport_poll(d.transport,false)==0);
+        TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_SEQUENCE_GAP) && !d.traces && !d.position_reads);
+        tb_cleanup(&d);
+    }
+    /* (b) Inside the frozen target window, on a key with no later record:
+     * the failure counter decides, the cut is not needed. */
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_open_round(&d));
+    d.attempts[4]=1;d.failures[4]=1;
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_SEQUENCE_GAP) && !d.position_reads && d.controls==1);
+    tb_cleanup(&d);
+    /* (c) The round's E boundary itself failed: it never arrives and the
+     * fence never starts. The open round's failure poll finds it. */
+    TB(tb_setup(&d));
+    unsigned char fork[24]={0};tb_le(fork,1,4);tb_le(fork+4,30,4);tb_le(fork+16,10,8);
+    TB(tb_emit(&d,0,2,PGWT_WIRE_LIFECYCLE,123,fork,24)==0);
+    TB(pgwt_transport_poll(d.transport,false)==0 && d.controls==1);
+    TB(tb_boundary(&d,1,2,1,13)==0);
+    TB(pgwt_transport_poll(d.transport,false)==0 && !d.count);
+    ++d.attempts[1];d.failures[1]=1;
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_SEQUENCE_GAP) && d.controls==1);
+    tb_cleanup(&d);
+    /* (d) Accounting that cannot be read is unknown, never zero. */
+    TB(tb_setup(&d));TB(tb_begin(&d));TB(tb_acks(&d,2,14));
+    d.accounting_error=true;
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_COUNTER_UNKNOWN) && !d.traces);
+    tb_cleanup(&d);
+    puts("completion: a counted failure on any key, a failed boundary and a failed ack VOID(sequence_gap) with no pass; unreadable accounting VOIDs PASS");
+    return true;
+}
+/* T5: the control for the box falsifier. If completion ever released too
+ * early, the record it should have waited for arrives afterwards below a
+ * published frontier, and the coordinator must say so. */
+static bool tb_seal_control(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));TB(tb_acks(&d,2,14));
+    TB(pgwt_transport_poll(d.transport,false)==0 && d.count==3 && d.outputs[2].F==12);
+    unsigned char trace[48];memcpy(trace,golden_T,48);tb_le(trace,5,8);tb_le(trace+8,30,4);
+    TB(tb_emit(&d,1,1,PGWT_WIRE_TRACE,123,trace,48)==0);
+    TB(pgwt_transport_poll(d.transport,false)==0 && d.ctl.round==2 && d.ctl.el_request==2);
+    TB(tb_boundary(&d,0,1,2,20)==0 && tb_boundary(&d,1,2,2,20)==0);
+    TB(pgwt_transport_poll(d.transport,false)==0 && d.ctl.round==3);
+    TB(tb_acks(&d,3,21));
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    pgwt_merge_report report=pgwt_capture_report(d.capture);
+    TB(tb_void(&d,d.count-1,PGWT_MERGE_SEAL_VIOLATION) && report.faults[PGWT_MERGE_SEAL_VIOLATION]==1 &&
+       report.epoch_invalid && report.status==PGWT_MERGE_SUSPENDED);
+    tb_cleanup(&d);
+    puts("completion control: a record below a published frontier arriving later => VOID(seal_violation), epoch invalid PASS");
+    return true;
+}
+/* A discard is an attempt withdrawn by design, with nothing lost. */
+static bool tb_interior_discards(void)
+{
+    for(unsigned dest=1;dest<3;++dest){
+        struct tb_driver d;TB(tb_setup(&d));
+        TB(tb_boundary(&d,0,dest,1,13)==0 && !d.count);            /* seq 1 */
+        d.seq[dest]=2;d.discards[dest]=1;                          /* seq 2 withdrawn, counted */
+        TB(tb_boundary(&d,0,dest,1,13)==0 && !d.count);            /* seq 3 */
+        TB(pgwt_transport_stats(d.transport).skipped==1 &&
+           pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+        d.seq[dest]=4;                                             /* seq 4 missing, counted nowhere */
+        TB(tb_boundary(&d,0,dest,1,13)==0);
+        TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_SEQUENCE_GAP));
+        tb_cleanup(&d);
+        /* A failure on the key is a loss, whatever else is counted. */
+        TB(tb_setup(&d));
+        TB(tb_boundary(&d,0,dest,1,13)==0);
+        d.seq[dest]=2;d.discards[dest]=1;d.failures[dest]=1;
+        TB(tb_boundary(&d,0,dest,1,13)==0);
+        TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_SEQUENCE_GAP));
+        tb_cleanup(&d);
+        /* A repeated number is never a discard, however many are counted. */
+        TB(tb_setup(&d));
+        TB(tb_boundary(&d,0,dest,1,13)==0);
+        d.seq[dest]=0;d.discards[dest]=UINT64_MAX;
+        TB(tb_boundary(&d,0,dest,1,13)==0);
+        TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_SEQUENCE_GAP));
+        tb_cleanup(&d);
+    }
+    puts("discards: a counted discard explains a skipped number; an uncounted skip, a failure and a repeat VOID(sequence_gap) PASS");
+    return true;
+}
+static bool tb_terminal_discard(void)
+{
+    /* The last snapshot-era attempt on (CPU 1, E) was withdrawn by design.
+     * No later record reveals it: only the cut can decide. */
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_open_round(&d));
+    d.attempts[4]=1;d.discards[4]=1;d.ring_produced[0]=88;
+    TB(pgwt_transport_poll(d.transport,false)==0 && d.controls==2);
+    TB(tb_acks(&d,2,14));
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(!d.count && d.position_reads==1);                /* not past the cut: hold */
+    d.ring_consumed[0]=88;                              /* the reader passed the withdrawn reservation */
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==3 && d.outputs[2].kind==PGWT_MERGE_OUT_FRONTIER && d.outputs[2].F==12 && d.traces==1);
+    struct pgwt_transport_stats s=pgwt_transport_stats(d.transport);
+    TB(s.terminal_discards==1 && s.cuts==1 && s.rounds_completed==1);
+    /* The key's next record carries seq 2: one skipped number, the same
+     * counted discard. It was never recorded as delivered. */
+    d.seq[4]=1;TB(tb_boundary(&d,1,1,2,20)==0);
+    s=pgwt_transport_stats(d.transport);
+    TB(d.count==3 && s.skipped==1 && pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    tb_cleanup(&d);
+
+    /* The same schedule with NO counted discard is a terminal hole. It is a
+     * hold while the reader is short of the cut, whatever else is reserved
+     * meanwhile, then VOID(sequence_gap). Nothing is released or skipped. */
+    TB(tb_setup(&d));TB(tb_open_round(&d));
+    d.attempts[4]=1;d.ring_produced[0]=88;
+    TB(pgwt_transport_poll(d.transport,false)==0);TB(tb_acks(&d,2,14));
+    TB(pgwt_transport_poll(d.transport,false)==0 && !d.count);   /* the cut: 88 */
+    for(unsigned pass=0;pass<200;++pass){
+        d.ring_produced[0]+=88;TB(pgwt_transport_poll(d.transport,false)==0 && !d.count);
+    }
+    d.ring_consumed[0]=88;
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_SEQUENCE_GAP) && !d.traces);
+    tb_cleanup(&d);
+
+    /* The bound. A prefix that is never consumed (a reservation that never
+     * finishes) is not waited for forever: after the stated number of
+     * passes the round VOIDs. Positions that cannot be read VOID at once. */
+    TB(tb_setup(&d));TB(tb_open_round(&d));
+    d.attempts[4]=1;d.ring_produced[0]=88;
+    TB(pgwt_transport_poll(d.transport,false)==0);TB(tb_acks(&d,2,14));
+    const unsigned limit=88/(PGWT_TRANSPORT_MIN_RING_RECORD*4096)+1+PGWT_TRANSPORT_CUT_STALL_PASSES;
+    for(unsigned pass=0;pass<limit;++pass)TB(pgwt_transport_poll(d.transport,false)==0 && !d.count);
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_UNKNOWN_EVIDENCE) && !d.traces);
+    tb_cleanup(&d);
+    TB(tb_setup(&d));TB(tb_open_round(&d));
+    d.attempts[4]=1;d.ring_produced[0]=88;d.position_error=true;
+    TB(pgwt_transport_poll(d.transport,false)==0);TB(tb_acks(&d,2,14));
+    TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==1 && tb_void(&d,0,PGWT_MERGE_UNKNOWN_EVIDENCE));
+    tb_cleanup(&d);
+    printf("terminal hole: a counted discard completes at the cut; an uncounted one holds until the cut then VOID(sequence_gap); "
+           "an unreachable cut VOIDs after %u passes PASS\n",limit+1);
+    return true;
+}
+/* A backend that existed before the capture has no lifetime cookie. */
+static bool tb_uncovered(void)
+{
+    struct tb_driver d;TB(tb_setup(&d));TB(tb_begin(&d));
+    unsigned char trace[48];memcpy(trace,golden_T,48);tb_le(trace,11,8);tb_le(trace+8,77,4);
+    TB(tb_emit(&d,1,0,PGWT_WIRE_TRACE,0,trace,48)==0);
+    unsigned char gone[24]={0};tb_le(gone,3,4);tb_le(gone+4,77,4);tb_le(gone+16,12,8);
+    TB(tb_emit(&d,1,2,PGWT_WIRE_LIFECYCLE,0,gone,24)==0);
+    /* Consumed and accounted; the daemon's own EXIT handling ran; not
+     * queued, not held, not merge input. */
+    TB(d.lifecycle==2 && !d.count && pgwt_transport_pending_records(d.transport)==4 &&
+       !pgwt_capture_pending_records(d.capture));
+    struct pgwt_transport_stats s=pgwt_transport_stats(d.transport);
+    TB(s.uncovered==2 && s.records==6);
+    TB(tb_acks(&d,2,14));
+    d.now=40;TB(pgwt_transport_poll(d.transport,false)==0);
+    TB(d.count==3 && d.outputs[2].kind==PGWT_MERGE_OUT_FRONTIER && d.outputs[2].F==12 && d.traces==1 &&
+       pgwt_capture_report(d.capture).status==PGWT_MERGE_OK);
+    /* It never entered the held-age accounting either. */
+    TB(pgwt_capture_max_held_ns(d.capture,1000000)==20);
+    tb_cleanup(&d);
+    puts("uncovered: cookie-less TRACE and EXIT are consumed, accounted and counted, never merge input PASS");
     return true;
 }
 #ifdef PGWT_TRANSPORT_HOST_TEST
@@ -1019,7 +1240,10 @@ static const struct {const char *name;bool(*run)(void);} tb_guards[]={
     {"attempt_window",tb_attempt_window},{"late_fork",tb_late_fork},{"unknown_init",tb_unknown_init},{"unknown",tb_unknown},
     {"gaps",tb_gaps},{"writer",tb_writer},{"decode_lost",tb_decode_and_lost},
     {"shutdown_topology",tb_shutdown_and_topology},{"shutdown_raw",tb_shutdown_raw},{"terminal_attempts",tb_terminal_attempts},
-    {"cadence",tb_cadence},{"pending",tb_pending},{"poll_budget",tb_poll_budget},{"completion_retry",tb_completion_retry},{"flag_off",tb_off},{"injected_kernel",tb_injected_kernel},{"dump",tb_dump},{"dump_failure",tb_dump_failure},{"bounded_ring",tb_bound},{"counter_cost",tb_counter_cost},
+    {"cadence",tb_cadence},{"pending",tb_pending},{"poll_budget",tb_poll_budget},
+    {"never_empty",tb_never_empty},{"snapshot_hold",tb_snapshot_hold},{"terminal_failure",tb_terminal_failure},
+    {"seal_control",tb_seal_control},{"discards",tb_interior_discards},{"terminal_discard",tb_terminal_discard},
+    {"uncovered",tb_uncovered},{"flag_off",tb_off},{"injected_kernel",tb_injected_kernel},{"dump",tb_dump},{"dump_failure",tb_dump_failure},{"bounded_ring",tb_bound},{"counter_cost",tb_counter_cost},
 #ifdef PGWT_TRANSPORT_HOST_TEST
     {"lifetime_history",tb_lifetime_history},
 #endif

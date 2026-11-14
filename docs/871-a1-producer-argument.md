@@ -21,11 +21,11 @@ before publication; a reader must never replace them using today's PID entry.
 | `on_report_activity` command flip | E ring | TRACE / 48 / 80 | producing state cookie |
 | `on_exit` terminal transition | E ring | TRACE / 48 / 80 | exiting state cookie |
 | `on_fork` | L ring | LIFECYCLE / 24 / 56 | **new child's** cookie, not postmaster's |
-| `on_bootstrap` | state only | **no envelope, reservation or attempt** | preserves fork-seeded cookie |
+| `on_bootstrap` | state only, plus a wake-up hint | **no envelope, reservation or attempt** | preserves fork-seeded cookie |
 | `on_exit` lifecycle EXIT | L ring | LIFECYCLE / 24 / 56 | exiting state cookie |
 | `on_report_query_id` query text | L ring | TEXT / 272 / 304 | producing state cookie |
 | `on_executor_start` PG13 text | L ring | TEXT / 272 / 304 | producing state cookie |
-| `on_transport_helper`, leader E/L request | E and L | BOUNDARY / 16 / 48 | 0 (no backend) |
+| `on_transport_helper`, the E/L issuer thread | E and L | BOUNDARY / 16 / 48 | 0 (no backend) |
 | `on_transport_helper`, each registered helper | its CPU perf | BOUNDARY / 16 / 48 | 0 (no backend) |
 
 `on_sched_switch` and the query/phase attribution helpers do not publish records.
@@ -61,8 +61,10 @@ phase-edge update with the fresh `now`. Command flips likewise reserve first
 when a boundary is needed, then update command/query attribution at `now` even
 if reservation failed. No old attribution edge is silently kept because its
 publication failed. A successful reservation that becomes unusable at the
-admission recheck is discarded and reconciled in `transport_failures` only;
-it does not increment the logical ring aggregate or site counter. The command
+admission recheck is withdrawn: it is counted in `transport_discards`, then
+released. It is not a failure and does not increment `transport_failures`,
+the logical ring aggregate or the site counter (see "Failures and discards"
+below). The command
 producer snapshots its boundary condition once so a userspace state replacement
 cannot strand a reservation or create an unreserved boundary.
 
@@ -77,22 +79,53 @@ transport attempt, even when L cannot reserve. Missing state still increments
 `INIT_NO_STATE`. Mode zero retains its existing raw hint publication and failure
 accounting. Stored INITs never become synthetic wire records.
 
-Text reservations precede reading/copying the string. Unreadable or empty text
-is discarded and counts a transport failure, including an empty but valid
-string, because it consumed a transport attempt. Existing logical failure
-semantics are preserved (only read error increments the text site). Wait DATA
+Text reservations precede reading/copying the string. An unreadable text is
+discarded and counts a transport failure plus the text site (it is a lost
+text). An empty but valid string is discarded and counts a transport discard:
+it consumed an attempt and nothing was lost. Wait DATA
 uses `bpf_perf_event_output(..., BPF_F_CURRENT_CPU, ...)`; nonzero return counts
 the existing wait site and `event_ring_drop` aggregate, plus a CPU transport
 failure. Helper and E/L boundary failures count the destination transport slot.
 
-B must read **both** `transport_attempts` and `transport_failures`
-(PERCPU_ARRAY[3], u64, CPU/E/L keys 0/1/2). They supplement, not replace, the
-fifteen logical counters. A failed boundary cannot disappear. INIT has no wire
+B must read `transport_attempts`, `transport_failures` **and**
+`transport_discards` (PERCPU_ARRAY[3], u64, CPU/E/L keys 0/1/2). They
+supplement, not replace, the fifteen logical counters. A failed boundary
+cannot disappear. INIT has no wire
 attempt under the mode; the logical `lifecycle_init_drop` component still counts
 bootstrap observations that were never attached, including no-opportunity loss
 for merge certification. A helper's
 return zero is not delivery evidence on old perf implementations. Reconcile
 attempts against consumed records after completion, including the terminal gap.
+
+### Failures and discards (changed by the B integration round)
+
+Until the integration round every attempt that delivered no record was counted
+in `transport_failures`, including a reservation withdrawn by design. The
+daemon cannot tell those apart from a loss, and a sequence number that no
+record carries then reads as a gap. They are now two counters, per
+(CPU,destination):
+
+    attempts = delivered + failures + discards
+
+- **Failure** (`transport_failures`): the record did not arrive. A refused
+  ring reservation, a refused perf output (DATA or a boundary), an unreadable
+  query text, and the granted half of a failed EXIT pair. Every site except a
+  failed boundary also increments one of the fifteen logical counters.
+- **Discard** (`transport_discards`): the producer withdrew a granted
+  reservation and nothing was lost: a marker or command boundary whose state
+  vanished or whose admission closed between the reservation and the recheck
+  (the default path publishes nothing there either), and an empty query text.
+  A discard increments no logical counter.
+
+The discard is counted **before** `bpf_ringbuf_discard` releases the
+reservation. A reader that has consumed past that reservation, or a later
+record of the same (CPU,destination), therefore finds it counted, without
+relying on the helper fence. The standalone probe and its live driver accept
+`attempted == delivered + discarded` in the clean arms and print the discards.
+
+Measured (the daemon's clean runs on EL8 4.18 and Ubuntu 6.8, PG13 and PG18,
+`-c16` and `-C`; see "Daemon integration" below): 0 failures and 0 discards in
+every run. The discard path is therefore exercised only by the host harness.
 
 ### What the 4.18 verifier needs (measured on EL8)
 
@@ -233,8 +266,11 @@ reservation to the program. Perf DATA and CPU boundaries use
 ## On-demand helper protocol for B
 
 Set `helper_tgid` before load. Register `helper_cpus[TID] = CPU`, with one pinned
-SCHED_OTHER helper per online CPU. The registered process leader is also pinned
-and issues E/L requests. An unregistered TID, foreign TGID or wrong current CPU
+SCHED_OTHER helper per online CPU. One registered, pinned thread issues the
+E/L boundaries: the thread named by the rodata `helper_el_tid`, or the process
+leader when that is 0. The standalone probe pins its leader and leaves it 0.
+The daemon's leader is its event loop and is not pinned, so the daemon names
+its first helper thread. An unregistered TID, foreign TGID or wrong current CPU
 publishes nothing. Perf output always selects `BPF_F_CURRENT_CPU`, never a CPU
 provided by userspace. The helper program is a task-context `getppid` syscall
 tracepoint, copied from the bench mechanism at `fcda6b39`; user helpers park on
@@ -242,7 +278,7 @@ untimed condition variables and call the syscall only after a request.
 
 `transport_ctl.round=0` is inactive. For an E/L request, update the single control
 entry with a nonzero round and a new nonzero `el_request` token, then wake the
-registered leader. It reads `w` before reserving each E/L boundary and copies
+issuer thread. It reads `w` before reserving each E/L boundary and copies
 round into that boundary. It attempts each E/L pair once per token. A failed
 boundary invalidates that request; a new token is needed for another attempt.
 Normal CPU helpers publish one CPU boundary per requested syscall. There is no
@@ -611,3 +647,148 @@ dispatch and visibility points of 1 and 3 above remain open for U2.
 The A2 boundary is unchanged: the earlier rounds copy `prev.cookie` during
 flagged preseed and skip the delayed userspace map deletion under the flag;
 this round changes no backend attachment code in `src/`.
+
+## Daemon integration (B, 2026-11-14)
+
+The daemon and these producers had never run together. On EL8 4.18 the daemon
+at 86a06d59 never completed a round: `helper_cpus` stayed empty, no CPU's
+`helper_progress` advanced, `transport_ctl` stayed at round 1, and the run
+ended in `VOID(allocation_fail)` with a 5.7 s held age
+(`tests/results/session-20261114/b-integration/el8/r0-base-pg18-c16/`).
+What each side now does for one round, in order:
+
+1. **Before load.** The daemon starts one pinned helper thread per online CPU
+   and reads each thread id. It sets rodata `helper_tgid` (its pid) and
+   `helper_el_tid` (its first helper). After load it writes
+   `helper_cpus[tid] = cpu` for every helper, before any wake.
+2. **Request** (at most once per 10 ms slot, only with queued or staged
+   records). The daemon writes `{round r, el_request = a new nonzero token}`
+   and wakes every helper. Each helper calls `getppid`. The issuer thread
+   publishes the E and the L boundary of round r, once for that token; every
+   helper also publishes a CPU boundary of round r, which is not an
+   acknowledgement and is not passed on.
+3. **Fence** (every loop pass). When the round's E and L boundaries have been
+   consumed, the daemon reads `transport_attempts` once into the frozen
+   targets, writes `{round r+1, el_request 0}` and wakes every helper again.
+4. **Acknowledgements.** Each helper publishes its CPU boundary of round r+1.
+5. **Completion** (every loop pass), in `complete_round`
+   (`src/percpu_transport.c`): see the rule below.
+6. **Release.** The daemon rereads the fifteen counters, then replays the
+   queued envelopes to the adapter and the coordinator, which releases DATA
+   strictly below `W = min(w[s])`.
+
+### The completion rule
+
+A round completes when (a) its E and L boundaries were consumed, (b) every
+CPU's higher-round acknowledgement was consumed, and (c) consumption reached
+the frozen target on every (CPU,destination), every skipped sequence number
+being a counted discard and no failure being counted. **An empty pass is not
+required.** It was a proxy: emptiness is not evidence (CONTRACT.md:128), and
+on a busy box no pass is ever empty. Measured: every completed round in every
+run of this unit completed on a pass that consumed something.
+
+Why nothing more is released than under the old rule (complete only after an
+empty pass). What is released is decided by the coordinator, not by the
+transport: DATA with `t < W`, where `W` is the minimum of the cutoffs carried
+by this round's boundaries and by consumed perf DATA (CONTRACT.md:103-106).
+Completing earlier presents the coordinator with a subset of what a later
+completion would present, so `W` is no larger. Every record below that `W`
+is already present, by what each boundary means (CONTRACT.md:83):
+- E and L: a producer reserves before it takes its timestamp, and the
+  boundary's `w` is read before the boundary's own reservation, so a record
+  with `t < w` was reserved earlier. The ring is consumed in reservation
+  order and an unfinished reservation stops the reader (CONTRACT.md:88), so
+  such a record was consumed before the boundary.
+- CPU i: its perf buffer is ordered, so every DATA record older than the
+  acknowledgement was consumed before it (CONTRACT.md:90-91).
+The fence, the targets and the counter reread are for the other half of a
+boundary's meaning: a failed publication of that window must be visible in
+out-of-band accounting before a frontier is published (CONTRACT.md:84, :98).
+That is unchanged: the reread still follows every acknowledgement.
+
+**A target that is not reached is a hold, not a fault**, while its records
+can still arrive. It is decided in a bounded number of passes even when no
+pass is ever empty:
+- A **failed** attempt is diagnosed without any pass. The failure counters
+  are read after every acknowledgement, and on every 10 ms slot while a round
+  is open (a failed boundary or acknowledgement never arrives, so the round
+  could otherwise wait for it forever). Any failure is `VOID(sequence_gap)`.
+- Otherwise the daemon reads the E and L producer positions **once**, after
+  every acknowledgement (the cut). Every attempt up to a target had finished
+  before its CPU's helper could acknowledge, so a record it delivered lies
+  below the cut. The reader reaches the cut in at most
+  `backlog / (4096 records) + 1` passes, not counting passes that stop at an
+  unfinished reservation; after 4096 of those the round is
+  `VOID(unknown_evidence)`. Later traffic cannot move the cut or the targets.
+- Past the cut, an attempt that is still missing was never delivered. If it
+  is a counted discard the round completes; otherwise `VOID(sequence_gap)`.
+A sequence number is never skipped or recorded as delivered, and nothing is
+released on the way to either verdict.
+
+Read in source for the cut: the kernel publishes `producer_pos` at
+reservation, after marking the record BUSY (EL8
+`kernel/bpf/ringbuf.c:358-362`), and commit or discard clears BUSY
+(`:388-402`). The box's libbpf (v1.4.7, `src/ringbuf.c:234-275`) stops at a
+BUSY record, and advances `consumer_pos` past a discarded one without calling
+the reader.
+
+### Also changed, and why
+
+- **INIT wake-up hint.** Under the mode INIT is stored in state and published
+  nowhere (issue 871 comment 6874906593), so nothing told the daemon to sweep
+  for it. An isolated short backend then exited unattached: measured, 2 of 4
+  short `-c16` runs ended in `VOID(counter_change, lifecycle_init_drop)`,
+  caused by pgbench's own setup connection. `on_bootstrap` now puts one
+  sample on a per-CPU hint buffer (`init_wake`) after storing the facts. It
+  is a wake-up only: no envelope, no sequence number, no attempt, no
+  accounting, and it takes no ring lock. With it, 0 of 6 repeats lost an INIT.
+- **Uncovered records.** A backend that existed before the capture has no
+  lifetime cookie. Its TRACE and lifecycle records are consumed and accounted
+  but are not merge input; the daemon counts them (`uncovered`). Before this,
+  the first such record (PostgreSQL's auxiliary processes produce them within
+  a second) was `VOID(unknown_evidence)`. A FRONTIER says nothing about an
+  uncovered backend.
+
+### What is still unproven, and what was found
+
+- The kernel premises 1, 3 and 5 above are as open as before. The cut adds no
+  premise beyond 1 (the helper cannot pass an unfinished producer on its
+  CPU). On Ubuntu 6.8 nothing is claimed: the daemon runs there only with
+  `PGWT_TEST_EXACT_UNCERTIFIED_KERNEL=1` and says so.
+- **No attachment proof exists (A2).** Without it every fork-seeded
+  generation is `VOID(unknown_evidence)` at its first TRANS (contract row 33):
+  measured. The box runs set `PGWT_TEST_EXACT_ATTACH_PREMISE=1`, which
+  assumes the proof at FORK consumption through the report path A2 will use.
+  Every number below is a transport measurement under that premise and
+  certifies nothing.
+- **The coordinator limits the rate.** `pgwt_merge_feed` (`src/core/merge.c`,
+  not changed here) re-sorts and re-validates its staged queue on every input
+  and moves the whole queue for every released record. Measured on EL8, 4
+  vCPU, PG18: clean at 8,000 select-only tps (32,000 released records/s);
+  at 12,000 tps and unthrottled (about 17,000 tps) a round's release takes
+  from 0.5 s to 98 s, the queue fills and the run ends in
+  `VOID(allocation_fail)`. 89.6% of daemon CPU was in `pgwt_merge_feed`.
+  The transport itself completed every round it requested in those runs.
+- **PG13, short-lived backends.** On PG13 the daemon needs milliseconds of
+  `/proc/<pid>/mem` reads to attach a backend. A `pgbench -S -C` backend
+  lives a few milliseconds and some exit unattached. The default transport
+  loses them too (15 and 20 `lifecycle_init_lost_total` in two 8 s runs at 200
+  connections/s, on 21227d96 and on this tree) and counts them as
+  no-opportunity. Under the mode the state is already retired by BPF when the
+  daemon handles the EXIT, so the loss cannot be classified, and each one is
+  `VOID(counter_change, lifecycle_init_drop)`: 39 in 8 s. Connections that
+  hold for 100 ms are attached and run clean. PG18 `-C` ran clean.
+- A backend that exits before it ever reaches `InitProcess` is also counted
+  as an INIT loss under the mode, for the same reason (state already
+  retired). How often that happens was not measured.
+- 0 discards and 0 transport failures occurred in any clean run, so the
+  discard and terminal-hole paths are exercised only by the host tests.
+- The two live mutants named in the brief as examples (a stale-round
+  acknowledgement, completion without the sequence check) cannot be made to
+  fail on a clean live run: a stale boundary arriving while fencing and a
+  sequence hole both need a stimulus the box does not produce. Host mutants
+  cover them (`accept_stale_round`, `ignore_terminal_hole`,
+  `uncounted_skip_accepted`). The four live mutants are the three defects
+  that kept rounds from completing, and completion without acknowledgements.
+
+Evidence: `tests/results/session-20261114/b-integration/` (git-ignored).

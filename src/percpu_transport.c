@@ -20,15 +20,23 @@ struct pgwt_percpu_transport {
     uint32_t *cpus;
     size_t ncpu, capacity, count;
     uint64_t *positions, *seq, *targets;
+    /* Per (CPU,destination), cpu-major like seq: records consumed, sequence
+     * numbers skipped inside the consumed prefix, and two scratch reads. */
+    uint64_t *delivered, *holes, *discards, *failures;
     struct queued_wire *queue;
     bool *acks;
     bool requested, fencing, suspended, finished, draining;
     bool prepared, configured, opened, serviced;
     bool e_seen, l_seen;
-    uint32_t round;
+    /* Producer positions of E and L read once after every ack of this round,
+     * only when a frozen target is still unreached. Never moved by traffic. */
+    bool cut_taken, pass_empty;
+    uint64_t cut[2], cut_passes, cut_limit;
+    uint32_t round, el_token;
     ma_snapshot snapshot;
-    uint64_t max_held, lost_total, last_record_at, last_service_at;
+    uint64_t max_held, lost_total, last_record_at, last_service_at, requested_at, fence_at;
     bool lost_valid;
+    struct pgwt_transport_stats stats;
 };
 struct pgwt_transport_perf_attributes pgwt_transport_perf_attributes(size_t bytes)
 {
@@ -114,11 +122,32 @@ static int fault(struct pgwt_percpu_transport *t, pgwt_merge_reason reason)
     counters(t);
     return t->io.fault(t->io.ctx, reason, observed(t), &t->snapshot);
 }
+/* Transport accounting, per (CPU,destination):
+ *   attempts = delivered + failures + discards.
+ * A FAILURE is an attempt whose record did not arrive (refused reservation or
+ * perf output, including a boundary). Any failure is a loss: VOID.
+ * A DISCARD is an attempt the producer withdrew by design after a successful
+ * reservation, with nothing lost. It explains a skipped sequence number; it
+ * never advances seq and is never counted as delivered.
+ * Returns the fault's result when it suspends; callers test t->suspended. */
+static int accounting(struct pgwt_percpu_transport *t)
+{
+    size_t n = t->ncpu * 3;
+    if (t->io.failures(t->io.ctx, t->failures, n) < 0 ||
+        t->io.discards(t->io.ctx, t->discards, n) < 0)
+        return fault(t, PGWT_MERGE_COUNTER_UNKNOWN);
+    for (size_t k = 0; k < n; ++k)
+        if (t->failures[k]) return fault(t, PGWT_MERGE_SEQUENCE_GAP);
+    for (size_t k = 0; k < n; ++k)
+        if (t->holes[k] > t->discards[k]) return fault(t, PGWT_MERGE_SEQUENCE_GAP);
+    return 0;
+}
 struct pgwt_percpu_transport *pgwt_transport_create(
     const uint32_t *cpus, size_t ncpu, size_t capacity, const struct pgwt_transport_io *io)
 {
     if (!cpus || !ncpu || !capacity || ncpu > 65536 || capacity > SIZE_MAX / sizeof(struct queued_wire) ||
         !io || !io->now || !io->control || !io->wake || !io->attempts ||
+        !io->failures || !io->discards || !io->positions ||
         !io->counters || !io->drain || !io->envelope || !io->fault || !io->cpu_set_unchanged)
         return NULL;
     for (size_t i = 0; i < ncpu; ++i)
@@ -129,13 +158,19 @@ struct pgwt_percpu_transport *pgwt_transport_create(
     t->positions = calloc(ncpu + 2, sizeof(uint64_t));
     t->seq = calloc(ncpu * 3, sizeof(uint64_t));
     t->targets = calloc(ncpu * 3, sizeof(uint64_t));
+    t->delivered = calloc(ncpu * 3, sizeof(uint64_t));
+    t->holes = calloc(ncpu * 3, sizeof(uint64_t));
+    t->discards = calloc(ncpu * 3, sizeof(uint64_t));
+    t->failures = calloc(ncpu * 3, sizeof(uint64_t));
     t->acks = calloc(ncpu, sizeof(bool));
     t->queue = calloc(capacity, sizeof(*t->queue));
-    if (!t->cpus || !t->positions || !t->seq || !t->targets || !t->acks || !t->queue) {
+    if (!t->cpus || !t->positions || !t->seq || !t->targets || !t->delivered || !t->holes ||
+        !t->discards || !t->failures || !t->acks || !t->queue) {
         pgwt_transport_destroy(t); return NULL;
     }
     memcpy(t->cpus, cpus, ncpu * sizeof(*cpus));
     t->ncpu = ncpu; t->capacity = capacity; t->io = *io; t->round = 1; t->lost_valid = true;
+    t->pass_empty = true;
     t->last_record_at = observed(t);
     counters(t);
     return t;
@@ -157,17 +192,35 @@ int pgwt_transport_record(struct pgwt_percpu_transport *t, uint32_t dest,
     if (t->positions[source] == UINT64_MAX) return fault(t, PGWT_MERGE_MALFORMED_ENVELOPE);
     r.envelope.position = ++t->positions[source];
     size_t i = cpu_index(t->cpus, t->ncpu, r.cpu), k = i * 3 + dest;
-    if (r.seq != t->seq[k] + 1 || t->seq[k] == UINT64_MAX) {
+    /* A repeated or lower number is never explainable. */
+    if (r.seq <= t->seq[k] || t->seq[k] == UINT64_MAX) {
         t->seq[k] = r.seq;
         return fault(t, PGWT_MERGE_SEQUENCE_GAP);
     }
+    uint64_t skipped = r.seq - t->seq[k] - 1;
     t->seq[k] = r.seq;
+    ++t->delivered[k]; ++t->stats.records;
+    if (skipped) {
+        /* The numbers in between were attempts that delivered no record.
+         * They are never treated as delivered: the producer must have
+         * counted every one as a discard, and none as a failure, BEFORE it
+         * could publish this later record on the same (CPU,destination).
+         * Checked now, before any further input is consumed. */
+        if (UINT64_MAX - t->holes[k] < skipped) return fault(t, PGWT_MERGE_SEQUENCE_GAP);
+        t->holes[k] += skipped;
+        int rc = accounting(t);
+        if (rc < 0 || t->suspended) return rc;
+        t->stats.skipped += skipped;
+    }
     uint64_t now = observed(t);
     t->last_record_at = now;
     if (t->io.received) {
         int rc = t->io.received(t->io.ctx, &r.envelope, now);
         if (rc < 0) return fault(t, rc == -ENOMEM ? PGWT_MERGE_ALLOCATION_FAIL :
             rc == -EINVAL ? PGWT_MERGE_MALFORMED_ENVELOPE : PGWT_MERGE_WRITER_PUSH_FAIL);
+        /* 1: consumed and accounted, but outside the covered population
+         * (no lifetime cookie). It is not merge input and is never queued. */
+        if (rc == 1) { ++t->stats.uncovered; return 0; }
     }
     if (t->suspended) return 0; /* consume/account, never automatically rearm */
     if (r.envelope.kind == MA_BOUNDARY) {
@@ -175,8 +228,12 @@ int pgwt_transport_record(struct pgwt_percpu_transport *t, uint32_t dest,
             if (dest == PGWT_WIRE_DEST_E) t->e_seen = true;
             if (dest == PGWT_WIRE_DEST_L) t->l_seen = true;
         }
-        if (t->fencing && dest == PGWT_WIRE_DEST_CPU && r.round > t->round)
+        if (t->fencing && dest == PGWT_WIRE_DEST_CPU && r.round > t->round) {
             t->acks[i] = true;
+            /* Measurement of the causal premise, never a condition: the
+             * helper read this cutoff after the fence request reached it. */
+            if (r.envelope.w < t->fence_at) ++t->stats.acks_before_fence;
+        }
         /* Unrequested/stale boundaries are not completeness evidence. Their
          * positions still count. Never pass them through to the core. */
         if (!t->requested || (dest == 0 ? !t->fencing || r.round <= t->round :
@@ -184,6 +241,7 @@ int pgwt_transport_record(struct pgwt_percpu_transport *t, uint32_t dest,
     }
     if (t->count == t->capacity) return fault(t, PGWT_MERGE_ALLOCATION_FAIL);
     struct queued_wire *q = &t->queue[t->count++];
+    if (t->count > t->stats.queue_high) t->stats.queue_high = t->count;
     q->record = r; q->arrived = now;
     if (r.envelope.size) {
         memcpy(q->payload, r.envelope.bytes, r.envelope.size);
@@ -231,8 +289,11 @@ int pgwt_transport_lost(struct pgwt_percpu_transport *t, uint32_t cpu, uint64_t 
 static int request(struct pgwt_percpu_transport *t, bool fence)
 {
     if (fence && t->round == UINT32_MAX) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    /* The producer publishes one E/L pair per request token and remembers
+     * the last one it served: every request needs a new nonzero token. */
+    if (!fence && ++t->el_token == 0) t->el_token = 1;
     struct pgwt_transport_ctl c = {.round = t->round + (fence ? 1U : 0U),
-                                    .el_request = fence ? 0 : 1};
+                                    .el_request = fence ? 0 : t->el_token};
     if (t->io.control(t->io.ctx, &c) < 0) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
     for (size_t i = 0; i < t->ncpu; ++i)
         if (t->io.wake(t->io.ctx, t->cpus[i]) < 0) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
@@ -255,9 +316,37 @@ static int release_queue(struct pgwt_percpu_transport *t, bool checkpoint)
     t->count = 0;
     return 0;
 }
-/* Completion is progress work, not a periodic duty. After the CPU acks,
- * retry every loop pass: a non-empty bounded drain proves nothing, and
- * waiting another service slot can multiply its delay under sustained load. */
+/* Fence: once the round's E and L boundaries are consumed, freeze the
+ * per-(CPU,destination) targets and ask every CPU for a higher-round
+ * acknowledgement. Progress work: runs on every loop pass, not per slot. */
+static int fence_round(struct pgwt_percpu_transport *t)
+{
+    if (t->suspended || !t->requested || t->fencing || !t->e_seen || !t->l_seen) return 0;
+    /* A lower bound captured before the wake: do NOT compare current
+     * growing producer totals with a partially consumed live stream. */
+    if (t->io.attempts(t->io.ctx, t->targets, t->ncpu * 3) < 0)
+        return fault(t, PGWT_MERGE_COUNTER_UNKNOWN);
+    for (size_t k = 0; k < t->ncpu * 3; ++k)
+        if (t->targets[k] < t->seq[k]) return fault(t, PGWT_MERGE_COUNTER_UNKNOWN);
+    t->fencing = true; t->cut_taken = false;
+    t->fence_at = observed(t);
+    return request(t, true);
+}
+/* Completion is progress work, not a periodic duty: retried on every loop
+ * pass once fencing. The rule (issue 871, both advisers and the lead):
+ *   (a) the round's E and L boundaries were consumed (fence_round), and
+ *   (b) every CPU's higher-round acknowledgement was consumed, and
+ *   (c) consumption reached the frozen target on every (CPU,destination),
+ *       every skipped number being a counted discard and no failure counted.
+ * An EMPTY pass is not required and is not evidence (CONTRACT.md:128).
+ * A target not reached is a HOLD while its records can still arrive. To
+ * decide in a bounded number of passes even when no pass is ever empty, the
+ * producer positions of E and L are read ONCE, after every ack ("the cut").
+ * Every attempt up to a target had finished before its CPU's helper could
+ * acknowledge, so a record it delivered lies below the cut. When the reader
+ * has consumed past the cut, what is still missing was never delivered: it
+ * must be a counted discard, otherwise VOID(sequence_gap). Later traffic
+ * cannot move the cut. Nothing is skipped and nothing is released early. */
 static int complete_round(struct pgwt_percpu_transport *t)
 {
     if (t->suspended || t->draining) return 0;
@@ -267,18 +356,69 @@ static int complete_round(struct pgwt_percpu_transport *t)
     }
     if (!t->fencing) return 0;
     for (size_t i = 0; i < t->ncpu; ++i) if (!t->acks[i]) return 0;
-    t->draining = true;
-    int drained = t->io.drain(t->io.ctx);
-    t->draining = false;
-    if (drained < 0) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
-    if (!drained) return 0;
-    for (size_t k = 0; k < t->ncpu * 3; ++k)
-        if (t->seq[k] < t->targets[k]) return fault(t, PGWT_MERGE_SEQUENCE_GAP);
+    /* After every ack: a failed attempt of this round's window is counted
+     * (the completion fence), so one read diagnoses it. No pass is needed. */
+    int rc = accounting(t);
+    if (rc < 0 || t->suspended) return rc;
+    bool short_e = false, short_l = false;
+    for (size_t k = 0; k < t->ncpu * 3; ++k) {
+        if (t->seq[k] >= t->targets[k]) continue;
+        /* A CPU's own ack was published after the target was frozen and its
+         * buffer is ordered: a CPU key cannot be short here. */
+        if (k % 3 == PGWT_WIRE_DEST_CPU) return fault(t, PGWT_MERGE_SEQUENCE_GAP);
+        if (k % 3 == PGWT_WIRE_DEST_E) short_e = true; else short_l = true;
+    }
+    if (short_e || short_l) {
+        uint64_t produced[2], consumed[2];
+        if (t->io.positions(t->io.ctx, produced, consumed) < 0)
+            return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+        if (!t->cut_taken) {
+            t->cut_taken = true; t->cut_passes = 0;
+            t->cut[0] = produced[0]; t->cut[1] = produced[1];
+            /* Each pass consumes up to 4096 records per ring unless it stops
+             * at an unfinished reservation, which cannot be skipped. */
+            uint64_t backlog = 0;
+            for (size_t d = 0; d < 2; ++d)
+                if (produced[d] > consumed[d] && produced[d] - consumed[d] > backlog)
+                    backlog = produced[d] - consumed[d];
+            t->cut_limit = backlog / (PGWT_TRANSPORT_MIN_RING_RECORD * 4096) + 1 +
+                           PGWT_TRANSPORT_CUT_STALL_PASSES;
+            ++t->stats.cuts;
+        }
+        if ((short_e && consumed[0] < t->cut[0]) || (short_l && consumed[1] < t->cut[1])) {
+            ++t->stats.holds;
+            /* Fail closed if the fixed prefix is not consumed within the
+             * bound (a reservation that never finishes): never release. */
+            if (++t->cut_passes > t->cut_limit) return fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+            return 0; /* hold: its records can still arrive */
+        }
+        /* Past the cut. The discards were counted before their reservations
+         * were released, so this read covers every one below the cut. */
+        rc = accounting(t);
+        if (rc < 0 || t->suspended) return rc;
+        for (size_t k = 0; k < t->ncpu * 3; ++k) {
+            if (t->seq[k] >= t->targets[k]) continue;
+            uint64_t missing = t->targets[k] - t->seq[k];
+            if (t->discards[k] < t->holes[k] || t->discards[k] - t->holes[k] < missing)
+                return fault(t, PGWT_MERGE_SEQUENCE_GAP); /* terminal hole */
+            t->stats.terminal_discards += missing;
+        }
+    }
     /* Completion fence: this reread MUST follow every CPU's consumed ack. */
     counters(t);
-    int rc = release_queue(t, true);
+    rc = release_queue(t, true);
     if (rc < 0) return rc;
-    t->requested = t->fencing = t->e_seen = t->l_seen = false;
+    uint64_t now = observed(t);
+    if (now >= t->requested_at) {
+        uint64_t took = now - t->requested_at;
+        t->stats.round_ns_total += took;
+        if (took > t->stats.round_ns_max) t->stats.round_ns_max = took;
+    }
+    ++t->stats.rounds_completed;
+    if (!t->pass_empty) ++t->stats.rounds_completed_nonempty;
+    /* Counted from the consumed records, not from the test above. */
+    for (size_t i = 0; i < t->ncpu; ++i) if (t->acks[i]) ++t->stats.acks_at_completion;
+    t->requested = t->fencing = t->e_seen = t->l_seen = t->cut_taken = false;
     memset(t->acks, 0, t->ncpu * sizeof(bool));
     ++t->round;
     return 0;
@@ -298,23 +438,22 @@ int pgwt_transport_poll(struct pgwt_percpu_transport *t, bool waiting)
         ma_envelope e = {.version = 1, .kind = MA_CHECK};
         return t->io.envelope(t->io.ctx, &e, now, &t->snapshot);
     }
+    if (t->requested) {
+        /* A failed boundary or acknowledgement is never delivered, so the
+         * round could wait for it forever: poll the failure accounting on
+         * every service slot while a round is open. Fail closed. */
+        int rc = accounting(t);
+        if (rc < 0 || t->suspended) return rc;
+    }
     if (!t->requested && (t->count || waiting)) {
-        t->requested = true;
+        t->requested = true; t->requested_at = now;
+        ++t->stats.rounds_requested;
         int rc = request(t, false);
         if (rc < 0 || t->suspended) return rc;
     }
     if (!t->requested) return 0; /* idle means no helper work */
-    if (!t->fencing && t->e_seen && t->l_seen) {
-        /* A lower bound captured before the wake: do NOT compare current
-         * growing producer totals with a partially consumed live stream. */
-        if (t->io.attempts(t->io.ctx, t->targets, t->ncpu * 3) < 0)
-            return fault(t, PGWT_MERGE_COUNTER_UNKNOWN);
-        for (size_t k = 0; k < t->ncpu * 3; ++k)
-            if (t->targets[k] < t->seq[k]) return fault(t, PGWT_MERGE_COUNTER_UNKNOWN);
-        t->fencing = true;
-        int rc = request(t, true);
-        if (rc < 0 || t->suspended) return rc;
-    }
+    int rc = fence_round(t);
+    if (rc < 0 || t->suspended) return rc;
     return complete_round(t);
 }
 
@@ -332,6 +471,7 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
     for (unsigned pass = 0; pass < 256; ++pass) {
         int drained = t->io.drain(t->io.ctx);
         if (drained < 0) { rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE); done = true; break; }
+        t->pass_empty = drained == 1;
         if (!t->suspended) {
             rc = pgwt_transport_poll(t, t->io.waiting && t->io.waiting(t->io.ctx));
             if (rc < 0) break;
@@ -343,12 +483,27 @@ int pgwt_transport_finish(struct pgwt_percpu_transport *t)
         if (t->io.wait && t->io.wait(t->io.ctx) < 0) break;
     }
     if (!done && rc >= 0) rc = fault(t, PGWT_MERGE_UNKNOWN_EVIDENCE);
+    /* Terminal reconciliation, per (CPU,destination), after an empty pass:
+     * attempts = delivered + failures + discards, with no failure. It also
+     * accounts for a missing final attempt that no later record reveals. */
+    size_t n = t->ncpu * 3;
+    bool read = t->io.attempts(t->io.ctx, t->targets, n) >= 0 &&
+                t->io.failures(t->io.ctx, t->failures, n) >= 0 &&
+                t->io.discards(t->io.ctx, t->discards, n) >= 0;
+    t->stats.final_read = read; t->stats.final_reconciled = read;
+    for (size_t k = 0; read && k < n; ++k) {
+        size_t dest = k % 3;
+        t->stats.final_attempts[dest] += t->targets[k];
+        t->stats.final_delivered[dest] += t->delivered[k];
+        t->stats.final_failures[dest] += t->failures[k];
+        t->stats.final_discards[dest] += t->discards[k];
+        if (t->failures[k] || t->targets[k] < t->delivered[k] ||
+            t->targets[k] - t->delivered[k] != t->discards[k])
+            t->stats.final_reconciled = false;
+    }
     if (done && !t->suspended) {
-        /* Also account for a missing terminal attempt with no later record. */
-        if (t->io.attempts(t->io.ctx, t->targets, t->ncpu * 3) < 0)
-            rc = fault(t, PGWT_MERGE_COUNTER_UNKNOWN);
-        else for (size_t k = 0; k < t->ncpu * 3; ++k)
-            if (t->targets[k] != t->seq[k]) { rc = fault(t, PGWT_MERGE_SEQUENCE_GAP); break; }
+        if (!read) rc = fault(t, PGWT_MERGE_COUNTER_UNKNOWN);
+        else if (!t->stats.final_reconciled) rc = fault(t, PGWT_MERGE_SEQUENCE_GAP);
     }
     t->finished = true;
     return rc;
@@ -374,6 +529,8 @@ bool pgwt_transport_lost_total(const struct pgwt_percpu_transport *t, uint64_t *
 }
 uint64_t pgwt_transport_max_held_ns(const struct pgwt_percpu_transport *t)
 { return t ? t->max_held : 0; }
+struct pgwt_transport_stats pgwt_transport_stats(const struct pgwt_percpu_transport *t)
+{ return t ? t->stats : (struct pgwt_transport_stats){0}; }
 size_t pgwt_transport_pending_records(const struct pgwt_percpu_transport *t)
 { return t ? t->count : 0; }
 bool pgwt_transport_silent(const struct pgwt_percpu_transport *t, uint64_t now, uint64_t interval)
@@ -382,6 +539,7 @@ void pgwt_transport_destroy(struct pgwt_percpu_transport *t)
 {
     if (!t) return;
     free(t->cpus); free(t->positions); free(t->seq); free(t->targets);
+    free(t->delivered); free(t->holes); free(t->discards); free(t->failures);
     free(t->acks); free(t->queue); free(t);
 }
 
@@ -409,7 +567,7 @@ struct pinned_helper {
     pthread_t thread;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
-    uint32_t cpu;
+    uint32_t cpu, tid;
     size_t mask_size;
     bool initialized, started, ready, wake, stop;
     int error;
@@ -422,12 +580,14 @@ struct ring_context {
 struct linux_transport {
     struct pgwt_daemon *d;
     struct perf_buffer **perf;
+    /* INIT wake-up hints: one page per CPU, woken per sample, bytes ignored. */
+    struct perf_buffer **hints;
     struct ring_buffer *rings[2];
     struct ring_context ring_ctx[2];
     struct pinned_helper *helpers;
     struct bpf_link *helper_link;
     size_t ncpu;
-    int possible, epoll_fd, attempts_fd, ctl_fd, callback_error;
+    int possible, epoll_fd, attempts_fd, failures_fd, discards_fd, ctl_fd, callback_error;
     bool topology_reported;
 };
 static struct linux_transport *linux_state(const struct pgwt_daemon *d)
@@ -494,18 +654,37 @@ static int linux_counters(void *ctx, ma_snapshot *s)
     uint64_t now;
     return pgwt_merge_capture_snapshot(l->d, s, &now);
 }
-static int linux_attempts(void *ctx, uint64_t *out, size_t count)
+static int percpu_triples(struct linux_transport *l, int fd, uint64_t *out, size_t count)
 {
-    struct linux_transport *l = ctx;
-    if (count != l->ncpu * 3 || l->attempts_fd < 0) return -EINVAL;
+    if (count != l->ncpu * 3 || fd < 0) return -EINVAL;
     uint64_t *v = calloc((size_t)l->possible, sizeof(*v));
     if (!v) return -ENOMEM;
     int rc = 0;
     for (uint32_t dest = 0; dest < 3; ++dest) {
-        if (bpf_map_lookup_elem(l->attempts_fd, &dest, v)) { rc = -errno; break; }
+        if (bpf_map_lookup_elem(fd, &dest, v)) { rc = -errno; break; }
         for (size_t i = 0; i < l->ncpu; ++i) out[i * 3 + dest] = v[l->d->percpu_transport->cpus[i]];
     }
     free(v); return rc;
+}
+static int linux_attempts(void *ctx, uint64_t *out, size_t count)
+{ struct linux_transport *l = ctx; return percpu_triples(l, l->attempts_fd, out, count); }
+static int linux_failures(void *ctx, uint64_t *out, size_t count)
+{ struct linux_transport *l = ctx; return percpu_triples(l, l->failures_fd, out, count); }
+static int linux_discards(void *ctx, uint64_t *out, size_t count)
+{ struct linux_transport *l = ctx; return percpu_triples(l, l->discards_fd, out, count); }
+/* The kernel advances producer_pos at reservation (kernel/bpf/ringbuf.c,
+ * __bpf_ringbuf_reserve) and libbpf advances consumer_pos past each finished
+ * record, stopping at a BUSY one. One ring per manager, index 0. */
+static int linux_positions(void *ctx, uint64_t produced[2], uint64_t consumed[2])
+{
+    struct linux_transport *l = ctx;
+    for (size_t i = 0; i < 2; ++i) {
+        struct ring *r = l->rings[i] ? ring_buffer__ring(l->rings[i], 0) : NULL;
+        if (!r) return -EINVAL;
+        consumed[i] = ring__consumer_pos(r);
+        produced[i] = ring__producer_pos(r);
+    }
+    return 0;
 }
 static int linux_control(void *ctx, const struct pgwt_transport_ctl *ctl)
 {
@@ -568,6 +747,8 @@ static void *helper_loop(void *ctx)
         if (rc || policy != SCHED_OTHER) error = rc ? rc : EINVAL;
     }
     pthread_mutex_lock(&h->mutex);
+    /* The producer admits a helper by its kernel thread id. */
+    h->tid = (uint32_t)syscall(SYS_gettid);
     h->error = error; h->ready = true; pthread_cond_signal(&h->cond);
     while (!h->stop && !h->error) {
         while (!h->wake && !h->stop) pthread_cond_wait(&h->cond, &h->mutex);
@@ -606,10 +787,18 @@ static enum bpf_perf_event_ret receive_perf(void *ctx, int cpu, struct perf_even
     if (rc < 0) l->callback_error = rc;
     return LIBBPF_PERF_EVENT_CONT;
 }
+static enum bpf_perf_event_ret receive_hint(void *ctx, int cpu, struct perf_event_header *event)
+{
+    /* A wake-up, not a record: the caller's loop pass runs the INIT sweep. */
+    (void)ctx; (void)cpu; (void)event;
+    return LIBBPF_PERF_EVENT_CONT;
+}
 static int consume_all(struct linux_transport *l, bool *empty)
 {
     *empty = true;
     for (size_t i = 0; i < l->ncpu; ++i) {
+        int hint = perf_buffer__consume(l->hints[i]);
+        if (hint < 0) return hint;
         uint64_t before = l->d->percpu_transport->positions[i];
         int n = perf_buffer__consume(l->perf[i]);
         if (n < 0) return n;
@@ -630,9 +819,10 @@ static int consume_all(struct linux_transport *l, bool *empty)
 }
 static int linux_drain(void *ctx)
 {
-    /* Bounded work: another poll continues the same round if more arrives.
-     * Helpers completed snapshot-era attempts. An empty pass through all
-     * destinations observes all of those completed publications. */
+    /* One bounded pass over every destination; another poll continues if
+     * more arrives. Whether it consumed anything is reported for a statistic
+     * and for the shutdown loop. It is NOT a completion condition: a round
+     * completes on consumed boundaries, acknowledgements and targets. */
     bool empty;
     int rc = consume_all(ctx, &empty);
     return rc < 0 ? rc : empty ? 1 : 0;
@@ -653,7 +843,7 @@ static int linux_bind(struct pgwt_daemon *d)
     }
     struct linux_transport *l = calloc(1, sizeof(*l));
     if (!l) return -ENOMEM;
-    l->d = d; l->epoll_fd = l->attempts_fd = l->ctl_fd = -1;
+    l->d = d; l->epoll_fd = l->attempts_fd = l->failures_fd = l->discards_fd = l->ctl_fd = -1;
     l->possible = libbpf_num_possible_cpus();
     if (l->possible <= 0 || l->possible > 65536) { free(l); return -EINVAL; }
     uint32_t *ids = calloc((size_t)l->possible, sizeof(*ids));
@@ -668,18 +858,20 @@ static int linux_bind(struct pgwt_daemon *d)
     free(mask);
     if (!allowed) { fprintf(stderr, "exact-perf: all online CPUs must be available to pinned helpers\n"); free(ids); free(l); return -ENOTSUP; }
     l->helpers = calloc(l->ncpu, sizeof(*l->helpers)); l->perf = calloc(l->ncpu, sizeof(*l->perf));
+    l->hints = calloc(l->ncpu, sizeof(*l->hints));
     struct pgwt_transport_io io = {.ctx = l, .prepare = linux_helpers_start,
         .configure = linux_configure_io, .open = linux_open_io, .epoll_fd = linux_epoll_io,
         .helper_tgid = linux_tgid_io, .consume = linux_consume_io, .close = linux_close_io, .now = linux_now, .cpu_set_unchanged = linux_topology,
         .control = linux_control, .wake = linux_wake, .attempts = linux_attempts,
+        .failures = linux_failures, .discards = linux_discards, .positions = linux_positions,
         .counters = linux_counters, .drain = linux_drain, .received = linux_received,
         .envelope = linux_envelope, .suspended = linux_suspended, .waiting = linux_waiting,
         .wait = linux_wait, .fault = linux_fault};
     d->percpu_transport = pgwt_transport_create(ids, l->ncpu, 262144, &io);
     free(ids);
-    if (!d->percpu_transport || !l->helpers || !l->perf) {
+    if (!d->percpu_transport || !l->helpers || !l->perf || !l->hints) {
         pgwt_transport_destroy(d->percpu_transport); d->percpu_transport = NULL;
-        free(l->helpers); free(l->perf); free(l); return -ENOMEM;
+        free(l->helpers); free(l->perf); free(l->hints); free(l); return -ENOMEM;
     }
     d->percpu_transport->platform = l;
     return 0;
@@ -730,6 +922,18 @@ static int linux_configure_io(void *ctx)
     struct bpf_map *perf = bpf_object__find_map_by_name(d->skel->obj, "perf_events");
     struct bpf_map *ctl = bpf_object__find_map_by_name(d->skel->obj, "transport_ctl");
     struct bpf_map *attempts = bpf_object__find_map_by_name(d->skel->obj, "transport_attempts");
+    const char *const accounting_maps[] = {"transport_failures", "transport_discards"};
+    for (size_t i = 0; i < 2; ++i) {
+        struct bpf_map *m = bpf_object__find_map_by_name(d->skel->obj, accounting_maps[i]);
+        if (!m || bpf_map__type(m) != BPF_MAP_TYPE_PERCPU_ARRAY || bpf_map__key_size(m) != 4 ||
+            bpf_map__value_size(m) != 8 || bpf_map__max_entries(m) != 3) perf = NULL;
+    }
+    struct bpf_map *wake = bpf_object__find_map_by_name(d->skel->obj, "init_wake");
+    if (!wake || bpf_map__type(wake) != BPF_MAP_TYPE_PERF_EVENT_ARRAY ||
+        bpf_map__set_max_entries(wake, (uint32_t)l->possible)) perf = NULL;
+    struct bpf_map *helpers = bpf_object__find_map_by_name(d->skel->obj, "helper_cpus");
+    if (!helpers || bpf_map__type(helpers) != BPF_MAP_TYPE_HASH || bpf_map__key_size(helpers) != 4 ||
+        bpf_map__value_size(helpers) != 4 || bpf_map__max_entries(helpers) < l->ncpu) perf = NULL;
     if (!perf || !ctl || !attempts || !helper_program(d) ||
         bpf_map__type(perf) != BPF_MAP_TYPE_PERF_EVENT_ARRAY ||
         bpf_map__type(ctl) != BPF_MAP_TYPE_ARRAY || bpf_map__value_size(ctl) != 8 ||
@@ -742,9 +946,21 @@ static int linux_configure_io(void *ctx)
     }
     struct utsname kernel;
     if (uname(&kernel) || strncmp(kernel.release, "4.18.", 5) || !strstr(kernel.release, ".el8")) {
-        fprintf(stderr, "exact-perf: production certification requires EL8 4.18; Ubuntu certification is outside this unit\n");
-        return -ENOTSUP;
+        /* Mechanism runs only (the Ubuntu control arm). The helper-exclusion
+         * premise is not argued for this kernel; nothing here certifies. */
+        const char *mechanism = getenv("PGWT_TEST_EXACT_UNCERTIFIED_KERNEL");
+        if (!mechanism || strcmp(mechanism, "1")) {
+            fprintf(stderr, "exact-perf: production certification requires EL8 4.18; Ubuntu certification is outside this unit\n");
+            return -ENOTSUP;
+        }
+        fprintf(stderr, "exact-perf: MECHANISM ONLY on kernel %s (PGWT_TEST_EXACT_UNCERTIFIED_KERNEL=1): "
+            "the completion argument is not made for this kernel; this capture certifies nothing\n",
+            kernel.release);
     }
+    /* The daemon's process leader is its event loop and is not pinned: one
+     * pinned helper thread publishes the requested E and L boundaries. */
+    if (!l->helpers[0].tid) return -EINVAL;
+    d->skel->rodata->helper_el_tid = l->helpers[0].tid;
     return bpf_map__set_max_entries(perf, (uint32_t)l->possible);
 }
 static int add_epoll(int epoll_fd, int fd)
@@ -762,7 +978,18 @@ static int linux_open_io(void *ctx)
     int perf_fd = bpf_object__find_map_fd_by_name(d->skel->obj, "perf_events");
     l->ctl_fd = bpf_object__find_map_fd_by_name(d->skel->obj, "transport_ctl");
     l->attempts_fd = bpf_object__find_map_fd_by_name(d->skel->obj, "transport_attempts");
-    if (perf_fd < 0 || l->ctl_fd < 0 || l->attempts_fd < 0) return -ENOTSUP;
+    l->failures_fd = bpf_object__find_map_fd_by_name(d->skel->obj, "transport_failures");
+    l->discards_fd = bpf_object__find_map_fd_by_name(d->skel->obj, "transport_discards");
+    int helpers_fd = bpf_object__find_map_fd_by_name(d->skel->obj, "helper_cpus");
+    int wake_fd = bpf_object__find_map_fd_by_name(d->skel->obj, "init_wake");
+    if (perf_fd < 0 || l->ctl_fd < 0 || l->attempts_fd < 0 || l->failures_fd < 0 ||
+        l->discards_fd < 0 || helpers_fd < 0 || wake_fd < 0) return -ENOTSUP;
+    /* Register every pinned helper (thread id -> its CPU) before any wake:
+     * the helper program publishes nothing for an unregistered thread. */
+    for (size_t i = 0; i < l->ncpu; ++i) {
+        uint32_t tid = l->helpers[i].tid, cpu = l->helpers[i].cpu;
+        if (!tid || bpf_map_update_elem(helpers_fd, &tid, &cpu, BPF_ANY)) return tid ? -errno : -EINVAL;
+    }
     l->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (l->epoll_fd < 0) return -errno;
     /* One raw perf buffer per online CPU. 64 MiB total, rounded down to a
@@ -786,6 +1013,15 @@ static int linux_open_io(void *ctx)
         long err = libbpf_get_error(l->perf[i]);
         if (!l->perf[i] || err) { l->perf[i] = NULL; return err ? (int)err : -errno; }
         int rc = add_epoll(l->epoll_fd, perf_buffer__epoll_fd(l->perf[i]));
+        if (rc < 0) return rc;
+        /* Hint buffer: every sample wakes the loop, which then sweeps. */
+        struct perf_event_attr hint = {.size = sizeof(hint), .type = policy.type,
+            .config = policy.config, .sample_type = policy.sample_type,
+            .sample_period = 1, .wakeup_events = 1};
+        l->hints[i] = perf_buffer__new_raw(wake_fd, 1, &hint, receive_hint, l, &opts);
+        err = libbpf_get_error(l->hints[i]);
+        if (!l->hints[i] || err) { l->hints[i] = NULL; return err ? (int)err : -errno; }
+        rc = add_epoll(l->epoll_fd, perf_buffer__epoll_fd(l->hints[i]));
         if (rc < 0) return rc;
     }
     const char *names[] = {"event_ringbuf", "lifecycle_rb"};
@@ -837,9 +1073,10 @@ static void linux_close_io(void *ctx)
     }
     if (l->helper_link) bpf_link__destroy(l->helper_link);
     for (size_t i = 0; i < l->ncpu; ++i) if (l->perf[i]) perf_buffer__free(l->perf[i]);
+    for (size_t i = 0; i < l->ncpu; ++i) if (l->hints[i]) perf_buffer__free(l->hints[i]);
     for (size_t i = 0; i < 2; ++i) if (l->rings[i]) ring_buffer__free(l->rings[i]);
     if (l->epoll_fd >= 0) close(l->epoll_fd);
-    free(l->perf); free(l->helpers); free(l);
+    free(l->perf); free(l->hints); free(l->helpers); free(l);
 }
 
 #endif
@@ -910,9 +1147,14 @@ int pgwt_percpu_transport_poll(struct pgwt_daemon *d)
     if (!t || !t->opened) return -EINVAL;
     int rc = t->io.drain(t->io.ctx);
     if (rc < 0) return rc;
+    /* Recorded for the non-empty-completion count only; never a condition. */
+    t->pass_empty = rc == 1;
     uint64_t now = observed(t);
-    if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced))
+    if (!pgwt_transport_service_due(now, t->last_service_at, t->serviced)) {
+        rc = fence_round(t);
+        if (rc < 0 || t->suspended) return rc;
         return complete_round(t);
+    }
     t->last_service_at = now; t->serviced = true;
     return pgwt_transport_poll(t, pgwt_capture_waiting(d->merge_capture));
 }

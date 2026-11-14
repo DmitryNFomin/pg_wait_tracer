@@ -103,6 +103,11 @@ static struct pgwt_wire_lifecycle *transport_reserve_lifecycle(u64 *seq)
 { (void)seq; abort(); }
 static bool transport_text(u32 pid, u64 query_id, u64 text, u32 site, u32 slot)
 { (void)pid; (void)query_id; (void)text; (void)site; (void)slot; abort(); }
+/* The INIT wake-up hint exists only under the mode: unreachable here too. */
+#define BPF_F_CURRENT_CPU 0xffffffffULL
+static int init_wake;
+static long bpf_perf_event_output(void *ctx, void *map, u64 flags, void *data, u64 size)
+{ (void)ctx; (void)map; (void)flags; (void)data; (void)size; abort(); }
 
 /* PRODUCTION_FUNCTIONS */
 

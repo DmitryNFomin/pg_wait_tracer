@@ -131,7 +131,7 @@ struct pgwt_percpu_transport { uint64_t *positions; };
 struct perf_buffer { struct pgwt_percpu_transport *transport;size_t source,records; };
 struct ring_context {struct pgwt_daemon *d;uint32_t dest;size_t consumed,limit;};
 struct ring_buffer {struct ring_context *ctx;size_t records;};
-struct linux_transport {struct pgwt_daemon *d;size_t ncpu;struct perf_buffer **perf;
+struct linux_transport {struct pgwt_daemon *d;size_t ncpu;struct perf_buffer **perf,**hints;
     struct ring_buffer *rings[2];struct ring_context ring_ctx[2];int callback_error;};
 static int perf_buffer__consume(struct perf_buffer *p)
 {p->transport->positions[p->source]+=p->records;p->records=0;return 0;}
@@ -148,10 +148,16 @@ static bool drain_cases(void)
     uint64_t positions[2]={0};struct pgwt_percpu_transport t={.positions=positions};d->percpu_transport=&t;
     struct perf_buffer cpu0={.transport=&t,.source=0,.records=7},cpu1={.transport=&t,.source=1};
     struct perf_buffer *perf[]={&cpu0,&cpu1};
-    struct linux_transport l={.d=d,.ncpu=2,.perf=perf};
+    /* INIT wake-up hints are drained on the same pass but are not transport
+     * records: they move no source position and never make a pass non-empty. */
+    uint64_t woken[2]={0};struct pgwt_percpu_transport w={.positions=woken};
+    struct perf_buffer hint0={.transport=&w,.source=0},hint1={.transport=&w,.source=1};
+    struct perf_buffer *hints[]={&hint0,&hint1};
+    struct linux_transport l={.d=d,.ncpu=2,.perf=perf,.hints=hints};
     struct ring_buffer e={.ctx=&l.ring_ctx[0]},life={.ctx=&l.ring_ctx[1]};l.rings[0]=&e;l.rings[1]=&life;
     bool empty=true;TICK(consume_all(&l,&empty)==0 && !empty && positions[0]==7);
     TICK(consume_all(&l,&empty)==0 && empty);
+    hint1.records=3;TICK(consume_all(&l,&empty)==0 && empty && woken[1]==3 && !positions[1]);
     e.records=5000;TICK(consume_all(&l,&empty)==0 && !empty && e.records==904 && l.ring_ctx[0].consumed==4096);
     TICK(consume_all(&l,&empty)==0 && !empty && e.records==0 && l.ring_ctx[0].consumed==904);
     TICK(consume_all(&l,&empty)==0 && empty);

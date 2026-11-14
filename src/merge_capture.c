@@ -38,7 +38,35 @@ struct pgwt_merge_capture {
     pgwt_merge_observation observation;
     bool finished, serviced;
     uint64_t last_service_at;
+    /* Measurements only. Ages in PGWT_CAPTURE_AGE_BUCKET_NS buckets; the
+     * last bucket collects everything at or beyond the range. */
+    uint64_t released_data, released_text, frontiers, voids;
+    uint64_t held_max, event_max;
+    uint32_t *held_hist, *event_hist;
 };
+#define PGWT_CAPTURE_AGE_BUCKET_NS UINT64_C(100000)
+#define PGWT_CAPTURE_AGE_BUCKETS 20000U /* 2 s */
+static void age_add(uint32_t *hist, uint64_t *max, uint64_t age)
+{
+    if (age > *max) *max = age;
+    uint64_t bucket = age / PGWT_CAPTURE_AGE_BUCKET_NS;
+    if (bucket > PGWT_CAPTURE_AGE_BUCKETS) bucket = PGWT_CAPTURE_AGE_BUCKETS;
+    if (hist && hist[bucket] != UINT32_MAX) ++hist[bucket];
+}
+/* Upper edge of the bucket holding the q-th record (q in 1/10000). */
+static uint64_t age_quantile(const uint32_t *hist, unsigned q)
+{
+    uint64_t total = 0, seen = 0;
+    if (!hist) return 0;
+    for (size_t i = 0; i <= PGWT_CAPTURE_AGE_BUCKETS; ++i) total += hist[i];
+    if (!total) return 0;
+    uint64_t rank = (total * q + 9999) / 10000;
+    for (size_t i = 0; i <= PGWT_CAPTURE_AGE_BUCKETS; ++i) {
+        seen += hist[i];
+        if (seen >= rank) return (i + 1) * PGWT_CAPTURE_AGE_BUCKET_NS;
+    }
+    return (PGWT_CAPTURE_AGE_BUCKETS + 1) * PGWT_CAPTURE_AGE_BUCKET_NS;
+}
 static uint64_t get_le(const unsigned char *p, size_t n)
 {
     uint64_t v = 0;
@@ -78,6 +106,8 @@ static void arrival_remove(struct pgwt_merge_capture *c, const pgwt_merge_record
     if (!index) return;
     held_age(c, now);
     struct arrival *a = &c->arrivals[index - 1];
+    /* This record's own age from wire consumption to publication. */
+    if (now >= a->at) age_add(c->held_hist, &c->held_max, now - a->at);
     if (a->prev == SIZE_MAX) c->oldest = a->next;
     else c->arrivals[a->prev].next = a->next;
     if (a->next == SIZE_MAX) c->newest = a->prev;
@@ -153,6 +183,14 @@ static bool capture_sink(void *ctx, const pgwt_merge_output *out,
     c->observation = *post;
     if (ok && (out->kind == PGWT_MERGE_OUT_DATA || out->kind == PGWT_MERGE_OUT_TEXT))
         arrival_remove(c, &out->record, post->d);
+    if (ok && out->kind == PGWT_MERGE_OUT_DATA) {
+        ++c->released_data;
+        /* Semantic event time to publication: includes kernel-buffer time. */
+        if (post->d >= out->record.t) age_add(c->event_hist, &c->event_max, post->d - out->record.t);
+    }
+    if (ok && out->kind == PGWT_MERGE_OUT_TEXT) ++c->released_text;
+    if (ok && out->kind == PGWT_MERGE_OUT_FRONTIER) ++c->frontiers;
+    if (out->kind == PGWT_MERGE_OUT_VOID) ++c->voids;
     if (out->kind == PGWT_MERGE_OUT_VOID) {
         held_age(c, out->d);
         arrival_reset(c);
@@ -209,6 +247,9 @@ static struct pgwt_merge_capture *capture_create(const struct pgwt_capture_confi
     c->heads = calloc(c->source_count, sizeof(*c->heads));
     c->tails = calloc(c->source_count, sizeof(*c->tails));
     c->storage = calloc(cfg->capacity, sizeof(*c->storage));
+    /* Optional measurement memory: a failed allocation only loses quantiles. */
+    c->held_hist = calloc(PGWT_CAPTURE_AGE_BUCKETS + 1, sizeof(*c->held_hist));
+    c->event_hist = calloc(PGWT_CAPTURE_AGE_BUCKETS + 1, sizeof(*c->event_hist));
     ma_source_decl *sources = calloc(c->source_count, sizeof(*sources));
     if (!c->lifetime_index || !c->binding_index || !c->arrival_buckets || !c->arrivals || !c->lifetimes || !c->bindings || !c->held || !c->heads || !c->tails || !c->storage || !sources)
         goto fail;
@@ -300,7 +341,15 @@ int pgwt_capture_received(struct pgwt_merge_capture *c, const ma_envelope *e, ui
     if (e->kind != MA_LIFECYCLE && e->kind != MA_TEXT && e->kind != MA_TRACE) return 0;
     size_t expected = e->kind == MA_TRACE ? 48 : e->kind == MA_TEXT ? 272 : 24;
     if (!e->bytes || e->size != expected) return -EINVAL;
-    if (pgwt_capture_report(c).status == PGWT_MERGE_OK) {
+    /* A TRACE or lifecycle record with no lifetime cookie comes from a
+     * backend that existed before this capture (issue 871 comment
+     * 6873823454: such backends "stay uncovered and reported"). It has no
+     * generation, so it is not merge input: it is not staged, not held and
+     * never published, and the caller counts it. Its legacy side effect
+     * (an EXIT retiring the daemon's backend entry) still runs below.
+     * A FRONTIER therefore says nothing about uncovered backends. */
+    bool uncovered = e->kind != MA_TEXT && !(e->cookie_present && e->cookie);
+    if (!uncovered && pgwt_capture_report(c).status == PGWT_MERGE_OK) {
         size_t slot = arrival_slot(c, e->source, e->position);
         if (c->arrival_free == SIZE_MAX) return -ENOMEM;
         if (c->arrival_buckets[slot]) {
@@ -325,9 +374,24 @@ int pgwt_capture_received(struct pgwt_merge_capture *c, const ma_envelope *e, ui
             c->lifetimes[c->lifetime_count++] = (ma_lifetime){.pid = pid,
                 .g = e->cookie, .identity_bound = true, .proof = MA_NOT_ATTEMPTED};
             c->lifetime_index[slot] = c->lifetime_count;
+            if (c->config.test_attach_premise) {
+                /* TEST PREMISE, never a production fact: the attachment
+                 * proof (unit A2) does not exist yet, so nothing reports
+                 * BEGIN/COMPLETE and every fork-seeded generation would VOID
+                 * at its first TRANS (contract row 33). The transport-only
+                 * box test ASSUMES the twelve facts here, through the same
+                 * report path A2 will use, at FORK consumption. */
+                ma_snapshot snap = pgwt_capture_last_snapshot(c);
+                struct pgwt_attach_report r = {.pid = (uint32_t)pid, .cookie = e->cookie, .event = MA_BEGIN};
+                int rc = pgwt_capture_attach(c, &r, now, &snap);
+                if (rc < 0) return rc;
+                r.event = MA_COMPLETE; r.facts_known = r.facts_true = MA_ALL_FACTS;
+                snap = pgwt_capture_last_snapshot(c);
+                if ((rc = pgwt_capture_attach(c, &r, now, &snap)) < 0) return rc;
+            }
         }
     }
-    uint64_t query = e->kind == MA_TRACE ? get_le(e->bytes + 32, 8) :
+    uint64_t query = uncovered ? 0 : e->kind == MA_TRACE ? get_le(e->bytes + 32, 8) :
                      e->kind == MA_TEXT ? get_le(e->bytes + 8, 8) : 0;
     if (query) {
         ma_table t = table(c);
@@ -343,10 +407,10 @@ int pgwt_capture_received(struct pgwt_merge_capture *c, const ma_envelope *e, ui
         if (rc < 0) {
             if (c->config.writer_failed) c->config.writer_failed(c->config.ctx);
             else if (c->local_writer_fail != UINT64_MAX) ++c->local_writer_fail;
+            return rc;
         }
-        return rc;
     }
-    return 0;
+    return uncovered ? 1 : 0;
 }
 ma_snapshot pgwt_capture_last_snapshot(const struct pgwt_merge_capture *c)
 {
@@ -478,7 +542,19 @@ void pgwt_capture_destroy(struct pgwt_merge_capture *c)
     pgwt_merge_destroy(c->core); ma_destroy(c->adapter);
     free(c->lifetimes); free(c->bindings); free(c->held); free(c->heads); free(c->tails);
     free(c->lifetime_index); free(c->binding_index);
+    free(c->held_hist); free(c->event_hist);
     free(c->storage); free(c->arrivals); free(c->arrival_buckets); free(c);
+}
+struct pgwt_capture_stats pgwt_capture_stats(const struct pgwt_merge_capture *c)
+{
+    struct pgwt_capture_stats s = {0};
+    if (!c) return s;
+    s.released_data = c->released_data; s.released_text = c->released_text;
+    s.frontiers = c->frontiers; s.voids = c->voids;
+    s.held_max_ns = c->held_max; s.event_max_ns = c->event_max;
+    s.held_p50_ns = age_quantile(c->held_hist, 5000); s.held_p99_ns = age_quantile(c->held_hist, 9900);
+    s.event_p50_ns = age_quantile(c->event_hist, 5000); s.event_p99_ns = age_quantile(c->event_hist, 9900);
+    return s;
 }
 /* One allocation at open; no record-path allocation, formatting or stdio. */
 struct pgwt_capture_dump {
@@ -681,7 +757,14 @@ int pgwt_merge_capture_open(struct pgwt_daemon *d)
         baseline.counters.known &= initial.component_valid[i];
     }
     if (!baseline.counters.known) return -EIO;
+    const char *premise = getenv("PGWT_TEST_EXACT_ATTACH_PREMISE");
+    bool assumed = premise && !strcmp(premise, "1");
+    if (assumed)
+        fprintf(stderr, "exact-perf: TEST PREMISE (PGWT_TEST_EXACT_ATTACH_PREMISE=1): attachment proofs "
+            "are ASSUMED for every fork-seeded backend; unit A2 does not exist; this capture "
+            "certifies nothing\n");
     struct pgwt_capture_config cfg = {.cpu_count = ncpu, .capacity = PGWT_CAPTURE_LIFETIME_CAPACITY,
+        .test_attach_premise = assumed,
         .baseline = baseline, .ctx = d, .lifecycle = daemon_lifecycle,
         .trace = daemon_trace, .observe = daemon_observe, .writer_failed = daemon_writer_failed,
         .sink = {.emit = daemon_sink, .ctx = d, .flush = daemon_flush}};
@@ -781,6 +864,37 @@ int pgwt_merge_capture_finish(struct pgwt_daemon *d)
     fprintf(stderr, "exact-perf: max held age ns=%llu; status=%u; perf LOST=%llu%s\n",
         (unsigned long long)age, (unsigned)report.status, (unsigned long long)lost,
         lost_known ? "" : " (unknown overflow)");
+    /* Measurements for the box runs, one parseable line each. Not gates. */
+    struct pgwt_transport_stats ts = pgwt_transport_stats(d->percpu_transport);
+    struct pgwt_capture_stats cs = pgwt_capture_stats(d->merge_capture);
+#define U(v) ((unsigned long long)(v))
+    fprintf(stderr, "exact-perf: stats rounds_requested=%llu rounds_completed=%llu "
+        "rounds_completed_nonempty=%llu holds=%llu cuts=%llu terminal_discards=%llu skipped=%llu "
+        "uncovered=%llu wire_records=%llu queue_high=%llu round_us_mean=%llu round_us_max=%llu "
+        "cpus=%llu acks_at_completion=%llu acks_before_fence=%llu "
+        "released_data=%llu released_text=%llu frontiers=%llu voids=%llu "
+        "held_us_p50=%llu held_us_p99=%llu held_us_max=%llu "
+        "event_us_p50=%llu event_us_p99=%llu event_us_max=%llu "
+        "seal_violation=%llu sequence_gap=%llu unknown_evidence=%llu perf_lost=%llu status=%u\n",
+        U(ts.rounds_requested), U(ts.rounds_completed), U(ts.rounds_completed_nonempty),
+        U(ts.holds), U(ts.cuts), U(ts.terminal_discards), U(ts.skipped), U(ts.uncovered),
+        U(ts.records), U(ts.queue_high),
+        U(ts.rounds_completed ? ts.round_ns_total / ts.rounds_completed / 1000 : 0),
+        U(ts.round_ns_max / 1000), U(pgwt_percpu_transport_cpu_count(d)),
+        U(ts.acks_at_completion), U(ts.acks_before_fence), U(cs.released_data), U(cs.released_text),
+        U(cs.frontiers), U(cs.voids), U(cs.held_p50_ns / 1000), U(cs.held_p99_ns / 1000),
+        U(cs.held_max_ns / 1000), U(cs.event_p50_ns / 1000), U(cs.event_p99_ns / 1000),
+        U(cs.event_max_ns / 1000), U(report.faults[PGWT_MERGE_SEAL_VIOLATION]),
+        U(report.faults[PGWT_MERGE_SEQUENCE_GAP]), U(report.faults[PGWT_MERGE_UNKNOWN_EVIDENCE]),
+        U(lost), (unsigned)report.status);
+    static const char *const names[3] = {"CPU", "E", "L"};
+    for (size_t i = 0; i < 3; ++i)
+        fprintf(stderr, "exact-perf: reconcile dest=%s attempted=%llu delivered=%llu failures=%llu "
+            "discards=%llu read=%d ok=%d\n", names[i], U(ts.final_attempts[i]), U(ts.final_delivered[i]),
+            U(ts.final_failures[i]), U(ts.final_discards[i]), ts.final_read,
+            ts.final_read && !ts.final_failures[i] &&
+            ts.final_attempts[i] == ts.final_delivered[i] + ts.final_discards[i]);
+#undef U
     return rc < 0 ? rc : end;
 }
 int pgwt_merge_capture_record(struct pgwt_daemon *d, size_t source, const void *p, size_t n)
