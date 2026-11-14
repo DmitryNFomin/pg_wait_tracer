@@ -13,7 +13,7 @@ Run only on Linux as root: tests/run_all.sh registers this in its live tier.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from collections import Counter
+from collections import Counter, deque
 import json
 import os
 from pathlib import Path
@@ -28,6 +28,29 @@ from demo_rehearsal_lib import daemon_integrity_ok
 
 TRACER = Path(__file__).resolve().parents[1] / "pg_wait_tracer"
 TICK_SECONDS = 1
+ATTACH_COUNTERS = ("wp_attach_failures_total", "wp_attach_exit_race_total",
+                   "wp_attach_failures_live_total", "wp_attach_failures_unknown_total")
+DIAGNOSTIC_LINES = 40
+DIAGNOSTIC_WIDTH = 512
+
+
+def print_failure_diagnostics(text, after):
+    # Bound both line count and width, even under an attach-failure storm.
+    for prefix, title in (("INIT-LOST:", "INIT loss diagnostics (CLOCK_MONOTONIC)"),
+                          ("WP-ATTACH-FAIL:", "Watchpoint attach diagnostics")):
+        lines = deque(maxlen=DIAGNOSTIC_LINES)
+        total = 0
+        for line in text.splitlines():
+            if line.startswith(prefix):
+                total += 1
+                lines.append(line[:DIAGNOSTIC_WIDTH])
+        print(f"{title} (last {len(lines)} of {total}, max {DIAGNOSTIC_WIDTH} chars/line):")
+        print("\n".join(lines))
+    if after is not None:
+        print({name: after[name] for name in (
+            "lifecycle_init_lost_total", "lifecycle_init_lost_with_opportunity_total",
+            "lifecycle_init_lost_no_opportunity_total",
+            "lifecycle_init_lost_untraced_ns_total", *ATTACH_COUNTERS)})
 
 
 def ctl(directory):
@@ -48,8 +71,7 @@ def ctl(directory):
                 "lifecycle_init_lost_no_opportunity_total",
                 "lifecycle_init_lost_untraced_ns_total",
                 "ringbuf_lifecycle_fork_drops_total", "ringbuf_lifecycle_exit_drops_total",
-                "state_map_full_total", "wp_attach_failures_total",
-                "wp_attach_exit_race_total"):
+                "state_map_full_total", *ATTACH_COUNTERS):
         assert type(metrics.get(key)) is int and metrics[key] >= 0, (key, metrics)
     return metrics
 
@@ -178,7 +200,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                 wait_for(proc, retired, 10, "not every cohort EXIT was handled")
                 after = ctl(directory)
                 text = log.read_text()
-                assert "PGWT_TEST_DROP_INIT_HINT" in text, text
+                assert "PGWT_TEST_DROP_INIT_HINT" in text, "missing INIT hint-drop hook diagnostic"
                 hint_delta = after["lifecycle_init_hint_drops_total"] - before["lifecycle_init_hint_drops_total"]
                 lost_delta = after["lifecycle_init_lost_total"] - before["lifecycle_init_lost_total"]
                 with_opportunity_delta = (after["lifecycle_init_lost_with_opportunity_total"] -
@@ -197,7 +219,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                 if churn:
                     assert short_lived & pending, "no pending bootstrap backend lived for less than one tick"
                 if skip_store:
-                    assert "PGWT_TEST_SKIP_INIT_STORE" in text, text
+                    assert "PGWT_TEST_SKIP_INIT_STORE" in text, "missing INIT store-skip hook diagnostic"
                     assert with_opportunity_delta > 0, "skipping INIT stores did not raise with-opportunity losses"
                     ok, detail = daemon_integrity_ok(after)
                     assert not ok and "lifecycle_init_lost_with_opportunity_total=" in detail, detail
@@ -224,17 +246,7 @@ def run_arm(pm_pid, skip_store, churn=False):
                       f"{len(short_lived & pending)} pending backends shorter than a tick")
             except Exception:
                 text = log.read_text()
-                print("INIT loss diagnostics (CLOCK_MONOTONIC):")
-                print("\n".join(line for line in text.splitlines()
-                                if line.startswith("INIT-LOST:")))
-                if after is not None:
-                    print({name: after[name] for name in (
-                        "lifecycle_init_lost_total",
-                        "lifecycle_init_lost_with_opportunity_total",
-                        "lifecycle_init_lost_no_opportunity_total",
-                        "lifecycle_init_lost_untraced_ns_total",
-                        "wp_attach_failures_total", "wp_attach_exit_race_total")})
-                print(text)
+                print_failure_diagnostics(text, after)
                 raise
             finally:
                 stop(proc)

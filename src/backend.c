@@ -308,13 +308,28 @@ static int open_watchpoint_target(pid_t pid)
     return fd >= 0 ? fd : -errno;
 }
 
-static void record_watchpoint_failure(struct pgwt_daemon *d, int target_fd)
+/* Failure-only diagnostics. The legacy split deliberately ignores errno;
+ * these observations allow a later box run to establish a stricter rule. */
+static void record_watchpoint_failure(struct pgwt_daemon *d, int target_fd,
+                                      pid_t pid, const char *site,
+                                      int error, int resolve_error)
 {
-    int error = errno;
-    if (pgwt_backend_target_live_fd(target_fd, d->postmaster_pid) == 0)
+    int live = pgwt_backend_target_live_fd(target_fd, d->postmaster_pid);
+    int live_error = live < 0 ? errno : 0;
+    if (live == 0)
         d->counters.wp_attach_exit_race_total++;
-    else
+    else {
         d->counters.wp_attach_failures_total++;
+        if (live > 0)
+            d->counters.wp_attach_failures_live_total++;
+        else
+            d->counters.wp_attach_failures_unknown_total++;
+    }
+    fprintf(stderr,
+            "WP-ATTACH-FAIL: pid=%d site=%s errno=%d "
+            "resolve_errno=%d liveness=%s liveness_result=%d liveness_errno=%d\n",
+            pid, site, error, resolve_error,
+            live > 0 ? "live" : live == 0 ? "gone" : "unknown", live, live_error);
     if (target_fd >= 0) close(target_fd);
     errno = error;
 }
@@ -333,14 +348,15 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
     int target_fd = open_watchpoint_target(be->pid);
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->wp_fd = pgwt_open_watchpoint_disabled(be->pid, be->wp_addr, wp_prog_fd);
-    pgwt_debug_block_end(d, be->wp_fd < 0 ? "watchpoint_open_failed"
-                                          : "watchpoint_open",
-                         be->pid, started_ns);
     if (be->wp_fd < 0) {
+        int error = errno;
+        pgwt_debug_block_end(d, "watchpoint_open_failed", be->pid, started_ns);
         /* Caller decides on cleanup; only a confirmed exit is a race. */
-        record_watchpoint_failure(d, target_fd);
+        record_watchpoint_failure(d, target_fd, be->pid,
+                                  "watchpoint_open", error, 0);
         return -1;
     }
+    pgwt_debug_block_end(d, "watchpoint_open", be->pid, started_ns);
 
     if (be->attach_ts == 0)
         be->attach_ts = now_ns();
@@ -358,17 +374,19 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
 
     started_ns = pgwt_debug_block_begin(d);
     int enable_rc = pgwt_watchpoint_enable(be->wp_fd);
-    pgwt_debug_block_end(d, enable_rc != 0 ? "watchpoint_enable_failed"
-                                           : "watchpoint_enable",
-                         be->pid, started_ns);
     if (enable_rc != 0) {
-        record_watchpoint_failure(d, target_fd);
+        int error = errno;
+        pgwt_debug_block_end(d, "watchpoint_enable_failed", be->pid, started_ns);
+        record_watchpoint_failure(d, target_fd, be->pid,
+                                  "watchpoint_enable", error, 0);
         started_ns = pgwt_debug_block_begin(d);
         pgwt_close_watchpoint(be->wp_fd);
         pgwt_debug_block_end(d, "watchpoint_close", be->pid, started_ns);
         be->wp_fd = -1;
+        errno = error;
         return -1;
     }
+    pgwt_debug_block_end(d, "watchpoint_enable", be->pid, started_ns);
     if (target_fd >= 0) close(target_fd);
     return 0;
 }
@@ -928,25 +946,29 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     uint64_t started_ns = pgwt_debug_block_begin(d);
     be->bootstrap_fd = pgwt_open_watchpoint(child_pid, d->my_wait_ptr_addr,
                                              bootstrap_prog_fd);
-    pgwt_debug_block_end(d,
-                         be->bootstrap_fd < 0
-                             ? "bootstrap_watchpoint_open_failed"
-                             : "bootstrap_watchpoint_open",
-                         child_pid, started_ns);
     if (be->bootstrap_fd < 0) {
+        int error = errno;
+        pgwt_debug_block_end(d, "bootstrap_watchpoint_open_failed", child_pid, started_ns);
         /* Race: child may have already exited or initialized.
          * Try direct init path (version-aware address resolution). */
+        /* Zero with errno=0 also covers a pointer not yet assigned: the
+         * resolver's zero result is not necessarily a syscall failure. */
+        errno = 0;
         uint64_t ptr = pgwt_resolve_backend_wait_addr(d, child_pid);
+        int resolve_error = errno;
         if (ptr != 0) {
             if (target_fd >= 0) close(target_fd);
             return pgwt_handle_init(d, child_pid, ptr, 0);
         }
         /* Resolution alone cannot distinguish exit from a live failure. */
-        record_watchpoint_failure(d, target_fd);
+        record_watchpoint_failure(d, target_fd, child_pid,
+                                  "bootstrap_watchpoint_open/backend_wait_addr_resolve",
+                                  error, resolve_error);
         be->is_alive = false;
         be->pid = 0;
         return -1;
     }
+    pgwt_debug_block_end(d, "bootstrap_watchpoint_open", child_pid, started_ns);
     if (target_fd >= 0) close(target_fd);
 
     pgwt_pending_init_add(&d->backends, be);
