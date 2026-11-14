@@ -598,6 +598,10 @@ for declared, name, rc, want in (
         ("0", "test_execution_span_live", 78, "0 0 1 0 0"),
         ("0", "test_escalation", 78, "0 0 1 0 0"),
         ("0", "test_ui_live_smoke", 78, "0 0 1 0 0"),
+        ("0", "test_counter_vector_phase_live", 78, "0 0 1 0 0"),
+        ("1", "test_counter_vector_phase_live", 78, "0 1 0 0 0"),
+        ("", "test_counter_vector_phase_live", 78, "0 1 0 0 0"),
+        ("0", "test_counter_vector_live", 78, "0 1 0 0 0"),
         ("1", "test_escalation", 78, "0 1 0 0 0"),
         ("", "test_escalation", 78, "0 1 0 0 0"),
         ("0", "unrelated", 78, "0 1 0 0 0"),
@@ -610,7 +614,7 @@ for declared, name, rc, want in (
     diagnostic = ""
     if rc == 78 and declared != "0":
         diagnostic = 'declaration not "0"'
-    elif rc == 78 and name == "unrelated":
+    elif rc == 78 and name in ("unrelated", "test_counter_vector_live"):
         diagnostic = "test is not phase-dependent"
     runner_case(declared, name, rc, want, diagnostic=diagnostic)
 
@@ -622,6 +626,8 @@ runner_case("0", "test_phase_absent_live", 78, "0 1 0 0 0",
             diagnostic="test is not phase-dependent")
 
 runner_case("0", "test_execution_cardinality", 78, "0 1 0 0 0", output="",
+            diagnostic="refusal marker absent")
+runner_case("0", "test_counter_vector_phase_live", 78, "0 1 0 0 0", output="",
             diagnostic="refusal marker absent")
 runner_case("0", "test_execution_cardinality", 78, "0 0 1 0 0", stream="stderr")
 runner_case("0", "test_execution_cardinality", 78, "0 0 0 1 0", known=True,

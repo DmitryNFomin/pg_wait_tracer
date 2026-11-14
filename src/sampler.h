@@ -4,7 +4,7 @@
  * backend's PGPROC->wait_event_info (batched process_vm_readv for targets in
  * SHARED memory, per-pid pread for process-local ones — SMP-2), turn each
  * non-CPU reading into a SAMPLES record, and hand the batch to the trace
- * writer via pgwt_writer_push_samples(). No BPF in the per-sample hot path;
+ * writer via pgwt_writer_push_samples_counted(). No BPF in the per-sample hot path;
  * PostgreSQL executes zero extra instructions.
  *
  * Addresses come from the backend registry (pid -> resolved wait_event_info

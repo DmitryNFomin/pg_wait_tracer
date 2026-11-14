@@ -140,12 +140,23 @@ def main():
         if sys.platform == "darwin":
             prefix = subprocess.check_output(["brew", "--prefix", "lz4"], text=True).strip()
             extra = ["-I" + prefix + "/include", "-L" + prefix + "/lib", *extra]
-        for name, before, after, assertion in (
-            ("writer-sticky-rejection-removed", "if (w->failed) return -1;", "if (w->failed) return 0;", "pgwt_writer_push_event_counted"),
-            ("writer-count-removed", "++*writer_push_fail_total;", "(void)writer_push_fail_total;", "failures =="),
+        for name, func, before, after, assertion in (
+            ("writer-sticky-rejection-removed", "pgwt_writer_push_event",
+             "if (w->failed) return -1;", "if (w->failed) return 0;", "pgwt_writer_push_event_counted"),
+            ("writer-count-removed", "pgwt_writer_push_event_counted",
+             "++*writer_push_fail_total;", "(void)writer_push_fail_total;", "failures =="),
+            ("sample-sticky-rejection-removed", "pgwt_writer_push_samples",
+             "if (w->failed) return -1;", "if (w->failed) return 0;", "pgwt_writer_push_samples_counted"),
+            ("sample-count-removed", "pgwt_writer_push_samples_counted",
+             "++*writer_push_fail_total;", "(void)writer_push_fail_total;", "failures =="),
+            ("sample-failure-not-sticky", "pgwt_writer_push_samples",
+             "w->failed = true;", "w->failed = false;", "w->failed"),
+            ("sample-flush-error-ignored", "pgwt_writer_push_samples",
+             "if (flush_samples(w) != 0) goto fail;", "(void)flush_samples(w);", "pgwt_writer_push_samples_counted"),
         ):
+            body = function(writer, func)
             binary = compile_mutation(tmp, "writer", "test_writer_failure.c", "writer.c",
-                                      one(writer, before, after), extra)
+                                      writer.replace(body, one(body, before, after), 1), extra)
             run_result(binary, assertion)
             killed += 1
             print(f"KILLED {name}: {assertion}")

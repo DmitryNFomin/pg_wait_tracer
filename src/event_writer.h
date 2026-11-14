@@ -234,7 +234,10 @@ const char *pgwt_default_trace_group(void);
 int  pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
                       int pg_version, int retention_hours,
                       const char *group_name);
-/* All daemon event producers use this rejection-accounting wrapper. */
+/* All daemon event/sample producers use the corresponding counted wrapper.
+ * Each rejected call increments writer_push_fail_total once (a sample batch
+ * is one call). Both raw APIs reject every push after a failure; intentional
+ * no-recording remains a successful no-op. */
 int  pgwt_writer_push_event_counted(struct pgwt_event_writer *w,
                                     const struct pgwt_trace_event *evt,
                                     uint64_t *writer_push_fail_total);
@@ -252,6 +255,10 @@ int  pgwt_writer_push_event(struct pgwt_event_writer *w,
 int  pgwt_writer_push_samples(struct pgwt_event_writer *w,
                               const struct pgwt_trace_event *samples,
                               int count, uint64_t sample_period_ns);
+int  pgwt_writer_push_samples_counted(struct pgwt_event_writer *w,
+                                      const struct pgwt_trace_event *samples,
+                                      int count, uint64_t sample_period_ns,
+                                      uint64_t *writer_push_fail_total);
 
 /* #424: flush every pending buffer so the closed-record prefix is visible to
  * a concurrent reader, and report the high-watermark it reached. Returns 0 on

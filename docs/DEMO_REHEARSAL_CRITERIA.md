@@ -1046,6 +1046,9 @@ assertion unchanged.
   control proxy. The existing `state_map_full_total` includes fork-state
   insertion failures; the merge-v1 vector separates them into its dedicated
   fork component to avoid counting one failure in two components.
+  `writer_push_fail_total` counts rejected calls for both events and sample
+  batches, including every later push after an open or flush failure.
+  Intentional no-recording remains a successful no-op.
   `lifecycle_init_lost_total` counts an unattached backend with
   missing state, or INIT evidence never attached before backend exit. A missing
   state entry at bootstrap is only diagnostic (`lifecycle_init_no_state_total`):
@@ -1080,10 +1083,11 @@ assertion unchanged.
   the untraced-ns sum is then an upper bound including the daemon's own delay.
   A current EXIT record, including its pre-record sweep, uses
   `exit_ts_source=record`.
-  The other lifecycle and query-text counters count reserve failures.
+  The other lifecycle counters count reserve failures; query-text counters
+  also count unreadable text.
 - **Known blind spot, stated rather than implied:** BPF map update and read
-  failures without counters remain uncovered. Sampled/coop tiers report the
-  ring-drop counters as 0 because only the full provider fills them. So a clean
+  failures without counters remain uncovered. Capture loss counters are read
+  in every mode, with unreadable components invalidating the vector. A clean
   result means the reported counters are zero, never "nothing was missed";
   §3's conservation identity cannot detect missing backend attribution either.
 - "The daemon was alive" is not "the daemon captured everything".

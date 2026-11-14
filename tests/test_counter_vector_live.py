@@ -16,7 +16,7 @@ import tempfile
 
 from demo_rehearsal_lib import daemon_integrity_ok
 from test_init_hint_recovery import ctl, stop, wait_for
-from testutil import find_postmaster
+from testutil import find_postmaster, phase_contract_apply
 
 TRACER = Path(__file__).resolve().parents[1] / "pg_wait_tracer"
 NEW_COUNTERS = (
@@ -28,13 +28,13 @@ FAULTS = (
     ("wait_read", "wait_read_fail_total"),
     ("exact_query", "exact_query_update_fail_total"),
     ("exact_cmd", "exact_cmd_update_fail_total"),
-    ("exact_phase", "exact_phase_update_fail_total"),
     ("accum", "accum_update_fail_total"),
     ("fork_state", "fork_state_update_fail_total"),
 )
 
 
-def run_arm(pm_pid, fault, target=None):
+def run_arm(pm_pid, fault, target=None, *, expected_phase=None, mode="full"):
+    label = (fault or "clean") + (f" ({mode})" if mode != "full" else "")
     with tempfile.TemporaryDirectory(prefix="pgwt-counter-live-") as tmp:
         directory = Path(tmp)
         env = {k: v for k, v in os.environ.items() if not k.startswith("PGWT_TEST_")}
@@ -47,7 +47,7 @@ def run_arm(pm_pid, fault, target=None):
         log = directory / "daemon.stderr"
         with log.open("w") as err:
             proc = subprocess.Popen(
-                [str(TRACER), "--mode", "full", "--pid", str(pm_pid), "-T", str(directory),
+                [str(TRACER), "--mode", mode, "--pid", str(pm_pid), "-T", str(directory),
                  "-i", "1", "--duration", "60", "-q"],
                 stdout=subprocess.DEVNULL, stderr=err, env=env)
             try:
@@ -62,8 +62,12 @@ def run_arm(pm_pid, fault, target=None):
                 metrics = ctl(directory)
                 for key in NEW_COUNTERS:
                     assert type(metrics.get(key)) is int and metrics[key] >= 0, (key, metrics)
-                print(f"counter-vector live {fault or 'clean'}: {json.dumps(metrics, sort_keys=True)}", flush=True)
+                print(f"counter-vector live {label}: {json.dumps(metrics, sort_keys=True)}", flush=True)
                 assert metrics.get("counter_vector_valid") is True, metrics
+                if expected_phase is not None:
+                    phase_contract_apply(
+                        expected_phase, [metrics.get("exact_probe_attached_mask")],
+                        {target: metrics.get(target)}, "counter-vector exact_phase")
                 if fault:
                     # A missing stimulus is a failure; do not repeat the arm.
                     assert metrics[target] > 0, (fault, target, metrics)
@@ -76,7 +80,7 @@ def run_arm(pm_pid, fault, target=None):
                         assert metrics[key] == 0, f"natural failure: {key}={metrics[key]} (wait read rate belongs to Refs #909)"
             finally:
                 stop(proc)
-        print(f"counter-vector live {fault or 'clean'}: PASS", flush=True)
+        print(f"counter-vector live {label}: PASS", flush=True)
 
 
 def main():
@@ -96,6 +100,7 @@ def main():
     run_arm(pm_pid, "pg13_query_text" if major == 13 else "query_text",
             "ringbuf_pg13_query_text_drops_total" if major == 13 else "ringbuf_query_text_drops_total")
     run_arm(pm_pid, "writer", "writer_push_fail_total")
+    run_arm(pm_pid, "writer", "writer_push_fail_total", mode="sampled")
 
 
 if __name__ == "__main__":

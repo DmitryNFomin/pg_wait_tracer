@@ -97,7 +97,7 @@ struct pgwt_counters {
 
     /* Capture hardening (T4). All of these mean "something the operator
      * must know about is happening" — each is paired with a loud log. */
-    uint64_t writer_push_fail_total; /* every rejected event, including after failure */
+    uint64_t writer_push_fail_total; /* every rejected event/sample push call */
     uint64_t init_state_read_fail_total; /* sticky unknown INIT accounting */
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
     uint64_t lifecycle_init_lost_total; /* INIT evidence/missing state, never attached */
