@@ -113,7 +113,7 @@ test_backend_init: test_backend_init.c ../src/backend_init.c ../src/backend_init
 
 # Exercise the production lifecycle functions, replacing only hardware opens
 # and state reads/deletes. Capture objects exist after the parent build.
-LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o))
+LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o) $(wildcard $(BUILD)/core/*.o))
 test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=pgwt_watchpoint_enable -Wl,--wrap=bpf_map_delete_elem -Wl,--wrap=bpf_map_lookup_elem -Wl,--wrap=bpf_map_update_elem -Wl,--wrap=ring_buffer__consume $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 

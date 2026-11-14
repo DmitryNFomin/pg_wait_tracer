@@ -184,6 +184,12 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
     if (d->exact_perf)
         return d->transport.record
             ? d->transport.record(d, PGWT_WIRE_DEST_L, data, data_sz) : -ENOSYS;
+    return pgwt_process_lifecycle_payload(d, data, data_sz);
+}
+
+int pgwt_process_lifecycle_payload(struct pgwt_daemon *d,
+                                  void *data, size_t data_sz)
+{
     const struct pgwt_lifecycle_event *ev = data;
     if (ev->type == PGWT_LIFECYCLE_EXIT) {
         d->lifecycle_exit_pid = ev->pid;
@@ -191,7 +197,7 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
     }
     ++d->lifecycle_batch_records;
     pgwt_sweep_bootstrap_backends(d);
-    int rc = process_lifecycle_event(ctx, data, data_sz);
+    int rc = process_lifecycle_event(d, data, data_sz);
     d->lifecycle_exit_pid = 0;
     d->lifecycle_exit_ts = 0;
     return rc;
@@ -417,6 +423,11 @@ void pgwt_handle_timer(struct pgwt_daemon *d)
     ssize_t r = read(d->timer_fd, &expirations, sizeof(expirations));
     pgwt_debug_block_end(d, "timerfd_read", 0, started_ns);
     if (d->exact_perf) {
+        /* B's pgwt_merge_capture_tick owns the maintenance skipped by this
+         * early return: PostgreSQL liveness via kill(postmaster_pid, 0),
+         * pgwt_sweep_bootstrap_backends, pgwt_recover_unattached_backends,
+         * pgwt_sweep_stale_state and pgwt_escalation_check_budget. Preserve
+         * the daemon_mode/lightweight/test guards used below. */
         if (pgwt_merge_capture_tick(d) < 0) {
             fprintf(stderr, "FATAL: exact per-CPU capture tick failed\n");
             d->running = false;

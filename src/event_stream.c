@@ -57,6 +57,12 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
     if (d->exact_perf)
         return pgwt_percpu_transport_record(d, PGWT_WIRE_DEST_E,
                                             data, data_sz);
+    return pgwt_process_trace_payload(d, data, data_sz);
+}
+
+int pgwt_process_trace_payload(struct pgwt_daemon *d,
+                              void *data, size_t data_sz)
+{
     struct pgwt_trace_event *evt = data;
     struct pgwt_accumulator *acc = d->event_accum;
     uint64_t callback_started_ns = pgwt_debug_block_begin(d);

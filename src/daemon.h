@@ -550,6 +550,11 @@ int pgwt_publish_exec_sites(struct pgwt_daemon *d, const char *bin);
  * called a narrower seam could not have seen it. */
 void pgwt_handle_timer(struct pgwt_daemon *d);
 int pgwt_consume_lifecycle_ring(struct pgwt_daemon *d);
+/* Process one decoded L payload (FORK/INIT/EXIT or QUERY_TEXT), after wire
+ * validation. Shared by the default ring callback and B; never dispatches
+ * back into transport. Includes exit bookkeeping and the per-record sweep. */
+int pgwt_process_lifecycle_payload(struct pgwt_daemon *d,
+                                  void *data, size_t data_sz);
 /* Single dispatch for every raw event-ring drain (including provider,
  * escalation and open-snapshot callers). Keeps B out of those files. */
 int pgwt_consume_event_ring(struct pgwt_daemon *d, bool bounded);
