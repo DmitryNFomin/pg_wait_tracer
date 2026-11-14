@@ -685,7 +685,12 @@ the frozen target on every (CPU,destination), every skipped sequence number
 being a counted discard and no failure being counted. **An empty pass is not
 required.** It was a proxy: emptiness is not evidence (CONTRACT.md:128), and
 on a busy box no pass is ever empty. Measured: every completed round in every
-run of this unit completed on a pass that consumed something.
+loaded run of this unit completed on a pass that consumed something. Measured
+against the old rule on the same build and load (EL8, PG18, `-c16` at 2,000
+tps, 10 s, three runs each): the old rule completed 7, 12 and 7 rounds, held
+records for 1.2 s or more at the median, and two of the three runs ended in
+VOID; this rule completed 1,000 to 1,004 rounds with a held age of 12.2 to
+12.5 ms at the 99th percentile and no VOID.
 
 Why nothing more is released than under the old rule (complete only after an
 empty pass). What is released is decided by the coordinator, not by the
@@ -797,7 +802,8 @@ the reader.
   no-opportunity. Under the mode the state is already retired by BPF when the
   daemon handles the EXIT, so the loss cannot be classified, and each one is
   `VOID(counter_change, lifecycle_init_drop)`: 39 in 8 s. On PG18, where
-  attaching is cheap, a plain `-C` run lost a backend in 1 of 8 runs.
+  attaching is cheap, a plain `-C` run lost a backend in 1 of 8 runs at 200
+  connections/s and in 4 of 7 unthrottled runs (about 430 connections/s).
   Connections that hold for 100 ms are attached and run clean on both, so
   the registered live test's `-C` arm holds each connection for 100 ms.
 - A backend that exits before it ever reaches `InitProcess` is also counted
@@ -815,5 +821,28 @@ the reader.
   tried as a fourth: the sequence check stops it at or before its first
   round, at one of two assertions depending on timing, so it stays a host
   mutant (`skip_cpu_ack`).
+
+### Measurements (not gates)
+
+Under the attachment test premise, 4 vCPU (cx33), 10 s per run, three runs
+per cell, ranges over the runs. `-c16` is `pgbench -S -c 16 -j 4 -R 2000`;
+`-C` is `pgbench -C -c 16 -j 4 -R 200` with each connection holding 100 ms
+(about 143 connections/s). Every run: 0 VOID, 0 transport failures, 0
+discards, 0 perf LOST, every round completed on a non-empty pass, every
+acknowledgement produced after its fence request.
+
+| Kernel, PG, load | rounds/s | held age p99 / max, ms | event to release p99 / max, ms | released records/s | daemon CPU, % of a core | queue high |
+|---|---:|---:|---:|---:|---:|---:|
+| EL8 4.18, PG18, `-c16` | 99.7 to 100.1 | 12.2 to 12.7 / 32.6 to 35.1 | 12.4 to 13.0 / 32.7 to 114.8 | 7,883 to 7,994 | 15.7 to 16.5 | 156 to 181 |
+| EL8 4.18, PG18, `-C` | 79.9 to 85.1 | 24.8 to 27.0 / 31.0 to 46.2 | 25.9 to 27.8 / 33.9 to 47.0 | 2,850 to 2,871 | 24.7 to 25.9 | 122 to 152 |
+| EL8 4.18, PG13, `-c16` | 99.7 to 100.0 | 12.6 to 13.5 / 23.9 to 32.8 | 12.8 to 13.6 / 24.3 to 35.8 | 7,916 to 7,987 | 34.2 to 39.3 | 156 to 187 |
+| EL8 4.18, PG13, `-C` | 81.0 to 83.1 | 26.2 to 28.1 / 36.5 to 41.7 | 26.8 to 29.7 / 42.6 to 371.1 | 2,878 to 2,904 | 34.8 to 36.0 | 117 to 127 |
+
+Held age is from wire consumption to publication; event to release is from
+the record's own timestamp, so it includes kernel-buffer time. The two
+event-to-release maxima above 100 ms (114.8 and 371.1 ms) are FORK lifecycle
+records, not wait transitions (the daemon names the record with the
+largest age); in the other ten runs the largest is 47.0 ms. Rounds are requested at most once per 10 ms slot, which is
+the 100 rounds/s ceiling.
 
 Evidence: `tests/results/session-20261114/b-integration/` (git-ignored).
