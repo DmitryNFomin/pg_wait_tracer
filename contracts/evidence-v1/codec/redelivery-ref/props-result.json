@@ -1,0 +1,190 @@
+{
+  "bounds": {
+    "max_multiset_size": 4,
+    "thematic_alphabets": [
+      {
+        "name": "prefix_and_clean_ties",
+        "size": 6
+      },
+      {
+        "name": "header_flags_footer",
+        "size": 6
+      },
+      {
+        "name": "conflict_both_vs_one_valid",
+        "size": 5
+      },
+      {
+        "name": "sample_block_conflicts",
+        "size": 3
+      },
+      {
+        "name": "chain_and_seal",
+        "size": 6
+      },
+      {
+        "name": "bad_and_nonboundary_links",
+        "size": 5
+      },
+      {
+        "name": "reversed_chain_interleaved_captures",
+        "size": 4
+      },
+      {
+        "name": "fault_before_later_conflict",
+        "size": 5
+      },
+      {
+        "name": "second_boot_and_nonroot_reuse",
+        "size": 6
+      },
+      {
+        "name": "running_void_baseline",
+        "size": 5
+      },
+      {
+        "name": "unknown_baselines",
+        "size": 4
+      },
+      {
+        "name": "frontier_moves_baseline",
+        "size": 4
+      },
+      {
+        "name": "unqualified_ignored_baseline",
+        "size": 3
+      },
+      {
+        "name": "unqualified_explicit_void",
+        "size": 2
+      }
+    ],
+    "additional_alphabets": [
+      {
+        "name": "multiple_seal_claims_and_witness_ties",
+        "size": 5
+      },
+      {
+        "name": "empty_predecessor_multiple_claims",
+        "size": 4
+      },
+      {
+        "name": "complete_malformed_footer",
+        "size": 3
+      },
+      {
+        "name": "2a_distinct_witnesses",
+        "size": 6
+      }
+    ],
+    "cut_offsets": [
+      0,
+      1025
+    ],
+    "deterministic_rounds": 1,
+    "random_rounds": 0,
+    "targeted_direct_max_size": 7,
+    "scope": "exhaustive within alphabets; targeted extensions; not global cartesian product"
+  },
+  "monotonicity_exception": "Only a capture newly shown by independently valid headers to name multiple boots may retract all its positions/results under 2a; all other lost storage positions require a new HC/BC/SC at or before that position in the same boot/capture.",
+  "counts": {
+    "multisets": 3959,
+    "size_0": 1,
+    "permutations": 15972,
+    "assertions": 105621,
+    "permutation_prefix_checks": 69643,
+    "size_1": 1102,
+    "incremental_edges": 7521,
+    "monotonicity_edges": 7521,
+    "size_2": 1253,
+    "duplicate_edges": 1519,
+    "size_3": 533,
+    "size_4": 1070,
+    "ambiguity_retraction_edges": 131,
+    "byte_cuts": 1026,
+    "replay_assertions": 4,
+    "r3b_replay_assertions": 9,
+    "baseline_component_assertions": 15
+  },
+  "coverage": [
+    "2a_distinct_witnesses",
+    "all_baseline_components_0",
+    "all_baseline_components_1",
+    "all_baseline_components_10",
+    "all_baseline_components_11",
+    "all_baseline_components_12",
+    "all_baseline_components_13",
+    "all_baseline_components_14",
+    "all_baseline_components_2",
+    "all_baseline_components_3",
+    "all_baseline_components_4",
+    "all_baseline_components_5",
+    "all_baseline_components_6",
+    "all_baseline_components_7",
+    "all_baseline_components_8",
+    "all_baseline_components_9",
+    "all_block_header_payload_crc_cuts",
+    "all_footer_cuts",
+    "all_header_cuts",
+    "bad_and_nonboundary_links",
+    "bad_column_layout",
+    "bad_leb128",
+    "bad_lz4_distance",
+    "bad_lz4_end",
+    "bad_preceding_crc",
+    "bad_sample_weights",
+    "bad_self_offset",
+    "byte_cut",
+    "chain_and_seal",
+    "clean_boundary_snapshots",
+    "complete_malformed_footer",
+    "conflict_both_vs_one_valid",
+    "counter_change",
+    "crc_before_decode",
+    "cut_with_clean_copy",
+    "decode",
+    "delayed_life",
+    "empty_predecessor_multiple_claims",
+    "fault_before_later_conflict",
+    "frontier_moves_baseline",
+    "header_flags_footer",
+    "identical_records_at_distinct_positions",
+    "invalid_ordinal_header",
+    "missing_common_t",
+    "multiple_seal_claims_and_witness_ties",
+    "null_counters",
+    "omitted_marker_and_sample",
+    "prefix_and_clean_ties",
+    "raw_lz4_and_different_lengths",
+    "reserved",
+    "reversed_chain_interleaved_captures",
+    "running_void_baseline",
+    "sample_block_conflicts",
+    "second_boot_and_nonroot_reuse",
+    "short_header",
+    "short_payload",
+    "static_baseline_mismatch",
+    "static_descriptor_mismatch",
+    "static_mapping_mismatch",
+    "structural_fault_in_multi_record_block",
+    "terminal_reason_ties",
+    "unconsumed_suffix",
+    "unknown_baseline_readable_restoration",
+    "unknown_baselines",
+    "unknown_root_baseline",
+    "unqualified",
+    "unqualified_explicit_void",
+    "unqualified_ignored_baseline",
+    "unreachable_baseline_after_semantic_stop",
+    "unsafe_bounds",
+    "unsafe_count",
+    "unsupported_block_type",
+    "unsupported_codec",
+    "unsupported_header_schema",
+    "unsupported_payload_schema",
+    "whole_block_before_record_fault",
+    "zero_duration_wait"
+  ],
+  "failures": [],
+  "elapsed_seconds": 12.825
+}
