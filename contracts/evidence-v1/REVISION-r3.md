@@ -8,7 +8,7 @@ Q1 ACCEPT (§5) — malformed/unknown records stop at their physical boundary; r
 Q2 ACCEPT (§5) — overlapping/out-of-lifetime ATTACH_OK or END before anchor stops at that offending record, without synthetic loss fields.
 Q3 ACCEPT (§5) — END without exactly one addressable run stops at END after dependency resolution; tied-transition withholding stays intact.
 Q4 ACCEPT (§5) — FRONTIER t<=H stops at that FRONTIER; rollback does not reset publication high-water.
-Q5 ACCEPT (§§1,5,6,7) — the first descriptor binds capture to boot; a conflicting descriptor stops that ID, preserving its earlier prefix.
+Q5 ACCEPT (§§1,5,6,7) — for ordered logical fixtures, the first descriptor binds capture to boot; a conflicting descriptor stops that ID, preserving its earlier prefix. Codec delivery multisets follow CONTRACT §1’s precedence statement and REDELIVERY clause 2a instead.
 Q6 ACCEPT (§§4,5) — state/known-entry mismatch stops at TRANS; no later record can repair that capture.
 §5 common stop: keep earlier surviving certificates and verified LIFE; discard tentative run suffixes and every later record/file of that ID.
 §5 counter exception: consume FRONTIER/ATTACH_OK as VOID(t,vector,null); no certificate/run; reset/decrease or null means unknown, with §4 lifecycle recovery.

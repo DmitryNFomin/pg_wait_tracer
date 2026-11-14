@@ -1,9 +1,9 @@
 # Evidence-v1 binary codec for trace v5
 
 Status: proposed normative byte contract, for `contracts/evidence-v1/CODEC.md`.
-This is a design, not a claim that the daemon emits or qualifies v5. It supplements
-CONTRACT.md and REVISION-r2.md without changing their replay semantics. Source
-baseline: `origin/master` at `84779083f2fcf9a4a02e595bf041d14040927e7f`;
+This is a design, not a claim that the daemon emits or qualifies v5. It supplements CONTRACT.md, REVISION-r2.md and REVISION-r3.md, subject to CONTRACT §1’s explicit precedence for codec delivery multisets; other logical replay semantics remain controlling.
+
+Source baseline: `origin/master` at `84779083f2fcf9a4a02e595bf041d14040927e7f`;
 logical adapter types: `aa31b588` (master after #903; reviewed as local commit 33d9139e, whose
 `src/core/evidence_replay.{c,h}` are byte-identical). Revision r2 follows the logical
 contract where that replay implementation disagrees; see REVISION-codec-r2.md,
@@ -148,9 +148,9 @@ descriptors is ambiguous input, not grounds for stitching. file_no begins at 0
 and increments by one without wrap. For file 0 has_previous MUST be 0; for every
 other file it MUST be 1 and previous_file_no MUST equal file_no-1.
 
-Every successor repeats boot, capture, qualified, **the capture's original**
-loss_baseline, and the identical mapping entries. A successor header does not
-reset the current baseline, which is changed only by replayed VOID records.
+Every successor repeats boot, capture, qualified and the identical mapping entries. Its loss_baseline MUST restate the running baseline at that file boundary, including null when unknown. File 0 initializes the baseline; a successor descriptor never resets it or reports loss. Replay compares the declaration with its state after preceding replay, including applicable explicit VOID and records consumed as VOID, with the unqualified-certificate exception preserved. A mismatch stops replay at the successor descriptor under CONTRACT §6.
+For successor file n, “running baseline” means the value derived by contract replay of files 0 through n−1, not a live-counter snapshot or the preceding header’s declaration. If rotation observes changed or unreadable counters, the writer MUST persist the required explicit VOID in the predecessor before sealing it, using the contract’s counters/null and invalid_from rules. It MUST then derive and declare the resulting baseline. A successor header MUST NOT carry an unrecorded counter change or substitute for a loss report.
+
 Other creation metadata may differ. Unknown baseline is representable even in
 a qualified capture; it enables no certificates until restored by the contract's
 readable-VOID and fresh-attachment protocol. qualified=1 asserts the capture
@@ -533,13 +533,9 @@ order. It excludes exactly header flag bytes 6..7 and the entire footer starting
 at D. It also excludes any rejected tail; such a tail is not permitted in a
 predecessor admitted for continuation. Empty-file digest uses D=H.
 
-To admit a successor, first require a complete validated predecessor data
-region ending exactly at previous_data_end, and no further bytes except an
-absent or exactly valid footer. Then verify digest, immediate ordinal, matching
-boot/capture, qualification, original baseline and mapping. A shorter prefix
-with a valid CRC is insufficient; extra data blocks after the referenced D are
-also invalid for this link. If recovery removed any referenced block bytes,
-the link fails; rebuilding only the footer or changing flags leaves it valid.
+For local codec linkage, require an actual predecessor delivery whose complete validated data region ends exactly at previous_data_end, with no remaining bytes except an absent or exactly valid footer. Verify the digest, immediate ordinal, matching boot/capture, qualification and mapping. These are the static link requirements; baseline equality is not one of them. A shorter validated prefix is insufficient. A validated extension beyond the referenced D is handled by REDELIVERY’s sealing-conflict rule. Removing referenced block bytes invalidates the link; rebuilding only the footer or changing flags does not.
+A codec-admitted successor is separately checked during replay against the running baseline at its descriptor. A replay-baseline mismatch creates no PU, SC or RF and does not undo an independently established sealing contradiction. Baseline bytes remain immutable header bytes covered by header validation, header-conflict comparison and predecessor hashing.
+
 The same ordinal with conflicting physical files is ambiguous and must not be
 chosen by timestamp. Re-delivery of the identical validated file is not a new
 chain member.
