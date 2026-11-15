@@ -598,8 +598,8 @@ void pgwt_deescalate(struct pgwt_daemon *d, int reason)
     uint64_t now = mono_ns();
 
     /* Drain every transition captured before the boundary. */
-    if (d->event_rb)
-        ring_buffer__consume(d->event_rb);
+    if (d->event_rb || d->exact_perf)
+        pgwt_consume_event_ring(d, false);
 
     /* ESC-2: flush open wait intervals as final transitions BEFORE detach_all
      * wipes them, and before the END marker closes the exact-wins range — so a
