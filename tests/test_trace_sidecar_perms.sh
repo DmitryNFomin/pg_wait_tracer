@@ -43,6 +43,9 @@ done
 
 # #622 declares kernel/SDT expectations independently of the measurement.
 python3 "$SCRIPT_DIR/testutil.py" phase-expectation >/dev/null || exit $?
+if [[ "${PGWT_TEST_FORCE_NO_PHASE_PROBES:-}" == "1" ]]; then
+    export PGWT_TEST_NO_USDT_SEMA_REFCNT=1
+fi
 
 echo "=== test_trace_sidecar_perms ==="
 
