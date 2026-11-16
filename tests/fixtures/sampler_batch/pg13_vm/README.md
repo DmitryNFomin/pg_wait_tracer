@@ -84,8 +84,13 @@ The new (d) checks have no elapsed-time allowance or offsetting between classes:
   pre-eligibility or terminal exemptions cannot cancel any of them. The summary
   retains every classified outcome and counts each class and phase separately.
 
-The perf recorder uses system-wide mode for `sched:sched_process_fork` and
-`sched:sched_process_exit`: `-p daemon` alone cannot record postmaster forks.
+The perf recorder uses system-wide mode for `task:task_newtask` (fork; the
+parent is perf's tid column) and `sched:sched_process_free` (EXIT, never
+earlier than the real exit): `-p daemon` alone cannot record postmaster forks.
+`sched:sched_process_fork`/`exit` are unusable: the tracer under test attaches
+its own `tp/sched` programs there, and a BPF tracepoint program returning 0
+drops every perf sample of that tracepoint (EL8 4.18 recorded zero of each with
+the daemon running and four of each without it).
 Readv and tick events retain filters for all existing daemon threads. Every
 scheduler loss is subject to the same lossless rule as readv/ticks. Each cohort
 PID requires exactly one observed postmaster fork before E; the summary's

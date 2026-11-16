@@ -57,7 +57,8 @@ import time
 from sampler_batch_perf import (CALLS, SUPPORTED_MAJORS, assess_counts, file_io_reds,
                                 parse_summary, assess_pg13_timing, require_pg13_negative_control,
                                 assess_pg13_vm_calls, pg13_vm_diagnostics, parse_vm_trace, VM_EVENTS,
-                                parse_attr_failures, parse_pg13_lifecycle)
+                                parse_attr_failures, parse_pg13_lifecycle,
+                                PG13_FORK_EVENT, PG13_EXIT_EVENT)
 from testutil import find_postmaster
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -430,7 +431,12 @@ def start_pg13_perf(daemon_pid, tick_event, trace, stem="perf", ack_seconds=PG13
         events = []
         for event in (*VM_EVENTS.split(","), tick_event):
             events += ["-e", event, "--filter", daemon_filter]
-        events += ["-e", "sched:sched_process_fork", "-e", "sched:sched_process_exit"]
+        # Not sched:sched_process_fork/exit: the tracer under test attaches its
+        # own tp/sched programs there, and a BPF tracepoint program returning 0
+        # suppresses every perf sample of that tracepoint (both EL8 4.18 VMs
+        # recorded zero while readv/ticks recorded). task_newtask is emitted by
+        # copy_process; sched_process_free is never earlier than the exit.
+        events += ["-e", PG13_FORK_EVENT, "-e", PG13_EXIT_EVENT]
         with (trace / (stem + ".stderr")).open("w") as perr:
             perf = spawn(["perf", "record", "-q", "-m", str(PG13_PERF_PAGES),
                           "--clockid", "mono",
@@ -957,7 +963,7 @@ def main():
                        "perf_clock": "CLOCK_MONOTONIC",
                        "quiet_window_s": 5, "negative_control_revision": "0b1d7dd6",
                        "perf_pages": PG13_PERF_PAGES,
-                       "perf_events": VM_EVENTS + ",sched:sched_process_fork,sched:sched_process_exit",
+                       "perf_events": ",".join((VM_EVENTS, PG13_FORK_EVENT, PG13_EXIT_EVENT)),
                        "perf_tick_marker": "pgwt_sampler_poll symbol-entry uprobe"},
               "master_tracer": str(args.master_tracer) if args.master_tracer else None,
               "require_negative_control": args.require_negative_control}, sort_keys=True))

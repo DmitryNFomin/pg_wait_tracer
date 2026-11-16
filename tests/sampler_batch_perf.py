@@ -464,25 +464,33 @@ def require_lossless(*streams):
             raise AssertionError("perf lost events; syscall absence is unproven")
 
 
+# Lifecycle tracepoints the tracer under test never attaches BPF to. Its own
+# tp/sched/sched_process_{fork,exit} programs return 0, which drops every perf
+# sample of those tracepoints system-wide. task_newtask fires in copy_process
+# in the parent (perf's tid column); sched_process_free is never before EXIT.
+PG13_FORK_EVENT = "task:task_newtask"
+PG13_EXIT_EVENT = "sched:sched_process_free"
+
+
 def parse_pg13_lifecycle(text, extra_streams=(), *, postmaster=None):
     """sched events are system-wide: attaching only to the daemon misses PG forks."""
     require_lossless(text, *extra_streams)
     lifecycle = {"forks": [], "exits": []}
-    pattern = re.compile(r"^\s*\d+\s+(\d+)\.(\d{1,9}):\s+"
-                         r"sched:sched_process_(fork|exit):\s*(.*)$")
+    pattern = re.compile(r"^\s*(\d+)\s+(\d+)\.(\d{1,9}):\s+"
+                         r"(task:task_newtask|sched:sched_process_free):\s*(.*)$")
     for line in text.splitlines():
-        if not re.search(r"sched:sched_process_(?:fork|exit):", line):
+        if not re.search(r"(?:task:task_newtask|sched:sched_process_free):", line):
             continue
         match = pattern.fullmatch(line)
         assert match, f"unparseable scheduler lifecycle event: {line}"
-        seconds, fraction, kind, body = match.groups()
+        tid, seconds, fraction, kind, body = match.groups()
         ts = int(seconds) * 1_000_000_000 + int(fraction.ljust(9, "0"))
         def number(key):
             field = re.search(r"(?:^|\s)" + key + r"=(\d+)(?=\s|$)", body)
             assert field, f"missing {key} in scheduler event: {line}"
             return int(field[1])
-        if kind == "fork":
-            parent, pid = number("pid"), number("child_pid")
+        if kind == PG13_FORK_EVENT:
+            parent, pid = int(tid), number("pid")
             if postmaster is None or parent == postmaster:
                 lifecycle["forks"].append({"pid": pid, "parent_pid": parent, "timestamp_ns": ts})
         else:

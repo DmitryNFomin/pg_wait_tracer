@@ -232,13 +232,14 @@ def pg13_failure_parser_cases():
             pass
         else:
             raise AssertionError("missing, duplicated or malformed failure evidence accepted")
-    fork = " 42 1.000000001: sched:sched_process_fork: comm=postmaster pid=42 child_comm=postmaster child_pid=123\n"
-    exit_line = " 123 1.050000001: sched:sched_process_exit: comm=postmaster pid=123 prio=120\n"
+    # Verbatim shapes recorded on the EL8 4.18 VM (pids/times replaced).
+    fork = " 42 1.000000001:        task:task_newtask: pid=123 comm=postmaster clone_flags=1200011 oom_score_adj=0\n"
+    exit_line = " 9 1.050000001: sched:sched_process_free: comm=postmaster pid=123 prio=120\n"
     result = parse_pg13_lifecycle(exit_line + fork, postmaster=42)
     assert result == {"forks": [{"pid": 123, "parent_pid": 42, "timestamp_ns": 1000000001}],
                       "exits": [{"pid": 123, "timestamp_ns": 1050000001}]}
     assert not parse_pg13_lifecycle(fork, postmaster=43)["forks"]
-    for invalid in (fork.replace("child_pid=123", "child_pid=?"), fork.replace("1.000000001", "unknown"),
+    for invalid in (fork.replace("pid=123", "pid=?"), fork.replace("1.000000001", "unknown"),
                     fork + "PERF_RECORD_LOST id=1 lost=0"):
         try:
             parse_pg13_lifecycle(invalid)
@@ -607,7 +608,7 @@ def file_capture_cases():
                 assert command[command.index("-o") + 1] == str(trace / "perf.attach.data")
                 event_names = [command[i + 1] for i, value in enumerate(command) if value == "-e"]
                 assert event_names == [*live.VM_EVENTS.split(","), event,
-                                       "sched:sched_process_fork", "sched:sched_process_exit"]
+                                       "task:task_newtask", "sched:sched_process_free"]
                 assert "-a" in command and "-p" not in command
                 assert [command[i + 1] for i, value in enumerate(command) if value == "--filter"] == \
                        ["common_pid == 7473"] * 3
