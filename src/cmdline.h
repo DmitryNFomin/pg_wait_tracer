@@ -45,6 +45,10 @@ int pgwt_backend_target_live(pid_t pid, pid_t parent);
  * encode -errno from open: only ENOENT/ESRCH prove the target is gone. */
 int pgwt_backend_target_live_fd(int fd, pid_t parent);
 
+/* Preseed failure proof on a pinned identity: 1 gone/Z/X, 2 PF_EXITING
+ * with zero vsize, 0 live, -1 unknown. Parent mismatch is NOT an exit proof. */
+int pgwt_backend_no_command_fd(int fd, pid_t parent);
+
 /* Human-readable name for a backend type. */
 const char *pgwt_backend_type_name(enum pgwt_backend_type bt);
 

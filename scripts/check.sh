@@ -49,6 +49,7 @@ need node; need go; need python3
 
 step "watchpoint attach exit races (portable backend C harness)"
 run python3 -B tests/test_backend_attach_race.py --mutants
+run python3 -B tests/test_backend_exit_accounting.py
 
 # Portable C core: this script builds/runs the contract C test in a temporary
 # directory. The differential compares against the independent reference;

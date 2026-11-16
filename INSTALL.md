@@ -528,3 +528,47 @@ exceed the hard limit granted to it. If you see
 `perf_event_open: ... file descriptor limit reached` in the log (each such
 failure also increments `wp_attach_failures_total` on the control socket),
 raise the hard limit: `LimitNOFILE=` in the systemd unit or `ulimit -Hn`.
+
+### Watchpoint retirement metrics
+
+`wp_attach_exit_race_total` counts failed watchpoint operations only when errno
+is ESRCH and the pinned original task is gone, Z/X, or has both PF_EXITING and
+zero vsize. PF_EXITING proof is logged as `liveness=exiting` in
+`WP-ATTACH-FAIL` (`exit_proof=1` for gone/Z/X, `2` for PF_EXITING).
+ESRCH alone remains `wp_attach_failures_total`. Other errnos
+remain failures even when the target has gone. The liveness subsets are
+`wp_attach_failures_live_total`, `wp_attach_failures_gone_total`
+and `wp_attach_failures_unknown_total`. Gone targets with a non-ESRCH errno
+remain real failures in the gone subset.
+
+In watchpoint capture, `lifecycle_exit_before_attach_total` counts retirements
+without a completed real attachment or retained INIT evidence. It excludes
+watchpoint failures already counted in `wp_attach_failures_total`, counted
+enrollment refusals (including those without a registry entry), and counted
+live FORK conflicts with a retained exit-race entry. Each backend has one
+failure or retirement class. Its three once-per-retirement classes are:
+
+- `lifecycle_exit_before_attach_with_opportunity_total`: missed attachment,
+  opportunity observed (gated): a registry entry exists, bootstrap was armed,
+  and the post-arm check ran.
+- `lifecycle_exit_before_attach_unknown_total`: opportunity unknown (gated):
+  the required entry/armed/post-arm evidence is incomplete and there is no
+  positive first-handling exclusion. Bootstrap-open, startup-scan and direct
+  attach exit races without that evidence belong here.
+- `lifecycle_exit_before_attach_no_opportunity_total`: exited before the tracer
+  could attach (reported): no registry entry because first handling positively
+  found the target gone. Bounded refusal bookkeeping overflow denies this
+  exclusion; a PID without retained evidence of a counted failure stays unknown.
+
+Each counted PID emits `EXIT-BEFORE-ATTACH` with the class, entry/armed status,
+post-arm pointer, shared-address result and errnos, plus global no-state and
+wait-read counter deltas since enrollment (availability is explicit). These
+are diagnostic deltas, not per-PID attribution. No INIT timestamp or duration
+is invented. Retained INIT evidence keeps the existing INIT rule and counters.
+An exit proof supplies the `wp_attach_exit_race_total` reason; it never proves
+unavoidable loss or no opportunity. That reason may coexist with an INIT-loss
+class or a retirement class. `wp_attach_failures_total`, observed-opportunity
+retirements and unknown-opportunity retirements gate `DAEMON_INTEGRITY_COUNTERS`.
+The no-opportunity retirement class is reported. A live FORK conflicting with
+a retained startup exit-race entry is conservatively counted as an enrollment
+failure, including possible PID reuse; a proven exit is not retried.
